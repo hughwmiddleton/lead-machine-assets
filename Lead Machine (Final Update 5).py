@@ -16,6 +16,8 @@ Usage:
     python lead_machine11.py
 """
 
+from __future__ import annotations
+
 import sys
 import subprocess
 import platform
@@ -89,7 +91,17 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from bs4 import BeautifulSoup
 from webdriver_manager.chrome import ChromeDriverManager
+from urllib.parse import urlparse, urljoin
 from PyQt5 import QtWidgets, QtCore
+
+# ---------------------------
+# Bandcamp Configuration
+# ---------------------------
+BANDCAMP_SEED_TAGS = ["united-kingdom", "london", "manchester", "brighton", "leeds", "bristol", "glasgow"]
+BANDCAMP_PAGES_PER_TAG = 5
+BANDCAMP_MIN_CONTACT_REQUIREMENT = True
+BANDCAMP_DEFAULT_TAG_URL = "https://bandcamp.com/tag/united-kingdom"
+UNEARTHED_DEFAULT_URL = "https://www.abc.net.au/triplejunearthed/music/"
 
 # -----------------------------------------------------------------------------
 # Helper: URL Normalization
@@ -280,6 +292,304 @@ def save_to_csv(data, filename):
     combined_data.to_csv(filename, index=False)
     print(f"Data saved to {filename}")
 
+# =========================== Bandcamp Scraper ===========================
+def _bandcamp_extract_tag_from_url(url: str) -> str | None:
+    if not url:
+        return None
+    match = re.search(r"/tag/([^/?#]+)", url)
+    if match:
+        return match.group(1).lower()
+    return None
+
+def scrape_bandcamp(seed_tags, pages_per_tag=5, existing_csv="artist_social_links.csv", max_artists=200):
+    """High-level Bandcamp entry point. Iterates tags → paginated tag pages → collects candidate artist/album links → resolves to artist profile → extracts contacts → writes CSV."""
+    driver = setup_driver()
+    raw_candidates = []
+    candidate_profiles = []
+    seen_profiles = set()
+    bandcamp_rows = []
+    enriched_rows = []
+    seen_artist_profiles = set()
+    try:
+        for tag in seed_tags:
+            print(f"Bandcamp: scanning tag '{tag}', pages={pages_per_tag}")
+            for page in range(1, pages_per_tag + 1):
+                tag_url = f"https://bandcamp.com/tag/{tag}?page={page}"
+                try:
+                    driver.get(tag_url)
+                    WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.TAG_NAME, 'body')))
+                except Exception as exc:
+                    print(f"Bandcamp: error loading {tag_url}: {exc}")
+                    continue
+                candidates = _bandcamp_collect_from_tag_page(driver, tag_url)
+                raw_candidates.extend(candidates)
+                for link in candidates:
+                    profile_url = _bandcamp_resolve_artist_profile_url(link)
+                    if not profile_url:
+                        continue
+                    key = profile_url.rstrip('/').lower()
+                    if key in seen_profiles:
+                        continue
+                    seen_profiles.add(key)
+                    candidate_profiles.append((profile_url, tag))
+                if len(candidate_profiles) >= max_artists:
+                    break
+                time.sleep(random.uniform(1.0, 2.0))
+            if len(candidate_profiles) >= max_artists:
+                break
+        print(f"Bandcamp: total candidate links found {len(raw_candidates)}")
+        print(f"Bandcamp: total artist profiles resolved {len(candidate_profiles)}")
+        actionable_count = 0
+        for profile_url, tag in candidate_profiles:
+            artist_dict = _bandcamp_parse_artist_profile(driver, profile_url)
+            if not artist_dict:
+                continue
+            artist_dict["source_tag"] = tag
+            if BANDCAMP_MIN_CONTACT_REQUIREMENT and not _bandcamp_is_actionable(artist_dict):
+                continue
+            contact_links = []
+            website = artist_dict.get("website")
+            if website:
+                contact_links.append(website)
+            socials = artist_dict.get("socials", {})
+            for social_link in socials.values():
+                if social_link:
+                    contact_links.append(social_link)
+            email_address = artist_dict.get("email")
+            if email_address:
+                contact_links.append(f"mailto:{email_address}")
+            contact_links = list(dict.fromkeys([link for link in contact_links if link]))
+            if not contact_links:
+                continue
+            profile_key = (
+                artist_dict.get("artist_name", "").strip().lower(),
+                artist_dict.get("profile_url", "").rstrip("/").lower()
+            )
+            if profile_key in seen_artist_profiles:
+                continue
+            seen_artist_profiles.add(profile_key)
+            bandcamp_rows.append((
+                artist_dict.get("artist_name", ""),
+                artist_dict.get("location", ""),
+                artist_dict.get("latest_release_title", ""),
+                "",
+                contact_links,
+                "",
+                ""
+            ))
+            enriched_rows.append({
+                "Artist Name": artist_dict.get("artist_name", ""),
+                "Profile URL": artist_dict.get("profile_url", ""),
+                "Website": artist_dict.get("website", ""),
+                "Email": artist_dict.get("email", ""),
+                "Instagram": socials.get("instagram", ""),
+                "Twitter": socials.get("twitter", ""),
+                "Facebook": socials.get("facebook", ""),
+                "Linktree": socials.get("linktree", ""),
+                "YouTube": socials.get("youtube", ""),
+                "Location": artist_dict.get("location", ""),
+                "Latest Release": artist_dict.get("latest_release_title", ""),
+                "Latest Release Date": artist_dict.get("latest_release_date", ""),
+                "Source Tag": artist_dict.get("source_tag", "")
+            })
+            actionable_count += 1
+            if actionable_count >= max_artists:
+                break
+            time.sleep(random.uniform(1.0, 2.0))
+        print(f"Bandcamp: total actionable artists written {actionable_count}")
+    finally:
+        driver.quit()
+    if bandcamp_rows:
+        save_to_csv(bandcamp_rows, existing_csv)
+    if enriched_rows:
+        _bandcamp_write_enriched_csv(enriched_rows, existing_csv)
+
+def _bandcamp_collect_from_tag_page(driver, tag_url) -> list[str]:
+    """Return a list of candidate Bandcamp links from a tag page (album/track/artist)."""
+    candidates = []
+    try:
+        soup = BeautifulSoup(driver.page_source, 'html.parser')
+        for anchor in soup.find_all('a', href=True):
+            href = anchor['href']
+            absolute = urljoin(tag_url, href)
+            if not absolute:
+                continue
+            lower = absolute.lower()
+            if "bandcamp.com" not in lower:
+                continue
+            if any(segment in lower for segment in ["/album", "/track"]) or ".bandcamp.com" in urlparse(absolute).netloc:
+                candidates.append(absolute)
+    except Exception as exc:
+        print(f"Bandcamp: failed to collect links from {tag_url}: {exc}")
+    return candidates
+
+def _bandcamp_resolve_artist_profile_url(candidate_url: str) -> str:
+    """Normalize candidate links and resolve to canonical artist profile (https://artistname.bandcamp.com/)."""
+    if not candidate_url:
+        return ""
+    url = candidate_url.strip()
+    if url.startswith("//"):
+        url = f"https:{url}"
+    if not url.startswith("http"):
+        url = f"https://{url.lstrip('/')}"
+    parsed = urlparse(url)
+    host = parsed.netloc.lower()
+    if not host.endswith("bandcamp.com"):
+        return ""
+    if host == "bandcamp.com":
+        return ""
+    scheme = parsed.scheme or "https"
+    return f"{scheme}://{host}/"
+
+def _bandcamp_parse_artist_profile(driver, profile_url) -> dict:
+    """Visit artist profile; return dict with name, location, website, socials list, latest release title/date if visible."""
+    artist = {
+        "artist_name": "",
+        "profile_url": profile_url,
+        "location": "",
+        "website": "",
+        "email": "",
+        "socials": {
+            "instagram": "",
+            "twitter": "",
+            "facebook": "",
+            "youtube": "",
+            "linktree": "",
+            "spotify": "",
+            "bandsintown": "",
+            "songkick": ""
+        },
+        "latest_release_title": "",
+        "latest_release_date": "",
+        "source_tag": ""
+    }
+    try:
+        driver.get(profile_url)
+        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.TAG_NAME, 'body')))
+    except Exception as exc:
+        print(f"Bandcamp: unable to load profile {profile_url}: {exc}")
+        return {}
+    soup = BeautifulSoup(driver.page_source, 'html.parser')
+    title_meta = soup.find('meta', attrs={'property': 'og:title'})
+    if title_meta and title_meta.get('content'):
+        artist["artist_name"] = title_meta['content'].split(' · ')[0].strip()
+    if not artist["artist_name"]:
+        name_el = soup.find(['h1', 'h2'], class_=re.compile('band-name|title', re.I))
+        if name_el:
+            artist["artist_name"] = name_el.get_text(strip=True)
+    location_el = soup.find(class_=re.compile('location', re.I))
+    if location_el:
+        artist["location"] = location_el.get_text(" ", strip=True)
+    if not artist["location"]:
+        bio_el = soup.find('div', class_=re.compile('location', re.I))
+        if bio_el:
+            artist["location"] = bio_el.get_text(" ", strip=True)
+    for anchor in soup.find_all('a', href=True):
+        href = anchor['href'].strip()
+        if href.startswith("mailto:"):
+            email_value = href.split("mailto:")[-1].split("?")[0]
+            if email_value:
+                artist["email"] = email_value
+            continue
+        normalized = href.split('#')[0]
+        if normalized.startswith("//"):
+            normalized = f"https:{normalized}"
+        if normalized.startswith("/"):
+            normalized = urljoin(profile_url, normalized)
+        parsed = urlparse(normalized)
+        if not parsed.scheme.startswith("http"):
+            continue
+        netloc = parsed.netloc.lower()
+        if netloc.endswith("bandcamp.com"):
+            continue
+        if "instagram.com" in netloc:
+            artist["socials"]["instagram"] = normalized
+        elif "facebook.com" in netloc or "fb.me" in netloc:
+            artist["socials"]["facebook"] = normalized
+        elif "twitter.com" in netloc or "x.com" in netloc:
+            artist["socials"]["twitter"] = normalized
+        elif "youtube.com" in netloc or "youtu.be" in netloc:
+            artist["socials"]["youtube"] = normalized
+        elif any(domain in netloc for domain in ["linktr.ee", "linktree", "withkoji.com", "beacons.ai"]):
+            artist["socials"]["linktree"] = normalized
+        elif "spotify.com" in netloc:
+            artist["socials"]["spotify"] = normalized
+        elif "bandsintown.com" in netloc:
+            artist["socials"]["bandsintown"] = normalized
+        elif "songkick.com" in netloc:
+            artist["socials"]["songkick"] = normalized
+        else:
+            if not artist["website"]:
+                artist["website"] = normalized
+    release_container = soup.find('li', class_=re.compile('music-grid-item', re.I))
+    if release_container:
+        title_el = release_container.find(class_=re.compile('title', re.I))
+        if title_el:
+            artist["latest_release_title"] = title_el.get_text(strip=True)
+        date_el = release_container.find(class_=re.compile('release', re.I))
+        if date_el:
+            artist["latest_release_date"] = date_el.get_text(strip=True)
+    if not artist["latest_release_title"]:
+        track_title = soup.find(class_=re.compile('trackTitle', re.I))
+        if track_title:
+            artist["latest_release_title"] = track_title.get_text(strip=True)
+    if not artist["latest_release_date"]:
+        release_text = soup.find(class_=re.compile('release-date', re.I))
+        if release_text:
+            artist["latest_release_date"] = release_text.get_text(strip=True)
+    return artist
+
+def _bandcamp_is_actionable(artist_dict: dict) -> bool:
+    """Return True if website or email or at least one social exists."""
+    if not artist_dict:
+        return False
+    socials = artist_dict.get("socials", {})
+    has_social = any(value for value in socials.values())
+    return bool(artist_dict.get("website") or artist_dict.get("email") or has_social)
+
+def _bandcamp_write_enriched_csv(rows, existing_csv):
+    columns = [
+        "Artist Name",
+        "Profile URL",
+        "Website",
+        "Email",
+        "Instagram",
+        "Twitter",
+        "Facebook",
+        "Linktree",
+        "YouTube",
+        "Location",
+        "Latest Release",
+        "Latest Release Date",
+        "Source Tag"
+    ]
+    base_dir = os.path.dirname(os.path.abspath(existing_csv))
+    enriched_path = os.path.join(base_dir, "bandcamp_enriched.csv")
+    existing_df = pd.DataFrame(columns=columns)
+    if os.path.exists(enriched_path):
+        try:
+            existing_df = pd.read_csv(enriched_path)
+        except Exception:
+            existing_df = pd.DataFrame(columns=columns)
+    for col in columns:
+        if col not in existing_df.columns:
+            existing_df[col] = ""
+    if not existing_df.empty:
+        existing_df = existing_df[columns]
+    new_df = pd.DataFrame(rows)
+    for col in columns:
+        if col not in new_df.columns:
+            new_df[col] = ""
+    combined = pd.concat([existing_df, new_df], ignore_index=True)
+    combined["__dedupe_key"] = (
+        combined["Artist Name"].fillna("").str.strip().str.lower()
+        + "||" +
+        combined["Profile URL"].fillna("").str.rstrip("/").str.lower()
+    )
+    combined = combined.drop_duplicates(subset="__dedupe_key")
+    combined = combined.drop(columns="__dedupe_key")
+    combined = combined[columns]
+    combined.to_csv(enriched_path, index=False)
 # =============================================================================
 # Facebook Scraping Functions (Page 2)
 # =============================================================================
@@ -385,16 +695,29 @@ def scrape_csv(input_csv, output_csv, fb_username, fb_password, max_emails=None)
 class ArtistScraperThread(QtCore.QThread):
     log_signal = QtCore.pyqtSignal(str)
     finished_signal = QtCore.pyqtSignal()
-    def __init__(self, website_url, max_artists, output_csv, parent=None):
+    def __init__(self, website_url, max_artists, output_csv, source="Unearthed",
+                 pages_per_tag=BANDCAMP_PAGES_PER_TAG, seed_tags=None, parent=None):
         super().__init__(parent)
         self.website_url = website_url
         self.max_artists = max_artists
         self.output_csv = output_csv
+        self.source = source
+        self.pages_per_tag = pages_per_tag
+        self.seed_tags = list(seed_tags) if seed_tags else list(BANDCAMP_SEED_TAGS)
     def run(self):
         self.log_signal.emit("Starting artist scraping...")
         try:
-            scrape_website(self.website_url, existing_csv=self.output_csv, max_artists=self.max_artists)
-            self.log_signal.emit("Artist scraping completed.")
+            if self.source.lower() == "bandcamp":
+                scrape_bandcamp(
+                    self.seed_tags,
+                    pages_per_tag=self.pages_per_tag,
+                    existing_csv=self.output_csv,
+                    max_artists=self.max_artists
+                )
+                self.log_signal.emit("Bandcamp scraping completed.")
+            else:
+                scrape_website(self.website_url, existing_csv=self.output_csv, max_artists=self.max_artists)
+                self.log_signal.emit("Artist scraping completed.")
         except Exception as e:
             self.log_signal.emit(f"Error in artist scraping: {e}")
         self.finished_signal.emit()
@@ -456,12 +779,28 @@ class MainWindow(QtWidgets.QMainWindow):
             self.output_csv_edit.setText(file_path)
     def create_artist_tab(self):
         layout = QtWidgets.QVBoxLayout()
+        source_layout = QtWidgets.QHBoxLayout()
+        source_label = QtWidgets.QLabel("Source:")
+        self.source_combo = QtWidgets.QComboBox()
+        self.source_combo.addItems(["Unearthed", "Bandcamp"])
+        self.source_combo.currentTextChanged.connect(self.on_source_changed)
+        source_layout.addWidget(source_label)
+        source_layout.addWidget(self.source_combo)
+        layout.addLayout(source_layout)
         url_layout = QtWidgets.QHBoxLayout()
         url_label = QtWidgets.QLabel("Website URL:")
-        self.url_edit = QtWidgets.QLineEdit("https://www.abc.net.au/triplejunearthed/music/")
+        self.url_edit = QtWidgets.QLineEdit(UNEARTHED_DEFAULT_URL)
+        self.url_edit.setPlaceholderText(UNEARTHED_DEFAULT_URL)
         url_layout.addWidget(url_label)
         url_layout.addWidget(self.url_edit)
         layout.addLayout(url_layout)
+        pages_layout = QtWidgets.QHBoxLayout()
+        pages_label = QtWidgets.QLabel("Pages per Tag:")
+        self.pages_per_tag_edit = QtWidgets.QLineEdit(str(BANDCAMP_PAGES_PER_TAG))
+        self.pages_per_tag_edit.setEnabled(False)
+        pages_layout.addWidget(pages_label)
+        pages_layout.addWidget(self.pages_per_tag_edit)
+        layout.addLayout(pages_layout)
         max_artists_layout = QtWidgets.QHBoxLayout()
         max_artists_label = QtWidgets.QLabel("Max Artists:")
         self.max_artists_edit = QtWidgets.QLineEdit("200")
@@ -488,6 +827,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.artist_log.setReadOnly(True)
         layout.addWidget(self.artist_log)
         self.artist_tab.setLayout(layout)
+    def on_source_changed(self, source_text):
+        if source_text == "Bandcamp":
+            self.url_edit.setPlaceholderText(BANDCAMP_DEFAULT_TAG_URL)
+            current = self.url_edit.text().strip()
+            if not current or current == UNEARTHED_DEFAULT_URL:
+                self.url_edit.setText(BANDCAMP_DEFAULT_TAG_URL)
+            self.pages_per_tag_edit.setEnabled(True)
+        else:
+            self.url_edit.setPlaceholderText(UNEARTHED_DEFAULT_URL)
+            current = self.url_edit.text().strip()
+            if not current or current == BANDCAMP_DEFAULT_TAG_URL:
+                self.url_edit.setText(UNEARTHED_DEFAULT_URL)
+            self.pages_per_tag_edit.setEnabled(False)
     def create_facebook_tab(self):
         layout = QtWidgets.QVBoxLayout()
         input_layout = QtWidgets.QHBoxLayout()
@@ -537,19 +889,43 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addWidget(self.fb_log)
         self.facebook_tab.setLayout(layout)
     def start_artist_scraping(self):
+        source = self.source_combo.currentText()
         url = self.url_edit.text().strip()
-        if not url:
+        if source == "Bandcamp" and not url:
+            url = BANDCAMP_DEFAULT_TAG_URL
+            self.url_edit.setText(url)
+        if source != "Bandcamp" and not url:
             self.artist_log.append("Please enter a valid website URL.")
             return
         try:
             max_artists = int(self.max_artists_edit.text().strip())
         except ValueError:
             max_artists = 200
+        try:
+            pages_per_tag = int(self.pages_per_tag_edit.text().strip())
+        except ValueError:
+            pages_per_tag = BANDCAMP_PAGES_PER_TAG
+        if max_artists <= 0:
+            max_artists = 200
+        if pages_per_tag <= 0:
+            pages_per_tag = BANDCAMP_PAGES_PER_TAG
+        seed_tags = list(BANDCAMP_SEED_TAGS)
+        if source == "Bandcamp":
+            extracted_tag = _bandcamp_extract_tag_from_url(url)
+            if extracted_tag:
+                seed_tags = [extracted_tag]
         output_csv = self.artist_output_csv_edit.text().strip()
         self.artist_start_button.setEnabled(False)
         self.artist_progress_bar.setVisible(True)
         self.artist_log.append("Initiating artist scraping...")
-        self.artist_thread = ArtistScraperThread(url, max_artists, output_csv)
+        self.artist_thread = ArtistScraperThread(
+            url,
+            max_artists,
+            output_csv,
+            source=source,
+            pages_per_tag=pages_per_tag,
+            seed_tags=seed_tags
+        )
         self.artist_thread.log_signal.connect(self.update_artist_log)
         self.artist_thread.finished_signal.connect(self.artist_scraping_finished)
         self.artist_thread.start()
