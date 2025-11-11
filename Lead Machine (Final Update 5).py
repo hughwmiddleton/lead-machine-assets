@@ -616,6 +616,23 @@ def login_facebook(driver, fb_username, fb_password):
     driver.find_element(By.NAME, 'login').click()
     WebDriverWait(driver, 15).until(EC.presence_of_element_located((By.TAG_NAME, 'body')))
 
+def _extract_social_link_from_row(row):
+    """Return the first usable social/Facebook URL from various column headers."""
+    candidate_columns = [
+        "Social Link",
+        "social link",
+        "SOCIAL LINK",
+        "Facebook",
+        "facebook",
+        "FACEBOOK"
+    ]
+    for col in candidate_columns:
+        if col in row and pd.notna(row[col]):
+            value = str(row[col]).strip()
+            if value:
+                return value
+    return ""
+
 # =============================================================================
 # UPDATED scrape_csv Function (Simpler Version with Wait Times of 0.5 sec and Session Refresh every 20 pages)
 # =============================================================================
@@ -632,7 +649,9 @@ def scrape_csv(input_csv, output_csv, fb_username, fb_password, max_emails=None)
     exclude_urls = {"https://www.facebook.com/triplejunearthed/", "https://www.facebook.com/abc/"}
     facebook_rows = []
     for index, row in data.iterrows():
-        url = row['Social Link']
+        url = _extract_social_link_from_row(row)
+        if not url:
+            continue
         if url in exclude_urls or url in processed_urls:
             continue
         if 'facebook.com' in url:
@@ -644,7 +663,9 @@ def scrape_csv(input_csv, output_csv, fb_username, fb_password, max_emails=None)
     login_facebook(driver, fb_username, fb_password)
     session_counter = 0
     for row in facebook_rows:
-        url = row['Social Link']
+        url = _extract_social_link_from_row(row)
+        if not url:
+            continue
         try:
             print(f"Scraping Facebook page: {url}")
             driver.get(url)
