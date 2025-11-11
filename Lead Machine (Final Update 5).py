@@ -701,10 +701,13 @@ def scrape_csv(input_csv, output_csv, fb_username, fb_password, max_emails=None)
                 # Format artist name: replace hyphens with spaces and capitalise each word.
                 artist_name = row.get('Artist Name', '')
                 artist_name = artist_name.replace('-', ' ').title()
+                song_title = row.get('Song Title', '')
+                if (not song_title) and ('Latest Release' in row):
+                    song_title = row.get('Latest Release', '')
                 results.append({
                     'artist': artist_name,
                     'location': row.get('Location', ''),
-                    'song_title': row.get('Song Title', ''),
+                    'song_title': song_title,
                     'sounds_like': row.get('Sounds Like', ''),
                     'url': url,
                     'emails': ', '.join(unique_emails),
