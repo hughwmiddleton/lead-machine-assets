@@ -98,6 +98,7 @@ from urllib.parse import urlparse, urljoin, parse_qs, unquote
 import urllib.parse as _urlparse
 from PyQt5 import QtWidgets, QtCore
 from dateutil import parser as dparser
+from dateutil.relativedelta import relativedelta
 
 # ---------------------------
 # Bandcamp Configuration
@@ -1310,47 +1311,189 @@ def _sc_try_linktree_for_contacts(driver, urls: set, timeout=6) -> tuple:
     except Exception:
         return "", ""
 
+
+def _sc_rel_to_iso(text: str) -> str:
+    """
+    Convert 'x day(s)/week(s)/month(s)/year(s) ago' to an approximate ISO date (YYYY-MM-DD).
+    If not parseable, return "not present".
+    """
+    if not text:
+        return "not present"
+    s = text.strip().lower()
+    m = re.search(r'(\d+)\s*(day|week|month|year)s?\s+ago', s)
+    if not m:
+        return "not present"
+    n = int(m.group(1))
+    unit = m.group(2)
+    now = datetime.datetime.now()
+    try:
+        if unit == "day":
+            dt = now - relativedelta(days=n)
+        elif unit == "week":
+            dt = now - relativedelta(weeks=n)
+        elif unit == "month":
+            dt = now - relativedelta(months=n)
+        else:
+            dt = now - relativedelta(years=n)
+        return dt.strftime("%Y-%m-%d")
+    except Exception:
+        return "not present"
+
+
+def _sc_first_text(soup, selectors):
+    for sel in selectors:
+        el = soup.select_one(sel)
+        if el:
+            t = el.get_text(" ", strip=True)
+            if t:
+                return t
+    return ""
+
+
+def _sc_extract_profile_meta(driver) -> dict:
+    """
+    Best-effort metadata from a SoundCloud profile root page:
+      - artist_name (if present)
+      - location (right column: 'Based in ...')
+      - song_title (first visible track or spotlight)
+      - primary_genre (first '#Tag' chip near the first track)
+      - release_date (approx from 'x months ago', else 'not present')
+    """
+    meta = {
+        "artist_name": "",
+        "location": "",
+        "song_title": "",
+        "primary_genre": "",
+        "release_date": "not present",
+        "sounds_like": ""
+    }
+    try:
+        _sc_try_dismiss_consent(driver)
+    except Exception:
+        pass
+
+    html = driver.page_source
+    soup = BeautifulSoup(html, "html.parser")
+
+    meta["artist_name"] = _sc_first_text(soup, [
+        "h1.soundTitle__username",
+        "div.profileHeaderInfo h1",
+        "meta[property='og:title']"
+    ])
+    if not meta["artist_name"]:
+        og = soup.select_one("meta[property='og:title']")
+        if og and og.get("content"):
+            meta["artist_name"] = og["content"].strip()
+
+    loc = _sc_first_text(soup, [
+        "div.profileHeaderInfo",
+        ".profileSidebar"
+    ])
+    m = re.search(r"based in\s+(.+?)(?:\s{2,}|$)", loc, flags=re.I)
+    if m:
+        meta["location"] = m.group(1).strip()
+
+    track_container = None
+    for sel in [
+        ".spotlight .soundList__item",
+        ".profileStream__list .soundList__item",
+        ".soundList__item"
+    ]:
+        track_container = soup.select_one(sel)
+        if track_container:
+            break
+
+    if track_container:
+        t = _sc_first_text(track_container, [
+            "a.soundTitle__title",
+            "a.trackItem__trackTitle",
+            ".soundTitle__title",
+            "[data-e2e='track-title']",
+        ])
+        if t:
+            meta["song_title"] = t
+
+        tag = _sc_first_text(track_container, [
+            "a[href*='/tags/']",
+            ".sc-tag",
+            "a[aria-label^='#']"
+        ])
+        if tag:
+            meta["primary_genre"] = tag.lstrip("#").strip().title()
+
+        rel = _sc_first_text(track_container, [
+            ".relativeTime",
+            "time[datetime]",
+            "time",
+            "span[aria-label*='ago']"
+        ])
+        if rel:
+            if "datetime" in rel.lower():
+                tm = track_container.select_one("time[datetime]")
+                if tm and tm.get("datetime"):
+                    meta["release_date"] = tm["datetime"][:10]
+            if meta["release_date"] == "not present":
+                meta["release_date"] = _sc_rel_to_iso(rel)
+
+    return meta
+
 def _sc_collect_profile_links(driver, timeout=6, **_ignored) -> set:
+    """
+    Return a set of outbound link hrefs visible on a SoundCloud profile page.
+    Accepts a timeout kwarg for compatibility. Safe if called with extra kwargs.
+    """
     found = set()
     try:
         _sc_try_dismiss_consent(driver)
         _sc_try_show_more(driver)
         _sc_scroll_sidebar(driver)
+
+        # Give the sidebar a brief chance to render
         try:
-            WebDriverWait(driver, timeout).until(
+            WebDriverWait(driver, 4).until(
                 EC.presence_of_element_located((By.CSS_SELECTOR, "ul.profileLinks__linkList a[href]"))
             )
         except Exception:
             pass
+
         html = driver.page_source
         soup = BeautifulSoup(html, "html.parser")
-        for anchor in soup.select("ul.profileLinks__linkList a[href]"):
-            found.add(anchor["href"])
-        for anchor in soup.find_all("a", href=True):
-            href = anchor["href"].strip()
-            lower = href.lower()
-            if any(token in lower for token in ["facebook.com", "fb.me/", "mailto:", "linktr.ee", "linktree"]):
+
+        # 1) Preferred: explicit sidebar list
+        for a in soup.select("ul.profileLinks__linkList a[href]"):
+            found.add(a.get("href", "").strip())
+
+        # 2) Broad fallback: any obvious social/email anchors
+        for a in soup.find_all("a", href=True):
+            href = (a["href"] or "").strip()
+            low = href.lower()
+            if any(k in low for k in ["facebook.com", "fb.me/", "mailto:", "linktr.ee", "linktree"]):
                 found.add(href)
-        hydration_match = re.search(r"__sc_hydration\s*=\s*(\[[\s\S]*?\])\s*;?", html, flags=re.M)
-        if hydration_match:
-            data = json.loads(hydration_match.group(1))
-            stack = [data]
-            while stack:
-                value = stack.pop()
-                if isinstance(value, dict):
-                    ext = value.get("external_links") or value.get("externalLinks")
-                    if isinstance(ext, list):
-                        for item in ext:
-                            if isinstance(item, dict) and isinstance(item.get("url"), str):
-                                found.add(item["url"])
-                    for sub in value.values():
-                        if isinstance(sub, (dict, list)):
-                            stack.append(sub)
-                        elif isinstance(sub, str):
-                            if any(token in sub for token in ["facebook.com", "mailto:", "linktr.ee", "linktree"]):
-                                found.add(sub)
-                elif isinstance(value, list):
-                    stack.extend(value)
+
+        # 3) Hydration fallback (external_links / externalLinks)
+        m = re.search(r"__sc_hydration\s*=\s*(\[[\s\S]*?\])\s*;?", html, flags=re.M)
+        if m:
+            try:
+                data = json.loads(m.group(1))
+                stack = [data]
+                while stack:
+                    v = stack.pop()
+                    if isinstance(v, dict):
+                        ext = v.get("external_links") or v.get("externalLinks")
+                        if isinstance(ext, list):
+                            for it in ext:
+                                if isinstance(it, dict) and isinstance(it.get("url"), str):
+                                    found.add(it["url"])
+                        for vv in v.values():
+                            if isinstance(vv, (dict, list)):
+                                stack.append(vv)
+                            elif isinstance(vv, str):
+                                if any(s in vv for s in ["facebook.com", "mailto:", "linktr.ee", "linktree"]):
+                                    found.add(vv)
+                    elif isinstance(v, list):
+                        stack.extend(v)
+            except Exception:
+                pass
     except Exception:
         pass
     return found
@@ -1410,10 +1553,11 @@ def _sc_quick_has_fb_or_email(driver, url: str, timeout=10, debug_prefix="") -> 
             driver.get(links_url)
             WebDriverWait(driver, 4).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
             links_links = _sc_collect_profile_links(driver, timeout=timeout)
+            if debug_prefix:
+                print(f"{debug_prefix} links_found={len(links_links)}")
         except Exception:
-            links_links = set()
-        if debug_prefix:
-            print(f"{debug_prefix} links_found={len(links_links)}")
+            if debug_prefix:
+                print(f"{debug_prefix} links page not available")
 
         found = set(root_links) | set(links_links)
         cleaned = []
@@ -1807,45 +1951,6 @@ def _sc_fetch_latest_track(driver, profile_url: str) -> tuple:
     except Exception:
         return "", "", ""
 
-def _sc_collect_profile_links(driver, profile_url: str) -> dict:
-    """Scrape https://soundcloud.com/{handle}/links for outbound social links."""
-    collected = {}
-    try:
-        parsed = urlparse(profile_url)
-        handle = (parsed.path or "/").strip("/").split("/")[0]
-        if not handle:
-            return collected
-        links_url = f"https://soundcloud.com/{handle}/links"
-        driver.get(links_url)
-        _sc_accept_consent_if_present(driver)
-        WebDriverWait(driver, 8).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
-        _sc_soft_scroll(driver)
-        soup = BeautifulSoup(driver.page_source, "html.parser")
-        for anchor in soup.find_all("a", href=True):
-            anchor["href"] = _sc_unwrap_gate(anchor.get("href", ""))
-        for anchor in soup.find_all("a", href=True):
-            href = _sc_unwrap_gate(_sc_normalize_url(anchor["href"]))
-            if not href:
-                continue
-            parsed_href = urlparse(href)
-            host = (parsed_href.netloc or "").lower()
-            if (not host or
-                "soundcloud.com" in host or
-                host in _SC_JUNK_HOSTS or
-                host in _SC_STORE_HOSTS or
-                host in _SC_CONSENT_HOSTS):
-                continue
-            matched = None
-            for dom, key in _SC_SOCIAL_DOMAINS.items():
-                if dom in host:
-                    matched = key
-                    break
-            if matched and matched not in collected:
-                collected[matched] = href
-    except Exception:
-        pass
-    return collected
-
 def _sc_parse_profile(driver, profile_url: str, seed_primary_genre="") -> dict:
     """
     Visit artist profile and extract details similar to Bandcamp.
@@ -1920,13 +2025,47 @@ def _sc_parse_profile(driver, profile_url: str, seed_primary_genre="") -> dict:
                 if parsed.scheme in ("http", "https") and len(host.split(".")) >= 2:
                     artist["website"] = href
 
+        more_links = set()
         try:
-            more_links = _sc_collect_profile_links(driver, profile_url)
-            for key, value in more_links.items():
-                if value and not artist["socials"].get(key):
-                    artist["socials"][key] = value
+            parsed_profile = urlparse(profile_url)
+            handle = (parsed_profile.path or "/").strip("/").split("/")[0]
+            if handle:
+                links_url = f"https://soundcloud.com/{handle}/links"
+                driver.get(links_url)
+                WebDriverWait(driver, 8).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+                more_links = _sc_collect_profile_links(driver, timeout=6)
         except Exception:
-            pass
+            more_links = set()
+
+        for raw in more_links:
+            href = _sc_unwrap_gate(_sc_normalize_url(raw))
+            if not href:
+                continue
+            if href.startswith("mailto:"):
+                if not artist["email"]:
+                    address = href.split("mailto:")[-1].split("?")[0]
+                    if address and not address.lower().endswith("@soundcloud.com"):
+                        artist["email"] = address
+                continue
+            parsed_href = urlparse(href)
+            host = (parsed_href.netloc or "").lower()
+            if (not host or
+                "soundcloud.com" in host or
+                host in _SC_JUNK_HOSTS or
+                host in _SC_STORE_HOSTS or
+                host in _SC_CONSENT_HOSTS):
+                continue
+            matched = None
+            for dom, key in _SC_SOCIAL_DOMAINS.items():
+                if dom in host:
+                    matched = key
+                    break
+            if matched:
+                if not artist["socials"].get(matched):
+                    artist["socials"][matched] = href
+            elif not artist["website"]:
+                if parsed_href.scheme in ("http", "https") and len(host.split(".")) >= 2:
+                    artist["website"] = href
 
         artist["genres"] = _sc_extract_tags(soup)
         if not artist["primary_genre"]:
@@ -2112,6 +2251,11 @@ def scrape_soundcloud(start_url, seed_tags, pages_per_tag=SOUNDCLOUD_PAGES_PER_T
                 continue
             if fast:
                 handle = _sc_handle_from_profile(profile_url)
+                handle_title = (
+                    handle.replace("-", " ").replace("_", " ").title()
+                    if handle
+                    else ""
+                )
                 if not _sc_is_valid_handle(handle):
                     print(f"skip[{idx}] invalid handle: {profile_url}")
                     continue
@@ -2140,7 +2284,7 @@ def scrape_soundcloud(start_url, seed_tags, pages_per_tag=SOUNDCLOUD_PAGES_PER_T
                     soup_name = BeautifulSoup(driver.page_source, "html.parser")
                 except Exception:
                     soup_name = None
-                artist_name_value = profile_url.rstrip("/").split("/")[-1]
+                artist_name_value = handle_title or profile_url.rstrip("/").split("/")[-1]
                 if soup_name:
                     try:
                         og = soup_name.select_one('meta[property="og:title"]')
@@ -2164,14 +2308,34 @@ def scrape_soundcloud(start_url, seed_tags, pages_per_tag=SOUNDCLOUD_PAGES_PER_T
                 if not artist_name_value.strip() or not contacts:
                     print(f"skip[{idx}] company-only contacts: {handle}")
                     continue
-                release_date_value = date_iso or "not present"
-                primary_genre_value = ""
-                if genres:
-                    primary_genre_value = (genres[0] or "").title()
-                elif isinstance(seed_primary_genre, str) and seed_primary_genre.strip():
-                    primary_genre_value = seed_primary_genre.strip().title()
-                elif isinstance(source_tag, str) and source_tag.strip():
-                    primary_genre_value = source_tag.strip().title()
+
+                try:
+                    meta = _sc_extract_profile_meta(driver)
+                except Exception:
+                    meta = {
+                        "artist_name": "",
+                        "location": "",
+                        "song_title": "",
+                        "primary_genre": "",
+                        "release_date": "not present",
+                        "sounds_like": ""
+                    }
+                artist_name_value = (meta.get("artist_name") or artist_name_value or handle_title or "").strip()
+                location = meta.get("location") or location or ""
+                title = meta.get("song_title") or title or ""
+                sounds_like = meta.get("sounds_like") or sounds_like or ""
+                meta_release = meta.get("release_date") or ""
+                meta_primary = (meta.get("primary_genre") or "").strip()
+
+                release_date_value = meta_release if meta_release and meta_release.lower() != "not present" else (date_iso or "not present")
+                primary_genre_value = meta_primary
+                if not primary_genre_value:
+                    if genres:
+                        primary_genre_value = (genres[0] or "").title()
+                    elif isinstance(seed_primary_genre, str) and seed_primary_genre.strip():
+                        primary_genre_value = seed_primary_genre.strip().title()
+                    elif isinstance(source_tag, str) and source_tag.strip():
+                        primary_genre_value = source_tag.strip().title()
                 sc_rows.append((
                     artist_name_value.strip(),
                     location or "",
@@ -2214,17 +2378,55 @@ def scrape_soundcloud(start_url, seed_tags, pages_per_tag=SOUNDCLOUD_PAGES_PER_T
             if not (artist_name_value and contact_links):
                 continue
 
-            primary_genre_value = (artist.get("primary_genre", "") or "")
-            primary_genre_value = primary_genre_value.title() if isinstance(primary_genre_value, str) else primary_genre_value
+            location_value = artist.get("location", "")
+            song_title_value = artist.get("latest_release_title", "")
+            sounds_like_value = artist.get("sounds_like", "")
+            release_date_value = artist.get("latest_release_date", "") or "not present"
+
+            try:
+                current_url = ""
+                try:
+                    current_url = driver.current_url
+                except Exception:
+                    current_url = ""
+                if current_url.rstrip("/") != profile_url.rstrip("/"):
+                    driver.get(profile_url)
+                    WebDriverWait(driver, 6).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+                meta = _sc_extract_profile_meta(driver)
+            except Exception:
+                meta = {
+                    "artist_name": "",
+                    "location": "",
+                    "song_title": "",
+                    "primary_genre": "",
+                    "release_date": "not present",
+                    "sounds_like": ""
+                }
+
+            artist_name_value = (meta.get("artist_name") or artist_name_value).strip()
+            location_value = meta.get("location") or location_value or ""
+            song_title_value = meta.get("song_title") or song_title_value or ""
+            sounds_like_value = meta.get("sounds_like") or sounds_like_value or ""
+            meta_release = meta.get("release_date") or ""
+            if meta_release and meta_release.lower() != "not present":
+                release_date_value = meta_release
+            elif not release_date_value:
+                release_date_value = "not present"
+
+            meta_primary = (meta.get("primary_genre") or "").strip()
+            primary_genre_value = meta_primary or (artist.get("primary_genre", "") or "")
+            if isinstance(primary_genre_value, str) and primary_genre_value:
+                primary_genre_value = primary_genre_value.title()
+
             sc_rows.append((
                 artist_name_value,
-                artist.get("location", ""),
-                artist.get("latest_release_title", ""),
-                artist.get("sounds_like", ""),
+                location_value,
+                song_title_value,
+                sounds_like_value,
                 contact_links,
                 "",
                 "",
-                artist.get("latest_release_date", ""),
+                release_date_value,
                 primary_genre_value
             ))
 
