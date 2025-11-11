@@ -30,6 +30,7 @@ required_packages = {
     "tqdm": "tqdm",
     "selenium": "selenium",
     "bs4": "beautifulsoup4",
+    "dateutil": "python-dateutil",
     "webdriver_manager": "webdriver_manager",
     "PyQt5": "PyQt5"
 }
@@ -82,6 +83,7 @@ import random
 import re
 import pandas as pd
 import datetime
+import json
 from tqdm import tqdm
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
@@ -93,6 +95,7 @@ from bs4 import BeautifulSoup
 from webdriver_manager.chrome import ChromeDriverManager
 from urllib.parse import urlparse, urljoin
 from PyQt5 import QtWidgets, QtCore
+from dateutil import parser as dparser
 
 # ---------------------------
 # Bandcamp Configuration
@@ -293,6 +296,147 @@ def save_to_csv(data, filename):
     print(f"Data saved to {filename}")
 
 # =========================== Bandcamp Scraper ===========================
+
+# ---------------------------
+# Bandcamp release date extraction (robust)
+# ---------------------------
+_BC_RELEASE_PATTERNS = [
+    r"\breleased\s+([A-Za-z]+)\s+(\d{1,2}),\s*(\d{4})",
+    r"\breleased\s+(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})",
+    r"\breleased\s+([A-Za-z]+)\s+(\d{4})",
+    r"\breleased\s+(\d{4})"
+]
+
+def _parse_any_date_to_iso(text: str):
+    """
+    Try to parse any human date into ISO YYYY-MM-DD.
+    Returns (date_iso, precision) where precision is 'day'|'month'|'year'.
+    """
+    if not text:
+        return None, None
+    text_clean = " ".join(text.split())
+    try:
+        dt = dparser.parse(
+            text_clean,
+            fuzzy=True,
+            dayfirst=False,
+            default=datetime.datetime(1900, 1, 1)
+        )
+        year = dt.year
+        now_year = datetime.datetime.now().year
+        if 2000 <= year <= now_year + 1:
+            return dt.strftime("%Y-%m-%d"), "day"
+    except Exception:
+        pass
+    month_match = re.search(r"\b([A-Za-z]+)\s+(\d{4})\b", text_clean)
+    if month_match:
+        try:
+            dt = dparser.parse(
+                f"01 {month_match.group(1)} {month_match.group(2)}",
+                fuzzy=True,
+                dayfirst=True
+            )
+            return dt.strftime("%Y-%m-%d"), "month"
+        except Exception:
+            pass
+    year_match = re.search(r"\b(20\d{2}|19\d{2})\b", text_clean)
+    if year_match:
+        year = int(year_match.group(1))
+        now_year = datetime.datetime.now().year
+        if 2000 <= year <= now_year + 1:
+            return f"{year:04d}-01-01", "year"
+    return None, None
+
+def _extract_from_json_ld(soup) -> tuple:
+    """Scan all JSON-LD blocks for datePublished/uploadDate/dateCreated."""
+    for script in soup.find_all("script", type=lambda t: t and "ld+json" in t):
+        try:
+            data = json.loads(script.string or "")
+        except Exception:
+            continue
+        items = data if isinstance(data, list) else [data]
+        for obj in items:
+            if not isinstance(obj, dict):
+                continue
+            for key in ("datePublished", "uploadDate", "dateCreated"):
+                val = obj.get(key)
+                if isinstance(val, str) and val.strip():
+                    date_iso, prec = _parse_any_date_to_iso(val)
+                    if date_iso:
+                        return date_iso, prec, val
+    return None, None, None
+
+def _extract_from_meta(soup) -> tuple:
+    metas = []
+    metas += soup.select('meta[itemprop="datePublished"]')
+    metas += soup.select('meta[itemprop="dateCreated"]')
+    metas += soup.select('meta[name="date"]')
+    metas += soup.select('meta[property="music:release_date"]')
+    for meta in metas:
+        val = (meta.get("content") or meta.get("value") or "").strip()
+        if val:
+            date_iso, prec = _parse_any_date_to_iso(val)
+            if date_iso:
+                return date_iso, prec, val
+    og_meta = soup.select_one('meta[property="og:description"], meta[name="description"]')
+    if og_meta:
+        desc = (og_meta.get("content") or "").strip()
+        if "released" in desc.lower():
+            date_iso, prec = _parse_any_date_to_iso(desc)
+            if date_iso:
+                return date_iso, prec, desc
+    return None, None, None
+
+def _extract_from_time_tag(soup) -> tuple:
+    for time_el in soup.find_all("time"):
+        dt_attr = (time_el.get("datetime") or "").strip()
+        if dt_attr:
+            date_iso, prec = _parse_any_date_to_iso(dt_attr)
+            if date_iso:
+                return date_iso, prec, dt_attr
+        text = time_el.get_text(" ", strip=True)
+        if text:
+            date_iso, prec = _parse_any_date_to_iso(text)
+            if date_iso:
+                return date_iso, prec, text
+    return None, None, None
+
+def _extract_from_text_released(soup) -> tuple:
+    containers = []
+    containers += soup.select(".tralbum-credits")
+    containers += soup.select(".tralbumData")
+    containers += soup.select("#trackInfoInner, #bio-container")
+    collected_text = " ".join([c.get_text(" ", strip=True) for c in containers]) or soup.get_text(" ", strip=True)
+    for pattern in _BC_RELEASE_PATTERNS:
+        match = re.search(pattern, collected_text, flags=re.IGNORECASE)
+        if match:
+            raw = match.group(0)
+            date_iso, prec = _parse_any_date_to_iso(raw)
+            if date_iso:
+                return date_iso, prec, raw
+    return None, None, None
+
+def bandcamp_extract_release_date(html: str) -> dict:
+    """
+    Robust extractor. Order: JSON-LD -> meta -> <time> -> free-text 'released ...'
+    Returns dict with keys date_iso, precision, raw.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    extractors = (
+        _extract_from_json_ld,
+        _extract_from_meta,
+        _extract_from_time_tag,
+        _extract_from_text_released,
+    )
+    for extractor in extractors:
+        try:
+            date_iso, precision, raw = extractor(soup)
+            if date_iso:
+                return {"date_iso": date_iso, "precision": precision, "raw": raw}
+        except Exception:
+            continue
+    return {"date_iso": None, "precision": None, "raw": None}
+
 def _bandcamp_extract_tag_from_url(url: str) -> str | None:
     if not url:
         return None
@@ -390,6 +534,7 @@ def scrape_bandcamp(seed_tags, pages_per_tag=5, existing_csv="artist_social_link
                 "Location": artist_dict.get("location", ""),
                 "Latest Release": artist_dict.get("latest_release_title", ""),
                 "Latest Release Date": artist_dict.get("latest_release_date", ""),
+                "Latest Release Precision": artist_dict.get("latest_release_precision", ""),
                 "Source Tag": artist_dict.get("source_tag", "")
             })
             actionable_count += 1
@@ -461,6 +606,7 @@ def _bandcamp_parse_artist_profile(driver, profile_url) -> dict:
         },
         "latest_release_title": "",
         "latest_release_date": "",
+        "latest_release_precision": "",
         "source_tag": ""
     }
     try:
@@ -470,6 +616,10 @@ def _bandcamp_parse_artist_profile(driver, profile_url) -> dict:
         print(f"Bandcamp: unable to load profile {profile_url}: {exc}")
         return {}
     soup = BeautifulSoup(driver.page_source, 'html.parser')
+    release_info = bandcamp_extract_release_date(driver.page_source)
+    if release_info.get("date_iso"):
+        artist["latest_release_date"] = release_info.get("date_iso", "")
+        artist["latest_release_precision"] = release_info.get("precision", "") or ""
     title_meta = soup.find('meta', attrs={'property': 'og:title'})
     if title_meta and title_meta.get('content'):
         artist["artist_name"] = title_meta['content'].split(' · ')[0].strip()
@@ -527,8 +677,14 @@ def _bandcamp_parse_artist_profile(driver, profile_url) -> dict:
         if title_el:
             artist["latest_release_title"] = title_el.get_text(strip=True)
         date_el = release_container.find(class_=re.compile('release', re.I))
-        if date_el:
-            artist["latest_release_date"] = date_el.get_text(strip=True)
+        if date_el and not artist["latest_release_date"]:
+            raw_text = date_el.get_text(strip=True)
+            date_iso, prec = _parse_any_date_to_iso(raw_text)
+            if date_iso:
+                artist["latest_release_date"] = date_iso
+                artist["latest_release_precision"] = prec or artist["latest_release_precision"]
+            else:
+                artist["latest_release_date"] = raw_text
     if not artist["latest_release_title"]:
         track_title = soup.find(class_=re.compile('trackTitle', re.I))
         if track_title:
@@ -536,14 +692,26 @@ def _bandcamp_parse_artist_profile(driver, profile_url) -> dict:
     if not artist["latest_release_date"]:
         release_text = soup.find(class_=re.compile('release-date', re.I))
         if release_text:
-            artist["latest_release_date"] = release_text.get_text(strip=True)
+            raw_text = release_text.get_text(strip=True)
+            date_iso, prec = _parse_any_date_to_iso(raw_text)
+            if date_iso:
+                artist["latest_release_date"] = date_iso
+                artist["latest_release_precision"] = prec or artist["latest_release_precision"]
+            else:
+                artist["latest_release_date"] = raw_text
     if not artist["latest_release_date"]:
         credits = soup.find('div', class_=re.compile(r'tralbum-credits', re.I))
         if credits:
             credits_text = credits.get_text(" ", strip=True)
             match = re.search(r"released\s+(.+)", credits_text, re.I)
             if match:
-                artist["latest_release_date"] = match.group(1).strip()
+                raw_text = match.group(1).strip()
+                date_iso, prec = _parse_any_date_to_iso(raw_text)
+                if date_iso:
+                    artist["latest_release_date"] = date_iso
+                    artist["latest_release_precision"] = prec or artist["latest_release_precision"]
+                else:
+                    artist["latest_release_date"] = raw_text
             else:
                 artist["latest_release_date"] = credits_text.strip()
     if not artist["latest_release_date"]:
@@ -572,6 +740,7 @@ def _bandcamp_write_enriched_csv(rows, existing_csv):
         "Location",
         "Latest Release",
         "Latest Release Date",
+        "Latest Release Precision",
         "Source Tag"
     ]
     base_dir = os.path.dirname(os.path.abspath(existing_csv))
