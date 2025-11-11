@@ -437,6 +437,73 @@ def bandcamp_extract_release_date(html: str) -> dict:
             continue
     return {"date_iso": None, "precision": None, "raw": None}
 
+# ---------------------------
+# Bandcamp genres (tags) + sounds-like extraction
+# ---------------------------
+_BC_SOUNDS_PATTERNS = [
+    r"\bffo\b[:\-–]\s*([^.;\n]+)",
+    r"\briyl\b[:\-–]\s*([^.;\n]+)",
+    r"\bfor\s+fans\s+of\b[:\-–]?\s*([^.;\n]+)",
+    r"\bsounds\s+like\b[:\-–]?\s*([^.;\n]+)",
+    r"\binfluences?\b[:\-–]?\s*([^.;\n]+)",
+    r"\binspired\s+by\b[:\-–]?\s*([^.;\n]+)",
+]
+
+def _norm_tokens(line: str) -> list:
+    """Split a comma/pipe/slash separated line into clean tokens."""
+    if not line:
+        return []
+    parts = re.split(r"[,/|•]+|\band\b|\&", line, flags=re.IGNORECASE)
+    cleaned = []
+    for part in parts:
+        token = re.sub(r"\s+", " ", part).strip(" .;:()[]{}\"\u2013\u2014").strip()
+        if token:
+            cleaned.append(token)
+    seen = set()
+    unique = []
+    for token in cleaned:
+        key = token.lower()
+        if key not in seen:
+            seen.add(key)
+            unique.append(token)
+    return unique
+
+def bandcamp_extract_genres(soup) -> list:
+    """Collect Bandcamp tags/genres from artist or album pages."""
+    tags = set()
+    for anchor in soup.select(".tralbum-tags a, a.tag, #tags a"):
+        txt = anchor.get_text(" ", strip=True)
+        if txt:
+            tags.add(txt.lower())
+    meta_keywords = soup.select_one('meta[name="keywords"]')
+    if meta_keywords and meta_keywords.get("content"):
+        for token in _norm_tokens(meta_keywords["content"]):
+            if token:
+                tags.add(token.lower())
+    return list(tags)
+
+def bandcamp_extract_sounds_like(soup) -> str:
+    """Pull FFO/RIYL/sounds-like phrases from descriptive text."""
+    blocks = []
+    blocks += [b.get_text(" ", strip=True) for b in soup.select("#bio-container, .tralbum-credits, .tralbumData, #trackInfoInner")]
+    desc_meta = soup.select_one('meta[property="og:description"], meta[name="description"]')
+    if desc_meta and desc_meta.get("content"):
+        blocks.append(desc_meta["content"])
+    text = " \n".join(filter(None, blocks))
+    text = re.sub(r"\s+", " ", text).strip()
+    for pattern in _BC_SOUNDS_PATTERNS:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match and match.group(1):
+            tokens = _norm_tokens(match.group(1))
+            if tokens:
+                return ", ".join(t.title() for t in tokens[:5])
+    fallback = re.search(r"\b(ffo|riyl)\b[:\-–]\s*([^.;\n]+)", text, flags=re.IGNORECASE)
+    if fallback and fallback.group(2):
+        tokens = _norm_tokens(fallback.group(2))
+        if tokens:
+            return ", ".join(t.title() for t in tokens[:5])
+    return ""
+
 def _bandcamp_extract_tag_from_url(url: str) -> str | None:
     if not url:
         return None
@@ -516,7 +583,7 @@ def scrape_bandcamp(seed_tags, pages_per_tag=5, existing_csv="artist_social_link
                 artist_dict.get("artist_name", ""),
                 artist_dict.get("location", ""),
                 artist_dict.get("latest_release_title", ""),
-                "",
+                artist_dict.get("sounds_like", ""),
                 contact_links,
                 "",
                 ""
@@ -532,9 +599,11 @@ def scrape_bandcamp(seed_tags, pages_per_tag=5, existing_csv="artist_social_link
                 "Linktree": socials.get("linktree", ""),
                 "YouTube": socials.get("youtube", ""),
                 "Location": artist_dict.get("location", ""),
+                "Genres": "; ".join(artist_dict.get("genres", [])),
                 "Latest Release": artist_dict.get("latest_release_title", ""),
                 "Latest Release Date": artist_dict.get("latest_release_date", ""),
                 "Latest Release Precision": artist_dict.get("latest_release_precision", ""),
+                "Sounds Like": artist_dict.get("sounds_like", ""),
                 "Source Tag": artist_dict.get("source_tag", "")
             })
             actionable_count += 1
@@ -604,9 +673,11 @@ def _bandcamp_parse_artist_profile(driver, profile_url) -> dict:
             "bandsintown": "",
             "songkick": ""
         },
+        "genres": [],
         "latest_release_title": "",
         "latest_release_date": "",
         "latest_release_precision": "",
+        "sounds_like": "",
         "source_tag": ""
     }
     try:
@@ -616,6 +687,8 @@ def _bandcamp_parse_artist_profile(driver, profile_url) -> dict:
         print(f"Bandcamp: unable to load profile {profile_url}: {exc}")
         return {}
     soup = BeautifulSoup(driver.page_source, 'html.parser')
+    artist["genres"] = bandcamp_extract_genres(soup)
+    artist["sounds_like"] = bandcamp_extract_sounds_like(soup)
     release_info = bandcamp_extract_release_date(driver.page_source)
     if release_info.get("date_iso"):
         artist["latest_release_date"] = release_info.get("date_iso", "")
@@ -738,9 +811,11 @@ def _bandcamp_write_enriched_csv(rows, existing_csv):
         "Linktree",
         "YouTube",
         "Location",
+        "Genres",
         "Latest Release",
         "Latest Release Date",
         "Latest Release Precision",
+        "Sounds Like",
         "Source Tag"
     ]
     base_dir = os.path.dirname(os.path.abspath(existing_csv))
