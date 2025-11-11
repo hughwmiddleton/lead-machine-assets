@@ -620,6 +620,14 @@ def scrape_bandcamp(seed_tags, pages_per_tag=5, existing_csv="artist_social_link
 
 def _bandcamp_collect_from_tag_page(driver, tag_url) -> list[str]:
     """Return a list of candidate Bandcamp links from a tag page (album/track/artist)."""
+    excluded_hosts = {
+        "bandcamp.com",
+        "store.bandcamp.com",
+        "daily.bandcamp.com",
+        "blog.bandcamp.com",
+        "community.bandcamp.com",
+        "supporters.bandcamp.com"
+    }
     candidates = []
     try:
         soup = BeautifulSoup(driver.page_source, 'html.parser')
@@ -628,11 +636,19 @@ def _bandcamp_collect_from_tag_page(driver, tag_url) -> list[str]:
             absolute = urljoin(tag_url, href)
             if not absolute:
                 continue
-            lower = absolute.lower()
-            if "bandcamp.com" not in lower:
+            parsed = urlparse(absolute)
+            host = parsed.netloc.lower()
+            path = parsed.path.lower()
+            if not host.endswith("bandcamp.com") or host in excluded_hosts:
                 continue
-            if any(segment in lower for segment in ["/album", "/track"]) or ".bandcamp.com" in urlparse(absolute).netloc:
-                candidates.append(absolute)
+            allowed_path = (
+                path in ("", "/") or
+                path.startswith("/album") or
+                path.startswith("/track") or
+                path.startswith("/music")
+            )
+            if allowed_path:
+                candidates.append(f"{parsed.scheme or 'https'}://{host}{parsed.path}")
     except Exception as exc:
         print(f"Bandcamp: failed to collect links from {tag_url}: {exc}")
     return candidates
@@ -650,7 +666,15 @@ def _bandcamp_resolve_artist_profile_url(candidate_url: str) -> str:
     host = parsed.netloc.lower()
     if not host.endswith("bandcamp.com"):
         return ""
-    if host == "bandcamp.com":
+    excluded_hosts = {
+        "bandcamp.com",
+        "store.bandcamp.com",
+        "daily.bandcamp.com",
+        "blog.bandcamp.com",
+        "community.bandcamp.com",
+        "supporters.bandcamp.com"
+    }
+    if host in excluded_hosts:
         return ""
     scheme = parsed.scheme or "https"
     return f"{scheme}://{host}/"
