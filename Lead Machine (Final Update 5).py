@@ -223,7 +223,7 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200)
             played_on_triplej = "yes" if drum_status_raw == "triple j" else ""
             played_on_unearthed = "yes" if drum_status_raw == "triple j unearthed" else ""
             artist_data.append((artist_name, location, song_title, sounds_like, social_links,
-                                played_on_triplej, played_on_unearthed))
+                                played_on_triplej, played_on_unearthed, "", ""))
     except Exception as e:
         print(f"Error during website scraping: {e}")
     finally:
@@ -278,7 +278,11 @@ def save_to_csv(data, filename):
     if os.path.exists(filename):
         existing_data = pd.read_csv(filename)
     new_data = []
-    for artist_name, location, song_title, sounds_like, social_links, played_on_triplej, played_on_unearthed in data:
+    for entry in data:
+        entry_list = list(entry)
+        while len(entry_list) < 9:
+            entry_list.append("")
+        artist_name, location, song_title, sounds_like, social_links, played_on_triplej, played_on_unearthed, release_date, primary_genre = entry_list[:9]
         for link in social_links:
             new_data.append({
                 'Artist Name': artist_name,
@@ -288,6 +292,8 @@ def save_to_csv(data, filename):
                 'Social Link': link,
                 'Played on triple J': played_on_triplej,
                 'Played on Unearthed': played_on_unearthed,
+                'Release Date': release_date,
+                'Primary Genre': primary_genre,
                 'Date Added': current_date
             })
     combined_data = pd.concat([existing_data, pd.DataFrame(new_data)])
@@ -504,6 +510,73 @@ def bandcamp_extract_sounds_like(soup) -> str:
             return ", ".join(t.title() for t in tokens[:5])
     return ""
 
+# ---------------------------
+# Bandcamp: primary genre from grid card (robust)
+# ---------------------------
+_BC_CARD_SELECTORS = [
+    ".music-grid .item",
+    ".discover-results .item",
+    "li.searchresult",
+    ".result-items .item",
+    ".items .item"
+]
+
+def bandcamp_extract_primary_genre_from_card(card) -> str:
+    """Extract the genre label shown on a Bandcamp grid card."""
+    genre_el = card.select_one(".genre, .itemtext .genre, .result-info .genre")
+    if genre_el:
+        txt = genre_el.get_text(" ", strip=True)
+        if txt:
+            return txt.lower()
+    bad_tokens = {
+        "digital", "vinyl", "compact discs", "compact disc", "cd",
+        "cassettes", "cassette", "t-shirts", "t shirts", "t-shirt"
+    }
+    for anchor in card.select("a[href*='/tag/']"):
+        txt = anchor.get_text(" ", strip=True)
+        if txt and txt.lower() not in bad_tokens:
+            return txt.lower()
+    for el in card.select(".itemtext, .result-info, .details"):
+        tail = el.get_text("\n", strip=True).split("\n")
+        if tail:
+            candidate = tail[-1].strip()
+            if candidate and 2 <= len(candidate) <= 40 and "by " not in candidate.lower():
+                return candidate.lower()
+    return ""
+
+def _bandcamp_card_candidates_with_genre(soup, base_url) -> list:
+    """Return list of dicts {url, primary_genre} from a card grid."""
+    out = []
+    seen = set()
+    for selector in _BC_CARD_SELECTORS:
+        for card in soup.select(selector):
+            href = None
+            for anchor in card.select("a"):
+                raw_href = anchor.get("href") or ""
+                if not raw_href:
+                    continue
+                if raw_href.startswith("//"):
+                    candidate = f"https:{raw_href}"
+                elif raw_href.startswith("http"):
+                    candidate = raw_href
+                elif raw_href.startswith("/"):
+                    candidate = urljoin(base_url, raw_href)
+                elif "bandcamp.com" in raw_href:
+                    candidate = f"https://{raw_href.lstrip('/')}"
+                else:
+                    continue
+                if any(token in candidate for token in ["/album", "/track", ".bandcamp.com"]):
+                    href = candidate
+                    break
+            if not href or href in seen:
+                continue
+            seen.add(href)
+            out.append({
+                "url": href,
+                "primary_genre": bandcamp_extract_primary_genre_from_card(card)
+            })
+    return out
+
 def _bandcamp_extract_tag_from_url(url: str) -> str | None:
     if not url:
         return None
@@ -515,7 +588,7 @@ def _bandcamp_extract_tag_from_url(url: str) -> str | None:
 def scrape_bandcamp(seed_tags, pages_per_tag=5, existing_csv="artist_social_links.csv", max_artists=200):
     """High-level Bandcamp entry point. Iterates tags → paginated tag pages → collects candidate artist/album links → resolves to artist profile → extracts contacts → writes CSV."""
     driver = setup_driver()
-    raw_candidates = []
+    raw_candidates = 0
     candidate_profiles = []
     seen_profiles = set()
     bandcamp_rows = []
@@ -533,8 +606,9 @@ def scrape_bandcamp(seed_tags, pages_per_tag=5, existing_csv="artist_social_link
                     print(f"Bandcamp: error loading {tag_url}: {exc}")
                     continue
                 candidates = _bandcamp_collect_from_tag_page(driver, tag_url)
-                raw_candidates.extend(candidates)
-                for link in candidates:
+                raw_candidates += len(candidates)
+                for candidate in candidates:
+                    link = candidate.get("url")
                     profile_url = _bandcamp_resolve_artist_profile_url(link)
                     if not profile_url:
                         continue
@@ -542,17 +616,17 @@ def scrape_bandcamp(seed_tags, pages_per_tag=5, existing_csv="artist_social_link
                     if key in seen_profiles:
                         continue
                     seen_profiles.add(key)
-                    candidate_profiles.append((profile_url, tag))
+                    candidate_profiles.append((profile_url, tag, candidate.get("primary_genre", "")))
                 if len(candidate_profiles) >= max_artists:
                     break
                 time.sleep(random.uniform(1.0, 2.0))
             if len(candidate_profiles) >= max_artists:
                 break
-        print(f"Bandcamp: total candidate links found {len(raw_candidates)}")
+        print(f"Bandcamp: total candidate links found {raw_candidates}")
         print(f"Bandcamp: total artist profiles resolved {len(candidate_profiles)}")
         actionable_count = 0
-        for profile_url, tag in candidate_profiles:
-            artist_dict = _bandcamp_parse_artist_profile(driver, profile_url)
+        for profile_url, tag, seed_genre in candidate_profiles:
+            artist_dict = _bandcamp_parse_artist_profile(driver, profile_url, seed_genre)
             if not artist_dict:
                 continue
             artist_dict["source_tag"] = tag
@@ -579,6 +653,10 @@ def scrape_bandcamp(seed_tags, pages_per_tag=5, existing_csv="artist_social_link
             if profile_key in seen_artist_profiles:
                 continue
             seen_artist_profiles.add(profile_key)
+            release_date_value = artist_dict.get("latest_release_date", "") or ""
+            primary_genre_value = artist_dict.get("primary_genre", "")
+            if isinstance(primary_genre_value, str):
+                primary_genre_value = primary_genre_value.title()
             bandcamp_rows.append((
                 artist_dict.get("artist_name", ""),
                 artist_dict.get("location", ""),
@@ -586,7 +664,9 @@ def scrape_bandcamp(seed_tags, pages_per_tag=5, existing_csv="artist_social_link
                 artist_dict.get("sounds_like", ""),
                 contact_links,
                 "",
-                ""
+                "",
+                release_date_value,
+                primary_genre_value
             ))
             enriched_rows.append({
                 "Artist Name": artist_dict.get("artist_name", ""),
@@ -604,6 +684,7 @@ def scrape_bandcamp(seed_tags, pages_per_tag=5, existing_csv="artist_social_link
                 "Latest Release Date": artist_dict.get("latest_release_date", ""),
                 "Latest Release Precision": artist_dict.get("latest_release_precision", ""),
                 "Sounds Like": artist_dict.get("sounds_like", ""),
+                "Primary Genre": primary_genre_value,
                 "Source Tag": artist_dict.get("source_tag", "")
             })
             actionable_count += 1
@@ -618,37 +699,13 @@ def scrape_bandcamp(seed_tags, pages_per_tag=5, existing_csv="artist_social_link
     if enriched_rows:
         _bandcamp_write_enriched_csv(enriched_rows, existing_csv)
 
-def _bandcamp_collect_from_tag_page(driver, tag_url) -> list[str]:
-    """Return a list of candidate Bandcamp links from a tag page (album/track/artist)."""
-    excluded_hosts = {
-        "bandcamp.com",
-        "store.bandcamp.com",
-        "daily.bandcamp.com",
-        "blog.bandcamp.com",
-        "community.bandcamp.com",
-        "supporters.bandcamp.com"
-    }
+def _bandcamp_collect_from_tag_page(driver, tag_url) -> list:
+    """Return candidate dicts with URLs + card primary genre from a tag page."""
     candidates = []
     try:
         soup = BeautifulSoup(driver.page_source, 'html.parser')
-        for anchor in soup.find_all('a', href=True):
-            href = anchor['href']
-            absolute = urljoin(tag_url, href)
-            if not absolute:
-                continue
-            parsed = urlparse(absolute)
-            host = parsed.netloc.lower()
-            path = parsed.path.lower()
-            if not host.endswith("bandcamp.com") or host in excluded_hosts:
-                continue
-            allowed_path = (
-                path in ("", "/") or
-                path.startswith("/album") or
-                path.startswith("/track") or
-                path.startswith("/music")
-            )
-            if allowed_path:
-                candidates.append(f"{parsed.scheme or 'https'}://{host}{parsed.path}")
+        base_url = "https://bandcamp.com"
+        candidates = _bandcamp_card_candidates_with_genre(soup, base_url)
     except Exception as exc:
         print(f"Bandcamp: failed to collect links from {tag_url}: {exc}")
     return candidates
@@ -679,7 +736,7 @@ def _bandcamp_resolve_artist_profile_url(candidate_url: str) -> str:
     scheme = parsed.scheme or "https"
     return f"{scheme}://{host}/"
 
-def _bandcamp_parse_artist_profile(driver, profile_url) -> dict:
+def _bandcamp_parse_artist_profile(driver, profile_url, seed_primary_genre="") -> dict:
     """Visit artist profile; return dict with name, location, website, socials list, latest release title/date if visible."""
     artist = {
         "artist_name": "",
@@ -702,6 +759,7 @@ def _bandcamp_parse_artist_profile(driver, profile_url) -> dict:
         "latest_release_date": "",
         "latest_release_precision": "",
         "sounds_like": "",
+        "primary_genre": "",
         "source_tag": ""
     }
     try:
@@ -712,6 +770,8 @@ def _bandcamp_parse_artist_profile(driver, profile_url) -> dict:
         return {}
     soup = BeautifulSoup(driver.page_source, 'html.parser')
     artist["genres"] = bandcamp_extract_genres(soup)
+    primary_genre = (seed_primary_genre or (artist["genres"][0] if artist["genres"] else "")).strip()
+    artist["primary_genre"] = primary_genre
     artist["sounds_like"] = bandcamp_extract_sounds_like(soup)
     release_info = bandcamp_extract_release_date(driver.page_source)
     if release_info.get("date_iso"):
@@ -980,18 +1040,21 @@ def scrape_csv(input_csv, output_csv, fb_username, fb_password, max_emails=None)
                 song_title = _safe_row_value(row, 'Song Title', '')
                 if (not song_title) and ('Latest Release' in row):
                     song_title = _safe_row_value(row, 'Latest Release', '')
-                latest_release_date = _safe_row_value(row, 'Latest Release Date', '')
+                release_date_value = _safe_row_value(row, 'Release Date', '') or _safe_row_value(row, 'Latest Release Date', '')
+                primary_genre_value = _safe_row_value(row, 'Primary Genre', '')
                 source_tag = _safe_row_value(row, 'Source Tag', '')
                 results.append({
                     'artist': artist_name,
                     'location': row.get('Location', ''),
                     'song_title': song_title,
                     'sounds_like': row.get('Sounds Like', ''),
+                    'Release Date': release_date_value,
                     'url': url,
                     'emails': ', '.join(unique_emails),
                     'Played on triple J': row.get('Played on triple J', ''),
                     'Played on Unearthed': row.get('Played on Unearthed', ''),
-                    'latest_release_date': latest_release_date,
+                    'latest_release_date': release_date_value,
+                    'primary_genre': primary_genre_value,
                     'source_tag': source_tag,
                     'date_added': datetime.datetime.now().strftime("%Y-%m-%d")
                 })
