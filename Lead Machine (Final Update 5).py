@@ -511,48 +511,52 @@ def bandcamp_extract_sounds_like(soup) -> str:
     return ""
 
 # ---------------------------
-# Bandcamp: primary genre from grid card (robust)
+# Bandcamp: card-level genre extraction (uses <p class="genre">)
 # ---------------------------
-_BC_CARD_SELECTORS = [
-    ".music-grid .item",
-    ".discover-results .item",
-    "li.searchresult",
-    ".result-items .item",
-    ".items .item"
-]
-
 def bandcamp_extract_primary_genre_from_card(card) -> str:
-    """Extract the genre label shown on a Bandcamp grid card."""
-    genre_el = card.select_one(".genre, .itemtext .genre, .result-info .genre")
+    """
+    Extracts the visible genre displayed directly beneath the album title/artist
+    on Bandcamp discover/tag grids (inside <p class="genre"> ... </p>).
+    Falls back to text in the .meta container if the class is absent.
+    """
+    genre_el = card.select_one("p.genre")
     if genre_el:
         txt = genre_el.get_text(" ", strip=True)
         if txt:
             return txt.lower()
-    bad_tokens = {
-        "digital", "vinyl", "compact discs", "compact disc", "cd",
-        "cassettes", "cassette", "t-shirts", "t shirts", "t-shirt"
-    }
-    for anchor in card.select("a[href*='/tag/']"):
-        txt = anchor.get_text(" ", strip=True)
-        if txt and txt.lower() not in bad_tokens:
+    meta_el = card.select_one(".meta, .result-info")
+    if meta_el:
+        lines = meta_el.get_text("\n", strip=True).split("\n")
+        for line in reversed(lines):
+            if line and "by " not in line.lower() and len(line) < 40:
+                return line.lower()
+    alt = card.select_one("[class*='genre']")
+    if alt:
+        txt = alt.get_text(" ", strip=True)
+        if txt:
             return txt.lower()
-    for el in card.select(".itemtext, .result-info, .details"):
-        tail = el.get_text("\n", strip=True).split("\n")
-        if tail:
-            candidate = tail[-1].strip()
-            if candidate and 2 <= len(candidate) <= 40 and "by " not in candidate.lower():
-                return candidate.lower()
     return ""
 
 def _bandcamp_card_candidates_with_genre(soup, base_url) -> list:
-    """Return list of dicts {url, primary_genre} from a card grid."""
+    """
+    Returns list of dicts with candidate URLs and primary genres from Bandcamp grids.
+    """
+    selectors = ["li.results-grid-item", ".discover-results .item", ".music-grid .item"]
     out = []
     seen = set()
-    for selector in _BC_CARD_SELECTORS:
+    excluded_hosts = {
+        "bandcamp.com",
+        "store.bandcamp.com",
+        "daily.bandcamp.com",
+        "blog.bandcamp.com",
+        "community.bandcamp.com",
+        "supporters.bandcamp.com"
+    }
+    for selector in selectors:
         for card in soup.select(selector):
             href = None
-            for anchor in card.select("a"):
-                raw_href = anchor.get("href") or ""
+            for anchor in card.select("a[href]"):
+                raw_href = (anchor.get("href") or "").strip()
                 if not raw_href:
                     continue
                 if raw_href.startswith("//"):
@@ -565,10 +569,15 @@ def _bandcamp_card_candidates_with_genre(soup, base_url) -> list:
                     candidate = f"https://{raw_href.lstrip('/')}"
                 else:
                     continue
-                if any(token in candidate for token in ["/album", "/track", ".bandcamp.com"]):
+                lowered = candidate.lower()
+                if any(token in lowered for token in ["/album", "/track", ".bandcamp.com"]):
                     href = candidate
                     break
             if not href or href in seen:
+                continue
+            parsed = urlparse(href)
+            host = parsed.netloc.lower()
+            if not host.endswith("bandcamp.com") or host in excluded_hosts:
                 continue
             seen.add(href)
             out.append({
@@ -702,10 +711,41 @@ def scrape_bandcamp(seed_tags, pages_per_tag=5, existing_csv="artist_social_link
 def _bandcamp_collect_from_tag_page(driver, tag_url) -> list:
     """Return candidate dicts with URLs + card primary genre from a tag page."""
     candidates = []
+    excluded_hosts = {
+        "bandcamp.com",
+        "store.bandcamp.com",
+        "daily.bandcamp.com",
+        "blog.bandcamp.com",
+        "community.bandcamp.com",
+        "supporters.bandcamp.com"
+    }
     try:
         soup = BeautifulSoup(driver.page_source, 'html.parser')
-        base_url = "https://bandcamp.com"
+        base_url = tag_url.split("/tag/")[0] if "/tag/" in tag_url else "https://bandcamp.com"
         candidates = _bandcamp_card_candidates_with_genre(soup, base_url)
+        if not candidates:
+            # Fallback to legacy anchor scraping
+            for anchor in soup.find_all('a', href=True):
+                href = anchor['href']
+                absolute = urljoin(tag_url, href)
+                if not absolute:
+                    continue
+                parsed = urlparse(absolute)
+                host = parsed.netloc.lower()
+                path = parsed.path.lower()
+                if not host.endswith("bandcamp.com") or host in excluded_hosts:
+                    continue
+                allowed_path = (
+                    path in ("", "/") or
+                    path.startswith("/album") or
+                    path.startswith("/track") or
+                    path.startswith("/music")
+                )
+                if allowed_path:
+                    candidates.append({
+                        "url": f"{parsed.scheme or 'https'}://{host}{parsed.path}",
+                        "primary_genre": ""
+                    })
     except Exception as exc:
         print(f"Bandcamp: failed to collect links from {tag_url}: {exc}")
     return candidates
