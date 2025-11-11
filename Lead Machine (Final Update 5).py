@@ -217,18 +217,75 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200)
         if not profile_urls:
             print("No artist profile URLs found. Please check the website structure or selectors.")
         for profile_url in profile_urls:
-            social_links, location, song_title, sounds_like, artist_name, _ = scrape_artist_profile(driver, profile_url)
+            social_links, location, song_title, sounds_like, artist_name, release_date = scrape_artist_profile(driver, profile_url)
             # Determine drum status from the full page source.
             drum_status_raw = get_drum_status_from_source(driver.page_source)
             played_on_triplej = "yes" if drum_status_raw == "triple j" else ""
             played_on_unearthed = "yes" if drum_status_raw == "triple j unearthed" else ""
             artist_data.append((artist_name, location, song_title, sounds_like, social_links,
-                                played_on_triplej, played_on_unearthed, "", ""))
+                                played_on_triplej, played_on_unearthed, release_date, ""))
     except Exception as e:
         print(f"Error during website scraping: {e}")
     finally:
         driver.quit()
     save_to_csv(artist_data, existing_csv)
+
+# ---------------------------
+# Unearthed: release date extraction (robust)
+# ---------------------------
+_UNEARTHED_DATE_PATTERNS = [
+    r"\breleased\s+([A-Za-z]+)\s+(\d{1,2}),\s*(\d{4})",
+    r"\breleased\s+(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})",
+    r"\breleased\s+([A-Za-z]+)\s+(\d{4})",
+    r"\b(released|release\s+date|published)\b[:\s]+([A-Za-z]+\s+\d{1,2},\s*\d{4})",
+    r"\b(released|release\s+date|published)\b[:\s]+(\d{1,2}\s+[A-Za-z]+\s+\d{4})",
+    r"\b(20\d{2}|19\d{2})\b"
+]
+
+def unearthed_extract_release_date(html: str) -> str:
+    """
+    Best-effort extraction of a release date from an Unearthed artist/track page.
+    Strategy:
+      1) Look for <time datetime="..."> or time-like elements
+      2) Scan meta/aria/accessible-description blocks
+      3) Regex search for 'released ...' phrases and common date shapes
+    Returns a normalized string if found (prefer YYYY-MM-DD when datetime attr present),
+    else returns "".
+    """
+    soup = BeautifulSoup(html, "html.parser")
+
+    # 1) <time datetime="YYYY-MM-DD"> if present (most reliable)
+    for t in soup.find_all("time"):
+        dtattr = (t.get("datetime") or "").strip()
+        if dtattr and re.match(r"^\d{4}-\d{2}-\d{2}$", dtattr):
+            return dtattr
+        txt = t.get_text(" ", strip=True)
+        if txt and re.search(r"\d{4}", txt):
+            return txt
+
+    # 2) meta description sometimes contains 'released ...'
+    ogd = soup.select_one('meta[property="og:description"], meta[name="description"]')
+    if ogd and ogd.get("content"):
+        content = ogd["content"]
+        if "release" in content.lower() or "released" in content.lower():
+            return content
+
+    # 3) Visible text search in likely containers
+    blocks = []
+    blocks += [b.get_text(" ", strip=True) for b in soup.select("[data-component], .card, .content, .section, .divwU, .fRXHI, main")]
+    text = " ".join(blocks) or soup.get_text(" ", strip=True)
+
+    for pat in _UNEARTHED_DATE_PATTERNS:
+        m = re.search(pat, text, flags=re.IGNORECASE)
+        if not m:
+            continue
+        candidate = " ".join(g for g in m.groups() if g) if m.groups() else m.group(0)
+        candidate = candidate.strip()
+        if re.match(r"^\d{4}-\d{2}-\d{2}$", candidate):
+            return candidate
+        return candidate
+
+    return ""
 
 def scrape_artist_profile(driver, profile_url):
     social_links = []
@@ -236,6 +293,7 @@ def scrape_artist_profile(driver, profile_url):
     song_title = ""
     sounds_like = ""
     artist_name = profile_url.split('/')[-1]
+    release_date = ""
     exclude_social_urls = {
         "https://www.facebook.com/triplejunearthed",
         "https://www.instagram.com/triple_j_unearthed",
@@ -249,7 +307,9 @@ def scrape_artist_profile(driver, profile_url):
         WebDriverWait(driver, 10).until(
             EC.presence_of_element_located((By.TAG_NAME, 'body'))
         )
-        soup = BeautifulSoup(driver.page_source, 'html.parser')
+        page_source = driver.page_source
+        soup = BeautifulSoup(page_source, 'html.parser')
+        release_date = unearthed_extract_release_date(page_source) or ""
         links = soup.find_all('a', href=True)
         for link in links:
             href = link['href']
@@ -270,13 +330,15 @@ def scrape_artist_profile(driver, profile_url):
                 sounds_like = sounds_like_list.get_text(strip=True)
     except Exception as e:
         print(f"Error scraping profile {profile_url}: {e}")
-    return social_links, location, song_title, sounds_like, artist_name, ""
+    return social_links, location, song_title, sounds_like, artist_name, release_date
 
 def save_to_csv(data, filename):
     current_date = datetime.datetime.now().strftime("%Y-%m-%d")
     existing_data = pd.DataFrame()
     if os.path.exists(filename):
         existing_data = pd.read_csv(filename)
+        if 'Release Date' not in existing_data.columns:
+            existing_data['Release Date'] = ""
     new_data = []
     for entry in data:
         entry_list = list(entry)
@@ -1090,6 +1152,7 @@ def scrape_csv(input_csv, output_csv, fb_username, fb_password, max_emails=None)
                     'location': row.get('Location', ''),
                     'song_title': song_title,
                     'sounds_like': row.get('Sounds Like', ''),
+                    'release_date': release_date_value,
                     'Release Date': release_date_value,
                     'url': url,
                     'emails': ', '.join(unique_emails),
