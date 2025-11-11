@@ -666,6 +666,9 @@ def scrape_csv(input_csv, output_csv, fb_username, fb_password, max_emails=None)
         url = _extract_social_link_from_row(row)
         if not url:
             continue
+        preexisting_emails = []
+        if 'Email' in row and pd.notna(row['Email']):
+            preexisting_emails = extract_emails(str(row['Email']))
         try:
             print(f"Scraping Facebook page: {url}")
             driver.get(url)
@@ -688,12 +691,13 @@ def scrape_csv(input_csv, output_csv, fb_username, fb_password, max_emails=None)
             # Wait up to 0.5 seconds for the page body.
             WebDriverWait(driver, 0.5).until(EC.presence_of_element_located((By.TAG_NAME, 'body')))
             soup = BeautifulSoup(driver.page_source, 'html.parser')
-            emails = []
+            emails = list(preexisting_emails)
             for span in soup.find_all('span', class_=re.compile('.*x193iq5w.*')):
                 email = span.get_text(strip=True)
                 if email:
                     emails.extend(extract_emails(email))
-            if emails:
+            unique_emails = sorted(set(email.strip() for email in emails if email))
+            if unique_emails:
                 # Format artist name: replace hyphens with spaces and capitalise each word.
                 artist_name = row.get('Artist Name', '')
                 artist_name = artist_name.replace('-', ' ').title()
@@ -703,12 +707,12 @@ def scrape_csv(input_csv, output_csv, fb_username, fb_password, max_emails=None)
                     'song_title': row.get('Song Title', ''),
                     'sounds_like': row.get('Sounds Like', ''),
                     'url': url,
-                    'emails': ', '.join(emails),
+                    'emails': ', '.join(unique_emails),
                     'Played on triple J': row.get('Played on triple J', ''),
                     'Played on Unearthed': row.get('Played on Unearthed', ''),
                     'date_added': datetime.datetime.now().strftime("%Y-%m-%d")
                 })
-                emails_found += len(emails)
+                emails_found += len(unique_emails)
                 if max_emails is not None and emails_found >= max_emails:
                     break
         except Exception as e:
