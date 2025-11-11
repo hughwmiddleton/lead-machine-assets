@@ -802,6 +802,14 @@ def _extract_social_link_from_row(row):
                 return value
     return ""
 
+def _safe_row_value(row, key, fallback=""):
+    if key not in row:
+        return fallback
+    value = row.get(key)
+    if pd.isna(value):
+        return fallback
+    return value
+
 # =============================================================================
 # UPDATED scrape_csv Function (Simpler Version with Wait Times of 0.5 sec and Session Refresh every 20 pages)
 # =============================================================================
@@ -870,9 +878,11 @@ def scrape_csv(input_csv, output_csv, fb_username, fb_password, max_emails=None)
                 # Format artist name: replace hyphens with spaces and capitalise each word.
                 artist_name = row.get('Artist Name', '')
                 artist_name = artist_name.replace('-', ' ').title()
-                song_title = row.get('Song Title', '')
+                song_title = _safe_row_value(row, 'Song Title', '')
                 if (not song_title) and ('Latest Release' in row):
-                    song_title = row.get('Latest Release', '')
+                    song_title = _safe_row_value(row, 'Latest Release', '')
+                latest_release_date = _safe_row_value(row, 'Latest Release Date', '')
+                source_tag = _safe_row_value(row, 'Source Tag', '')
                 results.append({
                     'artist': artist_name,
                     'location': row.get('Location', ''),
@@ -882,6 +892,8 @@ def scrape_csv(input_csv, output_csv, fb_username, fb_password, max_emails=None)
                     'emails': ', '.join(unique_emails),
                     'Played on triple J': row.get('Played on triple J', ''),
                     'Played on Unearthed': row.get('Played on Unearthed', ''),
+                    'latest_release_date': latest_release_date,
+                    'source_tag': source_tag,
                     'date_added': datetime.datetime.now().strftime("%Y-%m-%d")
                 })
                 emails_found += len(unique_emails)
