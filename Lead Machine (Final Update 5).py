@@ -812,6 +812,8 @@ def _bandcamp_parse_artist_profile(driver, profile_url, seed_primary_genre="") -
     artist["genres"] = bandcamp_extract_genres(soup)
     primary_genre = (seed_primary_genre or (artist["genres"][0] if artist["genres"] else "")).strip()
     artist["primary_genre"] = primary_genre
+    if not artist["genres"] and primary_genre:
+        artist["genres"] = [primary_genre]
     artist["sounds_like"] = bandcamp_extract_sounds_like(soup)
     release_info = bandcamp_extract_release_date(driver.page_source)
     if release_info.get("date_iso"):
