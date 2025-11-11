@@ -537,6 +537,17 @@ def _bandcamp_parse_artist_profile(driver, profile_url) -> dict:
         release_text = soup.find(class_=re.compile('release-date', re.I))
         if release_text:
             artist["latest_release_date"] = release_text.get_text(strip=True)
+    if not artist["latest_release_date"]:
+        credits = soup.find('div', class_=re.compile(r'tralbum-credits', re.I))
+        if credits:
+            credits_text = credits.get_text(" ", strip=True)
+            match = re.search(r"released\s+(.+)", credits_text, re.I)
+            if match:
+                artist["latest_release_date"] = match.group(1).strip()
+            else:
+                artist["latest_release_date"] = credits_text.strip()
+    if not artist["latest_release_date"]:
+        artist["latest_release_date"] = "not present"
     return artist
 
 def _bandcamp_is_actionable(artist_dict: dict) -> bool:
