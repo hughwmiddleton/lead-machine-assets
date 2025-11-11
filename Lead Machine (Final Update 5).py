@@ -21,6 +21,7 @@ from __future__ import annotations
 import sys
 import subprocess
 import platform
+import traceback
 
 # ---------------------------
 # Dependency Check and Installation
@@ -93,7 +94,8 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from bs4 import BeautifulSoup
 from webdriver_manager.chrome import ChromeDriverManager
-from urllib.parse import urlparse, urljoin
+from urllib.parse import urlparse, urljoin, parse_qs, unquote
+import urllib.parse as _urlparse
 from PyQt5 import QtWidgets, QtCore
 from dateutil import parser as dparser
 
@@ -106,12 +108,43 @@ BANDCAMP_MIN_CONTACT_REQUIREMENT = True
 BANDCAMP_DEFAULT_TAG_URL = "https://bandcamp.com/tag/united-kingdom"
 UNEARTHED_DEFAULT_URL = "https://www.abc.net.au/triplejunearthed/music/"
 
+# ---------------------------
+# SoundCloud Configuration
+# ---------------------------
+SOUNDCLOUD_SEED_TAGS = ["indie", "rock", "electronic", "hip-hop", "pop", "alternative", "singer-songwriter", "punk", "garage", "ambient"]
+SOUNDCLOUD_PAGES_PER_TAG = 5
+SOUNDCLOUD_MIN_CONTACT_REQUIREMENT = True
+SOUNDCLOUD_DEFAULT_TAG_URL = "https://soundcloud.com/tags/indie"
+
+# ---------------------------
+# SoundCloud FAST mode (fb/email focus)
+# ---------------------------
+SOUNDCLOUD_FAST_FACEBOOK_EMAIL_ONLY = True
+SOUNDCLOUD_FAST_TIMEOUT_SEC = 10
+SOUNDCLOUD_FAST_MAX_CANDIDATES = 600
+
 # -----------------------------------------------------------------------------
 # Helper: URL Normalization
 # -----------------------------------------------------------------------------
 def normalize_url(url):
     """Normalize a URL by stripping trailing slashes and converting to lowercase."""
     return url.rstrip('/').lower()
+
+def _ensure_parent_dir(path: str):
+    try:
+        directory = os.path.dirname(os.path.abspath(path))
+        if directory and not os.path.exists(directory):
+            os.makedirs(directory, exist_ok=True)
+    except Exception:
+        pass
+
+def _write_empty_csv_with_headers(path: str):
+    _ensure_parent_dir(path)
+    headers = [
+        'Artist Name', 'Location', 'Song Title', 'Sounds Like', 'Social Link',
+        'Played on triple J', 'Played on Unearthed', 'Release Date', 'Primary Genre', 'Date Added'
+    ]
+    pd.DataFrame(columns=headers).to_csv(path, index=False, encoding="utf-8-sig")
 
 # -----------------------------------------------------------------------------
 # Helper: Drum Status Detection from Page Source using BeautifulSoup
@@ -149,15 +182,35 @@ def get_drum_status_from_source(page_source):
 # -----------------------------------------------------------------------------
 def setup_driver():
     chrome_options = Options()
-    chrome_options.add_argument("--headless")
+    chrome_options.add_argument("--headless=new")
     chrome_options.add_argument("--disable-gpu")
-    chrome_options.add_argument("--window-size=1920x1080")
+    chrome_options.add_argument("--window-size=1440,900")
     chrome_options.add_argument("--disable-extensions")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+    chrome_options.add_argument("--lang=en-US,en")
+    chrome_options.page_load_strategy = 'eager'
+    prefs = {
+        "profile.managed_default_content_settings.images": 2,
+        "profile.default_content_setting_values.notifications": 2,
+    }
+    chrome_options.add_experimental_option("prefs", prefs)
+    chrome_options.add_argument(
+        "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    )
     service = Service(ChromeDriverManager().install())
     driver = webdriver.Chrome(service=service, options=chrome_options)
+
+    try:
+        driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
+            "source": """
+                Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+            """
+        })
+    except Exception:
+        pass
     return driver
 
 # -----------------------------------------------------------------------------
@@ -333,19 +386,30 @@ def scrape_artist_profile(driver, profile_url):
     return social_links, location, song_title, sounds_like, artist_name, release_date
 
 def save_to_csv(data, filename):
+    _ensure_parent_dir(filename)
     current_date = datetime.datetime.now().strftime("%Y-%m-%d")
+
+    if not data:
+        _write_empty_csv_with_headers(filename)
+        print(f"Created empty CSV with headers at {filename}")
+        return
+
     existing_data = pd.DataFrame()
     if os.path.exists(filename):
-        existing_data = pd.read_csv(filename)
+        try:
+            existing_data = pd.read_csv(filename)
+        except Exception:
+            existing_data = pd.DataFrame()
         if 'Release Date' not in existing_data.columns:
             existing_data['Release Date'] = ""
+
     new_data = []
     for entry in data:
         entry_list = list(entry)
         while len(entry_list) < 9:
             entry_list.append("")
         artist_name, location, song_title, sounds_like, social_links, played_on_triplej, played_on_unearthed, release_date, primary_genre = entry_list[:9]
-        for link in social_links:
+        for link in (social_links or []):
             new_data.append({
                 'Artist Name': artist_name,
                 'Location': location,
@@ -358,9 +422,11 @@ def save_to_csv(data, filename):
                 'Primary Genre': primary_genre,
                 'Date Added': current_date
             })
-    combined_data = pd.concat([existing_data, pd.DataFrame(new_data)])
-    combined_data = combined_data.drop_duplicates(subset=['Artist Name', 'Social Link'])
-    combined_data.to_csv(filename, index=False)
+
+    combined = pd.concat([existing_data, pd.DataFrame(new_data)], ignore_index=True)
+    if not combined.empty:
+        combined = combined.drop_duplicates(subset=['Artist Name', 'Social Link'])
+    combined.to_csv(filename, index=False, encoding="utf-8-sig")
     print(f"Data saved to {filename}")
 
 # =========================== Bandcamp Scraper ===========================
@@ -1032,7 +1098,1168 @@ def _bandcamp_write_enriched_csv(rows, existing_csv):
     combined = combined.drop_duplicates(subset="__dedupe_key")
     combined = combined.drop(columns="__dedupe_key")
     combined = combined[columns]
-    combined.to_csv(enriched_path, index=False)
+    combined.to_csv(enriched_path, index=False, encoding="utf-8-sig")
+
+# ---------------------------
+# SoundCloud Helpers
+# ---------------------------
+def _sc_normalize_url(u: str) -> str:
+    if not u:
+        return ""
+    u = u.strip()
+    if u.startswith("//"):
+        u = "https:" + u
+    if u.startswith("/"):
+        return "https://soundcloud.com" + u
+    return u
+
+def _sc_accept_consent_if_present(driver):
+    """Dismiss OneTrust or generic consent banners so content loads."""
+    try:
+        WebDriverWait(driver, 6).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+        for xp in [
+            "//*[@id='onetrust-accept-btn-handler']",
+            "//button[contains(@class,'onetrust-accept-btn-handler')]",
+            "//button[contains(., 'Accept All')]",
+            "//button[contains(., 'Accept all')]",
+            "//button[contains(., 'I agree')]",
+            "//button[contains(., 'Accept & Continue')]",
+        ]:
+            try:
+                btn = WebDriverWait(driver, 2).until(EC.element_to_be_clickable((By.XPATH, xp)))
+                driver.execute_script("arguments[0].click();", btn)
+                time.sleep(0.5)
+                break
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+def _sc_soft_scroll(driver):
+    try:
+        for y in (300, 900, 1600):
+            driver.execute_script(f"window.scrollTo(0,{y});")
+            time.sleep(0.3)
+    except Exception:
+        pass
+
+def _sc_unwrap_gate(href: str) -> str:
+    """
+    Unwrap gate.sc redirect URLs that embed the real target in ?url=.
+    """
+    if not href:
+        return href
+    try:
+        parsed = urlparse(href)
+        if parsed.netloc and "gate.sc" in parsed.netloc.lower():
+            inner = parse_qs(parsed.query or "").get("url", [None])[0]
+            if inner:
+                return unquote(inner)
+    except Exception:
+        pass
+    return href
+
+def _sc_handle_from_profile(profile_url: str) -> str:
+    try:
+        parsed = urlparse(profile_url)
+        return (parsed.path or "/").strip("/").split("/")[0]
+    except Exception:
+        return ""
+
+def _norm_url_general(href: str) -> str:
+    if not href:
+        return ""
+    href = _sc_unwrap_gate(href.strip())
+    if href.startswith(("facebook.com/", "m.facebook.com/", "fb.me/")):
+        href = "https://" + href
+    try:
+        parsed = urlparse(href)
+        host = (parsed.netloc or "").lower()
+        if host in _FB_REDIRECT_HOSTS:
+            inner = parse_qs(parsed.query or "").get("u", [None])[0]
+            if inner:
+                return unquote(inner)
+    except Exception:
+        pass
+    return href
+
+def _sc_try_dismiss_consent(driver):
+    selectors = [
+        "#onetrust-accept-btn-handler",
+        ".onetrust-close-btn-handler",
+        "button[aria-label='Accept All']",
+        "button[aria-label='Accept all']",
+    ]
+    for sel in selectors:
+        try:
+            el = driver.find_element(By.CSS_SELECTOR, sel)
+            el.click()
+            time.sleep(0.2)
+            return
+        except Exception:
+            continue
+
+def _sc_try_show_more(driver):
+    xpaths = [
+        "//button[.//*[contains(translate(normalize-space(text()),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'show more')]]",
+        "//a[contains(translate(normalize-space(text()),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'show more')]",
+        "//button[contains(translate(normalize-space(text()),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'see more')]",
+    ]
+    for xp in xpaths:
+        try:
+            btn = WebDriverWait(driver, 2).until(EC.element_to_be_clickable((By.XPATH, xp)))
+            btn.click()
+            time.sleep(0.25)
+            return
+        except Exception:
+            continue
+
+def _sc_scroll_sidebar(driver):
+    try:
+        driver.execute_script("window.scrollTo(0,0);")
+        driver.execute_script(
+            "const el = document.querySelector('.profileSidebar') || document.querySelector('.profileHeaderInfo') || document.querySelector('ul.profileLinks__linkList');"
+            "if (el) el.scrollIntoView({behavior:'instant', block:'center'});"
+        )
+        time.sleep(0.25)
+    except Exception:
+        pass
+
+def _norm_fb(url: str) -> str:
+    return _norm_url_general(url)
+
+def _is_fb(url: str) -> bool:
+    try:
+        host = urlparse(url).netloc.lower()
+        return any(h in host for h in _FB_HOSTS)
+    except Exception:
+        return False
+
+def _is_company_fb(href: str) -> bool:
+    try:
+        path = (urlparse(href).path or "").lower()
+        return any(path.startswith(deny) for deny in _FB_PATH_DENY)
+    except Exception:
+        return False
+
+def _sc_extract_objects_from_hydration(html: str) -> list:
+    try:
+        match = re.search(r"__sc_hydration\s*=\s*(\[[\s\S]*?\])\s*;?", html, flags=re.M)
+        if not match:
+            return []
+        data = json.loads(match.group(1))
+        return data if isinstance(data, list) else [data]
+    except Exception:
+        return []
+
+def _sc_collect_urls_from_obj(obj, bucket: set):
+    if isinstance(obj, str):
+        if obj.startswith("http") or obj.startswith("mailto:"):
+            bucket.add(obj)
+    elif isinstance(obj, dict):
+        for value in obj.values():
+            _sc_collect_urls_from_obj(value, bucket)
+    elif isinstance(obj, list):
+        for value in obj:
+            _sc_collect_urls_from_obj(value, bucket)
+
+def _sc_extract_urls_from_hydration(html: str) -> set:
+    urls = set()
+    for obj in _sc_extract_objects_from_hydration(html):
+        _sc_collect_urls_from_obj(obj, urls)
+    return urls
+
+def _sc_extract_urls_from_ldjson(soup) -> set:
+    urls = set()
+    for script in soup.find_all("script", type=lambda t: t and "ld+json" in t):
+        try:
+            data = json.loads(script.string or "")
+        except Exception:
+            continue
+        _sc_collect_urls_from_obj(data, urls)
+    return urls
+
+def _sc_try_linktree_for_contacts(driver, urls: set, timeout=6) -> tuple:
+    linktree_url = None
+    for candidate in urls or set():
+        try:
+            host = (urlparse(candidate).netloc or "").lower()
+            if any(h in host for h in {"linktr.ee", "linktree.com", "www.linktr.ee", "www.linktree.com"}):
+                linktree_url = candidate
+                break
+        except Exception:
+            continue
+    if not linktree_url:
+        return "", ""
+    try:
+        driver.get(linktree_url)
+        WebDriverWait(driver, timeout).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+        soup = BeautifulSoup(driver.page_source, "html.parser")
+        fb = ""
+        em = ""
+        for anchor in soup.find_all("a", href=True):
+            href = _norm_url_general(anchor["href"])
+            if _is_fb(href) and not _is_company_fb(href):
+                fb = href
+                break
+            if href.startswith("mailto:"):
+                candidate_email = href.split("mailto:")[-1].split("?")[0]
+                if candidate_email and not candidate_email.lower().endswith("@soundcloud.com"):
+                    em = candidate_email
+        return fb, em
+    except Exception:
+        return "", ""
+
+def _sc_collect_profile_links(driver, timeout=6, **_ignored) -> set:
+    found = set()
+    try:
+        _sc_try_dismiss_consent(driver)
+        _sc_try_show_more(driver)
+        _sc_scroll_sidebar(driver)
+        try:
+            WebDriverWait(driver, timeout).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, "ul.profileLinks__linkList a[href]"))
+            )
+        except Exception:
+            pass
+        html = driver.page_source
+        soup = BeautifulSoup(html, "html.parser")
+        for anchor in soup.select("ul.profileLinks__linkList a[href]"):
+            found.add(anchor["href"])
+        for anchor in soup.find_all("a", href=True):
+            href = anchor["href"].strip()
+            lower = href.lower()
+            if any(token in lower for token in ["facebook.com", "fb.me/", "mailto:", "linktr.ee", "linktree"]):
+                found.add(href)
+        hydration_match = re.search(r"__sc_hydration\s*=\s*(\[[\s\S]*?\])\s*;?", html, flags=re.M)
+        if hydration_match:
+            data = json.loads(hydration_match.group(1))
+            stack = [data]
+            while stack:
+                value = stack.pop()
+                if isinstance(value, dict):
+                    ext = value.get("external_links") or value.get("externalLinks")
+                    if isinstance(ext, list):
+                        for item in ext:
+                            if isinstance(item, dict) and isinstance(item.get("url"), str):
+                                found.add(item["url"])
+                    for sub in value.values():
+                        if isinstance(sub, (dict, list)):
+                            stack.append(sub)
+                        elif isinstance(sub, str):
+                            if any(token in sub for token in ["facebook.com", "mailto:", "linktr.ee", "linktree"]):
+                                found.add(sub)
+                elif isinstance(value, list):
+                    stack.extend(value)
+    except Exception:
+        pass
+    return found
+
+def _sc_collect_from_tag_page(driver, tag_url: str) -> list:
+    """
+    Extract artist profile URLs from /tags/{tag}?page=N by inspecting track links.
+    Only accepts handles that pass _sc_is_valid_handle.
+    """
+    results = []
+    seen = set()
+    tag_value = ""
+    match = re.search(r"/tags/([^/?#]+)", tag_url or "")
+    if match:
+        tag_value = match.group(1)
+    try:
+        soup = BeautifulSoup(driver.page_source, "html.parser")
+        anchors = soup.find_all("a", href=True)
+        for anchor in anchors:
+            href = anchor["href"].strip()
+            if not href:
+                continue
+            if href.startswith("http"):
+                parsed = urlparse(href)
+                if "soundcloud.com" not in (parsed.netloc or "").lower():
+                    continue
+                path = (parsed.path or "").strip("/")
+            else:
+                path = href.strip("/")
+            parts = [segment for segment in path.split("/") if segment]
+            if len(parts) < 2:
+                continue
+            handle = parts[0]
+            if not _sc_is_valid_handle(handle):
+                continue
+            profile_url = f"https://soundcloud.com/{handle}"
+            if profile_url in seen:
+                continue
+            seen.add(profile_url)
+            results.append({"url": profile_url, "primary_genre": tag_value})
+    except Exception as exc:
+        print(f"SoundCloud: collect failed on {tag_url}: {exc}")
+    return results
+
+def _sc_quick_has_fb_or_email(driver, url: str, timeout=10, debug_prefix="") -> tuple:
+    fb, em = "", ""
+    try:
+        driver.get(url)
+        WebDriverWait(driver, timeout).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+        root_links = _sc_collect_profile_links(driver, timeout=timeout)
+        if debug_prefix:
+            print(f"{debug_prefix} root_found={len(root_links)}")
+        links_links = set()
+        try:
+            handle = url.rstrip("/").split("/")[-1]
+            links_url = f"https://soundcloud.com/{handle}/links"
+            driver.get(links_url)
+            WebDriverWait(driver, 4).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+            links_links = _sc_collect_profile_links(driver, timeout=timeout)
+        except Exception:
+            links_links = set()
+        if debug_prefix:
+            print(f"{debug_prefix} links_found={len(links_links)}")
+
+        found = set(root_links) | set(links_links)
+        cleaned = []
+        for raw in found:
+            normalized = _norm_url_general(raw)
+            if not normalized:
+                continue
+            host = (urlparse(normalized).netloc or "").lower()
+            if not host or "soundcloud.com" in host:
+                continue
+            cleaned.append(normalized)
+
+        for candidate in cleaned:
+            if _is_fb(candidate) and not _is_company_fb(candidate):
+                fb = candidate
+                break
+
+        if not em:
+            for candidate in cleaned:
+                if candidate.startswith("mailto:"):
+                    address = candidate.split("mailto:")[-1].split("?")[0]
+                    if address and not address.lower().endswith("@soundcloud.com"):
+                        em = address
+                        break
+        if not em:
+            try:
+                soup = BeautifulSoup(driver.page_source, "html.parser")
+                for address in extract_emails(soup.get_text(" ", strip=True)):
+                    if address and not address.lower().endswith("@soundcloud.com"):
+                        em = address
+                        break
+            except Exception:
+                pass
+
+        if not fb and not em and cleaned:
+            fb, em = _sc_try_linktree_for_contacts(driver, set(cleaned), timeout=6)
+
+        if not fb and not em and debug_prefix:
+            print(f"{debug_prefix} no fb/email")
+
+    except Exception as exc:
+        if debug_prefix:
+            print(f"{debug_prefix} error: {exc}\n{traceback.format_exc()}")
+    return fb, em
+
+def _sc_profile_basics(driver, profile_url: str, timeout=10) -> tuple:
+    location = ""
+    bio_text = ""
+    try:
+        driver.get(profile_url)
+        WebDriverWait(driver, timeout).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+        try:
+            WebDriverWait(driver, 3).until(EC.presence_of_element_located((By.CSS_SELECTOR, ".profileHeaderInfo")))
+        except Exception:
+            pass
+        html = driver.page_source
+        soup = BeautifulSoup(html, "html.parser")
+        loc_el = (soup.select_one(".profileHeaderInfo__additional") or
+                  soup.select_one(".profileHeaderInfo__location") or
+                  soup.select_one("[itemprop='addressLocality']"))
+        if loc_el:
+            location = loc_el.get_text(" ", strip=True)
+        bio_el = (soup.select_one(".profileHeaderInfo__bio") or
+                  soup.select_one('[data-testid="profile-bio"]'))
+        if bio_el:
+            bio_text = bio_el.get_text(" ", strip=True)
+        if not location or not bio_text:
+            for obj in _sc_extract_objects_from_hydration(html):
+                if not isinstance(obj, dict):
+                    continue
+                if not location:
+                    city = obj.get("city") or obj.get("address_city")
+                    country = obj.get("country_code") or obj.get("address_country")
+                    candidate_loc = " ".join([str(city or ""), str(country or "")]).strip()
+                    if candidate_loc:
+                        location = candidate_loc
+                if not bio_text and isinstance(obj.get("description"), str):
+                    bio_text = obj.get("description")
+                if location and bio_text:
+                    break
+    except Exception:
+        pass
+    return location, bio_text
+
+def _sc_quick_first_track_meta(driver, profile_url: str, timeout=12, hop=True) -> tuple:
+    title = ""
+    date_iso = ""
+    precision = ""
+    genres = []
+    try:
+        handle = profile_url.rstrip("/").split("/")[-1]
+        tracks_url = f"https://soundcloud.com/{handle}/tracks"
+        driver.get(tracks_url)
+        WebDriverWait(driver, timeout).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+        html = driver.page_source
+        soup = BeautifulSoup(html, "html.parser")
+        card = None
+        for c in soup.select(".soundList__item, .lazyLoadingList__item, li, article"):
+            t = c.find("time")
+            if t and (t.get("datetime") or "").strip():
+                card = c
+                break
+        if card:
+            anchor = (card.select_one("a.soundTitle__title") or
+                      card.select_one("a.sc-link-primary") or
+                      card.select_one(f"a[href^='/{handle}/']"))
+            if anchor:
+                candidate = anchor.get_text(" ", strip=True)
+                if candidate and candidate.lower() not in ("home", "tracks", "likes"):
+                    title = candidate[:200]
+            t = card.find("time")
+            if t:
+                dt = (t.get("datetime") or "").strip()
+                if dt:
+                    iso, prec = _parse_any_date_to_iso(dt)
+                    if iso:
+                        date_iso, precision = iso, prec or "day"
+        for obj in _sc_extract_objects_from_hydration(html):
+            if not isinstance(obj, dict):
+                continue
+            g = obj.get("genre")
+            if isinstance(g, str) and g.strip():
+                genres.append(g.strip().lower())
+            tag_list = obj.get("tag_list")
+            if isinstance(tag_list, str) and tag_list.strip():
+                for token in re.split(r"[, ]+", tag_list.strip()):
+                    if token:
+                        genres.append(token.lower())
+        if hop and (not title or not date_iso):
+            first_url = None
+            if card:
+                a = card.select_one("a[href]")
+                if a and a.get("href"):
+                    href = a["href"]
+                    first_url = href if href.startswith("http") else f"https://soundcloud.com{href}"
+            if first_url:
+                driver.get(first_url)
+                WebDriverWait(driver, timeout).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+                track_html = driver.page_source
+                track_soup = BeautifulSoup(track_html, "html.parser")
+                if not title:
+                    og = track_soup.select_one('meta[property="og:title"]')
+                    if og and og.get("content"):
+                        title = og["content"].strip()[:200]
+                if not date_iso:
+                    t = track_soup.find("time")
+                    if t:
+                        dt = (t.get("datetime") or "").strip()
+                        if dt:
+                            iso, prec = _parse_any_date_to_iso(dt)
+                            if iso:
+                                date_iso, precision = iso, prec or "day"
+                for obj in _sc_extract_objects_from_hydration(track_html):
+                    if not isinstance(obj, dict):
+                        continue
+                    g = obj.get("genre")
+                    if isinstance(g, str) and g.strip():
+                        genres.append(g.strip().lower())
+                    tag_list = obj.get("tag_list")
+                    if isinstance(tag_list, str) and tag_list.strip():
+                        for token in re.split(r"[, ]+", tag_list.strip()):
+                            if token:
+                                genres.append(token.lower())
+        if genres:
+            seen = set()
+            clean = []
+            for g in genres:
+                normalized = re.sub(r"[^a-z0-9 +\-_/]", "", g.lower()).strip()
+                if normalized and normalized not in seen:
+                    seen.add(normalized)
+                    clean.append(normalized)
+            genres = clean[:6]
+    except Exception:
+        pass
+    return title, date_iso or "", precision or "", genres
+
+def _sc_resolve_artist_profile_url(candidate_url: str) -> str:
+    """
+    Normalize a candidate SoundCloud URL to canonical artist profile if possible.
+    - If already looks like https://soundcloud.com/{handle}, return as is.
+    - If it's a track URL, try to strip to /{handle}.
+    """
+    if not candidate_url:
+        return ""
+    try:
+        url = _sc_normalize_url(candidate_url)
+        parsed = urlparse(url)
+        if "soundcloud.com" not in parsed.netloc.lower():
+            return ""
+        path = (parsed.path or "").strip("/")
+        if not path:
+            return ""
+        parts = path.split("/")
+        handle = parts[0].strip()
+        if not _sc_is_valid_handle(handle):
+            return ""
+        return f"https://soundcloud.com/{handle}"
+    except Exception:
+        return ""
+
+_SC_SOCIAL_DOMAINS = {
+    "instagram.com": "instagram",
+    "facebook.com": "facebook",
+    "fb.me": "facebook",
+    "twitter.com": "twitter",
+    "x.com": "twitter",
+    "youtube.com": "youtube",
+    "youtu.be": "youtube",
+    "linktr.ee": "linktree",
+    "linktree": "linktree",
+    "withkoji.com": "linktree",
+    "beacons.ai": "linktree",
+    "spotify.com": "spotify",
+    "bandsintown.com": "bandsintown",
+    "songkick.com": "songkick",
+}
+
+_SC_JUNK_HOSTS = (
+    _SC_JUNK_HOSTS
+    if "_SC_JUNK_HOSTS" in globals()
+    else {
+        "www.enable-javascript.com", "enable-javascript.com",
+        "firefox.com", "www.firefox.com", "mozilla.org", "www.mozilla.org",
+        "google.com", "www.google.com", "chrome.com", "www.chrome.com",
+    }
+)
+
+_SC_STORE_HOSTS = (
+    _SC_STORE_HOSTS if "_SC_STORE_HOSTS" in globals() else set()
+)
+_SC_STORE_HOSTS = set(_SC_STORE_HOSTS) | {"apps.apple.com", "itunes.apple.com", "play.google.com"}
+
+_SC_CONSENT_HOSTS = {"onetrust.com", "www.onetrust.com", "cookiepro.com", "www.cookiepro.com"}
+_FB_HOSTS = {"facebook.com", "www.facebook.com", "m.facebook.com", "fb.me", "l.facebook.com", "lm.facebook.com"}
+_FB_PATH_DENY = {"/soundcloud"}
+_FB_REDIRECT_HOSTS = {"l.facebook.com", "lm.facebook.com"}
+_LINKTREE_HOSTS = {"linktr.ee", "www.linktr.ee", "linktree", "linktree.com", "www.linktree.com"}
+_SC_HOSTS = {"soundcloud.com", "www.soundcloud.com"}
+_SC_SOUNDS_PATTERNS = [
+    r"\bffo\b[:\-–]\s*([^.;\n]+)",
+    r"\briyl\b[:\-–]\s*([^.;\n]+)",
+    r"\bfor\s+fans\s+of\b[:\-–]?\s*([^.;\n]+)",
+    r"\bsounds\s+like\b[:\-–]?\s*([^.;\n]+)",
+    r"\binfluences?\b[:\-–]?\s*([^.;\n]+)",
+    r"\binspired\s+by\b[:\-–]?\s*([^.;\n]+)",
+]
+
+_SC_RESERVED_SLUGS = {
+    "soundcloud", "feed", "upload", "artist", "artists", "tags", "getstarted", "transparency-reports",
+    "terms-of-use", "terms", "privacy", "cookie-policy", "cookies", "legal", "copyright", "imprint",
+    "contact", "press", "about", "company", "jobs", "developers", "forartists", "pro", "go",
+    "on-soundcloud", "login", "signup", "you", "stream", "discover", "charts", "popular", "stations",
+    "settings", "pages", "help", "brand", "policy", "resources", "ads"
+}
+
+def _sc_is_valid_handle(handle: str) -> bool:
+    if not handle:
+        return False
+    h = handle.strip("/").lower()
+    if h in _SC_RESERVED_SLUGS:
+        return False
+    if not any(ch.isalpha() for ch in h):
+        return False
+    if len(h) < 2 or len(h) > 50:
+        return False
+    if re.fullmatch(r"[0-9\-]+", h):
+        return False
+    return True
+
+def _sc_unpack3(candidate):
+    if not candidate:
+        return ("", "", "")
+    if isinstance(candidate, (str, bytes)):
+        return (str(candidate).strip(), "", "")
+    if isinstance(candidate, dict):
+        url = str(candidate.get("url", "")).strip()
+        tag = str(candidate.get("tag", "")).strip()
+        genre = str(candidate.get("genre", "")).strip()
+        if url:
+            return (url, tag, genre)
+        candidate = list(candidate.values())
+    try:
+        seq = list(candidate)
+    except Exception:
+        return (str(candidate).strip(), "", "")
+    url = str(seq[0]).strip() if len(seq) > 0 else ""
+    tag = str(seq[1]).strip() if len(seq) > 1 else ""
+    genre = str(seq[2]).strip() if len(seq) > 2 else ""
+    return (url, tag, genre)
+
+def _sc_append(candidate_profiles, candidate):
+    candidate_profiles.append(_sc_unpack3(candidate))
+
+def _sc_sounds_like_from_bio(bio_text: str) -> str:
+    if not bio_text:
+        return ""
+    text = re.sub(r"\s+", " ", bio_text).strip()
+    matches = []
+    for pattern in _SC_SOUNDS_PATTERNS:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match and match.group(1):
+            matches.append(match.group(1))
+    if not matches:
+        return ""
+    combined = ", ".join(matches)
+    tokens = re.split(r"[,/|•]+|\band\b|\&", combined, flags=re.IGNORECASE)
+    seen = set()
+    clean = []
+    for token in tokens:
+        trimmed = re.sub(r"\s+", " ", token).strip(" .;:()[]{}\"")
+        lowered = trimmed.lower()
+        if trimmed and lowered not in seen:
+            seen.add(lowered)
+            clean.append(trimmed.title())
+    return ", ".join(clean[:6])
+
+def _sc_url_mode(url: str) -> tuple:
+    if not url:
+        return ("tags", "")
+    try:
+        parsed = _urlparse.urlparse(url)
+        host = (parsed.netloc or "").lower()
+        if not any(h in host for h in _SC_HOSTS):
+            return ("tags", "")
+        path = (parsed.path or "").strip("/")
+        if path.startswith("search/people"):
+            qs = _urlparse.parse_qs(parsed.query or "")
+            query = (qs.get("q", [""])[0] or "").strip()
+            return ("search_people", query)
+        segments = [seg for seg in path.split("/") if seg]
+        if segments and segments[0] not in {"search", "discover"}:
+            return ("profile", segments[0])
+    except Exception:
+        pass
+    return ("tags", "")
+
+def _sc_extract_tags(soup) -> list:
+    """
+    Best-effort tag/genre extraction from profile + meta.
+    """
+    tags = set()
+    meta_k = soup.select_one('meta[name="keywords"]')
+    if meta_k and meta_k.get("content"):
+        for token in _norm_tokens(meta_k["content"]):
+            if token:
+                tags.add(token.lower())
+    for span in soup.find_all(["a", "span"], class_=re.compile("tag|genre|chip", re.I)):
+        txt = span.get_text(" ", strip=True)
+        if txt:
+            tags.add(txt.lower())
+    return list(tags)
+
+def _sc_fetch_latest_track(driver, profile_url: str) -> tuple:
+    """Return (title, date_iso, precision) strictly from /tracks with <time datetime>."""
+    try:
+        parsed = urlparse(profile_url)
+        handle = (parsed.path or "/").strip("/").split("/")[0]
+        if not handle:
+            return "", "", ""
+        tracks_url = f"https://soundcloud.com/{handle}/tracks"
+        driver.get(tracks_url)
+        _sc_accept_consent_if_present(driver)
+        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+        _sc_soft_scroll(driver)
+        soup = BeautifulSoup(driver.page_source, "html.parser")
+        card = None
+        for c in soup.select(".soundList__item, .lazyLoadingList__item, li, article"):
+            t = c.find("time")
+            if t and (t.get("datetime") or "").strip():
+                card = c
+                break
+        if not card:
+            return "", "", ""
+        title = ""
+        t_anchor = (card.select_one("a.soundTitle__title") or
+                    card.select_one("a.sc-link-primary") or
+                    card.select_one(f"a[href*='/{handle}/']"))
+        if t_anchor:
+            candidate = t_anchor.get_text(" ", strip=True)
+            if candidate and candidate.lower() not in ("home", "tracks", "likes"):
+                title = candidate[:200]
+        date_iso, precision = "", ""
+        t = card.find("time")
+        if t:
+            dt = (t.get("datetime") or "").strip()
+            if dt:
+                iso, prec = _parse_any_date_to_iso(dt)
+                if iso:
+                    date_iso, precision = iso, (prec or "day")
+        return title, date_iso, precision
+    except Exception:
+        return "", "", ""
+
+def _sc_collect_profile_links(driver, profile_url: str) -> dict:
+    """Scrape https://soundcloud.com/{handle}/links for outbound social links."""
+    collected = {}
+    try:
+        parsed = urlparse(profile_url)
+        handle = (parsed.path or "/").strip("/").split("/")[0]
+        if not handle:
+            return collected
+        links_url = f"https://soundcloud.com/{handle}/links"
+        driver.get(links_url)
+        _sc_accept_consent_if_present(driver)
+        WebDriverWait(driver, 8).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+        _sc_soft_scroll(driver)
+        soup = BeautifulSoup(driver.page_source, "html.parser")
+        for anchor in soup.find_all("a", href=True):
+            anchor["href"] = _sc_unwrap_gate(anchor.get("href", ""))
+        for anchor in soup.find_all("a", href=True):
+            href = _sc_unwrap_gate(_sc_normalize_url(anchor["href"]))
+            if not href:
+                continue
+            parsed_href = urlparse(href)
+            host = (parsed_href.netloc or "").lower()
+            if (not host or
+                "soundcloud.com" in host or
+                host in _SC_JUNK_HOSTS or
+                host in _SC_STORE_HOSTS or
+                host in _SC_CONSENT_HOSTS):
+                continue
+            matched = None
+            for dom, key in _SC_SOCIAL_DOMAINS.items():
+                if dom in host:
+                    matched = key
+                    break
+            if matched and matched not in collected:
+                collected[matched] = href
+    except Exception:
+        pass
+    return collected
+
+def _sc_parse_profile(driver, profile_url: str, seed_primary_genre="") -> dict:
+    """
+    Visit artist profile and extract details similar to Bandcamp.
+    Very defensive: SoundCloud markup changes often.
+    """
+    artist = {
+        "artist_name": "",
+        "profile_url": profile_url,
+        "location": "",
+        "website": "",
+        "email": "",
+        "socials": {k: "" for k in ["instagram", "twitter", "facebook", "youtube", "linktree", "spotify", "bandsintown", "songkick"]},
+        "genres": [],
+        "latest_release_title": "",
+        "latest_release_date": "",
+        "latest_release_precision": "",
+        "sounds_like": "",
+        "primary_genre": seed_primary_genre or "",
+        "source_tag": ""
+    }
+    try:
+        driver.get(profile_url)
+        _sc_accept_consent_if_present(driver)
+        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+        _sc_soft_scroll(driver)
+        profile_html = driver.page_source
+        soup = BeautifulSoup(profile_html, "html.parser")
+
+        for anchor in soup.find_all("a", href=True):
+            anchor["href"] = _sc_unwrap_gate(anchor.get("href", ""))
+
+        og_title = soup.select_one('meta[property="og:title"]')
+        if og_title and og_title.get("content"):
+            artist["artist_name"] = og_title["content"].strip()
+        if not artist["artist_name"]:
+            h1 = soup.find(["h1", "h2"], attrs={"itemprop": re.compile("name", re.I)})
+            if h1:
+                artist["artist_name"] = h1.get_text(strip=True)
+
+        loc = ""
+        for el in soup.select("header [class*='location'], header [class*='small'], header [class*='subheader'], .profileHeader"):
+            txt = el.get_text(" ", strip=True)
+            if txt and 3 <= len(txt) <= 80 and re.search(r"[A-Za-z]", txt):
+                loc = txt
+                break
+        artist["location"] = loc
+
+        for a in soup.find_all("a", href=True):
+            href = _sc_unwrap_gate(_sc_normalize_url(a["href"]))
+            if not href:
+                continue
+            if href.startswith("mailto:"):
+                artist["email"] = href.split("mailto:")[-1].split("?")[0]
+                continue
+            parsed = urlparse(href)
+            host = parsed.netloc.lower()
+            if (not host or
+                "soundcloud.com" in host or
+                host in _SC_JUNK_HOSTS or
+                host in _SC_STORE_HOSTS or
+                host in _SC_CONSENT_HOSTS):
+                continue
+            matched = None
+            for dom, key in _SC_SOCIAL_DOMAINS.items():
+                if dom in host:
+                    matched = key
+                    break
+            if matched:
+                if not artist["socials"].get(matched):
+                    artist["socials"][matched] = href
+            elif not artist["website"]:
+                if parsed.scheme in ("http", "https") and len(host.split(".")) >= 2:
+                    artist["website"] = href
+
+        try:
+            more_links = _sc_collect_profile_links(driver, profile_url)
+            for key, value in more_links.items():
+                if value and not artist["socials"].get(key):
+                    artist["socials"][key] = value
+        except Exception:
+            pass
+
+        artist["genres"] = _sc_extract_tags(soup)
+        if not artist["primary_genre"]:
+            artist["primary_genre"] = (artist["genres"][0] if artist["genres"] else "")
+
+        lt_title, lt_date, lt_prec = _sc_fetch_latest_track(driver, profile_url)
+        if lt_title:
+            artist["latest_release_title"] = lt_title
+        if lt_date:
+            artist["latest_release_date"] = lt_date
+            artist["latest_release_precision"] = lt_prec
+        else:
+            artist["latest_release_date"] = artist.get("latest_release_date", "") or "not present"
+
+        if not artist["latest_release_title"]:
+            first_title = soup.find(["a", "div"], attrs={"title": True})
+            if first_title:
+                t = first_title.get("title", "").strip()
+                if t and len(t) <= 120 and t.lower() != "home":
+                    artist["latest_release_title"] = t
+
+        text_blob = soup.get_text(" ", strip=True)
+        if not artist["sounds_like"]:
+            for pattern in _BC_SOUNDS_PATTERNS:
+                match = re.search(pattern, text_blob, flags=re.IGNORECASE)
+                if match and match.group(1):
+                    tokens = _norm_tokens(match.group(1))
+                    if tokens:
+                        artist["sounds_like"] = ", ".join(t.title() for t in tokens[:5])
+                        break
+
+        return artist
+    except Exception as exc:
+        print(f"SoundCloud: profile parse failed {profile_url}: {exc}")
+        return {}
+
+def _sc_is_actionable(artist_dict: dict) -> bool:
+    if not artist_dict:
+        return False
+    if artist_dict.get("website") or artist_dict.get("email"):
+        return True
+    socials = artist_dict.get("socials", {})
+    return any(bool(v) for v in socials.values())
+
+def _sc_write_enriched_csv(rows, existing_csv):
+    columns = [
+        "Artist Name", "Profile URL", "Website", "Email", "Instagram", "Twitter", "Facebook", "Linktree", "YouTube",
+        "Location", "Genres", "Latest Release", "Latest Release Date", "Latest Release Precision", "Sounds Like", "Primary Genre", "Source Tag"
+    ]
+    base_dir = os.path.dirname(os.path.abspath(existing_csv))
+    enriched_path = os.path.join(base_dir, "soundcloud_enriched.csv")
+    existing_df = pd.DataFrame(columns=columns)
+    if os.path.exists(enriched_path):
+        try:
+            existing_df = pd.read_csv(enriched_path)
+        except Exception:
+            existing_df = pd.DataFrame(columns=columns)
+    for col in columns:
+        if col not in existing_df.columns:
+            existing_df[col] = ""
+    if not existing_df.empty:
+        existing_df = existing_df[columns]
+    new_df = pd.DataFrame(rows)
+    for col in columns:
+        if col not in new_df.columns:
+            new_df[col] = ""
+    combined = pd.concat([existing_df, new_df], ignore_index=True)
+    combined["__dedupe_key"] = (
+        combined["Artist Name"].fillna("").str.strip().str.lower()
+        + "||" +
+        combined["Profile URL"].fillna("").str.rstrip("/").str.lower()
+    )
+    combined = combined.drop_duplicates(subset="__dedupe_key").drop(columns="__dedupe_key")
+    combined = combined[columns]
+    combined.to_csv(enriched_path, index=False, encoding="utf-8-sig")
+
+def scrape_soundcloud(start_url, seed_tags, pages_per_tag=SOUNDCLOUD_PAGES_PER_TAG, existing_csv="artist_social_links.csv", max_artists=200):
+    driver = setup_driver()
+    candidate_profiles = []
+    seen_profiles = set()
+    sc_rows = []
+    enriched_rows = []
+    actionable_count = 0
+    fast = bool(SOUNDCLOUD_FAST_FACEBOOK_EMAIL_ONLY)
+    try:
+        mode, token = _sc_url_mode(start_url)
+        seen_handles = set()
+
+        if mode == "profile" and token and _sc_is_valid_handle(token):
+            profile_url = f"https://soundcloud.com/{token}"
+            key = profile_url.rstrip("/").lower()
+            if key not in seen_profiles:
+                seen_profiles.add(key)
+                _sc_append(candidate_profiles, (profile_url, "", ""))
+
+        elif mode == "search_people" and token:
+            try:
+                driver.get(start_url)
+                WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+                try:
+                    WebDriverWait(driver, 5).until(
+                        EC.presence_of_element_located((By.CSS_SELECTOR, "a[href^='/'][aria-label]"))
+                    )
+                except Exception:
+                    pass
+                soup = BeautifulSoup(driver.page_source, "html.parser")
+                for a in soup.select("a[href^='/'][aria-label]"):
+                    href = a.get("href") or ""
+                    parts = [seg for seg in href.strip("/").split("/") if seg]
+                    if not parts:
+                        continue
+                    handle = parts[0]
+                    if not _sc_is_valid_handle(handle) or handle in seen_handles:
+                        continue
+                    seen_handles.add(handle)
+                    profile_url = f"https://soundcloud.com/{handle}"
+                    key = profile_url.rstrip("/").lower()
+                    if key in seen_profiles:
+                        continue
+                    seen_profiles.add(key)
+                    _sc_append(candidate_profiles, (profile_url, token, ""))
+                    if len(candidate_profiles) >= max_artists:
+                        break
+            except Exception as exc:
+                print(f"SoundCloud search/people parse failed: {exc}")
+
+        else:
+            tags = seed_tags or []
+            for tag in tags:
+                tag_query = (tag or "").strip()
+                if not tag_query:
+                    continue
+                print(f"SoundCloud: scanning tag '{tag_query}', pages={pages_per_tag}")
+                for page in range(1, pages_per_tag + 1):
+                    tag_url = f"https://soundcloud.com/search/people?q={_urlparse.quote(tag_query)}&page={page}"
+                    try:
+                        driver.get(tag_url)
+                        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+                        soup = BeautifulSoup(driver.page_source, "html.parser")
+                    except Exception as exc:
+                        print(f"SoundCloud: error loading {tag_url}: {exc}")
+                        continue
+                    for a in soup.select("a[href^='/'][aria-label]"):
+                        href = a.get("href") or ""
+                        parts = [seg for seg in href.strip("/").split("/") if seg]
+                        if not parts:
+                            continue
+                        handle = parts[0]
+                        if not _sc_is_valid_handle(handle) or handle in seen_handles:
+                            continue
+                        seen_handles.add(handle)
+                        profile_url = f"https://soundcloud.com/{handle}"
+                        key = profile_url.rstrip("/").lower()
+                        if key in seen_profiles:
+                            continue
+                        seen_profiles.add(key)
+                        _sc_append(candidate_profiles, (profile_url, tag_query, ""))
+                        if len(candidate_profiles) >= max_artists:
+                            break
+                    if len(candidate_profiles) >= max_artists:
+                        break
+                if len(candidate_profiles) >= max_artists:
+                    break
+
+        if fast and len(candidate_profiles) > SOUNDCLOUD_FAST_MAX_CANDIDATES:
+            candidate_profiles = candidate_profiles[:SOUNDCLOUD_FAST_MAX_CANDIDATES]
+
+        print(f"SoundCloud: total artist profiles resolved {len(candidate_profiles)}")
+        if not candidate_profiles:
+            print("SoundCloud: no candidate_profiles; check tag or page selectors.")
+        else:
+            preview_handles = [
+                (_sc_unpack3(c)[0].rstrip("/").split("/")[-1])
+                for c in candidate_profiles[:5]
+            ]
+            print("SoundCloud: first 5 handles ->", preview_handles)
+        weird_shapes = [c for c in candidate_profiles if not isinstance(c, (tuple, list)) or len(c) != 3]
+        if weird_shapes:
+            print(f"SoundCloud: normalized {len(weird_shapes)} non-3-tuples in candidates")
+        for idx, cand in enumerate(candidate_profiles):
+            profile_url, source_tag, seed_primary_genre = _sc_unpack3(cand)
+            if not profile_url:
+                continue
+            if fast:
+                handle = _sc_handle_from_profile(profile_url)
+                if not _sc_is_valid_handle(handle):
+                    print(f"skip[{idx}] invalid handle: {profile_url}")
+                    continue
+                links_url = f"https://soundcloud.com/{handle}/links"
+                fb, em = _sc_quick_has_fb_or_email(
+                    driver,
+                    links_url,
+                    timeout=SOUNDCLOUD_FAST_TIMEOUT_SEC,
+                    debug_prefix=f"[links {handle}]"
+                )
+                if not fb and not em:
+                    fb, em = _sc_quick_has_fb_or_email(
+                        driver,
+                        profile_url,
+                        timeout=SOUNDCLOUD_FAST_TIMEOUT_SEC,
+                        debug_prefix=f"[root {handle}]"
+                    )
+                if not fb and not em:
+                    print(f"skip[{idx}] no fb/email: {handle}")
+                    continue
+                location, bio_text = _sc_profile_basics(driver, profile_url, timeout=10)
+                title, date_iso, prec, genres = _sc_quick_first_track_meta(driver, profile_url, timeout=12, hop=True)
+                try:
+                    driver.get(profile_url)
+                    WebDriverWait(driver, SOUNDCLOUD_FAST_TIMEOUT_SEC).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+                    soup_name = BeautifulSoup(driver.page_source, "html.parser")
+                except Exception:
+                    soup_name = None
+                artist_name_value = profile_url.rstrip("/").split("/")[-1]
+                if soup_name:
+                    try:
+                        og = soup_name.select_one('meta[property="og:title"]')
+                        if og and og.get("content"):
+                            candidate_name = og["content"].strip()
+                            if candidate_name:
+                                artist_name_value = candidate_name[:200]
+                    except Exception:
+                        pass
+                sounds_like = _sc_sounds_like_from_bio(bio_text)
+                if fb and _is_company_fb(fb):
+                    fb = ""
+                if em and em.lower().endswith("@soundcloud.com"):
+                    em = ""
+                contacts = []
+                if fb:
+                    contacts.append(fb)
+                if em:
+                    contacts.append(f"mailto:{em}")
+                contacts = list(dict.fromkeys([link for link in contacts if link]))
+                if not artist_name_value.strip() or not contacts:
+                    print(f"skip[{idx}] company-only contacts: {handle}")
+                    continue
+                release_date_value = date_iso or "not present"
+                primary_genre_value = ""
+                if genres:
+                    primary_genre_value = (genres[0] or "").title()
+                elif isinstance(seed_primary_genre, str) and seed_primary_genre.strip():
+                    primary_genre_value = seed_primary_genre.strip().title()
+                elif isinstance(source_tag, str) and source_tag.strip():
+                    primary_genre_value = source_tag.strip().title()
+                sc_rows.append((
+                    artist_name_value.strip(),
+                    location or "",
+                    title or "",
+                    sounds_like or "",
+                    contacts,
+                    "",
+                    "",
+                    release_date_value,
+                    primary_genre_value
+                ))
+                actionable_count += 1
+                if actionable_count >= max_artists:
+                    break
+                time.sleep(random.uniform(0.2, 0.6))
+                continue
+
+            artist = _sc_parse_profile(driver, profile_url, seed_primary_genre=seed_primary_genre or source_tag)
+            if not artist:
+                continue
+            artist["source_tag"] = source_tag
+            if SOUNDCLOUD_MIN_CONTACT_REQUIREMENT and not _sc_is_actionable(artist):
+                continue
+
+            contact_links = []
+            if artist.get("website"):
+                contact_links.append(artist["website"])
+            for s in artist.get("socials", {}).values():
+                if s:
+                    contact_links.append(s)
+            if artist.get("email"):
+                contact_links.append(f"mailto:{artist['email']}")
+            contact_links = list(dict.fromkeys([x for x in contact_links if x]))
+            contact_links = [
+                link for link in contact_links
+                if urlparse(link).netloc.lower() not in _SC_CONSENT_HOSTS
+            ]
+
+            artist_name_value = artist.get("artist_name", "").strip()
+            if not (artist_name_value and contact_links):
+                continue
+
+            primary_genre_value = (artist.get("primary_genre", "") or "")
+            primary_genre_value = primary_genre_value.title() if isinstance(primary_genre_value, str) else primary_genre_value
+            sc_rows.append((
+                artist_name_value,
+                artist.get("location", ""),
+                artist.get("latest_release_title", ""),
+                artist.get("sounds_like", ""),
+                contact_links,
+                "",
+                "",
+                artist.get("latest_release_date", ""),
+                primary_genre_value
+            ))
+
+            socials = artist.get("socials", {})
+            enriched_rows.append({
+                "Artist Name": artist_name_value,
+                "Profile URL": artist.get("profile_url", ""),
+                "Website": artist.get("website", ""),
+                "Email": artist.get("email", ""),
+                "Instagram": socials.get("instagram", ""),
+                "Twitter": socials.get("twitter", ""),
+                "Facebook": socials.get("facebook", ""),
+                "Linktree": socials.get("linktree", ""),
+                "YouTube": socials.get("youtube", ""),
+                "Location": artist.get("location", ""),
+                "Genres": "; ".join(artist.get("genres", [])),
+                "Latest Release": artist.get("latest_release_title", ""),
+                "Latest Release Date": artist.get("latest_release_date", ""),
+                "Latest Release Precision": artist.get("latest_release_precision", ""),
+                "Sounds Like": artist.get("sounds_like", ""),
+                "Primary Genre": primary_genre_value,
+                "Source Tag": artist.get("source_tag", "")
+            })
+
+            actionable_count += 1
+            if actionable_count >= max_artists:
+                break
+            time.sleep(random.uniform(1.0, 2.0))
+        print(f"SoundCloud: total actionable artists written {actionable_count}")
+    finally:
+        driver.quit()
+
+    save_to_csv(sc_rows, existing_csv)
+    if enriched_rows:
+        _sc_write_enriched_csv(enriched_rows, existing_csv)
 # =============================================================================
 # Facebook Scraping Functions (Page 2)
 # =============================================================================
@@ -1190,7 +2417,12 @@ class ArtistScraperThread(QtCore.QThread):
         self.output_csv = output_csv
         self.source = source
         self.pages_per_tag = pages_per_tag
-        self.seed_tags = list(seed_tags) if seed_tags else list(BANDCAMP_SEED_TAGS)
+        if seed_tags:
+            self.seed_tags = list(seed_tags)
+        elif self.source and self.source.lower() == "soundcloud":
+            self.seed_tags = list(SOUNDCLOUD_SEED_TAGS)
+        else:
+            self.seed_tags = list(BANDCAMP_SEED_TAGS)
     def run(self):
         self.log_signal.emit("Starting artist scraping...")
         try:
@@ -1202,6 +2434,16 @@ class ArtistScraperThread(QtCore.QThread):
                     max_artists=self.max_artists
                 )
                 self.log_signal.emit("Bandcamp scraping completed.")
+            elif self.source.lower() == "soundcloud":
+                seed_tags = self.seed_tags if self.seed_tags else list(SOUNDCLOUD_SEED_TAGS)
+                scrape_soundcloud(
+                    self.website_url.strip(),
+                    seed_tags,
+                    pages_per_tag=self.pages_per_tag,
+                    existing_csv=self.output_csv,
+                    max_artists=self.max_artists
+                )
+                self.log_signal.emit("SoundCloud scraping completed.")
             else:
                 scrape_website(self.website_url, existing_csv=self.output_csv, max_artists=self.max_artists)
                 self.log_signal.emit("Artist scraping completed.")
@@ -1269,7 +2511,7 @@ class MainWindow(QtWidgets.QMainWindow):
         source_layout = QtWidgets.QHBoxLayout()
         source_label = QtWidgets.QLabel("Source:")
         self.source_combo = QtWidgets.QComboBox()
-        self.source_combo.addItems(["Unearthed", "Bandcamp"])
+        self.source_combo.addItems(["Unearthed", "Bandcamp", "SoundCloud"])
         self.source_combo.currentTextChanged.connect(self.on_source_changed)
         source_layout.addWidget(source_label)
         source_layout.addWidget(self.source_combo)
@@ -1318,13 +2560,19 @@ class MainWindow(QtWidgets.QMainWindow):
         if source_text == "Bandcamp":
             self.url_edit.setPlaceholderText(BANDCAMP_DEFAULT_TAG_URL)
             current = self.url_edit.text().strip()
-            if not current or current == UNEARTHED_DEFAULT_URL:
+            if not current or current in (UNEARTHED_DEFAULT_URL, SOUNDCLOUD_DEFAULT_TAG_URL):
                 self.url_edit.setText(BANDCAMP_DEFAULT_TAG_URL)
+            self.pages_per_tag_edit.setEnabled(True)
+        elif source_text == "SoundCloud":
+            self.url_edit.setPlaceholderText(SOUNDCLOUD_DEFAULT_TAG_URL)
+            current = self.url_edit.text().strip()
+            if not current or current in (UNEARTHED_DEFAULT_URL, BANDCAMP_DEFAULT_TAG_URL):
+                self.url_edit.setText(SOUNDCLOUD_DEFAULT_TAG_URL)
             self.pages_per_tag_edit.setEnabled(True)
         else:
             self.url_edit.setPlaceholderText(UNEARTHED_DEFAULT_URL)
             current = self.url_edit.text().strip()
-            if not current or current == BANDCAMP_DEFAULT_TAG_URL:
+            if not current or current in (BANDCAMP_DEFAULT_TAG_URL, SOUNDCLOUD_DEFAULT_TAG_URL):
                 self.url_edit.setText(UNEARTHED_DEFAULT_URL)
             self.pages_per_tag_edit.setEnabled(False)
     def create_facebook_tab(self):
@@ -1378,10 +2626,11 @@ class MainWindow(QtWidgets.QMainWindow):
     def start_artist_scraping(self):
         source = self.source_combo.currentText()
         url = self.url_edit.text().strip()
-        if source == "Bandcamp" and not url:
-            url = BANDCAMP_DEFAULT_TAG_URL
+        if source in ("Bandcamp", "SoundCloud") and not url:
+            default_url = BANDCAMP_DEFAULT_TAG_URL if source == "Bandcamp" else SOUNDCLOUD_DEFAULT_TAG_URL
+            url = default_url
             self.url_edit.setText(url)
-        if source != "Bandcamp" and not url:
+        if source == "Unearthed" and not url:
             self.artist_log.append("Please enter a valid website URL.")
             return
         try:
@@ -1391,16 +2640,31 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             pages_per_tag = int(self.pages_per_tag_edit.text().strip())
         except ValueError:
-            pages_per_tag = BANDCAMP_PAGES_PER_TAG
+            if source == "Bandcamp":
+                pages_per_tag = BANDCAMP_PAGES_PER_TAG
+            elif source == "SoundCloud":
+                pages_per_tag = SOUNDCLOUD_PAGES_PER_TAG
+            else:
+                pages_per_tag = BANDCAMP_PAGES_PER_TAG
         if max_artists <= 0:
             max_artists = 200
-        if pages_per_tag <= 0:
-            pages_per_tag = BANDCAMP_PAGES_PER_TAG
-        seed_tags = list(BANDCAMP_SEED_TAGS)
         if source == "Bandcamp":
+            default_pages = BANDCAMP_PAGES_PER_TAG
+        elif source == "SoundCloud":
+            default_pages = SOUNDCLOUD_PAGES_PER_TAG
+        else:
+            default_pages = BANDCAMP_PAGES_PER_TAG
+        if pages_per_tag <= 0:
+            pages_per_tag = default_pages
+        seed_tags = None
+        if source == "Bandcamp":
+            seed_tags = list(BANDCAMP_SEED_TAGS)
             extracted_tag = _bandcamp_extract_tag_from_url(url)
             if extracted_tag:
                 seed_tags = [extracted_tag]
+        elif source == "SoundCloud":
+            match = re.search(r"/tags/([^/?#]+)", url)
+            seed_tags = [match.group(1).lower()] if match else list(SOUNDCLOUD_SEED_TAGS)
         output_csv = self.artist_output_csv_edit.text().strip()
         self.artist_start_button.setEnabled(False)
         self.artist_progress_bar.setVisible(True)
