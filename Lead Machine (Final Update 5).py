@@ -142,7 +142,7 @@ def _ensure_parent_dir(path: str):
 def _write_empty_csv_with_headers(path: str):
     _ensure_parent_dir(path)
     headers = [
-        'Artist Name', 'Location', 'Song Title', 'Sounds Like', 'Social Link',
+        'Artist Name', 'Location', 'Song Title', 'Sounds Like', 'Social Link', 'SoundCloud Link',
         'Played on triple J', 'Played on Unearthed', 'Release Date', 'Primary Genre', 'Date Added'
     ]
     pd.DataFrame(columns=headers).to_csv(path, index=False, encoding="utf-8-sig")
@@ -277,7 +277,7 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200)
             played_on_triplej = "yes" if drum_status_raw == "triple j" else ""
             played_on_unearthed = "yes" if drum_status_raw == "triple j unearthed" else ""
             artist_data.append((artist_name, location, song_title, sounds_like, social_links,
-                                played_on_triplej, played_on_unearthed, release_date, ""))
+                                "", played_on_triplej, played_on_unearthed, release_date, ""))
     except Exception as e:
         print(f"Error during website scraping: {e}")
     finally:
@@ -388,10 +388,14 @@ def scrape_artist_profile(driver, profile_url):
 
 def save_to_csv(data, filename):
     _ensure_parent_dir(filename)
+    headers = [
+        'Artist Name', 'Location', 'Song Title', 'Sounds Like', 'Social Link', 'SoundCloud Link',
+        'Played on triple J', 'Played on Unearthed', 'Release Date', 'Primary Genre', 'Date Added'
+    ]
     current_date = datetime.datetime.now().strftime("%Y-%m-%d")
 
     if not data:
-        _write_empty_csv_with_headers(filename)
+        pd.DataFrame(columns=headers).to_csv(filename, index=False, encoding="utf-8-sig")
         print(f"Created empty CSV with headers at {filename}")
         return
 
@@ -401,22 +405,29 @@ def save_to_csv(data, filename):
             existing_data = pd.read_csv(filename)
         except Exception:
             existing_data = pd.DataFrame()
-        if 'Release Date' not in existing_data.columns:
-            existing_data['Release Date'] = ""
+        for col in headers:
+            if col not in existing_data.columns:
+                existing_data[col] = ""
 
     new_data = []
+    expected_fields = len(headers) - 1  # exclude Date Added (set during write)
     for entry in data:
         entry_list = list(entry)
-        while len(entry_list) < 9:
+        while len(entry_list) < expected_fields:
             entry_list.append("")
-        artist_name, location, song_title, sounds_like, social_links, played_on_triplej, played_on_unearthed, release_date, primary_genre = entry_list[:9]
-        for link in (social_links or []):
+        artist_name, location, song_title, sounds_like, social_links, soundcloud_link, played_on_triplej, played_on_unearthed, release_date, primary_genre = entry_list[:expected_fields]
+        if isinstance(social_links, (str, bytes)):
+            links_iterable = [social_links] if social_links else []
+        else:
+            links_iterable = list(social_links or [])
+        for link in links_iterable:
             new_data.append({
                 'Artist Name': artist_name,
                 'Location': location,
                 'Song Title': song_title,
                 'Sounds Like': sounds_like,
                 'Social Link': link,
+                'SoundCloud Link': soundcloud_link,
                 'Played on triple J': played_on_triplej,
                 'Played on Unearthed': played_on_unearthed,
                 'Release Date': release_date,
@@ -801,6 +812,7 @@ def scrape_bandcamp(seed_tags, pages_per_tag=5, existing_csv="artist_social_link
                 artist_dict.get("latest_release_title", ""),
                 artist_dict.get("sounds_like", ""),
                 contact_links,
+                "",
                 "",
                 "",
                 release_date_value,
@@ -2260,6 +2272,7 @@ def scrape_soundcloud(start_url, seed_tags, pages_per_tag=SOUNDCLOUD_PAGES_PER_T
                     print(f"skip[{idx}] invalid handle: {profile_url}")
                     continue
                 links_url = f"https://soundcloud.com/{handle}/links"
+                artist_url = f"https://soundcloud.com/{handle}" if handle else profile_url
                 fb, em = _sc_quick_has_fb_or_email(
                     driver,
                     links_url,
@@ -2342,6 +2355,7 @@ def scrape_soundcloud(start_url, seed_tags, pages_per_tag=SOUNDCLOUD_PAGES_PER_T
                     title or "",
                     sounds_like or "",
                     contacts,
+                    artist_url,
                     "",
                     "",
                     release_date_value,
@@ -2359,6 +2373,7 @@ def scrape_soundcloud(start_url, seed_tags, pages_per_tag=SOUNDCLOUD_PAGES_PER_T
             artist["source_tag"] = source_tag
             if SOUNDCLOUD_MIN_CONTACT_REQUIREMENT and not _sc_is_actionable(artist):
                 continue
+            artist_profile_link = (artist.get("profile_url") or profile_url or "").strip()
 
             contact_links = []
             if artist.get("website"):
@@ -2424,6 +2439,7 @@ def scrape_soundcloud(start_url, seed_tags, pages_per_tag=SOUNDCLOUD_PAGES_PER_T
                 song_title_value,
                 sounds_like_value,
                 contact_links,
+                artist_profile_link,
                 "",
                 "",
                 release_date_value,
