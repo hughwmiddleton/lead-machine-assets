@@ -99,7 +99,13 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup as BS
+try:
+    from bs4 import FeatureNotFound
+except Exception:
+    class FeatureNotFound(Exception):
+        pass
+BeautifulSoup = BS
 from webdriver_manager.chrome import ChromeDriverManager
 from urllib.parse import urlparse, urljoin, parse_qs, unquote
 import urllib.parse as _urlparse
@@ -150,24 +156,99 @@ SC_SOCIAL_SELECTORS = [
     'a[href*="carrd.co"]',
     'a[href*="flow.page"]'
 ]
-SC_AGGREGATOR_HOSTS = ("linktr.ee", "beacons.ai", "carrd.co", "flow.page")
-SC_SOCIAL_HOST_HINTS = (
-    "instagram.com", "facebook.com", "twitter.com", "x.com", "youtube.com", "tiktok.com",
-    "bandcamp.com", "beacons.ai", "linktr.ee", "carrd.co", "flow.page", "spotify.com"
-)
+SC_AGGREGATOR_HOSTS = ("linktr.ee", "beacons.ai", "bandcamp.com", "carrd.co", "flow.page")
+SC_AGGREGATOR_PREFERENCE = ("linktr.ee", "beacons.ai", "bandcamp.com", "carrd.co", "flow.page")
 SC_REQUEST_TIMEOUT = (5, 10)
 SC_MAX_WORKERS = 8
-SC_HTTP_MAX_RETRIES = Retry(total=2, backoff_factor=0.3, status_forcelist=(429, 500, 502, 503, 504))
 SC_CACHE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "soundcloud_about_cache.json")
 SC_CACHE_MAX_AGE_DAYS = 7
-SC_DEFAULT_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-                  "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept-Language": "en-US,en;q=0.9"
+
+UAS = [
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:120.0) Gecko/20100101 Firefox/120.0",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:119.0) Gecko/20100101 Firefox/119.0",
+]
+
+SC_HEADERS_BASE = {
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Connection": "keep-alive",
+    "DNT": "1",
+    "Upgrade-Insecure-Requests": "1",
 }
+
+
+def _rand_headers():
+    headers = dict(SC_HEADERS_BASE)
+    headers["User-Agent"] = random.choice(UAS)
+    return headers
+
+
+def build_hardened_session():
+    session = requests.Session()
+    retry = Retry(
+        total=3,
+        connect=3,
+        read=3,
+        status=3,
+        backoff_factor=0.4,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=False,
+    )
+    adapter = HTTPAdapter(pool_connections=64, pool_maxsize=64, max_retries=retry)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    session.headers.update(_rand_headers())
+    return session
+
+
+def polite_sleep(min_ms=120, max_ms=240):
+    time.sleep(random.uniform(min_ms / 1000.0, max_ms / 1000.0))
 SC_LINK_BATCH_SIZE = 25
 SYMBOL_CAT = {"So", "Cs"}
 _SC_GENRE_DENY = {"melbourne", "naarm", "australia"}
+CONFIG = {}
+SC_ABOUT_FIRST = CONFIG.get("SC_ABOUT_FIRST", True)
+SC_EXPAND_1HOP = CONFIG.get("SC_EXPAND_1HOP", True)
+_SC_CLIENT_ID_LOCK = threading.Lock()
+_SC_CLIENT_ID = None
+SC_CLIENT_ID_CANDIDATES = ["MaZ7bR62GvbulJgV8EUjQnHfbZGDEKaI"]
+SOCIAL_HOSTS = (
+    "linktr.ee", "beacons.ai", "bandcamp.com", "carrd.co", "flow.page",
+    "instagram.com", "facebook.com", "x.com", "twitter.com", "youtube.com", "tiktok.com",
+    "soundcloud.com"
+)
+SOCIAL_HOSTS_PATTERN = r"(?:linktr\.ee|beacons\.ai|bandcamp\.com|carrd\.co|flow\.page|instagram\.com|facebook\.com|x\.com|twitter\.com|youtube\.com|tiktok\.com)"
+URL_RE = re.compile(rf"https?://{SOCIAL_HOSTS_PATTERN}[^\s\"'<)]+", re.IGNORECASE)
+HANDLE_RE = re.compile(r"^/[a-z0-9][a-z0-9._-]{1,49}$", re.IGNORECASE)
+SC_DISCOVERY_BAN = {
+    "feed", "upload", "terms-of-use", "imprint", "transparency-reports", "pages",
+    "you", "stream", "discover", "explore", "popular"
+}
+COUNTRY_CODE_OVERRIDES = {
+    "au": "Australia",
+    "us": "United States",
+    "uk": "United Kingdom",
+    "gb": "United Kingdom",
+    "ca": "Canada",
+    "nz": "New Zealand",
+    "de": "Germany",
+    "fr": "France",
+    "es": "Spain",
+    "it": "Italy",
+    "ie": "Ireland",
+    "se": "Sweden",
+    "no": "Norway",
+    "fi": "Finland",
+    "dk": "Denmark",
+    "nl": "Netherlands",
+    "be": "Belgium",
+    "br": "Brazil",
+    "mx": "Mexico",
+    "jp": "Japan"
+}
 
 # -----------------------------------------------------------------------------
 # Helper: URL Normalization
@@ -175,6 +256,175 @@ _SC_GENRE_DENY = {"melbourne", "naarm", "australia"}
 def normalize_url(url):
     """Normalize a URL by stripping trailing slashes and converting to lowercase."""
     return url.rstrip('/').lower()
+
+
+_PARSER_USED = None
+
+
+def get_soup(html: str):
+    """Prefer lxml; fallback to html.parser if lxml is unavailable."""
+    global _PARSER_USED
+    try:
+        soup = BS(html or "", "lxml")
+        if _PARSER_USED is None:
+            _PARSER_USED = "lxml"
+            print("[init] BeautifulSoup parser=lxml")
+        return soup
+    except FeatureNotFound:
+        soup = BS(html or "", "html.parser")
+        if _PARSER_USED is None:
+            _PARSER_USED = "html.parser"
+            print("[init] BeautifulSoup parser=html.parser (fallback)")
+        return soup
+
+
+def _strip_tracking(u: str) -> str:
+    u = re.sub(r"[?&](?:utm_[^=&]+|fbclid|gclid|mc_cid|mc_eid)=[^&]+", "", u, flags=re.IGNORECASE)
+    u = re.sub(r"[?&]$", "", u)
+    return u
+
+
+def normalize_external_url(u: str) -> str:
+    if not u:
+        return ""
+    u = u.strip()
+    if not u:
+        return ""
+    if u.startswith("//"):
+        u = "https:" + u
+    try:
+        parsed = urlparse(u)
+        host = (parsed.hostname or "").lower()
+        if host.endswith("l.soundcloud.com"):
+            qs = parse_qs(parsed.query or "")
+            target = qs.get("url") or qs.get("q") or []
+            if target:
+                candidate = unquote(target[0])
+                if candidate.startswith("//"):
+                    candidate = "https:" + candidate
+                u = candidate
+    except Exception:
+        pass
+    return _strip_tracking(u)
+
+
+SC_ASSET_JS_PATTERN = re.compile(r"https://a-v2\.sndcdn\.com/assets/\d+-[a-z0-9]+\.js", re.IGNORECASE)
+SC_CLIENT_ID_PATTERN = re.compile(r'client_id:"([a-zA-Z0-9]+)"')
+
+
+def _sc_test_client_id(session, candidate: str) -> bool:
+    try:
+        resp = session.get(
+            "https://api-v2.soundcloud.com/resolve",
+            params={"url": "https://soundcloud.com/soundcloud", "client_id": candidate},
+            timeout=SC_REQUEST_TIMEOUT,
+            headers=_rand_headers(),
+        )
+        return resp.status_code == 200
+    except Exception:
+        return False
+
+
+def _sc_scrape_client_id(session) -> str:
+    sources = [
+        "https://soundcloud.com",
+        "https://soundcloud.com/discover",
+    ]
+    for source in sources:
+        try:
+            resp = session.get(source, timeout=SC_REQUEST_TIMEOUT, headers=_rand_headers())
+            resp.raise_for_status()
+        except Exception:
+            continue
+        assets = SC_ASSET_JS_PATTERN.findall(resp.text or "")
+        for asset_url in assets[:20]:
+            try:
+                js_resp = session.get(asset_url, timeout=SC_REQUEST_TIMEOUT)
+                js_resp.raise_for_status()
+                match = SC_CLIENT_ID_PATTERN.search(js_resp.text or "")
+                if match:
+                    return match.group(1)
+            except Exception:
+                continue
+    return ""
+
+
+def _sc_get_client_id(session) -> str:
+    global _SC_CLIENT_ID
+    with _SC_CLIENT_ID_LOCK:
+        if _SC_CLIENT_ID:
+            return _SC_CLIENT_ID
+        for candidate in SC_CLIENT_ID_CANDIDATES:
+            if _sc_test_client_id(session, candidate):
+                _SC_CLIENT_ID = candidate
+                print(f"[init] SoundCloud client_id={candidate[:6]}… (predefined)")
+                return _SC_CLIENT_ID
+        scraped = _sc_scrape_client_id(session)
+        if scraped:
+            _SC_CLIENT_ID = scraped
+            print(f"[init] SoundCloud client_id={scraped[:6]}… (scraped)")
+            return _SC_CLIENT_ID
+    print("[warn] Unable to acquire SoundCloud client_id.")
+    return ""
+
+
+def _safe_bs(html: str, parser: str = "lxml"):
+    if parser == "lxml":
+        return get_soup(html)
+    try:
+        return BS(html, parser)
+    except Exception:
+        return get_soup(html)
+
+
+def _extract_handles_generic(html: str):
+    doc = get_soup(html)
+    handles = []
+    for anchor in doc.select('a[href^="/"]'):
+        href = (anchor.get("href") or "").strip()
+        if not href:
+            continue
+        if not HANDLE_RE.match(href):
+            continue
+        slug = href.strip("/").lower()
+        if slug in SC_DISCOVERY_BAN:
+            continue
+        handles.append(slug)
+    seen = set()
+    ordered = []
+    for handle in handles:
+        if handle not in seen:
+            seen.add(handle)
+            ordered.append(handle)
+    return ordered
+
+
+def scrape_handles_from_people_search(session, url: str):
+    resp = session.get(url, timeout=(6, 12), headers=_rand_headers())
+    resp.raise_for_status()
+    polite_sleep()
+    return _extract_handles_generic(resp.text)
+
+
+def scrape_handles_from_tag_page(session, url: str):
+    resp = session.get(url, timeout=(6, 12), headers=_rand_headers())
+    resp.raise_for_status()
+    polite_sleep()
+    return _extract_handles_generic(resp.text)
+
+
+def discover_handles(session, source_url: str):
+    if not source_url:
+        return []
+    lowered = source_url.lower()
+    if "/search/people" in lowered:
+        return scrape_handles_from_people_search(session, source_url)
+    if "/tags/" in lowered:
+        return scrape_handles_from_tag_page(session, source_url)
+    match = re.match(r"^https?://soundcloud\.com/([a-z0-9][a-z0-9._-]{1,49})/?$", source_url, re.IGNORECASE)
+    if match:
+        return [match.group(1).lower()]
+    return []
 
 def _ensure_parent_dir(path: str):
     try:
@@ -492,7 +742,7 @@ def save_soundcloud_csv(rows, filename):
     headers = [
         'Artist Name', 'Location', 'Song Title', 'Sounds Like', 'Social Link', 'SoundCloud Link',
         'Played on triple J', 'Played on Unearthed', 'Release Date', 'Primary Genre', 'Date Added',
-        'External Links', 'Email'
+        'Email'
     ]
     current_date = datetime.datetime.now().strftime("%Y-%m-%d")
 
@@ -1201,27 +1451,63 @@ def _bandcamp_write_enriched_csv(rows, existing_csv):
 # ---------------------------
 # SoundCloud Helpers
 # ---------------------------
-def _strip_emoji(text: str) -> str:
+def clean_display_name(value: str) -> str:
+    text = value or ""
     out = []
-    for ch in text or "":
+    for ch in text:
         if unicodedata.category(ch) in SYMBOL_CAT:
             continue
         out.append(ch)
-    s = "".join(out)
-    s = re.sub(r"[^\w\s\.\&\-\’'/|]", "", s, flags=re.UNICODE)
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
+    cleaned = "".join(out)
+    cleaned = re.sub(r"[^\w\s\.\&\-\’\'/|]", "", cleaned, flags=re.UNICODE)
+    return re.sub(r"\s+", " ", cleaned).strip()
 
 
-def clean_display_name(value: str) -> str:
-    return _strip_emoji(value or "")
+def export_soundcloud_row(data: dict) -> dict:
+    fields = [
+        "Artist Name", "Location", "Song Title", "Sounds Like", "Social Link",
+        "SoundCloud Link", "Played on triple J", "Played on Unearthed",
+        "Release Date", "Primary Genre", "Date Added", "Email"
+    ]
+    row = {field: "" for field in fields}
+    handle = data.get("handle", "")
+    display = data.get("display_name") or handle
+    row["Artist Name"] = clean_display_name(display) if display else ""
+    row["SoundCloud Link"] = data.get("soundcloud_link") or (f"https://soundcloud.com/{handle}" if handle else "")
+    exts = data.get("external_urls") or []
+    emails = data.get("emails") or []
+    row["Social Link"] = "; ".join(exts[:5])
+    row["Email"] = emails[0] if emails else ""
+    row["Song Title"] = ""
+    row["Release Date"] = ""
+    row["Played on triple J"] = ""
+    row["Played on Unearthed"] = ""
+    if row["Social Link"] == "http://firefox.com":
+        row["Social Link"] = ""
+    return row
+
+
+def _resolve_country_name(value: str) -> str:
+    if not value:
+        return ""
+    raw = value.strip()
+    if not raw:
+        return ""
+    lower = raw.lower()
+    if lower in COUNTRY_CODE_OVERRIDES:
+        return COUNTRY_CODE_OVERRIDES[lower]
+    if len(raw) == 2 and raw.isalpha():
+        return raw.upper()
+    return raw
 
 
 def normalize_location(city: str, country: str) -> str:
     city_clean = (city or "").strip()
-    country_clean = (country or "").strip()
+    country_clean = _resolve_country_name(country)
     if "naarm" in city_clean.lower():
         city_clean = "Melbourne"
+        if not country_clean:
+            country_clean = "Australia"
     if city_clean and country_clean:
         return f"{city_clean}, {country_clean}"
     return city_clean or country_clean or ""
@@ -1296,16 +1582,7 @@ _SC_THREAD_LOCAL = threading.local()
 
 
 def _build_sc_session() -> requests.Session:
-    session = requests.Session()
-    adapter = HTTPAdapter(
-        pool_connections=100,
-        pool_maxsize=100,
-        max_retries=SC_HTTP_MAX_RETRIES,
-    )
-    session.mount("http://", adapter)
-    session.mount("https://", adapter)
-    session.headers.update(SC_DEFAULT_HEADERS)
-    return session
+    return build_hardened_session()
 
 
 def is_valid_sc_url(url: str):
@@ -1320,163 +1597,196 @@ def is_valid_sc_url(url: str):
     return True, slug
 
 
-def _extract_links_from_json(html: str) -> set:
-    out = set()
-    if not html:
-        return out
-    soup = BeautifulSoup(html, "html.parser")
-    for script in soup.find_all("script"):
-        txt = script.string or ""
-        if not txt or ("http" not in txt and "sameAs" not in txt):
-            continue
-        try:
-            data = json.loads(txt)
-        except Exception:
-            continue
-        stack = [data]
-        while stack:
-            cur = stack.pop()
-            if isinstance(cur, dict):
-                for key, value in cur.items():
-                    lower_key = key.lower()
-                    if lower_key in {"sameas", "externallinks", "externalurls", "external_url", "external_urls", "socials"}:
-                        if isinstance(value, (list, tuple)):
-                            for item in value:
-                                if isinstance(item, str) and item.startswith("http"):
-                                    out.add(item)
-                    elif isinstance(value, (dict, list)):
-                        stack.append(value)
-                    elif isinstance(value, str) and value.startswith("http"):
-                        out.add(value)
-            elif isinstance(cur, list):
-                for value in cur:
-                    if isinstance(value, (dict, list)):
-                        stack.append(value)
-                    elif isinstance(value, str) and value.startswith("http"):
-                        out.add(value)
-    return out
+AGG_PREF = SC_AGGREGATOR_PREFERENCE
 
 
-def _normalize_contact_href(href: str) -> str:
-    if not href:
-        return ""
-    href = _sc_unwrap_gate(href.strip())
-    if href.startswith("mailto:"):
-        return href.lower()
-    return _sc_normalize_url(href)
-
-
-def _extract_mailtos_from_html(html: str) -> set:
-    soup = BeautifulSoup(html, "html.parser")
-    emails = set()
-    for anchor in soup.select('a[href^="mailto:"]'):
-        href = anchor.get("href") or ""
-        if href:
-            email = href.replace("mailto:", "").split("?")[0].strip()
-            if email:
-                emails.add(email)
-    return emails
-
-
-def _scan_aggregator_for_emails(session: requests.Session, url: str) -> set:
+def expand_for_email(session, url):
+    mails = set()
+    if not url:
+        return sorted(mails)
     try:
-        resp = session.get(url, timeout=SC_REQUEST_TIMEOUT)
-        resp.raise_for_status()
-        return _extract_mailtos_from_html(resp.text)
+        resp = session.get(url, timeout=(6, 12), headers=_rand_headers())
+        if resp.status_code >= 400:
+            polite_sleep()
+            return sorted(mails)
+        doc = get_soup(resp.text)
+        for a in doc.select('a[href^="mailto:"]'):
+            href = (a.get("href") or "").strip()
+            if href.startswith("mailto:"):
+                mails.add(href.replace("mailto:", "").split("?", 1)[0])
     except Exception:
-        return set()
+        pass
+    polite_sleep()
+    return sorted(mails)
+
+
+def _sc_fetch_api_profile(session, handle: str) -> dict:
+    client_id = _sc_get_client_id(session)
+    if not client_id:
+        return {}
+    try:
+        resp = session.get(
+            "https://api-v2.soundcloud.com/resolve",
+            params={
+                "url": f"https://soundcloud.com/{handle}",
+                "client_id": client_id,
+            },
+            timeout=SC_REQUEST_TIMEOUT,
+            headers=_rand_headers(),
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        print(f"[warn] SoundCloud resolve API failed for {handle}: {exc}")
+        return {}
+    profile = {
+        "display_name": data.get("full_name") or data.get("username"),
+        "city": data.get("city") or "",
+        "country": _resolve_country_name(data.get("country_code")),
+        "genre": data.get("genre") or data.get("primary_genre") or "",
+        "external_urls": [],
+    }
+    user_urn = data.get("urn") or ""
+    if user_urn:
+        try:
+            wp_resp = session.get(
+                f"https://api-v2.soundcloud.com/users/{user_urn}/web-profiles",
+                params={"client_id": client_id},
+                timeout=SC_REQUEST_TIMEOUT,
+                headers=_rand_headers(),
+            )
+            if wp_resp.status_code == 200:
+                for item in wp_resp.json() or []:
+                    url = item.get("url")
+                    if url:
+                        profile["external_urls"].append(url)
+        except Exception as exc:
+            print(f"[warn] SoundCloud web profiles failed for {handle}: {exc}")
+    return profile
 
 
 def extract_sc_links(session: requests.Session, handle: str) -> dict:
     cached = SC_ABOUT_CACHE.get(handle)
     if cached:
-        return cached.get("data", {})
+        cached_data = cached.get("data", {})
+        exts = [u for u in (cached_data.get("external_urls") or []) if u and u.lower() != "http://firefox.com"]
+        emails = cached_data.get("emails") or []
+        if cached_data and (exts or emails):
+            cached_data["external_urls"] = exts
+            return cached_data
 
-    emails = set()
-    profiles = set()
-    websites = set()
-    aggregator_urls = set()
-    headers = dict(SC_DEFAULT_HEADERS)
-    about_etag = ""
-    about_last_modified = ""
-    user_profile = {}
-
-    for path in ("/about", "/"):
-        url = f"https://soundcloud.com/{handle}{path}"
-        try:
-            resp = session.get(url, headers=headers, timeout=SC_REQUEST_TIMEOUT)
-            resp.raise_for_status()
-        except Exception:
-            continue
+    external_urls, emails = set(), set()
+    display_name = handle
+    user_city = ""
+    user_country = ""
+    user_genre = ""
+    t0 = time.perf_counter()
+    html = ""
+    about_url = f"https://soundcloud.com/{handle}/about"
+    print(f"[dbg] fetching {about_url}")
+    try:
+        resp = session.get(about_url, timeout=(6, 12), headers=_rand_headers())
+        print(f"[dbg] fetched {handle} status={resp.status_code} len={len(resp.text)}")
+        resp.raise_for_status()
         html = resp.text
-        if not user_profile:
-            user_profile = _sc_extract_user_profile_from_html(html)
-        if path == "/about":
-            about_etag = resp.headers.get("ETag", "") or about_etag
-            about_last_modified = resp.headers.get("Last-Modified", "") or about_last_modified
-            doc = BeautifulSoup(html, "html.parser")
-            for selector in SC_SOCIAL_SELECTORS:
-                for anchor in doc.select(selector):
-                    href = _normalize_contact_href(anchor.get("href"))
-                    if not href:
-                        continue
-                    if href.startswith("mailto:"):
-                        email = href.replace("mailto:", "").split("?")[0]
-                        if email and not email.endswith("@soundcloud.com"):
-                            emails.add(email)
-                        continue
-                    parsed = urlparse(href)
-                    host = (parsed.hostname or "").lower()
-                    if host.endswith("soundcloud.com"):
-                        continue
-                    if any(host.endswith(agg) for agg in SC_AGGREGATOR_HOSTS):
-                        aggregator_urls.add(href)
-                    if any(token in host for token in SC_SOCIAL_HOST_HINTS):
-                        profiles.add(href)
-                    else:
-                        websites.add(href)
-        urls_from_json = _extract_links_from_json(html)
-        for candidate in urls_from_json:
-            href = _normalize_contact_href(candidate)
-            if not href or href.startswith("mailto:@soundcloud.com"):
+    except Exception as exc:
+        print(f"[warn] {handle} about fetch failed: {exc}")
+    finally:
+        polite_sleep()
+
+    if html:
+        doc = get_soup(html)
+        name_el = doc.select_one("h1, .profileHeaderInfo__userName, .profileHeaderInfo__content")
+        if name_el:
+            text = name_el.get_text(strip=True)
+            if text:
+                display_name = text
+
+        for a in doc.select(
+            'a[href^="mailto:"], '
+            'a[href*="instagram.com"], a[href*="facebook.com"], '
+            'a[href*="linktr.ee"], a[href*="bandcamp.com"], '
+            'a[href*="youtube.com"], a[href*="tiktok.com"], '
+            'a[href*="twitter.com"], a[href*="x.com"], '
+            'a[href*="beacons.ai"], a[href*="carrd.co"], '
+            'a[href*="flow.page"]'
+        ):
+            href = (a.get("href") or "").strip()
+            if not href:
                 continue
             if href.startswith("mailto:"):
-                email = href.replace("mailto:", "").split("?")[0]
-                if email and not email.endswith("@soundcloud.com"):
-                    emails.add(email)
-                continue
-            parsed = urlparse(href)
-            host = (parsed.hostname or "").lower()
-            if not host or host.endswith("soundcloud.com"):
-                continue
-            if any(host.endswith(agg) for agg in SC_AGGREGATOR_HOSTS):
-                aggregator_urls.add(href)
-            if any(token in host for token in SC_SOCIAL_HOST_HINTS):
-                profiles.add(href)
+                emails.add(href.replace("mailto:", "").split("?", 1)[0])
             else:
-                websites.add(href)
-        if emails or profiles or websites:
+                external_urls.add(href)
+
+        for script in doc.find_all("script"):
+            txt = script.string or ""
+            if not txt or ("http" not in txt and "sameAs" not in txt):
+                continue
+            external_urls.update(URL_RE.findall(txt))
+            try:
+                data = json.loads(txt)
+            except Exception:
+                continue
+            stack = [data]
+            while stack:
+                cur = stack.pop()
+                if isinstance(cur, dict):
+                    for key, value in cur.items():
+                        if isinstance(value, (list, tuple)) and key and key.lower() in ("sameas", "externalurls", "externallinks", "external_url", "socials"):
+                            for item in value:
+                                if isinstance(item, str) and item.startswith("http"):
+                                    external_urls.add(item)
+                        elif isinstance(value, (dict, list)):
+                            stack.append(value)
+                        elif isinstance(value, str) and value.startswith("http"):
+                            external_urls.add(value)
+                elif isinstance(cur, list):
+                    stack.extend(cur)
+        if not external_urls:
+            external_urls.update(URL_RE.findall(html))
+
+    did_expand = False
+    for candidate in list(external_urls):
+        host = (urlparse(candidate).hostname or "").lower()
+        if any(host.endswith(pref) for pref in AGG_PREF):
+            for mail in expand_for_email(session, candidate):
+                emails.add(mail)
+            did_expand = True
             break
 
-    expanded_emails = set()
-    for agg_url in aggregator_urls:
-        expanded_emails |= _scan_aggregator_for_emails(session, agg_url)
+    api_profile = _sc_fetch_api_profile(session, handle)
+    if api_profile:
+        if api_profile.get("display_name"):
+            display_name = api_profile["display_name"]
+        user_city = api_profile.get("city") or user_city
+        user_country = api_profile.get("country") or user_country
+        user_genre = api_profile.get("genre") or user_genre
+        external_urls.update(api_profile.get("external_urls") or [])
 
-    emails |= expanded_emails
+    norm_exts = []
+    seen_norm = set()
+    for url in external_urls:
+        normalized = normalize_external_url(url)
+        if not normalized or normalized in seen_norm:
+            continue
+        seen_norm.add(normalized)
+        norm_exts.append(normalized)
 
+    elapsed_ms = int(round((time.perf_counter() - t0) * 1000))
     payload = {
-        "emails": sorted(e for e in emails if e),
-        "profiles": sorted(profiles),
-        "websites": sorted(websites),
-        "display_name": user_profile.get("display_name", ""),
-        "city": user_profile.get("city", ""),
-        "country_name": user_profile.get("country_name", ""),
-        "country": user_profile.get("country_name", ""),
-        "genre": user_profile.get("genre", ""),
         "handle": handle,
+        "display_name": display_name,
+        "external_urls": norm_exts,
+        "emails": sorted(emails),
+        "city": user_city,
+        "country": user_country,
+        "genre": user_genre,
+        "elapsed_ms": elapsed_ms,
+        "aggregator_expanded": int(did_expand),
     }
-    payload["external_urls"] = _sc_extract_external_urls(payload)
-    SC_ABOUT_CACHE.set(handle, payload, etag=about_etag, last_modified=about_last_modified)
+    if payload["external_urls"] or payload["emails"]:
+        SC_ABOUT_CACHE.set(handle, payload)
     return payload
 
 
@@ -1496,18 +1806,19 @@ def _sc_fetch_contact_payload(handle: str) -> dict:
         data = extract_sc_links(session, handle)
     except Exception as exc:
         error = str(exc)
-        data = {"emails": [], "profiles": [], "websites": []}
-    elapsed_ms = max(0, int((time.perf_counter() - started) * 1000))
-    emails_len = len(data.get("emails", []))
-    profiles_len = len(data.get("profiles", []))
-    websites_len = len(data.get("websites", []))
-    print(f"[sc] handle={handle} links={profiles_len} email={emails_len} site={websites_len} ms={elapsed_ms}")
+        data = {"emails": [], "external_urls": [], "aggregator_expanded": 0}
+    elapsed_ms = int(round((time.perf_counter() - started) * 1000))
+    emails_len = len(data.get("emails", []) or [])
+    links_len = len(data.get("external_urls", []) or [])
+    elapsed = data.get("elapsed_ms", elapsed_ms)
+    site_flag = int(data.get("aggregator_expanded", data.get("_aggregator_tried", 0)))
+    print(f"[sc] handle={handle} links={links_len} email={emails_len} site={site_flag} ms={elapsed}")
     return {
         "data": data,
-        "elapsed_ms": elapsed_ms,
-        "links": profiles_len,
+        "elapsed_ms": elapsed,
+        "links": links_len,
         "emails": emails_len,
-        "site": websites_len,
+        "site": site_flag,
         "error": error,
     }
 
@@ -1526,7 +1837,7 @@ def _sc_fetch_contacts_concurrently(handles: list) -> dict:
             except Exception as exc:
                 print(f"[sc] handle={handle} error={exc}")
                 results[handle] = {
-                    "data": {"emails": [], "profiles": [], "websites": []},
+                    "data": {"emails": [], "external_urls": [], "_aggregator_tried": 0},
                     "elapsed_ms": 0,
                     "links": 0,
                     "emails": 0,
@@ -1542,14 +1853,15 @@ def _sc_has_contact_links(entry) -> bool:
     payload = entry.get("data") if isinstance(entry, dict) else entry
     if not isinstance(payload, dict):
         return False
-    return any(payload.get(key) for key in ("emails", "profiles", "websites"))
+    return bool(payload.get("emails") or payload.get("external_urls"))
 
 
 def _sc_collect_contact_links(handle_jobs: list, min_yield: int) -> tuple:
     contact_map = {}
     processed_jobs = []
+    hits = 0
     if not handle_jobs:
-        return contact_map, processed_jobs
+        return contact_map, processed_jobs, hits
     for start in range(0, len(handle_jobs), SC_LINK_BATCH_SIZE):
         chunk = handle_jobs[start:start + SC_LINK_BATCH_SIZE]
         handles = [job["handle"] for job in chunk]
@@ -1557,7 +1869,7 @@ def _sc_collect_contact_links(handle_jobs: list, min_yield: int) -> tuple:
         for job in chunk:
             handle = job["handle"]
             contact_map[handle] = batch_results.get(handle, {
-                "data": {"emails": [], "profiles": [], "websites": []},
+                "data": {"emails": [], "external_urls": [], "aggregator_expanded": 0},
                 "elapsed_ms": 0,
                 "links": 0,
                 "emails": 0,
@@ -1565,94 +1877,19 @@ def _sc_collect_contact_links(handle_jobs: list, min_yield: int) -> tuple:
                 "error": "not-fetched",
             })
         processed_jobs.extend(chunk)
-        if min_yield and min_yield > 0:
-            hits = sum(1 for handle in handles if _sc_has_contact_links(contact_map.get(handle)))
-            if hits < min_yield:
-                print(f"SoundCloud: last batch produced {hits} contacts (< {min_yield}). Consider adjusting your query.")
-                break
-    return contact_map, processed_jobs
-
-
-def _sc_contact_links_from_payload(payload: dict) -> list:
-    if not payload:
-        return []
-    emails = payload.get("emails") or []
-    profiles = payload.get("profiles") or []
-    websites = payload.get("websites") or []
-    links = []
-    for email in emails:
-        if email and not email.lower().endswith("@soundcloud.com"):
-            links.append(f"mailto:{email}")
-    for profile in profiles:
-        if _is_fb(profile) and _is_company_fb(profile):
-            continue
-        links.append(profile)
-    links.extend(websites)
-    deduped = []
-    seen = set()
-    for link in links:
-        if not link:
-            continue
-        if link in seen:
-            continue
-        seen.add(link)
-        deduped.append(link)
-    return deduped
-
-
-def _sc_extract_external_urls(payload: dict, fallback=None) -> list:
-    fallback = fallback or []
-    sources = []
-    if payload:
-        if payload.get("external_urls"):
-            sources.append(payload.get("external_urls") or [])
-        sources.append(payload.get("profiles") or [])
-        sources.append(payload.get("websites") or [])
-    sources.append(fallback)
-    urls = []
-    seen = set()
-    for bucket in sources:
-        for url in bucket or []:
-            if not url or not isinstance(url, str):
-                continue
-            if url.startswith("mailto:"):
-                continue
-            clean_url = url.strip()
-            if not clean_url.startswith(("http://", "https://")):
-                continue
-            if clean_url.lower() == "http://firefox.com":
-                continue
-            if clean_url in seen:
-                continue
-            seen.add(clean_url)
-            urls.append(clean_url)
-    return urls
-
-
-def _sc_extract_emails(payload: dict, fallback=None) -> list:
-    fallback = fallback or []
-    emails = []
-    seen = set()
-    for bucket in [
-        (payload or {}).get("emails") if payload else None,
-        fallback
-    ]:
-        for email in bucket or []:
-            if not email or not isinstance(email, str):
-                continue
-            clean = email.strip()
-            if not clean or clean.lower().endswith("@soundcloud.com"):
-                continue
-            if clean in seen:
-                continue
-            seen.add(clean)
-            emails.append(clean)
-    return emails
+    hits = sum(1 for handle in (job["handle"] for job in processed_jobs) if _sc_has_contact_links(contact_map.get(handle)))
+    return contact_map, processed_jobs, hits
 
 
 def _sc_apply_row_guards(row: dict):
-    if row.get("Social Link") == "http://firefox.com":
-        row["Social Link"] = ""
+    socials_raw = row.get("Social Link") or ""
+    if socials_raw:
+        cleaned_links = []
+        for token in [part.strip() for part in socials_raw.split(";")]:
+            if not token or token.lower() == "http://firefox.com":
+                continue
+            cleaned_links.append(token)
+        row["Social Link"] = "; ".join(cleaned_links)
     artist = (row.get("Artist Name") or "").strip()
     location = (row.get("Location") or "").strip()
     if artist and location and artist.lower() == location.lower():
@@ -1668,43 +1905,82 @@ def _sc_build_row(handle: str, payload: dict, soundcloud_link: str, fallback_nam
                   sounds_like: str = "", fallback_tags=None, fallback_external=None, fallback_emails=None):
     payload = payload or {}
     fallback_tags = fallback_tags or []
-    display_name = payload.get("display_name") or fallback_name or handle.replace("-", " ").replace("_", " ").title()
-    artist_name = clean_display_name(display_name) or handle.replace("-", " ").replace("_", " ").title()
+    fallback_external = fallback_external or []
+    fallback_emails = fallback_emails or []
+    default_name = handle.replace("-", " ").replace("_", " ").title()
+    display_name = payload.get("display_name") or fallback_name or default_name
     location_value = normalize_location(
         payload.get("city"),
-        payload.get("country_name") or payload.get("country")
+        payload.get("country") or payload.get("country_name")
     )
     if not location_value:
         location_value = (fallback_location or "").strip()
     primary_genre_value = choose_primary_genre(payload.get("genre"), fallback_tags)
-    external_urls = _sc_extract_external_urls(payload, fallback_external)
-    emails = _sc_extract_emails(payload, fallback_emails)
-    social_link = external_urls[0] if external_urls else ""
-    release_clean = (release_date or "").strip()
-    if release_clean.lower() == "not present":
-        release_clean = ""
-    row = {
-        "Artist Name": artist_name,
-        "Location": location_value,
-        "Song Title": (song_title or "").strip(),
-        "Sounds Like": (sounds_like or "").strip(),
-        "Social Link": social_link,
-        "SoundCloud Link": soundcloud_link,
-        "Played on triple J": "",
-        "Played on Unearthed": "",
-        "Release Date": release_clean,
-        "Primary Genre": primary_genre_value,
-        "External Links": "; ".join(external_urls[:5]),
-        "Email": emails[0] if emails else "",
+    external_sources = list(payload.get("external_urls") or []) + list(fallback_external or [])
+    emails_source = list(payload.get("emails") or []) + list(fallback_emails or [])
+
+    def _dedupe_external(items):
+        seen = set()
+        cleaned = []
+        for item in items:
+            if not item or not isinstance(item, str):
+                continue
+            val = item.strip()
+            if not val.startswith(("http://", "https://")):
+                continue
+            if val.lower() == "http://firefox.com":
+                continue
+            if val in seen:
+                continue
+            seen.add(val)
+            cleaned.append(val)
+        return cleaned
+
+    def _dedupe_emails(items):
+        seen = set()
+        cleaned = []
+        for item in items:
+            if not item or not isinstance(item, str):
+                continue
+            val = item.strip()
+            if not val or val.lower().endswith("@soundcloud.com"):
+                continue
+            if val in seen:
+                continue
+            seen.add(val)
+            cleaned.append(val)
+        return cleaned
+
+    external_urls = _dedupe_external(external_sources)
+    emails = _dedupe_emails(emails_source)
+    row_data = {
+        "handle": handle,
+        "display_name": display_name,
+        "external_urls": external_urls,
+        "emails": emails,
+        "soundcloud_link": soundcloud_link,
     }
+    row = export_soundcloud_row(row_data)
+    row["Location"] = location_value
+    row["Primary Genre"] = primary_genre_value
+    row["Song Title"] = (song_title or "").strip()
+    row["Release Date"] = (release_date or "").strip()
+    row["Sounds Like"] = (sounds_like or "").strip()
     _sc_apply_row_guards(row)
     return row, external_urls, emails
 
 
-def _sc_log_csv_row(handle: str, row: dict):
-    print(f'[csv] {handle} name="{row.get("Artist Name","")}" loc="{row.get("Location","")}" '
-          f'genre="{row.get("Primary Genre","")}" social={bool(row.get("Social Link"))} '
-          f'email={bool(row.get("Email"))}')
+def _sc_log_csv_row(handle: str, row: dict, external_urls=None, emails=None):
+    external_urls = external_urls or []
+    emails = emails or []
+    social_ok = bool(row.get("Social Link"))
+    print(
+        f'[csv] {handle} name="{row.get("Artist Name","")}" '
+        f'loc="{row.get("Location","")}" genre="{row.get("Primary Genre","")}"\n'
+        f'      social={social_ok} email={bool(row.get("Email"))} links_ct={len(external_urls)}'
+    )
+    if external_urls and not social_ok:
+        print(f"[alert] mapping mismatch: links found but Social Link empty; exts[:3]={external_urls[:3]}")
 
 
 def _sc_print_dry_run_row(handle: str, row: dict, external_urls: list, emails: list):
@@ -1879,6 +2155,35 @@ def _sc_extract_urls_from_hydration(html: str) -> set:
         _sc_collect_urls_from_obj(obj, urls)
     return urls
 
+
+def _extract_from_json_or_regex(html: str) -> set:
+    urls = set()
+    soup = _safe_bs(html)
+    for script in soup.find_all("script"):
+        txt = script.string or ""
+        if not txt or ("http" not in txt and "sameAs" not in txt):
+            continue
+        urls.update(URL_RE.findall(txt))
+        try:
+            data = json.loads(txt)
+        except Exception:
+            continue
+        stack = [data]
+        while stack:
+            cur = stack.pop()
+            if isinstance(cur, dict):
+                for key, value in cur.items():
+                    if isinstance(value, (list, tuple)) and key and key.lower() in ("sameas", "externallinks", "external_url", "externalurls", "socials"):
+                        for item in value:
+                            if isinstance(item, str) and item.startswith("http"):
+                                urls.add(item)
+                    stack.append(value)
+            elif isinstance(cur, list):
+                stack.extend(cur)
+    if not urls:
+        urls.update(URL_RE.findall(html or ""))
+    return urls
+
 def _sc_extract_urls_from_ldjson(soup) -> set:
     urls = set()
     for script in soup.find_all("script", type=lambda t: t and "ld+json" in t):
@@ -1921,12 +2226,18 @@ def _sc_extract_user_profile_from_html(html: str) -> dict:
                 or ""
             )
             city = candidate.get("city") or candidate.get("city_name") or ""
-            country_name = candidate.get("country_name") or candidate.get("country") or candidate.get("country_code") or ""
+            country_raw = (
+                candidate.get("country_name")
+                or candidate.get("country")
+                or candidate.get("country_code")
+                or ""
+            )
+            country_name = _resolve_country_name(country_raw)
             genre = candidate.get("genre") or candidate.get("music_style") or ""
             return {
                 "display_name": display_name,
                 "city": city,
-                "country_name": country_name,
+                "country": country_name,
                 "genre": genre,
             }
     return {}
@@ -2873,7 +3184,14 @@ def _sc_write_enriched_csv(rows, existing_csv):
 def scrape_soundcloud(website_url, seed_tags=None, pages_per_tag=SOUNDCLOUD_PAGES_PER_TAG,
                       existing_csv="artist_social_links.csv", max_artists=200,
                       max_handles=None, min_yield=3, dry_run=False):
+    print("[init] SoundCloud scraper starting…")
     driver = setup_driver()
+    try:
+        discovery_session = build_hardened_session()
+    except Exception as exc:
+        print(f"SoundCloud: failed to build hardened session ({exc}); falling back to basic session.")
+        discovery_session = requests.Session()
+        discovery_session.headers.update(_rand_headers())
     candidate_profiles = []
     seen_profiles = set()
     sc_rows = []
@@ -2901,7 +3219,13 @@ def scrape_soundcloud(website_url, seed_tags=None, pages_per_tag=SOUNDCLOUD_PAGE
             except Exception:
                 query = ""
             search_cap = max_handles or max_artists
-            handles = _sc_collect_from_people_search(driver, url, max_handles=search_cap)
+            handles = []
+            try:
+                handles = discover_handles(discovery_session, url)
+            except Exception as exc:
+                print(f"SoundCloud: people search fetch failed: {exc}")
+            if search_cap:
+                handles = handles[:search_cap]
             print(f"SoundCloud: people search -> {len(handles)} handles (from provided URL)")
             handles_with_tags.extend((h, query) for h in handles)
 
@@ -2925,15 +3249,38 @@ def scrape_soundcloud(website_url, seed_tags=None, pages_per_tag=SOUNDCLOUD_PAGE
             elif tags:
                 print(f"SoundCloud: fallback to tags (last resort): {tags}")
                 for tag in tags:
+                    normalized_tag = tag.lower()
+                    normalized_tag = re.sub(r"\s+", "-", normalized_tag).strip("-") or normalized_tag
+                    try:
+                        tag_path = _urlparse.quote(normalized_tag)
+                    except Exception:
+                        tag_path = normalized_tag
+                    tag_url = f"https://soundcloud.com/tags/{tag_path}"
+                    try:
+                        tag_handles = discover_handles(discovery_session, tag_url)
+                    except Exception as exc:
+                        print(f"SoundCloud: tag '{tag}' page fetch failed: {exc}")
+                        tag_handles = []
+                    if tag_handles:
+                        print(f"SoundCloud: tag '{tag}' (/tags) -> {len(tag_handles)} handles")
+                        handles_with_tags.extend((h, tag) for h in tag_handles)
+                    if len(handles_with_tags) >= max_artists:
+                        break
                     try:
                         encoded = _urlparse.quote(tag)
                     except Exception:
                         encoded = tag
                     people_url = f"https://soundcloud.com/search/people?q={encoded}"
                     search_cap = max_handles or max_artists
-                    handles = _sc_collect_from_people_search(driver, people_url, max_handles=search_cap)
+                    handles = []
+                    try:
+                        handles = discover_handles(discovery_session, people_url)
+                    except Exception as exc:
+                        print(f"SoundCloud: tag '{tag}' people search fetch failed: {exc}")
+                    if search_cap:
+                        handles = handles[:search_cap]
                     if handles:
-                        print(f"SoundCloud: tag '{tag}' -> {len(handles)} handles")
+                        print(f"SoundCloud: tag '{tag}' (search) -> {len(handles)} handles")
                         handles_with_tags.extend((h, tag) for h in handles)
                     if len(handles_with_tags) >= max_artists:
                         break
@@ -3003,7 +3350,10 @@ def scrape_soundcloud(website_url, seed_tags=None, pages_per_tag=SOUNDCLOUD_PAGE
                     "source_tag": source_tag,
                     "seed_primary_genre": seed_primary_genre,
                 })
-            contact_map, processed_jobs = _sc_collect_contact_links(handle_jobs, min_yield or 0)
+            contact_map, processed_jobs, batch_hits = _sc_collect_contact_links(handle_jobs, min_yield or 0)
+            min_yield_msg = None
+            if (min_yield or 0) and batch_hits < (min_yield or 0):
+                min_yield_msg = f"SoundCloud: last batch produced {batch_hits} contacts (< {min_yield}). Consider adjusting your query."
             for idx, job in enumerate(processed_jobs):
                 profile_url = job["profile_url"]
                 source_tag = job["source_tag"]
@@ -3019,7 +3369,6 @@ def scrape_soundcloud(website_url, seed_tags=None, pages_per_tag=SOUNDCLOUD_PAGE
                 if not _sc_has_contact_links(contact_payload):
                     print(f"skip[{idx}] no links: {handle}")
                     continue
-                fallback_links = _sc_contact_links_from_payload(contact_data)
                 location_text, bio_text = _sc_profile_basics(driver, profile_url, timeout=10)
                 title, date_iso, prec, genres = _sc_quick_first_track_meta(driver, profile_url, timeout=12, hop=True)
                 try:
@@ -3067,10 +3416,10 @@ def scrape_soundcloud(website_url, seed_tags=None, pages_per_tag=SOUNDCLOUD_PAGE
                     release_date=release_date_value,
                     sounds_like=sounds_like_value,
                     fallback_tags=genres or [],
-                    fallback_external=fallback_links,
+                    fallback_external=None,
                     fallback_emails=None,
                 )
-                _sc_log_csv_row(handle, row)
+                _sc_log_csv_row(handle, row, external_urls, emails)
                 if dry_run:
                     _sc_print_dry_run_row(handle, row, external_urls, emails)
                     continue
@@ -3080,8 +3429,9 @@ def scrape_soundcloud(website_url, seed_tags=None, pages_per_tag=SOUNDCLOUD_PAGE
                     break
                 time.sleep(random.uniform(0.2, 0.6))
             if dry_run:
-                hits = sum(1 for job in processed_jobs if _sc_has_contact_links(contact_map.get(job["handle"])))
-                print(f"SoundCloud: dry-run complete – {hits}/{len(processed_jobs)} handles yielded outbound links.")
+                print(f"SoundCloud: dry-run complete – {batch_hits}/{len(processed_jobs)} handles yielded outbound links.")
+            if min_yield_msg:
+                print(min_yield_msg)
         else:
             for idx, cand in enumerate(candidate_profiles):
                 profile_url, source_tag, seed_primary_genre = _sc_unpack3(cand)
@@ -3159,10 +3509,19 @@ def scrape_soundcloud(website_url, seed_tags=None, pages_per_tag=SOUNDCLOUD_PAGE
                     and link.startswith(("http://", "https://"))
                     and link.lower() != "http://firefox.com"
                 ]
+                email_fallback = [artist.get("email")] if artist.get("email") else []
                 handle_slug = _sc_handle_from_profile(profile_url) or artist_name_value or ""
-                row, _, _ = _sc_build_row(
+                payload_override = {
+                    "display_name": artist_name_value,
+                    "city": "",
+                    "country": "",
+                    "genre": artist.get("primary_genre", ""),
+                    "external_urls": http_links,
+                    "emails": email_fallback,
+                }
+                row, external_urls, emails = _sc_build_row(
                     handle=handle_slug,
-                    payload=None,
+                    payload=payload_override,
                     soundcloud_link=artist_profile_link,
                     fallback_name=artist_name_value,
                     fallback_location=location_value,
@@ -3170,10 +3529,10 @@ def scrape_soundcloud(website_url, seed_tags=None, pages_per_tag=SOUNDCLOUD_PAGE
                     release_date="" if release_date_value.lower() == "not present" else release_date_value,
                     sounds_like=sounds_like_value,
                     fallback_tags=artist.get("genres", []),
-                    fallback_external=http_links,
-                    fallback_emails=[artist.get("email")] if artist.get("email") else []
+                    fallback_external=None,
+                    fallback_emails=None
                 )
-                _sc_log_csv_row(handle_slug, row)
+                _sc_log_csv_row(handle_slug, row, external_urls, emails)
                 sc_rows.append(row)
 
                 socials = artist.get("socials", {})
@@ -3203,6 +3562,10 @@ def scrape_soundcloud(website_url, seed_tags=None, pages_per_tag=SOUNDCLOUD_PAGE
                 time.sleep(random.uniform(1.0, 2.0))
         print(f"SoundCloud: total actionable artists written {actionable_count}")
     finally:
+        try:
+            discovery_session.close()
+        except Exception:
+            pass
         driver.quit()
 
     if dry_run:
@@ -3227,8 +3590,8 @@ def login_facebook(driver, fb_username, fb_password):
     driver.find_element(By.NAME, 'login').click()
     WebDriverWait(driver, 15).until(EC.presence_of_element_located((By.TAG_NAME, 'body')))
 
-def _extract_social_link_from_row(row):
-    """Return the first usable social/Facebook URL from various column headers."""
+def _extract_social_links(row):
+    """Return all usable social URLs (split on ';' or ',') from likely columns."""
     candidate_columns = [
         "Social Link",
         "social link",
@@ -3237,12 +3600,23 @@ def _extract_social_link_from_row(row):
         "facebook",
         "FACEBOOK"
     ]
+    urls = []
     for col in candidate_columns:
         if col in row and pd.notna(row[col]):
             value = str(row[col]).strip()
             if value:
-                return value
-    return ""
+                parts = re.split(r"[;,]", value)
+                for part in parts:
+                    url = part.strip()
+                    if url:
+                        urls.append(url)
+    return urls
+
+
+def _extract_social_link_from_row(row):
+    """Maintain backward compatibility: return the first social link if present."""
+    links = _extract_social_links(row)
+    return links[0] if links else ""
 
 def _safe_row_value(row, key, fallback=""):
     if key not in row:
@@ -3266,23 +3640,29 @@ def scrape_csv(input_csv, output_csv, fb_username, fb_password, max_emails=None)
     emails_found = 0
     processed_urls = set(existing_data['url'].tolist() if not existing_data.empty else [])
     exclude_urls = {"https://www.facebook.com/triplejunearthed/", "https://www.facebook.com/abc/"}
+    exclude_urls_lower = {url.lower() for url in exclude_urls}
     facebook_rows = []
     for index, row in data.iterrows():
-        url = _extract_social_link_from_row(row)
-        if not url:
+        links = _extract_social_links(row)
+        if not links:
             continue
-        if url in exclude_urls or url in processed_urls:
-            continue
-        if 'facebook.com' in url:
-            facebook_rows.append(row)
+        for candidate in links:
+            url = candidate.strip()
+            if not url:
+                continue
+            url_lower = url.lower()
+            if url_lower in exclude_urls_lower or url in processed_urls:
+                continue
+            if "facebook.com" in url_lower:
+                facebook_rows.append((row, url))
+                break
     if not facebook_rows:
         print("No Facebook pages to process.")
         return
     driver = setup_facebook_driver()
     login_facebook(driver, fb_username, fb_password)
     session_counter = 0
-    for row in facebook_rows:
-        url = _extract_social_link_from_row(row)
+    for row, url in facebook_rows:
         if not url:
             continue
         preexisting_emails = []
@@ -3347,6 +3727,7 @@ def scrape_csv(input_csv, output_csv, fb_username, fb_password, max_emails=None)
                     break
         except Exception as e:
             print(f"Error scraping {url}: {e}")
+        processed_urls.add(url)
         # Random sleep between 1 and 2 seconds.
         time.sleep(random.uniform(1, 2))
     driver.quit()
