@@ -80,6 +80,7 @@ else:
 # Now import the dependencies
 # ---------------------------
 import os
+import html
 import time
 import random
 import re
@@ -107,7 +108,15 @@ except Exception:
         pass
 BeautifulSoup = BS
 from webdriver_manager.chrome import ChromeDriverManager
-from urllib.parse import urlparse, urljoin, parse_qs, unquote
+from urllib.parse import (
+    urlparse,
+    urljoin,
+    parse_qs,
+    parse_qsl,
+    urlunparse,
+    urlencode,
+    unquote,
+)
 import urllib.parse as _urlparse
 from PyQt5 import QtWidgets, QtCore
 from dateutil import parser as dparser
@@ -121,6 +130,11 @@ BANDCAMP_SEED_TAGS = ["united-kingdom", "london", "manchester", "brighton", "lee
 BANDCAMP_PAGES_PER_TAG = 5
 BANDCAMP_MIN_CONTACT_REQUIREMENT = True
 BANDCAMP_DEFAULT_TAG_URL = "https://bandcamp.com/tag/united-kingdom"
+BANDCAMP_LOCATION_FALLBACK = False
+BANDCAMP_TARGET_ROWS = 40
+BANDCAMP_MAX_CANDIDATES = 120
+BANDCAMP_DISCOVER_PAGES_DEFAULT = 5
+BANDCAMP_DISCOVER_HINT_MISMATCH_THRESHOLD = 0.10
 UNEARTHED_DEFAULT_URL = "https://www.abc.net.au/triplejunearthed/music/"
 
 # ---------------------------
@@ -498,6 +512,11 @@ def setup_driver():
     )
     service = Service(ChromeDriverManager().install())
     driver = webdriver.Chrome(service=service, options=chrome_options)
+    try:
+        driver.set_page_load_timeout(35)
+        driver.set_script_timeout(35)
+    except Exception:
+        pass
 
     try:
         driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
@@ -1061,6 +1080,15 @@ def _bandcamp_card_candidates_with_genre(soup, base_url) -> list:
             })
     return out
 
+_BANDCAMP_EXCLUDED_HOSTS = {
+    "bandcamp.com",
+    "store.bandcamp.com",
+    "daily.bandcamp.com",
+    "blog.bandcamp.com",
+    "community.bandcamp.com",
+    "supporters.bandcamp.com"
+}
+
 def _bandcamp_extract_tag_from_url(url: str) -> str | None:
     if not url:
         return None
@@ -1069,90 +1097,584 @@ def _bandcamp_extract_tag_from_url(url: str) -> str | None:
         return match.group(1).lower()
     return None
 
-def scrape_bandcamp(seed_tags, pages_per_tag=5, existing_csv="artist_social_links.csv", max_artists=200):
-    """High-level Bandcamp entry point. Iterates tags → paginated tag pages → collects candidate artist/album links → resolves to artist profile → extracts contacts → writes CSV."""
+def _bandcamp_is_discover_url(url: str) -> bool:
+    if not url:
+        return False
+    normalized = url.strip()
+    if normalized.startswith("//"):
+        normalized = f"https:{normalized}"
+    if not normalized.startswith(("http://", "https://")):
+        normalized = f"https://{normalized.lstrip('/')}"
+    try:
+        parsed = urlparse(normalized)
+    except Exception:
+        return False
+    host = parsed.netloc.lower()
+    return "bandcamp.com" in host and "/discover" in parsed.path
+
+def _bandcamp_replace_query_param(url: str, key: str, value) -> str:
+    if not url:
+        return ""
+    normalized = url.strip()
+    if normalized.startswith("//"):
+        normalized = f"https:{normalized}"
+    if not normalized.startswith(("http://", "https://")):
+        normalized = f"https://{normalized.lstrip('/')}"
+    parsed = urlparse(normalized)
+    pairs = []
+    replaced = False
+    for k, v in parse_qsl(parsed.query, keep_blank_values=True):
+        if k == key:
+            if not replaced:
+                pairs.append((k, str(value)))
+                replaced = True
+            continue
+        pairs.append((k, v))
+    if not replaced:
+        pairs.append((key, str(value)))
+    new_query = urlencode(pairs)
+    return urlunparse((parsed.scheme or "https", parsed.netloc, parsed.path, parsed.params, new_query, parsed.fragment))
+
+def _bandcamp_build_discover_page_urls(base_url: str, pages: int) -> list[str]:
+    if pages <= 0:
+        pages = 1
+    urls = []
+    for index in range(pages):
+        urls.append(_bandcamp_replace_query_param(base_url, "p", index))
+    return urls
+
+def _bandcamp_label_from_discover_url(url: str) -> str:
+    if not url:
+        return "discover:custom"
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return "discover:custom"
+    params = parse_qs(parsed.query)
+    parts = []
+    loc = (params.get("loc") or [""])[0]
+    if loc:
+        parts.append(f"loc={loc}")
+    genre = (params.get("g") or [""])[0]
+    if genre:
+        parts.append(f"genre={genre}")
+    sort_mode = (params.get("s") or [""])[0]
+    if sort_mode:
+        parts.append(f"sort={sort_mode}")
+    if not parts:
+        return "discover:custom"
+    return "discover:" + ",".join(parts)
+
+def _normalize_location_text(value: str) -> str:
+    if not value:
+        return ""
+    normalized = unicodedata.normalize("NFKD", value)
+    normalized = "".join(ch for ch in normalized if not unicodedata.combining(ch))
+    return normalized.strip().lower()
+
+def _norm_text_(value: str) -> str:
+    if not value:
+        return ""
+    value = unicodedata.normalize("NFKD", value)
+    value = "".join(ch for ch in value if not unicodedata.combining(ch))
+    value = value.lower()
+    return re.sub(r"[\s,;|/]+", " ", value.strip())
+
+_BANDCAMP_BAD_HOST_PREFIXES = (
+    "f0.bcbits.com",
+    "f1.bcbits.com",
+    "f2.bcbits.com",
+    "f3.bcbits.com",
+    "f4.bcbits.com",
+    "t4.bcbits.com",
+    "p4.bcbits.com",
+    "popplers5.bandcamp.com",
+)
+
+_BANDCAMP_BAD_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".svg", ".webp", ".mp3", ".wav", ".zip", ".rar"}
+
+def _bandcamp_contact_is_valid(url: str) -> bool:
+    if not url:
+        return False
+    url = url.strip()
+    if url.startswith(("mailto:", "tel:")):
+        return True
+    if not url.startswith(("http://", "https://")):
+        return False
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return False
+    host = (parsed.netloc or "").lower()
+    for bad in _BANDCAMP_BAD_HOST_PREFIXES:
+        if host.startswith(bad):
+            return False
+    ext = os.path.splitext(parsed.path.lower())[1]
+    if ext in _BANDCAMP_BAD_EXTS:
+        return False
+    if host.endswith("bandcamp.com"):
+        return parsed.path in ("", "/", "/music")
+    return True
+
+def _bandcamp_collect_contacts(artist_dict: dict) -> list:
+    contacts = []
+    website = artist_dict.get("website")
+    if website and _bandcamp_contact_is_valid(website):
+        contacts.append(website)
+    socials = artist_dict.get("socials", {})
+    for value in socials.values():
+        if value and _bandcamp_contact_is_valid(value):
+            contacts.append(value)
+    email_value = artist_dict.get("email")
+    if email_value:
+        contacts.append(f"mailto:{email_value}")
+    seen = set()
+    deduped = []
+    for link in contacts:
+        if link not in seen:
+            seen.add(link)
+            deduped.append(link)
+    return deduped
+
+def _bandcamp_location_match_(profile_loc: str, api_hint: str, requested_label: str | None, requested_hint: str | None) -> bool:
+    if not requested_label and not requested_hint:
+        return True
+    profile_norm = _norm_text_(profile_loc)
+    api_norm = _norm_text_(api_hint)
+    if requested_label:
+        label_norm = _norm_text_(requested_label)
+        if label_norm and (label_norm in profile_norm or label_norm in api_norm):
+            return True
+    if requested_hint:
+        hint_norm = _norm_text_(requested_hint)
+        if hint_norm and (hint_norm in profile_norm or hint_norm in api_norm):
+            return True
+    return False
+
+_BANDCAMP_CONTACT_PRIORITY = [
+    ("linktr.ee", "linktree", "beacons.ai", "solo.to", "carrd.co", "band.link"),
+    ("instagram.com",),
+    ("soundcloud.com",),
+    ("youtube.com", "youtu.be"),
+    ("facebook.com", "fb.me", "m.me"),
+    ("twitter.com", "x.com"),
+    ("spotify.com",),
+    ("bandcamp.com",),
+]
+
+def _best_contact_(links: list[str]) -> str:
+    if not links:
+        return ""
+    cleaned = []
+    seen = set()
+    for link in links:
+        if link not in seen:
+            seen.add(link)
+            cleaned.append(link)
+    for group in _BANDCAMP_CONTACT_PRIORITY:
+        for link in cleaned:
+            lowered = link.lower()
+            if any(dom in lowered for dom in group):
+                return link
+    return cleaned[0]
+
+def _bandcamp_parse_discover_params(url: str) -> dict:
+    result = {"g": "all", "s": "new"}
+    if not url:
+        return result
+    normalized = url.strip()
+    if normalized.startswith("//"):
+        normalized = f"https:{normalized}"
+    if not normalized.startswith(("http://", "https://")):
+        normalized = f"https://{normalized.lstrip('/')}"
+    parsed = urlparse(normalized)
+    params = {}
+    for key, values in parse_qs(parsed.query, keep_blank_values=True).items():
+        if not values:
+            continue
+        if key.lower().startswith("utm_"):
+            continue
+        params[key.lower()] = values[-1]
+    if params.get("g"):
+        result["g"] = params["g"]
+    if params.get("s"):
+        result["s"] = params["s"]
+    loc_value = params.get("loc") or params.get("location")
+    if loc_value:
+        result["loc"] = loc_value
+        if "loct" in params:
+            result["loct"] = params.get("loct")
+        else:
+            result["loct"] = params.get("location_type", "1")
+    tag_value = params.get("t") or params.get("tag")
+    if tag_value:
+        result["t"] = tag_value
+    return result
+
+def _bandcamp_location_label_from_url(url: str) -> dict:
+    if not _bandcamp_is_discover_url(url):
+        return {"display_label": "", "hint": ""}
+    params = _bandcamp_parse_discover_params(url)
+    loc_value = params.get("loc") or ""
+    display_label = ""
+    try:
+        session = build_hardened_session()
+        response = session.get(url, headers=_rand_headers(), timeout=(6, 15))
+        response.raise_for_status()
+        match = re.search(r'id="DiscoverApp"[^>]+data-blob="([^"]+)"', response.text)
+        if match:
+            blob = json.loads(html.unescape(match.group(1)))
+            locations = (
+                blob.get("appData", {})
+                    .get("initialState", {})
+                    .get("locations", [])
+            )
+            for entry in locations:
+                if str(entry.get("id")) == str(loc_value):
+                    display_label = entry.get("label", "") or ""
+                    break
+    except Exception:
+        display_label = ""
+    if not display_label and loc_value and not loc_value.isdigit():
+        display_label = loc_value
+    hint = ""
+    if display_label:
+        hint = display_label
+    elif loc_value.isdigit():
+        hint = f"loc:{loc_value}"
+    elif loc_value:
+        hint = loc_value
+    return {"display_label": display_label, "hint": hint}
+
+def _bandcamp_collect_from_discover_api(url: str, pages: int = 5, requested_label: str = "") -> tuple[list[dict], float]:
+    params = _bandcamp_parse_discover_params(url)
+    api_url = "https://bandcamp.com/api/discover/3/get_web"
+    session = build_hardened_session()
+    per_page = 40
+    candidates = []
+    match_hits = 0
+    match_total = 0
+    norm_label = _norm_text_(requested_label) if requested_label else ""
+    try:
+        page_count = int(pages)
+    except Exception:
+        page_count = 1
+    if page_count <= 0:
+        page_count = 1
+    for page_index in range(page_count):
+        page_items = []
+        preferred_sort = params.get("s") or "new"
+        sorts_to_try = [preferred_sort]
+        if (preferred_sort or "").lower() != "top":
+            sorts_to_try.append("top")
+        for sort_value in sorts_to_try:
+            query = {}
+            for key, value in params.items():
+                if key in {"s", "p", "offset", "limit"}:
+                    continue
+                if value:
+                    query[key] = value
+            if sort_value:
+                query["s"] = sort_value
+            query["p"] = page_index
+            query["offset"] = page_index * per_page
+            query["limit"] = per_page
+            try:
+                response = session.get(api_url, params=query, timeout=(6, 15), headers=_rand_headers())
+                response.raise_for_status()
+                payload = response.json() or {}
+            except Exception as exc:
+                print(f"Bandcamp: discover API failed (page {page_index}, sort={sort_value}): {exc}")
+                continue
+            if payload.get("error"):
+                print(f"Bandcamp: discover API error (page {page_index}, sort={sort_value}): {payload.get('error_message')}")
+                continue
+            items = payload.get("items") or []
+            if items:
+                page_items = items
+                break
+        if not page_items:
+            print(f"Bandcamp: discover API returned 0 items for page {page_index}, attempting HTML fallback")
+            fallback = _bandcamp_collect_from_discover_html_page(session, url, page_index)
+            if fallback:
+                print(f"Bandcamp: discover HTML fallback produced {len(fallback)} items for page {page_index}")
+                candidates.extend(fallback)
+            else:
+                print(f"Bandcamp: discover fallback empty for page {page_index}")
+            continue
+        for item in page_items:
+            hints = item.get("url_hints") or {}
+            subdomain = (hints.get("subdomain") or "").strip()
+            custom_domain = (hints.get("custom_domain") or "").strip()
+            profile_url = ""
+            if custom_domain:
+                profile_url = custom_domain
+            elif subdomain:
+                profile_url = f"{subdomain}.bandcamp.com"
+            if not profile_url:
+                continue
+            if not profile_url.startswith(("http://", "https://")):
+                profile_url = f"https://{profile_url}"
+            if not profile_url.endswith("/"):
+                profile_url = f"{profile_url}/"
+            location_text = (item.get("location_text") or "").strip()
+            if norm_label and location_text:
+                match_total += 1
+                if norm_label in _norm_text_(location_text):
+                    match_hits += 1
+            candidates.append({
+                "url": profile_url,
+                "primary_genre": item.get("genre_text") or "",
+                "artist_name": item.get("secondary_text") or "",
+                "location": location_text,
+                "cover": item.get("art_id"),
+                "release_title": item.get("primary_text") or ""
+            })
+    ratio = (match_hits / match_total) if match_total else 0.0
+    return candidates, ratio
+
+def _bandcamp_fetch_profile_html(profile_url: str, session=None) -> str:
+    session = session or _bandcamp_thread_session()
+    try:
+        response = session.get(profile_url, timeout=(6, 15), headers=_rand_headers())
+        response.raise_for_status()
+        return response.text
+    except Exception:
+        return ""
+
+def _bandcamp_quick_visit(driver, profile_url: str) -> str:
+    try:
+        driver.set_page_load_timeout(20)
+    except Exception:
+        pass
+    try:
+        driver.get(profile_url)
+        WebDriverWait(driver, 8).until(EC.presence_of_element_located((By.TAG_NAME, 'body')))
+        return driver.page_source
+    except Exception as exc:
+        print(f"Bandcamp: selenium quick visit failed {profile_url}: {exc}")
+        return ""
+
+def scrape_bandcamp(seed_tags, pages_per_tag=5, existing_csv="artist_social_links.csv", max_artists=200, custom_url=None):
+    """High-level Bandcamp entry point. Supports seed tags or discover URLs with HTTP-first parsing."""
     driver = setup_driver()
-    raw_candidates = 0
-    candidate_profiles = []
-    seen_profiles = set()
+    custom_url = (custom_url or "").strip()
+    discover_mode = _bandcamp_is_discover_url(custom_url)
+    discover_label = _bandcamp_label_from_discover_url(custom_url) if discover_mode else ""
+    location_meta = _bandcamp_location_label_from_url(custom_url) if discover_mode else {"display_label": "", "hint": ""}
+    requested_label = location_meta.get("display_label") or ""
+    requested_hint = location_meta.get("hint") or ""
+    seeds = list(seed_tags or [])
+    if not seeds and not discover_mode:
+        seeds = list(BANDCAMP_SEED_TAGS)
+
+    try:
+        pages_to_scan = int(pages_per_tag)
+    except Exception:
+        pages_to_scan = BANDCAMP_DISCOVER_PAGES_DEFAULT
+    if pages_to_scan <= 0:
+        pages_to_scan = BANDCAMP_DISCOVER_PAGES_DEFAULT
+
+    rows_limit = max_artists if max_artists and max_artists > 0 else BANDCAMP_TARGET_ROWS or BANDCAMP_PAGES_PER_TAG
+    if BANDCAMP_TARGET_ROWS and BANDCAMP_TARGET_ROWS > 0:
+        rows_limit = min(rows_limit, BANDCAMP_TARGET_ROWS)
+    rows_limit = max(rows_limit, 1)
+
+    computed_cap = max(max_artists * 5, max_artists + 40)
+    if BANDCAMP_MAX_CANDIDATES and BANDCAMP_MAX_CANDIDATES > 0:
+        computed_cap = min(computed_cap, BANDCAMP_MAX_CANDIDATES)
+    max_candidates = max(computed_cap, rows_limit)
+    hit_candidate_cap = False
+
     bandcamp_rows = []
     enriched_rows = []
-    seen_artist_profiles = set()
+    candidate_profiles = []
+    seen_profiles = set()
+
+    def enqueue_candidate(source_tag, candidate, api_location=""):
+        nonlocal hit_candidate_cap
+        profile_url = _bandcamp_resolve_artist_profile_url(candidate.get("url"))
+        if not profile_url:
+            return False
+        key = profile_url.rstrip("/").lower()
+        if key in seen_profiles or len(candidate_profiles) >= max_candidates:
+            if len(candidate_profiles) >= max_candidates:
+                hit_candidate_cap = True
+            return False
+        seen_profiles.add(key)
+        candidate_profiles.append({
+            "profile_url": profile_url,
+            "seed_genre": candidate.get("primary_genre", ""),
+            "source_tag": source_tag,
+            "api_location": api_location,
+        })
+        if len(candidate_profiles) >= max_candidates:
+            hit_candidate_cap = True
+        return True
+
     try:
-        for tag in seed_tags:
-            print(f"Bandcamp: scanning tag '{tag}', pages={pages_per_tag}")
-            for page in range(1, pages_per_tag + 1):
-                tag_url = f"https://bandcamp.com/tag/{tag}?page={page}"
-                try:
-                    driver.get(tag_url)
-                    WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.TAG_NAME, 'body')))
-                except Exception as exc:
-                    print(f"Bandcamp: error loading {tag_url}: {exc}")
-                    continue
-                candidates = _bandcamp_collect_from_tag_page(driver, tag_url)
-                raw_candidates += len(candidates)
-                for candidate in candidates:
-                    link = candidate.get("url")
-                    profile_url = _bandcamp_resolve_artist_profile_url(link)
-                    if not profile_url:
+        if discover_mode:
+            print(f"Bandcamp: scanning discover '{discover_label or 'discover:custom'}', pages={pages_to_scan}")
+            discover_candidates, hint_ratio = _bandcamp_collect_from_discover_api(custom_url, pages_to_scan, requested_label)
+            print(f"Bandcamp: discover API yielded {len(discover_candidates)} tiles")
+            use_tag_fallback = False
+            if requested_label and hint_ratio < BANDCAMP_DISCOVER_HINT_MISMATCH_THRESHOLD:
+                print(f"Bandcamp: discover loc appears ignored (hint match < {int(BANDCAMP_DISCOVER_HINT_MISMATCH_THRESHOLD*100)}%). Falling back to tag pages for '{requested_label}'.")
+                use_tag_fallback = True
+            source_tag_label = discover_label or "discover:custom"
+            source_candidates = discover_candidates
+            if use_tag_fallback:
+                fallback_label = requested_label or requested_hint
+                tag_candidates = _bandcamp_collect_city_tag_candidates(driver, fallback_label, pages_to_scan) if fallback_label else []
+                print(f"Bandcamp: tag fallback yielded {len(tag_candidates)} tiles")
+                source_candidates = tag_candidates
+                source_tag_label = fallback_label or source_tag_label
+            for cand in source_candidates:
+                if not enqueue_candidate(source_tag_label, cand, cand.get("location", "")):
+                    if hit_candidate_cap:
+                        break
+            if hit_candidate_cap:
+                print("Bandcamp: candidate collection capped by BANDCAMP_MAX_CANDIDATES")
+        else:
+            for tag in seeds:
+                print(f"Bandcamp: scanning tag '{tag}', pages={pages_to_scan}")
+                for page in range(1, pages_to_scan + 1):
+                    tag_url = f"https://bandcamp.com/tag/{tag}?page={page}"
+                    try:
+                        driver.get(tag_url)
+                        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.TAG_NAME, 'body')))
+                    except Exception as exc:
+                        print(f"Bandcamp: error loading {tag_url}: {exc}")
                         continue
-                    key = profile_url.rstrip('/').lower()
-                    if key in seen_profiles:
-                        continue
-                    seen_profiles.add(key)
-                    candidate_profiles.append((profile_url, tag, candidate.get("primary_genre", "")))
-                if len(candidate_profiles) >= max_artists:
+                    candidates = _bandcamp_collect_from_tag_page(driver, tag_url)
+                    for candidate in candidates:
+                        if not enqueue_candidate(tag, candidate, candidate.get("primary_genre", "")):
+                            if hit_candidate_cap:
+                                break
+                    if hit_candidate_cap:
+                        break
+                    time.sleep(random.uniform(1.0, 2.0))
+                if hit_candidate_cap:
                     break
-                time.sleep(random.uniform(1.0, 2.0))
-            if len(candidate_profiles) >= max_artists:
-                break
-        print(f"Bandcamp: total candidate links found {raw_candidates}")
-        print(f"Bandcamp: total artist profiles resolved {len(candidate_profiles)}")
-        actionable_count = 0
-        for profile_url, tag, seed_genre in candidate_profiles:
-            artist_dict = _bandcamp_parse_artist_profile(driver, profile_url, seed_genre)
+
+        print(f"Bandcamp: total candidate links found {len(candidate_profiles)}")
+
+        aggregated = {}
+        http_success = 0
+        selenium_used = 0
+        kept_after_location = 0
+        rejected_location = 0
+        sample_kept = ""
+        sample_rejected = ""
+        stop_processing = False
+
+        def process_artist(candidate, artist_dict):
+            nonlocal kept_after_location, sample_kept, sample_rejected, rejected_location, stop_processing
             if not artist_dict:
+                return
+            artist_dict["source_tag"] = candidate.get("source_tag", "")
+            profile_location = artist_dict.get("location", "")
+            api_hint = candidate.get("api_location", "")
+            location_ok = _bandcamp_location_match_(profile_location, api_hint, requested_label, requested_hint)
+            if (not location_ok and BANDCAMP_LOCATION_FALLBACK and requested_label and not profile_location):
+                label_norm = _norm_text_(requested_label)
+                hint_norm = _norm_text_(api_hint)
+                if label_norm and label_norm in hint_norm:
+                    location_ok = True
+            if not location_ok:
+                rejected_location += 1
+                if not sample_rejected:
+                    sample_rejected = f"{artist_dict.get('artist_name', '') or 'unknown'} ({artist_dict.get('location', '') or 'n/a'})"
+                return
+            contacts = _bandcamp_collect_contacts(artist_dict)
+            if not contacts:
+                return
+            key = artist_dict["profile_url"].rstrip("/").lower()
+            entry = aggregated.get(key)
+            if entry:
+                entry["contacts"].update(contacts)
+                current = entry["artist"]
+                for field in ["artist_name", "location", "latest_release_title", "latest_release_date", "website", "email"]:
+                    if not current.get(field) and artist_dict.get(field):
+                        current[field] = artist_dict[field]
+                entry["artist"] = current
+            else:
+                aggregated[key] = {
+                    "artist": artist_dict,
+                    "contacts": set(contacts),
+                }
+            kept_after_location += 1
+            if not sample_kept:
+                sample_kept = f"{artist_dict.get('artist_name', '')} ({artist_dict.get('location', '')})"
+            if kept_after_location >= rows_limit:
+                stop_processing = True
+
+        http_workers = min(6, len(candidate_profiles)) or 1
+        fallback_candidates = []
+        with ThreadPoolExecutor(max_workers=http_workers) as executor:
+            future_map = {executor.submit(_bandcamp_fetch_profile_html, cand["profile_url"]): cand for cand in candidate_profiles}
+            for future in as_completed(future_map):
+                if stop_processing:
+                    break
+                cand = future_map[future]
+                html = future.result()
+                if html:
+                    http_success += 1
+                    artist_dict = _bandcamp_parse_html(cand["profile_url"], html, cand.get("seed_genre", ""))
+                    process_artist(cand, artist_dict)
+                else:
+                    fallback_candidates.append(cand)
+                if stop_processing:
+                    break
+
+        for cand in fallback_candidates:
+            if stop_processing:
+                break
+            html = _bandcamp_quick_visit(driver, cand["profile_url"])
+            if not html:
                 continue
-            artist_dict["source_tag"] = tag
-            if BANDCAMP_MIN_CONTACT_REQUIREMENT and not _bandcamp_is_actionable(artist_dict):
-                continue
-            contact_links = []
-            website = artist_dict.get("website")
-            if website:
-                contact_links.append(website)
-            socials = artist_dict.get("socials", {})
-            for social_link in socials.values():
-                if social_link:
-                    contact_links.append(social_link)
-            email_address = artist_dict.get("email")
-            if email_address:
-                contact_links.append(f"mailto:{email_address}")
-            contact_links = list(dict.fromkeys([link for link in contact_links if link]))
-            if not contact_links:
-                continue
-            profile_key = (
-                artist_dict.get("artist_name", "").strip().lower(),
-                artist_dict.get("profile_url", "").rstrip("/").lower()
-            )
-            if profile_key in seen_artist_profiles:
-                continue
-            seen_artist_profiles.add(profile_key)
-            release_date_value = artist_dict.get("latest_release_date", "") or ""
+            selenium_used += 1
+            artist_dict = _bandcamp_parse_html(cand["profile_url"], html, cand.get("seed_genre", ""))
+            process_artist(cand, artist_dict)
+            if stop_processing:
+                break
+
+        stop_reason = "done"
+        if kept_after_location >= rows_limit:
+            stop_reason = "target"
+        elif hit_candidate_cap:
+            stop_reason = "cap"
+
+        print(f"Bandcamp: candidates={len(candidate_profiles)} http_ok={http_success} selenium_fallback={selenium_used} kept_after_location={kept_after_location} stop_reason={stop_reason}")
+        if sample_kept:
+            print(f"Bandcamp: kept sample -> {sample_kept}")
+        if sample_rejected:
+            print(f"Bandcamp: rejected (location) sample -> {sample_rejected}")
+        if kept_after_location == 0 and requested_label:
+            print("Bandcamp: warning – no profiles matched requested location. Consider widening filters.")
+
+        for entry in aggregated.values():
+            artist_dict = entry["artist"]
+            contacts = list(entry["contacts"])
+            best_contact = _best_contact_(contacts) if contacts else ""
             primary_genre_value = artist_dict.get("primary_genre", "")
             if isinstance(primary_genre_value, str):
                 primary_genre_value = primary_genre_value.title()
+            release_date_value = artist_dict.get("latest_release_date", "") or ""
+            contact_payload = [best_contact] if best_contact else []
             bandcamp_rows.append((
                 artist_dict.get("artist_name", ""),
                 artist_dict.get("location", ""),
                 artist_dict.get("latest_release_title", ""),
                 artist_dict.get("sounds_like", ""),
-                contact_links,
+                contact_payload,
                 "",
                 "",
                 "",
                 release_date_value,
                 primary_genre_value
             ))
+            socials = artist_dict.get("socials", {})
             enriched_rows.append({
                 "Artist Name": artist_dict.get("artist_name", ""),
                 "Profile URL": artist_dict.get("profile_url", ""),
@@ -1172,11 +1694,8 @@ def scrape_bandcamp(seed_tags, pages_per_tag=5, existing_csv="artist_social_link
                 "Primary Genre": primary_genre_value,
                 "Source Tag": artist_dict.get("source_tag", "")
             })
-            actionable_count += 1
-            if actionable_count >= max_artists:
+            if len(bandcamp_rows) >= rows_limit:
                 break
-            time.sleep(random.uniform(1.0, 2.0))
-        print(f"Bandcamp: total actionable artists written {actionable_count}")
     finally:
         driver.quit()
     if bandcamp_rows:
@@ -1184,32 +1703,34 @@ def scrape_bandcamp(seed_tags, pages_per_tag=5, existing_csv="artist_social_link
     if enriched_rows:
         _bandcamp_write_enriched_csv(enriched_rows, existing_csv)
 
-def _bandcamp_collect_from_tag_page(driver, tag_url) -> list:
-    """Return candidate dicts with URLs + card primary genre from a tag page."""
+def _bandcamp_base_from_page(page_url: str) -> str:
+    if not page_url:
+        return "https://bandcamp.com"
+    if "/tag/" in page_url:
+        return page_url.split("/tag/")[0] or "https://bandcamp.com"
+    if "/discover" in page_url:
+        return page_url.split("/discover")[0] or "https://bandcamp.com"
+    return "https://bandcamp.com"
+
+
+def _bandcamp_candidates_from_html(html: str, page_url: str) -> list:
     candidates = []
-    excluded_hosts = {
-        "bandcamp.com",
-        "store.bandcamp.com",
-        "daily.bandcamp.com",
-        "blog.bandcamp.com",
-        "community.bandcamp.com",
-        "supporters.bandcamp.com"
-    }
+    if not html:
+        return candidates
     try:
-        soup = BeautifulSoup(driver.page_source, 'html.parser')
-        base_url = tag_url.split("/tag/")[0] if "/tag/" in tag_url else "https://bandcamp.com"
+        soup = BeautifulSoup(html, 'html.parser')
+        base_url = _bandcamp_base_from_page(page_url)
         candidates = _bandcamp_card_candidates_with_genre(soup, base_url)
         if not candidates:
-            # Fallback to legacy anchor scraping
             for anchor in soup.find_all('a', href=True):
                 href = anchor['href']
-                absolute = urljoin(tag_url, href)
+                absolute = urljoin(page_url, href)
                 if not absolute:
                     continue
                 parsed = urlparse(absolute)
-                host = parsed.netloc.lower()
-                path = parsed.path.lower()
-                if not host.endswith("bandcamp.com") or host in excluded_hosts:
+                host = (parsed.netloc or "").lower()
+                path = (parsed.path or "").lower()
+                if not host.endswith("bandcamp.com") or host in _BANDCAMP_EXCLUDED_HOSTS:
                     continue
                 allowed_path = (
                     path in ("", "/") or
@@ -1223,8 +1744,58 @@ def _bandcamp_collect_from_tag_page(driver, tag_url) -> list:
                         "primary_genre": ""
                     })
     except Exception as exc:
-        print(f"Bandcamp: failed to collect links from {tag_url}: {exc}")
+        print(f"Bandcamp: failed to parse HTML listing {page_url}: {exc}")
     return candidates
+
+def _bandcamp_city_to_tag_slug(city_label: str) -> str:
+    if not city_label:
+        return ""
+    base = _norm_text_(city_label)
+    slug = re.sub(r"[^a-z0-9]+", "-", base).strip("-")
+    return slug or city_label.strip().lower().replace(" ", "-")
+
+
+def _bandcamp_collect_city_tag_candidates(driver, city_label: str, pages: int) -> list:
+    if not city_label:
+        return []
+    slug = _bandcamp_city_to_tag_slug(city_label)
+    if not slug:
+        return []
+    candidates = []
+    for page in range(1, max(1, pages) + 1):
+        tag_url = f"https://bandcamp.com/tag/{slug}?tab=artists&page={page}"
+        try:
+            driver.get(tag_url)
+            WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.TAG_NAME, 'body')))
+        except Exception as exc:
+            print(f"Bandcamp: error loading fallback tag page {tag_url}: {exc}")
+            continue
+        page_candidates = _bandcamp_collect_from_tag_page(driver, tag_url)
+        candidates.extend(page_candidates)
+        time.sleep(random.uniform(1.0, 2.0))
+    return candidates
+
+
+def _bandcamp_collect_from_tag_page(driver, tag_url) -> list:
+    """Return candidate dicts with URLs + card primary genre from a tag page."""
+    try:
+        html = driver.page_source
+    except Exception as exc:
+        print(f"Bandcamp: error reading tag page source {tag_url}: {exc}")
+        html = ""
+    return _bandcamp_candidates_from_html(html, tag_url)
+
+
+def _bandcamp_collect_from_discover_html_page(session, base_url: str, page_index: int) -> list:
+    page_url = _bandcamp_replace_query_param(base_url, "p", page_index)
+    try:
+        resp = session.get(page_url, timeout=(6, 15), headers=_rand_headers())
+        resp.raise_for_status()
+        html = resp.text
+    except Exception as exc:
+        print(f"Bandcamp: discover HTML fallback failed for page {page_index}: {exc}")
+        return []
+    return _bandcamp_candidates_from_html(html, page_url)
 
 def _bandcamp_resolve_artist_profile_url(candidate_url: str) -> str:
     """Normalize candidate links and resolve to canonical artist profile (https://artistname.bandcamp.com/)."""
@@ -1252,8 +1823,7 @@ def _bandcamp_resolve_artist_profile_url(candidate_url: str) -> str:
     scheme = parsed.scheme or "https"
     return f"{scheme}://{host}/"
 
-def _bandcamp_parse_artist_profile(driver, profile_url, seed_primary_genre="") -> dict:
-    """Visit artist profile; return dict with name, location, website, socials list, latest release title/date if visible."""
+def _bandcamp_parse_html(profile_url: str, html: str, seed_primary_genre: str = "") -> dict:
     artist = {
         "artist_name": "",
         "profile_url": profile_url,
@@ -1278,20 +1848,17 @@ def _bandcamp_parse_artist_profile(driver, profile_url, seed_primary_genre="") -
         "primary_genre": "",
         "source_tag": ""
     }
-    try:
-        driver.get(profile_url)
-        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.TAG_NAME, 'body')))
-    except Exception as exc:
-        print(f"Bandcamp: unable to load profile {profile_url}: {exc}")
+    page_source = ""
+    if not html:
         return {}
-    soup = BeautifulSoup(driver.page_source, 'html.parser')
+    soup = BeautifulSoup(html, 'html.parser')
     artist["genres"] = bandcamp_extract_genres(soup)
     primary_genre = (seed_primary_genre or (artist["genres"][0] if artist["genres"] else "")).strip()
     artist["primary_genre"] = primary_genre
     if not artist["genres"] and primary_genre:
         artist["genres"] = [primary_genre]
     artist["sounds_like"] = bandcamp_extract_sounds_like(soup)
-    release_info = bandcamp_extract_release_date(driver.page_source)
+    release_info = bandcamp_extract_release_date(html)
     if release_info.get("date_iso"):
         artist["latest_release_date"] = release_info.get("date_iso", "")
         artist["latest_release_precision"] = release_info.get("precision", "") or ""
@@ -1392,6 +1959,13 @@ def _bandcamp_parse_artist_profile(driver, profile_url, seed_primary_genre="") -
     if not artist["latest_release_date"]:
         artist["latest_release_date"] = "not present"
     return artist
+
+def _bandcamp_parse_artist_profile(driver, profile_url, seed_primary_genre="") -> dict:
+    """Visit artist profile via Selenium fallback."""
+    page_source = _bandcamp_quick_visit(driver, profile_url)
+    if not page_source:
+        page_source = _bandcamp_fetch_profile_html(profile_url)
+    return _bandcamp_parse_html(profile_url, page_source, seed_primary_genre)
 
 def _bandcamp_is_actionable(artist_dict: dict) -> bool:
     """Return True if website or email or at least one social exists."""
@@ -1587,6 +2161,15 @@ SC_ABOUT_CACHE_REQUIRED_KEYS = (
 
 _SC_THREAD_LOCAL = threading.local()
 
+_BANDCAMP_THREAD_LOCAL = threading.local()
+
+def _bandcamp_thread_session():
+    session = getattr(_BANDCAMP_THREAD_LOCAL, "session", None)
+    if session is None:
+        session = build_hardened_session()
+        _BANDCAMP_THREAD_LOCAL.session = session
+    return session
+
 
 def _build_sc_session() -> requests.Session:
     return build_hardened_session()
@@ -1605,6 +2188,31 @@ def is_valid_sc_url(url: str):
 
 
 AGG_PREF = SC_AGGREGATOR_PREFERENCE
+
+def _sc_is_people_search_url(value: str) -> bool:
+    if not value:
+        return False
+    try:
+        parsed = urlparse(value.strip())
+    except Exception:
+        return False
+    if not parsed.scheme or not parsed.netloc:
+        return False
+    return parsed.netloc.lower().endswith("soundcloud.com") and parsed.path.strip("/").lower() == "search/people"
+
+
+def _sc_parse_people_search(value: str) -> dict:
+    result = {"q": "", "place": ""}
+    if not value:
+        return result
+    try:
+        parsed = urlparse(value.strip())
+        query = parse_qs(parsed.query or "")
+    except Exception:
+        return result
+    result["q"] = (query.get("q", [""])[0] or "").strip()
+    result["place"] = (query.get("filter.place", [""])[0] or "").strip()
+    return result
 
 
 def expand_for_email(session, url):
@@ -3330,7 +3938,7 @@ def scrape_soundcloud(website_url, seed_tags=None, pages_per_tag=SOUNDCLOUD_PAGE
     try:
         url = (website_url or "").strip()
         url_lower = url.lower()
-        use_people_url = url_lower.startswith("https://soundcloud.com/search/people")
+        use_people_url = _sc_is_people_search_url(url)
         use_profile_url = (
             url_lower.startswith("https://soundcloud.com/")
             and "/search/people" not in url_lower
@@ -3340,22 +3948,37 @@ def scrape_soundcloud(website_url, seed_tags=None, pages_per_tag=SOUNDCLOUD_PAGE
         handles_with_tags = []
 
         if use_people_url:
-            query = ""
-            try:
-                parsed = urlparse(url)
-                query = parse_qs(parsed.query or "").get("q", [""])[0]
-            except Exception:
-                query = ""
+            people_params = _sc_parse_people_search(url)
+            query = people_params.get("q", "")
+            place = people_params.get("place", "")
+            param_parts = []
+            if query:
+                try:
+                    encoded_query = _urlparse.quote(query)
+                except Exception:
+                    encoded_query = query
+                param_parts.append(f"q={encoded_query}")
+            if place:
+                try:
+                    encoded_place = _urlparse.quote(place)
+                except Exception:
+                    encoded_place = place
+                param_parts.append(f"filter.place={encoded_place}")
+            if param_parts:
+                people_url = f"https://soundcloud.com/search/people?{'&'.join(param_parts)}"
+            else:
+                people_url = url
             search_cap = max_handles or max_artists
             handles = []
             try:
-                handles = discover_handles(discovery_session, url)
+                handles = discover_handles(discovery_session, people_url)
             except Exception as exc:
                 print(f"SoundCloud: people search fetch failed: {exc}")
             if search_cap:
                 handles = handles[:search_cap]
-            print(f"SoundCloud: people search -> {len(handles)} handles (from provided URL)")
-            handles_with_tags.extend((h, query) for h in handles)
+            tag_hint = query or place or ""
+            print(f"SoundCloud: people search -> {len(handles)} handles (query='{query}' place='{place}')")
+            handles_with_tags.extend((h, tag_hint) for h in handles)
 
         elif use_profile_url:
             parsed = urlparse(url)
@@ -3940,7 +4563,7 @@ class ArtistScraperThread(QtCore.QThread):
         self.output_csv = output_csv
         self.source = source
         self.pages_per_tag = pages_per_tag
-        if seed_tags:
+        if seed_tags is not None:
             self.seed_tags = list(seed_tags)
         elif self.source and self.source.lower() == "soundcloud":
             if website_url and website_url.strip():
@@ -3957,7 +4580,8 @@ class ArtistScraperThread(QtCore.QThread):
                     self.seed_tags,
                     pages_per_tag=self.pages_per_tag,
                     existing_csv=self.output_csv,
-                    max_artists=self.max_artists
+                    max_artists=self.max_artists,
+                    custom_url=self.website_url
                 )
                 self.log_signal.emit("Bandcamp scraping completed.")
             elif self.source.lower() == "soundcloud":
@@ -4183,10 +4807,11 @@ class MainWindow(QtWidgets.QMainWindow):
             pages_per_tag = default_pages
         seed_tags = None
         if source == "Bandcamp":
-            seed_tags = list(BANDCAMP_SEED_TAGS)
-            extracted_tag = _bandcamp_extract_tag_from_url(url)
-            if extracted_tag:
-                seed_tags = [extracted_tag]
+            if _bandcamp_is_discover_url(url):
+                seed_tags = []
+            else:
+                extracted_tag = _bandcamp_extract_tag_from_url(url)
+                seed_tags = [extracted_tag] if extracted_tag else list(BANDCAMP_SEED_TAGS)
         elif source == "SoundCloud":
             match = re.search(r"/tags/([^/?#]+)", url)
             seed_tags = [match.group(1).lower()] if match else list(SOUNDCLOUD_SEED_TAGS)
