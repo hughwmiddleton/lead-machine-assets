@@ -116,6 +116,7 @@ from urllib.parse import (
     urlunparse,
     urlencode,
     unquote,
+    quote,
 )
 import urllib.parse as _urlparse
 from PyQt5 import QtWidgets, QtCore
@@ -319,6 +320,26 @@ def _bc_parse_discover_params(u: str) -> dict:
     except Exception:
         pass
     return params
+
+
+def _bc_normalize_tag_slug(city_or_tag: str) -> str:
+    """Normalize a human tag/city string into a Bandcamp slug."""
+    value = (city_or_tag or "").strip().lower()
+    if not value:
+        return ""
+    value = re.sub(r"[,+]+", " ", value)
+    value = re.sub(r"[\s/_]+", "-", value)
+    value = re.sub(r"[^a-z0-9\-]+", "", value)
+    value = re.sub(r"-{2,}", "-", value)
+    return value.strip("-")
+
+
+def _bc_make_tag_url(slug: str, page: int) -> str:
+    """Build a tag URL that explicitly loads the artists tab."""
+    normalized = _bc_normalize_tag_slug(slug)
+    if not normalized:
+        return ""
+    return f"https://bandcamp.com/tag/{quote(normalized)}?tab=artists&page={int(page)}"
 
 # -----------------------------------------------------------------------------
 # Helper: URL Normalization
@@ -1594,22 +1615,13 @@ def scrape_bandcamp(seed_tags_or_url, pages_per_tag=5, existing_csv="artist_soci
             if not tag:
                 continue
             print(f"Bandcamp: scanning tag '{tag}', pages={pages_to_scan}")
-            for page in range(1, pages_to_scan + 1):
-                tag_url = f"https://bandcamp.com/tag/{tag}?page={page}"
-                try:
-                    driver.get(tag_url)
-                    WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.TAG_NAME, 'body')))
-                except Exception as exc:
-                    print(f"Bandcamp: error loading {tag_url}: {exc}")
-                    continue
-                candidates = _bandcamp_collect_from_tag_page(driver, tag_url)
-                for candidate in candidates:
-                    if not enqueue_candidate(tag, candidate, candidate.get("primary_genre", "")):
-                        if hit_candidate_cap:
-                            break
-                if hit_candidate_cap:
-                    break
-                time.sleep(random.uniform(1.0, 2.0))
+            candidates = _bandcamp_collect_tag_pages(driver, tag, pages_to_scan, search_query=tag)
+            if not candidates:
+                continue
+            for candidate in candidates:
+                if not enqueue_candidate(tag, candidate, candidate.get("primary_genre", "")):
+                    if hit_candidate_cap:
+                        break
             if hit_candidate_cap:
                 break
 
@@ -1865,43 +1877,171 @@ def _bandcamp_candidates_from_html(html: str, page_url: str) -> list:
         print(f"Bandcamp: failed to parse HTML listing {page_url}: {exc}")
     return candidates
 
-def _bandcamp_city_to_tag_slug(city_label: str) -> str:
-    if not city_label:
-        return ""
-    base = _norm_text_(city_label)
-    slug = re.sub(r"[^a-z0-9]+", "-", base).strip("-")
-    return slug or city_label.strip().lower().replace(" ", "-")
-
-
 def _bandcamp_collect_city_tag_candidates(driver, city_label: str, pages: int) -> list:
     if not city_label:
         return []
-    slug = _bandcamp_city_to_tag_slug(city_label)
+    return _bandcamp_collect_tag_pages(driver, city_label, pages, search_query=city_label)
+
+
+def _bandcamp_collect_from_tag_page(driver, tag_url) -> list:
+    """
+    Return candidate dicts with URLs + primary genres from a tag page.
+    Tries multiple selector sets and falls back to a generic anchor sweep.
+    """
+    candidates = []
+    counts = {}
+    try:
+        try:
+            html = driver.page_source
+        except Exception:
+            html = ""
+        soup = BeautifulSoup(html or "", 'html.parser')
+        base_url = tag_url or "https://bandcamp.com"
+        selector_sets = [
+            ("li.results-grid-item",),
+            (".discover-results .item",),
+            (".music-grid .item",),
+            ("ul.results-grid li",),
+            ("ol.music-grid li",),
+            (".result-items li",),
+        ]
+        seen = set()
+        for sels in selector_sets:
+            total_here = 0
+            for sel in sels:
+                for card in soup.select(sel):
+                    href = None
+                    for anchor in card.select("a[href]"):
+                        raw_href = (anchor.get("href") or "").strip()
+                        if not raw_href:
+                            continue
+                        if raw_href.startswith("//"):
+                            candidate = f"https:{raw_href}"
+                        elif raw_href.startswith("http"):
+                            candidate = raw_href
+                        elif raw_href.startswith("/"):
+                            candidate = urljoin(base_url, raw_href)
+                        elif "bandcamp.com" in raw_href:
+                            candidate = f"https://{raw_href.lstrip('/')}"
+                        else:
+                            continue
+                        lowered = candidate.lower()
+                        if any(token in lowered for token in ["/album", "/track", ".bandcamp.com"]):
+                            if candidate not in seen:
+                                seen.add(candidate)
+                                candidates.append({
+                                    "url": candidate,
+                                    "primary_genre": bandcamp_extract_primary_genre_from_card(card)
+                                })
+                                total_here += 1
+                                break
+            counts[",".join(s for s in sels)] = total_here
+        if not candidates:
+            excluded_hosts = {
+                "bandcamp.com",
+                "store.bandcamp.com",
+                "daily.bandcamp.com",
+                "blog.bandcamp.com",
+                "community.bandcamp.com",
+                "supporters.bandcamp.com"
+            }
+            generic = 0
+            for anchor in soup.find_all('a', href=True):
+                absolute = urljoin(base_url, anchor['href'])
+                parsed = urlparse(absolute)
+                host = (parsed.netloc or "").lower()
+                path = (parsed.path or "").lower()
+                if not host.endswith("bandcamp.com") or host in excluded_hosts:
+                    continue
+                allowed_path = (
+                    path in ("", "/") or
+                    path.startswith("/album") or
+                    path.startswith("/track") or
+                    path.startswith("/music")
+                )
+                if allowed_path:
+                    normalized = f"{parsed.scheme or 'https'}://{host}{parsed.path}"
+                    if normalized not in seen:
+                        seen.add(normalized)
+                        candidates.append({"url": normalized, "primary_genre": ""})
+                        generic += 1
+            counts["generic_anchor_sweep"] = generic
+        try:
+            total = sum(counts.values()) if counts else 0
+            print(f"Bandcamp: tag selectors counts → {counts} (total {total})")
+        except Exception:
+            pass
+    except Exception as exc:
+        print(f"Bandcamp: failed to collect links from {tag_url}: {exc}")
+    return candidates
+
+
+def _bandcamp_collect_from_search(driver, query, page=1) -> list:
+    """
+    Fallback: search Bands for the provided query.
+    """
+    q = quote((query or "").strip())
+    url = f"https://bandcamp.com/search?item_type=b&q={q}&page={int(page)}"
+    try:
+        driver.get(url)
+        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.TAG_NAME, 'body')))
+    except Exception as exc:
+        print(f"Bandcamp: error loading {url}: {exc}")
+        return []
+    soup = BeautifulSoup(driver.page_source or "", "html.parser")
+    out = []
+    seen = set()
+    for anchor in soup.select("a[href]"):
+        href = (anchor.get("href") or "").strip()
+        if not href:
+            continue
+        if href.startswith("//"):
+            href = "https:" + href
+        elif href.startswith("/"):
+            href = urljoin("https://bandcamp.com", href)
+        lowered = href.lower()
+        if ".bandcamp.com" in lowered and "community.bandcamp.com" not in lowered:
+            if href not in seen:
+                seen.add(href)
+                out.append({"url": href, "primary_genre": ""})
+        elif "/album/" in lowered or "/track/" in lowered:
+            if href not in seen:
+                seen.add(href)
+                out.append({"url": href, "primary_genre": ""})
+    print(f"Bandcamp: search fallback found {len(out)} candidates on page {page} for '{query}'")
+    return out
+
+
+def _bandcamp_collect_tag_pages(driver, tag_label: str, pages: int, search_query: str | None = None) -> list:
+    slug = _bc_normalize_tag_slug(tag_label)
     if not slug:
         return []
-    candidates = []
-    for page in range(1, max(1, pages) + 1):
-        tag_url = f"https://bandcamp.com/tag/{slug}?tab=artists&page={page}"
+    total_candidates = []
+    page_count = max(1, pages)
+    for page in range(1, page_count + 1):
+        tag_url = _bc_make_tag_url(slug, page)
+        if not tag_url:
+            continue
         try:
             driver.get(tag_url)
             WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.TAG_NAME, 'body')))
         except Exception as exc:
-            print(f"Bandcamp: error loading fallback tag page {tag_url}: {exc}")
+            print(f"Bandcamp: error loading {tag_url}: {exc}")
             continue
         page_candidates = _bandcamp_collect_from_tag_page(driver, tag_url)
-        candidates.extend(page_candidates)
+        if page_candidates:
+            total_candidates.extend(page_candidates)
         time.sleep(random.uniform(1.0, 2.0))
-    return candidates
-
-
-def _bandcamp_collect_from_tag_page(driver, tag_url) -> list:
-    """Return candidate dicts with URLs + card primary genre from a tag page."""
-    try:
-        html = driver.page_source
-    except Exception as exc:
-        print(f"Bandcamp: error reading tag page source {tag_url}: {exc}")
-        html = ""
-    return _bandcamp_candidates_from_html(html, tag_url)
+        if BANDCAMP_MAX_CANDIDATES and len(total_candidates) >= BANDCAMP_MAX_CANDIDATES:
+            break
+    if not total_candidates:
+        query = search_query or tag_label or slug
+        for page in range(1, page_count + 1):
+            search_candidates = _bandcamp_collect_from_search(driver, query, page=page)
+            if search_candidates:
+                total_candidates.extend(search_candidates)
+                break
+    return total_candidates
 
 
 def _bandcamp_collect_from_discover_html_page(session, base_url: str, page_index: int) -> list:
