@@ -815,6 +815,8 @@ def save_to_csv(data, filename):
             links_iterable = [social_links] if social_links else []
         else:
             links_iterable = list(social_links or [])
+        if not links_iterable:
+            links_iterable = [""]
         for link in links_iterable:
             new_data.append({
                 'Artist Name': artist_name,
@@ -2214,66 +2216,69 @@ def _bandcamp_collect_tag_via_api(slug: str, page_index: int, base_params: dict 
 
 
 def _bandcamp_collect_discover_dom(driver, discover_url: str, max_pages: int = 1) -> list:
+    max_pages = max(1, int(max_pages or 1))
     candidates = []
-    try:
-        driver.get(discover_url)
-        WebDriverWait(driver, 12).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "ul.result-items li, li.results-grid-item, .discover-results li"))
-        )
-    except Exception as exc:
-        print(f"Bandcamp: discover DOM load failed: {exc}")
-        return candidates
-    soup = BeautifulSoup(driver.page_source or "", "html.parser")
     selectors = [
         "ul.result-items li",
         ".discover-results li",
         "li.results-grid-item",
     ]
     seen = set()
-    for sel in selectors:
-        for card in soup.select(sel):
-            link = card.find("a", href=True)
-            if not link:
-                continue
-            href = link.get("href", "").strip()
-            if href.startswith("//"):
-                href = f"https:{href}"
-            elif href.startswith("/"):
-                href = urljoin("https://bandcamp.com", href)
-            elif not href.startswith(("http://", "https://")):
-                href = f"https://bandcamp.com{href if href.startswith('/') else '/' + href}"
-            lowered = href.lower()
-            if "bandcamp.com" not in lowered:
-                continue
-            if "/help/" in lowered or "/daily" in lowered:
-                continue
-            profile_url = _bandcamp_resolve_artist_profile_url(href)
-            if not profile_url:
-                continue
-            key = profile_url.rstrip("/").lower()
-            if key in seen:
-                continue
-            seen.add(key)
-            title_text = card.get_text(" ", strip=True) or ""
-            tile_title = ""
-            tile_artist = ""
-            if " by " in title_text:
-                parts = title_text.split(" by ", 1)
-                tile_title = parts[0].strip()
-                tile_artist = parts[1].strip()
-            elif "\n" in title_text:
-                parts = title_text.split("\n", 1)
-                tile_title = parts[0].strip()
-                tile_artist = parts[1].strip()
-            else:
-                tile_title = title_text.strip()
-            candidates.append({
-                "url": profile_url,
-                "primary_genre": "",
-                "location": "",
-                "tile_artist": tile_artist,
-                "tile_title": tile_title,
-            })
+    page_urls = _bandcamp_build_discover_page_urls(discover_url, max_pages)
+    for page_index, page_url in enumerate(page_urls, start=1):
+        try:
+            driver.get(page_url)
+            WebDriverWait(driver, 12).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, "ul.result-items li, li.results-grid-item, .discover-results li"))
+            )
+        except Exception as exc:
+            print(f"Bandcamp: discover DOM load failed for page {page_index}: {exc}")
+            continue
+        soup = BeautifulSoup(driver.page_source or "", "html.parser")
+        for sel in selectors:
+            for card in soup.select(sel):
+                link = card.find("a", href=True)
+                if not link:
+                    continue
+                href = link.get("href", "").strip()
+                if href.startswith("//"):
+                    href = f"https:{href}"
+                elif href.startswith("/"):
+                    href = urljoin("https://bandcamp.com", href)
+                elif not href.startswith(("http://", "https://")):
+                    href = f"https://bandcamp.com{href if href.startswith('/') else '/' + href}"
+                lowered = href.lower()
+                if "bandcamp.com" not in lowered:
+                    continue
+                if "/help/" in lowered or "/daily" in lowered:
+                    continue
+                profile_url = _bandcamp_resolve_artist_profile_url(href)
+                if not profile_url:
+                    continue
+                key = profile_url.rstrip("/").lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                title_text = card.get_text(" ", strip=True) or ""
+                tile_title = ""
+                tile_artist = ""
+                if " by " in title_text:
+                    parts = title_text.split(" by ", 1)
+                    tile_title = parts[0].strip()
+                    tile_artist = parts[1].strip()
+                elif "\n" in title_text:
+                    parts = title_text.split("\n", 1)
+                    tile_title = parts[0].strip()
+                    tile_artist = parts[1].strip()
+                else:
+                    tile_title = title_text.strip()
+                candidates.append({
+                    "url": profile_url,
+                    "primary_genre": "",
+                    "location": "",
+                    "tile_artist": tile_artist,
+                    "tile_title": tile_title,
+                })
     return candidates
 
 
