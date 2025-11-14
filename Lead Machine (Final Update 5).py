@@ -173,6 +173,7 @@ SC_SOCIAL_SELECTORS = [
 SC_AGGREGATOR_HOSTS = ("linktr.ee", "beacons.ai", "bandcamp.com", "carrd.co", "flow.page")
 SC_AGGREGATOR_PREFERENCE = ("linktr.ee", "beacons.ai", "bandcamp.com", "carrd.co", "flow.page")
 SC_REQUEST_TIMEOUT = (5, 10)
+SC_SEARCH_USERS_API = "https://api-v2.soundcloud.com/search/users"
 SC_MAX_WORKERS = 8
 SC_CACHE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "soundcloud_about_cache.json")
 SC_CACHE_MAX_AGE_DAYS = 7
@@ -413,11 +414,91 @@ def _extract_handles_generic(html: str):
     return ordered
 
 
-def scrape_handles_from_people_search(session, url: str):
+def scrape_handles_from_people_search(session, url: str, limit=None):
+    try:
+        api_handles = _sc_fetch_people_search_api(session, url, limit)
+        if api_handles:
+            return api_handles
+    except Exception as exc:
+        print(f"SoundCloud: people search API fallback triggered ({exc}).")
     resp = session.get(url, timeout=(6, 12), headers=_rand_headers())
     resp.raise_for_status()
     polite_sleep()
     return _extract_handles_generic(resp.text)
+
+
+def _sc_fetch_people_search_api(session, url: str, limit=None) -> list:
+    if not url:
+        return []
+    client_id = _sc_get_client_id(session)
+    if not client_id:
+        return []
+    parsed = urlparse(url)
+    query_params = parse_qs((parsed.query or ""))
+    raw_query = (query_params.get("q", [""])[0] or "").strip()
+    query_limit = None
+    if query_params.get("limit"):
+        try:
+            query_limit = int(query_params["limit"][0])
+        except (ValueError, TypeError):
+            query_limit = None
+    target_cap = limit if isinstance(limit, int) and limit > 0 else query_limit
+    if not target_cap or target_cap <= 0:
+        target_cap = 50
+    target_cap = max(1, min(target_cap, 500))
+    offset = 0
+    if query_params.get("offset"):
+        try:
+            offset = int(query_params["offset"][0])
+        except (ValueError, TypeError):
+            offset = 0
+    passthrough = {}
+    for key, values in query_params.items():
+        if not values:
+            continue
+        value = values[0]
+        if key in {"q", "limit", "offset"}:
+            continue
+        passthrough[key] = value
+    handles = []
+    while len(handles) < target_cap:
+        batch_limit = min(50, target_cap - len(handles))
+        params = {
+            "client_id": client_id,
+            "linked_partitioning": 1,
+            "limit": batch_limit,
+            "offset": offset,
+        }
+        if raw_query:
+            params["q"] = raw_query
+        params.update(passthrough)
+        resp = session.get(
+            SC_SEARCH_USERS_API,
+            params=params,
+            timeout=SC_REQUEST_TIMEOUT,
+            headers=_rand_headers(),
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        collection = data.get("collection") or []
+        for item in collection:
+            handle = (item.get("permalink") or "").strip().lower()
+            if _sc_handle_ok(handle):
+                handles.append(handle)
+                if len(handles) >= target_cap:
+                    break
+        if len(handles) >= target_cap:
+            break
+        next_href = data.get("next_href")
+        if not next_href or not collection:
+            break
+        try:
+            parsed_next = urlparse(next_href)
+            query_next = parse_qs(parsed_next.query or "")
+            offset = int(query_next.get("offset", [offset + batch_limit])[0])
+        except Exception:
+            offset += batch_limit
+    return handles
 
 
 def scrape_handles_from_tag_page(session, url: str):
@@ -427,12 +508,12 @@ def scrape_handles_from_tag_page(session, url: str):
     return _extract_handles_generic(resp.text)
 
 
-def discover_handles(session, source_url: str):
+def discover_handles(session, source_url: str, limit=None):
     if not source_url:
         return []
     lowered = source_url.lower()
     if "/search/people" in lowered:
-        return scrape_handles_from_people_search(session, source_url)
+        return scrape_handles_from_people_search(session, source_url, limit=limit)
     if "/tags/" in lowered:
         return scrape_handles_from_tag_page(session, source_url)
     match = re.match(r"^https?://soundcloud\.com/([a-z0-9][a-z0-9._-]{1,49})/?$", source_url, re.IGNORECASE)
@@ -4443,7 +4524,7 @@ def scrape_soundcloud(website_url, seed_tags=None, pages_per_tag=SOUNDCLOUD_PAGE
             search_cap = max_handles or max_artists
             handles = []
             try:
-                handles = discover_handles(discovery_session, people_url)
+                handles = discover_handles(discovery_session, people_url, limit=search_cap)
             except Exception as exc:
                 print(f"SoundCloud: people search fetch failed: {exc}")
             if search_cap:
@@ -4497,7 +4578,7 @@ def scrape_soundcloud(website_url, seed_tags=None, pages_per_tag=SOUNDCLOUD_PAGE
                     search_cap = max_handles or max_artists
                     handles = []
                     try:
-                        handles = discover_handles(discovery_session, people_url)
+                        handles = discover_handles(discovery_session, people_url, limit=search_cap)
                     except Exception as exc:
                         print(f"SoundCloud: tag '{tag}' people search fetch failed: {exc}")
                     if search_cap:
