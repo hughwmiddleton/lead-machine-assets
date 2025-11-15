@@ -3,6 +3,7 @@ set -e
 
 PROJECT_DIR="/Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets"
 VENV_DIR="/Users/hughmiddleton/Lead Machine/Lead Machine Code/venv"
+export LASTFM_API_KEY="7bc79636d72e2cb2fc4217aa7681199d"
 
 cd "$PROJECT_DIR"
 

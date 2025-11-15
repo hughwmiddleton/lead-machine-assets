@@ -195,6 +195,14 @@ SC_HEADERS_BASE = {
 }
 
 
+# ---------------------------
+# Last.fm Configuration
+# ---------------------------
+LASTFM_API_KEY = os.environ.get("LASTFM_API_KEY", "").strip()
+LASTFM_API_BASE = "https://ws.audioscrobbler.com/2.0/"
+LASTFM_MAX_SIMILAR_PER_SEED = 200  # soft ceiling per seed
+
+
 def _rand_headers():
     headers = dict(SC_HEADERS_BASE)
     headers["User-Agent"] = random.choice(UAS)
@@ -537,6 +545,126 @@ def _write_empty_csv_with_headers(path: str):
     ]
     pd.DataFrame(columns=headers).to_csv(path, index=False, encoding="utf-8-sig")
 
+
+# -----------------------------------------------------------------------------
+# Last.fm Helpers
+# -----------------------------------------------------------------------------
+_lastfm_session = None
+
+
+def _lastfm_get_session():
+    global _lastfm_session
+    if _lastfm_session is None:
+        _lastfm_session = requests.Session()
+        _lastfm_session.headers.update({
+            "User-Agent": "LeadMachine/1.0 (+https://outwiththein.com)"
+        })
+        _lastfm_session.timeout = 15
+    return _lastfm_session
+
+
+def _lastfm_api_get(method, params):
+    """
+    Call Last.fm API and return parsed JSON or {} on error.
+    """
+    if not LASTFM_API_KEY:
+        return {}
+    session = _lastfm_get_session()
+    payload = dict(params or {})
+    payload["method"] = method
+    payload["api_key"] = LASTFM_API_KEY
+    payload["format"] = "json"
+    try:
+        resp = session.get(LASTFM_API_BASE, params=payload, timeout=15)
+        resp.raise_for_status()
+        return resp.json() or {}
+    except Exception as e:
+        print(f"Last.fm: API call failed for {method}: {e}")
+        return {}
+
+
+_LASTFM_EXCLUDED_HOSTS = {
+    "www.last.fm", "last.fm", "www.lastfm.com", "lastfm.com",
+    "support.last.fm", "help.last.fm", "forum.last.fm"
+}
+_LASTFM_PLACEHOLDER_TOKENS = ("lastfm", "last_fm", "last-fm", "last.fm")
+
+
+def _lastfm_is_placeholder_social(parsed):
+    target = f"{parsed.netloc}{parsed.path or ''}".lower()
+    return any(token in target for token in _LASTFM_PLACEHOLDER_TOKENS)
+
+
+def _lastfm_extract_socials_and_website(html, profile_url):
+    """
+    Parse a Last.fm artist HTML page and extract:
+      - website (first non-social external link)
+      - socials dict: instagram, facebook, twitter, youtube, linktree, spotify, bandsintown, songkick
+      - best_guess_location (if any obvious location text is found)
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    socials = {
+        "instagram": "",
+        "facebook": "",
+        "twitter": "",
+        "youtube": "",
+        "linktree": "",
+        "spotify": "",
+        "bandsintown": "",
+        "songkick": ""
+    }
+    website = ""
+    location = ""
+
+    possible_loc = soup.find(class_=re.compile("location", re.I)) or soup.find("p", class_=re.compile("header-metadata", re.I))
+    if possible_loc:
+        txt = possible_loc.get_text(" ", strip=True)
+        if txt and len(txt) < 80:
+            location = txt
+
+    for a in soup.find_all("a", href=True):
+        href = (a.get("href") or "").strip()
+        if not href or href.startswith("#"):
+            continue
+        if href.startswith("//"):
+            href = "https:" + href
+        elif href.startswith("/"):
+            href = urljoin(profile_url, href)
+
+        parsed = urlparse(href)
+        scheme = (parsed.scheme or "").lower()
+        if not scheme.startswith("http"):
+            continue
+        host = (parsed.netloc or "").lower()
+        if host in _LASTFM_EXCLUDED_HOSTS:
+            continue
+
+        if _lastfm_is_placeholder_social(parsed):
+            continue
+
+        if "instagram.com" in host:
+            socials["instagram"] = socials["instagram"] or href
+        elif "facebook.com" in host or "fb.me" in host:
+            socials["facebook"] = socials["facebook"] or href
+        elif "twitter.com" in host or "x.com" in host:
+            socials["twitter"] = socials["twitter"] or href
+        elif "youtube.com" in host or "youtu.be" in host:
+            socials["youtube"] = socials["youtube"] or href
+        elif any(t in host for t in ["linktr.ee", "linktree", "withkoji.com", "beacons.ai"]):
+            socials["linktree"] = socials["linktree"] or href
+        elif "spotify.com" in host:
+            socials["spotify"] = socials["spotify"] or href
+        elif "bandsintown.com" in host:
+            socials["bandsintown"] = socials["bandsintown"] or href
+        elif "songkick.com" in host:
+            socials["songkick"] = socials["songkick"] or href
+        else:
+            if not website:
+                website = href
+
+    return website, socials, location
+
+
 # -----------------------------------------------------------------------------
 # Helper: Drum Status Detection from Page Source using BeautifulSoup
 # -----------------------------------------------------------------------------
@@ -837,6 +965,157 @@ def save_to_csv(data, filename):
         combined = combined.drop_duplicates(subset=['Artist Name', 'Social Link'])
     combined.to_csv(filename, index=False, encoding="utf-8-sig")
     print(f"Data saved to {filename}")
+
+
+# =========================== Last.fm Scraper ===========================
+def scrape_lastfm_similar(seed_artists, existing_csv="artist_social_links.csv", max_artists=200, log_fn=None):
+    """
+    Given a list of seed artist names (strings), use the Last.fm API to:
+      - fetch similar artists (artist.getSimilar)
+      - fetch each similar artist's info (artist.getInfo)
+      - optionally scrape the artist's Last.fm page HTML for socials/website
+      - write results to the standard CSV schema via save_to_csv()
+    """
+    def _log(msg):
+        if not msg:
+            return
+        print(msg)
+        if log_fn:
+            try:
+                log_fn(msg)
+            except Exception:
+                pass
+
+    if not LASTFM_API_KEY:
+        _log("Last.fm: LASTFM_API_KEY not set – skipping Last.fm scraping.")
+        return
+
+    if not seed_artists:
+        _log("Last.fm: no seed artists provided.")
+        return
+
+    session = _lastfm_get_session()
+    candidates = {}
+    valid_seed_found = False
+    for seed in seed_artists:
+        seed_name = (seed or "").strip()
+        if not seed_name:
+            continue
+        valid_seed_found = True
+        _log(f"Last.fm: fetching similar artists for seed '{seed_name}'")
+        data = _lastfm_api_get("artist.getSimilar", {
+            "artist": seed_name,
+            "limit": LASTFM_MAX_SIMILAR_PER_SEED,
+            "autocorrect": 1
+        }) or {}
+        similar_block = data.get("similarartists", {}).get("artist", [])
+        if isinstance(similar_block, dict):
+            similar_block = [similar_block]
+        for artist in similar_block or []:
+            name = (artist.get("name") or "").strip()
+            url = (artist.get("url") or "").strip()
+            if not name:
+                continue
+            key = name.lower()
+            if key not in candidates:
+                candidates[key] = {
+                    "name": name,
+                    "url": url,
+                    "seed": seed_name
+                }
+
+    if not valid_seed_found:
+        _log("Last.fm: no seed artists provided.")
+        return
+
+    if not candidates:
+        _log("Last.fm: no similar artists returned.")
+        return
+
+    _log(f"Last.fm: {len(candidates)} unique similar artists collected before limit.")
+    rows = []
+    processed = 0
+
+    for _, info in candidates.items():
+        if processed >= max_artists:
+            break
+        artist_name = info.get("name") or ""
+        profile_url = info.get("url") or ""
+        seed_name = info.get("seed") or ""
+
+        info_json = _lastfm_api_get("artist.getInfo", {
+            "artist": artist_name,
+            "autocorrect": 1
+        }) or {}
+        artist_obj = info_json.get("artist") or {}
+        tags = artist_obj.get("tags", {}).get("tag", []) or []
+        if isinstance(tags, dict):
+            tags = [tags]
+        tag_names = [t.get("name", "").strip() for t in tags if t.get("name")]
+        primary_genre = tag_names[0].title() if tag_names else ""
+
+        top_data = _lastfm_api_get("artist.getTopTracks", {
+            "artist": artist_name,
+            "limit": 1,
+            "autocorrect": 1
+        }) or {}
+        top_tracks = top_data.get("toptracks", {}).get("track", []) or []
+        if isinstance(top_tracks, dict):
+            top_tracks = [top_tracks]
+        song_title = ""
+        if top_tracks:
+            song_title = (top_tracks[0].get("name") or "").strip()
+
+        website = ""
+        socials = {}
+        location = ""
+        if profile_url:
+            try:
+                resp = session.get(profile_url, timeout=15)
+                if resp.ok:
+                    website, socials, location = _lastfm_extract_socials_and_website(resp.text, profile_url)
+            except Exception as exc:
+                _log(f"Last.fm: failed to fetch HTML for {profile_url}: {exc}")
+
+        contact_links = []
+        if website:
+            contact_links.append(website)
+        for link in (socials or {}).values():
+            if link:
+                contact_links.append(link)
+        seen = set()
+        clean_links = []
+        for link in contact_links:
+            if link not in seen:
+                seen.add(link)
+                clean_links.append(link)
+        if not clean_links:
+            if profile_url:
+                clean_links.append(profile_url)
+            else:
+                clean_links.append("")
+
+        sounds_like = f"Similar to {seed_name}" if seed_name else ""
+        rows.append((
+            artist_name,
+            location,
+            song_title,
+            sounds_like,
+            clean_links,
+            "",
+            "",
+            "",
+            "not present",
+            primary_genre
+        ))
+        processed += 1
+
+    if not rows:
+        _log("Last.fm: no rows to write.")
+        return
+
+    save_to_csv(rows, existing_csv)
+    _log(f"Last.fm: total artists written {processed}")
 
 
 def save_soundcloud_csv(rows, filename):
@@ -5128,6 +5407,8 @@ class ArtistScraperThread(QtCore.QThread):
                 self.seed_tags = []
             else:
                 self.seed_tags = list(SOUNDCLOUD_SEED_TAGS)
+        elif self.source and self.source.lower().startswith("last.fm"):
+            self.seed_tags = []
         else:
             self.seed_tags = list(BANDCAMP_SEED_TAGS)
     def run(self):
@@ -5151,6 +5432,17 @@ class ArtistScraperThread(QtCore.QThread):
                     max_artists=self.max_artists
                 )
                 self.log_signal.emit("SoundCloud scraping completed.")
+            elif self.source.lower().startswith("last.fm"):
+                seed_raw = self.website_url or ""
+                seed_parts = re.split(r"[,\n]+", seed_raw) if seed_raw else []
+                seed_artists = [s.strip() for s in seed_parts if s.strip()]
+                scrape_lastfm_similar(
+                    seed_artists,
+                    existing_csv=self.output_csv,
+                    max_artists=self.max_artists,
+                    log_fn=self.log_signal.emit
+                )
+                self.log_signal.emit("Last.fm similar-artist scraping completed.")
             else:
                 scrape_website(self.website_url, existing_csv=self.output_csv, max_artists=self.max_artists)
                 self.log_signal.emit("Artist scraping completed.")
@@ -5218,16 +5510,16 @@ class MainWindow(QtWidgets.QMainWindow):
         source_layout = QtWidgets.QHBoxLayout()
         source_label = QtWidgets.QLabel("Source:")
         self.source_combo = QtWidgets.QComboBox()
-        self.source_combo.addItems(["Unearthed", "Bandcamp", "SoundCloud"])
+        self.source_combo.addItems(["Unearthed", "Bandcamp", "SoundCloud", "Last.fm Similar"])
         self.source_combo.currentTextChanged.connect(self.on_source_changed)
         source_layout.addWidget(source_label)
         source_layout.addWidget(self.source_combo)
         layout.addLayout(source_layout)
         url_layout = QtWidgets.QHBoxLayout()
-        url_label = QtWidgets.QLabel("Website URL:")
+        self.url_label = QtWidgets.QLabel("Website URL:")
         self.url_edit = QtWidgets.QLineEdit(UNEARTHED_DEFAULT_URL)
         self.url_edit.setPlaceholderText(UNEARTHED_DEFAULT_URL)
-        url_layout.addWidget(url_label)
+        url_layout.addWidget(self.url_label)
         url_layout.addWidget(self.url_edit)
         layout.addLayout(url_layout)
         pages_layout = QtWidgets.QHBoxLayout()
@@ -5265,18 +5557,28 @@ class MainWindow(QtWidgets.QMainWindow):
         self.artist_tab.setLayout(layout)
     def on_source_changed(self, source_text):
         if source_text == "Bandcamp":
+            self.url_label.setText("Website URL:")
             self.url_edit.setPlaceholderText(BANDCAMP_DEFAULT_TAG_URL)
             current = self.url_edit.text().strip()
             if not current or current in (UNEARTHED_DEFAULT_URL, SOUNDCLOUD_DEFAULT_TAG_URL):
                 self.url_edit.setText(BANDCAMP_DEFAULT_TAG_URL)
             self.pages_per_tag_edit.setEnabled(True)
         elif source_text == "SoundCloud":
+            self.url_label.setText("Website URL:")
             self.url_edit.setPlaceholderText(SOUNDCLOUD_DEFAULT_TAG_URL)
             current = self.url_edit.text().strip()
             if not current or current in (UNEARTHED_DEFAULT_URL, BANDCAMP_DEFAULT_TAG_URL):
                 self.url_edit.setText(SOUNDCLOUD_DEFAULT_TAG_URL)
             self.pages_per_tag_edit.setEnabled(True)
+        elif source_text == "Last.fm Similar":
+            self.url_label.setText("Seed Artists:")
+            self.url_edit.setPlaceholderText("Seed artist names, comma separated (e.g. Hope D, Jaguar Jonze)")
+            current = self.url_edit.text().strip()
+            if not current or current in (UNEARTHED_DEFAULT_URL, BANDCAMP_DEFAULT_TAG_URL, SOUNDCLOUD_DEFAULT_TAG_URL):
+                self.url_edit.clear()
+            self.pages_per_tag_edit.setEnabled(False)
         else:
+            self.url_label.setText("Website URL:")
             self.url_edit.setPlaceholderText(UNEARTHED_DEFAULT_URL)
             current = self.url_edit.text().strip()
             if not current or current in (BANDCAMP_DEFAULT_TAG_URL, SOUNDCLOUD_DEFAULT_TAG_URL):
@@ -5339,6 +5641,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.url_edit.setText(url)
         if source == "Unearthed" and not url:
             self.artist_log.append("Please enter a valid website URL.")
+            return
+        if source == "Last.fm Similar" and not url:
+            self.artist_log.append("Please enter at least one seed artist (comma separated).")
             return
         try:
             max_artists = int(self.max_artists_edit.text().strip())
