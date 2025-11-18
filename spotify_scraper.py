@@ -4,8 +4,10 @@ Spotify playlist discovery scraper for Lead Machine.
 Phase 2 wires into the Spotify Web API using editorial playlists (e.g. Fresh
 Finds) and returns real artist rows that match the shared CSV schema.
 """
+import re
 import time
 from typing import Callable, Dict, List, Optional
+from urllib.parse import urlparse
 
 from spotify_about_scraper import enrich_spotify_rows_with_about_links
 from spotify_client import SpotifyClient
@@ -23,6 +25,27 @@ FRESH_FINDS_PLAYLIST_IDS = [
     "TODO_FRESH_FINDS_UK_IE_PLAYLIST_ID",
     "TODO_FRESH_FINDS_AU_NZ_PLAYLIST_ID",
 ]
+
+
+def _extract_playlist_id(value: str) -> Optional[str]:
+    if not value:
+        return None
+    candidate = value.strip()
+    if not candidate:
+        return None
+    if candidate.startswith("spotify:playlist:"):
+        return candidate.split(":")[-1]
+    if "spotify.com" in candidate:
+        try:
+            parsed = urlparse(candidate)
+            path_parts = [part for part in parsed.path.split("/") if part]
+            if len(path_parts) >= 2 and path_parts[0].lower() == "playlist":
+                return path_parts[1]
+        except Exception:
+            return None
+    if re.fullmatch(r"[A-Za-z0-9]{16,40}", candidate):
+        return candidate
+    return None
 
 
 def scrape_spotify(
@@ -63,7 +86,20 @@ def scrape_spotify(
         logger(f"[Spotify] Starting playlist discovery for {target_count} artists.")
 
     playlist_ids_param = params.get("playlist_ids")
-    playlist_ids = playlist_ids_param if playlist_ids_param else FRESH_FINDS_PLAYLIST_IDS
+    search_input = (params.get("search_term") or "").strip()
+    playlist_from_input = _extract_playlist_id(search_input)
+
+    if playlist_ids_param:
+        if isinstance(playlist_ids_param, str):
+            playlist_ids = [playlist_ids_param]
+        else:
+            playlist_ids = list(playlist_ids_param)
+    elif playlist_from_input:
+        playlist_ids = [playlist_from_input]
+        if logger:
+            logger(f"[Spotify] Using playlist from input field: {playlist_from_input}")
+    else:
+        playlist_ids = FRESH_FINDS_PLAYLIST_IDS
     resolved_playlist_ids = [pid for pid in playlist_ids if pid and not pid.startswith("TODO_")]
     if not resolved_playlist_ids:
         if logger:
