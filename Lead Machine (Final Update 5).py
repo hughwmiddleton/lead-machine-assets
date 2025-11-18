@@ -123,6 +123,7 @@ from PyQt5 import QtWidgets, QtCore
 from dateutil import parser as dparser
 from dateutil.relativedelta import relativedelta
 import unicodedata
+from spotify_scraper import scrape_spotify
 
 # ---------------------------
 # Bandcamp Configuration
@@ -5443,6 +5444,50 @@ class ArtistScraperThread(QtCore.QThread):
                     log_fn=self.log_signal.emit
                 )
                 self.log_signal.emit("Last.fm similar-artist scraping completed.")
+            elif self.source.lower() == "spotify":
+                params = {
+                    "search_term": (self.website_url or "").strip(),
+                    "max_artists": self.max_artists
+                }
+                rows = scrape_spotify(
+                    self.max_artists,
+                    params,
+                    logger=self.log_signal.emit,
+                    progress_callback=None
+                )
+                if not rows:
+                    self.log_signal.emit("Spotify scraping returned no rows.")
+                else:
+                    try:
+                        existing_df = pd.read_csv(self.output_csv) if os.path.exists(self.output_csv) else pd.DataFrame()
+                    except Exception:
+                        existing_df = pd.DataFrame()
+                    new_df = pd.DataFrame(rows)
+                    spotify_columns = [
+                        "Artist Name", "Location", "Song Title", "Sounds Like", "Social Link",
+                        "SoundCloud Link", "Played on triple J", "Played on Unearthed",
+                        "Release Date", "Primary Genre", "Date Added", "External Links", "Email",
+                        "Spotify_URL", "Spotify_Artist_ID", "Spotify_Instagram_URL",
+                        "Spotify_Facebook_URL", "Spotify_Twitter_URL", "Spotify_Website_URL"
+                    ]
+                    for col in spotify_columns:
+                        if col not in new_df.columns:
+                            new_df[col] = ""
+                        if col not in existing_df.columns:
+                            existing_df[col] = ""
+                    combined = pd.concat([existing_df, new_df], ignore_index=True, sort=False)
+                    column_order = list(existing_df.columns)
+                    if not column_order:
+                        column_order = []
+                    for col in spotify_columns:
+                        if col not in column_order:
+                            column_order.append(col)
+                    if not column_order:
+                        column_order = spotify_columns
+                    combined = combined[column_order]
+                    _ensure_parent_dir(self.output_csv)
+                    combined.to_csv(self.output_csv, index=False, encoding="utf-8-sig")
+                    self.log_signal.emit(f"Spotify scraping completed with {len(new_df)} rows.")
             else:
                 scrape_website(self.website_url, existing_csv=self.output_csv, max_artists=self.max_artists)
                 self.log_signal.emit("Artist scraping completed.")
@@ -5510,7 +5555,7 @@ class MainWindow(QtWidgets.QMainWindow):
         source_layout = QtWidgets.QHBoxLayout()
         source_label = QtWidgets.QLabel("Source:")
         self.source_combo = QtWidgets.QComboBox()
-        self.source_combo.addItems(["Unearthed", "Bandcamp", "SoundCloud", "Last.fm Similar"])
+        self.source_combo.addItems(["Unearthed", "Bandcamp", "SoundCloud", "Last.fm Similar", "Spotify"])
         self.source_combo.currentTextChanged.connect(self.on_source_changed)
         source_layout.addWidget(source_label)
         source_layout.addWidget(self.source_combo)
