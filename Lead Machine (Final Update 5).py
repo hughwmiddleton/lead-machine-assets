@@ -5527,34 +5527,44 @@ def _goto_facebook_about(driver, page_url: str, timeout: float = 5.0) -> bool:
     normalized = (page_url or "").strip()
     if not normalized:
         return False
+    try:
+        parsed_src = urlparse(normalized)
+        source_host = (parsed_src.netloc or "").lower().lstrip("www.")
+        base_path = (parsed_src.path or "").rstrip("/")
+        base = f"{parsed_src.scheme}://{parsed_src.netloc}{base_path}"
+    except Exception:
+        source_host = ""
+        base = normalized.rstrip("/")
+
     about_selectors = [
         (By.XPATH, "//a[contains(@href,'about_contact_and_basic_info')]"),
         (By.XPATH, "//a[contains(@href,'about_details')]"),
         (By.XPATH, "//a[contains(@href,'/about')]"),
-        (By.XPATH, "//a[.//span[text()='About']]"),
-        (By.XPATH, "//a[normalize-space(text())='About']"),
     ]
     for by, locator in about_selectors:
         try:
             target = WebDriverWait(driver, timeout).until(EC.element_to_be_clickable((by, locator)))
+            href = (target.get_attribute("href") or "").strip()
+            if href:
+                try:
+                    parsed_href = urlparse(href)
+                    href_host = (parsed_href.netloc or "").lower()
+                except Exception:
+                    href_host = ""
+                href_host = href_host.lstrip("www.")
+                if href_host and source_host and href_host != source_host:
+                    continue  # Skip global Meta "About" links that navigate away.
             driver.execute_script("arguments[0].click();", target)
             WebDriverWait(driver, timeout).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
             return True
         except Exception:
             continue
-    base = normalized.rstrip("/")
-    about_variants = []
-    try:
-        parsed = urlparse(normalized)
-        path = (parsed.path or "").rstrip("/")
-        base = f"{parsed.scheme}://{parsed.netloc}{path}"
-        about_variants = [
-            f"{base}/about_contact_and_basic_info",
-            f"{base}/about_details",
-            f"{base}/about",
-        ]
-    except Exception:
-        about_variants = [f"{base}/about"]
+
+    about_variants = [
+        f"{base}/about_contact_and_basic_info",
+        f"{base}/about_details",
+        f"{base}/about",
+    ]
     for candidate in about_variants:
         try:
             driver.get(candidate)

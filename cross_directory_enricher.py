@@ -5,6 +5,7 @@ import os
 import re
 import unicodedata
 import time
+import urllib.parse
 from urllib.parse import urlparse
 
 import pandas as pd
@@ -20,7 +21,40 @@ SOCIAL_DOMAINS = {
     "youtube": ("youtube.com", "youtu.be"),
     "linktree": ("linktr.ee",),
     "beacons": ("beacons.ai",),
+    "bio_link": ("bio.link",),
+    "lnk_bio": ("lnk.bio",),
 }
+
+LINK_HUB_HOSTS = {
+    "linktr.ee",
+    "beacons.ai",
+    "bio.link",
+    "lnk.bio",
+}
+
+# maximum number of link-hub hops per artist row
+MAX_LINK_HUB_HOPS_PER_ROW = 2
+
+LASTFM_BRAND_KEYWORDS = (
+    "lastfm",
+    "last.fm",
+    "last_fm",
+)
+
+SOCIAL_HOST_WHITELIST = (
+    "facebook.com",
+    "m.facebook.com",
+    "instagram.com",
+    "x.com",
+    "twitter.com",
+    "tiktok.com",
+    "youtube.com",
+    "youtu.be",
+    "linktr.ee",
+    "beacons.ai",
+    "bio.link",
+    "lnk.bio",
+)
 
 SOCIAL_PRIORITY = [
     "facebook.com",
@@ -33,9 +67,21 @@ SOCIAL_PRIORITY = [
     "youtu.be",
     "linktr.ee",
     "beacons.ai",
+    "bio.link",
+    "lnk.bio",
 ]
 
-SOCIAL_HOST_WHITELIST = tuple(SOCIAL_PRIORITY)
+
+def _social_sort_key(url: str) -> tuple[int, str]:
+    try:
+        parsed = urllib.parse.urlparse(url)
+        host = parsed.netloc.lower()
+    except Exception:
+        host = ""
+    for idx, dom in enumerate(SOCIAL_PRIORITY):
+        if host.endswith(dom):
+            return (idx, url)
+    return (len(SOCIAL_PRIORITY), url)
 
 PLATFORM_HOSTS = {
     "bandcamp": (
@@ -86,6 +132,13 @@ def normalise_artist_name(name: str) -> str:
     text = unicodedata.normalize("NFKD", text)
     text = "".join(ch for ch in text if not unicodedata.combining(ch))
     return text.strip()
+
+
+def _normalise_artist_query(name: str) -> str:
+    cleaned = (name or "").strip()
+    cleaned = "".join(ch for ch in cleaned if ch.isalnum() or ch.isspace())
+    cleaned = " ".join(cleaned.split())
+    return cleaned
 
 
 def _clean_cell(value: Any) -> str:
@@ -197,116 +250,112 @@ class CrossDirectoryEnricherWorker(QThread):
         live_search_attempts = 0
         live_limit = self.max_live_searches if self.max_live_searches > 0 else None
         live_limit_notified = False
-        for position, (row_idx, row) in enumerate(seed_df.iterrows(), start=1):
-            artist = _clean_cell(row.get("Artist Name"))
-            key = normalise_artist_name(artist)
-            if not key:
-                self.log_message.emit(f"[Enricher] Row {position}/{total}: empty or invalid artist name; skipping.")
-                self._update_progress(position, total)
-                continue
-            existing_social = _clean_cell(row.get("Social Link"))
-            existing_email = _clean_cell(row.get("Email"))
-            existing_external = _clean_cell(row.get("External Links"))
-            if existing_social or existing_email or existing_external:
-                self.log_message.emit(
-                    f"[Enricher] Row {position}/{total}: {artist or 'Unknown'} already has socials/email; skipping."
-                )
-                self._update_progress(position, total)
-                continue
-            enriched = False
-            for source in priority:
-                idx = directory_indexes.get(source) or {}
-                match = idx.get(key)
-                if not match:
+        session = requests.Session()
+        try:
+            for position, (row_idx, row) in enumerate(seed_df.iterrows(), start=1):
+                artist = _clean_cell(row.get("Artist Name"))
+                key = normalise_artist_name(artist)
+                if not key:
+                    self.log_message.emit(
+                        f"[Enricher] Row {position}/{total}: empty or invalid artist name; skipping."
+                    )
+                    self._update_progress(position, total)
                     continue
-                m_social = _clean_cell(match.get("Social Link"))
-                m_email = _clean_cell(match.get("Email"))
-                m_external = _clean_cell(match.get("External Links"))
-                source_url = ""
-                for candidate_col in ["SoundCloud Link", "External Links", "Profile URL", "URL", "Website"]:
-                    if candidate_col in match:
-                        candidate_val = _clean_cell(match.get(candidate_col))
-                        if candidate_val:
-                            source_url = candidate_val
-                            break
-                if not source_url and m_external:
-                    source_url = m_external
-                if any([m_social, m_email, m_external, source_url]):
-                    if not existing_social and m_social:
-                        seed_df.at[row_idx, "Social Link"] = m_social
-                    if not existing_email and m_email:
-                        seed_df.at[row_idx, "Email"] = m_email
-                    if not existing_external and m_external:
-                        seed_df.at[row_idx, "External Links"] = m_external
-                    seed_df.at[row_idx, "Source Directory"] = source
-                    seed_df.at[row_idx, "Source URL"] = source_url
-                    enriched = True
+                existing_social = _clean_cell(row.get("Social Link"))
+                existing_email = _clean_cell(row.get("Email"))
+                existing_external = _clean_cell(row.get("External Links"))
+                if existing_social or existing_email or existing_external:
                     self.log_message.emit(
-                        f"[Enricher] Row {position}/{total}: matched {artist!r} via {source}, "
-                        f"social={bool(m_social)}, email={bool(m_email)}, url={source_url or 'None'}"
+                        f"[Enricher] Row {position}/{total}: {artist or 'Unknown'} already has socials/email; skipping."
                     )
-                    break
-            if not enriched:
-                can_live_search = self.enable_live_search and (
-                    live_limit is None or live_search_attempts < live_limit
-                )
-                if can_live_search:
-                    live_search_attempts += 1
-                    success = self._live_search_and_enrich(
-                        seed_df,
-                        row_idx,
-                        artist or "",
-                        key,
-                        directory_indexes,
-                    )
-                    if success:
+                    self._update_progress(position, total)
+                    continue
+                enriched = False
+                for source in priority:
+                    idx = directory_indexes.get(source) or {}
+                    match = idx.get(key)
+                    if not match:
+                        continue
+                    m_social = _clean_cell(match.get("Social Link"))
+                    m_email = _clean_cell(match.get("Email"))
+                    m_external = _clean_cell(match.get("External Links"))
+                    source_url = ""
+                    for candidate_col in ["SoundCloud Link", "External Links", "Profile URL", "URL", "Website"]:
+                        if candidate_col in match:
+                            candidate_val = _clean_cell(match.get(candidate_col))
+                            if candidate_val:
+                                source_url = candidate_val
+                                break
+                    if not source_url and m_external:
+                        source_url = m_external
+                    if any([m_social, m_email, m_external, source_url]):
+                        if not existing_social and m_social:
+                            seed_df.at[row_idx, "Social Link"] = m_social
+                        if not existing_email and m_email:
+                            seed_df.at[row_idx, "Email"] = m_email
+                        if not existing_external and m_external:
+                            seed_df.at[row_idx, "External Links"] = m_external
+                        seed_df.at[row_idx, "Source Directory"] = source
+                        seed_df.at[row_idx, "Source URL"] = source_url
                         enriched = True
-                    if (
-                        live_limit is not None
-                        and live_search_attempts >= live_limit
-                        and not live_limit_notified
-                    ):
                         self.log_message.emit(
-                            "[Enricher] Live search limit reached; remaining rows will skip live lookup."
+                            f"[Enricher] Row {position}/{total}: matched {artist!r} via {source}, "
+                            f"social={bool(m_social)}, email={bool(m_email)}, url={source_url or 'None'}"
                         )
-                        live_limit_notified = True
+                        break
                 if not enriched:
-                    self.log_message.emit(
-                        f"[Enricher] Row {position}/{total}: no match for {artist!r} in directory CSVs."
+                    can_live_search = self.enable_live_search and (
+                        live_limit is None or live_search_attempts < live_limit
                     )
-            self._update_progress(position, total)
-        out_path = self.output_csv_path
-        out_dir = os.path.dirname(out_path) or "."
-        try:
-            os.makedirs(out_dir, exist_ok=True)
-        except Exception as exc:
-            self.log_message.emit(f"[Enricher] Failed to create output directory {out_dir}: {exc}")
-            self.finished.emit("")
-            return
-        try:
-            seed_df.to_csv(out_path, index=False)
-        except Exception as exc:
-            self.log_message.emit(f"[Enricher] Failed to write enriched CSV: {exc}")
-            self.finished.emit("")
-            return
-        self.log_message.emit(f"[Enricher] Enriched CSV written to {out_path}")
-        # TODO: Optional phase 2 – attempt live directory lookups when CSVs miss a match.
-        self.finished.emit(out_path)
+                    if can_live_search:
+                        live_search_attempts += 1
+                        success = self._live_search_and_enrich(
+                            seed_df,
+                            row_idx,
+                            artist or "",
+                            key,
+                            directory_indexes,
+                            session,
+                        )
+                        if success:
+                            enriched = True
+                        if (
+                            live_limit is not None
+                            and live_search_attempts >= live_limit
+                            and not live_limit_notified
+                        ):
+                            self.log_message.emit(
+                                "[Enricher] Live search limit reached; remaining rows will skip live lookup."
+                            )
+                            live_limit_notified = True
+                    if not enriched:
+                        self.log_message.emit(
+                            f"[Enricher] Row {position}/{total}: no match for {artist!r} in directory CSVs."
+                        )
+                self._update_progress(position, total)
+            out_path = self.output_csv_path
+            out_dir = os.path.dirname(out_path) or "."
+            try:
+                os.makedirs(out_dir, exist_ok=True)
+            except Exception as exc:
+                self.log_message.emit(f"[Enricher] Failed to create output directory {out_dir}: {exc}")
+                self.finished.emit("")
+                return
+            try:
+                seed_df.to_csv(out_path, index=False)
+            except Exception as exc:
+                self.log_message.emit(f"[Enricher] Failed to write enriched CSV: {exc}")
+                self.finished.emit("")
+                return
+            self.log_message.emit(f"[Enricher] Enriched CSV written to {out_path}")
+            # TODO: Optional phase 2 – attempt live directory lookups when CSVs miss a match.
+            self.finished.emit(out_path)
+        finally:
+            session.close()
 
     def _update_progress(self, current: int, total: int):
         pct = int((current / max(1, total)) * 100)
         self.progress.emit(pct)
-
-    @staticmethod
-    def _social_sort_key(url: str):
-        try:
-            host = urlparse(url).netloc.lower()
-        except Exception:
-            host = ""
-        for idx, domain in enumerate(SOCIAL_PRIORITY):
-            if host.endswith(domain):
-                return (idx, url)
-        return (len(SOCIAL_PRIORITY), url)
 
     def _live_search_and_enrich(
         self,
@@ -315,6 +364,7 @@ class CrossDirectoryEnricherWorker(QThread):
         artist_name: str,
         key: str,
         directory_indexes: Dict[str, Dict[str, Dict[str, Any]]],
+        session: requests.Session,
     ) -> bool:
         loaded_sources = ", ".join(sorted(directory_indexes.keys())) or "none"
         self.log_message.emit(
@@ -326,11 +376,11 @@ class CrossDirectoryEnricherWorker(QThread):
         for source in ["bandcamp", "soundcloud", "lastfm"]:
             try:
                 if source == "bandcamp":
-                    success = self._live_search_bandcamp(df, row_idx, artist_name)
+                    success = self._live_search_bandcamp(df, row_idx, artist_name, session)
                 elif source == "soundcloud":
-                    success = self._live_search_soundcloud(df, row_idx, artist_name)
+                    success = self._live_search_soundcloud(df, row_idx, artist_name, session)
                 elif source == "lastfm":
-                    success = self._live_search_lastfm(df, row_idx, artist_name)
+                    success = self._live_search_lastfm(df, row_idx, artist_name, session)
                 else:
                     success = False
                 if success:
@@ -341,12 +391,14 @@ class CrossDirectoryEnricherWorker(QThread):
         self.log_message.emit(f"[Enricher] Live search: no match found online for {artist_name!r}.")
         return False
 
-    def _live_search_bandcamp(self, df, row_idx, artist_name: str) -> bool:
+    def _live_search_bandcamp(
+        self, df, row_idx, artist_name: str, session: requests.Session
+    ) -> bool:
         quoted = requests.utils.quote(artist_name)
         url = f"https://bandcamp.com/search?q={quoted}&item_type=b"
         self.log_message.emit(f"[Enricher] Bandcamp live search: {url}")
         try:
-            resp = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+            resp = session.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
             resp.raise_for_status()
         except Exception as exc:
             self.log_message.emit(f"[Enricher] Bandcamp search request failed: {exc}")
@@ -361,28 +413,44 @@ class CrossDirectoryEnricherWorker(QThread):
             self.log_message.emit("[Enricher] Bandcamp search: first result has no href.")
             return False
         self.log_message.emit(f"[Enricher] Bandcamp search: candidate profile {profile_url}")
-        return self._fetch_profile_and_apply(df, row_idx, "bandcamp", profile_url)
+        return self._fetch_profile_and_apply(df, row_idx, "bandcamp", profile_url, session)
 
-    def _live_search_soundcloud(self, df, row_idx, artist_name: str) -> bool:
-        quoted = requests.utils.quote(artist_name)
+    def _live_search_soundcloud(
+        self, df, row_idx, artist_name: str, session: requests.Session
+    ) -> bool:
+        profile_url = self._soundcloud_search_once(session, artist_name)
+        if not profile_url:
+            norm = _normalise_artist_query(artist_name)
+            if norm and norm.lower() != (artist_name or "").lower():
+                self.log_message.emit(
+                    f"[Enricher] SoundCloud search retry with normalised name '{norm}' "
+                    f"(was '{artist_name}')"
+                )
+                profile_url = self._soundcloud_search_once(session, norm)
+        if not profile_url:
+            return False
+        return self._fetch_profile_and_apply(df, row_idx, "soundcloud", profile_url, session)
+
+    def _soundcloud_search_once(self, session: requests.Session, query: str) -> str:
+        quoted = requests.utils.quote(query or "")
         url = f"https://soundcloud.com/search/people?q={quoted}"
         self.log_message.emit(f"[Enricher] SoundCloud live search: {url}")
         try:
-            resp = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+            resp = session.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
             resp.raise_for_status()
         except Exception as exc:
             self.log_message.emit(f"[Enricher] SoundCloud search request failed: {exc}")
-            return False
+            return ""
         soup = BeautifulSoup(resp.text, "html.parser")
         first_link = soup.select_one("a.userBadge__title, a[href^='https://soundcloud.com/']")
         if not first_link:
             self.log_message.emit("[Enricher] SoundCloud search: no results found.")
-            return False
+            return ""
         profile_url = (first_link.get("href") or "").strip()
         if not profile_url.startswith("http"):
             profile_url = f"https://soundcloud.com{profile_url}"
         self.log_message.emit(f"[Enricher] SoundCloud search: candidate profile {profile_url}")
-        return self._fetch_profile_and_apply(df, row_idx, "soundcloud", profile_url)
+        return profile_url
 
     def _live_search_unearthed(self, df, row_idx, artist_name: str) -> bool:
         """
@@ -392,12 +460,14 @@ class CrossDirectoryEnricherWorker(QThread):
         self.log_message.emit("[Enricher] Unearthed live search disabled; skipping.")
         return False
 
-    def _live_search_lastfm(self, df, row_idx, artist_name: str) -> bool:
+    def _live_search_lastfm(
+        self, df, row_idx, artist_name: str, session: requests.Session
+    ) -> bool:
         quoted = requests.utils.quote(artist_name)
         url = f"https://www.last.fm/search?q={quoted}&type=artist"
         self.log_message.emit(f"[Enricher] Last.fm live search: {url}")
         try:
-            resp = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+            resp = session.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
             resp.raise_for_status()
         except Exception as exc:
             self.log_message.emit(f"[Enricher] Last.fm search request failed: {exc}")
@@ -411,26 +481,32 @@ class CrossDirectoryEnricherWorker(QThread):
         if profile_url.startswith("/"):
             profile_url = f"https://www.last.fm{profile_url}"
         self.log_message.emit(f"[Enricher] Last.fm search: candidate profile {profile_url}")
-        return self._fetch_profile_and_apply(df, row_idx, "lastfm", profile_url)
+        return self._fetch_profile_and_apply(df, row_idx, "lastfm", profile_url, session)
 
-    def _fetch_profile_and_apply(self, df, row_idx, source_name: str, profile_url: str) -> bool:
+    def _fetch_profile_and_apply(
+        self,
+        df,
+        row_idx,
+        source_name: str,
+        profile_url: str,
+        session: requests.Session,
+    ) -> bool:
         self.log_message.emit(f"[Enricher] Fetching {source_name} profile: {profile_url}")
         try:
-            resp = requests.get(profile_url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
+            resp = session.get(profile_url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
             resp.raise_for_status()
         except Exception as exc:
             self.log_message.emit(f"[Enricher] Profile request failed for {source_name}: {exc}")
             return False
         soup = BeautifulSoup(resp.text, "html.parser")
         anchors = soup.select("a[href]")
-        social_candidates: Dict[str, list] = {key: [] for key in SOCIAL_DOMAINS.keys()}
-        social_seen: Dict[str, set] = {key: set() for key in SOCIAL_DOMAINS.keys()}
+        social_candidates: Dict[str, set[str]] = {key: set() for key in SOCIAL_DOMAINS.keys()}
         websites: list[str] = []
         website_seen: set[str] = set()
+        link_hub_candidates: set[str] = set()
         emails: list[str] = []
         email_seen: set[str] = set()
         platform_hosts = PLATFORM_HOSTS.get(source_name, ())
-        lastfm_brand_markers = ("lastfm", "last.fm", "last_fm")
         static_tokens = (".jpg", ".jpeg", ".png", ".gif", ".webp", "/img/", "/image/", "/static/", "/assets/")
         skip_paths = ("/login", "/signup", "/help", "/support", "/download", "/about")
 
@@ -460,12 +536,13 @@ class CrossDirectoryEnricherWorker(QThread):
             for key, domains in SOCIAL_DOMAINS.items():
                 if any(host.endswith(domain) for domain in domains):
                     if source_name == "lastfm":
-                        if any(marker in lower for marker in lastfm_brand_markers):
+                        full = lower
+                        if any(marker in full for marker in LASTFM_BRAND_KEYWORDS):
                             handled_social = True
                             break
-                    if href not in social_seen[key]:
-                        social_candidates[key].append(href)
-                        social_seen[key].add(href)
+                    social_candidates[key].add(href)
+                    if any(host.endswith(dom) for dom in LINK_HUB_HOSTS):
+                        link_hub_candidates.add(href)
                     handled_social = True
                     break
             if handled_social:
@@ -475,7 +552,7 @@ class CrossDirectoryEnricherWorker(QThread):
             if host in JUNK_WEBSITE_HOSTS:
                 continue
             if source_name == "lastfm":
-                if any(marker in lower for marker in lastfm_brand_markers):
+                if any(marker in lower for marker in LASTFM_BRAND_KEYWORDS):
                     continue
             if any(token in path for token in static_tokens):
                 continue
@@ -486,15 +563,27 @@ class CrossDirectoryEnricherWorker(QThread):
             if href not in website_seen:
                 websites.append(href)
                 website_seen.add(href)
+                if any(host.endswith(dom) for dom in LINK_HUB_HOSTS):
+                    link_hub_candidates.add(href)
 
-        all_socials: list[str] = []
-        seen_socials: set[str] = set()
+        if MAX_LINK_HUB_HOPS_PER_ROW and link_hub_candidates:
+            hops = 0
+            for hub_url in list(link_hub_candidates):
+                if hops >= MAX_LINK_HUB_HOPS_PER_ROW:
+                    break
+                hops += 1
+                extra_socials = self._scrape_link_hub_socials(session, hub_url)
+                if extra_socials:
+                    bucket = social_candidates.setdefault("link_hub", set())
+                    bucket.update(extra_socials)
+
+        all_socials: set[str] = set()
         for values in social_candidates.values():
-            for item in values:
-                if item not in seen_socials:
-                    seen_socials.add(item)
-                    all_socials.append(item)
-        ordered_socials = sorted(all_socials, key=self._social_sort_key)
+            all_socials.update(values)
+
+        ordered_socials: list[str] = []
+        if all_socials:
+            ordered_socials = sorted(all_socials, key=_social_sort_key)
 
         if not ordered_socials and not websites and not emails:
             self.log_message.emit(f"[Enricher] No useful socials/website/email found on {profile_url}")
@@ -521,3 +610,31 @@ class CrossDirectoryEnricherWorker(QThread):
             f"socials={len(ordered_socials)}, websites={len(websites)}, emails={len(emails)}"
         )
         return True
+
+    def _scrape_link_hub_socials(
+        self, session: requests.Session, hub_url: str
+    ) -> set[str]:
+        socials: set[str] = set()
+        try:
+            resp = session.get(hub_url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+            resp.raise_for_status()
+        except Exception as exc:
+            self.log_message.emit(f"[Enricher] Link-hub fetch failed for {hub_url}: {exc}")
+            return socials
+
+        soup = BeautifulSoup(resp.text, "html.parser")
+        anchors = soup.find_all("a", href=True)
+        for anchor in anchors:
+            href = (anchor.get("href") or "").strip()
+            if not href:
+                continue
+            parsed = urlparse(href)
+            scheme = (parsed.scheme or "").lower()
+            if not scheme.startswith("http"):
+                continue
+            host = (parsed.netloc or "").lower()
+            if not host:
+                continue
+            if any(host.endswith(dom) for dom in SOCIAL_HOST_WHITELIST):
+                socials.add(href)
+        return socials
