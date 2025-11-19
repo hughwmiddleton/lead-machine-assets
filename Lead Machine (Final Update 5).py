@@ -127,6 +127,7 @@ from dateutil import parser as dparser
 from dateutil.relativedelta import relativedelta
 import unicodedata
 from spotify_scraper import scrape_spotify
+from cross_directory_enricher import CrossDirectoryEnricherWorker
 
 # ---------------------------
 # Bandcamp Configuration
@@ -6164,6 +6165,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setMinimumSize(800, 600)
         self.artist_thread = None
         self.fb_thread = None
+        self.enricher_worker = None
+        self.output_base_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output_tests")
         self.create_menu()
         self.tabs = QtWidgets.QTabWidget()
         self.setCentralWidget(self.tabs)
@@ -6175,6 +6178,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.create_facebook_tab()
         self.spotify_tab = SpotifyScraperTab()
         self.tabs.addTab(self.spotify_tab, "Spotify Scraper")
+        self.enricher_tab = QtWidgets.QWidget()
+        self.tabs.addTab(self.enricher_tab, "Cross-Directory Enricher")
+        self.create_enricher_tab()
     def create_menu(self):
         menubar = self.menuBar()
         file_menu = menubar.addMenu("File")
@@ -6324,6 +6330,165 @@ class MainWindow(QtWidgets.QMainWindow):
         self.fb_log.setReadOnly(True)
         layout.addWidget(self.fb_log)
         self.facebook_tab.setLayout(layout)
+
+    def create_enricher_tab(self):
+        layout = QtWidgets.QVBoxLayout()
+
+        def add_file_selector(label_text, attr_name, browse_slot, placeholder=""):
+            row_layout = QtWidgets.QHBoxLayout()
+            label = QtWidgets.QLabel(label_text)
+            line_edit = QtWidgets.QLineEdit()
+            if placeholder:
+                line_edit.setPlaceholderText(placeholder)
+            browse_btn = QtWidgets.QPushButton("Browse...")
+            browse_btn.clicked.connect(browse_slot)
+            row_layout.addWidget(label)
+            row_layout.addWidget(line_edit)
+            row_layout.addWidget(browse_btn)
+            layout.addLayout(row_layout)
+            setattr(self, attr_name, line_edit)
+
+        add_file_selector(
+            "Seed CSV (Spotify):",
+            "enricher_seed_path_edit",
+            self.browse_enricher_seed_csv,
+            "Select Spotify playlist CSV",
+        )
+        add_file_selector(
+            "Bandcamp CSV:",
+            "enricher_bandcamp_path_edit",
+            self.browse_enricher_bandcamp_csv,
+            "Optional Bandcamp directory CSV",
+        )
+        add_file_selector(
+            "SoundCloud CSV:",
+            "enricher_soundcloud_path_edit",
+            self.browse_enricher_soundcloud_csv,
+            "Optional SoundCloud directory CSV",
+        )
+        add_file_selector(
+            "Unearthed CSV:",
+            "enricher_unearthed_path_edit",
+            self.browse_enricher_unearthed_csv,
+            "Optional Triple J Unearthed CSV",
+        )
+        add_file_selector(
+            "Last.fm CSV:",
+            "enricher_lastfm_path_edit",
+            self.browse_enricher_lastfm_csv,
+            "Optional Last.fm directory CSV",
+        )
+
+        self.enricher_live_search_checkbox = QtWidgets.QCheckBox(
+            "Try online directory search for unmatched artists"
+        )
+        self.enricher_live_search_checkbox.setChecked(False)
+        layout.addWidget(self.enricher_live_search_checkbox)
+
+        live_limit_layout = QtWidgets.QHBoxLayout()
+        live_limit_label = QtWidgets.QLabel("Max live searches (0 = unlimited):")
+        self.enricher_max_live_spin = QtWidgets.QSpinBox()
+        self.enricher_max_live_spin.setRange(0, 500)
+        self.enricher_max_live_spin.setValue(40)
+        live_limit_layout.addWidget(live_limit_label)
+        live_limit_layout.addWidget(self.enricher_max_live_spin)
+        layout.addLayout(live_limit_layout)
+
+        self.enricher_start_button = QtWidgets.QPushButton("Start Enrichment")
+        self.enricher_start_button.clicked.connect(self.start_cross_directory_enrichment)
+        layout.addWidget(self.enricher_start_button)
+
+        self.enricher_progress_bar = QtWidgets.QProgressBar()
+        self.enricher_progress_bar.setRange(0, 100)
+        self.enricher_progress_bar.setValue(0)
+        layout.addWidget(self.enricher_progress_bar)
+
+        self.enricher_log_edit = QtWidgets.QPlainTextEdit()
+        self.enricher_log_edit.setReadOnly(True)
+        layout.addWidget(self.enricher_log_edit)
+
+        self.enricher_tab.setLayout(layout)
+
+    def _browse_csv_for_line_edit(self, line_edit, title):
+        file_path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            title,
+            "",
+            "CSV Files (*.csv);;All Files (*)",
+        )
+        if file_path:
+            line_edit.setText(file_path)
+
+    def browse_enricher_seed_csv(self):
+        self._browse_csv_for_line_edit(self.enricher_seed_path_edit, "Select Seed CSV")
+
+    def browse_enricher_bandcamp_csv(self):
+        self._browse_csv_for_line_edit(self.enricher_bandcamp_path_edit, "Select Bandcamp CSV")
+
+    def browse_enricher_soundcloud_csv(self):
+        self._browse_csv_for_line_edit(self.enricher_soundcloud_path_edit, "Select SoundCloud CSV")
+
+    def browse_enricher_unearthed_csv(self):
+        self._browse_csv_for_line_edit(self.enricher_unearthed_path_edit, "Select Unearthed CSV")
+
+    def browse_enricher_lastfm_csv(self):
+        self._browse_csv_for_line_edit(self.enricher_lastfm_path_edit, "Select Last.fm CSV")
+
+    def start_cross_directory_enrichment(self):
+        if self.enricher_worker and self.enricher_worker.isRunning():
+            self.enricher_log_edit.appendPlainText("[Enricher] Already running; please wait.")
+            return
+        seed_csv_path = self.enricher_seed_path_edit.text().strip()
+        if not seed_csv_path:
+            self.enricher_log_edit.appendPlainText("[Enricher] Please select a seed CSV.")
+            return
+        if not os.path.exists(seed_csv_path):
+            self.enricher_log_edit.appendPlainText(f"[Enricher] Seed CSV not found: {seed_csv_path}")
+            return
+        bandcamp_csv_path = self.enricher_bandcamp_path_edit.text().strip()
+        soundcloud_csv_path = self.enricher_soundcloud_path_edit.text().strip()
+        unearthed_csv_path = self.enricher_unearthed_path_edit.text().strip()
+        lastfm_csv_path = self.enricher_lastfm_path_edit.text().strip()
+        enable_live_search = self.enricher_live_search_checkbox.isChecked()
+        max_live_searches = self.enricher_max_live_spin.value()
+        os.makedirs(self.output_base_dir, exist_ok=True)
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_csv_path = os.path.join(self.output_base_dir, f"spotify_enriched_{timestamp}.csv")
+        self.enricher_log_edit.clear()
+        self.enricher_log_edit.appendPlainText("[Enricher] Preparing to start...")
+        self.enricher_progress_bar.setValue(0)
+        self.enricher_start_button.setEnabled(False)
+        self.enricher_worker = CrossDirectoryEnricherWorker(
+            seed_csv_path=seed_csv_path,
+            output_csv_path=output_csv_path,
+            bandcamp_csv_path=bandcamp_csv_path,
+            soundcloud_csv_path=soundcloud_csv_path,
+            unearthed_csv_path=unearthed_csv_path,
+            lastfm_csv_path=lastfm_csv_path,
+            enable_live_search=enable_live_search,
+            max_live_searches=max_live_searches,
+        )
+        self.enricher_worker.log_message.connect(self._on_enricher_log)
+        self.enricher_worker.progress.connect(self._on_enricher_progress)
+        self.enricher_worker.finished.connect(self._on_enricher_finished)
+        self.enricher_worker.start()
+
+    def _on_enricher_log(self, message: str):
+        self.enricher_log_edit.appendPlainText(message)
+        scrollbar = self.enricher_log_edit.verticalScrollBar()
+        if scrollbar:
+            scrollbar.setValue(scrollbar.maximum())
+
+    def _on_enricher_progress(self, pct: int):
+        self.enricher_progress_bar.setValue(max(0, min(100, pct)))
+
+    def _on_enricher_finished(self, output_path: str):
+        self.enricher_start_button.setEnabled(True)
+        if output_path:
+            self.enricher_log_edit.appendPlainText(f"[Enricher] Done. Output: {output_path}")
+        else:
+            self.enricher_log_edit.appendPlainText("[Enricher] Finished with errors; see log above.")
+        self.enricher_worker = None
     def start_artist_scraping(self):
         source = self.source_combo.currentText()
         url = self.url_edit.text().strip()
@@ -6439,6 +6604,23 @@ class MainWindow(QtWidgets.QMainWindow):
                         thread.wait(2000)
                     except Exception:
                         pass
+        worker = getattr(self, "enricher_worker", None)
+        if worker and worker.isRunning():
+            try:
+                worker.requestInterruption()
+            except Exception:
+                pass
+            try:
+                finished = worker.wait(10000)
+            except Exception:
+                finished = False
+            if not finished:
+                try:
+                    worker.terminate()
+                    worker.wait(2000)
+                except Exception:
+                    pass
+        self.enricher_worker = None
         if hasattr(self, "spotify_tab") and hasattr(self.spotify_tab, "shutdown"):
             self.spotify_tab.shutdown()
 
