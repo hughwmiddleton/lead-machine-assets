@@ -192,3 +192,14 @@ class SpotifyClient:
                     details[artist_id] = artist
 
         return details
+
+    def get_playlist_metadata(self, playlist_id: str) -> Dict:
+        """
+        Fetch playlist metadata (e.g., name) for labeling rows.
+        """
+        playlist_id = _clean_playlist_id(playlist_id)
+        if not playlist_id:
+            return {}
+        url = f"{self.API_BASE}/playlists/{playlist_id}"
+        params = {"fields": "id,name"}
+        return self._authorized_request("GET", url, params=params)

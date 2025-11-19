@@ -1,53 +1,80 @@
-"""Spotify About tab scraper for artist social links.
+"""Spotify About tab scraper using lightweight HTTP requests.
 
-Phase 3 adds an optional enrichment step that pulls basic social links from
-the Spotify artist "About" page so that later phases (email scraping, social
-automation) have richer context.
+Collects social links and basic metadata (location, genres) from the Spotify
+artist About page via the embedded __NEXT_DATA__ payload, falling back to HTML
+anchors when the JSON payload is unavailable.
 """
 from __future__ import annotations
 
-import contextlib
+import json
+import os
+import re
 import time
-from typing import Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import urlparse
 
+import requests
 from bs4 import BeautifulSoup
-
-try:  # Playwright (preferred)
-    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
-    from playwright.sync_api import sync_playwright
-except ImportError:  # pragma: no cover - optional dependency
-    PlaywrightTimeoutError = Exception  # type: ignore
-    sync_playwright = None  # type: ignore
-
-try:  # Selenium fallback when Playwright is unavailable
-    from selenium import webdriver
-    from selenium.webdriver.chrome.options import Options as ChromeOptions
-    from selenium.webdriver.chrome.service import Service as ChromeService
-    from selenium.webdriver.common.by import By
-    from selenium.webdriver.support import expected_conditions as EC
-    from selenium.webdriver.support.ui import WebDriverWait
-    from webdriver_manager.chrome import ChromeDriverManager
-except ImportError:  # pragma: no cover - optional dependency
-    webdriver = None  # type: ignore
-    ChromeOptions = ChromeService = By = EC = WebDriverWait = ChromeDriverManager = None  # type: ignore
-
 
 Row = Dict[str, str]
 LoggerFn = Callable[[str], None]
 ProgressFn = Callable[[int, int], None]
 
-SOCIAL_FIELDS = (
-    "Spotify_Instagram_URL",
-    "Spotify_Facebook_URL",
-    "Spotify_Twitter_URL",
-    "Spotify_Website_URL",
-)
+SOCIAL_FIELDS = ("Spotify_Website_URL",)
 
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 )
+
+HTTP_HEADERS = {
+    "User-Agent": USER_AGENT,
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Connection": "keep-alive",
+    "DNT": "1",
+    "Pragma": "no-cache",
+    "Cache-Control": "no-cache",
+}
+HTTP_TIMEOUT = 10
+HTTP_REQUEST_DELAY = 0.7  # polite gap between artist fetches
+SOCIAL_DOMAIN_MAP = {
+    "instagram.com": "instagram",
+    "instagr.am": "instagram",
+    "facebook.com": "facebook",
+    "twitter.com": "twitter",
+    "x.com": "twitter",
+    "official.fm": "website",
+}
+SOCIAL_LABEL_MAP = {
+    "instagram": "instagram",
+    "facebook": "facebook",
+    "twitter": "twitter",
+    "x": "twitter",
+    "website": "website",
+    "homepage": "website",
+    "home page": "website",
+    "official site": "website",
+    "official website": "website",
+}
+NON_WEBSITE_DOMAINS = {
+    "spotify.com",
+    "open.spotify.com",
+    "spoti.fi",
+    "scdn.co",
+    "apple.com",
+    "music.apple.com",
+    "itunes.apple.com",
+    "linktr.ee",
+    "beacons.ai",
+}
+LOCATION_KEYS = ("city", "hometown", "origin", "location")
+GENRE_KEYS = ("genres", "genreNames", "genre_names")
+
+_HTTP_SESSION: Optional[requests.Session] = None
+_ABOUT_CACHE: Dict[str, Dict[str, Any]] = {}
+DEBUG_SPOTIFY_ABOUT = bool(os.environ.get("SPOTIFY_ABOUT_DEBUG"))
+_DEBUG_SPOTIFY_ABOUT_ONCE = False
 
 
 def _log(logger: Optional[LoggerFn], message: str) -> None:
@@ -59,53 +86,119 @@ def _log(logger: Optional[LoggerFn], message: str) -> None:
         pass
 
 
-def extract_social_links_from_page(page_html: str) -> Dict[str, str]:
-    """Return detected social URLs from the About page HTML."""
-    results = {
+def _get_http_session() -> requests.Session:
+    global _HTTP_SESSION
+    if _HTTP_SESSION is None:
+        session = requests.Session()
+        session.headers.update(HTTP_HEADERS)
+        _HTTP_SESSION = session
+    return _HTTP_SESSION
+
+
+def _empty_socials() -> Dict[str, str]:
+    return {
         "instagram": "",
         "facebook": "",
         "twitter": "",
         "website": "",
     }
-    if not page_html:
-        return results
 
+
+def _log_social_summary(logger: Optional[LoggerFn], artist_id: str, socials: Dict[str, str], cached: bool = False) -> None:
+    if not logger:
+        return
+    prefix = "[Spotify About] (cache) " if cached else "[Spotify About] "
+    if socials and any(socials.values()):
+        _log(
+            logger,
+            f"{prefix}Found socials for artist {artist_id}: "
+            f"IG={socials.get('instagram') or ''} "
+            f"FB={socials.get('facebook') or ''} "
+            f"TW={socials.get('twitter') or ''} "
+            f"WEB={socials.get('website') or ''}",
+        )
+    else:
+        _log(logger, f"{prefix}No socials found for artist {artist_id}")
+
+
+def _debug_spotify_about(url: str) -> None:
+    """Temporary helper to inspect anchors on an artist page when debugging."""
+    global _DEBUG_SPOTIFY_ABOUT_ONCE
+    if _DEBUG_SPOTIFY_ABOUT_ONCE:
+        return
+    _DEBUG_SPOTIFY_ABOUT_ONCE = True
+    session = _get_http_session()
+    try:
+        resp = session.get(url, timeout=HTTP_TIMEOUT)
+    except Exception as exc:
+        print(f"[Spotify Debug] Failed to fetch {url}: {exc}")
+        return
+    print(f"[Spotify Debug] HTTP {resp.status_code} for {url}")
+    soup = BeautifulSoup(resp.text, "html.parser")
+    body = soup.find("body")
+    body_class = body.get("class") if body else None
+    print(f"[Spotify Debug] <body class=> {body_class}")
+    anchors = soup.find_all("a", href=True)
+    print(f"[Spotify Debug] Found {len(anchors)} anchors.")
+    for anchor in anchors[:50]:
+        href = (anchor.get("href") or "").strip()
+        text = (anchor.get_text(strip=True) or "")
+        print(f"  - {href} | {text}")
+
+
+def extract_social_links_from_page(page_html: str) -> Dict[str, str]:
+    """Return detected social URLs from the About page HTML anchors."""
+    if not page_html:
+        return _empty_socials()
     soup = BeautifulSoup(page_html, "html.parser")
+    return _extract_socials_from_soup(soup)
+
+
+def _extract_socials_from_soup(soup: Optional[BeautifulSoup]) -> Dict[str, str]:
+    results = _empty_socials()
+    if soup is None:
+        return results
     anchors = soup.find_all("a", href=True)
     for anchor in anchors:
         href = (anchor.get("href") or "").strip()
-        if not href or href.startswith("javascript:"):
+        if not href:
             continue
-        lowered = href.lower()
-        parsed = urlparse(href)
-        domain = (parsed.netloc or "").lower()
-        if not domain:
+        if href.startswith("//"):
+            href = "https:" + href
+        normalized = href.split("?")[0].strip()
+        if not normalized:
             continue
-        # Normalize to avoid duplicate query params across buttons.
-        normalized = href.split("?")[0]
+        lowered = normalized.lower()
+        if lowered.startswith("javascript:") or lowered.startswith("#") or lowered.startswith("mailto:"):
+            continue
+        if "spotify.com" in lowered or lowered.endswith("scdn.co"):
+            continue
 
-        if "instagram.com" in domain or "instagr.am" in domain:
+        parsed = urlparse(normalized)
+        domain = (parsed.netloc or "").lower()
+        if not parsed.scheme or not domain:
+            continue
+
+        if "instagram.com" in lowered or "instagr.am" in lowered:
             if not results["instagram"]:
                 results["instagram"] = normalized
             continue
-        if "facebook.com" in domain:
+        if "facebook.com" in lowered:
             if not results["facebook"]:
                 results["facebook"] = normalized
             continue
-        if "twitter.com" in domain or "x.com" in domain:
+        if "twitter.com" in lowered or "x.com" in lowered:
             if not results["twitter"]:
                 results["twitter"] = normalized
             continue
-        if "spotify.com" in domain or domain.endswith("scdn.co"):
-            continue
-        if lowered.startswith("mailto:"):
-            continue
-        if not results["website"]:
-            results["website"] = normalized
+        if domain and domain not in NON_WEBSITE_DOMAINS and parsed.scheme in ("http", "https"):
+            if not results["website"]:
+                results["website"] = normalized
 
     return results
 
 
+# Updated to drive enrichment from the base artist page JSON instead of /about.
 def enrich_spotify_rows_with_about_links(
     rows: List[Row],
     logger: Optional[LoggerFn] = None,
@@ -116,110 +209,262 @@ def enrich_spotify_rows_with_about_links(
     if not rows:
         return rows
 
-    if sync_playwright is not None:
-        try:
-            return _enrich_with_playwright(rows, logger, progress_callback)
-        except Exception as exc:  # pragma: no cover - defensive
-            _log(logger, f"[Spotify About] Playwright scraping failed: {exc}")
-
-    if webdriver is not None:
-        try:
-            return _enrich_with_selenium(rows, logger, progress_callback)
-        except Exception as exc:  # pragma: no cover - defensive
-            _log(logger, f"[Spotify About] Selenium scraping failed: {exc}")
-
-    _log(logger, "[Spotify About] No supported browser automation backend available; skipping.")
-    return rows
-
-
-def _enrich_with_playwright(
-    rows: List[Row],
-    logger: Optional[LoggerFn],
-    progress_callback: Optional[ProgressFn],
-) -> List[Row]:
+    session = _get_http_session()
     total = len(rows)
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        context = browser.new_context(user_agent=USER_AGENT, locale="en-US", viewport={"width": 1280, "height": 720})
-        page = context.new_page()
-        try:
-            for idx, row in enumerate(rows, start=1):
-                _populate_defaults(row)
-                artist_id = _resolve_artist_id(row)
-                if not artist_id:
-                    _log(logger, "[Spotify About] Missing artist ID; skipping row.")
-                    _apply_socials(row, {})
-                    _emit_progress(progress_callback, idx, total)
-                    continue
-                about_url = f"https://open.spotify.com/artist/{artist_id}/about"
-                try:
-                    page.goto(about_url, wait_until="domcontentloaded", timeout=20000)
-                    with contextlib.suppress(PlaywrightTimeoutError):
-                        page.wait_for_selector('text="About"', timeout=8000)
-                    page.wait_for_timeout(1200)
-                    html = page.content()
-                    links = extract_social_links_from_page(html)
-                    _apply_socials(row, links)
-                except PlaywrightTimeoutError:
-                    _log(logger, f"[Spotify About] Timeout while loading {about_url}")
-                    _apply_socials(row, {})
-                except Exception as exc:  # pragma: no cover - defensive
-                    _log(logger, f"[Spotify About] Error scraping {about_url}: {exc}")
-                    _apply_socials(row, {})
-                _emit_progress(progress_callback, idx, total)
-        finally:
-            context.close()
-            browser.close()
-    return rows
-
-
-def _enrich_with_selenium(
-    rows: List[Row],
-    logger: Optional[LoggerFn],
-    progress_callback: Optional[ProgressFn],
-) -> List[Row]:
-    if webdriver is None:
-        return rows
-    total = len(rows)
-    options = ChromeOptions()
-    options.add_argument("--headless=new")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--window-size=1280,720")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--no-sandbox")
-    options.add_argument(f"--user-agent={USER_AGENT}")
-    service = ChromeService(ChromeDriverManager().install())
-    driver = webdriver.Chrome(service=service, options=options)
-    try:
-        for idx, row in enumerate(rows, start=1):
-            _populate_defaults(row)
-            artist_id = _resolve_artist_id(row)
-            if not artist_id:
-                _log(logger, "[Spotify About] Missing artist ID; skipping row.")
-                _apply_socials(row, {})
-                _emit_progress(progress_callback, idx, total)
-                continue
-            about_url = f"https://open.spotify.com/artist/{artist_id}/about"
-            try:
-                driver.get(about_url)
-                WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
-                time.sleep(1.0)
-                html = driver.page_source
-                links = extract_social_links_from_page(html)
-                _apply_socials(row, links)
-            except Exception as exc:
-                _log(logger, f"[Spotify About] Selenium error on {about_url}: {exc}")
-                _apply_socials(row, {})
+    for idx, row in enumerate(rows, start=1):
+        _populate_defaults(row)
+        artist_id = _resolve_artist_id(row)
+        if not artist_id:
+            _log(logger, "[Spotify About] Missing artist ID; skipping row.")
+            _apply_socials(row, {})
             _emit_progress(progress_callback, idx, total)
-    finally:
-        driver.quit()
+            continue
+
+        cached = _ABOUT_CACHE.get(artist_id)
+        if cached:
+            _log_social_summary(logger, artist_id, cached.get("socials") or {}, cached=True)
+            _apply_enrichment(row, cached)
+            _emit_progress(progress_callback, idx, total)
+            continue
+
+        payload = _fetch_about_payload(session, artist_id, logger)
+        if payload:
+            _ABOUT_CACHE[artist_id] = payload
+            _apply_enrichment(row, payload)
+        else:
+            _apply_socials(row, {})
+        if HTTP_REQUEST_DELAY:
+            time.sleep(HTTP_REQUEST_DELAY)
+        _emit_progress(progress_callback, idx, total)
+
     return rows
+
+
+# Updated to parse __NEXT_DATA__ from the base artist page (no /about) and pull socials/location/genres.
+def _fetch_about_payload(
+    session: requests.Session,
+    artist_id: str,
+    logger: Optional[LoggerFn],
+) -> Dict[str, Any]:
+    artist_url = f"https://open.spotify.com/artist/{artist_id}"
+    html = _fetch_artist_html(session, artist_url, logger)
+    if not html:
+        return {}
+
+    if DEBUG_SPOTIFY_ABOUT:
+        _debug_spotify_about(artist_url)
+
+    soup = BeautifulSoup(html, "html.parser")
+
+    payload: Dict[str, Any] = {
+        "socials": _empty_socials(),
+        "location": "",
+        "primary_genre": "",
+    }
+
+    html_socials = _extract_socials_from_soup(soup)
+    payload["socials"] = dict(html_socials)
+
+    next_data = _extract_next_data_from_soup(soup)
+    if not next_data:
+        _log(logger, f"[Spotify About] __NEXT_DATA__ missing for artist {artist_id}")
+    else:
+        profile = _extract_profile_blob(next_data)
+        if not profile:
+            _log(logger, f"[Spotify About] Unable to locate profile JSON for artist {artist_id}")
+        else:
+            profile_socials = _extract_socials_from_profile(profile)
+            for key, value in profile_socials.items():
+                if value and not payload["socials"].get(key):
+                    payload["socials"][key] = value
+            payload["location"] = _extract_location_from_profile(profile)
+            payload["primary_genre"] = _extract_primary_genre(profile)
+
+    _log_social_summary(logger, artist_id, payload.get("socials") or {})
+
+    return payload
+
+
+# Updated to fetch the canonical artist page once (no /about) with graceful logging.
+def _fetch_artist_html(
+    session: requests.Session,
+    artist_url: str,
+    logger: Optional[LoggerFn],
+) -> str:
+    try:
+        resp = session.get(artist_url, timeout=HTTP_TIMEOUT)
+    except requests.RequestException as exc:
+        _log(logger, f"[Spotify About] HTTP error for {artist_url}: {exc}")
+        return ""
+    if resp.status_code != 200:
+        _log(logger, f"[Spotify About] HTTP {resp.status_code} for {artist_url}")
+        return ""
+    return resp.text
+
+
+# Updated to pull __NEXT_DATA__ via BeautifulSoup for better resilience to markup changes.
+def _extract_next_data_from_soup(soup: Optional[BeautifulSoup]) -> Optional[Dict[str, Any]]:
+    if soup is None:
+        return None
+    script = soup.find("script", id="__NEXT_DATA__")
+    if not script or not script.string:
+        return None
+    raw = script.string.strip()
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+
+
+def _extract_profile_blob(next_data: Dict[str, Any]) -> Dict[str, Any]:
+    props = next_data.get("props") or {}
+    page_props = props.get("pageProps") or {}
+    candidates: List[Any] = []
+    for key in (
+        "artistProfile",
+        "artist",
+        "data",
+        "profile",
+        "state",
+        "pageData",
+    ):
+        value = page_props.get(key)
+        if value:
+            candidates.append(value)
+    candidates.append(page_props)
+    for candidate in candidates:
+        profile = _resolve_profile_candidate(candidate)
+        if profile:
+            return profile
+    return _search_for_profile(page_props)
+
+
+def _resolve_profile_candidate(candidate: Any) -> Dict[str, Any]:
+    if not isinstance(candidate, dict):
+        return {}
+    if isinstance(candidate.get("profile"), dict):
+        return candidate["profile"]
+    if isinstance(candidate.get("artist"), dict):
+        return _resolve_profile_candidate(candidate["artist"])
+    if any(key in candidate for key in ("externalLinks", "city", "genres", "location")):
+        return candidate
+    if isinstance(candidate.get("data"), dict):
+        return _resolve_profile_candidate(candidate["data"])
+    return {}
+
+
+def _search_for_profile(blob: Any) -> Dict[str, Any]:
+    stack = [blob]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, dict):
+            if any(key in item for key in ("externalLinks", "city", "location", "profile")):
+                if isinstance(item.get("profile"), dict):
+                    return item["profile"]
+                return item
+            stack.extend(item.values())
+        elif isinstance(item, list):
+            stack.extend(item)
+    return {}
+
+
+def _extract_socials_from_profile(profile: Dict[str, Any]) -> Dict[str, str]:
+    socials = _empty_socials()
+    external_links = (
+        ((profile.get("externalLinks") or {}).get("items"))
+        if isinstance(profile.get("externalLinks"), dict)
+        else profile.get("externalLinks")
+    )
+    if not isinstance(external_links, list):
+        external_links = []
+
+    for item in external_links:
+        if not isinstance(item, dict):
+            continue
+        raw_url = (item.get("url") or item.get("uri") or "").strip()
+        if not raw_url:
+            continue
+        normalized = raw_url.split("?")[0]
+        label = (item.get("name") or item.get("title") or item.get("type") or "").strip().lower()
+        mapped = SOCIAL_LABEL_MAP.get(label)
+        if not mapped:
+            domain = urlparse(normalized).netloc.lower()
+            for domain_key, target in SOCIAL_DOMAIN_MAP.items():
+                if domain_key in domain:
+                    mapped = target
+                    break
+        if not mapped:
+            continue
+        if mapped == "instagram" and not socials["instagram"]:
+            socials["instagram"] = normalized
+        elif mapped == "facebook" and not socials["facebook"]:
+            socials["facebook"] = normalized
+        elif mapped == "twitter" and not socials["twitter"]:
+            socials["twitter"] = normalized
+        elif mapped == "website" and not socials["website"]:
+            socials["website"] = normalized
+    return socials
+
+
+def _extract_location_from_profile(profile: Dict[str, Any]) -> str:
+    def _normalize_entry(value: Any) -> str:
+        if isinstance(value, dict):
+            for key in ("name", "displayName", "label", "value"):
+                candidate = (value.get(key) or "").strip()
+                if candidate:
+                    return candidate
+        elif isinstance(value, str):
+            return value.strip()
+        return ""
+
+    city = ""
+    for key in LOCATION_KEYS:
+        if city:
+            break
+        city = _normalize_entry(profile.get(key))
+    country = _normalize_entry(profile.get("country"))
+    if not country and isinstance(profile.get("city"), dict):
+        country = _normalize_entry(profile["city"].get("country"))
+    if city and country:
+        if country.lower() in city.lower():
+            return city
+        return f"{city}, {country}"
+    return city or country
+
+
+def _extract_primary_genre(profile: Dict[str, Any]) -> str:
+    for key in GENRE_KEYS:
+        value = profile.get(key)
+        if isinstance(value, list):
+            dedup: List[str] = []
+            for entry in value:
+                entry = (entry or "").strip()
+                if entry and entry not in dedup:
+                    dedup.append(entry)
+            if dedup:
+                return ", ".join(dedup[:3])
+        elif isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _apply_enrichment(row: Row, payload: Dict[str, Any]) -> None:
+    socials = payload.get("socials") or {}
+    _apply_socials(row, socials)
+    location = (payload.get("location") or "").strip()
+    if location and not (row.get("Location") or "").strip():
+        row["Location"] = location
+    genre = (payload.get("primary_genre") or "").strip()
+    if genre and not (row.get("Primary Genre") or "").strip():
+        row["Primary Genre"] = genre
 
 
 def _populate_defaults(row: Row) -> None:
     for key in SOCIAL_FIELDS:
         row.setdefault(key, "")
     row.setdefault("Social Link", "")
+    row.setdefault("Location", "")
+    row.setdefault("Primary Genre", "")
 
 
 def _resolve_artist_id(row: Row) -> str:
@@ -237,19 +482,36 @@ def _resolve_artist_id(row: Row) -> str:
 
 
 def _apply_socials(row: Row, data: Dict[str, str]) -> None:
-    instagram = data.get("instagram", "")
-    facebook = data.get("facebook", "")
-    twitter = data.get("twitter", "")
-    website = data.get("website", "")
+    website = (data.get("website") or "").strip()
+    if website.startswith("//"):
+        website = f"https:{website}"
+    normalized_website = website.split("?")[0].strip() if website else ""
+    if normalized_website and "spotify.com" in normalized_website.lower():
+        normalized_website = ""
 
-    row["Spotify_Instagram_URL"] = instagram
-    row["Spotify_Facebook_URL"] = facebook
-    row["Spotify_Twitter_URL"] = twitter
-    row["Spotify_Website_URL"] = website
+    social_urls: List[str] = []
+    for key in ("instagram", "facebook", "twitter", "website"):
+        value = (data.get(key) or "").strip()
+        if not value:
+            continue
+        if value.startswith("//"):
+            value = f"https:{value}"
+        normalized = value.split("?")[0].strip()
+        if not normalized or "spotify.com" in normalized.lower():
+            continue
+        if normalized not in social_urls:
+            social_urls.append(normalized)
 
-    primary_social = instagram or facebook or twitter or website
-    if primary_social:
-        row["Social Link"] = primary_social
+    if social_urls:
+        row["Social Link"] = " | ".join(social_urls)
+    elif not (row.get("Social Link") or ""):
+        row["Social Link"] = ""
+
+    if normalized_website:
+        row["Spotify_Website_URL"] = normalized_website
+        row["External Links"] = normalized_website
+    else:
+        row.setdefault("External Links", row.get("External Links", ""))
 
 
 def _emit_progress(callback: Optional[ProgressFn], current: int, total: int) -> None:

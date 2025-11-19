@@ -5467,8 +5467,7 @@ class ArtistScraperThread(QtCore.QThread):
                         "Artist Name", "Location", "Song Title", "Sounds Like", "Social Link",
                         "SoundCloud Link", "Played on triple J", "Played on Unearthed",
                         "Release Date", "Primary Genre", "Date Added", "External Links", "Email",
-                        "Spotify_URL", "Spotify_Artist_ID", "Spotify_Instagram_URL",
-                        "Spotify_Facebook_URL", "Spotify_Twitter_URL", "Spotify_Website_URL"
+                        "Spotify_URL", "Spotify_Artist_ID", "Spotify_Website_URL"
                     ]
                     for col in spotify_columns:
                         if col not in new_df.columns:
