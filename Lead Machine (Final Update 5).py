@@ -6188,6 +6188,188 @@ class SpotifyScraperTab(QtWidgets.QWidget):
                     pass
         self.worker = None
 
+class CrossDirectoryEnricherTab(QtWidgets.QWidget):
+    def __init__(self, parent=None, enricher_module=None):
+        super().__init__(parent)
+        self.enricher_module = enricher_module
+        self.worker = None
+        self.output_path = ""
+        self._build_ui()
+
+    def _build_ui(self):
+        layout = QtWidgets.QVBoxLayout()
+        self.seed_edit = self._add_file_row(
+            layout,
+            "Seed CSV (Spotify):",
+            "Select Spotify playlist CSV",
+            required=True,
+        )
+        self.bandcamp_edit = self._add_file_row(
+            layout,
+            "Bandcamp CSV:",
+            "Optional Bandcamp directory CSV",
+        )
+        self.soundcloud_edit = self._add_file_row(
+            layout,
+            "SoundCloud CSV:",
+            "Optional SoundCloud directory CSV",
+        )
+        self.unearthed_edit = self._add_file_row(
+            layout,
+            "Unearthed CSV:",
+            "Optional Triple J Unearthed CSV",
+        )
+        self.lastfm_edit = self._add_file_row(
+            layout,
+            "Last.fm CSV:",
+            "Optional Last.fm directory CSV",
+        )
+        self.live_search_checkbox = QtWidgets.QCheckBox(
+            "Try online directory search for unmatched artists"
+        )
+        self.live_search_checkbox.setChecked(True)
+        self.live_search_checkbox.stateChanged.connect(self._toggle_live_controls)
+        layout.addWidget(self.live_search_checkbox)
+        live_layout = QtWidgets.QHBoxLayout()
+        live_label = QtWidgets.QLabel("Max live searches (0 = unlimited):")
+        self.max_live_spin = QtWidgets.QSpinBox()
+        self.max_live_spin.setRange(0, 1000)
+        self.max_live_spin.setValue(40)
+        live_layout.addWidget(live_label)
+        live_layout.addWidget(self.max_live_spin)
+        live_layout.addStretch()
+        layout.addLayout(live_layout)
+        self.start_button = QtWidgets.QPushButton("Start Enrichment")
+        self.start_button.clicked.connect(self.start_enrichment)
+        layout.addWidget(self.start_button)
+        self.progress_bar = QtWidgets.QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        layout.addWidget(self.progress_bar)
+        self.log_console = QtWidgets.QPlainTextEdit()
+        self.log_console.setReadOnly(True)
+        layout.addWidget(self.log_console)
+        layout.addStretch()
+        if self.enricher_module is None:
+            self.start_button.setEnabled(False)
+            self.log_console.setPlainText(
+                "cross_directory_enricher.py not found. Place the module in the project root."
+            )
+        self.setLayout(layout)
+
+    def _add_file_row(self, parent_layout, label_text, placeholder, required=False):
+        row = QtWidgets.QHBoxLayout()
+        label = QtWidgets.QLabel(label_text)
+        line_edit = QtWidgets.QLineEdit()
+        line_edit.setPlaceholderText(placeholder)
+        browse_button = QtWidgets.QPushButton("Browse...")
+        browse_button.clicked.connect(lambda: self._browse_csv(line_edit))
+        row.addWidget(label)
+        row.addWidget(line_edit)
+        row.addWidget(browse_button)
+        parent_layout.addLayout(row)
+        if required:
+            line_edit.setProperty("required", True)
+        return line_edit
+
+    def _browse_csv(self, target_edit):
+        file_path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Select CSV File",
+            "",
+            "CSV Files (*.csv);;All Files (*)",
+        )
+        if file_path:
+            target_edit.setText(file_path)
+
+    def _toggle_live_controls(self):
+        enabled = self.live_search_checkbox.isChecked()
+        self.max_live_spin.setEnabled(enabled)
+
+    def start_enrichment(self):
+        if self.enricher_module is None:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Enricher not available",
+                "cross_directory_enricher.py not found.",
+            )
+            return
+        if self.worker:
+            self._append_log("Enrichment already running.")
+            return
+        seed_path = self.seed_edit.text().strip()
+        if not seed_path:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Missing seed CSV",
+                "Please select a Spotify seed CSV.",
+            )
+            return
+        if not os.path.exists(seed_path):
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Seed CSV not found",
+                f"The selected seed CSV does not exist:\n{seed_path}",
+            )
+            return
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        base, ext = os.path.splitext(seed_path)
+        ext = ext or ".csv"
+        self.output_path = f"{base}_enriched_{timestamp}{ext}"
+        self.log_console.clear()
+        self.progress_bar.setValue(0)
+        enable_live = self.live_search_checkbox.isChecked()
+        max_live = self.max_live_spin.value()
+        self.worker = self.enricher_module.CrossDirectoryEnricherWorker(
+            seed_csv_path=seed_path,
+            output_csv_path=self.output_path,
+            bandcamp_csv_path=self.bandcamp_edit.text().strip(),
+            soundcloud_csv_path=self.soundcloud_edit.text().strip(),
+            unearthed_csv_path=self.unearthed_edit.text().strip(),
+            lastfm_csv_path=self.lastfm_edit.text().strip(),
+            enable_live_search=enable_live,
+            max_live_searches=max_live,
+        )
+        self.worker.progress.connect(self.progress_bar.setValue)
+        self.worker.log_message.connect(self._append_log)
+        self.worker.finished.connect(self._handle_finished)
+        self.start_button.setEnabled(False)
+        self._append_log("Starting enrichment...")
+        self.worker.start()
+
+    def _handle_finished(self, output_path: str):
+        success = bool(output_path)
+        self.start_button.setEnabled(True)
+        self.worker = None
+        if success:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Enrichment complete",
+                f"Output written to:\n{output_path}",
+            )
+        else:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Enrichment failed",
+                "An error occurred during enrichment. Check the log for details.",
+            )
+
+    def _append_log(self, message: str):
+        self.log_console.appendPlainText(message)
+        scrollbar = self.log_console.verticalScrollBar()
+        if scrollbar:
+            scrollbar.setValue(scrollbar.maximum())
+
+    def shutdown(self):
+        worker = self.worker
+        if not worker:
+            return
+        if worker.isRunning():
+            try:
+                worker.wait(2000)
+            except Exception:
+                pass
+        self.worker = None
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
@@ -6206,6 +6388,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.create_facebook_tab()
         self.spotify_tab = SpotifyScraperTab()
         self.tabs.addTab(self.spotify_tab, "Spotify Scraper")
+        self.cross_enricher_tab = CrossDirectoryEnricherTab(
+            enricher_module=cross_directory_enricher
+        )
+        self.tabs.addTab(self.cross_enricher_tab, "Cross-Directory Enricher")
     def create_menu(self):
         menubar = self.menuBar()
         file_menu = menubar.addMenu("File")
@@ -6472,6 +6658,11 @@ class MainWindow(QtWidgets.QMainWindow):
                         pass
         if hasattr(self, "spotify_tab") and hasattr(self.spotify_tab, "shutdown"):
             self.spotify_tab.shutdown()
+        if (
+            hasattr(self, "cross_enricher_tab")
+            and hasattr(self.cross_enricher_tab, "shutdown")
+        ):
+            self.cross_enricher_tab.shutdown()
 
 
 def _handle_cli_entry(argv=None):
