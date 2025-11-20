@@ -89,7 +89,6 @@ import pandas as pd
 import datetime
 import json
 import argparse
-from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 import requests
@@ -766,287 +765,6 @@ def setup_facebook_driver():
     return driver
 
 
-def build_headless_chrome_for_spotify(headless=True):
-    """
-    Build a Chrome WebDriver for Spotify social enrichment.
-
-    Uses a dedicated, persistent Chrome profile folder so that Spotify login
-    cookies survive across runs. This avoids trying to reuse the user's main
-    Chrome profile (which caused locking issues) but still lets us stay logged in.
-    """
-    options = webdriver.ChromeOptions()
-    base_dir = Path.home() / "selenium-profiles" / "spotify"
-    base_dir.mkdir(parents=True, exist_ok=True)
-    options.add_argument(f"--user-data-dir={str(base_dir)}")
-    # OPTIONAL: you can explicitly name the profile directory inside user-data-dir
-    # options.add_argument("--profile-directory=Default")
-
-    if headless:
-        options.add_argument("--headless=new")
-
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--window-size=1366,768")
-    options.add_argument(
-        "user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/142.0 Safari/537.36"
-    )
-
-    try:
-        driver = webdriver.Chrome(
-            service=ChromeService(ChromeDriverManager().install()),
-            options=options,
-        )
-    except WebDriverException as exc:
-        print("[Spotify Social] Error starting Chrome driver:", exc)
-        print("[Spotify Social] Hint: make sure Chrome is closed when sharing this profile.")
-        raise
-
-    driver.set_page_load_timeout(30)
-    return driver
-
-
-def scrape_spotify_artist_socials(driver, artist_url, timeout=20):
-    """
-    Given a Selenium driver and an artist URL, open the artist page,
-    click the About tab inside the SPA (if present), and return socials:
-      dict(insta, facebook, twitter, website)
-
-    We intentionally do NOT navigate to /about directly, because
-    that path returns a 404 "Page not found" on some accounts.
-    """
-    socials = {"insta": None, "facebook": None, "twitter": None, "website": None}
-    if not artist_url:
-        print("[Spotify Social] No artist URL provided.")
-        return socials
-
-    base = artist_url.split("?", 1)[0].rstrip("/")
-    print(f"[Spotify Social] GET {base}")
-    try:
-        driver.get(base)
-    except Exception as e:
-        print(f"[Spotify Social] Error loading {base}: {e}")
-        return socials
-
-    wait = WebDriverWait(driver, timeout)
-
-    _dismiss_spotify_cookie_banner(driver, timeout=5)
-
-    try:
-        wait.until(
-            EC.presence_of_element_located(
-                (By.XPATH, "//body//*[contains(., 'Monthly listeners') or contains(., 'listeners')]")
-            )
-        )
-    except Exception:
-        pass
-
-    try:
-        about_buttons = driver.find_elements(
-            By.XPATH,
-            "//button[normalize-space()='About'] | //a[normalize-space()='About'] | "
-            "//button[contains(., 'About')]"
-        )
-        if about_buttons:
-            print("[Spotify Social] Clicking About tab inside artist page.")
-            try:
-                about_buttons[0].click()
-                time.sleep(2)
-            except Exception as e:
-                print(f"[Spotify Social] Error clicking About tab: {e}")
-    except Exception as e:
-        print(f"[Spotify Social] Error locating About tab: {e}")
-
-    try:
-        title = (driver.title or "").strip()
-        if "Page not found" in title:
-            print("[Spotify Social] Artist page returned 'Page not found'; no socials available.")
-            return socials
-    except Exception:
-        pass
-
-    anchors = driver.find_elements(By.XPATH, "//a[@href]")
-    print(f"[Spotify Social] Found {len(anchors)} anchors on artist page.")
-    for a in anchors[:20]:
-        href = (a.get_attribute("href") or "").strip()
-        text = (a.text or "").strip()
-        print(f"[Spotify Social] Anchor: {href} | text='{text}'")
-
-    for a in anchors:
-        href = (a.get_attribute("href") or "").strip()
-        if not href:
-            continue
-        lower = href.lower()
-        if "spotify.com" in lower:
-            continue
-        if "instagram.com" in lower and not socials["insta"]:
-            socials["insta"] = href
-        elif "facebook.com" in lower and not socials["facebook"]:
-            socials["facebook"] = href
-        elif ("twitter.com" in lower or "x.com" in lower) and not socials["twitter"]:
-            socials["twitter"] = href
-        else:
-            if href.startswith("http") and not socials["website"]:
-                socials["website"] = href
-
-    print(f"[Spotify Social] Extracted socials: {socials}")
-    return socials
-
-
-def _dismiss_spotify_cookie_banner(driver, timeout=5):
-    """
-    Try to close/dismiss Spotify's cookie/consent banner if present.
-    Best-effort only; failures are non-fatal.
-    """
-    try:
-        wait = WebDriverWait(driver, timeout)
-        button = wait.until(
-            EC.element_to_be_clickable(
-                (
-                    By.XPATH,
-                    "//button[contains(., 'Accept') or "
-                    "contains(., 'Allow all cookies') or "
-                    "contains(., 'I agree') or "
-                    "contains(., 'Accept Cookies')]",
-                )
-            )
-        )
-        print("[Spotify Social] Clicking cookie/consent button.")
-        button.click()
-        time.sleep(1)
-    except Exception:
-        pass
-
-
-_SPOTIFY_SOCIAL_LABELS = {
-    "instagram": "insta",
-    "facebook": "facebook",
-    "twitter": "twitter",
-    "x": "twitter",
-    "website": "website",
-    "homepage": "website",
-    "official site": "website",
-    "official website": "website",
-}
-
-_SPOTIFY_SOCIAL_DOMAINS = {
-    "instagram.com": "insta",
-    "instagr.am": "insta",
-    "facebook.com": "facebook",
-    "twitter.com": "twitter",
-    "x.com": "twitter",
-}
-
-
-def _extract_spotify_socials_from_html(html):
-    results = {"insta": None, "facebook": None, "twitter": None, "website": None}
-    if not html:
-        return results
-    soup = BeautifulSoup(html, "html.parser")
-    if soup:
-        _merge_socials(results, _extract_socials_from_anchors(soup))
-        _merge_socials(results, _extract_socials_from_next_data(soup))
-    return results
-
-
-def _merge_socials(base, updates):
-    for key, value in updates.items():
-        if value and not base.get(key):
-            base[key] = value
-
-
-def _extract_socials_from_anchors(soup):
-    socials = {"insta": None, "facebook": None, "twitter": None, "website": None}
-    anchors = soup.find_all("a", href=True)
-    for anchor in anchors:
-        href = _normalize_url(anchor.get("href"))
-        if not href:
-            continue
-        lower = href.lower()
-        if "spotify.com" in lower or lower.endswith("scdn.co"):
-            continue
-        if "instagram.com" in lower or "instagr.am" in lower:
-            _merge_socials(socials, {"insta": href})
-            continue
-        if "facebook.com" in lower:
-            _merge_socials(socials, {"facebook": href})
-            continue
-        if "twitter.com" in lower or "x.com" in lower:
-            _merge_socials(socials, {"twitter": href})
-            continue
-        parsed = urlparse(href)
-        if parsed.scheme in ("http", "https"):
-            _merge_socials(socials, {"website": href})
-    return socials
-
-
-def _extract_socials_from_next_data(soup):
-    socials = {"insta": None, "facebook": None, "twitter": None, "website": None}
-    script = soup.find("script", id="__NEXT_DATA__")
-    if not script or not script.string:
-        return socials
-    raw = script.string.strip()
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError:
-        return socials
-    for item in _iter_external_link_items(payload):
-        url = _normalize_url(item.get("url") or item.get("uri"))
-        if not url:
-            continue
-        label = (item.get("name") or item.get("title") or item.get("type") or "").strip().lower()
-        target = _SPOTIFY_SOCIAL_LABELS.get(label)
-        if not target:
-            domain = urlparse(url).netloc.lower()
-            for domain_key, mapped in _SPOTIFY_SOCIAL_DOMAINS.items():
-                if domain_key in domain:
-                    target = mapped
-                    break
-        if not target:
-            target = "website"
-        mapped_key = {
-            "insta": "insta",
-            "facebook": "facebook",
-            "twitter": "twitter",
-            "website": "website",
-        }.get(target, "website")
-        if mapped_key:
-            _merge_socials(socials, {mapped_key: url})
-    return socials
-
-
-def _iter_external_link_items(payload):
-    stack = [payload]
-    while stack:
-        item = stack.pop()
-        if isinstance(item, dict):
-            external = item.get("externalLinks")
-            if isinstance(external, dict):
-                items = external.get("items") or external.get("itemsV2") or []
-            else:
-                items = external
-            if isinstance(items, list) and items:
-                for entry in items:
-                    if isinstance(entry, dict):
-                        yield entry
-            stack.extend(item.values())
-        elif isinstance(item, list):
-            stack.extend(item)
-
-
-def _normalize_url(url):
-    if not url:
-        return ""
-    cleaned = url.strip()
-    if not cleaned:
-        return ""
-    if cleaned.startswith("//"):
-        cleaned = "https:" + cleaned
-    if "?" in cleaned:
-        cleaned = cleaned.split("?", 1)[0]
-    return cleaned
-
 # =============================================================================
 # Scraping Functions for Artist Data (Page 1)
 # =============================================================================
@@ -1666,20 +1384,47 @@ def bandcamp_extract_primary_genre_from_card(card) -> str:
     on Bandcamp discover/tag grids (inside <p class="genre"> ... </p>).
     Falls back to text in the .meta container if the class is absent.
     """
-    genre_el = card.select_one("p.genre")
-    if genre_el:
-        txt = genre_el.get_text(" ", strip=True)
-        if txt:
-            return txt.lower()
+    def _clean_text(raw: str) -> str:
+        if not raw:
+            return ""
+        return re.sub(r"\s+", " ", raw).strip()
+
+    def _extract(selector: str) -> str:
+        el = card.select_one(selector)
+        if not el:
+            return ""
+        txt = _clean_text(el.get_text(" ", strip=True))
+        return txt.lower() if txt else ""
+
+    genre_value = _extract("p.genre")
+    if genre_value:
+        return genre_value
+
+    targeted_selectors = [
+        ".meta .item-tag",
+        ".meta p.subtext span.item-tag",
+        ".meta [class*='tag']",
+        ".meta [class*='genre']",
+        ".result-info .item-tag",
+        ".result-info [class*='tag']",
+        ".result-info [class*='genre']",
+        ".discover-item-info .item-tag"
+    ]
+    for selector in targeted_selectors:
+        genre_value = _extract(selector)
+        if genre_value:
+            return genre_value
+
     meta_el = card.select_one(".meta, .result-info")
     if meta_el:
         lines = meta_el.get_text("\n", strip=True).split("\n")
         for line in reversed(lines):
-            if line and "by " not in line.lower() and len(line) < 40:
-                return line.lower()
+            cleaned = _clean_text(line)
+            if cleaned and "by " not in cleaned.lower() and len(cleaned) < 40:
+                return cleaned.lower()
     alt = card.select_one("[class*='genre']")
     if alt:
-        txt = alt.get_text(" ", strip=True)
+        txt = _clean_text(alt.get_text(" ", strip=True))
         if txt:
             return txt.lower()
     return ""
@@ -2842,9 +2587,10 @@ def _bandcamp_collect_discover_dom(driver, discover_url: str, max_pages: int = 1
                     tile_artist = parts[1].strip()
                 else:
                     tile_title = title_text.strip()
+                primary_genre = bandcamp_extract_primary_genre_from_card(card)
                 candidates.append({
                     "url": profile_url,
-                    "primary_genre": "",
+                    "primary_genre": primary_genre,
                     "location": "",
                     "tile_artist": tile_artist,
                     "tile_title": tile_title,
@@ -5804,395 +5550,6 @@ class FacebookScraperThread(QtCore.QThread):
         self.finished_signal.emit()
 
 
-class SpotifyScraperWorker(QtCore.QThread):
-    progress_changed = QtCore.pyqtSignal(int)
-    log_message = QtCore.pyqtSignal(str)
-    finished = QtCore.pyqtSignal()
-    row_progress = QtCore.pyqtSignal(int, int)
-
-    def __init__(self, input_path, output_path, skip_with_socials=True, max_rows=None, parent=None):
-        super().__init__(parent)
-        self.input_path = input_path
-        self.output_path = output_path
-        self.skip_with_socials = bool(skip_with_socials)
-        self.max_rows = max_rows if max_rows and max_rows > 0 else None
-        self._cancelled = False
-        self._input_delimiter = "\t"
-
-    def cancel(self):
-        self._cancelled = True
-
-    def run(self):
-        try:
-            self._do_enrichment()
-        except Exception as exc:
-            self.log_message.emit(f"Spotify enrichment encountered an error: {exc}")
-            try:
-                self.log_message.emit(traceback.format_exc())
-            except Exception:
-                pass
-        finally:
-            self.finished.emit()
-
-    def _emit_progress(self, current, total):
-        divisor = max(total, 1)
-        pct = int((current / divisor) * 100)
-        self.progress_changed.emit(pct)
-        self.row_progress.emit(current, total)
-
-    def _do_enrichment(self):
-        if not os.path.exists(self.input_path):
-            self.log_message.emit(f"Input CSV not found: {self.input_path}")
-            return
-        self._input_delimiter = self._detect_delimiter()
-        try:
-            with open(self.input_path, "r", encoding="utf-8", newline="") as f_in:
-                reader = csv.DictReader(f_in, delimiter=self._input_delimiter)
-                raw_fields = list(reader.fieldnames or [])
-                fieldnames = [self._sanitize_header(name) for name in raw_fields]
-                rows = [self._sanitize_row(dict(row)) for row in reader]
-        except Exception as exc:
-            self.log_message.emit(f"Failed to read input CSV: {exc}")
-            return
-        if not rows:
-            self.log_message.emit("No rows found in Spotify CSV.")
-            self.progress_changed.emit(100)
-            self.row_progress.emit(0, 0)
-            return
-        required_columns = [
-            "Social Link",
-            "Spotify_URL",
-            "Spotify_Website_URL",
-            "External Links",
-        ]
-        for col in required_columns:
-            if col not in fieldnames:
-                fieldnames.append(col)
-        for row in rows:
-            for col in required_columns:
-                row.setdefault(col, "")
-        total_target = len(rows)
-        if self.max_rows is not None:
-            total_target = min(total_target, self.max_rows)
-        self._emit_progress(0, total_target)
-        try:
-            driver = build_headless_chrome_for_spotify(headless=False)
-        except Exception as exc:
-            self.log_message.emit(f"Unable to start Chrome driver: {exc}")
-            return
-        self.log_message.emit(
-            "[Spotify Social] Opening Spotify in Selenium profile. "
-            "If this is your first run, please log in to Spotify in the opened browser."
-        )
-        try:
-            driver.get("https://open.spotify.com/")
-        except Exception as exc:
-            self.log_message.emit(f"[Spotify Social] Error loading Spotify homepage: {exc}")
-        try:
-            for idx, row in enumerate(rows[:total_target], start=1):
-                if self._cancelled:
-                    self.log_message.emit("Cancellation requested. Stopping Spotify enrichment.")
-                    break
-                artist_name = row.get("Artist Name", "").strip()
-                artist_url = row.get("Spotify_URL", "").strip()
-                if not artist_url:
-                    self.log_message.emit(f"[Row {idx}/{total_target}] Missing Spotify URL for {artist_name or 'unknown artist'}.")
-                    self._emit_progress(idx, total_target)
-                    continue
-                existing_social = (row.get("Social Link") or "").strip()
-                if self.skip_with_socials and existing_social:
-                    self.log_message.emit(f"[Row {idx}/{total_target}] Skipping {artist_name}: Social Link already set.")
-                    self._emit_progress(idx, total_target)
-                    continue
-                self.log_message.emit(f"[Row {idx}/{total_target}] Enriching {artist_name or artist_url} -> {artist_url}")
-                try:
-                    socials = scrape_spotify_artist_socials(driver, artist_url)
-                except Exception as exc:
-                    self.log_message.emit(f"  Error scraping {artist_url}: {exc}")
-                    socials = {"insta": None, "facebook": None, "twitter": None, "website": None}
-                self.log_message.emit(
-                    f"[Row {idx}/{total_target}] Socials for {artist_name or artist_url}: "
-                    f"IG={socials.get('insta')}, "
-                    f"FB={socials.get('facebook')}, "
-                    f"TW={socials.get('twitter')}, "
-                    f"WEB={socials.get('website')}"
-                )
-                links = []
-                for key in ("insta", "facebook", "twitter"):
-                    val = socials.get(key)
-                    if val and val not in links:
-                        links.append(val)
-                combined = " | ".join(links)
-                if combined:
-                    row["Social Link"] = combined
-                website = socials.get("website")
-                if website:
-                    row["Spotify_Website_URL"] = website
-                    existing_external = (row.get("External Links") or "").strip()
-                    if not existing_external:
-                        row["External Links"] = website
-                    elif website not in existing_external:
-                        row["External Links"] = f"{existing_external} | {website}"
-                self._emit_progress(idx, total_target)
-        finally:
-            try:
-                driver.quit()
-            except Exception:
-                pass
-        try:
-            _ensure_parent_dir(self.output_path)
-            with open(self.output_path, "w", encoding="utf-8", newline="") as f_out:
-                writer = csv.DictWriter(
-                    f_out,
-                    fieldnames=fieldnames,
-                    delimiter=self._input_delimiter or "\t",
-                )
-                writer.writeheader()
-                writer.writerows(rows)
-            self.log_message.emit(f"Spotify enriched CSV written to {self.output_path}")
-        except Exception as exc:
-            self.log_message.emit(f"Failed to write enriched CSV: {exc}")
-
-    def _detect_delimiter(self):
-        default = "\t"
-        try:
-            with open(self.input_path, "r", encoding="utf-8", newline="") as f_in:
-                sample = f_in.read(4096)
-        except Exception:
-            return default
-        if not sample:
-            return default
-        sample = sample.lstrip("\ufeff")
-        try:
-            dialect = csv.Sniffer().sniff(sample, delimiters="\t,;")
-            return dialect.delimiter
-        except Exception:
-            pass
-        tab_count = sample.count("\t")
-        comma_count = sample.count(",")
-        if comma_count >= tab_count and comma_count > 0:
-            return ","
-        if tab_count > 0:
-            return "\t"
-        return default
-
-    @staticmethod
-    def _sanitize_header(value):
-        if isinstance(value, str):
-            return value.lstrip("\ufeff")
-        return value
-
-    def _sanitize_row(self, row):
-        sanitized = {}
-        for key, val in row.items():
-            if isinstance(key, str):
-                new_key = key.lstrip("\ufeff")
-            else:
-                new_key = key
-            sanitized[new_key] = val
-        return sanitized
-
-
-class SpotifyScraperTab(QtWidgets.QWidget):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.worker = None
-        self._build_ui()
-
-    def _build_ui(self):
-        layout = QtWidgets.QVBoxLayout()
-        input_layout = QtWidgets.QHBoxLayout()
-        input_label = QtWidgets.QLabel("Spotify CSV:")
-        self.input_path_edit = QtWidgets.QLineEdit()
-        self.input_path_edit.setPlaceholderText("Select Spotify playlist CSV/TSV")
-        self.input_path_edit.setReadOnly(True)
-        input_browse = QtWidgets.QPushButton("Browse...")
-        input_browse.clicked.connect(self._browse_input_csv)
-        input_layout.addWidget(input_label)
-        input_layout.addWidget(self.input_path_edit)
-        input_layout.addWidget(input_browse)
-        layout.addLayout(input_layout)
-        output_layout = QtWidgets.QHBoxLayout()
-        output_label = QtWidgets.QLabel("Enriched Output:")
-        self.output_path_edit = QtWidgets.QLineEdit("spotify_enriched.csv")
-        self.output_path_edit.setPlaceholderText("spotify_enriched.csv")
-        output_browse = QtWidgets.QPushButton("Browse...")
-        output_browse.clicked.connect(self._browse_output_csv)
-        output_layout.addWidget(output_label)
-        output_layout.addWidget(self.output_path_edit)
-        output_layout.addWidget(output_browse)
-        layout.addLayout(output_layout)
-        self.skip_with_socials_checkbox = QtWidgets.QCheckBox("Skip rows that already have Social Link")
-        self.skip_with_socials_checkbox.setChecked(True)
-        layout.addWidget(self.skip_with_socials_checkbox)
-        max_rows_layout = QtWidgets.QHBoxLayout()
-        max_rows_label = QtWidgets.QLabel("Max artists to process:")
-        self.max_rows_spin = QtWidgets.QSpinBox()
-        self.max_rows_spin.setRange(0, 1000000)
-        self.max_rows_spin.setSpecialValueText("All")
-        self.max_rows_spin.setValue(0)
-        max_rows_layout.addWidget(max_rows_label)
-        max_rows_layout.addWidget(self.max_rows_spin)
-        layout.addLayout(max_rows_layout)
-        buttons_layout = QtWidgets.QHBoxLayout()
-        self.start_button = QtWidgets.QPushButton("Start Spotify Social Enrich")
-        self.start_button.clicked.connect(self.start_enrichment)
-        self.stop_button = QtWidgets.QPushButton("Stop")
-        self.stop_button.clicked.connect(self.stop_enrichment)
-        self.stop_button.setEnabled(False)
-        buttons_layout.addWidget(self.start_button)
-        buttons_layout.addWidget(self.stop_button)
-        layout.addLayout(buttons_layout)
-        enricher_layout = QtWidgets.QHBoxLayout()
-        self.enricher_button = QtWidgets.QPushButton("Spotify CSV Enricher")
-        self.enricher_button.setToolTip(
-            "Take a Spotify CSV and enrich it with socials from Bandcamp / SoundCloud / Last.fm"
-        )
-        self.enricher_button.clicked.connect(self._launch_csv_enricher)
-        enricher_layout.addWidget(self.enricher_button)
-        enricher_layout.addStretch()
-        layout.addLayout(enricher_layout)
-        progress_layout = QtWidgets.QHBoxLayout()
-        self.progress_bar = QtWidgets.QProgressBar()
-        self.progress_bar.setRange(0, 100)
-        self.progress_bar.setValue(0)
-        self.row_progress_label = QtWidgets.QLabel("Row 0 / 0")
-        progress_layout.addWidget(self.progress_bar)
-        progress_layout.addWidget(self.row_progress_label)
-        layout.addLayout(progress_layout)
-        self.log_console = QtWidgets.QPlainTextEdit()
-        self.log_console.setReadOnly(True)
-        layout.addWidget(self.log_console)
-        self.setLayout(layout)
-
-    def _browse_input_csv(self):
-        file_path, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self,
-            "Select Spotify CSV",
-            "",
-            "CSV or TSV Files (*.csv *.tsv *.txt);;All Files (*)",
-        )
-        if file_path:
-            self.input_path_edit.setText(file_path)
-            if not self.output_path_edit.text().strip():
-                self.output_path_edit.setText(self._default_output_path(file_path))
-
-    def _browse_output_csv(self):
-        file_path, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self,
-            "Select Enriched Output",
-            self.output_path_edit.text().strip() or "spotify_enriched.csv",
-            "CSV or TSV Files (*.csv *.tsv *.txt);;All Files (*)",
-        )
-        if file_path:
-            self.output_path_edit.setText(file_path)
-
-    def _launch_csv_enricher(self):
-        if cross_directory_enricher is None:
-            QtWidgets.QMessageBox.warning(
-                self,
-                "Enricher not available",
-                "cross_directory_enricher.py not found.",
-            )
-            return
-        try:
-            cross_directory_enricher.run_spotify_enricher_dialog(parent=self)
-        except Exception as exc:
-            QtWidgets.QMessageBox.warning(
-                self,
-                "Enricher error",
-                f"Failed to launch Spotify CSV Enricher:\n{exc}",
-            )
-
-    def _default_output_path(self, input_path):
-        base, ext = os.path.splitext(input_path)
-        ext = ext or ".csv"
-        return f"{base}_enriched{ext}"
-
-    def start_enrichment(self):
-        if self.worker:
-            self.append_log_line("Spotify enrichment already running.")
-            return
-        input_path = self.input_path_edit.text().strip()
-        if not input_path:
-            self.append_log_line("Please select a Spotify CSV to enrich.")
-            return
-        if not os.path.exists(input_path):
-            self.append_log_line(f"Input CSV not found: {input_path}")
-            return
-        output_path = self.output_path_edit.text().strip()
-        if not output_path:
-            output_path = self._default_output_path(input_path)
-            self.output_path_edit.setText(output_path)
-        self.log_console.clear()
-        self.progress_bar.setValue(0)
-        self.row_progress_label.setText("Row 0 / 0")
-        self.start_button.setEnabled(False)
-        self.stop_button.setEnabled(True)
-        max_rows_value = self.max_rows_spin.value()
-        max_rows = max_rows_value if max_rows_value > 0 else None
-        self.worker = SpotifyScraperWorker(
-            input_path=input_path,
-            output_path=output_path,
-            skip_with_socials=self.skip_with_socials_checkbox.isChecked(),
-            max_rows=max_rows,
-        )
-        self.worker.progress_changed.connect(self.progress_bar.setValue)
-        self.worker.row_progress.connect(self._update_row_progress)
-        self.worker.log_message.connect(self.append_log_line)
-        self.worker.finished.connect(self._on_worker_finished)
-        self.append_log_line("Starting Spotify enrichment...")
-        self.worker.start()
-
-    def stop_enrichment(self):
-        if self.worker:
-            self.worker.cancel()
-            self.append_log_line("Cancellation requested...")
-
-    def _update_row_progress(self, current, total):
-        self.row_progress_label.setText(f"Row {current} / {total}")
-
-    def _on_worker_finished(self):
-        worker = self.worker
-        cancelled = False
-        if worker:
-            try:
-                worker.wait()
-            except Exception:
-                pass
-            cancelled = getattr(worker, "_cancelled", False)
-        self.worker = None
-        self.start_button.setEnabled(True)
-        self.stop_button.setEnabled(False)
-        if cancelled:
-            self.append_log_line("Spotify enrichment cancelled.")
-        else:
-            self.append_log_line("Spotify enrichment completed.")
-
-    def append_log_line(self, message):
-        self.log_console.appendPlainText(message)
-        scrollbar = self.log_console.verticalScrollBar()
-        if scrollbar:
-            scrollbar.setValue(scrollbar.maximum())
-
-    def shutdown(self):
-        worker = self.worker
-        if not worker:
-            return
-        if worker.isRunning():
-            worker.cancel()
-            try:
-                finished = worker.wait(10000)
-            except Exception:
-                finished = False
-            if not finished:
-                try:
-                    worker.terminate()
-                    worker.wait(2000)
-                except Exception:
-                    pass
-        self.worker = None
-
 class CrossDirectoryEnricherTab(QtWidgets.QWidget):
     def __init__(self, parent=None, enricher_module=None):
         super().__init__(parent)
@@ -6403,8 +5760,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.facebook_tab = QtWidgets.QWidget()
         self.tabs.addTab(self.facebook_tab, "Facebook Scraping")
         self.create_facebook_tab()
-        self.spotify_tab = SpotifyScraperTab()
-        self.tabs.addTab(self.spotify_tab, "Spotify Scraper")
         self.cross_enricher_tab = CrossDirectoryEnricherTab(
             enricher_module=cross_directory_enricher
         )
@@ -6685,8 +6040,6 @@ class MainWindow(QtWidgets.QMainWindow):
                         thread.wait(2000)
                     except Exception:
                         pass
-        if hasattr(self, "spotify_tab") and hasattr(self.spotify_tab, "shutdown"):
-            self.spotify_tab.shutdown()
         if (
             hasattr(self, "cross_enricher_tab")
             and hasattr(self.cross_enricher_tab, "shutdown")
