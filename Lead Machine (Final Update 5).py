@@ -128,6 +128,11 @@ from dateutil.relativedelta import relativedelta
 import unicodedata
 from spotify_scraper import scrape_spotify
 
+try:
+    import cross_directory_enricher
+except ImportError:
+    cross_directory_enricher = None
+
 # ---------------------------
 # Bandcamp Configuration
 # ---------------------------
@@ -6038,6 +6043,15 @@ class SpotifyScraperTab(QtWidgets.QWidget):
         buttons_layout.addWidget(self.start_button)
         buttons_layout.addWidget(self.stop_button)
         layout.addLayout(buttons_layout)
+        enricher_layout = QtWidgets.QHBoxLayout()
+        self.enricher_button = QtWidgets.QPushButton("Spotify CSV Enricher")
+        self.enricher_button.setToolTip(
+            "Take a Spotify CSV and enrich it with socials from Bandcamp / SoundCloud / Last.fm"
+        )
+        self.enricher_button.clicked.connect(self._launch_csv_enricher)
+        enricher_layout.addWidget(self.enricher_button)
+        enricher_layout.addStretch()
+        layout.addLayout(enricher_layout)
         progress_layout = QtWidgets.QHBoxLayout()
         self.progress_bar = QtWidgets.QProgressBar()
         self.progress_bar.setRange(0, 100)
@@ -6072,6 +6086,23 @@ class SpotifyScraperTab(QtWidgets.QWidget):
         )
         if file_path:
             self.output_path_edit.setText(file_path)
+
+    def _launch_csv_enricher(self):
+        if cross_directory_enricher is None:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Enricher not available",
+                "cross_directory_enricher.py not found.",
+            )
+            return
+        try:
+            cross_directory_enricher.run_spotify_enricher_dialog(parent=self)
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Enricher error",
+                f"Failed to launch Spotify CSV Enricher:\n{exc}",
+            )
 
     def _default_output_path(self, input_path):
         base, ext = os.path.splitext(input_path)
