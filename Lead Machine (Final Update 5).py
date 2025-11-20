@@ -5475,13 +5475,39 @@ def extract_emails(text):
     email_pattern = r'([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})'
     return list(set(re.findall(email_pattern, text)))
 
+
+def _unwrap_mailto_from_href(href: str) -> str:
+    """Extract an email address from a direct or Facebook-redirected mailto link."""
+    if not href:
+        return ""
+    href = href.strip()
+    if not href:
+        return ""
+    lowered = href.lower()
+    if lowered.startswith("mailto:"):
+        return href.split("mailto:", 1)[1].split("?", 1)[0]
+    if "facebook.com/l.php" in lowered and "mailto%3a" in lowered:
+        try:
+            parsed = urlparse(href)
+            query = parse_qs(parsed.query or "")
+            target = query.get("u", [""])[0]
+            if target:
+                unwrapped = unquote(target)
+                if unwrapped.lower().startswith("mailto:"):
+                    return unwrapped.split("mailto:", 1)[1].split("?", 1)[0]
+        except Exception:
+            return ""
+    return ""
+
+
 def login_facebook(driver, fb_username, fb_password):
-    driver.get('https://www.facebook.com/')
-    WebDriverWait(driver, 15).until(EC.presence_of_element_located((By.ID, 'email')))
-    driver.find_element(By.ID, 'email').send_keys(fb_username)
-    driver.find_element(By.ID, 'pass').send_keys(fb_password)
-    driver.find_element(By.NAME, 'login').click()
-    WebDriverWait(driver, 15).until(EC.presence_of_element_located((By.TAG_NAME, 'body')))
+    driver.get("https://www.facebook.com/")
+    WebDriverWait(driver, 15).until(EC.presence_of_element_located((By.ID, "email")))
+    driver.find_element(By.ID, "email").send_keys(fb_username)
+    driver.find_element(By.ID, "pass").send_keys(fb_password)
+    driver.find_element(By.NAME, "login").click()
+    WebDriverWait(driver, 15).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+
 
 def _extract_social_links(row):
     """Return all usable social URLs (split on ';' or ',') from likely columns."""
@@ -5491,18 +5517,23 @@ def _extract_social_links(row):
         "SOCIAL LINK",
         "Facebook",
         "facebook",
-        "FACEBOOK"
+        "FACEBOOK",
     ]
     urls = []
+    split_pattern = r"[;,\|]"
     for col in candidate_columns:
         if col in row and pd.notna(row[col]):
             value = str(row[col]).strip()
             if value:
-                parts = re.split(r"[;,]", value)
-                for part in parts:
-                    url = part.strip()
-                    if url:
-                        urls.append(url)
+                for part in re.split(split_pattern, value):
+                    part = part.strip()
+                    if not part:
+                        continue
+                    if " http" in part or " https" in part:
+                        tokens = part.split()
+                        part = tokens[0] if tokens else ""
+                    if part:
+                        urls.append(part)
     return urls
 
 
@@ -5510,6 +5541,7 @@ def _extract_social_link_from_row(row):
     """Maintain backward compatibility: return the first social link if present."""
     links = _extract_social_links(row)
     return links[0] if links else ""
+
 
 def _safe_row_value(row, key, fallback=""):
     if key not in row:
@@ -5519,6 +5551,7 @@ def _safe_row_value(row, key, fallback=""):
         return fallback
     return value
 
+
 def _goto_facebook_about(driver, page_url: str, timeout: float = 5.0) -> bool:
     """
     Try multiple strategies to land on the About tab for a Facebook page.
@@ -5527,6 +5560,7 @@ def _goto_facebook_about(driver, page_url: str, timeout: float = 5.0) -> bool:
     normalized = (page_url or "").strip()
     if not normalized:
         return False
+
     try:
         parsed_src = urlparse(normalized)
         source_host = (parsed_src.netloc or "").lower().lstrip("www.")
@@ -5540,22 +5574,28 @@ def _goto_facebook_about(driver, page_url: str, timeout: float = 5.0) -> bool:
         (By.XPATH, "//a[contains(@href,'about_contact_and_basic_info')]"),
         (By.XPATH, "//a[contains(@href,'about_details')]"),
         (By.XPATH, "//a[contains(@href,'/about')]"),
+        (By.XPATH, "//a[.//span[text()='About']]"),
+        (By.XPATH, "//a[normalize-space(text())='About']"),
     ]
     for by, locator in about_selectors:
         try:
-            target = WebDriverWait(driver, timeout).until(EC.element_to_be_clickable((by, locator)))
+            target = WebDriverWait(driver, timeout).until(
+                EC.element_to_be_clickable((by, locator))
+            )
             href = (target.get_attribute("href") or "").strip()
             if href:
                 try:
                     parsed_href = urlparse(href)
-                    href_host = (parsed_href.netloc or "").lower()
+                    href_host = (parsed_href.netloc or "").lower().lstrip("www.")
                 except Exception:
                     href_host = ""
-                href_host = href_host.lstrip("www.")
                 if href_host and source_host and href_host != source_host:
-                    continue  # Skip global Meta "About" links that navigate away.
+                    # Skip meta/global links that navigate away from the artist page.
+                    continue
             driver.execute_script("arguments[0].click();", target)
-            WebDriverWait(driver, timeout).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+            WebDriverWait(driver, timeout).until(
+                EC.presence_of_element_located((By.TAG_NAME, "body"))
+            )
             return True
         except Exception:
             continue
@@ -5568,11 +5608,14 @@ def _goto_facebook_about(driver, page_url: str, timeout: float = 5.0) -> bool:
     for candidate in about_variants:
         try:
             driver.get(candidate)
-            WebDriverWait(driver, timeout).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+            WebDriverWait(driver, timeout).until(
+                EC.presence_of_element_located((By.TAG_NAME, "body"))
+            )
             return True
         except Exception:
             continue
     return False
+
 
 # =============================================================================
 # UPDATED scrape_csv Function (Simpler Version with Wait Times of 0.5 sec and Session Refresh every 20 pages)
@@ -5581,16 +5624,42 @@ def scrape_csv(input_csv, output_csv, fb_username, fb_password, max_emails=None)
     existing_data = pd.DataFrame()
     if os.path.exists(output_csv):
         existing_data = pd.read_csv(output_csv)
+
     data = pd.read_csv(input_csv)
-    # Normalize column names to remove extra whitespace.
     data.columns = [col.strip() for col in data.columns]
+
+    result_columns = [
+        "artist",
+        "location",
+        "song_title",
+        "sounds_like",
+        "release_date",
+        "Release Date",
+        "url",
+        "emails",
+        "Played on triple J",
+        "Played on Unearthed",
+        "latest_release_date",
+        "primary_genre",
+        "source_tag",
+        "date_added",
+    ]
     results = []
     emails_found = 0
-    processed_urls = set(existing_data['url'].tolist() if not existing_data.empty else [])
-    exclude_urls = {"https://www.facebook.com/triplejunearthed/", "https://www.facebook.com/abc/"}
+
+    existing_urls = []
+    if not existing_data.empty and "url" in existing_data.columns:
+        existing_urls = existing_data["url"].dropna().tolist()
+    processed_urls = set(existing_urls)
+
+    exclude_urls = {
+        "https://www.facebook.com/triplejunearthed/",
+        "https://www.facebook.com/abc/",
+    }
     exclude_urls_lower = {url.lower() for url in exclude_urls}
+
     facebook_rows = []
-    for index, row in data.iterrows():
+    for _, row in data.iterrows():
         links = _extract_social_links(row)
         if not links:
             continue
@@ -5598,88 +5667,116 @@ def scrape_csv(input_csv, output_csv, fb_username, fb_password, max_emails=None)
             url = candidate.strip()
             if not url:
                 continue
-            url_lower = url.lower()
-            if url_lower in exclude_urls_lower or url in processed_urls:
+            lowered = url.lower()
+            if lowered in exclude_urls_lower or url in processed_urls:
                 continue
-            if "facebook.com" in url_lower:
+            if "facebook.com" in lowered:
                 facebook_rows.append((row, url))
                 break
+
     if not facebook_rows:
         print("No Facebook pages to process.")
         return
+
     driver = setup_facebook_driver()
     login_facebook(driver, fb_username, fb_password)
+
     session_counter = 0
     for row, url in facebook_rows:
         if not url:
             continue
+
         preexisting_emails = []
-        if 'Email' in row and pd.notna(row['Email']):
-            preexisting_emails = extract_emails(str(row['Email']))
+        if "Email" in row and pd.notna(row["Email"]):
+            preexisting_emails = extract_emails(str(row["Email"]))
+
         try:
             print(f"Scraping Facebook page: {url}")
             driver.get(url)
             session_counter += 1
-            # Refresh the session every 20 pages.
+
             if session_counter % 20 == 0:
                 print("Refreshing Facebook session...")
                 driver.quit()
                 driver = setup_facebook_driver()
                 login_facebook(driver, fb_username, fb_password)
+
             navigated = _goto_facebook_about(driver, url, timeout=5)
             if not navigated:
                 print(f"Warning: could not open About section for {url}; scanning current page.")
-            time.sleep(1.0)
-            WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.TAG_NAME, 'body')))
-            soup = BeautifulSoup(driver.page_source, 'html.parser')
+
+            time.sleep(0.5)
+            WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+
+            soup = BeautifulSoup(driver.page_source, "html.parser")
             emails = list(preexisting_emails)
+
             body_text = soup.get_text(" ", strip=True)
             if body_text:
                 emails.extend(extract_emails(body_text))
-            for anchor in soup.select('a[href^="mailto:"]'):
-                href = anchor.get("href") or ""
-                if href.startswith("mailto:"):
-                    addr = href.split("mailto:")[-1].split("?", 1)[0]
-                    if addr:
-                        emails.append(addr)
-            unique_emails = sorted(set(email.strip() for email in emails if email))
+
+            for anchor in soup.find_all("a", href=True):
+                candidate = _unwrap_mailto_from_href(anchor.get("href"))
+                if not candidate:
+                    lynx_attr = anchor.get("data-lynx-uri") or anchor.get("data-lynx-href")
+                    candidate = _unwrap_mailto_from_href(lynx_attr or "")
+                if candidate:
+                    emails.append(candidate)
+
+            unique_emails = sorted({email.strip() for email in emails if email})
             if unique_emails:
-                # Format artist name: replace hyphens with spaces and capitalise each word.
-                artist_name = row.get('Artist Name', '')
-                artist_name = artist_name.replace('-', ' ').title()
-                song_title = _safe_row_value(row, 'Song Title', '')
-                if (not song_title) and ('Latest Release' in row):
-                    song_title = _safe_row_value(row, 'Latest Release', '')
-                release_date_value = _safe_row_value(row, 'Release Date', '') or _safe_row_value(row, 'Latest Release Date', '')
-                primary_genre_value = _safe_row_value(row, 'Primary Genre', '')
-                source_tag = _safe_row_value(row, 'Source Tag', '')
-                results.append({
-                    'artist': artist_name,
-                    'location': row.get('Location', ''),
-                    'song_title': song_title,
-                    'sounds_like': row.get('Sounds Like', ''),
-                    'release_date': release_date_value,
-                    'Release Date': release_date_value,
-                    'url': url,
-                    'emails': ', '.join(unique_emails),
-                    'Played on triple J': row.get('Played on triple J', ''),
-                    'Played on Unearthed': row.get('Played on Unearthed', ''),
-                    'latest_release_date': release_date_value,
-                    'primary_genre': primary_genre_value,
-                    'source_tag': source_tag,
-                    'date_added': datetime.datetime.now().strftime("%Y-%m-%d")
-                })
+                artist_name = str(row.get("Artist Name", "") or "").replace("-", " ").title()
+                song_title = _safe_row_value(row, "Song Title", "")
+                if not song_title and "Latest Release" in row:
+                    song_title = _safe_row_value(row, "Latest Release", "")
+                release_date_value = (
+                    _safe_row_value(row, "Release Date", "")
+                    or _safe_row_value(row, "Latest Release Date", "")
+                )
+                primary_genre_value = _safe_row_value(row, "Primary Genre", "")
+                source_tag = _safe_row_value(row, "Source Tag", "")
+
+                results.append(
+                    {
+                        "artist": artist_name,
+                        "location": row.get("Location", ""),
+                        "song_title": song_title,
+                        "sounds_like": row.get("Sounds Like", ""),
+                        "release_date": release_date_value,
+                        "Release Date": release_date_value,
+                        "url": url,
+                        "emails": ", ".join(unique_emails),
+                        "Played on triple J": row.get("Played on triple J", ""),
+                        "Played on Unearthed": row.get("Played on Unearthed", ""),
+                        "latest_release_date": release_date_value,
+                        "primary_genre": primary_genre_value,
+                        "source_tag": source_tag,
+                        "date_added": datetime.datetime.now().strftime("%Y-%m-%d"),
+                    }
+                )
                 emails_found += len(unique_emails)
                 if max_emails is not None and emails_found >= max_emails:
                     break
         except Exception as e:
             print(f"Error scraping {url}: {e}")
+
         processed_urls.add(url)
-        # Random sleep between 1 and 2 seconds.
-        time.sleep(random.uniform(1, 2))
+        time.sleep(0.5)
+
     driver.quit()
-    results_df = pd.DataFrame(results)
-    combined_data = pd.concat([existing_data, results_df]).drop_duplicates(subset=['url', 'emails'])
+    results_df = pd.DataFrame(results, columns=result_columns)
+    if existing_data.empty:
+        existing_data = pd.DataFrame(columns=result_columns)
+    else:
+        for col in result_columns:
+            if col not in existing_data.columns:
+                existing_data[col] = ""
+
+    combined_data = (
+        pd.concat([existing_data[result_columns], results_df], ignore_index=True)
+        .drop_duplicates(subset=["url", "emails"])
+        .reindex(columns=result_columns)
+    )
     combined_data.to_csv(output_csv, index=False)
     print(f"Scraping completed. Results saved to {output_csv}")
 
