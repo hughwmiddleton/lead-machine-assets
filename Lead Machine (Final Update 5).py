@@ -6153,9 +6153,14 @@ class SpotifyScraperTab(QtWidgets.QWidget):
         self.row_progress_label.setText(f"Row {current} / {total}")
 
     def _on_worker_finished(self):
+        worker = self.worker
         cancelled = False
-        if self.worker:
-            cancelled = getattr(self.worker, "_cancelled", False)
+        if worker:
+            try:
+                worker.wait()
+            except Exception:
+                pass
+            cancelled = getattr(worker, "_cancelled", False)
         self.worker = None
         self.start_button.setEnabled(True)
         self.stop_button.setEnabled(False)
@@ -6340,6 +6345,12 @@ class CrossDirectoryEnricherTab(QtWidgets.QWidget):
     def _handle_finished(self, output_path: str):
         success = bool(output_path)
         self.start_button.setEnabled(True)
+        worker = self.worker
+        if worker:
+            try:
+                worker.wait()
+            except Exception:
+                pass
         self.worker = None
         if success:
             QtWidgets.QMessageBox.information(
@@ -6366,9 +6377,15 @@ class CrossDirectoryEnricherTab(QtWidgets.QWidget):
             return
         if worker.isRunning():
             try:
-                worker.wait(2000)
+                finished = worker.wait(2000)
             except Exception:
-                pass
+                finished = False
+            if not finished and worker.isRunning():
+                try:
+                    worker.terminate()
+                    worker.wait(2000)
+                except Exception:
+                    pass
         self.worker = None
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
@@ -6608,6 +6625,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.artist_log.append("Artist scraping thread finished.")
         self.artist_progress_bar.setVisible(False)
         self.artist_start_button.setEnabled(True)
+        thread = self.artist_thread
+        if thread:
+            try:
+                thread.wait()
+            except Exception:
+                pass
         self.artist_thread = None
     def start_facebook_scraping(self):
         input_csv = self.input_csv_edit.text().strip()
@@ -6632,6 +6655,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.fb_log.append("Facebook scraping thread finished.")
         self.fb_progress_bar.setVisible(False)
         self.fb_start_button.setEnabled(True)
+        thread = self.fb_thread
+        if thread:
+            try:
+                thread.wait()
+            except Exception:
+                pass
         self.fb_thread = None
 
     def closeEvent(self, event):

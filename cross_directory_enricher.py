@@ -170,11 +170,23 @@ SOURCE_PRIORITY = {
     "soundcloud": 1,
     "lastfm": 2,
     "unearthed": 3,
-    "live_search": 4,
+    "bandcamp_live": 5,
+    "soundcloud_live": 5,
+    "lastfm_live": 5,
+    "live_search": 5,
+}
+
+SOURCE_BASE_NAMES = {
+    "bandcamp": "Bandcamp",
+    "soundcloud": "SoundCloud",
+    "lastfm": "Last.fm",
+    "unearthed": "Triple J Unearthed",
+    "live_search": "Live search",
 }
 
 MAX_WEBSITES = 2
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+MULTI_VALUE_SEPARATOR = ", "
 
 
 @dataclass
@@ -185,6 +197,7 @@ class EnrichmentPayload:
     link_hubs: Set[str] = field(default_factory=set)
     source_dir: Optional[str] = None
     source_url: Optional[str] = None
+    source_detail: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -203,13 +216,44 @@ def _build_session() -> requests.Session:
     return session
 
 
+def _format_source_display(source_key: Optional[str]) -> str:
+    if not source_key:
+        return ""
+    key = source_key.strip().lower()
+    live_suffix = False
+    if key.endswith("_live"):
+        live_suffix = True
+        key = key[:-5]
+    base_name = SOURCE_BASE_NAMES.get(key, key.title())
+    if live_suffix or key == "live_search":
+        return f"{base_name} (live search)"
+    return base_name
+
+
+def _canonical_source_key(label: Optional[str]) -> str:
+    if not label:
+        return ""
+    normalized = re.sub(r"[^a-z0-9]+", "", label.strip().lower())
+    if not normalized:
+        return ""
+    priority_keys = list(SOURCE_PRIORITY.keys())
+    live_keys = [k for k in priority_keys if k.endswith("_live") or k == "live_search"]
+    base_keys = [k for k in priority_keys if k not in live_keys]
+    for key in live_keys + base_keys:
+        key_norm = re.sub(r"[^a-z0-9]+", "", key.lower())
+        if key_norm and key_norm in normalized:
+            return key
+    return normalized
+
+
 def _read_csv_flexible(path: str) -> Optional[pd.DataFrame]:
     if not os.path.exists(path):
         return None
     last_exc = None
     for kwargs in ({"sep": None, "engine": "python"}, {}):
         try:
-            return pd.read_csv(path, **kwargs)
+            df = pd.read_csv(path, **kwargs)
+            return _sanitize_dataframe(df)
         except Exception as exc:
             last_exc = exc
     print(f"[Enricher] Failed to read CSV {path}: {last_exc}")
@@ -220,6 +264,27 @@ def _ensure_parent_dir(path: str) -> None:
     directory = os.path.dirname(os.path.abspath(path))
     if directory and not os.path.exists(directory):
         os.makedirs(directory, exist_ok=True)
+
+
+def _sanitize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None:
+        return df
+    try:
+        new_columns = []
+        updated = False
+        for col in df.columns:
+            if isinstance(col, str):
+                sanitized = col.lstrip("\ufeff")
+                new_columns.append(sanitized)
+                if sanitized != col:
+                    updated = True
+            else:
+                new_columns.append(col)
+        if updated:
+            df.columns = new_columns
+    except Exception:
+        pass
+    return df
 
 
 def _split_multi_value(value, delimiter: Optional[str] = None) -> Iterable[str]:
@@ -269,7 +334,8 @@ def _split_pipe_cell(value, is_email: bool = False) -> Set[str]:
     if not isinstance(value, str):
         value = str(value)
     values = set()
-    for part in value.split("|"):
+    normalized = value.replace("|", "\n").replace(", ", "\n")
+    for part in normalized.split("\n"):
         part = part.strip()
         if not part:
             continue
@@ -644,6 +710,7 @@ class CrossDirectoryEnricherWorker(QThread):
             link_hubs=link_hubs,
             source_dir=source,
             source_url=_extract_profile_url(row),
+            source_detail=_format_source_display(source),
         )
         return payload
 
@@ -665,22 +732,25 @@ class CrossDirectoryEnricherWorker(QThread):
         sites_all = existing_sites | new_sites
         emails_all = existing_emails | new_emails
         if socials_all:
-            df.at[row_idx, "Social Link"] = " | ".join(
+            df.at[row_idx, "Social Link"] = MULTI_VALUE_SEPARATOR.join(
                 sorted(socials_all, key=_social_sort_key)
             )
         if sites_all:
             ordered_sites = sorted(sites_all)
             if MAX_WEBSITES:
                 ordered_sites = ordered_sites[:MAX_WEBSITES]
-            df.at[row_idx, "External Links"] = " | ".join(ordered_sites)
+            df.at[row_idx, "External Links"] = MULTI_VALUE_SEPARATOR.join(ordered_sites)
         if emails_all:
-            df.at[row_idx, "Email"] = " | ".join(sorted(emails_all))
+            df.at[row_idx, "Email"] = MULTI_VALUE_SEPARATOR.join(sorted(emails_all))
         if payload.source_dir:
-            current = (_clean_cell(df.at[row_idx, "Source Directory"]) or "").lower()
-            current_priority = SOURCE_PRIORITY.get(current, 999)
-            candidate_priority = SOURCE_PRIORITY.get(payload.source_dir, 999)
-            if not current or candidate_priority < current_priority:
-                df.at[row_idx, "Source Directory"] = payload.source_dir
+            current_raw = _clean_cell(df.at[row_idx, "Source Directory"]) or ""
+            current_key = _canonical_source_key(current_raw)
+            current_priority = SOURCE_PRIORITY.get(current_key, 999)
+            candidate_key = payload.source_dir
+            candidate_priority = SOURCE_PRIORITY.get(candidate_key, 999)
+            if not current_key or candidate_priority < current_priority:
+                display_value = payload.source_detail or _format_source_display(candidate_key)
+                df.at[row_idx, "Source Directory"] = display_value
                 df.at[row_idx, "Source URL"] = payload.source_url or ""
 
     def _live_lookup(self, artist_name: str) -> Optional[EnrichmentPayload]:
@@ -803,13 +873,15 @@ class CrossDirectoryEnricherWorker(QThread):
                 f"[Enricher] No actionable data on {source_dir} profile: {profile_url}"
             )
             return None
+        live_key = f"{source_dir}_live"
         payload = EnrichmentPayload(
             socials=socials,
             websites=websites,
             emails=emails,
             link_hubs=link_hubs,
-            source_dir="live_search",
+            source_dir=live_key,
             source_url=profile_url,
+            source_detail=_format_source_display(live_key),
         )
         return payload
 
