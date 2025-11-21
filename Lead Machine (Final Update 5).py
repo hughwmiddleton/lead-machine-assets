@@ -549,7 +549,7 @@ def _write_empty_csv_with_headers(path: str):
     _ensure_parent_dir(path)
     headers = [
         'Artist Name', 'Location', 'Song Title', 'Sounds Like', 'Social Link', 'SoundCloud Link',
-        'Played on triple J', 'Played on Unearthed', 'Release Date', 'Primary Genre', 'Date Added'
+        'Played on triple J', 'Played on Unearthed', 'Release Date', 'Primary Genre', 'Date Added', 'Email'
     ]
     pd.DataFrame(columns=headers).to_csv(path, index=False, encoding="utf-8-sig")
 
@@ -809,7 +809,7 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200)
             played_on_triplej = "yes" if drum_status_raw == "triple j" else ""
             played_on_unearthed = "yes" if drum_status_raw == "triple j unearthed" else ""
             artist_data.append((artist_name, location, song_title, sounds_like, social_links,
-                                "", played_on_triplej, played_on_unearthed, release_date, ""))
+                                "", played_on_triplej, played_on_unearthed, release_date, "", ""))
     except Exception as e:
         print(f"Error during website scraping: {e}")
     finally:
@@ -922,7 +922,7 @@ def save_to_csv(data, filename):
     _ensure_parent_dir(filename)
     headers = [
         'Artist Name', 'Location', 'Song Title', 'Sounds Like', 'Social Link', 'SoundCloud Link',
-        'Played on triple J', 'Played on Unearthed', 'Release Date', 'Primary Genre', 'Date Added'
+        'Played on triple J', 'Played on Unearthed', 'Release Date', 'Primary Genre', 'Date Added', 'Email'
     ]
     current_date = datetime.datetime.now().strftime("%Y-%m-%d")
 
@@ -942,12 +942,25 @@ def save_to_csv(data, filename):
                 existing_data[col] = ""
 
     new_data = []
-    expected_fields = len(headers) - 1  # exclude Date Added (set during write)
+    data_columns = [col for col in headers if col != 'Date Added']
+    expected_fields = len(data_columns)
     for entry in data:
         entry_list = list(entry)
         while len(entry_list) < expected_fields:
             entry_list.append("")
-        artist_name, location, song_title, sounds_like, social_links, soundcloud_link, played_on_triplej, played_on_unearthed, release_date, primary_genre = entry_list[:expected_fields]
+        (
+            artist_name,
+            location,
+            song_title,
+            sounds_like,
+            social_links,
+            soundcloud_link,
+            played_on_triplej,
+            played_on_unearthed,
+            release_date,
+            primary_genre,
+            email_value
+        ) = entry_list[:expected_fields]
         if isinstance(social_links, (str, bytes)):
             links_iterable = [social_links] if social_links else []
         else:
@@ -966,7 +979,8 @@ def save_to_csv(data, filename):
                 'Played on Unearthed': played_on_unearthed,
                 'Release Date': release_date,
                 'Primary Genre': primary_genre,
-                'Date Added': current_date
+                'Date Added': current_date,
+                'Email': email_value
             })
 
     combined = pd.concat([existing_data, pd.DataFrame(new_data)], ignore_index=True)
@@ -1115,7 +1129,8 @@ def scrape_lastfm_similar(seed_artists, existing_csv="artist_social_links.csv", 
             "",
             "",
             "not present",
-            primary_genre
+            primary_genre,
+            ""
         ))
         processed += 1
 
@@ -1177,6 +1192,8 @@ _BC_RELEASE_PATTERNS = [
     r"\breleased\s+([A-Za-z]+)\s+(\d{4})",
     r"\breleased\s+(\d{4})"
 ]
+
+_BC_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", re.IGNORECASE)
 
 def _parse_any_date_to_iso(text: str):
     """
@@ -1819,8 +1836,15 @@ def _bandcamp_collect_contacts(artist_dict: dict) -> list:
     for value in socials.values():
         if value and _bandcamp_contact_is_valid(value):
             contacts.append(value)
-    email_value = artist_dict.get("email")
-    if email_value:
+    email_values = []
+    primary_email = (artist_dict.get("email") or "").strip()
+    if primary_email:
+        email_values.append(primary_email)
+    for item in artist_dict.get("emails", []) or []:
+        cleaned = (item or "").strip()
+        if cleaned and cleaned not in email_values:
+            email_values.append(cleaned)
+    for email_value in email_values:
         contacts.append(f"mailto:{email_value}")
     seen = set()
     deduped = []
@@ -2223,6 +2247,11 @@ def scrape_bandcamp(seed_tags_or_url, pages_per_tag=5, existing_csv="artist_soci
                 primary_genre_value = primary_genre_value.title()
             release_date_value = artist_dict.get("latest_release_date", "") or ""
             contact_payload = ", ".join(contacts) if contacts else best_contact
+            email_value = ", ".join(
+                [email.strip() for email in (artist_dict.get("emails") or []) if email and email.strip()]
+            )
+            if not email_value:
+                email_value = (artist_dict.get("email", "") or "").strip()
             song_title_value = tile_title or artist_dict.get("latest_release_title", "") or ""
             artist_name_value = tile_artist or artist_dict.get("artist_name", "")
             bandcamp_rows.append((
@@ -2235,14 +2264,15 @@ def scrape_bandcamp(seed_tags_or_url, pages_per_tag=5, existing_csv="artist_soci
                 "",
                 "",
                 release_date_value,
-                primary_genre_value
+                primary_genre_value,
+                email_value
             ))
             socials = artist_dict.get("socials", {})
             enriched_rows.append({
                 "Artist Name": artist_name_value,
                 "Profile URL": artist_dict.get("profile_url", ""),
                 "Website": artist_dict.get("website", ""),
-                "Email": artist_dict.get("email", ""),
+                "Email": email_value,
                 "Instagram": socials.get("instagram", ""),
                 "Twitter": socials.get("twitter", ""),
                 "Facebook": socials.get("facebook", ""),
@@ -2721,6 +2751,7 @@ def _bandcamp_parse_html(profile_url: str, html: str, seed_primary_genre: str = 
         "location": "",
         "website": "",
         "email": "",
+        "emails": [],
         "socials": {
             "instagram": "",
             "twitter": "",
@@ -2772,12 +2803,23 @@ def _bandcamp_parse_html(profile_url: str, html: str, seed_primary_genre: str = 
             seen_links.add(url)
             collected_links.append(url)
 
+    def _record_email(value: str):
+        if not value:
+            return
+        cleaned = value.strip()
+        if not cleaned:
+            return
+        if cleaned not in artist["emails"]:
+            artist["emails"].append(cleaned)
+        if not artist["email"]:
+            artist["email"] = cleaned
+
     for anchor in soup.find_all('a', href=True):
         href = anchor['href'].strip()
         if href.startswith("mailto:"):
             email_value = href.split("mailto:")[-1].split("?")[0]
             if email_value:
-                artist["email"] = email_value
+                _record_email(email_value)
             continue
         normalized = href.split('#')[0]
         if normalized.startswith("//"):
@@ -2810,6 +2852,32 @@ def _bandcamp_parse_html(profile_url: str, html: str, seed_primary_genre: str = 
         else:
             if not artist["website"]:
                 artist["website"] = normalized
+    contact_texts = []
+    contact_selectors = [
+        "#bio-container",
+        "#bio-text",
+        ".bio-container",
+        ".bio-text",
+        ".bio",
+        ".band-bio",
+        ".profile-bio",
+        "#rightColumn",
+        "#right-column",
+        ".rightColumn",
+        ".tralbum-about",
+        ".tralbumData",
+    ]
+    for selector in contact_selectors:
+        for node in soup.select(selector):
+            text = node.get_text(" ", strip=True)
+            if text:
+                contact_texts.append(text)
+    combined_contact_text = " ".join(contact_texts)
+    for block in contact_texts or [combined_contact_text]:
+        if not block:
+            continue
+        for match in _BC_EMAIL_RE.findall(block):
+            _record_email(match)
     artist["all_social_links"] = collected_links
     release_container = soup.find('li', class_=re.compile('music-grid-item', re.I))
     if release_container:
@@ -5287,6 +5355,83 @@ def _extract_social_link_from_row(row):
     links = _extract_social_links(row)
     return links[0] if links else ""
 
+def _extract_existing_emails(row, precomputed_links=None):
+    """Gather any email addresses already present in Email/Social Link fields."""
+    emails = []
+    seen = set()
+
+    def _record(email_candidate: str):
+        cleaned = (email_candidate or "").strip()
+        if cleaned and cleaned not in seen:
+            seen.add(cleaned)
+            emails.append(cleaned)
+
+    if "Email" in row and pd.notna(row["Email"]):
+        for addr in extract_emails(str(row["Email"])):
+            _record(addr)
+
+    links = precomputed_links if precomputed_links is not None else _extract_social_links(row)
+    for link in links:
+        text = (link or "").strip()
+        if not text:
+            continue
+        lower = text.lower()
+        if lower.startswith("mailto:"):
+            addr = text.split("mailto:", 1)[-1].split("?", 1)[0]
+            _record(addr)
+        else:
+            for addr in extract_emails(text):
+                _record(addr)
+
+    return emails
+
+def _build_email_result(row, url, emails, preferred_url=""):
+    """Assemble the Facebook email row payload from an input row + emails."""
+    unique_emails = []
+    seen = set()
+    for value in emails or []:
+        cleaned = (value or "").strip()
+        if cleaned and cleaned not in seen:
+            seen.add(cleaned)
+            unique_emails.append(cleaned)
+    if not unique_emails:
+        return None, []
+
+    def _row_value(keys, default=""):
+        for key in keys:
+            if key in row and not pd.isna(row.get(key)):
+                return str(row.get(key))
+        return default
+
+    artist_name = _row_value(["Artist Name", "artist"]).replace("-", " ").title()
+    song_title = _safe_row_value(row, "Song Title", "")
+    if (not song_title) and ("Latest Release" in row):
+        song_title = _safe_row_value(row, "Latest Release", "")
+    release_date_value = (
+        _safe_row_value(row, "Release Date", "")
+        or _safe_row_value(row, "Latest Release Date", "")
+    )
+    primary_genre_value = _safe_row_value(row, "Primary Genre", "")
+    source_tag = _safe_row_value(row, "Source Tag", "")
+    final_url = preferred_url or url or _extract_social_link_from_row(row) or ""
+    payload = {
+        "artist": artist_name,
+        "location": row.get("Location", row.get("location", "")),
+        "song_title": song_title,
+        "sounds_like": row.get("Sounds Like", row.get("sounds_like", "")),
+        "release_date": release_date_value,
+        "Release Date": release_date_value,
+        "url": final_url,
+        "emails": ", ".join(unique_emails),
+        "Played on triple J": row.get("Played on triple J", row.get("Played on tri", "")),
+        "Played on Unearthed": row.get("Played on Unearthed", row.get("Played on Ur", "")),
+        "latest_release_date": release_date_value,
+        "primary_genre": primary_genre_value,
+        "source_tag": source_tag,
+        "date_added": datetime.datetime.now().strftime("%Y-%m-%d"),
+    }
+    return payload, unique_emails
+
 def _safe_row_value(row, key, fallback=""):
     if key not in row:
         return fallback
@@ -5358,8 +5503,24 @@ def scrape_csv(input_csv, output_csv, fb_username, fb_password, max_emails=None)
     facebook_rows = []
     for index, row in data.iterrows():
         links = _extract_social_links(row)
+        preexisting_emails = _extract_existing_emails(row, links)
+        existing_contact_url = ""
+        for candidate_link in links or []:
+            lowered = candidate_link.lower()
+            if "facebook.com" not in lowered:
+                existing_contact_url = candidate_link
+                break
+        if not existing_contact_url and links:
+            existing_contact_url = links[0]
+
+        if preexisting_emails:
+            payload, _ = _build_email_result(row, "", preexisting_emails, preferred_url=existing_contact_url)
+            if payload:
+                results.append(payload)
+
         if not links:
             continue
+
         for candidate in links:
             url = candidate.strip()
             if not url:
@@ -5368,20 +5529,25 @@ def scrape_csv(input_csv, output_csv, fb_username, fb_password, max_emails=None)
             if url_lower in exclude_urls_lower or url in processed_urls:
                 continue
             if "facebook.com" in url_lower:
-                facebook_rows.append((row, url))
+                facebook_rows.append((row, url, preexisting_emails))
                 break
     if not facebook_rows:
-        print("No Facebook pages to process.")
+        if results:
+            results_df = pd.DataFrame(results)
+            combined_data = pd.concat([existing_data, results_df]).drop_duplicates(subset=['url', 'emails'])
+            combined_data.to_csv(output_csv, index=False)
+            print(f"Scraping completed. Results saved to {output_csv}")
+        else:
+            print("No Facebook pages to process.")
         return
     driver = setup_facebook_driver()
     login_facebook(driver, fb_username, fb_password)
     session_counter = 0
-    for row, url in facebook_rows:
+    remaining_rows = []
+    for idx, (row, url, known_emails) in enumerate(facebook_rows):
         if not url:
             continue
-        preexisting_emails = []
-        if 'Email' in row and pd.notna(row['Email']):
-            preexisting_emails = extract_emails(str(row['Email']))
+        preexisting_emails = list(known_emails or [])
         try:
             print(f"Scraping Facebook page: {url}")
             driver.get(url)
@@ -5408,42 +5574,30 @@ def scrape_csv(input_csv, output_csv, fb_username, fb_password, max_emails=None)
                     addr = href.split("mailto:")[-1].split("?", 1)[0]
                     if addr:
                         emails.append(addr)
-            unique_emails = sorted(set(email.strip() for email in emails if email))
-            if unique_emails:
-                # Format artist name: replace hyphens with spaces and capitalise each word.
-                artist_name = row.get('Artist Name', '')
-                artist_name = artist_name.replace('-', ' ').title()
-                song_title = _safe_row_value(row, 'Song Title', '')
-                if (not song_title) and ('Latest Release' in row):
-                    song_title = _safe_row_value(row, 'Latest Release', '')
-                release_date_value = _safe_row_value(row, 'Release Date', '') or _safe_row_value(row, 'Latest Release Date', '')
-                primary_genre_value = _safe_row_value(row, 'Primary Genre', '')
-                source_tag = _safe_row_value(row, 'Source Tag', '')
-                results.append({
-                    'artist': artist_name,
-                    'location': row.get('Location', ''),
-                    'song_title': song_title,
-                    'sounds_like': row.get('Sounds Like', ''),
-                    'release_date': release_date_value,
-                    'Release Date': release_date_value,
-                    'url': url,
-                    'emails': ', '.join(unique_emails),
-                    'Played on triple J': row.get('Played on triple J', ''),
-                    'Played on Unearthed': row.get('Played on Unearthed', ''),
-                    'latest_release_date': release_date_value,
-                    'primary_genre': primary_genre_value,
-                    'source_tag': source_tag,
-                    'date_added': datetime.datetime.now().strftime("%Y-%m-%d")
-                })
+            payload, unique_emails = _build_email_result(row, url, emails, preferred_url=url)
+            if payload:
+                results.append(payload)
                 emails_found += len(unique_emails)
                 if max_emails is not None and emails_found >= max_emails:
+                    remaining_rows = facebook_rows[idx + 1 :]
                     break
         except Exception as e:
             print(f"Error scraping {url}: {e}")
+            if preexisting_emails:
+                payload, _ = _build_email_result(row, url, preexisting_emails, preferred_url=url)
+                if payload:
+                    results.append(payload)
         processed_urls.add(url)
         # Random sleep between 1 and 2 seconds.
         time.sleep(random.uniform(1, 2))
+    else:
+        remaining_rows = []
     driver.quit()
+    for row, url, known_emails in remaining_rows:
+        if known_emails:
+            payload, _ = _build_email_result(row, url, known_emails, preferred_url=url)
+            if payload:
+                results.append(payload)
     results_df = pd.DataFrame(results)
     combined_data = pd.concat([existing_data, results_df]).drop_duplicates(subset=['url', 'emails'])
     combined_data.to_csv(output_csv, index=False)
