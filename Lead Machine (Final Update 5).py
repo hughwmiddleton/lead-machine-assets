@@ -253,6 +253,24 @@ SOCIAL_HOSTS = (
 )
 SOCIAL_HOSTS_PATTERN = r"(?:linktr\.ee|beacons\.ai|bandcamp\.com|carrd\.co|flow\.page|instagram\.com|facebook\.com|x\.com|twitter\.com|youtube\.com|tiktok\.com)"
 URL_RE = re.compile(rf"https?://{SOCIAL_HOSTS_PATTERN}[^\s\"'<)]+", re.IGNORECASE)
+_SOCIAL_TEXT_RE = re.compile(
+    rf"((?:https?://|www\.)?{SOCIAL_HOSTS_PATTERN}[^\s\"'<)]+)",
+    re.IGNORECASE,
+)
+_BANDCAMP_HANDLE_HINTS = (
+    (
+        re.compile(r"(?:instagram|ig)\s*[:\-]?\s*@?([a-z0-9._]{3,})", re.IGNORECASE),
+        "https://instagram.com/{handle}",
+    ),
+    (
+        re.compile(r"(?:twitter|x)\s*[:\-]?\s*@?([a-z0-9_]{3,})", re.IGNORECASE),
+        "https://twitter.com/{handle}",
+    ),
+    (
+        re.compile(r"(?:tiktok)\s*[:\-]?\s*@?([a-z0-9._]{3,})", re.IGNORECASE),
+        "https://www.tiktok.com/@{handle}",
+    ),
+)
 HANDLE_RE = re.compile(r"^/[a-z0-9][a-z0-9._-]{1,49}$", re.IGNORECASE)
 SC_DISCOVERY_BAN = {
     "feed", "upload", "terms-of-use", "imprint", "transparency-reports", "pages",
@@ -2896,25 +2914,45 @@ def _bandcamp_parse_html(profile_url: str, html: str, seed_primary_genre: str = 
             artist["emails"].append(cleaned)
         if not artist["email"]:
             artist["email"] = cleaned
-
-    for anchor in soup.find_all('a', href=True):
-        href = anchor['href'].strip()
-        if href.startswith("mailto:"):
-            email_value = href.split("mailto:")[-1].split("?")[0]
+    def _consume_external_candidate(candidate: str):
+        if not candidate:
+            return
+        candidate = candidate.strip()
+        if not candidate:
+            return
+        candidate = candidate.strip("()[]{}<>.,; ")
+        if not candidate:
+            return
+        if candidate.lower().startswith("mailto:"):
+            email_value = candidate.split("mailto:")[-1].split("?")[0]
             if email_value:
                 _record_email(email_value)
-            continue
-        normalized = href.split('#')[0]
+            return
+        normalized = candidate.split("#")[0]
         if normalized.startswith("//"):
             normalized = f"https:{normalized}"
-        if normalized.startswith("/"):
+        elif normalized.startswith("/"):
             normalized = urljoin(profile_url, normalized)
-        parsed = urlparse(normalized)
-        if not parsed.scheme.startswith("http"):
-            continue
-        netloc = parsed.netloc.lower()
-        if netloc.endswith("bandcamp.com"):
-            continue
+        elif normalized.startswith("www."):
+            normalized = f"https://{normalized}"
+        else:
+            try:
+                parsed = urlparse(normalized)
+                if not parsed.scheme:
+                    normalized = f"https://{normalized}"
+            except Exception:
+                normalized = f"https://{normalized}"
+        normalized = normalize_external_url(normalized)
+        try:
+            parsed = urlparse(normalized)
+        except Exception:
+            return
+        scheme = (parsed.scheme or "").lower()
+        if not scheme.startswith("http"):
+            return
+        netloc = (parsed.netloc or "").lower()
+        if not netloc or netloc.endswith("bandcamp.com"):
+            return
         _record_link(normalized)
         if "instagram.com" in netloc:
             artist["socials"]["instagram"] = normalized
@@ -2935,6 +2973,9 @@ def _bandcamp_parse_html(profile_url: str, html: str, seed_primary_genre: str = 
         else:
             if not artist["website"]:
                 artist["website"] = normalized
+
+    for anchor in soup.find_all('a', href=True):
+        _consume_external_candidate(anchor['href'])
     contact_texts = []
     contact_selectors = [
         "#bio-container",
@@ -2961,6 +3002,14 @@ def _bandcamp_parse_html(profile_url: str, html: str, seed_primary_genre: str = 
             continue
         for match in _BC_EMAIL_RE.findall(block):
             _record_email(match)
+        for candidate in _SOCIAL_TEXT_RE.findall(block):
+            _consume_external_candidate(candidate)
+        for pattern, template in _BANDCAMP_HANDLE_HINTS:
+            for handle in pattern.findall(block):
+                handle_clean = handle.strip().lstrip("@").strip(".,/ ")
+                if not handle_clean:
+                    continue
+                _consume_external_candidate(template.format(handle=handle_clean))
     artist["all_social_links"] = collected_links
     release_container = soup.find('li', class_=re.compile('music-grid-item', re.I))
     release_page_html = ""
