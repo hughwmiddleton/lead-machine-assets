@@ -1275,6 +1275,87 @@ def _extract_from_meta(soup) -> tuple:
                 return date_iso, prec, desc
     return None, None, None
 
+def _extract_from_tralbum_attr(soup) -> tuple:
+    """Look for data-tralbum attributes embedded on the page."""
+    for node in soup.find_all(attrs={"data-tralbum": True}):
+        blob = node.get("data-tralbum")
+        if not blob:
+            continue
+        try:
+            data = json.loads(blob)
+        except Exception:
+            continue
+        blocks = []
+        if isinstance(data, dict):
+            blocks.append(data)
+            current = data.get("current")
+            if isinstance(current, dict):
+                blocks.append(current)
+            trackinfo = data.get("trackinfo")
+            if isinstance(trackinfo, list):
+                blocks.extend([ti for ti in trackinfo if isinstance(ti, dict)])
+        for block in blocks:
+            for key in ("release_date", "publish_date", "album_release_date", "date"):
+                val = block.get(key)
+                if isinstance(val, str) and val.strip():
+                    date_iso, prec = _parse_any_date_to_iso(val)
+                    if date_iso:
+                        return date_iso, prec, val
+    return None, None, None
+
+def _extract_from_tralbum_data(soup) -> tuple:
+    """Parse the inline TralbumData blob for release dates."""
+    pattern = re.compile(r"var\s+TralbumData\s*=", re.IGNORECASE)
+    for script in soup.find_all("script"):
+        text = script.string or ""
+        if not text or "TralbumData" not in text:
+            continue
+        match = pattern.search(text)
+        if not match:
+            continue
+        remainder = text[match.end():].strip()
+        brace_index = remainder.find("{")
+        if brace_index == -1:
+            continue
+        json_text = remainder[brace_index:]
+        brace_count = 0
+        end_index = None
+        for idx, ch in enumerate(json_text):
+            if ch == "{":
+                brace_count += 1
+            elif ch == "}":
+                brace_count -= 1
+                if brace_count == 0:
+                    end_index = idx + 1
+                    break
+        if end_index is None:
+            continue
+        payload = json_text[:end_index]
+        try:
+            data = json.loads(payload)
+        except Exception:
+            continue
+        candidates = []
+        blocks = []
+        if isinstance(data, dict):
+            blocks.append(data)
+            current = data.get("current")
+            if isinstance(current, dict):
+                blocks.append(current)
+            trackinfo = data.get("trackinfo")
+            if isinstance(trackinfo, list):
+                blocks.extend([ti for ti in trackinfo if isinstance(ti, dict)])
+        for block in blocks:
+            for key in ("release_date", "publish_date", "date", "album_release_date"):
+                val = block.get(key)
+                if isinstance(val, str) and val.strip():
+                    candidates.append(val.strip())
+        for val in candidates:
+            date_iso, prec = _parse_any_date_to_iso(val)
+            if date_iso:
+                return date_iso, prec, val
+    return None, None, None
+
 def _extract_from_time_tag(soup) -> tuple:
     for time_el in soup.find_all("time"):
         dt_attr = (time_el.get("datetime") or "").strip()
@@ -1312,6 +1393,8 @@ def bandcamp_extract_release_date(html: str) -> dict:
     soup = BeautifulSoup(html, "html.parser")
     extractors = (
         _extract_from_json_ld,
+        _extract_from_tralbum_attr,
+        _extract_from_tralbum_data,
         _extract_from_meta,
         _extract_from_time_tag,
         _extract_from_text_released,
@@ -2880,6 +2963,7 @@ def _bandcamp_parse_html(profile_url: str, html: str, seed_primary_genre: str = 
             _record_email(match)
     artist["all_social_links"] = collected_links
     release_container = soup.find('li', class_=re.compile('music-grid-item', re.I))
+    release_page_html = ""
     if release_container:
         title_el = release_container.find(class_=re.compile('title', re.I))
         if title_el:
@@ -2893,6 +2977,35 @@ def _bandcamp_parse_html(profile_url: str, html: str, seed_primary_genre: str = 
                 artist["latest_release_precision"] = prec or artist["latest_release_precision"]
             else:
                 artist["latest_release_date"] = raw_text
+        if not release_page_html:
+            release_anchor = release_container.find("a", href=True)
+            if release_anchor:
+                rel = release_anchor.get("href", "").strip()
+                release_url = ""
+                if rel.startswith("//"):
+                    release_url = f"https:{rel}"
+                elif rel.startswith("http"):
+                    release_url = rel
+                elif rel.startswith("/"):
+                    release_url = urljoin(profile_url, rel)
+                elif rel:
+                    release_url = urljoin(profile_url, f"/{rel.lstrip('/')}")
+                if release_url and release_url != profile_url:
+                    release_page_html = _bandcamp_fetch_profile_html(release_url)
+                    if release_page_html:
+                        release_info = bandcamp_extract_release_date(release_page_html)
+                        if release_info.get("date_iso"):
+                            artist["latest_release_date"] = release_info["date_iso"]
+                            artist["latest_release_precision"] = release_info.get("precision") or artist["latest_release_precision"]
+                        if not artist["latest_release_title"]:
+                            release_soup = BeautifulSoup(release_page_html, "html.parser")
+                            title_candidate = (
+                                release_soup.select_one("h2.trackTitle")
+                                or release_soup.select_one(".trackTitle")
+                                or release_soup.select_one("h1")
+                            )
+                            if title_candidate:
+                                artist["latest_release_title"] = title_candidate.get_text(" ", strip=True)
     if not artist["latest_release_title"]:
         track_title = soup.find(class_=re.compile('trackTitle', re.I))
         if track_title:
