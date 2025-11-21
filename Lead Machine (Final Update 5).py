@@ -1809,6 +1809,9 @@ def _bandcamp_contact_is_valid(url: str) -> bool:
 
 def _bandcamp_collect_contacts(artist_dict: dict) -> list:
     contacts = []
+    for extra in artist_dict.get("all_social_links", []) or []:
+        if extra and _bandcamp_contact_is_valid(extra):
+            contacts.append(extra)
     website = artist_dict.get("website")
     if website and _bandcamp_contact_is_valid(website):
         contacts.append(website)
@@ -2133,7 +2136,15 @@ def scrape_bandcamp(seed_tags_or_url, pages_per_tag=5, existing_csv="artist_soci
             key = artist_dict["profile_url"].rstrip("/").lower()
             entry = aggregated.get(key)
             if entry:
-                entry["contacts"].update(contacts)
+                existing_contacts = entry.get("contacts") or []
+                if isinstance(existing_contacts, set):
+                    existing_contacts = list(existing_contacts)
+                seen_existing = set(existing_contacts)
+                for link in contacts:
+                    if link not in seen_existing:
+                        existing_contacts.append(link)
+                        seen_existing.add(link)
+                entry["contacts"] = existing_contacts
                 current = entry["artist"]
                 for field in ["artist_name", "location", "latest_release_title", "latest_release_date", "website", "email"]:
                     if not current.get(field) and artist_dict.get(field):
@@ -2144,7 +2155,7 @@ def scrape_bandcamp(seed_tags_or_url, pages_per_tag=5, existing_csv="artist_soci
             else:
                 aggregated[key] = {
                     "artist": artist_dict,
-                    "contacts": set(contacts),
+                    "contacts": list(contacts),
                     "tile": tile_info
                 }
             kept_after_location += 1
@@ -2199,7 +2210,10 @@ def scrape_bandcamp(seed_tags_or_url, pages_per_tag=5, existing_csv="artist_soci
 
         for entry in aggregated.values():
             artist_dict = entry["artist"]
-            contacts = [link for link in entry["contacts"] if _bandcamp_contact_is_valid_url(link)]
+            raw_contacts = entry.get("contacts") or []
+            if isinstance(raw_contacts, set):
+                raw_contacts = list(raw_contacts)
+            contacts = [link for link in raw_contacts if _bandcamp_contact_is_valid_url(link)]
             best_contact = _best_contact_(contacts) if contacts else ""
             tile = entry.get("tile") or {}
             tile_artist = (tile.get("artist") or "").strip()
@@ -2208,7 +2222,7 @@ def scrape_bandcamp(seed_tags_or_url, pages_per_tag=5, existing_csv="artist_soci
             if isinstance(primary_genre_value, str):
                 primary_genre_value = primary_genre_value.title()
             release_date_value = artist_dict.get("latest_release_date", "") or ""
-            contact_payload = [best_contact] if best_contact else []
+            contact_payload = ", ".join(contacts) if contacts else best_contact
             song_title_value = tile_title or artist_dict.get("latest_release_title", "") or ""
             artist_name_value = tile_artist or artist_dict.get("artist_name", "")
             bandcamp_rows.append((
@@ -2748,6 +2762,16 @@ def _bandcamp_parse_html(profile_url: str, html: str, seed_primary_genre: str = 
         if bio_el:
             artist["location"] = bio_el.get_text(" ", strip=True)
     artist["location"] = _canon_location(artist.get("location", ""))
+    collected_links = []
+    seen_links = set()
+
+    def _record_link(url: str):
+        if not url:
+            return
+        if url not in seen_links:
+            seen_links.add(url)
+            collected_links.append(url)
+
     for anchor in soup.find_all('a', href=True):
         href = anchor['href'].strip()
         if href.startswith("mailto:"):
@@ -2766,6 +2790,7 @@ def _bandcamp_parse_html(profile_url: str, html: str, seed_primary_genre: str = 
         netloc = parsed.netloc.lower()
         if netloc.endswith("bandcamp.com"):
             continue
+        _record_link(normalized)
         if "instagram.com" in netloc:
             artist["socials"]["instagram"] = normalized
         elif "facebook.com" in netloc or "fb.me" in netloc:
@@ -2785,6 +2810,7 @@ def _bandcamp_parse_html(profile_url: str, html: str, seed_primary_genre: str = 
         else:
             if not artist["website"]:
                 artist["website"] = normalized
+    artist["all_social_links"] = collected_links
     release_container = soup.find('li', class_=re.compile('music-grid-item', re.I))
     if release_container:
         title_el = release_container.find(class_=re.compile('title', re.I))
