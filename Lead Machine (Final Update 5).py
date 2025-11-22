@@ -4685,11 +4685,59 @@ def _sc_quick_first_track_meta(driver, profile_url: str, timeout=12, hop=True) -
         html = driver.page_source
         soup = BeautifulSoup(html, "html.parser")
         card = None
+        first_url = None
+        track_candidates = []
         for c in soup.select(".soundList__item, .lazyLoadingList__item, li, article"):
+            anchor = (c.select_one("a.soundTitle__title") or
+                      c.select_one("a.sc-link-primary") or
+                      c.select_one(f"a[href^='/{handle}/']"))
             t = c.find("time")
-            if t and (t.get("datetime") or "").strip():
-                card = c
-                break
+            if not anchor and not t:
+                continue
+            candidate_title = ""
+            if anchor:
+                candidate = anchor.get_text(" ", strip=True)
+                if candidate and candidate.lower() not in ("home", "tracks", "likes"):
+                    candidate_title = candidate[:200]
+            href = ""
+            if anchor and anchor.get("href"):
+                href = anchor["href"]
+                if not href.startswith("http"):
+                    href = f"https://soundcloud.com{href}"
+            iso_val = ""
+            precision_val = ""
+            sort_key = None
+            if t:
+                raw_dt = (t.get("datetime") or "").strip()
+                if not raw_dt:
+                    raw_dt = t.get_text(" ", strip=True)
+                if raw_dt:
+                    iso_val, precision_val = _parse_any_date_to_iso(raw_dt)
+                    if iso_val:
+                        try:
+                            sort_key = datetime.datetime.strptime(iso_val, "%Y-%m-%d")
+                        except Exception:
+                            sort_key = None
+            track_candidates.append({
+                "card": c,
+                "title": candidate_title,
+                "href": href,
+                "iso": iso_val,
+                "precision": precision_val,
+                "sort_key": sort_key
+            })
+        if track_candidates:
+            dated = [cand for cand in track_candidates if cand["sort_key"]]
+            chosen = max(dated, key=lambda cand: cand["sort_key"]) if dated else track_candidates[0]
+            card = chosen["card"]
+            if chosen["title"]:
+                title = chosen["title"]
+            if chosen["iso"]:
+                date_iso = chosen["iso"]
+                precision = chosen["precision"]
+            first_url = chosen["href"] or None
+        else:
+            first_url = None
         if card:
             anchor = (card.select_one("a.soundTitle__title") or
                       card.select_one("a.sc-link-primary") or
@@ -4697,9 +4745,13 @@ def _sc_quick_first_track_meta(driver, profile_url: str, timeout=12, hop=True) -
             if anchor:
                 candidate = anchor.get_text(" ", strip=True)
                 if candidate and candidate.lower() not in ("home", "tracks", "likes"):
-                    title = candidate[:200]
+                    if not title:
+                        title = candidate[:200]
+                if not first_url and anchor.get("href"):
+                    href = anchor["href"]
+                    first_url = href if href.startswith("http") else f"https://soundcloud.com{href}"
             t = card.find("time")
-            if t:
+            if t and not date_iso:
                 dt = (t.get("datetime") or "").strip()
                 if dt:
                     iso, prec = _parse_any_date_to_iso(dt)
@@ -4717,12 +4769,6 @@ def _sc_quick_first_track_meta(driver, profile_url: str, timeout=12, hop=True) -
                     if token:
                         genres.append(token.lower())
         if hop and (not title or not date_iso):
-            first_url = None
-            if card:
-                a = card.select_one("a[href]")
-                if a and a.get("href"):
-                    href = a["href"]
-                    first_url = href if href.startswith("http") else f"https://soundcloud.com{href}"
             if first_url:
                 driver.get(first_url)
                 WebDriverWait(driver, timeout).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
