@@ -59,6 +59,53 @@ EMPTY_FIELD_MARKERS = {
     "-",
 }
 
+NOISE_HOSTS = {
+    "cbsinteractive.com",
+    "careers.paramount.com",
+}
+
+GENERIC_SOCIAL_ROOT_HOSTS = {
+    "facebook.com",
+    "m.facebook.com",
+    "instagram.com",
+    "twitter.com",
+    "x.com",
+    "tiktok.com",
+    "youtube.com",
+    "youtu.be",
+    "soundcloud.com",
+    "bandcamp.com",
+    "last.fm",
+    "lastfm.com",
+    "open.spotify.com",
+    "spotify.com",
+}
+
+NOISE_PATH_KEYWORDS = (
+    "/img/",
+    "/image/",
+    "/images/",
+    "/static/",
+    "/assets/",
+    "/uploads/",
+)
+
+NOISE_FILE_EXTENSIONS = {
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".gif",
+    ".svg",
+    ".bmp",
+    ".webp",
+    ".tif",
+    ".tiff",
+}
+
+GENERIC_SOCIAL_HANDLES = {
+    "instagram.com": {"last_fm", "last.fm"},
+}
+
 DIRECTORY_FIELD_MAP: Dict[str, Dict[str, Tuple[str, ...]]] = {
     "bandcamp": {
         "primary_genre": (
@@ -416,6 +463,42 @@ def _split_multi_value(value, delimiter: Optional[str] = None) -> Iterable[str]:
     return [part.strip() for part in parts if part.strip()]
 
 
+def _is_noise_url(raw_url: str) -> bool:
+    if not raw_url:
+        return True
+    url = raw_url.strip()
+    if not url:
+        return True
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except Exception:
+        return True
+    host = (parsed.netloc or "").lower()
+    if not host:
+        return True
+    if host.startswith("www."):
+        host = host[4:]
+    host = host.split(":", 1)[0]
+    path = (parsed.path or "").lower()
+    if host in NOISE_HOSTS:
+        return True
+    if host in GENERIC_SOCIAL_ROOT_HOSTS and not path.strip("/"):
+        return True
+    for keyword in NOISE_PATH_KEYWORDS:
+        if keyword in path:
+            return True
+    _, ext = os.path.splitext(path)
+    if ext and ext in NOISE_FILE_EXTENSIONS:
+        return True
+    segments = [segment for segment in path.split("/") if segment]
+    if segments:
+        first_segment = segments[0].lower()
+        handles = GENERIC_SOCIAL_HANDLES.get(host) or GENERIC_SOCIAL_HANDLES.get("www." + host, set())
+        if handles and first_segment in handles:
+            return True
+    return False
+
+
 def _normalise_url(value: str) -> Optional[str]:
     if not value:
         return None
@@ -456,7 +539,7 @@ def _split_pipe_cell(value, is_email: bool = False) -> Set[str]:
             values.add(part.lower())
         else:
             normalised = _normalise_url(part)
-            if normalised:
+            if normalised and not _is_noise_url(normalised):
                 values.add(normalised)
     return values
 
@@ -502,7 +585,7 @@ def _extract_directory_fields(
         value = row.get(column)
         for item in _split_multi_value(value):
             normalised = _normalise_url(item)
-            if not normalised:
+            if not normalised or _is_noise_url(normalised):
                 continue
             host = _host(normalised)
             if host in LINK_HUB_HOSTS:
@@ -516,7 +599,7 @@ def _extract_directory_fields(
         value = row.get(column)
         for item in _split_multi_value(value):
             normalised = _normalise_url(item)
-            if not normalised:
+            if not normalised or _is_noise_url(normalised):
                 continue
             host = _host(normalised)
             if host in LINK_HUB_HOSTS:
@@ -652,7 +735,7 @@ def _extract_links_from_profile(
             continue
         absolute = urllib.parse.urljoin(profile_url, href)
         normalised = _normalise_url(absolute)
-        if not normalised:
+        if not normalised or _is_noise_url(normalised):
             continue
         parsed = urllib.parse.urlparse(normalised)
         if parsed.scheme not in ("http", "https"):
@@ -703,7 +786,7 @@ def _scrape_link_hub_socials(session: requests.Session, hub_url: str) -> Set[str
             continue
         absolute = urllib.parse.urljoin(hub_url, href)
         normalised = _normalise_url(absolute)
-        if not normalised:
+        if not normalised or _is_noise_url(normalised):
             continue
         host = _host(normalised)
         if any(host.endswith(domain) for domain in SOCIAL_HOST_WHITELIST):
