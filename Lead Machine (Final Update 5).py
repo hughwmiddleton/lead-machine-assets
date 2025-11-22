@@ -5547,6 +5547,27 @@ def _extract_existing_emails(row, precomputed_links=None):
 
     return emails
 
+def _preserve_row_fields(row) -> dict:
+    """Copy a row/Series to a dict, replacing NaN values with empty strings."""
+    if row is None:
+        return {}
+    if isinstance(row, pd.Series):
+        source = row.to_dict()
+    elif isinstance(row, dict):
+        source = dict(row)
+    else:
+        try:
+            source = dict(row)
+        except Exception:
+            source = {}
+    preserved = {}
+    for key, value in source.items():
+        if pd.isna(value):
+            preserved[key] = ""
+        else:
+            preserved[key] = value
+    return preserved
+
 def _build_email_result(row, url, emails, preferred_url=""):
     """Assemble the Facebook email row payload from an input row + emails."""
     unique_emails = []
@@ -5559,39 +5580,46 @@ def _build_email_result(row, url, emails, preferred_url=""):
     if not unique_emails:
         return None, []
 
+    row_data = _preserve_row_fields(row)
+
     def _row_value(keys, default=""):
         for key in keys:
-            if key in row and not pd.isna(row.get(key)):
-                return str(row.get(key))
+            value = row_data.get(key)
+            if value not in ("", None):
+                return str(value)
         return default
 
     artist_name = _row_value(["Artist Name", "artist"]).replace("-", " ").title()
-    song_title = _safe_row_value(row, "Song Title", "")
-    if (not song_title) and ("Latest Release" in row):
-        song_title = _safe_row_value(row, "Latest Release", "")
+    song_title = _safe_row_value(row_data, "Song Title", "")
+    if (not song_title) and ("Latest Release" in row_data):
+        song_title = _safe_row_value(row_data, "Latest Release", "")
     release_date_value = (
-        _safe_row_value(row, "Release Date", "")
-        or _safe_row_value(row, "Latest Release Date", "")
+        _safe_row_value(row_data, "Release Date", "")
+        or _safe_row_value(row_data, "Latest Release Date", "")
+        or _safe_row_value(row_data, "latest_release_date", "")
+        or _safe_row_value(row_data, "release_date", "")
     )
-    primary_genre_value = _safe_row_value(row, "Primary Genre", "")
-    source_tag = _safe_row_value(row, "Source Tag", "")
-    final_url = preferred_url or url or _extract_social_link_from_row(row) or ""
-    payload = {
-        "artist": artist_name,
-        "location": row.get("Location", row.get("location", "")),
-        "song_title": song_title,
-        "sounds_like": row.get("Sounds Like", row.get("sounds_like", "")),
-        "release_date": release_date_value,
-        "Release Date": release_date_value,
-        "url": final_url,
-        "emails": ", ".join(unique_emails),
-        "Played on triple J": row.get("Played on triple J", row.get("Played on tri", "")),
-        "Played on Unearthed": row.get("Played on Unearthed", row.get("Played on Ur", "")),
-        "latest_release_date": release_date_value,
-        "primary_genre": primary_genre_value,
-        "source_tag": source_tag,
-        "date_added": datetime.datetime.now().strftime("%Y-%m-%d"),
-    }
+    primary_genre_value = _safe_row_value(row_data, "Primary Genre", "")
+    source_tag = _safe_row_value(row_data, "Source Tag", "")
+    final_url = preferred_url or url or _extract_social_link_from_row(row_data) or ""
+    payload = dict(row_data)
+    payload["artist"] = artist_name
+    payload["Artist Name"] = payload.get("Artist Name") or artist_name
+    payload["location"] = row_data.get("Location", row_data.get("location", ""))
+    payload["song_title"] = song_title
+    payload["sounds_like"] = row_data.get("Sounds Like", row_data.get("sounds_like", ""))
+    payload["release_date"] = release_date_value
+    payload["Release Date"] = release_date_value
+    payload["url"] = final_url
+    payload["emails"] = ", ".join(unique_emails)
+    payload["Played on triple J"] = row_data.get("Played on triple J", row_data.get("Played on tri", ""))
+    payload["Played on Unearthed"] = row_data.get("Played on Unearthed", row_data.get("Played on Ur", ""))
+    payload["latest_release_date"] = row_data.get("latest_release_date", release_date_value)
+    payload["primary_genre"] = primary_genre_value
+    payload["source_tag"] = source_tag
+    payload["date_added"] = datetime.datetime.now().strftime("%Y-%m-%d")
+    if unique_emails and not payload.get("Email"):
+        payload["Email"] = unique_emails[0]
     return payload, unique_emails
 
 def _safe_row_value(row, key, fallback=""):
@@ -5601,6 +5629,108 @@ def _safe_row_value(row, key, fallback=""):
     if pd.isna(value):
         return fallback
     return value
+
+def _canonicalize_release_date_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Ensure only one 'Release Date' column remains and is populated."""
+    if df is None:
+        return df
+    if df.empty and "Release Date" not in df.columns:
+        df["Release Date"] = ""
+        return df
+    if "Release Date" not in df.columns:
+        df["Release Date"] = ""
+    def _norm(series):
+        if series.empty:
+            return series
+        return series.fillna("").astype(str).str.strip()
+    df["Release Date"] = _norm(df["Release Date"])
+    for alt in ("release_date", "latest_release_date"):
+        if alt not in df.columns:
+            continue
+        alt_values = _norm(df[alt])
+        mask = df["Release Date"].str.len() == 0
+        df.loc[mask, "Release Date"] = alt_values[mask]
+        df.drop(columns=alt, inplace=True)
+    df["Release Date"] = _norm(df["Release Date"])
+    return df
+
+def _ensure_dataframe_column(df: pd.DataFrame, column: str, fallback_column: str | None = None) -> pd.DataFrame:
+    """Ensure a column exists, optionally cloning values from a fallback column."""
+    if df is None:
+        return df
+    if column in df.columns:
+        df[column] = df[column].fillna("").astype(str)
+        if fallback_column and fallback_column in df.columns:
+            fallback_values = df[fallback_column].fillna("").astype(str)
+            mask = df[column].str.strip() == ""
+            df.loc[mask, column] = fallback_values[mask]
+    elif fallback_column and fallback_column in df.columns:
+        df[column] = df[fallback_column].fillna("").astype(str)
+    else:
+        df[column] = ""
+    return df
+
+_FACEBOOK_CANONICAL_COLUMN_MAP = {
+    "Artist Name": ["artist"],
+    "Location": ["location"],
+    "Song Title": ["song_title"],
+    "Sounds Like": ["sounds_like"],
+    "Social Link": ["url"],
+    "Primary Genre": ["Primary Gen", "primary_genre"],
+    "Source Tag": ["source_tag"],
+    "Date Added": ["date_added"],
+    "Email": ["emails"],
+}
+
+_FACEBOOK_OUTPUT_COLUMNS = [
+    "Artist Name",
+    "Location",
+    "Song Title",
+    "Sounds Like",
+    "Social Link",
+    "SoundCloud Link",
+    "Played on triple J",
+    "Played on Unearthed",
+    "Release Date",
+    "Primary Genre",
+    "Source Tag",
+    "Date Added",
+    "Email",
+]
+
+def _finalize_facebook_output_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """Merge duplicate columns and enforce canonical ordering for Facebook CSV export."""
+    if df is None:
+        return df
+    if df.empty:
+        for col in _FACEBOOK_OUTPUT_COLUMNS:
+            if col not in df.columns:
+                df[col] = ""
+        return df[_FACEBOOK_OUTPUT_COLUMNS]
+    df = df.copy()
+    for canonical, alternatives in _FACEBOOK_CANONICAL_COLUMN_MAP.items():
+        if canonical not in df.columns:
+            df[canonical] = ""
+        df[canonical] = df[canonical].fillna("").astype(str)
+        for source in alternatives:
+            if source not in df.columns:
+                continue
+            source_values = df[source].fillna("").astype(str).str.strip()
+            mask = df[canonical].astype(str).str.strip() == ""
+            df.loc[mask, canonical] = source_values[mask]
+    drop_cols = []
+    for alternatives in _FACEBOOK_CANONICAL_COLUMN_MAP.values():
+        for source in alternatives:
+            if source in df.columns:
+                drop_cols.append(source)
+    if drop_cols:
+        df = df.drop(columns=drop_cols)
+    df = _canonicalize_release_date_columns(df)
+    for col in _FACEBOOK_OUTPUT_COLUMNS:
+        if col not in df.columns:
+            df[col] = ""
+    ordered_cols = _FACEBOOK_OUTPUT_COLUMNS + [c for c in df.columns if c not in _FACEBOOK_OUTPUT_COLUMNS]
+    return df[ordered_cols]
 
 def _goto_facebook_about(driver, page_url: str, timeout: float = 5.0) -> bool:
     """
@@ -5653,13 +5783,25 @@ def _goto_facebook_about(driver, page_url: str, timeout: float = 5.0) -> bool:
 def scrape_csv(input_csv, output_csv, fb_username, fb_password, max_emails=None):
     existing_data = pd.DataFrame()
     if os.path.exists(output_csv):
-        existing_data = pd.read_csv(output_csv)
+        try:
+            existing_data = pd.read_csv(output_csv)
+        except Exception:
+            existing_data = pd.DataFrame()
+    existing_data = _ensure_dataframe_column(existing_data, "url", "Social Link")
+    existing_data = _ensure_dataframe_column(existing_data, "emails", "Email")
+    existing_data = _canonicalize_release_date_columns(existing_data)
     data = pd.read_csv(input_csv)
     # Normalize column names to remove extra whitespace.
     data.columns = [col.strip() for col in data.columns]
     results = []
     emails_found = 0
-    processed_urls = set(existing_data['url'].tolist() if not existing_data.empty else [])
+    processed_urls = set()
+    if not existing_data.empty and "url" in existing_data.columns:
+        processed_urls = {
+            value.strip()
+            for value in existing_data["url"].astype(str).tolist()
+            if isinstance(value, str) and value.strip()
+        }
     exclude_urls = {"https://www.facebook.com/triplejunearthed/", "https://www.facebook.com/abc/"}
     exclude_urls_lower = {url.lower() for url in exclude_urls}
     facebook_rows = []
@@ -5696,7 +5838,11 @@ def scrape_csv(input_csv, output_csv, fb_username, fb_password, max_emails=None)
     if not facebook_rows:
         if results:
             results_df = pd.DataFrame(results)
+            results_df = _ensure_dataframe_column(results_df, "url")
+            results_df = _ensure_dataframe_column(results_df, "emails")
+            results_df = _canonicalize_release_date_columns(results_df)
             combined_data = pd.concat([existing_data, results_df]).drop_duplicates(subset=['url', 'emails'])
+            combined_data = _finalize_facebook_output_dataframe(combined_data)
             combined_data.to_csv(output_csv, index=False)
             print(f"Scraping completed. Results saved to {output_csv}")
         else:
@@ -5761,7 +5907,11 @@ def scrape_csv(input_csv, output_csv, fb_username, fb_password, max_emails=None)
             if payload:
                 results.append(payload)
     results_df = pd.DataFrame(results)
+    results_df = _ensure_dataframe_column(results_df, "url")
+    results_df = _ensure_dataframe_column(results_df, "emails")
+    results_df = _canonicalize_release_date_columns(results_df)
     combined_data = pd.concat([existing_data, results_df]).drop_duplicates(subset=['url', 'emails'])
+    combined_data = _finalize_facebook_output_dataframe(combined_data)
     combined_data.to_csv(output_csv, index=False)
     print(f"Scraping completed. Results saved to {output_csv}")
 
