@@ -4315,7 +4315,34 @@ def _sc_first_text(soup, selectors):
     return ""
 
 
-def _sc_extract_profile_meta(driver) -> dict:
+def _sc_preferred_artist_name_from_soup(soup):
+    if soup is None:
+        return ""
+    hero_selectors = [
+        ".soundTitle__usernameHeroName",
+        ".soundTitle__usernameHeroLink:last-child",
+        ".soundTitle__usernameHero a:last-child",
+        "[data-testid='playback-sound-badge-artist-name']",
+    ]
+    for selector in hero_selectors:
+        el = soup.select_one(selector)
+        if not el:
+            continue
+        text = el.get_text(" ", strip=True)
+        if text:
+            return text
+    hero_container = soup.select_one(".soundTitle__usernameHero")
+    if hero_container:
+        text = hero_container.get_text(" ", strip=True)
+        parts = [part.strip("•·|- ").strip() for part in re.split(r"[•·|]", text) if part.strip()]
+        if len(parts) >= 2:
+            candidate = parts[-1]
+            if candidate:
+                return candidate
+    return ""
+
+
+def _sc_extract_profile_meta(driver, soup_override=None) -> dict:
     """
     Best-effort metadata from a SoundCloud profile root page:
       - artist_name (if present)
@@ -4332,19 +4359,26 @@ def _sc_extract_profile_meta(driver) -> dict:
         "release_date": "not present",
         "sounds_like": ""
     }
-    try:
-        _sc_try_dismiss_consent(driver)
-    except Exception:
-        pass
+    preferred_artist = ""
+    if soup_override is None:
+        try:
+            _sc_try_dismiss_consent(driver)
+        except Exception:
+            pass
+        html = driver.page_source
+        soup = BeautifulSoup(html, "html.parser")
+    else:
+        soup = soup_override
+    preferred_artist = _sc_preferred_artist_name_from_soup(soup)
 
-    html = driver.page_source
-    soup = BeautifulSoup(html, "html.parser")
-
-    meta["artist_name"] = _sc_first_text(soup, [
-        "h1.soundTitle__username",
-        "div.profileHeaderInfo h1",
-        "meta[property='og:title']"
-    ])
+    if preferred_artist:
+        meta["artist_name"] = preferred_artist
+    if not meta["artist_name"]:
+        meta["artist_name"] = _sc_first_text(soup, [
+            "h1.soundTitle__username",
+            "div.profileHeaderInfo h1",
+            "meta[property='og:title']"
+        ])
     if not meta["artist_name"]:
         og = soup.select_one("meta[property='og:title']")
         if og and og.get("content"):
@@ -4597,9 +4631,14 @@ def _sc_quick_has_fb_or_email(driver, url: str, timeout=10, debug_prefix="") -> 
 def _sc_profile_basics(driver, profile_url: str, timeout=10) -> tuple:
     location = ""
     bio_text = ""
+    soup = None
     try:
         driver.get(profile_url)
         WebDriverWait(driver, timeout).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+        try:
+            _sc_try_dismiss_consent(driver)
+        except Exception:
+            pass
         try:
             WebDriverWait(driver, 3).until(EC.presence_of_element_located((By.CSS_SELECTOR, ".profileHeaderInfo")))
         except Exception:
@@ -4630,8 +4669,8 @@ def _sc_profile_basics(driver, profile_url: str, timeout=10) -> tuple:
                 if location and bio_text:
                     break
     except Exception:
-        pass
-    return location, bio_text
+        soup = None
+    return location, bio_text, soup
 
 def _sc_quick_first_track_meta(driver, profile_url: str, timeout=12, hop=True) -> tuple:
     title = ""
@@ -4987,8 +5026,11 @@ def _sc_parse_profile(driver, profile_url: str, seed_primary_genre="") -> dict:
         for anchor in soup.find_all("a", href=True):
             anchor["href"] = _sc_unwrap_gate(anchor.get("href", ""))
 
+        preferred_artist = _sc_preferred_artist_name_from_soup(soup)
         og_title = soup.select_one('meta[property="og:title"]')
-        if og_title and og_title.get("content"):
+        if preferred_artist:
+            artist["artist_name"] = preferred_artist
+        elif og_title and og_title.get("content"):
             artist["artist_name"] = og_title["content"].strip()
         if not artist["artist_name"]:
             h1 = soup.find(["h1", "h2"], attrs={"itemprop": re.compile("name", re.I)})
@@ -5363,14 +5405,16 @@ def scrape_soundcloud(website_url, seed_tags=None, pages_per_tag=SOUNDCLOUD_PAGE
                     contact_sounds_like = (contact_data.get("sounds_like") or "").strip()
                     if not contact_sounds_like:
                         contact_sounds_like = _sc_sounds_like_from_bio(contact_data.get("bio_text", ""))
-                location_text, bio_text = _sc_profile_basics(driver, profile_url, timeout=10)
+                location_text, bio_text, profile_soup = _sc_profile_basics(driver, profile_url, timeout=10)
                 title, date_iso, prec, genres = _sc_quick_first_track_meta(driver, profile_url, timeout=12, hop=True)
-                try:
-                    driver.get(profile_url)
-                    WebDriverWait(driver, SOUNDCLOUD_FAST_TIMEOUT_SEC).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
-                    soup_name = BeautifulSoup(driver.page_source, "html.parser")
-                except Exception:
-                    soup_name = None
+                soup_name = profile_soup
+                if soup_name is None:
+                    try:
+                        driver.get(profile_url)
+                        WebDriverWait(driver, SOUNDCLOUD_FAST_TIMEOUT_SEC).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+                        soup_name = BeautifulSoup(driver.page_source, "html.parser")
+                    except Exception:
+                        soup_name = None
                 fallback_name = handle.replace("-", " ").replace("_", " ").title()
                 if soup_name:
                     try:
@@ -5383,7 +5427,7 @@ def scrape_soundcloud(website_url, seed_tags=None, pages_per_tag=SOUNDCLOUD_PAGE
                         pass
                 sounds_like_value = _sc_sounds_like_from_bio(bio_text)
                 try:
-                    meta = _sc_extract_profile_meta(driver)
+                    meta = _sc_extract_profile_meta(driver, soup_override=soup_name)
                 except Exception:
                     meta = {
                         "artist_name": "",
@@ -5405,9 +5449,13 @@ def scrape_soundcloud(website_url, seed_tags=None, pages_per_tag=SOUNDCLOUD_PAGE
                 combined_tags = list(genres or [])
                 if contact_tags:
                     combined_tags.extend(contact_tags)
+                row_payload = contact_data or {}
+                if fallback_name and isinstance(row_payload, dict):
+                    row_payload = dict(row_payload)
+                    row_payload["display_name"] = fallback_name
                 row, external_urls, emails = _sc_build_row(
                     handle=handle,
-                    payload=contact_data,
+                    payload=row_payload,
                     soundcloud_link=profile_url,
                     fallback_name=fallback_name,
                     fallback_location=fallback_location,
