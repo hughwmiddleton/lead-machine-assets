@@ -406,7 +406,7 @@ def _extract_directory_fields(row: dict) -> Tuple[Set[str], Set[str], Set[str], 
             if host in LINK_HUB_HOSTS:
                 link_hubs.add(normalised)
             websites.add(normalised)
-    email_val = row.get("Email") or row.get("Emails")
+    email_val = row.get("Email") or row.get("Emails") or row.get("email")
     for email in _split_multi_value(email_val):
         cleaned = email.strip().lower()
         if cleaned:

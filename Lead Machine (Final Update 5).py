@@ -3181,7 +3181,7 @@ def export_soundcloud_row(data: dict) -> dict:
     exts = data.get("external_urls") or []
     emails = data.get("emails") or []
     row["Social Link"] = "; ".join(exts[:5])
-    row["Email"] = emails[0] if emails else ""
+    row["Email"] = ", ".join(emails) if emails else ""
     row["Song Title"] = ""
     row["Release Date"] = ""
     row["Played on triple J"] = ""
@@ -3287,6 +3287,22 @@ SC_ABOUT_CACHE_REQUIRED_KEYS = (
     "latest_track_tags",
     "sounds_like",
     "bio_text",
+)
+
+SC_CONTACT_TEXT_SELECTORS = (
+    ".profileLinks__contactText",
+    ".profileLinks__body",
+    ".profileLinks__content",
+    ".profileLinks__description",
+    ".profileLinks__text",
+    ".profileLinks__cta",
+    "[data-testid='profileLinksContactText']",
+    "[data-testid='profile-links-contact-text']",
+)
+
+SC_CONTACT_FALLBACK_SELECTORS = (
+    ".profileSidebar",
+    "[class*='profileLinks']",
 )
 
 _SC_THREAD_LOCAL = threading.local()
@@ -3502,14 +3518,28 @@ def extract_sc_links(session: requests.Session, handle: str) -> dict:
     user_genre = ""
     t0 = time.perf_counter()
     html = ""
+    profile_html = ""
     bio_text = ""
     latest_title = ""
     latest_release = ""
     latest_precision = ""
     latest_genre = ""
     latest_tags = []
-    about_url = f"https://soundcloud.com/{handle}/about"
+    root_url = f"https://soundcloud.com/{handle}"
+    about_url = f"{root_url}/about"
     print(f"[dbg] fetching {about_url}")
+    contact_text_seen = set()
+
+    def _record_contact_text(text):
+        if not text:
+            return
+        normalized = re.sub(r"\s+", " ", text)
+        normalized = (normalized or "").strip()
+        if not normalized or normalized in contact_text_seen:
+            return
+        contact_text_seen.add(normalized)
+        _sc_collect_emails_from_text(emails, normalized)
+
     try:
         resp = session.get(about_url, timeout=(6, 12), headers=_rand_headers())
         print(f"[dbg] fetched {handle} status={resp.status_code} len={len(resp.text)}")
@@ -3527,6 +3557,9 @@ def extract_sc_links(session: requests.Session, handle: str) -> dict:
             text = name_el.get_text(strip=True)
             if text:
                 display_name = text
+
+        for snippet in _sc_extract_contact_text_sections(doc):
+            _record_contact_text(snippet)
 
         for a in doc.select(
             'a[href^="mailto:"], '
@@ -3578,14 +3611,42 @@ def extract_sc_links(session: requests.Session, handle: str) -> dict:
         )
         if bio_el:
             bio_text = bio_el.get_text(" ", strip=True)
+            _record_contact_text(bio_text)
         # plain-text email fallback (bios often list contact without mailto)
+        text_blob = ""
         try:
             text_blob = doc.get_text(" ", strip=True)
-            for address in extract_emails(text_blob):
-                if address and not address.lower().endswith("@soundcloud.com"):
-                    emails.add(address)
         except Exception:
-            pass
+            text_blob = ""
+        _record_contact_text(text_blob)
+
+    try:
+        root_resp = session.get(root_url, timeout=(6, 12), headers=_rand_headers())
+        print(f"[dbg] fetched root {handle} status={root_resp.status_code} len={len(root_resp.text)}")
+        root_resp.raise_for_status()
+        profile_html = root_resp.text
+    except Exception as exc:
+        print(f"[warn] {handle} profile fetch failed: {exc}")
+    finally:
+        polite_sleep()
+
+    if profile_html:
+        profile_doc = get_soup(profile_html)
+        for snippet in _sc_extract_contact_text_sections(profile_doc):
+            _record_contact_text(snippet)
+        for meta in profile_doc.select(
+            "meta[property='og:description'], "
+            "meta[property='twitter:description'], "
+            "meta[name='description'], "
+            "meta[name='twitter:description']"
+        ):
+            _record_contact_text(meta.get("content") or "")
+        try:
+            text_blob = profile_doc.get_text(" ", strip=True)
+        except Exception:
+            text_blob = ""
+        if text_blob:
+            _record_contact_text(text_blob[:4000])
 
     did_expand = False
     for candidate in list(external_urls):
@@ -3604,8 +3665,11 @@ def extract_sc_links(session: requests.Session, handle: str) -> dict:
         user_country = api_profile.get("country") or user_country
         user_genre = api_profile.get("genre") or user_genre
         external_urls.update(api_profile.get("external_urls") or [])
-        if not bio_text and api_profile.get("description"):
-            bio_text = api_profile["description"]
+        profile_description = api_profile.get("description") or ""
+        if profile_description:
+            if not bio_text:
+                bio_text = profile_description
+            _record_contact_text(profile_description)
         latest_title = api_profile.get("latest_track_title") or latest_title
         latest_release = api_profile.get("latest_track_release_date") or latest_release
         latest_precision = api_profile.get("latest_track_precision") or latest_precision
@@ -3753,6 +3817,42 @@ def _sc_apply_row_guards(row: dict):
     if genre.lower() in _SC_GENRE_DENY:
         row["Primary Genre"] = ""
     assert row.get("Social Link", "") != "http://firefox.com"
+
+
+def _sc_extract_contact_text_sections(doc):
+    if doc is None:
+        return []
+    seen = set()
+    sections = []
+    for selector in SC_CONTACT_TEXT_SELECTORS:
+        for node in doc.select(selector):
+            text = node.get_text(" ", strip=True)
+            normalized = re.sub(r"\s+", " ", text).strip()
+            if normalized and normalized not in seen:
+                seen.add(normalized)
+                sections.append(normalized)
+    if not sections:
+        for selector in SC_CONTACT_FALLBACK_SELECTORS:
+            for node in doc.select(selector):
+                text = node.get_text(" ", strip=True)
+                normalized = re.sub(r"\s+", " ", text).strip()
+                if not normalized or normalized in seen:
+                    continue
+                lower = normalized.lower()
+                if "@" not in normalized and not any(keyword in lower for keyword in ("book", "contact", "enquiry", "inquiry", "press", "mgmt")):
+                    continue
+                seen.add(normalized)
+                sections.append(normalized)
+    return sections
+
+
+def _sc_collect_emails_from_text(bucket: set, text: str):
+    if not text:
+        return
+    for address in extract_emails(text):
+        cleaned = (address or "").strip()
+        if cleaned and not cleaned.lower().endswith("@soundcloud.com"):
+            bucket.add(cleaned)
 
 
 def _sc_build_row(handle: str, payload: dict, soundcloud_link: str, fallback_name: str = "",
@@ -5528,9 +5628,10 @@ def _extract_existing_emails(row, precomputed_links=None):
             seen.add(cleaned)
             emails.append(cleaned)
 
-    if "Email" in row and pd.notna(row["Email"]):
-        for addr in extract_emails(str(row["Email"])):
-            _record(addr)
+    for key in ("Email", "email"):
+        if key in row and pd.notna(row[key]):
+            for addr in extract_emails(str(row[key])):
+                _record(addr)
 
     links = precomputed_links if precomputed_links is not None else _extract_social_links(row)
     for link in links:
@@ -5679,7 +5780,7 @@ _FACEBOOK_CANONICAL_COLUMN_MAP = {
     "Primary Genre": ["Primary Gen", "primary_genre"],
     "Source Tag": ["source_tag"],
     "Date Added": ["date_added"],
-    "Email": ["emails"],
+    "Email": ["emails", "email"],
 }
 
 _FACEBOOK_OUTPUT_COLUMNS = [
