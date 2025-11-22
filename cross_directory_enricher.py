@@ -11,7 +11,7 @@ import time
 import unicodedata
 import urllib.parse
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, Optional, Set, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 import pandas as pd
 import requests
@@ -41,6 +41,115 @@ DIRECTORY_FILES = {
     "soundcloud": SOUNDCLOUD_CSV,
     "lastfm": LASTFM_CSV,
     "unearthed": UNEARTHED_CSV,
+}
+
+EMPTY_FIELD_MARKERS = {
+    "",
+    "n/a",
+    "na",
+    "none",
+    "null",
+    "not available",
+    "not_present",
+    "not present",
+    "notprovided",
+    "tbd",
+    "unknown",
+    "unavailable",
+    "-",
+}
+
+DIRECTORY_FIELD_MAP: Dict[str, Dict[str, Tuple[str, ...]]] = {
+    "bandcamp": {
+        "primary_genre": (
+            "Primary Genre",
+            "primary_genre",
+            "Genres",
+            "Genre",
+            "seed_genre",
+        ),
+        "release_date": (
+            "Latest Release Date",
+            "Release Date",
+            "latest_release_date",
+            "release_date",
+        ),
+        "location": (
+            "Location",
+            "location",
+            "api_location",
+        ),
+        "email": (
+            "Email",
+            "Emails",
+            "emails",
+        ),
+    },
+    "soundcloud": {
+        "primary_genre": (
+            "Primary Genre",
+            "primary_genre",
+            "Genres",
+        ),
+        "release_date": (
+            "Latest Release Date",
+            "Release Date",
+            "latest_release_date",
+            "release_date",
+        ),
+        "location": (
+            "Location",
+            "location",
+            "city",
+            "country",
+        ),
+        "email": (
+            "Email",
+            "Emails",
+            "emails",
+        ),
+    },
+    "lastfm": {
+        "primary_genre": (
+            "Primary Genre",
+            "primary_genre",
+            "Genre",
+            "Genres",
+        ),
+        "release_date": (
+            "Release Date",
+            "latest_release_date",
+            "Latest Release Date",
+        ),
+        "location": (
+            "Location",
+            "location",
+        ),
+        "email": (
+            "Email",
+            "Emails",
+            "emails",
+        ),
+    },
+    "unearthed": {
+        "primary_genre": (
+            "Primary Genre",
+            "Genre",
+        ),
+        "release_date": (
+            "Release Date",
+            "latest_release_date",
+        ),
+        "location": (
+            "Location",
+            "location",
+        ),
+        "email": (
+            "Email",
+            "Emails",
+            "emails",
+        ),
+    },
 }
 
 LINK_HUB_HOSTS = {
@@ -163,6 +272,10 @@ DIRECTORY_WEBSITE_COLUMNS = (
     "Bandcamp Link",
     "SoundCloud Link",
     "SoundCloud URL",
+    "Profile URL",
+    "Profile",
+    "URL",
+    "url",
 )
 
 SOURCE_PRIORITY = {
@@ -377,7 +490,10 @@ def _extract_profile_url(row: dict) -> Optional[str]:
     return None
 
 
-def _extract_directory_fields(row: dict) -> Tuple[Set[str], Set[str], Set[str], Set[str]]:
+def _extract_directory_fields(
+    row: dict,
+    source: Optional[str] = None,
+) -> Tuple[Set[str], Set[str], Set[str], Set[str]]:
     socials: Set[str] = set()
     websites: Set[str] = set()
     emails: Set[str] = set()
@@ -406,12 +522,107 @@ def _extract_directory_fields(row: dict) -> Tuple[Set[str], Set[str], Set[str], 
             if host in LINK_HUB_HOSTS:
                 link_hubs.add(normalised)
             websites.add(normalised)
-    email_val = row.get("Email") or row.get("Emails") or row.get("email")
-    for email in _split_multi_value(email_val):
-        cleaned = email.strip().lower()
-        if cleaned:
-            emails.add(cleaned)
+    email_values: List[Any] = []
+    if source and source in DIRECTORY_FIELD_MAP:
+        email_columns = DIRECTORY_FIELD_MAP[source].get("email", ())
+        for column in email_columns:
+            email_values.append(row.get(column))
+    else:
+        email_values.extend(
+            [row.get("Email"), row.get("Emails"), row.get("email"), row.get("emails")]
+        )
+    for email_value in email_values:
+        for email in _split_multi_value(email_value):
+            cleaned = email.strip().lower()
+            if cleaned:
+                emails.add(cleaned)
     return socials, websites, emails, link_hubs
+
+
+def _coerce_directory_value(value: Any) -> str:
+    if isinstance(value, (list, tuple, set)):
+        parts = [_clean_cell(part) for part in value]
+        value = MULTI_VALUE_SEPARATOR.join(part for part in parts if part)
+    text = _clean_cell(value)
+    if not text:
+        return ""
+    if text.lower() in EMPTY_FIELD_MARKERS:
+        return ""
+    return text
+
+
+def _normalise_genre_value(value: str) -> str:
+    if not value:
+        return ""
+    for delimiter in (";", "|"):
+        if delimiter in value:
+            value = value.split(delimiter, 1)[0]
+            break
+    return value.strip()
+
+
+def _iter_directory_field_values(
+    row: Dict[str, Any],
+    source: str,
+    field_key: str,
+) -> Iterable[str]:
+    mapping = DIRECTORY_FIELD_MAP.get(source, {})
+    columns = mapping.get(field_key, ())
+    for column in columns:
+        if column not in row:
+            continue
+        value = _coerce_directory_value(row.get(column))
+        if not value:
+            continue
+        if field_key == "primary_genre":
+            value = _normalise_genre_value(value)
+        if value:
+            yield value
+
+
+def _first_directory_value(
+    matches: Iterable[Tuple[str, Dict[str, Any]]],
+    field_key: str,
+) -> str:
+    for source, row in matches:
+        for value in _iter_directory_field_values(row, source, field_key):
+            if value:
+                return value
+    return ""
+
+
+def _parse_release_date(value: str) -> Optional[datetime.date]:
+    if not value:
+        return None
+    cleaned = value.strip()
+    if not cleaned:
+        return None
+    lowered = cleaned.lower()
+    if lowered in EMPTY_FIELD_MARKERS:
+        return None
+    parsed = None
+    for dayfirst in (False, True):
+        try:
+            parsed_ts = pd.to_datetime(cleaned, errors="coerce", dayfirst=dayfirst)
+        except Exception:
+            parsed_ts = None
+        if parsed_ts is not None and not pd.isna(parsed_ts):
+            if isinstance(parsed_ts, datetime.datetime):
+                parsed = parsed_ts.date()
+            else:
+                try:
+                    parsed = parsed_ts.to_pydatetime().date()
+                except Exception:
+                    parsed = None
+            if parsed:
+                return parsed
+    if re.fullmatch(r"\d{4}-\d{2}", cleaned):
+        year, month = map(int, cleaned.split("-"))
+        month = min(max(month, 1), 12)
+        return datetime.date(year, month, 1)
+    if re.fullmatch(r"\d{4}", cleaned):
+        return datetime.date(int(cleaned), 1, 1)
+    return None
 
 
 def _extract_links_from_profile(
@@ -640,7 +851,17 @@ class CrossDirectoryEnricherWorker(QThread):
             self.log_message.emit("[Enricher] Seed CSV has no rows; nothing to do.")
             self.finished.emit("")
             return
-        for column in ["Social Link", "External Links", "Email", "Source Directory", "Source URL"]:
+        required_columns = [
+            "Social Link",
+            "External Links",
+            "Email",
+            "Source Directory",
+            "Source URL",
+            "Location",
+            "Primary Genre",
+            "Release Date",
+        ]
+        for column in required_columns:
             if column not in seed_df.columns:
                 seed_df[column] = ""
         directory_indexes: Dict[str, Dict[str, Dict[str, Any]]] = {}
@@ -665,20 +886,38 @@ class CrossDirectoryEnricherWorker(QThread):
                 self._update_progress(position, total)
                 continue
             enriched = False
+            matches_used: List[Tuple[str, Dict[str, Any]]] = []
+            sources_logged: List[str] = []
             for source in priority:
                 mapping = directory_indexes.get(source) or {}
                 match = mapping.get(key)
                 if not match:
                     continue
+                matches_used.append((source, match))
                 payload = self._payload_from_directory_row(match, source)
                 if not payload:
                     continue
                 self._apply_payload(seed_df, row_idx, payload)
                 enriched = True
-                self.log_message.emit(
-                    f"[Enricher] Row {position}/{total}: matched {artist!r} via {source}."
+                if source not in sources_logged:
+                    sources_logged.append(source)
+            metadata_updated = self._apply_structured_fields(seed_df, row_idx, matches_used)
+            if metadata_updated:
+                enriched = True
+                for source, _ in matches_used:
+                    if source not in sources_logged:
+                        sources_logged.append(source)
+            if enriched and sources_logged:
+                display_sources = ", ".join(
+                    filter(
+                        None,
+                        [_format_source_display(src) or src.title() for src in sources_logged],
+                    )
                 )
-                break
+                if display_sources:
+                    self.log_message.emit(
+                        f"[Enricher] Row {position}/{total}: matched {artist!r} via {display_sources}."
+                    )
             if not enriched and self.enable_live_search:
                 payload = self._live_lookup(artist)
                 if payload:
@@ -700,7 +939,7 @@ class CrossDirectoryEnricherWorker(QThread):
         self.finished.emit(self.output_csv_path)
 
     def _payload_from_directory_row(self, row: Dict[str, Any], source: str) -> Optional[EnrichmentPayload]:
-        socials, websites, emails, link_hubs = _extract_directory_fields(row)
+        socials, websites, emails, link_hubs = _extract_directory_fields(row, source=source)
         if not (socials or websites or emails or link_hubs):
             return None
         payload = EnrichmentPayload(
@@ -752,6 +991,62 @@ class CrossDirectoryEnricherWorker(QThread):
                 display_value = payload.source_detail or _format_source_display(candidate_key)
                 df.at[row_idx, "Source Directory"] = display_value
                 df.at[row_idx, "Source URL"] = payload.source_url or ""
+
+    def _apply_structured_fields(
+        self,
+        df: pd.DataFrame,
+        row_idx,
+        matches: List[Tuple[str, Dict[str, Any]]],
+    ) -> bool:
+        if not matches:
+            return False
+        updated = False
+
+        def _current_value(column: str) -> str:
+            if column not in df.columns:
+                return ""
+            return _coerce_directory_value(df.at[row_idx, column])
+
+        current_location = _current_value("Location")
+        if not current_location:
+            location_candidate = _first_directory_value(matches, "location")
+            if location_candidate:
+                df.at[row_idx, "Location"] = location_candidate
+                updated = True
+
+        current_genre = _current_value("Primary Genre")
+        if not current_genre:
+            genre_candidate = _first_directory_value(matches, "primary_genre")
+            if genre_candidate:
+                df.at[row_idx, "Primary Genre"] = genre_candidate
+                updated = True
+
+        release_updated = False
+        current_release = _current_value("Release Date")
+        current_release_date = _parse_release_date(current_release)
+        best_value = current_release
+        best_date = current_release_date
+        fallback_string = ""
+        for source, row in matches:
+            for candidate in _iter_directory_field_values(row, source, "release_date"):
+                if not fallback_string:
+                    fallback_string = candidate
+                parsed_candidate = _parse_release_date(candidate)
+                if not parsed_candidate:
+                    continue
+                if best_date is None or parsed_candidate > best_date:
+                    best_date = parsed_candidate
+                    best_value = candidate
+        if best_date and (current_release_date is None or best_date > current_release_date or not current_release):
+            if best_value and best_value != current_release:
+                df.at[row_idx, "Release Date"] = best_value
+                release_updated = True
+        elif not current_release and fallback_string:
+            df.at[row_idx, "Release Date"] = fallback_string
+            release_updated = True
+        if release_updated:
+            updated = True
+        return updated
 
     def _live_lookup(self, artist_name: str) -> Optional[EnrichmentPayload]:
         if not artist_name:
