@@ -209,6 +209,7 @@ LINK_HUB_HOSTS = {
 SOCIAL_PRIORITY = [
     "facebook.com",
     "m.facebook.com",
+    "fb.me",
     "instagram.com",
     "x.com",
     "twitter.com",
@@ -296,15 +297,48 @@ PROFILE_URL_CANDIDATES = (
     "Unearthed URL",
 )
 
+TRACK_NAME_COLUMNS = (
+    "Song Title",
+    "Song",
+    "Track Name",
+    "Track",
+    "Track Title",
+    "Latest Release",
+    "Latest Release Title",
+    "Latest Release Name",
+    "Release Title",
+)
+
+SEED_TRACK_COLUMNS = (
+    "Song Title",
+    "Track Name",
+    "Track",
+)
+
+TRACK_TOKEN_FIELD = "__track_tokens"
+
 DIRECTORY_SOCIAL_COLUMNS = (
     "Social Link",
     "Instagram",
+    "Instagram URL",
+    "Instagram_URL",
+    "instagram_url",
     "Facebook",
+    "Facebook URL",
+    "Facebook_URL",
+    "facebook_url",
     "Twitter",
+    "Twitter URL",
+    "Twitter_URL",
+    "twitter_url",
     "X",
     "TikTok",
+    "TikTok URL",
+    "TikTok_URL",
     "Youtube",
     "YouTube",
+    "YouTube URL",
+    "YouTube_URL",
     "Threads",
     "LinkedIn",
 )
@@ -358,6 +392,41 @@ class EnrichmentPayload:
     source_dir: Optional[str] = None
     source_url: Optional[str] = None
     source_detail: Optional[str] = None
+
+
+@dataclass
+class DirectoryIndex:
+    source: str
+    rows_by_artist: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
+    rows_by_track: Dict[Tuple[str, str], List[Dict[str, Any]]] = field(default_factory=dict)
+
+    def add_row(
+        self,
+        artist_key: str,
+        row_dict: Dict[str, Any],
+        track_tokens: Iterable[str],
+    ) -> None:
+        if not artist_key:
+            return
+        self.rows_by_artist.setdefault(artist_key, []).append(row_dict)
+        tokens = tuple(token for token in track_tokens if token)
+        if tokens:
+            row_dict[TRACK_TOKEN_FIELD] = tokens
+            for token in tokens:
+                self.rows_by_track.setdefault((artist_key, token), []).append(row_dict)
+
+    def lookup_artist(self, artist_key: str) -> List[Dict[str, Any]]:
+        if not artist_key:
+            return []
+        return list(self.rows_by_artist.get(artist_key, []))
+
+    def lookup_track(self, artist_key: str, track_key: str) -> List[Dict[str, Any]]:
+        if not artist_key or not track_key:
+            return []
+        return list(self.rows_by_track.get((artist_key, track_key), []))
+
+    def unique_artist_count(self) -> int:
+        return len(self.rows_by_artist)
 
 
 # ---------------------------------------------------------------------------
@@ -456,10 +525,11 @@ def _split_multi_value(value, delimiter: Optional[str] = None) -> Iterable[str]:
         value = str(value)
     if not value.strip():
         return []
+    text = value.replace("\r\n", "\n").replace("\r", "\n")
     if delimiter:
-        parts = value.split(delimiter)
+        parts = text.split(delimiter)
     else:
-        parts = re.split(r"[|;,]", value)
+        parts = re.split(r"[|;,\n]", text)
     return [part.strip() for part in parts if part.strip()]
 
 
@@ -555,6 +625,18 @@ def _social_sort_key(url: str) -> Tuple[int, str]:
     return (len(SOCIAL_PRIORITY), url)
 
 
+def _prioritise_facebook_first(urls: Iterable[str]) -> List[str]:
+    facebook: List[str] = []
+    non_facebook: List[str] = []
+    for url in urls:
+        lowered = url.lower()
+        if "facebook.com" in lowered or "fb.me" in lowered:
+            facebook.append(url)
+        else:
+            non_facebook.append(url)
+    return facebook + non_facebook
+
+
 def _host(url: str) -> str:
     try:
         return urllib.parse.urlparse(url).netloc.lower()
@@ -604,7 +686,11 @@ def _extract_directory_fields(
             host = _host(normalised)
             if host in LINK_HUB_HOSTS:
                 link_hubs.add(normalised)
-            websites.add(normalised)
+                websites.add(normalised)
+            elif any(host.endswith(dom) for dom in SOCIAL_HOST_WHITELIST):
+                socials.add(normalised)
+            else:
+                websites.add(normalised)
     email_values: List[Any] = []
     if source and source in DIRECTORY_FIELD_MAP:
         email_columns = DIRECTORY_FIELD_MAP[source].get("email", ())
@@ -823,6 +909,10 @@ def normalise_artist_name(name: str) -> str:
     base = _norm_name(name)
     if not base:
         return ""
+    for suffix in (" official", " - topic"):
+        if base.endswith(suffix):
+            base = base[: -len(suffix)]
+            base = base.strip()
     base = re.sub(r"^(the|a)\s+", "", base)
     base = re.sub(r"[^\w\s]", "", base)
     base = re.sub(r"\s+", " ", base)
@@ -844,8 +934,52 @@ def _clean_cell(value: Any) -> str:
     return str(value).strip()
 
 
-def _load_directory_csv(path: str, source_name: str) -> Dict[str, Dict[str, Any]]:
-    index: Dict[str, Dict[str, Any]] = {}
+def normalise_track_title(value: Any) -> str:
+    text = _clean_cell(value)
+    if not text:
+        return ""
+    lowered = text.lower()
+    lowered = lowered.replace("’", "'")
+    lowered = re.sub(r"\s+-\s+topic$", "", lowered)
+    lowered = re.sub(r"\bofficial\b", "", lowered)
+    lowered = re.sub(r"\(.*?\)", " ", lowered)
+    lowered = re.sub(r"[^\w\s]", " ", lowered)
+    lowered = re.sub(r"\s+", " ", lowered)
+    return lowered.strip()
+
+
+def _compute_row_track_tokens(row: Dict[str, Any]) -> Tuple[str, ...]:
+    tokens: List[str] = []
+    seen: Set[str] = set()
+    for column in TRACK_NAME_COLUMNS:
+        token = normalise_track_title(row.get(column))
+        if token and token not in seen:
+            seen.add(token)
+            tokens.append(token)
+    return tuple(tokens)
+
+
+def _row_track_tokens(row: Dict[str, Any]) -> Tuple[str, ...]:
+    tokens = row.get(TRACK_TOKEN_FIELD)
+    if isinstance(tokens, (list, tuple, set)):
+        return tuple(token for token in tokens if token)
+    computed = _compute_row_track_tokens(row)
+    if computed:
+        row[TRACK_TOKEN_FIELD] = computed
+    return computed
+
+
+def _extract_seed_track_key(row: pd.Series) -> str:
+    for column in SEED_TRACK_COLUMNS:
+        value = _clean_cell(row.get(column))
+        token = normalise_track_title(value)
+        if token:
+            return token
+    return ""
+
+
+def _load_directory_csv(path: str, source_name: str) -> DirectoryIndex:
+    index = DirectoryIndex(source=source_name)
     if not path or not os.path.exists(path):
         return index
     df = _read_csv_flexible(path)
@@ -860,10 +994,12 @@ def _load_directory_csv(path: str, source_name: str) -> Dict[str, Dict[str, Any]
         if not artist:
             continue
         key = normalise_artist_name(artist)
-        if not key or key in index:
-            continue
-        index[key] = row.to_dict()
-    print(f"[Enricher] Loaded {len(index)} artists for {source_name} from {path}")
+        row_dict = row.to_dict()
+        tokens = _compute_row_track_tokens(row_dict)
+        index.add_row(key, row_dict, tokens)
+    print(
+        f"[Enricher] Loaded {index.unique_artist_count()} artists for {source_name} from {path}"
+    )
     return index
 
 
@@ -947,7 +1083,7 @@ class CrossDirectoryEnricherWorker(QThread):
         for column in required_columns:
             if column not in seed_df.columns:
                 seed_df[column] = ""
-        directory_indexes: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        directory_indexes: Dict[str, DirectoryIndex] = {}
         if self.unearthed_csv_path:
             directory_indexes["unearthed"] = _load_directory_csv(self.unearthed_csv_path, "Unearthed")
         if self.bandcamp_csv_path:
@@ -962,6 +1098,7 @@ class CrossDirectoryEnricherWorker(QThread):
             row = seed_df.loc[row_idx]
             artist = _clean_cell(row.get("Artist Name"))
             key = normalise_artist_name(artist)
+            track_key = _extract_seed_track_key(row)
             if not key:
                 self.log_message.emit(
                     f"[Enricher] Row {position}/{total}: invalid artist name; skipping."
@@ -972,12 +1109,14 @@ class CrossDirectoryEnricherWorker(QThread):
             matches_used: List[Tuple[str, Dict[str, Any]]] = []
             sources_logged: List[str] = []
             for source in priority:
-                mapping = directory_indexes.get(source) or {}
-                match = mapping.get(key)
-                if not match:
+                directory_index = directory_indexes.get(source)
+                if not directory_index:
                     continue
-                matches_used.append((source, match))
-                payload = self._payload_from_directory_row(match, source)
+                matches = self._find_directory_matches(directory_index, key, track_key)
+                if not matches:
+                    continue
+                matches_used.extend((source, match) for match in matches)
+                payload = self._payload_from_directory_rows(matches, source)
                 if not payload:
                     continue
                 self._apply_payload(seed_df, row_idx, payload)
@@ -1021,8 +1160,43 @@ class CrossDirectoryEnricherWorker(QThread):
         self.log_message.emit(f"[Enricher] Enriched CSV written to {self.output_csv_path}")
         self.finished.emit(self.output_csv_path)
 
-    def _payload_from_directory_row(self, row: Dict[str, Any], source: str) -> Optional[EnrichmentPayload]:
-        socials, websites, emails, link_hubs = _extract_directory_fields(row, source=source)
+    def _find_directory_matches(
+        self,
+        directory_index: DirectoryIndex,
+        artist_key: str,
+        track_key: str,
+    ) -> List[Dict[str, Any]]:
+        if not directory_index or not artist_key:
+            return []
+        matches = directory_index.lookup_artist(artist_key)
+        if not matches:
+            return []
+        if track_key:
+            filtered = [row for row in matches if track_key in _row_track_tokens(row)]
+            if filtered:
+                return filtered
+        return matches
+
+    def _payload_from_directory_rows(
+        self,
+        rows: Iterable[Dict[str, Any]],
+        source: str,
+    ) -> Optional[EnrichmentPayload]:
+        socials: Set[str] = set()
+        websites: Set[str] = set()
+        emails: Set[str] = set()
+        link_hubs: Set[str] = set()
+        source_url = ""
+        for row in rows:
+            row_socials, row_websites, row_emails, row_link_hubs = _extract_directory_fields(
+                row, source=source
+            )
+            socials |= row_socials
+            websites |= row_websites
+            emails |= row_emails
+            link_hubs |= row_link_hubs
+            if not source_url:
+                source_url = _extract_profile_url(row) or ""
         if not (socials or websites or emails or link_hubs):
             return None
         payload = EnrichmentPayload(
@@ -1031,7 +1205,7 @@ class CrossDirectoryEnricherWorker(QThread):
             emails=emails,
             link_hubs=link_hubs,
             source_dir=source,
-            source_url=_extract_profile_url(row),
+            source_url=source_url,
             source_detail=_format_source_display(source),
         )
         return payload
@@ -1054,9 +1228,9 @@ class CrossDirectoryEnricherWorker(QThread):
         sites_all = existing_sites | new_sites
         emails_all = existing_emails | new_emails
         if socials_all:
-            df.at[row_idx, "Social Link"] = MULTI_VALUE_SEPARATOR.join(
-                sorted(socials_all, key=_social_sort_key)
-            )
+            ordered_socials = sorted(socials_all, key=_social_sort_key)
+            ordered_socials = _prioritise_facebook_first(ordered_socials)
+            df.at[row_idx, "Social Link"] = MULTI_VALUE_SEPARATOR.join(ordered_socials)
         if sites_all:
             ordered_sites = sorted(sites_all)
             if MAX_WEBSITES:
