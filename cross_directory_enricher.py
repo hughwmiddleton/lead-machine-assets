@@ -1441,25 +1441,19 @@ class CrossDirectoryEnricherWorker(QThread):
         return self._fetch_profile_and_build(profile_url, "bandcamp")
 
     def _live_search_soundcloud(self, artist_name: str) -> Optional[EnrichmentPayload]:
-        quoted = urllib.parse.quote_plus(artist_name)
-        url = f"https://soundcloud.com/search/people?q={quoted}"
         if not self._increment_live_counter():
             return None
-        self.log_message.emit(f"[Enricher] SoundCloud live search: {url}")
-        html = self._fetch_url(url, label="SoundCloud search")
-        if not html:
-            return None
-        soup = BeautifulSoup(html, "html.parser")
-        first_link = soup.select_one("a.userBadge__title, a[href^='https://soundcloud.com/']")
-        if not first_link:
-            self.log_message.emit("[Enricher] SoundCloud search: no results found.")
-            return None
-        profile_url = (first_link.get("href") or "").strip()
+        profile_url = self._soundcloud_people_search_first_profile_url(artist_name)
         if not profile_url:
-            self.log_message.emit("[Enricher] SoundCloud search: result missing href.")
+            self.log_message.emit(
+                "[Enricher] SoundCloud people search: no results found, trying universal search..."
+            )
+            profile_url = self._soundcloud_universal_search_first_profile_url(artist_name)
+        if not profile_url:
+            self.log_message.emit(
+                "[Enricher] SoundCloud search: no results found (people + universal)."
+            )
             return None
-        if not profile_url.startswith("http"):
-            profile_url = f"https://soundcloud.com{profile_url}"
         return self._fetch_profile_and_build(profile_url, "soundcloud")
 
     def _live_search_lastfm(self, artist_name: str) -> Optional[EnrichmentPayload]:
@@ -1518,6 +1512,78 @@ class CrossDirectoryEnricherWorker(QThread):
     def _update_progress(self, current: int, total: int) -> None:
         pct = int((current / max(1, total)) * 100)
         self.progress.emit(pct)
+
+    def _soundcloud_people_search_first_profile_url(self, artist_name: str) -> Optional[str]:
+        quoted = urllib.parse.quote_plus(artist_name)
+        url = f"https://soundcloud.com/search/people?q={quoted}"
+        self.log_message.emit(f"[Enricher] SoundCloud live search: {url}")
+        html = self._fetch_url(url, label="SoundCloud search")
+        if not html:
+            return None
+        soup = BeautifulSoup(html, "html.parser")
+        first_link = soup.select_one("a.userBadge__title, a[href^='https://soundcloud.com/']")
+        if not first_link:
+            return None
+        profile_url = (first_link.get("href") or "").strip()
+        if not profile_url:
+            self.log_message.emit("[Enricher] SoundCloud search: result missing href.")
+            return None
+        if not profile_url.startswith("http"):
+            profile_url = f"https://soundcloud.com{profile_url}"
+        return profile_url
+
+    def _soundcloud_universal_search_first_profile_url(self, artist_name: str) -> Optional[str]:
+        quoted = urllib.parse.quote_plus(artist_name)
+        url = f"https://soundcloud.com/search?q={quoted}"
+        self.log_message.emit(f"[Enricher] SoundCloud universal search fallback: {url}")
+        html = self._fetch_url(url, label="SoundCloud universal search")
+        if not html:
+            return None
+        soup = BeautifulSoup(html, "html.parser")
+        noscript = soup.find("noscript")
+        search_container = soup
+        if noscript:
+            try:
+                search_container = BeautifulSoup(noscript.decode_contents(), "html.parser")
+            except Exception:
+                search_container = soup
+        links = search_container.select("a[href]")
+        for link in links:
+            href = (link.get("href") or "").strip()
+            profile_url = self._normalise_soundcloud_profile_href(href)
+            if not profile_url:
+                continue
+            self.log_message.emit(
+                f"[Enricher] SoundCloud universal search candidate profile: {profile_url}"
+            )
+            return profile_url
+        self.log_message.emit("[Enricher] SoundCloud universal search: no fallback candidates.")
+        return None
+
+    def _normalise_soundcloud_profile_href(self, href: str) -> Optional[str]:
+        if not href:
+            return None
+        href = href.strip()
+        if not href or href.startswith("#"):
+            return None
+        if href.startswith("//"):
+            href = f"https:{href}"
+        if href.startswith("/"):
+            href = f"https://soundcloud.com{href}"
+        elif not href.startswith("http"):
+            href = f"https://soundcloud.com/{href.lstrip('/')}"
+        parsed = urllib.parse.urlparse(href)
+        host = parsed.netloc.lower()
+        if host not in {"soundcloud.com", "www.soundcloud.com"}:
+            return None
+        path_parts = [part for part in parsed.path.split("/") if part]
+        if not path_parts:
+            return None
+        first_segment = path_parts[0]
+        if first_segment in {"search", "pages"}:
+            return None
+        profile_url = f"https://soundcloud.com/{first_segment}"
+        return profile_url
 
 
 # ---------------------------------------------------------------------------
