@@ -317,6 +317,19 @@ SEED_TRACK_COLUMNS = (
 
 TRACK_TOKEN_FIELD = "__track_tokens"
 
+SEED_LINK_COLUMNS = (
+    "Social Link",
+    "External Links",
+    "SoundCloud Link",
+    "SoundCloud URL",
+    "Bandcamp Link",
+    "Bandcamp URL",
+    "Last.fm URL",
+    "LastFM URL",
+    "Source URL",
+    "Profile URL",
+)
+
 DIRECTORY_SOCIAL_COLUMNS = (
     "Social Link",
     "Instagram",
@@ -399,6 +412,7 @@ class DirectoryIndex:
     source: str
     rows_by_artist: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
     rows_by_track: Dict[Tuple[str, str], List[Dict[str, Any]]] = field(default_factory=dict)
+    rows_by_profile_url: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
 
     def add_row(
         self,
@@ -414,6 +428,9 @@ class DirectoryIndex:
             row_dict[TRACK_TOKEN_FIELD] = tokens
             for token in tokens:
                 self.rows_by_track.setdefault((artist_key, token), []).append(row_dict)
+        profile_url = _extract_profile_url(row_dict)
+        if profile_url:
+            self.rows_by_profile_url.setdefault(profile_url, []).append(row_dict)
 
     def lookup_artist(self, artist_key: str) -> List[Dict[str, Any]]:
         if not artist_key:
@@ -424,6 +441,12 @@ class DirectoryIndex:
         if not artist_key or not track_key:
             return []
         return list(self.rows_by_track.get((artist_key, track_key), []))
+
+    def lookup_profile_url(self, url: str) -> List[Dict[str, Any]]:
+        normalised = _normalise_url(url)
+        if not normalised:
+            return []
+        return list(self.rows_by_profile_url.get(normalised, []))
 
     def unique_artist_count(self) -> int:
         return len(self.rows_by_artist)
@@ -642,6 +665,16 @@ def _host(url: str) -> str:
         return urllib.parse.urlparse(url).netloc.lower()
     except Exception:
         return ""
+
+
+def _source_for_url(url: str) -> Optional[str]:
+    host = _host(url)
+    if not host:
+        return None
+    for source, domains in PLATFORM_HOSTS.items():
+        if any(host.endswith(domain) for domain in domains):
+            return source
+    return None
 
 
 def _extract_profile_url(row: dict) -> Optional[str]:
@@ -978,6 +1011,43 @@ def _extract_seed_track_key(row: pd.Series) -> str:
     return ""
 
 
+def _iter_seed_links(row: pd.Series) -> Iterable[str]:
+    if row is None:
+        return []
+    for column in SEED_LINK_COLUMNS:
+        if column not in row:
+            continue
+        value = row.get(column)
+        for token in _split_multi_value(value):
+            normalised = _normalise_url(token)
+            if normalised:
+                yield normalised
+
+
+def _extract_seed_links_by_source(row: pd.Series) -> Dict[str, Set[str]]:
+    mapping: Dict[str, Set[str]] = {}
+    for url in _iter_seed_links(row):
+        source = _source_for_url(url)
+        if not source:
+            continue
+        mapping.setdefault(source, set()).add(url)
+    return mapping
+
+
+def _dedupe_rows(rows: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    deduped: List[Dict[str, Any]] = []
+    seen_ids: Set[int] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        marker = id(row)
+        if marker in seen_ids:
+            continue
+        seen_ids.add(marker)
+        deduped.append(row)
+    return deduped
+
+
 def _load_directory_csv(path: str, source_name: str) -> DirectoryIndex:
     index = DirectoryIndex(source=source_name)
     if not path or not os.path.exists(path):
@@ -1099,6 +1169,7 @@ class CrossDirectoryEnricherWorker(QThread):
             artist = _clean_cell(row.get("Artist Name"))
             key = normalise_artist_name(artist)
             track_key = _extract_seed_track_key(row)
+            seed_links_by_source = _extract_seed_links_by_source(row)
             if not key:
                 self.log_message.emit(
                     f"[Enricher] Row {position}/{total}: invalid artist name; skipping."
@@ -1112,7 +1183,10 @@ class CrossDirectoryEnricherWorker(QThread):
                 directory_index = directory_indexes.get(source)
                 if not directory_index:
                     continue
-                matches = self._find_directory_matches(directory_index, key, track_key)
+                url_candidates = list(seed_links_by_source.get(source, ()))
+                matches = self._find_directory_matches(
+                    directory_index, key, track_key, url_candidates
+                )
                 if not matches:
                     continue
                 matches_used.extend((source, match) for match in matches)
@@ -1165,17 +1239,21 @@ class CrossDirectoryEnricherWorker(QThread):
         directory_index: DirectoryIndex,
         artist_key: str,
         track_key: str,
+        url_candidates: Iterable[str],
     ) -> List[Dict[str, Any]]:
-        if not directory_index or not artist_key:
+        if not directory_index:
             return []
-        matches = directory_index.lookup_artist(artist_key)
-        if not matches:
-            return []
-        if track_key:
-            filtered = [row for row in matches if track_key in _row_track_tokens(row)]
-            if filtered:
-                return filtered
-        return matches
+        matches: List[Dict[str, Any]] = []
+        if artist_key:
+            name_matches = directory_index.lookup_artist(artist_key)
+            if track_key:
+                filtered = [row for row in name_matches if track_key in _row_track_tokens(row)]
+                if filtered:
+                    name_matches = filtered
+            matches.extend(name_matches)
+        for url in url_candidates or []:
+            matches.extend(directory_index.lookup_profile_url(url))
+        return _dedupe_rows(matches)
 
     def _payload_from_directory_rows(
         self,

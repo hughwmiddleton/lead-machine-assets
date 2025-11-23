@@ -4,9 +4,12 @@ Spotify playlist discovery scraper for Lead Machine.
 Phase 2 wires into the Spotify Web API using editorial playlists (e.g. Fresh
 Finds) and returns real artist rows that match the shared CSV schema.
 """
+import csv
+import os
 import re
 import time
-from typing import Any, Callable, Dict, List, Optional
+import unicodedata
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set
 from urllib.parse import urlparse
 
 from spotify_about_scraper import enrich_spotify_rows_with_about_links
@@ -26,6 +29,26 @@ FRESH_FINDS_PLAYLIST_IDS = [
     "TODO_FRESH_FINDS_UK_IE_PLAYLIST_ID",
     "TODO_FRESH_FINDS_AU_NZ_PLAYLIST_ID",
 ]
+
+GENRE_COLUMN_CANDIDATES: Sequence[str] = (
+    "Primary Genre",
+    "primary_genre",
+    "Genres",
+    "Genre",
+    "genre",
+    "seed_genre",
+)
+
+DIRECTORY_GENRE_FILES: Sequence[Sequence[Any]] = [
+    ("bandcamp_enriched.csv", GENRE_COLUMN_CANDIDATES),
+    ("bandcamp_output.csv", GENRE_COLUMN_CANDIDATES),
+    ("soundcloud_enriched.csv", GENRE_COLUMN_CANDIDATES),
+    ("soundcloud_output.csv", GENRE_COLUMN_CANDIDATES),
+    ("lastfm_output.csv", GENRE_COLUMN_CANDIDATES),
+    ("unearthed_output.csv", GENRE_COLUMN_CANDIDATES),
+]
+
+SCRIPT_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 def _extract_playlist_id(value: str) -> Optional[str]:
@@ -119,6 +142,102 @@ def _collapse_spotify_socials(rows: List[Row]) -> List[Row]:
     for row in rows or []:
         _collapse_spotify_socials_into_social_link(row)
     return rows
+
+
+def _normalize_artist_name(name: str) -> str:
+    if not isinstance(name, str):
+        return ""
+    value = name.strip().lower()
+    if not value:
+        return ""
+    for suffix in (" - topic", " official"):
+        if value.endswith(suffix):
+            value = value[: -len(suffix)].strip()
+    value = re.sub(r"^(the|a)\s+", "", value)
+    value = re.sub(r"[^\w\s]", "", value)
+    value = re.sub(r"\s+", " ", value)
+    value = unicodedata.normalize("NFKD", value)
+    value = "".join(ch for ch in value if not unicodedata.combining(ch))
+    return value.strip()
+
+
+def _resolve_directory_csv(filename: str, base_dir: str) -> Optional[str]:
+    if not filename:
+        return None
+    candidates = []
+    if os.path.isabs(filename):
+        candidates.append(filename)
+    else:
+        candidates.append(os.path.join(base_dir, filename))
+        candidates.append(os.path.join(SCRIPT_BASE_DIR, filename))
+        candidates.append(os.path.abspath(filename))
+    for candidate in candidates:
+        if os.path.exists(candidate):
+            return candidate
+    return None
+
+
+def _extract_first_value(row: Dict[str, Any], columns: Iterable[str]) -> str:
+    for column in columns:
+        value = row.get(column) if isinstance(row, dict) else None
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            cleaned = text.split("|")[0].split(";")[0].strip()
+            if cleaned:
+                return cleaned
+    return ""
+
+
+def _load_directory_genre_map(base_dir: str) -> Dict[str, str]:
+    genre_map: Dict[str, str] = {}
+    seen_paths: Set[str] = set()
+    for entry in DIRECTORY_GENRE_FILES:
+        if not entry:
+            continue
+        if len(entry) == 2:
+            filename, genre_columns = entry  # type: ignore
+        else:
+            filename = entry[0]
+            genre_columns = entry[1:]
+        path = _resolve_directory_csv(filename, base_dir)
+        if not path:
+            continue
+        if path in seen_paths:
+            continue
+        seen_paths.add(path)
+        try:
+            with open(path, "r", encoding="utf-8-sig", newline="") as handle:
+                reader = csv.DictReader(handle)
+                for row in reader:
+                    artist = (row.get("Artist Name") or row.get("artist") or "").strip()
+                    if not artist:
+                        continue
+                    key = _normalize_artist_name(artist)
+                    if not key or key in genre_map:
+                        continue
+                    genre_value = _extract_first_value(row, genre_columns)
+                    if genre_value:
+                        genre_map[key] = genre_value
+        except Exception:
+            continue
+    return genre_map
+
+
+def _apply_directory_genres(rows: List[Row], genre_map: Dict[str, str]) -> None:
+    if not rows or not genre_map:
+        return
+    for row in rows:
+        current = (row.get("Primary Genre") or "").strip()
+        if current:
+            continue
+        key = _normalize_artist_name(row.get("Artist Name"))
+        if not key:
+            continue
+        genre_value = genre_map.get(key)
+        if genre_value:
+            row["Primary Genre"] = genre_value
 
 
 def _resolve_playlist_label(
@@ -315,6 +434,12 @@ def scrape_spotify(
 
     if logger:
         logger(f"[Spotify] Discovery complete — returning {len(rows)} rows.")
+
+    directory_base = params.get("directory_base") or os.getcwd()
+    genre_map = _load_directory_genre_map(directory_base)
+    if genre_map and logger:
+        logger(f"[Spotify] Applied genre fallbacks for {len(genre_map)} artists from existing CSVs.")
+    _apply_directory_genres(rows, genre_map)
 
     if logger:
         logger("[Spotify] Starting About-page enrichment...")
