@@ -4,9 +4,12 @@
 from __future__ import annotations
 
 import datetime
+import importlib.util
+import json
 import math
 import os
 import re
+import threading
 import time
 import unicodedata
 import urllib.parse
@@ -16,8 +19,13 @@ from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 import pandas as pd
 import requests
 from bs4 import BeautifulSoup
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service as ChromeService
 from PyQt5 import QtWidgets
 from PyQt5.QtCore import QThread, pyqtSignal
+from webdriver_manager.chrome import ChromeDriverManager
+from urllib.parse import urlparse, parse_qs, unquote
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -30,6 +38,11 @@ USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/117.0.0.0 Safari/537.36"
 )
+
+ENABLE_FACEBOOK_ENRICHMENT = True
+FACEBOOK_SEARCH_URL = "https://www.facebook.com/search/pages/"
+FACEBOOK_CATEGORY_KEYWORDS = ("musician", "band", "artist", "music")
+FACEBOOK_SEARCH_WAIT_SECONDS = 10
 
 UNEARTHED_CSV = "unearthed_output.csv"
 BANDCAMP_CSV = "bandcamp_output.csv"
@@ -394,6 +407,113 @@ SOURCE_BASE_NAMES = {
 MAX_WEBSITES = 2
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MULTI_VALUE_SEPARATOR = ", "
+FACEBOOK_HELPERS_PATH = os.path.join(BASE_DIR, "Lead Machine (Final Update 5).py")
+ENRICHER_FB_PROFILE = os.path.join(os.path.expanduser("~"), "LeadMachine", "fb_enricher_profile")
+_FB_DRIVER = None
+_FB_DRIVER_LOCK = threading.Lock()
+setup_facebook_driver = None
+fb_scrape_emails_from_page = None
+fb_find_page_and_emails_by_name = None
+if os.path.exists(FACEBOOK_HELPERS_PATH):
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "lead_machine_final_update_5", FACEBOOK_HELPERS_PATH
+        )
+        if spec and spec.loader:
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            setup_facebook_driver = getattr(module, "setup_facebook_driver", None)
+            fb_scrape_emails_from_page = getattr(module, "fb_scrape_emails_from_page", None)
+            fb_find_page_and_emails_by_name = getattr(module, "fb_find_page_and_emails_by_name", None)
+    except Exception:
+        setup_facebook_driver = None
+        fb_scrape_emails_from_page = None
+        fb_find_page_and_emails_by_name = None
+
+
+def normalize_external_url(u: str) -> str:
+    """
+    Lightweight URL normalizer for Facebook enrichment to unwrap redirectors and strip noise.
+    """
+    if not u:
+        return ""
+    u = u.strip()
+    if not u:
+        return ""
+
+    if u.startswith("//"):
+        u = "https:" + u
+
+    try:
+        parsed = urlparse(u)
+        host = (parsed.hostname or "").lower()
+        if host.endswith("l.facebook.com") or host.endswith("lm.facebook.com"):
+            qs = parse_qs(parsed.query or "")
+            target = (qs.get("u") or qs.get("url") or [""])[0]
+            if target:
+                target = unquote(target)
+                if target.startswith("//"):
+                    target = "https:" + target
+                u = target
+        u = u.rstrip("/")
+    except Exception:
+        return u.rstrip("/")
+    return u
+
+
+def enricher_fb_profile_has_cookies() -> bool:
+    return os.path.exists(os.path.join(ENRICHER_FB_PROFILE, "Default", "Cookies"))
+
+
+def persistent_fb_driver():
+    chrome_options = Options()
+    chrome_options.add_argument("--disable-gpu")
+    chrome_options.add_argument("--window-size=1920,1080")
+    chrome_options.add_argument("--disable-extensions")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+    chrome_options.page_load_strategy = "eager"
+    chrome_options.add_argument(f"--user-data-dir={ENRICHER_FB_PROFILE}")
+    chrome_options.add_argument("--profile-directory=Default")
+    prefs = {
+        "profile.managed_default_content_settings.images": 2,
+        "profile.default_content_setting_values.notifications": 2,
+    }
+    chrome_options.add_experimental_option("prefs", prefs)
+    service_path = ChromeDriverManager().install()
+    driver = webdriver.Chrome(service=ChromeService(service_path), options=chrome_options)
+    try:
+        driver.set_page_load_timeout(35)
+    except Exception:
+        pass
+    return driver
+
+
+def _get_enricher_facebook_driver():
+    """
+    Lazily initialize and return a shared Selenium Chrome driver for Facebook enrichment.
+    Uses a persistent user-data-dir so login persists across runs.
+    """
+    global _FB_DRIVER
+    with _FB_DRIVER_LOCK:
+        if _FB_DRIVER is not None:
+            return _FB_DRIVER
+        os.makedirs(ENRICHER_FB_PROFILE, exist_ok=True)
+        _FB_DRIVER = persistent_fb_driver()
+        return _FB_DRIVER
+
+
+def _cleanup_enricher_facebook_driver():
+    """Safely close the Enricher's shared Facebook driver, if one was created."""
+    global _FB_DRIVER
+    with _FB_DRIVER_LOCK:
+        if _FB_DRIVER is not None:
+            try:
+                _FB_DRIVER.quit()
+            except Exception:
+                pass
+            _FB_DRIVER = None
 
 
 @dataclass
@@ -466,6 +586,378 @@ def _build_session() -> requests.Session:
         }
     )
     return session
+
+
+def cell_to_str(value) -> str:
+    """
+    Safely convert a CSV cell value into a clean string.
+    Handles None, NaN, float, int, str, etc. without raising.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, float):
+        try:
+            if math.isnan(value):
+                return ""
+        except Exception:
+            pass
+    try:
+        return str(value).strip()
+    except Exception:
+        try:
+            return f"{value}".strip()
+        except Exception:
+            return ""
+
+
+def _safe_log(logger, message: str, *args) -> None:
+    if not logger:
+        return
+    try:
+        if hasattr(logger, "info"):
+            logger.info(message, *args)
+            return
+        if callable(logger):
+            formatted = message % args if args else message
+            logger(str(formatted))
+    except Exception:
+        try:
+            print(message % args if args else message)
+        except Exception:
+            pass
+
+
+def _append_link(existing: str, new: str) -> str:
+    existing_str = cell_to_str(existing)
+    new_str = cell_to_str(new)
+    if not new_str:
+        return existing_str
+    parts = [part.strip() for part in existing_str.split(",") if part.strip()]
+    if new_str not in parts:
+        parts.append(new_str)
+    return ", ".join(parts)
+
+
+def _normalise_facebook_name(value: str) -> str:
+    cleaned = cell_to_str(value).lower()
+    if not cleaned:
+        return ""
+    cleaned = cleaned.replace("official", "")
+    cleaned = re.sub(r"[^\w\s]", " ", cleaned)
+    cleaned = " ".join(cleaned.split())
+    return cleaned
+
+
+def _facebook_candidate_score(
+    target_name: str, location: str, candidate_name: str, context_text: str
+) -> float:
+    target_norm = _normalise_facebook_name(cell_to_str(target_name))
+    candidate_norm = _normalise_facebook_name(cell_to_str(candidate_name) or cell_to_str(context_text))
+    if not candidate_norm or not target_norm:
+        return 0.0
+    score = 0.0
+    if candidate_norm == target_norm:
+        score += 60.0
+    elif target_norm in candidate_norm or candidate_norm in target_norm:
+        score += 40.0
+    target_tokens = set(target_norm.split())
+    candidate_tokens = set(candidate_norm.split())
+    if target_tokens:
+        overlap = len(target_tokens & candidate_tokens)
+        score += overlap * 5.0
+    context_norm = _normalise_facebook_name(context_text)
+    if context_norm:
+        score += len(target_tokens & set(context_norm.split())) * 2.0
+    category_lower = cell_to_str(context_text).lower()
+    if any(keyword in category_lower for keyword in FACEBOOK_CATEGORY_KEYWORDS):
+        score += 8.0
+    if location:
+        loc_norm = _normalise_facebook_name(cell_to_str(location))
+        if loc_norm and (loc_norm in candidate_norm or loc_norm in category_lower):
+            score += 5.0
+    return score
+
+
+@dataclass
+class FacebookSearchClient:
+    driver: Any
+    logger: Any
+    user_data_dir: Optional[str] = None
+    cookies_path: Optional[str] = None
+    _login_checked: bool = False
+
+    def _is_logged_in(self) -> bool:
+        try:
+            from selenium.webdriver.common.by import By
+            from selenium.webdriver.support.ui import WebDriverWait
+            from selenium.webdriver.support import expected_conditions as EC
+            from selenium.common.exceptions import TimeoutException
+        except Exception:
+            return False
+        try:
+            WebDriverWait(self.driver, 5).until(
+                EC.presence_of_element_located(
+                    (By.CSS_SELECTOR, "a[aria-label*='profile'], a[aria-label*='account'], a[href*='profile.php']")
+                )
+            )
+            return True
+        except TimeoutException:
+            return False
+        except Exception:
+            return False
+
+    def ensure_facebook_logged_in(self) -> bool:
+        """Ensure driver has an authenticated FB session."""
+        try:
+            from selenium.webdriver.common.by import By
+            from selenium.webdriver.support.ui import WebDriverWait
+            from selenium.webdriver.support import expected_conditions as EC
+            from selenium.common.exceptions import TimeoutException
+        except Exception as exc:
+            _safe_log(self.logger, "[FB Enrich] Selenium imports unavailable: %s", exc)
+            return False
+        try:
+            self.driver.get("https://www.facebook.com/")
+        except Exception as exc:
+            _safe_log(self.logger, "[FB Enrich] Could not open facebook.com: %s", exc)
+            return False
+
+        if self._is_logged_in():
+            return True
+
+        # Try loading cookies if provided
+        if self.cookies_path and os.path.exists(self.cookies_path):
+            try:
+                with open(self.cookies_path, "r", encoding="utf-8") as fh:
+                    cookies = json.load(fh) or []
+                for cookie in cookies:
+                    try:
+                        self.driver.add_cookie(cookie)
+                    except Exception:
+                        continue
+                self.driver.get("https://www.facebook.com/")
+                if self._is_logged_in():
+                    return True
+            except Exception as exc:
+                _safe_log(self.logger, "[FB Enrich] Failed to load FB cookies: %s", exc)
+
+        # One-time manual login prompt
+        if not self._login_checked:
+            self._login_checked = True
+            _safe_log(
+                self.logger,
+                "[FB Enrich] Facebook not logged in. Please log in within 30s in the opened browser...",
+            )
+            try:
+                self.driver.get("https://www.facebook.com/")
+            except Exception as exc:
+                _safe_log(self.logger, "[FB Enrich] Failed to open Facebook homepage: %s", exc)
+                return False
+            try:
+                WebDriverWait(self.driver, 30).until(
+                    EC.presence_of_element_located(
+                        (By.CSS_SELECTOR, "a[aria-label*='profile'], a[aria-label*='account'], a[href*='profile.php']")
+                    )
+                )
+                _safe_log(self.logger, "[FB Enrich] Facebook login detected; continuing enrichment.")
+                return True
+            except TimeoutException:
+                _safe_log(self.logger, "[FB Enrich] Login window timed out.")
+                return False
+        return False
+
+    def find_best_page_url(self, artist_name: str, location: Optional[str] = None) -> Optional[str]:
+        try:
+            from selenium.webdriver.common.by import By
+            from selenium.webdriver.support.ui import WebDriverWait
+            from selenium.webdriver.support import expected_conditions as EC
+            from selenium.common.exceptions import TimeoutException, WebDriverException
+        except Exception as exc:
+            _safe_log(self.logger, "[FB Enrich] Selenium imports unavailable: %s", exc)
+            return None
+        if not self.ensure_facebook_logged_in():
+            _safe_log(self.logger, "[FB Enrich] Facebook login not available, skipping.")
+            return None
+        query_parts = [cell_to_str(artist_name)]
+        if location:
+            query_parts.append(cell_to_str(location))
+        query = " ".join(part for part in query_parts if part)
+        if not query:
+            return None
+        search_url = f"{FACEBOOK_SEARCH_URL}?q={urllib.parse.quote_plus(query)}"
+        _safe_log(self.logger, "[FB Enrich] Selenium FB search URL: %s", search_url)
+        try:
+            self.driver.get(search_url)
+        except WebDriverException as exc:
+            _safe_log(
+                self.logger,
+                "[FB Enrich] WebDriver error while navigating FB for '%s': %s",
+                artist_name,
+                exc,
+            )
+            return None
+        try:
+            WebDriverWait(self.driver, FACEBOOK_SEARCH_WAIT_SECONDS).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, "a[href*='facebook.com']"))
+            )
+        except TimeoutException:
+            _safe_log(self.logger, "[FB Enrich] No FB results rendered for query '%s'", query)
+            return None
+        try:
+            page_html = self.driver.page_source or ""
+        except Exception:
+            page_html = ""
+        if not page_html:
+            return None
+        try:
+            soup = BeautifulSoup(page_html, "html.parser")
+        except Exception as exc:
+            _safe_log(
+                self.logger,
+                "[FB Enrich] Failed to parse FB search DOM for '%s': %s",
+                artist_name,
+                exc,
+            )
+            return None
+        candidates: List[Tuple[float, str, str]] = []
+        for anchor in soup.select("a[href]"):
+            href = cell_to_str(anchor.get("href"))
+            if "facebook.com" not in href:
+                continue
+            if any(fragment in href for fragment in ("sharer.php", "logout.php", "login.php", "l.php")):
+                continue
+            absolute = urllib.parse.urljoin(FACEBOOK_SEARCH_URL, href)
+            normalised = _normalise_url(absolute.split("?", 1)[0])
+            if not normalised or "facebook.com" not in normalised:
+                continue
+            parsed = urllib.parse.urlparse(normalised)
+            path_parts = [part for part in parsed.path.split("/") if part]
+            if not path_parts:
+                continue
+            if path_parts[0] in {"search", "plugins", "dialog", "privacy"}:
+                continue
+            name_text = cell_to_str(anchor.get_text(" ", strip=True) or anchor.get("aria-label"))
+            context_text = ""
+            parent = anchor.find_parent(["div", "span"])
+            if parent:
+                context_text = cell_to_str(parent.get_text(" ", strip=True))
+            score = _facebook_candidate_score(artist_name, location, name_text, context_text)
+            if score <= 0:
+                continue
+            candidates.append((score, normalised, name_text))
+        if not candidates:
+            _safe_log(self.logger, "[FB Enrich] No Facebook page candidates for '%s'.", artist_name)
+            return None
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        best_score, best_url, _ = candidates[0]
+        _safe_log(self.logger, "[FB Enrich] Chosen page: %s (score %.2f)", best_url, best_score)
+        return best_url
+
+
+def _build_facebook_search_client(logger) -> Tuple[Optional["FacebookSearchClient"], Optional[Any]]:
+    try:
+        from selenium import webdriver
+        from selenium.webdriver.chrome.service import Service
+    except Exception as exc:
+        _safe_log(logger, "[FB Enrich] Selenium not available; skipping FB enrichment: %s", exc)
+        return None, None
+    try:
+        from webdriver_manager.chrome import ChromeDriverManager
+    except Exception:
+        ChromeDriverManager = None
+    try:
+        user_data_dir = os.environ.get("FACEBOOK_USER_DATA_DIR") or ""
+        cookies_path = os.path.join(BASE_DIR, "fb_cookies.json")
+        options = webdriver.ChromeOptions()
+        # Facebook enrichment should use a visible browser for manual login.
+        # Remove any inherited headless flags defensively.
+        for arg in list(options.arguments):
+            if "headless" in arg:
+                try:
+                    options.arguments.remove(arg)
+                except Exception:
+                    pass
+        options.add_experimental_option("detach", True)
+        options.add_argument("--disable-gpu")
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+        if user_data_dir:
+            options.add_argument(f"--user-data-dir={user_data_dir}")
+            options.add_argument("--profile-directory=Default")
+        service = None
+        if ChromeDriverManager:
+            service = Service(ChromeDriverManager().install())
+        driver = webdriver.Chrome(service=service, options=options) if service else webdriver.Chrome(options=options)
+        if cookies_path and os.path.exists(cookies_path):
+            try:
+                driver.get("https://www.facebook.com/")
+                with open(cookies_path, "r", encoding="utf-8") as fh:
+                    cookies = json.load(fh) or []
+                for cookie in cookies:
+                    try:
+                        driver.add_cookie(cookie)
+                    except Exception:
+                        continue
+            except Exception as exc:
+                _safe_log(logger, "[FB Enrich] Failed to preload FB cookies: %s", exc)
+        client = FacebookSearchClient(
+            driver=driver,
+            logger=logger,
+            user_data_dir=user_data_dir or None,
+            cookies_path=cookies_path if os.path.exists(cookies_path) else None,
+        )
+        return client, driver
+    except Exception as exc:
+        _safe_log(logger, "[FB Enrich] Failed to start Selenium driver: %s", exc)
+        return None, None
+
+
+def facebook_find_best_page(
+    artist_name: str, location: str, fb_client, logger
+) -> Optional[str]:
+    artist_name = cell_to_str(artist_name)
+    location = cell_to_str(location)
+    if not fb_client or not hasattr(fb_client, "find_best_page_url"):
+        _safe_log(logger, "[FB Enrich] No Facebook search client available; skipping '%s'.", artist_name)
+        return None
+    try:
+        return fb_client.find_best_page_url(artist_name, location)
+    except Exception as exc:
+        _safe_log(logger, "[FB Enrich] Facebook search client error for '%s': %s", artist_name, exc)
+        return None
+
+
+def enrich_row_with_facebook(row: dict, logger, fb_client) -> None:
+    artist_name = cell_to_str(row.get("Artist Name") or row.get("artist"))
+    if not artist_name:
+        _safe_log(logger, "[FB Enrich] Skipping row with empty artist name: %r", row)
+        return
+    existing_links_raw = [
+        cell_to_str(row.get("Social Link")),
+        cell_to_str(row.get("External Links")),
+        cell_to_str(row.get("Facebook_URL")),
+    ]
+    if any("facebook.com" in value.lower() for value in existing_links_raw if value):
+        _safe_log(logger, "[FB Enrich] Row already has Facebook link, skipping: %s", artist_name)
+        return
+    location = cell_to_str(row.get("Location") or row.get("location"))
+    fb_url = facebook_find_best_page(artist_name, location, fb_client, logger)
+    if not fb_url:
+        return
+    fb_url = cell_to_str(fb_url)
+    if not fb_url:
+        return
+    fb_url = fb_url.split("?", 1)[0].rstrip("/")
+    normalised = _normalise_url(fb_url)
+    if normalised and "facebook.com" in normalised.lower():
+        fb_url = normalised
+    if "facebook.com" not in fb_url.lower():
+        return
+    row["Social Link"] = _append_link(row.get("Social Link", ""), fb_url)
+    if "External Links" in row:
+        row["External Links"] = _append_link(row.get("External Links", ""), fb_url)
+    if "Facebook_URL" in row:
+        row["Facebook_URL"] = cell_to_str(fb_url)
 
 
 def _format_source_display(source_key: Optional[str]) -> str:
@@ -1120,119 +1612,223 @@ class CrossDirectoryEnricherWorker(QThread):
                 pass
 
     def _run_impl(self) -> None:
-        if not os.path.exists(self.seed_csv_path):
-            self.log_message.emit(f"[Enricher] Seed CSV not found: {self.seed_csv_path}")
-            self.finished.emit("")
-            return
-        self.log_message.emit(f"[Enricher] Loading seed CSV: {self.seed_csv_path}")
-        seed_df = _read_csv_flexible(self.seed_csv_path)
-        if seed_df is None:
-            self.log_message.emit("[Enricher] Failed to read Spotify CSV; aborting.")
-            self.finished.emit("")
-            return
-        if "Artist Name" not in seed_df.columns:
-            self.log_message.emit("[Enricher] Seed CSV missing 'Artist Name'; aborting.")
-            self.finished.emit("")
-            return
-        total = len(seed_df.index)
-        self.total_rows = total
-        if total == 0:
-            self.log_message.emit("[Enricher] Seed CSV has no rows; nothing to do.")
-            self.finished.emit("")
-            return
-        required_columns = [
-            "Social Link",
-            "External Links",
-            "Email",
-            "Source Directory",
-            "Source URL",
-            "Location",
-            "Primary Genre",
-            "Release Date",
-        ]
-        for column in required_columns:
-            if column not in seed_df.columns:
-                seed_df[column] = ""
-        directory_indexes: Dict[str, DirectoryIndex] = {}
-        if self.unearthed_csv_path:
-            directory_indexes["unearthed"] = _load_directory_csv(self.unearthed_csv_path, "Unearthed")
-        if self.bandcamp_csv_path:
-            directory_indexes["bandcamp"] = _load_directory_csv(self.bandcamp_csv_path, "Bandcamp")
-        if self.soundcloud_csv_path:
-            directory_indexes["soundcloud"] = _load_directory_csv(self.soundcloud_csv_path, "SoundCloud")
-        if self.lastfm_csv_path:
-            directory_indexes["lastfm"] = _load_directory_csv(self.lastfm_csv_path, "Last.fm")
-        self.log_message.emit(f"[Enricher] Starting enrichment for {total} rows...")
-        priority = ["bandcamp", "soundcloud", "lastfm", "unearthed"]
-        for position, row_idx in enumerate(seed_df.index, start=1):
-            row = seed_df.loc[row_idx]
-            artist = _clean_cell(row.get("Artist Name"))
-            key = normalise_artist_name(artist)
-            track_key = _extract_seed_track_key(row)
-            seed_links_by_source = _extract_seed_links_by_source(row)
-            if not key:
-                self.log_message.emit(
-                    f"[Enricher] Row {position}/{total}: invalid artist name; skipping."
-                )
-                self._update_progress(position, total)
-                continue
-            enriched = False
-            matches_used: List[Tuple[str, Dict[str, Any]]] = []
-            sources_logged: List[str] = []
-            for source in priority:
-                directory_index = directory_indexes.get(source)
-                if not directory_index:
-                    continue
-                url_candidates = list(seed_links_by_source.get(source, ()))
-                matches = self._find_directory_matches(
-                    directory_index, key, track_key, url_candidates
-                )
-                if not matches:
-                    continue
-                matches_used.extend((source, match) for match in matches)
-                payload = self._payload_from_directory_rows(matches, source)
-                if not payload:
-                    continue
-                self._apply_payload(seed_df, row_idx, payload)
-                enriched = True
-                if source not in sources_logged:
-                    sources_logged.append(source)
-            metadata_updated = self._apply_structured_fields(seed_df, row_idx, matches_used)
-            if metadata_updated:
-                enriched = True
-                for source, _ in matches_used:
-                    if source not in sources_logged:
-                        sources_logged.append(source)
-            if enriched and sources_logged:
-                display_sources = ", ".join(
-                    filter(
-                        None,
-                        [_format_source_display(src) or src.title() for src in sources_logged],
+        fb_driver = None
+        try:
+            if ENABLE_FACEBOOK_ENRICHMENT:
+                try:
+                    if not enricher_fb_profile_has_cookies():
+                        driver = None
+                        try:
+                            driver = persistent_fb_driver()
+                            try:
+                                driver.get("https://www.facebook.com/")
+                            except Exception:
+                                pass
+                            message = "[FB Enrich] Please manually log into Facebook in the opened window."
+                            _safe_log(self.log_message.emit, message)
+                            try:
+                                input("Press ENTER once logged in…")
+                            except EOFError:
+                                pass
+                            except Exception:
+                                pass
+                        finally:
+                            if driver:
+                                try:
+                                    driver.quit()
+                                except Exception:
+                                    pass
+                    fb_driver = _get_enricher_facebook_driver()
+                except Exception as exc:
+                    _safe_log(
+                        self.log_message.emit,
+                        "[FB Enrich] Failed to start Facebook driver: %s",
+                        exc,
                     )
-                )
-                if display_sources:
+                    fb_driver = None
+            if not os.path.exists(self.seed_csv_path):
+                self.log_message.emit(f"[Enricher] Seed CSV not found: {self.seed_csv_path}")
+                self.finished.emit("")
+                return
+            self.log_message.emit(f"[Enricher] Loading seed CSV: {self.seed_csv_path}")
+            seed_df = _read_csv_flexible(self.seed_csv_path)
+            if seed_df is None:
+                self.log_message.emit("[Enricher] Failed to read Spotify CSV; aborting.")
+                self.finished.emit("")
+                return
+            if "Artist Name" not in seed_df.columns:
+                self.log_message.emit("[Enricher] Seed CSV missing 'Artist Name'; aborting.")
+                self.finished.emit("")
+                return
+            total = len(seed_df.index)
+            self.total_rows = total
+            if total == 0:
+                self.log_message.emit("[Enricher] Seed CSV has no rows; nothing to do.")
+                self.finished.emit("")
+                return
+            required_columns = [
+                "Social Link",
+                "External Links",
+                "Email",
+                "Source Directory",
+                "Source URL",
+                "Location",
+                "Primary Genre",
+                "Release Date",
+            ]
+            for column in required_columns:
+                if column not in seed_df.columns:
+                    seed_df[column] = ""
+            directory_indexes: Dict[str, DirectoryIndex] = {}
+            if self.unearthed_csv_path:
+                directory_indexes["unearthed"] = _load_directory_csv(self.unearthed_csv_path, "Unearthed")
+            if self.bandcamp_csv_path:
+                directory_indexes["bandcamp"] = _load_directory_csv(self.bandcamp_csv_path, "Bandcamp")
+            if self.soundcloud_csv_path:
+                directory_indexes["soundcloud"] = _load_directory_csv(self.soundcloud_csv_path, "SoundCloud")
+            if self.lastfm_csv_path:
+                directory_indexes["lastfm"] = _load_directory_csv(self.lastfm_csv_path, "Last.fm")
+            self.log_message.emit(f"[Enricher] Starting enrichment for {total} rows...")
+            priority = ["bandcamp", "soundcloud", "lastfm", "unearthed"]
+            for position, row_idx in enumerate(seed_df.index, start=1):
+                row = seed_df.loc[row_idx]
+                artist = _clean_cell(row.get("Artist Name"))
+                key = normalise_artist_name(artist)
+                track_key = _extract_seed_track_key(row)
+                seed_links_by_source = _extract_seed_links_by_source(row)
+                if not key:
                     self.log_message.emit(
-                        f"[Enricher] Row {position}/{total}: matched {artist!r} via {display_sources}."
+                        f"[Enricher] Row {position}/{total}: invalid artist name; skipping."
                     )
-            if not enriched and self.enable_live_search:
-                payload = self._live_lookup(artist)
-                if payload:
+                    self._update_progress(position, total)
+                    continue
+                enriched = False
+                matches_used: List[Tuple[str, Dict[str, Any]]] = []
+                sources_logged: List[str] = []
+                for source in priority:
+                    directory_index = directory_indexes.get(source)
+                    if not directory_index:
+                        continue
+                    url_candidates = list(seed_links_by_source.get(source, ()))
+                    matches = self._find_directory_matches(
+                        directory_index, key, track_key, url_candidates
+                    )
+                    if not matches:
+                        continue
+                    matches_used.extend((source, match) for match in matches)
+                    payload = self._payload_from_directory_rows(matches, source)
+                    if not payload:
+                        continue
                     self._apply_payload(seed_df, row_idx, payload)
                     enriched = True
-            if not enriched:
-                self.log_message.emit(
-                    f"[Enricher] Row {position}/{total}: no enrichment for {artist!r}."
-                )
-            self._update_progress(position, total)
-        _ensure_parent_dir(self.output_csv_path)
-        try:
-            seed_df.to_csv(self.output_csv_path, index=False, encoding="utf-8-sig")
-        except Exception as exc:
-            self.log_message.emit(f"[Enricher] Failed to write output CSV: {exc}")
-            self.finished.emit("")
-            return
-        self.log_message.emit(f"[Enricher] Enriched CSV written to {self.output_csv_path}")
-        self.finished.emit(self.output_csv_path)
+                    if source not in sources_logged:
+                        sources_logged.append(source)
+                metadata_updated = self._apply_structured_fields(seed_df, row_idx, matches_used)
+                if metadata_updated:
+                    enriched = True
+                    for source, _ in matches_used:
+                        if source not in sources_logged:
+                            sources_logged.append(source)
+                if enriched and sources_logged:
+                    display_sources = ", ".join(
+                        filter(
+                            None,
+                            [_format_source_display(src) or src.title() for src in sources_logged],
+                        )
+                    )
+                    if display_sources:
+                        self.log_message.emit(
+                            f"[Enricher] Row {position}/{total}: matched {artist!r} via {display_sources}."
+                        )
+                if not enriched and self.enable_live_search:
+                    payload = self._live_lookup(artist)
+                    if payload:
+                        self._apply_payload(seed_df, row_idx, payload)
+                        enriched = True
+                if ENABLE_FACEBOOK_ENRICHMENT and fb_driver:
+                    social_link_val = cell_to_str(row.get("Social Link", ""))
+                    external_link_val = cell_to_str(row.get("External Links", ""))
+                    fb_url_val = cell_to_str(row.get("Facebook_URL", ""))
+                    existing_fb_links: List[str] = []
+                    for blob in (social_link_val, external_link_val, fb_url_val):
+                        if not blob:
+                            continue
+                        parts = [part.strip() for part in blob.split(",") if part.strip()]
+                        for part in parts:
+                            if "facebook.com" in part.lower():
+                                existing_fb_links.append(part)
+                    fb_emails: List[str] = []
+                    page_url_used = ""
+                    try:
+                        if existing_fb_links:
+                            fb_candidates = (
+                                [existing_fb_links]
+                                if isinstance(existing_fb_links, str)
+                                else list(existing_fb_links)
+                            )
+                            for candidate in fb_candidates:
+                                candidate_norm = normalize_external_url(candidate)
+                                found = fb_scrape_emails_from_page(
+                                    fb_driver, candidate_norm, log_fn=self.log_message.emit
+                                )
+                                try:
+                                    current_url = (fb_driver.current_url or "").lower()
+                                    if "facebook.com/login" in current_url:
+                                        self.log_message.emit(
+                                            "[FB Enrich] Facebook login wall detected for this page; enrichment skipped (not logged in)."
+                                        )
+                                        found = []
+                                except Exception:
+                                    pass
+                                if found:
+                                    fb_emails = found
+                                    page_url_used = candidate_norm
+                                    break
+                        elif fb_find_page_and_emails_by_name:
+                            page_url_used, fb_emails = fb_find_page_and_emails_by_name(
+                                fb_driver,
+                                artist,
+                                location=cell_to_str(row.get("Location") or row.get("location")),
+                                log_fn=self.log_message.emit,
+                            )
+                            try:
+                                current_url = (fb_driver.current_url or "").lower()
+                                if "facebook.com/login" in current_url:
+                                    self.log_message.emit(
+                                        "[FB Enrich] Facebook login wall detected for this page; enrichment skipped (not logged in)."
+                                    )
+                                    fb_emails = []
+                                    page_url_used = ""
+                            except Exception:
+                                pass
+                    except Exception as exc:
+                        self.log_message.emit(
+                            f"[FB Enrich] Error enriching row {position}/{total} ({artist}): {exc}"
+                        )
+                    if fb_emails:
+                        current_email = cell_to_str(seed_df.at[row_idx, "Email"])
+                        if not current_email:
+                            seed_df.at[row_idx, "Email"] = fb_emails[0]
+                        if not existing_fb_links and page_url_used:
+                            if not seed_df.at[row_idx, "Social Link"]:
+                                seed_df.at[row_idx, "Social Link"] = page_url_used
+                        enriched = True
+                if not enriched:
+                    self.log_message.emit(
+                        f"[Enricher] Row {position}/{total}: no enrichment for {artist!r}."
+                    )
+                self._update_progress(position, total)
+            _ensure_parent_dir(self.output_csv_path)
+            try:
+                seed_df.to_csv(self.output_csv_path, index=False, encoding="utf-8-sig")
+            except Exception as exc:
+                self.log_message.emit(f"[Enricher] Failed to write output CSV: {exc}")
+                self.finished.emit("")
+                return
+            self.log_message.emit(f"[Enricher] Enriched CSV written to {self.output_csv_path}")
+            self.finished.emit(self.output_csv_path)
+        finally:
+            _cleanup_enricher_facebook_driver()
 
     def _find_directory_matches(
         self,

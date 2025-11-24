@@ -65,16 +65,15 @@ def check_and_install_dependencies():
             print("Dependencies are missing. Exiting.")
             sys.exit(1)
 
-check_and_install_dependencies()
-
 # ---------------------------
 # Prevent Sleep on macOS using caffeinate
 # ---------------------------
-if platform.system() == "Darwin":
-    print("Detected macOS – starting caffeinate to prevent sleep.")
-    caffeinate_proc = subprocess.Popen(['caffeinate'])
-else:
-    caffeinate_proc = None
+caffeinate_proc = None
+if __name__ == "__main__":
+    check_and_install_dependencies()
+    if platform.system() == "Darwin":
+        print("Detected macOS – starting caffeinate to prevent sleep.")
+        caffeinate_proc = subprocess.Popen(['caffeinate'])
 
 # ---------------------------
 # Now import the dependencies
@@ -119,6 +118,7 @@ from urllib.parse import (
     urlencode,
     unquote,
     quote,
+    quote_plus,
 )
 import urllib.parse as _urlparse
 from PyQt5 import QtWidgets, QtCore
@@ -127,6 +127,7 @@ from dateutil.relativedelta import relativedelta
 import unicodedata
 from spotify_scraper import scrape_spotify
 
+cross_directory_enricher = None
 try:
     import cross_directory_enricher
 except ImportError:
@@ -5671,6 +5672,140 @@ def scrape_soundcloud(website_url, seed_tags=None, pages_per_tag=SOUNDCLOUD_PAGE
 # =============================================================================
 # Facebook Scraping Functions (Page 2)
 # =============================================================================
+def fb_extract_emails_from_html(html: str) -> list[str]:
+    """
+    Given Facebook page HTML, return a de-duplicated list of email addresses.
+    Reuses the existing Bandcamp email regex for consistency.
+    """
+    emails = set()
+    soup = BeautifulSoup(html or "", "html.parser")
+    email_re = _BC_EMAIL_RE
+    for text_node in soup.stripped_strings:
+        for match in email_re.findall(text_node):
+            emails.add(match.strip())
+    return sorted(emails)
+
+
+def fb_scrape_emails_from_page(driver, page_url: str, log_fn=None) -> list[str]:
+    """
+    Open a Facebook page in Selenium and return any emails found.
+    """
+    def _log(msg):
+        if log_fn:
+            try:
+                log_fn(msg)
+            except Exception:
+                pass
+        print(msg)
+
+    if not page_url:
+        return []
+
+    try:
+        _log(f"[FB Enrich] Scraping Facebook page: {page_url}")
+        driver.get(page_url)
+        WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.TAG_NAME, "body"))
+        )
+        html = driver.page_source or ""
+        emails = fb_extract_emails_from_html(html)
+        if emails:
+            _log(f"[FB Enrich] Found {len(emails)} email(s) on {page_url}")
+        else:
+            _log(f"[FB Enrich] No emails found on {page_url}")
+        return emails
+    except Exception as exc:
+        _log(f"[FB Enrich] Error scraping {page_url}: {exc}")
+        return []
+
+def _fb_is_real_page_url(url: str) -> bool:
+    """
+    Return True if this looks like a Facebook page/profile URL, and False for search/login/help/etc.
+    """
+    if not url:
+        return False
+    url = url.strip()
+    if url.startswith("/"):
+        url = "https://www.facebook.com" + url
+    parsed = urlparse(url)
+    host = (parsed.netloc or "").lower()
+    path = (parsed.path or "").lower()
+
+    if "facebook.com" not in host:
+        return False
+
+    if "/search/" in path:
+        return False
+    if "/login" in path or "/recover" in path or "/help" in path:
+        return False
+
+    if "/pages/" in path or "/people/" in path:
+        return True
+
+    if path.count("/") == 1 and len(path) > 1:
+        return True
+
+    return False
+
+
+def fb_find_page_and_emails_by_name(driver, artist_name: str, location: str = "", log_fn=None) -> tuple[str, list[str]]:
+    """
+    Use Facebook search to locate a page for an artist and scrape emails.
+    Returns (page_url, emails). If nothing found, returns ("", []).
+    """
+    def _log(msg):
+        if log_fn:
+            try:
+                log_fn(msg)
+            except Exception:
+                pass
+        print(msg)
+
+    artist_name = (artist_name or "").strip()
+    if not artist_name:
+        return "", []
+
+    query_value = artist_name
+    if location:
+        query_value = f"{artist_name} {location}".strip()
+    query = quote_plus(query_value)
+    search_url = f"https://www.facebook.com/search/pages/?q={query}"
+    _log(f"[FB Enrich] Selenium FB search URL: {search_url}")
+
+    try:
+        driver.get(search_url)
+        WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.TAG_NAME, "body"))
+        )
+    except Exception as exc:
+        _log(f"[FB Enrich] Facebook search failed for '{artist_name}': {exc}")
+        return "", []
+
+    html = driver.page_source or ""
+    soup = BeautifulSoup(html, "html.parser")
+    candidate_url = ""
+    for a in soup.find_all("a", href=True):
+        href = (a.get("href") or "").strip()
+        if not href:
+            continue
+        text = a.get_text(" ", strip=True) or ""
+        if href.startswith("/"):
+            href = "https://www.facebook.com" + href
+        if not _fb_is_real_page_url(href):
+            continue
+        lower_name = artist_name.lower()
+        if lower_name in text.lower() or lower_name in href.lower():
+            candidate_url = href
+            break
+
+    if not candidate_url:
+        _log(f"[FB Enrich] No Facebook page candidates for '{artist_name}'.")
+        return "", []
+
+    candidate_url = normalize_external_url(candidate_url)
+    emails = fb_scrape_emails_from_page(driver, candidate_url, log_fn=_log)
+    return candidate_url, emails
+
 def extract_emails(text):
     email_pattern = r'([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})'
     return list(set(re.findall(email_pattern, text)))
