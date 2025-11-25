@@ -263,7 +263,10 @@ def score_candidate(artist_name: str, cand: FbCandidate) -> Tuple[float, float, 
     """
     if score_fb_candidate:
         try:
-            return score_fb_candidate(artist_name, cand.name, cand.url, cand.category)  # type: ignore
+            scored = score_fb_candidate(artist_name, cand.name, cand.url, cand.category)  # type: ignore
+            if scored is None:
+                return (-1.0, 0.0, 0.0)
+            return scored
         except Exception:
             pass
     return _local_score_candidate(artist_name, cand)

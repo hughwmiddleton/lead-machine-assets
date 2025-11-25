@@ -29,10 +29,18 @@ from urllib.parse import urlparse, parse_qs, unquote
 
 from facebook_enrich import (
     FbCandidate,
+    detect_corporate_token,
     extract_fb_category,
+    classify_corporate_signals,
     has_corporate_token,
+    MUSIC_CATEGORY_KEYWORDS,
+    MUSIC_TOKENS,
     normalize_fb_name,
     score_fb_candidate,
+    is_music_page,
+    _corporate_hit,
+    _looks_corporate,
+    _looks_music_related,
 )
 
 # ---------------------------------------------------------------------------
@@ -999,11 +1007,12 @@ class FacebookSearchClient:
             if path_parts[0] in {"search", "plugins", "dialog", "privacy"}:
                 continue
             name_text = cell_to_str(anchor.get_text(" ", strip=True) or anchor.get("aria-label"))
+            fallback_name = name_text or (path_parts[0] if path_parts else "") or normalised
             parent = anchor.find_parent(["div", "span"])
             category_raw = extract_fb_category(parent, name_text) or ""
             candidates.append(
                 FbCandidate(
-                    name=name_text or normalised,
+                    name=fallback_name,
                     url=normalised,
                     category=category_raw,
                 )
@@ -1018,76 +1027,237 @@ class FacebookSearchClient:
             )
             return None
 
-        best_candidate: Optional[FbCandidate] = None
-        best_score = float("-inf")
-        best_base_score = 0.0
-        best_cat_boost = 0.0
+        music_pool: List[Tuple[float, float, float, bool, bool, FbCandidate]] = []
+        neutral_pool: List[Tuple[float, float, float, bool, bool, FbCandidate]] = []
+        corporate_tokens = [
+            "ltd",
+            "pty",
+            "pty ltd",
+            "inc",
+            "corp",
+            "company",
+            "co.",
+            "store",
+            "shop",
+            "shoppe",
+            "boutique",
+            "market",
+            "resort",
+            "hotel",
+            "hostel",
+            "motel",
+            "lodge",
+            "guest house",
+            "guesthouse",
+            "real estate",
+            "realestate",
+            "estate agent",
+            "estateagency",
+            "spa",
+            "salon",
+            "barber",
+            "restaurant",
+            "cafe",
+            "coffee shop",
+            "coffeehouse",
+            "coffee",
+            "bar",
+            "pub",
+            "farm",
+            "farms",
+            "op shop",
+            "thrift",
+            "mart",
+            "properties",
+            "agency",
+            "travel",
+            "construction",
+            "hospital",
+            "club",
+            "school",
+            "college",
+            "university",
+            "academy",
+            "church",
+            "ministry",
+            "ministries",
+            "temple",
+            "mosque",
+            "foundation",
+            "ngo",
+            "association",
+            "society",
+            "pvt",
+            "limited",
+            "s.a.",
+            "s.r.l",
+        ]
         for cand in candidates:
-            final_score, base_score, cat_boost = score_fb_candidate(
-                artist_name, cand.name, cand.url, cand.category
-            )
-            is_music = _looks_music_related(cand.name, cand.category or "")
-            is_corporate = _looks_corporate(cand.name, cand.category or "", cand.url)
-            if is_corporate and not is_music:
+            name_lc = (cand.name or "").lower()
+            url_lc = (cand.url or "").lower()
+            category_lc = (cand.category or "").lower()
+            cand_name_norm = normalize_fb_name(cand.name or "")
+            artist_norm = normalize_fb_name(artist_name)
+            try:
+                cand_username_norm = normalize_fb_name(urllib.parse.urlparse(cand.url or "").path.strip("/").split("/")[0])
+            except Exception:
+                cand_username_norm = ""
+
+            # First, reuse the shared helper for robust corporate detection.
+            corp_hit_shared, corp_token_shared, corp_field_shared = _corporate_hit(name_lc, url_lc, category_lc)
+            if corp_hit_shared:
                 _safe_log(
                     self.logger,
-                    "[FB Enrich] Rejecting FB candidate '%s' (%s) for '%s' as corporate/business.",
+                    "[FB Enrich] Rejecting FB candidate '%s' (%s) for '%s' due to corporate token '%s' in %s.",
                     cand.name or cand.url,
                     cand.url,
                     artist_name,
+                    corp_token_shared or "<unknown>",
+                    corp_field_shared or "name/url/category",
                 )
                 continue
+
+            rejected = False
+            for token in corporate_tokens:
+                if token in name_lc:
+                    _safe_log(
+                        self.logger,
+                        "[FB Enrich] Rejecting FB candidate '%s' (%s) for '%s' due to corporate token '%s' in name.",
+                        cand.name or cand.url,
+                        cand.url,
+                        artist_name,
+                        token,
+                    )
+                    rejected = True
+                    break
+                if token in url_lc:
+                    _safe_log(
+                        self.logger,
+                        "[FB Enrich] Rejecting FB candidate '%s' (%s) for '%s' due to corporate token '%s' in url.",
+                        cand.name or cand.url,
+                        cand.url,
+                        artist_name,
+                        token,
+                    )
+                    rejected = True
+                    break
+                if token in category_lc:
+                    _safe_log(
+                        self.logger,
+                        "[FB Enrich] Rejecting FB candidate '%s' (%s) for '%s' due to corporate token '%s' in category.",
+                        cand.name or cand.url,
+                        cand.url,
+                        artist_name,
+                        token,
+                    )
+                    rejected = True
+                    break
+            if rejected:
+                continue
+
+            music_flag = is_music_page(name_lc, url_lc, category_lc)
+            if not music_flag:
+                if cand_name_norm and artist_norm and cand_name_norm == artist_norm:
+                    music_flag = True
+                elif cand_username_norm and artist_norm and cand_username_norm == artist_norm:
+                    music_flag = True
+            if not music_flag:
+                _safe_log(
+                    self.logger,
+                    "[FB Enrich] Skipping non-music FB candidate '%s' for '%s' (category='%s')",
+                    cand.name or cand.url,
+                    artist_name,
+                    cand.category or "<none>",
+                )
+                continue
+
+            scored = score_fb_candidate(artist_name, cand.name, cand.url, cand.category)
+            if scored is None:
+                continue
+            final_score, name_score, cat_boost = scored
+            music_cat_bonus = 0.5 if any(tok in category_lc for tok in MUSIC_TOKENS) else 0.0
+            final_score += music_cat_bonus
             _safe_log(
                 self.logger,
-                "-> '%s' (cat='%s', base=%.2f, cat_boost=%.2f, final=%.2f)",
+                "-> '%s' (cat='%s', name_score=%.2f, cat_boost=%.2f, final=%.2f, music=%s, corporate=%s)",
                 cand.name or cand.url,
                 cand.category or "<none>",
-                base_score,
-                cat_boost,
+                name_score,
+                cat_boost + music_cat_bonus,
                 final_score,
+                music_flag,
+                False,
             )
-            if final_score < 0:
-                continue
-            better_tie = final_score == best_score and cat_boost > best_cat_boost
-            if final_score > best_score or better_tie:
-                best_candidate = cand
-                best_score = final_score
-                best_base_score = base_score
-                best_cat_boost = cat_boost
+            bucket = music_pool if music_flag else neutral_pool
+            bucket.append((final_score, name_score, cat_boost, music_flag, False, cand))
 
-        if not best_candidate:
+        # Pick absolute best by final_score, then apply minimum threshold.
+        best_entry: Optional[Tuple[float, float, float, bool, bool, FbCandidate]] = None
+        for pool in (music_pool, neutral_pool):
+            if not pool:
+                continue
+            top = max(pool, key=lambda item: item[0])
+            if best_entry is None or top[0] > best_entry[0]:
+                best_entry = top
+
+        MIN_FINAL_SCORE = 1.0
+        if not best_entry or best_entry[0] < MIN_FINAL_SCORE or not best_entry[3]:
             _safe_log(self.logger, "[FB Enrich] No high-confidence Facebook match for '%s'.", artist_name)
             return None
 
-        is_music_best = _looks_music_related(best_candidate.name, best_candidate.category or "")
-        music_min = 1.0
-        non_music_min = 1.5
-        if is_music_best and best_score < music_min:
-            _safe_log(
-                self.logger,
-                "[FB Enrich] No high-confidence FB music match for '%s' (score=%.2f).",
-                artist_name,
-                best_score,
-            )
-            return None
-        if not is_music_best and best_score < non_music_min:
-            _safe_log(
-                self.logger,
-                "[FB Enrich] Rejecting non-music FB page '%s' for '%s' (score=%.2f below threshold).",
-                best_candidate.name or best_candidate.url,
-                artist_name,
-                best_score,
-            )
-            return None
+        best_score, best_name_score, best_cat_boost, best_is_music, best_is_corp, best_candidate = best_entry
+
+        # Second-layer validation: fetch page category and reject late if corporate.
+        try:
+            self.driver.get(best_candidate.url)
+            WebDriverWait(self.driver, 5).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+            page_html = self.driver.page_source or ""
+            page_category_text = None
+            try:
+                soup = BeautifulSoup(page_html, "html.parser")
+                meta_desc = soup.find("meta", attrs={"name": "description"}) or soup.find(
+                    "meta", attrs={"property": "og:description"}
+                )
+                if meta_desc:
+                    page_category_text = (meta_desc.get("content") or "").strip()
+                if not page_category_text:
+                    for tag in soup.find_all(["span", "div"]):
+                        val = tag.get_text(" ", strip=True)
+                        if val and len(val) <= 80 and ("/" in val or "music" in val.lower()):
+                            page_category_text = val
+                            break
+            except Exception:
+                page_category_text = None
+            sig_page = classify_corporate_signals(best_candidate.url, best_candidate.name, page_category_text or "")
+            if sig_page.has_hard and not sig_page.has_artist:
+                _safe_log(
+                    self.logger,
+                    "[FB Enrich] Rejecting FB page '%s' for '%s' after scrape due to HARD corporate category '%s'.",
+                    best_candidate.url,
+                    artist_name,
+                    page_category_text or "<none>",
+                )
+                return None
+            if page_category_text and sig_page.has_artist:
+                _safe_log(
+                    self.logger,
+                    "[FB Enrich] Confirmed music page for '%s' with FB category '%s'.",
+                    artist_name,
+                    page_category_text,
+                )
+        except Exception:
+            pass
 
         _safe_log(
             self.logger,
-            "[FB Enrich] Best FB candidate for '%s' -> '%s' (final_score=%.2f, base_score=%.2f, cat_boost=%.2f, category='%s')",
+            "[FB Enrich] Best FB candidate for '%s' -> '%s' (final_score=%.2f, name_score=%.2f, cat_boost=%.2f, music=%s, corporate=%s, category='%s')",
             artist_name,
             best_candidate.name or best_candidate.url,
             best_score,
-            best_base_score,
+            best_name_score,
             best_cat_boost,
+            best_is_music,
+            best_is_corp,
             best_candidate.category or "<none>",
         )
         return best_candidate.url
