@@ -6635,7 +6635,7 @@ class CrossDirectoryEnricherTab(QtWidgets.QWidget):
         live_label = QtWidgets.QLabel("Max live searches (0 = unlimited):")
         self.max_live_spin = QtWidgets.QSpinBox()
         self.max_live_spin.setRange(0, 1000)
-        self.max_live_spin.setValue(40)
+        self.max_live_spin.setValue(50)
         live_layout.addWidget(live_label)
         live_layout.addWidget(self.max_live_spin)
         live_layout.addStretch()

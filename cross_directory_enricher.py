@@ -27,10 +27,18 @@ from PyQt5.QtCore import QThread, pyqtSignal
 from webdriver_manager.chrome import ChromeDriverManager
 from urllib.parse import urlparse, parse_qs, unquote
 
+from facebook_enrich import (
+    FbCandidate,
+    extract_fb_category,
+    has_corporate_token,
+    normalize_fb_name,
+    score_fb_candidate,
+)
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-LIVE_SEARCH_MAX_ATTEMPTS = 40  # 0 = no limit
+LIVE_SEARCH_MAX_ATTEMPTS = 50  # 0 = no limit
 MAX_LINK_HUB_HOPS_PER_ROW = 1
 HTTP_TIMEOUT = 15
 USER_AGENT = (
@@ -722,7 +730,7 @@ def _normalise_facebook_name(value: str) -> str:
     cleaned = " ".join(cleaned.split())
     return cleaned
 
-_FB_ALLOWED_CATEGORY_TOKENS = ("musician", "band", "artist", "music", "singer")
+_FB_ALLOWED_CATEGORY_TOKENS = ("musician", "band", "artist", "music", "singer", "dj", "producer", "songwriter")
 _FB_BLOCKED_CATEGORY_TOKENS = (
     "church",
     "chapel",
@@ -740,10 +748,21 @@ _FB_BLOCKED_CATEGORY_TOKENS = (
     "cafe",
     "bar",
     "pub",
+    "spa",
+    "resort",
+    "hotel",
+    "boutique",
+    "store",
+    "shop",
+    "market",
+    "mart",
 )
 
 def _facebook_score_candidate(artist_norm: str, page_name_norm: str, username_norm: str, category_norm: str) -> float:
     if not artist_norm:
+        return 0.0
+    category_norm = normalize_fb_name(category_norm)
+    if has_corporate_token(page_name_norm) or has_corporate_token(username_norm) or has_corporate_token(category_norm):
         return 0.0
     score = 0.0
     if page_name_norm == artist_norm:
@@ -801,22 +820,9 @@ def _fb_scoring_sanity_tests():
     """
     Lightweight sanity checks for FB scoring without live requests.
     """
-    FB_STRONG = [
-        "musician/band", "musician", "band", "artist", "music", "singer",
-    ]
-    FB_NEG = ["spa", "real estate", "hotel", "boutique", "store"]
-
-    def cat_boost(cat: str) -> float:
-        cat_norm = normalize_name(cat)
-        if any(token in cat_norm for token in FB_STRONG):
-            return 2.5
-        if any(token in cat_norm for token in FB_NEG):
-            return -3.0
-        return 0.0
-
     def score(artist, name, category):
-        base = _facebook_candidate_score(artist, "", name, category or "")
-        return base + cat_boost(category or "")
+        final, _, _ = score_fb_candidate(artist, name, name, category or "")
+        return final
 
     scenarios = [
         ("Aneya", "Aneya Music", "Musician/band", "Aneya Care Spa", "Health spa"),
@@ -972,110 +978,8 @@ class FacebookSearchClient:
                 exc,
             )
             return None
-        FB_CATEGORY_BOOSTS = {
-            "musician/band": 2.5,
-            "artist": 2.2,
-            "band": 2.2,
-            "singer": 2.0,
-            "music": 2.0,
-            "record label": 1.8,
-            "entertainer": 1.5,
-            "public figure": 1.0,
-        }
-        MUSIC_STRONG = [
-            "musician/band", "musician", "band",
-            "artist", "music", "singer", "singer-songwriter",
-            "rapper", "dj", "producer", "recording studio",
-            "music production studio", "music producer",
-            "songwriter", "performing artist", "public figure",
-            "entertainer",
-        ]
-        MUSIC_MEDIUM = [
-            "record label", "entertainment website",
-            "media", "radio station", "podcast",
-            "music video", "music award", "festival",
-        ]
-        NON_MUSIC_CORPORATE = [
-            "spa", "care spa", "health spa", "resort",
-            "hotel", "boutique", "clothing", "store",
-            "shop", "vintage", "retro", "restaurant",
-            "bar", "cafe", "coffee shop",
-            "real estate", "estate agent", "construction",
-            "company", "ltd", "llc", "inc",
-            "university", "college", "school",
-            "church", "temple", "mosque",
-            "government", "politician", "political",
-        ]
-
-        def compute_fb_category_boost(category_norm: str | None) -> float:
-            if not category_norm:
-                return 0.0
-            cat = category_norm.strip().lower()
-            if not cat:
-                return 0.0
-            if cat in FB_CATEGORY_BOOSTS:
-                return FB_CATEGORY_BOOSTS[cat]
-            if any(token in cat for token in MUSIC_STRONG):
-                return 2.5
-            if any(token in cat for token in MUSIC_MEDIUM):
-                return 1.5
-            if any(token in cat for token in NON_MUSIC_CORPORATE):
-                return -3.0
-            return 0.0
-
-        def extract_fb_category(result_element, page_name: str = "") -> tuple[str | None, str | None]:
-            if result_element is None:
-                return None, None
-            seen = set()
-            name_norm = normalize_name(page_name)
-
-            def _clean(text: str) -> str:
-                return re.sub(r"\s+", " ", text or "").strip()
-
-            candidates = []
-            try:
-                for node in result_element.stripped_strings:
-                    val = _clean(node)
-                    if not val or val.lower() == (page_name or "").strip().lower():
-                        continue
-                    if name_norm and normalize_name(val) == name_norm:
-                        continue
-                    if len(val) > 80:
-                        continue
-                    if val in seen:
-                        continue
-                    seen.add(val)
-                    candidates.append(val)
-            except Exception:
-                candidates = []
-
-            for candidate in candidates:
-                lower = candidate.lower()
-                if "/" in candidate or "band" in lower or "music" in lower or "artist" in lower or "dj" in lower:
-                    return candidate, normalize_name(candidate)
-                if len(candidate.split()) <= 6:
-                    return candidate, normalize_name(candidate)
-            return (candidates[0], normalize_name(candidates[0])) if candidates else (None, None)
-
-        best_candidate_url = None
-        best_score = 0.0
-        best_name = ""
-        best_category_raw = None
-        best_category_norm = None
-        best_base_score = 0.0
-        best_cat_boost = 0.0
-        artist_norm = normalize_name(artist_name)
-        blocked_tokens = [
-            "games", "game",
-            "creations",
-            "store", "shop",
-            "company", "co ", " co.", "corp", "inc", "ltd", "llc",
-            "exterior", "exteriors",
-            "boutique",
-            "farm", "farms",
-            "international",
-        ]
-        downrank_tokens = ["studio", "studios"]
+        seen_urls: Set[str] = set()
+        candidates: List[FbCandidate] = []
         for anchor in soup.select("a[href]"):
             href = cell_to_str(anchor.get("href"))
             if "facebook.com" not in href:
@@ -1086,6 +990,8 @@ class FacebookSearchClient:
             normalised = _normalise_url(absolute.split("?", 1)[0])
             if not normalised or "facebook.com" not in normalised:
                 continue
+            if normalised in seen_urls:
+                continue
             parsed = urllib.parse.urlparse(normalised)
             path_parts = [part for part in parsed.path.split("/") if part]
             if not path_parts:
@@ -1094,81 +1000,97 @@ class FacebookSearchClient:
                 continue
             name_text = cell_to_str(anchor.get_text(" ", strip=True) or anchor.get("aria-label"))
             parent = anchor.find_parent(["div", "span"])
-            category_raw, category_norm = extract_fb_category(parent, name_text)
-            context_text = category_raw or ""
-            page_name_norm = normalize_name(name_text)
-            username_norm = normalize_name(path_parts[0])
-            score = _facebook_score_candidate(artist_norm, page_name_norm, username_norm, normalize_name(context_text))
-            context = " ".join([
-                (normalised or "").lower(),
-                username_norm,
-                (name_text or "").lower(),
-            ])
-            corporate_hit = False
-            for token in blocked_tokens:
-                if token in context and token not in artist_norm:
-                    corporate_hit = True
-                    score = 0.0
-                    _safe_log(
-                        self.logger,
-                        "[FB Enrich] Rejecting FB candidate '%s' for '%s' due to corporate token '%s' in URL/name.",
-                        name_text or normalised,
-                        artist_name,
-                        token,
-                    )
-                    break
-            if not corporate_hit:
-                for token in downrank_tokens:
-                    if token in context and token not in artist_norm:
-                        score = max(score - 0.2, 0.0)
-                        break
-            base_score = score
-            cat_boost = 0.0
-            if not corporate_hit and score > 0:
-                cat_boost = compute_fb_category_boost(category_norm)
-                score += cat_boost
-            if score <= 0 and best_candidate_url is not None:
-                continue
-            better_tie = (score == best_score and best_candidate_url is None) or (score == best_score and cat_boost > best_cat_boost)
-            if score > best_score or better_tie:
-                best_score = score
-                best_candidate_url = normalised
-                best_name = name_text or normalised
-                best_category_raw = category_raw
-                best_category_norm = category_norm
-                best_base_score = base_score
-                best_cat_boost = cat_boost
-        if not best_candidate_url:
+            category_raw = extract_fb_category(parent, name_text) or ""
+            candidates.append(
+                FbCandidate(
+                    name=name_text or normalised,
+                    url=normalised,
+                    category=category_raw,
+                )
+            )
+            seen_urls.add(normalised)
+
+        if not candidates:
             _safe_log(
                 self.logger,
                 "[FB Enrich] No safe Facebook page candidates for '%s'",
                 artist_name,
             )
             return None
-        if best_score < 0.7:
+
+        best_candidate: Optional[FbCandidate] = None
+        best_score = float("-inf")
+        best_base_score = 0.0
+        best_cat_boost = 0.0
+        for cand in candidates:
+            final_score, base_score, cat_boost = score_fb_candidate(
+                artist_name, cand.name, cand.url, cand.category
+            )
+            is_music = _looks_music_related(cand.name, cand.category or "")
+            is_corporate = _looks_corporate(cand.name, cand.category or "", cand.url)
+            if is_corporate and not is_music:
+                _safe_log(
+                    self.logger,
+                    "[FB Enrich] Rejecting FB candidate '%s' (%s) for '%s' as corporate/business.",
+                    cand.name or cand.url,
+                    cand.url,
+                    artist_name,
+                )
+                continue
             _safe_log(
                 self.logger,
-                "[FB Enrich] Best FB candidate for '%s' -> '%s' (final_score=%.2f, base_score=%.2f, cat_boost=%.2f, category='%s') – rejected (score below threshold).",
-                artist_name,
-                best_name or best_candidate_url,
-                best_score,
-                best_base_score,
-                best_cat_boost,
-                best_category_raw or "<none>",
+                "-> '%s' (cat='%s', base=%.2f, cat_boost=%.2f, final=%.2f)",
+                cand.name or cand.url,
+                cand.category or "<none>",
+                base_score,
+                cat_boost,
+                final_score,
             )
+            if final_score < 0:
+                continue
+            better_tie = final_score == best_score and cat_boost > best_cat_boost
+            if final_score > best_score or better_tie:
+                best_candidate = cand
+                best_score = final_score
+                best_base_score = base_score
+                best_cat_boost = cat_boost
+
+        if not best_candidate:
             _safe_log(self.logger, "[FB Enrich] No high-confidence Facebook match for '%s'.", artist_name)
             return None
+
+        is_music_best = _looks_music_related(best_candidate.name, best_candidate.category or "")
+        music_min = 1.0
+        non_music_min = 1.5
+        if is_music_best and best_score < music_min:
+            _safe_log(
+                self.logger,
+                "[FB Enrich] No high-confidence FB music match for '%s' (score=%.2f).",
+                artist_name,
+                best_score,
+            )
+            return None
+        if not is_music_best and best_score < non_music_min:
+            _safe_log(
+                self.logger,
+                "[FB Enrich] Rejecting non-music FB page '%s' for '%s' (score=%.2f below threshold).",
+                best_candidate.name or best_candidate.url,
+                artist_name,
+                best_score,
+            )
+            return None
+
         _safe_log(
             self.logger,
             "[FB Enrich] Best FB candidate for '%s' -> '%s' (final_score=%.2f, base_score=%.2f, cat_boost=%.2f, category='%s')",
             artist_name,
-            best_name or best_candidate_url,
+            best_candidate.name or best_candidate.url,
             best_score,
             best_base_score,
             best_cat_boost,
-            best_category_raw or "<none>",
+            best_candidate.category or "<none>",
         )
-        return best_candidate_url
+        return best_candidate.url
 
 
 def _build_facebook_search_client(logger) -> Tuple[Optional["FacebookSearchClient"], Optional[Any]]:
@@ -1270,8 +1192,10 @@ def enrich_row_with_facebook(row: dict, logger, fb_client) -> None:
         fb_url = normalised
     if "facebook.com" not in fb_url.lower():
         return
-    row["Social Link"] = _append_link(row.get("Social Link", ""), fb_url)
-    if "External Links" in row:
+    # Only back-fill Social Link if empty; never overwrite existing seed value.
+    if not cell_to_str(row.get("Social Link")):
+        row["Social Link"] = _append_link(row.get("Social Link", ""), fb_url)
+    if "External Links" in row and not cell_to_str(row.get("External Links")):
         row["External Links"] = _append_link(row.get("External Links", ""), fb_url)
     if "Facebook_URL" in row:
         row["Facebook_URL"] = cell_to_str(fb_url)
