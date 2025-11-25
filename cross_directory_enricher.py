@@ -516,6 +516,53 @@ def _cleanup_enricher_facebook_driver():
             _FB_DRIVER = None
 
 
+def _is_music_related_facebook_candidate(
+    artist_name: str,
+    candidate_name: str,
+    category_text: str = "",
+    description_text: str = "",
+) -> bool:
+    import re
+
+    # Normalise
+    artist = artist_name.lower().strip()
+    cand = candidate_name.lower().strip()
+    cat = (category_text or "").lower()
+    desc = (description_text or "").lower()
+    combined = cat + " " + desc
+
+    # Stopwords
+    stop = set(["the", "and", "music", "band", "artist", "official"])
+
+    tokens = [re.sub(r"[^a-z0-9]", "", t) for t in artist.split()]
+    tokens = [t for t in tokens if t and t not in stop]
+
+    # Must match at least one token
+    if not any(t in cand for t in tokens):
+        return False
+
+    # Whitelist (MUST appear)
+    whitelist = [
+        "musician", "band", "artist", "singer", "songwriter",
+        "rapper", "dj", "producer", "music", "record label",
+        "recording studio"
+    ]
+    if not any(w in combined for w in whitelist):
+        return False
+
+    # Blacklist (MUST NOT appear)
+    blacklist = [
+        "church", "chapel", "ministries", "worship",
+        "park", "city", "council", "tourism",
+        "school", "college", "university",
+        "restaurant", "cafe", "bar", "pub"
+    ]
+    if any(b in cand or b in combined for b in blacklist):
+        return False
+
+    return True
+
+
 @dataclass
 class EnrichmentPayload:
     socials: Set[str] = field(default_factory=set)
@@ -608,6 +655,34 @@ def cell_to_str(value) -> str:
             return f"{value}".strip()
         except Exception:
             return ""
+
+
+def _row_has_facebook_or_email(row) -> bool:
+    """
+    Return True if the row already has any Facebook URL or any email address.
+    Considers both seed CSV contents and any enrichment already applied.
+    """
+    if row is None:
+        return False
+
+    def _get(key: str) -> str:
+        try:
+            value = row.get(key, "")
+        except AttributeError:
+            try:
+                value = row[key]
+            except Exception:
+                value = ""
+        return (str(value) or "").strip()
+
+    social = _get("Social Link")
+    email = _get("Email")
+    candidates = []
+    if social:
+        candidates.extend([p.strip() for p in re.split(r"[,\s]+", social) if p.strip()])
+    has_fb = any("facebook.com" in url.lower() or "fb.me" in url.lower() for url in candidates)
+    has_email = bool(email)
+    return has_fb or has_email
 
 
 def _safe_log(logger, message: str, *args) -> None:
@@ -819,7 +894,7 @@ class FacebookSearchClient:
                 exc,
             )
             return None
-        candidates: List[Tuple[float, str, str]] = []
+        best_candidate_url = None
         for anchor in soup.select("a[href]"):
             href = cell_to_str(anchor.get("href"))
             if "facebook.com" not in href:
@@ -837,21 +912,31 @@ class FacebookSearchClient:
             if path_parts[0] in {"search", "plugins", "dialog", "privacy"}:
                 continue
             name_text = cell_to_str(anchor.get_text(" ", strip=True) or anchor.get("aria-label"))
-            context_text = ""
             parent = anchor.find_parent(["div", "span"])
-            if parent:
-                context_text = cell_to_str(parent.get_text(" ", strip=True))
-            score = _facebook_candidate_score(artist_name, location, name_text, context_text)
-            if score <= 0:
+            context_text = cell_to_str(parent.get_text(" ", strip=True)) if parent else ""
+            if not _is_music_related_facebook_candidate(
+                artist_name,
+                name_text,
+                context_text,
+                context_text,
+            ):
+                _safe_log(
+                    self.logger,
+                    "[FB Enrich] Rejecting candidate '%s' due to guard rails",
+                    name_text,
+                )
                 continue
-            candidates.append((score, normalised, name_text))
-        if not candidates:
-            _safe_log(self.logger, "[FB Enrich] No Facebook page candidates for '%s'.", artist_name)
+            best_candidate_url = normalised
+            _safe_log(self.logger, "[FB Enrich] Chosen page: %s", best_candidate_url)
+            break
+        if not best_candidate_url:
+            _safe_log(
+                self.logger,
+                "[FB Enrich] No safe Facebook page candidates for '%s'",
+                artist_name,
+            )
             return None
-        candidates.sort(key=lambda item: item[0], reverse=True)
-        best_score, best_url, _ = candidates[0]
-        _safe_log(self.logger, "[FB Enrich] Chosen page: %s (score %.2f)", best_url, best_score)
-        return best_url
+        return best_candidate_url
 
 
 def _build_facebook_search_client(logger) -> Tuple[Optional["FacebookSearchClient"], Optional[Any]]:
@@ -1675,10 +1760,12 @@ class CrossDirectoryEnricherWorker(QThread):
                 "Location",
                 "Primary Genre",
                 "Release Date",
+                "Facebook_URL",
             ]
             for column in required_columns:
                 if column not in seed_df.columns:
                     seed_df[column] = ""
+                seed_df[column] = seed_df[column].fillna("").astype(str)
             directory_indexes: Dict[str, DirectoryIndex] = {}
             if self.unearthed_csv_path:
                 directory_indexes["unearthed"] = _load_directory_csv(self.unearthed_csv_path, "Unearthed")
@@ -1692,6 +1779,7 @@ class CrossDirectoryEnricherWorker(QThread):
             priority = ["bandcamp", "soundcloud", "lastfm", "unearthed"]
             for position, row_idx in enumerate(seed_df.index, start=1):
                 row = seed_df.loc[row_idx]
+                had_fb_or_email_from_seed = _row_has_facebook_or_email(row)
                 artist = _clean_cell(row.get("Artist Name"))
                 key = normalise_artist_name(artist)
                 track_key = _extract_seed_track_key(row)
@@ -1746,73 +1834,96 @@ class CrossDirectoryEnricherWorker(QThread):
                         self._apply_payload(seed_df, row_idx, payload)
                         enriched = True
                 if ENABLE_FACEBOOK_ENRICHMENT and fb_driver:
-                    social_link_val = cell_to_str(row.get("Social Link", ""))
-                    external_link_val = cell_to_str(row.get("External Links", ""))
-                    fb_url_val = cell_to_str(row.get("Facebook_URL", ""))
-                    existing_fb_links: List[str] = []
-                    for blob in (social_link_val, external_link_val, fb_url_val):
-                        if not blob:
-                            continue
-                        parts = [part.strip() for part in blob.split(",") if part.strip()]
-                        for part in parts:
-                            if "facebook.com" in part.lower():
-                                existing_fb_links.append(part)
-                    fb_emails: List[str] = []
-                    page_url_used = ""
-                    try:
-                        if existing_fb_links:
-                            fb_candidates = (
-                                [existing_fb_links]
-                                if isinstance(existing_fb_links, str)
-                                else list(existing_fb_links)
-                            )
-                            for candidate in fb_candidates:
-                                candidate_norm = normalize_external_url(candidate)
-                                found = fb_scrape_emails_from_page(
-                                    fb_driver, candidate_norm, log_fn=self.log_message.emit
-                                )
-                                try:
-                                    current_url = (fb_driver.current_url or "").lower()
-                                    if "facebook.com/login" in current_url:
-                                        self.log_message.emit(
-                                            "[FB Enrich] Facebook login wall detected for this page; enrichment skipped (not logged in)."
-                                        )
-                                        found = []
-                                except Exception:
-                                    pass
-                                if found:
-                                    fb_emails = found
-                                    page_url_used = candidate_norm
-                                    break
-                        elif fb_find_page_and_emails_by_name:
-                            page_url_used, fb_emails = fb_find_page_and_emails_by_name(
-                                fb_driver,
-                                artist,
-                                location=cell_to_str(row.get("Location") or row.get("location")),
-                                log_fn=self.log_message.emit,
-                            )
-                            try:
-                                current_url = (fb_driver.current_url or "").lower()
-                                if "facebook.com/login" in current_url:
-                                    self.log_message.emit(
-                                        "[FB Enrich] Facebook login wall detected for this page; enrichment skipped (not logged in)."
-                                    )
-                                    fb_emails = []
-                                    page_url_used = ""
-                            except Exception:
-                                pass
-                    except Exception as exc:
+                    has_fb_or_email_after_directories = _row_has_facebook_or_email(seed_df.loc[row_idx])
+                    if had_fb_or_email_from_seed or has_fb_or_email_after_directories:
                         self.log_message.emit(
-                            f"[FB Enrich] Error enriching row {position}/{total} ({artist}): {exc}"
+                            f"[FB Enrich] Skipping Facebook enrichment for '{artist}' (already has Facebook/email from seed or directory enrichment)."
                         )
-                    if fb_emails:
+                    else:
+                        current_social_links = [
+                            cell_to_str(seed_df.at[row_idx, "Social Link"]),
+                            cell_to_str(seed_df.at[row_idx, "External Links"]),
+                            cell_to_str(seed_df.at[row_idx, "Facebook_URL"]),
+                        ]
                         current_email = cell_to_str(seed_df.at[row_idx, "Email"])
-                        if not current_email:
-                            seed_df.at[row_idx, "Email"] = fb_emails[0]
-                        if not existing_fb_links and page_url_used:
-                            if not seed_df.at[row_idx, "Social Link"]:
-                                seed_df.at[row_idx, "Social Link"] = page_url_used
-                        enriched = True
+                        has_fb_link = any(
+                            isinstance(link, str) and "facebook.com" in link.lower()
+                            for link in current_social_links
+                            if link
+                        )
+                        has_email = bool((current_email or "").strip())
+                        if has_fb_link or has_email:
+                            self.log_message.emit(
+                                f"[FB Enrich] Skipping Facebook enrichment for '{artist}' (already has Facebook/email from directory enrichment)."
+                            )
+                        else:
+                            social_link_val = cell_to_str(row.get("Social Link", ""))
+                            external_link_val = cell_to_str(row.get("External Links", ""))
+                            fb_url_val = cell_to_str(row.get("Facebook_URL", ""))
+                            existing_fb_links: List[str] = []
+                            for blob in (social_link_val, external_link_val, fb_url_val):
+                                if not blob:
+                                    continue
+                                parts = [part.strip() for part in blob.split(",") if part.strip()]
+                                for part in parts:
+                                    if "facebook.com" in part.lower():
+                                        existing_fb_links.append(part)
+                            fb_emails: List[str] = []
+                            page_url_used = ""
+                            try:
+                                if existing_fb_links:
+                                    fb_candidates = (
+                                        [existing_fb_links]
+                                        if isinstance(existing_fb_links, str)
+                                        else list(existing_fb_links)
+                                    )
+                                    for candidate in fb_candidates:
+                                        candidate_norm = normalize_external_url(candidate)
+                                        found = fb_scrape_emails_from_page(
+                                            fb_driver, candidate_norm, log_fn=self.log_message.emit
+                                        )
+                                        try:
+                                            current_url = (fb_driver.current_url or "").lower()
+                                            if "facebook.com/login" in current_url:
+                                                self.log_message.emit(
+                                                    "[FB Enrich] Facebook login wall detected for this page; enrichment skipped (not logged in)."
+                                                )
+                                                found = []
+                                        except Exception:
+                                            pass
+                                        if found:
+                                            fb_emails = found
+                                            page_url_used = candidate_norm
+                                            break
+                                elif fb_find_page_and_emails_by_name:
+                                    page_url_used, fb_emails = fb_find_page_and_emails_by_name(
+                                        fb_driver,
+                                        artist,
+                                        location=cell_to_str(row.get("Location") or row.get("location")),
+                                        log_fn=self.log_message.emit,
+                                    )
+                                    try:
+                                        current_url = (fb_driver.current_url or "").lower()
+                                        if "facebook.com/login" in current_url:
+                                            self.log_message.emit(
+                                                "[FB Enrich] Facebook login wall detected for this page; enrichment skipped (not logged in)."
+                                            )
+                                            fb_emails = []
+                                            page_url_used = ""
+                                    except Exception:
+                                        pass
+                            except Exception as exc:
+                                self.log_message.emit(
+                                    f"[FB Enrich] Error enriching row {position}/{total} ({artist}): {exc}"
+                                )
+                            if fb_emails:
+                                current_email = cell_to_str(seed_df.at[row_idx, "Email"])
+                                if not current_email:
+                                    seed_df.at[row_idx, "Email"] = fb_emails[0]
+                                if not existing_fb_links and page_url_used:
+                                    if not seed_df.at[row_idx, "Social Link"]:
+                                        seed_df.at[row_idx, "Social Link"] = page_url_used
+                                enriched = True
                 if not enriched:
                     self.log_message.emit(
                         f"[Enricher] Row {position}/{total}: no enrichment for {artist!r}."
