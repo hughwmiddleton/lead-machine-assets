@@ -1697,6 +1697,19 @@ def _norm_text_(value: str) -> str:
     value = value.lower()
     return re.sub(r"[\s,;|/]+", " ", value.strip())
 
+def normalize_name(name: str) -> str:
+    """
+    Normalise a name for comparison: lowercase, strip accents/punctuation, collapse spaces.
+    """
+    if not isinstance(name, str):
+        return ""
+    cleaned = unicodedata.normalize("NFKD", name)
+    cleaned = "".join(ch for ch in cleaned if not unicodedata.combining(ch))
+    cleaned = cleaned.lower()
+    cleaned = re.sub(r"[.,!?:;\'\"\\-_/]+", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
+
 def _nf(s: str) -> str:
     s = (s or "").strip().lower()
     s = unicodedata.normalize("NFKD", s)
@@ -5753,6 +5766,99 @@ def fb_find_page_and_emails_by_name(driver, artist_name: str, location: str = ""
     Use Facebook search to locate a page for an artist and scrape emails.
     Returns (page_url, emails). If nothing found, returns ("", []).
     """
+    FB_CATEGORY_BOOSTS = {
+        "musician/band": 2.5,
+        "artist": 2.2,
+        "band": 2.2,
+        "singer": 2.0,
+        "music": 2.0,
+        "record label": 1.8,
+        "entertainer": 1.5,
+        "public figure": 1.0,
+    }
+    MUSIC_STRONG = [
+        "musician/band", "musician", "band",
+        "artist", "music", "singer", "singer-songwriter",
+        "rapper", "dj", "producer", "recording studio",
+        "music production studio", "music producer",
+        "songwriter", "performing artist", "public figure",
+        "entertainer",
+    ]
+    MUSIC_MEDIUM = [
+        "record label", "entertainment website",
+        "media", "radio station", "podcast",
+        "music video", "music award", "festival",
+    ]
+    NON_MUSIC_CORPORATE = [
+        "spa", "care spa", "health spa", "resort",
+        "hotel", "boutique", "clothing", "store",
+        "shop", "vintage", "retro", "restaurant",
+        "bar", "cafe", "coffee shop",
+        "real estate", "estate agent", "construction",
+        "company", "ltd", "llc", "inc",
+        "university", "college", "school",
+        "church", "temple", "mosque",
+        "government", "politician", "political",
+    ]
+
+    def compute_fb_category_boost(category_norm: str | None) -> float:
+        """
+        Favor musician/artist categories; penalize obvious non-music businesses.
+        """
+        if not category_norm:
+            return 0.0
+        cat = category_norm.strip().lower()
+        if not cat:
+            return 0.0
+        if cat in FB_CATEGORY_BOOSTS:
+            return FB_CATEGORY_BOOSTS[cat]
+        if any(token in cat for token in MUSIC_STRONG):
+            return 2.5
+        if any(token in cat for token in MUSIC_MEDIUM):
+            return 1.5
+        if any(token in cat for token in NON_MUSIC_CORPORATE):
+            return -3.0
+        return 0.0
+
+    def extract_fb_category(result_element, page_name: str = "") -> tuple[str | None, str | None]:
+        """
+        Best-effort category extraction from a single search result element.
+        Returns (raw, norm).
+        """
+        if result_element is None:
+            return None, None
+        seen = set()
+        name_norm = normalize_name(page_name)
+
+        def _clean(text: str) -> str:
+            cleaned = re.sub(r"\s+", " ", text or "").strip()
+            return cleaned
+
+        candidates = []
+        try:
+            for node in result_element.stripped_strings:
+                val = _clean(node)
+                if not val or val.lower() == (page_name or "").strip().lower():
+                    continue
+                if name_norm and normalize_name(val) == name_norm:
+                    continue
+                if len(val) > 80:
+                    continue
+                if val in seen:
+                    continue
+                seen.add(val)
+                candidates.append(val)
+        except Exception:
+            candidates = []
+
+        for candidate in candidates:
+            lower = candidate.lower()
+            if "/" in candidate or "band" in lower or "music" in lower or "artist" in lower or "dj" in lower:
+                return candidate, normalize_name(candidate)
+            if len(candidate.split()) <= 6:
+                return candidate, normalize_name(candidate)
+        return (candidates[0], normalize_name(candidates[0])) if candidates else (None, None)
+
     def _log(msg):
         if log_fn:
             try:
@@ -5783,7 +5889,25 @@ def fb_find_page_and_emails_by_name(driver, artist_name: str, location: str = ""
 
     html = driver.page_source or ""
     soup = BeautifulSoup(html, "html.parser")
-    candidate_url = ""
+    artist_norm = normalize_name(artist_name)
+    best_url = ""
+    best_score = 0.0
+    best_name = ""
+    best_category_raw = None
+    best_category_norm = None
+    best_base_score = 0.0
+    best_cat_boost = 0.0
+    blocked_tokens = [
+        "games", "game",
+        "creations",
+        "store", "shop",
+        "company", "co ", " co.", "corp", "inc", "ltd", "llc",
+        "exterior", "exteriors",
+        "boutique",
+        "farm", "farms",
+        "international",
+    ]
+    downrank_tokens = ["studio", "studios"]
     for a in soup.find_all("a", href=True):
         href = (a.get("href") or "").strip()
         if not href:
@@ -5793,18 +5917,111 @@ def fb_find_page_and_emails_by_name(driver, artist_name: str, location: str = ""
             href = "https://www.facebook.com" + href
         if not _fb_is_real_page_url(href):
             continue
-        lower_name = artist_name.lower()
-        if lower_name in text.lower() or lower_name in href.lower():
-            candidate_url = href
-            break
+        try:
+            parsed = urlparse(href)
+            username = (parsed.path or "").strip("/").split("/")[0] if parsed.path else ""
+        except Exception:
+            username = ""
+        parent = a.find_parent(["div", "span"])
+        category_raw, category_norm = extract_fb_category(parent, text)
+        page_name_norm = normalize_name(text)
+        username_norm = normalize_name(username)
+        score = 0.0
+        if page_name_norm == artist_norm:
+            score += 1.0
+        elif page_name_norm.startswith(artist_norm):
+            score += 0.7
+        elif artist_norm in page_name_norm:
+            score += 0.4
+        if username_norm == artist_norm:
+            score += 1.0
+        elif username_norm.startswith(artist_norm):
+            score += 0.7
+        context = " ".join([
+            (href or "").lower(),
+            username_norm,
+            (text or "").lower()
+        ])
+        corporate_hit = False
+        for token in blocked_tokens:
+            if token in context and token not in artist_norm:
+                corporate_hit = True
+                score = 0.0
+                _log(f"[FB Enrich] Rejecting FB candidate '{text or href}' for '{artist_name}' due to corporate token '{token}' in URL/name.")
+                break
+        if not corporate_hit:
+            for token in downrank_tokens:
+                if token in context and token not in artist_norm:
+                    score = max(score - 0.2, 0.0)
+                    break
+        base_score = score
+        cat_boost = 0.0
+        if not corporate_hit and score > 0:
+            cat_boost = compute_fb_category_boost(category_norm)
+            score += cat_boost
+        if score <= 0 and best_url:
+            continue
+        better_tie = (score == best_score and not best_url) or (score == best_score and cat_boost > best_cat_boost)
+        if score > best_score or better_tie:
+            best_score = score
+            best_base_score = base_score
+            best_cat_boost = cat_boost
+            best_url = href
+            best_name = text or href
+            best_category_raw = category_raw
+            best_category_norm = category_norm
 
-    if not candidate_url:
+    if not best_url:
         _log(f"[FB Enrich] No Facebook page candidates for '{artist_name}'.")
         return "", []
 
-    candidate_url = normalize_external_url(candidate_url)
+    threshold = 0.7
+    cat_display = best_category_raw or "<none>"
+    if best_score < threshold:
+        _log(f"[FB Enrich] Best FB candidate for '{artist_name}' -> '{best_name}' (final_score={best_score:.2f}, base_score={best_base_score:.2f}, cat_boost={best_cat_boost:.2f}, category='{cat_display}') – rejected (score below threshold).")
+        _log(f"[FB Enrich] No high-confidence Facebook match for '{artist_name}'.")
+        return "", []
+
+    _log(f"[FB Enrich] Best FB candidate for '{artist_name}' -> '{best_name}' (final_score={best_score:.2f}, base_score={best_base_score:.2f}, cat_boost={best_cat_boost:.2f}, category='{cat_display}')")
+    candidate_url = normalize_external_url(best_url)
     emails = fb_scrape_emails_from_page(driver, candidate_url, log_fn=_log)
     return candidate_url, emails
+
+def _fb_scoring_sanity_tests():
+    """
+    Lightweight sanity checks for FB scoring without live requests.
+    """
+    def cat_boost(cat: str) -> float:
+        cat_norm = normalize_name(cat)
+        strong = ["musician/band", "musician", "band", "artist", "music", "singer"]
+        neg = ["spa", "real estate", "hotel", "boutique", "store"]
+        if any(token in cat_norm for token in strong):
+            return 2.5
+        if any(token in cat_norm for token in neg):
+            return -3.0
+        return 0.0
+
+    def score(artist, name, category):
+        artist_norm = normalize_name(artist)
+        base = 0.0
+        page_norm = normalize_name(name)
+        if page_norm == artist_norm:
+            base += 1.0
+        elif page_norm.startswith(artist_norm):
+            base += 0.7
+        elif artist_norm in page_norm:
+            base += 0.4
+        return base + cat_boost(category or "")
+
+    scenarios = [
+        ("Aneya", "Aneya Music", "Musician/band", "Aneya Care Spa", "Health spa"),
+        ("Ṣẹwà", "Ṣẹwà", "Musician/band", "Sewa Sandhu - Real Estate", "Real Estate Agent"),
+        ("Salle", "Salle", "Musician", "Salle Sells Retro Vintage", "Clothing store"),
+        ("The.wav", "The.wav", "Musician/band", "The Wave Resort", "Hotel/Resort"),
+    ]
+    for artist, good_name, good_cat, bad_name, bad_cat in scenarios:
+        assert score(artist, good_name, good_cat) > score(artist, bad_name, bad_cat)
+    print("[FB Enrich] Sanity tests passed.")
 
 def extract_emails(text):
     email_pattern = r'([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})'

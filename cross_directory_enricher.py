@@ -722,6 +722,50 @@ def _normalise_facebook_name(value: str) -> str:
     cleaned = " ".join(cleaned.split())
     return cleaned
 
+_FB_ALLOWED_CATEGORY_TOKENS = ("musician", "band", "artist", "music", "singer")
+_FB_BLOCKED_CATEGORY_TOKENS = (
+    "church",
+    "chapel",
+    "ministries",
+    "ministry",
+    "worship",
+    "park",
+    "city",
+    "council",
+    "tourism",
+    "school",
+    "college",
+    "university",
+    "restaurant",
+    "cafe",
+    "bar",
+    "pub",
+)
+
+def _facebook_score_candidate(artist_norm: str, page_name_norm: str, username_norm: str, category_norm: str) -> float:
+    if not artist_norm:
+        return 0.0
+    score = 0.0
+    if page_name_norm == artist_norm:
+        score += 1.0
+    elif page_name_norm.startswith(artist_norm):
+        score += 0.7
+    elif artist_norm in page_name_norm:
+        score += 0.4
+
+    if username_norm == artist_norm:
+        score += 1.0
+    elif username_norm.startswith(artist_norm):
+        score += 0.7
+
+    if category_norm:
+        if any(bad in category_norm for bad in _FB_BLOCKED_CATEGORY_TOKENS):
+            return 0.0
+        if any(good in category_norm for good in _FB_ALLOWED_CATEGORY_TOKENS):
+            score += 0.5
+    return score
+
+
 
 def _facebook_candidate_score(
     target_name: str, location: str, candidate_name: str, context_text: str
@@ -751,6 +795,40 @@ def _facebook_candidate_score(
         if loc_norm and (loc_norm in candidate_norm or loc_norm in category_lower):
             score += 5.0
     return score
+
+
+def _fb_scoring_sanity_tests():
+    """
+    Lightweight sanity checks for FB scoring without live requests.
+    """
+    FB_STRONG = [
+        "musician/band", "musician", "band", "artist", "music", "singer",
+    ]
+    FB_NEG = ["spa", "real estate", "hotel", "boutique", "store"]
+
+    def cat_boost(cat: str) -> float:
+        cat_norm = normalize_name(cat)
+        if any(token in cat_norm for token in FB_STRONG):
+            return 2.5
+        if any(token in cat_norm for token in FB_NEG):
+            return -3.0
+        return 0.0
+
+    def score(artist, name, category):
+        base = _facebook_candidate_score(artist, "", name, category or "")
+        return base + cat_boost(category or "")
+
+    scenarios = [
+        ("Aneya", "Aneya Music", "Musician/band", "Aneya Care Spa", "Health spa"),
+        ("Ṣẹwà", "Ṣẹwà", "Musician/band", "Sewa Sandhu - Real Estate", "Real Estate Agent"),
+        ("Salle", "Salle", "Musician", "Salle Sells Retro Vintage", "Clothing store"),
+        ("The.wav", "The.wav", "Musician/band", "The Wave Resort", "Hotel/Resort"),
+    ]
+    for artist, good_name, good_cat, bad_name, bad_cat in scenarios:
+        good_score = score(artist, good_name, good_cat)
+        bad_score = score(artist, bad_name, bad_cat)
+        assert good_score > bad_score, f"Expected music page to outrank business for {artist}"
+    print("[FB Enrich] Sanity tests passed.")
 
 
 @dataclass
@@ -894,7 +972,110 @@ class FacebookSearchClient:
                 exc,
             )
             return None
+        FB_CATEGORY_BOOSTS = {
+            "musician/band": 2.5,
+            "artist": 2.2,
+            "band": 2.2,
+            "singer": 2.0,
+            "music": 2.0,
+            "record label": 1.8,
+            "entertainer": 1.5,
+            "public figure": 1.0,
+        }
+        MUSIC_STRONG = [
+            "musician/band", "musician", "band",
+            "artist", "music", "singer", "singer-songwriter",
+            "rapper", "dj", "producer", "recording studio",
+            "music production studio", "music producer",
+            "songwriter", "performing artist", "public figure",
+            "entertainer",
+        ]
+        MUSIC_MEDIUM = [
+            "record label", "entertainment website",
+            "media", "radio station", "podcast",
+            "music video", "music award", "festival",
+        ]
+        NON_MUSIC_CORPORATE = [
+            "spa", "care spa", "health spa", "resort",
+            "hotel", "boutique", "clothing", "store",
+            "shop", "vintage", "retro", "restaurant",
+            "bar", "cafe", "coffee shop",
+            "real estate", "estate agent", "construction",
+            "company", "ltd", "llc", "inc",
+            "university", "college", "school",
+            "church", "temple", "mosque",
+            "government", "politician", "political",
+        ]
+
+        def compute_fb_category_boost(category_norm: str | None) -> float:
+            if not category_norm:
+                return 0.0
+            cat = category_norm.strip().lower()
+            if not cat:
+                return 0.0
+            if cat in FB_CATEGORY_BOOSTS:
+                return FB_CATEGORY_BOOSTS[cat]
+            if any(token in cat for token in MUSIC_STRONG):
+                return 2.5
+            if any(token in cat for token in MUSIC_MEDIUM):
+                return 1.5
+            if any(token in cat for token in NON_MUSIC_CORPORATE):
+                return -3.0
+            return 0.0
+
+        def extract_fb_category(result_element, page_name: str = "") -> tuple[str | None, str | None]:
+            if result_element is None:
+                return None, None
+            seen = set()
+            name_norm = normalize_name(page_name)
+
+            def _clean(text: str) -> str:
+                return re.sub(r"\s+", " ", text or "").strip()
+
+            candidates = []
+            try:
+                for node in result_element.stripped_strings:
+                    val = _clean(node)
+                    if not val or val.lower() == (page_name or "").strip().lower():
+                        continue
+                    if name_norm and normalize_name(val) == name_norm:
+                        continue
+                    if len(val) > 80:
+                        continue
+                    if val in seen:
+                        continue
+                    seen.add(val)
+                    candidates.append(val)
+            except Exception:
+                candidates = []
+
+            for candidate in candidates:
+                lower = candidate.lower()
+                if "/" in candidate or "band" in lower or "music" in lower or "artist" in lower or "dj" in lower:
+                    return candidate, normalize_name(candidate)
+                if len(candidate.split()) <= 6:
+                    return candidate, normalize_name(candidate)
+            return (candidates[0], normalize_name(candidates[0])) if candidates else (None, None)
+
         best_candidate_url = None
+        best_score = 0.0
+        best_name = ""
+        best_category_raw = None
+        best_category_norm = None
+        best_base_score = 0.0
+        best_cat_boost = 0.0
+        artist_norm = normalize_name(artist_name)
+        blocked_tokens = [
+            "games", "game",
+            "creations",
+            "store", "shop",
+            "company", "co ", " co.", "corp", "inc", "ltd", "llc",
+            "exterior", "exteriors",
+            "boutique",
+            "farm", "farms",
+            "international",
+        ]
+        downrank_tokens = ["studio", "studios"]
         for anchor in soup.select("a[href]"):
             href = cell_to_str(anchor.get("href"))
             if "facebook.com" not in href:
@@ -913,22 +1094,50 @@ class FacebookSearchClient:
                 continue
             name_text = cell_to_str(anchor.get_text(" ", strip=True) or anchor.get("aria-label"))
             parent = anchor.find_parent(["div", "span"])
-            context_text = cell_to_str(parent.get_text(" ", strip=True)) if parent else ""
-            if not _is_music_related_facebook_candidate(
-                artist_name,
-                name_text,
-                context_text,
-                context_text,
-            ):
-                _safe_log(
-                    self.logger,
-                    "[FB Enrich] Rejecting candidate '%s' due to guard rails",
-                    name_text,
-                )
+            category_raw, category_norm = extract_fb_category(parent, name_text)
+            context_text = category_raw or ""
+            page_name_norm = normalize_name(name_text)
+            username_norm = normalize_name(path_parts[0])
+            score = _facebook_score_candidate(artist_norm, page_name_norm, username_norm, normalize_name(context_text))
+            context = " ".join([
+                (normalised or "").lower(),
+                username_norm,
+                (name_text or "").lower(),
+            ])
+            corporate_hit = False
+            for token in blocked_tokens:
+                if token in context and token not in artist_norm:
+                    corporate_hit = True
+                    score = 0.0
+                    _safe_log(
+                        self.logger,
+                        "[FB Enrich] Rejecting FB candidate '%s' for '%s' due to corporate token '%s' in URL/name.",
+                        name_text or normalised,
+                        artist_name,
+                        token,
+                    )
+                    break
+            if not corporate_hit:
+                for token in downrank_tokens:
+                    if token in context and token not in artist_norm:
+                        score = max(score - 0.2, 0.0)
+                        break
+            base_score = score
+            cat_boost = 0.0
+            if not corporate_hit and score > 0:
+                cat_boost = compute_fb_category_boost(category_norm)
+                score += cat_boost
+            if score <= 0 and best_candidate_url is not None:
                 continue
-            best_candidate_url = normalised
-            _safe_log(self.logger, "[FB Enrich] Chosen page: %s", best_candidate_url)
-            break
+            better_tie = (score == best_score and best_candidate_url is None) or (score == best_score and cat_boost > best_cat_boost)
+            if score > best_score or better_tie:
+                best_score = score
+                best_candidate_url = normalised
+                best_name = name_text or normalised
+                best_category_raw = category_raw
+                best_category_norm = category_norm
+                best_base_score = base_score
+                best_cat_boost = cat_boost
         if not best_candidate_url:
             _safe_log(
                 self.logger,
@@ -936,6 +1145,29 @@ class FacebookSearchClient:
                 artist_name,
             )
             return None
+        if best_score < 0.7:
+            _safe_log(
+                self.logger,
+                "[FB Enrich] Best FB candidate for '%s' -> '%s' (final_score=%.2f, base_score=%.2f, cat_boost=%.2f, category='%s') – rejected (score below threshold).",
+                artist_name,
+                best_name or best_candidate_url,
+                best_score,
+                best_base_score,
+                best_cat_boost,
+                best_category_raw or "<none>",
+            )
+            _safe_log(self.logger, "[FB Enrich] No high-confidence Facebook match for '%s'.", artist_name)
+            return None
+        _safe_log(
+            self.logger,
+            "[FB Enrich] Best FB candidate for '%s' -> '%s' (final_score=%.2f, base_score=%.2f, cat_boost=%.2f, category='%s')",
+            artist_name,
+            best_name or best_candidate_url,
+            best_score,
+            best_base_score,
+            best_cat_boost,
+            best_category_raw or "<none>",
+        )
         return best_candidate_url
 
 
@@ -1514,6 +1746,24 @@ def _norm_name(name: str) -> str:
         return ""
     return " ".join(name.split())
 
+def normalize_name(name: str) -> str:
+    """
+    Normalise a name for comparison:
+    - lowercase
+    - strip leading/trailing whitespace
+    - collapse internal whitespace
+    - strip common punctuation
+    - remove accents
+    """
+    if not isinstance(name, str):
+        return ""
+    cleaned = unicodedata.normalize("NFKD", name)
+    cleaned = "".join(ch for ch in cleaned if not unicodedata.combining(ch))
+    cleaned = cleaned.lower()
+    cleaned = re.sub(r"[.,!?:;\'\"\\-_/]+", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
+
 
 def normalise_artist_name(name: str) -> str:
     base = _norm_name(name)
@@ -1534,6 +1784,17 @@ def normalise_artist_name(name: str) -> str:
 def _normalise_for_soundcloud(name: str) -> str:
     cleaned = "".join(ch for ch in name if ch.isalnum() or ch.isspace())
     return " ".join(cleaned.split())
+
+def _clean_soundcloud_query(name: str) -> str:
+    """
+    Prepare a SoundCloud search query once per artist to avoid duplicate logical searches.
+    """
+    query = cell_to_str(name)
+    query = query.strip()
+    if len(query) > 1 and query.endswith("."):
+        query = query[:-1].strip()
+    query = re.sub(r"\s+", " ", query)
+    return query
 
 
 def _clean_cell(value: Any) -> str:
@@ -2106,10 +2367,6 @@ class CrossDirectoryEnricherWorker(QThread):
                 payload = self._live_search_bandcamp(artist_name)
             elif source == "soundcloud":
                 payload = self._live_search_soundcloud(artist_name)
-                if not payload:
-                    cleaned = _normalise_for_soundcloud(artist_name)
-                    if cleaned and cleaned != artist_name:
-                        payload = self._live_search_soundcloud(cleaned)
             elif source == "lastfm":
                 payload = self._live_search_lastfm(artist_name)
             if payload:
@@ -2141,21 +2398,54 @@ class CrossDirectoryEnricherWorker(QThread):
         if not first_link:
             self.log_message.emit("[Enricher] Bandcamp search: no results found.")
             return None
+        display_name = ""
+        parent_li = first_link.find_parent("li")
+        if parent_li:
+            name_el = parent_li.select_one(".heading") or parent_li.select_one("div.heading")
+            if name_el:
+                display_name = name_el.get_text(" ", strip=True)
+            if not display_name:
+                display_name = parent_li.get_text(" ", strip=True)
+        if not display_name:
+            display_name = first_link.get_text(" ", strip=True)
         profile_url = (first_link.get("href") or "").strip()
         if not profile_url:
             self.log_message.emit("[Enricher] Bandcamp search result missing href.")
             return None
+        artist_norm = normalize_name(artist_name)
+        bc_name_norm = normalize_name(display_name)
+        if artist_norm and bc_name_norm:
+            prefix_artist = artist_norm.split()[0] if artist_norm.split() else ""
+            prefix_bc = bc_name_norm.split()[0] if bc_name_norm.split() else ""
+            prefix_match = (
+                prefix_artist
+                and prefix_bc
+                and (prefix_artist.startswith(prefix_bc[:4]) or prefix_bc.startswith(prefix_artist[:4]))
+            )
+            if not (
+                artist_norm == bc_name_norm
+                or artist_norm in bc_name_norm
+                or bc_name_norm in artist_norm
+                or prefix_match
+            ):
+                self.log_message.emit(
+                    f"[Enricher] Bandcamp candidate '{display_name or profile_url}' rejected for artist '{artist_name}' (name mismatch)."
+                )
+                return None
         return self._fetch_profile_and_build(profile_url, "bandcamp")
 
     def _live_search_soundcloud(self, artist_name: str) -> Optional[EnrichmentPayload]:
         if not self._increment_live_counter():
             return None
-        profile_url = self._soundcloud_people_search_first_profile_url(artist_name)
+        sc_query = _clean_soundcloud_query(artist_name)
+        if not sc_query:
+            return None
+        profile_url = self._soundcloud_people_search_first_profile_url(sc_query)
         if not profile_url:
             self.log_message.emit(
                 "[Enricher] SoundCloud people search: no results found, trying universal search..."
             )
-            profile_url = self._soundcloud_universal_search_first_profile_url(artist_name)
+            profile_url = self._soundcloud_universal_search_first_profile_url(sc_query)
         if not profile_url:
             self.log_message.emit(
                 "[Enricher] SoundCloud search: no results found (people + universal)."
