@@ -2618,6 +2618,7 @@ class CrossDirectoryEnricherWorker(QThread):
                     "location": _clean_cell(row.get("Location")),
                     "track": track_key,
                     "genre": _coerce_directory_value(row.get("Primary Genre")) if "Primary Genre" in row else "",
+                    "song_title": _clean_cell(row.get("Song Title")),
                 }
                 seed_links_by_source = _extract_seed_links_by_source(row)
                 if not key:
@@ -3075,10 +3076,34 @@ class CrossDirectoryEnricherWorker(QThread):
                 best_candidate = candidate
         best_score = best_candidate.get("score", 0) if best_candidate else 0.0
         if not best_candidate or best_score < MIN_SC_CONFIDENCE:
-            self.log_message.emit(
-                f"[Enricher] SoundCloud Enrich: no safe match for '{artist_name}' (best_confidence={best_score:.2f}), skipping."
-            )
-            return None
+            # Optional fallback: try artist + song title if available.
+            song_title = _clean_cell(getattr(self, "_live_context", {}).get("song_title", ""))
+            if song_title:
+                fallback_query = f"{artist_name} {song_title}"
+                self.log_message.emit(
+                    f"[Enricher] SoundCloud Enrich: primary search found no safe match for '{artist_name}', "
+                    f"trying artist+song query '{fallback_query}'."
+                )
+                fallback_candidate = self._soundcloud_best_candidate_for_query(
+                    artist_name, fallback_query, location_hint, genre_hint
+                )
+                if (
+                    fallback_candidate
+                    and fallback_candidate.get("score", 0) >= MIN_SC_CONFIDENCE
+                    and (
+                        best_candidate is None
+                        or fallback_candidate.get("score", 0) > best_candidate.get("score", 0)
+                    )
+                ):
+                    best_candidate = fallback_candidate
+                    best_score = fallback_candidate.get("score", 0)
+            if not best_candidate or best_candidate.get("score", 0) < MIN_SC_CONFIDENCE:
+                best_score = best_candidate.get("score", 0) if best_candidate else 0.0
+                self.log_message.emit(
+                    f"[Enricher] SoundCloud Enrich: no safe match for '{artist_name}' "
+                    f"(best_confidence={best_score:.2f}), skipping."
+                )
+                return None
         self.log_message.emit(
             f"[Enricher] SoundCloud Enrich: best match '{best_candidate.get('display_name') or best_candidate.get('handle')}' "
             f"({best_candidate.get('profile_url')}), confidence={best_candidate.get('score'):.2f}"
@@ -3175,6 +3200,29 @@ class CrossDirectoryEnricherWorker(QThread):
                 self.log_message.emit("[Enricher] SoundCloud API fallback provided candidates.")
                 candidates = api_candidates
         return candidates
+
+    def _soundcloud_best_candidate_for_query(
+        self,
+        artist_name: str,
+        query: str,
+        location_hint: str,
+        genre_hint: str,
+    ) -> Optional[Dict[str, Any]]:
+        candidates = self._soundcloud_people_search_candidates(query)
+        best_candidate = self._pick_best_soundcloud_candidate(
+            artist_name, candidates, location_hint, genre_hint
+        )
+        if not best_candidate or best_candidate.get("score", 0) < _SC_CONFIDENCE_MIN:
+            # Try universal + API fallback using the same query.
+            uni_candidates = self._soundcloud_universal_search_candidates(query)
+            candidate = self._pick_best_soundcloud_candidate(
+                artist_name, uni_candidates, location_hint, genre_hint
+            )
+            if candidate and (
+                best_candidate is None or candidate.get("score", 0) > best_candidate.get("score", 0)
+            ):
+                best_candidate = candidate
+        return best_candidate
 
     def _parse_soundcloud_search_results(
         self,
