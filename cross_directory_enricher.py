@@ -2169,6 +2169,8 @@ _SC_CONFIDENCE_MIN = 0.45
 _SC_CLIENT_ID_CACHE = ""
 _SC_ASSET_JS_PATTERN = re.compile(r"https://a-v2\.sndcdn\.com/assets/\d+-[a-z0-9]+\.js", re.IGNORECASE)
 _SC_CLIENT_ID_PATTERN = re.compile(r'client_id:"([a-zA-Z0-9]+)"')
+_SC_GENERIC_TOKENS = {"ix", "dj", "mc"}
+MIN_SC_CONFIDENCE = 0.95
 
 
 def _sc_handle_from_url(url: str) -> str:
@@ -2183,6 +2185,12 @@ def _sc_handle_from_url(url: str) -> str:
 def _sc_normalise_text(value: str) -> str:
     cleaned = _normalise_for_soundcloud(value or "")
     return cleaned.lower().strip()
+
+
+def _sc_strip_basic(value: str) -> str:
+    """Lowercase, trim, and drop simple punctuation for strict short-name checks."""
+    text = (value or "").lower().strip()
+    return re.sub(r"[\\.,!?\\'\\\"]+", "", text)
 
 
 def _sc_extract_client_id_from_js(text: str) -> str:
@@ -2282,6 +2290,9 @@ def _sc_score_candidate(
     handle_norm = _sc_normalise_text(handle)
     if not artist_norm or not cand_norm:
         return 0.0
+    artist_norm_basic = _sc_strip_basic(artist_norm)
+    cand_norm_basic = _sc_strip_basic(cand_norm)
+    handle_norm_basic = _sc_strip_basic(handle_norm)
     ratio = difflib.SequenceMatcher(None, artist_norm, cand_norm).ratio()
     score = ratio
     if artist_norm == cand_norm:
@@ -2304,6 +2315,14 @@ def _sc_score_candidate(
         score -= 0.25
     if any(keyword in cand_norm for keyword in _SC_LABEL_PODCAST_KEYWORDS):
         score -= 0.15
+    # Generic/short-name penalty unless exact basic match.
+    if artist_norm_basic in _SC_GENERIC_TOKENS or len(artist_norm_basic) <= 3:
+        if not (artist_norm_basic and artist_norm_basic == cand_norm_basic == handle_norm_basic):
+            score -= 0.15
+    # Penalise digits in candidate when artist name has none.
+    if artist_norm_basic and not any(ch.isdigit() for ch in artist_norm_basic):
+        if any(ch.isdigit() for ch in cand_norm_basic) or any(ch.isdigit() for ch in handle_norm_basic):
+            score -= 0.2
     return max(0.0, min(score, 1.0))
 
 
@@ -3054,9 +3073,10 @@ class CrossDirectoryEnricherWorker(QThread):
             )
             if candidate and (best_candidate is None or candidate["score"] > best_candidate["score"]):
                 best_candidate = candidate
-        if not best_candidate or best_candidate["score"] < _SC_CONFIDENCE_MIN:
+        best_score = best_candidate.get("score", 0) if best_candidate else 0.0
+        if not best_candidate or best_score < MIN_SC_CONFIDENCE:
             self.log_message.emit(
-                f"[Enricher] SoundCloud Enrich: no safe match for '{artist_name}', skipping."
+                f"[Enricher] SoundCloud Enrich: no safe match for '{artist_name}' (best_confidence={best_score:.2f}), skipping."
             )
             return None
         self.log_message.emit(
@@ -3273,6 +3293,7 @@ class CrossDirectoryEnricherWorker(QThread):
         genre_hint: str = "",
     ) -> Optional[Dict[str, Any]]:
         best: Optional[Dict[str, Any]] = None
+        artist_norm_basic = _sc_strip_basic(_sc_normalise_text(artist_name))
         for candidate in candidates:
             handle = candidate.get("handle") or ""
             display = candidate.get("display_name") or ""
@@ -3288,6 +3309,24 @@ class CrossDirectoryEnricherWorker(QThread):
             candidate["score"] = score
             if best is None or score > best.get("score", 0):
                 best = candidate
+        # Short-name guard: require near-exact match for very short artist names.
+        if best and artist_norm_basic and len(artist_norm_basic) <= 3:
+            best_basic_display = _sc_strip_basic(_sc_normalise_text(best.get("display_name") or best.get("handle") or ""))
+            if not (
+                artist_norm_basic == best_basic_display
+                or (best.get("score", 0) >= 0.98 and not best_basic_display.split()[1:])
+            ):
+                self.log_message.emit(
+                    f"[Enricher] SoundCloud Enrich: rejecting candidate '{best.get('display_name') or best.get('handle')}' "
+                    f"for short artist '{artist_name}' (confidence={best.get('score', 0):.2f})"
+                )
+                return None
+            if best.get("score", 0) < 0.99:
+                self.log_message.emit(
+                    f"[Enricher] SoundCloud Enrich: rejecting candidate '{best.get('display_name') or best.get('handle')}' "
+                    f"for short artist '{artist_name}' (confidence={best.get('score', 0):.2f})"
+                )
+                return None
         return best
 
     def _update_progress(self, current: int, total: int) -> None:
