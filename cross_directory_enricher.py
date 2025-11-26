@@ -33,7 +33,10 @@ from facebook_enrich import (
     extract_fb_category,
     classify_corporate_signals,
     has_corporate_token,
+    is_noisy_fb_text_block,
+    looks_like_music_fallback,
     MUSIC_CATEGORY_KEYWORDS,
+    FB_MUSIC_CATEGORY_TOKENS,
     MUSIC_TOKENS,
     normalize_fb_name,
     score_fb_candidate,
@@ -1167,10 +1170,7 @@ class FacebookSearchClient:
                 exact_match = (cand_name_norm and artist_norm and cand_name_norm == artist_norm) or (
                     cand_username_norm and artist_norm and cand_username_norm == artist_norm
                 )
-                # If the candidate exactly matches the artist name/username and isn't corporate, allow it.
                 if exact_match:
-                    music_flag = True
-                elif exact_match and contains_music_token:
                     music_flag = True
             if not music_flag:
                 _safe_log(
@@ -1220,6 +1220,7 @@ class FacebookSearchClient:
 
         # Second-layer validation: fetch page category and reject late if corporate or not music.
         page_music = False
+        confirmed_logged = False
         best_name_norm = normalize_fb_name(best_candidate.name or "")
         artist_norm = normalize_fb_name(artist_name)
         try:
@@ -1232,23 +1233,41 @@ class FacebookSearchClient:
             WebDriverWait(self.driver, 5).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
             page_html = self.driver.page_source or ""
             page_category_text = None
+            page_text_blocks: List[str] = []
             try:
                 soup = BeautifulSoup(page_html, "html.parser")
+                seen_blocks: Set[str] = set()
+
+                def _add_block(val: str) -> Optional[str]:
+                    val = (val or "").strip()
+                    if not val or len(val) > 160:
+                        return None
+                    if is_noisy_fb_text_block(val):
+                        return None
+                    if val in seen_blocks:
+                        return None
+                    seen_blocks.add(val)
+                    page_text_blocks.append(val)
+                    return val
+
                 meta_desc = soup.find("meta", attrs={"name": "description"}) or soup.find(
                     "meta", attrs={"property": "og:description"}
                 )
                 if meta_desc:
-                    page_category_text = (meta_desc.get("content") or "").strip()
+                    cleaned_meta = _add_block(meta_desc.get("content") or "")
+                    if cleaned_meta and not page_category_text:
+                        page_category_text = cleaned_meta
                 # Scan visible spans/divs for music-y labels.
-                if not page_category_text:
-                    for tag in soup.find_all(["span", "div"]):
-                        val = tag.get_text(" ", strip=True)
-                        if not val or len(val) > 80:
-                            continue
-                        low = val.lower()
-                        if "/" in val or any(tok in low for tok in MUSIC_TOKENS):
-                            page_category_text = val
-                            break
+                MAX_FB_TEXT_BLOCKS = 80
+                for tag in soup.find_all(["span", "div"]):
+                    val = _add_block(tag.get_text(" ", strip=True))
+                    if not val:
+                        continue
+                    low = val.lower()
+                    if not page_category_text and ("/" in val or any(tok in low for tok in MUSIC_TOKENS)):
+                        page_category_text = val
+                    if len(page_text_blocks) >= MAX_FB_TEXT_BLOCKS:
+                        break
             except Exception:
                 page_category_text = None
             sig_page = classify_corporate_signals(best_candidate.url, best_candidate.name, page_category_text or "")
@@ -1261,6 +1280,7 @@ class FacebookSearchClient:
                     page_category_text or "<none>",
                 )
                 return None
+            category_non_music = bool(page_category_text and not sig_page.has_artist)
             if page_category_text and sig_page.has_artist:
                 _safe_log(
                     self.logger,
@@ -1268,27 +1288,48 @@ class FacebookSearchClient:
                     artist_name,
                     page_category_text,
                 )
-            elif page_category_text and not sig_page.has_artist:
-                _safe_log(
-                    self.logger,
-                    "[FB Enrich] Rejecting FB page '%s' for '%s' after scrape: category '%s' not music-related.",
-                    best_candidate.url,
-                    artist_name,
-                    page_category_text or "<none>",
-                )
-                return None
+                confirmed_logged = True
+            has_reliable_category = any(
+                (cat and any(tok in (cat or "").lower() for tok in FB_MUSIC_CATEGORY_TOKENS))
+                for cat in (page_category_text, best_candidate.category)
+            )
             page_music = sig_page.has_artist or is_music_page(
                 (best_candidate.name or "").lower(),
                 (best_candidate.url or "").lower(),
                 (page_category_text or "").lower(),
             )
+            if not page_music and not has_reliable_category and not category_non_music:
+                if looks_like_music_fallback(page_text_blocks, artist_name):
+                    page_music = True
+                    _safe_log(
+                        self.logger,
+                        "[FB Enrich] Falling back to text-based music detection for '%s' (no FB category; matched name+music tokens)",
+                        artist_name,
+                    )
+                    if not confirmed_logged:
+                        _safe_log(
+                            self.logger,
+                            "[FB Enrich] Confirmed music page for '%s' with FB category '%s'.",
+                            artist_name,
+                            page_category_text or "<none>",
+                        )
+                        confirmed_logged = True
             if not page_music:
-                _safe_log(
-                    self.logger,
-                    "[FB Enrich] Rejecting FB page '%s' for '%s' after scrape: no music signals found.",
-                    best_candidate.url,
-                    artist_name,
-                )
+                if category_non_music and page_category_text:
+                    _safe_log(
+                        self.logger,
+                        "[FB Enrich] Rejecting FB page '%s' for '%s' after scrape: category '%s' not music-related.",
+                        best_candidate.url,
+                        artist_name,
+                        page_category_text or "<none>",
+                    )
+                else:
+                    _safe_log(
+                        self.logger,
+                        "[FB Enrich] Rejecting FB page '%s' for '%s' after scrape: no music signals found.",
+                        best_candidate.url,
+                        artist_name,
+                    )
                 return None
         except Exception as exc:
             _safe_log(
@@ -1298,11 +1339,6 @@ class FacebookSearchClient:
                 artist_name,
                 exc,
             )
-
-        # If we still have no music signal after page scrape, allow exact-name matches as a final fallback.
-        if not page_music and artist_norm:
-            if best_name_norm == artist_norm or (best_username_norm and best_username_norm == artist_norm):
-                page_music = True
 
         # If we still have no music signal after page scrape, reject.
         if not page_music:

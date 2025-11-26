@@ -8,6 +8,21 @@ import urllib.parse
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
+# Blocks of common FB UI/notification text that should be ignored entirely.
+NOISY_FB_TOKENS = [
+    "Unread",
+    "Mark as read",
+    "Notifications",
+    "Out with the In",
+    "Home ·",
+    "menu",
+    "search",
+    "mentioned you in a post",
+    "news feed",
+    "create post",
+    "stories",
+]
+
 # Tokens that indicate a music-related Facebook page.
 MUSIC_CATEGORY_KEYWORDS = (
     "musician",
@@ -117,6 +132,19 @@ MUSIC_TOKENS = [
     "composers",
     "lyricist",
     "lyricists",
+]
+
+# Narrow music cues for the strict fallback.
+MUSIC_FALLBACK_TOKENS = [
+    "musician",
+    "music",
+    "band",
+    "artist",
+    "singer",
+    "songwriter",
+    "rapper",
+    "producer",
+    "dj",
 ]
 
 # Broader corporate markers to penalise or drop before scoring.
@@ -271,6 +299,47 @@ class FbCandidate:
     name: str
     url: str
     category: str = ""
+
+
+def is_noisy_fb_text_block(text: str) -> bool:
+    text = (text or "").replace("\u00a0", " ").replace("\u202f", " ")
+    normalized = re.sub(r"\s+", " ", text).lower()
+    for token in NOISY_FB_TOKENS:
+        if token.lower() in normalized:
+            return True
+    return False
+
+
+def looks_like_music_fallback(text_blocks: List[str], artist_name: str) -> bool:
+    """
+    Strict fallback: for pages with no reliable FB category.
+    Returns True only if we find a text block that:
+      - is not noisy UI text
+      - contains the artist name (case-insensitive, or a close variant)
+      - AND contains at least one music-related token.
+    """
+    if not artist_name:
+        return False
+
+    artist_l = artist_name.strip().lower()
+    if not artist_l:
+        return False
+
+    for raw in text_blocks or []:
+        if not raw:
+            continue
+        if is_noisy_fb_text_block(raw):
+            continue
+
+        block = raw.lower()
+
+        if artist_l not in block:
+            continue
+
+        if any(tok in block for tok in MUSIC_FALLBACK_TOKENS):
+            return True
+
+    return False
 
 
 def _strip_accents(text: str) -> str:
@@ -448,18 +517,24 @@ def extract_fb_category(card_el, page_name: str = "") -> Optional[str]:
                     continue
                 if val in seen or len(val) > 80:
                     continue
+                if is_noisy_fb_text_block(val):
+                    continue
                 seen.add(val)
                 candidates.append(val)
             # Short text from nearby spans/divs (often the grey label).
             for sub in container.find_all(["span", "div"], limit=12):
                 text = _clean(getattr(sub, "get_text", lambda *_: "")(" ", strip=True))
                 if text and text not in seen and len(text) <= 80:
+                    if is_noisy_fb_text_block(text):
+                        continue
                     seen.add(text)
                     candidates.append(text)
             # Attributes sometimes hold the label.
             for attr in ("aria-label", "title"):
                 text = _clean(getattr(container, "get", lambda *_: "")(attr, ""))
                 if text and text not in seen and len(text) <= 80:
+                    if is_noisy_fb_text_block(text):
+                        continue
                     seen.add(text)
                     candidates.append(text)
         for sib in getattr(card_el, "next_siblings", []) or []:
@@ -468,6 +543,8 @@ def extract_fb_category(card_el, page_name: str = "") -> Optional[str]:
             except Exception:
                 text = ""
             if text and text not in seen and len(text) <= 80:
+                if is_noisy_fb_text_block(text):
+                    continue
                 seen.add(text)
                 candidates.append(text)
     except Exception:

@@ -5975,6 +5975,8 @@ def fb_find_page_and_emails_by_name(driver, artist_name: str, location: str = ""
         "pop band",
         "record label",
     ]
+    from facebook_enrich import is_noisy_fb_text_block, looks_like_music_fallback
+
     def _is_music_page(name_lc: str, url_lc: str, category_lc: str) -> bool:
         for blob in (name_lc, url_lc, category_lc):
             for token in music_tokens:
@@ -6094,15 +6096,32 @@ def fb_find_page_and_emails_by_name(driver, artist_name: str, location: str = ""
         WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
         page_html = driver.page_source or ""
         page_category_text = None
+        page_text_blocks = []
         try:
             soup = BeautifulSoup(page_html, "html.parser")
+            seen_blocks = set()
+
+            def _add_block(val: str):
+                val = (val or "").strip()
+                if not val or len(val) > 160:
+                    return None
+                if is_noisy_fb_text_block(val):
+                    return None
+                if val in seen_blocks:
+                    return None
+                seen_blocks.add(val)
+                page_text_blocks.append(val)
+                return val
+
             meta_desc = soup.find("meta", attrs={"name": "description"}) or soup.find("meta", attrs={"property": "og:description"})
             if meta_desc:
-                page_category_text = (meta_desc.get("content") or "").strip()
+                candidate = _add_block(meta_desc.get("content") or "")
+                if candidate and not page_category_text:
+                    page_category_text = candidate
             if not page_category_text:
                 for tag in soup.find_all(["span", "div"]):
-                    val = tag.get_text(" ", strip=True)
-                    if not val or len(val) > 120:
+                    val = _add_block(tag.get_text(" ", strip=True))
+                    if not val:
                         continue
                     low = val.lower()
                     if "/" in val or any(tok in low for tok in music_tokens):
@@ -6111,20 +6130,21 @@ def fb_find_page_and_emails_by_name(driver, artist_name: str, location: str = ""
             if not page_category_text:
                 og_title = soup.find("meta", attrs={"property": "og:title"})
                 if og_title:
-                    page_category_text = (og_title.get("content") or "").strip()
+                    page_category_text = _add_block(og_title.get("content") or "")
             # Quick body scan for music tokens if no category.
             body_music = False
-            if not page_category_text:
-                body_text = soup.get_text(" ", strip=True).lower()
-                if any(tok in body_text for tok in music_tokens):
-                    body_music = True
             cat_lc = (page_category_text or "").lower()
             # Reject if the scraped category looks corporate.
             for token in corporate_tokens:
                 if token in cat_lc:
                     _log(f"[FB Enrich] Rejecting FB page '{best_url}' for '{artist_name}' after scrape due to corporate token '{token}' in category.")
                     return "", []
-            page_music = _is_music_page((best_name or "").lower(), (best_url or "").lower(), cat_lc) or body_music
+            page_music = _is_music_page((best_name or "").lower(), (best_url or "").lower(), cat_lc)
+            has_reliable_category = bool(page_category_text and any(tok in cat_lc for tok in music_tokens))
+            if not page_music and not has_reliable_category and not cat_lc:
+                if looks_like_music_fallback(page_text_blocks, artist_name):
+                    page_music = True
+                    _log(f"[FB Enrich] Falling back to text-based music detection for '{artist_name}' (no FB category; matched name+music tokens)")
             if page_category_text and page_music:
                 _log(f"[FB Enrich] Confirmed music page for '{artist_name}' with FB category '{page_category_text}'.")
         except Exception:
