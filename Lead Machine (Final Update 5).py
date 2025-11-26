@@ -5928,6 +5928,7 @@ def fb_find_page_and_emails_by_name(driver, artist_name: str, location: str = ""
     best_base_score = 0.0
     best_cat_boost = 0.0
     best_is_music = False
+    uncertain_used = False
     blocked_tokens = [
         "games", "game",
         "creations",
@@ -5983,7 +5984,11 @@ def fb_find_page_and_emails_by_name(driver, artist_name: str, location: str = ""
                 if token in blob:
                     return True
         return False
-    for a in soup.find_all("a", href=True):
+    anchor_candidates = list(soup.find_all("a", href=True)) + list(soup.select('a[role="link"][href*="facebook.com"]')) + list(
+        soup.select('div[role="article"] a[href*="facebook.com"]')
+    )
+    strong_cat_tokens = ("musician", "band", "artist", "singer", "songwriter", "music", "recording artist")
+    for a in anchor_candidates:
         href = (a.get("href") or "").strip()
         if not href:
             continue
@@ -5998,7 +6003,119 @@ def fb_find_page_and_emails_by_name(driver, artist_name: str, location: str = ""
         except Exception:
             username = ""
         parent = a.find_parent(["div", "span"])
-        category_raw, category_norm = extract_fb_category(parent, text)
+        aria_label = a.get("aria-label") or ""
+        category_raw = ""
+        if aria_label and any(tok in aria_label.lower() for tok in music_tokens):
+            text = aria_label
+            category_raw = aria_label
+        extracted_cat, category_norm = extract_fb_category(parent, text)
+        category_raw = category_raw or extracted_cat
+        if not category_raw:
+            for probe in (aria_label, text):
+                if probe and any(tok in probe.lower() for tok in music_tokens):
+                    category_raw = probe
+                    break
+        if not category_raw and parent:
+            try:
+                card_blob = parent.get_text(" ", strip=True)
+                if card_blob and any(tok in card_blob.lower() for tok in music_tokens):
+                    category_raw = card_blob
+            except Exception:
+                pass
+        if not category_raw:
+            ancestor = parent.find_parent(["div", "section", "article"]) if parent else None
+            if ancestor:
+                try:
+                    blob = ancestor.get_text(" ", strip=True)
+                    if blob and any(tok in blob.lower() for tok in music_tokens):
+                        category_raw = blob
+                except Exception:
+                    pass
+        if not category_raw:
+            shells = []
+            try:
+                shells.append(a.get_text(" ", strip=True))
+            except Exception:
+                pass
+            for node in (parent, getattr(parent, "parent", None), getattr(getattr(parent, "parent", None), "parent", None)):
+                if not node:
+                    continue
+                try:
+                    shells.append(node.get_text(" ", strip=True))
+                except Exception:
+                    continue
+            for blob in shells:
+                if blob and any(tok in (blob or "").lower() for tok in music_tokens):
+                    category_raw = blob
+                    break
+        if not category_raw:
+            try:
+                for sib in a.next_siblings:
+                    try:
+                        text_blob = getattr(sib, "get_text", lambda *_: str(sib))(" ", strip=True)
+                    except Exception:
+                        continue
+                    if text_blob and any(tok in text_blob.lower() for tok in music_tokens):
+                        category_raw = text_blob
+                        break
+                    parent_sib = getattr(sib, "parent", None)
+                    if parent_sib:
+                        try:
+                            text_blob = parent_sib.get_text(" ", strip=True)
+                        except Exception:
+                            text_blob = ""
+                        if text_blob and any(tok in text_blob.lower() for tok in music_tokens):
+                            category_raw = text_blob
+                            break
+            except Exception:
+                pass
+        if not category_raw:
+            try:
+                container = a.find_parent(["div", "section", "article"])
+                if container:
+                    text_blob = container.get_text(" ", strip=True)
+                    if text_blob and any(tok in text_blob.lower() for tok in music_tokens):
+                        category_raw = text_blob
+            except Exception:
+                pass
+        if not category_raw:
+            try:
+                for span in a.find_all("span"):
+                    span_text = span.get_text(" ", strip=True)
+                    if span_text and any(tok in span_text.lower() for tok in music_tokens):
+                        category_raw = span_text
+                        break
+                if not category_raw and parent:
+                    for span in parent.find_all("span"):
+                        span_text = span.get_text(" ", strip=True)
+                        if span_text and any(tok in span_text.lower() for tok in music_tokens):
+                            category_raw = span_text
+                            break
+            except Exception:
+                pass
+        if not category_raw:
+            context_blobs = []
+            try:
+                context_blobs.append(a.get_text(" ", strip=True))
+            except Exception:
+                pass
+            for node in (parent, getattr(parent, "parent", None), getattr(getattr(parent, "parent", None), "parent", None)):
+                if not node:
+                    continue
+                try:
+                    context_blobs.append(node.get_text(" ", strip=True))
+                except Exception:
+                    continue
+            try:
+                container = a.find_parent(["div", "section", "article"])
+                if container:
+                    context_blobs.append(container.get_text(" ", strip=True))
+            except Exception:
+                pass
+            for blob in context_blobs:
+                if blob and any(tok in blob.lower() for tok in music_tokens):
+                    category_raw = blob
+                    break
         fallback_name = text or username or href
         name_lc = (fallback_name or "").lower()
         url_lc = (href or "").lower()
@@ -6019,14 +6136,6 @@ def fb_find_page_and_emails_by_name(driver, artist_name: str, location: str = ""
                 break
         if corp_hit:
             continue
-        music_flag = _is_music_page(name_lc, url_lc, category_lc)
-        if not music_flag and normalize_name(text) == artist_norm:
-            music_flag = True
-        if not music_flag and normalize_name(username) == artist_norm:
-            music_flag = True
-        if not music_flag:
-            _log(f"[FB Enrich] Skipping non-music FB candidate '{text or href}' for '{artist_name}' (category='{category_raw or '<none>'}').")
-            continue
         page_name_norm = normalize_name(text)
         username_norm = normalize_name(username)
         score = 0.0
@@ -6040,6 +6149,31 @@ def fb_find_page_and_emails_by_name(driver, artist_name: str, location: str = ""
             score += 1.0
         elif username_norm.startswith(artist_norm):
             score += 0.7
+        name_score = score
+        music_flag = _is_music_page(name_lc, url_lc, category_lc)
+        if not music_flag and normalize_name(text) == artist_norm:
+            music_flag = True
+        if not music_flag and normalize_name(username) == artist_norm:
+            music_flag = True
+        category_has_strong = any(tok in category_lc for tok in strong_cat_tokens)
+        if (
+            not music_flag
+            and not category_has_strong
+            and "profile.php" not in url_lc
+            and not uncertain_used
+            and (
+                name_score >= 0.1
+                or (artist_norm and artist_norm.split() and artist_norm.split()[0] in name_lc)
+                or (artist_norm and artist_norm.split() and artist_norm.split()[0] in url_lc)
+            )
+        ):
+            uncertain_used = True
+            music_flag = True
+            score = max(score, 1.0)
+            _log(f"[FB Enrich] Trying uncertain music FB candidate '{text or href}' for '{artist_name}' (category='{category_raw or '<none>'}', base_score={name_score:.2f}).")
+        if not music_flag:
+            _log(f"[FB Enrich] Skipping non-music FB candidate '{text or href}' for '{artist_name}' (category='{category_raw or '<none>'}').")
+            continue
         context = " ".join([
             (href or "").lower(),
             username_norm,

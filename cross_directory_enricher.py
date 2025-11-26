@@ -992,7 +992,10 @@ class FacebookSearchClient:
             return None
         seen_urls: Set[str] = set()
         candidates: List[FbCandidate] = []
-        for anchor in soup.select("a[href]"):
+        anchor_candidates = list(soup.select("a[href]")) + list(soup.select('a[role="link"][href*="facebook.com"]')) + list(
+            soup.select('div[role="article"] a[href*="facebook.com"]')
+        )
+        for anchor in anchor_candidates:
             href = cell_to_str(anchor.get("href"))
             if "facebook.com" not in href:
                 continue
@@ -1015,9 +1018,134 @@ class FacebookSearchClient:
             aria_label = cell_to_str(anchor.get("aria-label"))
             if aria_label and any(tok in aria_label.lower() for tok in MUSIC_TOKENS):
                 name_text = aria_label
+                category_raw = aria_label
+            else:
+                category_raw = ""
             fallback_name = name_text or (path_parts[0] if path_parts else "") or normalised
             parent = anchor.find_parent(["div", "span"])
-            category_raw = extract_fb_category(parent, name_text) or ""
+            category_raw = category_raw or extract_fb_category(parent, name_text) or ""
+            if not category_raw:
+                for probe in (aria_label, name_text):
+                    if probe and any(tok in probe.lower() for tok in MUSIC_TOKENS):
+                        category_raw = probe
+                        break
+            if not category_raw and parent:
+                try:
+                    card_blob = parent.get_text(" ", strip=True)
+                    if card_blob and any(tok in card_blob.lower() for tok in MUSIC_TOKENS):
+                        category_raw = card_blob
+                except Exception:
+                    pass
+            if not category_raw:
+                ancestor = parent.find_parent(["div", "section", "article"]) if parent else None
+                if ancestor:
+                    try:
+                        blob = ancestor.get_text(" ", strip=True)
+                        if blob and any(tok in blob.lower() for tok in MUSIC_TOKENS):
+                            category_raw = blob
+                    except Exception:
+                        pass
+            if not category_raw:
+                shells = []
+                try:
+                    shells.append(anchor.get_text(" ", strip=True))
+                except Exception:
+                    pass
+                for node in (parent, getattr(parent, "parent", None), getattr(getattr(parent, "parent", None), "parent", None)):
+                    if not node:
+                        continue
+                    try:
+                        shells.append(node.get_text(" ", strip=True))
+                    except Exception:
+                        continue
+            for blob in shells:
+                if blob and any(tok in (blob or "").lower() for tok in MUSIC_TOKENS):
+                    category_raw = blob
+                    break
+            if not category_raw:
+                try:
+                    for sib in anchor.next_siblings:
+                        try:
+                            text_blob = getattr(sib, "get_text", lambda *_: str(sib))(" ", strip=True)
+                        except Exception:
+                            continue
+                        if text_blob and any(tok in text_blob.lower() for tok in MUSIC_TOKENS):
+                            category_raw = text_blob
+                            break
+                        parent_sib = getattr(sib, "parent", None)
+                        if parent_sib:
+                            try:
+                                text_blob = parent_sib.get_text(" ", strip=True)
+                            except Exception:
+                                text_blob = ""
+                            if text_blob and any(tok in text_blob.lower() for tok in MUSIC_TOKENS):
+                                category_raw = text_blob
+                                break
+                except Exception:
+                    pass
+            if not category_raw:
+                try:
+                    for span in anchor.find_all("span"):
+                        span_text = span.get_text(" ", strip=True)
+                        if span_text and any(tok in span_text.lower() for tok in MUSIC_TOKENS):
+                            category_raw = span_text
+                            break
+                    if not category_raw and parent:
+                        for span in parent.find_all("span"):
+                            span_text = span.get_text(" ", strip=True)
+                            if span_text and any(tok in span_text.lower() for tok in MUSIC_TOKENS):
+                                category_raw = span_text
+                                break
+                except Exception:
+                    pass
+            # Last resort: pull any music-tagged text from nearest ancestors/siblings into category.
+            if not category_raw:
+                context_blobs: List[str] = []
+                try:
+                    context_blobs.append(anchor.get_text(" ", strip=True))
+                except Exception:
+                    pass
+                for node in (parent, getattr(parent, "parent", None), getattr(getattr(parent, "parent", None), "parent", None)):
+                    if not node:
+                        continue
+                    try:
+                        context_blobs.append(node.get_text(" ", strip=True))
+                    except Exception:
+                        continue
+                try:
+                    container = anchor.find_parent(["div", "section", "article"])
+                    if container:
+                        context_blobs.append(container.get_text(" ", strip=True))
+                except Exception:
+                    pass
+                for blob in context_blobs:
+                    if blob and any(tok in blob.lower() for tok in MUSIC_TOKENS):
+                        category_raw = blob
+                        break
+            # If we still have no explicit category, see if any nearby text carries music cues and reuse it.
+            context_blobs: List[str] = [category_raw or "", aria_label or "", name_text or "", fallback_name or ""]
+            try:
+                if parent:
+                    context_blobs.append(parent.get_text(" ", strip=True))
+                    anc = parent.find_parent(["div", "section", "article"])
+                    if anc:
+                        context_blobs.append(anc.get_text(" ", strip=True))
+            except Exception:
+                pass
+            try:
+                for sib in anchor.next_siblings:
+                    try:
+                        context_blobs.append(getattr(sib, "get_text", lambda *_: str(sib))(" ", strip=True))
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+            for blob in context_blobs:
+                if blob and any(tok in blob.lower() for tok in MUSIC_TOKENS):
+                    if not category_raw:
+                        category_raw = blob
+                    break
+            cand.category = category_raw
             candidates.append(
                 FbCandidate(
                     name=fallback_name,
@@ -1037,6 +1165,7 @@ class FacebookSearchClient:
 
         music_pool: List[Tuple[float, float, float, bool, bool, FbCandidate]] = []
         neutral_pool: List[Tuple[float, float, float, bool, bool, FbCandidate]] = []
+        uncertain_used = False
         corporate_tokens = [
             "ltd",
             "pty",
@@ -1165,14 +1294,43 @@ class FacebookSearchClient:
             if rejected:
                 continue
 
+            scored = score_fb_candidate(artist_name, cand.name, cand.url, cand.category)
+            if scored is None:
+                continue
+            final_score, name_score, cat_boost = scored
             contains_music_token = any(tok in name_lc or tok in url_lc or tok in category_lc for tok in MUSIC_TOKENS)
-            music_flag = is_music_page(name_lc, url_lc, category_lc)
+            strong_cat_tokens = ("musician", "band", "artist", "singer", "songwriter", "music", "recording artist")
+            category_has_strong = any(tok in category_lc for tok in strong_cat_tokens)
+            music_flag = category_has_strong or is_music_page(name_lc, url_lc, category_lc)
             if not music_flag:
                 exact_match = (cand_name_norm and artist_norm and cand_name_norm == artist_norm) or (
                     cand_username_norm and artist_norm and cand_username_norm == artist_norm
                 )
                 if exact_match:
                     music_flag = True
+            if not music_flag:
+                allow_uncertain = (
+                    not category_has_strong
+                    and "profile.php" not in url_lc
+                    and not uncertain_used
+                    and (
+                        name_score >= 0.1
+                        or (artist_norm and artist_norm.split() and artist_norm.split()[0] in (name_lc or ""))
+                        or (artist_norm and artist_norm.split() and artist_norm.split()[0] in (url_lc or ""))
+                    )
+                )
+                if allow_uncertain:
+                    uncertain_used = True
+                    music_flag = True
+                    final_score = max(final_score, 1.0)
+                    _safe_log(
+                        self.logger,
+                        "[FB Enrich] Trying uncertain music FB candidate '%s' for '%s' (category='%s', base_score=%.2f).",
+                        cand.name or cand.url,
+                        artist_name,
+                        cand.category or "<none>",
+                        name_score,
+                    )
             if not music_flag:
                 _safe_log(
                     self.logger,
@@ -1182,11 +1340,6 @@ class FacebookSearchClient:
                     cand.category or "<none>",
                 )
                 continue
-
-            scored = score_fb_candidate(artist_name, cand.name, cand.url, cand.category)
-            if scored is None:
-                continue
-            final_score, name_score, cat_boost = scored
             music_cat_bonus = 0.5 if any(tok in category_lc for tok in MUSIC_TOKENS) else 0.0
             final_score += music_cat_bonus
             _safe_log(

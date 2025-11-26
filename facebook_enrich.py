@@ -152,15 +152,17 @@ def clean_fb_category_text(text: str) -> str:
     raw = re.sub(r"\s+", " ", text or "").strip(" -\u2022")
     if not raw:
         return raw
-    segments = [seg.strip(" -") for seg in raw.split("·") if seg and seg.strip(" -")]
-    music_segments = [seg for seg in segments if any(tok in seg.lower() for tok in MUSIC_TOKENS)]
-    if music_segments:
-        candidate = min(music_segments, key=len)
-    elif segments:
-        candidate = segments[0]
+    # Split on common FB separators and keep the first music-relevant piece.
+    segments = [seg.strip(" -") for seg in re.split(r"[·|]", raw) if seg and seg.strip(" -")]
+    for seg in segments:
+        lower = seg.lower()
+        if any(tok in lower for tok in MUSIC_TOKENS):
+            candidate = seg
+            break
     else:
-        candidate = raw
-    candidate = re.split(r"(\+\d[\d\s().-]{5,}|facebook\.com/|https?://)", candidate)[0].strip(" -·")
+        candidate = segments[0] if segments else raw
+    # Trim at phones/URLs/emails if present.
+    candidate = re.split(r"(\+\d[\d\s().-]{5,}|\b\d{3,}[-\s]\d{3,}|\bmailto:|facebook\.com/|https?://|\w+@)", candidate)[0].strip(" -·")
     return candidate or raw
 
 # Broader corporate markers to penalise or drop before scoring.
