@@ -59,6 +59,8 @@ USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/117.0.0.0 Safari/537.36"
 )
+MIN_BC_CONFIDENCE = 0.92
+MIN_LF_CONFIDENCE = 0.9
 
 ENABLE_FACEBOOK_ENRICHMENT = True
 FACEBOOK_SEARCH_URL = "https://www.facebook.com/search/pages/"
@@ -2193,6 +2195,49 @@ def _sc_strip_basic(value: str) -> str:
     return re.sub(r"[\\.,!?\\'\\\"]+", "", text)
 
 
+def _bandcamp_confidence(artist_name: str, display_name: str, profile_url: str, song_title: str = "") -> float:
+    """
+    Lightweight Bandcamp confidence:
+    - Name similarity baseline
+    - Boost when subdomain closely matches artist name
+    - Optional boost when song title overlaps search context
+    - Small penalty for label/store/festival-like tokens
+    """
+    artist_norm = normalize_name(artist_name)
+    disp_norm = normalize_name(display_name or "")
+    if not artist_norm or not disp_norm:
+        return 0.0
+    score = difflib.SequenceMatcher(None, artist_norm, disp_norm).ratio()
+    # Subdomain boost when it closely matches the artist.
+    try:
+        parsed = urllib.parse.urlparse(profile_url or "")
+        host = (parsed.netloc or "").split(".")[0].lower()
+        host_norm = normalize_name(host)
+        if host_norm and artist_norm and (host_norm == artist_norm or artist_norm in host_norm or host_norm in artist_norm):
+            score = max(score, score + 0.08)
+    except Exception:
+        pass
+    # Song-title boost if provided and appears in display text.
+    song_norm = normalize_name(song_title or "")
+    if song_norm and song_norm in disp_norm:
+        score += 0.03
+    penalty_tokens = {"records", "recordings", "label", "store", "festival", "shop"}
+    if any(tok in disp_norm for tok in penalty_tokens):
+        score -= 0.1
+    return max(0.0, min(score, 1.0))
+
+
+def _lastfm_confidence(artist_name: str, candidate_name: str) -> float:
+    artist_norm = normalize_name(artist_name)
+    cand_norm = normalize_name(candidate_name)
+    if not artist_norm or not cand_norm:
+        return 0.0
+    score = difflib.SequenceMatcher(None, artist_norm, cand_norm).ratio()
+    if artist_norm == cand_norm:
+        score = max(score, 0.98)
+    return max(0.0, min(score, 1.0))
+
+
 def _sc_extract_client_id_from_js(text: str) -> str:
     if not text:
         return ""
@@ -2992,54 +3037,81 @@ class CrossDirectoryEnricherWorker(QThread):
         return True
 
     def _live_search_bandcamp(self, artist_name: str) -> Optional[EnrichmentPayload]:
-        quoted = urllib.parse.quote_plus(artist_name)
-        url = f"https://bandcamp.com/search?q={quoted}&item_type=b"
         if not self._increment_live_counter():
             return None
-        self.log_message.emit(f"[Enricher] Bandcamp live search: {url}")
-        html = self._fetch_url(url, label="Bandcamp search")
-        if not html:
-            return None
-        soup = BeautifulSoup(html, "html.parser")
-        first_link = soup.select_one("li.searchresult a.itemurl, li.searchresult a[href*='bandcamp.com']")
-        if not first_link:
-            self.log_message.emit("[Enricher] Bandcamp search: no results found.")
-            return None
-        display_name = ""
-        parent_li = first_link.find_parent("li")
-        if parent_li:
-            name_el = parent_li.select_one(".heading") or parent_li.select_one("div.heading")
-            if name_el:
-                display_name = name_el.get_text(" ", strip=True)
+        song_title = _clean_cell(getattr(self, "_live_context", {}).get("song_title", ""))
+
+        def _search(query: str) -> Tuple[Optional[EnrichmentPayload], float]:
+            quoted = urllib.parse.quote_plus(query)
+            url = f"https://bandcamp.com/search?q={quoted}&item_type=b"
+            self.log_message.emit(f"[Enricher] Bandcamp live search: {url}")
+            html = self._fetch_url(url, label="Bandcamp search")
+            if not html:
+                return (None, 0.0)
+            soup = BeautifulSoup(html, "html.parser")
+            first_link = soup.select_one("li.searchresult a.itemurl, li.searchresult a[href*='bandcamp.com']")
+            if not first_link:
+                self.log_message.emit("[Enricher] Bandcamp search: no results found.")
+                return (None, 0.0)
+            display_name = ""
+            parent_li = first_link.find_parent("li")
+            if parent_li:
+                name_el = parent_li.select_one(".heading") or parent_li.select_one("div.heading")
+                if name_el:
+                    display_name = name_el.get_text(" ", strip=True)
+                if not display_name:
+                    display_name = parent_li.get_text(" ", strip=True)
             if not display_name:
-                display_name = parent_li.get_text(" ", strip=True)
-        if not display_name:
-            display_name = first_link.get_text(" ", strip=True)
-        profile_url = (first_link.get("href") or "").strip()
-        if not profile_url:
-            self.log_message.emit("[Enricher] Bandcamp search result missing href.")
-            return None
-        artist_norm = normalize_name(artist_name)
-        bc_name_norm = normalize_name(display_name)
-        if artist_norm and bc_name_norm:
-            prefix_artist = artist_norm.split()[0] if artist_norm.split() else ""
-            prefix_bc = bc_name_norm.split()[0] if bc_name_norm.split() else ""
-            prefix_match = (
-                prefix_artist
-                and prefix_bc
-                and (prefix_artist.startswith(prefix_bc[:4]) or prefix_bc.startswith(prefix_artist[:4]))
-            )
-            if not (
-                artist_norm == bc_name_norm
-                or artist_norm in bc_name_norm
-                or bc_name_norm in artist_norm
-                or prefix_match
-            ):
-                self.log_message.emit(
-                    f"[Enricher] Bandcamp candidate '{display_name or profile_url}' rejected for artist '{artist_name}' (name mismatch)."
+                display_name = first_link.get_text(" ", strip=True)
+            profile_url = (first_link.get("href") or "").strip()
+            if not profile_url:
+                self.log_message.emit("[Enricher] Bandcamp search result missing href.")
+                return (None, 0.0)
+            artist_norm = normalize_name(artist_name)
+            bc_name_norm = normalize_name(display_name)
+            if artist_norm and bc_name_norm:
+                prefix_artist = artist_norm.split()[0] if artist_norm.split() else ""
+                prefix_bc = bc_name_norm.split()[0] if bc_name_norm.split() else ""
+                prefix_match = (
+                    prefix_artist
+                    and prefix_bc
+                    and (prefix_artist.startswith(prefix_bc[:4]) or prefix_bc.startswith(prefix_artist[:4]))
                 )
-                return None
-        return self._fetch_profile_and_build(profile_url, "bandcamp")
+                if not (
+                    artist_norm == bc_name_norm
+                    or artist_norm in bc_name_norm
+                    or bc_name_norm in artist_norm
+                    or prefix_match
+                ):
+                    self.log_message.emit(
+                        f"[Enricher] Bandcamp candidate '{display_name or profile_url}' rejected for artist '{artist_name}' (name mismatch)."
+                    )
+                    return (None, 0.0)
+            confidence = _bandcamp_confidence(artist_name, display_name, profile_url, song_title=song_title if query != artist_name else "")
+            self.log_message.emit(
+                f"[Enricher] Bandcamp Enrich: best candidate '{profile_url}' for '{artist_name}' has confidence={confidence:.2f}."
+            )
+            if confidence >= MIN_BC_CONFIDENCE:
+                return (self._fetch_profile_and_build(profile_url, "bandcamp"), confidence)
+            return (None, confidence)
+
+        payload, best_score = _search(artist_name)
+        if payload:
+            return payload
+        fallback_score = best_score
+        if song_title:
+            fallback_query = f"{artist_name} {song_title}"
+            self.log_message.emit(
+                f"[Enricher] Bandcamp Enrich: no safe match for '{artist_name}', trying artist+song query '{fallback_query}'."
+            )
+            payload, fallback_score = _search(fallback_query)
+            best_score = max(best_score, fallback_score)
+            if payload:
+                return payload
+        self.log_message.emit(
+            f"[Enricher] Bandcamp Enrich: no safe match for '{artist_name}' (best_confidence={best_score:.2f}), skipping."
+        )
+        return None
 
     def _live_search_soundcloud(self, artist_name: str) -> Optional[EnrichmentPayload]:
         if not self._increment_live_counter():
@@ -3124,9 +3196,45 @@ class CrossDirectoryEnricherWorker(QThread):
         if not first_link:
             self.log_message.emit("[Enricher] Last.fm search: no artist results.")
             return None
+        display_name = first_link.get_text(" ", strip=True)
         profile_url = (first_link.get("href") or "").strip()
         if profile_url.startswith("/"):
             profile_url = f"https://www.last.fm{profile_url}"
+        confidence = _lastfm_confidence(artist_name, display_name)
+        self.log_message.emit(
+            f"[Enricher] Last.fm Enrich: candidate '{display_name or profile_url}' for '{artist_name}' has confidence={confidence:.2f}."
+        )
+        best_score = confidence
+        song_title = _clean_cell(getattr(self, "_live_context", {}).get("song_title", ""))
+        if confidence < MIN_LF_CONFIDENCE and song_title:
+            fallback_query = f"{artist_name} {song_title}"
+            self.log_message.emit(
+                f"[Enricher] Last.fm Enrich: no safe match for '{artist_name}', trying artist+song query '{fallback_query}'."
+            )
+            quoted_fb = urllib.parse.quote_plus(fallback_query)
+            fb_url = f"https://www.last.fm/search?q={quoted_fb}&type=artist"
+            fb_html = self._fetch_url(fb_url, label="Last.fm search (artist+song)")
+            if fb_html:
+                fb_soup = BeautifulSoup(fb_html, "html.parser")
+                fb_link = fb_soup.select_one("a[href*='/music/']")
+                if fb_link:
+                    fb_display = fb_link.get_text(" ", strip=True)
+                    fb_profile = (fb_link.get("href") or "").strip()
+                    if fb_profile.startswith("/"):
+                        fb_profile = f"https://www.last.fm{fb_profile}"
+                    fb_conf = _lastfm_confidence(artist_name, fb_display)
+                    self.log_message.emit(
+                        f"[Enricher] Last.fm Enrich: fallback candidate '{fb_display or fb_profile}' for '{artist_name}' has confidence={fb_conf:.2f}."
+                    )
+                    if fb_conf > best_score:
+                        display_name = fb_display
+                        profile_url = fb_profile
+                        best_score = fb_conf
+        if best_score < MIN_LF_CONFIDENCE:
+            self.log_message.emit(
+                f"[Enricher] Last.fm Enrich: no safe match for '{artist_name}' (best_confidence={best_score:.2f}), skipping."
+            )
+            return None
         return self._fetch_profile_and_build(profile_url, "lastfm")
 
     def _fetch_url(self, url: str, label: str) -> Optional[str]:
