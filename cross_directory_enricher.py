@@ -35,6 +35,7 @@ from facebook_enrich import (
     has_corporate_token,
     is_noisy_fb_text_block,
     looks_like_music_fallback,
+    clean_fb_category_text,
     MUSIC_CATEGORY_KEYWORDS,
     FB_MUSIC_CATEGORY_TOKENS,
     MUSIC_TOKENS,
@@ -1268,6 +1269,7 @@ class FacebookSearchClient:
                         page_category_text = val
                     if len(page_text_blocks) >= MAX_FB_TEXT_BLOCKS:
                         break
+                page_category_text = clean_fb_category_text(page_category_text) if page_category_text else None
             except Exception:
                 page_category_text = None
             sig_page = classify_corporate_signals(best_candidate.url, best_candidate.name, page_category_text or "")

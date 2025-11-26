@@ -5975,7 +5975,7 @@ def fb_find_page_and_emails_by_name(driver, artist_name: str, location: str = ""
         "pop band",
         "record label",
     ]
-    from facebook_enrich import is_noisy_fb_text_block, looks_like_music_fallback
+    from facebook_enrich import is_noisy_fb_text_block, looks_like_music_fallback, clean_fb_category_text
 
     def _is_music_page(name_lc: str, url_lc: str, category_lc: str) -> bool:
         for blob in (name_lc, url_lc, category_lc):
@@ -6131,6 +6131,7 @@ def fb_find_page_and_emails_by_name(driver, artist_name: str, location: str = ""
                 og_title = soup.find("meta", attrs={"property": "og:title"})
                 if og_title:
                     page_category_text = _add_block(og_title.get("content") or "")
+            page_category_text = clean_fb_category_text(page_category_text) if page_category_text else None
             # Quick body scan for music tokens if no category.
             body_music = False
             cat_lc = (page_category_text or "").lower()
