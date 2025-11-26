@@ -398,6 +398,34 @@ def _sc_scrape_client_id(session) -> str:
                 continue
     return ""
 
+def _dedupe_song_title_value(value: str) -> str:
+    """
+    Normalise a Song Title cell that may contain multiple entries (comma/pipe/semicolon separated).
+    Removes duplicates while preserving order.
+    """
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if not text:
+        return ""
+    parts = re.split(r"[|;,]+", text)
+    seen = set()
+    cleaned = []
+    for part in parts:
+        token = part.strip()
+        if not token:
+            continue
+        key = token.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned.append(token)
+    if not cleaned:
+        return ""
+    if len(cleaned) == 1:
+        return cleaned[0]
+    return ", ".join(cleaned)
+
 
 def _sc_get_client_id(session) -> str:
     global _SC_CLIENT_ID
@@ -990,7 +1018,7 @@ def save_to_csv(data, filename):
             new_data.append({
                 'Artist Name': artist_name,
                 'Location': location,
-                'Song Title': song_title,
+                'Song Title': _dedupe_song_title_value(song_title),
                 'Sounds Like': sounds_like,
                 'Social Link': link,
                 'SoundCloud Link': soundcloud_link,
@@ -1003,6 +1031,8 @@ def save_to_csv(data, filename):
             })
 
     combined = pd.concat([existing_data, pd.DataFrame(new_data)], ignore_index=True)
+    if "Song Title" in combined.columns:
+        combined["Song Title"] = combined["Song Title"].apply(_dedupe_song_title_value)
     if not combined.empty:
         combined = combined.drop_duplicates(subset=['Artist Name', 'Social Link'])
     combined.to_csv(filename, index=False, encoding="utf-8-sig")
@@ -5902,6 +5932,7 @@ def fb_find_page_and_emails_by_name(driver, artist_name: str, location: str = ""
         "games", "game",
         "creations",
         "store", "shop",
+        "gallery", "galleria",
         "company", "co ", " co.", "corp", "inc", "ltd", "llc",
         "exterior", "exteriors",
         "boutique",
@@ -5912,6 +5943,7 @@ def fb_find_page_and_emails_by_name(driver, artist_name: str, location: str = ""
     corporate_tokens = [
         "ltd", "pty", "pty ltd", "inc", "corp", "company", "co.",
         "store", "shop", "boutique", "market",
+        "gallery", "galleria",
         "resort", "hotel", "hostel", "motel", "guest house", "guesthouse",
         "real estate", "realestate", "estate agent", "estateagency",
         "spa", "salon", "barber",
@@ -6053,6 +6085,57 @@ def fb_find_page_and_emails_by_name(driver, artist_name: str, location: str = ""
     if best_score < threshold or not best_is_music:
         _log(f"[FB Enrich] Best FB candidate for '{artist_name}' -> '{best_name}' (final_score={best_score:.2f}, base_score={best_base_score:.2f}, cat_boost={best_cat_boost:.2f}, category='{cat_display}') – rejected (music/score gate).")
         _log(f"[FB Enrich] No high-confidence music FB match for '{artist_name}'.")
+        return "", []
+
+    # Final validation: scrape page to ensure music signals are present.
+    page_music = False
+    try:
+        driver.get(best_url)
+        WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+        page_html = driver.page_source or ""
+        page_category_text = None
+        try:
+            soup = BeautifulSoup(page_html, "html.parser")
+            meta_desc = soup.find("meta", attrs={"name": "description"}) or soup.find("meta", attrs={"property": "og:description"})
+            if meta_desc:
+                page_category_text = (meta_desc.get("content") or "").strip()
+            if not page_category_text:
+                for tag in soup.find_all(["span", "div"]):
+                    val = tag.get_text(" ", strip=True)
+                    if not val or len(val) > 120:
+                        continue
+                    low = val.lower()
+                    if "/" in val or any(tok in low for tok in music_tokens):
+                        page_category_text = val
+                        break
+            if not page_category_text:
+                og_title = soup.find("meta", attrs={"property": "og:title"})
+                if og_title:
+                    page_category_text = (og_title.get("content") or "").strip()
+            # Quick body scan for music tokens if no category.
+            body_music = False
+            if not page_category_text:
+                body_text = soup.get_text(" ", strip=True).lower()
+                if any(tok in body_text for tok in music_tokens):
+                    body_music = True
+            cat_lc = (page_category_text or "").lower()
+            # Reject if the scraped category looks corporate.
+            for token in corporate_tokens:
+                if token in cat_lc:
+                    _log(f"[FB Enrich] Rejecting FB page '{best_url}' for '{artist_name}' after scrape due to corporate token '{token}' in category.")
+                    return "", []
+            page_music = _is_music_page((best_name or "").lower(), (best_url or "").lower(), cat_lc) or body_music
+            if page_category_text and page_music:
+                _log(f"[FB Enrich] Confirmed music page for '{artist_name}' with FB category '{page_category_text}'.")
+        except Exception:
+            page_category_text = None
+            page_music = False
+            # fall through to final gate
+    except Exception as exc:
+        _log(f"[FB Enrich] Failed to parse FB page '{best_url}' for '{artist_name}': {exc}")
+
+    if not page_music:
+        _log(f"[FB Enrich] Rejecting FB page '{best_url}' for '{artist_name}' after scrape: no music signals found (final gate).")
         return "", []
 
     _log(f"[FB Enrich] Best FB candidate for '{artist_name}' -> '{best_name}' (final_score={best_score:.2f}, base_score={best_base_score:.2f}, cat_boost={best_cat_boost:.2f}, category='{cat_display}')")

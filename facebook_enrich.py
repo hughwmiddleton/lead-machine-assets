@@ -145,6 +145,8 @@ FB_CORPORATE_TOKENS = [
     "estate agent",
     "estateagency",
     "spa",
+    "gallery",
+    "galleria",
     "salon",
     "barber",
     "restaurant",
