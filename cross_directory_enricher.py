@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import datetime
+import difflib
 import importlib.util
 import json
 import math
@@ -95,6 +96,11 @@ EMPTY_FIELD_MARKERS = {
 NOISE_HOSTS = {
     "cbsinteractive.com",
     "careers.paramount.com",
+    "firefox.com",
+    "apple.com",
+    "google.com",
+    "enable-javascript.com",
+    "microsoft.com",
 }
 
 GENERIC_SOCIAL_ROOT_HOSTS = {
@@ -121,6 +127,9 @@ NOISE_PATH_KEYWORDS = (
     "/static/",
     "/assets/",
     "/uploads/",
+    "enable-javascript",
+    "trust-center",
+    "privacy",
 )
 
 NOISE_FILE_EXTENSIONS = {
@@ -282,6 +291,11 @@ JUNK_WEBSITE_HOSTS = {
     "get.bandcamp.help",
     "help.bandcamp.com",
     "bandcamp.help",
+    "firefox.com",
+    "apple.com",
+    "google.com",
+    "enable-javascript.com",
+    "microsoft.com",
 }
 
 JUNK_WEBSITE_PATH_KEYWORDS = (
@@ -410,9 +424,9 @@ SOURCE_PRIORITY = {
     "soundcloud": 1,
     "lastfm": 2,
     "unearthed": 3,
-    "bandcamp_live": 5,
-    "soundcloud_live": 5,
-    "lastfm_live": 5,
+    "bandcamp_live": 0,
+    "soundcloud_live": 1,
+    "lastfm_live": 2,
     "live_search": 5,
 }
 
@@ -2140,6 +2154,179 @@ def _normalise_for_soundcloud(name: str) -> str:
     cleaned = "".join(ch for ch in name if ch.isalnum() or ch.isspace())
     return " ".join(cleaned.split())
 
+
+_SC_LABEL_PODCAST_KEYWORDS = {
+    "records",
+    "recordings",
+    "label",
+    "radio",
+    "podcast",
+    "station",
+    "network",
+}
+_SC_CONFIDENCE_ACCEPT = 0.68
+_SC_CONFIDENCE_MIN = 0.45
+_SC_CLIENT_ID_CACHE = ""
+_SC_ASSET_JS_PATTERN = re.compile(r"https://a-v2\.sndcdn\.com/assets/\d+-[a-z0-9]+\.js", re.IGNORECASE)
+_SC_CLIENT_ID_PATTERN = re.compile(r'client_id:"([a-zA-Z0-9]+)"')
+
+
+def _sc_handle_from_url(url: str) -> str:
+    try:
+        parsed = urllib.parse.urlparse(url)
+        segment = parsed.path.strip("/").split("/")[0]
+        return segment.lower()
+    except Exception:
+        return ""
+
+
+def _sc_normalise_text(value: str) -> str:
+    cleaned = _normalise_for_soundcloud(value or "")
+    return cleaned.lower().strip()
+
+
+def _sc_extract_client_id_from_js(text: str) -> str:
+    if not text:
+        return ""
+    match = re.search(r'"client_id":"([a-zA-Z0-9]+)"', text)
+    if match:
+        return match.group(1)
+    match = re.search(r"client_id=([a-zA-Z0-9]+)", text)
+    if match:
+        return match.group(1)
+    return ""
+
+
+def _sc_get_client_id(session: requests.Session) -> str:
+    global _SC_CLIENT_ID_CACHE
+    if _SC_CLIENT_ID_CACHE:
+        return _SC_CLIENT_ID_CACHE
+    scraped = _sc_scrape_client_id(session)
+    if scraped:
+        _SC_CLIENT_ID_CACHE = scraped
+        return _SC_CLIENT_ID_CACHE
+    return ""
+
+
+def _sc_test_client_id(session: requests.Session, candidate: str) -> bool:
+    try:
+        resp = session.get(
+            "https://api-v2.soundcloud.com/resolve",
+            params={"url": "https://soundcloud.com/soundcloud", "client_id": candidate},
+            timeout=HTTP_TIMEOUT,
+            headers={"User-Agent": USER_AGENT},
+        )
+        return resp.status_code == 200
+    except Exception:
+        return False
+
+
+def _sc_scrape_client_id(session: requests.Session) -> str:
+    sources = [
+        "https://soundcloud.com/discover",
+        "https://soundcloud.com",
+    ]
+    for source in sources:
+        try:
+            resp = session.get(source, timeout=HTTP_TIMEOUT, headers={"User-Agent": USER_AGENT})
+            resp.raise_for_status()
+        except Exception:
+            continue
+        cid = _sc_extract_client_id_from_js(resp.text or "")
+        if cid and _sc_test_client_id(session, cid):
+            return cid
+        assets = _SC_ASSET_JS_PATTERN.findall(resp.text or "")
+        for asset_url in assets[:10]:
+            try:
+                js_resp = session.get(asset_url, timeout=HTTP_TIMEOUT, headers={"User-Agent": USER_AGENT})
+                js_resp.raise_for_status()
+                match = _SC_CLIENT_ID_PATTERN.search(js_resp.text or "")
+                if match:
+                    candidate = match.group(1)
+                    if _sc_test_client_id(session, candidate):
+                        return candidate
+            except Exception:
+                continue
+    return ""
+
+
+def _sc_location_match(hint: str, candidate: str) -> bool:
+    if not hint or not candidate:
+        return False
+    hint_norm = _clean_cell(hint).lower()
+    cand_norm = _clean_cell(candidate).lower()
+    if not hint_norm or not cand_norm:
+        return False
+    if hint_norm in cand_norm:
+        return True
+    hint_parts = [part.strip() for part in hint_norm.split(",") if part.strip()]
+    return all(part in cand_norm for part in hint_parts)
+
+
+def _sc_score_candidate(
+    artist_name: str,
+    candidate_name: str,
+    handle: str,
+    location_hint: str = "",
+    candidate_location: str = "",
+    genre_hint: str = "",
+) -> float:
+    """
+    Lightweight confidence score for SoundCloud candidates:
+    - anchor on cleaned display name + handle similarity to artist name
+    - boost on location/genre hints when available
+    - penalise label/podcast-like handles to de-prioritise obvious mismatches
+    """
+    artist_norm = _sc_normalise_text(artist_name)
+    cand_norm = _sc_normalise_text(candidate_name or handle)
+    handle_norm = _sc_normalise_text(handle)
+    if not artist_norm or not cand_norm:
+        return 0.0
+    ratio = difflib.SequenceMatcher(None, artist_norm, cand_norm).ratio()
+    score = ratio
+    if artist_norm == cand_norm:
+        score = max(score, 0.95)
+    if handle_norm and (artist_norm == handle_norm or artist_norm in handle_norm):
+        score = max(score, 0.92)
+    if handle_norm and handle_norm.replace("_", " ") == artist_norm:
+        score = max(score, 0.9)
+    if artist_norm and cand_norm.startswith(artist_norm):
+        score = max(score, 0.85)
+    if artist_norm and handle_norm.startswith(artist_norm.split()[0]):
+        score = max(score, score + 0.05)
+    if location_hint and _sc_location_match(location_hint, candidate_location):
+        score += 0.08
+    if genre_hint:
+        genre_norm = _sc_normalise_text(genre_hint)
+        if genre_norm and genre_norm in _sc_normalise_text(candidate_name):
+            score += 0.05
+    if any(keyword in handle_norm for keyword in _SC_LABEL_PODCAST_KEYWORDS):
+        score -= 0.25
+    if any(keyword in cand_norm for keyword in _SC_LABEL_PODCAST_KEYWORDS):
+        score -= 0.15
+    return max(0.0, min(score, 1.0))
+
+
+def _build_soundcloud_queries(base_query: str, track_hint: str = "", location_hint: str = "") -> List[str]:
+    """
+    Build a small set of progressively broader SoundCloud search strings.
+    - base: artist name
+    - optional: artist + track, artist + location
+    """
+    queries: List[str] = []
+
+    def _add(candidate: str):
+        candidate = (candidate or "").strip()
+        if candidate and candidate not in queries:
+            queries.append(candidate)
+
+    _add(base_query)
+    if track_hint:
+        _add(f"{base_query} {track_hint}")
+    if location_hint:
+        _add(f"{base_query} {location_hint}")
+    return queries[:4]
+
 def _clean_soundcloud_query(name: str) -> str:
     """
     Prepare a SoundCloud search query once per artist to avoid duplicate logical searches.
@@ -2299,6 +2486,7 @@ class CrossDirectoryEnricherWorker(QThread):
         self.live_search_attempts = 0
         self._notified_limit = False
         self.total_rows = 0
+        self._live_context: Dict[str, Any] = {}
 
     def run(self) -> None:
         try:
@@ -2392,6 +2580,13 @@ class CrossDirectoryEnricherWorker(QThread):
             if self.lastfm_csv_path:
                 directory_indexes["lastfm"] = _load_directory_csv(self.lastfm_csv_path, "Last.fm")
             self.log_message.emit(f"[Enricher] Starting enrichment for {total} rows...")
+            self.log_message.emit(
+                f"[Enricher] Live search enabled={self.enable_live_search} max={self.max_live_searches}"
+            )
+            if self.soundcloud_csv_path:
+                self.log_message.emit(
+                    f"[Enricher] SoundCloud directory path set -> {self.soundcloud_csv_path}"
+                )
             priority = ["bandcamp", "soundcloud", "lastfm", "unearthed"]
             for position, row_idx in enumerate(seed_df.index, start=1):
                 row = seed_df.loc[row_idx]
@@ -2399,6 +2594,12 @@ class CrossDirectoryEnricherWorker(QThread):
                 artist = _clean_cell(row.get("Artist Name"))
                 key = normalise_artist_name(artist)
                 track_key = _extract_seed_track_key(row)
+                self._live_context = {
+                    "artist": artist,
+                    "location": _clean_cell(row.get("Location")),
+                    "track": track_key,
+                    "genre": _coerce_directory_value(row.get("Primary Genre")) if "Primary Genre" in row else "",
+                }
                 seed_links_by_source = _extract_seed_links_by_source(row)
                 if not key:
                     self.log_message.emit(
@@ -2444,8 +2645,20 @@ class CrossDirectoryEnricherWorker(QThread):
                         self.log_message.emit(
                             f"[Enricher] Row {position}/{total}: matched {artist!r} via {display_sources}."
                         )
-                if not enriched and self.enable_live_search:
-                    payload = self._live_lookup(artist)
+                # Even if another source enriched the row, optionally try SoundCloud live lookup to attach a profile link/socials when missing.
+                if self.enable_live_search and not _coerce_directory_value(seed_df.at[row_idx, "SoundCloud Link"]):
+                    self.log_message.emit(
+                        f"[Enricher] SoundCloud live check for '{artist}' (current SC link missing)."
+                    )
+                    sc_payload = self._live_search_soundcloud(artist)
+                    if sc_payload:
+                        self._apply_payload(seed_df, row_idx, sc_payload)
+                        enriched = True
+                        if "soundcloud" not in sources_logged:
+                            sources_logged.append("soundcloud")
+                if self.enable_live_search:
+                    skip_soundcloud = bool(_coerce_directory_value(seed_df.at[row_idx, "SoundCloud Link"]))
+                    payload = self._live_lookup(artist, skip_soundcloud=skip_soundcloud)
                     if payload:
                         self._apply_payload(seed_df, row_idx, payload)
                         enriched = True
@@ -2612,8 +2825,10 @@ class CrossDirectoryEnricherWorker(QThread):
         return payload
 
     def _apply_payload(self, df: pd.DataFrame, row_idx, payload: EnrichmentPayload) -> None:
-        existing_socials = _split_pipe_cell(df.at[row_idx, "Social Link"])
-        existing_sites = _split_pipe_cell(df.at[row_idx, "External Links"])
+        original_social_raw = df.at[row_idx, "Social Link"]
+        original_sites_raw = df.at[row_idx, "External Links"]
+        existing_socials = _split_pipe_cell(original_social_raw)
+        existing_sites = _split_pipe_cell(original_sites_raw)
         existing_emails = _split_pipe_cell(df.at[row_idx, "Email"], is_email=True)
         new_socials = set(payload.socials)
         new_sites = set(payload.websites)
@@ -2632,13 +2847,28 @@ class CrossDirectoryEnricherWorker(QThread):
             ordered_socials = sorted(socials_all, key=_social_sort_key)
             ordered_socials = _prioritise_facebook_first(ordered_socials)
             df.at[row_idx, "Social Link"] = MULTI_VALUE_SEPARATOR.join(ordered_socials)
+        elif original_social_raw:
+            # Drop placeholder noise socials when nothing useful remains.
+            df.at[row_idx, "Social Link"] = ""
         if sites_all:
             ordered_sites = sorted(sites_all)
             if MAX_WEBSITES:
                 ordered_sites = ordered_sites[:MAX_WEBSITES]
             df.at[row_idx, "External Links"] = MULTI_VALUE_SEPARATOR.join(ordered_sites)
+        elif original_sites_raw:
+            df.at[row_idx, "External Links"] = ""
         if emails_all:
             df.at[row_idx, "Email"] = MULTI_VALUE_SEPARATOR.join(sorted(emails_all))
+        if (
+            payload.source_dir
+            and payload.source_dir.startswith("soundcloud")
+            and payload.source_url
+            and "SoundCloud Link" in df.columns
+        ):
+            # Persist the matched SoundCloud profile link when the seed is missing it.
+            current_sc = _coerce_directory_value(df.at[row_idx, "SoundCloud Link"])
+            if not current_sc:
+                df.at[row_idx, "SoundCloud Link"] = payload.source_url
         if payload.source_dir:
             current_raw = _clean_cell(df.at[row_idx, "Source Directory"]) or ""
             current_key = _canonical_source_key(current_raw)
@@ -2706,7 +2936,7 @@ class CrossDirectoryEnricherWorker(QThread):
             updated = True
         return updated
 
-    def _live_lookup(self, artist_name: str) -> Optional[EnrichmentPayload]:
+    def _live_lookup(self, artist_name: str, skip_soundcloud: bool = False) -> Optional[EnrichmentPayload]:
         if not artist_name:
             return None
         if self.max_live_searches > 0 and self.live_search_attempts >= self.max_live_searches:
@@ -2721,6 +2951,8 @@ class CrossDirectoryEnricherWorker(QThread):
             if source == "bandcamp":
                 payload = self._live_search_bandcamp(artist_name)
             elif source == "soundcloud":
+                if skip_soundcloud:
+                    continue
                 payload = self._live_search_soundcloud(artist_name)
             elif source == "lastfm":
                 payload = self._live_search_lastfm(artist_name)
@@ -2791,22 +3023,47 @@ class CrossDirectoryEnricherWorker(QThread):
 
     def _live_search_soundcloud(self, artist_name: str) -> Optional[EnrichmentPayload]:
         if not self._increment_live_counter():
+            self.log_message.emit("[Enricher] SoundCloud live search skipped (limit reached).")
             return None
         sc_query = _clean_soundcloud_query(artist_name)
         if not sc_query:
             return None
-        profile_url = self._soundcloud_people_search_first_profile_url(sc_query)
-        if not profile_url:
-            self.log_message.emit(
-                "[Enricher] SoundCloud people search: no results found, trying universal search..."
+        location_hint = _clean_cell(getattr(self, "_live_context", {}).get("location", ""))
+        track_hint = _clean_cell(getattr(self, "_live_context", {}).get("track", ""))
+        genre_hint = _clean_cell(getattr(self, "_live_context", {}).get("genre", ""))
+        # Prefer people/artist search results, expanding the query with optional track or location hints.
+        self.log_message.emit(f"[Enricher] SoundCloud Enrich: searching for '{artist_name}'")
+        best_candidate: Optional[Dict[str, Any]] = None
+        for query in _build_soundcloud_queries(sc_query, track_hint, location_hint):
+            candidates = self._soundcloud_people_search_candidates(query)
+            candidate = self._pick_best_soundcloud_candidate(
+                artist_name, candidates, location_hint, genre_hint
             )
-            profile_url = self._soundcloud_universal_search_first_profile_url(sc_query)
-        if not profile_url:
+            if candidate and (best_candidate is None or candidate["score"] > best_candidate["score"]):
+                best_candidate = candidate
+            # Early exit when we have a high-confidence handle/display-name match.
+            if best_candidate and best_candidate["score"] >= _SC_CONFIDENCE_ACCEPT:
+                break
+        if not best_candidate or best_candidate["score"] < _SC_CONFIDENCE_MIN:
             self.log_message.emit(
-                "[Enricher] SoundCloud search: no results found (people + universal)."
+                "[Enricher] SoundCloud people search: no confident match, trying universal search..."
+            )
+            uni_candidates = self._soundcloud_universal_search_candidates(sc_query)
+            candidate = self._pick_best_soundcloud_candidate(
+                artist_name, uni_candidates, location_hint, genre_hint
+            )
+            if candidate and (best_candidate is None or candidate["score"] > best_candidate["score"]):
+                best_candidate = candidate
+        if not best_candidate or best_candidate["score"] < _SC_CONFIDENCE_MIN:
+            self.log_message.emit(
+                f"[Enricher] SoundCloud Enrich: no safe match for '{artist_name}', skipping."
             )
             return None
-        return self._fetch_profile_and_build(profile_url, "soundcloud")
+        self.log_message.emit(
+            f"[Enricher] SoundCloud Enrich: best match '{best_candidate.get('display_name') or best_candidate.get('handle')}' "
+            f"({best_candidate.get('profile_url')}), confidence={best_candidate.get('score'):.2f}"
+        )
+        return self._fetch_profile_and_build(best_candidate["profile_url"], "soundcloud")
 
     def _live_search_lastfm(self, artist_name: str) -> Optional[EnrichmentPayload]:
         quoted = urllib.parse.quote_plus(artist_name)
@@ -2845,10 +3102,16 @@ class CrossDirectoryEnricherWorker(QThread):
             html, source_dir, profile_url
         )
         if not (socials or websites or emails or link_hubs):
-            self.log_message.emit(
-                f"[Enricher] No actionable data on {source_dir} profile: {profile_url}"
-            )
-            return None
+            if source_dir == "soundcloud":
+                # Still return a payload so we can record the matched SoundCloud profile URL even if no external links.
+                self.log_message.emit(
+                    f"[Enricher] No outbound links on SoundCloud profile, keeping profile URL: {profile_url}"
+                )
+            else:
+                self.log_message.emit(
+                    f"[Enricher] No actionable data on {source_dir} profile: {profile_url}"
+                )
+                return None
         live_key = f"{source_dir}_live"
         payload = EnrichmentPayload(
             socials=socials,
@@ -2861,54 +3124,191 @@ class CrossDirectoryEnricherWorker(QThread):
         )
         return payload
 
-    def _update_progress(self, current: int, total: int) -> None:
-        pct = int((current / max(1, total)) * 100)
-        self.progress.emit(pct)
-
-    def _soundcloud_people_search_first_profile_url(self, artist_name: str) -> Optional[str]:
-        quoted = urllib.parse.quote_plus(artist_name)
+    def _soundcloud_people_search_candidates(self, artist_query: str) -> List[Dict[str, Any]]:
+        """
+        Primary SoundCloud search path: people search endpoint keeps results scoped to artist profiles.
+        """
+        quoted = urllib.parse.quote_plus(artist_query)
         url = f"https://soundcloud.com/search/people?q={quoted}"
         self.log_message.emit(f"[Enricher] SoundCloud live search: {url}")
         html = self._fetch_url(url, label="SoundCloud search")
-        if not html:
-            return None
-        soup = BeautifulSoup(html, "html.parser")
-        first_link = soup.select_one("a.userBadge__title, a[href^='https://soundcloud.com/']")
-        if not first_link:
-            return None
-        profile_url = (first_link.get("href") or "").strip()
-        if not profile_url:
-            self.log_message.emit("[Enricher] SoundCloud search: result missing href.")
-            return None
-        if not profile_url.startswith("http"):
-            profile_url = f"https://soundcloud.com{profile_url}"
-        return profile_url
+        candidates = self._parse_soundcloud_search_results(html, url)
+        if not candidates:
+            api_candidates = self._soundcloud_api_user_search(artist_query)
+            if api_candidates:
+                self.log_message.emit("[Enricher] SoundCloud API fallback provided candidates.")
+                candidates = api_candidates
+        return candidates
 
-    def _soundcloud_universal_search_first_profile_url(self, artist_name: str) -> Optional[str]:
-        quoted = urllib.parse.quote_plus(artist_name)
+    def _soundcloud_universal_search_candidates(self, artist_query: str) -> List[Dict[str, Any]]:
+        """
+        Broader fallback: generic search page that may include tracks/playlists; we filter to profile links.
+        """
+        quoted = urllib.parse.quote_plus(artist_query)
         url = f"https://soundcloud.com/search?q={quoted}"
         self.log_message.emit(f"[Enricher] SoundCloud universal search fallback: {url}")
         html = self._fetch_url(url, label="SoundCloud universal search")
+        candidates = self._parse_soundcloud_search_results(html, url)
+        if not candidates:
+            api_candidates = self._soundcloud_api_user_search(artist_query)
+            if api_candidates:
+                self.log_message.emit("[Enricher] SoundCloud API fallback provided candidates.")
+                candidates = api_candidates
+        return candidates
+
+    def _parse_soundcloud_search_results(
+        self,
+        html: Optional[str],
+        search_url: str = "",
+        max_candidates: int = 12,
+    ) -> List[Dict[str, Any]]:
+        candidates: List[Dict[str, Any]] = []
         if not html:
-            return None
+            return candidates
         soup = BeautifulSoup(html, "html.parser")
-        noscript = soup.find("noscript")
         search_container = soup
+        noscript = soup.find("noscript")
         if noscript:
             try:
                 search_container = BeautifulSoup(noscript.decode_contents(), "html.parser")
             except Exception:
                 search_container = soup
-        links = search_container.select("a[href]")
-        for link in links:
-            href = (link.get("href") or "").strip()
+        seen_urls: Set[str] = set()
+        # Consider any anchor that looks like a profile link; harvest nearby text as display/location hints.
+        anchors = search_container.select("a[href]")
+        for anchor in anchors:
+            href = (anchor.get("href") or "").strip()
             profile_url = self._normalise_soundcloud_profile_href(href)
-            if not profile_url:
+            if not profile_url or profile_url in seen_urls:
                 continue
-            self.log_message.emit(
-                f"[Enricher] SoundCloud universal search candidate profile: {profile_url}"
+            handle = _sc_handle_from_url(profile_url)
+            container = (
+                anchor.find_parent("li")
+                or anchor.find_parent("article")
+                or anchor.find_parent("div")
             )
-            return profile_url
+            display_name = anchor.get_text(" ", strip=True)
+            location_text = ""
+            context_text = ""
+            if container:
+                context_text = container.get_text(" ", strip=True)
+                if not display_name:
+                    display_name = context_text[:200]
+                loc_el = container.select_one(
+                    ".userBadgeListItem__additional, "
+                    ".userBadge__additional, "
+                    ".userBadgeListItem__metadata, "
+                    ".userBadgeListItem__info, "
+                    "[data-testid='user-badge-metadata']"
+                )
+                if loc_el:
+                    location_text = loc_el.get_text(" ", strip=True)
+            candidates.append(
+                {
+                    "profile_url": profile_url,
+                    "handle": handle,
+                    "display_name": display_name,
+                    "location": location_text or context_text,
+                    "context": context_text,
+                }
+            )
+            seen_urls.add(profile_url)
+            if len(candidates) >= max_candidates:
+                break
+        if not candidates and search_url:
+            self.log_message.emit(f"[Enricher] SoundCloud search: no candidates found for {search_url}")
+        return candidates
+
+    def _soundcloud_api_user_search(self, artist_query: str, limit: int = 8) -> List[Dict[str, Any]]:
+        client_id = _sc_get_client_id(self.session)
+        if not client_id:
+            self.log_message.emit("[Enricher] SoundCloud API fallback unavailable (no client_id).")
+            return []
+        params = {
+            "q": artist_query,
+            "client_id": client_id,
+            "limit": limit,
+        }
+        try:
+            resp = self.session.get(
+                "https://api-v2.soundcloud.com/search/users",
+                params=params,
+                timeout=HTTP_TIMEOUT,
+            )
+            resp.raise_for_status()
+            payload = resp.json() or {}
+        except Exception as exc:
+            self.log_message.emit(f"[Enricher] SoundCloud API fallback failed: {exc}")
+            return []
+        collection = payload.get("collection") if isinstance(payload, dict) else None
+        if not isinstance(collection, list):
+            return []
+        candidates: List[Dict[str, Any]] = []
+        for user in collection:
+            if not isinstance(user, dict):
+                continue
+            permalink = user.get("permalink") or ""
+            handle = (permalink or "").strip().lower()
+            if not handle:
+                continue
+            profile_url = user.get("permalink_url") or f"https://soundcloud.com/{handle}"
+            candidates.append(
+                {
+                    "profile_url": profile_url,
+                    "handle": handle,
+                    "display_name": user.get("full_name") or user.get("username") or handle,
+                    "location": f"{user.get('city') or ''} {user.get('country_code') or ''}".strip(),
+                    "context": user.get("description") or "",
+                }
+            )
+            if len(candidates) >= limit:
+                break
+        return candidates
+
+    def _pick_best_soundcloud_candidate(
+        self,
+        artist_name: str,
+        candidates: List[Dict[str, Any]],
+        location_hint: str = "",
+        genre_hint: str = "",
+    ) -> Optional[Dict[str, Any]]:
+        best: Optional[Dict[str, Any]] = None
+        for candidate in candidates:
+            handle = candidate.get("handle") or ""
+            display = candidate.get("display_name") or ""
+            location_text = candidate.get("location") or ""
+            score = _sc_score_candidate(
+                artist_name,
+                display,
+                handle,
+                location_hint=location_hint,
+                candidate_location=location_text,
+                genre_hint=genre_hint,
+            )
+            candidate["score"] = score
+            if best is None or score > best.get("score", 0):
+                best = candidate
+        return best
+
+    def _update_progress(self, current: int, total: int) -> None:
+        pct = int((current / max(1, total)) * 100)
+        self.progress.emit(pct)
+
+    def _soundcloud_people_search_first_profile_url(self, artist_name: str) -> Optional[str]:
+        candidates = self._soundcloud_people_search_candidates(artist_name)
+        if candidates:
+            return candidates[0].get("profile_url")
+        return None
+
+    def _soundcloud_universal_search_first_profile_url(self, artist_name: str) -> Optional[str]:
+        candidates = self._soundcloud_universal_search_candidates(artist_name)
+        for candidate in candidates:
+            profile_url = candidate.get("profile_url")
+            if profile_url:
+                self.log_message.emit(
+                    f"[Enricher] SoundCloud universal search candidate profile: {profile_url}"
+                )
+                return profile_url
         self.log_message.emit("[Enricher] SoundCloud universal search: no fallback candidates.")
         return None
 
