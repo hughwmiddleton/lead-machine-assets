@@ -5920,15 +5920,9 @@ def fb_find_page_and_emails_by_name(driver, artist_name: str, location: str = ""
     html = driver.page_source or ""
     soup = BeautifulSoup(html, "html.parser")
     artist_norm = normalize_name(artist_name)
-    best_url = ""
-    best_score = 0.0
-    best_name = ""
-    best_category_raw = None
-    best_category_norm = None
-    best_base_score = 0.0
-    best_cat_boost = 0.0
-    best_is_music = False
-    uncertain_used = False
+    strong_candidates: list[tuple[float, float, float, str, str, str, str, bool]] = []
+    fallback_candidates: list[tuple[float, float, float, str, str, str, str, bool]] = []
+    generic_candidates: list[tuple[float, float, float, str, str, str, str, bool]] = []
     blocked_tokens = [
         "games", "game",
         "creations",
@@ -6156,24 +6150,6 @@ def fb_find_page_and_emails_by_name(driver, artist_name: str, location: str = ""
         if not music_flag and normalize_name(username) == artist_norm:
             music_flag = True
         category_has_strong = any(tok in category_lc for tok in strong_cat_tokens)
-        if (
-            not music_flag
-            and not category_has_strong
-            and "profile.php" not in url_lc
-            and not uncertain_used
-            and (
-                name_score >= 0.1
-                or (artist_norm and artist_norm.split() and artist_norm.split()[0] in name_lc)
-                or (artist_norm and artist_norm.split() and artist_norm.split()[0] in url_lc)
-            )
-        ):
-            uncertain_used = True
-            music_flag = True
-            score = max(score, 1.0)
-            _log(f"[FB Enrich] Trying uncertain music FB candidate '{text or href}' for '{artist_name}' (category='{category_raw or '<none>'}', base_score={name_score:.2f}).")
-        if not music_flag:
-            _log(f"[FB Enrich] Skipping non-music FB candidate '{text or href}' for '{artist_name}' (category='{category_raw or '<none>'}').")
-            continue
         context = " ".join([
             (href or "").lower(),
             username_norm,
@@ -6196,32 +6172,75 @@ def fb_find_page_and_emails_by_name(driver, artist_name: str, location: str = ""
         if not corporate_hit and score > 0:
             cat_boost = compute_fb_category_boost(category_norm)
             score += cat_boost
-        if score <= 0 and best_url:
-            continue
-        better_tie = (score == best_score and not best_url) or (score == best_score and cat_boost > best_cat_boost)
         # Prefer entries whose category explicitly contains music tokens.
         music_cat_bonus = 0.5 if any(tok in category_lc for tok in music_tokens) else 0.0
-        score_with_bonus = score + music_cat_bonus
-        if score_with_bonus > best_score or (score_with_bonus == best_score and music_cat_bonus > 0):
-            best_score = score_with_bonus
-            best_base_score = base_score
-            best_cat_boost = cat_boost + music_cat_bonus
-            best_url = href
-            best_name = fallback_name or href
-            best_category_raw = category_raw
-            best_category_norm = category_norm
-            best_is_music = True
+        score_with_bonus = max(score + music_cat_bonus, 0.01)
+        entry = (
+            score_with_bonus,
+            base_score,
+            cat_boost + music_cat_bonus,
+            href,
+            fallback_name or href,
+            category_raw,
+            category_norm,
+            True,
+        )
+        if music_flag and category_has_strong:
+            strong_candidates.append(entry)
+        elif music_flag or (
+            not category_has_strong
+            and "profile.php" not in url_lc
+            and (
+                name_score >= 0.1
+                or (artist_norm and artist_norm.split() and artist_norm.split()[0] in name_lc)
+                or (artist_norm and artist_norm.split() and artist_norm.split()[0] in url_lc)
+            )
+        ):
+            fallback_candidates.append(entry)
+        else:
+            generic_candidates.append(
+                (
+                    max(score_with_bonus, 1.0),
+                    base_score,
+                    cat_boost + music_cat_bonus,
+                    href,
+                    fallback_name or href,
+                    category_raw,
+                    category_norm,
+                    True,
+                )
+            )
 
-    if not best_url:
+    using_fallback = False
+    using_generic = False
+    if strong_candidates:
+        best_score, best_base_score, best_cat_boost, best_url, best_name, best_category_raw, best_category_norm, best_is_music = max(
+            strong_candidates, key=lambda x: x[0]
+        )
+    elif fallback_candidates:
+        best_score, best_base_score, best_cat_boost, best_url, best_name, best_category_raw, best_category_norm, best_is_music = max(
+            fallback_candidates, key=lambda x: x[0]
+        )
+        using_fallback = True
+    elif generic_candidates:
+        best_score, best_base_score, best_cat_boost, best_url, best_name, best_category_raw, best_category_norm, best_is_music = max(
+            generic_candidates, key=lambda x: x[0]
+        )
+        using_generic = True
+    else:
         _log(f"[FB Enrich] No Facebook page candidates for '{artist_name}'.")
         return "", []
 
-    threshold = 1.0
+    if using_generic:
+        _log(
+            f"[FB Enrich] Trying very loose FB candidate '{best_name or best_url}' for '{artist_name}' (category='{best_category_raw or '<none>'}', base_score={best_base_score:.2f})."
+        )
+    elif using_fallback:
+        _log(
+            f"[FB Enrich] Trying uncertain music FB candidate '{best_name or best_url}' for '{artist_name}' (category='{best_category_raw or '<none>'}', base_score={best_base_score:.2f})."
+        )
+
     cat_display = best_category_raw or "<none>"
-    if best_score < threshold or not best_is_music:
-        _log(f"[FB Enrich] Best FB candidate for '{artist_name}' -> '{best_name}' (final_score={best_score:.2f}, base_score={best_base_score:.2f}, cat_boost={best_cat_boost:.2f}, category='{cat_display}') – rejected (music/score gate).")
-        _log(f"[FB Enrich] No high-confidence music FB match for '{artist_name}'.")
-        return "", []
 
     # Final validation: scrape page to ensure music signals are present.
     page_music = False

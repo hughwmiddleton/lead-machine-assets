@@ -1163,9 +1163,9 @@ class FacebookSearchClient:
             )
             return None
 
-        music_pool: List[Tuple[float, float, float, bool, bool, FbCandidate]] = []
-        neutral_pool: List[Tuple[float, float, float, bool, bool, FbCandidate]] = []
-        uncertain_used = False
+        strong_music_candidates: List[Tuple[float, float, float, bool, bool, FbCandidate]] = []
+        fallback_candidates: List[Tuple[float, float, float, bool, bool, FbCandidate]] = []
+        generic_candidates: List[Tuple[float, float, float, bool, bool, FbCandidate]] = []
         corporate_tokens = [
             "ltd",
             "pty",
@@ -1308,38 +1308,6 @@ class FacebookSearchClient:
                 )
                 if exact_match:
                     music_flag = True
-            if not music_flag:
-                allow_uncertain = (
-                    not category_has_strong
-                    and "profile.php" not in url_lc
-                    and not uncertain_used
-                    and (
-                        name_score >= 0.1
-                        or (artist_norm and artist_norm.split() and artist_norm.split()[0] in (name_lc or ""))
-                        or (artist_norm and artist_norm.split() and artist_norm.split()[0] in (url_lc or ""))
-                    )
-                )
-                if allow_uncertain:
-                    uncertain_used = True
-                    music_flag = True
-                    final_score = max(final_score, 1.0)
-                    _safe_log(
-                        self.logger,
-                        "[FB Enrich] Trying uncertain music FB candidate '%s' for '%s' (category='%s', base_score=%.2f).",
-                        cand.name or cand.url,
-                        artist_name,
-                        cand.category or "<none>",
-                        name_score,
-                    )
-            if not music_flag:
-                _safe_log(
-                    self.logger,
-                    "[FB Enrich] Skipping non-music FB candidate '%s' for '%s' (category='%s')",
-                    cand.name or cand.url,
-                    artist_name,
-                    cand.category or "<none>",
-                )
-                continue
             music_cat_bonus = 0.5 if any(tok in category_lc for tok in MUSIC_TOKENS) else 0.0
             final_score += music_cat_bonus
             _safe_log(
@@ -1353,22 +1321,58 @@ class FacebookSearchClient:
                 music_flag,
                 False,
             )
-            bucket = music_pool if music_flag else neutral_pool
-            bucket.append((final_score, name_score, cat_boost, music_flag, False, cand))
+            if music_flag and category_has_strong:
+                strong_music_candidates.append((final_score, name_score, cat_boost, music_flag, False, cand))
+            elif music_flag or (
+                not category_has_strong
+                and "profile.php" not in url_lc
+                and (
+                    name_score >= 0.1
+                    or (artist_norm and artist_norm.split() and artist_norm.split()[0] in (name_lc or ""))
+                    or (artist_norm and artist_norm.split() and artist_norm.split()[0] in (url_lc or ""))
+                )
+            ):
+                fallback_candidates.append((max(final_score, 1.0), name_score, cat_boost, True, False, cand))
+            else:
+                generic_candidates.append((max(final_score, 1.0), name_score, cat_boost, True, False, cand))
 
-        # Pick absolute best by final_score, then apply minimum threshold.
         best_entry: Optional[Tuple[float, float, float, bool, bool, FbCandidate]] = None
-        for pool in (music_pool, neutral_pool):
-            if not pool:
-                continue
-            top = max(pool, key=lambda item: item[0])
-            if best_entry is None or top[0] > best_entry[0]:
-                best_entry = top
+        using_fallback = False
+        using_generic = False
+        if strong_music_candidates:
+            best_entry = max(strong_music_candidates, key=lambda item: item[0])
+        elif fallback_candidates:
+            best_entry = max(fallback_candidates, key=lambda item: item[0])
+            using_fallback = True
+        elif generic_candidates:
+            best_entry = max(generic_candidates, key=lambda item: item[0])
+            using_generic = True
 
         MIN_FINAL_SCORE = 1.0
         if not best_entry or best_entry[0] < MIN_FINAL_SCORE or not best_entry[3]:
             _safe_log(self.logger, "[FB Enrich] No high-confidence Facebook match for '%s'.", artist_name)
             return None
+
+        if using_fallback and best_entry:
+            _, base_score, _, _, _, cand = best_entry
+            _safe_log(
+                self.logger,
+                "[FB Enrich] Trying uncertain music FB candidate '%s' for '%s' (category='%s', base_score=%.2f).",
+                cand.name or cand.url,
+                artist_name,
+                cand.category or "<none>",
+                base_score,
+            )
+        elif using_generic and best_entry:
+            _, base_score, _, _, _, cand = best_entry
+            _safe_log(
+                self.logger,
+                "[FB Enrich] Trying very loose FB candidate '%s' for '%s' (category='%s', base_score=%.2f).",
+                cand.name or cand.url,
+                artist_name,
+                cand.category or "<none>",
+                base_score,
+            )
 
         best_score, best_name_score, best_cat_boost, best_is_music, best_is_corp, best_candidate = best_entry
 
