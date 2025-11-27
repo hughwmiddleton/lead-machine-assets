@@ -705,6 +705,25 @@ def build_search_query(artist_name: str, song_title: str | None) -> str:
     return artist_name
 
 
+def build_bandcamp_queries(artist_name: str, track_title: Optional[str] = None) -> List[str]:
+    artist = (artist_name or "").strip()
+    track = (track_title or "").strip()
+
+    queries: List[str] = []
+    if track:
+        queries.append(f'"{artist}" "{track}"')
+        queries.append(f'{artist} "{track}"')
+    queries.append(artist)
+
+    seen = set()
+    unique_queries: List[str] = []
+    for q in queries:
+        if q and q not in seen:
+            seen.add(q)
+            unique_queries.append(q)
+    return unique_queries
+
+
 def normalize_text(s: str) -> str:
     if not isinstance(s, str):
         return ""
@@ -3339,7 +3358,7 @@ class CrossDirectoryEnricherWorker(QThread):
             self._set_platform_state("bandcamp", "skipped")
             return None
         song_title = _clean_cell(getattr(self, "_live_context", {}).get("song_title", ""))
-        primary_query = build_search_query(artist_name, song_title)
+        queries = build_bandcamp_queries(artist_name, song_title)
 
         def _search(query: str) -> Tuple[Optional[EnrichmentPayload], float, float]:
             quoted = urllib.parse.quote_plus(query)
@@ -3404,22 +3423,30 @@ class CrossDirectoryEnricherWorker(QThread):
                 return (payload, confidence, rank_confidence)
             return (None, confidence, rank_confidence)
 
-        best_payload, best_score, best_rank_score = _search(primary_query)
-        best_match_score = getattr(best_payload, "match_score", 0.0) if best_payload else 0.0
-        fallback_score = best_score
-        fallback_rank = best_rank_score
-        if song_title and primary_query != artist_name and best_match_score < MATCH_THRESHOLD:
-            fallback_query = artist_name
-            self.log_message.emit(
-                f"[Enricher] Bandcamp Enrich: no safe match for '{artist_name}', trying artist-only query '{fallback_query}'."
-            )
-            payload, fallback_score, fallback_rank = _search(fallback_query)
-            best_score = max(best_score, fallback_score)
-            best_rank_score = max(best_rank_score, fallback_rank)
+        best_payload: Optional[EnrichmentPayload] = None
+        best_score = 0.0
+        best_rank_score = 0.0
+        best_match_score = 0.0
+        for query in queries:
+            payload, confidence, rank_confidence = _search(query)
             candidate_match = getattr(payload, "match_score", 0.0) if payload else 0.0
-            if payload and candidate_match >= best_match_score:
+            if payload and (
+                candidate_match > best_match_score
+                or confidence > best_score
+                or (
+                    abs(confidence - best_score) <= 0.02
+                    and rank_confidence > best_rank_score
+                )
+            ):
                 best_payload = payload
+                best_score = confidence
+                best_rank_score = rank_confidence
                 best_match_score = candidate_match
+            else:
+                best_score = max(best_score, confidence)
+                best_rank_score = max(best_rank_score, rank_confidence)
+            if best_payload and best_score >= 0.95 and '"' in query:
+                break
         if best_payload:
             self._set_platform_state("bandcamp", "matched")
             return best_payload
