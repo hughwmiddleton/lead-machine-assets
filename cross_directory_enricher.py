@@ -23,10 +23,12 @@ from bs4 import BeautifulSoup
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service as ChromeService
+from rapidfuzz import fuzz
 from PyQt5 import QtWidgets
 from PyQt5.QtCore import QThread, pyqtSignal
 from webdriver_manager.chrome import ChromeDriverManager
 from urllib.parse import urlparse, parse_qs, unquote
+from unidecode import unidecode
 
 from facebook_enrich import (
     FbCandidate,
@@ -61,6 +63,8 @@ USER_AGENT = (
 )
 MIN_BC_CONFIDENCE = 0.92
 MIN_LF_CONFIDENCE = 0.9
+STRICT_MATCHING = True
+MATCH_THRESHOLD = 0.7
 
 ENABLE_FACEBOOK_ENRICHMENT = True
 FACEBOOK_SEARCH_URL = "https://www.facebook.com/search/pages/"
@@ -610,6 +614,18 @@ class EnrichmentPayload:
     source_dir: Optional[str] = None
     source_url: Optional[str] = None
     source_detail: Optional[str] = None
+    match_score: float = 0.0
+    candidate_name: str = ""
+
+    def summary(self) -> str:
+        parts = []
+        if self.candidate_name:
+            parts.append(self.candidate_name)
+        if self.source_detail:
+            parts.append(self.source_detail)
+        if self.source_url:
+            parts.append(self.source_url)
+        return " | ".join(part for part in parts if part) or (self.source_dir or "")
 
 
 @dataclass
@@ -660,6 +676,88 @@ class DirectoryIndex:
 # ---------------------------------------------------------------------------
 # Helper functions
 # ---------------------------------------------------------------------------
+def extract_domain(url: str) -> str:
+    """
+    Return a normalised domain string from a URL, e.g.
+    'https://www.myband.com/about' -> 'myband.com'.
+    If url is empty/invalid, return ''.
+    """
+    if not url or not isinstance(url, str):
+        return ""
+    try:
+        url = url.split(",")[0].strip()
+        parsed = urlparse(url)
+        netloc = parsed.netloc.lower()
+        if netloc.startswith("www."):
+            netloc = netloc[4:]
+        return netloc
+    except Exception:
+        return ""
+
+
+def build_search_query(artist_name: str, song_title: str | None) -> str:
+    artist_name = artist_name or ""
+    song_title = song_title or ""
+    artist_name = artist_name.strip()
+    song_title = song_title.strip()
+    if artist_name and song_title:
+        return f'"{artist_name}" "{song_title}"'
+    return artist_name
+
+
+def normalize_text(s: str) -> str:
+    if not isinstance(s, str):
+        return ""
+    s = unidecode(s).lower().strip()
+    for bad in (" the ", "the ", " the"):
+        s = s.replace(bad, " ")
+    return " ".join(s.split())
+
+
+def compute_match_score(
+    seed_artist: str,
+    seed_title: str,
+    cand_artist: str,
+    cand_title: str,
+    spotify_domain: str,
+    candidate_domain: str,
+) -> float:
+    """
+    Returns a score between 0.0 and 1.0 indicating confidence that
+    this candidate matches the seed Spotify artist/track.
+    """
+    seed_artist_n = normalize_text(seed_artist)
+    seed_title_n = normalize_text(seed_title)
+    cand_artist_n = normalize_text(cand_artist)
+    cand_title_n = normalize_text(cand_title)
+
+    artist_score = fuzz.ratio(seed_artist_n, cand_artist_n) if seed_artist_n and cand_artist_n else 0
+    title_score = fuzz.ratio(seed_title_n, cand_title_n) if seed_title_n and cand_title_n else 0
+
+    score = 0.0
+    if artist_score >= 90:
+        score += 0.5
+    elif artist_score >= 80:
+        score += 0.35
+    elif artist_score >= 70:
+        score += 0.2
+
+    if title_score >= 90:
+        score += 0.3
+    elif title_score >= 80:
+        score += 0.2
+    elif title_score >= 70:
+        score += 0.1
+
+    spotify_domain = (spotify_domain or "").lower()
+    candidate_domain = (candidate_domain or "").lower()
+    if spotify_domain and candidate_domain:
+        if spotify_domain == candidate_domain or candidate_domain.endswith("." + spotify_domain):
+            score += 0.2
+
+    return max(0.0, min(score, 1.0))
+
+
 def _build_session() -> requests.Session:
     session = requests.Session()
     session.headers.update(
@@ -1870,6 +1968,15 @@ def _extract_profile_url(row: dict) -> Optional[str]:
     return None
 
 
+def _extract_directory_track_title(row: dict) -> str:
+    for column in TRACK_NAME_COLUMNS:
+        value = row.get(column)
+        cleaned = _clean_cell(value)
+        if cleaned:
+            return cleaned
+    return ""
+
+
 def _extract_directory_fields(
     row: dict,
     source: Optional[str] = None,
@@ -2477,6 +2584,14 @@ def _row_track_tokens(row: Dict[str, Any]) -> Tuple[str, ...]:
     return computed
 
 
+def _extract_seed_track_text(row: pd.Series) -> str:
+    for column in SEED_TRACK_COLUMNS:
+        value = _clean_cell(row.get(column))
+        if value:
+            return value
+    return ""
+
+
 def _extract_seed_track_key(row: pd.Series) -> str:
     for column in SEED_TRACK_COLUMNS:
         value = _clean_cell(row.get(column))
@@ -2662,10 +2777,18 @@ class CrossDirectoryEnricherWorker(QThread):
                 "Release Date",
                 "Facebook_URL",
             ]
+            match_score_column = "Match_Score"
             for column in required_columns:
                 if column not in seed_df.columns:
                     seed_df[column] = ""
                 seed_df[column] = seed_df[column].fillna("").astype(str)
+            if match_score_column not in seed_df.columns:
+                seed_df[match_score_column] = 0.0
+            seed_df[match_score_column] = (
+                pd.to_numeric(seed_df[match_score_column], errors="coerce")
+                .fillna(0.0)
+                .clip(lower=0.0, upper=1.0)
+            )
             directory_indexes: Dict[str, DirectoryIndex] = {}
             if self.unearthed_csv_path:
                 directory_indexes["unearthed"] = _load_directory_csv(self.unearthed_csv_path, "Unearthed")
@@ -2690,13 +2813,18 @@ class CrossDirectoryEnricherWorker(QThread):
                 artist = _clean_cell(row.get("Artist Name"))
                 key = normalise_artist_name(artist)
                 track_key = _extract_seed_track_key(row)
+                seed_song_title = _extract_seed_track_text(row)
+                spotify_domain = extract_domain(_clean_cell(row.get("Spotify_Website_URL", "")))
                 self._live_context = {
                     "artist": artist,
                     "location": _clean_cell(row.get("Location")),
                     "track": track_key,
                     "genre": _coerce_directory_value(row.get("Primary Genre")) if "Primary Genre" in row else "",
-                    "song_title": _clean_cell(row.get("Song Title")),
+                    "song_title": seed_song_title,
+                    "spotify_domain": spotify_domain,
+                    "spotify_id": _clean_cell(row.get("Spotify_Artist_ID")),
                 }
+                spotify_id = self._live_context.get("spotify_id", "")
                 self._init_row_enrichment_state()
                 seed_links_by_source = _extract_seed_links_by_source(row)
                 if not key:
@@ -2718,14 +2846,20 @@ class CrossDirectoryEnricherWorker(QThread):
                     )
                     if not matches:
                         continue
-                    matches_used.extend((source, match) for match in matches)
-                    payload = self._payload_from_directory_rows(matches, source)
+                    payload, best_row = self._payload_from_directory_matches(
+                        matches, source
+                    )
                     if not payload:
                         continue
-                    self._apply_payload(seed_df, row_idx, payload)
-                    enriched = True
-                    if source not in sources_logged:
-                        sources_logged.append(source)
+                    applied = self._apply_payload_guarded(
+                        seed_df, row_idx, payload, artist, spotify_id=spotify_id
+                    )
+                    if applied:
+                        enriched = True
+                        if best_row:
+                            matches_used.append((source, best_row))
+                        if source not in sources_logged:
+                            sources_logged.append(source)
                 metadata_updated = self._apply_structured_fields(seed_df, row_idx, matches_used)
                 if metadata_updated:
                     enriched = True
@@ -2750,16 +2884,22 @@ class CrossDirectoryEnricherWorker(QThread):
                     )
                     sc_payload = self._live_search_soundcloud(artist)
                     if sc_payload:
-                        self._apply_payload(seed_df, row_idx, sc_payload)
-                        enriched = True
-                        if "soundcloud" not in sources_logged:
-                            sources_logged.append("soundcloud")
+                        applied = self._apply_payload_guarded(
+                            seed_df, row_idx, sc_payload, artist, spotify_id=spotify_id
+                        )
+                        if applied:
+                            enriched = True
+                            if "soundcloud" not in sources_logged:
+                                sources_logged.append("soundcloud")
                 if self.enable_live_search:
                     skip_soundcloud = bool(_coerce_directory_value(seed_df.at[row_idx, "SoundCloud Link"]))
                     payload = self._live_lookup(artist, skip_soundcloud=skip_soundcloud)
                     if payload:
-                        self._apply_payload(seed_df, row_idx, payload)
-                        enriched = True
+                        applied = self._apply_payload_guarded(
+                            seed_df, row_idx, payload, artist, spotify_id=spotify_id
+                        )
+                        if applied:
+                            enriched = True
                 if ENABLE_FACEBOOK_ENRICHMENT and fb_driver:
                     fb_attempted = False
                     fb_matched = False
@@ -2900,6 +3040,87 @@ class CrossDirectoryEnricherWorker(QThread):
             return False
         return True
 
+    def _compute_match_score_for_candidate(
+        self,
+        cand_artist: str,
+        cand_title: str = "",
+        candidate_domain: str = "",
+    ) -> float:
+        seed_artist = _clean_cell(getattr(self, "_live_context", {}).get("artist", ""))
+        seed_title = _clean_cell(getattr(self, "_live_context", {}).get("song_title", ""))
+        if not seed_title:
+            seed_title = _clean_cell(getattr(self, "_live_context", {}).get("track", ""))
+        spotify_domain = _clean_cell(getattr(self, "_live_context", {}).get("spotify_domain", ""))
+        return compute_match_score(
+            seed_artist,
+            seed_title,
+            cand_artist,
+            cand_title,
+            spotify_domain,
+            candidate_domain,
+        )
+
+    def _update_row_match_score(self, df: pd.DataFrame, row_idx, score: float) -> None:
+        if "Match_Score" not in df.columns:
+            return
+        try:
+            current = float(df.at[row_idx, "Match_Score"])
+            if math.isnan(current):
+                current = 0.0
+        except Exception:
+            current = 0.0
+        cleaned = round(max(0.0, min(float(score or 0.0), 1.0)), 4)
+        if cleaned > current:
+            df.at[row_idx, "Match_Score"] = cleaned
+
+    def _apply_payload_guarded(
+        self,
+        df: pd.DataFrame,
+        row_idx,
+        payload: EnrichmentPayload,
+        artist_name: str,
+        spotify_id: str = "",
+    ) -> bool:
+        if not payload:
+            return False
+        score = max(0.0, min(float(getattr(payload, "match_score", 0.0) or 0.0), 1.0))
+        if STRICT_MATCHING and score < MATCH_THRESHOLD:
+            self.log_message.emit(
+                f"[Enricher] low-confidence match skipped for '{artist_name}' (Spotify ID {spotify_id or '<unknown>'}) – "
+                f"score={score:.2f}, candidate={payload.summary() or '<none>'}"
+            )
+            return False
+        self._update_row_match_score(df, row_idx, score)
+        self._apply_payload(df, row_idx, payload)
+        return True
+
+    def _payload_from_directory_matches(
+        self,
+        matches: Iterable[Dict[str, Any]],
+        source: str,
+    ) -> Tuple[Optional[EnrichmentPayload], Optional[Dict[str, Any]]]:
+        best_row: Optional[Dict[str, Any]] = None
+        best_score = 0.0
+        for row in matches:
+            cand_artist = _clean_cell(row.get("Artist Name"))
+            cand_title = _extract_directory_track_title(row)
+            candidate_domain = extract_domain(_extract_profile_url(row) or "")
+            score = self._compute_match_score_for_candidate(
+                cand_artist, cand_title, candidate_domain
+            )
+            if score > best_score:
+                best_score = score
+                best_row = row
+        if not best_row:
+            return (None, None)
+        payload = self._payload_from_directory_rows(
+            [best_row],
+            source,
+            match_score=best_score,
+            candidate_name=_clean_cell(best_row.get("Artist Name")),
+        )
+        return payload, best_row
+
     def _find_directory_matches(
         self,
         directory_index: DirectoryIndex,
@@ -2925,6 +3146,8 @@ class CrossDirectoryEnricherWorker(QThread):
         self,
         rows: Iterable[Dict[str, Any]],
         source: str,
+        match_score: float = 0.0,
+        candidate_name: str = "",
     ) -> Optional[EnrichmentPayload]:
         socials: Set[str] = set()
         websites: Set[str] = set()
@@ -2951,6 +3174,8 @@ class CrossDirectoryEnricherWorker(QThread):
             source_dir=source,
             source_url=source_url,
             source_detail=_format_source_display(source),
+            match_score=match_score,
+            candidate_name=candidate_name,
         )
         return payload
 
@@ -3076,6 +3301,7 @@ class CrossDirectoryEnricherWorker(QThread):
                 )
                 self._notified_limit = True
             return None
+        best_payload: Optional[EnrichmentPayload] = None
         for source in ("bandcamp", "soundcloud", "lastfm"):
             payload = None
             if source == "bandcamp":
@@ -3087,8 +3313,13 @@ class CrossDirectoryEnricherWorker(QThread):
             elif source == "lastfm":
                 payload = self._live_search_lastfm(artist_name)
             if payload:
-                return payload
-        return None
+                current_best = getattr(best_payload, "match_score", 0.0) if best_payload else 0.0
+                candidate_score = getattr(payload, "match_score", 0.0) or 0.0
+                if candidate_score > current_best:
+                    best_payload = payload
+                elif best_payload is None:
+                    best_payload = payload
+        return best_payload
 
     def _increment_live_counter(self) -> bool:
         if self.max_live_searches > 0 and self.live_search_attempts >= self.max_live_searches:
@@ -3108,6 +3339,7 @@ class CrossDirectoryEnricherWorker(QThread):
             self._set_platform_state("bandcamp", "skipped")
             return None
         song_title = _clean_cell(getattr(self, "_live_context", {}).get("song_title", ""))
+        primary_query = build_search_query(artist_name, song_title)
 
         def _search(query: str) -> Tuple[Optional[EnrichmentPayload], float, float]:
             quoted = urllib.parse.quote_plus(query)
@@ -3161,26 +3393,36 @@ class CrossDirectoryEnricherWorker(QThread):
                 f"[Enricher] Bandcamp Enrich: best candidate '{profile_url}' for '{artist_name}' has confidence={confidence:.2f}."
             )
             if confidence >= MIN_BC_CONFIDENCE:
-                return (self._fetch_profile_and_build(profile_url, "bandcamp"), confidence, rank_confidence)
+                payload = self._fetch_profile_and_build(profile_url, "bandcamp")
+                if payload:
+                    payload.match_score = self._compute_match_score_for_candidate(
+                        display_name or profile_url,
+                        song_title,
+                        extract_domain(profile_url),
+                    )
+                    payload.candidate_name = display_name or ""
+                return (payload, confidence, rank_confidence)
             return (None, confidence, rank_confidence)
 
-        payload, best_score, best_rank_score = _search(artist_name)
-        if payload:
-            self._set_platform_state("bandcamp", "matched")
-            return payload
+        best_payload, best_score, best_rank_score = _search(primary_query)
+        best_match_score = getattr(best_payload, "match_score", 0.0) if best_payload else 0.0
         fallback_score = best_score
         fallback_rank = best_rank_score
-        if song_title:
-            fallback_query = f"{artist_name} {song_title}"
+        if song_title and primary_query != artist_name and best_match_score < MATCH_THRESHOLD:
+            fallback_query = artist_name
             self.log_message.emit(
-                f"[Enricher] Bandcamp Enrich: no safe match for '{artist_name}', trying artist+song query '{fallback_query}'."
+                f"[Enricher] Bandcamp Enrich: no safe match for '{artist_name}', trying artist-only query '{fallback_query}'."
             )
             payload, fallback_score, fallback_rank = _search(fallback_query)
             best_score = max(best_score, fallback_score)
             best_rank_score = max(best_rank_score, fallback_rank)
-            if payload:
-                self._set_platform_state("bandcamp", "matched")
-                return payload
+            candidate_match = getattr(payload, "match_score", 0.0) if payload else 0.0
+            if payload and candidate_match >= best_match_score:
+                best_payload = payload
+                best_match_score = candidate_match
+        if best_payload:
+            self._set_platform_state("bandcamp", "matched")
+            return best_payload
         best_confidence_display = max(best_score, best_rank_score)
         self.log_message.emit(
             f"[Enricher] Bandcamp Enrich: no safe match for '{artist_name}' (best_confidence={best_confidence_display:.2f}), skipping."
@@ -3195,7 +3437,8 @@ class CrossDirectoryEnricherWorker(QThread):
             self.log_message.emit("[Enricher] SoundCloud live search skipped (limit reached).")
             self._set_platform_state("soundcloud", "skipped")
             return None
-        sc_query = _clean_soundcloud_query(artist_name)
+        song_title = _clean_cell(getattr(self, "_live_context", {}).get("song_title", ""))
+        sc_query = _clean_soundcloud_query(build_search_query(artist_name, song_title))
         if not sc_query:
             self._set_platform_state("soundcloud", "skipped")
             return None
@@ -3203,7 +3446,7 @@ class CrossDirectoryEnricherWorker(QThread):
         track_hint = _clean_cell(getattr(self, "_live_context", {}).get("track", ""))
         genre_hint = _clean_cell(getattr(self, "_live_context", {}).get("genre", ""))
         # Prefer people/artist search results, expanding the query with optional track or location hints.
-        self.log_message.emit(f"[Enricher] SoundCloud Enrich: searching for '{artist_name}'")
+        self.log_message.emit(f"[Enricher] SoundCloud Enrich: searching for '{sc_query}'")
         best_candidate: Optional[Dict[str, Any]] = None
 
         def _is_better_candidate(candidate: Dict[str, Any], current: Optional[Dict[str, Any]]) -> bool:
@@ -3241,13 +3484,12 @@ class CrossDirectoryEnricherWorker(QThread):
                 best_candidate = candidate
         best_score = best_candidate.get("score", 0) if best_candidate else 0.0
         if not best_candidate or best_score < MIN_SC_CONFIDENCE:
-            # Optional fallback: try artist + song title if available.
-            song_title = _clean_cell(getattr(self, "_live_context", {}).get("song_title", ""))
+            # Optional fallback: broaden to artist-only query if we started with artist + track.
             if song_title:
-                fallback_query = f"{artist_name} {song_title}"
+                fallback_query = _clean_soundcloud_query(artist_name)
                 self.log_message.emit(
                     f"[Enricher] SoundCloud Enrich: primary search found no safe match for '{artist_name}', "
-                    f"trying artist+song query '{fallback_query}'."
+                    f"trying artist-only query '{fallback_query}'."
                 )
                 fallback_candidate = self._soundcloud_best_candidate_for_query(
                     artist_name, fallback_query, location_hint, genre_hint
@@ -3273,6 +3515,12 @@ class CrossDirectoryEnricherWorker(QThread):
         )
         payload = self._fetch_profile_and_build(best_candidate["profile_url"], "soundcloud")
         if payload:
+            payload.match_score = self._compute_match_score_for_candidate(
+                best_candidate.get("display_name") or best_candidate.get("handle") or "",
+                song_title,
+                extract_domain(best_candidate.get("profile_url") or ""),
+            )
+            payload.candidate_name = best_candidate.get("display_name") or best_candidate.get("handle") or ""
             self._set_platform_state("soundcloud", "matched")
             return payload
         self._set_platform_state("soundcloud", "skipped")
@@ -3281,7 +3529,9 @@ class CrossDirectoryEnricherWorker(QThread):
     def _live_search_lastfm(self, artist_name: str) -> Optional[EnrichmentPayload]:
         if not self._platform_attempt_allowed("lastfm", artist_name, "Last.fm Enrich"):
             return None
-        quoted = urllib.parse.quote_plus(artist_name)
+        song_title = _clean_cell(getattr(self, "_live_context", {}).get("song_title", ""))
+        primary_query = build_search_query(artist_name, song_title)
+        quoted = urllib.parse.quote_plus(primary_query)
         url = f"https://www.last.fm/search?q={quoted}&type=artist"
         if not self._increment_live_counter():
             self._set_platform_state("lastfm", "skipped")
@@ -3303,20 +3553,22 @@ class CrossDirectoryEnricherWorker(QThread):
             profile_url = f"https://www.last.fm{profile_url}"
         confidence = _lastfm_confidence(artist_name, display_name)
         rank_confidence = _locale_rank_score(confidence, display_name, profile_url)
+        best_match_score = self._compute_match_score_for_candidate(
+            display_name, song_title, extract_domain(profile_url)
+        )
         self.log_message.emit(
             f"[Enricher] Last.fm Enrich: candidate '{display_name or profile_url}' for '{artist_name}' has confidence={confidence:.2f}."
         )
         best_score = confidence
         best_rank_score = rank_confidence
-        song_title = _clean_cell(getattr(self, "_live_context", {}).get("song_title", ""))
-        if confidence < MIN_LF_CONFIDENCE and song_title:
-            fallback_query = f"{artist_name} {song_title}"
+        if confidence < MIN_LF_CONFIDENCE and song_title and primary_query != artist_name:
+            fallback_query = artist_name
             self.log_message.emit(
-                f"[Enricher] Last.fm Enrich: no safe match for '{artist_name}', trying artist+song query '{fallback_query}'."
+                f"[Enricher] Last.fm Enrich: no safe match for '{artist_name}', trying artist-only query '{fallback_query}'."
             )
             quoted_fb = urllib.parse.quote_plus(fallback_query)
             fb_url = f"https://www.last.fm/search?q={quoted_fb}&type=artist"
-            fb_html = self._fetch_url(fb_url, label="Last.fm search (artist+song)")
+            fb_html = self._fetch_url(fb_url, label="Last.fm search (fallback)")
             if fb_html:
                 fb_soup = BeautifulSoup(fb_html, "html.parser")
                 fb_link = fb_soup.select_one("a[href*='/music/']")
@@ -3327,16 +3579,25 @@ class CrossDirectoryEnricherWorker(QThread):
                         fb_profile = f"https://www.last.fm{fb_profile}"
                     fb_conf = _lastfm_confidence(artist_name, fb_display)
                     fb_rank = _locale_rank_score(fb_conf, fb_display, fb_profile)
+                    fb_match_score = self._compute_match_score_for_candidate(
+                        fb_display, song_title, extract_domain(fb_profile)
+                    )
                     self.log_message.emit(
                         f"[Enricher] Last.fm Enrich: fallback candidate '{fb_display or fb_profile}' for '{artist_name}' has confidence={fb_conf:.2f}."
                     )
-                    if fb_conf > best_score or (
-                        abs(fb_conf - best_score) <= 0.02 and fb_rank > best_rank_score
+                    if (
+                        fb_match_score > best_match_score
+                        or fb_conf > best_score
+                        or (
+                            abs(fb_conf - best_score) <= 0.02
+                            and fb_rank > best_rank_score
+                        )
                     ):
                         display_name = fb_display
                         profile_url = fb_profile
                         best_score = fb_conf
                         best_rank_score = fb_rank
+                        best_match_score = fb_match_score
         if best_score < MIN_LF_CONFIDENCE:
             self.log_message.emit(
                 f"[Enricher] Last.fm Enrich: no safe match for '{artist_name}' (best_confidence={best_score:.2f}), skipping."
@@ -3345,6 +3606,8 @@ class CrossDirectoryEnricherWorker(QThread):
             return None
         payload = self._fetch_profile_and_build(profile_url, "lastfm")
         if payload:
+            payload.match_score = best_match_score
+            payload.candidate_name = display_name or ""
             self._set_platform_state("lastfm", "matched")
             return payload
         self._set_platform_state("lastfm", "skipped")
@@ -3604,9 +3867,22 @@ class CrossDirectoryEnricherWorker(QThread):
             rank_score = _locale_rank_score(score, location_text, candidate.get("context", ""))
             candidate["score"] = score
             candidate["rank_score"] = rank_score
+            candidate_domain = extract_domain(candidate.get("profile_url") or "")
+            candidate["match_score"] = self._compute_match_score_for_candidate(
+                display or handle, "", candidate_domain
+            )
             best_rank = best.get("rank_score", best.get("score", 0)) if best else 0
             best_score = best.get("score", 0) if best else 0
-            if best is None or score > best_score or (
+            best_match_score = best.get("match_score", 0) if best else 0
+            if best is None:
+                best = candidate
+                continue
+            if candidate["match_score"] > best_match_score:
+                best = candidate
+                continue
+            if candidate["match_score"] + 0.01 < best_match_score:
+                continue
+            if score > best_score or (
                 abs(score - best_score) <= 0.02 and rank_score > best_rank
             ):
                 best = candidate
