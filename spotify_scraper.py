@@ -242,6 +242,134 @@ def _find_unused_track_via_api(
     return None
 
 
+def _fetch_additional_genres(
+    spotify_client: Optional[SpotifyClient],
+    artist_id: str,
+    logger: Optional[LoggerFn],
+) -> str:
+    """
+    Try to infer genres via related artists as a lightweight fallback.
+    Returns a comma-separated genre string or empty string.
+    """
+    if not spotify_client or not artist_id:
+        return ""
+
+    def _log_debug(message: str) -> None:
+        if logger:
+            try:
+                logger(message)
+            except Exception:
+                pass
+
+    try:
+        payload = spotify_client._authorized_request(  # type: ignore[attr-defined]
+            "GET",
+            f"{spotify_client.API_BASE}/artists/{artist_id}/related-artists",
+        )
+    except Exception as exc:
+        _log_debug(f"[Spotify S1] genre fallback: related-artists lookup failed for artist_id={artist_id}: {exc}")
+        return ""
+
+    genre_counts: Dict[str, int] = {}
+    for artist in payload.get("artists", []) or []:
+        for genre in artist.get("genres") or []:
+            cleaned = (genre or "").strip()
+            if not cleaned:
+                continue
+            genre_counts[cleaned] = genre_counts.get(cleaned, 0) + 1
+
+    if not genre_counts:
+        return ""
+
+    sorted_genres = sorted(genre_counts.items(), key=lambda kv: (-kv[1], kv[0].lower()))
+    top = [name for name, _ in sorted_genres[:3]]
+    primary = ", ".join(top)
+    if primary and logger:
+        _log_debug(f"[Spotify S1] genre fallback: using related-artist genres for {artist_id}: {primary}")
+    return primary
+
+
+def _fetch_genres_from_top_tracks(
+    spotify_client: Optional[SpotifyClient],
+    artist_id: str,
+    logger: Optional[LoggerFn],
+) -> str:
+    """
+    Fallback: pull genres from artists that appear on the artist's top tracks.
+    """
+    if not spotify_client or not artist_id:
+        return ""
+
+    def _log_debug(message: str) -> None:
+        if logger:
+            try:
+                logger(message)
+            except Exception:
+                pass
+
+    try:
+        top_resp = spotify_client._authorized_request(  # type: ignore[attr-defined]
+            "GET",
+            f"{spotify_client.API_BASE}/artists/{artist_id}/top-tracks",
+            params={"market": "US"},
+        )
+    except Exception as exc:
+        _log_debug(f"[Spotify S1] genre fallback: top-tracks lookup failed for artist_id={artist_id}: {exc}")
+        return ""
+
+    track_artist_ids: Set[str] = set()
+    for track in top_resp.get("tracks", []) or []:
+        for artist in track.get("artists", []) or []:
+            aid = (artist.get("id") or "").strip()
+            if aid:
+                track_artist_ids.add(aid)
+
+    if not track_artist_ids:
+        return ""
+
+    try:
+        details = spotify_client.get_artists_details(list(track_artist_ids)[:50])
+    except Exception as exc:
+        _log_debug(f"[Spotify S1] genre fallback: artist details lookup failed for top-track artists of {artist_id}: {exc}")
+        return ""
+
+    genre_counts: Dict[str, int] = {}
+    for artist in details.values():
+        for genre in artist.get("genres") or []:
+            cleaned = (genre or "").strip()
+            if not cleaned:
+                continue
+            genre_counts[cleaned] = genre_counts.get(cleaned, 0) + 1
+
+    if not genre_counts:
+        return ""
+
+    sorted_genres = sorted(genre_counts.items(), key=lambda kv: (-kv[1], kv[0].lower()))
+    top = [name for name, _ in sorted_genres[:3]]
+    primary = ", ".join(top)
+    if primary:
+        _log_debug(f"[Spotify S1] genre fallback: using top-track artist genres for {artist_id}: {primary}")
+    return primary
+
+
+def _most_common_playlist_genre(genre_pool: List[str]) -> str:
+    """
+    Lightweight fallback: return the most common genre seen so far in the playlist run.
+    """
+    if not genre_pool:
+        return ""
+    counts: Dict[str, int] = {}
+    for genre in genre_pool:
+        key = (genre or "").strip()
+        if not key:
+            continue
+        counts[key] = counts.get(key, 0) + 1
+    if not counts:
+        return ""
+    sorted_genres = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0].lower()))
+    return sorted_genres[0][0]
+
+
 def _resolve_directory_csv(filename: str, base_dir: str) -> Optional[str]:
     if not filename:
         return None
@@ -636,6 +764,7 @@ def scrape_spotify(
     rows: List[Row] = []
     timestamp = time.strftime(DATE_FORMAT)
     total_artists = len(artists_by_id)
+    playlist_genre_pool: List[str] = []
 
     for idx, (artist_id, stub_info) in enumerate(artists_by_id.items(), start=1):
         artist_payload = artist_details.get(artist_id, {})
@@ -644,6 +773,12 @@ def scrape_spotify(
         spotify_url = (artist_payload.get("external_urls") or {}).get("spotify") or stub_info.get("artist_url") or ""
         genres = artist_payload.get("genres") or []
         primary_genre = ", ".join(genres[:3])
+        if not primary_genre:
+            primary_genre = _fetch_additional_genres(spotify_client=client, artist_id=artist_id, logger=logger)
+        if not primary_genre:
+            primary_genre = _fetch_genres_from_top_tracks(spotify_client=client, artist_id=artist_id, logger=logger)
+        if not primary_genre:
+            primary_genre = _most_common_playlist_genre(playlist_genre_pool)
         track_name = ""
         playlist_label = stub_info.get("playlist_label") or ""
 
@@ -668,6 +803,9 @@ def scrape_spotify(
             artist_id=artist_id,
         )
         rows.append(row)
+        for token in (primary_genre or "").split(","):
+            if token.strip():
+                playlist_genre_pool.append(token.strip())
 
         if progress_callback:
             try:
