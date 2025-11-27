@@ -66,6 +66,8 @@ ENABLE_FACEBOOK_ENRICHMENT = True
 FACEBOOK_SEARCH_URL = "https://www.facebook.com/search/pages/"
 FACEBOOK_CATEGORY_KEYWORDS = ("musician", "band", "artist", "music")
 FACEBOOK_SEARCH_WAIT_SECONDS = 10
+ENABLE_LOCALE_BIAS = False
+LOCALE_COUNTRY_HINT: Optional[str] = None  # Optional hint (e.g. "BR") to gently bias ties; never relaxes safety.
 
 UNEARTHED_CSV = "unearthed_output.csv"
 BANDCAMP_CSV = "bandcamp_output.csv"
@@ -2173,6 +2175,7 @@ _SC_ASSET_JS_PATTERN = re.compile(r"https://a-v2\.sndcdn\.com/assets/\d+-[a-z0-9
 _SC_CLIENT_ID_PATTERN = re.compile(r'client_id:"([a-zA-Z0-9]+)"')
 _SC_GENERIC_TOKENS = {"ix", "dj", "mc"}
 MIN_SC_CONFIDENCE = 0.95
+_LOCALE_FALLBACK_KEYWORDS = {"brazil", "brasil", "sao paulo", "rio de janeiro"}
 
 
 def _sc_handle_from_url(url: str) -> str:
@@ -2193,6 +2196,34 @@ def _sc_strip_basic(value: str) -> str:
     """Lowercase, trim, and drop simple punctuation for strict short-name checks."""
     text = (value or "").lower().strip()
     return re.sub(r"[\\.,!?\\'\\\"]+", "", text)
+
+
+def _locale_bias_amount(text: str) -> float:
+    """
+    Optional locale-aware nudge for tie-breaking between already plausible candidates.
+    Never used to relax safety thresholds; consumers should keep using base scores for acceptance checks.
+    """
+    if not ENABLE_LOCALE_BIAS:
+        return 0.0
+    haystack = (text or "").lower()
+    hint = (LOCALE_COUNTRY_HINT or "").strip().lower()
+    keywords = set()
+    if hint:
+        keywords.add(hint)
+        if hint in {"br", "bra", "brazil", "brasil"}:
+            keywords |= _LOCALE_FALLBACK_KEYWORDS
+    else:
+        keywords |= set()
+    if any(keyword and keyword in haystack for keyword in keywords):
+        return 0.03
+    return 0.0
+
+
+def _locale_rank_score(base_score: float, *texts: str) -> float:
+    bias = _locale_bias_amount(" ".join([t for t in texts if t]))
+    if bias <= 0.0:
+        return base_score
+    return min(1.0, base_score + bias)
 
 
 def _bandcamp_confidence(artist_name: str, display_name: str, profile_url: str, song_title: str = "") -> float:
@@ -2551,6 +2582,7 @@ class CrossDirectoryEnricherWorker(QThread):
         self._notified_limit = False
         self.total_rows = 0
         self._live_context: Dict[str, Any] = {}
+        self._row_enrichment_state: Dict[str, str] = {}
 
     def run(self) -> None:
         try:
@@ -2665,6 +2697,7 @@ class CrossDirectoryEnricherWorker(QThread):
                     "genre": _coerce_directory_value(row.get("Primary Genre")) if "Primary Genre" in row else "",
                     "song_title": _clean_cell(row.get("Song Title")),
                 }
+                self._init_row_enrichment_state()
                 seed_links_by_source = _extract_seed_links_by_source(row)
                 if not key:
                     self.log_message.emit(
@@ -2728,53 +2761,79 @@ class CrossDirectoryEnricherWorker(QThread):
                         self._apply_payload(seed_df, row_idx, payload)
                         enriched = True
                 if ENABLE_FACEBOOK_ENRICHMENT and fb_driver:
-                    has_fb_or_email_after_directories = _row_has_facebook_or_email(seed_df.loc[row_idx])
-                    if had_fb_or_email_from_seed or has_fb_or_email_after_directories:
-                        self.log_message.emit(
-                            f"[FB Enrich] Skipping Facebook enrichment for '{artist}' (already has Facebook/email from seed or directory enrichment)."
-                        )
+                    fb_attempted = False
+                    fb_matched = False
+                    if not self._platform_attempt_allowed("facebook", artist, "Facebook Enrich"):
+                        fb_attempted = False
                     else:
-                        current_social_links = [
-                            cell_to_str(seed_df.at[row_idx, "Social Link"]),
-                            cell_to_str(seed_df.at[row_idx, "External Links"]),
-                            cell_to_str(seed_df.at[row_idx, "Facebook_URL"]),
-                        ]
-                        current_email = cell_to_str(seed_df.at[row_idx, "Email"])
-                        has_fb_link = any(
-                            isinstance(link, str) and "facebook.com" in link.lower()
-                            for link in current_social_links
-                            if link
-                        )
-                        has_email = bool((current_email or "").strip())
-                        if has_fb_link or has_email:
+                        fb_attempted = True
+                        has_fb_or_email_after_directories = _row_has_facebook_or_email(seed_df.loc[row_idx])
+                        if had_fb_or_email_from_seed or has_fb_or_email_after_directories:
                             self.log_message.emit(
-                                f"[FB Enrich] Skipping Facebook enrichment for '{artist}' (already has Facebook/email from directory enrichment)."
+                                f"[FB Enrich] Skipping Facebook enrichment for '{artist}' (already has Facebook/email from seed or directory enrichment)."
                             )
                         else:
-                            social_link_val = cell_to_str(row.get("Social Link", ""))
-                            external_link_val = cell_to_str(row.get("External Links", ""))
-                            fb_url_val = cell_to_str(row.get("Facebook_URL", ""))
-                            existing_fb_links: List[str] = []
-                            for blob in (social_link_val, external_link_val, fb_url_val):
-                                if not blob:
-                                    continue
-                                parts = [part.strip() for part in blob.split(",") if part.strip()]
-                                for part in parts:
-                                    if "facebook.com" in part.lower():
-                                        existing_fb_links.append(part)
-                            fb_emails: List[str] = []
-                            page_url_used = ""
-                            try:
-                                if existing_fb_links:
-                                    fb_candidates = (
-                                        [existing_fb_links]
-                                        if isinstance(existing_fb_links, str)
-                                        else list(existing_fb_links)
-                                    )
-                                    for candidate in fb_candidates:
-                                        candidate_norm = normalize_external_url(candidate)
-                                        found = fb_scrape_emails_from_page(
-                                            fb_driver, candidate_norm, log_fn=self.log_message.emit
+                            current_social_links = [
+                                cell_to_str(seed_df.at[row_idx, "Social Link"]),
+                                cell_to_str(seed_df.at[row_idx, "External Links"]),
+                                cell_to_str(seed_df.at[row_idx, "Facebook_URL"]),
+                            ]
+                            current_email = cell_to_str(seed_df.at[row_idx, "Email"])
+                            has_fb_link = any(
+                                isinstance(link, str) and "facebook.com" in link.lower()
+                                for link in current_social_links
+                                if link
+                            )
+                            has_email = bool((current_email or "").strip())
+                            if has_fb_link or has_email:
+                                self.log_message.emit(
+                                    f"[FB Enrich] Skipping Facebook enrichment for '{artist}' (already has Facebook/email from directory enrichment)."
+                                )
+                            else:
+                                social_link_val = cell_to_str(row.get("Social Link", ""))
+                                external_link_val = cell_to_str(row.get("External Links", ""))
+                                fb_url_val = cell_to_str(row.get("Facebook_URL", ""))
+                                existing_fb_links: List[str] = []
+                                for blob in (social_link_val, external_link_val, fb_url_val):
+                                    if not blob:
+                                        continue
+                                    parts = [part.strip() for part in blob.split(",") if part.strip()]
+                                    for part in parts:
+                                        if "facebook.com" in part.lower():
+                                            existing_fb_links.append(part)
+                                fb_emails: List[str] = []
+                                page_url_used = ""
+                                try:
+                                    if existing_fb_links:
+                                        fb_candidates = (
+                                            [existing_fb_links]
+                                            if isinstance(existing_fb_links, str)
+                                            else list(existing_fb_links)
+                                        )
+                                        for candidate in fb_candidates:
+                                            candidate_norm = normalize_external_url(candidate)
+                                            found = fb_scrape_emails_from_page(
+                                                fb_driver, candidate_norm, log_fn=self.log_message.emit
+                                            )
+                                            try:
+                                                current_url = (fb_driver.current_url or "").lower()
+                                                if "facebook.com/login" in current_url:
+                                                    self.log_message.emit(
+                                                        "[FB Enrich] Facebook login wall detected for this page; enrichment skipped (not logged in)."
+                                                    )
+                                                    found = []
+                                            except Exception:
+                                                pass
+                                            if found:
+                                                fb_emails = found
+                                                page_url_used = candidate_norm
+                                                break
+                                    elif fb_find_page_and_emails_by_name:
+                                        page_url_used, fb_emails = fb_find_page_and_emails_by_name(
+                                            fb_driver,
+                                            artist,
+                                            location=cell_to_str(row.get("Location") or row.get("location")),
+                                            log_fn=self.log_message.emit,
                                         )
                                         try:
                                             current_url = (fb_driver.current_url or "").lower()
@@ -2782,42 +2841,27 @@ class CrossDirectoryEnricherWorker(QThread):
                                                 self.log_message.emit(
                                                     "[FB Enrich] Facebook login wall detected for this page; enrichment skipped (not logged in)."
                                                 )
-                                                found = []
+                                                fb_emails = []
+                                                page_url_used = ""
                                         except Exception:
                                             pass
-                                        if found:
-                                            fb_emails = found
-                                            page_url_used = candidate_norm
-                                            break
-                                elif fb_find_page_and_emails_by_name:
-                                    page_url_used, fb_emails = fb_find_page_and_emails_by_name(
-                                        fb_driver,
-                                        artist,
-                                        location=cell_to_str(row.get("Location") or row.get("location")),
-                                        log_fn=self.log_message.emit,
+                                except Exception as exc:
+                                    self.log_message.emit(
+                                        f"[FB Enrich] Error enriching row {position}/{total} ({artist}): {exc}"
                                     )
-                                    try:
-                                        current_url = (fb_driver.current_url or "").lower()
-                                        if "facebook.com/login" in current_url:
-                                            self.log_message.emit(
-                                                "[FB Enrich] Facebook login wall detected for this page; enrichment skipped (not logged in)."
-                                            )
-                                            fb_emails = []
-                                            page_url_used = ""
-                                    except Exception:
-                                        pass
-                            except Exception as exc:
-                                self.log_message.emit(
-                                    f"[FB Enrich] Error enriching row {position}/{total} ({artist}): {exc}"
-                                )
-                            if fb_emails:
-                                current_email = cell_to_str(seed_df.at[row_idx, "Email"])
-                                if not current_email:
-                                    seed_df.at[row_idx, "Email"] = fb_emails[0]
-                                if not existing_fb_links and page_url_used:
-                                    if not seed_df.at[row_idx, "Social Link"]:
-                                        seed_df.at[row_idx, "Social Link"] = page_url_used
-                                enriched = True
+                                if fb_emails:
+                                    current_email = cell_to_str(seed_df.at[row_idx, "Email"])
+                                    if not current_email:
+                                        seed_df.at[row_idx, "Email"] = fb_emails[0]
+                                    if not existing_fb_links and page_url_used:
+                                        if not seed_df.at[row_idx, "Social Link"]:
+                                            seed_df.at[row_idx, "Social Link"] = page_url_used
+                                    enriched = True
+                                    fb_matched = True
+                    if fb_attempted and not fb_matched:
+                        self._set_platform_state("facebook", "skipped")
+                    elif fb_matched:
+                        self._set_platform_state("facebook", "matched")
                 if not enriched:
                     self.log_message.emit(
                         f"[Enricher] Row {position}/{total}: no enrichment for {artist!r}."
@@ -2834,6 +2878,27 @@ class CrossDirectoryEnricherWorker(QThread):
             self.finished.emit(self.output_csv_path)
         finally:
             _cleanup_enricher_facebook_driver()
+
+    def _init_row_enrichment_state(self) -> None:
+        self._row_enrichment_state = {
+            "soundcloud": "pending",
+            "bandcamp": "pending",
+            "lastfm": "pending",
+            "facebook": "pending",
+        }
+
+    def _set_platform_state(self, platform: str, status: str) -> None:
+        if not hasattr(self, "_row_enrichment_state"):
+            self._row_enrichment_state = {}
+        self._row_enrichment_state[platform] = status
+
+    def _platform_attempt_allowed(self, platform: str, artist_name: str, label: str) -> bool:
+        state = getattr(self, "_row_enrichment_state", {}).get(platform)
+        if state in {"matched", "skipped"}:
+            prefix = "[FB Enrich]" if platform == "facebook" else "[Enricher]"
+            self.log_message.emit(f"{prefix} {label}: skipping '{artist_name}' (already attempted).")
+            return False
+        return True
 
     def _find_directory_matches(
         self,
@@ -3037,22 +3102,25 @@ class CrossDirectoryEnricherWorker(QThread):
         return True
 
     def _live_search_bandcamp(self, artist_name: str) -> Optional[EnrichmentPayload]:
+        if not self._platform_attempt_allowed("bandcamp", artist_name, "Bandcamp Enrich"):
+            return None
         if not self._increment_live_counter():
+            self._set_platform_state("bandcamp", "skipped")
             return None
         song_title = _clean_cell(getattr(self, "_live_context", {}).get("song_title", ""))
 
-        def _search(query: str) -> Tuple[Optional[EnrichmentPayload], float]:
+        def _search(query: str) -> Tuple[Optional[EnrichmentPayload], float, float]:
             quoted = urllib.parse.quote_plus(query)
             url = f"https://bandcamp.com/search?q={quoted}&item_type=b"
             self.log_message.emit(f"[Enricher] Bandcamp live search: {url}")
             html = self._fetch_url(url, label="Bandcamp search")
             if not html:
-                return (None, 0.0)
+                return (None, 0.0, 0.0)
             soup = BeautifulSoup(html, "html.parser")
             first_link = soup.select_one("li.searchresult a.itemurl, li.searchresult a[href*='bandcamp.com']")
             if not first_link:
                 self.log_message.emit("[Enricher] Bandcamp search: no results found.")
-                return (None, 0.0)
+                return (None, 0.0, 0.0)
             display_name = ""
             parent_li = first_link.find_parent("li")
             if parent_li:
@@ -3066,7 +3134,7 @@ class CrossDirectoryEnricherWorker(QThread):
             profile_url = (first_link.get("href") or "").strip()
             if not profile_url:
                 self.log_message.emit("[Enricher] Bandcamp search result missing href.")
-                return (None, 0.0)
+                return (None, 0.0, 0.0)
             artist_norm = normalize_name(artist_name)
             bc_name_norm = normalize_name(display_name)
             if artist_norm and bc_name_norm:
@@ -3086,39 +3154,50 @@ class CrossDirectoryEnricherWorker(QThread):
                     self.log_message.emit(
                         f"[Enricher] Bandcamp candidate '{display_name or profile_url}' rejected for artist '{artist_name}' (name mismatch)."
                     )
-                    return (None, 0.0)
+                    return (None, 0.0, 0.0)
             confidence = _bandcamp_confidence(artist_name, display_name, profile_url, song_title=song_title if query != artist_name else "")
+            rank_confidence = _locale_rank_score(confidence, display_name, profile_url)
             self.log_message.emit(
                 f"[Enricher] Bandcamp Enrich: best candidate '{profile_url}' for '{artist_name}' has confidence={confidence:.2f}."
             )
             if confidence >= MIN_BC_CONFIDENCE:
-                return (self._fetch_profile_and_build(profile_url, "bandcamp"), confidence)
-            return (None, confidence)
+                return (self._fetch_profile_and_build(profile_url, "bandcamp"), confidence, rank_confidence)
+            return (None, confidence, rank_confidence)
 
-        payload, best_score = _search(artist_name)
+        payload, best_score, best_rank_score = _search(artist_name)
         if payload:
+            self._set_platform_state("bandcamp", "matched")
             return payload
         fallback_score = best_score
+        fallback_rank = best_rank_score
         if song_title:
             fallback_query = f"{artist_name} {song_title}"
             self.log_message.emit(
                 f"[Enricher] Bandcamp Enrich: no safe match for '{artist_name}', trying artist+song query '{fallback_query}'."
             )
-            payload, fallback_score = _search(fallback_query)
+            payload, fallback_score, fallback_rank = _search(fallback_query)
             best_score = max(best_score, fallback_score)
+            best_rank_score = max(best_rank_score, fallback_rank)
             if payload:
+                self._set_platform_state("bandcamp", "matched")
                 return payload
+        best_confidence_display = max(best_score, best_rank_score)
         self.log_message.emit(
-            f"[Enricher] Bandcamp Enrich: no safe match for '{artist_name}' (best_confidence={best_score:.2f}), skipping."
+            f"[Enricher] Bandcamp Enrich: no safe match for '{artist_name}' (best_confidence={best_confidence_display:.2f}), skipping."
         )
+        self._set_platform_state("bandcamp", "skipped")
         return None
 
     def _live_search_soundcloud(self, artist_name: str) -> Optional[EnrichmentPayload]:
+        if not self._platform_attempt_allowed("soundcloud", artist_name, "SoundCloud Enrich"):
+            return None
         if not self._increment_live_counter():
             self.log_message.emit("[Enricher] SoundCloud live search skipped (limit reached).")
+            self._set_platform_state("soundcloud", "skipped")
             return None
         sc_query = _clean_soundcloud_query(artist_name)
         if not sc_query:
+            self._set_platform_state("soundcloud", "skipped")
             return None
         location_hint = _clean_cell(getattr(self, "_live_context", {}).get("location", ""))
         track_hint = _clean_cell(getattr(self, "_live_context", {}).get("track", ""))
@@ -3126,12 +3205,26 @@ class CrossDirectoryEnricherWorker(QThread):
         # Prefer people/artist search results, expanding the query with optional track or location hints.
         self.log_message.emit(f"[Enricher] SoundCloud Enrich: searching for '{artist_name}'")
         best_candidate: Optional[Dict[str, Any]] = None
+
+        def _is_better_candidate(candidate: Dict[str, Any], current: Optional[Dict[str, Any]]) -> bool:
+            if not candidate:
+                return False
+            cand_score = candidate.get("score", 0)
+            cand_rank = candidate.get("rank_score", cand_score)
+            curr_score = current.get("score", 0) if current else 0
+            curr_rank = current.get("rank_score", curr_score) if current else 0
+            if cand_score > curr_score:
+                return True
+            if curr_score > cand_score + 0.02:
+                return False
+            return cand_rank > curr_rank
+
         for query in _build_soundcloud_queries(sc_query, track_hint, location_hint):
             candidates = self._soundcloud_people_search_candidates(query)
             candidate = self._pick_best_soundcloud_candidate(
                 artist_name, candidates, location_hint, genre_hint
             )
-            if candidate and (best_candidate is None or candidate["score"] > best_candidate["score"]):
+            if candidate and _is_better_candidate(candidate, best_candidate):
                 best_candidate = candidate
             # Early exit when we have a high-confidence handle/display-name match.
             if best_candidate and best_candidate["score"] >= _SC_CONFIDENCE_ACCEPT:
@@ -3144,7 +3237,7 @@ class CrossDirectoryEnricherWorker(QThread):
             candidate = self._pick_best_soundcloud_candidate(
                 artist_name, uni_candidates, location_hint, genre_hint
             )
-            if candidate and (best_candidate is None or candidate["score"] > best_candidate["score"]):
+            if candidate and _is_better_candidate(candidate, best_candidate):
                 best_candidate = candidate
         best_score = best_candidate.get("score", 0) if best_candidate else 0.0
         if not best_candidate or best_score < MIN_SC_CONFIDENCE:
@@ -3162,10 +3255,7 @@ class CrossDirectoryEnricherWorker(QThread):
                 if (
                     fallback_candidate
                     and fallback_candidate.get("score", 0) >= MIN_SC_CONFIDENCE
-                    and (
-                        best_candidate is None
-                        or fallback_candidate.get("score", 0) > best_candidate.get("score", 0)
-                    )
+                    and (best_candidate is None or _is_better_candidate(fallback_candidate, best_candidate))
                 ):
                     best_candidate = fallback_candidate
                     best_score = fallback_candidate.get("score", 0)
@@ -3175,36 +3265,49 @@ class CrossDirectoryEnricherWorker(QThread):
                     f"[Enricher] SoundCloud Enrich: no safe match for '{artist_name}' "
                     f"(best_confidence={best_score:.2f}), skipping."
                 )
+                self._set_platform_state("soundcloud", "skipped")
                 return None
         self.log_message.emit(
             f"[Enricher] SoundCloud Enrich: best match '{best_candidate.get('display_name') or best_candidate.get('handle')}' "
             f"({best_candidate.get('profile_url')}), confidence={best_candidate.get('score'):.2f}"
         )
-        return self._fetch_profile_and_build(best_candidate["profile_url"], "soundcloud")
+        payload = self._fetch_profile_and_build(best_candidate["profile_url"], "soundcloud")
+        if payload:
+            self._set_platform_state("soundcloud", "matched")
+            return payload
+        self._set_platform_state("soundcloud", "skipped")
+        return None
 
     def _live_search_lastfm(self, artist_name: str) -> Optional[EnrichmentPayload]:
+        if not self._platform_attempt_allowed("lastfm", artist_name, "Last.fm Enrich"):
+            return None
         quoted = urllib.parse.quote_plus(artist_name)
         url = f"https://www.last.fm/search?q={quoted}&type=artist"
         if not self._increment_live_counter():
+            self._set_platform_state("lastfm", "skipped")
             return None
         self.log_message.emit(f"[Enricher] Last.fm live search: {url}")
         html = self._fetch_url(url, label="Last.fm search")
         if not html:
+            self._set_platform_state("lastfm", "skipped")
             return None
         soup = BeautifulSoup(html, "html.parser")
         first_link = soup.select_one("a[href*='/music/']")
         if not first_link:
             self.log_message.emit("[Enricher] Last.fm search: no artist results.")
+            self._set_platform_state("lastfm", "skipped")
             return None
         display_name = first_link.get_text(" ", strip=True)
         profile_url = (first_link.get("href") or "").strip()
         if profile_url.startswith("/"):
             profile_url = f"https://www.last.fm{profile_url}"
         confidence = _lastfm_confidence(artist_name, display_name)
+        rank_confidence = _locale_rank_score(confidence, display_name, profile_url)
         self.log_message.emit(
             f"[Enricher] Last.fm Enrich: candidate '{display_name or profile_url}' for '{artist_name}' has confidence={confidence:.2f}."
         )
         best_score = confidence
+        best_rank_score = rank_confidence
         song_title = _clean_cell(getattr(self, "_live_context", {}).get("song_title", ""))
         if confidence < MIN_LF_CONFIDENCE and song_title:
             fallback_query = f"{artist_name} {song_title}"
@@ -3223,28 +3326,53 @@ class CrossDirectoryEnricherWorker(QThread):
                     if fb_profile.startswith("/"):
                         fb_profile = f"https://www.last.fm{fb_profile}"
                     fb_conf = _lastfm_confidence(artist_name, fb_display)
+                    fb_rank = _locale_rank_score(fb_conf, fb_display, fb_profile)
                     self.log_message.emit(
                         f"[Enricher] Last.fm Enrich: fallback candidate '{fb_display or fb_profile}' for '{artist_name}' has confidence={fb_conf:.2f}."
                     )
-                    if fb_conf > best_score:
+                    if fb_conf > best_score or (
+                        abs(fb_conf - best_score) <= 0.02 and fb_rank > best_rank_score
+                    ):
                         display_name = fb_display
                         profile_url = fb_profile
                         best_score = fb_conf
+                        best_rank_score = fb_rank
         if best_score < MIN_LF_CONFIDENCE:
             self.log_message.emit(
                 f"[Enricher] Last.fm Enrich: no safe match for '{artist_name}' (best_confidence={best_score:.2f}), skipping."
             )
+            self._set_platform_state("lastfm", "skipped")
             return None
-        return self._fetch_profile_and_build(profile_url, "lastfm")
+        payload = self._fetch_profile_and_build(profile_url, "lastfm")
+        if payload:
+            self._set_platform_state("lastfm", "matched")
+            return payload
+        self._set_platform_state("lastfm", "skipped")
+        return None
 
     def _fetch_url(self, url: str, label: str) -> Optional[str]:
-        try:
-            resp = self.session.get(url, timeout=HTTP_TIMEOUT)
-            resp.raise_for_status()
-            return resp.text
-        except Exception as exc:
-            self.log_message.emit(f"[Enricher] {label} failed: {exc}")
-            return None
+        max_attempts = 2
+        attempt = 0
+        while attempt < max_attempts:
+            attempt += 1
+            try:
+                resp = self.session.get(url, timeout=HTTP_TIMEOUT)
+                resp.raise_for_status()
+                return resp.text
+            except requests.HTTPError as exc:
+                status = exc.response.status_code if exc.response is not None else None
+                if status and 500 <= status < 600 and attempt < max_attempts:
+                    self.log_message.emit(
+                        f"[Enricher] {label} {status} for {url} (attempt {attempt}/{max_attempts}), retrying..."
+                    )
+                    time.sleep(1.0)
+                    continue
+                self.log_message.emit(f"[Enricher] {label} failed: {exc}")
+                return None
+            except Exception as exc:
+                self.log_message.emit(f"[Enricher] {label} failed: {exc}")
+                return None
+        return None
 
     def _fetch_profile_and_build(self, profile_url: str, source_dir: str) -> Optional[EnrichmentPayload]:
         self.log_message.emit(f"[Enricher] Fetching {source_dir} profile: {profile_url}")
@@ -3316,6 +3444,19 @@ class CrossDirectoryEnricherWorker(QThread):
         location_hint: str,
         genre_hint: str,
     ) -> Optional[Dict[str, Any]]:
+        def _is_better_candidate(candidate: Dict[str, Any], current: Optional[Dict[str, Any]]) -> bool:
+            if not candidate:
+                return False
+            cand_score = candidate.get("score", 0)
+            cand_rank = candidate.get("rank_score", cand_score)
+            curr_score = current.get("score", 0) if current else 0
+            curr_rank = current.get("rank_score", curr_score) if current else 0
+            if cand_score > curr_score:
+                return True
+            if curr_score > cand_score + 0.02:
+                return False
+            return cand_rank > curr_rank
+
         candidates = self._soundcloud_people_search_candidates(query)
         best_candidate = self._pick_best_soundcloud_candidate(
             artist_name, candidates, location_hint, genre_hint
@@ -3326,9 +3467,7 @@ class CrossDirectoryEnricherWorker(QThread):
             candidate = self._pick_best_soundcloud_candidate(
                 artist_name, uni_candidates, location_hint, genre_hint
             )
-            if candidate and (
-                best_candidate is None or candidate.get("score", 0) > best_candidate.get("score", 0)
-            ):
+            if candidate and _is_better_candidate(candidate, best_candidate):
                 best_candidate = candidate
         return best_candidate
 
@@ -3462,8 +3601,14 @@ class CrossDirectoryEnricherWorker(QThread):
                 candidate_location=location_text,
                 genre_hint=genre_hint,
             )
+            rank_score = _locale_rank_score(score, location_text, candidate.get("context", ""))
             candidate["score"] = score
-            if best is None or score > best.get("score", 0):
+            candidate["rank_score"] = rank_score
+            best_rank = best.get("rank_score", best.get("score", 0)) if best else 0
+            best_score = best.get("score", 0) if best else 0
+            if best is None or score > best_score or (
+                abs(score - best_score) <= 0.02 and rank_score > best_rank
+            ):
                 best = candidate
         # Short-name guard: require near-exact match for very short artist names.
         if best and artist_norm_basic and len(artist_norm_basic) <= 3:
