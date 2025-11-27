@@ -107,6 +107,41 @@ def _pairwise_conflict(names: list[str], threshold: float) -> int:
     return 0
 
 
+def _normalise_review_url_value(value) -> str:
+    try:
+        if pd.isna(value):
+            return ""
+    except Exception:
+        pass
+    return str(value or "").strip()
+
+
+def _split_external_links(value) -> list[str]:
+    text = _normalise_review_url_value(value)
+    if not text:
+        return []
+    return [part.strip() for part in text.split(",") if part.strip()]
+
+
+def _build_review_urls(row: pd.Series) -> str:
+    candidates: list[str] = []
+    seen: set[str] = set()
+
+    def _add(value) -> None:
+        text = _normalise_review_url_value(value)
+        if text and text not in seen:
+            seen.add(text)
+            candidates.append(text)
+
+    _add(row["Spotify_URL"] if "Spotify_URL" in row else "")
+    _add(row["Facebook_URL"] if "Facebook_URL" in row else "")
+    _add(row["SoundCloud Link"] if "SoundCloud Link" in row else "")
+    for link in _split_external_links(row["External Links"] if "External Links" in row else ""):
+        _add(link)
+    _add(row["Source URL"] if "Source URL" in row else "")
+    return " | ".join(candidates)
+
+
 def run_final_checker(final_csv_path: str) -> str:
     try:
         if not final_csv_path or not os.path.exists(final_csv_path):
@@ -193,6 +228,12 @@ def run_final_checker(final_csv_path: str) -> str:
         result_df["genre_outlier_flag"] = genre_outlier_flags
         result_df["match_score_overall"] = match_scores
         result_df["final_status"] = statuses
+        result_df["Review_Urls"] = ""
+        review_mask = result_df["final_status"].isin(["BLOCK", "WARN"])
+        if review_mask.any():
+            result_df.loc[review_mask, "Review_Urls"] = result_df.loc[review_mask].apply(
+                _build_review_urls, axis=1
+            )
 
         base, ext = os.path.splitext(final_csv_path)
         checked_path = f"{base}_checked{ext or '.csv'}"
