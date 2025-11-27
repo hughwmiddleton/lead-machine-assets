@@ -123,37 +123,55 @@ def _merge_artist_entries(
     current_rows: List[Dict[str, str]],
     playlist_name: str,
     seen_ids: Set[str],
+    unique_artist_ids: Set[str],
     results: List[Dict[str, str]],
     max_artists: int,
     progress_callback: ProgressFn,
+    track_counter: List[int],
 ) -> int:
     added = 0
     for row in current_rows:
+        track_counter[0] += 1
+        track_position = track_counter[0]
         track_name = (row.get("trackName") or "").strip()
-        for artist in row.get("artists") or []:
+        for idx, artist in enumerate(row.get("artists") or []):
             artist_url = (artist.get("url") or "").strip()
             artist_name = (artist.get("name") or "").strip()
             if not artist_url:
                 continue
             artist_id = _parse_artist_id(artist_url)
             dedupe_key = artist_id or artist_url
-            if not dedupe_key or dedupe_key in seen_ids:
-                continue
-            seen_ids.add(dedupe_key)
+            # Allow multiple appearances to be captured so primary-track matches can override features.
+            if dedupe_key and dedupe_key in seen_ids:
+                # If already seen, append anyway so callers can prioritise the best track per artist.
+                pass
+            else:
+                seen_ids.add(dedupe_key)
+            # Count unique artists separately so we don't stop before primary tracks appear.
+            if artist_id:
+                if artist_id not in unique_artist_ids:
+                    if len(unique_artist_ids) >= max_artists:
+                        # Skip new artists beyond target but keep scanning for existing ones.
+                        continue
+                    unique_artist_ids.add(artist_id)
+            elif dedupe_key and dedupe_key not in unique_artist_ids:
+                if len(unique_artist_ids) >= max_artists:
+                    continue
+                unique_artist_ids.add(dedupe_key)
             artist_record = {
                 "artist_name": artist_name,
                 "artist_url": artist_url,
                 "artist_id": artist_id,
                 "track_name": track_name,
                 "playlist_name": playlist_name,
+                "track_position": track_position,
+                "is_primary": idx == 0,
             }
             results.append(artist_record)
             added += 1
             if progress_callback:
                 with contextlib.suppress(Exception):
                     progress_callback(len(results), max_artists)
-            if len(results) >= max_artists:
-                return added
     return added
 
 
@@ -188,6 +206,8 @@ def scrape_playlist_artists_via_html(
 
     artists: List[Dict[str, str]] = []
     seen_ids: Set[str] = set()
+    unique_artist_ids: Set[str] = set()
+    track_counter = [0]
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True, args=["--disable-gpu", "--no-sandbox"])
@@ -216,9 +236,11 @@ def scrape_playlist_artists_via_html(
                 payload.get("rows", []),
                 playlist_name,
                 seen_ids,
+                unique_artist_ids,
                 artists,
                 max_artists,
                 progress_callback,
+                track_counter,
             )
 
             scroll_attempts = 0
@@ -231,9 +253,11 @@ def scrape_playlist_artists_via_html(
                     payload.get("rows", []),
                     playlist_name,
                     seen_ids,
+                    unique_artist_ids,
                     artists,
                     max_artists,
                     progress_callback,
+                    track_counter,
                 )
                 if len(artists) == before:
                     stale_attempts += 1

@@ -9,7 +9,7 @@ import os
 import re
 import time
 import unicodedata
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 from urllib.parse import urlparse
 
 from spotify_about_scraper import enrich_spotify_rows_with_about_links
@@ -161,6 +161,87 @@ def _normalize_artist_name(name: str) -> str:
     return value.strip()
 
 
+def _normalize_track_title(title: str) -> str:
+    if not isinstance(title, str):
+        return ""
+    t = title.strip().lower()
+    if not t:
+        return ""
+    t = unicodedata.normalize("NFKD", t)
+    t = "".join(ch for ch in t if not unicodedata.combining(ch))
+    t = re.sub(r"[^a-z0-9]+", " ", t)
+    return t.strip()
+
+
+def _find_unused_track_via_api(
+    spotify_client: Optional[SpotifyClient],
+    artist_id: str,
+    used_song_titles: Set[str],
+    logger: Optional[LoggerFn],
+) -> Optional[Dict[str, Any]]:
+    """
+    Attempt to retrieve an unused track for the artist via the Spotify API.
+    Tries top tracks first, then scans a limited set of album/single tracks.
+    """
+    if not spotify_client or not artist_id:
+        return None
+
+    def _log_debug(message: str) -> None:
+        if logger:
+            try:
+                logger(message)
+            except Exception:
+                pass
+
+    # Top tracks
+    try:
+        top_resp = spotify_client._authorized_request(  # type: ignore[attr-defined]
+            "GET",
+            f"{spotify_client.API_BASE}/artists/{artist_id}/top-tracks",
+            params={"market": "US"},
+        )
+        for track in top_resp.get("tracks", []) or []:
+            title = (track.get("name") or "").strip()
+            norm = _normalize_track_title(title)
+            if norm and norm not in used_song_titles:
+                _log_debug(f"[Spotify S1] uniqueness fallback: using top track '{title}' for artist_id={artist_id}")
+                return track
+    except Exception as exc:
+        _log_debug(f"[Spotify S1] uniqueness fallback: top-tracks lookup failed for artist_id={artist_id}: {exc}")
+
+    # Album/single tracks (limited)
+    try:
+        albums_resp = spotify_client._authorized_request(  # type: ignore[attr-defined]
+            "GET",
+            f"{spotify_client.API_BASE}/artists/{artist_id}/albums",
+            params={"include_groups": "single,album", "limit": 10},
+        )
+        for album in albums_resp.get("items", []) or []:
+            album_id = album.get("id")
+            if not album_id:
+                continue
+            try:
+                tracks_resp = spotify_client._authorized_request(  # type: ignore[attr-defined]
+                    "GET",
+                    f"{spotify_client.API_BASE}/albums/{album_id}/tracks",
+                    params={"limit": 50},
+                )
+            except Exception:
+                continue
+            for track in tracks_resp.get("items", []) or []:
+                title = (track.get("name") or "").strip()
+                norm = _normalize_track_title(title)
+                if norm and norm not in used_song_titles:
+                    _log_debug(
+                        f"[Spotify S1] uniqueness fallback: using album track '{title}' for artist_id={artist_id} (album_id={album_id})"
+                    )
+                    return track
+    except Exception as exc:
+        _log_debug(f"[Spotify S1] uniqueness fallback: album-tracks lookup failed for artist_id={artist_id}: {exc}")
+
+    return None
+
+
 def _resolve_directory_csv(filename: str, base_dir: str) -> Optional[str]:
     if not filename:
         return None
@@ -258,6 +339,113 @@ def _resolve_playlist_label(
         return fallback_label
 
 
+def _select_track_for_artist(
+    artist_id: str,
+    artist_name: str,
+    stub_info: Dict[str, Any],
+    tracks_by_artist_id: Dict[str, List[Dict[str, Any]]],
+    tracks_by_artist_name: Dict[str, List[Dict[str, Any]]],
+    used_song_titles: Set[str],
+    spotify_client: Optional[SpotifyClient],
+    logger: Optional[LoggerFn],
+) -> Tuple[str, str]:
+    """
+    Choose a track for the given artist based on playlist membership.
+    Returns (track_name, playlist_label) with empty track_name when no match is found.
+    """
+    playlist_label = stub_info.get("playlist_label") or ""
+    track_name = ""
+    track_id = ""
+
+    candidates: List[Dict[str, Any]] = []
+
+    if artist_id:
+        candidates = tracks_by_artist_id.get(artist_id, []) or []
+    if (not candidates) and artist_name:
+        normalized = _normalize_artist_name(artist_name)
+        if normalized and not candidates:
+            candidates = tracks_by_artist_name.get(normalized, []) or []
+
+    selected_track: Dict[str, Any] = {}
+    if candidates:
+        # Prefer tracks where this artist is the primary credited artist, otherwise first in playlist order.
+        sorted_candidates = sorted(candidates, key=lambda c: c.get("order", 0))
+        primaries = [c for c in sorted_candidates if c.get("primary_for_artist")]
+        ordered_candidates = primaries or sorted_candidates
+        for candidate in ordered_candidates:
+            norm_title = _normalize_track_title(candidate.get("track_name") or "")
+            if norm_title and norm_title not in used_song_titles:
+                selected_track = candidate
+                break
+        if not selected_track:
+            # Try API fallback for a unique title before reusing a duplicate.
+            if logger:
+                try:
+                    logger(
+                        f"[Spotify S1] playlist candidates for artist '{artist_name}' are duplicates; trying API fallback for a unique track"
+                    )
+                except Exception:
+                    pass
+            api_track = _find_unused_track_via_api(
+                spotify_client=spotify_client,
+                artist_id=artist_id or "",
+                used_song_titles=used_song_titles,
+                logger=logger,
+            )
+            if api_track:
+                selected_track = {
+                    "track_id": api_track.get("id") or "",
+                    "track_name": api_track.get("name") or "",
+                    "artist_id": artist_id,
+                    "artist_name": artist_name,
+                    "playlist_label": stub_info.get("playlist_label") or "",
+                    "order": ordered_candidates[0].get("order", 0) if ordered_candidates else 0,
+                    "primary_for_artist": True,
+                }
+        if not selected_track and ordered_candidates:
+            selected_track = ordered_candidates[0]
+
+    if selected_track:
+        track_name = selected_track.get("track_name") or ""
+        track_id = selected_track.get("track_id") or ""
+        playlist_label = selected_track.get("playlist_label") or playlist_label
+        norm_title = _normalize_track_title(track_name)
+        already_used = norm_title in used_song_titles if norm_title else False
+        if norm_title:
+            used_song_titles.add(norm_title)
+        else:
+            norm_title = ""
+    else:
+        # HTML fallback may only provide a sample track name without full track metadata.
+        track_name = stub_info.get("sample_track") or ""
+        norm_title = _normalize_track_title(track_name)
+        already_used = norm_title in used_song_titles if norm_title else False
+        if norm_title:
+            used_song_titles.add(norm_title)
+
+    if logger:
+        prefix = "[Spotify S1]"
+        if track_name:
+            logger(
+                f"{prefix} selected track '{track_name}' for artist '{artist_name}' "
+                f"(artist_id={artist_id or 'n/a'}, track_id={track_id or 'n/a'})"
+            )
+            if already_used:
+                try:
+                    logger(
+                        f"{prefix} note: all candidate tracks for artist '{artist_name}' already used; reusing title '{track_name}'"
+                    )
+                except Exception:
+                    pass
+        else:
+            logger(
+                f"{prefix} no track found for artist '{artist_name}' "
+                f"(artist_id={artist_id or 'n/a'}), leaving Song Title blank"
+            )
+
+    return track_name, playlist_label
+
+
 def scrape_spotify(
     scrape_amount: int,
     params: Dict,
@@ -317,7 +505,11 @@ def scrape_spotify(
         return []
 
     artists_by_id: Dict[str, Dict[str, Any]] = {}
+    tracks_by_artist_id: Dict[str, List[Dict[str, Any]]] = {}
+    tracks_by_artist_name: Dict[str, List[Dict[str, Any]]] = {}
+    used_song_titles: Set[str] = set()
     total_tracks_scanned = 0
+    track_order = 0
 
     for playlist_id in resolved_playlist_ids:
         if len(artists_by_id) >= target_count:
@@ -351,7 +543,25 @@ def scrape_spotify(
                     if len(artists_by_id) >= target_count:
                         break
                     artist_id = (artist.get("artist_id") or "").strip()
-                    if not artist_id or artist_id in artists_by_id:
+                    if not artist_id:
+                        continue
+                    # Map HTML rows as track candidates so Song Title selection remains per-artist.
+                    track_order += 1
+                    track_name = (artist.get("track_name") or "").strip()
+                    track_info = {
+                        "track_id": "",
+                        "track_name": track_name,
+                        "artist_id": artist_id,
+                        "artist_name": artist.get("artist_name") or "",
+                        "playlist_label": fallback_label,
+                        "order": artist.get("track_position") or track_order,
+                        "primary_for_artist": bool(artist.get("is_primary")),
+                    }
+                    tracks_by_artist_id.setdefault(artist_id, []).append(track_info)
+                    normalized_html_name = _normalize_artist_name(artist.get("artist_name"))
+                    if normalized_html_name:
+                        tracks_by_artist_name.setdefault(normalized_html_name, []).append(track_info)
+                    if artist_id in artists_by_id:
                         continue
                     artists_by_id[artist_id] = {
                         "artist_stub": {"name": artist.get("artist_name") or "", "id": artist_id},
@@ -372,10 +582,32 @@ def scrape_spotify(
             track_obj = entry.get("track") if isinstance(entry, dict) else entry
             if not track_obj:
                 continue
+            track_order += 1
             track_name = track_obj.get("name", "")
             artists = track_obj.get("artists") or []
             if not artists:
                 continue
+            track_id = track_obj.get("id") or ""
+
+            # Map tracks to all participating artists to avoid cross-artist carry-over.
+            for track_artist in artists:
+                ta_id = (track_artist or {}).get("id") or ""
+                ta_name = (track_artist or {}).get("name") or ""
+                normalized_name = _normalize_artist_name(ta_name)
+                track_info = {
+                    "track_id": track_id,
+                    "track_name": track_name,
+                    "artist_id": ta_id,
+                    "artist_name": ta_name,
+                    "playlist_label": playlist_label,
+                    "order": track_order,
+                    "primary_for_artist": track_artist is artists[0],
+                }
+                if ta_id:
+                    tracks_by_artist_id.setdefault(ta_id, []).append(track_info)
+                if normalized_name:
+                    tracks_by_artist_name.setdefault(normalized_name, []).append(track_info)
+
             primary_artist = artists[0]
             artist_id = (primary_artist or {}).get("id")
             if not artist_id or artist_id in artists_by_id:
@@ -412,8 +644,19 @@ def scrape_spotify(
         spotify_url = (artist_payload.get("external_urls") or {}).get("spotify") or stub_info.get("artist_url") or ""
         genres = artist_payload.get("genres") or []
         primary_genre = ", ".join(genres[:3])
-        track_name = stub_info.get("sample_track") or ""
+        track_name = ""
         playlist_label = stub_info.get("playlist_label") or ""
+
+        track_name, playlist_label = _select_track_for_artist(
+            artist_id=artist_id,
+            artist_name=artist_name,
+            stub_info=stub_info,
+            tracks_by_artist_id=tracks_by_artist_id,
+            tracks_by_artist_name=tracks_by_artist_name,
+            used_song_titles=used_song_titles,
+            spotify_client=client,
+            logger=logger,
+        )
 
         row = _build_spotify_row(
             artist_name=artist_name,
