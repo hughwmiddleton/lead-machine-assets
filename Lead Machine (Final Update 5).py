@@ -6722,6 +6722,13 @@ def scrape_csv(input_csv, output_csv, fb_username, fb_password, max_emails=None)
             combined_data = _finalize_facebook_output_dataframe(combined_data)
             combined_data.to_csv(output_csv, index=False)
             print(f"Scraping completed. Results saved to {output_csv}")
+            final_csv_path = output_csv
+            from final_checker import run_final_checker
+            try:
+                checked_path = run_final_checker(final_csv_path)
+                print(f"[Final Checker] Completed → {checked_path}")
+            except Exception as e:
+                print(f"[Final Checker] Failed safely: {e}")
         else:
             print("No Facebook pages to process.")
         return
@@ -6791,6 +6798,13 @@ def scrape_csv(input_csv, output_csv, fb_username, fb_password, max_emails=None)
     combined_data = _finalize_facebook_output_dataframe(combined_data)
     combined_data.to_csv(output_csv, index=False)
     print(f"Scraping completed. Results saved to {output_csv}")
+    final_csv_path = output_csv
+    from final_checker import run_final_checker
+    try:
+        checked_path = run_final_checker(final_csv_path)
+        print(f"[Final Checker] Completed → {checked_path}")
+    except Exception as e:
+        print(f"[Final Checker] Failed safely: {e}")
 
 # =============================================================================
 # PyQt5 GUI Code
