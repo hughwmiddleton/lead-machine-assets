@@ -1644,6 +1644,33 @@ def _bandcamp_extract_tag_from_url(url: str) -> str | None:
         return match.group(1).lower()
     return None
 
+# Bandcamp resume-from-checkpoint helpers
+def load_bandcamp_progress(progress_path: str) -> dict:
+    if not progress_path:
+        return {}
+    try:
+        with open(progress_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            if isinstance(data, dict):
+                return data
+    except FileNotFoundError:
+        return {}
+    except json.JSONDecodeError:
+        print(f"Bandcamp: progress file {progress_path} is malformed, recreating.")
+    except Exception as exc:
+        print(f"Bandcamp: could not read progress file {progress_path}: {exc}")
+    return {}
+
+
+def save_bandcamp_progress(progress: dict, progress_path: str) -> None:
+    if not progress_path:
+        return
+    try:
+        with open(progress_path, "w", encoding="utf-8") as f:
+            json.dump(progress, f, indent=2)
+    except Exception as exc:
+        print(f"Bandcamp: failed to write progress file {progress_path}: {exc}")
+
 def _bandcamp_is_discover_url(url: str) -> bool:
     if not url:
         return False
@@ -1658,6 +1685,33 @@ def _bandcamp_is_discover_url(url: str) -> bool:
         return False
     host = parsed.netloc.lower()
     return "bandcamp.com" in host and "/discover" in parsed.path
+
+
+def is_discover_page(url: str) -> bool:
+    """Explicit discover-page detector for Bandcamp."""
+    return _bandcamp_is_discover_url(url)
+
+
+def _bandcamp_wait_for_discover_tiles(driver, selectors: list[str], timeout: int = 15) -> int:
+    """Wait for discover tiles to render and trigger lazy JS by scrolling."""
+    sel = ", ".join(selectors)
+    try:
+        WebDriverWait(driver, timeout).until(EC.presence_of_element_located((By.CSS_SELECTOR, sel)))
+    except Exception:
+        return 0
+    try:
+        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+    except Exception:
+        pass
+    time.sleep(random.uniform(0.5, 1.0))
+    try:
+        driver.execute_script("window.scrollTo(0, Math.max(document.body.scrollHeight * 0.1, 0));")
+    except Exception:
+        pass
+    try:
+        return len(driver.find_elements(By.CSS_SELECTOR, sel))
+    except Exception:
+        return 0
 
 def _bandcamp_replace_query_param(url: str, key: str, value) -> str:
     if not url:
@@ -2132,7 +2186,7 @@ def _bandcamp_quick_visit(driver, profile_url: str) -> str:
         print(f"Bandcamp: selenium quick visit failed {profile_url}: {exc}")
         return ""
 
-def scrape_bandcamp(seed_tags_or_url, pages_per_tag=5, existing_csv="artist_social_links.csv", max_artists=200):
+def scrape_bandcamp(seed_tags_or_url, pages_per_tag=5, existing_csv="artist_social_links.csv", max_artists=200, progress_path="bandcamp_progress.json"):
     """
     High-level Bandcamp entry point. Accepts any Bandcamp URL (discover/tag/artist/album/track)
     or the legacy list of tag seeds.
@@ -2168,16 +2222,35 @@ def scrape_bandcamp(seed_tags_or_url, pages_per_tag=5, existing_csv="artist_soci
     if pages_to_scan <= 0:
         pages_to_scan = BANDCAMP_DISCOVER_PAGES_DEFAULT
 
-    rows_limit = max_artists if max_artists and max_artists > 0 else BANDCAMP_TARGET_ROWS or BANDCAMP_PAGES_PER_TAG
-    if BANDCAMP_TARGET_ROWS and BANDCAMP_TARGET_ROWS > 0:
-        rows_limit = min(rows_limit, BANDCAMP_TARGET_ROWS)
+    user_max = max_artists if max_artists and max_artists > 0 else None
+    rows_limit = user_max if user_max else BANDCAMP_TARGET_ROWS or BANDCAMP_PAGES_PER_TAG
     rows_limit = max(rows_limit, 1)
 
-    computed_cap = max(max_artists * 5, max_artists + 40)
+    # Let explicit user max drive the candidate cap; default keeps prior heuristic.
+    if user_max:
+        computed_cap = max(user_max * 5, user_max + 40)
+    else:
+        computed_cap = max(BANDCAMP_TARGET_ROWS * 5, BANDCAMP_TARGET_ROWS + 40)
     if BANDCAMP_MAX_CANDIDATES and BANDCAMP_MAX_CANDIDATES > 0:
-        computed_cap = min(computed_cap, BANDCAMP_MAX_CANDIDATES)
+        computed_cap = max(computed_cap, BANDCAMP_MAX_CANDIDATES)
+    if user_max:
+        computed_cap = max(computed_cap, user_max)
     max_candidates = max(computed_cap, rows_limit)
     hit_candidate_cap = False
+
+    # Bandcamp resume-from-checkpoint
+    progress_path = progress_path or "bandcamp_progress.json"
+    progress = load_bandcamp_progress(progress_path)
+    progress_key = (url_input or "").strip().rstrip("/").lower()
+    # If the target CSV was deleted, reset checkpoint for this URL so artists can be re-scraped.
+    if progress_key and not os.path.exists(existing_csv):
+        if progress.pop(progress_key, None) is not None:
+            print(f"Bandcamp: output CSV missing; resetting checkpoint for {progress_key}")
+            save_bandcamp_progress(progress, progress_path)
+    elif progress_key and os.path.exists(existing_csv):
+        print(f"Bandcamp: appending new artists to existing CSV {existing_csv} (checkpoint retained).")
+    seen_artist_urls = set(progress.get(progress_key, {}).get("scraped_artist_urls", []) if progress_key else [])
+    progress_save_counter = 0
 
     bandcamp_rows = []
     enriched_rows = []
@@ -2193,6 +2266,9 @@ def scrape_bandcamp(seed_tags_or_url, pages_per_tag=5, existing_csv="artist_soci
         if not profile_url:
             return False
         key = profile_url.rstrip("/").lower()
+        if progress_key and key in seen_artist_urls:
+            print(f"Bandcamp: skip (checkpoint) {profile_url}")
+            return False
         if key in seen_profiles or len(candidate_profiles) >= max_candidates:
             if len(candidate_profiles) >= max_candidates:
                 hit_candidate_cap = True
@@ -2221,8 +2297,10 @@ def scrape_bandcamp(seed_tags_or_url, pages_per_tag=5, existing_csv="artist_soci
                 tag,
                 pages_to_scan,
                 search_query=tag,
-                api_params=params_map.get(tag)
+                api_params=params_map.get(tag),
+                max_items=max_candidates
             )
+            print(f"Bandcamp: tag '{tag}' yielded {len(candidates)} raw candidates")
             if not candidates:
                 continue
             for candidate in candidates:
@@ -2240,7 +2318,8 @@ def scrape_bandcamp(seed_tags_or_url, pages_per_tag=5, existing_csv="artist_soci
             if kind == "discover":
                 url_processed = True
                 print("Bandcamp: collecting tiles directly from discover page")
-                discover_tiles = _bandcamp_collect_discover_dom(driver, url_input, pages_per_tag)
+                discover_tiles = _bandcamp_collect_discover_dom(driver, url_input, pages_per_tag, max_items=max_candidates)
+                print(f"Bandcamp: discover yielded {len(discover_tiles)} raw candidates")
                 for tile in discover_tiles:
                     enqueue_candidate("discover", tile, tile.get("location", ""))
             elif kind == "tag":
@@ -2432,8 +2511,25 @@ def scrape_bandcamp(seed_tags_or_url, pages_per_tag=5, existing_csv="artist_soci
                 "Primary Genre": primary_genre_value,
                 "Source Tag": artist_dict.get("source_tag", "")
             })
+            # Bandcamp resume-from-checkpoint: persist profile URLs once written to CSV rows
+            profile_key = (artist_dict.get("profile_url", "") or "").rstrip("/").lower()
+            if progress_key and profile_key:
+                if not isinstance(progress.get(progress_key), dict):
+                    progress[progress_key] = {"scraped_artist_urls": []}
+                progress_entry = progress.setdefault(progress_key, {"scraped_artist_urls": []})
+                current_list = progress_entry.get("scraped_artist_urls") or []
+                current_set = {str(u).rstrip("/").lower() for u in current_list if isinstance(u, str)}
+                if profile_key not in current_set:
+                    current_set.add(profile_key)
+                    progress_entry["scraped_artist_urls"] = list(current_set)
+                    seen_artist_urls.add(profile_key)
+                    progress_save_counter += 1
+                    if progress_save_counter % 5 == 0:
+                        save_bandcamp_progress(progress, progress_path)
             if len(bandcamp_rows) >= rows_limit:
                 break
+        if progress_key:
+            save_bandcamp_progress(progress, progress_path)
     finally:
         driver.quit()
     if bandcamp_rows:
@@ -2485,13 +2581,161 @@ def _bandcamp_candidates_from_html(html: str, page_url: str) -> list:
         print(f"Bandcamp: failed to parse HTML listing {page_url}: {exc}")
     return candidates
 
+_BANDCAMP_GRID_SELECTORS = [
+    "li.searchresult",
+    ".result-items li",
+    "li.results-grid-item",
+    ".results-grid-item",
+    "[data-test^='results-grid-item']",
+    ".music-grid .item",
+    ".discover-results .item",
+    "ul.results-grid li",
+]
+
+
+def _bandcamp_trigger_pagination(driver) -> bool:
+    """Scroll or click a 'load more' button if present."""
+    # Ensure we are at the bottom to reveal the button.
+    try:
+        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+    except Exception:
+        pass
+    # Try the explicit "View more results" button used on discover grids first.
+    view_more_selectors = [
+        "#view-more",
+        "button[data-test='view-more']",
+        "button.g-button#view-more"
+    ]
+    for sel in view_more_selectors:
+        try:
+            button = driver.find_element(By.CSS_SELECTOR, sel)
+            if button.is_displayed() and button.is_enabled():
+                driver.execute_script("arguments[0].scrollIntoView({behavior:'smooth',block:'center'});", button)
+                try:
+                    driver.execute_script("arguments[0].click();", button)
+                except Exception:
+                    button.click()
+                try:
+                    WebDriverWait(driver, 6).until(
+                        EC.invisibility_of_element_located((By.CSS_SELECTOR, "#view-more.g-button[disabled]"))
+                    )
+                except Exception:
+                    pass
+                print(f"Bandcamp: clicked view-more via selector {sel}")
+                return True
+        except Exception:
+            continue
+    # Fallback: attempt by text
+    try:
+        button = driver.find_element(By.XPATH, "//button[contains(., 'View more results')]")
+        if button.is_displayed() and button.is_enabled():
+            driver.execute_script("arguments[0].scrollIntoView({behavior:'smooth',block:'center'});", button)
+            try:
+                driver.execute_script("arguments[0].click();", button)
+            except Exception:
+                button.click()
+            print("Bandcamp: clicked view-more via text xpath")
+            return True
+    except Exception:
+        pass
+
+    buttons = [
+        "button.more-items",
+        "button.show-more",
+        "button.load-more",
+        "#view-more",
+        ".view-more",
+        "button[data-action='more']",
+    ]
+    for selector in buttons:
+        try:
+            button = driver.find_element(By.CSS_SELECTOR, selector)
+            if not button.is_displayed() or not button.is_enabled():
+                continue
+            driver.execute_script("arguments[0].scrollIntoView({behavior:'smooth',block:'center'});", button)
+            button.click()
+            return True
+        except Exception:
+            continue
+    try:
+        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+        return True
+    except Exception:
+        return False
+
+
+def _bandcamp_collect_with_pagination(driver, start_url: str, selectors: list[str], max_items: int | None = None) -> list:
+    """
+    Attempt to exhaust 'load more' / infinite scroll on a Bandcamp grid page.
+    Stops when no new items appear for a few attempts or when max_items is reached.
+    """
+    print(f"Bandcamp: pagination start {start_url} max_items={max_items or 'none'} selectors={len(selectors)}")
+    tile_selector = ", ".join(selectors) if selectors else "body"
+    seen = set()
+    collected = []
+    no_change_attempts = 0
+    max_no_change_attempts = 6
+    max_cycles = 60
+    try:
+        driver.get(start_url)
+        WebDriverWait(driver, 12).until(EC.presence_of_element_located((By.CSS_SELECTOR, tile_selector)))
+    except Exception as exc:
+        print(f"Bandcamp: error loading {start_url}: {exc}")
+    for _ in range(max_cycles):
+        try:
+            html_text = driver.page_source or ""
+        except Exception:
+            html_text = ""
+        page_candidates = _bandcamp_candidates_from_html(html_text, start_url)
+        new_added = 0
+        for cand in page_candidates:
+            key = (cand.get("url") or "").rstrip("/").lower()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            collected.append(cand)
+            new_added += 1
+            if max_items and len(collected) >= max_items:
+                print(f"Bandcamp: pagination stopping (hit max_items {max_items}) with {len(collected)} collected")
+                return collected
+        if new_added == 0:
+            no_change_attempts += 1
+        else:
+            no_change_attempts = 0
+        print(f"Bandcamp: pagination loop collected={len(collected)} new={new_added} no_change_attempts={no_change_attempts}")
+        if max_items and len(collected) >= max_items:
+            break
+        try:
+            prev_count = len(driver.find_elements(By.CSS_SELECTOR, tile_selector))
+        except Exception:
+            prev_count = len(collected)
+        triggered = _bandcamp_trigger_pagination(driver)
+        if not triggered:
+            print("Bandcamp: pagination could not trigger load-more/scroll; stopping soon")
+            no_change_attempts += 1
+            if no_change_attempts >= max_no_change_attempts:
+                break
+        try:
+            WebDriverWait(driver, 15).until(
+                lambda d: len(d.find_elements(By.CSS_SELECTOR, tile_selector)) > prev_count
+            )
+        except Exception:
+            pass
+        time.sleep(random.uniform(1.0, 1.8))
+    print(f"Bandcamp: pagination end with {len(collected)} collected")
+    return collected
+
+
 def _bandcamp_collect_city_tag_candidates(driver, city_label: str, pages: int) -> list:
     if not city_label:
         return []
     return _bandcamp_collect_tag_pages(driver, city_label, pages, search_query=city_label)
 
 
-def _bandcamp_collect_from_tag_page(driver, tag_url) -> list:
+def _bandcamp_collect_from_tag_page(driver, tag_url, max_items: int | None = None) -> list:
+    paginated_candidates = _bandcamp_collect_with_pagination(driver, tag_url, _BANDCAMP_GRID_SELECTORS, max_items=max_items)
+    if paginated_candidates:
+        return paginated_candidates
     candidates = []
     counts = {}
     try:
@@ -2719,75 +2963,61 @@ def _bandcamp_collect_tag_via_api(slug: str, page_index: int, base_params: dict 
     return candidates
 
 
-def _bandcamp_collect_discover_dom(driver, discover_url: str, max_pages: int = 1) -> list:
+def _bandcamp_collect_discover_dom(driver, discover_url: str, max_pages: int = 1, max_items: int | None = None) -> list:
     max_pages = max(1, int(max_pages or 1))
-    candidates = []
     selectors = [
-        "ul.result-items li",
-        ".discover-results li",
-        "li.results-grid-item",
+        ".discover-item",
+        ".results-grid-item",
+        ".result",
+        ".item",
     ]
+    candidates = []
     seen = set()
-    page_urls = _bandcamp_build_discover_page_urls(discover_url, max_pages)
-    for page_index, page_url in enumerate(page_urls, start=1):
-        try:
-            driver.get(page_url)
-            WebDriverWait(driver, 12).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, "ul.result-items li, li.results-grid-item, .discover-results li"))
-            )
-        except Exception as exc:
-            print(f"Bandcamp: discover DOM load failed for page {page_index}: {exc}")
-            continue
-        soup = BeautifulSoup(driver.page_source or "", "html.parser")
-        for sel in selectors:
-            for card in soup.select(sel):
-                link = card.find("a", href=True)
-                if not link:
+    base_url = discover_url
+    for page_index in range(max_pages):
+        page_url = _bandcamp_replace_query_param(base_url, "p", page_index)
+        page_label = page_index + 1
+        attempts = 0
+        page_candidates = []
+        while attempts < 3:
+            try:
+                driver.get(page_url)
+            except Exception as exc:
+                print(f"Bandcamp: discover load error page {page_label} attempt {attempts+1}: {exc}")
+            tile_count = _bandcamp_wait_for_discover_tiles(driver, selectors, timeout=15)
+            print(f"Bandcamp: discover page {page_label} raw tiles = {tile_count}")
+            if tile_count == 0:
+                attempts += 1
+                if attempts < 3:
+                    print(f"Bandcamp: discover page {page_label} reload attempt {attempts+1}")
                     continue
-                href = link.get("href", "").strip()
-                if href.startswith("//"):
-                    href = f"https:{href}"
-                elif href.startswith("/"):
-                    href = urljoin("https://bandcamp.com", href)
-                elif not href.startswith(("http://", "https://")):
-                    href = f"https://bandcamp.com{href if href.startswith('/') else '/' + href}"
-                lowered = href.lower()
-                if "bandcamp.com" not in lowered:
-                    continue
-                if "/help/" in lowered or "/daily" in lowered:
-                    continue
-                profile_url = _bandcamp_resolve_artist_profile_url(href)
-                if not profile_url:
-                    continue
-                key = profile_url.rstrip("/").lower()
-                if key in seen:
-                    continue
-                seen.add(key)
-                title_text = card.get_text(" ", strip=True) or ""
-                tile_title = ""
-                tile_artist = ""
-                if " by " in title_text:
-                    parts = title_text.split(" by ", 1)
-                    tile_title = parts[0].strip()
-                    tile_artist = parts[1].strip()
-                elif "\n" in title_text:
-                    parts = title_text.split("\n", 1)
-                    tile_title = parts[0].strip()
-                    tile_artist = parts[1].strip()
-                else:
-                    tile_title = title_text.strip()
-                primary_genre = bandcamp_extract_primary_genre_from_card(card)
-                candidates.append({
-                    "url": profile_url,
-                    "primary_genre": primary_genre,
-                    "location": "",
-                    "tile_artist": tile_artist,
-                    "tile_title": tile_title,
-                })
+            try:
+                page_candidates = _bandcamp_candidates_from_html(driver.page_source or "", page_url)
+            except Exception:
+                page_candidates = []
+            break
+        raw_count = len(page_candidates)
+        # Deduplicate across pages and checkpoint; track kept_count for stop logic.
+        new_added = 0
+        for cand in page_candidates:
+            key = (cand.get("url") or "").rstrip("/").lower()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            candidates.append(cand)
+            new_added += 1
+            if max_items and len(candidates) >= max_items:
+                break
+        print(f"Bandcamp: discover page {page_label} unique candidates = {raw_count}")
+        print(f"Bandcamp: discover page {page_label} kept_after_filters = {new_added}")
+        print(f"Bandcamp: discover page {page_label} -> {new_added} items")
+        if max_items and len(candidates) >= max_items:
+            break
+    print(f"Bandcamp: discover collected total = {len(candidates)}")
     return candidates
 
 
-def _bandcamp_collect_tag_pages(driver, tag_label: str, pages: int, search_query: str | None = None, api_params: dict | None = None) -> list:
+def _bandcamp_collect_tag_pages(driver, tag_label: str, pages: int, search_query: str | None = None, api_params: dict | None = None, max_items: int | None = None) -> list:
     slug = _bc_normalize_tag_slug(tag_label)
     if not slug:
         return []
@@ -2802,21 +3032,42 @@ def _bandcamp_collect_tag_pages(driver, tag_label: str, pages: int, search_query
     for page_index in range(page_count):
         api_candidates = _bandcamp_collect_tag_via_api(slug, page_index, base_params)
         page_candidates = api_candidates
+        per_page = int(base_params.get("limit") or 40)
+        tag_url = _bc_make_tag_url(slug, page_index + 1)
+        need_dom_fallback = False
+        print(f"Bandcamp: tag '{slug}' page {page_index+1}/{page_count} via API -> {len(api_candidates)} candidates")
         if not page_candidates:
-            tag_url = _bc_make_tag_url(slug, page_index + 1)
-            if not tag_url:
-                continue
-            try:
-                driver.get(tag_url)
-                WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.TAG_NAME, 'body')))
-            except Exception as exc:
-                print(f"Bandcamp: error loading {tag_url}: {exc}")
-                continue
-            page_candidates = _bandcamp_collect_from_tag_page(driver, tag_url)
+            need_dom_fallback = True
+        elif len(page_candidates) < per_page:
+            need_dom_fallback = True
+        if max_items and len(total_candidates) >= max_items:
+            break
+        page_limit = None
+        if max_items:
+            remaining = max_items - len(total_candidates)
+            if remaining <= 0:
+                break
+            page_limit = remaining
+        if need_dom_fallback and tag_url:
+            print(f"Bandcamp: tag '{slug}' page {page_index+1} DOM fallback (page_limit={page_limit}) url={tag_url}")
+            dom_candidates = _bandcamp_collect_from_tag_page(driver, tag_url, max_items=page_limit)
+            if dom_candidates:
+                if not page_candidates:
+                    page_candidates = dom_candidates
+                else:
+                    seen_urls = {c.get("url", "").rstrip("/").lower() for c in page_candidates}
+                    for cand in dom_candidates:
+                        key = (cand.get("url") or "").rstrip("/").lower()
+                        if key and key not in seen_urls:
+                            page_candidates.append(cand)
+                            seen_urls.add(key)
             time.sleep(random.uniform(1.0, 2.0))
         if page_candidates:
             total_candidates.extend(page_candidates)
+        print(f"Bandcamp: tag '{slug}' accumulated {len(total_candidates)} candidates so far")
         if BANDCAMP_MAX_CANDIDATES and len(total_candidates) >= BANDCAMP_MAX_CANDIDATES:
+            break
+        if max_items and len(total_candidates) >= max_items:
             break
     if not total_candidates:
         query = search_query or tag_label or slug
@@ -2824,6 +3075,8 @@ def _bandcamp_collect_tag_pages(driver, tag_label: str, pages: int, search_query
             search_candidates = _bandcamp_collect_from_search(driver, query, page=page)
             if search_candidates:
                 total_candidates.extend(search_candidates)
+                break
+            if max_items and len(total_candidates) >= max_items:
                 break
     return total_candidates
 
