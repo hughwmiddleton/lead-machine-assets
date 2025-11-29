@@ -969,7 +969,7 @@ def save_to_csv(data, filename):
     _ensure_parent_dir(filename)
     headers = [
         'Artist Name', 'Location', 'Song Title', 'Sounds Like', 'Social Link', 'SoundCloud Link',
-        'Played on triple J', 'Played on Unearthed', 'Release Date', 'Primary Genre', 'Date Added', 'Email'
+        'Played on triple J', 'Played on Unearthed', 'Release Date', 'Primary Genre', 'Bandcamp_Source_Mode', 'Date Added', 'Email'
     ]
     current_date = datetime.datetime.now().strftime("%Y-%m-%d")
 
@@ -1006,6 +1006,7 @@ def save_to_csv(data, filename):
             played_on_unearthed,
             release_date,
             primary_genre,
+            bandcamp_source_mode,
             email_value
         ) = entry_list[:expected_fields]
         if isinstance(social_links, (str, bytes)):
@@ -1026,6 +1027,7 @@ def save_to_csv(data, filename):
                 'Played on Unearthed': played_on_unearthed,
                 'Release Date': release_date,
                 'Primary Genre': primary_genre,
+                'Bandcamp_Source_Mode': bandcamp_source_mode,
                 'Date Added': current_date,
                 'Email': email_value
             })
@@ -1671,6 +1673,24 @@ def save_bandcamp_progress(progress: dict, progress_path: str) -> None:
     except Exception as exc:
         print(f"Bandcamp: failed to write progress file {progress_path}: {exc}")
 
+def _bandcamp_checkpoint_key(mode: str, base_key: str) -> str:
+    normalized_mode = (mode or "discover").strip().lower()
+    if not base_key:
+        return ""
+    return f"{normalized_mode}:{base_key}"
+
+def _bandcamp_mode_output_csv_path(existing_csv: str, mode: str) -> str:
+    """For search runs, redirect to a distinct CSV so discover outputs remain untouched."""
+    normalized_mode = (mode or "discover").strip().lower()
+    path = existing_csv or "bandcamp_output.csv"
+    if normalized_mode != "search":
+        return path
+    root, ext = os.path.splitext(path)
+    ext = ext or ".csv"
+    if root.lower().endswith("_search"):
+        return root + ext
+    return f"{root}_search{ext}"
+
 def _bandcamp_is_discover_url(url: str) -> bool:
     if not url:
         return False
@@ -1735,6 +1755,15 @@ def _bandcamp_replace_query_param(url: str, key: str, value) -> str:
         pairs.append((key, str(value)))
     new_query = urlencode(pairs)
     return urlunparse((parsed.scheme or "https", parsed.netloc, parsed.path, parsed.params, new_query, parsed.fragment))
+
+def _bandcamp_build_paged_url(base_url: str, page: int) -> str:
+    try:
+        page_number = int(page)
+    except Exception:
+        page_number = 1
+    if page_number < 1:
+        page_number = 1
+    return _bandcamp_replace_query_param(base_url, "page", page_number)
 
 def _bandcamp_build_discover_page_urls(base_url: str, pages: int) -> list[str]:
     if pages <= 0:
@@ -2186,7 +2215,16 @@ def _bandcamp_quick_visit(driver, profile_url: str) -> str:
         print(f"Bandcamp: selenium quick visit failed {profile_url}: {exc}")
         return ""
 
-def scrape_bandcamp(seed_tags_or_url, pages_per_tag=5, existing_csv="artist_social_links.csv", max_artists=200, progress_path="bandcamp_progress.json"):
+def scrape_bandcamp(
+    seed_tags_or_url,
+    pages_per_tag=5,
+    existing_csv="artist_social_links.csv",
+    max_artists=200,
+    progress_path="bandcamp_progress.json",
+    mode: str = "discover",
+    max_pages: int | None = None,
+    max_items: int | None = None,
+):
     """
     High-level Bandcamp entry point. Accepts any Bandcamp URL (discover/tag/artist/album/track)
     or the legacy list of tag seeds.
@@ -2216,13 +2254,20 @@ def scrape_bandcamp(seed_tags_or_url, pages_per_tag=5, existing_csv="artist_soci
         seed_tags = list(BANDCAMP_SEED_TAGS)
 
     try:
-        pages_to_scan = int(pages_per_tag)
+        pages_to_scan = int(max_pages if max_pages is not None else pages_per_tag)
     except Exception:
         pages_to_scan = BANDCAMP_DISCOVER_PAGES_DEFAULT
     if pages_to_scan <= 0:
         pages_to_scan = BANDCAMP_DISCOVER_PAGES_DEFAULT
 
-    user_max = max_artists if max_artists and max_artists > 0 else None
+    normalized_mode = (mode or "discover").strip().lower()
+    if normalized_mode not in {"discover", "tag", "search"}:
+        raise ValueError(f"Unknown Bandcamp mode: {mode}")
+
+    existing_csv = _bandcamp_mode_output_csv_path(existing_csv, normalized_mode)
+
+    explicit_max = max_items if max_items and max_items > 0 else None
+    user_max = explicit_max if explicit_max is not None else (max_artists if max_artists and max_artists > 0 else None)
     rows_limit = user_max if user_max else BANDCAMP_TARGET_ROWS or BANDCAMP_PAGES_PER_TAG
     rows_limit = max(rows_limit, 1)
 
@@ -2241,15 +2286,24 @@ def scrape_bandcamp(seed_tags_or_url, pages_per_tag=5, existing_csv="artist_soci
     # Bandcamp resume-from-checkpoint
     progress_path = progress_path or "bandcamp_progress.json"
     progress = load_bandcamp_progress(progress_path)
-    progress_key = (url_input or "").strip().rstrip("/").lower()
+    progress_base_key = (url_input or "").strip().rstrip("/").lower()
+    checkpoint_key = _bandcamp_checkpoint_key(normalized_mode, progress_base_key)
+    legacy_key = progress_base_key if normalized_mode == "discover" else ""
+    checkpoint_keys = [key for key in {checkpoint_key, legacy_key} if key]
     # If the target CSV was deleted, reset checkpoint for this URL so artists can be re-scraped.
-    if progress_key and not os.path.exists(existing_csv):
-        if progress.pop(progress_key, None) is not None:
-            print(f"Bandcamp: output CSV missing; resetting checkpoint for {progress_key}")
+    if checkpoint_keys and not os.path.exists(existing_csv):
+        reset_any = False
+        for key in checkpoint_keys:
+            if progress.pop(key, None) is not None:
+                reset_any = True
+        if reset_any:
+            print(f"Bandcamp: output CSV missing; resetting checkpoint for {checkpoint_keys[0]}")
             save_bandcamp_progress(progress, progress_path)
-    elif progress_key and os.path.exists(existing_csv):
+    elif checkpoint_key and os.path.exists(existing_csv):
         print(f"Bandcamp: appending new artists to existing CSV {existing_csv} (checkpoint retained).")
-    seen_artist_urls = set(progress.get(progress_key, {}).get("scraped_artist_urls", []) if progress_key else [])
+    seen_artist_urls = set()
+    for key in checkpoint_keys:
+        seen_artist_urls.update(progress.get(key, {}).get("scraped_artist_urls", []) if key else [])
     progress_save_counter = 0
 
     bandcamp_rows = []
@@ -2259,6 +2313,8 @@ def scrape_bandcamp(seed_tags_or_url, pages_per_tag=5, existing_csv="artist_soci
     requested_label = ""
     requested_hint = ""
     contacts_required = BANDCAMP_MIN_CONTACT_REQUIREMENT and not bool(url_input)
+    search_cutoff = datetime.date.today() - datetime.timedelta(days=730) if normalized_mode == "search" else None
+    search_skipped_old = 0
 
     def enqueue_candidate(source_tag, candidate, api_location=""):
         nonlocal hit_candidate_cap
@@ -2266,7 +2322,7 @@ def scrape_bandcamp(seed_tags_or_url, pages_per_tag=5, existing_csv="artist_soci
         if not profile_url:
             return False
         key = profile_url.rstrip("/").lower()
-        if progress_key and key in seen_artist_urls:
+        if checkpoint_key and key in seen_artist_urls:
             print(f"Bandcamp: skip (checkpoint) {profile_url}")
             return False
         if key in seen_profiles or len(candidate_profiles) >= max_candidates:
@@ -2283,6 +2339,39 @@ def scrape_bandcamp(seed_tags_or_url, pages_per_tag=5, existing_csv="artist_soci
         if len(candidate_profiles) >= max_candidates:
             hit_candidate_cap = True
         return True
+
+    def _parse_release_to_date(value) -> datetime.date | None:
+        if not value:
+            return None
+        if isinstance(value, datetime.date):
+            return value
+        text = str(value).strip()
+        if not text or text.lower() == "not present":
+            return None
+        try:
+            # Try strict ISO first.
+            return datetime.date.fromisoformat(text[:10])
+        except Exception:
+            pass
+        try:
+            iso_text, _ = _parse_any_date_to_iso(text)
+            if iso_text:
+                return datetime.date.fromisoformat(iso_text[:10])
+        except Exception:
+            return None
+        return None
+
+    def _is_recent_enough(artist_dict: dict) -> bool:
+        """
+        Allow entries without a parsable date, but enforce a 2-year cutoff when present.
+        Missing dates are kept so the user can manually review later.
+        """
+        if not search_cutoff:
+            return True
+        parsed_date = _parse_release_to_date(artist_dict.get("latest_release_date", ""))
+        if not parsed_date:
+            return True
+        return parsed_date >= search_cutoff
 
     def collect_tag_candidates(tag_list, params_map=None):
         params_map = params_map or {}
@@ -2314,34 +2403,45 @@ def scrape_bandcamp(seed_tags_or_url, pages_per_tag=5, existing_csv="artist_soci
 
     try:
         if url_input:
-            kind = _bc_url_kind(url_input)
-            if kind == "discover":
+            if normalized_mode == "discover":
+                kind = _bc_url_kind(url_input)
+                if kind == "discover":
+                    url_processed = True
+                    print("Bandcamp: collecting tiles directly from discover page")
+                    discover_tiles = scrape_bandcamp_discover(driver, url_input, pages_to_scan, max_items=max_candidates)
+                    print(f"Bandcamp: discover yielded {len(discover_tiles)} raw candidates")
+                    for tile in discover_tiles:
+                        enqueue_candidate("discover", tile, tile.get("location", ""))
+                elif kind == "tag":
+                    tag_slug = _bandcamp_extract_tag_from_url(url_input)
+                    if tag_slug:
+                        params_map = {tag_slug: _bc_api_params_from_url(url_input)}
+                        collect_tag_candidates([tag_slug], params_map=params_map)
+                        url_processed = True
+                elif kind in {"artist_profile", "album_or_track"}:
+                    resolved = _bandcamp_resolve_artist_profile_url(url_input)
+                    if resolved:
+                        print(f"Bandcamp: queuing profile {resolved}")
+                        url_processed = enqueue_candidate("direct", {"url": resolved, "primary_genre": ""})
+                    else:
+                        print(f"Bandcamp: unable to resolve artist profile from {url_input}")
+                else:
+                    extracted_tag = _bandcamp_extract_tag_from_url(url_input)
+                    if extracted_tag:
+                        collect_tag_candidates([extracted_tag])
+                        url_processed = True
+                    else:
+                        print("Bandcamp: unknown URL shape; falling back to legacy tag flow.")
+            elif normalized_mode == "tag":
                 url_processed = True
-                print("Bandcamp: collecting tiles directly from discover page")
-                discover_tiles = _bandcamp_collect_discover_dom(driver, url_input, pages_per_tag, max_items=max_candidates)
-                print(f"Bandcamp: discover yielded {len(discover_tiles)} raw candidates")
-                for tile in discover_tiles:
-                    enqueue_candidate("discover", tile, tile.get("location", ""))
-            elif kind == "tag":
-                tag_slug = _bandcamp_extract_tag_from_url(url_input)
-                if tag_slug:
-                    params_map = {tag_slug: _bc_api_params_from_url(url_input)}
-                    collect_tag_candidates([tag_slug], params_map=params_map)
-                    url_processed = True
-            elif kind in {"artist_profile", "album_or_track"}:
-                resolved = _bandcamp_resolve_artist_profile_url(url_input)
-                if resolved:
-                    print(f"Bandcamp: queuing profile {resolved}")
-                    url_processed = enqueue_candidate("direct", {"url": resolved, "primary_genre": ""})
-                else:
-                    print(f"Bandcamp: unable to resolve artist profile from {url_input}")
-            else:
-                extracted_tag = _bandcamp_extract_tag_from_url(url_input)
-                if extracted_tag:
-                    collect_tag_candidates([extracted_tag])
-                    url_processed = True
-                else:
-                    print("Bandcamp: unknown URL shape; falling back to legacy tag flow.")
+                tag_candidates = scrape_bandcamp_tag(driver, url_input, max_pages=pages_to_scan, max_items=max_candidates)
+                for candidate in tag_candidates:
+                    enqueue_candidate("tag", candidate, candidate.get("location", ""))
+            elif normalized_mode == "search":
+                url_processed = True
+                search_candidates = scrape_bandcamp_search(driver, url_input, max_pages=pages_to_scan, max_items=max_candidates)
+                for candidate in search_candidates:
+                    enqueue_candidate("search", candidate, candidate.get("location", ""))
         if not url_processed:
             collect_tag_candidates(seed_tags or list(BANDCAMP_SEED_TAGS))
 
@@ -2357,7 +2457,7 @@ def scrape_bandcamp(seed_tags_or_url, pages_per_tag=5, existing_csv="artist_soci
         stop_processing = False
 
         def process_artist(candidate, artist_dict):
-            nonlocal kept_after_location, sample_kept, sample_rejected, rejected_location, stop_processing
+            nonlocal kept_after_location, sample_kept, sample_rejected, rejected_location, stop_processing, search_skipped_old
             if not artist_dict:
                 return
             artist_dict["source_tag"] = candidate.get("source_tag", "")
@@ -2382,6 +2482,10 @@ def scrape_bandcamp(seed_tags_or_url, pages_per_tag=5, existing_csv="artist_soci
                 "title": (candidate.get("tile_title") or "").strip(),
             }
             key = artist_dict["profile_url"].rstrip("/").lower()
+            if normalized_mode == "search" and search_cutoff:
+                if not _is_recent_enough(artist_dict):
+                    search_skipped_old += 1
+                    return
             entry = aggregated.get(key)
             if entry:
                 existing_contacts = entry.get("contacts") or []
@@ -2449,6 +2553,8 @@ def scrape_bandcamp(seed_tags_or_url, pages_per_tag=5, existing_csv="artist_soci
             stop_reason = "cap"
 
         print(f"Bandcamp: candidates={len(candidate_profiles)} http_ok={http_success} selenium_fallback={selenium_used} kept_after_location={kept_after_location} stop_reason={stop_reason}")
+        if normalized_mode == "search" and search_cutoff:
+            print(f"Bandcamp (search): kept_recent={kept_after_location} skipped_old={search_skipped_old} cutoff={search_cutoff.isoformat()}")
         if sample_kept:
             print(f"Bandcamp: kept sample -> {sample_kept}")
         if sample_rejected:
@@ -2489,6 +2595,7 @@ def scrape_bandcamp(seed_tags_or_url, pages_per_tag=5, existing_csv="artist_soci
                 "",
                 release_date_value,
                 primary_genre_value,
+                normalized_mode,
                 email_value
             ))
             socials = artist_dict.get("socials", {})
@@ -2509,26 +2616,31 @@ def scrape_bandcamp(seed_tags_or_url, pages_per_tag=5, existing_csv="artist_soci
                 "Latest Release Precision": artist_dict.get("latest_release_precision", ""),
                 "Sounds Like": artist_dict.get("sounds_like", ""),
                 "Primary Genre": primary_genre_value,
-                "Source Tag": artist_dict.get("source_tag", "")
+                "Source Tag": artist_dict.get("source_tag", ""),
+                "Bandcamp_Source_Mode": normalized_mode
             })
             # Bandcamp resume-from-checkpoint: persist profile URLs once written to CSV rows
             profile_key = (artist_dict.get("profile_url", "") or "").rstrip("/").lower()
-            if progress_key and profile_key:
-                if not isinstance(progress.get(progress_key), dict):
-                    progress[progress_key] = {"scraped_artist_urls": []}
-                progress_entry = progress.setdefault(progress_key, {"scraped_artist_urls": []})
-                current_list = progress_entry.get("scraped_artist_urls") or []
-                current_set = {str(u).rstrip("/").lower() for u in current_list if isinstance(u, str)}
-                if profile_key not in current_set:
-                    current_set.add(profile_key)
-                    progress_entry["scraped_artist_urls"] = list(current_set)
-                    seen_artist_urls.add(profile_key)
+            if checkpoint_keys and profile_key:
+                updated_any = False
+                for checkpoint in checkpoint_keys:
+                    if not isinstance(progress.get(checkpoint), dict):
+                        progress[checkpoint] = {"scraped_artist_urls": []}
+                    progress_entry = progress.setdefault(checkpoint, {"scraped_artist_urls": []})
+                    current_list = progress_entry.get("scraped_artist_urls") or []
+                    current_set = {str(u).rstrip("/").lower() for u in current_list if isinstance(u, str)}
+                    if profile_key not in current_set:
+                        current_set.add(profile_key)
+                        progress_entry["scraped_artist_urls"] = list(current_set)
+                        seen_artist_urls.add(profile_key)
+                        updated_any = True
+                if updated_any:
                     progress_save_counter += 1
                     if progress_save_counter % 5 == 0:
                         save_bandcamp_progress(progress, progress_path)
             if len(bandcamp_rows) >= rows_limit:
                 break
-        if progress_key:
+        if checkpoint_key:
             save_bandcamp_progress(progress, progress_path)
     finally:
         driver.quit()
@@ -2724,6 +2836,66 @@ def _bandcamp_collect_with_pagination(driver, start_url: str, selectors: list[st
         time.sleep(random.uniform(1.0, 1.8))
     print(f"Bandcamp: pagination end with {len(collected)} collected")
     return collected
+
+def _bandcamp_collect_mode_pages(driver, base_url: str, mode_label: str, selectors: list[str], max_pages: int, max_items: int | None = None, empty_streak_limit: int = 3) -> list:
+    max_pages = max(1, int(max_pages or 1))
+    selectors = selectors or _BANDCAMP_GRID_SELECTORS
+    collected = []
+    seen = set()
+    empty_streak = 0
+    for page_index in range(max_pages):
+        page_number = page_index + 1
+        page_url = _bandcamp_build_paged_url(base_url, page_number)
+        try:
+            driver.get(page_url)
+        except Exception as exc:
+            print(f"Bandcamp: {mode_label} load error page {page_number}: {exc}")
+        tile_count = _bandcamp_wait_for_discover_tiles(driver, selectors, timeout=15)
+        print(f"Bandcamp: {mode_label} page {page_number} raw tiles = {tile_count}")
+        try:
+            page_candidates = _bandcamp_candidates_from_html(driver.page_source or "", page_url)
+        except Exception:
+            page_candidates = []
+        page_seen = set()
+        unique_candidates = []
+        for cand in page_candidates:
+            key = (cand.get("url") or "").rstrip("/").lower()
+            if not key or key in page_seen:
+                continue
+            page_seen.add(key)
+            unique_candidates.append(cand)
+        unique_count = len(unique_candidates)
+        new_added = 0
+        for cand in unique_candidates:
+            key = (cand.get("url") or "").rstrip("/").lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            collected.append(cand)
+            new_added += 1
+            if max_items and len(collected) >= max_items:
+                break
+        print(f"Bandcamp: {mode_label} page {page_number} unique candidates = {unique_count}")
+        print(f"Bandcamp: {mode_label} page {page_number} kept_after_filters = {new_added}")
+        if max_items and len(collected) >= max_items:
+            break
+        if new_added == 0:
+            empty_streak += 1
+            if empty_streak >= empty_streak_limit:
+                break
+        else:
+            empty_streak = 0
+    print(f"Bandcamp: {mode_label} collected total = {len(collected)}")
+    return collected
+
+def scrape_bandcamp_discover(driver, discover_url: str, max_pages: int = 1, max_items: int | None = None) -> list:
+    return _bandcamp_collect_discover_dom(driver, discover_url, max_pages, max_items=max_items)
+
+def scrape_bandcamp_tag(driver, tag_url: str, max_pages: int = 20, max_items: int | None = None) -> list:
+    return _bandcamp_collect_mode_pages(driver, tag_url, "tag", _BANDCAMP_GRID_SELECTORS, max_pages, max_items=max_items)
+
+def scrape_bandcamp_search(driver, search_url: str, max_pages: int = 20, max_items: int | None = None) -> list:
+    return _bandcamp_collect_mode_pages(driver, search_url, "search", _BANDCAMP_GRID_SELECTORS, max_pages, max_items=max_items)
 
 
 def _bandcamp_collect_city_tag_candidates(driver, city_label: str, pages: int) -> list:
@@ -3419,7 +3591,8 @@ def _bandcamp_write_enriched_csv(rows, existing_csv):
         "Latest Release Date",
         "Latest Release Precision",
         "Sounds Like",
-        "Source Tag"
+        "Source Tag",
+        "Bandcamp_Source_Mode"
     ]
     base_dir = os.path.dirname(os.path.abspath(existing_csv))
     enriched_path = os.path.join(base_dir, "bandcamp_enriched.csv")
@@ -7066,13 +7239,14 @@ class ArtistScraperThread(QtCore.QThread):
     log_signal = QtCore.pyqtSignal(str)
     finished_signal = QtCore.pyqtSignal()
     def __init__(self, website_url, max_artists, output_csv, source="Unearthed",
-                 pages_per_tag=BANDCAMP_PAGES_PER_TAG, seed_tags=None, parent=None):
+                 pages_per_tag=BANDCAMP_PAGES_PER_TAG, seed_tags=None, bandcamp_mode: str = "discover", parent=None):
         super().__init__(parent)
         self.website_url = website_url
         self.max_artists = max_artists
         self.output_csv = output_csv
         self.source = source
         self.pages_per_tag = pages_per_tag
+        self.bandcamp_mode = (bandcamp_mode or "discover").strip().lower()
         if seed_tags is not None:
             self.seed_tags = list(seed_tags)
         elif self.source and self.source.lower() == "soundcloud":
@@ -7093,7 +7267,8 @@ class ArtistScraperThread(QtCore.QThread):
                     target,
                     pages_per_tag=self.pages_per_tag,
                     existing_csv=self.output_csv,
-                    max_artists=self.max_artists
+                    max_artists=self.max_artists,
+                    mode=self.bandcamp_mode
                 )
                 self.log_signal.emit("Bandcamp scraping completed.")
             elif self.source.lower() == "soundcloud":
@@ -7552,6 +7727,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def start_artist_scraping(self):
         source = self.source_combo.currentText()
         url = self.url_edit.text().strip()
+        bandcamp_mode = "discover"
         if source in ("Bandcamp", "SoundCloud") and not url:
             default_url = BANDCAMP_DEFAULT_TAG_URL if source == "Bandcamp" else SOUNDCLOUD_DEFAULT_TAG_URL
             url = default_url
@@ -7579,6 +7755,44 @@ class MainWindow(QtWidgets.QMainWindow):
             max_artists = 200
         if source == "Bandcamp":
             default_pages = BANDCAMP_PAGES_PER_TAG
+            bandcamp_mode = "discover"
+            bandcamp_base_url = url
+            # Prompt for mode selection when running Bandcamp.
+            choice_text, ok = QtWidgets.QInputDialog.getText(
+                self,
+                "Bandcamp mode",
+                "Select mode [1) Discover, 2) Search]:",
+                QtWidgets.QLineEdit.Normal,
+                "1",
+            )
+            if ok and choice_text.strip() == "2":
+                bandcamp_mode = "search"
+            self.artist_log.append(f"Bandcamp: mode={bandcamp_mode}")
+            print(f"Bandcamp: mode={bandcamp_mode}")
+            if bandcamp_mode == "search":
+                raw_prompt = bandcamp_base_url or ""
+                raw_value, raw_ok = QtWidgets.QInputDialog.getText(
+                    self,
+                    "Bandcamp search",
+                    "Bandcamp search (keywords OR full URL):",
+                    QtWidgets.QLineEdit.Normal,
+                    raw_prompt,
+                )
+                raw = (raw_value if raw_ok else raw_prompt).strip()
+                if raw.lower().startswith("http"):
+                    bandcamp_base_url = raw
+                else:
+                    q = quote_plus(raw)
+                    bandcamp_base_url = f"https://bandcamp.com/search?q={q}&item_type=b&sort_field=date"
+                self.artist_log.append(f"Bandcamp: base URL={bandcamp_base_url}")
+                print(f"Bandcamp: base URL={bandcamp_base_url}")
+                url = bandcamp_base_url
+            else:
+                bandcamp_base_url = url
+            output_csv = _bandcamp_mode_output_csv_path(self.artist_output_csv_edit.text().strip(), bandcamp_mode)
+            self.artist_output_csv_edit.setText(output_csv)
+            self.artist_log.append(f"Bandcamp: output CSV={output_csv}")
+            print(f"Bandcamp: output CSV={output_csv}")
         elif source == "SoundCloud":
             default_pages = SOUNDCLOUD_PAGES_PER_TAG
         else:
@@ -7605,7 +7819,8 @@ class MainWindow(QtWidgets.QMainWindow):
             output_csv,
             source=source,
             pages_per_tag=pages_per_tag,
-            seed_tags=seed_tags
+            seed_tags=seed_tags,
+            bandcamp_mode=bandcamp_mode if source == "Bandcamp" else "discover"
         )
         self.artist_thread.log_signal.connect(self.update_artist_log)
         self.artist_thread.finished_signal.connect(self.artist_scraping_finished)
