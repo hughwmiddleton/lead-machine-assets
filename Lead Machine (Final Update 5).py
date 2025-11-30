@@ -6369,8 +6369,10 @@ def fb_find_page_and_emails_by_name(driver, artist_name: str, location: str = ""
         "resort", "hotel", "hostel", "motel", "guest house", "guesthouse",
         "real estate", "realestate", "estate agent", "estateagency",
         "spa", "salon", "barber",
-        "restaurant", "cafe", "coffee shop", "coffeehouse", "pub", "bar",
+        "restaurant", "cafe", "cafè", "coffee shop", "coffeehouse", "pub", "bar",
         "farm", "farms",
+        "beauty", "hair", "lash", "lashes", "makeup", "nails", "clinic", "boutique", "brand",
+        "journalist", "agency", "market", "grocer", "butcher", "bakery", "store", "shop",
     ]
     music_tokens = [
         "musician",
@@ -6397,14 +6399,111 @@ def fb_find_page_and_emails_by_name(driver, artist_name: str, location: str = ""
         "pop band",
         "record label",
     ]
+    press_tokens = [
+        "news",
+        "magazine",
+        "press",
+        "blog",
+        "journal",
+        "media",
+        "publisher",
+    ]
+    music_category_tokens = [
+        "musician",
+        "band",
+        "artist",
+        "music",
+        "singer",
+        "songwriter",
+        "record label",
+        "musical artist",
+        "music production",
+        "recording studio",
+        "music producer",
+        "producer",
+    ]
+    music_link_tokens = [
+        "spotify.com",
+        "open.spotify.com",
+        "bandcamp.com",
+        "soundcloud.com",
+        "music.apple.com",
+        "deezer.com",
+        "tidal.com",
+        "youtube.com",
+        "youtu.be",
+        "linktr.ee",
+        "distrokid",
+        "tunecore",
+        "artist.to",
+        "songwhip",
+    ]
+    music_text_tokens = [
+        "single",
+        "ep",
+        "album",
+        "track",
+        "new song",
+        "stream now",
+        "listen now",
+        "out now",
+        "tour",
+        "gig",
+        "live show",
+        "producer",
+        "mixing",
+        "mastering",
+        "recording",
+        "studio",
+        "band",
+        "musician",
+        "songwriter",
+    ]
     from facebook_enrich import is_noisy_fb_text_block, looks_like_music_fallback, clean_fb_category_text
 
+    def _is_corporate_page(name: str, url: str, category: str | None) -> bool:
+        text = f"{name} {url} {category or ''}".lower()
+        return any(tok in text for tok in corporate_tokens)
+
+    def _has_press_token(name: str, url: str, category: str | None) -> bool:
+        text = f"{name} {url} {category or ''}".lower()
+        return any(tok in text for tok in press_tokens)
+
+    def _has_music_category(category: str | None) -> bool:
+        if not category:
+            return False
+        cat = category.lower()
+        return any(tok in cat for tok in music_category_tokens)
+
+    def _has_music_signals(page_text: str, outbound_links: list[str]) -> bool:
+        text = (page_text or "").lower()
+        for link in outbound_links or []:
+            l = (link or "").lower()
+            if any(tok in l for tok in music_link_tokens):
+                return True
+        return any(tok in text for tok in music_text_tokens)
+
     def _is_music_page(name_lc: str, url_lc: str, category_lc: str) -> bool:
-        for blob in (name_lc, url_lc, category_lc):
+        if _is_corporate_page(name_lc, url_lc, category_lc):
+            return False
+        if _has_music_category(category_lc):
+            return True
+        for blob in (name_lc, url_lc):
             for token in music_tokens:
                 if token in blob:
                     return True
         return False
+
+    def _is_music_page_final(name: str, url: str, category: str | None, page_text: str, outbound_links: list[str]) -> bool:
+        if _is_corporate_page(name, url, category):
+            return False
+        if _has_press_token(name, url, category) and not _has_music_category(category):
+            return False
+        if not _has_music_category(category):
+            return False
+        if not _has_music_signals(page_text, outbound_links):
+            return False
+        return True
     anchor_candidates = list(soup.find_all("a", href=True)) + list(soup.select('a[role="link"][href*="facebook.com"]')) + list(
         soup.select('div[role="article"] a[href*="facebook.com"]')
     )
@@ -6677,6 +6776,7 @@ def fb_find_page_and_emails_by_name(driver, artist_name: str, location: str = ""
         page_html = driver.page_source or ""
         page_category_text = None
         page_text_blocks = []
+        outbound_links = []
         try:
             soup = BeautifulSoup(page_html, "html.parser")
             seen_blocks = set()
@@ -6712,6 +6812,11 @@ def fb_find_page_and_emails_by_name(driver, artist_name: str, location: str = ""
                 if og_title:
                     page_category_text = _add_block(og_title.get("content") or "")
             page_category_text = clean_fb_category_text(page_category_text) if page_category_text else None
+            # Outbound links
+            for tag in soup.find_all("a", href=True):
+                href_val = (tag.get("href") or "").strip()
+                if href_val.startswith("http"):
+                    outbound_links.append(href_val)
             # Quick body scan for music tokens if no category.
             body_music = False
             cat_lc = (page_category_text or "").lower()
@@ -6720,7 +6825,20 @@ def fb_find_page_and_emails_by_name(driver, artist_name: str, location: str = ""
                 if token in cat_lc:
                     _log(f"[FB Enrich] Rejecting FB page '{best_url}' for '{artist_name}' after scrape due to corporate token '{token}' in category.")
                     return "", []
-            page_music = _is_music_page((best_name or "").lower(), (best_url or "").lower(), cat_lc)
+            page_text_combined = " ".join(page_text_blocks)
+            if _is_corporate_page((best_name or ""), (best_url or ""), page_category_text):
+                _log(f"[FB Enrich] Rejecting FB page '{best_url}' for '{artist_name}' after scrape due to corporate markers.")
+                return "", []
+            if _has_press_token((best_name or ""), (best_url or ""), page_category_text) and not _has_music_category(page_category_text):
+                _log(f"[FB Enrich] Rejecting FB page '{best_url}' for '{artist_name}' after scrape due to press/media markers.")
+                return "", []
+            page_music = _is_music_page_final(
+                (best_name or ""),
+                (best_url or ""),
+                page_category_text or best_category_raw,
+                page_text_combined,
+                outbound_links,
+            )
             has_reliable_category = bool(page_category_text and any(tok in cat_lc for tok in music_tokens))
             if not page_music and not has_reliable_category and not cat_lc:
                 if looks_like_music_fallback(page_text_blocks, artist_name):

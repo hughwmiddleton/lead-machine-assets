@@ -1339,6 +1339,20 @@ class FacebookSearchClient:
             "pub",
             "farm",
             "farms",
+            "beauty",
+            "hair",
+            "lash",
+            "lashes",
+            "makeup",
+            "nails",
+            "clinic",
+            "brand",
+            "journalist",
+            "agency",
+            "market",
+            "grocer",
+            "butcher",
+            "bakery",
             "op shop",
             "thrift",
             "mart",
@@ -1366,6 +1380,87 @@ class FacebookSearchClient:
             "s.a.",
             "s.r.l",
         ]
+        music_category_tokens = [
+            "musician",
+            "band",
+            "artist",
+            "music",
+            "singer",
+            "songwriter",
+            "record label",
+            "musical artist",
+            "music production",
+            "recording studio",
+            "music producer",
+            "producer",
+        ]
+        music_link_tokens = [
+            "spotify.com",
+            "open.spotify.com",
+            "bandcamp.com",
+            "soundcloud.com",
+            "music.apple.com",
+            "deezer.com",
+            "tidal.com",
+            "youtube.com",
+            "youtu.be",
+            "linktr.ee",
+            "distrokid",
+            "tunecore",
+            "artist.to",
+            "songwhip",
+        ]
+        music_text_tokens = [
+            "single",
+            "ep",
+            "album",
+            "track",
+            "new song",
+            "stream now",
+            "listen now",
+            "out now",
+            "tour",
+            "gig",
+            "live show",
+            "producer",
+            "mixing",
+            "mastering",
+            "recording",
+            "studio",
+            "band",
+            "musician",
+            "songwriter",
+        ]
+
+        def _has_music_category(category: str | None) -> bool:
+            if not category:
+                return False
+            cat = category.lower()
+            return any(tok in cat for tok in music_category_tokens)
+
+        def _has_press_token(name: str, url: str, category: str | None) -> bool:
+            text = f"{name} {url} {category or ''}".lower()
+            return any(tok in text for tok in ("news", "magazine", "press", "blog", "journal", "media", "publisher"))
+
+        def _has_music_signals(page_text: str, outbound_links: List[str]) -> bool:
+            text = (page_text or "").lower()
+            for link in outbound_links or []:
+                l = (link or "").lower()
+                if any(tok in l for tok in music_link_tokens):
+                    return True
+            return any(tok in text for tok in music_text_tokens)
+
+        def _is_music_page_final(name: str, url: str, category: str | None, page_text: str, outbound_links: List[str]) -> bool:
+            combined = f"{name} {url} {category or ''}".lower()
+            if any(tok in combined for tok in corporate_tokens):
+                return False
+            if _has_press_token(name, url, category) and not _has_music_category(category):
+                return False
+            if not _has_music_category(category):
+                return False
+            if not _has_music_signals(page_text, outbound_links):
+                return False
+            return True
         for cand in candidates:
             name_lc = (cand.name or "").lower()
             url_lc = (cand.url or "").lower()
@@ -1530,6 +1625,7 @@ class FacebookSearchClient:
             try:
                 soup = BeautifulSoup(page_html, "html.parser")
                 seen_blocks: Set[str] = set()
+                outbound_links: List[str] = []
 
                 def _add_block(val: str) -> Optional[str]:
                     val = (val or "").strip()
@@ -1561,6 +1657,10 @@ class FacebookSearchClient:
                         page_category_text = val
                     if len(page_text_blocks) >= MAX_FB_TEXT_BLOCKS:
                         break
+                for tag in soup.find_all("a", href=True):
+                    href_val = (tag.get("href") or "").strip()
+                    if href_val.startswith("http"):
+                        outbound_links.append(href_val)
                 page_category_text = clean_fb_category_text(page_category_text) if page_category_text else None
             except Exception:
                 page_category_text = None
@@ -1587,11 +1687,20 @@ class FacebookSearchClient:
                 (cat and any(tok in (cat or "").lower() for tok in FB_MUSIC_CATEGORY_TOKENS))
                 for cat in (page_category_text, best_candidate.category)
             )
-            page_music = sig_page.has_artist or is_music_page(
-                (best_candidate.name or "").lower(),
-                (best_candidate.url or "").lower(),
-                (page_category_text or "").lower(),
+            page_text_combined = " ".join(page_text_blocks)
+            page_music = _is_music_page_final(
+                best_candidate.name or "",
+                best_candidate.url or "",
+                page_category_text or best_candidate.category,
+                page_text_combined,
+                outbound_links,
             )
+            if not page_music:
+                page_music = sig_page.has_artist or is_music_page(
+                    (best_candidate.name or "").lower(),
+                    (best_candidate.url or "").lower(),
+                    (page_category_text or "").lower(),
+                )
             if not page_music and not has_reliable_category and not category_non_music:
                 if looks_like_music_fallback(page_text_blocks, artist_name):
                     page_music = True
