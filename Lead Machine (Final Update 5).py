@@ -126,6 +126,7 @@ from dateutil import parser as dparser
 from dateutil.relativedelta import relativedelta
 import unicodedata
 from spotify_scraper import scrape_spotify
+from origin_validator import run_auto_validate
 
 cross_directory_enricher = None
 try:
@@ -6933,6 +6934,75 @@ def _safe_row_value(row, key, fallback=""):
         return fallback
     return value
 
+
+def _prompt_origin_auto_validate(csv_path: str, default_scope: str = "uncertain_only"):
+    """
+    Offer a lightweight prompt to run origin auto-validate on a CSV.
+    Skips in non-interactive contexts (e.g. GUI threads).
+    """
+    if not csv_path or not os.path.exists(csv_path):
+        return None
+    try:
+        if not sys.stdin or not sys.stdin.isatty():
+            return None
+    except Exception:
+        return None
+    print(
+        "\nEnable Origin Auto-Validate on the output CSV? (recommended for production batches)\n"
+        "This will:\n"
+        "  - Re-open origin URLs (Bandcamp/SoundCloud/Unearthed/Spotify)\n"
+        "  - Confirm Artist + Song exist on the original page\n"
+        "  - Auto-upgrade good matches to OK and auto-block obvious mismatches\n"
+    )
+    ans = input("Auto-Validate now? [y/N]: ").strip().lower()
+    if ans not in ("y", "yes"):
+        return None
+    scope_choice = input("Run on 1) Uncertain rows only (default) or 2) All rows? [1/2]: ").strip()
+    scope = "all" if scope_choice == "2" else default_scope
+    try:
+        result_path = run_auto_validate(csv_path, validate_scope=scope, logger=print)
+        print(f"[Auto-Validate] Completed → {result_path}")
+        return result_path
+    except Exception as exc:
+        print(f"[Auto-Validate] Failed safely: {exc}")
+        return None
+
+
+def _run_auto_validate_only():
+    path = input("[Auto-Validate Only]\nInput CSV path: ").strip()
+    if not path:
+        print("No CSV provided.")
+        return
+    if not os.path.exists(path):
+        print(f"CSV not found: {path}")
+        return
+    scope_choice = input("Run on:\n  1) Only uncertain rows (REVIEW/BLOCKED or mid-band scores)\n  2) All rows\nSelection [1/2]: ").strip()
+    scope = "all" if scope_choice == "2" else "uncertain_only"
+    try:
+        result_path = run_auto_validate(path, validate_scope=scope, logger=print)
+        print(f"[Auto-Validate] Completed → {result_path}")
+    except Exception as exc:
+        print(f"[Auto-Validate] Failed safely: {exc}")
+
+
+def _run_text_main_menu():
+    while True:
+        print(
+            "\nLead Machine – Main Menu\n"
+            "1) Scrape directory (use GUI tabs)\n"
+            "2) Facebook scraper (use GUI tabs)\n"
+            "3) Spotify enricher (use GUI tabs)\n"
+            "4) Run Auto-Validate (origin checks) on existing CSV\n"
+            "5) Exit\n"
+        )
+        choice = input("Selection: ").strip()
+        if choice == "4":
+            _run_auto_validate_only()
+        elif choice == "5":
+            return
+        else:
+            print("For scraping/enriching, please use the GUI tabs. Select option 4 for Auto-Validate.")
+
 def _canonicalize_release_date_columns(df: pd.DataFrame) -> pd.DataFrame:
     """Ensure only one 'Release Date' column remains and is populated."""
     if df is None:
@@ -7150,11 +7220,13 @@ def scrape_csv(input_csv, output_csv, fb_username, fb_password, max_emails=None)
             print(f"Scraping completed. Results saved to {output_csv}")
             final_csv_path = output_csv
             from final_checker import run_final_checker
+            checked_path = final_csv_path
             try:
                 checked_path = run_final_checker(final_csv_path)
                 print(f"[Final Checker] Completed → {checked_path}")
             except Exception as e:
                 print(f"[Final Checker] Failed safely: {e}")
+            _prompt_origin_auto_validate(checked_path or output_csv)
         else:
             print("No Facebook pages to process.")
         return
@@ -7231,6 +7303,7 @@ def scrape_csv(input_csv, output_csv, fb_username, fb_password, max_emails=None)
         print(f"[Final Checker] Completed → {checked_path}")
     except Exception as e:
         print(f"[Final Checker] Failed safely: {e}")
+    _prompt_origin_auto_validate(checked_path or output_csv)
 
 # =============================================================================
 # PyQt5 GUI Code
@@ -7361,12 +7434,41 @@ class FacebookScraperThread(QtCore.QThread):
         self.finished_signal.emit()
 
 
+class AutoValidateWorker(QtCore.QThread):
+    log_signal = QtCore.pyqtSignal(str)
+    finished_signal = QtCore.pyqtSignal(str)
+
+    def __init__(self, csv_path: str, scope: str = "uncertain_only", parent=None):
+        super().__init__(parent)
+        self.csv_path = csv_path
+        self.scope = scope
+
+    def run(self):
+        try:
+            self._log(f"[Auto-Validate] Starting origin validation on {self.csv_path} (scope: {self.scope})...")
+            result = run_auto_validate(self.csv_path, validate_scope=self.scope, logger=self._log)
+            self._log(f"[Auto-Validate] Completed. Output: {result}")
+            self.finished_signal.emit(result)
+        except Exception as exc:
+            self._log(f"[Auto-Validate] Failed safely: {exc}")
+            self.finished_signal.emit("")
+
+    def _log(self, message: str):
+        if message is None:
+            return
+        try:
+            self.log_signal.emit(str(message))
+        except Exception:
+            pass
+
+
 class CrossDirectoryEnricherTab(QtWidgets.QWidget):
     def __init__(self, parent=None, enricher_module=None):
         super().__init__(parent)
         self.enricher_module = enricher_module
         self.worker = None
         self.output_path = ""
+        self.av_worker = None
         self._build_ui()
 
     def _build_ui(self):
@@ -7403,6 +7505,9 @@ class CrossDirectoryEnricherTab(QtWidgets.QWidget):
         self.live_search_checkbox.setChecked(True)
         self.live_search_checkbox.stateChanged.connect(self._toggle_live_controls)
         layout.addWidget(self.live_search_checkbox)
+        self.auto_validate_checkbox = QtWidgets.QCheckBox("Enable Origin Auto-Validate after this run")
+        self.auto_validate_checkbox.setChecked(False)
+        layout.addWidget(self.auto_validate_checkbox)
         live_layout = QtWidgets.QHBoxLayout()
         live_label = QtWidgets.QLabel("Max live searches (0 = unlimited):")
         self.max_live_spin = QtWidgets.QSpinBox()
@@ -7526,6 +7631,9 @@ class CrossDirectoryEnricherTab(QtWidgets.QWidget):
                 "Enrichment complete",
                 f"Output written to:\n{output_path}",
             )
+            if self.auto_validate_checkbox.isChecked():
+                self._append_log("[Auto-Validate] Queueing origin validation...")
+                self._start_auto_validate(output_path)
         else:
             QtWidgets.QMessageBox.warning(
                 self,
@@ -7555,6 +7663,144 @@ class CrossDirectoryEnricherTab(QtWidgets.QWidget):
                 except Exception:
                     pass
         self.worker = None
+        self._stop_auto_validate_worker()
+
+    def _start_auto_validate(self, csv_path: str, scope: str = "uncertain_only"):
+        self._stop_auto_validate_worker()
+        if not csv_path or not os.path.exists(csv_path):
+            self._append_log(f"[Auto-Validate] Output CSV not found: {csv_path}")
+            return
+        self.av_worker = AutoValidateWorker(csv_path=csv_path, scope=scope)
+        self.av_worker.log_signal.connect(self._append_log)
+        self.av_worker.finished_signal.connect(self._on_auto_validate_finished)
+        self.av_worker.start()
+
+    def _on_auto_validate_finished(self, output_path: str):
+        if output_path:
+            self._append_log(f"[Auto-Validate] Done. Output: {output_path}")
+        else:
+            self._append_log("[Auto-Validate] Finished with errors.")
+        self._stop_auto_validate_worker()
+
+    def _stop_auto_validate_worker(self):
+        worker = getattr(self, "av_worker", None)
+        if not worker:
+            return
+        if worker.isRunning():
+            try:
+                worker.wait(2000)
+            except Exception:
+                try:
+                    worker.terminate()
+                    worker.wait(2000)
+                except Exception:
+                    pass
+        self.av_worker = None
+
+
+class AutoValidateTab(QtWidgets.QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.worker = None
+        self._build_ui()
+
+    def _build_ui(self):
+        layout = QtWidgets.QVBoxLayout()
+        path_row = QtWidgets.QHBoxLayout()
+        path_label = QtWidgets.QLabel("CSV Path:")
+        self.csv_path_edit = QtWidgets.QLineEdit()
+        browse_btn = QtWidgets.QPushButton("Browse...")
+        browse_btn.clicked.connect(self._browse_csv)
+        path_row.addWidget(path_label)
+        path_row.addWidget(self.csv_path_edit)
+        path_row.addWidget(browse_btn)
+        layout.addLayout(path_row)
+
+        scope_layout = QtWidgets.QHBoxLayout()
+        scope_label = QtWidgets.QLabel("Scope:")
+        self.scope_uncertain = QtWidgets.QRadioButton("Uncertain rows only (recommended)")
+        self.scope_all = QtWidgets.QRadioButton("All rows")
+        self.scope_uncertain.setChecked(True)
+        scope_group = QtWidgets.QButtonGroup(self)
+        scope_group.addButton(self.scope_uncertain)
+        scope_group.addButton(self.scope_all)
+        scope_layout.addWidget(scope_label)
+        scope_layout.addWidget(self.scope_uncertain)
+        scope_layout.addWidget(self.scope_all)
+        scope_layout.addStretch()
+        layout.addLayout(scope_layout)
+
+        self.run_button = QtWidgets.QPushButton("Run Origin Auto-Validate")
+        self.run_button.clicked.connect(self._run_validation)
+        layout.addWidget(self.run_button)
+
+        self.log_console = QtWidgets.QPlainTextEdit()
+        self.log_console.setReadOnly(True)
+        layout.addWidget(self.log_console)
+        self.setLayout(layout)
+
+    def _browse_csv(self):
+        file_path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Select CSV File",
+            "",
+            "CSV Files (*.csv);;All Files (*)",
+        )
+        if file_path:
+            self.csv_path_edit.setText(file_path)
+
+    def _run_validation(self):
+        if self.worker:
+            self._append_log("Auto-Validate already running.")
+            return
+        csv_path = self.csv_path_edit.text().strip()
+        if not csv_path or not os.path.exists(csv_path):
+            QtWidgets.QMessageBox.warning(
+                self,
+                "CSV not found",
+                "Please choose a valid CSV file.",
+            )
+            return
+        scope = "all" if self.scope_all.isChecked() else "uncertain_only"
+        self.log_console.clear()
+        self._append_log(f"[Auto-Validate] Starting on {csv_path} (scope: {scope})...")
+        self.run_button.setEnabled(False)
+        self.worker = AutoValidateWorker(csv_path=csv_path, scope=scope)
+        self.worker.log_signal.connect(self._append_log)
+        self.worker.finished_signal.connect(self._on_finished)
+        self.worker.start()
+
+    def _append_log(self, message: str):
+        self.log_console.appendPlainText(message)
+        scrollbar = self.log_console.verticalScrollBar()
+        if scrollbar:
+            scrollbar.setValue(scrollbar.maximum())
+
+    def _on_finished(self, output_path: str):
+        if output_path:
+            self._append_log(f"[Auto-Validate] Completed. Output: {output_path}")
+        else:
+            self._append_log("[Auto-Validate] Finished with errors.")
+        self.run_button.setEnabled(True)
+        self._stop_worker()
+
+    def _stop_worker(self):
+        worker = self.worker
+        if not worker:
+            return
+        if worker.isRunning():
+            try:
+                worker.wait(2000)
+            except Exception:
+                try:
+                    worker.terminate()
+                    worker.wait(2000)
+                except Exception:
+                    pass
+        self.worker = None
+
+    def shutdown(self):
+        self._stop_worker()
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
@@ -7562,6 +7808,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setMinimumSize(800, 600)
         self.artist_thread = None
         self.fb_thread = None
+        self.fb_av_worker = None
         self.create_menu()
         self.tabs = QtWidgets.QTabWidget()
         self.setCentralWidget(self.tabs)
@@ -7575,6 +7822,8 @@ class MainWindow(QtWidgets.QMainWindow):
             enricher_module=cross_directory_enricher
         )
         self.tabs.addTab(self.cross_enricher_tab, "Cross-Directory Enricher")
+        self.auto_validate_tab = AutoValidateTab()
+        self.tabs.addTab(self.auto_validate_tab, "Auto-Validate")
     def create_menu(self):
         menubar = self.menuBar()
         file_menu = menubar.addMenu("File")
@@ -7713,6 +7962,9 @@ class MainWindow(QtWidgets.QMainWindow):
         max_emails_layout.addWidget(max_emails_label)
         max_emails_layout.addWidget(self.max_emails_edit)
         layout.addLayout(max_emails_layout)
+        self.fb_auto_validate_checkbox = QtWidgets.QCheckBox("Enable Origin Auto-Validate after this run")
+        self.fb_auto_validate_checkbox.setChecked(False)
+        layout.addWidget(self.fb_auto_validate_checkbox)
         self.fb_start_button = QtWidgets.QPushButton("Start Facebook Scraping")
         self.fb_start_button.clicked.connect(self.start_facebook_scraping)
         layout.addWidget(self.fb_start_button)
@@ -7868,6 +8120,47 @@ class MainWindow(QtWidgets.QMainWindow):
             except Exception:
                 pass
         self.fb_thread = None
+        if self.fb_auto_validate_checkbox.isChecked():
+            output_csv = self.output_csv_edit.text().strip()
+            if output_csv:
+                base, ext = os.path.splitext(output_csv)
+                checked_candidate = f"{base}_checked{ext or '.csv'}"
+                target = checked_candidate if os.path.exists(checked_candidate) else output_csv
+                self._start_fb_auto_validate(target)
+            else:
+                self.fb_log.append("[Auto-Validate] No output CSV provided; skipping.")
+
+    def _start_fb_auto_validate(self, csv_path: str, scope: str = "uncertain_only"):
+        self._stop_fb_auto_validate()
+        if not csv_path or not os.path.exists(csv_path):
+            self.fb_log.append(f"[Auto-Validate] Output CSV not found: {csv_path}")
+            return
+        self.fb_av_worker = AutoValidateWorker(csv_path=csv_path, scope=scope)
+        self.fb_av_worker.log_signal.connect(self.update_fb_log)
+        self.fb_av_worker.finished_signal.connect(self._on_fb_auto_validate_finished)
+        self.fb_av_worker.start()
+
+    def _on_fb_auto_validate_finished(self, output_path: str):
+        if output_path:
+            self.fb_log.append(f"[Auto-Validate] Completed. Output: {output_path}")
+        else:
+            self.fb_log.append("[Auto-Validate] Finished with errors.")
+        self._stop_fb_auto_validate()
+
+    def _stop_fb_auto_validate(self):
+        worker = getattr(self, "fb_av_worker", None)
+        if not worker:
+            return
+        if worker.isRunning():
+            try:
+                worker.wait(2000)
+            except Exception:
+                try:
+                    worker.terminate()
+                    worker.wait(2000)
+                except Exception:
+                    pass
+        self.fb_av_worker = None
 
     def closeEvent(self, event):
         self._shutdown_threads()
@@ -7896,6 +8189,9 @@ class MainWindow(QtWidgets.QMainWindow):
             and hasattr(self.cross_enricher_tab, "shutdown")
         ):
             self.cross_enricher_tab.shutdown()
+        if hasattr(self, "auto_validate_tab") and hasattr(self.auto_validate_tab, "shutdown"):
+            self.auto_validate_tab.shutdown()
+        self._stop_fb_auto_validate()
 
 
 def _handle_cli_entry(argv=None):
@@ -7908,8 +8204,23 @@ def _handle_cli_entry(argv=None):
     parser.add_argument("--min-yield", type=int, dest="min_yield", default=3)
     parser.add_argument("--dry-run", action="store_true", dest="dry_run")
     parser.add_argument("--soundcloud-cli", action="store_true", dest="soundcloud_cli")
+    parser.add_argument("--auto-validate", dest="auto_validate_csv")
+    parser.add_argument("--validate-scope", dest="validate_scope", default="uncertain_only")
+    parser.add_argument("--main-menu", action="store_true", dest="main_menu")
     args, remaining = parser.parse_known_args(argv[1:])
     cli_requested = bool(args.soundcloud_cli or args.soundcloud_url or (args.soundcloud_tags and len(args.soundcloud_tags) > 0))
+    if args.main_menu:
+        _run_text_main_menu()
+        return True, [argv[0]] + remaining
+    if args.auto_validate_csv:
+        csv_path = args.auto_validate_csv.strip()
+        scope = (args.validate_scope or "uncertain_only").strip().lower()
+        try:
+            result_path = run_auto_validate(csv_path, validate_scope=scope, logger=print)
+            print(f"[Auto-Validate] Completed → {result_path}")
+        except Exception as exc:
+            print(f"[Auto-Validate] Failed safely: {exc}")
+        return True, [argv[0]] + remaining
     if cli_requested:
         scrape_soundcloud(
             (args.soundcloud_url or "").strip(),
