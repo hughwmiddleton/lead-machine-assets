@@ -6460,6 +6460,25 @@ def fb_find_page_and_emails_by_name(driver, artist_name: str, location: str = ""
         "musician",
         "songwriter",
     ]
+    non_music_artist_tokens = [
+        "makeup",
+        "cosmetic",
+        "hair",
+        "nail",
+        "lashes",
+        "lash",
+        "brow",
+        "tattoo",
+        "piercing",
+        "barber",
+        "beauty",
+        "jewelry",
+        "clinic",
+        "dentist",
+        "lawyer",
+        "shop",
+        "store",
+    ]
     from facebook_enrich import is_noisy_fb_text_block, looks_like_music_fallback, clean_fb_category_text
 
     def _is_corporate_page(name: str, url: str, category: str | None) -> bool:
@@ -6476,7 +6495,13 @@ def fb_find_page_and_emails_by_name(driver, artist_name: str, location: str = ""
         cat = category.lower()
         return any(tok in cat for tok in music_category_tokens)
 
-    def _has_music_signals(page_text: str, outbound_links: list[str]) -> bool:
+    def _has_music_signals(page_text: str, outbound_links: list[str], category: str | None, page_html: str | None = None) -> bool:
+        combined_text = " ".join(part for part in (category or "", page_text or "") if part).lower()
+        if "artist" in combined_text and not any(bad in combined_text for bad in non_music_artist_tokens):
+            return True
+        html_lc = (page_html or "").lower()
+        if html_lc and "artist" in html_lc and not any(bad in html_lc for bad in non_music_artist_tokens):
+            return True
         text = (page_text or "").lower()
         for link in outbound_links or []:
             l = (link or "").lower()
@@ -6495,14 +6520,16 @@ def fb_find_page_and_emails_by_name(driver, artist_name: str, location: str = ""
                     return True
         return False
 
-    def _is_music_page_final(name: str, url: str, category: str | None, page_text: str, outbound_links: list[str]) -> bool:
+    def _is_music_page_final(
+        name: str, url: str, category: str | None, page_text: str, outbound_links: list[str], page_html: str | None
+    ) -> bool:
         if _is_corporate_page(name, url, category):
             return False
         if _has_press_token(name, url, category) and not _has_music_category(category):
             return False
         if not _has_music_category(category):
             return False
-        if not _has_music_signals(page_text, outbound_links):
+        if not _has_music_signals(page_text, outbound_links, category, page_html):
             return False
         return True
     anchor_candidates = list(soup.find_all("a", href=True)) + list(soup.select('a[role="link"][href*="facebook.com"]')) + list(
@@ -6755,8 +6782,22 @@ def fb_find_page_and_emails_by_name(driver, artist_name: str, location: str = ""
         )
         using_generic = True
     else:
-        _log(f"[FB Enrich] No Facebook page candidates for '{artist_name}'.")
-        return "", []
+        slug = normalize_name(artist_name).replace(" ", "")
+        if slug and len(slug) >= 4:
+            fallback_url = f"https://www.facebook.com/{quote(slug)}"
+            best_score = 1.0
+            best_base_score = 1.0
+            best_cat_boost = 0.0
+            best_url = fallback_url
+            best_name = artist_name
+            best_category_raw = "artist"
+            best_category_norm = "artist"
+            best_is_music = True
+            using_fallback = True
+            _log(f"[FB Enrich] No FB search candidates for '{artist_name}'; trying slug fallback '{fallback_url}'.")
+        else:
+            _log(f"[FB Enrich] No Facebook page candidates for '{artist_name}'.")
+            return "", []
 
     if using_generic:
         _log(
@@ -6778,6 +6819,7 @@ def fb_find_page_and_emails_by_name(driver, artist_name: str, location: str = ""
         page_category_text = None
         page_text_blocks = []
         outbound_links = []
+        raw_html_lc = (page_html or "").lower()
         try:
             soup = BeautifulSoup(page_html, "html.parser")
             seen_blocks = set()
@@ -6813,6 +6855,9 @@ def fb_find_page_and_emails_by_name(driver, artist_name: str, location: str = ""
                 if og_title:
                     page_category_text = _add_block(og_title.get("content") or "")
             page_category_text = clean_fb_category_text(page_category_text) if page_category_text else None
+            if not page_category_text and raw_html_lc and "artist" in raw_html_lc:
+                if not any(bad in raw_html_lc for bad in non_music_artist_tokens):
+                    page_category_text = "Artist"
             # Outbound links
             for tag in soup.find_all("a", href=True):
                 href_val = (tag.get("href") or "").strip()
@@ -6839,6 +6884,7 @@ def fb_find_page_and_emails_by_name(driver, artist_name: str, location: str = ""
                 page_category_text or best_category_raw,
                 page_text_combined,
                 outbound_links,
+                page_html,
             )
             has_reliable_category = bool(page_category_text and any(tok in cat_lc for tok in music_tokens))
             if not page_music and not has_reliable_category and not cat_lc:

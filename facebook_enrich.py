@@ -146,6 +146,25 @@ MUSIC_FALLBACK_TOKENS = [
     "producer",
     "dj",
 ]
+NON_MUSIC_ARTIST_TOKENS = [
+    "makeup",
+    "cosmetic",
+    "hair",
+    "nail",
+    "lashes",
+    "lash",
+    "brow",
+    "tattoo",
+    "piercing",
+    "barber",
+    "beauty",
+    "jewelry",
+    "clinic",
+    "dentist",
+    "lawyer",
+    "shop",
+    "store",
+]
 
 # Basic cleaner to strip noisy tails from FB category strings (phone, URLs, long blurbs).
 def clean_fb_category_text(text: str) -> str:
@@ -353,6 +372,11 @@ def looks_like_music_fallback(text_blocks: List[str], artist_name: str) -> bool:
 
         if artist_l not in block:
             continue
+
+        if "artist" in block:
+            if any(bad in block for bad in NON_MUSIC_ARTIST_TOKENS):
+                continue
+            return True
 
         if any(tok in block for tok in MUSIC_FALLBACK_TOKENS):
             return True

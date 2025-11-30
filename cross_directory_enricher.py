@@ -1291,12 +1291,31 @@ class FacebookSearchClient:
             seen_urls.add(normalised)
 
         if not candidates:
-            _safe_log(
-                self.logger,
-                "[FB Enrich] No safe Facebook page candidates for '%s'",
-                artist_name,
-            )
-            return None
+            slug = normalize_fb_name(artist_name).replace(" ", "")
+            if slug and len(slug) >= 4:
+                fallback_url = f"https://www.facebook.com/{urllib.parse.quote(slug)}"
+                if fallback_url not in seen_urls:
+                    candidates.append(
+                        FbCandidate(
+                            name=artist_name,
+                            url=fallback_url,
+                            category="",
+                        )
+                    )
+                    seen_urls.add(fallback_url)
+                    _safe_log(
+                        self.logger,
+                        "[FB Enrich] No FB search candidates for '%s'; trying slug fallback '%s'.",
+                        artist_name,
+                        fallback_url,
+                    )
+            if not candidates:
+                _safe_log(
+                    self.logger,
+                    "[FB Enrich] No safe Facebook page candidates for '%s'",
+                    artist_name,
+                )
+                return None
 
         strong_music_candidates: List[Tuple[float, float, float, bool, bool, FbCandidate]] = []
         fallback_candidates: List[Tuple[float, float, float, bool, bool, FbCandidate]] = []
@@ -1384,6 +1403,7 @@ class FacebookSearchClient:
             "musician",
             "band",
             "artist",
+            "recording artist",
             "music",
             "singer",
             "songwriter",
@@ -1431,6 +1451,25 @@ class FacebookSearchClient:
             "musician",
             "songwriter",
         ]
+        non_music_artist_tokens = [
+            "makeup",
+            "cosmetic",
+            "hair",
+            "nail",
+            "lashes",
+            "lash",
+            "brow",
+            "tattoo",
+            "piercing",
+            "barber",
+            "beauty",
+            "jewelry",
+            "clinic",
+            "dentist",
+            "lawyer",
+            "shop",
+            "store",
+        ]
 
         def _has_music_category(category: str | None) -> bool:
             if not category:
@@ -1442,7 +1481,51 @@ class FacebookSearchClient:
             text = f"{name} {url} {category or ''}".lower()
             return any(tok in text for tok in ("news", "magazine", "press", "blog", "journal", "media", "publisher"))
 
-        def _has_music_signals(page_text: str, outbound_links: List[str]) -> bool:
+        def _has_music_signals(
+            category: str | None,
+            page_text: str,
+            outbound_links: List[str],
+            page_url: str,
+            page_html: str | None = None,
+        ) -> bool:
+            combined_text = " ".join(part for part in (category or "", page_text or "") if part).lower()
+            if "artist" in combined_text:
+                for bad in non_music_artist_tokens:
+                    if bad in combined_text:
+                        break
+                else:
+                    if self.logger:
+                        try:
+                            if hasattr(self.logger, "debug"):
+                                self.logger.debug(
+                                    "[FB Enrich] Treating FB page '%s' as music based on 'artist' token.", page_url
+                                )
+                            else:
+                                _safe_log(
+                                    self.logger,
+                                    "[FB Enrich] Treating FB page '%s' as music based on 'artist' token.",
+                                    page_url,
+                                )
+                        except Exception:
+                            pass
+                    return True
+            html_lc = (page_html or "").lower()
+            if html_lc and "artist" in html_lc and not any(bad in html_lc for bad in non_music_artist_tokens):
+                if self.logger:
+                    try:
+                        if hasattr(self.logger, "debug"):
+                            self.logger.debug(
+                                "[FB Enrich] Treating FB page '%s' as music based on 'artist' token (HTML).", page_url
+                            )
+                        else:
+                            _safe_log(
+                                self.logger,
+                                "[FB Enrich] Treating FB page '%s' as music based on 'artist' token (HTML).",
+                                page_url,
+                            )
+                    except Exception:
+                        pass
+                return True
             text = (page_text or "").lower()
             for link in outbound_links or []:
                 l = (link or "").lower()
@@ -1450,7 +1533,9 @@ class FacebookSearchClient:
                     return True
             return any(tok in text for tok in music_text_tokens)
 
-        def _is_music_page_final(name: str, url: str, category: str | None, page_text: str, outbound_links: List[str]) -> bool:
+        def _is_music_page_final(
+            name: str, url: str, category: str | None, page_text: str, outbound_links: List[str], page_html: str | None
+        ) -> bool:
             combined = f"{name} {url} {category or ''}".lower()
             if any(tok in combined for tok in corporate_tokens):
                 return False
@@ -1458,7 +1543,7 @@ class FacebookSearchClient:
                 return False
             if not _has_music_category(category):
                 return False
-            if not _has_music_signals(page_text, outbound_links):
+            if not _has_music_signals(category, page_text, outbound_links, url, page_html):
                 return False
             return True
         for cand in candidates:
@@ -1622,10 +1707,11 @@ class FacebookSearchClient:
             page_html = self.driver.page_source or ""
             page_category_text = None
             page_text_blocks: List[str] = []
+            raw_html_lc = (page_html or "").lower()
+            outbound_links: List[str] = []
             try:
                 soup = BeautifulSoup(page_html, "html.parser")
                 seen_blocks: Set[str] = set()
-                outbound_links: List[str] = []
 
                 def _add_block(val: str) -> Optional[str]:
                     val = (val or "").strip()
@@ -1664,7 +1750,13 @@ class FacebookSearchClient:
                 page_category_text = clean_fb_category_text(page_category_text) if page_category_text else None
             except Exception:
                 page_category_text = None
-            sig_page = classify_corporate_signals(best_candidate.url, best_candidate.name, page_category_text or "")
+            if not page_category_text and raw_html_lc and "artist" in raw_html_lc:
+                if not any(bad in raw_html_lc for bad in non_music_artist_tokens):
+                    page_category_text = "Artist"
+            page_text_combined = " ".join(page_text_blocks)
+            sig_page = classify_corporate_signals(
+                best_candidate.url, best_candidate.name, page_category_text or "", page_text_combined
+            )
             if sig_page.has_hard and not sig_page.has_artist:
                 _safe_log(
                     self.logger,
@@ -1687,13 +1779,13 @@ class FacebookSearchClient:
                 (cat and any(tok in (cat or "").lower() for tok in FB_MUSIC_CATEGORY_TOKENS))
                 for cat in (page_category_text, best_candidate.category)
             )
-            page_text_combined = " ".join(page_text_blocks)
             page_music = _is_music_page_final(
                 best_candidate.name or "",
                 best_candidate.url or "",
                 page_category_text or best_candidate.category,
                 page_text_combined,
                 outbound_links,
+                page_html,
             )
             if not page_music:
                 page_music = sig_page.has_artist or is_music_page(
