@@ -213,6 +213,10 @@ def enrich_spotify_rows_with_about_links(
     total = len(rows)
     for idx, row in enumerate(rows, start=1):
         _populate_defaults(row)
+        if _row_is_fully_enriched(row):
+            _log(logger, "[Spotify About] Row already has contacts + location/genre; skipping fetch.")
+            _emit_progress(progress_callback, idx, total)
+            continue
         artist_id = _resolve_artist_id(row)
         if not artist_id:
             _log(logger, "[Spotify About] Missing artist ID; skipping row.")
@@ -479,6 +483,13 @@ def _resolve_artist_id(row: Row) -> str:
     if len(path_parts) >= 2 and path_parts[0] == "artist":
         return path_parts[1]
     return ""
+
+def _row_is_fully_enriched(row: Row) -> bool:
+    contact_fields = ("Email", "Social Link", "External Links", "Spotify_Website_URL")
+    has_contacts = any((row.get(field) or "").strip() for field in contact_fields)
+    has_location = bool((row.get("Location") or "").strip())
+    has_genre = bool((row.get("Primary Genre") or "").strip())
+    return has_contacts and has_location and has_genre
 
 
 def _apply_socials(row: Row, data: Dict[str, str]) -> None:

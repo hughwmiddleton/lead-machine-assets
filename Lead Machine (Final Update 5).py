@@ -2314,6 +2314,25 @@ def scrape_bandcamp(
     seen_profiles = set()
     requested_label = ""
     requested_hint = ""
+    if url_input and _bandcamp_is_discover_url(url_input):
+        loc_meta = _bandcamp_location_label_from_url(url_input)
+        requested_label = loc_meta.get("display_label", "") or ""
+        requested_hint = loc_meta.get("hint", "") or ""
+        if not requested_hint:
+            params = _bandcamp_parse_discover_params(url_input)
+            requested_hint = params.get("loc") or params.get("location") or ""
+        if not (requested_label or requested_hint):
+            parsed = urlparse(url_input)
+            segments = [seg for seg in (parsed.path or "").split("/") if seg]
+            if len(segments) >= 2 and segments[0] == "discover":
+                slug = segments[1]
+                slug_parts = [part for part in re.split(r"[+\\s]+", slug) if part]
+                if len(slug_parts) >= 2:
+                    loc_guess = " ".join(slug_parts[:-1]).strip()
+                    if loc_guess:
+                        requested_hint = loc_guess
+        if requested_label or requested_hint:
+            print(f"Bandcamp: applying location filter -> {requested_label or requested_hint}")
     contacts_required = BANDCAMP_MIN_CONTACT_REQUIREMENT and not bool(url_input)
     search_cutoff = datetime.date.today() - datetime.timedelta(days=730) if normalized_mode == "search" else None
     search_skipped_old = 0
