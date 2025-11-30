@@ -6162,6 +6162,63 @@ def scrape_soundcloud(website_url, seed_tags=None, pages_per_tag=SOUNDCLOUD_PAGE
 # =============================================================================
 # Facebook Scraping Functions (Page 2)
 # =============================================================================
+FACEBOOK_CLOSE_EXTRA_WINDOWS = True
+
+def close_unexpected_windows(driver, main_window_handle, logger=None):
+    """
+    Close any Selenium windows/tabs that are not the main scraping window.
+
+    Always switches focus back to the main window at the end.
+    Safe to call repeatedly during the scrape.
+    """
+    def _log(level: str, message: str):
+        if not logger:
+            return
+        try:
+            if hasattr(logger, level):
+                getattr(logger, level)(message)
+            else:
+                logger(message)
+        except Exception:
+            pass
+
+    try:
+        handles = driver.window_handles
+    except Exception as e:
+        _log("warning", f"Could not read window handles: {e}")
+        return
+
+    if not main_window_handle:
+        _log("warning", "Main window handle not available; skipping unexpected window cleanup.")
+        return
+    if main_window_handle not in handles:
+        _log("warning", "Main window handle missing from current handles; skipping unexpected window cleanup.")
+        return
+
+    for handle in handles:
+        if handle == main_window_handle:
+            continue
+        try:
+            driver.switch_to.window(handle)
+            current_url = ""
+            try:
+                current_url = driver.current_url
+            except Exception:
+                current_url = ""
+            if "meta-pay" in (current_url or "").lower() or "payments" in (current_url or "").lower():
+                _log("info", f"Detected Meta Pay popup window, closing: {current_url}")
+            else:
+                _log("info", f"Closing unexpected window {handle} (url={current_url})")
+            driver.close()
+        except Exception as e:
+            _log("warning", f"Error closing unexpected window {handle}: {e}")
+
+    try:
+        if main_window_handle in driver.window_handles:
+            driver.switch_to.window(main_window_handle)
+    except Exception as e:
+        _log("warning", f"Could not switch back to main window: {e}")
+
 def fb_extract_emails_from_html(html: str) -> list[str]:
     """
     Given Facebook page HTML, return a de-duplicated list of email addresses.
@@ -7375,6 +7432,13 @@ def scrape_csv(input_csv, output_csv, fb_username, fb_password, max_emails=None)
     results = []
     emails_found = 0
     processed_urls = set()
+    main_window_handle = None
+
+    def _fb_log(msg: str):
+        try:
+            print(msg)
+        except Exception:
+            pass
     if not existing_data.empty and "url" in existing_data.columns:
         processed_urls = {
             value.strip()
@@ -7450,6 +7514,13 @@ def scrape_csv(input_csv, output_csv, fb_username, fb_password, max_emails=None)
         return
     driver = setup_facebook_driver()
     login_facebook(driver, fb_username, fb_password)
+    try:
+        main_window_handle = driver.current_window_handle
+    except Exception as exc:
+        main_window_handle = None
+        print(f"[FB Scraper] Warning: could not capture main window handle: {exc}")
+    if FACEBOOK_CLOSE_EXTRA_WINDOWS:
+        close_unexpected_windows(driver, main_window_handle, logger=_fb_log)
     session_counter = 0
     remaining_rows = []
     for idx, (row, url, known_emails) in enumerate(facebook_rows):
@@ -7457,8 +7528,12 @@ def scrape_csv(input_csv, output_csv, fb_username, fb_password, max_emails=None)
             continue
         preexisting_emails = list(known_emails or [])
         try:
+            if FACEBOOK_CLOSE_EXTRA_WINDOWS:
+                close_unexpected_windows(driver, main_window_handle, logger=_fb_log)
             print(f"Scraping Facebook page: {url}")
             driver.get(url)
+            if FACEBOOK_CLOSE_EXTRA_WINDOWS:
+                close_unexpected_windows(driver, main_window_handle, logger=_fb_log)
             session_counter += 1
             # Refresh the session every 20 pages.
             if session_counter % 20 == 0:
@@ -7466,7 +7541,14 @@ def scrape_csv(input_csv, output_csv, fb_username, fb_password, max_emails=None)
                 driver.quit()
                 driver = setup_facebook_driver()
                 login_facebook(driver, fb_username, fb_password)
+                try:
+                    main_window_handle = driver.current_window_handle
+                except Exception as exc:
+                    main_window_handle = None
+                    print(f"[FB Scraper] Warning: could not capture main window handle after refresh: {exc}")
             navigated = _goto_facebook_about(driver, url, timeout=5)
+            if FACEBOOK_CLOSE_EXTRA_WINDOWS:
+                close_unexpected_windows(driver, main_window_handle, logger=_fb_log)
             if not navigated:
                 print(f"Warning: could not open About section for {url}; scanning current page.")
             time.sleep(1.0)
