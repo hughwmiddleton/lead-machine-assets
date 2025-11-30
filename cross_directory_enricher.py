@@ -2752,6 +2752,101 @@ def _extract_seed_links_by_source(row: pd.Series) -> Dict[str, Set[str]]:
     return mapping
 
 
+def dedupe_pre_enrich(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Removes duplicate artist rows before enrichment based on
+    composite key: Artist Name + Song Title + Source Directory (+ Email if present).
+    Normalises text before comparison.
+    Logs how many duplicates were removed.
+    Returns the cleaned DataFrame.
+    """
+    if df is None:
+        return df
+
+    total_before = len(df.index)
+
+    def _log_dedupe(removed: int, kept: int) -> str:
+        message = f"[Deduper] Removed {removed} duplicate rows (kept {kept} unique rows)"
+        try:
+            dedupe_pre_enrich._last_log_message = message  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        try:
+            print(message)
+        except Exception:
+            pass
+        return message
+
+    if total_before == 0:
+        _log_dedupe(0, 0)
+        return df
+
+    def _song_key(row: pd.Series) -> str:
+        token = _extract_seed_track_key(row)
+        if token:
+            return token
+        for column in TRACK_NAME_COLUMNS:
+            if column not in row:
+                continue
+            candidate = normalise_track_title(row.get(column))
+            if candidate:
+                return candidate
+        return ""
+
+    def _contact_key(row: pd.Series) -> str:
+        email = _clean_cell(row.get("Email")).lower()
+        if email:
+            return email
+        for column in ("External Links", "Spotify_URL", "SoundCloud Link"):
+            if column not in row:
+                continue
+            raw = _clean_cell(row.get(column))
+            if not raw:
+                continue
+            for token in _split_multi_value(raw):
+                normalised = _normalise_url(token) or token.strip().lower()
+                if normalised:
+                    return normalised
+        return ""
+
+    seen: Set[Tuple[str, str, str, str]] = set()
+    keep_indices: List[Any] = []
+    best_contact_for_key: Dict[Tuple[str, str, str, str], Tuple[Any, bool]] = {}
+    for idx, row in df.iterrows():
+        artist_key = normalise_artist_name(_clean_cell(row.get("Artist Name")))
+        if not artist_key:
+            keep_indices.append(idx)
+            continue
+        track_key = _song_key(row)
+        track_key = unidecode(track_key) if track_key else ""
+        source_raw = _clean_cell(row.get("Source Directory"))
+        source_key = _canonical_source_key(source_raw) or _norm_name(source_raw)
+        contact = _contact_key(row)
+        composite = (artist_key, track_key, source_key, contact)
+        has_email = bool(_clean_cell(row.get("Email")))
+        if composite in seen:
+            _, existing_has_email = best_contact_for_key.get(composite, (None, False))
+            # Prefer the row that carries an email if the first kept row lacked one.
+            if has_email and not existing_has_email:
+                previous_idx, _ = best_contact_for_key[composite]
+                try:
+                    keep_indices.remove(previous_idx)
+                except ValueError:
+                    pass
+                keep_indices.append(idx)
+                best_contact_for_key[composite] = (idx, has_email)
+            continue
+        seen.add(composite)
+        best_contact_for_key[composite] = (idx, has_email)
+        keep_indices.append(idx)
+
+    deduped_df = df.loc[keep_indices].copy()
+    deduped_df.reset_index(drop=True, inplace=True)
+    removed = total_before - len(deduped_df.index)
+    _log_dedupe(removed, len(deduped_df.index))
+    return deduped_df
+
+
 def _dedupe_rows(rows: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
     deduped: List[Dict[str, Any]] = []
     seen_ids: Set[int] = set()
@@ -2888,6 +2983,10 @@ class CrossDirectoryEnricherWorker(QThread):
                 self.log_message.emit("[Enricher] Seed CSV missing 'Artist Name'; aborting.")
                 self.finished.emit("")
                 return
+            seed_df = dedupe_pre_enrich(seed_df)
+            dedupe_message = getattr(dedupe_pre_enrich, "_last_log_message", "")
+            if dedupe_message:
+                self.log_message.emit(dedupe_message)
             total = len(seed_df.index)
             self.total_rows = total
             if total == 0:

@@ -381,6 +381,20 @@ def _infer_directory_from_url(url: str) -> str:
     return ""
 
 
+def _normalise_source_directory(raw_dir: str) -> Optional[str]:
+    raw = str(raw_dir or "")
+    text = raw.strip().lower()
+    if "soundcloud" in text:
+        return "soundcloud"
+    if "bandcamp" in text:
+        return "bandcamp"
+    if "unearthed" in text or "triple j" in text:
+        return "unearthed"
+    if "spotify" in text:
+        return "spotify"
+    return None
+
+
 def _choose_checker(directory: str):
     mapping = {
         "bandcamp": check_bandcamp_origin,
@@ -388,7 +402,9 @@ def _choose_checker(directory: str):
         "unearthed": check_unearthed_origin,
         "spotify": check_spotify_origin,
     }
-    key = (directory or "").strip().lower()
+    key = _normalise_source_directory(directory)
+    if not key and directory:
+        key = _normalise_source_directory(_infer_directory_from_url(directory))
     return mapping.get(key)
 
 
@@ -413,6 +429,69 @@ def _first_url_from_cell(value: str) -> str:
         if candidate.startswith(("http://", "https://")):
             return candidate
     return ""
+
+
+def dedupe_pre_auto_validate(df: pd.DataFrame, source_dir_col: str) -> pd.DataFrame:
+    """
+    Removes duplicate rows before origin auto-validate using the composite key:
+    normalised Artist Name + core Song Title + Source Directory (+ Email/first link if present).
+    Keeps the first occurrence only and logs how many rows were removed.
+    """
+    if df is None:
+        return df
+    total_before = len(df.index)
+    if total_before == 0:
+        _log(None, "[Deduper] Removed 0 duplicate rows before Auto-Validate (kept 0 unique rows)")
+        return df
+
+    def _contact_key(row: pd.Series) -> str:
+        email = str(row.get("Email", "") or "").strip().lower()
+        if email:
+            return email
+        for col in ("External Links", "Spotify_URL", "SoundCloud Link", "Social Link"):
+            if col not in row:
+                continue
+            url = _first_url_from_cell(row.get(col, ""))
+            if url:
+                return url.strip().lower()
+        return ""
+
+    def _song_key(row: pd.Series) -> str:
+        raw = row.get("Song Title", "") or ""
+        core = extract_core_title(str(raw))
+        return normalize_text(core)
+
+    seen = set()
+    keep_indices: List[int] = []
+    best_contact: Dict[Tuple[str, str, str, str], Tuple[int, bool]] = {}
+    for idx, row in df.iterrows():
+        artist_norm = normalize_text(str(row.get("Artist Name", "") or ""))
+        track_norm = _song_key(row)
+        source_raw = str(row.get(source_dir_col, "") or "")
+        source_norm = _normalise_source_directory(source_raw) or normalize_text(source_raw)
+        contact_norm = _contact_key(row)
+        composite = (artist_norm, track_norm, source_norm, contact_norm)
+        has_email = bool(str(row.get("Email", "") or "").strip())
+        if composite in seen:
+            _, existing_has_email = best_contact.get(composite, (-1, False))
+            if has_email and not existing_has_email:
+                prev_idx, _ = best_contact[composite]
+                try:
+                    keep_indices.remove(prev_idx)
+                except ValueError:
+                    pass
+                keep_indices.append(idx)
+                best_contact[composite] = (idx, has_email)
+            continue
+        seen.add(composite)
+        best_contact[composite] = (idx, has_email)
+        keep_indices.append(idx)
+
+    deduped = df.loc[keep_indices].copy()
+    deduped.reset_index(drop=True, inplace=True)
+    removed = total_before - len(deduped.index)
+    _log(None, f"[Deduper] Removed {removed} duplicate rows before Auto-Validate (kept {len(deduped.index)} unique rows)")
+    return deduped
 
 
 def _select_rows_to_validate(df: pd.DataFrame, scope: str, match_col: str, status_col: str) -> List[int]:
@@ -462,6 +541,17 @@ def _update_status_with_origin(row: pd.Series, result: OriginMatchResult) -> Tup
     return updated_status, updated_score
 
 
+def _derive_origin_output_path(input_path: str) -> str:
+    base, ext = os.path.splitext(input_path)
+    if not ext:
+        ext = ".csv"
+    if base.endswith("_checked_origin"):
+        return f"{base}{ext}"
+    if base.endswith("_checked"):
+        return f"{base}_origin{ext}"
+    return f"{base}_origin{ext}"
+
+
 def run_auto_validate(
     csv_path: str,
     output_path: Optional[str] = None,
@@ -481,9 +571,16 @@ def run_auto_validate(
 
     source_dir_col = _ensure_column(df, SOURCE_DIR_COLUMNS)
     source_url_col = _ensure_column(df, SOURCE_URL_COLUMNS)
+    df = dedupe_pre_auto_validate(df, source_dir_col)
     for col in ("final_status", "match_score_overall", "origin_match_flag", "origin_match_reason", "origin_artist_score", "origin_title_score"):
         if col not in df.columns:
             df[col] = "" if col.endswith("_reason") else 0
+    for col in ("origin_artist_score", "origin_title_score", "match_score_overall"):
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0).astype(float)
+    for col in ("final_status", "origin_match_reason"):
+        if col in df.columns:
+            df[col] = df[col].fillna("").astype(str)
 
     match_col = "match_score_overall"
     status_col = "final_status"
@@ -501,7 +598,8 @@ def run_auto_validate(
         row = df.loc[idx]
         artist_name = str(row.get("Artist Name", "") or "").strip()
         song_title = str(row.get("Song Title", "") or "").strip()
-        source_dir = str(row.get(source_dir_col, "") or "").strip()
+        raw_source_dir = str(row.get(source_dir_col, "") or "")
+        source_dir = raw_source_dir.strip()
         source_url = str(row.get(source_url_col, "") or "").strip()
         if not source_url:
             for alt_col in ("SoundCloud Link", "Social Link", "Spotify_URL", "External Links"):
@@ -510,15 +608,29 @@ def run_auto_validate(
                 if source_url:
                     break
         if not source_dir:
-            source_dir = _infer_directory_from_url(source_url)
-            if source_dir:
-                df.at[idx, source_dir_col] = source_dir
-        if not source_dir or not source_url:
+            inferred_dir = _infer_directory_from_url(source_url)
+            if inferred_dir:
+                source_dir = inferred_dir
+                df.at[idx, source_dir_col] = inferred_dir
+        origin_type = _normalise_source_directory(source_dir)
+        if not origin_type:
+            inferred_dir = _infer_directory_from_url(source_url)
+            origin_type = _normalise_source_directory(inferred_dir)
+            if origin_type:
+                df.at[idx, source_dir_col] = origin_type
+        if not origin_type:
+            if source_dir or source_url:
+                df.at[idx, "origin_match_flag"] = 0
+                df.at[idx, "origin_match_reason"] = "unsupported_directory"
+                df.at[idx, "origin_artist_score"] = 0.0
+                df.at[idx, "origin_title_score"] = 0.0
             continue
-        checker = _choose_checker(source_dir)
+        if not source_url:
+            continue
+        checker = _choose_checker(origin_type)
         if not checker:
             continue
-        dir_key = source_dir.lower()
+        dir_key = origin_type.lower()
         dir_counts[dir_key] = dir_counts.get(dir_key, 0) + 1
         try:
             result = checker(source_url, artist_name, song_title, session, html_cache, logger)
@@ -554,12 +666,10 @@ def run_auto_validate(
                 blocked += 1
         df.at[idx, "match_score_overall"] = new_score
 
-    base, ext = os.path.splitext(csv_path)
     if output_path:
         target_path = output_path
     else:
-        suffix = "_origin_checked" if base.endswith("_checked") else "_checked"
-        target_path = f"{base}{suffix}{ext or '.csv'}"
+        target_path = _derive_origin_output_path(csv_path)
     df.to_csv(target_path, index=False)
     for dir_name, count in dir_counts.items():
         _log(logger, f"[Auto-Validate] {dir_name}: checked {count} URL(s)")

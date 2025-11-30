@@ -22,6 +22,7 @@ import sys
 import subprocess
 import platform
 import traceback
+from typing import Optional
 
 # ---------------------------
 # Dependency Check and Installation
@@ -126,7 +127,7 @@ from dateutil import parser as dparser
 from dateutil.relativedelta import relativedelta
 import unicodedata
 from spotify_scraper import scrape_spotify
-from origin_validator import run_auto_validate
+from origin_validator import _derive_origin_output_path, run_auto_validate
 
 cross_directory_enricher = None
 try:
@@ -7061,6 +7062,11 @@ def _prompt_origin_auto_validate(csv_path: str, default_scope: str = "uncertain_
     if not csv_path or not os.path.exists(csv_path):
         return None
     try:
+        if QtWidgets.QApplication.instance():
+            return None
+    except Exception:
+        return None
+    try:
         if not sys.stdin or not sys.stdin.isatty():
             return None
     except Exception:
@@ -7079,7 +7085,6 @@ def _prompt_origin_auto_validate(csv_path: str, default_scope: str = "uncertain_
     scope = "all" if scope_choice == "2" else default_scope
     try:
         result_path = run_auto_validate(csv_path, validate_scope=scope, logger=print)
-        print(f"[Auto-Validate] Completed → {result_path}")
         return result_path
     except Exception as exc:
         print(f"[Auto-Validate] Failed safely: {exc}")
@@ -7098,7 +7103,6 @@ def _run_auto_validate_only():
     scope = "all" if scope_choice == "2" else "uncertain_only"
     try:
         result_path = run_auto_validate(path, validate_scope=scope, logger=print)
-        print(f"[Auto-Validate] Completed → {result_path}")
     except Exception as exc:
         print(f"[Auto-Validate] Failed safely: {exc}")
 
@@ -7556,16 +7560,36 @@ class AutoValidateWorker(QtCore.QThread):
     log_signal = QtCore.pyqtSignal(str)
     finished_signal = QtCore.pyqtSignal(str)
 
-    def __init__(self, csv_path: str, scope: str = "uncertain_only", parent=None):
+    def __init__(
+        self,
+        csv_path: str,
+        scope: str = "uncertain_only",
+        output_path: Optional[str] = None,
+        auto_run: bool = False,
+        emit_start_log: bool = True,
+        parent=None,
+    ):
         super().__init__(parent)
         self.csv_path = csv_path
         self.scope = scope
+        self.output_path = output_path
+        self.auto_run = auto_run
+        self.emit_start_log = emit_start_log
 
     def run(self):
         try:
-            self._log(f"[Auto-Validate] Starting origin validation on {self.csv_path} (scope: {self.scope})...")
-            result = run_auto_validate(self.csv_path, validate_scope=self.scope, logger=self._log)
-            self._log(f"[Auto-Validate] Completed. Output: {result}")
+            target_path = self.output_path or _derive_origin_output_path(self.csv_path)
+            if self.emit_start_log:
+                if self.auto_run:
+                    self._log("[Auto-Validate] Auto-run enabled (GUI). Validating all rows...")
+                else:
+                    self._log(f"[Auto-Validate] Starting origin validation on {self.csv_path} (scope: {self.scope})...")
+            result = run_auto_validate(
+                self.csv_path,
+                output_path=target_path,
+                validate_scope=self.scope,
+                logger=self._log,
+            )
             self.finished_signal.emit(result)
         except Exception as exc:
             self._log(f"[Auto-Validate] Failed safely: {exc}")
@@ -7751,7 +7775,13 @@ class CrossDirectoryEnricherTab(QtWidgets.QWidget):
             )
             if self.auto_validate_checkbox.isChecked():
                 self._append_log("[Auto-Validate] Queueing origin validation...")
-                self._start_auto_validate(output_path)
+                target_path = _derive_origin_output_path(output_path)
+                self._start_auto_validate(
+                    output_path,
+                    scope="all",
+                    output_path=target_path,
+                    auto_run=True,
+                )
         else:
             QtWidgets.QMessageBox.warning(
                 self,
@@ -7783,21 +7813,33 @@ class CrossDirectoryEnricherTab(QtWidgets.QWidget):
         self.worker = None
         self._stop_auto_validate_worker()
 
-    def _start_auto_validate(self, csv_path: str, scope: str = "uncertain_only"):
+    def _start_auto_validate(
+        self,
+        csv_path: str,
+        scope: str = "uncertain_only",
+        output_path: Optional[str] = None,
+        auto_run: bool = False,
+    ):
         self._stop_auto_validate_worker()
         if not csv_path or not os.path.exists(csv_path):
             self._append_log(f"[Auto-Validate] Output CSV not found: {csv_path}")
             return
-        self.av_worker = AutoValidateWorker(csv_path=csv_path, scope=scope)
+        target_path = output_path or _derive_origin_output_path(csv_path)
+        self.av_worker = AutoValidateWorker(
+            csv_path=csv_path,
+            scope=scope,
+            output_path=target_path,
+            auto_run=auto_run,
+        )
         self.av_worker.log_signal.connect(self._append_log)
         self.av_worker.finished_signal.connect(self._on_auto_validate_finished)
         self.av_worker.start()
 
     def _on_auto_validate_finished(self, output_path: str):
         if output_path:
-            self._append_log(f"[Auto-Validate] Done. Output: {output_path}")
+            self._append_log(f"Origin Auto-Validate finished. Output: {output_path}")
         else:
-            self._append_log("[Auto-Validate] Finished with errors.")
+            self._append_log("Origin Auto-Validate finished with errors.")
         self._stop_auto_validate_worker()
 
     def _stop_auto_validate_worker(self):
@@ -7883,7 +7925,13 @@ class AutoValidateTab(QtWidgets.QWidget):
         self.log_console.clear()
         self._append_log(f"[Auto-Validate] Starting on {csv_path} (scope: {scope})...")
         self.run_button.setEnabled(False)
-        self.worker = AutoValidateWorker(csv_path=csv_path, scope=scope)
+        target_path = _derive_origin_output_path(csv_path)
+        self.worker = AutoValidateWorker(
+            csv_path=csv_path,
+            scope=scope,
+            output_path=target_path,
+            emit_start_log=False,
+        )
         self.worker.log_signal.connect(self._append_log)
         self.worker.finished_signal.connect(self._on_finished)
         self.worker.start()
@@ -7896,9 +7944,9 @@ class AutoValidateTab(QtWidgets.QWidget):
 
     def _on_finished(self, output_path: str):
         if output_path:
-            self._append_log(f"[Auto-Validate] Completed. Output: {output_path}")
+            self._append_log(f"Origin Auto-Validate finished. Output: {output_path}")
         else:
-            self._append_log("[Auto-Validate] Finished with errors.")
+            self._append_log("Origin Auto-Validate finished with errors.")
         self.run_button.setEnabled(True)
         self._stop_worker()
 
@@ -8244,25 +8292,43 @@ class MainWindow(QtWidgets.QMainWindow):
                 base, ext = os.path.splitext(output_csv)
                 checked_candidate = f"{base}_checked{ext or '.csv'}"
                 target = checked_candidate if os.path.exists(checked_candidate) else output_csv
-                self._start_fb_auto_validate(target)
+                target_path = _derive_origin_output_path(target)
+                self._start_fb_auto_validate(
+                    target,
+                    scope="all",
+                    output_path=target_path,
+                    auto_run=True,
+                )
             else:
                 self.fb_log.append("[Auto-Validate] No output CSV provided; skipping.")
 
-    def _start_fb_auto_validate(self, csv_path: str, scope: str = "uncertain_only"):
+    def _start_fb_auto_validate(
+        self,
+        csv_path: str,
+        scope: str = "uncertain_only",
+        output_path: Optional[str] = None,
+        auto_run: bool = False,
+    ):
         self._stop_fb_auto_validate()
         if not csv_path or not os.path.exists(csv_path):
             self.fb_log.append(f"[Auto-Validate] Output CSV not found: {csv_path}")
             return
-        self.fb_av_worker = AutoValidateWorker(csv_path=csv_path, scope=scope)
+        target_path = output_path or _derive_origin_output_path(csv_path)
+        self.fb_av_worker = AutoValidateWorker(
+            csv_path=csv_path,
+            scope=scope,
+            output_path=target_path,
+            auto_run=auto_run,
+        )
         self.fb_av_worker.log_signal.connect(self.update_fb_log)
         self.fb_av_worker.finished_signal.connect(self._on_fb_auto_validate_finished)
         self.fb_av_worker.start()
 
     def _on_fb_auto_validate_finished(self, output_path: str):
         if output_path:
-            self.fb_log.append(f"[Auto-Validate] Completed. Output: {output_path}")
+            self.fb_log.append(f"Origin Auto-Validate finished. Output: {output_path}")
         else:
-            self.fb_log.append("[Auto-Validate] Finished with errors.")
+            self.fb_log.append("Origin Auto-Validate finished with errors.")
         self._stop_fb_auto_validate()
 
     def _stop_fb_auto_validate(self):
@@ -8335,7 +8401,6 @@ def _handle_cli_entry(argv=None):
         scope = (args.validate_scope or "uncertain_only").strip().lower()
         try:
             result_path = run_auto_validate(csv_path, validate_scope=scope, logger=print)
-            print(f"[Auto-Validate] Completed → {result_path}")
         except Exception as exc:
             print(f"[Auto-Validate] Failed safely: {exc}")
         return True, [argv[0]] + remaining
