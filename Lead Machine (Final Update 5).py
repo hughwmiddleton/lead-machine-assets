@@ -6985,6 +6985,25 @@ def _extract_social_link_from_row(row):
     links = _extract_social_links(row)
     return links[0] if links else ""
 
+def row_has_email(row, email_column: str = "Email") -> bool:
+    """
+    Returns True if the row already has at least one email address
+    in the given email_column. Treats whitespace-only strings as empty.
+    """
+    if row is None:
+        return False
+    try:
+        value = row.get(email_column, "")
+    except Exception:
+        try:
+            value = row[email_column]
+        except Exception:
+            value = ""
+    if value is None or pd.isna(value):
+        return False
+    text = str(value).strip()
+    return len(text) > 0
+
 def _extract_existing_emails(row, precomputed_links=None):
     """Gather any email addresses already present in Email/Social Link fields."""
     emails = []
@@ -7347,6 +7366,14 @@ def scrape_csv(input_csv, output_csv, fb_username, fb_password, max_emails=None)
     exclude_urls_lower = {url.lower() for url in exclude_urls}
     facebook_rows = []
     for index, row in data.iterrows():
+        artist_name = ""
+        try:
+            artist_name = str(row.get("Artist Name", "")).strip()
+        except Exception:
+            try:
+                artist_name = str(row["Artist Name"]).strip()
+            except Exception:
+                artist_name = ""
         links = _extract_social_links(row)
         preexisting_emails = _extract_existing_emails(row, links)
         existing_contact_url = ""
@@ -7362,6 +7389,10 @@ def scrape_csv(input_csv, output_csv, fb_username, fb_password, max_emails=None)
             payload, _ = _build_email_result(row, "", preexisting_emails, preferred_url=existing_contact_url)
             if payload:
                 results.append(payload)
+
+        if row_has_email(row, email_column="Email"):
+            print(f"[FB Scraper] Row {index + 1}: skipping '{artist_name}' because Email column is already populated.")
+            continue
 
         if not links:
             continue
