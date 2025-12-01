@@ -1,0 +1,23 @@
+{
+  "export_mode": "both",
+  "jobs": [
+    {
+      "job_id": "spotify_freshfinds_uk_indie_2025-12-01",
+      "directory": "spotify",
+      "mode": "playlist",
+      "input_seed_csv": "input/Spotify_uk_indie_seed.csv",
+      "target_valid_leads": 120,
+      "max_hours": 4,
+      "notes": "Spotify Fresh Finds UK/IE, indie/alt"
+    },
+    {
+      "job_id": "bandcamp_us_emo_discover_2025-12-01",
+      "directory": "bandcamp",
+      "mode": "discover",
+      "input_seed_csv": "input/Bandcamp_us_emo_seed.csv",
+      "target_valid_leads": 100,
+      "max_hours": 3,
+      "notes": "Bandcamp discover scan for US emo"
+    }
+  ]
+}

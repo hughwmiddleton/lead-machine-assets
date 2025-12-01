@@ -1,0 +1,37 @@
+{
+  "export_mode": "both",
+  "jobs": [
+    {
+      "directory": "spotify",
+      "mode": "playlist",
+      "input_seed_csv": "https://open.spotify.com/playlist/37i9dQZF1DX3u9TSHqpdJC?si=41afa3c17b7f45d2",
+      "target_valid_leads": 20,
+      "max_hours": 0,
+      "job_id": "job_spotify_1"
+    },
+    {
+      "directory": "bandcamp",
+      "mode": "discover",
+      "input_seed_csv": "https://bandcamp.com/discover/london+pop?s=new",
+      "target_valid_leads": 100,
+      "max_hours": 0,
+      "job_id": "job_bandcamp_2"
+    },
+    {
+      "directory": "soundcloud",
+      "mode": "people",
+      "input_seed_csv": "https://soundcloud.com/search/people?q=london&filter.place=east%20london",
+      "target_valid_leads": 100,
+      "max_hours": 0,
+      "job_id": "job_soundcloud_3"
+    },
+    {
+      "directory": "unearthed",
+      "mode": "",
+      "input_seed_csv": "https://www.abc.net.au/triplejunearthed/music/",
+      "target_valid_leads": 50,
+      "max_hours": 0,
+      "job_id": "job_unearthed_4"
+    }
+  ]
+}

@@ -22,6 +22,7 @@ import sys
 import subprocess
 import platform
 import traceback
+import tempfile
 from typing import Optional, Tuple
 
 # ---------------------------
@@ -8425,6 +8426,462 @@ class AutoValidateTab(QtWidgets.QWidget):
 
     def shutdown(self):
         self._stop_worker()
+
+
+class NightModeWorker(QtCore.QThread):
+    log_signal = QtCore.pyqtSignal(str)
+    finished_signal = QtCore.pyqtSignal(int)
+
+    def __init__(self, command: list[str], workdir: str, parent=None):
+        super().__init__(parent)
+        self.command = command
+        self.workdir = workdir
+        self._process = None
+        self._stop_requested = False
+
+    def run(self):
+        exit_code = -1
+        try:
+            pretty_cmd = " ".join(self.command)
+            self.log_signal.emit(f"[Night Mode] Running: {pretty_cmd}")
+            self._process = subprocess.Popen(
+                self.command,
+                cwd=self.workdir,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+            if self._process.stdout:
+                for line in self._process.stdout:
+                    self.log_signal.emit(line.rstrip("\n"))
+                    if self._stop_requested:
+                        break
+            if self._process:
+                exit_code = self._process.wait()
+        except Exception as exc:
+            self.log_signal.emit(f"[Night Mode] Error: {exc}")
+        self.finished_signal.emit(exit_code)
+
+    def stop(self):
+        self._stop_requested = True
+        proc = self._process
+        if proc and proc.poll() is None:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+
+
+class NightModeTab(QtWidgets.QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.worker = None
+        self.jobs = []
+        self._build_ui()
+
+    def _build_ui(self):
+        layout = QtWidgets.QVBoxLayout()
+
+        # Config selection
+        config_row = QtWidgets.QHBoxLayout()
+        config_label = QtWidgets.QLabel("Night Mode config (JSON):")
+        self.config_path_edit = QtWidgets.QLineEdit("overnight_jobs.json")
+        browse_btn = QtWidgets.QPushButton("Browse...")
+        browse_btn.clicked.connect(self._browse_config)
+        reload_btn = QtWidgets.QPushButton("Reload")
+        reload_btn.clicked.connect(self._load_config_summary)
+        config_row.addWidget(config_label)
+        config_row.addWidget(self.config_path_edit)
+        config_row.addWidget(browse_btn)
+        config_row.addWidget(reload_btn)
+        layout.addLayout(config_row)
+
+        # Job summary
+        self.jobs_summary = QtWidgets.QPlainTextEdit()
+        self.jobs_summary.setReadOnly(True)
+        self.jobs_summary.setPlaceholderText("Load a config to view jobs (job_id, directory, mode, target_valid_leads, max_hours).")
+        layout.addWidget(self.jobs_summary)
+
+        jobs_label = QtWidgets.QLabel("Configure Night Mode jobs here. You can add multiple directories to run overnight in sequence.")
+        layout.addWidget(jobs_label)
+
+        self.jobs_table = QtWidgets.QTableWidget(0, 6)
+        self.jobs_table.setHorizontalHeaderLabels(["#", "Directory", "Mode", "Input/Seed", "Target Leads", "Max Hours"])
+        self.jobs_table.horizontalHeader().setStretchLastSection(True)
+        self.jobs_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        layout.addWidget(self.jobs_table)
+
+        jobs_btn_row = QtWidgets.QHBoxLayout()
+        add_btn = QtWidgets.QPushButton("Add job")
+        edit_btn = QtWidgets.QPushButton("Edit job")
+        remove_btn = QtWidgets.QPushButton("Remove job")
+        save_btn = QtWidgets.QPushButton("Save config")
+        load_btn = QtWidgets.QPushButton("Load config")
+        add_btn.clicked.connect(self._add_job_dialog)
+        edit_btn.clicked.connect(self._edit_job_dialog)
+        remove_btn.clicked.connect(self._remove_selected_job)
+        save_btn.clicked.connect(self._save_config_to_file)
+        load_btn.clicked.connect(self._browse_config)
+        jobs_btn_row.addWidget(add_btn)
+        jobs_btn_row.addWidget(edit_btn)
+        jobs_btn_row.addWidget(remove_btn)
+        jobs_btn_row.addStretch()
+        jobs_btn_row.addWidget(save_btn)
+        jobs_btn_row.addWidget(load_btn)
+        layout.addLayout(jobs_btn_row)
+
+        # Options
+        options_layout = QtWidgets.QHBoxLayout()
+        export_label = QtWidgets.QLabel("Export mode:")
+        self.export_mode_combo = QtWidgets.QComboBox()
+        self.export_mode_combo.addItems(["both", "per_directory", "combined"])
+        options_layout.addWidget(export_label)
+        options_layout.addWidget(self.export_mode_combo)
+        self.resume_checkbox = QtWidgets.QCheckBox("Resume unfinished jobs")
+        self.stop_on_failure_checkbox = QtWidgets.QCheckBox("Stop on first failure")
+        options_layout.addWidget(self.resume_checkbox)
+        options_layout.addWidget(self.stop_on_failure_checkbox)
+        options_layout.addStretch()
+        layout.addLayout(options_layout)
+
+        # Run root
+        run_root_layout = QtWidgets.QHBoxLayout()
+        run_root_label = QtWidgets.QLabel("Run root (optional):")
+        self.run_root_edit = QtWidgets.QLineEdit()
+        run_root_browse = QtWidgets.QPushButton("Browse...")
+        run_root_browse.clicked.connect(self._browse_run_root)
+        run_root_layout.addWidget(run_root_label)
+        run_root_layout.addWidget(self.run_root_edit)
+        run_root_layout.addWidget(run_root_browse)
+        layout.addLayout(run_root_layout)
+
+        # Controls
+        controls_layout = QtWidgets.QHBoxLayout()
+        self.start_button = QtWidgets.QPushButton("Start Night Mode")
+        self.start_button.clicked.connect(self._start_night_mode)
+        self.stop_button = QtWidgets.QPushButton("Stop")
+        self.stop_button.clicked.connect(self._stop_night_mode)
+        self.stop_button.setEnabled(False)
+        clear_log_btn = QtWidgets.QPushButton("Clear log")
+        clear_log_btn.clicked.connect(self._clear_log)
+        controls_layout.addWidget(self.start_button)
+        controls_layout.addWidget(self.stop_button)
+        controls_layout.addWidget(clear_log_btn)
+        controls_layout.addStretch()
+        layout.addLayout(controls_layout)
+
+        # Status + log
+        self.status_label = QtWidgets.QLabel("Status: idle")
+        layout.addWidget(self.status_label)
+        self.log_console = QtWidgets.QPlainTextEdit()
+        self.log_console.setReadOnly(True)
+        layout.addWidget(self.log_console)
+
+        self.setLayout(layout)
+        self._load_config_summary()
+
+    def _update_jobs_summary_from_jobs(self):
+        lines = []
+        for job in self.jobs:
+            line = (
+                f"job_id={job.get('job_id', '')} | "
+                f"dir={job.get('directory', '')} | "
+                f"mode={job.get('mode', '')} | "
+                f"target={job.get('target_valid_leads', '')} | "
+                f"max_hours={job.get('max_hours', '')}"
+            )
+            lines.append(line)
+        if not lines:
+            lines.append("No jobs configured.")
+        self.jobs_summary.setPlainText("\n".join(lines))
+
+    def _refresh_jobs_table(self):
+        self.jobs_table.setRowCount(len(self.jobs))
+        for idx, job in enumerate(self.jobs):
+            values = [
+                str(idx + 1),
+                job.get("directory", ""),
+                job.get("mode", ""),
+                job.get("input_seed_csv", ""),
+                str(job.get("target_valid_leads", "")),
+                str(job.get("max_hours", "")),
+            ]
+            for col, value in enumerate(values):
+                item = QtWidgets.QTableWidgetItem(value)
+                self.jobs_table.setItem(idx, col, item)
+
+    def _open_job_dialog(self, existing_job=None, index=None):
+        dialog = NightModeJobDialog(existing_job, parent=self)
+        if dialog.exec_() == QtWidgets.QDialog.Accepted:
+            job = dialog.get_job()
+            if existing_job is None:
+                if not job.get("job_id"):
+                    job["job_id"] = f"job_{job.get('directory', 'dir')}_{len(self.jobs)+1}"
+                self.jobs.append(job)
+            else:
+                self.jobs[index] = job
+            self._refresh_jobs_table()
+            self._update_jobs_summary_from_jobs()
+
+    def _add_job_dialog(self):
+        self._open_job_dialog()
+
+    def _edit_job_dialog(self):
+        row = self.jobs_table.currentRow()
+        if row < 0 or row >= len(self.jobs):
+            QtWidgets.QMessageBox.information(self, "Select a job", "Please select a job to edit.")
+            return
+        self._open_job_dialog(existing_job=self.jobs[row], index=row)
+
+    def _remove_selected_job(self):
+        row = self.jobs_table.currentRow()
+        if row < 0 or row >= len(self.jobs):
+            QtWidgets.QMessageBox.information(self, "Select a job", "Please select a job to remove.")
+            return
+        del self.jobs[row]
+        self._refresh_jobs_table()
+        self._update_jobs_summary_from_jobs()
+
+    def _save_config_to_file(self):
+        if not self.jobs:
+            QtWidgets.QMessageBox.warning(self, "No jobs", "Add at least one job before saving a config.")
+            return
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Save Night Mode config",
+            self.config_path_edit.text().strip() or "overnight_jobs.json",
+            "JSON Files (*.json);;All Files (*)",
+        )
+        if not path:
+            return
+        config = {
+            "export_mode": self.export_mode_combo.currentText().strip(),
+            "jobs": self.jobs,
+        }
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(config, f, indent=2)
+            self.config_path_edit.setText(path)
+            self._append_log(f"[Night Mode] Saved config to {path}")
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, "Save failed", f"Could not save config:\n{exc}")
+
+    def _browse_config(self):
+        file_path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Select Night Mode config",
+            "",
+            "JSON Files (*.json);;All Files (*)",
+        )
+        if file_path:
+            self.config_path_edit.setText(file_path)
+            self._load_config_summary()
+
+    def _browse_run_root(self):
+        directory = QtWidgets.QFileDialog.getExistingDirectory(
+            self,
+            "Select run root directory",
+            "",
+        )
+        if directory:
+            self.run_root_edit.setText(directory)
+
+    def _load_config_summary(self):
+        path = self.config_path_edit.text().strip()
+        if not path or not os.path.exists(path):
+            self.jobs_summary.setPlainText("Config not found. Please choose a valid JSON file.")
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                config = json.load(f)
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, "Invalid config", f"Could not read config:\n{exc}")
+            self.jobs_summary.setPlainText("Config could not be parsed.")
+            return
+        export_mode = (config.get("export_mode") or "both").strip().lower()
+        if export_mode in {"both", "per_directory", "combined"}:
+            idx = self.export_mode_combo.findText(export_mode)
+            if idx >= 0:
+                self.export_mode_combo.setCurrentIndex(idx)
+        jobs = config.get("jobs", [])
+        if isinstance(jobs, list):
+            self.jobs = jobs
+            self._refresh_jobs_table()
+        self._update_jobs_summary_from_jobs()
+
+    def _start_night_mode(self):
+        if self.worker and self.worker.isRunning():
+            QtWidgets.QMessageBox.information(self, "Night Mode", "Night Mode is already running.")
+            return
+        config_path = self.config_path_edit.text().strip()
+        config_path_to_use = ""
+        if self.jobs:
+            config = {
+                "export_mode": self.export_mode_combo.currentText().strip(),
+                "jobs": self.jobs,
+            }
+            try:
+                temp_dir = tempfile.mkdtemp(prefix="nightmode_")
+                config_path_to_use = os.path.join(temp_dir, "overnight_jobs_gui.json")
+                with open(config_path_to_use, "w", encoding="utf-8") as f:
+                    json.dump(config, f, indent=2)
+                self._append_log(f"[Night Mode] Using GUI-configured jobs ({len(self.jobs)} job(s)).")
+            except Exception as exc:
+                QtWidgets.QMessageBox.warning(self, "Config error", f"Could not write temp config:\n{exc}")
+                return
+        else:
+            if not config_path or not os.path.exists(config_path):
+                QtWidgets.QMessageBox.warning(self, "Config missing", "Add jobs in the table or select a valid night mode config JSON.")
+                return
+            config_path_to_use = config_path
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        script_path = os.path.join(base_dir, "night_mode_runner.py")
+        cmd = [sys.executable, script_path, "--config", config_path_to_use]
+        export_mode = self.export_mode_combo.currentText().strip()
+        if export_mode:
+            cmd.extend(["--export-mode", export_mode])
+        if self.resume_checkbox.isChecked():
+            cmd.append("--resume")
+        if self.stop_on_failure_checkbox.isChecked():
+            cmd.append("--stop-on-failure")
+        run_root = self.run_root_edit.text().strip()
+        if run_root:
+            cmd.extend(["--run-root", run_root])
+
+        self.log_console.clear()
+        self.status_label.setText("Status: running")
+        self.start_button.setEnabled(False)
+        self.stop_button.setEnabled(True)
+        self.worker = NightModeWorker(cmd, workdir=base_dir)
+        self.worker.log_signal.connect(self._append_log)
+        self.worker.finished_signal.connect(self._on_finished)
+        self.worker.start()
+
+    def _stop_night_mode(self):
+        if not self.worker:
+            return
+        self._append_log("[Night Mode] Stop requested.")
+        self.worker.stop()
+        self.stop_button.setEnabled(False)
+
+    def _on_finished(self, exit_code: int):
+        status = "completed" if exit_code == 0 else f"finished with errors (code {exit_code})"
+        self.status_label.setText(f"Status: {status}")
+        self.start_button.setEnabled(True)
+        self.stop_button.setEnabled(False)
+        self.worker = None
+        if exit_code != 0:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Night Mode",
+                "Night Mode finished with errors. Check the log for details.",
+            )
+
+    def _append_log(self, message: str):
+        self.log_console.appendPlainText(message)
+        scrollbar = self.log_console.verticalScrollBar()
+        if scrollbar:
+            scrollbar.setValue(scrollbar.maximum())
+
+    def _clear_log(self):
+        self.log_console.clear()
+
+    def shutdown(self):
+        worker = self.worker
+        if not worker:
+            return
+        if worker.isRunning():
+            try:
+                worker.stop()
+                worker.wait(2000)
+            except Exception:
+                try:
+                    worker.terminate()
+                    worker.wait(2000)
+                except Exception:
+                    pass
+        self.worker = None
+
+
+class NightModeJobDialog(QtWidgets.QDialog):
+    def __init__(self, job: Optional[dict] = None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Night Mode Job")
+        self.job = job or {}
+        self._build_ui()
+        if job:
+            self._load_job(job)
+
+    def _build_ui(self):
+        layout = QtWidgets.QFormLayout()
+        self.job_id_edit = QtWidgets.QLineEdit()
+        self.directory_combo = QtWidgets.QComboBox()
+        self.directory_combo.addItems(["spotify", "bandcamp", "soundcloud", "unearthed"])
+        self.mode_combo = QtWidgets.QComboBox()
+        self.mode_combo.addItems(["", "playlist", "discover", "search", "people", "tracks"])
+        self.input_edit = QtWidgets.QLineEdit()
+        self.target_spin = QtWidgets.QSpinBox()
+        self.target_spin.setRange(0, 100000)
+        self.target_spin.setValue(100)
+        self.max_hours_spin = QtWidgets.QDoubleSpinBox()
+        self.max_hours_spin.setRange(0, 168)
+        self.max_hours_spin.setDecimals(1)
+        self.max_hours_spin.setValue(0.0)
+        self.notes_edit = QtWidgets.QLineEdit()
+
+        layout.addRow("Job ID (optional):", self.job_id_edit)
+        layout.addRow("Directory:", self.directory_combo)
+        layout.addRow("Mode:", self.mode_combo)
+        layout.addRow("Input/Seed:", self.input_edit)
+        layout.addRow("Target leads:", self.target_spin)
+        layout.addRow("Max hours (0 = no limit):", self.max_hours_spin)
+        layout.addRow("Notes:", self.notes_edit)
+
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        main_layout = QtWidgets.QVBoxLayout()
+        main_layout.addLayout(layout)
+        main_layout.addWidget(buttons)
+        self.setLayout(main_layout)
+
+    def _load_job(self, job: dict):
+        self.job_id_edit.setText(job.get("job_id", ""))
+        directory = job.get("directory", "")
+        idx = self.directory_combo.findText(directory)
+        if idx >= 0:
+            self.directory_combo.setCurrentIndex(idx)
+        mode = job.get("mode", "")
+        idx = self.mode_combo.findText(mode)
+        if idx >= 0:
+            self.mode_combo.setCurrentIndex(idx)
+        self.input_edit.setText(job.get("input_seed_csv", ""))
+        try:
+            self.target_spin.setValue(int(job.get("target_valid_leads", 100)))
+        except Exception:
+            pass
+        try:
+            self.max_hours_spin.setValue(float(job.get("max_hours", 0.0)))
+        except Exception:
+            pass
+        self.notes_edit.setText(job.get("notes", ""))
+
+    def get_job(self) -> dict:
+        job = dict(self.job)
+        job_id = self.job_id_edit.text().strip()
+        if job_id:
+            job["job_id"] = job_id
+        job["directory"] = self.directory_combo.currentText().strip()
+        job["mode"] = self.mode_combo.currentText().strip()
+        job["input_seed_csv"] = self.input_edit.text().strip()
+        job["target_valid_leads"] = int(self.target_spin.value())
+        max_hours = float(self.max_hours_spin.value())
+        job["max_hours"] = max_hours if max_hours > 0 else 0
+        notes = self.notes_edit.text().strip()
+        if notes:
+            job["notes"] = notes
+        return job
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
@@ -8448,6 +8905,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tabs.addTab(self.cross_enricher_tab, "Cross-Directory Enricher")
         self.auto_validate_tab = AutoValidateTab()
         self.tabs.addTab(self.auto_validate_tab, "Auto-Validate")
+        self.night_mode_tab = NightModeTab()
+        self.tabs.addTab(self.night_mode_tab, "Night Mode")
     def create_menu(self):
         menubar = self.menuBar()
         file_menu = menubar.addMenu("File")
@@ -8869,6 +9328,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.cross_enricher_tab.shutdown()
         if hasattr(self, "auto_validate_tab") and hasattr(self.auto_validate_tab, "shutdown"):
             self.auto_validate_tab.shutdown()
+        if hasattr(self, "night_mode_tab") and hasattr(self.night_mode_tab, "shutdown"):
+            self.night_mode_tab.shutdown()
         self._stop_fb_auto_validate()
 
 
