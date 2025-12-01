@@ -971,7 +971,7 @@ def save_to_csv(data, filename):
     _ensure_parent_dir(filename)
     headers = [
         'Artist Name', 'Location', 'Song Title', 'Sounds Like', 'Social Link', 'SoundCloud Link',
-        'Played on triple J', 'Played on Unearthed', 'Release Date', 'Primary Genre', 'Bandcamp_Source_Mode', 'Date Added', 'Email'
+        'Played on triple J', 'Played on Unearthed', 'Release Date', 'Primary Genre', 'Bandcamp_Source_Mode', 'Bandcamp_Search_Domain', 'Date Added', 'Email'
     ]
     current_date = datetime.datetime.now().strftime("%Y-%m-%d")
 
@@ -1009,6 +1009,7 @@ def save_to_csv(data, filename):
             release_date,
             primary_genre,
             bandcamp_source_mode,
+            bandcamp_search_domain,
             email_value
         ) = entry_list[:expected_fields]
         if isinstance(social_links, (str, bytes)):
@@ -1030,6 +1031,7 @@ def save_to_csv(data, filename):
                 'Release Date': release_date,
                 'Primary Genre': primary_genre,
                 'Bandcamp_Source_Mode': bandcamp_source_mode,
+                'Bandcamp_Search_Domain': bandcamp_search_domain,
                 'Date Added': current_date,
                 'Email': email_value
             })
@@ -1681,17 +1683,45 @@ def _bandcamp_checkpoint_key(mode: str, base_key: str) -> str:
         return ""
     return f"{normalized_mode}:{base_key}"
 
-def _bandcamp_mode_output_csv_path(existing_csv: str, mode: str) -> str:
-    """For search runs, redirect to a distinct CSV so discover outputs remain untouched."""
+def _bandcamp_mode_output_csv_path(existing_csv: str, mode: str, search_domain: str | None = None, search_location: str | None = None) -> str:
+    """
+    For search runs, redirect to a distinct CSV so discover outputs remain untouched.
+    Optionally append the search domain to avoid collisions between artists vs tracks searches.
+    """
     normalized_mode = (mode or "discover").strip().lower()
     path = existing_csv or "bandcamp_output.csv"
-    if normalized_mode != "search":
-        return path
     root, ext = os.path.splitext(path)
     ext = ext or ".csv"
-    if root.lower().endswith("_search"):
+
+    def _strip_search_suffix(base_root: str) -> str:
+        lowered = base_root.lower()
+        # Remove trailing _search, _search_domain, or _search_domain_loc_xxx variants.
+        match = re.match(r"^(.*)_search(?:_[^_]+)?(?:_loc_.+)?$", lowered)
+        if match and match.group(1):
+            # Preserve original casing for the kept portion.
+            keep_len = len(match.group(1))
+            return base_root[:keep_len]
+        return base_root
+
+    def _sanitize_slug(text: str) -> str:
+        slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+        return slug[:40]
+
+    if normalized_mode != "search":
+        # If the user previously ran a search and left the _search suffix in the filename, strip it so
+        # discover runs go back to the canonical path and never overwrite search outputs.
+        root = _strip_search_suffix(root)
         return root + ext
-    return f"{root}_search{ext}"
+    domain = (search_domain or "").strip().lower()
+    loc_slug = _sanitize_slug(search_location) if search_location else ""
+    # Strip any previous search suffix before constructing the new one.
+    base_root = _strip_search_suffix(root)
+    parts = [base_root, "_search"]
+    if domain:
+        parts.append(f"_{domain}")
+    if loc_slug:
+        parts.append(f"_loc_{loc_slug}")
+    return "".join(parts) + ext
 
 def _bandcamp_is_discover_url(url: str) -> bool:
     if not url:
@@ -2226,6 +2256,8 @@ def scrape_bandcamp(
     mode: str = "discover",
     max_pages: int | None = None,
     max_items: int | None = None,
+    search_domain: str = "artists",
+    search_location_filter: str = "",
 ):
     """
     High-level Bandcamp entry point. Accepts any Bandcamp URL (discover/tag/artist/album/track)
@@ -2265,8 +2297,18 @@ def scrape_bandcamp(
     normalized_mode = (mode or "discover").strip().lower()
     if normalized_mode not in {"discover", "tag", "search"}:
         raise ValueError(f"Unknown Bandcamp mode: {mode}")
+    normalized_search_domain = (search_domain or "artists").strip().lower() or "artists"
+    if normalized_search_domain not in {"artists", "tracks"}:
+        normalized_search_domain = "artists"
+    effective_search_domain = normalized_search_domain if normalized_mode == "search" else ""
+    normalized_search_location = (search_location_filter or "").strip()
 
-    existing_csv = _bandcamp_mode_output_csv_path(existing_csv, normalized_mode)
+    existing_csv = _bandcamp_mode_output_csv_path(
+        existing_csv,
+        normalized_mode,
+        search_domain=effective_search_domain or None,
+        search_location=normalized_search_location if normalized_mode == "search" else None,
+    )
 
     explicit_max = max_items if max_items and max_items > 0 else None
     user_max = explicit_max if explicit_max is not None else (max_artists if max_artists and max_artists > 0 else None)
@@ -2314,6 +2356,7 @@ def scrape_bandcamp(
     seen_profiles = set()
     requested_label = ""
     requested_hint = ""
+    slug_parts = []
     if url_input and _bandcamp_is_discover_url(url_input):
         loc_meta = _bandcamp_location_label_from_url(url_input)
         requested_label = loc_meta.get("display_label", "") or ""
@@ -2327,15 +2370,20 @@ def scrape_bandcamp(
             if len(segments) >= 2 and segments[0] == "discover":
                 slug = segments[1]
                 slug_parts = [part for part in re.split(r"[+\\s]+", slug) if part]
-                if len(slug_parts) >= 2:
-                    loc_guess = " ".join(slug_parts[:-1]).strip()
-                    if loc_guess:
-                        requested_hint = loc_guess
+            if len(slug_parts) >= 2:
+                loc_guess = " ".join(slug_parts[:-1]).strip()
+                if loc_guess:
+                    requested_hint = loc_guess
         if requested_label or requested_hint:
             print(f"Bandcamp: applying location filter -> {requested_label or requested_hint}")
+    elif normalized_mode == "search" and normalized_search_location:
+        requested_label = normalized_search_location
+        requested_hint = normalized_search_location
+        print(f"Bandcamp: applying search location filter -> {normalized_search_location}")
     contacts_required = BANDCAMP_MIN_CONTACT_REQUIREMENT and not bool(url_input)
     search_cutoff = datetime.date.today() - datetime.timedelta(days=730) if normalized_mode == "search" else None
     search_skipped_old = 0
+    search_skipped_location = 0
 
     def enqueue_candidate(source_tag, candidate, api_location=""):
         nonlocal hit_candidate_cap
@@ -2460,7 +2508,13 @@ def scrape_bandcamp(
                     enqueue_candidate("tag", candidate, candidate.get("location", ""))
             elif normalized_mode == "search":
                 url_processed = True
-                search_candidates = scrape_bandcamp_search(driver, url_input, max_pages=pages_to_scan, max_items=max_candidates)
+                search_candidates = scrape_bandcamp_search(
+                    driver,
+                    url_input,
+                    max_pages=pages_to_scan,
+                    max_items=max_candidates,
+                    search_domain=normalized_search_domain,
+                )
                 for candidate in search_candidates:
                     enqueue_candidate("search", candidate, candidate.get("location", ""))
         if not url_processed:
@@ -2478,7 +2532,7 @@ def scrape_bandcamp(
         stop_processing = False
 
         def process_artist(candidate, artist_dict):
-            nonlocal kept_after_location, sample_kept, sample_rejected, rejected_location, stop_processing, search_skipped_old
+            nonlocal kept_after_location, sample_kept, sample_rejected, rejected_location, stop_processing, search_skipped_old, search_skipped_location
             if not artist_dict:
                 return
             artist_dict["source_tag"] = candidate.get("source_tag", "")
@@ -2491,7 +2545,21 @@ def scrape_bandcamp(
                 if label_norm and label_norm in hint_norm:
                     location_ok = True
             if not location_ok:
+                # For search runs with a user-provided location filter, allow entries with missing locations
+                # to pass through so we don't over-prune track searches that rarely expose locations.
+                if normalized_mode == "search" and normalized_search_location and (not profile_location and not api_hint):
+                    location_ok = True
+                else:
+                    rejected_location += 1
+                    if normalized_mode == "search" and normalized_search_location:
+                        search_skipped_location += 1
+                    if not sample_rejected:
+                        sample_rejected = f"{artist_dict.get('artist_name', '') or 'unknown'} ({artist_dict.get('location', '') or 'n/a'})"
+                    return
+            if not location_ok:
                 rejected_location += 1
+                if normalized_mode == "search" and normalized_search_location:
+                    search_skipped_location += 1
                 if not sample_rejected:
                     sample_rejected = f"{artist_dict.get('artist_name', '') or 'unknown'} ({artist_dict.get('location', '') or 'n/a'})"
                 return
@@ -2575,7 +2643,9 @@ def scrape_bandcamp(
 
         print(f"Bandcamp: candidates={len(candidate_profiles)} http_ok={http_success} selenium_fallback={selenium_used} kept_after_location={kept_after_location} stop_reason={stop_reason}")
         if normalized_mode == "search" and search_cutoff:
-            print(f"Bandcamp (search): kept_recent={kept_after_location} skipped_old={search_skipped_old} cutoff={search_cutoff.isoformat()}")
+            print(f"Bandcamp (search, domain={normalized_search_domain}): kept_recent={kept_after_location} skipped_old={search_skipped_old} cutoff={search_cutoff.isoformat()}")
+            if normalized_search_location:
+                print(f"Bandcamp (search): skipped_location_mismatch={search_skipped_location} filter='{normalized_search_location}'")
         if sample_kept:
             print(f"Bandcamp: kept sample -> {sample_kept}")
         if sample_rejected:
@@ -2605,6 +2675,7 @@ def scrape_bandcamp(
                 email_value = (artist_dict.get("email", "") or "").strip()
             song_title_value = tile_title or artist_dict.get("latest_release_title", "") or ""
             artist_name_value = tile_artist or artist_dict.get("artist_name", "")
+            bandcamp_search_domain = effective_search_domain
             bandcamp_rows.append((
                 artist_name_value,
                 artist_dict.get("location", ""),
@@ -2617,6 +2688,7 @@ def scrape_bandcamp(
                 release_date_value,
                 primary_genre_value,
                 normalized_mode,
+                bandcamp_search_domain,
                 email_value
             ))
             socials = artist_dict.get("socials", {})
@@ -2638,7 +2710,8 @@ def scrape_bandcamp(
                 "Sounds Like": artist_dict.get("sounds_like", ""),
                 "Primary Genre": primary_genre_value,
                 "Source Tag": artist_dict.get("source_tag", ""),
-                "Bandcamp_Source_Mode": normalized_mode
+                "Bandcamp_Source_Mode": normalized_mode,
+                "Bandcamp_Search_Domain": bandcamp_search_domain
             })
             # Bandcamp resume-from-checkpoint: persist profile URLs once written to CSV rows
             profile_key = (artist_dict.get("profile_url", "") or "").rstrip("/").lower()
@@ -2915,8 +2988,28 @@ def scrape_bandcamp_discover(driver, discover_url: str, max_pages: int = 1, max_
 def scrape_bandcamp_tag(driver, tag_url: str, max_pages: int = 20, max_items: int | None = None) -> list:
     return _bandcamp_collect_mode_pages(driver, tag_url, "tag", _BANDCAMP_GRID_SELECTORS, max_pages, max_items=max_items)
 
-def scrape_bandcamp_search(driver, search_url: str, max_pages: int = 20, max_items: int | None = None) -> list:
-    return _bandcamp_collect_mode_pages(driver, search_url, "search", _BANDCAMP_GRID_SELECTORS, max_pages, max_items=max_items)
+def scrape_bandcamp_search(driver, search_url: str, max_pages: int = 20, max_items: int | None = None, search_domain: str = "artists") -> list:
+    # search_domain is accepted for future branching (tracks vs artists), but current DOM collection is shared.
+    results = _bandcamp_collect_mode_pages(driver, search_url, "search", _BANDCAMP_GRID_SELECTORS, max_pages, max_items=max_items)
+    if results:
+        return results
+    # Fallback: try pagination/scroll if the first pass yielded nothing (Bandcamp sometimes lazy-loads results).
+    try:
+        fallback = _bandcamp_collect_with_pagination(driver, search_url, _BANDCAMP_GRID_SELECTORS, max_items=max_items)
+        if fallback:
+            return fallback
+    except Exception:
+        pass
+    # Last resort: fetch HTML directly without Selenium.
+    try:
+        session = build_hardened_session()
+        resp = session.get(search_url, timeout=(6, 15))
+        if resp.ok:
+            parsed = _bandcamp_candidates_from_html(resp.text, search_url)
+            return parsed
+    except Exception:
+        pass
+    return results
 
 
 def _bandcamp_collect_city_tag_candidates(driver, city_label: str, pages: int) -> list:
@@ -3613,7 +3706,8 @@ def _bandcamp_write_enriched_csv(rows, existing_csv):
         "Latest Release Precision",
         "Sounds Like",
         "Source Tag",
-        "Bandcamp_Source_Mode"
+        "Bandcamp_Source_Mode",
+        "Bandcamp_Search_Domain",
     ]
     base_dir = os.path.dirname(os.path.abspath(existing_csv))
     enriched_path = os.path.join(base_dir, "bandcamp_enriched.csv")
@@ -7612,7 +7706,7 @@ class ArtistScraperThread(QtCore.QThread):
     log_signal = QtCore.pyqtSignal(str)
     finished_signal = QtCore.pyqtSignal()
     def __init__(self, website_url, max_artists, output_csv, source="Unearthed",
-                 pages_per_tag=BANDCAMP_PAGES_PER_TAG, seed_tags=None, bandcamp_mode: str = "discover", parent=None):
+                 pages_per_tag=BANDCAMP_PAGES_PER_TAG, seed_tags=None, bandcamp_mode: str = "discover", bandcamp_search_domain: str = "artists", bandcamp_search_location: str = "", parent=None):
         super().__init__(parent)
         self.website_url = website_url
         self.max_artists = max_artists
@@ -7620,6 +7714,8 @@ class ArtistScraperThread(QtCore.QThread):
         self.source = source
         self.pages_per_tag = pages_per_tag
         self.bandcamp_mode = (bandcamp_mode or "discover").strip().lower()
+        self.bandcamp_search_domain = (bandcamp_search_domain or "artists").strip().lower() or "artists"
+        self.bandcamp_search_location = (bandcamp_search_location or "").strip()
         if seed_tags is not None:
             self.seed_tags = list(seed_tags)
         elif self.source and self.source.lower() == "soundcloud":
@@ -7641,7 +7737,9 @@ class ArtistScraperThread(QtCore.QThread):
                     pages_per_tag=self.pages_per_tag,
                     existing_csv=self.output_csv,
                     max_artists=self.max_artists,
-                    mode=self.bandcamp_mode
+                    mode=self.bandcamp_mode,
+                    search_domain=self.bandcamp_search_domain,
+                    search_location_filter=self.bandcamp_search_location,
                 )
                 self.log_signal.emit("Bandcamp scraping completed.")
             elif self.source.lower() == "soundcloud":
@@ -8324,6 +8422,8 @@ class MainWindow(QtWidgets.QMainWindow):
         source = self.source_combo.currentText()
         url = self.url_edit.text().strip()
         bandcamp_mode = "discover"
+        bandcamp_search_domain = "artists"
+        bandcamp_search_location = ""
         if source in ("Bandcamp", "SoundCloud") and not url:
             default_url = BANDCAMP_DEFAULT_TAG_URL if source == "Bandcamp" else SOUNDCLOUD_DEFAULT_TAG_URL
             url = default_url
@@ -8366,6 +8466,30 @@ class MainWindow(QtWidgets.QMainWindow):
             self.artist_log.append(f"Bandcamp: mode={bandcamp_mode}")
             print(f"Bandcamp: mode={bandcamp_mode}")
             if bandcamp_mode == "search":
+                domain_choice_text, domain_ok = QtWidgets.QInputDialog.getText(
+                    self,
+                    "Bandcamp search domain",
+                    "Bandcamp search domain:\n  1) Artists & labels\n  2) Tracks\nSelect [1/2] (default 1):",
+                    QtWidgets.QLineEdit.Normal,
+                    "1",
+                )
+                if domain_ok and domain_choice_text.strip() == "2":
+                    bandcamp_search_domain = "tracks"
+                else:
+                    bandcamp_search_domain = "artists"
+                self.artist_log.append(f"Bandcamp: search domain={bandcamp_search_domain}")
+                print(f"Bandcamp: search domain={bandcamp_search_domain}")
+                search_loc_value, search_loc_ok = QtWidgets.QInputDialog.getText(
+                    self,
+                    "Bandcamp search location (optional)",
+                    "Optional location filter (keeps rows whose location contains this text; leave blank for no filter):",
+                    QtWidgets.QLineEdit.Normal,
+                    "",
+                )
+                bandcamp_search_location = (search_loc_value if search_loc_ok else "").strip()
+                if bandcamp_search_location:
+                    self.artist_log.append(f"Bandcamp: search location filter={bandcamp_search_location}")
+                    print(f"Bandcamp: search location filter={bandcamp_search_location}")
                 raw_prompt = bandcamp_base_url or ""
                 raw_value, raw_ok = QtWidgets.QInputDialog.getText(
                     self,
@@ -8379,13 +8503,21 @@ class MainWindow(QtWidgets.QMainWindow):
                     bandcamp_base_url = raw
                 else:
                     q = quote_plus(raw)
-                    bandcamp_base_url = f"https://bandcamp.com/search?q={q}&item_type=b&sort_field=date"
+                    if bandcamp_search_domain == "tracks":
+                        bandcamp_base_url = f"https://bandcamp.com/search?q={q}&item_type=t&sort_field=date"
+                    else:
+                        bandcamp_base_url = f"https://bandcamp.com/search?q={q}&item_type=b&sort_field=date"
                 self.artist_log.append(f"Bandcamp: base URL={bandcamp_base_url}")
                 print(f"Bandcamp: base URL={bandcamp_base_url}")
                 url = bandcamp_base_url
             else:
                 bandcamp_base_url = url
-            output_csv = _bandcamp_mode_output_csv_path(self.artist_output_csv_edit.text().strip(), bandcamp_mode)
+            output_csv = _bandcamp_mode_output_csv_path(
+                self.artist_output_csv_edit.text().strip(),
+                bandcamp_mode,
+                search_domain=bandcamp_search_domain if bandcamp_mode == "search" else None,
+                search_location=bandcamp_search_location if bandcamp_mode == "search" else None,
+            )
             self.artist_output_csv_edit.setText(output_csv)
             self.artist_log.append(f"Bandcamp: output CSV={output_csv}")
             print(f"Bandcamp: output CSV={output_csv}")
@@ -8416,7 +8548,9 @@ class MainWindow(QtWidgets.QMainWindow):
             source=source,
             pages_per_tag=pages_per_tag,
             seed_tags=seed_tags,
-            bandcamp_mode=bandcamp_mode if source == "Bandcamp" else "discover"
+            bandcamp_mode=bandcamp_mode if source == "Bandcamp" else "discover",
+            bandcamp_search_domain=bandcamp_search_domain if source == "Bandcamp" else "artists",
+            bandcamp_search_location=bandcamp_search_location if source == "Bandcamp" else ""
         )
         self.artist_thread.log_signal.connect(self.update_artist_log)
         self.artist_thread.finished_signal.connect(self.artist_scraping_finished)

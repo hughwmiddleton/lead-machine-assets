@@ -1144,5 +1144,96 @@
       "https://mini-fridge.bandcamp.com",
       "https://hennerecords.bandcamp.com"
     ]
+  },
+  "search:https://bandcamp.com/search?q=jamaica+reggae&item_type=t&sort_field=date": {
+    "scraped_artist_urls": [
+      "https://sillywalksdisco.bandcamp.com",
+      "https://roominthesky.bandcamp.com",
+      "https://dubstorerecords.bandcamp.com",
+      "https://dizowaiofficial.bandcamp.com",
+      "https://putumayo.bandcamp.com",
+      "https://digmanybeats.bandcamp.com",
+      "https://panoramicview.bandcamp.com",
+      "https://weddingparty.bandcamp.com",
+      "https://liberationhall.bandcamp.com",
+      "https://mashmasterscs.bandcamp.com",
+      "https://tbproductions.bandcamp.com",
+      "https://honestjonsrecords.bandcamp.com",
+      "https://themysticphilosopher.bandcamp.com",
+      "https://meier-gt.bandcamp.com",
+      "https://blueclawjazz.bandcamp.com",
+      "https://rankingbassie.bandcamp.com",
+      "https://letshirtfrancais.bandcamp.com",
+      "https://infractionroyaltyfreemusic.bandcamp.com",
+      "https://pakkardiman.bandcamp.com",
+      "https://djiron.bandcamp.com",
+      "https://linge.bandcamp.com",
+      "https://palenquerecords.bandcamp.com",
+      "https://originalgravityrecords.bandcamp.com",
+      "https://reggaesoundsquad.bandcamp.com",
+      "https://musiquemuscle.bandcamp.com",
+      "https://parisdjs.bandcamp.com",
+      "https://studioone.bandcamp.com",
+      "https://creativeanddreams.bandcamp.com",
+      "https://brainsurgeentertainment.bandcamp.com",
+      "https://nowyoushred.bandcamp.com"
+    ]
+  },
+  "https://bandcamp.com/discover/jamaica+reggae?s=new": {
+    "scraped_artist_urls": [
+      "https://frankiepaul.bandcamp.com",
+      "https://taxitabou1.bandcamp.com",
+      "https://mightydiamonds.bandcamp.com",
+      "https://naomicowan.bandcamp.com",
+      "https://primetimemusiq.bandcamp.com",
+      "https://thecongos.bandcamp.com",
+      "https://soundclasharchive.bandcamp.com",
+      "https://robotdread.bandcamp.com",
+      "https://soundtingja.bandcamp.com",
+      "https://jahrain.bandcamp.com",
+      "https://djdotcom.bandcamp.com",
+      "https://lavenderfields.bandcamp.com",
+      "https://kingjammy.bandcamp.com",
+      "https://djwass.bandcamp.com",
+      "https://ayezeeno.bandcamp.com"
+    ]
+  },
+  "discover:https://bandcamp.com/discover/jamaica+reggae?s=new": {
+    "scraped_artist_urls": [
+      "https://frankiepaul.bandcamp.com",
+      "https://taxitabou1.bandcamp.com",
+      "https://mightydiamonds.bandcamp.com",
+      "https://naomicowan.bandcamp.com",
+      "https://primetimemusiq.bandcamp.com",
+      "https://thecongos.bandcamp.com",
+      "https://soundclasharchive.bandcamp.com",
+      "https://robotdread.bandcamp.com",
+      "https://soundtingja.bandcamp.com",
+      "https://jahrain.bandcamp.com",
+      "https://djdotcom.bandcamp.com",
+      "https://lavenderfields.bandcamp.com",
+      "https://kingjammy.bandcamp.com",
+      "https://djwass.bandcamp.com",
+      "https://ayezeeno.bandcamp.com"
+    ]
+  },
+  "search:https://bandcamp.com/search?q=rock&item_type=t&sort_field=date": {
+    "scraped_artist_urls": [
+      "https://aesoprock.bandcamp.com",
+      "https://iteachvader.bandcamp.com"
+    ]
+  },
+  "search:https://bandcamp.com/search?q=japan+rock&item_type=t&sort_field=date": {
+    "scraped_artist_urls": [
+      "https://wamono.bandcamp.com",
+      "https://wajazz.bandcamp.com",
+      "https://aisyasuragiroom.bandcamp.com",
+      "https://bentheace.bandcamp.com",
+      "https://modernjazzwar.bandcamp.com",
+      "https://j-otakusound.bandcamp.com",
+      "https://gcrecords.bandcamp.com",
+      "https://futuremanrecords.bandcamp.com",
+      "https://takashikokubo.bandcamp.com"
+    ]
   }
 }
