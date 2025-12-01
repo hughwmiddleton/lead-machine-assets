@@ -1235,5 +1235,53 @@
       "https://futuremanrecords.bandcamp.com",
       "https://takashikokubo.bandcamp.com"
     ]
+  },
+  "https://bandcamp.com/discover/japan+rock?s=new": {
+    "scraped_artist_urls": [
+      "https://kyushikichappie.bandcamp.com",
+      "https://stinggon.bandcamp.com",
+      "https://hebisan.bandcamp.com",
+      "https://theprakriti.bandcamp.com",
+      "https://13gravesociety.bandcamp.com",
+      "https://masaakikikuchi.bandcamp.com",
+      "https://pomodorosa.bandcamp.com",
+      "https://laanagoten.bandcamp.com",
+      "https://marissamoorebeats.bandcamp.com",
+      "https://junichiyano.bandcamp.com",
+      "https://xxnahazz.bandcamp.com",
+      "https://minstre1.bandcamp.com",
+      "https://thepsychedelicmars.bandcamp.com",
+      "https://sickdigital.bandcamp.com",
+      "https://rock-home-haru.bandcamp.com",
+      "https://constellationgoddesses.bandcamp.com",
+      "https://hotarunrun.bandcamp.com",
+      "https://myymusic.bandcamp.com",
+      "https://dedondedan.bandcamp.com",
+      "https://weekdaysleepers.bandcamp.com"
+    ]
+  },
+  "discover:https://bandcamp.com/discover/japan+rock?s=new": {
+    "scraped_artist_urls": [
+      "https://kyushikichappie.bandcamp.com",
+      "https://stinggon.bandcamp.com",
+      "https://hebisan.bandcamp.com",
+      "https://theprakriti.bandcamp.com",
+      "https://13gravesociety.bandcamp.com",
+      "https://masaakikikuchi.bandcamp.com",
+      "https://pomodorosa.bandcamp.com",
+      "https://laanagoten.bandcamp.com",
+      "https://marissamoorebeats.bandcamp.com",
+      "https://junichiyano.bandcamp.com",
+      "https://xxnahazz.bandcamp.com",
+      "https://minstre1.bandcamp.com",
+      "https://thepsychedelicmars.bandcamp.com",
+      "https://sickdigital.bandcamp.com",
+      "https://rock-home-haru.bandcamp.com",
+      "https://constellationgoddesses.bandcamp.com",
+      "https://hotarunrun.bandcamp.com",
+      "https://myymusic.bandcamp.com",
+      "https://dedondedan.bandcamp.com",
+      "https://weekdaysleepers.bandcamp.com"
+    ]
   }
 }

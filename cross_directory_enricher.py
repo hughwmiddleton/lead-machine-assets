@@ -3101,6 +3101,10 @@ class CrossDirectoryEnricherWorker(QThread):
                 if column not in seed_df.columns:
                     seed_df[column] = ""
                 seed_df[column] = seed_df[column].fillna("").astype(str)
+            # Keep optional link fields as strings to avoid dtype warnings when updating.
+            for column in ("SoundCloud Link",):
+                if column in seed_df.columns:
+                    seed_df[column] = seed_df[column].fillna("").astype(str)
             if match_score_column not in seed_df.columns:
                 seed_df[match_score_column] = 0.0
             seed_df[match_score_column] = (
