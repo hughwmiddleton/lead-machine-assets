@@ -22,7 +22,7 @@ import sys
 import subprocess
 import platform
 import traceback
-from typing import Optional
+from typing import Optional, Tuple
 
 # ---------------------------
 # Dependency Check and Installation
@@ -480,19 +480,23 @@ def _extract_handles_generic(html: str):
 
 
 def scrape_handles_from_people_search(session, url: str, limit=None):
-    try:
-        api_handles = _sc_fetch_people_search_api(session, url, limit)
-        if api_handles:
-            return api_handles
-    except Exception as exc:
-        print(f"SoundCloud: people search API fallback triggered ({exc}).")
-    resp = session.get(url, timeout=(6, 12), headers=_rand_headers())
-    resp.raise_for_status()
-    polite_sleep()
-    return _extract_handles_generic(resp.text)
+    query, place = sc_parse_people_search_url(url)
+    client_id = _sc_get_client_id(session)
+    max_results = limit if isinstance(limit, int) and limit > 0 else 50
+    handles = sc_fetch_people_handles_v2(
+        query=query,
+        place=place,
+        client_id=client_id,
+        session=session,
+        logger=None,
+        max_results=max_results,
+    )
+    if limit and isinstance(limit, int) and limit > 0:
+        handles = handles[:limit]
+    return handles
 
 
-def _sc_fetch_people_search_api(session, url: str, limit=None) -> list:
+def _sc_fetch_people_search_api(session, url: str, limit=None, place_filter: str = "") -> list:
     if not url:
         return []
     client_id = _sc_get_client_id(session)
@@ -526,6 +530,7 @@ def _sc_fetch_people_search_api(session, url: str, limit=None) -> list:
             continue
         passthrough[key] = value
     handles = []
+    place_filter = (place_filter or "").strip()
     while len(handles) < target_cap:
         batch_limit = min(50, target_cap - len(handles))
         params = {
@@ -549,6 +554,12 @@ def _sc_fetch_people_search_api(session, url: str, limit=None) -> list:
         for item in collection:
             handle = (item.get("permalink") or "").strip().lower()
             if _sc_handle_ok(handle):
+                if place_filter:
+                    city = (item.get("city") or "").strip()
+                    country = (item.get("country") or item.get("country_code") or item.get("country_name") or "").strip()
+                    location_text = " ".join(part for part in (city, country) if part)
+                    if not _sc_location_matches_filter(location_text, place_filter):
+                        continue
                 handles.append(handle)
                 if len(handles) >= target_cap:
                     break
@@ -566,6 +577,128 @@ def _sc_fetch_people_search_api(session, url: str, limit=None) -> list:
     return handles
 
 
+def _sc_handles_from_people_page(driver, url: str, limit=None) -> list:
+    """
+    Load a SoundCloud people search page with Selenium and extract handles
+    in the order they appear.
+    """
+    handles = []
+    if not url:
+        return handles
+    print(f"[dbg] fetching people search via browser: {url}")
+    try:
+        driver.get(url)
+        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+        polite_sleep()
+        html = driver.page_source
+        handles = _extract_handles_generic(html)
+        if limit and isinstance(limit, int) and limit > 0:
+            handles = handles[:limit]
+        print(f"SoundCloud: people search (browser) -> {len(handles)} handles")
+    except Exception as exc:
+        print(f"SoundCloud: browser people search fetch failed ({exc})")
+    return handles
+def sc_fetch_people_handles_v2(query: Optional[str], place: Optional[str], client_id: str, session, logger=None,
+                               max_results: int = 50) -> list:
+    """
+    Fetch handles from SoundCloud v2 people search API, honoring filter.place when provided.
+    """
+    if logger is None:
+        class _PrintLogger:
+            def info(self, msg, *args, **kwargs):
+                try:
+                    print(msg % args if args else msg)
+                except Exception:
+                    print(msg)
+            def warning(self, msg, *args, **kwargs):
+                try:
+                    print(msg % args if args else msg)
+                except Exception:
+                    print(msg)
+            def error(self, msg, *args, **kwargs):
+                try:
+                    print(msg % args if args else msg)
+                except Exception:
+                    print(msg)
+        logger = _PrintLogger()
+    handles: list = []
+    if not query:
+        logger.warning("SoundCloud: v2 people search called without query; returning empty handle list")
+        return handles
+    base_url = "https://api-v2.soundcloud.com/search/users"
+    offset = 0
+    page_size = min(50, max_results if max_results > 0 else 50)
+    params_base = {
+        "q": query,
+        "client_id": client_id,
+        "limit": page_size,
+        "linked_partitioning": 1,
+    }
+    if place:
+        params_base["filter.place"] = place
+        params_base["facet"] = "place"
+    logger.info(
+        "SoundCloud: v2 people search API -> query='%s' place='%s' max_results=%d",
+        query, place, max_results,
+    )
+    while True:
+        params = dict(params_base)
+        params["offset"] = offset
+        try:
+            resp = session.get(base_url, params=params, timeout=(6, 12), headers=_rand_headers())
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as exc:
+            logger.error("SoundCloud: v2 people search API error: %s", exc, exc_info=True)
+            break
+        collection = data.get("collection") or []
+        for item in collection:
+            if not isinstance(item, dict):
+                continue
+            handle = (item.get("permalink") or item.get("username") or "").strip()
+            if not _sc_handle_ok(handle):
+                continue
+            if place:
+                place_clean = place.strip().lower()
+                city = (item.get("city") or "").strip()
+                country = (item.get("country") or item.get("country_code") or item.get("country_name") or "").strip()
+                location_text = " ".join(part for part in (city, country) if part).lower()
+                if place_clean and place_clean not in location_text:
+                    continue
+            handles.append(handle)
+            if max_results and len(handles) >= max_results:
+                break
+        logger.info(
+            "SoundCloud: v2 people search page -> %d new handles (total=%d)",
+            len(collection), len(handles),
+        )
+        if max_results and len(handles) >= max_results:
+            break
+        next_href = data.get("next_href")
+        if not next_href:
+            break
+        try:
+            parsed_next = urlparse(next_href)
+            qs_next = parse_qs(parsed_next.query or "")
+            offset = int(qs_next.get("offset", [offset + page_size])[0])
+        except Exception:
+            offset += page_size
+        polite_sleep()
+    # Deduplicate preserving order
+    deduped = []
+    seen = set()
+    for h in handles:
+        if h in seen:
+            continue
+        seen.add(h)
+        deduped.append(h)
+    logger.info(
+        "SoundCloud: v2 people search API -> %d unique handles (query='%s' place='%s')",
+        len(deduped), query, place,
+    )
+    return deduped
+
+
 def scrape_handles_from_tag_page(session, url: str):
     resp = session.get(url, timeout=(6, 12), headers=_rand_headers())
     resp.raise_for_status()
@@ -578,7 +711,19 @@ def discover_handles(session, source_url: str, limit=None):
         return []
     lowered = source_url.lower()
     if "/search/people" in lowered:
-        return scrape_handles_from_people_search(session, source_url, limit=limit)
+        query, place = sc_parse_people_search_url(source_url)
+        print(f"SoundCloud: people search detected -> query='{query}' place='{place}' (using v2 API)")
+        client_id = _sc_get_client_id(session)
+        handles = sc_fetch_people_handles_v2(
+            query=query,
+            place=place,
+            client_id=client_id,
+            session=session,
+            logger=None,
+            max_results=limit or 50,
+        )
+        print(f"SoundCloud: people search -> {len(handles)} handles (query='{query}' place='{place}')")
+        return handles
     if "/tags/" in lowered:
         return scrape_handles_from_tag_page(session, source_url)
     match = re.match(r"^https?://soundcloud\.com/([a-z0-9][a-z0-9._-]{1,49})/?$", source_url, re.IGNORECASE)
@@ -3941,9 +4086,37 @@ def _sc_parse_people_search(value: str) -> dict:
         query = parse_qs(parsed.query or "")
     except Exception:
         return result
-    result["q"] = (query.get("q", [""])[0] or "").strip()
-    result["place"] = (query.get("filter.place", [""])[0] or "").strip()
+    result["q"] = (query.get("q", [""])[0] or "")
+    result["place"] = (query.get("filter.place", [""])[0] or "")
     return result
+
+
+def sc_parse_people_search_url(source_url: str) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Parse a SoundCloud /search/people URL and return (query, place).
+    """
+    try:
+        parsed = urlparse(source_url)
+        qs = parse_qs(parsed.query or "")
+    except Exception:
+        return None, None
+    q_vals = qs.get("q") or qs.get("query") or []
+    place_vals = qs.get("filter.place") or []
+    query = (q_vals[0] if q_vals else None) or None
+    place = (place_vals[0] if place_vals else None) or None
+    return query, place
+
+
+def _sc_location_matches_filter(location_text: str, place_filter: str) -> bool:
+    """
+    Return True if no place filter is set, or if the provided location contains the filter text.
+    If the location is missing, allow it to pass so we don't drop candidates due to parse gaps.
+    """
+    if not place_filter:
+        return True
+    if not location_text:
+        return True
+    return place_filter.lower() in (location_text or "").lower()
 
 
 def expand_for_email(session, url):
@@ -5838,6 +6011,7 @@ def scrape_soundcloud(website_url, seed_tags=None, pages_per_tag=SOUNDCLOUD_PAGE
     actionable_count = 0
     ACTIONABLE_LIMIT = max_artists
     fast = bool(SOUNDCLOUD_FAST_FACEBOOK_EMAIL_ONLY)
+    place_filter = ""
     try:
         url = (website_url or "").strip()
         url_lower = url.lower()
@@ -5874,13 +6048,21 @@ def scrape_soundcloud(website_url, seed_tags=None, pages_per_tag=SOUNDCLOUD_PAGE
             search_cap = max_handles or max_artists
             handles = []
             try:
-                handles = discover_handles(discovery_session, people_url, limit=search_cap)
+                handles = sc_fetch_people_handles_v2(
+                    query=query,
+                    place=place,
+                    client_id=_sc_get_client_id(discovery_session),
+                    session=discovery_session,
+                    logger=None,
+                    max_results=search_cap or 50,
+                )
             except Exception as exc:
-                print(f"SoundCloud: people search fetch failed: {exc}")
+                print(f"SoundCloud: people search API fetch failed: {exc}")
             if search_cap:
                 handles = handles[:search_cap]
-            tag_hint = query or place or ""
-            print(f"SoundCloud: people search -> {len(handles)} handles (query='{query}' place='{place}')")
+            tag_hint = (query or "").strip() or (place or "").strip()
+            place_filter = (place or "")
+            print(f"SoundCloud: people search (API) -> {len(handles)} handles (query='{query}' place='{place}')")
             handles_with_tags.extend((h, tag_hint) for h in handles)
 
         elif use_profile_url:
