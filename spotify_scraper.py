@@ -9,6 +9,7 @@ import os
 import re
 import time
 import unicodedata
+import requests
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 from urllib.parse import urlparse
 
@@ -22,6 +23,7 @@ LoggerFn = Callable[[str], None]
 ProgressFn = Callable[[int, int], None]
 
 DATE_FORMAT = "%d/%m/%Y"
+_LASTFM_GENRE_CACHE: Dict[str, str] = {}
 
 # TODO: Fill these with real playlist IDs for Fresh Finds / region-specific lists.
 FRESH_FINDS_PLAYLIST_IDS = [
@@ -368,6 +370,62 @@ def _most_common_playlist_genre(genre_pool: List[str]) -> str:
         return ""
     sorted_genres = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0].lower()))
     return sorted_genres[0][0]
+
+
+def _fetch_genres_from_lastfm(
+    artist_name: str,
+    api_key: Optional[str],
+    logger: Optional[LoggerFn],
+) -> str:
+    """
+    Fallback: ask Last.fm for top tags on the artist and treat them as genres.
+    """
+    if not artist_name or not api_key:
+        return ""
+
+    cache_key = artist_name.lower().strip()
+    if cache_key in _LASTFM_GENRE_CACHE:
+        return _LASTFM_GENRE_CACHE[cache_key]
+
+    def _log_debug(message: str) -> None:
+        if logger:
+            try:
+                logger(message)
+            except Exception:
+                pass
+
+    params = {
+        "method": "artist.getTopTags",
+        "artist": artist_name,
+        "api_key": api_key,
+        "format": "json",
+    }
+    try:
+        resp = requests.get("https://ws.audioscrobbler.com/2.0", params=params, timeout=8)
+        resp.raise_for_status()
+        payload = resp.json()
+    except Exception as exc:
+        _log_debug(f"[Spotify S1] genre fallback: Last.fm lookup failed for '{artist_name}': {exc}")
+        return ""
+
+    tags = (payload.get("toptags") or {}).get("tag") or []
+    dedup: List[str] = []
+    for tag in tags:
+        name = (tag.get("name") or "").strip()
+        if not name:
+            continue
+        if name.lower() in ("seen live",):
+            continue
+        if name not in dedup:
+            dedup.append(name)
+        if len(dedup) >= 3:
+            break
+
+    primary = ", ".join(dedup)
+    if primary:
+        _log_debug(f"[Spotify S1] genre fallback: using Last.fm tags for '{artist_name}': {primary}")
+        _LASTFM_GENRE_CACHE[cache_key] = primary
+    return primary
 
 
 def _resolve_directory_csv(filename: str, base_dir: str) -> Optional[str]:
@@ -765,6 +823,7 @@ def scrape_spotify(
     timestamp = time.strftime(DATE_FORMAT)
     total_artists = len(artists_by_id)
     playlist_genre_pool: List[str] = []
+    lastfm_api_key = os.getenv("LASTFM_API_KEY") or ""
 
     for idx, (artist_id, stub_info) in enumerate(artists_by_id.items(), start=1):
         artist_payload = artist_details.get(artist_id, {})
@@ -777,6 +836,8 @@ def scrape_spotify(
             primary_genre = _fetch_additional_genres(spotify_client=client, artist_id=artist_id, logger=logger)
         if not primary_genre:
             primary_genre = _fetch_genres_from_top_tracks(spotify_client=client, artist_id=artist_id, logger=logger)
+        if not primary_genre:
+            primary_genre = _fetch_genres_from_lastfm(artist_name=artist_name, api_key=lastfm_api_key, logger=logger)
         if not primary_genre:
             primary_genre = _most_common_playlist_genre(playlist_genre_pool)
         track_name = ""
