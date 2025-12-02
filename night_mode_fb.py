@@ -337,6 +337,7 @@ class NightModeFacebookEnricher:
         """Night-Mode-only FB enrichment for a single row."""
         original_row = dict(row or {})
         result = dict(original_row)
+        result["fb_status"] = result.get("fb_status", "") or "pending"
 
         def _clean_val(value: str) -> str:
             try:
@@ -349,6 +350,8 @@ class NightModeFacebookEnricher:
 
         existing_email = _clean_val(result.get("Email", ""))
         if existing_email:
+            if (result.get("fb_status", "") or "pending") == "pending":
+                result["fb_status"] = "email_found"
             return result
         artist_name = _clean_val(result.get("Artist Name", ""))
         location = _clean_val(result.get("Location", ""))
@@ -381,6 +384,7 @@ class NightModeFacebookEnricher:
                     log_prefix="[Night FB]",
                 )
                 if not page_url:
+                    result["fb_status"] = "no_candidates"
                     return result
 
             night_result = self._build_result(emails, str(result.get("Email_All", "") or ""), page_url, artist_name)
@@ -390,7 +394,15 @@ class NightModeFacebookEnricher:
                 result["Email_Type"] = night_result.email_type
                 if night_result.facebook_url:
                     result["Facebook_URL"] = night_result.facebook_url
+                result["fb_status"] = "email_found" if (night_result.email or emails) else result.get("fb_status", "pending")
                 _log(self.logger, f"[Night FB] extracted email(s) {emails} from {page_url}")
+            else:
+                # Page reached but no emails extracted.
+                lowered_url = (page_url or "").lower()
+                if "facebook.com/r.php" in lowered_url or "/login" in lowered_url:
+                    result["fb_status"] = "login_redirect"
+                else:
+                    result["fb_status"] = "no_email"
             return result
         except Exception as exc:  # pragma: no cover - defensive
             prefix = f"[FB Night] Night FB enrich failed at row {row_index}: {exc}" if row_index is not None else f"[FB Night] Night FB enrich failed: {exc}"

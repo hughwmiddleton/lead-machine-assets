@@ -6787,6 +6787,14 @@ def fb_find_page_and_emails_by_name(driver, artist_name: str, location: str = ""
         "music producer",
         "producer",
     ]
+    producer_dj_keywords = [
+        "producer",
+        "music producer",
+        "record producer",
+        "dj",
+        "dj/producer",
+        "dj / producer",
+    ]
     music_link_tokens = [
         "spotify.com",
         "open.spotify.com",
@@ -6868,17 +6876,21 @@ def fb_find_page_and_emails_by_name(driver, artist_name: str, location: str = ""
 
     def _has_music_signals(page_text: str, outbound_links: list[str], category: str | None, page_html: str | None = None) -> bool:
         combined_text = " ".join(part for part in (category or "", page_text or "") if part).lower()
-        if "artist" in combined_text and not any(bad in combined_text for bad in non_music_artist_tokens):
+        if any(tok in combined_text for tok in ("artist", "musician")) and not any(bad in combined_text for bad in non_music_artist_tokens):
+            return True
+        if any(tok in combined_text for tok in producer_dj_keywords):
             return True
         html_lc = (page_html or "").lower()
-        if html_lc and "artist" in html_lc and not any(bad in html_lc for bad in non_music_artist_tokens):
+        if html_lc and any(tok in html_lc for tok in ("artist", "musician")) and not any(bad in html_lc for bad in non_music_artist_tokens):
+            return True
+        if html_lc and any(tok in html_lc for tok in producer_dj_keywords):
             return True
         text = (page_text or "").lower()
         for link in outbound_links or []:
             l = (link or "").lower()
             if any(tok in l for tok in music_link_tokens):
                 return True
-        return any(tok in text for tok in music_text_tokens)
+        return any(tok in text for tok in music_text_tokens + producer_dj_keywords)
 
     def _is_music_page(name_lc: str, url_lc: str, category_lc: str) -> bool:
         if _is_corporate_page(name_lc, url_lc, category_lc):

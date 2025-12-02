@@ -324,6 +324,10 @@ def run_facebook_global_pass(
     fb_password = os.environ.get("FB_PASSWORD", "").strip()
 
     df = pd.read_csv(input_csv)
+    if "fb_status" not in df.columns:
+        df["fb_status"] = "pending"
+    else:
+        df["fb_status"] = df["fb_status"].fillna("pending")
     df["__row_id"] = range(len(df))
 
     def _eligible(row: pd.Series) -> bool:
@@ -341,6 +345,7 @@ def run_facebook_global_pass(
         df.drop(columns=["__row_id"], inplace=True)
         df.to_csv(output_csv, index=False)
         return
+    attempted_ids = set(eligible_df["__row_id"].astype(int).tolist())
 
     if not fb_username or not fb_password:
         # No credentials; pass through without modification.
@@ -381,13 +386,37 @@ def run_facebook_global_pass(
                             rid_int = int(float(rid))
                         except Exception:
                             continue
-                        current_email = updated_df.at[rid_int, "Email"] if "Email" in updated_df.columns else ""
-                        if pd.isna(current_email):
-                            current_email = ""
-                        if not str(current_email).strip():
-                            updated_df.at[rid_int, "Email"] = email_val
+                            current_email = updated_df.at[rid_int, "Email"] if "Email" in updated_df.columns else ""
+                            if pd.isna(current_email):
+                                current_email = ""
+                            if not str(current_email).strip():
+                                updated_df.at[rid_int, "Email"] = email_val
+                # Update fb_status for attempted rows based on email presence.
+                for rid_int in attempted_ids:
+                    try:
+                        email_val = updated_df.at[rid_int, "Email"] if "Email" in updated_df.columns else ""
+                    except Exception:
+                        email_val = ""
+                    status = "email_found" if str(email_val or "").strip() else "no_email"
+                    try:
+                        existing_status = str(updated_df.at[rid_int, "fb_status"]) if "fb_status" in updated_df.columns else ""
+                    except Exception:
+                        existing_status = ""
+                    if not existing_status or existing_status == "pending":
+                        updated_df.at[rid_int, "fb_status"] = status
         except Exception:
             pass
+
+    # Ensure rows with existing emails are marked as done.
+    if "fb_status" in df.columns:
+        for idx, row in df.iterrows():
+            email_val = row.get("Email", "")
+            if pd.isna(email_val):
+                email_val = ""
+            if str(email_val or "").strip():
+                current = str(row.get("fb_status", "") or "")
+                if not current or current == "pending":
+                    df.at[idx, "fb_status"] = "email_found"
 
     updated_df.drop(columns=["__row_id"], inplace=True, errors="ignore")
     updated_df.to_csv(output_csv, index=False)
@@ -486,6 +515,10 @@ def run_facebook_global_pass_nightmode(
     # Use existing output if present so resumes keep prior enrichments.
     base_path = output_csv if output_csv and os.path.exists(output_csv) else input_csv
     df = pd.read_csv(base_path)
+    if "fb_status" not in df.columns:
+        df["fb_status"] = "pending"
+    else:
+        df["fb_status"] = df["fb_status"].fillna("pending")
     df["__row_id"] = range(len(df))
 
     total_rows = len(df.index)
@@ -574,8 +607,11 @@ def run_facebook_global_pass_nightmode(
             if pd.isna(email_val):
                 email_val = ""
             has_email = bool(str(email_val or "").strip())
+            fb_status_val = str(row.get("fb_status", "") or "").strip().lower()
+            facebook_url_hint = str(row.get("Facebook_URL", "") or "").strip()
             has_clue = _has_facebook_clue(row)
-            if has_email or not has_clue:
+            should_run_night_fb = (not has_email) and ((fb_status_val in ("", "pending")) or (facebook_url_hint and not has_email))
+            if has_email or not has_clue or not should_run_night_fb:
                 state.update(
                     {
                         "fb_last_index": last_index,
@@ -633,6 +669,15 @@ def run_facebook_global_pass_nightmode(
                 for col in ("Email", "Email_All", "Email_Type", "Facebook_URL"):
                     if col in enriched:
                         df.at[idx, col] = enriched.get(col, "")
+                status_val = str(enriched.get("fb_status", "") or "")
+                if not status_val:
+                    email_now = enriched.get("Email", "") or ""
+                    fb_url_now = enriched.get("Facebook_URL", "") or ""
+                    status_val = "email_found" if str(email_now).strip() else ("no_email" if fb_url_now else "no_candidates")
+                df.at[idx, "fb_status"] = status_val
+            else:
+                # Attempted but no enrichment result; mark as no_candidates to avoid repeated retries.
+                df.at[idx, "fb_status"] = "no_candidates"
 
             state.update(
                 {
@@ -693,6 +738,7 @@ DEFAULT_EXPORT_COLUMNS: Sequence[str] = [
     "Email",
     "Email_All",
     "Email_Type",
+    "fb_status",
     "Played on triple J",
     "Played on Unearthed",
     "Release Date",
