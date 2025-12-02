@@ -8716,6 +8716,14 @@ class NightModeTab(QtWidgets.QWidget):
         fb_resume_layout.addStretch()
         layout.addLayout(fb_resume_layout)
 
+        # Master enrichment toggle
+        master_enrich_layout = QtWidgets.QHBoxLayout()
+        self.master_enrich_checkbox = QtWidgets.QCheckBox("Use master cross-directory enrichment (recommended)")
+        self.master_enrich_checkbox.setChecked(True)
+        master_enrich_layout.addWidget(self.master_enrich_checkbox)
+        master_enrich_layout.addStretch()
+        layout.addLayout(master_enrich_layout)
+
         # Run root
         run_root_layout = QtWidgets.QHBoxLayout()
         run_root_label = QtWidgets.QLabel("Run root (optional):")
@@ -8836,6 +8844,7 @@ class NightModeTab(QtWidgets.QWidget):
             "max_auto_resume_attempts": int(self.fb_max_attempts_spin.value()),
             "max_rows_per_run": int(self.fb_max_rows_spin.value()),
         }
+        config["master_enrichment"] = {"enabled": self.master_enrich_checkbox.isChecked()}
         try:
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(config, f, indent=2)
@@ -8895,6 +8904,8 @@ class NightModeTab(QtWidgets.QWidget):
             self.fb_max_rows_spin.setValue(int(fb_cfg.get("max_rows_per_run", self.fb_max_rows_spin.value())))
         except Exception:
             pass
+        master_enrich_cfg = config.get("master_enrichment", {}) or {}
+        self.master_enrich_checkbox.setChecked(bool(master_enrich_cfg.get("enabled", True)))
         jobs = config.get("jobs", [])
         if isinstance(jobs, list):
             self.jobs = jobs
@@ -8918,6 +8929,7 @@ class NightModeTab(QtWidgets.QWidget):
                 "max_auto_resume_attempts": int(self.fb_max_attempts_spin.value()),
                 "max_rows_per_run": int(self.fb_max_rows_spin.value()),
             }
+            config["master_enrichment"] = {"enabled": self.master_enrich_checkbox.isChecked()}
             try:
                 temp_dir = tempfile.mkdtemp(prefix="nightmode_")
                 config_path_to_use = os.path.join(temp_dir, "overnight_jobs_gui.json")

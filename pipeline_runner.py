@@ -116,6 +116,41 @@ def _write_rows_to_csv(rows: Iterable[Any], path: str, source_directory: str = "
     return path
 
 
+def run_master_enrichment(seed_csv_path: str, output_csv_path: str, logger: LoggerFn = None) -> str:
+    """
+    Run the cross-directory enricher on a single combined CSV.
+
+    This wraps the existing cross_directory_enricher logic used by the standalone tool.
+    """
+    _safe_log(logger, f"[Master Enrich] Starting cross-directory enrichment for {seed_csv_path}")
+    try:
+        import cross_directory_enricher
+    except Exception as exc:
+        _safe_log(logger, f"[Master Enrich] cross_directory_enricher unavailable: {exc}")
+        shutil.copyfile(seed_csv_path, output_csv_path)
+        return output_csv_path
+
+    try:
+        cross_directory_enricher.run_cross_directory_enrichment(
+            seed_csv_path,
+            output_csv_path,
+            bandcamp_csv_path="",
+            soundcloud_csv_path="",
+            unearthed_csv_path="",
+            lastfm_csv_path="",
+            enable_live_search=True,
+            max_live_searches=getattr(cross_directory_enricher, "LIVE_SEARCH_MAX_ATTEMPTS", 50),
+            logger=logger,
+        )
+    except Exception as exc:
+        _safe_log(logger, f"[Master Enrich] Enricher failed safely: {exc}")
+        shutil.copyfile(seed_csv_path, output_csv_path)
+        return output_csv_path
+
+    _safe_log(logger, f"[Master Enrich] Completed cross-directory enrichment -> {output_csv_path}")
+    return output_csv_path
+
+
 def run_directory_job(job_config: Dict[str, Any], raw_output_path: str, logger: LoggerFn = None) -> str:
     """
     Run a single directory scraper based on job_config.

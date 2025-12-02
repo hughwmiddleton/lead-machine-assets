@@ -28,6 +28,7 @@ from pipeline_runner import (
     run_directory_job,
     run_enrichment,
     run_facebook_global_pass_nightmode,
+    run_master_enrichment,
 )
 
 DEFAULT_EXPORT_MODE = "both"
@@ -180,6 +181,34 @@ def _merge_master(run_dir: str, job_states: List[Dict[str, Any]], logger: loggin
     return master_path
 
 
+def _merge_raw_master(run_dir: str, job_states: List[Dict[str, Any]], logger: logging.Logger) -> Optional[str]:
+    raw_paths = []
+    for state in job_states:
+        raw_path = state.get("raw_csv") or ""
+        if raw_path and os.path.exists(raw_path):
+            raw_paths.append((state.get("job_id", ""), raw_path))
+    if not raw_paths:
+        logger.warning("[Master] No raw CSVs found to merge.")
+        return None
+
+    frames = []
+    for job_id, path in raw_paths:
+        try:
+            df = pd.read_csv(path)
+            df["__source_job"] = job_id
+            frames.append(df)
+        except Exception as exc:
+            logger.warning("[Master] Skipping %s due to read error: %s", path, exc)
+    if not frames:
+        logger.warning("[Master] No data available after reading raw files.")
+        return None
+    combined = pd.concat(frames, ignore_index=True, sort=False)
+    master_path = os.path.join(run_dir, "master_raw.csv")
+    combined.to_csv(master_path, index=False)
+    logger.info("[Master] Wrote merged raw CSV: %s (rows=%s)", master_path, len(combined.index))
+    return master_path
+
+
 def _load_state(state_path: str) -> Dict[str, Any]:
     if not os.path.exists(state_path):
         return {}
@@ -194,6 +223,7 @@ def _process_job(
     run_dir: str,
     resume: bool,
     stop_on_failure: bool,
+    per_job_validate: bool = True,
 ) -> Dict[str, Any]:
     job_id = job.get("job_id") or f"job_{len(job)}"
     job_dir = os.path.join(run_dir, job_id)
@@ -238,13 +268,20 @@ def _process_job(
             logger.warning("Job %s hit max_hours=%s; marking partial_timeout.", job_id, max_hours)
             return state
 
-        logger.info("Starting enrichment for job %s", job_id)
-        final_enriched = run_enrichment(state["raw_csv"], state["enriched_csv"], logger=logger.info)
-        state["enriched_csv"] = final_enriched
-        state["valid_leads_so_far"] = _count_rows(final_enriched)
-        state["status"] = "completed"
-        _write_json(state_path, state)
-        logger.info("Completed job %s", job_id)
+        if per_job_validate:
+            logger.info("Starting enrichment for job %s", job_id)
+            final_enriched = run_enrichment(state["raw_csv"], state["enriched_csv"], logger=logger.info)
+            state["enriched_csv"] = final_enriched
+            state["valid_leads_so_far"] = _count_rows(final_enriched)
+            state["status"] = "completed"
+            _write_json(state_path, state)
+            logger.info("Completed job %s", job_id)
+        else:
+            # Skip per-job validation; leave enrichment for master stage.
+            state["enriched_csv"] = state["raw_csv"]
+            state["status"] = "completed"
+            _write_json(state_path, state)
+            logger.info("Completed job %s (raw only; master enrichment pending)", job_id)
         return state
     except Exception as exc:
         state["error_count"] = state.get("error_count", 0) + 1
@@ -272,6 +309,8 @@ def run_night_mode(
     export_mode = (export_mode_override or config.get("export_mode") or DEFAULT_EXPORT_MODE).strip().lower()
     if export_mode not in {"per_directory", "combined", "both"}:
         export_mode = DEFAULT_EXPORT_MODE
+    master_enrich_cfg = config.get("master_enrichment", {})
+    master_enrichment_enabled = master_enrich_cfg.get("enabled", True)
 
     fb_cfg = config.get("facebook", {}) or {}
     fb_auto_resume = fb_cfg.get("auto_resume_after_captcha", False) if fb_auto_resume_override is None else bool(fb_auto_resume_override)
@@ -296,17 +335,33 @@ def run_night_mode(
 
     job_states: List[Dict[str, Any]] = []
     for job in config.get("jobs", []):
-        result_state = _process_job(job, run_dir, resume=resume, stop_on_failure=stop_on_failure)
+        result_state = _process_job(
+            job,
+            run_dir,
+            resume=resume,
+            stop_on_failure=stop_on_failure,
+            per_job_validate=not master_enrichment_enabled,
+        )
         job_states.append(result_state)
         if stop_on_failure and result_state.get("status") in {"failed"}:
             break
 
+    master_raw = None
+    master_enriched = None
     master_pre_fb = None
     master_post_fb = None
     master_final = None
     if export_mode in {"combined", "both"}:
         logger = _setup_logger(os.path.join(run_dir, "master_log.txt"), "master")
-        master_pre_fb = _merge_master(run_dir, job_states, logger)
+        if master_enrichment_enabled:
+            master_raw = _merge_raw_master(run_dir, job_states, logger)
+            if master_raw and os.path.exists(master_raw):
+                master_enriched = os.path.join(run_dir, "master_enriched.csv")
+                master_enriched = run_master_enrichment(master_raw, master_enriched, logger=logger.info)
+                master_pre_fb = os.path.join(run_dir, "master_pre_fb.csv")
+                master_pre_fb = run_enrichment(master_enriched, master_pre_fb, logger=logger.info)
+        else:
+            master_pre_fb = _merge_master(run_dir, job_states, logger)
         if master_pre_fb and os.path.exists(master_pre_fb):
             master_post_fb = os.path.join(run_dir, "master_post_fb.csv")
             fb_state_path = os.path.join(run_dir, FACEBOOK_STATE_FILENAME)
@@ -378,6 +433,8 @@ def run_night_mode(
     return {
         "run_dir": run_dir,
         "jobs": job_states,
+        "master_raw": master_raw,
+        "master_enriched": master_enriched,
         "master_pre_fb": master_pre_fb,
         "master_post_fb": master_post_fb,
         "master_csv": master_final,

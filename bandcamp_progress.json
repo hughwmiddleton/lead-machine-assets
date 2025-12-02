@@ -1283,5 +1283,33 @@
       "https://dedondedan.bandcamp.com",
       "https://weekdaysleepers.bandcamp.com"
     ]
+  },
+  "discover:https://bandcamp.com/discover/london+metal?s=new": {
+    "scraped_artist_urls": [
+      "https://morktar.bandcamp.com",
+      "https://hellvetika.bandcamp.com",
+      "https://peaceville.bandcamp.com",
+      "https://cryptofthewizard.bandcamp.com",
+      "https://marsmedia.bandcamp.com",
+      "https://andreithebarbarian.bandcamp.com",
+      "https://antmetrics.bandcamp.com",
+      "https://subsequentdeath.bandcamp.com",
+      "https://sofarsogoodhc.bandcamp.com",
+      "https://eveofstmark.bandcamp.com"
+    ]
+  },
+  "https://bandcamp.com/discover/london+metal?s=new": {
+    "scraped_artist_urls": [
+      "https://morktar.bandcamp.com",
+      "https://hellvetika.bandcamp.com",
+      "https://peaceville.bandcamp.com",
+      "https://cryptofthewizard.bandcamp.com",
+      "https://marsmedia.bandcamp.com",
+      "https://andreithebarbarian.bandcamp.com",
+      "https://antmetrics.bandcamp.com",
+      "https://subsequentdeath.bandcamp.com",
+      "https://sofarsogoodhc.bandcamp.com",
+      "https://eveofstmark.bandcamp.com"
+    ]
   }
 }

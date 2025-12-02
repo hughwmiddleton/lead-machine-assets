@@ -21,6 +21,7 @@ class NightModeRunnerDummyTest(unittest.TestCase):
     def _write_config(self, path: str) -> dict:
         config = {
             "export_mode": "both",
+            "master_enrichment": {"enabled": True},
             "jobs": [
                 {
                     "job_id": "job_one",
@@ -56,6 +57,12 @@ class NightModeRunnerDummyTest(unittest.TestCase):
             df.to_csv(enriched_output_path, index=False)
             return enriched_output_path
 
+        def fake_run_master_enrichment(input_csv, output_csv, logger=None):
+            df = pd.read_csv(input_csv)
+            df["master_enriched"] = True
+            df.to_csv(output_csv, index=False)
+            return output_csv
+
         fb_calls = []
 
         def fake_fb_pass(input_csv, output_csv, state_path, max_rows_per_run=100, **kwargs):
@@ -72,25 +79,29 @@ class NightModeRunnerDummyTest(unittest.TestCase):
 
         with mock.patch.object(night_mode_runner, "run_directory_job", side_effect=fake_run_directory_job), mock.patch.object(
             night_mode_runner, "run_enrichment", side_effect=fake_run_enrichment
-        ), mock.patch.object(night_mode_runner, "run_facebook_global_pass_nightmode", side_effect=fake_fb_pass):
+        ), mock.patch.object(night_mode_runner, "run_master_enrichment", side_effect=fake_run_master_enrichment), mock.patch.object(
+            night_mode_runner, "run_facebook_global_pass_nightmode", side_effect=fake_fb_pass
+        ):
             result = night_mode_runner.run_night_mode(config_path, run_root=self.run_root)
 
         run_dir = result["run_dir"]
         for job in config["jobs"]:
             job_dir = os.path.join(run_dir, job["job_id"])
             state_path = os.path.join(job_dir, "state.json")
-            enriched_path = os.path.join(job_dir, "enriched.csv")
             log_path = os.path.join(job_dir, "log.txt")
             self.assertTrue(os.path.exists(state_path))
-            self.assertTrue(os.path.exists(enriched_path))
             self.assertTrue(os.path.exists(log_path))
             with open(state_path, "r", encoding="utf-8") as f:
                 state = json.load(f)
                 self.assertEqual(state.get("status"), "completed")
 
+        master_raw = os.path.join(run_dir, "master_raw.csv")
+        master_enriched = os.path.join(run_dir, "master_enriched.csv")
         master_pre = os.path.join(run_dir, "master_pre_fb.csv")
         master_post = os.path.join(run_dir, "master_post_fb.csv")
         master_path = os.path.join(run_dir, "master_enriched_deduped.csv")
+        self.assertTrue(os.path.exists(master_raw))
+        self.assertTrue(os.path.exists(master_enriched))
         self.assertTrue(os.path.exists(master_pre))
         self.assertTrue(os.path.exists(master_post))
         self.assertTrue(os.path.exists(master_path))
@@ -106,18 +117,18 @@ class NightModeRunnerDummyTest(unittest.TestCase):
         job_two_state["status"] = "running"
         with open(job_two_state_path, "w", encoding="utf-8") as f:
             json.dump(job_two_state, f, indent=2)
-        os.remove(os.path.join(job_two_dir, "enriched.csv"))
+        # raw exists; no per-job enrichment file expected in master-enrich mode.
 
         with mock.patch.object(night_mode_runner, "run_directory_job", side_effect=fake_run_directory_job), mock.patch.object(
             night_mode_runner, "run_enrichment", side_effect=fake_run_enrichment
-        ):
+        ), mock.patch.object(night_mode_runner, "run_master_enrichment", side_effect=fake_run_master_enrichment):
             result_resume = night_mode_runner.run_night_mode(config_path, resume=True, run_root=self.run_root)
 
         self.assertEqual(result_resume["run_dir"], run_dir)
         with open(job_two_state_path, "r", encoding="utf-8") as f:
             resumed_state = json.load(f)
             self.assertEqual(resumed_state.get("status"), "completed")
-        self.assertTrue(os.path.exists(os.path.join(job_two_dir, "enriched.csv")))
+        self.assertTrue(os.path.exists(os.path.join(job_two_dir, "raw.csv")))
 
     def test_facebook_global_pass_skip_rules(self) -> None:
         # Build a small CSV with various rows.

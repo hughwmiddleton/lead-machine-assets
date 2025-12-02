@@ -4330,6 +4330,56 @@ class _EnricherProgressDialog(QtWidgets.QDialog):
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
+def run_cross_directory_enrichment(
+    seed_csv_path: str,
+    output_csv_path: str,
+    bandcamp_csv_path: str = "",
+    soundcloud_csv_path: str = "",
+    unearthed_csv_path: str = "",
+    lastfm_csv_path: str = "",
+    enable_live_search: bool = True,
+    max_live_searches: int = LIVE_SEARCH_MAX_ATTEMPTS,
+    logger=None,
+) -> str:
+    """
+    Headless wrapper around the existing CrossDirectoryEnricherWorker for programmatic use.
+    Preserves existing behaviour; logs via logger callable or prints.
+    """
+
+    def _log(msg: str) -> None:
+        if not msg:
+            return
+        if logger:
+            try:
+                logger(msg)
+                return
+            except Exception:
+                pass
+        try:
+            print(msg)
+        except Exception:
+            pass
+
+    worker = CrossDirectoryEnricherWorker(
+        seed_csv_path=seed_csv_path,
+        output_csv_path=output_csv_path,
+        bandcamp_csv_path=bandcamp_csv_path,
+        soundcloud_csv_path=soundcloud_csv_path,
+        unearthed_csv_path=unearthed_csv_path,
+        lastfm_csv_path=lastfm_csv_path,
+        enable_live_search=enable_live_search,
+        max_live_searches=max_live_searches,
+    )
+
+    # Bypass Qt event loop by providing simple emit stubs.
+    worker.log_message = type("obj", (), {"emit": _log})
+    worker.progress = type("obj", (), {"emit": lambda *args, **kwargs: None})
+    worker.finished = type("obj", (), {"emit": lambda *args, **kwargs: None})
+
+    worker._run_impl()
+    return output_csv_path
+
+
 def run_spotify_enricher_dialog(parent: Optional[QtWidgets.QWidget] = None) -> None:
     app = QtWidgets.QApplication.instance()
     parent = parent or (app.activeWindow() if app else None)
