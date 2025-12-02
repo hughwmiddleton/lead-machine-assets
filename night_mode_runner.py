@@ -23,6 +23,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 
+import pipeline_runner
 from pipeline_runner import (
     FacebookGlobalPassStatus,
     run_directory_job,
@@ -424,6 +425,13 @@ def run_night_mode(
                 try:
                     run_enrichment(master_post_fb, master_final, logger=logger.info)
                     logger.info("[Master] Validation completed: %s", master_final)
+                    export_path = os.path.join(run_dir, "master_export_leads.csv")
+                    pipeline_runner.export_master_leads(
+                        input_csv=master_final,
+                        output_csv=export_path,
+                        logger=logger,
+                    )
+                    logger.info("[Master] Exported client-facing leads CSV: %s", export_path)
                 except Exception as exc:
                     logger.error("[Master] Final validation failed safely: %s", exc)
                     master_final = master_post_fb

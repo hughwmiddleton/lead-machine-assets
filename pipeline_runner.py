@@ -6,6 +6,7 @@ changes to scrapers do not require updating the orchestration layer.
 
 from __future__ import annotations
 
+import csv
 import importlib.util
 import json
 import logging
@@ -16,7 +17,7 @@ import tempfile
 import time
 import datetime
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Iterable, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
 
 import pandas as pd
 
@@ -703,3 +704,68 @@ def run_facebook_global_pass_nightmode(
         limit_reached=limit_reached,
         attempted_total=attempted_total,
     )
+
+
+DEFAULT_EXPORT_COLUMNS: Sequence[str] = [
+    "Artist Name",
+    "Location",
+    "Song Title",
+    "Sounds Like",
+    "Social Link",
+    "SoundCloud Link",
+    "Spotify_URL",
+    "Spotify_Artist_ID",
+    "Spotify_Website_URL",
+    "External Links",
+    "Facebook_URL",
+    "Email",
+    "Email_All",
+    "Email_Type",
+    "Played on triple J",
+    "Played on Unearthed",
+    "Release Date",
+    "Primary Genre",
+    "Date Added",
+    "Spotify Playlist",
+    "Source Directory",
+    "Source URL",
+    "Review_Urls",
+    "final_status",
+]
+
+
+def export_master_leads(
+    input_csv: str,
+    output_csv: str,
+    logger: Optional[logging.Logger] = None,
+    export_columns: Optional[Sequence[str]] = None,
+) -> None:
+    export_logger = logger or logging.getLogger(__name__)
+    if not input_csv or not os.path.exists(input_csv):
+        export_logger.warning("[Master] Export skipped; input not found: %s", input_csv)
+        return
+
+    columns = list(export_columns) if export_columns is not None else list(DEFAULT_EXPORT_COLUMNS)
+    export_logger.info("[Master] Exporting client-facing CSV: %s -> %s", input_csv, output_csv)
+    _ensure_parent(output_csv)
+    row_count = 0
+    try:
+        with open(input_csv, "r", encoding="utf-8", newline="") as infile, open(
+            output_csv, "w", encoding="utf-8", newline=""
+        ) as outfile:
+            reader = csv.DictReader(infile)
+            writer = csv.DictWriter(outfile, fieldnames=columns)
+            writer.writeheader()
+            for row in reader:
+                if row is None:
+                    continue
+                writer.writerow({col: row.get(col, "") for col in columns})
+                row_count += 1
+    except FileNotFoundError:
+        export_logger.warning("[Master] Export skipped; input not found during read: %s", input_csv)
+        return
+    except Exception as exc:  # pragma: no cover - defensive
+        export_logger.error("[Master] Export failed safely: %s", exc)
+        return
+
+    export_logger.info("[Master] Export wrote %s rows to %s", row_count, output_csv)
