@@ -37,6 +37,7 @@ from facebook_enrich import (
     classify_corporate_signals,
     has_corporate_token,
     is_noisy_fb_text_block,
+    is_fb_creator_category,
     looks_like_music_fallback,
     clean_fb_category_text,
     MUSIC_CATEGORY_KEYWORDS,
@@ -1151,6 +1152,8 @@ class FacebookSearchClient:
             name_text = cell_to_str(anchor.get_text(" ", strip=True) or anchor.get("aria-label"))
             # Prefer aria-label if it contains music cues.
             aria_label = cell_to_str(anchor.get("aria-label"))
+            if is_fb_creator_category(aria_label):
+                continue
             if aria_label and any(tok in aria_label.lower() for tok in MUSIC_TOKENS):
                 name_text = aria_label
                 category_raw = aria_label
@@ -1280,6 +1283,8 @@ class FacebookSearchClient:
                     if not category_raw:
                         category_raw = blob
                     break
+            if is_fb_creator_category(category_raw):
+                continue
             cand.category = category_raw
             candidates.append(
                 FbCandidate(

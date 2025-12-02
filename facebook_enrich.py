@@ -23,6 +23,13 @@ NOISY_FB_TOKENS = [
     "stories",
 ]
 
+# Non-music creator labels that should be treated as noise or rejected.
+FB_CREATOR_CATEGORY_TOKENS = (
+    "reel creator",
+    "page · reel creator",
+    "page·reel creator",
+)
+
 # Tokens that indicate a music-related Facebook page.
 MUSIC_CATEGORY_KEYWORDS = (
     "musician",
@@ -249,6 +256,7 @@ FB_CORPORATE_TOKENS = [
     "limited",
     "s.a.",
     "s.r.l",
+    "reel creator",
 ]
 
 HARD_CORPORATE_TOKENS = {
@@ -289,6 +297,7 @@ HARD_CORPORATE_TOKENS = {
     "nonprofit",
     "charity",
     "farm",
+    "reel creator",
 }
 
 SOFT_CORPORATE_TOKENS = {
@@ -341,6 +350,8 @@ class FbCandidate:
 def is_noisy_fb_text_block(text: str) -> bool:
     text = (text or "").replace("\u00a0", " ").replace("\u202f", " ")
     normalized = re.sub(r"\s+", " ", text).lower()
+    if is_fb_creator_category(normalized):
+        return True
     for token in NOISY_FB_TOKENS:
         if token.lower() in normalized:
             return True
@@ -530,6 +541,15 @@ def compute_category_boost(category: Optional[str]) -> float:
     return min(score, 2.0)
 
 
+def is_fb_creator_category(text: Optional[str]) -> bool:
+    if not text:
+        return False
+    normalized = re.sub(r"\s+", " ", text or "").strip().lower()
+    if not normalized:
+        return False
+    return any(tok in normalized for tok in FB_CREATOR_CATEGORY_TOKENS)
+
+
 def extract_fb_category(card_el, page_name: str = "") -> Optional[str]:
     """
     Extract the short grey category string from a FB search result container.
@@ -559,6 +579,8 @@ def extract_fb_category(card_el, page_name: str = "") -> Optional[str]:
                     continue
                 if val in seen or len(val) > 80:
                     continue
+                if is_fb_creator_category(val):
+                    continue
                 if is_noisy_fb_text_block(val):
                     continue
                 seen.add(val)
@@ -567,6 +589,8 @@ def extract_fb_category(card_el, page_name: str = "") -> Optional[str]:
             for sub in container.find_all(["span", "div"], limit=12):
                 text = _clean(getattr(sub, "get_text", lambda *_: "")(" ", strip=True))
                 if text and text not in seen and len(text) <= 80:
+                    if is_fb_creator_category(text):
+                        continue
                     if is_noisy_fb_text_block(text):
                         continue
                     seen.add(text)
@@ -575,6 +599,8 @@ def extract_fb_category(card_el, page_name: str = "") -> Optional[str]:
             for attr in ("aria-label", "title"):
                 text = _clean(getattr(container, "get", lambda *_: "")(attr, ""))
                 if text and text not in seen and len(text) <= 80:
+                    if is_fb_creator_category(text):
+                        continue
                     if is_noisy_fb_text_block(text):
                         continue
                     seen.add(text)
@@ -585,6 +611,8 @@ def extract_fb_category(card_el, page_name: str = "") -> Optional[str]:
             except Exception:
                 text = ""
             if text and text not in seen and len(text) <= 80:
+                if is_fb_creator_category(text):
+                    continue
                 if is_noisy_fb_text_block(text):
                     continue
                 seen.add(text)
@@ -594,6 +622,8 @@ def extract_fb_category(card_el, page_name: str = "") -> Optional[str]:
 
     for candidate in candidates:
         lower = candidate.lower()
+        if is_fb_creator_category(lower):
+            continue
         if "/" in candidate or any(tok in lower for tok in ("band", "music", "artist", "dj", "musician", "singer", "songwriter", "performer", "vocalist")):
             return candidate
         if len(candidate.split()) <= 6:
@@ -633,6 +663,9 @@ def score_fb_candidate(
         path_slug = ""
     username_norm = normalize_fb_name(path_slug)
     category_norm = normalize_fb_name(category or "")
+
+    if is_fb_creator_category(category):
+        return None
 
     sig = classify_corporate_signals(cand_url, cand_name, category or "")
     if sig.has_hard and not sig.has_artist:
