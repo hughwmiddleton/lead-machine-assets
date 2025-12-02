@@ -21,6 +21,12 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
 
 import pandas as pd
 
+try:  # Shared FB helper; safe fallback if unavailable.
+    from facebook_enrich import is_fb_login_redirect  # type: ignore
+except Exception:  # pragma: no cover - defensive
+    def is_fb_login_redirect(url: str) -> bool:  # type: ignore
+        return False
+
 from night_mode_fb import NightModeFacebookEnricher
 
 LoggerFn = Optional[Callable[[str], None]]
@@ -324,10 +330,13 @@ def run_facebook_global_pass(
     fb_password = os.environ.get("FB_PASSWORD", "").strip()
 
     df = pd.read_csv(input_csv)
-    if "fb_status" not in df.columns:
-        df["fb_status"] = "pending"
+    # Normalize FB_Status column (empty string default). Preserve legacy lowercase if present.
+    if "FB_Status" not in df.columns and "fb_status" in df.columns:
+        df.rename(columns={"fb_status": "FB_Status"}, inplace=True)
+    if "FB_Status" not in df.columns:
+        df["FB_Status"] = ""
     else:
-        df["fb_status"] = df["fb_status"].fillna("pending")
+        df["FB_Status"] = df["FB_Status"].fillna("")
     df["__row_id"] = range(len(df))
 
     def _eligible(row: pd.Series) -> bool:
@@ -378,45 +387,70 @@ def run_facebook_global_pass(
         try:
             fb_df = pd.read_csv(temp_output)
             if "__row_id" in fb_df.columns:
+                if "FB_Status" not in fb_df.columns and "fb_status" in fb_df.columns:
+                    fb_df.rename(columns={"fb_status": "FB_Status"}, inplace=True)
+                if "FB_Status" not in fb_df.columns:
+                    fb_df["FB_Status"] = ""
                 for _, row in fb_df.iterrows():
                     rid = row.get("__row_id")
                     email_val = str(row.get("Email", "") or "").strip()
+                    fb_url_val = str(row.get("Facebook_URL", "") or "").strip()
+                    fb_status_val = str(row.get("FB_Status", "") or "")
+                    artist_for_log = row.get("Artist Name", "") or row.get("Artist", "") or "<unknown>"
+                    if not fb_status_val and is_fb_login_redirect(fb_url_val):
+                        fb_status_val = "login_redirect"
+                        fb_url_val = ""
+                        _LOGGER.info(
+                            "[FB Enrich] Detected login redirect for '%s' -> %s, marking FB_Status='login_redirect'.",
+                            artist_for_log,
+                            row.get("Facebook_URL") or "",
+                        )
                     if email_val and not pd.isna(rid):
                         try:
                             rid_int = int(float(rid))
                         except Exception:
                             continue
-                            current_email = updated_df.at[rid_int, "Email"] if "Email" in updated_df.columns else ""
-                            if pd.isna(current_email):
-                                current_email = ""
-                            if not str(current_email).strip():
-                                updated_df.at[rid_int, "Email"] = email_val
-                # Update fb_status for attempted rows based on email presence.
+                        current_email = updated_df.at[rid_int, "Email"] if "Email" in updated_df.columns else ""
+                        if pd.isna(current_email):
+                            current_email = ""
+                        if not str(current_email).strip():
+                            updated_df.at[rid_int, "Email"] = email_val
+                        updated_df.at[rid_int, "FB_Status"] = fb_status_val or "ok"
+                        if fb_url_val:
+                            updated_df.at[rid_int, "Facebook_URL"] = fb_url_val
+                    elif not email_val and not fb_url_val and not pd.isna(rid):
+                        try:
+                            rid_int = int(float(rid))
+                        except Exception:
+                            continue
+                        existing_status = str(updated_df.at[rid_int, "FB_Status"] if "FB_Status" in updated_df.columns else "")
+                        if not existing_status:
+                            updated_df.at[rid_int, "FB_Status"] = fb_status_val or "no_candidates"
+                            if not fb_status_val:
+                                _LOGGER.info(
+                                    "[FB Enrich] No usable FB candidates for '%s', marking FB_Status='no_candidates'.",
+                                    artist_for_log,
+                                )
+                # Ensure attempted rows get a status if still empty.
                 for rid_int in attempted_ids:
-                    try:
+                    existing_status = str(updated_df.at[rid_int, "FB_Status"]) if "FB_Status" in updated_df.columns else ""
+                    if not existing_status:
                         email_val = updated_df.at[rid_int, "Email"] if "Email" in updated_df.columns else ""
-                    except Exception:
-                        email_val = ""
-                    status = "email_found" if str(email_val or "").strip() else "no_email"
-                    try:
-                        existing_status = str(updated_df.at[rid_int, "fb_status"]) if "fb_status" in updated_df.columns else ""
-                    except Exception:
-                        existing_status = ""
-                    if not existing_status or existing_status == "pending":
-                        updated_df.at[rid_int, "fb_status"] = status
+                        fb_url_val = updated_df.at[rid_int, "Facebook_URL"] if "Facebook_URL" in updated_df.columns else ""
+                        updated_df.at[rid_int, "FB_Status"] = "ok" if str(email_val or fb_url_val or "").strip() else "no_candidates"
         except Exception:
             pass
 
     # Ensure rows with existing emails are marked as done.
-    if "fb_status" in df.columns:
+    if "FB_Status" in df.columns:
         for idx, row in df.iterrows():
             email_val = row.get("Email", "")
             if pd.isna(email_val):
                 email_val = ""
             if str(email_val or "").strip():
-                current = str(row.get("fb_status", "") or "")
-                if not current or current == "pending":
-                    df.at[idx, "fb_status"] = "email_found"
+                current = str(row.get("FB_Status", "") or "")
+                if not current:
+                    df.at[idx, "FB_Status"] = "ok"
 
     updated_df.drop(columns=["__row_id"], inplace=True, errors="ignore")
     updated_df.to_csv(output_csv, index=False)
@@ -515,10 +549,12 @@ def run_facebook_global_pass_nightmode(
     # Use existing output if present so resumes keep prior enrichments.
     base_path = output_csv if output_csv and os.path.exists(output_csv) else input_csv
     df = pd.read_csv(base_path)
-    if "fb_status" not in df.columns:
-        df["fb_status"] = "pending"
+    if "FB_Status" not in df.columns and "fb_status" in df.columns:
+        df.rename(columns={"fb_status": "FB_Status"}, inplace=True)
+    if "FB_Status" not in df.columns:
+        df["FB_Status"] = ""
     else:
-        df["fb_status"] = df["fb_status"].fillna("pending")
+        df["FB_Status"] = df["FB_Status"].fillna("")
     df["__row_id"] = range(len(df))
 
     total_rows = len(df.index)
@@ -607,11 +643,18 @@ def run_facebook_global_pass_nightmode(
             if pd.isna(email_val):
                 email_val = ""
             has_email = bool(str(email_val or "").strip())
-            fb_status_val = str(row.get("fb_status", "") or "").strip().lower()
+            fb_status_val_raw = str(row.get("FB_Status", "") or "").strip()
+            fb_status_val = fb_status_val_raw.lower()
             facebook_url_hint = str(row.get("Facebook_URL", "") or "").strip()
             has_clue = _has_facebook_clue(row)
-            should_run_night_fb = (not has_email) and ((fb_status_val in ("", "pending")) or (facebook_url_hint and not has_email))
-            if has_email or not has_clue or not should_run_night_fb:
+            should_run_night_fb = (not has_email) and fb_status_val not in ("login_redirect", "no_candidates")
+            if has_email or fb_status_val in ("login_redirect", "no_candidates") or not has_clue or not should_run_night_fb:
+                if has_email or fb_status_val in ("login_redirect", "no_candidates"):
+                    email_state = "present" if has_email else "missing"
+                    _safe_log_console(
+                        logger,
+                        f"[Night FB] Skipping FB lookup for '{row.get('Artist Name', '') or row.get('Artist', '') or '<unknown>'}' (FB_Status='{fb_status_val_raw}', email='{email_state}').",
+                    )
                 state.update(
                     {
                         "fb_last_index": last_index,
@@ -669,15 +712,15 @@ def run_facebook_global_pass_nightmode(
                 for col in ("Email", "Email_All", "Email_Type", "Facebook_URL"):
                     if col in enriched:
                         df.at[idx, col] = enriched.get(col, "")
-                status_val = str(enriched.get("fb_status", "") or "")
+                status_val = str(enriched.get("FB_Status", "") or "")
                 if not status_val:
                     email_now = enriched.get("Email", "") or ""
                     fb_url_now = enriched.get("Facebook_URL", "") or ""
-                    status_val = "email_found" if str(email_now).strip() else ("no_email" if fb_url_now else "no_candidates")
-                df.at[idx, "fb_status"] = status_val
+                    status_val = "ok" if (str(email_now).strip() or fb_url_now) else "no_candidates"
+                df.at[idx, "FB_Status"] = status_val
             else:
                 # Attempted but no enrichment result; mark as no_candidates to avoid repeated retries.
-                df.at[idx, "fb_status"] = "no_candidates"
+                df.at[idx, "FB_Status"] = "no_candidates"
 
             state.update(
                 {
@@ -738,7 +781,7 @@ DEFAULT_EXPORT_COLUMNS: Sequence[str] = [
     "Email",
     "Email_All",
     "Email_Type",
-    "fb_status",
+    "FB_Status",
     "Played on triple J",
     "Played on Unearthed",
     "Release Date",

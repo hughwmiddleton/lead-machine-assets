@@ -21,6 +21,15 @@ except Exception:  # pragma: no cover - defensive import
 LoggerFn = Optional[Callable[[str], None]]
 
 EMAIL_REGEX = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
+_FB_SPLIT_PATTERN = re.compile(r"[,\s;|]+")
+FB_CLUE_FIELDS = [
+    "Social Link",
+    "External Links",
+    "Spotify_Website_URL",
+    "Spotify Website URL",
+    "Facebook_URL",
+    "Facebook URL",
+]
 
 
 def _log(logger: LoggerFn, message: str) -> None:
@@ -47,6 +56,47 @@ def _split_multi(value: str) -> List[str]:
         return []
     parts = re.split(r"[;,|]", value)
     return [p.strip() for p in parts if p and p.strip()]
+
+
+def _extract_fb_urls_from_row(row: Dict[str, str]) -> List[str]:
+    """
+    Collect explicit Facebook URLs from common clue fields in a row.
+    Splits on commas/semicolons/pipes/whitespace and removes obvious non-page endpoints.
+    """
+    fb_urls: List[str] = []
+
+    def _maybe_add(raw_url: str) -> None:
+        url = (raw_url or "").strip()
+        if not url:
+            return
+        lower = url.lower()
+        if "facebook.com" not in lower and "fb.me" not in lower and "m.me" not in lower:
+            return
+        if lower.startswith("//"):
+            url = "https:" + url
+            lower = url.lower()
+        elif not lower.startswith("http://") and not lower.startswith("https://"):
+            url = "https://" + url
+            lower = url.lower()
+        try:
+            parsed = urllib.parse.urlparse(url)
+        except Exception:
+            return
+        path_lower = (parsed.path or "").lower()
+        bad_paths = ("/r.php", "/login", "/share.php", "/dialog/", "/plugins/", "/l.php")
+        if any(path_lower.startswith(p) for p in bad_paths):
+            return
+        if url not in fb_urls:
+            fb_urls.append(url)
+
+    for field in FB_CLUE_FIELDS:
+        raw = row.get(field) or ""
+        if not raw:
+            continue
+        for token in _FB_SPLIT_PATTERN.split(str(raw)):
+            _maybe_add(token)
+
+    return fb_urls
 
 
 def _parse_existing_fb_url(row: Dict[str, str]) -> str:
@@ -337,7 +387,7 @@ class NightModeFacebookEnricher:
         """Night-Mode-only FB enrichment for a single row."""
         original_row = dict(row or {})
         result = dict(original_row)
-        result["fb_status"] = result.get("fb_status", "") or "pending"
+        result["FB_Status"] = result.get("FB_Status", "") or ""
 
         def _clean_val(value: str) -> str:
             try:
@@ -350,23 +400,42 @@ class NightModeFacebookEnricher:
 
         existing_email = _clean_val(result.get("Email", ""))
         if existing_email:
-            if (result.get("fb_status", "") or "pending") == "pending":
-                result["fb_status"] = "email_found"
+            if not result.get("FB_Status"):
+                result["FB_Status"] = "ok"
             return result
         artist_name = _clean_val(result.get("Artist Name", ""))
         location = _clean_val(result.get("Location", ""))
         facebook_url = _normalise_fb_url(_clean_val(result.get("Facebook_URL", "")))
-        if not facebook_url:
-            facebook_url = _parse_existing_fb_url(result)
-            facebook_url = _normalise_fb_url(facebook_url)
+        fb_urls = _extract_fb_urls_from_row(result)
+        if facebook_url and facebook_url not in fb_urls:
+            fb_urls.insert(0, facebook_url)
 
         try:
-            if facebook_url:
-                page_url = facebook_url
-                _log(self.logger, f"[Night FB] using direct Facebook_URL for {artist_name or '<unknown>'} -> {page_url}")
-                html = self._fetch_html(page_url)
-                emails = _extract_emails_from_html(html or "")
-            else:
+            page_url = ""
+            emails: List[str] = []
+            if fb_urls:
+                _log(self.logger, f"[Night FB] Using explicit FB URL(s) for {artist_name or '<unknown>'}: {fb_urls}")
+                for direct_url in fb_urls:
+                    try:
+                        if facebook_enrich and getattr(facebook_enrich, "is_fb_login_redirect", None):
+                            try:
+                                if facebook_enrich.is_fb_login_redirect(direct_url):
+                                    result["FB_Status"] = "login_redirect"
+                                    result["Facebook_URL"] = ""
+                                    _log(self.logger, f"[Night FB] Detected login redirect for '{artist_name or '<unknown>'}' -> {direct_url}, marking FB_Status='login_redirect'.")
+                                    return result
+                            except Exception:
+                                pass
+                        page_url = direct_url
+                        _log(self.logger, f"[Night FB] using direct Facebook_URL for {artist_name or '<unknown>'} -> {page_url}")
+                        html = self._fetch_html(page_url)
+                        emails = _extract_emails_from_html(html or "")
+                        if page_url:
+                            break
+                    except Exception:
+                        continue
+
+            if not page_url:
                 session = self._ensure_session()
                 if not session or not hasattr(self.legacy, "fb_find_page_and_emails_by_name"):
                     return result
@@ -384,7 +453,9 @@ class NightModeFacebookEnricher:
                     log_prefix="[Night FB]",
                 )
                 if not page_url:
-                    result["fb_status"] = "no_candidates"
+                    if not result.get("FB_Status"):
+                        result["FB_Status"] = "no_candidates"
+                    _log(self.logger, f"[Night FB] No usable FB candidates for '{artist_name}', marking FB_Status='no_candidates'.")
                     return result
 
             night_result = self._build_result(emails, str(result.get("Email_All", "") or ""), page_url, artist_name)
@@ -394,15 +465,19 @@ class NightModeFacebookEnricher:
                 result["Email_Type"] = night_result.email_type
                 if night_result.facebook_url:
                     result["Facebook_URL"] = night_result.facebook_url
-                result["fb_status"] = "email_found" if (night_result.email or emails) else result.get("fb_status", "pending")
+                if not result.get("FB_Status"):
+                    result["FB_Status"] = "ok"
                 _log(self.logger, f"[Night FB] extracted email(s) {emails} from {page_url}")
             else:
                 # Page reached but no emails extracted.
                 lowered_url = (page_url or "").lower()
                 if "facebook.com/r.php" in lowered_url or "/login" in lowered_url:
-                    result["fb_status"] = "login_redirect"
+                    result["FB_Status"] = "login_redirect"
+                    result["Facebook_URL"] = ""
+                    _log(self.logger, f"[Night FB] Detected login redirect for '{artist_name}' -> {page_url}, marking FB_Status='login_redirect'.")
                 else:
-                    result["fb_status"] = "no_email"
+                    if not result.get("FB_Status"):
+                        result["FB_Status"] = "ok"
             return result
         except Exception as exc:  # pragma: no cover - defensive
             prefix = f"[FB Night] Night FB enrich failed at row {row_index}: {exc}" if row_index is not None else f"[FB Night] Night FB enrich failed: {exc}"

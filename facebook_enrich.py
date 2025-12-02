@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import unicodedata
 import urllib.parse
+from urllib.parse import urlparse
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
@@ -49,6 +50,21 @@ MUSIC_CATEGORY_KEYWORDS = (
 
 MUSIC_CATEGORY_BOOST = 0.8
 MUSIC_FLAG_BOOST = 0.5
+
+
+def is_fb_login_redirect(url: str) -> bool:
+    """Return True if the URL points to a Facebook login/registration redirect (/r.php)."""
+    if not url:
+        return False
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return False
+    host = (parsed.netloc or "").lower()
+    path = (parsed.path or "").lower().lstrip("/")
+    if "facebook.com" not in host:
+        return False
+    return path.startswith("r.php")
 
 # If ANY of these strings appear in the candidate name, category or URL slug, hard-reject.
 BUSINESS_KILL_TOKENS = (
