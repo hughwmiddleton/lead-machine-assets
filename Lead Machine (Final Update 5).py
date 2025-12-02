@@ -7310,6 +7310,138 @@ def login_facebook(driver, fb_username, fb_password):
     driver.find_element(By.NAME, 'login').click()
     WebDriverWait(driver, 15).until(EC.presence_of_element_located((By.TAG_NAME, 'body')))
 
+
+class FacebookSessionManager:
+    """
+    Lightweight session manager to ensure we login once per run and reuse the same driver.
+    This keeps behaviour identical for callers while reducing repeated logins.
+    """
+
+    def __init__(self, username: str, password: str, driver_factory, logger=None):
+        self.username = username
+        self.password = password
+        self.driver_factory = driver_factory
+        self.logger = logger
+        self.driver = None
+        self.logged_in = False
+        self.main_window_handle = None
+        self.page_counter = 0
+
+    def _log(self, msg: str):
+        if not msg:
+            return
+        if self.logger:
+            try:
+                self.logger(msg)
+            except Exception:
+                pass
+        else:
+            try:
+                print(msg)
+            except Exception:
+                pass
+
+    def ensure_driver(self):
+        if self.driver is None:
+            self.driver = self.driver_factory()
+
+    def ensure_logged_in(self):
+        self.ensure_driver()
+        if self.logged_in:
+            return self.driver
+        login_facebook(self.driver, self.username, self.password)
+        self.logged_in = True
+        self._capture_main_window()
+        return self.driver
+
+    def _capture_main_window(self):
+        try:
+            self.main_window_handle = self.driver.current_window_handle
+        except Exception as exc:
+            self.main_window_handle = None
+            self._log(f"[FB Session] Warning: could not capture main window handle: {exc}")
+
+    def refresh_session(self):
+        self._log("[FB Session] Refreshing Facebook session...")
+        try:
+            if self.driver:
+                self.driver.quit()
+        except Exception:
+            pass
+        self.driver = None
+        self.logged_in = False
+        self.ensure_logged_in()
+
+    def maybe_refresh(self, refresh_every: int):
+        if refresh_every <= 0:
+            return
+        self.page_counter += 1
+        if self.page_counter % refresh_every == 0:
+            self.refresh_session()
+
+    def close_extra_windows(self):
+        if self.driver is None:
+            return
+        if self.main_window_handle:
+            try:
+                close_unexpected_windows(self.driver, self.main_window_handle, logger=self._log)
+            except Exception:
+                pass
+
+    def navigate(self, url: str):
+        driver = self.ensure_logged_in()
+        driver.get(url)
+        self._capture_main_window()
+        self.close_extra_windows()
+        return driver
+
+    def close(self):
+        try:
+            if self.driver:
+                self.driver.quit()
+        except Exception:
+            pass
+        self.driver = None
+        self.logged_in = False
+        self.main_window_handle = None
+
+
+_FB_SHARED_SESSION = None
+_FB_SHARED_CREDS = None
+
+
+def get_shared_facebook_session(username: str, password: str, logger=None) -> FacebookSessionManager:
+    """
+    Return a shared session for the given credentials, creating it if needed.
+    """
+    global _FB_SHARED_SESSION, _FB_SHARED_CREDS
+    creds = (username or "").strip(), (password or "").strip()
+    if _FB_SHARED_SESSION is not None and _FB_SHARED_CREDS == creds:
+        try:
+            _FB_SHARED_SESSION.ensure_logged_in()
+            return _FB_SHARED_SESSION
+        except Exception:
+            try:
+                _FB_SHARED_SESSION.close()
+            except Exception:
+                pass
+            _FB_SHARED_SESSION = None
+    _FB_SHARED_SESSION = FacebookSessionManager(username, password, setup_facebook_driver, logger=logger)
+    _FB_SHARED_SESSION.ensure_logged_in()
+    _FB_SHARED_CREDS = creds
+    return _FB_SHARED_SESSION
+
+
+def release_shared_facebook_session():
+    global _FB_SHARED_SESSION, _FB_SHARED_CREDS
+    try:
+        if _FB_SHARED_SESSION:
+            _FB_SHARED_SESSION.close()
+    except Exception:
+        pass
+    _FB_SHARED_SESSION = None
+    _FB_SHARED_CREDS = None
+
 def _extract_social_links(row):
     """Return all usable social URLs (split on ';' or ',') from likely columns."""
     candidate_columns = [
@@ -7477,6 +7609,11 @@ def _prompt_origin_auto_validate(csv_path: str, default_scope: str = "uncertain_
     Offer a lightweight prompt to run origin auto-validate on a CSV.
     Skips in non-interactive contexts (e.g. GUI threads).
     """
+    try:
+        if os.environ.get("DISABLE_ORIGIN_AUTO_VALIDATE_PROMPT"):
+            return None
+    except Exception:
+        return None
     if not csv_path or not os.path.exists(csv_path):
         return None
     try:
@@ -7693,7 +7830,7 @@ def _goto_facebook_about(driver, page_url: str, timeout: float = 5.0) -> bool:
 # =============================================================================
 # UPDATED scrape_csv Function (Simpler Version with Wait Times of 0.5 sec and Session Refresh every 20 pages)
 # =============================================================================
-def scrape_csv(input_csv, output_csv, fb_username, fb_password, max_emails=None):
+def scrape_csv(input_csv, output_csv, fb_username, fb_password, max_emails=None, use_shared_session: bool = False):
     existing_data = pd.DataFrame()
     if os.path.exists(output_csv):
         try:
@@ -7789,77 +7926,68 @@ def scrape_csv(input_csv, output_csv, fb_username, fb_password, max_emails=None)
         else:
             print("No Facebook pages to process.")
         return
-    driver = setup_facebook_driver()
-    login_facebook(driver, fb_username, fb_password)
-    try:
-        main_window_handle = driver.current_window_handle
-    except Exception as exc:
-        main_window_handle = None
-        print(f"[FB Scraper] Warning: could not capture main window handle: {exc}")
+    session = get_shared_facebook_session(fb_username, fb_password, logger=_fb_log) if use_shared_session else FacebookSessionManager(fb_username, fb_password, setup_facebook_driver, logger=_fb_log)
+    driver = session.ensure_logged_in()
     if FACEBOOK_CLOSE_EXTRA_WINDOWS:
-        close_unexpected_windows(driver, main_window_handle, logger=_fb_log)
+        session.close_extra_windows()
     session_counter = 0
     remaining_rows = []
-    for idx, (row, url, known_emails) in enumerate(facebook_rows):
-        if not url:
-            continue
-        preexisting_emails = list(known_emails or [])
-        try:
-            if FACEBOOK_CLOSE_EXTRA_WINDOWS:
-                close_unexpected_windows(driver, main_window_handle, logger=_fb_log)
-            print(f"Scraping Facebook page: {url}")
-            driver.get(url)
-            if FACEBOOK_CLOSE_EXTRA_WINDOWS:
-                close_unexpected_windows(driver, main_window_handle, logger=_fb_log)
-            session_counter += 1
-            # Refresh the session every 20 pages.
-            if session_counter % 20 == 0:
-                print("Refreshing Facebook session...")
-                driver.quit()
-                driver = setup_facebook_driver()
-                login_facebook(driver, fb_username, fb_password)
-                try:
-                    main_window_handle = driver.current_window_handle
-                except Exception as exc:
-                    main_window_handle = None
-                    print(f"[FB Scraper] Warning: could not capture main window handle after refresh: {exc}")
-            navigated = _goto_facebook_about(driver, url, timeout=5)
-            if FACEBOOK_CLOSE_EXTRA_WINDOWS:
-                close_unexpected_windows(driver, main_window_handle, logger=_fb_log)
-            if not navigated:
-                print(f"Warning: could not open About section for {url}; scanning current page.")
-            time.sleep(1.0)
-            WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.TAG_NAME, 'body')))
-            soup = BeautifulSoup(driver.page_source, 'html.parser')
-            emails = list(preexisting_emails)
-            body_text = soup.get_text(" ", strip=True)
-            if body_text:
-                emails.extend(extract_emails(body_text))
-            for anchor in soup.select('a[href^="mailto:"]'):
-                href = anchor.get("href") or ""
-                if href.startswith("mailto:"):
-                    addr = href.split("mailto:")[-1].split("?", 1)[0]
-                    if addr:
-                        emails.append(addr)
-            payload, unique_emails = _build_email_result(row, url, emails, preferred_url=url)
-            if payload:
-                results.append(payload)
-                emails_found += len(unique_emails)
-                if max_emails is not None and emails_found >= max_emails:
-                    remaining_rows = facebook_rows[idx + 1 :]
-                    break
-        except Exception as e:
-            print(f"Error scraping {url}: {e}")
-            if preexisting_emails:
-                payload, _ = _build_email_result(row, url, preexisting_emails, preferred_url=url)
+    try:
+        for idx, (row, url, known_emails) in enumerate(facebook_rows):
+            if not url:
+                continue
+            preexisting_emails = list(known_emails or [])
+            try:
+                if FACEBOOK_CLOSE_EXTRA_WINDOWS:
+                    session.close_extra_windows()
+                print(f"Scraping Facebook page: {url}")
+                driver = session.navigate(url)
+                if FACEBOOK_CLOSE_EXTRA_WINDOWS:
+                    session.close_extra_windows()
+                session_counter += 1
+                # Refresh the session every 20 pages.
+                if session_counter % 20 == 0:
+                    session.refresh_session()
+                    driver = session.ensure_logged_in()
+                navigated = _goto_facebook_about(driver, url, timeout=5)
+                if FACEBOOK_CLOSE_EXTRA_WINDOWS:
+                    session.close_extra_windows()
+                if not navigated:
+                    print(f"Warning: could not open About section for {url}; scanning current page.")
+                time.sleep(1.0)
+                WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.TAG_NAME, 'body')))
+                soup = BeautifulSoup(driver.page_source, 'html.parser')
+                emails = list(preexisting_emails)
+                body_text = soup.get_text(" ", strip=True)
+                if body_text:
+                    emails.extend(extract_emails(body_text))
+                for anchor in soup.select('a[href^="mailto:"]'):
+                    href = anchor.get("href") or ""
+                    if href.startswith("mailto:"):
+                        addr = href.split("mailto:")[-1].split("?", 1)[0]
+                        if addr:
+                            emails.append(addr)
+                payload, unique_emails = _build_email_result(row, url, emails, preferred_url=url)
                 if payload:
                     results.append(payload)
-        processed_urls.add(url)
-        # Random sleep between 1 and 2 seconds.
-        time.sleep(random.uniform(1, 2))
-    else:
-        remaining_rows = []
-    driver.quit()
+                    emails_found += len(unique_emails)
+                    if max_emails is not None and emails_found >= max_emails:
+                        remaining_rows = facebook_rows[idx + 1 :]
+                        break
+            except Exception as e:
+                print(f"Error scraping {url}: {e}")
+                if preexisting_emails:
+                    payload, _ = _build_email_result(row, url, preexisting_emails, preferred_url=url)
+                    if payload:
+                        results.append(payload)
+            processed_urls.add(url)
+            # Random sleep between 1 and 2 seconds.
+            time.sleep(random.uniform(1, 2))
+        else:
+            remaining_rows = []
+    finally:
+        if not use_shared_session:
+            session.close()
     for row, url, known_emails in remaining_rows:
         if known_emails:
             payload, _ = _build_email_result(row, url, known_emails, preferred_url=url)
@@ -8560,6 +8688,34 @@ class NightModeTab(QtWidgets.QWidget):
         fb_row.addStretch()
         layout.addLayout(fb_row)
 
+        # Facebook auto-resume options
+        fb_resume_layout = QtWidgets.QHBoxLayout()
+        self.fb_auto_resume_checkbox = QtWidgets.QCheckBox("Auto-resume FB after captcha")
+        self.fb_cooldown_spin = QtWidgets.QSpinBox()
+        self.fb_cooldown_spin.setRange(0, 36000)
+        self.fb_cooldown_spin.setValue(600)
+        fb_cooldown_label = QtWidgets.QLabel("Cooldown (seconds):")
+        self.fb_max_attempts_spin = QtWidgets.QSpinBox()
+        self.fb_max_attempts_spin.setRange(0, 10)
+        self.fb_max_attempts_spin.setValue(1)
+        fb_attempts_label = QtWidgets.QLabel("Max auto-resume attempts:")
+        self.fb_max_rows_spin = QtWidgets.QSpinBox()
+        self.fb_max_rows_spin.setRange(0, 100000)
+        self.fb_max_rows_spin.setValue(100)
+        fb_max_rows_label = QtWidgets.QLabel("FB rows per run (0 = no limit):")
+        fb_resume_layout.addWidget(self.fb_auto_resume_checkbox)
+        fb_resume_layout.addSpacing(10)
+        fb_resume_layout.addWidget(fb_cooldown_label)
+        fb_resume_layout.addWidget(self.fb_cooldown_spin)
+        fb_resume_layout.addSpacing(10)
+        fb_resume_layout.addWidget(fb_attempts_label)
+        fb_resume_layout.addWidget(self.fb_max_attempts_spin)
+        fb_resume_layout.addSpacing(10)
+        fb_resume_layout.addWidget(fb_max_rows_label)
+        fb_resume_layout.addWidget(self.fb_max_rows_spin)
+        fb_resume_layout.addStretch()
+        layout.addLayout(fb_resume_layout)
+
         # Run root
         run_root_layout = QtWidgets.QHBoxLayout()
         run_root_label = QtWidgets.QLabel("Run root (optional):")
@@ -8674,6 +8830,12 @@ class NightModeTab(QtWidgets.QWidget):
             "export_mode": self.export_mode_combo.currentText().strip(),
             "jobs": self.jobs,
         }
+        config["facebook"] = {
+            "auto_resume_after_captcha": self.fb_auto_resume_checkbox.isChecked(),
+            "cooldown_seconds": int(self.fb_cooldown_spin.value()),
+            "max_auto_resume_attempts": int(self.fb_max_attempts_spin.value()),
+            "max_rows_per_run": int(self.fb_max_rows_spin.value()),
+        }
         try:
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(config, f, indent=2)
@@ -8719,6 +8881,20 @@ class NightModeTab(QtWidgets.QWidget):
             idx = self.export_mode_combo.findText(export_mode)
             if idx >= 0:
                 self.export_mode_combo.setCurrentIndex(idx)
+        fb_cfg = config.get("facebook", {}) or {}
+        self.fb_auto_resume_checkbox.setChecked(bool(fb_cfg.get("auto_resume_after_captcha", False)))
+        try:
+            self.fb_cooldown_spin.setValue(int(fb_cfg.get("cooldown_seconds", self.fb_cooldown_spin.value())))
+        except Exception:
+            pass
+        try:
+            self.fb_max_attempts_spin.setValue(int(fb_cfg.get("max_auto_resume_attempts", self.fb_max_attempts_spin.value())))
+        except Exception:
+            pass
+        try:
+            self.fb_max_rows_spin.setValue(int(fb_cfg.get("max_rows_per_run", self.fb_max_rows_spin.value())))
+        except Exception:
+            pass
         jobs = config.get("jobs", [])
         if isinstance(jobs, list):
             self.jobs = jobs
@@ -8735,6 +8911,12 @@ class NightModeTab(QtWidgets.QWidget):
             config = {
                 "export_mode": self.export_mode_combo.currentText().strip(),
                 "jobs": self.jobs,
+            }
+            config["facebook"] = {
+                "auto_resume_after_captcha": self.fb_auto_resume_checkbox.isChecked(),
+                "cooldown_seconds": int(self.fb_cooldown_spin.value()),
+                "max_auto_resume_attempts": int(self.fb_max_attempts_spin.value()),
+                "max_rows_per_run": int(self.fb_max_rows_spin.value()),
             }
             try:
                 temp_dir = tempfile.mkdtemp(prefix="nightmode_")
@@ -8763,6 +8945,11 @@ class NightModeTab(QtWidgets.QWidget):
         run_root = self.run_root_edit.text().strip()
         if run_root:
             cmd.extend(["--run-root", run_root])
+        if self.fb_auto_resume_checkbox.isChecked():
+            cmd.append("--fb-auto-resume")
+        cmd.extend(["--fb-cooldown-seconds", str(int(self.fb_cooldown_spin.value()))])
+        cmd.extend(["--fb-max-auto-resume-attempts", str(int(self.fb_max_attempts_spin.value()))])
+        cmd.extend(["--fb-max-rows-per-run", str(int(self.fb_max_rows_spin.value()))])
 
         self.log_console.clear()
         self.status_label.setText("Status: running")

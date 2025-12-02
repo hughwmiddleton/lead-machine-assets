@@ -61,6 +61,14 @@ class NightModeRunnerDummyTest(unittest.TestCase):
         def fake_fb_pass(input_csv, output_csv, state_path, max_rows_per_run=100, **kwargs):
             fb_calls.append((input_csv, output_csv, state_path, max_rows_per_run))
             shutil.copyfile(input_csv, output_csv)
+            return pipeline_runner.FacebookGlobalPassStatus(
+                processed_rows=4,
+                total_rows=4,
+                completed=True,
+                hit_captcha=False,
+                limit_reached=False,
+                attempted_total=4,
+            )
 
         with mock.patch.object(night_mode_runner, "run_directory_job", side_effect=fake_run_directory_job), mock.patch.object(
             night_mode_runner, "run_enrichment", side_effect=fake_run_enrichment
@@ -191,7 +199,7 @@ class FacebookNightModeWrapperTest(unittest.TestCase):
         with mock.patch.object(pipeline_runner, "_load_legacy_module", return_value=fake_module), mock.patch.dict(
             os.environ, {"FB_USERNAME": "u", "FB_PASSWORD": "p"}
         ), mock.patch("pipeline_runner.time.sleep", return_value=None):
-            pipeline_runner.run_facebook_global_pass_nightmode(
+            status_first = pipeline_runner.run_facebook_global_pass_nightmode(
                 self.input_csv,
                 self.output_csv,
                 self.state_path,
@@ -200,6 +208,8 @@ class FacebookNightModeWrapperTest(unittest.TestCase):
                 short_break_range=(0, 0),
                 long_break_range=(0, 0),
             )
+        self.assertFalse(status_first.completed)
+        self.assertFalse(status_first.hit_captcha)
 
         with open(self.state_path, "r", encoding="utf-8") as f:
             first_state = json.load(f)
@@ -215,7 +225,7 @@ class FacebookNightModeWrapperTest(unittest.TestCase):
         with mock.patch.object(pipeline_runner, "_load_legacy_module", return_value=fake_module), mock.patch.dict(
             os.environ, {"FB_USERNAME": "u", "FB_PASSWORD": "p"}
         ), mock.patch("pipeline_runner.time.sleep", return_value=None):
-            pipeline_runner.run_facebook_global_pass_nightmode(
+            status_second = pipeline_runner.run_facebook_global_pass_nightmode(
                 self.input_csv,
                 self.output_csv,
                 self.state_path,
@@ -224,6 +234,8 @@ class FacebookNightModeWrapperTest(unittest.TestCase):
                 short_break_range=(0, 0),
                 long_break_range=(0, 0),
             )
+        self.assertTrue(status_second.completed)
+        self.assertFalse(status_second.hit_captcha)
 
         with open(self.state_path, "r", encoding="utf-8") as f:
             final_state = json.load(f)
@@ -246,7 +258,7 @@ class FacebookNightModeWrapperTest(unittest.TestCase):
         with mock.patch.object(pipeline_runner, "_load_legacy_module", return_value=FakeModule()), mock.patch.dict(
             os.environ, {"FB_USERNAME": "u", "FB_PASSWORD": "p"}
         ), mock.patch("pipeline_runner.time.sleep", return_value=None):
-            pipeline_runner.run_facebook_global_pass_nightmode(
+            status = pipeline_runner.run_facebook_global_pass_nightmode(
                 self.input_csv,
                 self.output_csv,
                 self.state_path,
@@ -255,6 +267,8 @@ class FacebookNightModeWrapperTest(unittest.TestCase):
                 short_break_range=(0, 0),
                 long_break_range=(0, 0),
             )
+        self.assertTrue(status.hit_captcha)
+        self.assertFalse(status.completed)
 
         with open(self.state_path, "r", encoding="utf-8") as f:
             state = json.load(f)
@@ -264,6 +278,95 @@ class FacebookNightModeWrapperTest(unittest.TestCase):
         email_two = df.loc[df["Artist Name"] == "NeedsFb1", "Email"].iloc[0]
         self.assertTrue(pd.isna(email_two) or email_two == "")
 
+
+class NightModeFacebookAutoResumeTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.run_root = os.path.join(self.tmpdir.name, "overnight_runs")
+        os.makedirs(self.run_root, exist_ok=True)
+
+    def _write_config(self, path: str) -> dict:
+        config = {
+            "export_mode": "both",
+            "facebook": {
+                "auto_resume_after_captcha": False,
+                "cooldown_seconds": 0,
+                "max_auto_resume_attempts": 2,
+                "max_rows_per_run": 100,
+            },
+            "jobs": [
+                {
+                    "job_id": "job_one",
+                    "directory": "spotify",
+                    "target_valid_leads": 1,
+                }
+            ],
+        }
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=2)
+        return config
+
+    def test_auto_resume_after_captcha(self) -> None:
+        config_path = os.path.join(self.tmpdir.name, "config.json")
+        self._write_config(config_path)
+
+        def fake_run_directory_job(job_config, raw_output_path, logger=None):
+            rows = [
+                {"Artist Name": f"{job_config['job_id']}_artist_a", "Email": ""},
+                {"Artist Name": f"{job_config['job_id']}_artist_b", "Email": ""},
+            ]
+            pd.DataFrame(rows).to_csv(raw_output_path, index=False)
+            return raw_output_path
+
+        def fake_run_enrichment(raw_csv_path, enriched_output_path, logger=None):
+            shutil.copyfile(raw_csv_path, enriched_output_path)
+            return enriched_output_path
+
+        fb_statuses = [
+            pipeline_runner.FacebookGlobalPassStatus(
+                processed_rows=1,
+                total_rows=2,
+                completed=False,
+                hit_captcha=True,
+                limit_reached=False,
+                attempted_total=1,
+            ),
+            pipeline_runner.FacebookGlobalPassStatus(
+                processed_rows=2,
+                total_rows=2,
+                completed=True,
+                hit_captcha=False,
+                limit_reached=False,
+                attempted_total=2,
+            ),
+        ]
+        fb_calls = []
+
+        def fake_fb_pass(input_csv, output_csv, state_path, **kwargs):
+            fb_calls.append((input_csv, output_csv, state_path))
+            shutil.copyfile(input_csv, output_csv)
+            return fb_statuses.pop(0)
+
+        with mock.patch.object(night_mode_runner, "run_directory_job", side_effect=fake_run_directory_job), mock.patch.object(
+            night_mode_runner, "run_enrichment", side_effect=fake_run_enrichment
+        ), mock.patch.object(night_mode_runner, "run_facebook_global_pass_nightmode", side_effect=fake_fb_pass), mock.patch(
+            "night_mode_runner.time.sleep", return_value=None
+        ):
+            result = night_mode_runner.run_night_mode(
+                config_path,
+                run_root=self.run_root,
+                fb_auto_resume_override=True,
+                fb_cooldown_override=0,
+                fb_max_attempts_override=2,
+            )
+
+        self.assertGreaterEqual(len(fb_calls), 2)
+        run_dir = result["run_dir"]
+        master_post = os.path.join(run_dir, "master_post_fb.csv")
+        master_final = os.path.join(run_dir, "master_enriched_deduped.csv")
+        self.assertTrue(os.path.exists(master_post))
+        self.assertTrue(os.path.exists(master_final))
 
 if __name__ == "__main__":
     unittest.main()

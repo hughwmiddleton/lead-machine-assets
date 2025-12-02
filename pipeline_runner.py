@@ -15,6 +15,7 @@ import shutil
 import tempfile
 import time
 import datetime
+from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
 import pandas as pd
@@ -53,6 +54,17 @@ def _safe_log(logger: LoggerFn, message: str) -> None:
         except Exception:
             pass
     _LOGGER.info(message)
+
+
+def _safe_log_console(logger: LoggerFn, message: str) -> None:
+    """
+    Log via provided logger and also echo to stdout for real-time GUI visibility.
+    """
+    _safe_log(logger, message)
+    try:
+        print(message)
+    except Exception:
+        pass
 
 
 def _ensure_parent(path: str) -> None:
@@ -386,6 +398,16 @@ def _is_captcha_error(exc: BaseException) -> bool:
     return False
 
 
+@dataclass
+class FacebookGlobalPassStatus:
+    processed_rows: int
+    total_rows: int
+    completed: bool
+    hit_captcha: bool
+    limit_reached: bool
+    attempted_total: int
+
+
 def run_facebook_global_pass_nightmode(
     input_csv: str,
     output_csv: str,
@@ -397,7 +419,7 @@ def run_facebook_global_pass_nightmode(
     long_break_every: int = 80,
     long_break_range: tuple[float, float] = (120.0, 360.0),
     logger: LoggerFn = None,
-) -> None:
+) -> FacebookGlobalPassStatus:
     """
     Night Mode–specific global FB enrichment pass.
 
@@ -407,6 +429,8 @@ def run_facebook_global_pass_nightmode(
       - periodic short/long breaks
       - per-run max row limit
       - stateful resume from state_path
+
+    Returns FacebookGlobalPassStatus describing outcome for the current run.
     """
     if not input_csv or not os.path.exists(input_csv):
         raise FileNotFoundError(f"Input CSV not found: {input_csv}")
@@ -426,15 +450,40 @@ def run_facebook_global_pass_nightmode(
     captcha_flag = bool(state.get("fb_captcha_flag", False))
     completed_rows = int(state.get("fb_completed", 0) or 0)
 
+    try:
+        os.environ["DISABLE_ORIGIN_AUTO_VALIDATE_PROMPT"] = "1"
+    except Exception:
+        pass
+
     if fb_username and fb_password:
         module = _load_legacy_module()
         if not hasattr(module, "scrape_csv"):
-            _safe_log(logger, "[FB Night] scrape_csv missing on legacy module; skipping.")
+            _safe_log_console(logger, "[FB Night] scrape_csv missing on legacy module; skipping.")
+            state.update(
+                {
+                    "fb_last_index": total_rows - 1,
+                    "fb_completed": total_rows,
+                    "fb_attempted_total": attempted_total,
+                    "fb_captcha_flag": False,
+                    "fb_total_rows": total_rows,
+                    "fb_run_completed": True,
+                    "fb_limit_reached": False,
+                    "fb_resume_input": os.path.abspath(input_csv),
+                }
+            )
+            _write_fb_state(state_path, state)
             df.drop(columns=["__row_id"], inplace=True, errors="ignore")
             df.to_csv(output_csv, index=False)
-            return
+            return FacebookGlobalPassStatus(
+                processed_rows=completed_rows,
+                total_rows=total_rows,
+                completed=True,
+                hit_captcha=False,
+                limit_reached=False,
+                attempted_total=attempted_total,
+            )
     else:
-        _safe_log(logger, "[FB Night] Missing FB credentials; passing through without enrichment.")
+        _safe_log_console(logger, "[FB Night] Missing FB credentials; passing through without enrichment.")
         state.update(
             {
                 "fb_last_index": total_rows - 1,
@@ -450,7 +499,14 @@ def run_facebook_global_pass_nightmode(
         _write_fb_state(state_path, state)
         df.drop(columns=["__row_id"], inplace=True, errors="ignore")
         df.to_csv(output_csv, index=False)
-        return
+        return FacebookGlobalPassStatus(
+            processed_rows=total_rows,
+            total_rows=total_rows,
+            completed=True,
+            hit_captcha=False,
+            limit_reached=False,
+            attempted_total=attempted_total,
+        )
 
     processed_this_run = 0
     limit_reached = False
@@ -487,7 +543,7 @@ def run_facebook_global_pass_nightmode(
 
             if processed_this_run > 0:
                 delay = random.uniform(*per_row_delay_range) if per_row_delay_range else 0.0
-                _safe_log(logger, f"[FB Night] Sleeping {delay:.2f}s before next row (index={idx}).")
+                _safe_log_console(logger, f"[FB Night] Sleeping {delay:.2f}s before next row (index={idx}).")
                 _safe_sleep(delay)
 
             processed_this_run += 1
@@ -495,11 +551,11 @@ def run_facebook_global_pass_nightmode(
 
             if short_break_every > 0 and processed_this_run % short_break_every == 0:
                 pause = random.uniform(*short_break_range) if short_break_range else 0.0
-                _safe_log(logger, f"[FB Night] Short break for {pause:.2f}s after {processed_this_run} rows.")
+                _safe_log_console(logger, f"[FB Night] Short break for {pause:.2f}s after {processed_this_run} rows.")
                 _safe_sleep(pause)
             if long_break_every > 0 and processed_this_run % long_break_every == 0:
                 pause = random.uniform(*long_break_range) if long_break_range else 0.0
-                _safe_log(logger, f"[FB Night] Long break for {pause:.2f}s after {processed_this_run} rows.")
+                _safe_log_console(logger, f"[FB Night] Long break for {pause:.2f}s after {processed_this_run} rows.")
                 _safe_sleep(pause)
 
             single_df = pd.DataFrame([row])
@@ -511,12 +567,12 @@ def run_facebook_global_pass_nightmode(
                 except Exception:
                     pass
             try:
-                module.scrape_csv(temp_input, temp_output, fb_username, fb_password, max_emails=None)
+                module.scrape_csv(temp_input, temp_output, fb_username, fb_password, max_emails=None, use_shared_session=True)
             except Exception as exc:
                 if _is_captcha_error(exc):
                     captcha_flag = True
                     captcha_detected = True
-                    _safe_log(logger, f"[FB Night] Captcha detected at row {idx}; stopping early.")
+                    _safe_log_console(logger, f"[FB Night] Captcha detected at row {idx}; stopping early.")
                     state.update(
                         {
                             "fb_last_index": last_index,
@@ -529,7 +585,7 @@ def run_facebook_global_pass_nightmode(
                     )
                     _write_fb_state(state_path, state)
                     break
-                _safe_log(logger, f"[FB Night] scrape_csv failed at row {idx}: {exc}")
+                _safe_log_console(logger, f"[FB Night] scrape_csv failed at row {idx}: {exc}")
                 state.update(
                     {
                         "fb_last_index": last_index,
@@ -582,7 +638,7 @@ def run_facebook_global_pass_nightmode(
 
             if max_rows_per_run and processed_this_run >= max_rows_per_run:
                 limit_reached = True
-                _safe_log(logger, f"[FB Night] Hit max_rows_per_run={max_rows_per_run}; stopping.")
+                _safe_log_console(logger, f"[FB Night] Hit max_rows_per_run={max_rows_per_run}; stopping.")
                 break
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
@@ -604,3 +660,11 @@ def run_facebook_global_pass_nightmode(
 
     df.drop(columns=["__row_id"], inplace=True, errors="ignore")
     df.to_csv(output_csv, index=False)
+    return FacebookGlobalPassStatus(
+        processed_rows=completed_rows,
+        total_rows=total_rows,
+        completed=run_completed,
+        hit_captcha=captcha_detected or captcha_flag,
+        limit_reached=limit_reached,
+        attempted_total=attempted_total,
+    )
