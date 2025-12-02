@@ -21,6 +21,8 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
 
 import pandas as pd
 
+from night_mode_fb import NightModeFacebookEnricher
+
 LoggerFn = Optional[Callable[[str], None]]
 
 _LEGACY_MODULE = None
@@ -235,7 +237,7 @@ def run_directory_job(job_config: Dict[str, Any], raw_output_path: str, logger: 
     raise ValueError(f"Unsupported directory: {directory}")
 
 
-def run_enrichment(raw_csv_path: str, enriched_output_path: str, logger: LoggerFn = None) -> str:
+def run_enrichment(raw_csv_path: str, enriched_output_path: str, logger: LoggerFn = None, night_mode: bool = False) -> str:
     """
     Invoke the existing enrichment/validation pipeline on a CSV.
 
@@ -257,6 +259,7 @@ def run_enrichment(raw_csv_path: str, enriched_output_path: str, logger: LoggerF
             output_path=enriched_output_path,
             validate_scope="uncertain_only",
             logger=logger,
+            night_mode=night_mode,
         )
     except Exception as exc:  # pragma: no cover - defensive fallback
         _safe_log(logger, f"[Enrich] Auto-validate failed safely: {exc}")
@@ -291,7 +294,13 @@ def _has_facebook_clue(row: pd.Series) -> bool:
     except Exception:
         pass
     # Fallback: if we have an artist name, we can attempt a search as a clue.
-    name = str(row.get("Artist Name", "") or "").strip()
+    name = row.get("Artist Name", "")
+    try:
+        if pd.isna(name):
+            name = ""
+    except Exception:
+        pass
+    name = str(name or "").strip()
     return bool(name)
 
 
@@ -547,11 +556,14 @@ def run_facebook_global_pass_nightmode(
     processed_this_run = 0
     limit_reached = False
     captcha_detected = False
-    temp_dir = tempfile.mkdtemp(prefix="fb_nightmode_")
-    temp_input = os.path.join(temp_dir, "fb_input.csv")
-    temp_output = os.path.join(temp_dir, "fb_output.csv")
+    fb_helper = NightModeFacebookEnricher(
+        module,
+        fb_username,
+        fb_password,
+        logger=lambda msg: _safe_log_console(logger, msg),
+    )
 
-    try:
+    with fb_helper:
         for idx, row in df.iterrows():
             if idx <= last_index:
                 continue
@@ -594,17 +606,10 @@ def run_facebook_global_pass_nightmode(
                 _safe_log_console(logger, f"[FB Night] Long break for {pause:.2f}s after {processed_this_run} rows.")
                 _safe_sleep(pause)
 
-            single_df = pd.DataFrame([row])
-            single_df.to_csv(temp_input, index=False)
-            # Ensure fresh output target for this pass while retaining prior runs for dedupe.
-            if os.path.exists(temp_output):
-                try:
-                    os.remove(temp_output)
-                except Exception:
-                    pass
             try:
-                module.scrape_csv(temp_input, temp_output, fb_username, fb_password, max_emails=None, use_shared_session=True)
-            except Exception as exc:
+                clean_row = {k: ("" if pd.isna(v) else v) for k, v in row.to_dict().items()}
+                enriched = fb_helper.enrich_row_with_facebook_night(clean_row)
+            except Exception as exc:  # pragma: no cover - defensive
                 if _is_captcha_error(exc):
                     captcha_flag = True
                     captcha_detected = True
@@ -621,44 +626,13 @@ def run_facebook_global_pass_nightmode(
                     )
                     _write_fb_state(state_path, state)
                     break
-                _safe_log_console(logger, f"[FB Night] scrape_csv failed at row {idx}: {exc}")
-                state.update(
-                    {
-                        "fb_last_index": last_index,
-                        "fb_completed": completed_rows,
-                        "fb_attempted_total": attempted_total,
-                        "fb_captcha_flag": captcha_flag,
-                        "fb_total_rows": total_rows,
-                        "fb_resume_input": os.path.abspath(input_csv),
-                        "fb_last_error": str(exc),
-                    }
-                )
-                _write_fb_state(state_path, state)
-                # Continue to next row safely.
-                continue
+                _safe_log_console(logger, f"[FB Night] Night FB enrich failed at row {idx}: {exc}")
+                enriched = None
 
-            if os.path.exists(temp_output):
-                try:
-                    fb_df = pd.read_csv(temp_output)
-                    if "__row_id" in fb_df.columns:
-                        for _, fb_row in fb_df.iterrows():
-                            rid = fb_row.get("__row_id")
-                            if pd.isna(rid):
-                                continue
-                            try:
-                                rid_int = int(float(rid))
-                            except Exception:
-                                continue
-                            email_out = str(fb_row.get("Email", "") or "").strip()
-                            if not email_out:
-                                continue
-                            current_email = df.at[rid_int, "Email"] if "Email" in df.columns else ""
-                            if pd.isna(current_email):
-                                current_email = ""
-                            if not str(current_email).strip():
-                                df.at[rid_int, "Email"] = email_out
-                except Exception:
-                    pass
+            if enriched:
+                for col in ("Email", "Email_All", "Email_Type", "Facebook_URL"):
+                    if col in enriched:
+                        df.at[idx, col] = enriched.get(col, "")
 
             state.update(
                 {
@@ -676,8 +650,6 @@ def run_facebook_global_pass_nightmode(
                 limit_reached = True
                 _safe_log_console(logger, f"[FB Night] Hit max_rows_per_run={max_rows_per_run}; stopping.")
                 break
-    finally:
-        shutil.rmtree(temp_dir, ignore_errors=True)
 
     run_completed = (last_index >= total_rows - 1) and not captcha_detected
     state.update(

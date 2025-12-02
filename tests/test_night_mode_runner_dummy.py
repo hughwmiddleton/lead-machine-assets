@@ -4,6 +4,7 @@ import shutil
 import tempfile
 import unittest
 from unittest import mock
+from typing import List
 
 import pandas as pd
 
@@ -51,7 +52,7 @@ class NightModeRunnerDummyTest(unittest.TestCase):
             pd.DataFrame(rows).to_csv(raw_output_path, index=False)
             return raw_output_path
 
-        def fake_run_enrichment(raw_csv_path, enriched_output_path, logger=None):
+        def fake_run_enrichment(raw_csv_path, enriched_output_path, logger=None, night_mode=False):
             df = pd.read_csv(raw_csv_path)
             df["enriched"] = True
             df.to_csv(enriched_output_path, index=False)
@@ -206,10 +207,31 @@ class FacebookNightModeWrapperTest(unittest.TestCase):
                 df_local["Email"] = df_local["Artist Name"].apply(lambda v: f"fb_{v}")
                 df_local.to_csv(out_csv, index=False)
 
+        class FakeHelper:
+            def __init__(self, *_args, **_kwargs):
+                self.calls: List[dict] = []
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def enrich_row_with_facebook_night(self, row):
+                self.calls.append(dict(row))
+                enriched = dict(row)
+                if not enriched.get("Email"):
+                    enriched["Email"] = f"fb_{enriched.get('Artist Name', '')}"
+                enriched["Email_All"] = enriched.get("Email_All", "")
+                enriched["Email_Type"] = "fb_night"
+                return enriched
+
         fake_module = FakeModule()
         with mock.patch.object(pipeline_runner, "_load_legacy_module", return_value=fake_module), mock.patch.dict(
             os.environ, {"FB_USERNAME": "u", "FB_PASSWORD": "p"}
-        ), mock.patch("pipeline_runner.time.sleep", return_value=None):
+        ), mock.patch("pipeline_runner.time.sleep", return_value=None), mock.patch.object(
+            pipeline_runner, "NightModeFacebookEnricher", side_effect=lambda *args, **kwargs: FakeHelper()
+        ):
             status_first = pipeline_runner.run_facebook_global_pass_nightmode(
                 self.input_csv,
                 self.output_csv,
@@ -235,7 +257,9 @@ class FacebookNightModeWrapperTest(unittest.TestCase):
         # Resume should continue from the stored state and finish remaining eligible rows.
         with mock.patch.object(pipeline_runner, "_load_legacy_module", return_value=fake_module), mock.patch.dict(
             os.environ, {"FB_USERNAME": "u", "FB_PASSWORD": "p"}
-        ), mock.patch("pipeline_runner.time.sleep", return_value=None):
+        ), mock.patch("pipeline_runner.time.sleep", return_value=None), mock.patch.object(
+            pipeline_runner, "NightModeFacebookEnricher", side_effect=lambda *args, **kwargs: FakeHelper()
+        ):
             status_second = pipeline_runner.run_facebook_global_pass_nightmode(
                 self.input_csv,
                 self.output_csv,
@@ -266,9 +290,24 @@ class FacebookNightModeWrapperTest(unittest.TestCase):
             def scrape_csv(self, in_csv, out_csv, fb_user, fb_pass, max_emails=None):
                 raise FakeCaptcha("captcha required")
 
+        class FakeHelper:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def enrich_row_with_facebook_night(self, row):
+                raise FakeCaptcha("captcha required")
+
         with mock.patch.object(pipeline_runner, "_load_legacy_module", return_value=FakeModule()), mock.patch.dict(
             os.environ, {"FB_USERNAME": "u", "FB_PASSWORD": "p"}
-        ), mock.patch("pipeline_runner.time.sleep", return_value=None):
+        ), mock.patch("pipeline_runner.time.sleep", return_value=None), mock.patch.object(
+            pipeline_runner, "NightModeFacebookEnricher", side_effect=lambda *args, **kwargs: FakeHelper()
+        ):
             status = pipeline_runner.run_facebook_global_pass_nightmode(
                 self.input_csv,
                 self.output_csv,
@@ -330,7 +369,7 @@ class NightModeFacebookAutoResumeTest(unittest.TestCase):
             pd.DataFrame(rows).to_csv(raw_output_path, index=False)
             return raw_output_path
 
-        def fake_run_enrichment(raw_csv_path, enriched_output_path, logger=None):
+        def fake_run_enrichment(raw_csv_path, enriched_output_path, logger=None, night_mode=False):
             shutil.copyfile(raw_csv_path, enriched_output_path)
             return enriched_output_path
 

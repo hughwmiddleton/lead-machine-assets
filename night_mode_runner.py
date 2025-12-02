@@ -271,7 +271,7 @@ def _process_job(
 
         if per_job_validate:
             logger.info("Starting enrichment for job %s", job_id)
-            final_enriched = run_enrichment(state["raw_csv"], state["enriched_csv"], logger=logger.info)
+            final_enriched = run_enrichment(state["raw_csv"], state["enriched_csv"], logger=logger.info, night_mode=True)
             state["enriched_csv"] = final_enriched
             state["valid_leads_so_far"] = _count_rows(final_enriched)
             state["status"] = "completed"
@@ -360,7 +360,7 @@ def run_night_mode(
                 master_enriched = os.path.join(run_dir, "master_enriched.csv")
                 master_enriched = run_master_enrichment(master_raw, master_enriched, logger=logger.info)
                 master_pre_fb = os.path.join(run_dir, "master_pre_fb.csv")
-                master_pre_fb = run_enrichment(master_enriched, master_pre_fb, logger=logger.info)
+                master_pre_fb = run_enrichment(master_enriched, master_pre_fb, logger=logger.info, night_mode=True)
         else:
             master_pre_fb = _merge_master(run_dir, job_states, logger)
         if master_pre_fb and os.path.exists(master_pre_fb):
@@ -423,7 +423,7 @@ def run_night_mode(
             master_final = os.path.join(run_dir, "master_enriched_deduped.csv")
             if fb_completed:
                 try:
-                    run_enrichment(master_post_fb, master_final, logger=logger.info)
+                    run_enrichment(master_post_fb, master_final, logger=logger.info, night_mode=True)
                     logger.info("[Master] Validation completed: %s", master_final)
                     export_path = os.path.join(run_dir, "master_export_leads.csv")
                     pipeline_runner.export_master_leads(

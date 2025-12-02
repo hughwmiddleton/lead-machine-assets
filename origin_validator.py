@@ -431,7 +431,7 @@ def _first_url_from_cell(value: str) -> str:
     return ""
 
 
-def dedupe_pre_auto_validate(df: pd.DataFrame, source_dir_col: str) -> pd.DataFrame:
+def dedupe_pre_auto_validate(df: pd.DataFrame, source_dir_col: str, night_mode: bool = False) -> pd.DataFrame:
     """
     Removes duplicate rows before origin auto-validate using the composite key:
     normalised Artist Name + core Song Title + Source Directory (+ Email/first link if present).
@@ -463,7 +463,21 @@ def dedupe_pre_auto_validate(df: pd.DataFrame, source_dir_col: str) -> pd.DataFr
 
     seen = set()
     keep_indices: List[int] = []
-    best_contact: Dict[Tuple[str, str, str, str], Tuple[int, bool]] = {}
+    best_contact: Dict[Tuple[str, str, str, str], Tuple[int, Tuple[int, int, int]]] = {}
+
+    def _night_mode_row_score(row: pd.Series) -> Tuple[int, int, int]:
+        def _has_value(val: Any) -> int:
+            if pd.isna(val):
+                return 0
+            text = str(val or "").strip()
+            return 1 if text else 0
+
+        has_email = _has_value(row.get("Email", ""))
+        has_fb = _has_value(row.get("Facebook_URL", ""))
+        has_social = _has_value(row.get("Social Link", ""))
+        if not night_mode:
+            return (has_email, 0, 0)
+        return (has_email, has_fb, has_social)
     for idx, row in df.iterrows():
         artist_norm = normalize_text(str(row.get("Artist Name", "") or ""))
         track_norm = _song_key(row)
@@ -471,20 +485,19 @@ def dedupe_pre_auto_validate(df: pd.DataFrame, source_dir_col: str) -> pd.DataFr
         source_norm = _normalise_source_directory(source_raw) or normalize_text(source_raw)
         contact_norm = _contact_key(row)
         composite = (artist_norm, track_norm, source_norm, contact_norm)
-        has_email = bool(str(row.get("Email", "") or "").strip())
+        score = _night_mode_row_score(row)
         if composite in seen:
-            _, existing_has_email = best_contact.get(composite, (-1, False))
-            if has_email and not existing_has_email:
-                prev_idx, _ = best_contact[composite]
+            prev_idx, prev_score = best_contact.get(composite, (-1, (0, 0, 0)))
+            if score > prev_score:
                 try:
                     keep_indices.remove(prev_idx)
                 except ValueError:
                     pass
                 keep_indices.append(idx)
-                best_contact[composite] = (idx, has_email)
+                best_contact[composite] = (idx, score)
             continue
         seen.add(composite)
-        best_contact[composite] = (idx, has_email)
+        best_contact[composite] = (idx, score)
         keep_indices.append(idx)
 
     deduped = df.loc[keep_indices].copy()
@@ -557,6 +570,7 @@ def run_auto_validate(
     output_path: Optional[str] = None,
     validate_scope: str = "uncertain_only",
     logger: Optional[Logger] = None,
+    night_mode: bool = False,
 ) -> str:
     """
     Run origin-based auto validation on the given CSV.
@@ -571,7 +585,7 @@ def run_auto_validate(
 
     source_dir_col = _ensure_column(df, SOURCE_DIR_COLUMNS)
     source_url_col = _ensure_column(df, SOURCE_URL_COLUMNS)
-    df = dedupe_pre_auto_validate(df, source_dir_col)
+    df = dedupe_pre_auto_validate(df, source_dir_col, night_mode=night_mode)
     for col in ("final_status", "match_score_overall", "origin_match_flag", "origin_match_reason", "origin_artist_score", "origin_title_score"):
         if col not in df.columns:
             df[col] = "" if col.endswith("_reason") else 0
