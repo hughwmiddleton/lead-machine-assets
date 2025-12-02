@@ -58,13 +58,13 @@ class NightModeRunnerDummyTest(unittest.TestCase):
 
         fb_calls = []
 
-        def fake_fb_pass(input_csv, output_csv, skip_rows_with_email=True, skip_rows_with_no_facebook_clue=True):
-            fb_calls.append((input_csv, output_csv))
+        def fake_fb_pass(input_csv, output_csv, state_path, max_rows_per_run=100, **kwargs):
+            fb_calls.append((input_csv, output_csv, state_path, max_rows_per_run))
             shutil.copyfile(input_csv, output_csv)
 
         with mock.patch.object(night_mode_runner, "run_directory_job", side_effect=fake_run_directory_job), mock.patch.object(
             night_mode_runner, "run_enrichment", side_effect=fake_run_enrichment
-        ), mock.patch.object(night_mode_runner, "run_facebook_global_pass", side_effect=fake_fb_pass):
+        ), mock.patch.object(night_mode_runner, "run_facebook_global_pass_nightmode", side_effect=fake_fb_pass):
             result = night_mode_runner.run_night_mode(config_path, run_root=self.run_root)
 
         run_dir = result["run_dir"]
@@ -152,6 +152,117 @@ class NightModeRunnerDummyTest(unittest.TestCase):
         )
         # Scraper should have been called once
         self.assertEqual(len(calls), 1)
+
+
+
+class FacebookNightModeWrapperTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.state_path = os.path.join(self.tmpdir.name, "fb_state.json")
+        self.input_csv = os.path.join(self.tmpdir.name, "fb_input.csv")
+        self.output_csv = os.path.join(self.tmpdir.name, "fb_output.csv")
+
+    def _write_input(self) -> None:
+        df = pd.DataFrame(
+            [
+                {"Artist Name": "HasEmail", "Email": "a@example.com", "Social Link": "https://facebook.com/hasemail"},
+                {"Artist Name": "NeedsFb1", "Email": "", "Social Link": "https://facebook.com/page1"},
+                {"Artist Name": "", "Email": "", "Social Link": ""},
+                {"Artist Name": "NeedsFb2", "Email": "", "Social Link": "https://facebook.com/page2"},
+            ]
+        )
+        df.to_csv(self.input_csv, index=False)
+
+    def test_nightmode_wrapper_resume_and_limit(self) -> None:
+        self._write_input()
+
+        class FakeModule:
+            def __init__(self):
+                self.calls = []
+
+            def scrape_csv(self, in_csv, out_csv, fb_user, fb_pass, max_emails=None):
+                df_local = pd.read_csv(in_csv)
+                self.calls.append(df_local.copy())
+                df_local["Email"] = df_local["Artist Name"].apply(lambda v: f"fb_{v}")
+                df_local.to_csv(out_csv, index=False)
+
+        fake_module = FakeModule()
+        with mock.patch.object(pipeline_runner, "_load_legacy_module", return_value=fake_module), mock.patch.dict(
+            os.environ, {"FB_USERNAME": "u", "FB_PASSWORD": "p"}
+        ), mock.patch("pipeline_runner.time.sleep", return_value=None):
+            pipeline_runner.run_facebook_global_pass_nightmode(
+                self.input_csv,
+                self.output_csv,
+                self.state_path,
+                max_rows_per_run=1,
+                per_row_delay_range=(0, 0),
+                short_break_range=(0, 0),
+                long_break_range=(0, 0),
+            )
+
+        with open(self.state_path, "r", encoding="utf-8") as f:
+            first_state = json.load(f)
+        self.assertTrue(first_state.get("fb_limit_reached"))
+        self.assertFalse(first_state.get("fb_run_completed"))
+        self.assertEqual(first_state.get("fb_attempted_total"), 1)
+        df_first = pd.read_csv(self.output_csv)
+        self.assertEqual(df_first.loc[df_first["Artist Name"] == "NeedsFb1", "Email"].iloc[0], "fb_NeedsFb1")
+        email_two = df_first.loc[df_first["Artist Name"] == "NeedsFb2", "Email"].iloc[0]
+        self.assertTrue(pd.isna(email_two) or email_two == "")
+
+        # Resume should continue from the stored state and finish remaining eligible rows.
+        with mock.patch.object(pipeline_runner, "_load_legacy_module", return_value=fake_module), mock.patch.dict(
+            os.environ, {"FB_USERNAME": "u", "FB_PASSWORD": "p"}
+        ), mock.patch("pipeline_runner.time.sleep", return_value=None):
+            pipeline_runner.run_facebook_global_pass_nightmode(
+                self.input_csv,
+                self.output_csv,
+                self.state_path,
+                max_rows_per_run=5,
+                per_row_delay_range=(0, 0),
+                short_break_range=(0, 0),
+                long_break_range=(0, 0),
+            )
+
+        with open(self.state_path, "r", encoding="utf-8") as f:
+            final_state = json.load(f)
+        self.assertTrue(final_state.get("fb_run_completed"))
+        self.assertFalse(final_state.get("fb_captcha_flag"))
+        self.assertEqual(final_state.get("fb_attempted_total"), 2)
+        df_final = pd.read_csv(self.output_csv)
+        self.assertEqual(df_final.loc[df_final["Artist Name"] == "NeedsFb2", "Email"].iloc[0], "fb_NeedsFb2")
+
+    def test_nightmode_wrapper_handles_captcha_signal(self) -> None:
+        self._write_input()
+
+        class FakeCaptcha(Exception):
+            pass
+
+        class FakeModule:
+            def scrape_csv(self, in_csv, out_csv, fb_user, fb_pass, max_emails=None):
+                raise FakeCaptcha("captcha required")
+
+        with mock.patch.object(pipeline_runner, "_load_legacy_module", return_value=FakeModule()), mock.patch.dict(
+            os.environ, {"FB_USERNAME": "u", "FB_PASSWORD": "p"}
+        ), mock.patch("pipeline_runner.time.sleep", return_value=None):
+            pipeline_runner.run_facebook_global_pass_nightmode(
+                self.input_csv,
+                self.output_csv,
+                self.state_path,
+                max_rows_per_run=5,
+                per_row_delay_range=(0, 0),
+                short_break_range=(0, 0),
+                long_break_range=(0, 0),
+            )
+
+        with open(self.state_path, "r", encoding="utf-8") as f:
+            state = json.load(f)
+        self.assertTrue(state.get("fb_captcha_flag"))
+        self.assertFalse(state.get("fb_run_completed"))
+        df = pd.read_csv(self.output_csv)
+        email_two = df.loc[df["Artist Name"] == "NeedsFb1", "Email"].iloc[0]
+        self.assertTrue(pd.isna(email_two) or email_two == "")
 
 
 if __name__ == "__main__":

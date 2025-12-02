@@ -7,10 +7,14 @@ changes to scrapers do not require updating the orchestration layer.
 from __future__ import annotations
 
 import importlib.util
+import json
 import logging
 import os
+import random
 import shutil
 import tempfile
+import time
+import datetime
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
 import pandas as pd
@@ -331,3 +335,272 @@ def run_facebook_global_pass(
     updated_df.drop(columns=["__row_id"], inplace=True, errors="ignore")
     updated_df.to_csv(output_csv, index=False)
     shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def _safe_sleep(duration: float) -> None:
+    try:
+        if duration > 0:
+            time.sleep(duration)
+    except Exception:
+        pass
+
+
+def _load_fb_state(path: str) -> Dict[str, Any]:
+    if not path or not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _write_fb_state(path: str, payload: Dict[str, Any]) -> None:
+    _ensure_parent(path)
+    payload = dict(payload or {})
+    payload["timestamp"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    temp_fd, temp_path = tempfile.mkstemp(prefix="fb_state_", suffix=".json", dir=os.path.dirname(os.path.abspath(path)))
+    try:
+        with os.fdopen(temp_fd, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+        os.replace(temp_path, path)
+    finally:
+        try:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+        except Exception:
+            pass
+
+
+def _is_captcha_error(exc: BaseException) -> bool:
+    """Minimal, non-invasive captcha heuristic."""
+    try:
+        name = exc.__class__.__name__.lower()
+        message = str(exc).lower()
+        if "captcha" in name or "captcha" in message:
+            return True
+        if getattr(exc, "is_captcha", False):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def run_facebook_global_pass_nightmode(
+    input_csv: str,
+    output_csv: str,
+    state_path: str,
+    max_rows_per_run: int = 100,
+    per_row_delay_range: tuple[float, float] = (2.0, 7.0),
+    short_break_every: int = 20,
+    short_break_range: tuple[float, float] = (25.0, 45.0),
+    long_break_every: int = 80,
+    long_break_range: tuple[float, float] = (120.0, 360.0),
+    logger: LoggerFn = None,
+) -> None:
+    """
+    Night Mode–specific global FB enrichment pass.
+
+    Applies:
+      - skip logic (rows with email or no FB clues)
+      - randomized per-row delay
+      - periodic short/long breaks
+      - per-run max row limit
+      - stateful resume from state_path
+    """
+    if not input_csv or not os.path.exists(input_csv):
+        raise FileNotFoundError(f"Input CSV not found: {input_csv}")
+
+    fb_username = os.environ.get("FB_USERNAME", "").strip()
+    fb_password = os.environ.get("FB_PASSWORD", "").strip()
+
+    # Use existing output if present so resumes keep prior enrichments.
+    base_path = output_csv if output_csv and os.path.exists(output_csv) else input_csv
+    df = pd.read_csv(base_path)
+    df["__row_id"] = range(len(df))
+
+    total_rows = len(df.index)
+    state = _load_fb_state(state_path)
+    last_index = int(state.get("fb_last_index", -1) or -1)
+    attempted_total = int(state.get("fb_attempted_total", 0) or 0)
+    captcha_flag = bool(state.get("fb_captcha_flag", False))
+    completed_rows = int(state.get("fb_completed", 0) or 0)
+
+    if fb_username and fb_password:
+        module = _load_legacy_module()
+        if not hasattr(module, "scrape_csv"):
+            _safe_log(logger, "[FB Night] scrape_csv missing on legacy module; skipping.")
+            df.drop(columns=["__row_id"], inplace=True, errors="ignore")
+            df.to_csv(output_csv, index=False)
+            return
+    else:
+        _safe_log(logger, "[FB Night] Missing FB credentials; passing through without enrichment.")
+        state.update(
+            {
+                "fb_last_index": total_rows - 1,
+                "fb_completed": total_rows,
+                "fb_attempted_total": attempted_total,
+                "fb_captcha_flag": False,
+                "fb_total_rows": total_rows,
+                "fb_run_completed": True,
+                "fb_limit_reached": False,
+                "fb_resume_input": os.path.abspath(input_csv),
+            }
+        )
+        _write_fb_state(state_path, state)
+        df.drop(columns=["__row_id"], inplace=True, errors="ignore")
+        df.to_csv(output_csv, index=False)
+        return
+
+    processed_this_run = 0
+    limit_reached = False
+    captcha_detected = False
+    temp_dir = tempfile.mkdtemp(prefix="fb_nightmode_")
+    temp_input = os.path.join(temp_dir, "fb_input.csv")
+    temp_output = os.path.join(temp_dir, "fb_output.csv")
+
+    try:
+        for idx, row in df.iterrows():
+            if idx <= last_index:
+                continue
+            completed_rows += 1
+            last_index = idx
+
+            email_val = row.get("Email", "")
+            if pd.isna(email_val):
+                email_val = ""
+            has_email = bool(str(email_val or "").strip())
+            has_clue = _has_facebook_clue(row)
+            if has_email or not has_clue:
+                state.update(
+                    {
+                        "fb_last_index": last_index,
+                        "fb_completed": completed_rows,
+                        "fb_attempted_total": attempted_total,
+                        "fb_captcha_flag": captcha_flag,
+                        "fb_total_rows": total_rows,
+                        "fb_resume_input": os.path.abspath(input_csv),
+                    }
+                )
+                _write_fb_state(state_path, state)
+                continue
+
+            if processed_this_run > 0:
+                delay = random.uniform(*per_row_delay_range) if per_row_delay_range else 0.0
+                _safe_log(logger, f"[FB Night] Sleeping {delay:.2f}s before next row (index={idx}).")
+                _safe_sleep(delay)
+
+            processed_this_run += 1
+            attempted_total += 1
+
+            if short_break_every > 0 and processed_this_run % short_break_every == 0:
+                pause = random.uniform(*short_break_range) if short_break_range else 0.0
+                _safe_log(logger, f"[FB Night] Short break for {pause:.2f}s after {processed_this_run} rows.")
+                _safe_sleep(pause)
+            if long_break_every > 0 and processed_this_run % long_break_every == 0:
+                pause = random.uniform(*long_break_range) if long_break_range else 0.0
+                _safe_log(logger, f"[FB Night] Long break for {pause:.2f}s after {processed_this_run} rows.")
+                _safe_sleep(pause)
+
+            single_df = pd.DataFrame([row])
+            single_df.to_csv(temp_input, index=False)
+            # Ensure fresh output target for this pass while retaining prior runs for dedupe.
+            if os.path.exists(temp_output):
+                try:
+                    os.remove(temp_output)
+                except Exception:
+                    pass
+            try:
+                module.scrape_csv(temp_input, temp_output, fb_username, fb_password, max_emails=None)
+            except Exception as exc:
+                if _is_captcha_error(exc):
+                    captcha_flag = True
+                    captcha_detected = True
+                    _safe_log(logger, f"[FB Night] Captcha detected at row {idx}; stopping early.")
+                    state.update(
+                        {
+                            "fb_last_index": last_index,
+                            "fb_completed": completed_rows,
+                            "fb_attempted_total": attempted_total,
+                            "fb_captcha_flag": True,
+                            "fb_total_rows": total_rows,
+                            "fb_resume_input": os.path.abspath(input_csv),
+                        }
+                    )
+                    _write_fb_state(state_path, state)
+                    break
+                _safe_log(logger, f"[FB Night] scrape_csv failed at row {idx}: {exc}")
+                state.update(
+                    {
+                        "fb_last_index": last_index,
+                        "fb_completed": completed_rows,
+                        "fb_attempted_total": attempted_total,
+                        "fb_captcha_flag": captcha_flag,
+                        "fb_total_rows": total_rows,
+                        "fb_resume_input": os.path.abspath(input_csv),
+                        "fb_last_error": str(exc),
+                    }
+                )
+                _write_fb_state(state_path, state)
+                # Continue to next row safely.
+                continue
+
+            if os.path.exists(temp_output):
+                try:
+                    fb_df = pd.read_csv(temp_output)
+                    if "__row_id" in fb_df.columns:
+                        for _, fb_row in fb_df.iterrows():
+                            rid = fb_row.get("__row_id")
+                            if pd.isna(rid):
+                                continue
+                            try:
+                                rid_int = int(float(rid))
+                            except Exception:
+                                continue
+                            email_out = str(fb_row.get("Email", "") or "").strip()
+                            if not email_out:
+                                continue
+                            current_email = df.at[rid_int, "Email"] if "Email" in df.columns else ""
+                            if pd.isna(current_email):
+                                current_email = ""
+                            if not str(current_email).strip():
+                                df.at[rid_int, "Email"] = email_out
+                except Exception:
+                    pass
+
+            state.update(
+                {
+                    "fb_last_index": last_index,
+                    "fb_completed": completed_rows,
+                    "fb_attempted_total": attempted_total,
+                    "fb_captcha_flag": captcha_flag,
+                    "fb_total_rows": total_rows,
+                    "fb_resume_input": os.path.abspath(input_csv),
+                }
+            )
+            _write_fb_state(state_path, state)
+
+            if max_rows_per_run and processed_this_run >= max_rows_per_run:
+                limit_reached = True
+                _safe_log(logger, f"[FB Night] Hit max_rows_per_run={max_rows_per_run}; stopping.")
+                break
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+    run_completed = (last_index >= total_rows - 1) and not captcha_detected
+    state.update(
+        {
+            "fb_last_index": last_index,
+            "fb_completed": completed_rows,
+            "fb_attempted_total": attempted_total,
+            "fb_captcha_flag": captcha_detected or captcha_flag,
+            "fb_total_rows": total_rows,
+            "fb_run_completed": run_completed,
+            "fb_limit_reached": limit_reached,
+            "fb_resume_input": os.path.abspath(input_csv),
+        }
+    )
+    _write_fb_state(state_path, state)
+
+    df.drop(columns=["__row_id"], inplace=True, errors="ignore")
+    df.to_csv(output_csv, index=False)

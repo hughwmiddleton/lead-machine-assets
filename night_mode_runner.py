@@ -23,13 +23,14 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 
-from pipeline_runner import run_directory_job, run_enrichment, run_facebook_global_pass
+from pipeline_runner import run_directory_job, run_enrichment, run_facebook_global_pass_nightmode
 
 DEFAULT_EXPORT_MODE = "both"
 MAX_CONSECUTIVE_ERRORS = 10
 CHECKPOINT_INTERVAL_ROWS = 5
 STATE_FILENAME = "state.json"
 LOG_FILENAME = "log.txt"
+FACEBOOK_STATE_FILENAME = "facebook_state.json"
 
 
 def _setup_logger(log_path: str, job_id: str) -> logging.Logger:
@@ -282,18 +283,52 @@ def run_night_mode(
         master_pre_fb = _merge_master(run_dir, job_states, logger)
         if master_pre_fb and os.path.exists(master_pre_fb):
             master_post_fb = os.path.join(run_dir, "master_post_fb.csv")
+            fb_state_path = os.path.join(run_dir, FACEBOOK_STATE_FILENAME)
+            fb_state = _load_state(fb_state_path)
+            fb_completed = bool(fb_state.get("fb_run_completed") and not fb_state.get("fb_captcha_flag"))
+            fb_limit_hit = bool(fb_state.get("fb_limit_reached"))
+            fb_rows_total = fb_state.get("fb_total_rows")
+            fb_max_rows_cfg = config.get("facebook_max_rows_per_run")
+            fb_max_rows = 100 if fb_max_rows_cfg is None else int(fb_max_rows_cfg)
+            if fb_max_rows < 0:
+                fb_max_rows = 0
             try:
-                run_facebook_global_pass(master_pre_fb, master_post_fb, skip_rows_with_email=True, skip_rows_with_no_facebook_clue=True)
-                logger.info("[Master] Facebook global pass completed: %s", master_post_fb)
+                if resume and fb_completed and os.path.exists(master_post_fb):
+                    logger.info("[Master] Resume: Facebook global pass already completed; skipping.")
+                else:
+                    run_facebook_global_pass_nightmode(
+                        master_pre_fb,
+                        master_post_fb,
+                        state_path=fb_state_path,
+                        max_rows_per_run=fb_max_rows,
+                        logger=logger.info,
+                    )
+                    fb_state = _load_state(fb_state_path)
+                    fb_completed = bool(fb_state.get("fb_run_completed") and not fb_state.get("fb_captcha_flag"))
+                    fb_limit_hit = bool(fb_state.get("fb_limit_reached"))
+                    fb_rows_total = fb_state.get("fb_total_rows")
+                if fb_completed:
+                    logger.info("[Master] Facebook global pass completed: %s", master_post_fb)
+                else:
+                    logger.info(
+                        "[Master] Facebook global pass partial (limit_hit=%s captcha=%s total_rows=%s)",
+                        fb_limit_hit,
+                        fb_state.get("fb_captcha_flag"),
+                        fb_rows_total,
+                    )
             except Exception as exc:
                 logger.error("[Master] Facebook global pass failed safely: %s", exc)
                 master_post_fb = master_pre_fb
+                fb_completed = False
             master_final = os.path.join(run_dir, "master_enriched_deduped.csv")
-            try:
-                run_enrichment(master_post_fb, master_final, logger=logger.info)
-                logger.info("[Master] Validation completed: %s", master_final)
-            except Exception as exc:
-                logger.error("[Master] Final validation failed safely: %s", exc)
+            if fb_completed:
+                try:
+                    run_enrichment(master_post_fb, master_final, logger=logger.info)
+                    logger.info("[Master] Validation completed: %s", master_final)
+                except Exception as exc:
+                    logger.error("[Master] Final validation failed safely: %s", exc)
+                    master_final = master_post_fb
+            else:
                 master_final = master_post_fb
 
     return {
