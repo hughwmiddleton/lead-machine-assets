@@ -10,6 +10,7 @@ import importlib.util
 import logging
 import os
 import shutil
+import tempfile
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
 import pandas as pd
@@ -168,6 +169,17 @@ def run_directory_job(job_config: Dict[str, Any], raw_output_path: str, logger: 
         )
         return raw_output_path
 
+    if directory == "unearthed":
+        url = job_config.get("input_seed_csv") or job_config.get("seed") or job_config.get("url") or ""
+        if not url:
+            url = getattr(module, "UNEARTHED_DEFAULT_URL", "")
+        module.scrape_website(
+            url,
+            existing_csv=raw_output_path,
+            max_artists=target_count or 200,
+        )
+        return raw_output_path
+
     raise ValueError(f"Unsupported directory: {directory}")
 
 
@@ -213,3 +225,109 @@ def run_enrichment(raw_csv_path: str, enriched_output_path: str, logger: LoggerF
 
     _safe_log(logger, f"[Enrich] Completed enrichment -> {final_path}")
     return final_path
+
+
+def _has_facebook_clue(row: pd.Series) -> bool:
+    """Determine if a row has any Facebook signal to try."""
+    try:
+        for value in row:
+            if not isinstance(value, str):
+                continue
+            lower = value.lower()
+            if "facebook.com" in lower:
+                return True
+    except Exception:
+        pass
+    # Fallback: if we have an artist name, we can attempt a search as a clue.
+    name = str(row.get("Artist Name", "") or "").strip()
+    return bool(name)
+
+
+def run_facebook_global_pass(
+    input_csv: str,
+    output_csv: str,
+    skip_rows_with_email: bool = True,
+    skip_rows_with_no_facebook_clue: bool = True,
+) -> None:
+    """
+    Run a global Facebook enrichment pass on the merged CSV.
+
+    - Skips rows that already have an Email (when requested).
+    - Skips rows with no Facebook signal (when requested).
+    - Uses the existing Facebook scraper logic (scrape_csv) from the legacy module.
+    """
+    if not input_csv or not os.path.exists(input_csv):
+        raise FileNotFoundError(f"Input CSV not found: {input_csv}")
+
+    fb_username = os.environ.get("FB_USERNAME", "").strip()
+    fb_password = os.environ.get("FB_PASSWORD", "").strip()
+
+    df = pd.read_csv(input_csv)
+    df["__row_id"] = range(len(df))
+
+    def _eligible(row: pd.Series) -> bool:
+        email_val = row.get("Email", "")
+        if pd.isna(email_val):
+            email_val = ""
+        if skip_rows_with_email and str(email_val or "").strip():
+            return False
+        if skip_rows_with_no_facebook_clue and not _has_facebook_clue(row):
+            return False
+        return True
+
+    eligible_df = df[df.apply(_eligible, axis=1)].copy()
+    if eligible_df.empty:
+        df.drop(columns=["__row_id"], inplace=True)
+        df.to_csv(output_csv, index=False)
+        return
+
+    if not fb_username or not fb_password:
+        # No credentials; pass through without modification.
+        df.drop(columns=["__row_id"], inplace=True)
+        df.to_csv(output_csv, index=False)
+        return
+
+    module = _load_legacy_module()
+    if not hasattr(module, "scrape_csv"):
+        df.drop(columns=["__row_id"], inplace=True)
+        df.to_csv(output_csv, index=False)
+        return
+
+    temp_dir = tempfile.mkdtemp(prefix="fb_global_")
+    temp_input = os.path.join(temp_dir, "fb_input.csv")
+    temp_output = os.path.join(temp_dir, "fb_output.csv")
+    eligible_df.to_csv(temp_input, index=False)
+
+    try:
+        module.scrape_csv(temp_input, temp_output, fb_username, fb_password, max_emails=None)
+    except Exception:
+        # Fail safely: emit original data.
+        df.drop(columns=["__row_id"], inplace=True)
+        df.to_csv(output_csv, index=False)
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        return
+
+    updated_df = df.copy()
+    if os.path.exists(temp_output):
+        try:
+            fb_df = pd.read_csv(temp_output)
+            if "__row_id" in fb_df.columns:
+                for _, row in fb_df.iterrows():
+                    rid = row.get("__row_id")
+                    email_val = str(row.get("Email", "") or "").strip()
+                    if email_val and not pd.isna(rid):
+                        try:
+                            rid_int = int(float(rid))
+                        except Exception:
+                            continue
+                        current_email = updated_df.at[rid_int, "Email"] if "Email" in updated_df.columns else ""
+                        if pd.isna(current_email):
+                            current_email = ""
+                        if not str(current_email).strip():
+                            updated_df.at[rid_int, "Email"] = email_val
+        except Exception:
+            pass
+
+    updated_df.drop(columns=["__row_id"], inplace=True, errors="ignore")
+    updated_df.to_csv(output_csv, index=False)
+    shutil.rmtree(temp_dir, ignore_errors=True)

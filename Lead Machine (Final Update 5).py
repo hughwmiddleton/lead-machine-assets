@@ -8432,10 +8432,11 @@ class NightModeWorker(QtCore.QThread):
     log_signal = QtCore.pyqtSignal(str)
     finished_signal = QtCore.pyqtSignal(int)
 
-    def __init__(self, command: list[str], workdir: str, parent=None):
+    def __init__(self, command: list[str], workdir: str, env: Optional[dict] = None, parent=None):
         super().__init__(parent)
         self.command = command
         self.workdir = workdir
+        self.env = env
         self._process = None
         self._stop_requested = False
 
@@ -8451,6 +8452,7 @@ class NightModeWorker(QtCore.QThread):
                 stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,
+                env=self.env,
             )
             if self._process.stdout:
                 for line in self._process.stdout:
@@ -8544,6 +8546,19 @@ class NightModeTab(QtWidgets.QWidget):
         options_layout.addWidget(self.stop_on_failure_checkbox)
         options_layout.addStretch()
         layout.addLayout(options_layout)
+
+        fb_row = QtWidgets.QHBoxLayout()
+        fb_user_label = QtWidgets.QLabel("FB Username (optional):")
+        self.fb_user_edit = QtWidgets.QLineEdit()
+        fb_pass_label = QtWidgets.QLabel("FB Password (optional):")
+        self.fb_pass_edit = QtWidgets.QLineEdit()
+        self.fb_pass_edit.setEchoMode(QtWidgets.QLineEdit.Password)
+        fb_row.addWidget(fb_user_label)
+        fb_row.addWidget(self.fb_user_edit)
+        fb_row.addWidget(fb_pass_label)
+        fb_row.addWidget(self.fb_pass_edit)
+        fb_row.addStretch()
+        layout.addLayout(fb_row)
 
         # Run root
         run_root_layout = QtWidgets.QHBoxLayout()
@@ -8753,7 +8768,14 @@ class NightModeTab(QtWidgets.QWidget):
         self.status_label.setText("Status: running")
         self.start_button.setEnabled(False)
         self.stop_button.setEnabled(True)
-        self.worker = NightModeWorker(cmd, workdir=base_dir)
+        env = os.environ.copy()
+        fb_user = self.fb_user_edit.text().strip()
+        fb_pass = self.fb_pass_edit.text().strip()
+        if fb_user:
+            env["FB_USERNAME"] = fb_user
+        if fb_pass:
+            env["FB_PASSWORD"] = fb_pass
+        self.worker = NightModeWorker(cmd, workdir=base_dir, env=env)
         self.worker.log_signal.connect(self._append_log)
         self.worker.finished_signal.connect(self._on_finished)
         self.worker.start()

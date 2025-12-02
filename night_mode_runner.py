@@ -23,7 +23,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 
-from pipeline_runner import run_directory_job, run_enrichment
+from pipeline_runner import run_directory_job, run_enrichment, run_facebook_global_pass
 
 DEFAULT_EXPORT_MODE = "both"
 MAX_CONSECUTIVE_ERRORS = 10
@@ -168,9 +168,9 @@ def _merge_master(run_dir: str, job_states: List[Dict[str, Any]], logger: loggin
 
     combined = pd.concat(frames, ignore_index=True, sort=False)
     deduped = _dedupe_master(combined)
-    master_path = os.path.join(run_dir, "master_enriched_deduped.csv")
+    master_path = os.path.join(run_dir, "master_pre_fb.csv")
     deduped.to_csv(master_path, index=False)
-    logger.info("[Master] Wrote merged deduped CSV: %s (rows=%s)", master_path, len(deduped.index))
+    logger.info("[Master] Wrote merged pre-Facebook CSV: %s (rows=%s)", master_path, len(deduped.index))
     return master_path
 
 
@@ -274,12 +274,36 @@ def run_night_mode(
         if stop_on_failure and result_state.get("status") in {"failed"}:
             break
 
-    master_path = None
+    master_pre_fb = None
+    master_post_fb = None
+    master_final = None
     if export_mode in {"combined", "both"}:
         logger = _setup_logger(os.path.join(run_dir, "master_log.txt"), "master")
-        master_path = _merge_master(run_dir, job_states, logger)
+        master_pre_fb = _merge_master(run_dir, job_states, logger)
+        if master_pre_fb and os.path.exists(master_pre_fb):
+            master_post_fb = os.path.join(run_dir, "master_post_fb.csv")
+            try:
+                run_facebook_global_pass(master_pre_fb, master_post_fb, skip_rows_with_email=True, skip_rows_with_no_facebook_clue=True)
+                logger.info("[Master] Facebook global pass completed: %s", master_post_fb)
+            except Exception as exc:
+                logger.error("[Master] Facebook global pass failed safely: %s", exc)
+                master_post_fb = master_pre_fb
+            master_final = os.path.join(run_dir, "master_enriched_deduped.csv")
+            try:
+                run_enrichment(master_post_fb, master_final, logger=logger.info)
+                logger.info("[Master] Validation completed: %s", master_final)
+            except Exception as exc:
+                logger.error("[Master] Final validation failed safely: %s", exc)
+                master_final = master_post_fb
 
-    return {"run_dir": run_dir, "jobs": job_states, "master_csv": master_path, "export_mode": export_mode}
+    return {
+        "run_dir": run_dir,
+        "jobs": job_states,
+        "master_pre_fb": master_pre_fb,
+        "master_post_fb": master_post_fb,
+        "master_csv": master_final,
+        "export_mode": export_mode,
+    }
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
