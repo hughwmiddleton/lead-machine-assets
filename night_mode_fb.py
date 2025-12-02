@@ -151,18 +151,38 @@ def _parse_search_candidates(html: str) -> List["facebook_enrich.FbCandidate"]:
 def _select_best_candidate_loose(artist_name: str, candidates: List["facebook_enrich.FbCandidate"]) -> Optional["facebook_enrich.FbCandidate"]:
     if facebook_enrich is None or not candidates:
         return candidates[0] if candidates else None
-    primary, *_ = candidates, None
+    selector = getattr(facebook_enrich, "select_best_facebook_candidate", None)
+    if callable(selector):
+        try:
+            best = selector(candidates, artist_name, logger=None)
+            if best:
+                return best
+        except Exception:
+            pass
     try:
         best, *_ = facebook_enrich.select_best_fb_candidate(artist_name, candidates)
+        if best:
+            return best
     except Exception:
-        best = None
-    if best:
-        return best
+        pass
     for cand in candidates:
         cat = (cand.category or "").lower()
         if any(tok in cat for tok in ("artist", "musician", "musician/band", "band", "music", "dj", "producer")):
             return cand
-    return primary
+    return candidates[0] if candidates else None
+
+
+def _pick_best_candidate_music_bias(artist_name: str, candidates: List["facebook_enrich.FbCandidate"]) -> Optional["facebook_enrich.FbCandidate"]:
+    if not candidates:
+        return None
+    best = None
+    best_score = float("-inf")
+    for cand in candidates:
+        score = _night_candidate_score(artist_name, cand)
+        if score > best_score:
+            best_score = score
+            best = cand
+    return best
 
 
 @dataclass
@@ -262,12 +282,20 @@ class NightModeFacebookEnricher:
             _log(self.logger, f"[Night FB] Search navigation failed: {exc}")
             return None
         candidates = _parse_search_candidates(html)
-        search_result = _select_best_candidate_loose(artist, candidates)
-        candidate = search_result
-        if isinstance(search_result, list):
-            candidate = next((c for c in search_result if c), None)
+        candidate = None
+        selector = getattr(facebook_enrich, "select_best_facebook_candidate", None) if facebook_enrich is not None else None
+        if callable(selector):
+            try:
+                candidate = selector(candidates, artist, logger=self.logger)
+            except Exception:
+                candidate = None
         if not candidate:
-            _log(self.logger, f"[Night FB] No Facebook candidates for '{artist}'.")
+            search_result = _select_best_candidate_loose(artist, candidates)
+            candidate = search_result
+            if isinstance(search_result, list):
+                candidate = next((c for c in search_result if c), None)
+        if not candidate:
+            _log(self.logger, f"[Night FB] No non-junk FB candidates for '{artist}', skipping Facebook.")
             return None
 
         fb_url = None
@@ -291,7 +319,6 @@ class NightModeFacebookEnricher:
 
         _log(self.logger, f"[Night FB] Selected FB candidate '{name or url}' -> {url} (category='{category or ''}')")
         return url
-        return None
 
     def _build_result(self, emails: List[str], email_all_existing: str, facebook_url: str, artist_name: str) -> Optional[NightModeFacebookResult]:
         if not emails:
@@ -331,24 +358,41 @@ class NightModeFacebookEnricher:
             facebook_url = _normalise_fb_url(facebook_url)
 
         try:
-            page_url = facebook_url or self._search_for_page(artist_name, location)
+            if facebook_url:
+                page_url = facebook_url
+                _log(self.logger, f"[Night FB] using direct Facebook_URL for {artist_name or '<unknown>'} -> {page_url}")
+                html = self._fetch_html(page_url)
+                emails = _extract_emails_from_html(html or "")
+            else:
+                session = self._ensure_session()
+                if not session or not hasattr(self.legacy, "fb_find_page_and_emails_by_name"):
+                    return result
+                try:
+                    driver = session.ensure_logged_in() if hasattr(session, "ensure_logged_in") else session.navigate("about:blank")
+                except Exception:
+                    driver = None
+                if not driver:
+                    return result
+                page_url, emails = self.legacy.fb_find_page_and_emails_by_name(
+                    driver,
+                    artist_name,
+                    location,
+                    log_fn=self.logger,
+                    log_prefix="[Night FB]",
+                )
+                if not page_url:
+                    return result
+
+            night_result = self._build_result(emails, str(result.get("Email_All", "") or ""), page_url, artist_name)
+            if night_result:
+                result["Email"] = night_result.email or result.get("Email", "")
+                result["Email_All"] = night_result.email_all
+                result["Email_Type"] = night_result.email_type
+                if night_result.facebook_url:
+                    result["Facebook_URL"] = night_result.facebook_url
+                _log(self.logger, f"[Night FB] extracted email(s) {emails} from {page_url}")
+            return result
         except Exception as exc:  # pragma: no cover - defensive
             prefix = f"[FB Night] Night FB enrich failed at row {row_index}: {exc}" if row_index is not None else f"[FB Night] Night FB enrich failed: {exc}"
             _log(self.logger, prefix)
             return original_row
-
-        if not page_url:
-            return result
-        if facebook_url:
-            _log(self.logger, f"[Night FB] using direct Facebook_URL for {artist_name or '<unknown>'} -> {page_url}")
-        html = self._fetch_html(page_url)
-        emails = _extract_emails_from_html(html or "")
-        night_result = self._build_result(emails, str(result.get("Email_All", "") or ""), page_url, artist_name)
-        if night_result:
-            result["Email"] = night_result.email or result.get("Email", "")
-            result["Email_All"] = night_result.email_all
-            result["Email_Type"] = night_result.email_type
-            if night_result.facebook_url:
-                result["Facebook_URL"] = night_result.facebook_url
-            _log(self.logger, f"[Night FB] extracted email(s) {emails} from {page_url}")
-        return result

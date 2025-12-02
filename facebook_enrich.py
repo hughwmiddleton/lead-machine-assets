@@ -42,7 +42,13 @@ MUSIC_CATEGORY_KEYWORDS = (
     "dj",
     "producer",
     "recording artist",
+    "record label",
+    "composer",
+    "songwriter",
 )
+
+MUSIC_CATEGORY_BOOST = 0.8
+MUSIC_FLAG_BOOST = 0.5
 
 # If ANY of these strings appear in the candidate name, category or URL slug, hard-reject.
 BUSINESS_KILL_TOKENS = (
@@ -741,3 +747,112 @@ def select_best_fb_candidate(
         return None, best[0] if best else float("-inf"), best[1] if best else 0.0, best[2] if best else 0.0
     _, base_score, cat_boost, cand = best
     return cand, best[0], base_score, cat_boost
+
+
+def _shared_fb_log(logger, message: str) -> None:
+    if not message:
+        return
+    if logger and hasattr(logger, "info"):
+        try:
+            logger.info(message)
+            return
+        except Exception:
+            pass
+    if callable(logger):
+        try:
+            logger(message)
+            return
+        except Exception:
+            pass
+    try:
+        print(message)
+    except Exception:
+        pass
+
+
+def is_junk_facebook_candidate(candidate: FbCandidate) -> bool:
+    name = (getattr(candidate, "name", "") or "").strip().lower()
+    cat = (getattr(candidate, "category", "") or "").strip().lower()
+    url = (getattr(candidate, "url", "") or "").strip().lower()
+
+    if name == "facebook":
+        return True
+    if url in ("https://www.facebook.com/", "http://www.facebook.com/"):
+        return True
+    if "go to facebook home" in cat:
+        return True
+
+    if name in {"forgotten account?", "find your account"}:
+        return True
+    if "email or phone" in cat:
+        return True
+    if "/recover/" in url or "recover/initiate" in url:
+        return True
+    if "/login/" in url or "/checkpoint/" in url:
+        return True
+
+    if name in {"video", "videos"}:
+        return True
+    if "browse in video" in cat:
+        return True
+    if "facebook.com/watch" in url:
+        return True
+
+    return False
+
+
+def is_music_like_category(category: str) -> bool:
+    if not category:
+        return False
+    cl = category.strip().lower()
+    return any(k in cl for k in MUSIC_CATEGORY_KEYWORDS)
+
+
+def select_best_facebook_candidate(
+    candidates: List[FbCandidate],
+    search_name: str,
+    logger=None,
+) -> Optional[FbCandidate]:
+    """
+    Shared selector for FB candidates used by daytime and Night Mode enrichment.
+
+    - Filters junk/home/recover/login candidates.
+    - Applies music-category and music-flag boosts.
+    - Relies on existing FB scoring for consistency.
+    """
+    if not candidates:
+        return None
+
+    filtered = [c for c in candidates if not is_junk_facebook_candidate(c)]
+    junk_count = len(candidates) - len(filtered)
+    if junk_count:
+        _shared_fb_log(logger, f"[FB Shared] Filtered {junk_count} junk FB candidate(s) for '{search_name}'")
+    if not filtered:
+        _shared_fb_log(logger, f"[FB Shared] All FB candidates for '{search_name}' were junk; no usable FB page.")
+        return None
+
+    best = None
+    for cand in filtered:
+        scored = score_fb_candidate(search_name, cand.name, cand.url, cand.category)
+        if scored is None:
+            continue
+        final_score, base_score, cat_boost = scored
+        music_bonus = 0.0
+        if is_music_like_category(getattr(cand, "category", "")):
+            music_bonus += MUSIC_CATEGORY_BOOST
+        if getattr(cand, "is_music_page", False):
+            music_bonus += MUSIC_FLAG_BOOST
+        adjusted = final_score + music_bonus
+        if best is None or adjusted > best[0]:
+            best = (adjusted, base_score, cat_boost, cand)
+
+    if best is None:
+        _shared_fb_log(logger, f"[FB Shared] No valid FB candidates for '{search_name}' after scoring.")
+        return None
+
+    candidate = best[3]
+    if is_junk_facebook_candidate(candidate):
+        _shared_fb_log(logger, f"[FB Shared] Best candidate for '{search_name}' turned out to be junk after scoring; dropping.")
+        return None
+
+    return candidate

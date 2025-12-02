@@ -6510,11 +6510,16 @@ def fb_extract_emails_from_html(html: str) -> list[str]:
     return sorted(emails)
 
 
-def fb_scrape_emails_from_page(driver, page_url: str, log_fn=None) -> list[str]:
+def fb_scrape_emails_from_page(driver, page_url: str, log_fn=None, log_prefix: str = "[FB Enrich]") -> list[str]:
     """
     Open a Facebook page in Selenium and return any emails found.
     """
     def _log(msg):
+        prefix = log_prefix or "[FB Enrich]"
+        if msg and "[FB Enrich]" in msg:
+            msg = msg.replace("[FB Enrich]", prefix)
+        elif msg and not msg.startswith("["):
+            msg = f"{prefix} {msg}"
         if log_fn:
             try:
                 log_fn(msg)
@@ -6572,7 +6577,7 @@ def _fb_is_real_page_url(url: str) -> bool:
     return False
 
 
-def fb_find_page_and_emails_by_name(driver, artist_name: str, location: str = "", log_fn=None) -> tuple[str, list[str]]:
+def fb_find_page_and_emails_by_name(driver, artist_name: str, location: str = "", log_fn=None, log_prefix: str = "[FB Enrich]") -> tuple[str, list[str]]:
     """
     Use Facebook search to locate a page for an artist and scrape emails.
     Returns (page_url, emails). If nothing found, returns ("", []).
@@ -6671,6 +6676,11 @@ def fb_find_page_and_emails_by_name(driver, artist_name: str, location: str = ""
         return (candidates[0], normalize_name(candidates[0])) if candidates else (None, None)
 
     def _log(msg):
+        prefix = log_prefix or "[FB Enrich]"
+        if msg and "[FB Enrich]" in msg:
+            msg = msg.replace("[FB Enrich]", prefix)
+        elif msg and not msg.startswith("["):
+            msg = f"{prefix} {msg}"
         if log_fn:
             try:
                 log_fn(msg)
@@ -6704,6 +6714,7 @@ def fb_find_page_and_emails_by_name(driver, artist_name: str, location: str = ""
     strong_candidates: list[tuple[float, float, float, str, str, str, str, bool]] = []
     fallback_candidates: list[tuple[float, float, float, str, str, str, str, bool]] = []
     generic_candidates: list[tuple[float, float, float, str, str, str, str, bool]] = []
+    fb_candidates: list[FbCandidate] = []
     blocked_tokens = [
         "games", "game",
         "creations",
@@ -6832,7 +6843,14 @@ def fb_find_page_and_emails_by_name(driver, artist_name: str, location: str = ""
         "shop",
         "store",
     ]
-    from facebook_enrich import is_noisy_fb_text_block, looks_like_music_fallback, clean_fb_category_text
+    from facebook_enrich import (
+        FbCandidate,
+        clean_fb_category_text,
+        is_noisy_fb_text_block,
+        looks_like_music_fallback,
+        score_fb_candidate,
+        select_best_facebook_candidate,
+    )
 
     def _is_corporate_page(name: str, url: str, category: str | None) -> bool:
         text = f"{name} {url} {category or ''}".lower()
@@ -7037,6 +7055,7 @@ def fb_find_page_and_emails_by_name(driver, artist_name: str, location: str = ""
                 break
         if corp_hit:
             continue
+        fb_candidates.append(FbCandidate(name=fallback_name or href, url=href, category=category_raw or ""))
         page_name_norm = normalize_name(text)
         username_norm = normalize_name(username)
         score = 0.0
@@ -7120,7 +7139,27 @@ def fb_find_page_and_emails_by_name(driver, artist_name: str, location: str = ""
 
     using_fallback = False
     using_generic = False
-    if strong_candidates:
+    shared_best = None
+    try:
+        shared_best = select_best_facebook_candidate(fb_candidates, artist_name, logger=_log)
+    except Exception:
+        shared_best = None
+    if shared_best:
+        best_url = shared_best.url
+        best_name = shared_best.name or shared_best.url
+        best_category_raw = getattr(shared_best, "category", "") or ""
+        best_category_norm = normalize_name(best_category_raw)
+        best_score = 1.0
+        best_base_score = 1.0
+        best_cat_boost = 0.0
+        try:
+            scored = score_fb_candidate(artist_name, best_name or "", best_url or "", best_category_raw)
+            if scored:
+                best_score, best_base_score, best_cat_boost = scored
+        except Exception:
+            pass
+        best_is_music = True
+    elif strong_candidates:
         best_score, best_base_score, best_cat_boost, best_url, best_name, best_category_raw, best_category_norm, best_is_music = max(
             strong_candidates, key=lambda x: x[0]
         )
