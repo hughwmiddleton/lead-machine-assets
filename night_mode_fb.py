@@ -262,12 +262,35 @@ class NightModeFacebookEnricher:
             _log(self.logger, f"[Night FB] Search navigation failed: {exc}")
             return None
         candidates = _parse_search_candidates(html)
-        best = _select_best_candidate_loose(artist, candidates)
-        if best:
-            url = _normalise_fb_url(best.url)
-            _log(self.logger, f"[Night FB] Selected FB candidate '{best.name}' -> {url} (category='{best.category}')")
-            return url
-        _log(self.logger, "[Night FB] No viable FB candidates from search.")
+        search_result = _select_best_candidate_loose(artist, candidates)
+        candidate = search_result
+        if isinstance(search_result, list):
+            candidate = next((c for c in search_result if c), None)
+        if not candidate:
+            _log(self.logger, f"[Night FB] No Facebook candidates for '{artist}'.")
+            return None
+
+        fb_url = None
+        if hasattr(candidate, "url"):
+            fb_url = getattr(candidate, "url", None)
+        elif isinstance(candidate, dict):
+            fb_url = candidate.get("url") or candidate.get("page_url")
+        elif isinstance(candidate, str):
+            fb_url = candidate
+
+        url = _normalise_fb_url(fb_url or "")
+        if not url:
+            _log(self.logger, f"[Night FB] Candidate missing URL for '{artist}', skipping.")
+            return None
+
+        name = getattr(candidate, "name", None)
+        category = getattr(candidate, "category", None)
+        if isinstance(candidate, dict):
+            name = name or candidate.get("name")
+            category = category or candidate.get("category")
+
+        _log(self.logger, f"[Night FB] Selected FB candidate '{name or url}' -> {url} (category='{category or ''}')")
+        return url
         return None
 
     def _build_result(self, emails: List[str], email_all_existing: str, facebook_url: str, artist_name: str) -> Optional[NightModeFacebookResult]:
@@ -283,9 +306,10 @@ class NightModeFacebookEnricher:
             facebook_url=facebook_url,
         )
 
-    def enrich_row_with_facebook_night(self, row: Dict[str, str]) -> Dict[str, str]:
+    def enrich_row_with_facebook_night(self, row: Dict[str, str], row_index: Optional[int] = None) -> Dict[str, str]:
         """Night-Mode-only FB enrichment for a single row."""
-        result = dict(row or {})
+        original_row = dict(row or {})
+        result = dict(original_row)
 
         def _clean_val(value: str) -> str:
             try:
@@ -305,7 +329,14 @@ class NightModeFacebookEnricher:
         if not facebook_url:
             facebook_url = _parse_existing_fb_url(result)
             facebook_url = _normalise_fb_url(facebook_url)
-        page_url = facebook_url or self._search_for_page(artist_name, location)
+
+        try:
+            page_url = facebook_url or self._search_for_page(artist_name, location)
+        except Exception as exc:  # pragma: no cover - defensive
+            prefix = f"[FB Night] Night FB enrich failed at row {row_index}: {exc}" if row_index is not None else f"[FB Night] Night FB enrich failed: {exc}"
+            _log(self.logger, prefix)
+            return original_row
+
         if not page_url:
             return result
         if facebook_url:

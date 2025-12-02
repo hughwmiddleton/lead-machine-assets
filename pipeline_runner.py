@@ -608,7 +608,7 @@ def run_facebook_global_pass_nightmode(
 
             try:
                 clean_row = {k: ("" if pd.isna(v) else v) for k, v in row.to_dict().items()}
-                enriched = fb_helper.enrich_row_with_facebook_night(clean_row)
+                enriched = fb_helper.enrich_row_with_facebook_night(clean_row, row_index=idx)
             except Exception as exc:  # pragma: no cover - defensive
                 if _is_captcha_error(exc):
                     captcha_flag = True

@@ -217,7 +217,7 @@ class FacebookNightModeWrapperTest(unittest.TestCase):
             def __exit__(self, exc_type, exc, tb):
                 return False
 
-            def enrich_row_with_facebook_night(self, row):
+            def enrich_row_with_facebook_night(self, row, row_index=None):
                 self.calls.append(dict(row))
                 enriched = dict(row)
                 if not enriched.get("Email"):
@@ -300,7 +300,7 @@ class FacebookNightModeWrapperTest(unittest.TestCase):
             def __exit__(self, exc_type, exc, tb):
                 return False
 
-            def enrich_row_with_facebook_night(self, row):
+            def enrich_row_with_facebook_night(self, row, row_index=None):
                 raise FakeCaptcha("captcha required")
 
         with mock.patch.object(pipeline_runner, "_load_legacy_module", return_value=FakeModule()), mock.patch.dict(
