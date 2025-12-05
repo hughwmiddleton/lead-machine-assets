@@ -8,6 +8,8 @@ from __future__ import annotations
 import re
 import time
 import urllib.parse
+import shutil
+from pathlib import Path
 from dataclasses import dataclass
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -157,6 +159,37 @@ def _normalise_fb_url(url: str) -> str:
     return cleaned
 
 
+def _purge_wdm_cache(driver_path: str) -> None:
+    """
+    Remove webdriver_manager's cache folder for a given driver path to self-heal bad downloads.
+    """
+    try:
+        path = Path(driver_path).resolve()
+        cache_dir = path.parent.parent
+        if cache_dir.exists():
+            shutil.rmtree(cache_dir, ignore_errors=True)
+    except Exception:
+        pass
+
+
+def _start_chromedriver_with_retry(chrome_options):
+    """
+    Start ChromeDriver with a one-time reinstall if the first launch fails.
+    """
+    last_exc: Exception | None = None
+    for _ in range(2):
+        driver_path = ChromeDriverManager().install()
+        try:
+            service = ChromeService(driver_path)
+            return webdriver.Chrome(service=service, options=chrome_options)
+        except Exception as exc:
+            last_exc = exc
+            _purge_wdm_cache(driver_path)
+    if last_exc:
+        raise last_exc
+    raise FacebookDriverError("Failed to start ChromeDriver.")
+
+
 def _create_fb_driver_public(headless: bool = True):
     """
     Create a clean, no-login Chrome driver for public FB scraping.
@@ -178,9 +211,7 @@ def _create_fb_driver_public(headless: bool = True):
     chrome_options.page_load_strategy = "eager"
     prefs = {"profile.managed_default_content_settings.images": 2}
     chrome_options.add_experimental_option("prefs", prefs)
-    service = ChromeService(ChromeDriverManager().install())
-    driver = webdriver.Chrome(service=service, options=chrome_options)
-    return driver
+    return _start_chromedriver_with_retry(chrome_options)
 
 
 def _extract_emails_from_html(html: str) -> List[str]:

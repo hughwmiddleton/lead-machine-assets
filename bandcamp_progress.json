@@ -1311,5 +1311,53 @@
       "https://sofarsogoodhc.bandcamp.com",
       "https://eveofstmark.bandcamp.com"
     ]
+  },
+  "https://bandcamp.com/discover/netherlands+folk?s=new": {
+    "scraped_artist_urls": [
+      "https://prettyuglyitems.bandcamp.com",
+      "https://francescotaranto.bandcamp.com",
+      "https://sterreweldring.bandcamp.com",
+      "https://niekvanveelen.bandcamp.com",
+      "https://juliamandoki.bandcamp.com",
+      "https://chronosdefied.bandcamp.com",
+      "https://maringoberenos.bandcamp.com",
+      "https://bartzeal.bandcamp.com",
+      "https://musthavemusic.bandcamp.com",
+      "https://harmonk.bandcamp.com",
+      "https://sine289.bandcamp.com",
+      "https://thelasses.bandcamp.com",
+      "https://harkenco.bandcamp.com",
+      "https://nortfalke.bandcamp.com",
+      "https://shakymaracas.bandcamp.com",
+      "https://juleschanson.bandcamp.com",
+      "https://geelhaer.bandcamp.com",
+      "https://davidgolek.bandcamp.com",
+      "https://oxsener.bandcamp.com",
+      "https://deweach.bandcamp.com"
+    ]
+  },
+  "discover:https://bandcamp.com/discover/netherlands+folk?s=new": {
+    "scraped_artist_urls": [
+      "https://prettyuglyitems.bandcamp.com",
+      "https://francescotaranto.bandcamp.com",
+      "https://sterreweldring.bandcamp.com",
+      "https://niekvanveelen.bandcamp.com",
+      "https://juliamandoki.bandcamp.com",
+      "https://chronosdefied.bandcamp.com",
+      "https://maringoberenos.bandcamp.com",
+      "https://bartzeal.bandcamp.com",
+      "https://musthavemusic.bandcamp.com",
+      "https://harmonk.bandcamp.com",
+      "https://sine289.bandcamp.com",
+      "https://thelasses.bandcamp.com",
+      "https://harkenco.bandcamp.com",
+      "https://nortfalke.bandcamp.com",
+      "https://shakymaracas.bandcamp.com",
+      "https://juleschanson.bandcamp.com",
+      "https://geelhaer.bandcamp.com",
+      "https://davidgolek.bandcamp.com",
+      "https://oxsener.bandcamp.com",
+      "https://deweach.bandcamp.com"
+    ]
   }
 }

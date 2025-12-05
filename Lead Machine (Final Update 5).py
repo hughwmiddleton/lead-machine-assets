@@ -23,7 +23,9 @@ import subprocess
 import platform
 import traceback
 import tempfile
+import shutil
 import logging
+from pathlib import Path
 from typing import Optional, Tuple
 
 # ---------------------------
@@ -874,6 +876,41 @@ def _lastfm_extract_socials_and_website(html, profile_url):
 
 
 # -----------------------------------------------------------------------------
+# ChromeDriver bootstrap with cache self-healing
+# -----------------------------------------------------------------------------
+def _purge_wdm_cache(driver_path: str) -> None:
+    """
+    Remove the webdriver_manager cache folder for a given driver path.
+    Intended for rare cases where the cached binary is corrupted or unsigned.
+    """
+    try:
+        path = Path(driver_path).resolve()
+        cache_dir = path.parent.parent
+        if cache_dir.exists():
+            shutil.rmtree(cache_dir, ignore_errors=True)
+    except Exception:
+        pass
+
+
+def _start_chromedriver_with_retry(chrome_options):
+    """
+    Start ChromeDriver with one automatic cache purge + reinstall retry if startup fails.
+    """
+    last_exc = None
+    for _ in range(2):
+        driver_path = ChromeDriverManager().install()
+        try:
+            service = ChromeService(driver_path)
+            return webdriver.Chrome(service=service, options=chrome_options)
+        except Exception as exc:
+            last_exc = exc
+            _purge_wdm_cache(driver_path)
+    if last_exc:
+        raise last_exc
+    raise RuntimeError("Failed to start ChromeDriver.")
+
+
+# -----------------------------------------------------------------------------
 # Helper: Drum Status Detection from Page Source using BeautifulSoup
 # -----------------------------------------------------------------------------
 def get_drum_status_from_source(page_source):
@@ -927,8 +964,7 @@ def setup_driver():
         "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     )
-    service = ChromeService(ChromeDriverManager().install())
-    driver = webdriver.Chrome(service=service, options=chrome_options)
+    driver = _start_chromedriver_with_retry(chrome_options)
     try:
         driver.set_page_load_timeout(35)
         driver.set_script_timeout(35)
@@ -960,8 +996,7 @@ def setup_facebook_driver():
     chrome_options.page_load_strategy = 'eager'
     prefs = {"profile.managed_default_content_settings.images": 2}
     chrome_options.add_experimental_option("prefs", prefs)
-    service = ChromeService(ChromeDriverManager().install())
-    driver = webdriver.Chrome(service=service, options=chrome_options)
+    driver = _start_chromedriver_with_retry(chrome_options)
     return driver
 
 
