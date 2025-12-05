@@ -960,6 +960,13 @@ def setup_facebook_driver():
     return driver
 
 
+# -----------------------------------------------------------------------------
+# Unearthed Page 1 configuration
+# -----------------------------------------------------------------------------
+# Unearthed Page 1 should only collect socials; email scraping happens in later passes.
+SCRAPE_FB_EMAILS_ON_UNEARTHED_PAGE1 = False
+
+
 # =============================================================================
 # Scraping Functions for Artist Data (Page 1)
 # =============================================================================
@@ -1000,7 +1007,7 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
             print("No artist profile URLs found. Please check the website structure or selectors.")
         for profile_url in profile_urls:
             # Lazily initialize FB driver only if we encounter a Facebook link later.
-            if fb_driver is None:
+            if fb_driver is None and SCRAPE_FB_EMAILS_ON_UNEARTHED_PAGE1:
                 try:
                     if fb_session is not None and hasattr(fb_session, "navigate"):
                         fb_driver = fb_session.navigate("about:blank")
@@ -1099,7 +1106,13 @@ def scrape_artist_profile(driver, profile_url, fb_driver=None):
         "https://twitter.com/triplejunearthd",
         "https://www.facebook.com/abc",
         "https://www.instagram.com/abcaustralia",
-        "https://twitter.com/abcaustralia"
+        "https://twitter.com/abcaustralia",
+        "https://soundcloud.com/triplejunearthed",
+        "https://www.soundcloud.com/triplejunearthed",
+        "https://tiktok.com/@triplejradio",
+        "https://www.tiktok.com/@triplejradio",
+        "https://youtube.com/abcaustralia",
+        "https://www.youtube.com/abcaustralia"
     }
     try:
         driver.get(profile_url)
@@ -1107,12 +1120,13 @@ def scrape_artist_profile(driver, profile_url, fb_driver=None):
             EC.presence_of_element_located((By.TAG_NAME, 'body'))
         )
         page_source = driver.page_source
-        try:
-            email_matches = re.findall(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}", page_source or "")
-            if email_matches:
-                email_value = email_matches[0]
-        except Exception:
-            email_value = ""
+        if SCRAPE_FB_EMAILS_ON_UNEARTHED_PAGE1:
+            try:
+                email_matches = re.findall(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}", page_source or "")
+                if email_matches:
+                    email_value = email_matches[0]
+            except Exception:
+                email_value = ""
         soup = BeautifulSoup(page_source, 'html.parser')
         release_date = unearthed_extract_release_date(page_source) or ""
         links = soup.find_all('a', href=True)
@@ -1175,7 +1189,7 @@ def scrape_artist_profile(driver, profile_url, fb_driver=None):
                 sounds_like = sounds_like_list.get_text(strip=True)
 
         # If we have a Facebook link and a driver is available, attempt to scrape contact email from the FB page.
-        if fb_driver and not email_value:
+        if fb_driver and SCRAPE_FB_EMAILS_ON_UNEARTHED_PAGE1 and not email_value:
             for link in list(social_links):
                 href_lc = (link or "").lower()
                 if not any(tok in href_lc for tok in ("facebook.com", "m.facebook.com", "fb.com", "fb.me")):
