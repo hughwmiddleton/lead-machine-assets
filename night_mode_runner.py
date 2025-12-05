@@ -16,6 +16,7 @@ import datetime
 import json
 import logging
 import os
+import re
 import sys
 import time
 import traceback
@@ -38,6 +39,25 @@ CHECKPOINT_INTERVAL_ROWS = 5
 STATE_FILENAME = "state.json"
 LOG_FILENAME = "log.txt"
 FACEBOOK_STATE_FILENAME = "facebook_state.json"
+EMAIL_PRIORITY_COLS = getattr(pipeline_runner, "EMAIL_PRIORITY_COLS", ("Email", "Email_All", "Directory_Email", "Unearthed_Email"))
+EXCLUDED_URL_SUBSTRINGS = (
+    "soundcloud.com/triplejunearthed",
+    "tiktok.com/@triplejradio",
+    "youtube.com/abcaustralia",
+)
+
+
+def _strip_excluded_urls(url_val: str) -> str:
+    """
+    Remove known platform-owned URLs (e.g., triple j Unearthed) so they never reach the client CSV.
+    """
+    raw = str(url_val or "")
+    if not raw:
+        return ""
+    # Split on whitespace or common separators (pipe/semicolon/comma).
+    parts = re.split("[\\s,;|]+", raw)
+    kept = [p for p in parts if p and not any(ex in p.lower() for ex in EXCLUDED_URL_SUBSTRINGS)]
+    return " | ".join(kept)
 
 
 def _setup_logger(log_path: str, job_id: str) -> logging.Logger:
@@ -103,6 +123,27 @@ def _primary_url_from_row(row: pd.Series) -> str:
     return ""
 
 
+def _coalesce_emails(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Backfill the Email column across known email fields without overwriting
+    existing directory-provided values with blanks.
+    """
+    if df is None or df.empty:
+        return df
+    existing = [c for c in EMAIL_PRIORITY_COLS if c in df.columns]
+    if not existing:
+        return df
+    # Ensure Email_All includes Email when Email_All is empty
+    if "Email_All" in df.columns and "Email" in df.columns:
+        email_all = df["Email_All"].fillna("").astype(str)
+        email_col = df["Email"].fillna("").astype(str)
+        mask_all = email_all.str.strip() == ""
+        df.loc[mask_all, "Email_All"] = email_col[mask_all]
+    email_series = df[existing].bfill(axis=1).iloc[:, 0].fillna("").astype(str)
+    df["Email"] = email_series.str.strip()
+    return df
+
+
 def _dedupe_master(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
@@ -110,6 +151,18 @@ def _dedupe_master(df: pd.DataFrame) -> pd.DataFrame:
     work["__email_key"] = work.get("Email", pd.Series(dtype=str)).fillna("").astype(str).str.strip().str.lower()
     work["__artist_key"] = work.get("Artist Name", pd.Series(dtype=str)).fillna("").astype(str).str.strip().str.lower()
     work["__primary_url"] = work.apply(_primary_url_from_row, axis=1)
+    work["__has_email"] = work.get("Email", pd.Series(dtype=str)).fillna("").astype(str).str.strip() != ""
+    # Prefer rows that carry a Facebook clue when de-duplicating.
+    def _has_fb(row: pd.Series) -> bool:
+        for col in ("Facebook_URL", "Social Link", "External Links"):
+            if col not in row:
+                continue
+            val = str(row.get(col) or "").lower()
+            if "facebook.com" in val or "fb.me" in val:
+                return True
+        return False
+
+    work["__has_fb"] = work.apply(_has_fb, axis=1)
 
     def _key(row: pd.Series) -> str:
         email = row.get("__email_key", "")
@@ -122,7 +175,8 @@ def _dedupe_master(df: pd.DataFrame) -> pd.DataFrame:
         return f"row::{row.name}"
 
     work["__dedupe_key"] = work.apply(_key, axis=1)
-    deduped = work.drop_duplicates(subset="__dedupe_key").drop(columns=["__dedupe_key", "__email_key", "__artist_key", "__primary_url"])
+    work = work.sort_values(["__dedupe_key", "__has_email", "__has_fb"], ascending=[True, False, False])
+    deduped = work.drop_duplicates(subset="__dedupe_key").drop(columns=["__dedupe_key", "__email_key", "__artist_key", "__primary_url", "__has_email", "__has_fb"])
     return deduped
 
 
@@ -175,6 +229,18 @@ def _merge_master(run_dir: str, job_states: List[Dict[str, Any]], logger: loggin
         return None
 
     combined = pd.concat(frames, ignore_index=True, sort=False)
+    for col in ("Source URL", "SoundCloud Link", "Social Link", "External Links", "Facebook_URL"):
+        if col in combined.columns:
+            combined[col] = combined[col].fillna("").astype(str).apply(_strip_excluded_urls)
+
+    combined = _coalesce_emails(combined)
+    try:
+        unearthed_mask = combined.get("Source Directory", pd.Series(dtype=str)).astype(str).str.contains("unearthed", case=False, na=False)
+        sample = combined.loc[unearthed_mask, ["Artist Name", "Source Directory", "Email", "Email_All"]].head()
+        if not sample.empty:
+            logger.info("[Debug Unearthed] Sample after raw merge:\n%s", sample.to_string(index=False))
+    except Exception:
+        pass
     deduped = _dedupe_master(combined)
     master_path = os.path.join(run_dir, "master_pre_fb.csv")
     deduped.to_csv(master_path, index=False)
@@ -204,6 +270,17 @@ def _merge_raw_master(run_dir: str, job_states: List[Dict[str, Any]], logger: lo
         logger.warning("[Master] No data available after reading raw files.")
         return None
     combined = pd.concat(frames, ignore_index=True, sort=False)
+    for col in ("Source URL", "SoundCloud Link", "Social Link", "External Links", "Facebook_URL"):
+        if col in combined.columns:
+            combined[col] = combined[col].fillna("").astype(str).apply(_strip_excluded_urls)
+    combined = _coalesce_emails(combined)
+    try:
+        unearthed_mask = combined.get("Source Directory", pd.Series(dtype=str)).astype(str).str.contains("unearthed", case=False, na=False)
+        sample = combined.loc[unearthed_mask, ["Artist Name", "Source Directory", "Email", "Email_All"]].head()
+        if not sample.empty:
+            logger.info("[Debug Unearthed] Sample after enriched merge:\n%s", sample.to_string(index=False))
+    except Exception:
+        pass
     master_path = os.path.join(run_dir, "master_raw.csv")
     combined.to_csv(master_path, index=False)
     logger.info("[Master] Wrote merged raw CSV: %s (rows=%s)", master_path, len(combined.index))

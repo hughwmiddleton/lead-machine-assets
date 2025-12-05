@@ -27,12 +27,13 @@ except Exception:  # pragma: no cover - defensive
     def is_fb_login_redirect(url: str) -> bool:  # type: ignore
         return False
 
-from night_mode_fb import NightModeFacebookEnricher
+from night_mode_fb import FacebookDriverError, NightModeFacebookEnricher
 
 LoggerFn = Optional[Callable[[str], None]]
 
 _LEGACY_MODULE = None
 _LOGGER = logging.getLogger(__name__)
+EMAIL_PRIORITY_COLS: Sequence[str] = ("Email", "Email_All", "Directory_Email", "Unearthed_Email")
 
 
 def _load_legacy_module():
@@ -99,6 +100,41 @@ def _read_seed_list(seed_path: str | None) -> List[str]:
         return []
 
 
+def _coalesce_emails(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Preserve any existing directory-provided emails by backfilling across known columns and syncing Email/Email_All.
+    """
+    if df is None or df.empty:
+        return df
+    existing = [c for c in EMAIL_PRIORITY_COLS if c in df.columns]
+    if not existing:
+        return df
+    # Make sure Email_All includes Email where Email_All is blank.
+    if "Email_All" in df.columns and "Email" in df.columns:
+        email_all = df["Email_All"].fillna("").astype(str)
+        email_col = df["Email"].fillna("").astype(str)
+        mask_all = email_all.str.strip() == ""
+        df.loc[mask_all, "Email_All"] = email_col[mask_all]
+    email_series = df[existing].bfill(axis=1).iloc[:, 0].fillna("").astype(str)
+    df["Email"] = email_series.str.strip()
+    return df
+
+
+def _maybe_set_email(df: pd.DataFrame, idx: int, new_email: Optional[str]) -> None:
+    """
+    Only set Email when a non-empty value is available and the existing cell is empty.
+    """
+    if "Email" not in df.columns:
+        df["Email"] = ""
+    new_clean = (new_email or "").strip()
+    if not new_clean:
+        return
+    current = str(df.at[idx, "Email"]) if idx in df.index else ""
+    if str(current or "").strip():
+        return
+    df.at[idx, "Email"] = new_clean
+
+
 def _write_rows_to_csv(rows: Iterable[Any], path: str, source_directory: str = "") -> str:
     _ensure_parent(path)
     materialized: List[Any] = list(rows or [])
@@ -160,6 +196,90 @@ def run_master_enrichment(seed_csv_path: str, output_csv_path: str, logger: Logg
     return output_csv_path
 
 
+def _run_unearthed_full_pipeline(job_config: Dict[str, Any], raw_output_path: str, module, logger: LoggerFn) -> str:
+    """
+    Night/legacy helper: run the full Unearthed pipeline, including the contact/email pass.
+    Falls back to the existing scrape_website implementation if a dedicated pipeline
+    entrypoint is not available.
+    """
+    search_term = (
+        job_config.get("input_seed_csv")
+        or job_config.get("seed")
+        or job_config.get("url")
+        or getattr(module, "UNEARTHED_DEFAULT_URL", "")
+    )
+    max_results = int(job_config.get("target_valid_leads") or job_config.get("max_results") or job_config.get("max_artists") or 0)
+    pipeline_entry = None
+    entrypoint_hint = (job_config.get("entrypoint") or "").strip()
+    candidate_names = [
+        entrypoint_hint,
+        "run_unearthed_pipeline",
+        "unearthed_pipeline",
+        "run_unearthed_full_pipeline",
+    ]
+
+    # Try dedicated module import first (if present in repo), then fall back to legacy module attrs.
+    fb_session = None
+    try:
+        fb_username = os.environ.get("FB_USERNAME", "").strip()
+        fb_password = os.environ.get("FB_PASSWORD", "").strip()
+        get_shared = getattr(module, "get_shared_facebook_session", None)
+        if fb_username and fb_password and callable(get_shared):
+            fb_session = get_shared(fb_username, fb_password, logger=logger)
+    except Exception:
+        fb_session = None
+
+    try:
+        import unearthed_pipeline  # type: ignore
+
+        for name in candidate_names:
+            if name and hasattr(unearthed_pipeline, name):
+                pipeline_entry = getattr(unearthed_pipeline, name)
+                break
+    except Exception:
+        pipeline_entry = None
+
+    if pipeline_entry is None:
+        for name in candidate_names:
+            if not name:
+                continue
+            if hasattr(module, name):
+                pipeline_entry = getattr(module, name)
+                break
+
+    if callable(pipeline_entry):
+        _safe_log(logger, f"[Unearthed] Using FULL pipeline entrypoint: {getattr(pipeline_entry, '__name__', pipeline_entry)}")
+        try:
+            result = pipeline_entry(
+                search_term=search_term,
+                region=job_config.get("region"),
+                max_results=max_results or None,
+                headless=True,
+                output_csv=raw_output_path,
+                fb_session=fb_session,
+            )
+            if isinstance(result, str) and result:
+                return result
+        except TypeError:
+            try:
+                result = pipeline_entry(search_term, region=job_config.get("region"), max_results=max_results or None, fb_session=fb_session)
+                if isinstance(result, str) and result:
+                    return result
+            except Exception:
+                pass
+        except Exception:
+            pass
+        _safe_log(logger, "[Unearthed] FULL pipeline entry failed; falling back to listing-only scrape_website.")
+    else:
+        _safe_log(logger, "[Unearthed] FULL pipeline entry not found; falling back to listing-only scrape_website.")
+    module.scrape_website(
+        search_term,
+        existing_csv=raw_output_path,
+        max_artists=max_results or 200,
+    )
+    return raw_output_path
+
+
 def run_directory_job(job_config: Dict[str, Any], raw_output_path: str, logger: LoggerFn = None) -> str:
     """
     Run a single directory scraper based on job_config.
@@ -171,6 +291,27 @@ def run_directory_job(job_config: Dict[str, Any], raw_output_path: str, logger: 
     directory = (job_config.get("directory") or "").strip().lower()
     target_count = int(job_config.get("target_valid_leads") or job_config.get("target_count") or 0)
     mode = (job_config.get("mode") or "").strip().lower()
+
+    _safe_log(logger, f"[Directory] Running job for directory={directory} slug={job_config.get('slug', '')} job_id={job_config.get('job_id', '')}")
+
+    if "unearthed" in directory:
+        # Try full Unearthed pipeline with contact/email pass first.
+        try:
+            full_csv = _run_unearthed_full_pipeline(job_config, raw_output_path, module, logger)
+        except Exception:
+            full_csv = None
+        if full_csv:
+            return full_csv
+        _safe_log(logger, f"[Unearthed] Falling back to listing-only scrape_website for job: {job_config}")
+        url = job_config.get("input_seed_csv") or job_config.get("seed") or job_config.get("url") or ""
+        if not url:
+            url = getattr(module, "UNEARTHED_DEFAULT_URL", "")
+        module.scrape_website(
+            url,
+            existing_csv=raw_output_path,
+            max_artists=target_count or 200,
+        )
+        return raw_output_path
 
     if directory == "spotify":
         params = {
@@ -230,15 +371,7 @@ def run_directory_job(job_config: Dict[str, Any], raw_output_path: str, logger: 
         return raw_output_path
 
     if directory == "unearthed":
-        url = job_config.get("input_seed_csv") or job_config.get("seed") or job_config.get("url") or ""
-        if not url:
-            url = getattr(module, "UNEARTHED_DEFAULT_URL", "")
-        module.scrape_website(
-            url,
-            existing_csv=raw_output_path,
-            max_artists=target_count or 200,
-        )
-        return raw_output_path
+        return _run_unearthed_full_pipeline(job_config, raw_output_path, module, logger)
 
     raise ValueError(f"Unsupported directory: {directory}")
 
@@ -410,11 +543,7 @@ def run_facebook_global_pass(
                             rid_int = int(float(rid))
                         except Exception:
                             continue
-                        current_email = updated_df.at[rid_int, "Email"] if "Email" in updated_df.columns else ""
-                        if pd.isna(current_email):
-                            current_email = ""
-                        if not str(current_email).strip():
-                            updated_df.at[rid_int, "Email"] = email_val
+                        _maybe_set_email(updated_df, rid_int, email_val)
                         updated_df.at[rid_int, "FB_Status"] = fb_status_val or "ok"
                         if fb_url_val:
                             updated_df.at[rid_int, "Facebook_URL"] = fb_url_val
@@ -545,6 +674,10 @@ def run_facebook_global_pass_nightmode(
 
     fb_username = os.environ.get("FB_USERNAME", "").strip()
     fb_password = os.environ.get("FB_PASSWORD", "").strip()
+    if fb_username:
+        _safe_log_console(logger, "[Night FB] FB username provided (length only logged).")
+    else:
+        _safe_log_console(logger, "[Night FB] FB username missing; Night FB will run unauthenticated.")
 
     # Use existing output if present so resumes keep prior enrichments.
     base_path = output_csv if output_csv and os.path.exists(output_csv) else input_csv
@@ -630,6 +763,7 @@ def run_facebook_global_pass_nightmode(
         fb_username,
         fb_password,
         logger=lambda msg: _safe_log_console(logger, msg),
+        use_shared_session=False,
     )
 
     with fb_helper:
@@ -647,9 +781,10 @@ def run_facebook_global_pass_nightmode(
             fb_status_val = fb_status_val_raw.lower()
             facebook_url_hint = str(row.get("Facebook_URL", "") or "").strip()
             has_clue = _has_facebook_clue(row)
-            should_run_night_fb = (not has_email) and fb_status_val not in ("login_redirect", "no_candidates")
-            if has_email or fb_status_val in ("login_redirect", "no_candidates") or not has_clue or not should_run_night_fb:
-                if has_email or fb_status_val in ("login_redirect", "no_candidates"):
+            final_fb_statuses = {"login_redirect", "no_candidates", "ok", "found"}
+            should_run_night_fb = (not has_email) and (fb_status_val not in final_fb_statuses)
+            if has_email or fb_status_val in final_fb_statuses or not has_clue or not should_run_night_fb:
+                if has_email or fb_status_val in final_fb_statuses:
                     email_state = "present" if has_email else "missing"
                     _safe_log_console(
                         logger,
@@ -688,6 +823,9 @@ def run_facebook_global_pass_nightmode(
             try:
                 clean_row = {k: ("" if pd.isna(v) else v) for k, v in row.to_dict().items()}
                 enriched = fb_helper.enrich_row_with_facebook_night(clean_row, row_index=idx)
+            except FacebookDriverError as exc:
+                _safe_log_console(logger, f"[FB Night] Driver error at row {idx}: {exc}")
+                enriched = {"FB_Status": "driver_error"}
             except Exception as exc:  # pragma: no cover - defensive
                 if _is_captcha_error(exc):
                     captcha_flag = True
@@ -709,7 +847,8 @@ def run_facebook_global_pass_nightmode(
                 enriched = None
 
             if enriched:
-                for col in ("Email", "Email_All", "Email_Type", "Facebook_URL"):
+                _maybe_set_email(df, idx, enriched.get("Email"))
+                for col in ("Email_All", "Email_Type", "Facebook_URL"):
                     if col in enriched:
                         df.at[idx, col] = enriched.get(col, "")
                 status_val = str(enriched.get("FB_Status", "") or "")

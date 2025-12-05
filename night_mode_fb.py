@@ -12,11 +12,23 @@ from dataclasses import dataclass
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from bs4 import BeautifulSoup
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options as ChromeOptions
+from selenium.webdriver.chrome.service import Service as ChromeService
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support.ui import WebDriverWait
+from webdriver_manager.chrome import ChromeDriverManager
 
 try:
     import facebook_enrich
 except Exception:  # pragma: no cover - defensive import
     facebook_enrich = None  # type: ignore
+try:
+    from facebook_enrich import is_fb_login_redirect  # type: ignore
+except Exception:  # pragma: no cover - defensive
+    def is_fb_login_redirect(url: str) -> bool:  # type: ignore
+        return False
 
 LoggerFn = Optional[Callable[[str], None]]
 
@@ -30,6 +42,23 @@ FB_CLUE_FIELDS = [
     "Facebook_URL",
     "Facebook URL",
 ]
+
+_FB_JUNK_HOSTS = (
+    "l.facebook.com",
+    "developers.facebook.com",
+    "about.meta.com",
+    "meta.com",
+    "www.facebook.com",  # home/redirects treated as junk for selection purposes
+)
+_FB_JUNK_PATH_TOKENS = (
+    "/about_contact_and_basic_info",
+    "/help/",
+    "/meta-pay",
+)
+
+
+class FacebookDriverError(RuntimeError):
+    """Raised when the Facebook driver/session is unavailable or dead."""
 
 
 def _log(logger: LoggerFn, message: str) -> None:
@@ -58,45 +87,50 @@ def _split_multi(value: str) -> List[str]:
     return [p.strip() for p in parts if p and p.strip()]
 
 
+def _extract_fb_urls_for_night_mode(row):
+    fields = [
+        "Social Link",
+        "External Links",
+        "Facebook_URL",
+        "Facebook URL",
+        "Spotify_Website_URL",
+        "Spotify Website URL",
+    ]
+    urls = []
+    for f in fields:
+        raw = (row.get(f) or "").strip()
+        if not raw:
+            continue
+        parts = re.split(r"[,\s;|]+", raw)
+        for p in parts:
+            if "facebook.com" in p.lower() or "fb.me" in p.lower():
+                urls.append(p)
+
+    clean = []
+    for url in urls:
+        u = url.strip()
+        if not u:
+            continue
+        if u.startswith("//"):
+            u = "https:" + u
+        if not u.startswith("http"):
+            u = "https://" + u
+        # filter login redirects
+        bad = ("/r.php", "/login", "/share.php", "/l.php", "/dialog/")
+        path = urllib.parse.urlparse(u).path.lower()
+        if any(path.startswith(b) for b in bad):
+            continue
+        clean.append(u)
+
+    return list(dict.fromkeys(clean))
+
+
 def _extract_fb_urls_from_row(row: Dict[str, str]) -> List[str]:
     """
     Collect explicit Facebook URLs from common clue fields in a row.
     Splits on commas/semicolons/pipes/whitespace and removes obvious non-page endpoints.
     """
-    fb_urls: List[str] = []
-
-    def _maybe_add(raw_url: str) -> None:
-        url = (raw_url or "").strip()
-        if not url:
-            return
-        lower = url.lower()
-        if "facebook.com" not in lower and "fb.me" not in lower and "m.me" not in lower:
-            return
-        if lower.startswith("//"):
-            url = "https:" + url
-            lower = url.lower()
-        elif not lower.startswith("http://") and not lower.startswith("https://"):
-            url = "https://" + url
-            lower = url.lower()
-        try:
-            parsed = urllib.parse.urlparse(url)
-        except Exception:
-            return
-        path_lower = (parsed.path or "").lower()
-        bad_paths = ("/r.php", "/login", "/share.php", "/dialog/", "/plugins/", "/l.php")
-        if any(path_lower.startswith(p) for p in bad_paths):
-            return
-        if url not in fb_urls:
-            fb_urls.append(url)
-
-    for field in FB_CLUE_FIELDS:
-        raw = row.get(field) or ""
-        if not raw:
-            continue
-        for token in _FB_SPLIT_PATTERN.split(str(raw)):
-            _maybe_add(token)
-
-    return fb_urls
+    return _extract_fb_urls_for_night_mode(row)
 
 
 def _parse_existing_fb_url(row: Dict[str, str]) -> str:
@@ -121,6 +155,32 @@ def _normalise_fb_url(url: str) -> str:
         cleaned = "https://www.facebook.com" + cleaned
     cleaned = cleaned.split("?", 1)[0].rstrip("/")
     return cleaned
+
+
+def _create_fb_driver_public(headless: bool = True):
+    """
+    Create a clean, no-login Chrome driver for public FB scraping.
+    Mirrors the legacy Unearthed driver (no cookies/session).
+    """
+    chrome_options = ChromeOptions()
+    if headless:
+        try:
+            chrome_options.add_argument("--headless=new")
+        except Exception:
+            chrome_options.add_argument("--headless")
+    chrome_options.add_argument("--disable-gpu")
+    chrome_options.add_argument("--window-size=1920x1080")
+    chrome_options.add_argument("--disable-extensions")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+    chrome_options.add_argument("--incognito")
+    chrome_options.page_load_strategy = "eager"
+    prefs = {"profile.managed_default_content_settings.images": 2}
+    chrome_options.add_experimental_option("prefs", prefs)
+    service = ChromeService(ChromeDriverManager().install())
+    driver = webdriver.Chrome(service=service, options=chrome_options)
+    return driver
 
 
 def _extract_emails_from_html(html: str) -> List[str]:
@@ -168,6 +228,65 @@ def _merge_email_all(existing: str, new_emails: Sequence[str]) -> str:
     return ";".join(merged)
 
 
+def _scrape_fb_page_unearthed_legacy(driver, fb_url: str, logger: LoggerFn = None) -> Tuple[List[str], str, str]:
+    """
+    Legacy-style public scrape: navigate directly to a FB URL and regex emails from span nodes.
+    Returns (emails, status, resolved_url).
+    """
+    url_raw = (fb_url or "").strip()
+    if not url_raw or "facebook.com" not in url_raw.lower():
+        return [], "no_fb_url", url_raw
+    url = _normalise_fb_url(url_raw)
+    if not url:
+        return [], "no_fb_url", url_raw
+    normalized = url.rstrip("/").lower()
+    excluded = {
+        "https://www.facebook.com/triplejunearthed",
+        "https://www.facebook.com/abc",
+    }
+    if normalized in excluded:
+        _log(logger, f"[Night FB][Unearthed] Skipping excluded FB URL: {url}")
+        return [], "excluded_url", url
+
+    _log(logger, f"[Night FB][Unearthed] Legacy-style scrape for FB page: {url}")
+    try:
+        driver.get(url)
+        try:
+            about_button = WebDriverWait(driver, 0.5).until(
+                EC.element_to_be_clickable((By.XPATH, '//a[@href="#about"]'))
+            )
+            _log(logger, "[Night FB][Unearthed] 'About' button found; clicking.")
+            about_button.click()
+        except Exception:
+            _log(logger, "[Night FB][Unearthed] 'About' button not clickable; continuing on main page.")
+        try:
+            WebDriverWait(driver, 0.5).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+        except Exception:
+            pass
+        resolved_url = _normalise_fb_url(getattr(driver, "current_url", "") or url)
+        if _is_fb_login_or_security_url(resolved_url):
+            return [], "login_redirect", resolved_url or url
+        soup = BeautifulSoup(driver.page_source, "html.parser")
+        raw_emails: List[str] = []
+        for span in soup.find_all("span", class_=re.compile(".*x193iq5w.*")):
+            txt = span.get_text(strip=True)
+            if not txt:
+                continue
+            raw_emails.extend(match.group(0) for match in EMAIL_REGEX.finditer(txt))
+        emails = sorted(set(raw_emails))
+        if not emails:
+            _log(logger, f"[Night FB][Unearthed] No emails found on {resolved_url}")
+            return [], "no_emails", resolved_url or url
+        _log(logger, f"[Night FB][Unearthed] Found {len(emails)} email(s) on {resolved_url}")
+        return emails, "ok", resolved_url or url
+    except Exception as exc:
+        try:
+            _log(logger, f"[Night FB][Unearthed] Error scraping {url}: {exc}")
+        except Exception:
+            pass
+        return [], "error", url
+
+
 def _dedupe_candidates(candidates: Iterable["facebook_enrich.FbCandidate"]) -> List["facebook_enrich.FbCandidate"]:
     seen = set()
     deduped: List["facebook_enrich.FbCandidate"] = []
@@ -178,6 +297,74 @@ def _dedupe_candidates(candidates: Iterable["facebook_enrich.FbCandidate"]) -> L
         seen.add(key)
         deduped.append(cand)
     return deduped
+
+
+def _is_junk_fb_candidate(url: str) -> bool:
+    if not url:
+        return True
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except Exception:
+        return False
+    host = (parsed.netloc or "").lower()
+    path = (parsed.path or "").lower()
+    if any(host == h or host.endswith(h) for h in _FB_JUNK_HOSTS):
+        return True
+    if any(tok in path for tok in _FB_JUNK_PATH_TOKENS):
+        return True
+    if "l.php" in path:
+        return True
+    if host.startswith("www.facebook.com") and path in ("", "/", "/home"):
+        return True
+    return False
+
+
+def _is_fb_login_or_security_url(url: str) -> bool:
+    if not url:
+        return False
+    url_lower = (url or "").lower()
+    if any(tok in url_lower for tok in ("/r.php", "/login", "/register")):
+        return True
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except Exception:
+        return False
+    host = (parsed.netloc or "").lower()
+    path = (parsed.path or "").lower()
+    if "facebook.com" not in host:
+        return False
+    bad_paths = ("/r.php", "/login", "/checkpoint", "/security", "/register")
+    return any(path.startswith(p) for p in bad_paths)
+
+
+def _night_fb_has_music_signals(soup: BeautifulSoup, meta: Optional[Dict[str, str]] = None) -> bool:
+    if soup is None:
+        return False
+    # Check aria-labels for DJ / Producer
+    aria_labels = " ".join(
+        (el.get("aria-label") or "").lower()
+        for el in soup.select("[aria-label]")
+    )
+
+    if any(term in aria_labels for term in ["artist", "musician", "band", "singer", "producer", "dj"]):
+        return True
+
+    meta_bits: List[str] = []
+    for selector in ('meta[name="description"]', 'meta[property="og:description"]', 'meta[property="og:title"]'):
+        tag = soup.select_one(selector)
+        if tag and tag.get("content"):
+            meta_bits.append(tag.get("content", ""))
+    if meta:
+        for key in ("category", "title", "description", "url"):
+            val = meta.get(key)
+            if val:
+                meta_bits.append(str(val))
+    meta_blob = " ".join(meta_bits).lower()
+    if any(token in meta_blob for token in ("musician", "artist", "band", "music", "singer", "producer", "dj")):
+        return True
+
+    page_text = (soup.get_text(" ", strip=True) or "").lower()
+    return any(token in page_text for token in ("musician", "artist", "band", "music", "singer", "producer", "dj"))
 
 
 def _parse_search_candidates(html: str) -> List["facebook_enrich.FbCandidate"]:
@@ -191,6 +378,8 @@ def _parse_search_candidates(html: str) -> List["facebook_enrich.FbCandidate"]:
         if "facebook.com" not in href:
             continue
         if "search/" in href and "facebook.com/search/" in href:
+            continue
+        if _is_junk_fb_candidate(href):
             continue
         name = anchor.get_text(" ", strip=True) or href
         category = facebook_enrich.extract_fb_category(anchor, page_name=name) if hasattr(facebook_enrich, "extract_fb_category") else ""
@@ -251,16 +440,29 @@ class NightModeFacebookEnricher:
       - Extracts emails via regex + mailto scanning.
     """
 
-    def __init__(self, legacy_module, username: str, password: str, logger: LoggerFn = None) -> None:
+    def __init__(
+        self,
+        legacy_module,
+        username: str,
+        password: str,
+        logger: LoggerFn = None,
+        use_shared_session: bool = True,
+    ) -> None:
         self.legacy = legacy_module
         self.username = username
         self.password = password
         self.logger = logger
         self.session = None
         self._owns_session = False
+        self.use_shared_session = use_shared_session
+        self._anon_driver = None
+        self._unearthed_driver = None
 
     def __enter__(self) -> "NightModeFacebookEnricher":
-        self._ensure_session()
+        try:
+            self._ensure_session()
+        except FacebookDriverError as exc:
+            _log(self.logger, f"[Night FB] Failed to start FB session: {exc}")
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
@@ -268,21 +470,35 @@ class NightModeFacebookEnricher:
 
     def _ensure_session(self):
         if self.session is not None:
-            return self.session
+            try:
+                self._ensure_driver_alive(self.session)
+                return self.session
+            except FacebookDriverError:
+                try:
+                    self.session.close()
+                except Exception:
+                    pass
+                self.session = None
         if not self.username or not self.password:
             _log(self.logger, "[Night FB] Missing FB credentials; running without live session.")
             return None
         try:
-            get_shared = getattr(self.legacy, "get_shared_facebook_session", None)
-            if callable(get_shared):
-                self.session = get_shared(self.username, self.password, logger=self.logger)
-                self._owns_session = False
-            else:
+            if self.use_shared_session:
+                get_shared = getattr(self.legacy, "get_shared_facebook_session", None)
+                if callable(get_shared):
+                    self.session = get_shared(self.username, self.password, logger=self.logger)
+                    self._owns_session = False
+            if self.session is None:
                 manager_cls = getattr(self.legacy, "FacebookSessionManager", None)
                 driver_factory = getattr(self.legacy, "setup_facebook_driver", None)
                 if manager_cls and driver_factory:
+                    _log(self.logger, "[FB] Creating new ChromeDriver session for Night FB (shared=False).")
                     self.session = manager_cls(self.username, self.password, driver_factory, logger=self.logger)
                     self._owns_session = True
+            if self.session:
+                self._ensure_driver_alive(self.session)
+        except FacebookDriverError:
+            raise
         except Exception as exc:  # pragma: no cover - defensive
             _log(self.logger, f"[Night FB] Failed to start Facebook session: {exc}")
             self.session = None
@@ -295,12 +511,69 @@ class NightModeFacebookEnricher:
             except Exception:
                 pass
         self.session = None
+        try:
+            if self._anon_driver:
+                self._anon_driver.quit()
+        except Exception:
+            pass
+        self._anon_driver = None
+        try:
+            if self._unearthed_driver:
+                self._unearthed_driver.quit()
+        except Exception:
+            pass
+        self._unearthed_driver = None
 
-    def _fetch_html(self, url: str) -> Optional[str]:
+    def _get_anon_driver(self):
+        if self._anon_driver:
+            return self._anon_driver
+        driver_factory = getattr(self.legacy, "setup_facebook_driver", None)
+        if not callable(driver_factory):
+            raise FacebookDriverError("Anonymous FB driver not available.")
+        self._anon_driver = driver_factory()
+        return self._anon_driver
+
+    def _get_unearthed_driver(self):
+        if self._unearthed_driver:
+            return self._unearthed_driver
+        self._unearthed_driver = _create_fb_driver_public(headless=True)
+        return self._unearthed_driver
+
+    def _refresh_driver(self, session) -> None:
+        _log(self.logger, "[FB] Driver appears dead, recreating a fresh instance...")
+        refresh = getattr(session, "refresh_session", None)
+        if callable(refresh):
+            try:
+                refresh()
+                driver = session.ensure_logged_in() if hasattr(session, "ensure_logged_in") else session.navigate("about:blank")
+                try:
+                    _ = driver.current_url
+                except Exception as exc:
+                    raise FacebookDriverError(f"Refreshed driver is still unavailable: {exc}")
+            except Exception as exc:
+                raise FacebookDriverError(f"Failed to refresh FB session: {exc}")
+        else:
+            raise FacebookDriverError("No refresh_session available to recreate driver.")
+
+    def _ensure_driver_alive(self, session):
+        if session is None:
+            raise FacebookDriverError("Facebook session not initialized.")
+        try:
+            driver = session.ensure_logged_in() if hasattr(session, "ensure_logged_in") else session.navigate("about:blank")
+        except Exception as exc:
+            raise FacebookDriverError(f"Failed to ensure Facebook login: {exc}")
+        try:
+            _ = driver.current_url
+        except Exception:
+            self._refresh_driver(session)
+        return session
+
+    def _fetch_html_with_url(self, url: str) -> Tuple[Optional[str], Optional[str]]:
         session = self._ensure_session()
         if not session:
-            return None
-        try:
+            return None, None
+        self._ensure_driver_alive(session)
+        def _navigate_once() -> Tuple[Optional[str], Optional[str]]:
             driver = session.navigate(url)
             goto_about = getattr(self.legacy, "_goto_facebook_about", None)
             if callable(goto_about):
@@ -309,28 +582,117 @@ class NightModeFacebookEnricher:
                 except Exception:
                     pass
             time.sleep(1.0)
-            return driver.page_source
-        except Exception as exc:  # pragma: no cover - defensive
-            _log(self.logger, f"[Night FB] Failed to fetch FB HTML for {url}: {exc}")
-            return None
+            current_url = getattr(driver, "current_url", None) or url
+            return driver.page_source, current_url
 
-    def _search_for_page(self, artist: str, location: str) -> Optional[str]:
+        html: Optional[str] = None
+        current_url: Optional[str] = None
+
+        try:
+            html, current_url = _navigate_once()
+        except Exception as exc:  # pragma: no cover - defensive
+            _log(self.logger, f"[Night FB] Fetch failed (will refresh session) for {url}: {exc}")
+            try:
+                self._refresh_driver(session)
+                html, current_url = _navigate_once()
+            except FacebookDriverError as exc2:
+                raise exc2
+            except Exception as exc2:  # pragma: no cover - defensive
+                _log(self.logger, f"[Night FB] Failed to fetch FB HTML after refresh for {url}: {exc2}")
+                raise FacebookDriverError(str(exc2))
+
+        current_url = current_url or url
+        if is_fb_login_redirect(current_url) or _is_fb_login_or_security_url(current_url):
+            _log(self.logger, f"[Night FB] Ignoring login/redirect page: {current_url}")
+            try:
+                self._refresh_driver(session)
+            except Exception:
+                pass
+            return None, current_url
+
+        return html, current_url
+
+    def _fetch_html_with_url_anon(self, url: str) -> Tuple[Optional[str], Optional[str]]:
+        try:
+            driver = self._get_anon_driver()
+        except Exception as exc:
+            _log(self.logger, f"[Night FB] Anonymous driver unavailable: {exc}")
+            return None, None
+        try:
+            driver.get(url)
+            goto_about = getattr(self.legacy, "_goto_facebook_about", None)
+            if callable(goto_about):
+                try:
+                    goto_about(driver, url, timeout=5.0)
+                except Exception:
+                    pass
+            time.sleep(1.0)
+            current_url = getattr(driver, "current_url", None) or url
+            if is_fb_login_redirect(current_url) or _is_fb_login_or_security_url(current_url):
+                return None, current_url
+            return driver.page_source, current_url
+        except Exception as exc:
+            _log(self.logger, f"[Night FB] Anonymous fetch failed for {url}: {exc}")
+            return None, None
+
+    def _fetch_html(self, url: str) -> Optional[str]:
+        html, _ = self._fetch_html_with_url(url)
+        return html
+
+    def _should_allow_anonymous(self, row: Dict[str, str]) -> bool:
+        source_dir = str(row.get("Source Directory", "") or row.get("Source Directory ".strip(), "") or "").lower()
+        source_job = str(row.get("__source_job", "") or "").lower()
+        return ("unearthed" in source_dir) or ("unearthed" in source_job)
+
+    def _is_unearthed_source(self, row: Dict[str, str]) -> bool:
+        source_dir = str(row.get("Source Directory", "") or "").strip().lower()
+        source_tag = str(row.get("Source Tag", "") or "").strip().lower()
+        source_job = str(row.get("__source_job", "") or "").strip().lower()
+        return any("unearthed" in val for val in (source_dir, source_tag, source_job))
+
+    def _search_for_page(self, artist: str, location: str, allow_anon: bool = False) -> Optional[str]:
         session = self._ensure_session()
-        if not session:
+        if not session and not allow_anon:
             return None
+        if session:
+            self._ensure_driver_alive(session)
         query = " ".join(part for part in (artist, location) if part).strip()
         if not query:
             return None
         encoded = urllib.parse.quote_plus(query)
         search_url = f"https://www.facebook.com/search/pages/?q={encoded}"
         _log(self.logger, f"[Night FB] Searching Facebook for '{query}' -> {search_url}")
-        try:
-            driver = session.navigate(search_url)
+        html = None
+
+        def _do_nav():
+            drv = session.navigate(search_url) if session else self._get_anon_driver().get(search_url) or self._get_anon_driver()
             time.sleep(1.5)
-            html = driver.page_source
+            return drv.page_source if hasattr(drv, "page_source") else self._anon_driver.page_source
+
+        try:
+            if session:
+                html = _do_nav()
+            else:
+                driver = self._get_anon_driver()
+                driver.get(search_url)
+                time.sleep(1.5)
+                html = driver.page_source
         except Exception as exc:  # pragma: no cover - defensive
-            _log(self.logger, f"[Night FB] Search navigation failed: {exc}")
-            return None
+            _log(self.logger, f"[Night FB] Search navigation failed (will refresh session): {exc}")
+            try:
+                if session:
+                    self._refresh_driver(session)
+                    html = _do_nav()
+                else:
+                    driver = self._get_anon_driver()
+                    driver.get(search_url)
+                    time.sleep(1.5)
+                    html = driver.page_source
+            except FacebookDriverError as exc2:
+                raise exc2
+            except Exception as exc2:  # pragma: no cover - defensive
+                _log(self.logger, f"[Night FB] Search navigation failed after refresh: {exc2}")
+                raise FacebookDriverError(str(exc2))
         candidates = _parse_search_candidates(html)
         candidate = None
         selector = getattr(facebook_enrich, "select_best_facebook_candidate", None) if facebook_enrich is not None else None
@@ -357,7 +719,7 @@ class NightModeFacebookEnricher:
             fb_url = candidate
 
         url = _normalise_fb_url(fb_url or "")
-        if not url:
+        if (not url) or _is_junk_fb_candidate(url):
             _log(self.logger, f"[Night FB] Candidate missing URL for '{artist}', skipping.")
             return None
 
@@ -369,6 +731,41 @@ class NightModeFacebookEnricher:
 
         _log(self.logger, f"[Night FB] Selected FB candidate '{name or url}' -> {url} (category='{category or ''}')")
         return url
+
+    def _scrape_single_fb_candidate(
+        self, fb_url: str, row: Dict[str, str], artist_name: str, allow_anon: bool = False
+    ) -> Optional[Tuple[NightModeFacebookResult, List[str]]]:
+        candidate_url = _normalise_fb_url(fb_url or "")
+        if not candidate_url:
+            return None
+        if _is_junk_fb_candidate(candidate_url):
+            return None
+        url_lower = candidate_url.lower()
+        if "/r.php" in url_lower or "/login" in url_lower or "/register" in url_lower:
+            _log(self.logger, f"[Night FB] Ignoring login/redirect page: {candidate_url}")
+            return None
+
+        html, resolved_url = self._fetch_html_with_url(candidate_url)
+        if (not html) and allow_anon:
+            html, resolved_url = self._fetch_html_with_url_anon(candidate_url)
+        if not html:
+            return None
+        resolved_url = _normalise_fb_url(resolved_url or candidate_url)
+        if _is_fb_login_or_security_url(resolved_url):
+            _log(self.logger, f"[Night FB] Ignoring login/redirect page: {resolved_url}")
+            return None
+
+        soup = BeautifulSoup(html, "html.parser")
+        has_music_signals = _night_fb_has_music_signals(soup, {"url": resolved_url})
+        emails = _extract_emails_from_html(html or "")
+        if not has_music_signals and not emails:
+            _log(self.logger, f"[Night FB] No music signals detected on FB page {resolved_url}, skipping.")
+            return None
+
+        night_result = self._build_result(emails, str(row.get("Email_All", "") or ""), resolved_url, artist_name)
+        if night_result:
+            return night_result, emails
+        return None
 
     def _build_result(self, emails: List[str], email_all_existing: str, facebook_url: str, artist_name: str) -> Optional[NightModeFacebookResult]:
         if not emails:
@@ -382,6 +779,75 @@ class NightModeFacebookEnricher:
             email_type=email_type,
             facebook_url=facebook_url,
         )
+
+    def _apply_night_fb_result(
+        self, target_row: Dict[str, str], night_result: NightModeFacebookResult, emails: List[str], page_url: str
+    ) -> Dict[str, str]:
+        target_row["Email"] = night_result.email or target_row.get("Email", "")
+        target_row["Email_All"] = night_result.email_all
+        target_row["Email_Type"] = night_result.email_type
+        if night_result.facebook_url:
+            target_row["Facebook_URL"] = night_result.facebook_url
+        if not target_row.get("FB_Status"):
+            target_row["FB_Status"] = "ok"
+        _log(self.logger, f"[Night FB] extracted email(s) {emails} from {page_url}")
+        return target_row
+
+    def _enrich_row_unearthed_legacy(
+        self,
+        result: Dict[str, str],
+        artist_name: str,
+        fb_urls: List[str],
+    ) -> Dict[str, str]:
+        # Always prefer explicit URLs first.
+        if fb_urls:
+            try:
+                driver = self._get_unearthed_driver()
+            except Exception as exc:
+                result["FB_Status"] = "unearthed_driver_error"
+                _log(self.logger, f"[Night FB][Unearthed] Could not start public FB driver: {exc}")
+                return result
+            for fb_url in fb_urls:
+                emails, status, resolved_url = _scrape_fb_page_unearthed_legacy(driver, fb_url, logger=self.logger)
+                if emails:
+                    night_result = self._build_result(emails, str(result.get("Email_All", "") or ""), resolved_url or fb_url, artist_name)
+                    if night_result:
+                        result = self._apply_night_fb_result(result, night_result, emails, resolved_url or fb_url)
+                        result["FB_Status"] = "ok_unearthed_legacy"
+                    else:
+                        result["FB_Status"] = "unearthed_no_emails"
+                    return result
+            # If explicit URLs failed, fall back to search.
+
+        # If no FB URL present, do not blind-search; just record no emails.
+        if not fb_urls:
+            result["FB_Status"] = "unearthed_no_emails"
+            _log(self.logger, "[Night FB] Unearthed row without FB URL -> FB_Status='unearthed_no_emails' (no blind search).")
+            return result
+
+        try:
+            driver = self._get_unearthed_driver()
+        except Exception as exc:
+            result["FB_Status"] = "unearthed_driver_error"
+            _log(self.logger, f"[Night FB][Unearthed] Could not start public FB driver: {exc}")
+            return result
+
+        last_status = "no_emails"
+        for fb_url in fb_urls:
+            emails, status, resolved_url = _scrape_fb_page_unearthed_legacy(driver, fb_url, logger=self.logger)
+            last_status = status or "no_emails"
+            if emails:
+                night_result = self._build_result(emails, str(result.get("Email_All", "") or ""), resolved_url or fb_url, artist_name)
+                if night_result:
+                    result = self._apply_night_fb_result(result, night_result, emails, resolved_url or fb_url)
+                    result["FB_Status"] = "ok_unearthed_legacy"
+                else:
+                    result["FB_Status"] = "unearthed_no_emails"
+                return result
+
+        if not result.get("FB_Status"):
+            result["FB_Status"] = f"unearthed_{last_status}"
+        return result
 
     def enrich_row_with_facebook_night(self, row: Dict[str, str], row_index: Optional[int] = None) -> Dict[str, str]:
         """Night-Mode-only FB enrichment for a single row."""
@@ -406,78 +872,83 @@ class NightModeFacebookEnricher:
         artist_name = _clean_val(result.get("Artist Name", ""))
         location = _clean_val(result.get("Location", ""))
         facebook_url = _normalise_fb_url(_clean_val(result.get("Facebook_URL", "")))
-        fb_urls = _extract_fb_urls_from_row(result)
+        fb_urls = _extract_fb_urls_for_night_mode(result)
         if facebook_url and facebook_url not in fb_urls:
             fb_urls.insert(0, facebook_url)
+        is_unearthed = self._is_unearthed_source(result)
 
         try:
             page_url = ""
             emails: List[str] = []
+            if is_unearthed:
+                _log(self.logger, "[Night FB] Detected Unearthed row -> using legacy no-login FB scrape.")
+                return self._enrich_row_unearthed_legacy(result, artist_name, fb_urls)
+
+            allow_anon = self._should_allow_anonymous(result)
             if fb_urls:
-                _log(self.logger, f"[Night FB] Using explicit FB URL(s) for {artist_name or '<unknown>'}: {fb_urls}")
+                _log(self.logger, f"[Night FB] Using explicit FB URLs: {fb_urls}")
+                candidates: List[Tuple[NightModeFacebookResult, List[str]]] = []
                 for direct_url in fb_urls:
                     try:
-                        if facebook_enrich and getattr(facebook_enrich, "is_fb_login_redirect", None):
-                            try:
-                                if facebook_enrich.is_fb_login_redirect(direct_url):
-                                    result["FB_Status"] = "login_redirect"
-                                    result["Facebook_URL"] = ""
-                                    _log(self.logger, f"[Night FB] Detected login redirect for '{artist_name or '<unknown>'}' -> {direct_url}, marking FB_Status='login_redirect'.")
-                                    return result
-                            except Exception:
-                                pass
-                        page_url = direct_url
-                        _log(self.logger, f"[Night FB] using direct Facebook_URL for {artist_name or '<unknown>'} -> {page_url}")
-                        html = self._fetch_html(page_url)
-                        emails = _extract_emails_from_html(html or "")
-                        if page_url:
-                            break
+                        candidate = self._scrape_single_fb_candidate(direct_url, result, artist_name, allow_anon=allow_anon)
                     except Exception:
-                        continue
+                        candidate = None
+                    if candidate:
+                        candidates.append(candidate)
+                if candidates:
+                    best_result, emails = candidates[0]
+                    page_url = best_result.facebook_url or (fb_urls[0] if fb_urls else "")
+                    result = self._apply_night_fb_result(result, best_result, emails, page_url)
+                    return result
+                else:
+                    _log(self.logger, "[Night FB] Explicit FB URLs produced no results; falling back to search.")
 
             if not page_url:
                 session = self._ensure_session()
-                if not session or not hasattr(self.legacy, "fb_find_page_and_emails_by_name"):
+                if (not session) and not allow_anon:
                     return result
-                try:
-                    driver = session.ensure_logged_in() if hasattr(session, "ensure_logged_in") else session.navigate("about:blank")
-                except Exception:
-                    driver = None
-                if not driver:
-                    return result
-                page_url, emails = self.legacy.fb_find_page_and_emails_by_name(
-                    driver,
-                    artist_name,
-                    location,
-                    log_fn=self.logger,
-                    log_prefix="[Night FB]",
-                )
+                if session and hasattr(self.legacy, "fb_find_page_and_emails_by_name"):
+                    try:
+                        driver = session.ensure_logged_in() if hasattr(session, "ensure_logged_in") else session.navigate("about:blank")
+                    except Exception:
+                        driver = None
+                    if driver:
+                        page_url, emails = self.legacy.fb_find_page_and_emails_by_name(
+                            driver,
+                            artist_name,
+                            location,
+                            log_fn=self.logger,
+                            log_prefix="[Night FB]",
+                        )
                 if not page_url:
+                    page_url = self._search_for_page(artist_name, location, allow_anon=allow_anon) or ""
+                    if page_url:
+                        candidate = self._scrape_single_fb_candidate(page_url, result, artist_name, allow_anon=allow_anon)
+                        if candidate:
+                            night_result, emails = candidate
+                            page_url = night_result.facebook_url or page_url
+                            result = self._apply_night_fb_result(result, night_result, emails, page_url)
+                            return result
                     if not result.get("FB_Status"):
                         result["FB_Status"] = "no_candidates"
                     _log(self.logger, f"[Night FB] No usable FB candidates for '{artist_name}', marking FB_Status='no_candidates'.")
                     return result
-
             night_result = self._build_result(emails, str(result.get("Email_All", "") or ""), page_url, artist_name)
             if night_result:
-                result["Email"] = night_result.email or result.get("Email", "")
-                result["Email_All"] = night_result.email_all
-                result["Email_Type"] = night_result.email_type
-                if night_result.facebook_url:
-                    result["Facebook_URL"] = night_result.facebook_url
-                if not result.get("FB_Status"):
-                    result["FB_Status"] = "ok"
-                _log(self.logger, f"[Night FB] extracted email(s) {emails} from {page_url}")
+                result = self._apply_night_fb_result(result, night_result, emails, page_url)
             else:
                 # Page reached but no emails extracted.
-                lowered_url = (page_url or "").lower()
-                if "facebook.com/r.php" in lowered_url or "/login" in lowered_url:
+                if _is_fb_login_or_security_url(page_url):
                     result["FB_Status"] = "login_redirect"
                     result["Facebook_URL"] = ""
                     _log(self.logger, f"[Night FB] Detected login redirect for '{artist_name}' -> {page_url}, marking FB_Status='login_redirect'.")
                 else:
                     if not result.get("FB_Status"):
                         result["FB_Status"] = "ok"
+            return result
+        except FacebookDriverError as exc:
+            result["FB_Status"] = "driver_error"
+            _log(self.logger, f"[Night FB] Driver error while enriching '{result.get('Artist Name', '') or '<unknown>'}': {exc}")
             return result
         except Exception as exc:  # pragma: no cover - defensive
             prefix = f"[FB Night] Night FB enrich failed at row {row_index}: {exc}" if row_index is not None else f"[FB Night] Night FB enrich failed: {exc}"

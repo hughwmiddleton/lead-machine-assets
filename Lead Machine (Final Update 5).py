@@ -963,8 +963,9 @@ def setup_facebook_driver():
 # =============================================================================
 # Scraping Functions for Artist Data (Page 1)
 # =============================================================================
-def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200):
+def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200, fb_session=None):
     driver = setup_driver()
+    fb_driver = None
     artist_data = []
     try:
         driver.get(url)
@@ -998,17 +999,33 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200)
         if not profile_urls:
             print("No artist profile URLs found. Please check the website structure or selectors.")
         for profile_url in profile_urls:
-            social_links, location, song_title, sounds_like, artist_name, release_date = scrape_artist_profile(driver, profile_url)
+            # Lazily initialize FB driver only if we encounter a Facebook link later.
+            if fb_driver is None:
+                try:
+                    if fb_session is not None and hasattr(fb_session, "navigate"):
+                        fb_driver = fb_session.navigate("about:blank")
+                    else:
+                        fb_driver = setup_facebook_driver()
+                except Exception:
+                    fb_driver = None
+            social_links, location, song_title, sounds_like, artist_name, release_date, email_value = scrape_artist_profile(
+                driver, profile_url, fb_driver=fb_driver
+            )
             # Determine drum status from the full page source.
             drum_status_raw = get_drum_status_from_source(driver.page_source)
             played_on_triplej = "yes" if drum_status_raw == "triple j" else ""
             played_on_unearthed = "yes" if drum_status_raw == "triple j unearthed" else ""
             artist_data.append((artist_name, location, song_title, sounds_like, social_links,
-                                "", played_on_triplej, played_on_unearthed, release_date, "", ""))
+                                "", played_on_triplej, played_on_unearthed, release_date, "", "", email_value))
     except Exception as e:
         print(f"Error during website scraping: {e}")
     finally:
         driver.quit()
+        if fb_driver:
+            try:
+                fb_driver.quit()
+            except Exception:
+                pass
     save_to_csv(artist_data, existing_csv)
 
 # ---------------------------
@@ -1068,13 +1085,14 @@ def unearthed_extract_release_date(html: str) -> str:
 
     return ""
 
-def scrape_artist_profile(driver, profile_url):
+def scrape_artist_profile(driver, profile_url, fb_driver=None):
     social_links = []
     location = ""
     song_title = ""
     sounds_like = ""
     artist_name = profile_url.split('/')[-1]
     release_date = ""
+    email_value = ""
     exclude_social_urls = {
         "https://www.facebook.com/triplejunearthed",
         "https://www.instagram.com/triple_j_unearthed",
@@ -1089,15 +1107,61 @@ def scrape_artist_profile(driver, profile_url):
             EC.presence_of_element_located((By.TAG_NAME, 'body'))
         )
         page_source = driver.page_source
+        try:
+            email_matches = re.findall(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}", page_source or "")
+            if email_matches:
+                email_value = email_matches[0]
+        except Exception:
+            email_value = ""
         soup = BeautifulSoup(page_source, 'html.parser')
         release_date = unearthed_extract_release_date(page_source) or ""
         links = soup.find_all('a', href=True)
         for link in links:
             href = link['href']
-            if any(domain in href for domain in ['facebook.com', 'instagram.com', 'twitter.com', 'spotify.com']):
+            if any(domain in href for domain in ['facebook.com', 'm.facebook.com', 'fb.com', 'fb.me', 'instagram.com', 'twitter.com', 'spotify.com', 'soundcloud.com', 'tiktok.com', 'youtube.com', 'youtu.be']):
                 if normalize_url(href) in exclude_social_urls:
                     continue
                 social_links.append(href)
+        # Explicitly capture icon bar socials (often rendered as SVGs with aria-labels).
+        for icon in soup.select("a[aria-label], a[rel='noopener']"):
+            href = icon.get("href") or ""
+            aria = (icon.get("aria-label") or "").lower()
+            if not href:
+                continue
+            if any(token in aria for token in ("facebook", "instagram", "tiktok", "youtube", "spotify", "soundcloud")) or any(
+                domain in href for domain in ("facebook.com", "m.facebook.com", "fb.com", "fb.me", "instagram.com", "tiktok.com", "youtube.com", "youtu.be", "spotify.com", "soundcloud.com")
+            ):
+                if normalize_url(href) in exclude_social_urls:
+                    continue
+                social_links.append(href)
+        # Also scrape raw HTML for embedded social URLs that may not be visible anchors.
+        try:
+            social_patterns = [
+                r"https?://[\\w.-]*(?:facebook\\.com|m\\.facebook\\.com|fb\\.com|fb\\.me)[^\\s\"'>]+",
+                r"https?://[\\w.-]*instagram\\.com[^\\s\"'>]+",
+                r"https?://[\\w.-]*tiktok\\.com[^\\s\"'>]+",
+                r"https?://[\\w.-]*soundcloud\\.com[^\\s\"'>]+",
+                r"https?://[\\w.-]*youtube\\.com[^\\s\"'>]+",
+                r"https?://[\\w.-]*youtu\\.be[^\\s\"'>]+",
+                r"https?://[\\w.-]*spotify\\.com[^\\s\"'>]+",
+            ]
+            for pat in social_patterns:
+                for candidate in re.findall(pat, page_source or "", flags=re.IGNORECASE):
+                    if normalize_url(candidate) in exclude_social_urls:
+                        continue
+                    social_links.append(candidate)
+        except Exception:
+            pass
+        # Deduplicate socials while preserving order.
+        seen_links = set()
+        clean_socials = []
+        for href in social_links:
+            norm = normalize_url(href)
+            if norm in seen_links:
+                continue
+            seen_links.add(norm)
+            clean_socials.append(href)
+        social_links = clean_socials
         location_element = soup.find('div', class_='divwU')
         if location_element:
             location = location_element.get_text(strip=True)
@@ -1109,9 +1173,23 @@ def scrape_artist_profile(driver, profile_url):
             sounds_like_list = sounds_like_element.find_next('p')
             if sounds_like_list:
                 sounds_like = sounds_like_list.get_text(strip=True)
+
+        # If we have a Facebook link and a driver is available, attempt to scrape contact email from the FB page.
+        if fb_driver and not email_value:
+            for link in list(social_links):
+                href_lc = (link or "").lower()
+                if not any(tok in href_lc for tok in ("facebook.com", "m.facebook.com", "fb.com", "fb.me")):
+                    continue
+                try:
+                    fb_emails = fb_scrape_emails_from_page(fb_driver, link, log_fn=print, log_prefix="[Unearthed FB]")
+                    if fb_emails:
+                        email_value = fb_emails[0]
+                        break
+                except Exception:
+                    continue
     except Exception as e:
         print(f"Error scraping profile {profile_url}: {e}")
-    return social_links, location, song_title, sounds_like, artist_name, release_date
+    return social_links, location, song_title, sounds_like, artist_name, release_date, email_value
 
 def save_to_csv(data, filename):
     _ensure_parent_dir(filename)
@@ -7495,6 +7573,11 @@ def release_shared_facebook_session():
 
 def _extract_social_links(row):
     """Return all usable social URLs (split on ';' or ',') from likely columns."""
+    excluded_snippets = (
+        "soundcloud.com/triplejunearthed",
+        "tiktok.com/@triplejradio",
+        "youtube.com/abcaustralia",
+    )
     candidate_columns = [
         "Social Link",
         "social link",
@@ -7511,7 +7594,7 @@ def _extract_social_links(row):
                 parts = re.split(r"[;,]", value)
                 for part in parts:
                     url = part.strip()
-                    if url:
+                    if url and not any(excl in url.lower() for excl in excluded_snippets):
                         urls.append(url)
     return urls
 
@@ -9653,6 +9736,38 @@ if __name__ == "__main__":
     window = MainWindow()
     window.show()
     sys.exit(app.exec_())
+
+# ---------------------------
+# Unearthed full pipeline entrypoint (wrapper)
+# ---------------------------
+def run_unearthed_pipeline(
+    search_term: str = "",
+    region: str | None = None,
+    max_results: int | None = None,
+    headless: bool = True,
+    output_csv: str | None = None,
+    job_config: dict | None = None,
+    fb_session=None,
+):
+    """
+    Best-effort Unearthed pipeline wrapper to match legacy entrypoints.
+
+    - Accepts a search_term/URL and optional max_results.
+    - Reuses the existing Unearthed scraper (scrape_website), which already
+      visits each profile, collects socials, and attempts email extraction
+      from the profile page + linked Facebook pages when available.
+    - Writes to output_csv if provided; otherwise returns the path used.
+    """
+    target_url = (search_term or "").strip() or UNEARTHED_DEFAULT_URL
+    target_max = max_results or (job_config.get("target_valid_leads") if job_config else None)
+    out_path = output_csv or (job_config.get("output_csv") if job_config else "") or "unearthed_output.csv"
+    scrape_website(
+        target_url,
+        existing_csv=out_path,
+        max_artists=target_max or 200,
+        fb_session=fb_session,
+    )
+    return out_path
 
 # ---------------------------
 # Stop caffeinate if it was started (macOS)
