@@ -23,6 +23,7 @@ import subprocess
 import platform
 import traceback
 import tempfile
+import logging
 from typing import Optional, Tuple
 
 # ---------------------------
@@ -38,6 +39,8 @@ required_packages = {
     "PyQt5": "PyQt5",
     "requests": "requests"
 }
+
+logger = logging.getLogger(__name__)
 
 def install_package(package_name):
     """Install a package using pip."""
@@ -1015,15 +1018,43 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
                         fb_driver = setup_facebook_driver()
                 except Exception:
                     fb_driver = None
-            social_links, location, song_title, sounds_like, artist_name, release_date, email_value = scrape_artist_profile(
+            (
+                social_links,
+                location,
+                song_title,
+                sounds_like,
+                artist_name,
+                release_date,
+                primary_genre_value,
+                unearthed_genre_raw,
+                email_value,
+            ) = scrape_artist_profile(
                 driver, profile_url, fb_driver=fb_driver
             )
             # Determine drum status from the full page source.
             drum_status_raw = get_drum_status_from_source(driver.page_source)
             played_on_triplej = "yes" if drum_status_raw == "triple j" else ""
             played_on_unearthed = "yes" if drum_status_raw == "triple j unearthed" else ""
-            artist_data.append((artist_name, location, song_title, sounds_like, social_links,
-                                "", played_on_triplej, played_on_unearthed, release_date, "", "", email_value))
+            primary_genre_value = primary_genre_value or ""
+            genre_raw_value = unearthed_genre_raw or ""
+            artist_data.append(
+                (
+                    artist_name,
+                    location,
+                    song_title,
+                    sounds_like,
+                    social_links,
+                    "",
+                    played_on_triplej,
+                    played_on_unearthed,
+                    release_date,
+                    primary_genre_value,
+                    genre_raw_value,
+                    "",
+                    "",
+                    email_value,
+                )
+            )
     except Exception as e:
         print(f"Error during website scraping: {e}")
     finally:
@@ -1092,6 +1123,73 @@ def unearthed_extract_release_date(html: str) -> str:
 
     return ""
 
+
+def parse_unearthed_genre(raw: str | None) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Returns (primary_genre, raw_cleaned).
+    primary_genre = first genre token, normalised (title case).
+    raw_cleaned = original string, stripped of extra whitespace.
+    """
+    if raw is None:
+        return None, None
+    raw_cleaned = raw.strip()
+    if not raw_cleaned:
+        return None, None
+    parts = re.split(r"[\\/•,-]", raw_cleaned)
+    first = next((p.strip() for p in parts if p and p.strip()), None)
+    if not first:
+        return None, raw_cleaned
+    primary = first.title()
+    return primary, raw_cleaned
+
+
+def _unearthed_extract_genre_text(soup: BeautifulSoup) -> str:
+    """
+    Locate the genre line in the Unearthed artist hero header and return a readable string.
+    Prefers the container between the ARTIST pill and artist name; falls back to the first
+    genre list on the page. Logs at DEBUG level if no candidate is found.
+    """
+    if not soup:
+        return ""
+
+    def _has_class(tag, candidates):
+        classes = tag.get("class") or []
+        return any(c in classes for c in candidates)
+
+    genre_container = None
+    hero_block = soup.select_one("div.q0wzh")
+    if hero_block:
+        genre_container = hero_block.find(
+            lambda t: t.name in ("div", "ul") and _has_class(t, ("ZF6HQ", "PARBR"))
+        )
+
+    if not genre_container:
+        sr_label = soup.find(
+            lambda t: t.name in ("span", "div")
+            and _has_class(t, ("gRMNM",))
+            and "genre" in t.get_text(" ", strip=True).lower()
+        )
+        if sr_label:
+            genre_container = sr_label.find_next(
+                lambda t: t.name in ("div", "ul") and _has_class(t, ("ZF6HQ", "PARBR"))
+            )
+
+    if not genre_container:
+        genre_container = soup.find(
+            "ul",
+            class_=lambda c: (
+                isinstance(c, str)
+                and "PARBR" in c.split()
+            )
+            or (isinstance(c, (list, tuple)) and "PARBR" in c),
+        )
+
+    if not genre_container:
+        logger.debug("[Unearthed] Genre container not found on profile page.")
+        return ""
+
+    return genre_container.get_text(" / ", strip=True)
+
 def scrape_artist_profile(driver, profile_url, fb_driver=None):
     social_links = []
     location = ""
@@ -1100,6 +1198,8 @@ def scrape_artist_profile(driver, profile_url, fb_driver=None):
     artist_name = profile_url.split('/')[-1]
     release_date = ""
     email_value = ""
+    primary_genre_value = ""
+    unearthed_genre_raw = ""
     exclude_social_urls = {
         "https://www.facebook.com/triplejunearthed",
         "https://www.instagram.com/triple_j_unearthed",
@@ -1129,6 +1229,12 @@ def scrape_artist_profile(driver, profile_url, fb_driver=None):
                 email_value = ""
         soup = BeautifulSoup(page_source, 'html.parser')
         release_date = unearthed_extract_release_date(page_source) or ""
+        genre_text_raw = _unearthed_extract_genre_text(soup)
+        parsed_primary_genre, parsed_genre_raw = parse_unearthed_genre(genre_text_raw)
+        if parsed_primary_genre:
+            primary_genre_value = primary_genre_value or parsed_primary_genre
+        if parsed_genre_raw:
+            unearthed_genre_raw = parsed_genre_raw
         links = soup.find_all('a', href=True)
         for link in links:
             href = link['href']
@@ -1203,13 +1309,13 @@ def scrape_artist_profile(driver, profile_url, fb_driver=None):
                     continue
     except Exception as e:
         print(f"Error scraping profile {profile_url}: {e}")
-    return social_links, location, song_title, sounds_like, artist_name, release_date, email_value
+    return social_links, location, song_title, sounds_like, artist_name, release_date, primary_genre_value, unearthed_genre_raw, email_value
 
 def save_to_csv(data, filename):
     _ensure_parent_dir(filename)
     headers = [
         'Artist Name', 'Location', 'Song Title', 'Sounds Like', 'Social Link', 'SoundCloud Link',
-        'Played on triple J', 'Played on Unearthed', 'Release Date', 'Primary Genre', 'Bandcamp_Source_Mode', 'Bandcamp_Search_Domain', 'Date Added', 'Email'
+        'Played on triple J', 'Played on Unearthed', 'Release Date', 'Primary Genre', 'Unearthed_Genre_Raw', 'Bandcamp_Source_Mode', 'Bandcamp_Search_Domain', 'Date Added', 'Email'
     ]
     current_date = datetime.datetime.now().strftime("%Y-%m-%d")
 
@@ -1246,6 +1352,7 @@ def save_to_csv(data, filename):
             played_on_unearthed,
             release_date,
             primary_genre,
+            unearthed_genre_raw,
             bandcamp_source_mode,
             bandcamp_search_domain,
             email_value
@@ -1268,6 +1375,7 @@ def save_to_csv(data, filename):
                 'Played on Unearthed': played_on_unearthed,
                 'Release Date': release_date,
                 'Primary Genre': primary_genre,
+                'Unearthed_Genre_Raw': unearthed_genre_raw,
                 'Bandcamp_Source_Mode': bandcamp_source_mode,
                 'Bandcamp_Search_Domain': bandcamp_search_domain,
                 'Date Added': current_date,
@@ -1423,6 +1531,9 @@ def scrape_lastfm_similar(seed_artists, existing_csv="artist_social_links.csv", 
             "",
             "not present",
             primary_genre,
+            "",
+            "",
+            "",
             ""
         ))
         processed += 1
@@ -2955,6 +3066,7 @@ def scrape_bandcamp(
                 "",
                 release_date_value,
                 primary_genre_value,
+                "",
                 normalized_mode,
                 bandcamp_search_domain,
                 email_value
