@@ -1,24 +1,9 @@
-import functools
-import importlib.util
-import pathlib
-
 from bs4 import BeautifulSoup
-
-
-@functools.lru_cache(maxsize=1)
-def _load_lead_machine_module():
-    root = pathlib.Path(__file__).resolve().parents[1]
-    module_path = root / "Lead Machine (Final Update 5).py"
-    spec = importlib.util.spec_from_file_location("lead_machine_module", module_path)
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(module)
-    return module
+import unearthed_common as uc
 
 
 def test_parse_unearthed_genre_variants():
-    mod = _load_lead_machine_module()
-    parse = mod.parse_unearthed_genre
+    parse = uc.parse_unearthed_genre
 
     assert parse("POP / ACOUSTIC / INDIE") == ("Pop", "POP / ACOUSTIC / INDIE")
     assert parse("r&b / soul") == ("R&B", "r&b / soul")
@@ -28,7 +13,6 @@ def test_parse_unearthed_genre_variants():
 
 
 def test_extracts_genre_from_hero_block():
-    mod = _load_lead_machine_module()
     html = """
     <div class="q0wzh">
       <div class="Fcccu">Artist</div>
@@ -44,5 +28,5 @@ def test_extracts_genre_from_hero_block():
     </div>
     """
     soup = BeautifulSoup(html, "html.parser")
-    text = mod._unearthed_extract_genre_text(soup)
+    text = uc.extract_unearthed_genre_text(soup)
     assert text == "POP / ACOUSTIC"

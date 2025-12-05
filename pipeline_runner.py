@@ -12,11 +12,13 @@ import json
 import logging
 import os
 import random
+import re
 import shutil
 import tempfile
 import time
 import datetime
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
 
 import pandas as pd
@@ -161,6 +163,419 @@ def _write_rows_to_csv(rows: Iterable[Any], path: str, source_directory: str = "
         df["Source Directory"] = source_directory
     df.to_csv(path, index=False)
     return path
+
+
+FINAL_EXPORT_COLUMNS: Sequence[str] = [
+    "Artist Name",
+    "Location",
+    "Country_Derived",
+    "Song Title",
+    "Primary Genre",
+    "Unearthed_Genre_Raw",
+    "Social Link",
+    "SoundCloud Link",
+    "Spotify_URL",
+    "External Links",
+    "Primary Email",
+    "All Emails",
+    "Email Source",
+    "Contact_Mode",
+    "Discovery Source",
+    "Source Directory",
+    "Source URL",
+    "Review_Urls",
+    "Played on triple J",
+    "Played on Unearthed",
+    "Release Date",
+    "Date Added",
+    "final_status",
+    "Needs_Review",
+]
+
+WOODPECKER_EXPORT_COLUMNS: Sequence[str] = [
+    "Artist Name",
+    "Primary Email",
+    "All Emails",
+    "Email Source",
+    "Contact_Mode",
+    "Location",
+    "Country_Derived",
+    "Song Title",
+    "Primary Genre",
+    "Unearthed_Genre_Raw",
+    "Social Link",
+    "SoundCloud Link",
+    "Spotify_URL",
+    "External Links",
+    "Discovery Source",
+    "Source Directory",
+    "Source URL",
+    "Review_Urls",
+    "Played on triple J",
+    "Played on Unearthed",
+    "Release Date",
+    "Date Added",
+    "final_status",
+    "Needs_Review",
+]
+
+_AU_STATE_TOKENS = ("nsw", "vic", "qld", "wa", "sa", "tas", "act", "nt")
+_UK_TOKENS = ("uk", "u.k", "united kingdom", "england", "scotland", "wales", "northern ireland")
+_FINAL_STATUS_KEEP = {"OK", "WARN", "BLOCK"}
+
+
+def _normalize_date_string(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    parsed = pd.to_datetime(text, errors="coerce", dayfirst=True)
+    if pd.isna(parsed):
+        return ""
+    try:
+        return parsed.strftime("%Y-%m-%d")
+    except Exception:
+        return ""
+
+
+def _derive_country_from_location(location: str) -> str:
+    text_raw = str(location or "")
+    text = text_raw.lower()
+    text_compact = text.replace(".", "")
+    if any(token in text for token in _AU_STATE_TOKENS):
+        return "Australia"
+    if any(token in text for token in _UK_TOKENS) or any(token in text_compact for token in _UK_TOKENS):
+        return "United Kingdom"
+    return ""
+
+
+def _derive_primary_email(email: str, email_all: str) -> str:
+    email_clean = (email or "").strip()
+    if email_clean:
+        return email_clean
+    combined = (email_all or "").strip()
+    if not combined:
+        return ""
+    candidates = [part.strip() for part in re.split(r"[;,]", combined) if part and part.strip()]
+    return candidates[0] if candidates else ""
+
+
+def _derive_all_emails(email: str, email_all: str) -> str:
+    combined = (email_all or "").strip()
+    if combined:
+        return combined
+    email_clean = (email or "").strip()
+    return email_clean if email_clean else ""
+
+
+def _derive_contact_mode(primary_email: str, social_link: str) -> str:
+    has_email = bool(primary_email.strip())
+    has_social = bool((social_link or "").strip())
+    if has_email and has_social:
+        return "email+dm"
+    if has_email:
+        return "email_only"
+    if has_social:
+        return "dm_only"
+    return "unknown"
+
+
+def _derive_discovery_source(spotify_playlist: str, source_directory: str) -> str:
+    playlist = (spotify_playlist or "").strip()
+    source_dir = (source_directory or "").strip()
+    if playlist and source_dir:
+        return f"{playlist} ({source_dir})"
+    if playlist:
+        return playlist
+    if source_dir:
+        return source_dir
+    return ""
+
+
+def infer_discovery_source(row: pd.Series) -> str:
+    playlist = str(row.get("Spotify Playlist") or "").strip()
+    src_dir = str(row.get("Source Directory") or "").strip()
+    raw_job = str(row.get("__source_job") or "").strip()
+
+    lower_src = src_dir.lower()
+    lower_job = raw_job.lower()
+    label = ""
+
+    if playlist:
+        label = f"{playlist} ({src_dir})" if lower_src else playlist
+
+    if not label:
+        source_token = lower_src or lower_job
+        if "unearthed" in source_token:
+            label = "Triple J Unearthed"
+        elif "soundcloud" in source_token:
+            label = "SoundCloud directory"
+        elif "bandcamp" in source_token:
+            label = "Bandcamp directory"
+        elif "spotify" in source_token:
+            label = "Spotify directory"
+        else:
+            label = src_dir or raw_job or ""
+
+    return label
+
+
+def infer_email_source(row: pd.Series) -> str:
+    email = str(row.get("Email") or row.get("Primary Email") or "").strip()
+    if not email:
+        return ""
+
+    email_type = str(row.get("Email_Type") or "").lower()
+    fb_status = str(row.get("FB_Status") or "").lower()
+    src_dir = str(row.get("Source Directory") or "").lower()
+    src_url = str(row.get("Source URL") or "").lower()
+
+    if email_type == "fb_night" or fb_status.startswith("ok"):
+        return "Facebook About"
+
+    if "unearthed" in src_dir or "unearthed" in src_url:
+        return "Triple J Unearthed profile"
+
+    if "soundcloud" in src_dir or "soundcloud.com" in src_url:
+        return "SoundCloud profile"
+
+    if "bandcamp" in src_dir or "bandcamp.com" in src_url:
+        return "Bandcamp page"
+
+    if "spotify" in src_dir or "spotify.com" in src_url:
+        return "Spotify / linked website"
+
+    if email and not email_type and not fb_status:
+        return "Seed directory (site/email scrape)"
+
+    return "Unknown"
+
+
+def infer_country_from_context(row: pd.Series) -> str:
+    """
+    Best-effort country inference when Country_Derived is missing.
+    Uses playlist / directory hints only and never overwrites non-empty values.
+    """
+    existing = str(row.get("Country_Derived") or "").strip()
+    if existing:
+        return existing
+
+    playlist = str(row.get("Spotify Playlist") or "").lower()
+    src_dir = str(row.get("Source Directory") or "").lower()
+
+    if "uk & ie" in playlist or "uk/ie" in playlist or "uk & ireland" in playlist:
+        return "United Kingdom"
+    if "australia" in playlist or "au & nz" in playlist or "au/nz" in playlist:
+        return "Australia"
+    if "canada" in playlist:
+        return "Canada"
+    if "usa" in playlist or "us " in playlist or "united states" in playlist:
+        return "United States"
+    if "brazil" in playlist:
+        return "Brazil"
+    if "mexico" in playlist:
+        return "Mexico"
+
+    if "unearthed" in src_dir:
+        return "Australia"
+
+    return existing
+
+
+def infer_location_for_export(row: pd.Series) -> str:
+    """
+    Prefer existing Location, then Country_Derived, then country from context.
+    """
+    loc = str(row.get("Location") or "").strip()
+    if loc:
+        return loc
+
+    country = str(row.get("Country_Derived") or "").strip()
+    if not country:
+        country = infer_country_from_context(row)
+
+    return country
+
+
+def _build_final_export_frame(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Build the client-facing final export view without mutating the input frame.
+    """
+    if df is None or df.empty:
+        return pd.DataFrame(columns=FINAL_EXPORT_COLUMNS)
+
+    work = df.copy()
+    status_series = work.get("final_status", pd.Series("", index=work.index)).astype(str).str.strip().str.upper()
+    filtered = work.loc[status_series.isin(_FINAL_STATUS_KEEP)].copy()
+    if filtered.empty:
+        return pd.DataFrame(columns=FINAL_EXPORT_COLUMNS)
+
+    filtered["_status_normalized"] = status_series.loc[filtered.index]
+
+    rows: List[Dict[str, str]] = []
+    for _, row in filtered.iterrows():
+        final_status = str(row.get("final_status", "") or "").strip()
+        status_normalized = str(row.get("_status_normalized", "") or "").strip()
+        needs_review = status_normalized == "BLOCK"
+
+        location_raw = str(row.get("Location", "") or "")
+        country = _derive_country_from_location(location_raw)
+
+        email = str(row.get("Email", "") or "")
+        email_all = str(row.get("Email_All", "") or "")
+        primary_email = _derive_primary_email(email, email_all)
+        all_emails = _derive_all_emails(email, email_all)
+
+        social_link = str(row.get("Social Link", "") or "")
+        contact_mode = _derive_contact_mode(primary_email, social_link)
+
+        spotify_playlist = str(row.get("Spotify Playlist", "") or "")
+        source_directory = str(row.get("Source Directory", "") or "")
+        discovery_source = infer_discovery_source(row)
+
+        release_date_norm = _normalize_date_string(row.get("Release Date", ""))
+        date_added_norm = _normalize_date_string(row.get("Date Added", ""))
+
+        row_for_email_source = row.copy()
+        row_for_email_source["Primary Email"] = primary_email
+        email_source = infer_email_source(row_for_email_source)
+
+        external_links = str(row.get("External Links", "") or "").strip()
+        review_urls = str(row.get("Review_Urls", "") or row.get("Review Urls", "") or "").strip()
+
+        rows.append(
+            {
+                "Artist Name": str(row.get("Artist Name", "") or "").strip(),
+                "Location": location_raw,
+                "Country_Derived": country,
+                "Song Title": str(row.get("Song Title", "") or "").strip(),
+                "Primary Genre": str(row.get("Primary Genre", "") or "").strip(),
+                "Unearthed_Genre_Raw": str(row.get("Unearthed_Genre_Raw", "") or "").strip(),
+                "Social Link": social_link.strip(),
+                "SoundCloud Link": str(row.get("SoundCloud Link", "") or "").strip(),
+                "Spotify_URL": str(row.get("Spotify_URL", "") or "").strip(),
+                "External Links": external_links,
+                "Primary Email": primary_email,
+                "All Emails": all_emails,
+                "Email Source": email_source,
+                "Contact_Mode": contact_mode,
+                "Discovery Source": discovery_source,
+                "Source Directory": source_directory,
+                "Source URL": str(row.get("Source URL", "") or "").strip(),
+                "Review_Urls": review_urls,
+                "Played on triple J": str(row.get("Played on triple J", "") or "").strip(),
+                "Played on Unearthed": str(row.get("Played on Unearthed", "") or "").strip(),
+                "Release Date": release_date_norm,
+                "Date Added": date_added_norm,
+                "final_status": final_status,
+                "Needs_Review": "TRUE" if needs_review else "FALSE",
+            }
+        )
+
+    return pd.DataFrame(rows, columns=FINAL_EXPORT_COLUMNS)
+
+
+def build_final_export_view(input_csv_path: Path | str, output_csv_path: Path | str, logger: Optional[logging.Logger] = None) -> None:
+    """
+    Read the enriched/master CSV and write a client-facing final export view.
+    """
+    export_logger = logger or logging.getLogger(__name__)
+    input_path = Path(input_csv_path)
+    output_path = Path(output_csv_path)
+    if not input_path.exists():
+        export_logger.warning("[Final Export] Input not found: %s", input_path)
+        return
+
+    try:
+        df = pd.read_csv(input_path, dtype=str, keep_default_na=False)
+    except Exception as exc:
+        export_logger.error("[Final Export] Failed to read %s: %s", input_path, exc)
+        return
+
+    df["Country_Derived"] = df.apply(infer_country_from_context, axis=1)
+    df["Location"] = df.apply(infer_location_for_export, axis=1)
+
+    total_rows = len(df.index)
+    final_df = _build_final_export_frame(df)
+    kept_rows = len(final_df.index)
+    needs_review_count = (
+        int(final_df["Needs_Review"].astype(str).str.upper().eq("TRUE").sum()) if "Needs_Review" in final_df else 0
+    )
+    export_logger.info(
+        "[Final Export] rows_in=%s rows_kept=%s needs_review=%s",
+        total_rows,
+        kept_rows,
+        needs_review_count,
+    )
+    _ensure_parent(str(output_path))
+    final_df.to_csv(output_path, index=False)
+    export_logger.info("[Final Export] Wrote final export CSV: %s", output_path)
+
+
+def _build_woodpecker_frame(final_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Build Woodpecker-friendly view from the already built final export DataFrame.
+    """
+    if final_df is None or final_df.empty:
+        return pd.DataFrame(columns=WOODPECKER_EXPORT_COLUMNS)
+    df = final_df.copy()
+    for col in WOODPECKER_EXPORT_COLUMNS:
+        if col not in df.columns:
+            df[col] = ""
+    mask = df["Primary Email"].fillna("").astype(str).str.strip() != ""
+    filtered = df.loc[mask].copy()
+    return filtered.loc[:, list(WOODPECKER_EXPORT_COLUMNS)]
+
+
+def write_final_and_woodpecker_exports(
+    input_csv_path: Path | str,
+    final_export_csv_path: Path | str,
+    woodpecker_export_csv_path: Path | str,
+    logger: Optional[logging.Logger] = None,
+) -> None:
+    export_logger = logger or logging.getLogger(__name__)
+    input_path = Path(input_csv_path)
+    if not input_path.exists():
+        export_logger.warning("[Final Export] Input not found: %s", input_path)
+        return
+    try:
+        df = pd.read_csv(input_path, dtype=str, keep_default_na=False)
+    except Exception as exc:
+        export_logger.error("[Final Export] Failed to read %s: %s", input_path, exc)
+        return
+
+    df["Country_Derived"] = df.apply(infer_country_from_context, axis=1)
+    df["Location"] = df.apply(infer_location_for_export, axis=1)
+
+    final_df = _build_final_export_frame(df)
+    total_rows = len(final_df.index)
+    needs_review_final = (
+        int(final_df["Needs_Review"].astype(str).str.upper().eq("TRUE").sum()) if "Needs_Review" in final_df else 0
+    )
+
+    _ensure_parent(str(final_export_csv_path))
+    final_df.to_csv(final_export_csv_path, index=False, encoding="utf-8")
+    export_logger.info(
+        "[Final Export] rows_kept=%s needs_review=%s -> %s",
+        total_rows,
+        needs_review_final,
+        final_export_csv_path,
+    )
+
+    woodpecker_df = _build_woodpecker_frame(final_df)
+    wood_rows = len(woodpecker_df.index)
+    wood_needs_review = (
+        int(woodpecker_df["Needs_Review"].astype(str).str.upper().eq("TRUE").sum())
+        if "Needs_Review" in woodpecker_df
+        else 0
+    )
+    _ensure_parent(str(woodpecker_export_csv_path))
+    woodpecker_df.to_csv(woodpecker_export_csv_path, index=False, encoding="utf-8")
+    export_logger.info(
+        "[Woodpecker Export] rows_with_email=%s needs_review=%s -> %s",
+        wood_rows,
+        wood_needs_review,
+        woodpecker_export_csv_path,
+    )
 
 
 def run_master_enrichment(seed_csv_path: str, output_csv_path: str, logger: LoggerFn = None) -> str:
@@ -973,6 +1388,7 @@ DEFAULT_EXPORT_COLUMNS: Sequence[str] = [
     "Played on Unearthed",
     "Release Date",
     "Primary Genre",
+    "Unearthed_Genre_Raw",
     "Date Added",
     "Spotify Playlist",
     "Source Directory",
@@ -988,6 +1404,8 @@ def export_master_leads(
     logger: Optional[logging.Logger] = None,
     export_columns: Optional[Sequence[str]] = None,
     export_profile: str = "full_dump",
+    final_export_csv: Optional[str] = None,
+    woodpecker_export_csv: Optional[str] = None,
 ) -> None:
     export_logger = logger or logging.getLogger(__name__)
     if not input_csv or not os.path.exists(input_csv):
@@ -996,6 +1414,15 @@ def export_master_leads(
 
     columns = list(export_columns) if export_columns is not None else list(DEFAULT_EXPORT_COLUMNS)
     export_logger.info("[Master] Exporting client-facing CSV: %s -> %s", input_csv, output_csv)
+    if not final_export_csv:
+        final_export_csv = os.path.join(os.path.dirname(os.path.abspath(input_csv)), "final_export.csv")
+    else:
+        final_export_csv = str(final_export_csv)
+    if not woodpecker_export_csv:
+        woodpecker_export_csv = os.path.join(os.path.dirname(os.path.abspath(input_csv)), "woodpecker_export.csv")
+    else:
+        woodpecker_export_csv = str(woodpecker_export_csv)
+
     _ensure_parent(output_csv)
     row_count = 0
     try:
@@ -1026,3 +1453,14 @@ def export_master_leads(
         return
 
     export_logger.info("[Master] Export wrote %s rows to %s", row_count, output_csv)
+
+    try:
+        # Final export and Woodpecker export views; legacy export kept for compatibility.
+        write_final_and_woodpecker_exports(
+            input_csv_path=input_csv,
+            final_export_csv_path=final_export_csv,
+            woodpecker_export_csv_path=woodpecker_export_csv,
+            logger=export_logger,
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        export_logger.error("[Master] Final export view failed safely: %s", exc)

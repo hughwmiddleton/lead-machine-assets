@@ -125,6 +125,7 @@ from urllib.parse import (
     quote,
     quote_plus,
 )
+from unearthed_common import extract_unearthed_genre_text, parse_unearthed_genre
 import urllib.parse as _urlparse
 from PyQt5 import QtWidgets, QtCore
 from dateutil import parser as dparser
@@ -132,6 +133,7 @@ from dateutil.relativedelta import relativedelta
 import unicodedata
 from spotify_scraper import scrape_spotify
 from origin_validator import _derive_origin_output_path, run_auto_validate
+import pipeline_runner
 
 cross_directory_enricher = None
 try:
@@ -1124,71 +1126,7 @@ def unearthed_extract_release_date(html: str) -> str:
     return ""
 
 
-def parse_unearthed_genre(raw: str | None) -> Tuple[Optional[str], Optional[str]]:
-    """
-    Returns (primary_genre, raw_cleaned).
-    primary_genre = first genre token, normalised (title case).
-    raw_cleaned = original string, stripped of extra whitespace.
-    """
-    if raw is None:
-        return None, None
-    raw_cleaned = raw.strip()
-    if not raw_cleaned:
-        return None, None
-    parts = re.split(r"[\\/•,-]", raw_cleaned)
-    first = next((p.strip() for p in parts if p and p.strip()), None)
-    if not first:
-        return None, raw_cleaned
-    primary = first.title()
-    return primary, raw_cleaned
-
-
-def _unearthed_extract_genre_text(soup: BeautifulSoup) -> str:
-    """
-    Locate the genre line in the Unearthed artist hero header and return a readable string.
-    Prefers the container between the ARTIST pill and artist name; falls back to the first
-    genre list on the page. Logs at DEBUG level if no candidate is found.
-    """
-    if not soup:
-        return ""
-
-    def _has_class(tag, candidates):
-        classes = tag.get("class") or []
-        return any(c in classes for c in candidates)
-
-    genre_container = None
-    hero_block = soup.select_one("div.q0wzh")
-    if hero_block:
-        genre_container = hero_block.find(
-            lambda t: t.name in ("div", "ul") and _has_class(t, ("ZF6HQ", "PARBR"))
-        )
-
-    if not genre_container:
-        sr_label = soup.find(
-            lambda t: t.name in ("span", "div")
-            and _has_class(t, ("gRMNM",))
-            and "genre" in t.get_text(" ", strip=True).lower()
-        )
-        if sr_label:
-            genre_container = sr_label.find_next(
-                lambda t: t.name in ("div", "ul") and _has_class(t, ("ZF6HQ", "PARBR"))
-            )
-
-    if not genre_container:
-        genre_container = soup.find(
-            "ul",
-            class_=lambda c: (
-                isinstance(c, str)
-                and "PARBR" in c.split()
-            )
-            or (isinstance(c, (list, tuple)) and "PARBR" in c),
-        )
-
-    if not genre_container:
-        logger.debug("[Unearthed] Genre container not found on profile page.")
-        return ""
-
-    return genre_container.get_text(" / ", strip=True)
+_unearthed_extract_genre_text = extract_unearthed_genre_text
 
 def scrape_artist_profile(driver, profile_url, fb_driver=None):
     social_links = []
@@ -8849,6 +8787,198 @@ class AutoValidateTab(QtWidgets.QWidget):
         self._stop_worker()
 
 
+class FinalExportWorker(QtCore.QThread):
+    log_signal = QtCore.pyqtSignal(str)
+    finished_signal = QtCore.pyqtSignal(str, str)
+
+    def __init__(self, input_path: str, output_path: str, woodpecker_path: str, parent=None):
+        super().__init__(parent)
+        self.input_path = input_path
+        self.output_path = output_path
+        self.woodpecker_path = woodpecker_path
+
+    def run(self):
+        class _QtLogger:
+            def __init__(self, emitter):
+                self._emit = emitter
+
+            def info(self, msg, *args, **kwargs):
+                try:
+                    self._emit(str(msg))
+                except Exception:
+                    pass
+
+            warning = info
+            error = info
+
+        logger = _QtLogger(self.log_signal.emit)
+        try:
+            self.log_signal.emit(f"[Final Export] Input: {self.input_path}")
+            self.log_signal.emit(f"[Final Export] Output: {self.output_path}")
+            self.log_signal.emit(f"[Final Export] Woodpecker Output: {self.woodpecker_path}")
+            pipeline_runner.write_final_and_woodpecker_exports(
+                input_csv_path=self.input_path,
+                final_export_csv_path=self.output_path,
+                woodpecker_export_csv_path=self.woodpecker_path,
+                logger=logger,
+            )
+            self.finished_signal.emit(self.output_path, self.woodpecker_path)
+        except Exception as exc:
+            self.log_signal.emit(f"[Final Export] Failed: {exc}")
+            self.finished_signal.emit("", "")
+
+
+class FinalExportTab(QtWidgets.QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.worker: Optional[FinalExportWorker] = None
+        self._build_ui()
+
+    def _build_ui(self):
+        layout = QtWidgets.QVBoxLayout()
+
+        input_row = QtWidgets.QHBoxLayout()
+        input_label = QtWidgets.QLabel("Enriched/master CSV:")
+        self.input_edit = QtWidgets.QLineEdit()
+        input_browse = QtWidgets.QPushButton("Browse...")
+        input_browse.clicked.connect(self._browse_input)
+        input_row.addWidget(input_label)
+        input_row.addWidget(self.input_edit)
+        input_row.addWidget(input_browse)
+        layout.addLayout(input_row)
+
+        output_row = QtWidgets.QHBoxLayout()
+        output_label = QtWidgets.QLabel("Final export output CSV:")
+        self.output_edit = QtWidgets.QLineEdit()
+        output_browse = QtWidgets.QPushButton("Browse...")
+        output_browse.clicked.connect(self._browse_output)
+        output_row.addWidget(output_label)
+        output_row.addWidget(self.output_edit)
+        output_row.addWidget(output_browse)
+        layout.addLayout(output_row)
+
+        woodpecker_row = QtWidgets.QHBoxLayout()
+        woodpecker_label = QtWidgets.QLabel("Woodpecker export CSV:")
+        self.woodpecker_edit = QtWidgets.QLineEdit()
+        woodpecker_browse = QtWidgets.QPushButton("Browse...")
+        woodpecker_browse.clicked.connect(self._browse_woodpecker)
+        woodpecker_row.addWidget(woodpecker_label)
+        woodpecker_row.addWidget(self.woodpecker_edit)
+        woodpecker_row.addWidget(woodpecker_browse)
+        layout.addLayout(woodpecker_row)
+
+        controls = QtWidgets.QHBoxLayout()
+        self.run_button = QtWidgets.QPushButton("Build Final Export")
+        self.run_button.clicked.connect(self._start_export)
+        self.stop_button = QtWidgets.QPushButton("Stop")
+        self.stop_button.setEnabled(False)
+        self.stop_button.clicked.connect(self._stop_worker)
+        controls.addWidget(self.run_button)
+        controls.addWidget(self.stop_button)
+        controls.addStretch()
+        layout.addLayout(controls)
+
+        self.log_console = QtWidgets.QPlainTextEdit()
+        self.log_console.setReadOnly(True)
+        layout.addWidget(self.log_console)
+
+        self.setLayout(layout)
+
+    def _browse_input(self):
+        file_path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Select enriched/master CSV",
+            "",
+            "CSV Files (*.csv);;All Files (*)",
+        )
+        if file_path:
+            self.input_edit.setText(file_path)
+            if not self.output_edit.text().strip():
+                directory = os.path.dirname(file_path)
+                self.output_edit.setText(os.path.join(directory, "final_export.csv"))
+            if not self.woodpecker_edit.text().strip():
+                directory = os.path.dirname(file_path)
+                self.woodpecker_edit.setText(os.path.join(directory, "woodpecker_export.csv"))
+
+    def _browse_output(self):
+        file_path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Select final export output CSV",
+            "",
+            "CSV Files (*.csv);;All Files (*)",
+        )
+        if file_path:
+            self.output_edit.setText(file_path)
+
+    def _browse_woodpecker(self):
+        file_path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Select Woodpecker export output CSV",
+            "",
+            "CSV Files (*.csv);;All Files (*)",
+        )
+        if file_path:
+            self.woodpecker_edit.setText(file_path)
+
+    def _append_log(self, message: str):
+        self.log_console.appendPlainText(message)
+        scrollbar = self.log_console.verticalScrollBar()
+        if scrollbar:
+            scrollbar.setValue(scrollbar.maximum())
+
+    def _start_export(self):
+        if self.worker and self.worker.isRunning():
+            QtWidgets.QMessageBox.information(self, "Final Export", "A final export is already running.")
+            return
+        input_path = self.input_edit.text().strip()
+        if not input_path or not os.path.exists(input_path):
+            QtWidgets.QMessageBox.warning(self, "Missing input", "Select a valid enriched/master CSV.")
+            return
+        output_path = self.output_edit.text().strip()
+        if not output_path:
+            output_path = os.path.join(os.path.dirname(input_path), "final_export.csv")
+            self.output_edit.setText(output_path)
+        woodpecker_path = self.woodpecker_edit.text().strip()
+        if not woodpecker_path:
+            woodpecker_path = os.path.join(os.path.dirname(input_path), "woodpecker_export.csv")
+            self.woodpecker_edit.setText(woodpecker_path)
+
+        self.log_console.clear()
+        self._append_log("[Final Export] Starting...")
+        self.run_button.setEnabled(False)
+        self.stop_button.setEnabled(True)
+        self.worker = FinalExportWorker(input_path=input_path, output_path=output_path, woodpecker_path=woodpecker_path)
+        self.worker.log_signal.connect(self._append_log)
+        self.worker.finished_signal.connect(self._on_finished)
+        self.worker.start()
+
+    def _on_finished(self, output_path: str, woodpecker_path: str):
+        if output_path:
+            self._append_log(f"[Final Export] Completed. Output: {output_path}")
+        if woodpecker_path:
+            self._append_log(f"[Final Export] Woodpecker Output: {woodpecker_path}")
+        else:
+            self._append_log("[Final Export] Finished with errors.")
+        self.run_button.setEnabled(True)
+        self.stop_button.setEnabled(False)
+        self._stop_worker()
+
+    def _stop_worker(self):
+        worker = self.worker
+        if not worker:
+            return
+        if worker.isRunning():
+            try:
+                worker.terminate()
+                worker.wait(2000)
+            except Exception:
+                pass
+        self.worker = None
+
+    def shutdown(self):
+        self._stop_worker()
+
+
 class NightModeWorker(QtCore.QThread):
     log_signal = QtCore.pyqtSignal(str)
     finished_signal = QtCore.pyqtSignal(int)
@@ -9419,6 +9549,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tabs.addTab(self.cross_enricher_tab, "Cross-Directory Enricher")
         self.auto_validate_tab = AutoValidateTab()
         self.tabs.addTab(self.auto_validate_tab, "Auto-Validate")
+        self.final_export_tab = FinalExportTab()
+        self.tabs.addTab(self.final_export_tab, "Final Export View")
         self.night_mode_tab = NightModeTab()
         self.tabs.addTab(self.night_mode_tab, "Night Mode")
     def create_menu(self):

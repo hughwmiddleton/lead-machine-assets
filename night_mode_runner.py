@@ -507,13 +507,19 @@ def run_night_mode(
                     run_enrichment(master_post_fb, master_final, logger=logger.info, night_mode=True)
                     logger.info("[Master] Validation completed: %s", master_final)
                     export_path = os.path.join(run_dir, "master_export_leads.csv")
+                    final_export_path = os.path.join(run_dir, "final_export.csv")
+                    woodpecker_export_path = os.path.join(run_dir, "woodpecker_export.csv")
                     pipeline_runner.export_master_leads(
                         input_csv=master_final,
                         output_csv=export_path,
                         logger=logger,
                         export_profile=export_profile,
+                        final_export_csv=final_export_path,
+                        woodpecker_export_csv=woodpecker_export_path,
                     )
                     logger.info("[Master] Exported client-facing leads CSV: %s", export_path)
+                    logger.info("[Master] Exported final export view CSV: %s", final_export_path)
+                    logger.info("[Master] Exported Woodpecker CSV: %s", woodpecker_export_path)
                 except Exception as exc:
                     logger.error("[Master] Final validation failed safely: %s", exc)
                     master_final = master_post_fb
