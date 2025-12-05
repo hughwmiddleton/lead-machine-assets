@@ -129,7 +129,9 @@ def _maybe_set_email(df: pd.DataFrame, idx: int, new_email: Optional[str]) -> No
     new_clean = (new_email or "").strip()
     if not new_clean:
         return
-    current = str(df.at[idx, "Email"]) if idx in df.index else ""
+    current = df.at[idx, "Email"] if idx in df.index else ""
+    if pd.isna(current):
+        current = ""
     if str(current or "").strip():
         return
     df.at[idx, "Email"] = new_clean
@@ -773,22 +775,68 @@ def run_facebook_global_pass_nightmode(
             completed_rows += 1
             last_index = idx
 
+            artist_label = row.get("Artist Name", "") or row.get("Artist", "") or "<unknown>"
+
             email_val = row.get("Email", "")
             if pd.isna(email_val):
                 email_val = ""
-            has_email = bool(str(email_val or "").strip())
+            email_all_val = row.get("Email_All", "")
+            if pd.isna(email_all_val):
+                email_all_val = ""
+            email_clean = str(email_val or "").strip()
+            email_all_clean = str(email_all_val or "").strip()
+            has_email = bool(email_clean or email_all_clean)
+
             fb_status_val_raw = str(row.get("FB_Status", "") or "").strip()
             fb_status_val = fb_status_val_raw.lower()
+
+            if has_email:
+                _safe_log_console(
+                    logger,
+                    f"[Night FB] Skipping row {idx} ('{artist_label}') – email already present (Email='{email_clean}', Email_All='{email_all_clean}').",
+                )
+                state.update(
+                    {
+                        "fb_last_index": last_index,
+                        "fb_completed": completed_rows,
+                        "fb_attempted_total": attempted_total,
+                        "fb_captcha_flag": captcha_flag,
+                        "fb_total_rows": total_rows,
+                        "fb_resume_input": os.path.abspath(input_csv),
+                    }
+                )
+                _write_fb_state(state_path, state)
+                continue
+
+            terminal_statuses = {"no_candidates", "unearthed_no_emails"}
+            if fb_status_val in terminal_statuses:
+                _safe_log_console(
+                    logger,
+                    f"[Night FB] Skipping row {idx} ('{artist_label}') – terminal FB_Status='{fb_status_val_raw}'.",
+                )
+                state.update(
+                    {
+                        "fb_last_index": last_index,
+                        "fb_completed": completed_rows,
+                        "fb_attempted_total": attempted_total,
+                        "fb_captcha_flag": captcha_flag,
+                        "fb_total_rows": total_rows,
+                        "fb_resume_input": os.path.abspath(input_csv),
+                    }
+                )
+                _write_fb_state(state_path, state)
+                continue
+
             facebook_url_hint = str(row.get("Facebook_URL", "") or "").strip()
             has_clue = _has_facebook_clue(row)
-            final_fb_statuses = {"login_redirect", "no_candidates", "ok", "found"}
+            final_fb_statuses = {"login_redirect", "no_candidates", "ok", "found"} | terminal_statuses
             should_run_night_fb = (not has_email) and (fb_status_val not in final_fb_statuses)
             if has_email or fb_status_val in final_fb_statuses or not has_clue or not should_run_night_fb:
                 if has_email or fb_status_val in final_fb_statuses:
                     email_state = "present" if has_email else "missing"
                     _safe_log_console(
                         logger,
-                        f"[Night FB] Skipping FB lookup for '{row.get('Artist Name', '') or row.get('Artist', '') or '<unknown>'}' (FB_Status='{fb_status_val_raw}', email='{email_state}').",
+                        f"[Night FB] Skipping FB lookup for '{artist_label}' (FB_Status='{fb_status_val_raw}', email='{email_state}').",
                     )
                 state.update(
                     {
@@ -939,6 +987,7 @@ def export_master_leads(
     output_csv: str,
     logger: Optional[logging.Logger] = None,
     export_columns: Optional[Sequence[str]] = None,
+    export_profile: str = "full_dump",
 ) -> None:
     export_logger = logger or logging.getLogger(__name__)
     if not input_csv or not os.path.exists(input_csv):
@@ -950,17 +999,25 @@ def export_master_leads(
     _ensure_parent(output_csv)
     row_count = 0
     try:
+        from final_checker import filter_rows_for_export
+
         with open(input_csv, "r", encoding="utf-8", newline="") as infile, open(
             output_csv, "w", encoding="utf-8", newline=""
         ) as outfile:
             reader = csv.DictReader(infile)
             writer = csv.DictWriter(outfile, fieldnames=columns)
             writer.writeheader()
-            for row in reader:
-                if row is None:
-                    continue
+            rows = [row for row in reader if row is not None]
+            filtered_rows = filter_rows_for_export(export_profile or "studio_safe", rows)
+            for row in filtered_rows:
                 writer.writerow({col: row.get(col, "") for col in columns})
-                row_count += 1
+            row_count = len(filtered_rows)
+            export_logger.info(
+                "[Exporter] Export profile=%s: input rows=%s, exported rows=%s",
+                (export_profile or "studio_safe"),
+                len(rows),
+                row_count,
+            )
     except FileNotFoundError:
         export_logger.warning("[Master] Export skipped; input not found during read: %s", input_csv)
         return

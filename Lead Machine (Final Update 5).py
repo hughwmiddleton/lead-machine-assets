@@ -2355,16 +2355,46 @@ def _bandcamp_collect_contacts(artist_dict: dict) -> list:
 def _bandcamp_location_match_(profile_loc: str, api_hint: str, requested_label: str | None, requested_hint: str | None) -> bool:
     if not requested_label and not requested_hint:
         return True
-    profile_norm = _norm_text_(profile_loc)
-    api_norm = _norm_text_(api_hint)
+    profile_norm = _norm_text_(profile_loc).replace("-", " ")
+    api_norm = _norm_text_(api_hint).replace("-", " ")
+    # Simple synonym/alias support for common regions (not exhaustive).
+    def _uk_match(text: str) -> bool:
+        if not text:
+            return False
+        aliases = (
+            "uk",
+            "u k",
+            "united kingdom",
+            "great britain",
+            "gb",
+            "england",
+            "scotland",
+            "wales",
+            "northern ireland",
+        )
+        return any(alias in text for alias in aliases)
+
     if requested_label:
         label_norm = _norm_text_(requested_label)
-        if label_norm and (label_norm in profile_norm or label_norm in api_norm):
+        label_norm_clean = label_norm.replace("-", " ")
+        if label_norm_clean and (label_norm_clean in profile_norm or label_norm_clean in api_norm):
+            return True
+        # Extra tolerance for UK-region filters that surface localized labels (e.g., "England, Uk").
+        if label_norm_clean and _uk_match(label_norm_clean) and (_uk_match(profile_norm) or _uk_match(api_norm)):
             return True
     if requested_hint:
         hint_norm = _norm_text_(requested_hint)
-        if hint_norm and (hint_norm in profile_norm or hint_norm in api_norm):
+        hint_norm_clean = hint_norm.replace("-", " ")
+        if hint_norm_clean and (hint_norm_clean in profile_norm or hint_norm_clean in api_norm):
             return True
+        if hint_norm_clean and _uk_match(hint_norm_clean) and (_uk_match(profile_norm) or _uk_match(api_norm)):
+            return True
+    # Fallback: token overlap of two or more characters to avoid over-pruning on partial matches.
+    profile_tokens = {tok for tok in profile_norm.split() if len(tok) >= 2}
+    requested_tokens = {tok for tok in (requested_label or "").lower().replace(",", " ").split() if len(tok) >= 2}
+    requested_tokens.update({tok for tok in (requested_hint or "").lower().replace(",", " ").split() if len(tok) >= 2})
+    if profile_tokens and requested_tokens and profile_tokens.intersection(requested_tokens):
+        return True
     return False
 
 _BANDCAMP_CONTACT_PRIORITY = [
@@ -2978,6 +3008,9 @@ def scrape_bandcamp(
         driver.quit()
     if bandcamp_rows:
         save_to_csv(bandcamp_rows, existing_csv)
+    else:
+        # Ensure the pipeline still produces a tangible CSV, even if location filters prune everything.
+        save_to_csv([], existing_csv)
     if enriched_rows:
         _bandcamp_write_enriched_csv(enriched_rows, existing_csv)
 

@@ -362,6 +362,20 @@ def _normalise_status(value: str) -> str:
     return text
 
 
+def _has_contact_email(row: pd.Series) -> bool:
+    """
+    Treat any non-empty Email/Email_All as a valid contact signal.
+    Used to avoid blocking rows where we already have a reachable contact.
+    """
+    for col in ("Email", "Email_All"):
+        if col not in row:
+            continue
+        val = str(row.get(col, "") or "").strip()
+        if val:
+            return True
+    return False
+
+
 def _infer_directory_from_url(url: str) -> str:
     if not url:
         return ""
@@ -534,6 +548,7 @@ def _update_status_with_origin(row: pd.Series, result: OriginMatchResult) -> Tup
         current_score = 0.0
     updated_status = status_value or ""
     updated_score = current_score
+    has_email = _has_contact_email(row)
     if result.origin_match_flag:
         avg_score = (result.artist_score + result.title_score) / 2.0
         if avg_score > updated_score:
@@ -543,7 +558,14 @@ def _update_status_with_origin(row: pd.Series, result: OriginMatchResult) -> Tup
     else:
         # clear mismatches: low artist score or explicit mismatch
         if result.artist_score < 0.6 or result.reason == "artist_mismatch":
-            updated_status = "BLOCKED_BY_ORIGIN"
+            if has_email:
+                # keep reachable rows out of BLOCK; downgrade hard blocks to REVIEW
+                if status_value in {"BLOCK", "BLOCKED", "BLOCKED_BY_ORIGIN"}:
+                    updated_status = "REVIEW"
+                else:
+                    updated_status = status_value or "REVIEW"
+            else:
+                updated_status = "BLOCKED_BY_ORIGIN"
         else:
             # borderline: keep or downgrade to REVIEW, do not over-block
             if status_value not in {"BLOCKED_BY_ORIGIN", "BLOCKED"}:

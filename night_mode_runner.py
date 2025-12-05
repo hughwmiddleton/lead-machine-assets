@@ -377,6 +377,7 @@ def run_night_mode(
     resume: bool = False,
     stop_on_failure: bool = False,
     export_mode_override: Optional[str] = None,
+    export_profile_override: Optional[str] = None,
     run_root: str = "overnight_runs",
     fb_auto_resume_override: Optional[bool] = None,
     fb_cooldown_override: Optional[int] = None,
@@ -387,6 +388,9 @@ def run_night_mode(
     export_mode = (export_mode_override or config.get("export_mode") or DEFAULT_EXPORT_MODE).strip().lower()
     if export_mode not in {"per_directory", "combined", "both"}:
         export_mode = DEFAULT_EXPORT_MODE
+    export_profile = (export_profile_override or config.get("export_profile") or "full_dump").strip().lower()
+    if export_profile not in {"studio_safe", "studio_plus", "unearthed_social", "full_dump"}:
+        export_profile = "full_dump"
     master_enrich_cfg = config.get("master_enrichment", {})
     master_enrichment_enabled = master_enrich_cfg.get("enabled", True)
 
@@ -507,6 +511,7 @@ def run_night_mode(
                         input_csv=master_final,
                         output_csv=export_path,
                         logger=logger,
+                        export_profile=export_profile,
                     )
                     logger.info("[Master] Exported client-facing leads CSV: %s", export_path)
                 except Exception as exc:
@@ -538,6 +543,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Override export mode from the config file",
     )
     parser.add_argument(
+        "--export-profile",
+        choices=["studio_safe", "studio_plus", "unearthed_social", "full_dump"],
+        help="Filter exported leads by strictness profile",
+    )
+    parser.add_argument(
         "--run-root",
         default="overnight_runs",
         help="Root directory for overnight run outputs (defaults to ./overnight_runs)",
@@ -561,6 +571,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         resume=args.resume,
         stop_on_failure=args.stop_on_failure,
         export_mode_override=args.export_mode,
+        export_profile_override=args.export_profile,
         run_root=args.run_root,
         fb_auto_resume_override=args.fb_auto_resume,
         fb_cooldown_override=args.fb_cooldown_seconds,
