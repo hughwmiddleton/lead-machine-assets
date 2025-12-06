@@ -10,6 +10,8 @@ import time
 import urllib.parse
 import shutil
 from pathlib import Path
+import atexit
+import weakref
 from dataclasses import dataclass
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -172,6 +174,28 @@ def _purge_wdm_cache(driver_path: str) -> None:
         pass
 
 
+_ACTIVE_DRIVERS = weakref.WeakSet()
+
+
+def _register_driver_cleanup(driver) -> None:
+    try:
+        _ACTIVE_DRIVERS.add(driver)
+    except Exception:
+        pass
+
+
+def _shutdown_all_drivers() -> None:
+    for drv in list(_ACTIVE_DRIVERS):
+        try:
+            drv.quit()
+        except Exception:
+            pass
+    _ACTIVE_DRIVERS.clear()
+
+
+atexit.register(_shutdown_all_drivers)
+
+
 def _start_chromedriver_with_retry(chrome_options):
     """
     Start ChromeDriver with a one-time reinstall if the first launch fails.
@@ -181,7 +205,9 @@ def _start_chromedriver_with_retry(chrome_options):
         driver_path = ChromeDriverManager().install()
         try:
             service = ChromeService(driver_path)
-            return webdriver.Chrome(service=service, options=chrome_options)
+            driver = webdriver.Chrome(service=service, options=chrome_options)
+            _register_driver_cleanup(driver)
+            return driver
         except Exception as exc:
             last_exc = exc
             _purge_wdm_cache(driver_path)

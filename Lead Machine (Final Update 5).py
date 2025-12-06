@@ -86,6 +86,7 @@ if __name__ == "__main__":
 # Now import the dependencies
 # ---------------------------
 import os
+import atexit
 import html
 import time
 import random
@@ -95,6 +96,8 @@ import pandas as pd
 import datetime
 import json
 import argparse
+import select
+import weakref
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 import requests
@@ -892,6 +895,28 @@ def _purge_wdm_cache(driver_path: str) -> None:
         pass
 
 
+_ACTIVE_DRIVERS = weakref.WeakSet()
+
+
+def _register_driver_cleanup(driver) -> None:
+    try:
+        _ACTIVE_DRIVERS.add(driver)
+    except Exception:
+        pass
+
+
+def _shutdown_all_drivers() -> None:
+    for drv in list(_ACTIVE_DRIVERS):
+        try:
+            drv.quit()
+        except Exception:
+            pass
+    _ACTIVE_DRIVERS.clear()
+
+
+atexit.register(_shutdown_all_drivers)
+
+
 def _start_chromedriver_with_retry(chrome_options):
     """
     Start ChromeDriver with one automatic cache purge + reinstall retry if startup fails.
@@ -901,7 +926,9 @@ def _start_chromedriver_with_retry(chrome_options):
         driver_path = ChromeDriverManager().install()
         try:
             service = ChromeService(driver_path)
-            return webdriver.Chrome(service=service, options=chrome_options)
+            driver = webdriver.Chrome(service=service, options=chrome_options)
+            _register_driver_cleanup(driver)
+            return driver
         except Exception as exc:
             last_exc = exc
             _purge_wdm_cache(driver_path)
@@ -9081,11 +9108,21 @@ class NightModeWorker(QtCore.QThread):
                 bufsize=1,
                 env=self.env,
             )
-            if self._process.stdout:
-                for line in self._process.stdout:
-                    self.log_signal.emit(line.rstrip("\n"))
-                    if self._stop_requested:
-                        break
+            stdout = self._process.stdout
+            while stdout:
+                if self._stop_requested:
+                    break
+                ready, _, _ = select.select([stdout], [], [], 0.5)
+                if ready:
+                    line = stdout.readline()
+                    if line:
+                        self.log_signal.emit(line.rstrip("\n"))
+                        continue
+                if self._process.poll() is not None:
+                    if ready:
+                        for line in stdout:
+                            self.log_signal.emit(line.rstrip("\n"))
+                    break
             if self._process:
                 exit_code = self._process.wait()
         except Exception as exc:
