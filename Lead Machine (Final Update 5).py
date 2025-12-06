@@ -2441,6 +2441,25 @@ def _bandcamp_location_match_(profile_loc: str, api_hint: str, requested_label: 
         return True
     profile_norm = _norm_text_(profile_loc).replace("-", " ")
     api_norm = _norm_text_(api_hint).replace("-", " ")
+    profile_compact = profile_norm.replace(" ", "")
+    api_compact = api_norm.replace(" ", "")
+    alias_corrections = {
+        "au tralia": "australia",
+        "autralia": "australia",
+        "austra lia": "australia",
+    }
+
+    def _canonical_variants(text: str) -> set[str]:
+        if not text:
+            return set()
+        norm = _norm_text_(text).replace("-", " ")
+        compact = norm.replace(" ", "")
+        variants = {norm, compact}
+        if norm in alias_corrections:
+            variants.add(alias_corrections[norm])
+        if compact in alias_corrections:
+            variants.add(alias_corrections[compact])
+        return {v for v in variants if v}
     # Simple synonym/alias support for common regions (not exhaustive).
     def _uk_match(text: str) -> bool:
         if not text:
@@ -2461,17 +2480,29 @@ def _bandcamp_location_match_(profile_loc: str, api_hint: str, requested_label: 
     if requested_label:
         label_norm = _norm_text_(requested_label)
         label_norm_clean = label_norm.replace("-", " ")
+        label_compact = label_norm_clean.replace(" ", "")
+        for variant in _canonical_variants(requested_label):
+            if variant in profile_norm or variant in api_norm or variant in profile_compact or variant in api_compact:
+                return True
         if label_norm_clean and (label_norm_clean in profile_norm or label_norm_clean in api_norm):
             return True
         # Extra tolerance for UK-region filters that surface localized labels (e.g., "England, Uk").
         if label_norm_clean and _uk_match(label_norm_clean) and (_uk_match(profile_norm) or _uk_match(api_norm)):
             return True
+        if label_compact and (label_compact in profile_compact or label_compact in api_compact):
+            return True
     if requested_hint:
         hint_norm = _norm_text_(requested_hint)
         hint_norm_clean = hint_norm.replace("-", " ")
+        hint_compact = hint_norm_clean.replace(" ", "")
+        for variant in _canonical_variants(requested_hint):
+            if variant in profile_norm or variant in api_norm or variant in profile_compact or variant in api_compact:
+                return True
         if hint_norm_clean and (hint_norm_clean in profile_norm or hint_norm_clean in api_norm):
             return True
         if hint_norm_clean and _uk_match(hint_norm_clean) and (_uk_match(profile_norm) or _uk_match(api_norm)):
+            return True
+        if hint_compact and (hint_compact in profile_compact or hint_compact in api_compact):
             return True
     # Fallback: token overlap of two or more characters to avoid over-pruning on partial matches.
     profile_tokens = {tok for tok in profile_norm.split() if len(tok) >= 2}
@@ -2709,6 +2740,7 @@ def scrape_bandcamp(
     requested_label = ""
     requested_hint = ""
     slug_parts = []
+    loc_guess = ""
     if url_input and _bandcamp_is_discover_url(url_input):
         loc_meta = _bandcamp_location_label_from_url(url_input)
         requested_label = loc_meta.get("display_label", "") or ""
@@ -2716,16 +2748,25 @@ def scrape_bandcamp(
         if not requested_hint:
             params = _bandcamp_parse_discover_params(url_input)
             requested_hint = params.get("loc") or params.get("location") or ""
-        if not (requested_label or requested_hint):
-            parsed = urlparse(url_input)
-            segments = [seg for seg in (parsed.path or "").split("/") if seg]
-            if len(segments) >= 2 and segments[0] == "discover":
-                slug = segments[1]
-                slug_parts = [part for part in re.split(r"[+\\s]+", slug) if part]
-            if len(slug_parts) >= 2:
-                loc_guess = " ".join(slug_parts[:-1]).strip()
-                if loc_guess:
-                    requested_hint = loc_guess
+        parsed = urlparse(url_input)
+        segments = [seg for seg in (parsed.path or "").split("/") if seg]
+        if len(segments) >= 2 and segments[0] == "discover":
+            slug = segments[1]
+            slug_parts = [part for part in re.split(r"[+\\s]+", slug) if part]
+        if len(slug_parts) >= 2:
+            loc_guess = " ".join(slug_parts[:-1]).strip()
+            if loc_guess and not requested_hint:
+                requested_hint = loc_guess
+        # Also include the slug-derived location as a hint so spacing/label issues don't prune everything.
+        if loc_guess:
+            loc_norm = _norm_text_(loc_guess)
+            label_norm = _norm_text_(requested_label)
+            if requested_label and loc_norm and loc_norm not in label_norm:
+                requested_label = loc_guess
+            if requested_hint and loc_guess.lower() not in requested_hint.lower():
+                requested_hint = f"{requested_hint} {loc_guess}".strip()
+            elif requested_label and loc_guess.lower() not in requested_label.lower():
+                requested_hint = loc_guess
         if requested_label or requested_hint:
             print(f"Bandcamp: applying location filter -> {requested_label or requested_hint}")
     elif normalized_mode == "search" and normalized_search_location:

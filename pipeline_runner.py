@@ -220,8 +220,13 @@ WOODPECKER_EXPORT_COLUMNS: Sequence[str] = [
 ]
 
 _AU_STATE_TOKENS = ("nsw", "vic", "qld", "wa", "sa", "tas", "act", "nt")
-_UK_TOKENS = ("uk", "u.k", "united kingdom", "england", "scotland", "wales", "northern ireland")
 _FINAL_STATUS_KEEP = {"OK", "WARN", "BLOCK"}
+_COUNTRY_ALIASES = [
+    (("united kingdom", "uk", "u.k.", "u.k", "england", "scotland", "wales", "northern ireland"), "United Kingdom"),
+    (("united states", "usa", "u.s.a", "u.s.a.", "us", "u.s.", "america"), "United States"),
+    (("australia", "aus"), "Australia"),
+    (("canada", "can."), "Canada"),
+]
 
 
 def _normalize_date_string(value: str) -> str:
@@ -237,14 +242,33 @@ def _normalize_date_string(value: str) -> str:
         return ""
 
 
-def _derive_country_from_location(location: str) -> str:
-    text_raw = str(location or "")
-    text = text_raw.lower()
-    text_compact = text.replace(".", "")
-    if any(token in text for token in _AU_STATE_TOKENS):
+def normalize_country_from_location(location_raw: str) -> str:
+    """
+    Canonicalise country names based on the Location text.
+    - Case-insensitive
+    - Splits on commas/slashes and prefers the first matching token
+    """
+    if not location_raw:
+        return ""
+
+    loc = str(location_raw or "").strip().lower()
+    if not loc:
+        return ""
+
+    tokens = [t.strip() for t in re.split(r"[,/]+", loc) if t.strip()]
+
+    for token in tokens:
+        for aliases, canonical in _COUNTRY_ALIASES:
+            if any(alias in token for alias in aliases):
+                return canonical
+
+    for aliases, canonical in _COUNTRY_ALIASES:
+        if any(alias in loc for alias in aliases):
+            return canonical
+
+    if any(token in loc for token in _AU_STATE_TOKENS):
         return "Australia"
-    if any(token in text for token in _UK_TOKENS) or any(token in text_compact for token in _UK_TOKENS):
-        return "United Kingdom"
+
     return ""
 
 
@@ -417,8 +441,9 @@ def _build_final_export_frame(df: pd.DataFrame) -> pd.DataFrame:
         status_normalized = str(row.get("_status_normalized", "") or "").strip()
         needs_review = status_normalized == "BLOCK"
 
-        location_raw = str(row.get("Location", "") or "")
-        country = _derive_country_from_location(location_raw)
+        location = str(row.get("Location", "") or "").strip()
+        existing_country = str(row.get("Country_Derived", "") or "").strip()
+        country = existing_country or normalize_country_from_location(location)
 
         email = str(row.get("Email", "") or "")
         email_all = str(row.get("Email_All", "") or "")
@@ -445,7 +470,7 @@ def _build_final_export_frame(df: pd.DataFrame) -> pd.DataFrame:
         rows.append(
             {
                 "Artist Name": str(row.get("Artist Name", "") or "").strip(),
-                "Location": location_raw,
+                "Location": location,
                 "Country_Derived": country,
                 "Song Title": str(row.get("Song Title", "") or "").strip(),
                 "Primary Genre": str(row.get("Primary Genre", "") or "").strip(),

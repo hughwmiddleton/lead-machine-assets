@@ -1359,5 +1359,81 @@
       "https://oxsener.bandcamp.com",
       "https://deweach.bandcamp.com"
     ]
+  },
+  "discover:https://bandcamp.com/discover/france+rock?s=new": {
+    "scraped_artist_urls": [
+      "https://prevot.bandcamp.com",
+      "https://franckdadure1.bandcamp.com",
+      "https://arsenek.bandcamp.com",
+      "https://movedone.bandcamp.com",
+      "https://livvv3.bandcamp.com",
+      "https://vladlabel.bandcamp.com",
+      "https://jamtrackschannel.bandcamp.com",
+      "https://kiusa.bandcamp.com",
+      "https://arnaudquevedo.bandcamp.com",
+      "https://earthmotion.bandcamp.com",
+      "https://crouxrecords.bandcamp.com",
+      "https://jefferro.bandcamp.com",
+      "https://eoda.bandcamp.com",
+      "https://semaphore68.bandcamp.com",
+      "https://cloudyheadsband.bandcamp.com",
+      "https://theunderlyingtalkers.bandcamp.com",
+      "https://romainfrisicaro.bandcamp.com",
+      "https://matpiche.bandcamp.com",
+      "https://vintagerecordsstudio.bandcamp.com",
+      "https://potionreacteur.bandcamp.com"
+    ]
+  },
+  "https://bandcamp.com/discover/france+rock?s=new": {
+    "scraped_artist_urls": [
+      "https://prevot.bandcamp.com",
+      "https://franckdadure1.bandcamp.com",
+      "https://arsenek.bandcamp.com",
+      "https://movedone.bandcamp.com",
+      "https://livvv3.bandcamp.com",
+      "https://vladlabel.bandcamp.com",
+      "https://jamtrackschannel.bandcamp.com",
+      "https://kiusa.bandcamp.com",
+      "https://arnaudquevedo.bandcamp.com",
+      "https://earthmotion.bandcamp.com",
+      "https://crouxrecords.bandcamp.com",
+      "https://jefferro.bandcamp.com",
+      "https://eoda.bandcamp.com",
+      "https://semaphore68.bandcamp.com",
+      "https://cloudyheadsband.bandcamp.com",
+      "https://theunderlyingtalkers.bandcamp.com",
+      "https://romainfrisicaro.bandcamp.com",
+      "https://matpiche.bandcamp.com",
+      "https://vintagerecordsstudio.bandcamp.com",
+      "https://potionreacteur.bandcamp.com"
+    ]
+  },
+  "discover:https://bandcamp.com/discover/australia+folk?s=new": {
+    "scraped_artist_urls": [
+      "https://judeseda.bandcamp.com",
+      "https://indiraelias.bandcamp.com",
+      "https://pinnacletricks.bandcamp.com",
+      "https://franklinsmint.bandcamp.com",
+      "https://laceling.bandcamp.com",
+      "https://siphilanthropist.bandcamp.com",
+      "https://bethandbluemusic.bandcamp.com",
+      "https://jeanelliotmusic.bandcamp.com",
+      "https://alexander-beetle.bandcamp.com",
+      "https://caramay.bandcamp.com"
+    ]
+  },
+  "https://bandcamp.com/discover/australia+folk?s=new": {
+    "scraped_artist_urls": [
+      "https://judeseda.bandcamp.com",
+      "https://indiraelias.bandcamp.com",
+      "https://pinnacletricks.bandcamp.com",
+      "https://franklinsmint.bandcamp.com",
+      "https://laceling.bandcamp.com",
+      "https://siphilanthropist.bandcamp.com",
+      "https://bethandbluemusic.bandcamp.com",
+      "https://jeanelliotmusic.bandcamp.com",
+      "https://alexander-beetle.bandcamp.com",
+      "https://caramay.bandcamp.com"
+    ]
   }
 }
