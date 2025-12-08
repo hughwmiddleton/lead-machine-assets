@@ -2906,9 +2906,39 @@ def dedupe_pre_enrich(df: pd.DataFrame) -> pd.DataFrame:
                     return normalised
         return ""
 
+    def _contact_rank(row: pd.Series) -> Tuple[int, str]:
+        """
+        Lower ranks are better. Prefers rows with an email, then rows that carry a
+        Facebook social link (so we keep the row that can produce an email during FB
+        enrichment instead of dropping it during dedupe), then other social links by
+        SOCIAL_PRIORITY order. Rows with no contact info get the worst score.
+        """
+        email = _clean_cell(row.get("Email"))
+        if email:
+            return (0, email)
+
+        social_raw = _clean_cell(row.get("Social Link"))
+        if social_raw:
+            social = _normalise_url(social_raw) or social_raw.strip().lower()
+            host = urllib.parse.urlparse(social).netloc.lower() if social else ""
+            if "facebook.com" in host or host.endswith("fb.me"):
+                return (1, social)
+            social_rank, _ = _social_sort_key(social)
+            return (2 + social_rank, social)
+
+        external_raw = _clean_cell(row.get("External Links"))
+        if external_raw:
+            external = _normalise_url(external_raw) or external_raw.strip().lower()
+            external_rank, _ = _social_sort_key(external)
+            return (20 + external_rank, external)
+
+        return (999, "")
+
     seen: Set[Tuple[str, str, str, str]] = set()
     keep_indices: List[Any] = []
-    best_contact_for_key: Dict[Tuple[str, str, str, str], Tuple[Any, bool]] = {}
+    best_contact_for_key: Dict[
+        Tuple[str, str, str, str], Tuple[Any, bool, Tuple[int, str]]
+    ] = {}
     for idx, row in df.iterrows():
         artist_key = normalise_artist_name(_clean_cell(row.get("Artist Name")))
         if not artist_key:
@@ -2921,20 +2951,29 @@ def dedupe_pre_enrich(df: pd.DataFrame) -> pd.DataFrame:
         contact = _contact_key(row)
         composite = (artist_key, track_key, source_key, contact)
         has_email = bool(_clean_cell(row.get("Email")))
+        contact_rank = _contact_rank(row)
         if composite in seen:
-            _, existing_has_email = best_contact_for_key.get(composite, (None, False))
+            _, existing_has_email, existing_rank = best_contact_for_key.get(
+                composite, (None, False, (999, ""))
+            )
             # Prefer the row that carries an email if the first kept row lacked one.
+            should_replace = False
             if has_email and not existing_has_email:
-                previous_idx, _ = best_contact_for_key[composite]
+                should_replace = True
+            elif has_email == existing_has_email and contact_rank < existing_rank:
+                should_replace = True
+
+            if should_replace:
+                previous_idx, _, _ = best_contact_for_key[composite]
                 try:
                     keep_indices.remove(previous_idx)
                 except ValueError:
                     pass
                 keep_indices.append(idx)
-                best_contact_for_key[composite] = (idx, has_email)
+                best_contact_for_key[composite] = (idx, has_email, contact_rank)
             continue
         seen.add(composite)
-        best_contact_for_key[composite] = (idx, has_email)
+        best_contact_for_key[composite] = (idx, has_email, contact_rank)
         keep_indices.append(idx)
 
     deduped_df = df.loc[keep_indices].copy()
