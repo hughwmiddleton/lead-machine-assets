@@ -876,10 +876,31 @@ class NightModeFacebookEnricher:
                     return result
             # If explicit URLs failed, fall back to search.
 
-        # If no FB URL present, do not blind-search; just record no emails.
+        # If no FB URL present, fall back to a cautious blind search (previously we skipped).
         if not fb_urls:
-            result["FB_Status"] = "unearthed_no_emails"
-            _log(self.logger, "[Night FB] Unearthed row without FB URL -> FB_Status='unearthed_no_emails' (no blind search).")
+            query = artist_name.strip()
+            if not query:
+                result["FB_Status"] = "unearthed_no_emails"
+                _log(self.logger, "[Night FB] Unearthed row without FB URL -> FB_Status='unearthed_no_emails' (empty artist).")
+                return result
+            page_url = self._search_for_page(query, location="", allow_anon=True) or ""
+            if not page_url:
+                result["FB_Status"] = "unearthed_no_candidates"
+                return result
+            try:
+                driver = self._get_unearthed_driver()
+            except Exception as exc:
+                result["FB_Status"] = "unearthed_driver_error"
+                _log(self.logger, f"[Night FB][Unearthed] Could not start public FB driver for blind search: {exc}")
+                return result
+            emails, status, resolved_url = _scrape_fb_page_unearthed_legacy(driver, page_url, logger=self.logger)
+            if emails:
+                night_result = self._build_result(emails, str(result.get("Email_All", "") or ""), resolved_url or page_url, artist_name)
+                if night_result:
+                    result = self._apply_night_fb_result(result, night_result, emails, resolved_url or page_url)
+                    result["FB_Status"] = "ok_unearthed_blind"
+                    return result
+            result["FB_Status"] = status or "unearthed_no_emails"
             return result
 
         try:
