@@ -397,12 +397,16 @@ def _is_fb_login_or_security_url(url: str) -> bool:
 def _night_fb_has_music_signals(soup: BeautifulSoup, meta: Optional[Dict[str, str]] = None) -> bool:
     if soup is None:
         return False
-    # Check aria-labels for DJ / Producer
-    aria_labels = " ".join(
-        (el.get("aria-label") or "").lower()
-        for el in soup.select("[aria-label]")
-    )
-
+    aria_values = [(el.get("aria-label") or "") for el in soup.select("[aria-label]")]
+    if facebook_enrich is not None:
+        for aria_val in aria_values:
+            try:
+                if facebook_enrich.is_musician_page(aria_val, None):
+                    return True
+            except Exception:
+                pass
+    # Check aria-labels for DJ / Producer (fallback)
+    aria_labels = " ".join(val.lower() for val in aria_values)
     if any(term in aria_labels for term in ["artist", "musician", "band", "singer", "producer", "dj"]):
         return True
 
@@ -416,6 +420,13 @@ def _night_fb_has_music_signals(soup: BeautifulSoup, meta: Optional[Dict[str, st
             val = meta.get(key)
             if val:
                 meta_bits.append(str(val))
+    if facebook_enrich is not None:
+        for meta_text in meta_bits:
+            try:
+                if facebook_enrich.is_music_like_category(meta_text):
+                    return True
+            except Exception:
+                pass
     meta_blob = " ".join(meta_bits).lower()
     if any(token in meta_blob for token in ("musician", "artist", "band", "music", "singer", "producer", "dj")):
         return True

@@ -31,6 +31,10 @@ FB_CREATOR_CATEGORY_TOKENS = (
     "page·reel creator",
 )
 
+# NOTE (2025-12-08): Music role/category detection was originally English-only
+# (e.g., "Musician/band"). We now normalise and whitelist common translations
+# so non-English aria-label/category strings are accepted. See
+# MUSICIAN_ROLE_KEYWORDS and normalize_role_text().
 # Tokens that indicate a music-related Facebook page.
 MUSIC_CATEGORY_KEYWORDS = (
     "musician",
@@ -47,6 +51,30 @@ MUSIC_CATEGORY_KEYWORDS = (
     "composer",
     "songwriter",
 )
+
+# Normalised, curated set of musician-role/category labels (accent-free).
+MUSICIAN_ROLE_KEYWORDS: set[str] = {
+    "musician",
+    "musician/band",
+    "artist",
+    "band",
+    # Spanish / Portuguese
+    "musico",
+    "musico/banda",
+    "banda",
+    # French
+    "musicien",
+    "musicien/groupe",
+    "groupe",
+    "groupe musical",
+    # Italian
+    "musicista",
+    "musicista/band",
+    "gruppo musicale",
+    "gruppo",
+}
+# 2025-12-08: Extended musician page detection to cover common non-English
+# aria labels/categories via this normalised keyword set.
 
 MUSIC_CATEGORY_BOOST = 0.8
 MUSIC_FLAG_BOOST = 0.5
@@ -359,6 +387,18 @@ FB_MUSIC_CATEGORY_TOKENS = [
     "record label",
     "musician",
     "songwriter",
+    # Common non-English musician labels (normalized)
+    "musico",
+    "musico/banda",
+    "banda",
+    "musicien",
+    "musicien/groupe",
+    "groupe",
+    "groupe musical",
+    "musicista",
+    "musicista/band",
+    "gruppo musicale",
+    "gruppo",
 ]
 
 
@@ -422,6 +462,88 @@ def _strip_accents(text: str) -> str:
     return "".join(ch for ch in normalized if not unicodedata.combining(ch))
 
 
+def normalize_role_text(raw: Optional[str]) -> str:
+    """
+    Normalise aria/category text for role detection:
+    - lowercase, accent-insensitive
+    - trim and collapse whitespace
+    - preserve separators like "/" so musician/band combos stay intact
+    """
+    if not raw:
+        return ""
+    text = str(raw).strip().lower()
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    text = " ".join(text.split())
+    return text
+
+
+def _role_keyword_hit(normalized_text: str) -> bool:
+    if not normalized_text:
+        return False
+    if normalized_text in MUSICIAN_ROLE_KEYWORDS:
+        return True
+    # Match against segments split by common separators while keeping "/" combos intact.
+    segments = [seg.strip(" -/") for seg in re.split(r"[|·]", normalized_text) if seg and seg.strip(" -/")]
+    for segment in segments:
+        if segment in MUSICIAN_ROLE_KEYWORDS:
+            return True
+        # Allow safe whole-word matches to catch things like "artist musician/band".
+        for kw in MUSICIAN_ROLE_KEYWORDS:
+            if re.search(rf"(?<!\\w){re.escape(kw)}(?!\\w)", segment):
+                return True
+    for kw in MUSICIAN_ROLE_KEYWORDS:
+        if re.search(rf"(?<!\\w){re.escape(kw)}(?!\\w)", normalized_text):
+            return True
+    return False
+
+
+def _debug_log_unknown_role(logger, aria_label: Optional[str], category_text: Optional[str]) -> None:
+    if not logger:
+        return
+    log_fn = getattr(logger, "debug", None) if hasattr(logger, "debug") else None
+    if not callable(log_fn):
+        return
+    norm_aria = normalize_role_text(aria_label or "")
+    norm_cat = normalize_role_text(category_text or "")
+    log_fn(
+        "Potential musician role missed: aria=%r norm_aria=%r category=%r norm_cat=%r",
+        aria_label,
+        norm_aria,
+        category_text,
+        norm_cat,
+    )
+
+
+def is_musician_page(
+    aria_text: Optional[str],
+    category_text: Optional[str],
+    logger=None,
+    debug_logging_enabled: bool = False,
+) -> bool:
+    """
+    Return True if aria/category text suggests a musician/artist/band page.
+    Uses a curated, normalised keyword set to avoid over-broad matches.
+    """
+    candidates = []
+    for raw in (aria_text, category_text):
+        norm = normalize_role_text(raw or "")
+        if norm:
+            candidates.append(norm)
+
+    for text in candidates:
+        if _role_keyword_hit(text):
+            return True
+
+    if debug_logging_enabled and (aria_text or category_text):
+        norm_aria = normalize_role_text(aria_text or "")
+        norm_cat = normalize_role_text(category_text or "")
+        if "music" in norm_aria or "music" in norm_cat:
+            _debug_log_unknown_role(logger, aria_text, category_text)
+
+    return False
+
+
 def normalize_fb_name(name: str) -> str:
     """
     Normalise a name for fuzzy matching:
@@ -464,6 +586,8 @@ def detect_corporate_token(url: str, name: str, category: Optional[str]) -> Tupl
 def _looks_music_related(name: str, category: str, url: str = "") -> bool:
     text = f"{name} {category} {url}".lower()
     if any(tok in text for tok in MUSIC_CATEGORY_KEYWORDS):
+        return True
+    if _role_keyword_hit(normalize_role_text(category)):
         return True
     if any(suffix in text for suffix in MUSIC_NAME_SUFFIXES):
         return True
@@ -528,7 +652,15 @@ def is_music_page(name_lc: str, url_lc: str, category_lc: str) -> bool:
     """
     Return True if any MUSIC_TOKENS appear in name/url/category.
     """
-    for blob in (name_lc, url_lc, category_lc):
+    if is_musician_page(None, category_lc):
+        return True
+
+    normalized_blobs = (
+        normalize_role_text(name_lc),
+        normalize_role_text(url_lc),
+        normalize_role_text(category_lc),
+    )
+    for blob in normalized_blobs:
         for token in MUSIC_TOKENS:
             if token in blob:
                 return True
@@ -555,8 +687,10 @@ def compute_category_boost(category: Optional[str]) -> float:
     """
     if not category:
         return 0.0
-    c = category.lower()
+    c = normalize_role_text(category)
     score = 0.0
+    if _role_keyword_hit(c):
+        score += 1.0
     for kw in MUSIC_CATEGORY_KEYWORDS:
         if kw in c:
             score += 1.0
@@ -817,11 +951,16 @@ def is_junk_facebook_candidate(candidate: FbCandidate) -> bool:
     return False
 
 
-def is_music_like_category(category: str) -> bool:
+def is_music_like_category(category: str, logger=None, debug_logging_enabled: bool = False) -> bool:
     if not category:
         return False
-    cl = category.strip().lower()
-    return any(k in cl for k in MUSIC_CATEGORY_KEYWORDS)
+    cl = normalize_role_text(category)
+    if _role_keyword_hit(cl):
+        return True
+    match = any(k in cl for k in MUSIC_CATEGORY_KEYWORDS)
+    if debug_logging_enabled and not match and ("music" in cl):
+        _debug_log_unknown_role(logger, None, category)
+    return match
 
 
 def select_best_facebook_candidate(
@@ -854,7 +993,7 @@ def select_best_facebook_candidate(
             continue
         final_score, base_score, cat_boost = scored
         music_bonus = 0.0
-        if is_music_like_category(getattr(cand, "category", "")):
+        if is_music_like_category(getattr(cand, "category", ""), logger=logger, debug_logging_enabled=True):
             music_bonus += MUSIC_CATEGORY_BOOST
         if getattr(cand, "is_music_page", False):
             music_bonus += MUSIC_FLAG_BOOST

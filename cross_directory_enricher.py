@@ -43,6 +43,8 @@ from facebook_enrich import (
     MUSIC_CATEGORY_KEYWORDS,
     FB_MUSIC_CATEGORY_TOKENS,
     MUSIC_TOKENS,
+    is_music_like_category,
+    normalize_role_text,
     normalize_fb_name,
     score_fb_candidate,
     is_music_page,
@@ -1477,10 +1479,7 @@ class FacebookSearchClient:
         ]
 
         def _has_music_category(category: str | None) -> bool:
-            if not category:
-                return False
-            cat = category.lower()
-            return any(tok in cat for tok in music_category_tokens)
+            return is_music_like_category(category or "", logger=self.logger, debug_logging_enabled=True)
 
         def _has_press_token(name: str, url: str, category: str | None) -> bool:
             text = f"{name} {url} {category or ''}".lower()
@@ -1781,7 +1780,10 @@ class FacebookSearchClient:
                 )
                 confirmed_logged = True
             has_reliable_category = any(
-                (cat and any(tok in (cat or "").lower() for tok in FB_MUSIC_CATEGORY_TOKENS))
+                (
+                    cat
+                    and any(tok in normalize_role_text(cat) for tok in FB_MUSIC_CATEGORY_TOKENS)
+                )
                 for cat in (page_category_text, best_candidate.category)
             )
             page_music = _is_music_page_final(
@@ -1794,9 +1796,9 @@ class FacebookSearchClient:
             )
             if not page_music:
                 page_music = sig_page.has_artist or is_music_page(
-                    (best_candidate.name or "").lower(),
-                    (best_candidate.url or "").lower(),
-                    (page_category_text or "").lower(),
+                    best_candidate.name or "",
+                    best_candidate.url or "",
+                    page_category_text or "",
                 )
             if not page_music and not has_reliable_category and not category_non_music:
                 if looks_like_music_fallback(page_text_blocks, artist_name):
