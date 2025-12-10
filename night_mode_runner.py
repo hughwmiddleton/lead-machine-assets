@@ -391,8 +391,16 @@ def run_night_mode(
     export_profile = (export_profile_override or config.get("export_profile") or "full_dump").strip().lower()
     if export_profile not in {"studio_safe", "studio_plus", "unearthed_social", "full_dump"}:
         export_profile = "full_dump"
-    master_enrich_cfg = config.get("master_enrichment", {})
+    master_enrich_cfg = config.get("master_enrichment", {}) or {}
     master_enrichment_enabled = master_enrich_cfg.get("enabled", True)
+    master_live_search_enabled = master_enrich_cfg.get("enable_live_search", True)
+    master_max_live_searches_raw = master_enrich_cfg.get("max_live_searches")
+    try:
+        master_max_live_searches = int(master_max_live_searches_raw) if master_max_live_searches_raw is not None else None
+    except Exception:
+        master_max_live_searches = None
+    if master_max_live_searches is not None and master_max_live_searches < 0:
+        master_max_live_searches = 0
 
     fb_cfg = config.get("facebook", {}) or {}
     fb_auto_resume = fb_cfg.get("auto_resume_after_captcha", False) if fb_auto_resume_override is None else bool(fb_auto_resume_override)
@@ -439,7 +447,13 @@ def run_night_mode(
             master_raw = _merge_raw_master(run_dir, job_states, logger)
             if master_raw and os.path.exists(master_raw):
                 master_enriched = os.path.join(run_dir, "master_enriched.csv")
-                master_enriched = run_master_enrichment(master_raw, master_enriched, logger=logger.info)
+                master_enriched = run_master_enrichment(
+                    master_raw,
+                    master_enriched,
+                    logger=logger.info,
+                    enable_live_search=master_live_search_enabled,
+                    max_live_searches=master_max_live_searches,
+                )
                 master_pre_fb = os.path.join(run_dir, "master_pre_fb.csv")
                 master_pre_fb = run_enrichment(master_enriched, master_pre_fb, logger=logger.info, night_mode=True)
         else:

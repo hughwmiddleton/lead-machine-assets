@@ -603,7 +603,13 @@ def write_final_and_woodpecker_exports(
     )
 
 
-def run_master_enrichment(seed_csv_path: str, output_csv_path: str, logger: LoggerFn = None) -> str:
+def run_master_enrichment(
+    seed_csv_path: str,
+    output_csv_path: str,
+    logger: LoggerFn = None,
+    enable_live_search: bool = True,
+    max_live_searches: Optional[int] = None,
+) -> str:
     """
     Run the cross-directory enricher on a single combined CSV.
 
@@ -618,6 +624,15 @@ def run_master_enrichment(seed_csv_path: str, output_csv_path: str, logger: Logg
         return output_csv_path
 
     try:
+        max_live = getattr(cross_directory_enricher, "LIVE_SEARCH_MAX_ATTEMPTS", 50)
+        if max_live_searches is not None:
+            try:
+                max_live = int(max_live_searches)
+            except Exception:
+                max_live = getattr(cross_directory_enricher, "LIVE_SEARCH_MAX_ATTEMPTS", 50)
+            if max_live < 0:
+                max_live = 0
+
         cross_directory_enricher.run_cross_directory_enrichment(
             seed_csv_path,
             output_csv_path,
@@ -625,8 +640,8 @@ def run_master_enrichment(seed_csv_path: str, output_csv_path: str, logger: Logg
             soundcloud_csv_path="",
             unearthed_csv_path="",
             lastfm_csv_path="",
-            enable_live_search=True,
-            max_live_searches=getattr(cross_directory_enricher, "LIVE_SEARCH_MAX_ATTEMPTS", 50),
+            enable_live_search=enable_live_search,
+            max_live_searches=max_live,
             logger=logger,
         )
     except Exception as exc:

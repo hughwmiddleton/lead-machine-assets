@@ -26,4 +26,4 @@ export SPOTIFY_REFRESH_TOKEN="AQB1vtP347IrhWrFAScJ_TwBSK0ZTiEdAbhxrmGf82vqmZIANM
 # pip install pandas tqdm selenium beautifulsoup4 webdriver_manager PyQt5
 
 # Run the Lead Machine program from the updated source directory.
-python "Lead Machine (Final Update 5).py"
+python3 "Lead Machine (Final Update 5).py"

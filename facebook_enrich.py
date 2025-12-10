@@ -34,7 +34,7 @@ FB_CREATOR_CATEGORY_TOKENS = (
 # NOTE (2025-12-08): Music role/category detection was originally English-only
 # (e.g., "Musician/band"). We now normalise and whitelist common translations
 # so non-English aria-label/category strings are accepted. See
-# MUSICIAN_ROLE_KEYWORDS and normalize_role_text().
+# MUSICIAN_ROLE_KEYWORDS and normalize_role_text()/normalise_role_text().
 # Tokens that indicate a music-related Facebook page.
 MUSIC_CATEGORY_KEYWORDS = (
     "musician",
@@ -54,26 +54,173 @@ MUSIC_CATEGORY_KEYWORDS = (
 
 # Normalised, curated set of musician-role/category labels (accent-free).
 MUSICIAN_ROLE_KEYWORDS: set[str] = {
+    # English
     "musician",
     "musician/band",
     "artist",
     "band",
-    # Spanish / Portuguese
+    "music artist",
+    "music band",
+    "music group",
+    "singer",
+    "singer-songwriter",
+    "singer / songwriter",
+    "rapper",
+    "vocalist",
+    "songwriter",
+    "music producer",
+    "producer",
+    "dj",
+    "disc jockey",
+    "recording artist",
+    "recording musician",
+    "composer",
+    "performer",
+
+    # Spanish (accent-stripped) / Portuguese
     "musico",
     "musico/banda",
     "banda",
+    "artista",
+    "artista musical",
+    "cantante",
+    "cantautor",
+    "cantautora",
+    "rapero",
+    "rapera",
+    "productor musical",
+    "grupo musical",
+    "cantor",
+    "cantora",
+    "cantor-compositor",
+
     # French
     "musicien",
+    "musicienne",
     "musicien/groupe",
     "groupe",
     "groupe musical",
+    "artiste",
+    "artiste musical",
+    "chanteur",
+    "chanteuse",
+    "auteur-compositeur",
+    "rappeur",
+    "producteur musical",
+
+    # German
+    "musiker",
+    "musikerin",
+    "kunstler",
+    "kunstlerin",
+    "sanger",
+    "sangerin",
+    "musikproduzent",
+    "musikgruppe",
+
     # Italian
     "musicista",
     "musicista/band",
     "gruppo musicale",
     "gruppo",
+    "cantante",
+    "cantautore",
+    "cantautrice",
+    "produttore musicale",
+
+    # Dutch
+    "muzikant",
+    "muzikante",
+    "artiest",
+    "zanger",
+    "zangeres",
+    "muziekproducent",
+    "muziekgroep",
+
+    # Polish
+    "muzyk",
+    "artysta",
+    "artystka",
+    "wokalista",
+    "wokalistka",
+    "piosenkarz",
+    "piosenkarka",
+    "zespol",
+    "zespol muzyczny",
+    "producent muzyczny",
+
+    # Scandinavian (Swedish/Norwegian/Danish)
+    "musiker",
+    "sanger",
+    "sangerinde",
+    "sangerinne",
+    "musikproducent",
+    "musikgruppe",
+    "musikband",
+
+    # Turkish (accent-stripped)
+    "muzisyen",
+    "sarkici",
+    "sanatci",
+    "muzik grubu",
+    "rapci",
+
+    # Russian / Slavic (kept in native form)
+    "музыкант",
+    "музыканты",
+    "артист",
+    "певец",
+    "певица",
+    "группа",
+    "музыкальная группа",
+    "рэпер",
+    "вокалист",
+    "музыкальный продюсер",
+
+    # Chinese (romanised)
+    "yinyueren",
+    "geshou",
+    "yuedui",
+    "zuhe",
+    "shuochang geshou",
+    "zhizuoren",
+
+    # Japanese (romanised)
+    "myuujishan",
+    "aatisuto",
+    "bando",
+    "kashu",
+    "vokalisto",
+
+    # Korean (romanised)
+    "myujisyeon",
+    "atisuteu",
+    "baendeu",
+    "gasu",
+    "bokeolliseuteu",
+
+    # Hindi / Hinglish
+    "sangeetkar",
+    "gayak",
+    "gayika",
+    "kalakaar",
+    "raepper",
+
+    # Indonesian / Malay
+    "musisi",
+    "pemuzik",
+    "penyanyi",
+    "penyanyi-penulis lagu",
+    "kumpulan muzik",
+    "produser musik",
+
+    # Tagalog
+    "musikero",
+    "musikera",
+    "mang-aawit",
+    "bokalis",
 }
-# 2025-12-08: Extended musician page detection to cover common non-English
+# 2025-12-08: Extended musician page detection to cover common multilingual
 # aria labels/categories via this normalised keyword set.
 
 MUSIC_CATEGORY_BOOST = 0.8
@@ -478,6 +625,11 @@ def normalize_role_text(raw: Optional[str]) -> str:
     return text
 
 
+# British spelling alias for callers that expect normalise_* naming.
+def normalise_role_text(raw: Optional[str]) -> str:
+    return normalize_role_text(raw)
+
+
 def _role_keyword_hit(normalized_text: str) -> bool:
     if not normalized_text:
         return False
@@ -494,6 +646,27 @@ def _role_keyword_hit(normalized_text: str) -> bool:
                 return True
     for kw in MUSICIAN_ROLE_KEYWORDS:
         if re.search(rf"(?<!\\w){re.escape(kw)}(?!\\w)", normalized_text):
+            return True
+    return False
+
+
+def is_musician_page_from_roles(*raw_role_texts: Optional[str]) -> bool:
+    """
+    Return True if any supplied role/category strings suggest a musician/artist/band.
+    Accepts multiple hints (aria-label, category text, etc.).
+    """
+    normalised: list[str] = [normalize_role_text(text) for text in raw_role_texts if text]
+    if not normalised:
+        return False
+
+    # Exact match first.
+    for text in normalised:
+        if text in MUSICIAN_ROLE_KEYWORDS:
+            return True
+
+    # Controlled substring match.
+    for text in normalised:
+        if _role_keyword_hit(text):
             return True
     return False
 
@@ -525,15 +698,10 @@ def is_musician_page(
     Return True if aria/category text suggests a musician/artist/band page.
     Uses a curated, normalised keyword set to avoid over-broad matches.
     """
-    candidates = []
-    for raw in (aria_text, category_text):
-        norm = normalize_role_text(raw or "")
-        if norm:
-            candidates.append(norm)
+    if is_musician_page_from_roles(aria_text, category_text):
+        return True
 
-    for text in candidates:
-        if _role_keyword_hit(text):
-            return True
+    candidates = [normalize_role_text(raw or "") for raw in (aria_text, category_text) if raw]
 
     if debug_logging_enabled and (aria_text or category_text):
         norm_aria = normalize_role_text(aria_text or "")

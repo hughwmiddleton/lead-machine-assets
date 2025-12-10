@@ -58,7 +58,7 @@ class NightModeRunnerDummyTest(unittest.TestCase):
             df.to_csv(enriched_output_path, index=False)
             return enriched_output_path
 
-        def fake_run_master_enrichment(input_csv, output_csv, logger=None):
+        def fake_run_master_enrichment(input_csv, output_csv, logger=None, enable_live_search=True, max_live_searches=None):
             df = pd.read_csv(input_csv)
             df["master_enriched"] = True
             df.to_csv(output_csv, index=False)

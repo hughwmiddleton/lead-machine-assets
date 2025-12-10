@@ -9254,11 +9254,29 @@ class NightModeTab(QtWidgets.QWidget):
 
         # Master enrichment toggle
         master_enrich_layout = QtWidgets.QHBoxLayout()
+        default_live_max = getattr(cross_directory_enricher, "LIVE_SEARCH_MAX_ATTEMPTS", 50) if cross_directory_enricher else 50
         self.master_enrich_checkbox = QtWidgets.QCheckBox("Use master cross-directory enrichment (recommended)")
         self.master_enrich_checkbox.setChecked(True)
         master_enrich_layout.addWidget(self.master_enrich_checkbox)
         master_enrich_layout.addStretch()
         layout.addLayout(master_enrich_layout)
+
+        # Master enrichment live search controls
+        master_live_layout = QtWidgets.QHBoxLayout()
+        self.master_live_checkbox = QtWidgets.QCheckBox("Enable live directory search during master enrich")
+        self.master_live_checkbox.setChecked(True)
+        master_live_label = QtWidgets.QLabel("Max live searches (0 = unlimited):")
+        self.master_live_spin = QtWidgets.QSpinBox()
+        self.master_live_spin.setRange(0, 10000)
+        self.master_live_spin.setValue(default_live_max)
+        master_live_layout.addWidget(self.master_live_checkbox)
+        master_live_layout.addSpacing(10)
+        master_live_layout.addWidget(master_live_label)
+        master_live_layout.addWidget(self.master_live_spin)
+        master_live_layout.addStretch()
+        layout.addLayout(master_live_layout)
+        self.master_enrich_checkbox.stateChanged.connect(self._toggle_master_live_controls)
+        self.master_live_checkbox.stateChanged.connect(self._toggle_master_live_controls)
 
         # Run root
         run_root_layout = QtWidgets.QHBoxLayout()
@@ -9294,6 +9312,7 @@ class NightModeTab(QtWidgets.QWidget):
         layout.addWidget(self.log_console)
 
         self.setLayout(layout)
+        self._toggle_master_live_controls()
         self._load_config_summary()
 
     def _update_jobs_summary_from_jobs(self):
@@ -9442,6 +9461,12 @@ class NightModeTab(QtWidgets.QWidget):
             pass
         master_enrich_cfg = config.get("master_enrichment", {}) or {}
         self.master_enrich_checkbox.setChecked(bool(master_enrich_cfg.get("enabled", True)))
+        self.master_live_checkbox.setChecked(bool(master_enrich_cfg.get("enable_live_search", True)))
+        try:
+            self.master_live_spin.setValue(int(master_enrich_cfg.get("max_live_searches", self.master_live_spin.value())))
+        except Exception:
+            pass
+        self._toggle_master_live_controls()
         jobs = config.get("jobs", [])
         if isinstance(jobs, list):
             self.jobs = jobs
@@ -9465,7 +9490,11 @@ class NightModeTab(QtWidgets.QWidget):
                 "max_auto_resume_attempts": int(self.fb_max_attempts_spin.value()),
                 "max_rows_per_run": int(self.fb_max_rows_spin.value()),
             }
-            config["master_enrichment"] = {"enabled": self.master_enrich_checkbox.isChecked()}
+            config["master_enrichment"] = {
+                "enabled": self.master_enrich_checkbox.isChecked(),
+                "enable_live_search": self.master_live_checkbox.isChecked(),
+                "max_live_searches": int(self.master_live_spin.value()),
+            }
             try:
                 temp_dir = tempfile.mkdtemp(prefix="nightmode_")
                 config_path_to_use = os.path.join(temp_dir, "overnight_jobs_gui.json")
@@ -9528,12 +9557,11 @@ class NightModeTab(QtWidgets.QWidget):
         self.start_button.setEnabled(True)
         self.stop_button.setEnabled(False)
         self.worker = None
-        if exit_code != 0:
-            QtWidgets.QMessageBox.warning(
-                self,
-                "Night Mode",
-                "Night Mode finished with errors. Check the log for details.",
-            )
+
+    def _toggle_master_live_controls(self):
+        enabled = self.master_enrich_checkbox.isChecked()
+        self.master_live_checkbox.setEnabled(enabled)
+        self.master_live_spin.setEnabled(enabled and self.master_live_checkbox.isChecked())
 
     def _append_log(self, message: str):
         self.log_console.appendPlainText(message)
