@@ -7,6 +7,7 @@ Usage:
     python night_mode_runner.py --config overnight_jobs.json
     python night_mode_runner.py --config overnight_jobs.json --resume
     python night_mode_runner.py --config overnight_jobs.json --export-mode both
+    python night_mode_runner.py --config overnight_jobs.json --with-sc-meta
 """
 
 from __future__ import annotations
@@ -32,6 +33,7 @@ from pipeline_runner import (
     run_facebook_global_pass_nightmode,
     run_master_enrichment,
 )
+from soundcloud_metadata_enricher import enrich_soundcloud_metadata
 
 DEFAULT_EXPORT_MODE = "both"
 MAX_CONSECUTIVE_ERRORS = 10
@@ -302,8 +304,10 @@ def _process_job(
     resume: bool,
     stop_on_failure: bool,
     per_job_validate: bool = True,
+    with_sc_meta: bool = False,
 ) -> Dict[str, Any]:
     job_id = job.get("job_id") or f"job_{len(job)}"
+    directory = (job.get("directory") or "").strip().lower()
     job_dir = os.path.join(run_dir, job_id)
     os.makedirs(job_dir, exist_ok=True)
     log_path = os.path.join(job_dir, LOG_FILENAME)
@@ -338,6 +342,28 @@ def _process_job(
         state["current_row_index"] = max(_count_rows(state["raw_csv"]) - 1, 0)
         state["valid_leads_so_far"] = state.get("valid_leads_so_far", 0) + state["current_row_index"]
         _write_json(state_path, state)
+
+        if with_sc_meta and directory == "soundcloud":
+            sc_raw_path = state.get("raw_csv")
+            if sc_raw_path and os.path.isfile(sc_raw_path):
+                logger.info("[SoundCloud] Running metadata enricher for %s", sc_raw_path)
+                try:
+                    enriched_path = enrich_soundcloud_metadata(
+                        input_csv=sc_raw_path,
+                        output_csv=None,
+                        max_rows=None,
+                        skip_existing=True,
+                        sleep_seconds=1.5,
+                    )
+                    state["raw_csv"] = enriched_path
+                    state["current_row_index"] = max(_count_rows(enriched_path) - 1, 0)
+                    state["valid_leads_so_far"] = state["current_row_index"]
+                    _write_json(state_path, state)
+                    logger.info("[SoundCloud] Metadata enrichment complete: %s", enriched_path)
+                except Exception as exc:
+                    logger.warning("[SoundCloud] Metadata enrichment failed safely for %s: %s", sc_raw_path, exc)
+            else:
+                logger.info("[SoundCloud] Metadata enrichment skipped; CSV not found at %s", sc_raw_path)
 
         max_hours = job.get("max_hours")
         if max_hours and (time.time() - start_time) > float(max_hours) * 3600:
@@ -383,6 +409,7 @@ def run_night_mode(
     fb_cooldown_override: Optional[int] = None,
     fb_max_attempts_override: Optional[int] = None,
     fb_max_rows_override: Optional[int] = None,
+    with_sc_meta: bool = False,
 ) -> Dict[str, Any]:
     config = _load_json(config_path)
     export_mode = (export_mode_override or config.get("export_mode") or DEFAULT_EXPORT_MODE).strip().lower()
@@ -431,6 +458,7 @@ def run_night_mode(
             resume=resume,
             stop_on_failure=stop_on_failure,
             per_job_validate=not master_enrichment_enabled,
+            with_sc_meta=with_sc_meta,
         )
         job_states.append(result_state)
         if stop_on_failure and result_state.get("status") in {"failed"}:
@@ -572,6 +600,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default="overnight_runs",
         help="Root directory for overnight run outputs (defaults to ./overnight_runs)",
     )
+    parser.add_argument(
+        "--with-sc-meta",
+        action="store_true",
+        help=(
+            "After scraping SoundCloud, run the SoundCloud metadata enricher to fill missing Primary Genre / Release Date fields."
+        ),
+    )
     parser.add_argument("--fb-auto-resume", action="store_true", help="Automatically resume FB pass after captcha once configured")
     parser.add_argument("--fb-cooldown-seconds", type=int, help="Cooldown in seconds before auto-resume after captcha")
     parser.add_argument(
@@ -597,6 +632,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         fb_cooldown_override=args.fb_cooldown_seconds,
         fb_max_attempts_override=args.fb_max_auto_resume_attempts,
         fb_max_rows_override=args.fb_max_rows_per_run,
+        with_sc_meta=args.with_sc_meta,
     )
     print(json.dumps(result, indent=2))
 

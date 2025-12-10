@@ -138,6 +138,7 @@ from dateutil.relativedelta import relativedelta
 import unicodedata
 from spotify_scraper import scrape_spotify
 from origin_validator import _derive_origin_output_path, run_auto_validate
+from soundcloud_metadata_enricher import enrich_soundcloud_metadata
 import pipeline_runner
 
 cross_directory_enricher = None
@@ -9278,6 +9279,13 @@ class NightModeTab(QtWidgets.QWidget):
         self.master_enrich_checkbox.stateChanged.connect(self._toggle_master_live_controls)
         self.master_live_checkbox.stateChanged.connect(self._toggle_master_live_controls)
 
+        sc_meta_layout = QtWidgets.QHBoxLayout()
+        self.sc_meta_checkbox = QtWidgets.QCheckBox("Run SoundCloud metadata enricher (fills missing genre/date)")
+        self.sc_meta_checkbox.setChecked(False)
+        sc_meta_layout.addWidget(self.sc_meta_checkbox)
+        sc_meta_layout.addStretch()
+        layout.addLayout(sc_meta_layout)
+
         # Run root
         run_root_layout = QtWidgets.QHBoxLayout()
         run_root_label = QtWidgets.QLabel("Run root (optional):")
@@ -9400,6 +9408,7 @@ class NightModeTab(QtWidgets.QWidget):
             "max_rows_per_run": int(self.fb_max_rows_spin.value()),
         }
         config["master_enrichment"] = {"enabled": self.master_enrich_checkbox.isChecked()}
+        config["soundcloud_meta_enricher"] = {"enabled": self.sc_meta_checkbox.isChecked()}
         try:
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(config, f, indent=2)
@@ -9467,6 +9476,8 @@ class NightModeTab(QtWidgets.QWidget):
         except Exception:
             pass
         self._toggle_master_live_controls()
+        sc_meta_cfg = config.get("soundcloud_meta_enricher", {}) or {}
+        self.sc_meta_checkbox.setChecked(bool(sc_meta_cfg.get("enabled", False)))
         jobs = config.get("jobs", [])
         if isinstance(jobs, list):
             self.jobs = jobs
@@ -9495,6 +9506,7 @@ class NightModeTab(QtWidgets.QWidget):
                 "enable_live_search": self.master_live_checkbox.isChecked(),
                 "max_live_searches": int(self.master_live_spin.value()),
             }
+            config["soundcloud_meta_enricher"] = {"enabled": self.sc_meta_checkbox.isChecked()}
             try:
                 temp_dir = tempfile.mkdtemp(prefix="nightmode_")
                 config_path_to_use = os.path.join(temp_dir, "overnight_jobs_gui.json")
@@ -9527,6 +9539,8 @@ class NightModeTab(QtWidgets.QWidget):
         cmd.extend(["--fb-cooldown-seconds", str(int(self.fb_cooldown_spin.value()))])
         cmd.extend(["--fb-max-auto-resume-attempts", str(int(self.fb_max_attempts_spin.value()))])
         cmd.extend(["--fb-max-rows-per-run", str(int(self.fb_max_rows_spin.value()))])
+        if self.sc_meta_checkbox.isChecked():
+            cmd.append("--with-sc-meta")
 
         self.log_console.clear()
         self.status_label.setText("Status: running")
@@ -9675,6 +9689,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.artist_thread = None
         self.fb_thread = None
         self.fb_av_worker = None
+        self.current_artist_source = ""
         self.create_menu()
         self.tabs = QtWidgets.QTabWidget()
         self.setCentralWidget(self.tabs)
@@ -9746,6 +9761,10 @@ class MainWindow(QtWidgets.QMainWindow):
         max_artists_layout.addWidget(max_artists_label)
         max_artists_layout.addWidget(self.max_artists_edit)
         layout.addLayout(max_artists_layout)
+        self.sc_meta_checkbox = QtWidgets.QCheckBox("Run SoundCloud metadata enricher (fill missing genre/date)")
+        self.sc_meta_checkbox.setChecked(False)
+        self.sc_meta_checkbox.setVisible(False)
+        layout.addWidget(self.sc_meta_checkbox)
         artist_output_layout = QtWidgets.QHBoxLayout()
         artist_output_label = QtWidgets.QLabel("Output CSV:")
         self.artist_output_csv_edit = QtWidgets.QLineEdit("artist_social_links.csv")
@@ -9774,6 +9793,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if not current or current in (UNEARTHED_DEFAULT_URL, SOUNDCLOUD_DEFAULT_TAG_URL):
                 self.url_edit.setText(BANDCAMP_DEFAULT_TAG_URL)
             self.pages_per_tag_edit.setEnabled(True)
+            self.sc_meta_checkbox.setVisible(False)
         elif source_text == "SoundCloud":
             self.url_label.setText("Website URL:")
             self.url_edit.setPlaceholderText(SOUNDCLOUD_DEFAULT_TAG_URL)
@@ -9781,6 +9801,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if not current or current in (UNEARTHED_DEFAULT_URL, BANDCAMP_DEFAULT_TAG_URL):
                 self.url_edit.setText(SOUNDCLOUD_DEFAULT_TAG_URL)
             self.pages_per_tag_edit.setEnabled(True)
+            self.sc_meta_checkbox.setVisible(True)
         elif source_text == "Last.fm Similar":
             self.url_label.setText("Seed Artists:")
             self.url_edit.setPlaceholderText("Seed artist names, comma separated (e.g. Hope D, Jaguar Jonze)")
@@ -9788,6 +9809,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if not current or current in (UNEARTHED_DEFAULT_URL, BANDCAMP_DEFAULT_TAG_URL, SOUNDCLOUD_DEFAULT_TAG_URL):
                 self.url_edit.clear()
             self.pages_per_tag_edit.setEnabled(False)
+            self.sc_meta_checkbox.setVisible(False)
         else:
             self.url_label.setText("Website URL:")
             self.url_edit.setPlaceholderText(UNEARTHED_DEFAULT_URL)
@@ -9795,6 +9817,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if not current or current in (BANDCAMP_DEFAULT_TAG_URL, SOUNDCLOUD_DEFAULT_TAG_URL):
                 self.url_edit.setText(UNEARTHED_DEFAULT_URL)
             self.pages_per_tag_edit.setEnabled(False)
+            self.sc_meta_checkbox.setVisible(False)
     def create_facebook_tab(self):
         layout = QtWidgets.QVBoxLayout()
         input_layout = QtWidgets.QHBoxLayout()
@@ -9969,6 +9992,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.artist_start_button.setEnabled(False)
         self.artist_progress_bar.setVisible(True)
         self.artist_log.append("Initiating artist scraping...")
+        self.current_artist_source = source
         self.artist_thread = ArtistScraperThread(
             url,
             max_artists,
@@ -9995,6 +10019,24 @@ class MainWindow(QtWidgets.QMainWindow):
                 thread.wait()
             except Exception:
                 pass
+        if (self.current_artist_source or "").lower() == "soundcloud" and self.sc_meta_checkbox.isChecked():
+            sc_raw = self.artist_output_csv_edit.text().strip()
+            if sc_raw and os.path.isfile(sc_raw):
+                try:
+                    self.artist_log.append(f"[SoundCloud] Running metadata enricher for {sc_raw} ...")
+                    enriched_path = enrich_soundcloud_metadata(
+                        input_csv=sc_raw,
+                        output_csv=None,
+                        max_rows=None,
+                        skip_existing=True,
+                        sleep_seconds=1.5,
+                    )
+                    self.artist_log.append(f"[SoundCloud] Metadata enrichment complete: {enriched_path}")
+                    self.artist_output_csv_edit.setText(enriched_path)
+                except Exception as exc:
+                    self.artist_log.append(f"[SoundCloud] Metadata enrichment failed safely: {exc}")
+            else:
+                self.artist_log.append(f"[SoundCloud] Metadata enrichment skipped: raw CSV not found at {sc_raw}")
         self.artist_thread = None
     def start_facebook_scraping(self):
         input_csv = self.input_csv_edit.text().strip()
