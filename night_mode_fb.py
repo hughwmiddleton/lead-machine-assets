@@ -10,12 +10,13 @@ import time
 import urllib.parse
 import shutil
 from pathlib import Path
+from datetime import datetime
 import atexit
 import weakref
 from dataclasses import dataclass
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup as BS
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options as ChromeOptions
 from selenium.webdriver.chrome.service import Service as ChromeService
@@ -196,6 +197,39 @@ def _shutdown_all_drivers() -> None:
 atexit.register(_shutdown_all_drivers)
 
 
+def _capture_fb_debug(driver, label: str, logger: LoggerFn = None):
+    """
+    Save a screenshot + HTML + snippet for diagnostics.
+    """
+    if driver is None:
+        return
+    ts = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+    base = Path(__file__).with_name("fb_debug")
+    base.mkdir(exist_ok=True)
+    screenshot_path = base / f"{label}-{ts}.png"
+    html_path = base / f"{label}-{ts}.html"
+    try:
+        driver.save_screenshot(str(screenshot_path))
+    except Exception:
+        pass
+    try:
+        html_path.write_text(driver.page_source or "", encoding="utf-8", errors="ignore")
+    except Exception:
+        pass
+    try:
+        url = getattr(driver, "current_url", "")
+        title = getattr(driver, "title", "")
+        body_snip = ""
+        try:
+            soup = BS(driver.page_source or "", "html.parser")
+            body_snip = (soup.get_text(" ", strip=True) or "")[:300]
+        except Exception:
+            pass
+        _log(logger, f"[Night FB] Debug snapshot '{label}' url={url} title={title} body_snip={body_snip}")
+    except Exception:
+        pass
+
+
 def _start_chromedriver_with_retry(chrome_options):
     """
     Start ChromeDriver with a one-time reinstall if the first launch fails.
@@ -244,7 +278,7 @@ def _extract_emails_from_html(html: str) -> List[str]:
     emails: List[str] = []
     if not html:
         return emails
-    soup = BeautifulSoup(html, "html.parser")
+    soup = BS(html, "html.parser")
     for anchor in soup.select('a[href^="mailto:"]'):
         href = anchor.get("href") or ""
         addr = href.split("mailto:", 1)[-1].split("?", 1)[0]
@@ -323,7 +357,7 @@ def _scrape_fb_page_unearthed_legacy(driver, fb_url: str, logger: LoggerFn = Non
         resolved_url = _normalise_fb_url(getattr(driver, "current_url", "") or url)
         if _is_fb_login_or_security_url(resolved_url):
             return [], "login_redirect", resolved_url or url
-        soup = BeautifulSoup(driver.page_source, "html.parser")
+        soup = BS(driver.page_source, "html.parser")
         raw_emails: List[str] = []
         for span in soup.find_all("span", class_=re.compile(".*x193iq5w.*")):
             txt = span.get_text(strip=True)
@@ -380,7 +414,7 @@ def _is_fb_login_or_security_url(url: str) -> bool:
     if not url:
         return False
     url_lower = (url or "").lower()
-    if any(tok in url_lower for tok in ("/r.php", "/login", "/register")):
+    if any(tok in url_lower for tok in ("/r.php", "/login", "/register", "/consent", "/privacy", "/policy", "/recover", "/security", "/checkpoint")):
         return True
     try:
         parsed = urllib.parse.urlparse(url)
@@ -438,7 +472,7 @@ def _night_fb_has_music_signals(soup: BeautifulSoup, meta: Optional[Dict[str, st
 def _parse_search_candidates(html: str) -> List["facebook_enrich.FbCandidate"]:
     if facebook_enrich is None or not html:
         return []
-    soup = BeautifulSoup(html, "html.parser")
+    soup = BS(html, "html.parser")
     anchors = soup.select("a[href]") if soup else []
     candidates: List[facebook_enrich.FbCandidate] = []
     for anchor in anchors:
@@ -641,7 +675,7 @@ class NightModeFacebookEnricher:
         if not session:
             return None, None
         self._ensure_driver_alive(session)
-        def _navigate_once() -> Tuple[Optional[str], Optional[str]]:
+        def _navigate_once() -> Tuple[Optional[str], Optional[str], Optional[object]]:
             driver = session.navigate(url)
             goto_about = getattr(self.legacy, "_goto_facebook_about", None)
             if callable(goto_about):
@@ -651,18 +685,19 @@ class NightModeFacebookEnricher:
                     pass
             time.sleep(1.0)
             current_url = getattr(driver, "current_url", None) or url
-            return driver.page_source, current_url
+            return driver.page_source, current_url, driver
 
         html: Optional[str] = None
         current_url: Optional[str] = None
+        nav_driver: Optional[object] = None
 
         try:
-            html, current_url = _navigate_once()
+            html, current_url, nav_driver = _navigate_once()
         except Exception as exc:  # pragma: no cover - defensive
             _log(self.logger, f"[Night FB] Fetch failed (will refresh session) for {url}: {exc}")
             try:
                 self._refresh_driver(session)
-                html, current_url = _navigate_once()
+                html, current_url, nav_driver = _navigate_once()
             except FacebookDriverError as exc2:
                 raise exc2
             except Exception as exc2:  # pragma: no cover - defensive
@@ -672,6 +707,9 @@ class NightModeFacebookEnricher:
         current_url = current_url or url
         if is_fb_login_redirect(current_url) or _is_fb_login_or_security_url(current_url):
             _log(self.logger, f"[Night FB] Ignoring login/redirect page: {current_url}")
+            if nav_driver is None:
+                nav_driver = getattr(session, "driver", None)
+            _capture_fb_debug(nav_driver, "login-redirect", logger=self.logger)
             try:
                 self._refresh_driver(session)
             except Exception:
@@ -697,6 +735,7 @@ class NightModeFacebookEnricher:
             time.sleep(1.0)
             current_url = getattr(driver, "current_url", None) or url
             if is_fb_login_redirect(current_url) or _is_fb_login_or_security_url(current_url):
+                _capture_fb_debug(driver, "anon-login-redirect", logger=self.logger)
                 return None, current_url
             return driver.page_source, current_url
         except Exception as exc:
@@ -809,7 +848,7 @@ class NightModeFacebookEnricher:
         if _is_junk_fb_candidate(candidate_url):
             return None
         url_lower = candidate_url.lower()
-        if "/r.php" in url_lower or "/login" in url_lower or "/register" in url_lower:
+        if any(tok in url_lower for tok in ("/r.php", "/login", "/register", "/checkpoint", "/recover", "/consent", "/privacy", "/policy", "/security")):
             _log(self.logger, f"[Night FB] Ignoring login/redirect page: {candidate_url}")
             return None
 
@@ -823,7 +862,7 @@ class NightModeFacebookEnricher:
             _log(self.logger, f"[Night FB] Ignoring login/redirect page: {resolved_url}")
             return None
 
-        soup = BeautifulSoup(html, "html.parser")
+        soup = BS(html, "html.parser")
         has_music_signals = _night_fb_has_music_signals(soup, {"url": resolved_url})
         emails = _extract_emails_from_html(html or "")
         if not has_music_signals and not emails:

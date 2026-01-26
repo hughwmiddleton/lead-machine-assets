@@ -26,6 +26,7 @@ import tempfile
 import shutil
 import logging
 from pathlib import Path
+from datetime import datetime
 from typing import Optional, Tuple
 
 # ---------------------------
@@ -816,7 +817,7 @@ def _lastfm_extract_socials_and_website(html, profile_url):
       - socials dict: instagram, facebook, twitter, youtube, linktree, spotify, bandsintown, songkick
       - best_guess_location (if any obvious location text is found)
     """
-    soup = BeautifulSoup(html, "html.parser")
+    soup = BS(html, "html.parser")
     socials = {
         "instagram": "",
         "facebook": "",
@@ -952,7 +953,7 @@ def get_drum_status_from_source(page_source):
       - Else if an SVG element with data-component "TripleJDrum" is found, returns "triple j".
       - Otherwise, returns an empty string.
     """
-    soup = BeautifulSoup(page_source, 'html.parser')
+    soup = BS(page_source, 'html.parser')
     played_on_list = soup.find("ul", class_="oqAY3 PARBR")
     if played_on_list:
         li = played_on_list.find("li", attrs={"data-component": "ListItem"})
@@ -1053,7 +1054,7 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
             existing_data = pd.read_csv(existing_csv)
         profile_urls = set()
         while len(profile_urls) < max_artists:
-            soup = BeautifulSoup(driver.page_source, 'html.parser')
+            soup = BS(driver.page_source, 'html.parser')
             artist_links = soup.find_all('a', class_='HU3iy p1_Ju mqDRk FQED6 O_grP', href=True)
             for link in artist_links:
                 href = link['href']
@@ -1153,7 +1154,7 @@ def unearthed_extract_release_date(html: str) -> str:
     Returns a normalized string if found (prefer YYYY-MM-DD when datetime attr present),
     else returns "".
     """
-    soup = BeautifulSoup(html, "html.parser")
+    soup = BS(html, "html.parser")
 
     # 1) <time datetime="YYYY-MM-DD"> if present (most reliable)
     for t in soup.find_all("time"):
@@ -1228,7 +1229,7 @@ def scrape_artist_profile(driver, profile_url, fb_driver=None):
                     email_value = email_matches[0]
             except Exception:
                 email_value = ""
-        soup = BeautifulSoup(page_source, 'html.parser')
+        soup = BS(page_source, 'html.parser')
         release_date = unearthed_extract_release_date(page_source) or ""
         genre_text_raw = _unearthed_extract_genre_text(soup)
         parsed_primary_genre, parsed_genre_raw = parse_unearthed_genre(genre_text_raw)
@@ -1795,7 +1796,7 @@ def bandcamp_extract_release_date(html: str) -> dict:
     Robust extractor. Order: JSON-LD -> meta -> <time> -> free-text 'released ...'
     Returns dict with keys date_iso, precision, raw.
     """
-    soup = BeautifulSoup(html, "html.parser")
+    soup = BS(html, "html.parser")
     extractors = (
         _extract_from_json_ld,
         _extract_from_tralbum_attr,
@@ -2292,7 +2293,7 @@ def _bc_discover_city_label_from_html(driver, url: str) -> str:
     try:
         driver.get(url)
         WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.TAG_NAME, 'body')))
-        soup = BeautifulSoup(driver.page_source, "html.parser")
+        soup = BS(driver.page_source, "html.parser")
         text_block = soup.get_text(" ", strip=True)
         match = re.search(r"artists\s+from\s+([A-Za-z\-\s\.’']+)", text_block, re.IGNORECASE)
         if match:
@@ -3183,7 +3184,7 @@ def _bandcamp_candidates_from_html(html: str, page_url: str) -> list:
     if not html:
         return candidates
     try:
-        soup = BeautifulSoup(html, 'html.parser')
+        soup = BS(html, 'html.parser')
         base_url = _bandcamp_base_from_page(page_url)
         candidates = _bandcamp_card_candidates_with_genre(soup, base_url)
         if not candidates:
@@ -3454,7 +3455,7 @@ def _bandcamp_collect_from_tag_page(driver, tag_url, max_items: int | None = Non
             html_text = driver.page_source or ""
         except Exception:
             html_text = ""
-        soup = BeautifulSoup(html_text, 'html.parser')
+        soup = BS(html_text, 'html.parser')
         base_url = "https://bandcamp.com"
         selector_sets = [
             ("li.searchresult",),
@@ -3551,7 +3552,7 @@ def _bandcamp_collect_from_search(driver, query, page=1) -> list:
     except Exception as exc:
         print(f"Bandcamp: error loading {url}: {exc}")
         return []
-    soup = BeautifulSoup(driver.page_source or "", "html.parser")
+    soup = BS(driver.page_source or "", "html.parser")
     out = []
     seen = set()
     for anchor in soup.select("a[href]"):
@@ -3579,7 +3580,7 @@ def _bandcamp_collect_from_tag_blob(html_text: str) -> list:
     candidates = []
     if not html_text:
         return candidates
-    soup = BeautifulSoup(html_text, "html.parser")
+    soup = BS(html_text, "html.parser")
     blob_attr = None
     blob_holder = soup.select_one("[data-blob]")
     if blob_holder and blob_holder.has_attr("data-blob"):
@@ -3882,7 +3883,7 @@ def _bandcamp_parse_html(profile_url: str, html: str, seed_primary_genre: str = 
     page_source = ""
     if not html:
         return {}
-    soup = BeautifulSoup(html, 'html.parser')
+    soup = BS(html, 'html.parser')
     artist["artist_name"] = _bc_extract_artist_name_from_profile_soup(soup)
     artist["genres"] = bandcamp_extract_genres(soup)
     primary_genre = (seed_primary_genre or (artist["genres"][0] if artist["genres"] else "")).strip()
@@ -4055,7 +4056,7 @@ def _bandcamp_parse_html(profile_url: str, html: str, seed_primary_genre: str = 
                             artist["latest_release_date"] = release_info["date_iso"]
                             artist["latest_release_precision"] = release_info.get("precision") or artist["latest_release_precision"]
                         if not artist["latest_release_title"]:
-                            release_soup = BeautifulSoup(release_page_html, "html.parser")
+                            release_soup = BS(release_page_html, "html.parser")
                             title_candidate = (
                                 release_soup.select_one("h2.trackTitle")
                                 or release_soup.select_one(".trackTitle")
@@ -5262,7 +5263,7 @@ def _sc_try_linktree_for_contacts(driver, urls: set, timeout=6) -> tuple:
     try:
         driver.get(linktree_url)
         WebDriverWait(driver, timeout).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
-        soup = BeautifulSoup(driver.page_source, "html.parser")
+        soup = BS(driver.page_source, "html.parser")
         fb = ""
         em = ""
         for anchor in soup.find_all("a", href=True):
@@ -5292,7 +5293,7 @@ def _sc_collect_from_people_search(driver, search_url, max_handles=200) -> list:
         pass
 
     for _ in range(10):
-        soup = BeautifulSoup(driver.page_source, "html.parser")
+        soup = BS(driver.page_source, "html.parser")
         for a in soup.select("a[href]"):
             href = a.get("href") or ""
             if not href or href in ("/", "#"):
@@ -5404,7 +5405,7 @@ def _sc_extract_profile_meta(driver, soup_override=None) -> dict:
         except Exception:
             pass
         html = driver.page_source
-        soup = BeautifulSoup(html, "html.parser")
+        soup = BS(html, "html.parser")
     else:
         soup = soup_override
     preferred_artist = _sc_preferred_artist_name_from_soup(soup)
@@ -5494,7 +5495,7 @@ def _sc_collect_profile_links(driver, timeout=6, **_ignored) -> set:
             pass
 
         html = driver.page_source
-        soup = BeautifulSoup(html, "html.parser")
+        soup = BS(html, "html.parser")
 
         # 1) Preferred: explicit sidebar list
         for a in soup.select("ul.profileLinks__linkList a[href]"):
@@ -5553,7 +5554,7 @@ def _sc_collect_from_tag_page(driver, tag_url: str) -> list:
     if match:
         tag_value = match.group(1)
     try:
-        soup = BeautifulSoup(driver.page_source, "html.parser")
+        soup = BS(driver.page_source, "html.parser")
         anchors = soup.find_all("a", href=True)
         for anchor in anchors:
             href = anchor["href"].strip()
@@ -5647,7 +5648,7 @@ def _sc_quick_has_fb_or_email(driver, url: str, timeout=10, debug_prefix="") -> 
                         break
         if not em:
             try:
-                soup = BeautifulSoup(driver.page_source, "html.parser")
+                soup = BS(driver.page_source, "html.parser")
                 for address in extract_emails(soup.get_text(" ", strip=True)):
                     if address and not address.lower().endswith("@soundcloud.com"):
                         em = address
@@ -5682,7 +5683,7 @@ def _sc_profile_basics(driver, profile_url: str, timeout=10) -> tuple:
         except Exception:
             pass
         html = driver.page_source
-        soup = BeautifulSoup(html, "html.parser")
+        soup = BS(html, "html.parser")
         loc_el = (soup.select_one(".profileHeaderInfo__additional") or
                   soup.select_one(".profileHeaderInfo__location") or
                   soup.select_one("[itemprop='addressLocality']"))
@@ -5721,7 +5722,7 @@ def _sc_quick_first_track_meta(driver, profile_url: str, timeout=12, hop=True) -
         driver.get(tracks_url)
         WebDriverWait(driver, timeout).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
         html = driver.page_source
-        soup = BeautifulSoup(html, "html.parser")
+        soup = BS(html, "html.parser")
         card = None
         first_url = None
         track_candidates = []
@@ -5811,7 +5812,7 @@ def _sc_quick_first_track_meta(driver, profile_url: str, timeout=12, hop=True) -
                 driver.get(first_url)
                 WebDriverWait(driver, timeout).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
                 track_html = driver.page_source
-                track_soup = BeautifulSoup(track_html, "html.parser")
+                track_soup = BS(track_html, "html.parser")
                 if not title:
                     og = track_soup.select_one('meta[property="og:title"]')
                     if og and og.get("content"):
@@ -6050,7 +6051,7 @@ def _sc_fetch_latest_track(driver, profile_url: str) -> tuple:
         _sc_accept_consent_if_present(driver)
         WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
         _sc_soft_scroll(driver)
-        soup = BeautifulSoup(driver.page_source, "html.parser")
+        soup = BS(driver.page_source, "html.parser")
         card = None
         for c in soup.select(".soundList__item, .lazyLoadingList__item, li, article"):
             t = c.find("time")
@@ -6105,7 +6106,7 @@ def _sc_parse_profile(driver, profile_url: str, seed_primary_genre="") -> dict:
         WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
         _sc_soft_scroll(driver)
         profile_html = driver.page_source
-        soup = BeautifulSoup(profile_html, "html.parser")
+        soup = BS(profile_html, "html.parser")
 
         for anchor in soup.find_all("a", href=True):
             anchor["href"] = _sc_unwrap_gate(anchor.get("href", ""))
@@ -6505,7 +6506,7 @@ def scrape_soundcloud(website_url, seed_tags=None, pages_per_tag=SOUNDCLOUD_PAGE
                     try:
                         driver.get(profile_url)
                         WebDriverWait(driver, SOUNDCLOUD_FAST_TIMEOUT_SEC).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
-                        soup_name = BeautifulSoup(driver.page_source, "html.parser")
+                        soup_name = BS(driver.page_source, "html.parser")
                     except Exception:
                         soup_name = None
                 fallback_name = handle.replace("-", " ").replace("_", " ").title()
@@ -6781,7 +6782,7 @@ def fb_extract_emails_from_html(html: str) -> list[str]:
     Reuses the existing Bandcamp email regex for consistency.
     """
     emails = set()
-    soup = BeautifulSoup(html or "", "html.parser")
+    soup = BS(html or "", "html.parser")
     email_re = _BC_EMAIL_RE
     for text_node in soup.stripped_strings:
         for match in email_re.findall(text_node):
@@ -6844,7 +6845,7 @@ def _fb_is_real_page_url(url: str) -> bool:
 
     if "/search/" in path:
         return False
-    if "/login" in path or "/recover" in path or "/help" in path:
+    if any(tok in path for tok in ("/login", "/recover", "/help", "/checkpoint", "/r.php", "/security", "/consent", "/privacy", "/policy")):
         return False
 
     if "/pages/" in path or "/people/" in path:
@@ -6988,7 +6989,7 @@ def fb_find_page_and_emails_by_name(driver, artist_name: str, location: str = ""
         return "", []
 
     html = driver.page_source or ""
-    soup = BeautifulSoup(html, "html.parser")
+    soup = BS(html, "html.parser")
     artist_norm = normalize_name(artist_name)
     strong_candidates: list[tuple[float, float, float, str, str, str, str, bool]] = []
     fallback_candidates: list[tuple[float, float, float, str, str, str, str, bool]] = []
@@ -7493,10 +7494,20 @@ def fb_find_page_and_emails_by_name(driver, artist_name: str, location: str = ""
 
     cat_display = best_category_raw or "<none>"
 
+    bad_url_tokens = ("r.php", "/login", "/checkpoint", "/recover", "/security", "/consent", "/privacy", "/policy")
+    if any(tok in (best_url or "").lower() for tok in bad_url_tokens):
+        _log(f"[FB Enrich] Rejecting FB page '{best_url}' for '{artist_name}' due to login/redirect token.")
+        return "", []
+
     # Final validation: scrape page to ensure music signals are present.
     page_music = False
     try:
         driver.get(best_url)
+        current_after_nav = getattr(driver, "current_url", "") or best_url
+        if any(tok in (current_after_nav or "").lower() for tok in bad_url_tokens):
+            _log(f"[FB Enrich] Login/redirect detected after navigation -> {current_after_nav}")
+            _fb_page_snapshot(driver, "login-redirect", prefix=log_prefix or "[FB Enrich]", log_fn=_log)
+            return "", []
         WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
         page_html = driver.page_source or ""
         page_category_text = None
@@ -7504,7 +7515,7 @@ def fb_find_page_and_emails_by_name(driver, artist_name: str, location: str = ""
         outbound_links = []
         raw_html_lc = (page_html or "").lower()
         try:
-            soup = BeautifulSoup(page_html, "html.parser")
+            soup = BS(page_html, "html.parser")
             seen_blocks = set()
 
             def _add_block(val: str):
@@ -7632,13 +7643,226 @@ def extract_emails(text):
     email_pattern = r'([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})'
     return list(set(re.findall(email_pattern, text)))
 
+FB_COOKIE_PATH = Path(__file__).with_name("facebook_cookies.json")
+FB_BAD_PATH_TOKENS = (
+    "/r.php",
+    "/login",
+    "/checkpoint",
+    "/recover",
+    "/security",
+    "/consent",
+    "/privacy",
+    "/policy",
+)
+
+
+def _fb_debug_dir() -> Path:
+    path = Path(__file__).with_name("fb_debug")
+    path.mkdir(exist_ok=True)
+    return path
+
+
+def _fb_page_snapshot(driver, label: str, prefix: str = "[FB Auth]", log_fn=None) -> None:
+    """Save screenshot + HTML for diagnostics without leaking credentials."""
+    ts = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+    base = _fb_debug_dir()
+    screenshot_path = base / f"{label}-{ts}.png"
+    html_path = base / f"{label}-{ts}.html"
+    try:
+        driver.save_screenshot(str(screenshot_path))
+    except Exception:
+        pass
+    try:
+        html = driver.page_source or ""
+        html_path.write_text(html, encoding="utf-8", errors="ignore")
+    except Exception:
+        pass
+    try:
+        url = getattr(driver, "current_url", "")
+        title = getattr(driver, "title", "")
+        body_snip = ""
+        try:
+            soup = BS(driver.page_source or "", "html.parser")
+            body_snip = (soup.get_text(" ", strip=True) or "")[:300]
+        except Exception:
+            pass
+        message = f"{prefix} Snapshot saved label={label} url={url} title={title} body_snip={body_snip}"
+        if log_fn:
+            try:
+                log_fn(message)
+            except Exception:
+                pass
+        else:
+            try:
+                print(message)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+def _fb_page_state(driver) -> tuple[str, str, str, str]:
+    """Return (state, url, title, body_snippet300)."""
+    try:
+        WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+    except Exception:
+        pass
+    url = getattr(driver, "current_url", "") or ""
+    title = getattr(driver, "title", "") or ""
+    try:
+        soup = BS(driver.page_source or "", "html.parser")
+        body_snip = (soup.get_text(" ", strip=True) or "")[:300]
+        body_lower = body_snip.lower()
+    except Exception:
+        body_snip = ""
+        body_lower = ""
+    url_lower = url.lower()
+
+    if any(tok in url_lower for tok in ("/checkpoint", "/two_step_verification", "/approvals_code")) or "checkpoint" in body_lower:
+        return "CHECKPOINT", url, title, body_snip
+    if "consent" in url_lower or "cookie" in url_lower or "privacy" in url_lower:
+        return "CONSENT", url, title, body_snip
+    if "temporarily blocked" in body_lower or "unusual activity" in body_lower:
+        return "BLOCKED", url, title, body_snip
+    if any(tok in url_lower for tok in FB_BAD_PATH_TOKENS):
+        return "LOGIN_REQUIRED", url, title, body_snip
+
+    try:
+        login_inputs = driver.find_elements(By.CSS_SELECTOR, "#email, input[name='email']")
+        pass_inputs = driver.find_elements(By.CSS_SELECTOR, "#pass, input[name='pass']")
+        login_buttons = driver.find_elements(By.NAME, "login") or driver.find_elements(By.CSS_SELECTOR, "button[type='submit']")
+        if any(el.is_displayed() for el in login_inputs + pass_inputs + login_buttons):
+            return "LOGIN_REQUIRED", url, title, body_snip
+    except Exception:
+        pass
+
+    try:
+        logged_in_markers = driver.find_elements(By.CSS_SELECTOR, "[aria-label*='Account'], [aria-label*='Profile'], [aria-label='Account'], [aria-label='Create a post'], [aria-label='Create story']")
+        if any(el.is_displayed() for el in logged_in_markers):
+            return "LOGGED_IN", url, title, body_snip
+    except Exception:
+        pass
+
+    return "UNKNOWN", url, title, body_snip
+
+
+def _load_fb_cookies(driver, cookie_store_path: Path, log_fn=None, prefix: str = "[FB Auth]") -> bool:
+    if not cookie_store_path or not cookie_store_path.exists():
+        return False
+    try:
+        driver.get("https://www.facebook.com/")
+        cookies = json.loads(cookie_store_path.read_text())
+        for cookie in cookies:
+            # selenium expects int for expiry if present
+            if "expiry" in cookie and isinstance(cookie["expiry"], float):
+                cookie["expiry"] = int(cookie["expiry"])
+            if "sameSite" in cookie:
+                cookie.pop("sameSite", None)
+            try:
+                driver.add_cookie(cookie)
+            except Exception:
+                continue
+        driver.refresh()
+        state, url, title, _ = _fb_page_state(driver)
+        if log_fn:
+            log_fn(f"{prefix} Loaded cookies -> state={state} url={url} title={title}")
+        return state == "LOGGED_IN"
+    except Exception as exc:
+        if log_fn:
+            log_fn(f"{prefix} Failed to load cookies: {exc}")
+        return False
+
+
+def _save_fb_cookies(driver, cookie_store_path: Path, log_fn=None, prefix: str = "[FB Auth]") -> None:
+    if not cookie_store_path:
+        return
+    try:
+        cookies = driver.get_cookies()
+        cookie_store_path.write_text(json.dumps(cookies, indent=2), encoding="utf-8")
+        if log_fn:
+            log_fn(f"{prefix} Saved {len(cookies)} cookies to {cookie_store_path.name}")
+    except Exception as exc:
+        if log_fn:
+            log_fn(f"{prefix} Failed to save cookies: {exc}")
+
+
+def _perform_fb_login(driver, fb_username: str, fb_password: str, timeout: int = 20, log_fn=None, prefix: str = "[FB Auth]") -> str:
+    try:
+        driver.get("https://www.facebook.com/login/")
+        WebDriverWait(driver, timeout).until(EC.presence_of_element_located((By.ID, "email")))
+        driver.find_element(By.ID, "email").clear()
+        driver.find_element(By.ID, "email").send_keys(fb_username)
+        driver.find_element(By.ID, "pass").clear()
+        driver.find_element(By.ID, "pass").send_keys(fb_password)
+        driver.find_element(By.NAME, "login").click()
+        WebDriverWait(driver, timeout).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+    except Exception as exc:
+        if log_fn:
+            log_fn(f"{prefix} Login form submit failed: {exc}")
+    state, url, title, snippet = _fb_page_state(driver)
+    if state != "LOGGED_IN":
+        _fb_page_snapshot(driver, "login-failure", prefix=prefix, log_fn=log_fn)
+    if log_fn:
+        masked = f"{len(fb_username)}:{len(fb_password)}"
+        log_fn(f"{prefix} STATE={state} after form submit url={url} title={title} creds_len={masked} snippet={snippet}")
+    return state
+
+
+def is_facebook_logged_in(driver, log_fn=None, prefix: str = "[FB Auth]") -> bool:
+    state, url, title, snippet = _fb_page_state(driver)
+    if log_fn:
+        log_fn(f"{prefix} STATE={state} url={url} title={title} snippet={snippet}")
+    return state == "LOGGED_IN"
+
+
+def ensure_facebook_logged_in(driver, creds: tuple[str, str], cookie_store_path: Path | None = None, timeout: int = 20, log_fn=None, prefix: str = "[FB Auth]") -> tuple[bool, str]:
+    username, password = creds
+    if not username or not password:
+        if log_fn:
+            log_fn(f"{prefix} Missing FB credentials; cannot login.")
+        return False, "MISSING_CREDS"
+
+    # Try cookies first
+    if cookie_store_path and _load_fb_cookies(driver, cookie_store_path, log_fn=log_fn, prefix=prefix):
+        return True, "LOGGED_IN"
+
+    # If already logged in, return early
+    if is_facebook_logged_in(driver, log_fn=log_fn, prefix=prefix):
+        if cookie_store_path:
+            _save_fb_cookies(driver, cookie_store_path, log_fn=log_fn, prefix=prefix)
+        return True, "LOGGED_IN"
+
+    state = _perform_fb_login(driver, username, password, timeout=timeout, log_fn=log_fn, prefix=prefix)
+    if state == "LOGGED_IN":
+        if cookie_store_path:
+            _save_fb_cookies(driver, cookie_store_path, log_fn=log_fn, prefix=prefix)
+        return True, state
+
+    if state in {"CHECKPOINT", "CONSENT", "BLOCKED"}:
+        if log_fn:
+            log_fn(f"{prefix} Login blocked (state={state}); capturing diagnostics.")
+        _fb_page_snapshot(driver, f"blocked-{state.lower()}", prefix=prefix, log_fn=log_fn)
+        return False, state
+
+    # If still not logged in, attempt one refresh + check again
+    try:
+        driver.get("https://www.facebook.com/")
+    except Exception:
+        pass
+    final_state, _, _, _ = _fb_page_state(driver)
+    if final_state == "LOGGED_IN":
+        if cookie_store_path:
+            _save_fb_cookies(driver, cookie_store_path, log_fn=log_fn, prefix=prefix)
+        return True, final_state
+
+    _fb_page_snapshot(driver, "login-required", prefix=prefix, log_fn=log_fn)
+    if log_fn:
+        log_fn(f"{prefix} STATE={final_state}; login still required.")
+    return False, final_state
+
+
 def login_facebook(driver, fb_username, fb_password):
-    driver.get('https://www.facebook.com/')
-    WebDriverWait(driver, 15).until(EC.presence_of_element_located((By.ID, 'email')))
-    driver.find_element(By.ID, 'email').send_keys(fb_username)
-    driver.find_element(By.ID, 'pass').send_keys(fb_password)
-    driver.find_element(By.NAME, 'login').click()
-    WebDriverWait(driver, 15).until(EC.presence_of_element_located((By.TAG_NAME, 'body')))
+    ensure_facebook_logged_in(driver, (fb_username, fb_password), cookie_store_path=None, log_fn=None, prefix="[FB Auth]")
 
 
 class FacebookSessionManager:
@@ -7647,11 +7871,12 @@ class FacebookSessionManager:
     This keeps behaviour identical for callers while reducing repeated logins.
     """
 
-    def __init__(self, username: str, password: str, driver_factory, logger=None):
+    def __init__(self, username: str, password: str, driver_factory, logger=None, cookie_store_path: Path | None = None):
         self.username = username
         self.password = password
         self.driver_factory = driver_factory
         self.logger = logger
+        self.cookie_store_path = cookie_store_path or FB_COOKIE_PATH
         self.driver = None
         self.logged_in = False
         self.main_window_handle = None
@@ -7679,8 +7904,17 @@ class FacebookSessionManager:
         self.ensure_driver()
         if self.logged_in:
             return self.driver
-        login_facebook(self.driver, self.username, self.password)
-        self.logged_in = True
+        logged_in, state = ensure_facebook_logged_in(
+            self.driver,
+            (self.username, self.password),
+            cookie_store_path=self.cookie_store_path,
+            timeout=20,
+            log_fn=self._log,
+            prefix="[FB Auth]",
+        )
+        self.logged_in = logged_in
+        if not logged_in:
+            raise RuntimeError(f"Facebook login failed (state={state})")
         self._capture_main_window()
         return self.driver
 
@@ -7740,7 +7974,7 @@ _FB_SHARED_SESSION = None
 _FB_SHARED_CREDS = None
 
 
-def get_shared_facebook_session(username: str, password: str, logger=None) -> FacebookSessionManager:
+def get_shared_facebook_session(username: str, password: str, logger=None, cookie_store_path: Path | None = None) -> FacebookSessionManager:
     """
     Return a shared session for the given credentials, creating it if needed.
     """
@@ -7756,7 +7990,13 @@ def get_shared_facebook_session(username: str, password: str, logger=None) -> Fa
             except Exception:
                 pass
             _FB_SHARED_SESSION = None
-    _FB_SHARED_SESSION = FacebookSessionManager(username, password, setup_facebook_driver, logger=logger)
+    _FB_SHARED_SESSION = FacebookSessionManager(
+        username,
+        password,
+        setup_facebook_driver,
+        logger=logger,
+        cookie_store_path=cookie_store_path or FB_COOKIE_PATH,
+    )
     _FB_SHARED_SESSION.ensure_logged_in()
     _FB_SHARED_CREDS = creds
     return _FB_SHARED_SESSION
@@ -8261,7 +8501,11 @@ def scrape_csv(input_csv, output_csv, fb_username, fb_password, max_emails=None,
         else:
             print("No Facebook pages to process.")
         return
-    session = get_shared_facebook_session(fb_username, fb_password, logger=_fb_log) if use_shared_session else FacebookSessionManager(fb_username, fb_password, setup_facebook_driver, logger=_fb_log)
+    session = (
+        get_shared_facebook_session(fb_username, fb_password, logger=_fb_log, cookie_store_path=FB_COOKIE_PATH)
+        if use_shared_session
+        else FacebookSessionManager(fb_username, fb_password, setup_facebook_driver, logger=_fb_log, cookie_store_path=FB_COOKIE_PATH)
+    )
     driver = session.ensure_logged_in()
     if FACEBOOK_CLOSE_EXTRA_WINDOWS:
         session.close_extra_windows()
@@ -8291,7 +8535,7 @@ def scrape_csv(input_csv, output_csv, fb_username, fb_password, max_emails=None,
                     print(f"Warning: could not open About section for {url}; scanning current page.")
                 time.sleep(1.0)
                 WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.TAG_NAME, 'body')))
-                soup = BeautifulSoup(driver.page_source, 'html.parser')
+                soup = BS(driver.page_source, 'html.parser')
                 emails = list(preexisting_emails)
                 body_text = soup.get_text(" ", strip=True)
                 if body_text:
