@@ -9,6 +9,8 @@ import re
 import time
 import urllib.parse
 import shutil
+import tempfile
+import os
 from pathlib import Path
 import logging
 import atexit
@@ -23,6 +25,7 @@ from selenium.webdriver.chrome.service import Service as ChromeService
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
+from selenium.common.exceptions import WebDriverException
 from webdriver_manager.chrome import ChromeDriverManager
 from browser.profile_paths import (
     assert_profile_available,
@@ -234,6 +237,12 @@ def _start_chromedriver_with_retry(chrome_options):
     Start ChromeDriver with a one-time reinstall if the first launch fails.
     """
     last_exc: Exception | None = None
+    try:
+        binary = getattr(chrome_options, "binary_location", None)
+        user_dir = _extract_user_data_dir(chrome_options)
+        _log_driver_create(f"chrome_paths binary={binary or '<default>'} user-data-dir={user_dir or '<unset>'}", user_dir)
+    except Exception:
+        pass
     for _ in range(2):
         driver_path = ChromeDriverManager().install()
         try:
@@ -255,28 +264,40 @@ def _create_fb_driver_public(headless: bool = True):
     Create a clean, no-login Chrome driver for public FB scraping.
     Mirrors the legacy Unearthed driver (no cookies/session).
     """
-    profile_dir = ensure_profile_dir(Path(NIGHT_FB_PROFILE))
-    assert_profile_available(profile_dir)
-    chrome_options = ChromeOptions()
-    if headless:
-        try:
-            chrome_options.add_argument("--headless=new")
-        except Exception:
-            chrome_options.add_argument("--headless")
-    chrome_options.add_argument("--disable-gpu")
-    chrome_options.add_argument("--window-size=1920x1080")
-    chrome_options.add_argument("--disable-extensions")
-    chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-    chrome_options.add_argument("--incognito")
-    chrome_options.add_argument(f"--user-data-dir={profile_dir}")
-    chrome_options.add_argument(f"--profile-directory={PROFILE_DIRECTORY_NAME}")
-    chrome_options.page_load_strategy = "eager"
-    prefs = {"profile.managed_default_content_settings.images": 2}
-    chrome_options.add_experimental_option("prefs", prefs)
-    log_profile_debug(profile_dir, profile_directory=PROFILE_DIRECTORY_NAME, logger=lambda msg: _log(None, msg))
-    return _start_chromedriver_with_retry(chrome_options)
+    tmp_profile_dir = Path(tempfile.mkdtemp(prefix="fb_night_"))
+    assert_profile_available(tmp_profile_dir)
+
+    def _build_options(use_headless_new: bool) -> ChromeOptions:
+        opts = ChromeOptions()
+        binary_path = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+        if os.path.exists(binary_path):
+            opts.binary_location = binary_path
+            _log(None, f"[DRV_CREATE] Using Chrome binary at {binary_path}")
+        if headless:
+            try:
+                opts.add_argument("--headless=new" if use_headless_new else "--headless")
+            except Exception:
+                opts.add_argument("--headless")
+        opts.add_argument("--disable-gpu")
+        opts.add_argument("--window-size=1920x1080")
+        opts.add_argument("--disable-extensions")
+        opts.add_argument("--disable-dev-shm-usage")
+        opts.add_argument("--no-sandbox")
+        opts.add_argument("--disable-blink-features=AutomationControlled")
+        opts.add_argument("--incognito")
+        opts.add_argument(f"--user-data-dir={tmp_profile_dir}")
+        opts.add_argument(f"--profile-directory={PROFILE_DIRECTORY_NAME}")
+        opts.page_load_strategy = "eager"
+        prefs = {"profile.managed_default_content_settings.images": 2}
+        opts.add_experimental_option("prefs", prefs)
+        log_profile_debug(tmp_profile_dir, profile_directory=PROFILE_DIRECTORY_NAME, logger=lambda msg: _log(None, msg))
+        return opts
+
+    try:
+        return _start_chromedriver_with_retry(_build_options(use_headless_new=True))
+    except Exception:
+        _log(None, "[DRV_CREATE] Headless=new failed; retrying with legacy headless.")
+        return _start_chromedriver_with_retry(_build_options(use_headless_new=False))
 
 
 def _extract_emails_from_html(html: str) -> List[str]:
@@ -1074,10 +1095,13 @@ class NightModeFacebookEnricher:
                     if not result.get("FB_Status"):
                         result["FB_Status"] = "ok"
             return result
-        except FacebookDriverError as exc:
-            result["FB_Status"] = "driver_error"
-            _log(self.logger, f"[Night FB] Driver error while enriching '{result.get('Artist Name', '') or '<unknown>'}': {exc}")
-            return result
+        except (FacebookDriverError, WebDriverException) as exc:
+            result["FB_Status"] = "fb_login_unavailable"
+            _log(self.logger, f"[Night FB] Driver unavailable, falling back to legacy no-login scrape: {exc}")
+            try:
+                return self._enrich_row_unearthed_legacy(result, artist_name, fb_urls)
+            except Exception:
+                return result
         except Exception as exc:  # pragma: no cover - defensive
             prefix = f"[FB Night] Night FB enrich failed at row {row_index}: {exc}" if row_index is not None else f"[FB Night] Night FB enrich failed: {exc}"
             _log(self.logger, prefix)

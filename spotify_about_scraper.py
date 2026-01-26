@@ -272,7 +272,20 @@ def _fetch_about_payload(
     next_data = _extract_next_data_from_soup(soup)
     if not next_data:
         _log(logger, f"[Spotify About] __NEXT_DATA__ missing for artist {artist_id}")
-    else:
+        # Secondary JSON hunt: scan all script tags for plausible profile blobs.
+        for script in soup.find_all("script"):
+            blob = (script.string or script.get_text() or "").strip()
+            if not blob:
+                continue
+            if not any(token in blob for token in ("artistProfile", "pageProps", "profile", "artist")):
+                continue
+            try:
+                next_data = json.loads(blob)
+                _log(logger, f"[Spotify About] Found fallback JSON blob for artist {artist_id}")
+                break
+            except Exception:
+                continue
+    if next_data:
         profile = _extract_profile_blob(next_data)
         if not profile:
             _log(logger, f"[Spotify About] Unable to locate profile JSON for artist {artist_id}")

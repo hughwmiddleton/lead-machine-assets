@@ -710,8 +710,12 @@ def scrape_spotify(
             tracks = client.get_playlist_tracks(playlist_id_clean, limit=100, max_items=max(target_count * 3, 300))
         except Exception as exc:
             if logger:
-                logger(f"[Spotify] API playlist fetch failed for {playlist_id_clean}: {exc}")
-            if _should_use_html_fallback(exc):
+                message = str(exc)
+                if "404" in message:
+                    logger(f"[Spotify] playlist tracks 404 for {playlist_id_clean} - falling back to HTML")
+                else:
+                    logger(f"[Spotify] API playlist fetch failed for {playlist_id_clean}: {exc}")
+            if _should_use_html_fallback(exc) or ("404" in str(exc)):
                 if logger:
                     logger(f"[Spotify] Falling back to HTML playlist scrape for {playlist_id_clean}...")
                 remaining_target = max(target_count - len(artists_by_id), 1)

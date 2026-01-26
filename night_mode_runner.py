@@ -221,7 +221,7 @@ def _merge_master(run_dir: str, job_states: List[Dict[str, Any]], logger: loggin
     frames = []
     for job_id, path in enriched_paths:
         try:
-            df = pd.read_csv(path)
+            df = pd.read_csv(path, dtype=str, keep_default_na=False)
             df["__source_job"] = job_id
             frames.append(df)
         except Exception as exc:
@@ -231,6 +231,9 @@ def _merge_master(run_dir: str, job_states: List[Dict[str, Any]], logger: loggin
         return None
 
     combined = pd.concat(frames, ignore_index=True, sort=False)
+    for col in ("Email", "Email_All"):
+        if col in combined.columns:
+            combined[col] = combined[col].fillna("").astype(str)
     for col in ("Source URL", "SoundCloud Link", "Social Link", "External Links", "Facebook_URL"):
         if col in combined.columns:
             combined[col] = combined[col].fillna("").astype(str).apply(_strip_excluded_urls)
@@ -263,7 +266,7 @@ def _merge_raw_master(run_dir: str, job_states: List[Dict[str, Any]], logger: lo
     frames = []
     for job_id, path in raw_paths:
         try:
-            df = pd.read_csv(path)
+            df = pd.read_csv(path, dtype=str, keep_default_na=False)
             df["__source_job"] = job_id
             frames.append(df)
         except Exception as exc:
@@ -272,6 +275,9 @@ def _merge_raw_master(run_dir: str, job_states: List[Dict[str, Any]], logger: lo
         logger.warning("[Master] No data available after reading raw files.")
         return None
     combined = pd.concat(frames, ignore_index=True, sort=False)
+    for col in ("Email", "Email_All"):
+        if col in combined.columns:
+            combined[col] = combined[col].fillna("").astype(str)
     for col in ("Source URL", "SoundCloud Link", "Social Link", "External Links", "Facebook_URL"):
         if col in combined.columns:
             combined[col] = combined[col].fillna("").astype(str).apply(_strip_excluded_urls)

@@ -108,6 +108,7 @@ if __name__ == "__main__":
 # Now import the dependencies
 # ---------------------------
 import os
+import tempfile
 import atexit
 import html
 import time
@@ -1051,9 +1052,13 @@ def setup_driver():
 # Facebook Driver Setup (Visible / Head Mode with Optimizations)
 # -----------------------------------------------------------------------------
 def setup_facebook_driver():
-    profile_dir = ensure_profile_dir(Path(FB_LOGGED_IN_PROFILE_DIR))
-    assert_profile_available(profile_dir)
+    tmp_profile_dir = Path(tempfile.mkdtemp(prefix="fb_logged_"))
+    assert_profile_available(tmp_profile_dir)
     chrome_options = Options()
+    binary_path = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+    if os.path.exists(binary_path):
+        chrome_options.binary_location = binary_path
+        logger.info("[FB] Using Chrome binary at %s", binary_path)
     # Run in visible mode for Facebook scraping.
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--window-size=1920x1080")
@@ -1061,12 +1066,12 @@ def setup_facebook_driver():
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-    chrome_options.add_argument(f"--user-data-dir={profile_dir}")
+    chrome_options.add_argument(f"--user-data-dir={tmp_profile_dir}")
     chrome_options.add_argument(f"--profile-directory={PROFILE_DIRECTORY_NAME}")
     chrome_options.page_load_strategy = 'eager'
     prefs = {"profile.managed_default_content_settings.images": 2}
     chrome_options.add_experimental_option("prefs", prefs)
-    log_profile_debug(profile_dir, profile_directory=PROFILE_DIRECTORY_NAME, logger=lambda msg: logger.info(msg))
+    log_profile_debug(tmp_profile_dir, profile_directory=PROFILE_DIRECTORY_NAME, logger=lambda msg: logger.info(msg))
     driver = _start_chromedriver_with_retry(chrome_options)
     return driver
 
@@ -2510,8 +2515,52 @@ def _bandcamp_collect_contacts(artist_dict: dict) -> list:
 def _bandcamp_location_match_(profile_loc: str, api_hint: str, requested_label: str | None, requested_hint: str | None) -> bool:
     if not requested_label and not requested_hint:
         return True
-    profile_norm = _norm_text_(profile_loc).replace("-", " ")
-    api_norm = _norm_text_(api_hint).replace("-", " ")
+    profile_norm_raw = _norm_text_(profile_loc).replace("-", " ")
+    api_norm_raw = _norm_text_(api_hint).replace("-", " ")
+    requested_label_norm = _norm_text_(requested_label).replace("-", " ")
+    requested_hint_norm = _norm_text_(requested_hint).replace("-", " ")
+    canada_aliases = {
+        "ontario": "canada",
+        "on": "canada",
+        "quebec": "canada",
+        "qc": "canada",
+        "british columbia": "canada",
+        "bc": "canada",
+        "alberta": "canada",
+        "ab": "canada",
+        "manitoba": "canada",
+        "mb": "canada",
+        "saskatchewan": "canada",
+        "sk": "canada",
+        "nova scotia": "canada",
+        "ns": "canada",
+        "new brunswick": "canada",
+        "nb": "canada",
+        "newfoundland and labrador": "canada",
+        "nl": "canada",
+        "prince edward island": "canada",
+        "pei": "canada",
+        "yukon": "canada",
+        "yt": "canada",
+        "nunavut": "canada",
+        "nu": "canada",
+        "northwest territories": "canada",
+        "nt": "canada",
+    }
+
+    def _canon_canada(text: str) -> str:
+        t = text.replace(" ", "")
+        if "canada" in text:
+            return "canada"
+        if text in canada_aliases:
+            return "canada"
+        if t in canada_aliases:
+            return "canada"
+        return text
+
+    requested_is_canada = requested_label_norm == "canada" or requested_hint_norm == "canada"
+    profile_norm = _canon_canada(profile_norm_raw) if requested_is_canada else profile_norm_raw
+    api_norm = _canon_canada(api_norm_raw) if requested_is_canada else api_norm_raw
     profile_compact = profile_norm.replace(" ", "")
     api_compact = api_norm.replace(" ", "")
     alias_corrections = {
