@@ -690,6 +690,8 @@ class NightModeFacebookEnricher:
         self.use_shared_session = use_shared_session
         self._anon_driver = None
         self._unearthed_driver = None
+        self._driver = None
+        self._driver_user_dir = None
 
     def __enter__(self) -> "NightModeFacebookEnricher":
         try:
@@ -723,7 +725,7 @@ class NightModeFacebookEnricher:
                     self._owns_session = False
             if self.session is None:
                 manager_cls = getattr(self.legacy, "FacebookSessionManager", None)
-                driver_factory = getattr(self.legacy, "setup_facebook_driver", None)
+                driver_factory = self._get_or_create_driver
                 if manager_cls and driver_factory:
                     _log(self.logger, "[FB] Creating new ChromeDriver session for Night FB (shared=False).")
                     self.session = manager_cls(self.username, self.password, driver_factory, logger=self.logger)
@@ -744,6 +746,7 @@ class NightModeFacebookEnricher:
             except Exception:
                 pass
         self.session = None
+        self._safe_quit_driver()
         try:
             if self._anon_driver:
                 self._anon_driver.quit()
@@ -760,10 +763,7 @@ class NightModeFacebookEnricher:
     def _get_anon_driver(self):
         if self._anon_driver:
             return self._anon_driver
-        driver_factory = getattr(self.legacy, "setup_facebook_driver", None)
-        if not callable(driver_factory):
-            raise FacebookDriverError("Anonymous FB driver not available.")
-        self._anon_driver = driver_factory()
+        self._anon_driver = _create_fb_driver_public(headless=True)
         return self._anon_driver
 
     def _get_unearthed_driver(self):
@@ -771,6 +771,36 @@ class NightModeFacebookEnricher:
             return self._unearthed_driver
         self._unearthed_driver = _create_fb_driver_public(headless=True)
         return self._unearthed_driver
+
+    def _get_or_create_driver(self):
+        if self._driver:
+            try:
+                _ = self._driver.current_url
+                _log(self.logger, "[Night FB] Reusing shared Night FB driver.")
+                return self._driver
+            except Exception:
+                self._safe_quit_driver()
+        driver_factory = getattr(self.legacy, "setup_facebook_driver", None)
+        if not callable(driver_factory):
+            raise FacebookDriverError("Facebook driver not available.")
+        driver = driver_factory()
+        self._driver = driver
+        try:
+            _register_driver_cleanup(driver)
+        except Exception:
+            pass
+        return driver
+
+    def _safe_quit_driver(self):
+        try:
+            if self._driver:
+                try:
+                    self._driver.quit()
+                except Exception:
+                    pass
+        finally:
+            self._driver = None
+            self._driver_user_dir = None
 
     def _refresh_driver(self, session) -> None:
         _log(self.logger, "[FB] Driver appears dead, recreating a fresh instance...")
@@ -1203,6 +1233,8 @@ class NightModeFacebookEnricher:
         except (FacebookDriverError, WebDriverException) as exc:
             result["FB_Status"] = "fb_login_unavailable"
             _log(self.logger, f"[Night FB] Driver unavailable, falling back to legacy no-login scrape: {exc}")
+            self._safe_quit_driver()
+            _log(self.logger, "[Night FB] Driver reset after error.")
             try:
                 return self._enrich_row_unearthed_legacy(result, artist_name, fb_urls)
             except Exception:
