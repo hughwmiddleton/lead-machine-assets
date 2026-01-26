@@ -414,7 +414,7 @@ def _is_fb_login_or_security_url(url: str) -> bool:
     if not url:
         return False
     url_lower = (url or "").lower()
-    if any(tok in url_lower for tok in ("/r.php", "/login", "/register", "/consent", "/privacy", "/policy", "/recover", "/security", "/checkpoint")):
+    if any(tok in url_lower for tok in ("/r.php", "/login", "/register", "/consent", "/privacy", "/policy", "/recover", "/security", "/checkpoint", "/l.php", "l.facebook.com/l.php", "instagram.com", "l.instagram.com")):
         return True
     try:
         parsed = urllib.parse.urlparse(url)
@@ -848,7 +848,8 @@ class NightModeFacebookEnricher:
         if _is_junk_fb_candidate(candidate_url):
             return None
         url_lower = candidate_url.lower()
-        if any(tok in url_lower for tok in ("/r.php", "/login", "/register", "/checkpoint", "/recover", "/consent", "/privacy", "/policy", "/security")):
+        # Block outbound link shims and IG redirects
+        if any(tok in url_lower for tok in ("/r.php", "/login", "/register", "/checkpoint", "/recover", "/consent", "/privacy", "/policy", "/security", "/l.php", "l.facebook.com/l.php", "instagram.com", "l.instagram.com")):
             _log(self.logger, f"[Night FB] Ignoring login/redirect page: {candidate_url}")
             return None
 

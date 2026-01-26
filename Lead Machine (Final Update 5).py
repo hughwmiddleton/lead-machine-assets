@@ -6839,13 +6839,20 @@ def _fb_is_real_page_url(url: str) -> bool:
     parsed = urlparse(url)
     host = (parsed.netloc or "").lower()
     path = (parsed.path or "").lower()
+    # Block outbound link shims and IG redirects
+    if "instagram.com" in host:
+        return False
+    if host.startswith("l.facebook.com"):
+        return False
+    if path.startswith("/l.php"):
+        return False
 
     if "facebook.com" not in host:
         return False
 
     if "/search/" in path:
         return False
-    if any(tok in path for tok in ("/login", "/recover", "/help", "/checkpoint", "/r.php", "/security", "/consent", "/privacy", "/policy")):
+    if any(tok in path for tok in ("/login", "/recover", "/help", "/checkpoint", "/r.php", "/security", "/consent", "/privacy", "/policy", "/l.php")):
         return False
 
     if "/pages/" in path or "/people/" in path:
@@ -7494,7 +7501,7 @@ def fb_find_page_and_emails_by_name(driver, artist_name: str, location: str = ""
 
     cat_display = best_category_raw or "<none>"
 
-    bad_url_tokens = ("r.php", "/login", "/checkpoint", "/recover", "/security", "/consent", "/privacy", "/policy")
+    bad_url_tokens = ("r.php", "/login", "/checkpoint", "/recover", "/security", "/consent", "/privacy", "/policy", "/l.php", "l.facebook.com/l.php", "instagram.com", "l.instagram.com")
     if any(tok in (best_url or "").lower() for tok in bad_url_tokens):
         _log(f"[FB Enrich] Rejecting FB page '{best_url}' for '{artist_name}' due to login/redirect token.")
         return "", []
@@ -7653,6 +7660,10 @@ FB_BAD_PATH_TOKENS = (
     "/consent",
     "/privacy",
     "/policy",
+    "/l.php",
+    "l.facebook.com/l.php",
+    "instagram.com",
+    "l.instagram.com",
 )
 
 
