@@ -9,8 +9,8 @@ import re
 import time
 import urllib.parse
 import shutil
+import datetime as _dt  # use module to avoid shadowing; call _dt.datetime.utcnow()
 from pathlib import Path
-from datetime import datetime
 import atexit
 import weakref
 from dataclasses import dataclass
@@ -204,7 +204,7 @@ def _capture_fb_debug(driver, label: str, logger: LoggerFn = None):
     """
     if driver is None:
         return
-    ts = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+    ts = _dt.datetime.utcnow().strftime("%Y%m%d-%H%M%S")
     base = Path(__file__).with_name("fb_debug")
     base.mkdir(exist_ok=True)
     screenshot_path = base / f"{label}-{ts}.png"
@@ -479,6 +479,10 @@ def _parse_search_candidates(html: str) -> List["facebook_enrich.FbCandidate"]:
     for anchor in anchors:
         href = anchor.get("href") or ""
         if "facebook.com" not in href:
+            continue
+        href_lower = href.lower()
+        if "/pages/create" in href_lower:
+            _log(None, f"[FB Enrich] Ignoring non-result FB URL: {href} (pages/create)")
             continue
         if "search/" in href and "facebook.com/search/" in href:
             continue
@@ -756,7 +760,28 @@ class NightModeFacebookEnricher:
         source_dir = str(row.get("Source Directory", "") or "").strip().lower()
         source_tag = str(row.get("Source Tag", "") or "").strip().lower()
         source_job = str(row.get("__source_job", "") or "").strip().lower()
-        return any("unearthed" in val for val in (source_dir, source_tag, source_job))
+        if any("unearthed" in val for val in (source_dir, source_tag, source_job)):
+            return True
+
+        played_cols = ("Played on triple J", "Played on Unearthed")
+        if any(str(row.get(col, "") or "").strip() for col in played_cols):
+            return True
+
+        link_keys = (
+            "Source URL",
+            "Social Link",
+            "External Links",
+            "Website",
+            "Spotify_Website_URL",
+            "Spotify Website URL",
+        )
+        unearthed_host = "abc.net.au/triplejunearthed"
+        for key in link_keys:
+            val = str(row.get(key, "") or "").strip().lower()
+            if unearthed_host in val:
+                return True
+
+        return False
 
     def _search_for_page(self, artist: str, location: str, allow_anon: bool = False) -> Optional[str]:
         session = self._ensure_session()
@@ -1009,15 +1034,17 @@ class NightModeFacebookEnricher:
         if facebook_url and facebook_url not in fb_urls:
             fb_urls.insert(0, facebook_url)
         is_unearthed = self._is_unearthed_source(result)
+        allow_anon = self._should_allow_anonymous(result)
+        _log(self.logger, f"[Night FB] is_unearthed={is_unearthed} allow_anon={allow_anon} fb_urls={len(fb_urls)}")
 
         try:
             page_url = ""
             emails: List[str] = []
             if is_unearthed:
                 _log(self.logger, "[Night FB] Detected Unearthed row -> using legacy no-login FB scrape.")
+                _log(self.logger, "[Night FB] Routing to UNEARTHED_LEGACY strategy.")
                 return self._enrich_row_unearthed_legacy(result, artist_name, fb_urls)
 
-            allow_anon = self._should_allow_anonymous(result)
             if fb_urls:
                 _log(self.logger, f"[Night FB] Using explicit FB URLs: {fb_urls}")
                 candidates: List[Tuple[NightModeFacebookResult, List[str]]] = []
