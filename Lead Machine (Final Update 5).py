@@ -6852,6 +6852,8 @@ def _fb_is_real_page_url(url: str) -> bool:
 
     if "/search/" in path:
         return False
+    if path.startswith("/pages/create"):
+        return False
     if any(tok in path for tok in ("/login", "/recover", "/help", "/checkpoint", "/r.php", "/security", "/consent", "/privacy", "/policy", "/l.php")):
         return False
 
@@ -7501,8 +7503,12 @@ def fb_find_page_and_emails_by_name(driver, artist_name: str, location: str = ""
 
     cat_display = best_category_raw or "<none>"
 
-    bad_url_tokens = ("r.php", "/login", "/checkpoint", "/recover", "/security", "/consent", "/privacy", "/policy", "/l.php", "l.facebook.com/l.php", "instagram.com", "l.instagram.com")
-    if any(tok in (best_url or "").lower() for tok in bad_url_tokens):
+    best_url_lower = (best_url or "").lower()
+    if "/pages/create" in best_url_lower:
+        _log(f"[FB Enrich] Ignoring non-result FB URL: {best_url} (pages/create)")
+        return "", []
+    bad_url_tokens = ("r.php", "/login", "/checkpoint", "/recover", "/security", "/consent", "/privacy", "/policy", "/pages/create", "/l.php", "l.facebook.com/l.php", "instagram.com", "l.instagram.com")
+    if any(tok in best_url_lower for tok in bad_url_tokens):
         _log(f"[FB Enrich] Rejecting FB page '{best_url}' for '{artist_name}' due to login/redirect token.")
         return "", []
 
@@ -7511,7 +7517,12 @@ def fb_find_page_and_emails_by_name(driver, artist_name: str, location: str = ""
     try:
         driver.get(best_url)
         current_after_nav = getattr(driver, "current_url", "") or best_url
-        if any(tok in (current_after_nav or "").lower() for tok in bad_url_tokens):
+        current_after_nav_lower = (current_after_nav or "").lower()
+        if "/pages/create" in current_after_nav_lower:
+            _log(f"[FB Enrich] Ignoring non-result FB URL: {current_after_nav} (pages/create)")
+            _fb_page_snapshot(driver, "login-redirect", prefix=log_prefix or "[FB Enrich]", log_fn=_log)
+            return "", []
+        if any(tok in current_after_nav_lower for tok in bad_url_tokens):
             _log(f"[FB Enrich] Login/redirect detected after navigation -> {current_after_nav}")
             _fb_page_snapshot(driver, "login-redirect", prefix=log_prefix or "[FB Enrich]", log_fn=_log)
             return "", []
@@ -7660,6 +7671,7 @@ FB_BAD_PATH_TOKENS = (
     "/consent",
     "/privacy",
     "/policy",
+    "/pages/create",
     "/l.php",
     "l.facebook.com/l.php",
     "instagram.com",
@@ -7675,7 +7687,7 @@ def _fb_debug_dir() -> Path:
 
 def _fb_page_snapshot(driver, label: str, prefix: str = "[FB Auth]", log_fn=None) -> None:
     """Save screenshot + HTML for diagnostics without leaking credentials."""
-    ts = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+    ts = datetime.datetime.utcnow().strftime("%Y%m%d-%H%M%S")
     base = _fb_debug_dir()
     screenshot_path = base / f"{label}-{ts}.png"
     html_path = base / f"{label}-{ts}.html"
