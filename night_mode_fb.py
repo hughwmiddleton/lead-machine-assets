@@ -6,6 +6,7 @@ This module isolates Night Mode tweaks so daytime paths stay unchanged.
 from __future__ import annotations
 
 import re
+import subprocess
 import time
 import urllib.parse
 import shutil
@@ -237,26 +238,118 @@ def _start_chromedriver_with_retry(chrome_options):
     Start ChromeDriver with a one-time reinstall if the first launch fails.
     """
     last_exc: Exception | None = None
+    chrome_major: int | None = None
+    chromedriver_major: int | None = None
+    chromedriver_path: str | None = None
+    original_path = os.environ.get("PATH", "") or ""
     try:
-        binary = getattr(chrome_options, "binary_location", None)
-        user_dir = _extract_user_data_dir(chrome_options)
-        _log_driver_create(f"chrome_paths binary={binary or '<default>'} user-data-dir={user_dir or '<unset>'}", user_dir)
-    except Exception:
-        pass
-    for _ in range(2):
-        driver_path = ChromeDriverManager().install()
         try:
-            service = ChromeService(driver_path)
+            binary = getattr(chrome_options, "binary_location", None)
+            user_dir = _extract_user_data_dir(chrome_options)
+            _log_driver_create(f"chrome_paths binary={binary or '<default>'} user-data-dir={user_dir or '<unset>'}", user_dir)
+            if binary and os.path.exists(binary):
+                try:
+                    chrome_version = subprocess.run(
+                        [binary, "--version"], capture_output=True, text=True, check=False, timeout=5
+                    )
+                    version_text = (chrome_version.stdout or chrome_version.stderr or "").strip()
+                    if version_text:
+                        _log(None, f"[DRV_CREATE] Chrome --version: {version_text}")
+                        match = re.search(r"(\d+)", version_text)
+                        if match:
+                            chrome_major = int(match.group(1))
+                except Exception:
+                    pass
+            chromedriver_path = shutil.which("chromedriver")
+            if chromedriver_path:
+                try:
+                    cd_version = subprocess.run(
+                        [chromedriver_path, "--version"], capture_output=True, text=True, check=False, timeout=5
+                    )
+                    cd_text = (cd_version.stdout or cd_version.stderr or "").strip()
+                    if cd_text:
+                        _log(None, f"[DRV_CREATE] PATH chromedriver --version: {cd_text} ({chromedriver_path})")
+                        match = re.search(r"(\d+)", cd_text)
+                        if match:
+                            chromedriver_major = int(match.group(1))
+                except Exception:
+                    pass
+            try:
+                if chromedriver_path and chrome_major and chromedriver_major and chromedriver_major != chrome_major:
+                    driver_dir = os.path.abspath(os.path.dirname(chromedriver_path))
+                    path_parts = [p for p in os.environ.get("PATH", "").split(os.pathsep) if os.path.abspath(p) != driver_dir]
+                    os.environ["PATH"] = os.pathsep.join(path_parts)
+                    _log(
+                        None,
+                        f"[DRV_CREATE] Ignoring PATH chromedriver v{chromedriver_major} at {chromedriver_path} (Chrome v{chrome_major}); removed from PATH.",
+                    )
+            except Exception:
+                pass
+        except Exception:
+            pass
+        try:
+            _log(None, "[DRV_CREATE] Trying Selenium Manager (no explicit chromedriver path).")
+        except Exception:
+            pass
+        try:
+            service = ChromeService()
             driver = webdriver.Chrome(service=service, options=chrome_options)
+            try:
+                resolved_path = getattr(getattr(driver, "service", None), "path", None)
+                if resolved_path:
+                    _log(None, f"[DRV_CREATE] Selenium Manager resolved driver path: {resolved_path}")
+                    try:
+                        version_out = subprocess.run(
+                            [resolved_path, "--version"], capture_output=True, text=True, check=False, timeout=5
+                        )
+                        if version_out and (version_out.stdout or version_out.stderr):
+                            _log(None, f"[DRV_CREATE] ChromeDriver --version: {(version_out.stdout or version_out.stderr).strip()}")
+                    except Exception:
+                        pass
+            except Exception:
+                pass
             _register_driver_cleanup(driver)
             _log_driver_create("night_fb._start_chromedriver_with_retry", _extract_user_data_dir(chrome_options))
             return driver
         except Exception as exc:
             last_exc = exc
-            _purge_wdm_cache(driver_path)
-    if last_exc:
-        raise last_exc
-    raise FacebookDriverError("Failed to start ChromeDriver.")
+            try:
+                _log(None, f"[DRV_CREATE] Selenium Manager failed: {exc}")
+            except Exception:
+                pass
+        for _ in range(2):
+            driver_path = ChromeDriverManager().install()
+            try:
+                _log(None, f"[DRV_CREATE] Resolved ChromeDriver path: {driver_path}")
+            except Exception:
+                pass
+            try:
+                version_out = subprocess.run([driver_path, "--version"], capture_output=True, text=True, check=False, timeout=5)
+                if version_out and (version_out.stdout or version_out.stderr):
+                    _log(None, f"[DRV_CREATE] ChromeDriver --version: {(version_out.stdout or version_out.stderr).strip()}")
+            except Exception:
+                pass
+            try:
+                service = ChromeService(driver_path)
+                driver = webdriver.Chrome(service=service, options=chrome_options)
+                _register_driver_cleanup(driver)
+                _log_driver_create("night_fb._start_chromedriver_with_retry", _extract_user_data_dir(chrome_options))
+                return driver
+            except Exception as exc:
+                last_exc = exc
+                try:
+                    _log(None, f"[DRV_CREATE] webdriver_manager failed: {exc}")
+                except Exception:
+                    pass
+                _purge_wdm_cache(driver_path)
+        if last_exc:
+            raise last_exc
+        raise FacebookDriverError("Failed to start ChromeDriver.")
+    finally:
+        try:
+            os.environ["PATH"] = original_path
+        except Exception:
+            pass
 
 
 def _create_fb_driver_public(headless: bool = True):
@@ -273,6 +366,14 @@ def _create_fb_driver_public(headless: bool = True):
         if os.path.exists(binary_path):
             opts.binary_location = binary_path
             _log(None, f"[DRV_CREATE] Using Chrome binary at {binary_path}")
+            try:
+                chrome_version = subprocess.run(
+                    [binary_path, "--version"], capture_output=True, text=True, check=False, timeout=5
+                )
+                if chrome_version and (chrome_version.stdout or chrome_version.stderr):
+                    _log(None, f"[DRV_CREATE] Chrome --version: {(chrome_version.stdout or chrome_version.stderr).strip()}")
+            except Exception:
+                pass
         if headless:
             try:
                 opts.add_argument("--headless=new" if use_headless_new else "--headless")
@@ -287,6 +388,10 @@ def _create_fb_driver_public(headless: bool = True):
         opts.add_argument("--incognito")
         opts.add_argument(f"--user-data-dir={tmp_profile_dir}")
         opts.add_argument(f"--profile-directory={PROFILE_DIRECTORY_NAME}")
+        opts.add_argument("--no-first-run")
+        opts.add_argument("--no-default-browser-check")
+        opts.add_argument("--disable-features=TranslateUI")
+        opts.add_argument("--remote-debugging-port=0")
         opts.page_load_strategy = "eager"
         prefs = {"profile.managed_default_content_settings.images": 2}
         opts.add_experimental_option("prefs", prefs)
