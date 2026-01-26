@@ -56,6 +56,16 @@ PROFILE_DIRECTORY_NAME = "Default"
 SCRAPER_PROFILE_DIR = get_profile_dir("scraper_headless")
 FB_LOGGED_IN_PROFILE_DIR = get_profile_dir("fb_logged_in")
 
+
+def _log_driver_create(tag: str, profile_dir: str | None = None):
+    try:
+        logger.info("[DRV_CREATE] %s profile=%s", tag, profile_dir or "<unknown>")
+    except Exception:
+        try:
+            print(f"[DRV_CREATE] {tag} profile={profile_dir or '<unknown>'}")
+        except Exception:
+            pass
+
 def install_package(package_name):
     """Install a package using pip."""
     print(f"Installing {package_name}...")
@@ -908,6 +918,16 @@ def _purge_wdm_cache(driver_path: str) -> None:
         pass
 
 
+def _extract_user_data_dir(chrome_options) -> str | None:
+    try:
+        for arg in getattr(chrome_options, "arguments", []):
+            if isinstance(arg, str) and arg.startswith("--user-data-dir="):
+                return arg.split("=", 1)[-1] or None
+    except Exception:
+        return None
+    return None
+
+
 _ACTIVE_DRIVERS = weakref.WeakSet()
 
 
@@ -941,6 +961,7 @@ def _start_chromedriver_with_retry(chrome_options):
             service = ChromeService(driver_path)
             driver = webdriver.Chrome(service=service, options=chrome_options)
             _register_driver_cleanup(driver)
+            _log_driver_create("main._start_chromedriver_with_retry", _extract_user_data_dir(chrome_options))
             return driver
         except Exception as exc:
             last_exc = exc

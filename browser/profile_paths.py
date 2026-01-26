@@ -10,18 +10,17 @@ from typing import Callable, Dict
 REAL_CHROME_DATA_DIR = Path(
     "~/Library/Application Support/Google/Chrome"
 ).expanduser().resolve()
-DEFAULT_BASE_DIR = Path(
-    os.environ.get("SELENIUM_PROFILE_BASE", "~/selenium-profiles")
-).expanduser().resolve()
+# Default base for isolated Selenium profiles (never the real Chrome tree).
+DEFAULT_BASE_DIR = Path("~/selenium-profiles").expanduser().resolve()
 
 _DEBUG_ONCE: set[Path] = set()
 
 
 def get_base_dir() -> Path:
     """Return the base directory for Selenium profiles."""
-    return Path(
-        os.environ.get("SELENIUM_PROFILE_BASE", DEFAULT_BASE_DIR)
-    ).expanduser().resolve()
+    override = os.environ.get("SELENIUM_PROFILE_BASE")
+    base = override if override else str(DEFAULT_BASE_DIR)
+    return Path(base).expanduser().resolve()
 
 
 def get_profile_dir(
@@ -31,10 +30,11 @@ def get_profile_dir(
     Resolve an absolute profile directory.
     If SELENIUM_PROFILE_NAME is set and allow_env_override is True, it overrides the name.
     """
-    if allow_env_override and os.environ.get("SELENIUM_PROFILE_NAME"):
-        name = os.environ["SELENIUM_PROFILE_NAME"]
-    else:
-        name = profile_name
+    name = (
+        os.environ["SELENIUM_PROFILE_NAME"]
+        if allow_env_override and os.environ.get("SELENIUM_PROFILE_NAME")
+        else profile_name
+    )
     return (get_base_dir() / name).resolve()
 
 

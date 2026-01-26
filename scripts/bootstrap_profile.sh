@@ -16,16 +16,24 @@ export PROFILE_BASE PROFILE_NAME
 PROFILE_DIR="$(python3 - <<'PY'
 import os
 from pathlib import Path
-base = Path(os.environ.get("PROFILE_BASE", "") or Path("~").expanduser() / "selenium-profiles")
-name = os.environ.get("PROFILE_NAME", "fb_logged_in")
-print((base.expanduser() / name).resolve())
+base_env = os.environ.get("PROFILE_BASE")
+name_env = os.environ.get("PROFILE_NAME")
+base = Path(base_env) if base_env else Path("~").expanduser() / "selenium-profiles"
+name = name_env if name_env else "fb_logged_in"
+print((base.expanduser().resolve() / name).resolve())
 PY
 )"
 
-if [[ "$PROFILE_DIR" == *"Library/Application Support/Google/Chrome"* ]]; then
-  echo "Refusing to use real Chrome profile: $PROFILE_DIR" >&2
-  exit 1
-fi
+export PROFILE_DIR
+python3 - <<'PY'
+import os, sys
+from pathlib import Path
+profile_dir = Path(os.environ["PROFILE_DIR"]).resolve()
+real = Path("~/Library/Application Support/Google/Chrome").expanduser().resolve()
+if real == profile_dir or real in profile_dir.parents:
+    sys.stderr.write(f"Refusing to use real Chrome profile: {profile_dir}\n")
+    sys.exit(1)
+PY
 
 mkdir -p "$PROFILE_DIR"
 

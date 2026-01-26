@@ -8,15 +8,16 @@ import difflib
 import importlib.util
 import json
 import math
+import logging
 import os
 import re
-from pathlib import Path
 import threading
 import time
 import unicodedata
 import urllib.parse
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+from pathlib import Path
 
 import pandas as pd
 import requests
@@ -60,6 +61,8 @@ from browser.profile_paths import (
     log_profile_debug,
 )
 
+logger = logging.getLogger(__name__)
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -78,6 +81,16 @@ MATCH_THRESHOLD = 0.7
 
 ENABLE_FACEBOOK_ENRICHMENT = True
 FACEBOOK_SEARCH_URL = "https://www.facebook.com/search/pages/"
+
+
+def _log_driver_create(tag: str, profile_dir: str | None = None):
+    try:
+        logger.info("[DRV_CREATE] %s profile=%s", tag, profile_dir or "<unknown>")
+    except Exception:
+        try:
+            print(f"[DRV_CREATE] {tag} profile={profile_dir or '<unknown>'}")
+        except Exception:
+            pass
 FACEBOOK_CATEGORY_KEYWORDS = ("musician", "band", "artist", "music")
 FACEBOOK_SEARCH_WAIT_SECONDS = 10
 ENABLE_LOCALE_BIAS = False
@@ -514,11 +527,11 @@ def normalize_external_url(u: str) -> str:
 
 
 def enricher_fb_profile_has_cookies() -> bool:
-    return os.path.exists(os.path.join(ENRICHER_FB_PROFILE, "Default", "Cookies"))
+    return (ENRICHER_FB_PROFILE / "Default" / "Cookies").exists()
 
 
 def persistent_fb_driver():
-    profile_dir = ensure_profile_dir(Path(ENRICHER_FB_PROFILE))
+    profile_dir = ensure_profile_dir(ENRICHER_FB_PROFILE)
     assert_profile_available(profile_dir)
     log_profile_debug(profile_dir, profile_directory="Default")
     chrome_options = Options()
@@ -542,6 +555,7 @@ def persistent_fb_driver():
         driver.set_page_load_timeout(35)
     except Exception:
         pass
+    _log_driver_create("enricher.persistent_fb_driver", str(profile_dir))
     return driver
 
 
@@ -554,7 +568,7 @@ def _get_enricher_facebook_driver():
     with _FB_DRIVER_LOCK:
         if _FB_DRIVER is not None:
             return _FB_DRIVER
-        ensure_profile_dir(Path(ENRICHER_FB_PROFILE))
+        ensure_profile_dir(ENRICHER_FB_PROFILE)
         _FB_DRIVER = persistent_fb_driver()
         return _FB_DRIVER
 
@@ -868,6 +882,16 @@ def _safe_log(logger, message: str, *args) -> None:
             print(message % args if args else message)
         except Exception:
             pass
+
+
+def _extract_user_data_dir(options) -> str | None:
+    try:
+        for arg in getattr(options, "arguments", []):
+            if isinstance(arg, str) and arg.startswith("--user-data-dir="):
+                return arg.split("=", 1)[-1] or None
+    except Exception:
+        return None
+    return None
 
 
 def _append_link(existing: str, new: str) -> str:
@@ -1904,7 +1928,7 @@ def _build_facebook_search_client(logger) -> Tuple[Optional["FacebookSearchClien
         options.add_argument("--disable-gpu")
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
-        profile_dir = Path(user_data_dir).expanduser() if user_data_dir else get_profile_dir("fb_logged_in")
+        profile_dir = Path(user_data_dir).expanduser().resolve() if user_data_dir else get_profile_dir("fb_logged_in")
         ensure_profile_dir(profile_dir)
         assert_profile_available(profile_dir)
         log_profile_debug(profile_dir, profile_directory="Default", logger=lambda msg: _safe_log(logger, "%s", msg))
@@ -1914,6 +1938,7 @@ def _build_facebook_search_client(logger) -> Tuple[Optional["FacebookSearchClien
         if ChromeDriverManager:
             service = Service(ChromeDriverManager().install())
         driver = webdriver.Chrome(service=service, options=options) if service else webdriver.Chrome(options=options)
+        _log_driver_create("enricher._build_facebook_search_client", _extract_user_data_dir(options))
         if cookies_path and os.path.exists(cookies_path):
             try:
                 driver.get("https://www.facebook.com/")
@@ -1929,7 +1954,7 @@ def _build_facebook_search_client(logger) -> Tuple[Optional["FacebookSearchClien
         client = FacebookSearchClient(
             driver=driver,
             logger=logger,
-            user_data_dir=user_data_dir or None,
+            user_data_dir=str(profile_dir),
             cookies_path=cookies_path if os.path.exists(cookies_path) else None,
         )
         return client, driver

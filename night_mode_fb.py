@@ -10,6 +10,7 @@ import time
 import urllib.parse
 import shutil
 from pathlib import Path
+import logging
 import atexit
 import weakref
 from dataclasses import dataclass
@@ -68,6 +69,7 @@ _FB_JUNK_PATH_TOKENS = (
 
 PROFILE_DIRECTORY_NAME = "Default"
 NIGHT_FB_PROFILE = get_profile_dir("fb_night_public")
+logger = logging.getLogger(__name__)
 
 
 class FacebookDriverError(RuntimeError):
@@ -85,6 +87,18 @@ def _log(logger: LoggerFn, message: str) -> None:
             pass
     try:
         print(message)
+    except Exception:
+        pass
+
+
+def _log_driver_create(tag: str, profile_dir: str | None = None):
+    try:
+        logger.info("[DRV_CREATE] %s profile=%s", tag, profile_dir or "<unknown>")
+        return
+    except Exception:
+        pass
+    try:
+        _log(None, f"[DRV_CREATE] {tag} profile={profile_dir or '<unknown>'}")
     except Exception:
         pass
 
@@ -183,6 +197,16 @@ def _purge_wdm_cache(driver_path: str) -> None:
         pass
 
 
+def _extract_user_data_dir(chrome_options) -> str | None:
+    try:
+        for arg in getattr(chrome_options, "arguments", []):
+            if isinstance(arg, str) and arg.startswith("--user-data-dir="):
+                return arg.split("=", 1)[-1] or None
+    except Exception:
+        return None
+    return None
+
+
 _ACTIVE_DRIVERS = weakref.WeakSet()
 
 
@@ -216,6 +240,7 @@ def _start_chromedriver_with_retry(chrome_options):
             service = ChromeService(driver_path)
             driver = webdriver.Chrome(service=service, options=chrome_options)
             _register_driver_cleanup(driver)
+            _log_driver_create("night_fb._start_chromedriver_with_retry", _extract_user_data_dir(chrome_options))
             return driver
         except Exception as exc:
             last_exc = exc
