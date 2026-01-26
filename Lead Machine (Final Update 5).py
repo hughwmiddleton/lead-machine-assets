@@ -1052,8 +1052,8 @@ def setup_driver():
 # Facebook Driver Setup (Visible / Head Mode with Optimizations)
 # -----------------------------------------------------------------------------
 def setup_facebook_driver():
-    tmp_profile_dir = Path(tempfile.mkdtemp(prefix="fb_logged_"))
-    assert_profile_available(tmp_profile_dir)
+    profile_dir = ensure_profile_dir(Path(FB_LOGGED_IN_PROFILE_DIR))
+    assert_profile_available(profile_dir)
     chrome_options = Options()
     binary_path = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
     if os.path.exists(binary_path):
@@ -1066,12 +1066,12 @@ def setup_facebook_driver():
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-    chrome_options.add_argument(f"--user-data-dir={tmp_profile_dir}")
+    chrome_options.add_argument(f"--user-data-dir={profile_dir}")
     chrome_options.add_argument(f"--profile-directory={PROFILE_DIRECTORY_NAME}")
     chrome_options.page_load_strategy = 'eager'
     prefs = {"profile.managed_default_content_settings.images": 2}
     chrome_options.add_experimental_option("prefs", prefs)
-    log_profile_debug(tmp_profile_dir, profile_directory=PROFILE_DIRECTORY_NAME, logger=lambda msg: logger.info(msg))
+    log_profile_debug(profile_dir, profile_directory=PROFILE_DIRECTORY_NAME, logger=lambda msg: logger.info(msg))
     driver = _start_chromedriver_with_retry(chrome_options)
     return driver
 
@@ -2549,14 +2549,15 @@ def _bandcamp_location_match_(profile_loc: str, api_hint: str, requested_label: 
     }
 
     def _canon_canada(text: str) -> str:
-        t = text.replace(" ", "")
-        if "canada" in text:
+        text_norm = text.strip()
+        text_compact = text_norm.replace(" ", "")
+        if text_norm == "canada":
             return "canada"
-        if text in canada_aliases:
+        if text_norm in canada_aliases:
             return "canada"
-        if t in canada_aliases:
+        if text_compact in canada_aliases:
             return "canada"
-        return text
+        return text_norm
 
     requested_is_canada = requested_label_norm == "canada" or requested_hint_norm == "canada"
     profile_norm = _canon_canada(profile_norm_raw) if requested_is_canada else profile_norm_raw
