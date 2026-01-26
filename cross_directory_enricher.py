@@ -10,6 +10,7 @@ import json
 import math
 import os
 import re
+from pathlib import Path
 import threading
 import time
 import unicodedata
@@ -51,6 +52,12 @@ from facebook_enrich import (
     _corporate_hit,
     _looks_corporate,
     _looks_music_related,
+)
+from browser.profile_paths import (
+    assert_profile_available,
+    ensure_profile_dir,
+    get_profile_dir,
+    log_profile_debug,
 )
 
 # ---------------------------------------------------------------------------
@@ -453,7 +460,7 @@ MAX_WEBSITES = 2
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MULTI_VALUE_SEPARATOR = ", "
 FACEBOOK_HELPERS_PATH = os.path.join(BASE_DIR, "Lead Machine (Final Update 5).py")
-ENRICHER_FB_PROFILE = os.path.join(os.path.expanduser("~"), "LeadMachine", "fb_enricher_profile")
+ENRICHER_FB_PROFILE = get_profile_dir("fb_enricher")
 _FB_DRIVER = None
 _FB_DRIVER_LOCK = threading.Lock()
 setup_facebook_driver = None
@@ -511,6 +518,9 @@ def enricher_fb_profile_has_cookies() -> bool:
 
 
 def persistent_fb_driver():
+    profile_dir = ensure_profile_dir(Path(ENRICHER_FB_PROFILE))
+    assert_profile_available(profile_dir)
+    log_profile_debug(profile_dir, profile_directory="Default")
     chrome_options = Options()
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--window-size=1920,1080")
@@ -519,7 +529,7 @@ def persistent_fb_driver():
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-blink-features=AutomationControlled")
     chrome_options.page_load_strategy = "eager"
-    chrome_options.add_argument(f"--user-data-dir={ENRICHER_FB_PROFILE}")
+    chrome_options.add_argument(f"--user-data-dir={profile_dir}")
     chrome_options.add_argument("--profile-directory=Default")
     prefs = {
         "profile.managed_default_content_settings.images": 2,
@@ -544,7 +554,7 @@ def _get_enricher_facebook_driver():
     with _FB_DRIVER_LOCK:
         if _FB_DRIVER is not None:
             return _FB_DRIVER
-        os.makedirs(ENRICHER_FB_PROFILE, exist_ok=True)
+        ensure_profile_dir(Path(ENRICHER_FB_PROFILE))
         _FB_DRIVER = persistent_fb_driver()
         return _FB_DRIVER
 
@@ -1894,9 +1904,12 @@ def _build_facebook_search_client(logger) -> Tuple[Optional["FacebookSearchClien
         options.add_argument("--disable-gpu")
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
-        if user_data_dir:
-            options.add_argument(f"--user-data-dir={user_data_dir}")
-            options.add_argument("--profile-directory=Default")
+        profile_dir = Path(user_data_dir).expanduser() if user_data_dir else get_profile_dir("fb_logged_in")
+        ensure_profile_dir(profile_dir)
+        assert_profile_available(profile_dir)
+        log_profile_debug(profile_dir, profile_directory="Default", logger=lambda msg: _safe_log(logger, "%s", msg))
+        options.add_argument(f"--user-data-dir={profile_dir}")
+        options.add_argument("--profile-directory=Default")
         service = None
         if ChromeDriverManager:
             service = Service(ChromeDriverManager().install())

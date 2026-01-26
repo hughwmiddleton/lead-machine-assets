@@ -27,6 +27,12 @@ import shutil
 import logging
 from pathlib import Path
 from typing import Optional, Tuple
+from browser.profile_paths import (
+    assert_profile_available,
+    ensure_profile_dir,
+    get_profile_dir,
+    log_profile_debug,
+)
 
 # ---------------------------
 # Dependency Check and Installation
@@ -43,6 +49,12 @@ required_packages = {
 }
 
 logger = logging.getLogger(__name__)
+
+
+# Selenium profile locations (isolated from the real Chrome profile)
+PROFILE_DIRECTORY_NAME = "Default"
+SCRAPER_PROFILE_DIR = get_profile_dir("scraper_headless")
+FB_LOGGED_IN_PROFILE_DIR = get_profile_dir("fb_logged_in")
 
 def install_package(package_name):
     """Install a package using pip."""
@@ -973,6 +985,8 @@ def get_drum_status_from_source(page_source):
 # General Driver Setup for Artist Scraping (Headless)
 # -----------------------------------------------------------------------------
 def setup_driver():
+    profile_dir = ensure_profile_dir(Path(SCRAPER_PROFILE_DIR))
+    assert_profile_available(profile_dir)
     chrome_options = Options()
     chrome_options.add_argument("--headless=new")
     chrome_options.add_argument("--disable-gpu")
@@ -982,6 +996,8 @@ def setup_driver():
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-blink-features=AutomationControlled")
     chrome_options.add_argument("--lang=en-US,en")
+    chrome_options.add_argument(f"--user-data-dir={profile_dir}")
+    chrome_options.add_argument(f"--profile-directory={PROFILE_DIRECTORY_NAME}")
     chrome_options.page_load_strategy = 'eager'
     prefs = {
         "profile.managed_default_content_settings.images": 2,
@@ -992,6 +1008,7 @@ def setup_driver():
         "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     )
+    log_profile_debug(profile_dir, profile_directory=PROFILE_DIRECTORY_NAME, logger=lambda msg: logger.info(msg))
     driver = _start_chromedriver_with_retry(chrome_options)
     try:
         driver.set_page_load_timeout(35)
@@ -1013,6 +1030,8 @@ def setup_driver():
 # Facebook Driver Setup (Visible / Head Mode with Optimizations)
 # -----------------------------------------------------------------------------
 def setup_facebook_driver():
+    profile_dir = ensure_profile_dir(Path(FB_LOGGED_IN_PROFILE_DIR))
+    assert_profile_available(profile_dir)
     chrome_options = Options()
     # Run in visible mode for Facebook scraping.
     chrome_options.add_argument("--disable-gpu")
@@ -1021,9 +1040,12 @@ def setup_facebook_driver():
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+    chrome_options.add_argument(f"--user-data-dir={profile_dir}")
+    chrome_options.add_argument(f"--profile-directory={PROFILE_DIRECTORY_NAME}")
     chrome_options.page_load_strategy = 'eager'
     prefs = {"profile.managed_default_content_settings.images": 2}
     chrome_options.add_experimental_option("prefs", prefs)
+    log_profile_debug(profile_dir, profile_directory=PROFILE_DIRECTORY_NAME, logger=lambda msg: logger.info(msg))
     driver = _start_chromedriver_with_retry(chrome_options)
     return driver
 

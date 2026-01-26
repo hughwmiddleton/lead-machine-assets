@@ -23,6 +23,12 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 from webdriver_manager.chrome import ChromeDriverManager
+from browser.profile_paths import (
+    assert_profile_available,
+    ensure_profile_dir,
+    get_profile_dir,
+    log_profile_debug,
+)
 
 try:
     import facebook_enrich
@@ -59,6 +65,9 @@ _FB_JUNK_PATH_TOKENS = (
     "/help/",
     "/meta-pay",
 )
+
+PROFILE_DIRECTORY_NAME = "Default"
+NIGHT_FB_PROFILE = get_profile_dir("fb_night_public")
 
 
 class FacebookDriverError(RuntimeError):
@@ -221,6 +230,8 @@ def _create_fb_driver_public(headless: bool = True):
     Create a clean, no-login Chrome driver for public FB scraping.
     Mirrors the legacy Unearthed driver (no cookies/session).
     """
+    profile_dir = ensure_profile_dir(Path(NIGHT_FB_PROFILE))
+    assert_profile_available(profile_dir)
     chrome_options = ChromeOptions()
     if headless:
         try:
@@ -234,9 +245,12 @@ def _create_fb_driver_public(headless: bool = True):
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-blink-features=AutomationControlled")
     chrome_options.add_argument("--incognito")
+    chrome_options.add_argument(f"--user-data-dir={profile_dir}")
+    chrome_options.add_argument(f"--profile-directory={PROFILE_DIRECTORY_NAME}")
     chrome_options.page_load_strategy = "eager"
     prefs = {"profile.managed_default_content_settings.images": 2}
     chrome_options.add_experimental_option("prefs", prefs)
+    log_profile_debug(profile_dir, profile_directory=PROFILE_DIRECTORY_NAME, logger=lambda msg: _log(None, msg))
     return _start_chromedriver_with_retry(chrome_options)
 
 
