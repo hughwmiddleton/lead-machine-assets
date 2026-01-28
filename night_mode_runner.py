@@ -410,6 +410,8 @@ def run_night_mode(
     fb_max_attempts_override: Optional[int] = None,
     fb_max_rows_override: Optional[int] = None,
     with_sc_meta: bool = False,
+    enable_night_fb_override: Optional[bool] = None,
+    skip_night_fb_override: Optional[bool] = None,
 ) -> Dict[str, Any]:
     config = _load_json(config_path)
     export_mode = (export_mode_override or config.get("export_mode") or DEFAULT_EXPORT_MODE).strip().lower()
@@ -430,6 +432,13 @@ def run_night_mode(
         master_max_live_searches = 0
 
     fb_cfg = config.get("facebook", {}) or {}
+    fb_enabled_cfg = fb_cfg.get("enabled")
+    # Default to disabled to avoid double-running Facebook (cross-directory enrichment already does a pass).
+    fb_enabled = bool(fb_enabled_cfg) if fb_enabled_cfg is not None else False
+    if enable_night_fb_override is True:
+        fb_enabled = True
+    if skip_night_fb_override is True:
+        fb_enabled = False
     fb_auto_resume = fb_cfg.get("auto_resume_after_captcha", False) if fb_auto_resume_override is None else bool(fb_auto_resume_override)
     fb_cooldown_seconds = int(fb_cfg.get("cooldown_seconds", 600)) if fb_cooldown_override is None else int(fb_cooldown_override)
     fb_max_auto_resume_attempts = (
@@ -495,7 +504,11 @@ def run_night_mode(
             fb_rows_total = fb_state.get("fb_total_rows")
             try:
                 fb_status: Optional[FacebookGlobalPassStatus] = None
-                if resume and fb_completed and os.path.exists(master_post_fb):
+                if not fb_enabled:
+                    logger.info("[Master] Night FB pass disabled; skipping Facebook global pass.")
+                    master_post_fb = master_pre_fb
+                    fb_completed = True
+                elif resume and fb_completed and os.path.exists(master_post_fb):
                     logger.info("[Master] Resume: Facebook global pass already completed; skipping.")
                     fb_status = FacebookGlobalPassStatus(
                         processed_rows=fb_state.get("fb_completed", 0) or 0,
@@ -532,7 +545,7 @@ def run_night_mode(
                         break
                 if fb_status and fb_status.completed:
                     logger.info("[Master] Facebook global pass completed: %s", master_post_fb)
-                else:
+                elif fb_enabled:
                     logger.info(
                         "[Master] Facebook global pass partial (limit_hit=%s captcha=%s total_rows=%s)",
                         fb_limit_hit,
@@ -615,6 +628,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Maximum auto-resume attempts for FB pass after captcha (default from config or 1)",
     )
     parser.add_argument("--fb-max-rows-per-run", type=int, help="Limit FB rows per Night Mode run")
+    parser.add_argument(
+        "--enable-night-fb",
+        action="store_true",
+        help="Force-enable the Night Mode Facebook global pass (overrides config)",
+    )
+    parser.add_argument(
+        "--skip-night-fb",
+        action="store_true",
+        help="Skip the Night Mode Facebook global pass even if configured",
+    )
     return parser
 
 
@@ -633,6 +656,8 @@ def main(argv: Optional[List[str]] = None) -> None:
         fb_max_attempts_override=args.fb_max_auto_resume_attempts,
         fb_max_rows_override=args.fb_max_rows_per_run,
         with_sc_meta=args.with_sc_meta,
+        enable_night_fb_override=True if args.enable_night_fb else None,
+        skip_night_fb_override=True if args.skip_night_fb else None,
     )
     print(json.dumps(result, indent=2))
 
