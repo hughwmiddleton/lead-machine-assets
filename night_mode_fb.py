@@ -64,6 +64,14 @@ _FB_JUNK_PATH_TOKENS = (
 class FacebookDriverError(RuntimeError):
     """Raised when the Facebook driver/session is unavailable or dead."""
 
+class FacebookLoginRequired(FacebookDriverError):
+    """Raised when Facebook redirects to a login/signup/checkpoint page."""
+    is_captcha = True  # so upstream captcha detection stops the run
+
+    def __init__(self, url: str = "") -> None:
+        super().__init__(f"login_required:{url}")
+        self.url = url
+
 
 def _log(logger: LoggerFn, message: str) -> None:
     if not message:
@@ -816,12 +824,13 @@ class NightModeFacebookEnricher:
         html, resolved_url = self._fetch_html_with_url(candidate_url)
         if (not html) and allow_anon:
             html, resolved_url = self._fetch_html_with_url_anon(candidate_url)
+        if (not html) and _is_fb_login_or_security_url(resolved_url or ""):
+            raise FacebookLoginRequired(resolved_url or candidate_url)
         if not html:
             return None
         resolved_url = _normalise_fb_url(resolved_url or candidate_url)
         if _is_fb_login_or_security_url(resolved_url):
-            _log(self.logger, f"[Night FB] Ignoring login/redirect page: {resolved_url}")
-            return None
+            raise FacebookLoginRequired(resolved_url)
 
         soup = BeautifulSoup(html, "html.parser")
         has_music_signals = _night_fb_has_music_signals(soup, {"url": resolved_url})
@@ -1035,6 +1044,10 @@ class NightModeFacebookEnricher:
                     if not result.get("FB_Status"):
                         result["FB_Status"] = "ok"
             return result
+        except FacebookLoginRequired as exc:
+            result["FB_Status"] = "login_required"
+            _log(self.logger, f"[Night FB] Login required for '{artist_name}' at {getattr(exc, 'url', '')}; escalating to caller.")
+            raise
         except FacebookDriverError as exc:
             result["FB_Status"] = "driver_error"
             _log(self.logger, f"[Night FB] Driver error while enriching '{result.get('Artist Name', '') or '<unknown>'}': {exc}")
