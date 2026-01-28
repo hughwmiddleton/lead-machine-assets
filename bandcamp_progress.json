@@ -1360,54 +1360,6 @@
       "https://deweach.bandcamp.com"
     ]
   },
-  "discover:https://bandcamp.com/discover/france+rock?s=new": {
-    "scraped_artist_urls": [
-      "https://prevot.bandcamp.com",
-      "https://franckdadure1.bandcamp.com",
-      "https://arsenek.bandcamp.com",
-      "https://movedone.bandcamp.com",
-      "https://livvv3.bandcamp.com",
-      "https://vladlabel.bandcamp.com",
-      "https://jamtrackschannel.bandcamp.com",
-      "https://kiusa.bandcamp.com",
-      "https://arnaudquevedo.bandcamp.com",
-      "https://earthmotion.bandcamp.com",
-      "https://crouxrecords.bandcamp.com",
-      "https://jefferro.bandcamp.com",
-      "https://eoda.bandcamp.com",
-      "https://semaphore68.bandcamp.com",
-      "https://cloudyheadsband.bandcamp.com",
-      "https://theunderlyingtalkers.bandcamp.com",
-      "https://romainfrisicaro.bandcamp.com",
-      "https://matpiche.bandcamp.com",
-      "https://vintagerecordsstudio.bandcamp.com",
-      "https://potionreacteur.bandcamp.com"
-    ]
-  },
-  "https://bandcamp.com/discover/france+rock?s=new": {
-    "scraped_artist_urls": [
-      "https://prevot.bandcamp.com",
-      "https://franckdadure1.bandcamp.com",
-      "https://arsenek.bandcamp.com",
-      "https://movedone.bandcamp.com",
-      "https://livvv3.bandcamp.com",
-      "https://vladlabel.bandcamp.com",
-      "https://jamtrackschannel.bandcamp.com",
-      "https://kiusa.bandcamp.com",
-      "https://arnaudquevedo.bandcamp.com",
-      "https://earthmotion.bandcamp.com",
-      "https://crouxrecords.bandcamp.com",
-      "https://jefferro.bandcamp.com",
-      "https://eoda.bandcamp.com",
-      "https://semaphore68.bandcamp.com",
-      "https://cloudyheadsband.bandcamp.com",
-      "https://theunderlyingtalkers.bandcamp.com",
-      "https://romainfrisicaro.bandcamp.com",
-      "https://matpiche.bandcamp.com",
-      "https://vintagerecordsstudio.bandcamp.com",
-      "https://potionreacteur.bandcamp.com"
-    ]
-  },
   "discover:https://bandcamp.com/discover/australia+folk?s=new": {
     "scraped_artist_urls": [
       "https://judeseda.bandcamp.com",
@@ -1434,6 +1386,102 @@
       "https://jeanelliotmusic.bandcamp.com",
       "https://alexander-beetle.bandcamp.com",
       "https://caramay.bandcamp.com"
+    ]
+  },
+  "discover:https://bandcamp.com/discover/united-kingdom+rock?s=new": {
+    "scraped_artist_urls": [
+      "https://seagreenai.bandcamp.com",
+      "https://lmjhoney.bandcamp.com",
+      "https://martsmusic.bandcamp.com",
+      "https://drnakano.bandcamp.com",
+      "https://harpernhubble.bandcamp.com",
+      "https://maximumtension.bandcamp.com",
+      "https://elijahobrienwave.bandcamp.com",
+      "https://charlesmeyerlab.bandcamp.com",
+      "https://jnuk.bandcamp.com",
+      "https://chrisbraide.bandcamp.com",
+      "https://stageboat4.bandcamp.com",
+      "https://mavmyangryvoice.bandcamp.com",
+      "https://mattekinsmusic.bandcamp.com",
+      "https://pamelajordanbeats.bandcamp.com",
+      "https://jamestrevinovibes.bandcamp.com",
+      "https://michaelalan.bandcamp.com",
+      "https://rocksavage.bandcamp.com",
+      "https://tombaitson.bandcamp.com",
+      "https://nicoleallan.bandcamp.com",
+      "https://mniki-p.bandcamp.com"
+    ]
+  },
+  "https://bandcamp.com/discover/united-kingdom+rock?s=new": {
+    "scraped_artist_urls": [
+      "https://seagreenai.bandcamp.com",
+      "https://lmjhoney.bandcamp.com",
+      "https://martsmusic.bandcamp.com",
+      "https://drnakano.bandcamp.com",
+      "https://harpernhubble.bandcamp.com",
+      "https://maximumtension.bandcamp.com",
+      "https://elijahobrienwave.bandcamp.com",
+      "https://charlesmeyerlab.bandcamp.com",
+      "https://jnuk.bandcamp.com",
+      "https://chrisbraide.bandcamp.com",
+      "https://stageboat4.bandcamp.com",
+      "https://mavmyangryvoice.bandcamp.com",
+      "https://mattekinsmusic.bandcamp.com",
+      "https://pamelajordanbeats.bandcamp.com",
+      "https://jamestrevinovibes.bandcamp.com",
+      "https://michaelalan.bandcamp.com",
+      "https://rocksavage.bandcamp.com",
+      "https://tombaitson.bandcamp.com",
+      "https://nicoleallan.bandcamp.com",
+      "https://mniki-p.bandcamp.com"
+    ]
+  },
+  "discover:https://bandcamp.com/discover/france+rock?s=new": {
+    "scraped_artist_urls": [
+      "https://lonely-loeb.bandcamp.com",
+      "https://fffmusique.bandcamp.com",
+      "https://labordere.bandcamp.com",
+      "https://kinofrontera.bandcamp.com",
+      "https://contrecourantmusic.bandcamp.com",
+      "https://stephanemelo.bandcamp.com",
+      "https://howlinbananarecords.bandcamp.com",
+      "https://simplemortel.bandcamp.com",
+      "https://wedecay.bandcamp.com",
+      "https://joandtheschizos.bandcamp.com",
+      "https://fredbelenger.bandcamp.com",
+      "https://michelmachoire.bandcamp.com",
+      "https://ledid.bandcamp.com",
+      "https://gloryslava.bandcamp.com",
+      "https://youpoor1.bandcamp.com",
+      "https://lechateaucosco.bandcamp.com",
+      "https://solaceinme.bandcamp.com",
+      "https://thomassaintmichel.bandcamp.com",
+      "https://fiascobangbang.bandcamp.com",
+      "https://johnmcnultyandthedimestore.bandcamp.com"
+    ]
+  },
+  "https://bandcamp.com/discover/france+rock?s=new": {
+    "scraped_artist_urls": [
+      "https://lonely-loeb.bandcamp.com",
+      "https://fffmusique.bandcamp.com",
+      "https://labordere.bandcamp.com",
+      "https://kinofrontera.bandcamp.com",
+      "https://contrecourantmusic.bandcamp.com",
+      "https://stephanemelo.bandcamp.com",
+      "https://howlinbananarecords.bandcamp.com",
+      "https://simplemortel.bandcamp.com",
+      "https://wedecay.bandcamp.com",
+      "https://joandtheschizos.bandcamp.com",
+      "https://fredbelenger.bandcamp.com",
+      "https://michelmachoire.bandcamp.com",
+      "https://ledid.bandcamp.com",
+      "https://gloryslava.bandcamp.com",
+      "https://youpoor1.bandcamp.com",
+      "https://lechateaucosco.bandcamp.com",
+      "https://solaceinme.bandcamp.com",
+      "https://thomassaintmichel.bandcamp.com",
+      "https://fiascobangbang.bandcamp.com",
+      "https://johnmcnultyandthedimestore.bandcamp.com"
     ]
   }
 }

@@ -1024,6 +1024,21 @@ def setup_facebook_driver():
     chrome_options.page_load_strategy = 'eager'
     prefs = {"profile.managed_default_content_settings.images": 2}
     chrome_options.add_experimental_option("prefs", prefs)
+
+    # Allow an optional persistent profile for Facebook so login survives captchas.
+    # Set FB_CHROME_PROFILE_DIR to a writable directory; we'll create it if missing.
+    profile_dir = os.environ.get("FB_CHROME_PROFILE_DIR", "").strip()
+    if not profile_dir:
+        profile_dir = os.path.join(os.path.expanduser("~"), ".lead_machine_fb_profile")
+    if profile_dir:
+        try:
+            os.makedirs(profile_dir, exist_ok=True)
+            # Quote so Chrome handles spaces in the path (e.g., "Lead Machine VS Code").
+            chrome_options.add_argument(f'--user-data-dir="{profile_dir}"')
+            chrome_options.add_argument("--profile-directory=Default")
+        except Exception as exc:
+            logger.warning(f"[FB] Could not set user-data-dir '{profile_dir}': {exc}")
+
     driver = _start_chromedriver_with_retry(chrome_options)
     return driver
 
@@ -7632,13 +7647,40 @@ def extract_emails(text):
     email_pattern = r'([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})'
     return list(set(re.findall(email_pattern, text)))
 
+def _has_fb_session_cookie(driver) -> bool:
+    """
+    Return True if the current driver already has an authenticated FB cookie.
+    Uses the presence of the 'c_user' cookie which is only set on logged-in pages.
+    """
+    try:
+        for cookie in driver.get_cookies():
+            if cookie.get("name") == "c_user" and cookie.get("value"):
+                return True
+    except Exception:
+        pass
+    return False
+
 def login_facebook(driver, fb_username, fb_password):
     driver.get('https://www.facebook.com/')
+    # If we're already logged in (persisted profile/cookies), skip credentials entirely.
+    if _has_fb_session_cookie(driver):
+        return
+
+    # Optional manual login path for 2FA/checkpoint flows.
+    manual_login = os.environ.get("FB_MANUAL_LOGIN", "").strip().lower() in ("1", "true", "yes")
+    wait_seconds = int(os.environ.get("FB_LOGIN_TIMEOUT", "180") or 180)
+
+    if manual_login:
+        print(f"[FB Session] Waiting up to {wait_seconds}s for manual Facebook login (FB_MANUAL_LOGIN=1).")
+        WebDriverWait(driver, wait_seconds).until(lambda d: _has_fb_session_cookie(d))
+        return
+
     WebDriverWait(driver, 15).until(EC.presence_of_element_located((By.ID, 'email')))
     driver.find_element(By.ID, 'email').send_keys(fb_username)
     driver.find_element(By.ID, 'pass').send_keys(fb_password)
     driver.find_element(By.NAME, 'login').click()
-    WebDriverWait(driver, 15).until(EC.presence_of_element_located((By.TAG_NAME, 'body')))
+    # Wait until logged in (cookie appears) or fallback to body load.
+    WebDriverWait(driver, 30).until(lambda d: _has_fb_session_cookie(d) or EC.presence_of_element_located((By.TAG_NAME, 'body'))(d))
 
 
 class FacebookSessionManager:

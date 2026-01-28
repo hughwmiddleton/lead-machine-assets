@@ -22,6 +22,13 @@ export SPOTIFY_CLIENT_SECRET="27188b55b8d94604a9a2172092e19416"
 export SPOTIFY_REDIRECT_URI="http://127.0.0.1:8080/callback"
 export SPOTIFY_REFRESH_TOKEN="AQB1vtP347IrhWrFAScJ_TwBSK0ZTiEdAbhxrmGf82vqmZIANMZdpLqnkpUDsEjGK9HZGGVfkfB9D915m28IK5CCAFFTMBwLd63n0UVmoYSSkjs_F8qXHJeDG-I0UgwrtAU"
 
+# Persist Facebook session to reduce captcha/login prompts (use a path without spaces).
+export FB_CHROME_PROFILE_DIR="${HOME}/.lead_machine_fb_profile"
+# Allow manual login once per session when captcha appears.
+export FB_MANUAL_LOGIN=1
+# Optional: extend manual login wait (seconds) if needed.
+export FB_LOGIN_TIMEOUT=300
+
 # (Optional) Install dependencies if needed
 # pip install pandas tqdm selenium beautifulsoup4 webdriver_manager PyQt5
 
