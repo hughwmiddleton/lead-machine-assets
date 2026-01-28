@@ -29,7 +29,7 @@ except Exception:  # pragma: no cover - defensive
     def is_fb_login_redirect(url: str) -> bool:  # type: ignore
         return False
 
-from night_mode_fb import FacebookDriverError, NightModeFacebookEnricher
+from night_mode_fb import FacebookDriverError, FacebookLoginRequired, NightModeFacebookEnricher
 
 LoggerFn = Optional[Callable[[str], None]]
 
@@ -609,6 +609,7 @@ def run_master_enrichment(
     logger: LoggerFn = None,
     enable_live_search: bool = True,
     max_live_searches: Optional[int] = None,
+    disable_fb_enrich: bool = False,
 ) -> str:
     """
     Run the cross-directory enricher on a single combined CSV.
@@ -633,17 +634,30 @@ def run_master_enrichment(
             if max_live < 0:
                 max_live = 0
 
-        cross_directory_enricher.run_cross_directory_enrichment(
-            seed_csv_path,
-            output_csv_path,
-            bandcamp_csv_path="",
-            soundcloud_csv_path="",
-            unearthed_csv_path="",
-            lastfm_csv_path="",
-            enable_live_search=enable_live_search,
-            max_live_searches=max_live,
-            logger=logger,
-        )
+        original_fb_flag = getattr(cross_directory_enricher, "ENABLE_FACEBOOK_ENRICHMENT", True)
+        if disable_fb_enrich:
+            try:
+                cross_directory_enricher.ENABLE_FACEBOOK_ENRICHMENT = False
+                _safe_log(logger, "[Master Enrich] Facebook enrichment disabled for Night Mode (will rely on Night FB pass).")
+            except Exception:
+                pass
+        try:
+            cross_directory_enricher.run_cross_directory_enrichment(
+                seed_csv_path,
+                output_csv_path,
+                bandcamp_csv_path="",
+                soundcloud_csv_path="",
+                unearthed_csv_path="",
+                lastfm_csv_path="",
+                enable_live_search=enable_live_search,
+                max_live_searches=max_live,
+                logger=logger,
+            )
+        finally:
+            try:
+                cross_directory_enricher.ENABLE_FACEBOOK_ENRICHMENT = original_fb_flag
+            except Exception:
+                pass
     except Exception as exc:
         _safe_log(logger, f"[Master Enrich] Enricher failed safely: {exc}")
         shutil.copyfile(seed_csv_path, output_csv_path)
@@ -1326,6 +1340,26 @@ def run_facebook_global_pass_nightmode(
             try:
                 clean_row = {k: ("" if pd.isna(v) else v) for k, v in row.to_dict().items()}
                 enriched = fb_helper.enrich_row_with_facebook_night(clean_row, row_index=idx)
+            except FacebookLoginRequired as exc:
+                captcha_flag = True
+                captcha_detected = True
+                _safe_log_console(
+                    logger,
+                    f"[FB Night] Login required at row {idx} (url={getattr(exc, 'url', '')}); stopping early with FB_Status='login_required'.",
+                )
+                df.at[idx, "FB_Status"] = "login_required"
+                state.update(
+                    {
+                        "fb_last_index": last_index,
+                        "fb_completed": completed_rows,
+                        "fb_attempted_total": attempted_total,
+                        "fb_captcha_flag": True,
+                        "fb_total_rows": total_rows,
+                        "fb_resume_input": os.path.abspath(input_csv),
+                    }
+                )
+                _write_fb_state(state_path, state)
+                break
             except FacebookDriverError as exc:
                 _safe_log_console(logger, f"[FB Night] Driver error at row {idx}: {exc}")
                 enriched = {"FB_Status": "driver_error"}

@@ -481,6 +481,7 @@ def run_night_mode(
                     logger=logger.info,
                     enable_live_search=master_live_search_enabled,
                     max_live_searches=master_max_live_searches,
+                    disable_fb_enrich=True,  # avoid double FB; Night FB pass runs later
                 )
                 master_pre_fb = os.path.join(run_dir, "master_pre_fb.csv")
                 master_pre_fb = run_enrichment(master_enriched, master_pre_fb, logger=logger.info, night_mode=True)
