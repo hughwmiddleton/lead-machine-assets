@@ -252,16 +252,27 @@ def _get_night_fb_profile_config() -> Optional[Tuple[str, str]]:
     return user_data_dir, profile_name
 
 
-def _inject_fb_cookies_from_profile(driver, user_data_dir: str, profile_name: str, logger: LoggerFn = None) -> bool:
+def _resolve_chrome_cookie_db(user_data_dir: str, profile_name: str) -> Path:
     """
-    Best-effort: read Facebook cookies from the Chrome profile DB and load them into the driver.
-    Returns True if a c_user cookie was injected.
+    Prefer the modern Chrome cookie DB path (Network/Cookies) and
+    fall back to the legacy Cookies file if needed.
     """
+    net_path = Path(user_data_dir, profile_name, "Network", "Cookies")
+    legacy_path = Path(user_data_dir, profile_name, "Cookies")
+    if net_path.exists():
+        return net_path
+    return legacy_path
+
+
+def _read_fb_cookies_from_db(db_path: Path) -> List[Tuple[str, str, str, str, int]]:
+    """
+    Return list of (name, value, host_key, path, expires_utc) facebook cookies from db_path.
+    Safe to call even if db is missing or unreadable (returns []).
+    """
+    if not db_path.exists():
+        return []
     try:
-        cookies_path = Path(user_data_dir, profile_name, "Cookies")
-        if not cookies_path.exists():
-            return False
-        conn = sqlite3.connect(str(cookies_path))
+        conn = sqlite3.connect(str(db_path))
         cur = conn.cursor()
         cur.execute(
             """
@@ -272,6 +283,20 @@ def _inject_fb_cookies_from_profile(driver, user_data_dir: str, profile_name: st
         )
         rows = cur.fetchall()
         conn.close()
+        return rows or []
+    except Exception:
+        return []
+
+
+def _inject_fb_cookies_from_profile(driver, user_data_dir: str, profile_name: str, logger: LoggerFn = None) -> bool:
+    """
+    Best-effort: read Facebook cookies from the Chrome profile DB and load them into the driver.
+    Returns True if a c_user cookie was injected.
+    """
+    try:
+        cookies_path = _resolve_chrome_cookie_db(user_data_dir, profile_name)
+        _log(logger, f"[Night FB] Cookie DB resolved: {cookies_path}")
+        rows = _read_fb_cookies_from_db(cookies_path)
         if not rows:
             return False
         try:
@@ -722,6 +747,13 @@ class NightModeFacebookEnricher:
                     except Exception:
                         driver = None
                     if driver:
+                        db_path = _resolve_chrome_cookie_db(persistent_profile_cfg[0], persistent_profile_cfg[1])
+                        rows = _read_fb_cookies_from_db(db_path)
+                        has_c_user = any(r[0] == "c_user" and r[1] for r in rows)
+                        _log(
+                            self.logger,
+                            f"[FB Session] Pre-check cookies loaded: c_user={has_c_user}, fb_cookie_count={len(rows)}, db={db_path}, url=https://www.facebook.com/",
+                        )
                         injected = _inject_fb_cookies_from_profile(driver, persistent_profile_cfg[0], persistent_profile_cfg[1], logger=self.logger)
                         if injected:
                             try:
@@ -818,7 +850,7 @@ class NightModeFacebookEnricher:
             self._refresh_driver(session)
         return session
 
-    def _fetch_html_with_url(self, url: str) -> Tuple[Optional[str], Optional[str]]:
+def _fetch_html_with_url(self, url: str) -> Tuple[Optional[str], Optional[str]]:
         session = self._ensure_session()
         if not session:
             return None, None
