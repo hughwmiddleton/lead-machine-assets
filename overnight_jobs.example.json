@@ -5,6 +5,9 @@
     "enable_live_search": true,
     "max_live_searches": 50
   },
+  "facebook": {
+    "enabled": true
+  },
   "jobs": [
     {
       "job_id": "spotify_freshfinds_uk_indie_2025-12-01",

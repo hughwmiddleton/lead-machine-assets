@@ -433,8 +433,8 @@ def run_night_mode(
 
     fb_cfg = config.get("facebook", {}) or {}
     fb_enabled_cfg = fb_cfg.get("enabled")
-    # Default to disabled to avoid double-running Facebook (cross-directory enrichment already does a pass).
-    fb_enabled = bool(fb_enabled_cfg) if fb_enabled_cfg is not None else False
+    # Default to enabled so Night FB runs unless explicitly disabled.
+    fb_enabled = bool(fb_enabled_cfg) if fb_enabled_cfg is not None else True
     if enable_night_fb_override is True:
         fb_enabled = True
     if skip_night_fb_override is True:
