@@ -5,13 +5,10 @@ This module isolates Night Mode tweaks so daytime paths stay unchanged.
 
 from __future__ import annotations
 
-import os
-import sys
 import re
 import time
 import urllib.parse
 import shutil
-import sqlite3
 from pathlib import Path
 import atexit
 import weakref
@@ -217,171 +214,6 @@ def _start_chromedriver_with_retry(chrome_options):
     if last_exc:
         raise last_exc
     raise FacebookDriverError("Failed to start ChromeDriver.")
-
-
-def _normalize_user_data_dir(raw_value: str) -> Optional[str]:
-    """Strip quotes/whitespace and require an absolute path."""
-    if not raw_value:
-        return None
-
-    cleaned = raw_value.strip()
-
-    # Remove matching or stray leading/trailing quotes to avoid creating ./"
-    if len(cleaned) >= 2 and cleaned[0] == cleaned[-1] and cleaned[0] in {"'", '"'}:
-        cleaned = cleaned[1:-1].strip()
-    cleaned = cleaned.lstrip('\'"').rstrip('\'"')
-
-    cleaned = os.path.expanduser(cleaned)
-    if not cleaned or not os.path.isabs(cleaned):
-        print(
-            f"Ignoring NIGHT_FB_USER_DATA_DIR because it is not an absolute path: {raw_value}",
-            file=sys.stderr,
-        )
-        return None
-
-    return cleaned
-
-
-def _get_night_fb_profile_config() -> Optional[Tuple[str, str]]:
-    """Return (user_data_dir, profile_name) if persistence is requested."""
-    user_data_dir_raw = os.environ.get("NIGHT_FB_USER_DATA_DIR") or ""
-    user_data_dir = _normalize_user_data_dir(user_data_dir_raw)
-    if not user_data_dir:
-        return None
-    profile_name = (os.environ.get("NIGHT_FB_PROFILE_NAME") or "Default").strip() or "Default"
-    return user_data_dir, profile_name
-
-
-def _resolve_chrome_cookie_db(user_data_dir: str, profile_name: str) -> Path:
-    """
-    Prefer the modern Chrome cookie DB path (Network/Cookies) and
-    fall back to the legacy Cookies file if needed.
-    """
-    net_path = Path(user_data_dir, profile_name, "Network", "Cookies")
-    legacy_path = Path(user_data_dir, profile_name, "Cookies")
-    if net_path.exists():
-        return net_path
-    return legacy_path
-
-
-def _read_fb_cookies_from_db(
-    db_path: Path,
-) -> List[Tuple[str, str, bytes | memoryview | None, str, str, int]]:
-    """
-    Return list of (name, value, encrypted_value, host_key, path, expires_utc) facebook cookies from db_path.
-    Safe to call even if db is missing or unreadable (returns []).
-    """
-    if not db_path.exists():
-        return []
-    try:
-        with sqlite3.connect(str(db_path)) as conn:
-            cur = conn.cursor()
-            cur.execute(
-                """
-                SELECT name, value, encrypted_value, host_key, path, expires_utc
-                FROM cookies
-                WHERE host_key LIKE '%facebook.com%' AND name IN ('c_user','xs','fr','datr','sb')
-                """
-            )
-            rows = cur.fetchall()
-        return rows or []
-    except Exception:
-        return []
-
-
-def _inject_fb_cookies_from_profile(driver, user_data_dir: str, profile_name: str, logger: LoggerFn = None) -> bool:
-    """
-    Best-effort: read Facebook cookies from the Chrome profile DB and load them into the driver.
-    Returns True if a c_user cookie was injected.
-    """
-    try:
-        db_path = _resolve_chrome_cookie_db(user_data_dir, profile_name)
-        _log(logger, f"[Night FB] Cookie DB resolved: {db_path}")
-        rows = _read_fb_cookies_from_db(db_path)
-        if not rows:
-            return False
-        try:
-            driver.get("https://www.facebook.com/")
-        except Exception:
-            pass
-        injected_c_user = False
-        for name, value, encrypted_value, host, path_val, expires_utc in rows:
-            if not value:
-                continue
-            cookie = {
-                "name": name,
-                "value": value,
-                "domain": host or ".facebook.com",
-                "path": path_val or "/",
-            }
-            if expires_utc and expires_utc > 0:
-                cookie["expiry"] = int(expires_utc / 1_000_000)
-            try:
-                driver.add_cookie(cookie)
-                if name == "c_user":
-                    injected_c_user = True
-            except Exception:
-                continue
-        if injected_c_user:
-            _log(logger, "[Night FB] Injected facebook cookies from profile into driver.")
-        return injected_c_user
-    except Exception as exc:
-        _log(logger, f"[Night FB] Cookie injection failed: {exc}")
-        return False
-
-
-def _make_persistent_fb_driver_factory(base_factory, logger: LoggerFn = None):
-    """
-    Wrap the legacy driver factory with persistent Chrome profile support.
-    Only used for authenticated Night FB sessions.
-    """
-    profile_cfg = _get_night_fb_profile_config()
-    if not profile_cfg:
-        return base_factory
-
-    user_data_dir, profile_name = profile_cfg
-
-    def _factory():
-        try:
-            os.makedirs(user_data_dir, exist_ok=True)
-        except Exception:
-            pass
-
-        chrome_options = ChromeOptions()
-        chrome_options.add_argument("--disable-gpu")
-        chrome_options.add_argument("--window-size=1920x1080")
-        chrome_options.add_argument("--disable-extensions")
-        chrome_options.add_argument("--disable-dev-shm-usage")
-        chrome_options.add_argument("--no-sandbox")
-        chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-        chrome_options.page_load_strategy = "eager"
-        prefs = {"profile.managed_default_content_settings.images": 2}
-        chrome_options.add_experimental_option("prefs", prefs)
-        # Pass raw paths; ChromeOptions handles spaces safely without quoting.
-        chrome_options.add_argument(f"--user-data-dir={user_data_dir}")
-        if profile_name:
-            chrome_options.add_argument(f"--profile-directory={profile_name}")
-
-        # Allow an explicit Chrome binary override (useful on macOS where Google Chrome
-        # is typically not on PATH). If not provided, webdriver will fall back to the
-        # system default. Keeping this here ensures we open the *same* Chrome install
-        # that the user just confirmed is already logged in with the persistent profile.
-        chrome_binary = (os.environ.get("NIGHT_FB_CHROME_BINARY") or "").strip()
-        if not chrome_binary and sys.platform == "darwin":
-            chrome_binary = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-        if chrome_binary:
-            chrome_options.binary_location = chrome_binary
-            _log(logger, f"[Night FB] Using Chrome binary: {chrome_binary}")
-
-        _log(logger, f"[Night FB] Using persistent Chrome profile: {user_data_dir} (profile={profile_name})")
-
-        try:
-            return _start_chromedriver_with_retry(chrome_options)
-        except Exception as exc:
-            _log(logger, f"[Night FB] Failed to start Chrome with persistent profile (is it already open?): {exc}")
-            raise FacebookDriverError(f"Persistent profile startup failed: {exc}")
-
-    return _factory
 
 
 def _create_fb_driver_public(headless: bool = True):
@@ -718,68 +550,21 @@ class NightModeFacebookEnricher:
         if not self.username or not self.password:
             _log(self.logger, "[Night FB] Missing FB credentials; running without live session.")
             return None
-        persistent_profile_cfg = _get_night_fb_profile_config()
         try:
-            if self.use_shared_session and not persistent_profile_cfg:
+            if self.use_shared_session:
                 get_shared = getattr(self.legacy, "get_shared_facebook_session", None)
                 if callable(get_shared):
                     self.session = get_shared(self.username, self.password, logger=self.logger)
                     self._owns_session = False
             if self.session is None:
                 manager_cls = getattr(self.legacy, "FacebookSessionManager", None)
-                base_driver_factory = getattr(self.legacy, "setup_facebook_driver", None)
-                if manager_cls and base_driver_factory:
-                    driver_factory = _make_persistent_fb_driver_factory(base_driver_factory, logger=self.logger)
+                driver_factory = getattr(self.legacy, "setup_facebook_driver", None)
+                if manager_cls and driver_factory:
                     _log(self.logger, "[FB] Creating new ChromeDriver session for Night FB (shared=False).")
-                    try:
-                        self.session = manager_cls(self.username, self.password, driver_factory, logger=self.logger)
-                        self._owns_session = True
-                    except FacebookDriverError:
-                        if persistent_profile_cfg:
-                            _log(self.logger, "[Night FB] Persistent profile failed at launch; retrying with fresh session (no persistence).")
-                            self.session = manager_cls(self.username, self.password, base_driver_factory, logger=self.logger)
-                            self._owns_session = True
-                        else:
-                            raise
-                # Attempt cookie injection if persistent profile is configured but session not yet authenticated.
-                if self.session and persistent_profile_cfg:
-                    try:
-                        driver = self.session.navigate("about:blank")
-                    except Exception:
-                        driver = None
-                    if driver:
-                        db_path = _resolve_chrome_cookie_db(persistent_profile_cfg[0], persistent_profile_cfg[1])
-                        rows = _read_fb_cookies_from_db(db_path)
-                        has_c_user = any(r[0] == "c_user" and (r[1] or r[2]) for r in rows)
-                        _log(
-                            self.logger,
-                            f"[FB Session] Pre-check cookies loaded: c_user(value|encrypted)={has_c_user}, fb_cookie_count={len(rows)}, db={db_path}, url=https://www.facebook.com/",
-                        )
-                        injected = _inject_fb_cookies_from_profile(driver, persistent_profile_cfg[0], persistent_profile_cfg[1], logger=self.logger)
-                        if injected:
-                            try:
-                                driver.get("https://www.facebook.com/")
-                                if _is_fb_session_authenticated(driver):
-                                    self.logged_in = True
-                                    self._capture_main_window()
-                                    return self.session
-                            except Exception:
-                                pass
+                    self.session = manager_cls(self.username, self.password, driver_factory, logger=self.logger)
+                    self._owns_session = True
             if self.session:
-                try:
-                    self._ensure_driver_alive(self.session)
-                except FacebookDriverError as exc:
-                    if persistent_profile_cfg and manager_cls and base_driver_factory:
-                        _log(self.logger, "[Night FB] Persistent profile login failed; falling back to fresh session (profile may be locked or logged out).")
-                        try:
-                            self.session.close()
-                        except Exception:
-                            pass
-                        self.session = manager_cls(self.username, self.password, base_driver_factory, logger=self.logger)
-                        self._owns_session = True
-                        self._ensure_driver_alive(self.session)
-                    else:
-                        raise exc
+                self._ensure_driver_alive(self.session)
         except FacebookDriverError:
             raise
         except Exception as exc:  # pragma: no cover - defensive
