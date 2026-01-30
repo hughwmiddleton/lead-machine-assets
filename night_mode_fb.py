@@ -5,6 +5,7 @@ This module isolates Night Mode tweaks so daytime paths stay unchanged.
 
 from __future__ import annotations
 
+import os
 import re
 import time
 import urllib.parse
@@ -214,6 +215,57 @@ def _start_chromedriver_with_retry(chrome_options):
     if last_exc:
         raise last_exc
     raise FacebookDriverError("Failed to start ChromeDriver.")
+
+
+def _get_night_fb_profile_config() -> Optional[Tuple[str, str]]:
+    """Return (user_data_dir, profile_name) if persistence is requested."""
+    user_data_dir = (os.environ.get("NIGHT_FB_USER_DATA_DIR") or "").strip()
+    if not user_data_dir:
+        return None
+    profile_name = (os.environ.get("NIGHT_FB_PROFILE_NAME") or "Default").strip() or "Default"
+    return user_data_dir, profile_name
+
+
+def _make_persistent_fb_driver_factory(base_factory, logger: LoggerFn = None):
+    """
+    Wrap the legacy driver factory with persistent Chrome profile support.
+    Only used for authenticated Night FB sessions.
+    """
+    profile_cfg = _get_night_fb_profile_config()
+    if not profile_cfg:
+        return base_factory
+
+    user_data_dir, profile_name = profile_cfg
+
+    def _factory():
+        try:
+            os.makedirs(user_data_dir, exist_ok=True)
+        except Exception:
+            pass
+
+        chrome_options = ChromeOptions()
+        chrome_options.add_argument("--disable-gpu")
+        chrome_options.add_argument("--window-size=1920x1080")
+        chrome_options.add_argument("--disable-extensions")
+        chrome_options.add_argument("--disable-dev-shm-usage")
+        chrome_options.add_argument("--no-sandbox")
+        chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+        chrome_options.page_load_strategy = "eager"
+        prefs = {"profile.managed_default_content_settings.images": 2}
+        chrome_options.add_experimental_option("prefs", prefs)
+        chrome_options.add_argument(f"--user-data-dir={user_data_dir}")
+        if profile_name:
+            chrome_options.add_argument(f"--profile-directory={profile_name}")
+
+        _log(logger, f"[Night FB] Using persistent Chrome profile: {user_data_dir} (profile={profile_name})")
+
+        try:
+            return _start_chromedriver_with_retry(chrome_options)
+        except Exception as exc:
+            _log(logger, f"[Night FB] Failed to start Chrome with persistent profile (is it already open?): {exc}")
+            raise FacebookDriverError(f"Persistent profile startup failed: {exc}")
+
+    return _factory
 
 
 def _create_fb_driver_public(headless: bool = True):
@@ -550,8 +602,9 @@ class NightModeFacebookEnricher:
         if not self.username or not self.password:
             _log(self.logger, "[Night FB] Missing FB credentials; running without live session.")
             return None
+        persistent_profile_cfg = _get_night_fb_profile_config()
         try:
-            if self.use_shared_session:
+            if self.use_shared_session and not persistent_profile_cfg:
                 get_shared = getattr(self.legacy, "get_shared_facebook_session", None)
                 if callable(get_shared):
                     self.session = get_shared(self.username, self.password, logger=self.logger)
@@ -560,6 +613,7 @@ class NightModeFacebookEnricher:
                 manager_cls = getattr(self.legacy, "FacebookSessionManager", None)
                 driver_factory = getattr(self.legacy, "setup_facebook_driver", None)
                 if manager_cls and driver_factory:
+                    driver_factory = _make_persistent_fb_driver_factory(driver_factory, logger=self.logger)
                     _log(self.logger, "[FB] Creating new ChromeDriver session for Night FB (shared=False).")
                     self.session = manager_cls(self.username, self.password, driver_factory, logger=self.logger)
                     self._owns_session = True
