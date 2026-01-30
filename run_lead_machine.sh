@@ -26,6 +26,10 @@ export SPOTIFY_REFRESH_TOKEN="AQB1vtP347IrhWrFAScJ_TwBSK0ZTiEdAbhxrmGf82vqmZIANM
 export FB_USERNAME="hugh_middleton99@hotmail.com"
 export FB_PASSWORD="20011990Hwm"
 
+# Night FB persistent Chrome profile (keeps login/cookies between runs).
+export NIGHT_FB_USER_DATA_DIR="/Users/hughmiddleton/Lead Machine/Lead Machine Code/night_fb_profile"
+export NIGHT_FB_PROFILE_NAME="Default"
+
 # (Optional) Install dependencies if needed
 # pip install pandas tqdm selenium beautifulsoup4 webdriver_manager PyQt5
 
