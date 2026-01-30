@@ -7633,12 +7633,93 @@ def extract_emails(text):
     return list(set(re.findall(email_pattern, text)))
 
 def login_facebook(driver, fb_username, fb_password):
-    driver.get('https://www.facebook.com/')
-    WebDriverWait(driver, 15).until(EC.presence_of_element_located((By.ID, 'email')))
-    driver.find_element(By.ID, 'email').send_keys(fb_username)
-    driver.find_element(By.ID, 'pass').send_keys(fb_password)
-    driver.find_element(By.NAME, 'login').click()
-    WebDriverWait(driver, 15).until(EC.presence_of_element_located((By.TAG_NAME, 'body')))
+    def _go_login():
+        driver.get('https://www.facebook.com/login')
+
+    def _go_login_mobile():
+        driver.get('https://m.facebook.com/login.php')
+
+    def _accept_cookies_if_present():
+        try:
+            btn = WebDriverWait(driver, 3).until(
+                EC.presence_of_element_located((
+                    By.XPATH,
+                    "//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'allow all') or contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'accept all') or contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'only allow essential')]"
+                ))
+            )
+            btn.click()
+        except Exception:
+            pass
+
+    def _fill_and_submit(email_selector, pass_selector, login_selector):
+        driver.find_element(*email_selector).clear()
+        driver.find_element(*email_selector).send_keys(fb_username)
+        driver.find_element(*pass_selector).clear()
+        driver.find_element(*pass_selector).send_keys(fb_password)
+        driver.find_element(*login_selector).click()
+
+    def _wait_logged_in(timeout=15):
+        end = time.time() + timeout
+        while time.time() < end:
+            try:
+                url = driver.current_url.lower()
+                if "facebook.com/home.php" in url or "facebook.com/?sk=h_chr" in url:
+                    return True
+                if "login" not in url and "r.php" not in url:
+                    # Any non-login FB page is good enough.
+                    return True
+            except Exception:
+                pass
+            time.sleep(0.5)
+        return False
+
+    _go_login()
+    try:
+        _accept_cookies_if_present()
+    except Exception:
+        pass
+
+    try:
+        WebDriverWait(driver, 8).until(EC.presence_of_element_located((By.ID, 'email')))
+    except Exception:
+        _go_login()
+        WebDriverWait(driver, 8).until(EC.presence_of_element_located((By.ID, 'email')))
+
+    _fill_and_submit((By.ID, 'email'), (By.ID, 'pass'), (By.NAME, 'login'))
+    if not _wait_logged_in(timeout=15):
+        # Retry via mobile login if still unauthenticated / redirected to r.php.
+        _go_login_mobile()
+        try:
+            WebDriverWait(driver, 8).until(EC.presence_of_element_located((By.NAME, 'email')))
+            _fill_and_submit((By.NAME, 'email'), (By.NAME, 'pass'), (By.NAME, 'login'))
+            _wait_logged_in(timeout=15)
+        except Exception:
+            pass
+
+
+class FacebookDriverError(RuntimeError):
+    """Raised when Facebook login/session is unavailable."""
+
+
+def _is_fb_session_authenticated(driver) -> bool:
+    """
+    Best-effort check: must have a c_user cookie AND not be on a login/signup URL.
+    (Some expired sessions still keep c_user; r.php/login means we're not authenticated.)
+    """
+    has_c_user = False
+    try:
+        for ck in driver.get_cookies():
+            if ck.get("name") == "c_user" and ck.get("value"):
+                has_c_user = True
+                break
+    except Exception:
+        has_c_user = False
+    try:
+        url = (driver.current_url or "").lower()
+        on_login = ("login" in url) or ("r.php" in url) or ("checkpoint" in url)
+    except Exception:
+        on_login = True
+    return has_c_user and not on_login
 
 
 class FacebookSessionManager:
@@ -7677,9 +7758,30 @@ class FacebookSessionManager:
 
     def ensure_logged_in(self):
         self.ensure_driver()
-        if self.logged_in:
+        # First visit Facebook so cookies for that domain are loaded, then
+        # reuse an existing session if the profile is already logged in.
+        try:
+            self.driver.get("https://www.facebook.com/")
+        except Exception:
+            pass
+        try:
+            cookies = self.driver.get_cookies()
+            has_c_user = any(ck.get("name") == "c_user" and ck.get("value") for ck in cookies)
+            url_now = ""
+            try:
+                url_now = (self.driver.current_url or "")
+            except Exception:
+                url_now = ""
+            self._log(f"[FB Session] Pre-check cookies loaded: c_user={has_c_user}, cookie_count={len(cookies)}, url={url_now}")
+        except Exception:
+            pass
+        if _is_fb_session_authenticated(self.driver):
+            self.logged_in = True
+            self._capture_main_window()
             return self.driver
         login_facebook(self.driver, self.username, self.password)
+        if not _is_fb_session_authenticated(self.driver):
+            raise FacebookDriverError("Facebook login failed (still on login/signup page).")
         self.logged_in = True
         self._capture_main_window()
         return self.driver

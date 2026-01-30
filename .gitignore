@@ -1,0 +1,13 @@
+# Bytecode and caches
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# macOS metadata
+.DS_Store
+
+# Accidental Chrome profile drop (created when user-data-dir is set to the literal \"None\")
+None/
+
+# Accidental Chrome profile when NIGHT_FB_USER_DATA_DIR is quoted and treated as relative
+"/
