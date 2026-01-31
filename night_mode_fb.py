@@ -5,6 +5,7 @@ This module isolates Night Mode tweaks so daytime paths stay unchanged.
 
 from __future__ import annotations
 
+import os
 import re
 import time
 import urllib.parse
@@ -59,6 +60,12 @@ _FB_JUNK_PATH_TOKENS = (
     "/help/",
     "/meta-pay",
 )
+
+DEFAULT_NIGHT_FB_PROFILE_DIR = Path(
+    os.environ.get("NIGHT_FB_USER_DATA_DIR", str(Path("~/Lead Machine/Lead Machine Code/night_fb_profile")))
+).expanduser()
+DEFAULT_NIGHT_FB_PROFILE_NAME = os.environ.get("NIGHT_FB_PROFILE_NAME", "Default")
+_NIGHT_FB_HEADLESS = str(os.environ.get("NIGHT_FB_HEADLESS", "") or "").strip().lower() in ("1", "true", "yes")
 
 
 class FacebookDriverError(RuntimeError):
@@ -214,6 +221,132 @@ def _start_chromedriver_with_retry(chrome_options):
     if last_exc:
         raise last_exc
     raise FacebookDriverError("Failed to start ChromeDriver.")
+
+
+def _ensure_dir(path: Path, logger: LoggerFn = None) -> Path:
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except Exception as exc:
+        _log(logger, f"[Night FB] Warning: could not create profile dir {path}: {exc}")
+    return path
+
+
+def _is_driver_authenticated(driver) -> bool:
+    has_c_user = False
+    try:
+        for ck in driver.get_cookies():
+            if ck.get("name") == "c_user" and ck.get("value"):
+                has_c_user = True
+                break
+    except Exception:
+        has_c_user = False
+    try:
+        url_now = (driver.current_url or "").lower()
+    except Exception:
+        url_now = ""
+    on_login = any(token in url_now for token in ("login", "r.php", "checkpoint", "register"))
+    return has_c_user and not on_login
+
+
+def _ensure_fb_login_with_profile(driver, logger: LoggerFn = None, headless: bool = False, wait_seconds: int = 90) -> None:
+    try:
+        driver.get("https://www.facebook.com/")
+    except Exception as exc:
+        raise FacebookDriverError(f"Failed to load Facebook homepage: {exc}")
+    authed = _is_driver_authenticated(driver)
+    mode = "headless" if headless else "headed"
+    _log(logger, f"[Night FB] Auth check after FB homepage ({mode}): authed={authed}")
+    if authed:
+        return
+    if headless:
+        _log(logger, "[Night FB] Not authenticated while headless; rerun once in headed mode to seed login.")
+        raise FacebookDriverError("Failed to ensure Facebook login")
+
+    pause_seconds = max(60, min(wait_seconds, 120))
+    _log(logger, f"[Night FB] Please complete Facebook login in the opened window. Waiting up to {pause_seconds} seconds...")
+    time.sleep(pause_seconds)
+    try:
+        driver.get("https://www.facebook.com/")
+    except Exception:
+        pass
+    authed = _is_driver_authenticated(driver)
+    _log(logger, f"[Night FB] Auth check after manual login wait: authed={authed}")
+    if authed:
+        _log(logger, "[Night FB] Login detected; persistent session ready.")
+        return
+    raise FacebookDriverError("Failed to ensure Facebook login")
+
+
+def _create_fb_driver_night(headless: bool = False, logger: LoggerFn = None):
+    profile_dir = _ensure_dir(DEFAULT_NIGHT_FB_PROFILE_DIR, logger)
+    chrome_options = ChromeOptions()
+    if headless:
+        try:
+            chrome_options.add_argument("--headless=new")
+        except Exception:
+            chrome_options.add_argument("--headless")
+    chrome_options.add_argument(f"--user-data-dir={profile_dir}")
+    chrome_options.add_argument(f"--profile-directory={DEFAULT_NIGHT_FB_PROFILE_NAME}")
+    chrome_options.add_argument("--start-maximized")
+    chrome_options.add_argument("--disable-gpu")
+    chrome_options.add_argument("--window-size=1920x1080")
+    chrome_options.add_argument("--disable-extensions")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+    chrome_options.page_load_strategy = "eager"
+    prefs = {"profile.managed_default_content_settings.images": 2}
+    chrome_options.add_experimental_option("prefs", prefs)
+    driver = _start_chromedriver_with_retry(chrome_options)
+    _log(logger, f"[Night FB] Using Chrome profile dir: {profile_dir} (profile '{DEFAULT_NIGHT_FB_PROFILE_NAME}', headless={headless})")
+    _ensure_fb_login_with_profile(driver, logger=logger, headless=headless, wait_seconds=90)
+    return driver
+
+
+_NIGHT_FB_SHARED_SESSION = None
+_NIGHT_FB_SHARED_CREDS = None
+
+
+def _get_shared_night_fb_session(username: str, password: str, driver_factory, legacy_module, logger: LoggerFn = None):
+    global _NIGHT_FB_SHARED_SESSION, _NIGHT_FB_SHARED_CREDS
+    creds = (username or "").strip(), (password or "").strip()
+    if _NIGHT_FB_SHARED_SESSION is not None and _NIGHT_FB_SHARED_CREDS == creds:
+        try:
+            _NIGHT_FB_SHARED_SESSION.ensure_logged_in()
+            return _NIGHT_FB_SHARED_SESSION
+        except Exception:
+            try:
+                _NIGHT_FB_SHARED_SESSION.close()
+            except Exception:
+                pass
+            _NIGHT_FB_SHARED_SESSION = None
+
+    manager_cls = getattr(legacy_module, "FacebookSessionManager", None)
+    if not manager_cls:
+        return None
+    _NIGHT_FB_SHARED_SESSION = manager_cls(username, password, driver_factory, logger=logger)
+    _NIGHT_FB_SHARED_SESSION.ensure_logged_in()
+    _NIGHT_FB_SHARED_CREDS = creds
+    return _NIGHT_FB_SHARED_SESSION
+
+
+def _mark_session_logged_in(session, driver, logger: LoggerFn = None):
+    if session is None or driver is None:
+        return
+    for attr in ("logged_in", "is_logged_in"):
+        if hasattr(session, attr):
+            try:
+                setattr(session, attr, True)
+            except Exception:
+                pass
+    try:
+        session.driver = driver
+    except Exception:
+        pass
+    try:
+        _ = driver.current_url
+    except Exception as exc:
+        _log(logger, f"[Night FB] Warning: driver current_url unavailable while marking logged-in: {exc}")
 
 
 def _create_fb_driver_public(headless: bool = True):
@@ -525,6 +658,9 @@ class NightModeFacebookEnricher:
         self.use_shared_session = use_shared_session
         self._anon_driver = None
         self._unearthed_driver = None
+        self._session_failed = False
+        self._session_failed_reason = ""
+        self._night_headless = _NIGHT_FB_HEADLESS
 
     def __enter__(self) -> "NightModeFacebookEnricher":
         try:
@@ -537,6 +673,8 @@ class NightModeFacebookEnricher:
         self.close()
 
     def _ensure_session(self):
+        if self._session_failed:
+            raise FacebookDriverError(self._session_failed_reason or "Night FB session previously failed.")
         if self.session is not None:
             try:
                 self._ensure_driver_alive(self.session)
@@ -550,24 +688,46 @@ class NightModeFacebookEnricher:
         if not self.username or not self.password:
             _log(self.logger, "[Night FB] Missing FB credentials; running without live session.")
             return None
+
+        driver_factory = self._make_night_fb_driver_factory()
         try:
             if self.use_shared_session:
-                get_shared = getattr(self.legacy, "get_shared_facebook_session", None)
-                if callable(get_shared):
-                    self.session = get_shared(self.username, self.password, logger=self.logger)
-                    self._owns_session = False
+                shared = None
+                legacy_shared_fn = getattr(self.legacy, "get_shared_facebook_session", None)
+                if callable(legacy_shared_fn):
+                    try:
+                        shared = legacy_shared_fn(self.username, self.password, logger=self.logger)
+                        _log(self.logger, "[Night FB] Reusing legacy shared FB session (if already logged in).")
+                    except Exception:
+                        shared = None
+                if shared is None:
+                    shared = _get_shared_night_fb_session(
+                        self.username,
+                        self.password,
+                        driver_factory,
+                        self.legacy,
+                        logger=self.logger,
+                    )
+                self.session = shared
+                self._owns_session = False
             if self.session is None:
                 manager_cls = getattr(self.legacy, "FacebookSessionManager", None)
-                driver_factory = getattr(self.legacy, "setup_facebook_driver", None)
-                if manager_cls and driver_factory:
-                    _log(self.logger, "[FB] Creating new ChromeDriver session for Night FB (shared=False).")
+                if manager_cls:
+                    _log(
+                        self.logger,
+                        "[Night FB] Creating ChromeDriver session with persistent profile (shared=False).",
+                    )
                     self.session = manager_cls(self.username, self.password, driver_factory, logger=self.logger)
                     self._owns_session = True
             if self.session:
                 self._ensure_driver_alive(self.session)
-        except FacebookDriverError:
+        except FacebookDriverError as exc:
+            self._session_failed = True
+            self._session_failed_reason = str(exc)
             raise
         except Exception as exc:  # pragma: no cover - defensive
+            self._session_failed = True
+            self._session_failed_reason = str(exc)
             _log(self.logger, f"[Night FB] Failed to start Facebook session: {exc}")
             self.session = None
         return self.session
@@ -591,6 +751,9 @@ class NightModeFacebookEnricher:
         except Exception:
             pass
         self._unearthed_driver = None
+
+    def _make_night_fb_driver_factory(self):
+        return lambda: _create_fb_driver_night(headless=self._night_headless, logger=self.logger)
 
     def _get_anon_driver(self):
         if self._anon_driver:
@@ -617,19 +780,39 @@ class NightModeFacebookEnricher:
                 try:
                     _ = driver.current_url
                 except Exception as exc:
+                    self._session_failed = True
+                    self._session_failed_reason = f"Refreshed driver is still unavailable: {exc}"
                     raise FacebookDriverError(f"Refreshed driver is still unavailable: {exc}")
             except Exception as exc:
+                self._session_failed = True
+                self._session_failed_reason = f"Failed to refresh FB session: {exc}"
                 raise FacebookDriverError(f"Failed to refresh FB session: {exc}")
         else:
+            self._session_failed = True
+            self._session_failed_reason = "No refresh_session available to recreate driver."
             raise FacebookDriverError("No refresh_session available to recreate driver.")
 
     def _ensure_driver_alive(self, session):
         if session is None:
             raise FacebookDriverError("Facebook session not initialized.")
-        try:
-            driver = session.ensure_logged_in() if hasattr(session, "ensure_logged_in") else session.navigate("about:blank")
-        except Exception as exc:
-            raise FacebookDriverError(f"Failed to ensure Facebook login: {exc}")
+        driver = getattr(session, "driver", None)
+        authed = False
+        if driver:
+            try:
+                authed = _is_driver_authenticated(driver)
+            except Exception:
+                authed = False
+        if driver and authed:
+            _log(self.logger, "[Night FB] Reusing existing authenticated driver (skipping legacy login).")
+            _mark_session_logged_in(session, driver, logger=self.logger)
+        else:
+            try:
+                driver = session.ensure_logged_in() if hasattr(session, "ensure_logged_in") else session.navigate("about:blank")
+                _mark_session_logged_in(session, driver, logger=self.logger)
+            except Exception as exc:
+                self._session_failed = True
+                self._session_failed_reason = f"Failed to ensure Facebook login: {exc}"
+                raise FacebookDriverError(f"Failed to ensure Facebook login: {exc}")
         try:
             _ = driver.current_url
         except Exception:
