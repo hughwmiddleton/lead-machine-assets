@@ -16,6 +16,7 @@ import weakref
 from dataclasses import dataclass
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 import logging
+from typing import Union
 
 from bs4 import BeautifulSoup
 from selenium import webdriver
@@ -36,7 +37,7 @@ except Exception:  # pragma: no cover - defensive
     def is_fb_login_redirect(url: str) -> bool:  # type: ignore
         return False
 
-LoggerFn = Optional[Callable[[str], None] | "logging.Logger"]
+LoggerFn = Optional[Union[Callable[[str], None], logging.Logger]]
 
 EMAIL_REGEX = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
 _FB_SPLIT_PATTERN = re.compile(r"[,\s;|]+")
