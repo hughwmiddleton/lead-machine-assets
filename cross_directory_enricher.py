@@ -75,6 +75,9 @@ FACEBOOK_CATEGORY_KEYWORDS = ("musician", "band", "artist", "music")
 FACEBOOK_SEARCH_WAIT_SECONDS = 10
 ENABLE_LOCALE_BIAS = False
 LOCALE_COUNTRY_HINT: Optional[str] = None  # Optional hint (e.g. "BR") to gently bias ties; never relaxes safety.
+# Daytime-only flag to keep Facebook scraping anonymous by default (no login prompt).
+FB_DAYTIME_ANON = str(os.environ.get("FB_DAYTIME_ANON", "1")).strip().lower() in ("1", "true", "yes", "on")
+# Smoke check (daytime): run with FB_DAYTIME_ANON=1 and no FB_USERNAME/FB_PASSWORD; expect no FB login prompt and enrichment to skip gracefully.
 
 UNEARTHED_CSV = "unearthed_output.csv"
 BANDCAMP_CSV = "bandcamp_output.csv"
@@ -3074,32 +3077,37 @@ class CrossDirectoryEnricherWorker(QThread):
 
     def _run_impl(self) -> None:
         fb_driver = None
+        anon_fb_driver_owned = False
         try:
             if ENABLE_FACEBOOK_ENRICHMENT:
                 try:
-                    if not enricher_fb_profile_has_cookies():
-                        driver = None
-                        try:
-                            driver = persistent_fb_driver()
+                    if FB_DAYTIME_ANON:
+                        # Anonymous mode: skip manual login prompt and lazy-init later.
+                        fb_driver = None
+                    else:
+                        if not enricher_fb_profile_has_cookies():
+                            driver = None
                             try:
-                                driver.get("https://www.facebook.com/")
-                            except Exception:
-                                pass
-                            message = "[FB Enrich] Please manually log into Facebook in the opened window."
-                            _safe_log(self.log_message.emit, message)
-                            try:
-                                input("Press ENTER once logged in…")
-                            except EOFError:
-                                pass
-                            except Exception:
-                                pass
-                        finally:
-                            if driver:
+                                driver = persistent_fb_driver()
                                 try:
-                                    driver.quit()
+                                    driver.get("https://www.facebook.com/")
                                 except Exception:
                                     pass
-                    fb_driver = _get_enricher_facebook_driver()
+                                message = "[FB Enrich] Please manually log into Facebook in the opened window."
+                                _safe_log(self.log_message.emit, message)
+                                try:
+                                    input("Press ENTER once logged in…")
+                                except EOFError:
+                                    pass
+                                except Exception:
+                                    pass
+                            finally:
+                                if driver:
+                                    try:
+                                        driver.quit()
+                                    except Exception:
+                                        pass
+                        fb_driver = _get_enricher_facebook_driver()
                 except Exception as exc:
                     _safe_log(
                         self.log_message.emit,
@@ -3269,13 +3277,25 @@ class CrossDirectoryEnricherWorker(QThread):
                         )
                         if applied:
                             enriched = True
-                if ENABLE_FACEBOOK_ENRICHMENT and fb_driver:
+                if ENABLE_FACEBOOK_ENRICHMENT and (fb_driver or FB_DAYTIME_ANON):
                     fb_attempted = False
                     fb_matched = False
                     if not self._platform_attempt_allowed("facebook", artist, "Facebook Enrich"):
                         fb_attempted = False
                     else:
                         fb_attempted = True
+                        # Lazily create anonymous driver when allowed and needed.
+                        if fb_driver is None and FB_DAYTIME_ANON and callable(setup_facebook_driver):
+                            try:
+                                fb_driver = setup_facebook_driver()
+                                anon_fb_driver_owned = True
+                            except Exception as exc:
+                                self.log_message.emit(f"[FB Enrich] Could not start anonymous FB driver: {exc}")
+                                fb_driver = None
+                        if fb_driver is None:
+                            self.log_message.emit("[FB Enrich] Facebook driver unavailable; skipping FB enrichment.")
+                            fb_attempted = False
+                            continue
                         has_fb_or_email_after_directories = _row_has_facebook_or_email(seed_df.loc[row_idx])
                         if had_fb_or_email_from_seed or has_fb_or_email_after_directories:
                             self.log_message.emit(
@@ -3386,6 +3406,11 @@ class CrossDirectoryEnricherWorker(QThread):
             self.log_message.emit(f"[Enricher] Enriched CSV written to {self.output_csv_path}")
             self.finished.emit(self.output_csv_path)
         finally:
+            if anon_fb_driver_owned and fb_driver:
+                try:
+                    fb_driver.quit()
+                except Exception:
+                    pass
             _cleanup_enricher_facebook_driver()
 
     def _init_row_enrichment_state(self) -> None:
