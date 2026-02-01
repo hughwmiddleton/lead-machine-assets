@@ -35,6 +35,14 @@ from pipeline_runner import (
 )
 from soundcloud_metadata_enricher import enrich_soundcloud_metadata
 
+def _ensure_string_columns(df: pd.DataFrame, cols: List[str]) -> None:
+    for col in cols:
+        if col in df.columns:
+            try:
+                df[col] = df[col].astype("string")
+            except Exception:
+                df[col] = df[col].astype(object)
+
 DEFAULT_EXPORT_MODE = "both"
 MAX_CONSECUTIVE_ERRORS = 10
 CHECKPOINT_INTERVAL_ROWS = 5
@@ -132,6 +140,7 @@ def _coalesce_emails(df: pd.DataFrame) -> pd.DataFrame:
     """
     if df is None or df.empty:
         return df
+    _ensure_string_columns(df, list(EMAIL_PRIORITY_COLS) + ["Email_All", "Email"])
     existing = [c for c in EMAIL_PRIORITY_COLS if c in df.columns]
     if not existing:
         return df

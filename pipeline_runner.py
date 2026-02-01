@@ -93,6 +93,19 @@ def _safe_log_console(logger: LoggerFn, message: str) -> None:
         pass
 
 
+def _ensure_string_columns(df: pd.DataFrame, cols: Iterable[str]) -> None:
+    """
+    Cast selected columns to pandas string dtype to avoid FutureWarning when assigning
+    empty strings into numeric columns.
+    """
+    for col in cols:
+        if col in df.columns:
+            try:
+                df[col] = df[col].astype("string")
+            except Exception:
+                df[col] = df[col].astype(object)
+
+
 def _ensure_parent(path: str) -> None:
     parent = os.path.dirname(os.path.abspath(path))
     if parent:
@@ -1160,6 +1173,16 @@ def run_facebook_global_pass_nightmode(
     else:
         df["FB_Status"] = df["FB_Status"].fillna("")
     df["__row_id"] = range(len(df))
+    _ensure_string_columns(
+        df,
+        (
+            "Email",
+            "Email_All",
+            "Email_Type",
+            "Facebook_URL",
+            "FB_Status",
+        ),
+    )
 
     total_rows = len(df.index)
     state = _load_fb_state(state_path)

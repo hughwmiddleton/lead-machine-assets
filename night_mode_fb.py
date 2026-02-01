@@ -15,6 +15,7 @@ import atexit
 import weakref
 from dataclasses import dataclass
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+import logging
 
 from bs4 import BeautifulSoup
 from selenium import webdriver
@@ -35,7 +36,7 @@ except Exception:  # pragma: no cover - defensive
     def is_fb_login_redirect(url: str) -> bool:  # type: ignore
         return False
 
-LoggerFn = Optional[Callable[[str], None]]
+LoggerFn = Optional[Callable[[str], None] | "logging.Logger"]
 
 EMAIL_REGEX = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
 _FB_SPLIT_PATTERN = re.compile(r"[,\s;|]+")
@@ -67,14 +68,20 @@ class FacebookDriverError(RuntimeError):
 
 
 def _log(logger: LoggerFn, message: str) -> None:
+    """Emit message once via callable/logger.info or fallback to print."""
     if not message:
         return
-    if logger:
-        try:
-            logger(message)
-            return
-        except Exception:
-            pass
+    try:
+        if logger:
+            if callable(logger):
+                logger(message)
+                return
+            info_fn = getattr(logger, "info", None)
+            if callable(info_fn):
+                info_fn(message)
+                return
+    except Exception:
+        pass
     try:
         print(message)
     except Exception:
@@ -663,7 +670,9 @@ def _select_best_candidate_loose(artist_name: str, candidates: List["facebook_en
         except Exception:
             pass
     try:
-        best, *_ = facebook_enrich.select_best_fb_candidate(artist_name, candidates)
+        best, *_ = facebook_enrich.select_best_fb_candidate(
+            artist_name, candidates, suppress_console=True, logger=self.logger
+        )
         if best:
             return best
     except Exception:
@@ -715,7 +724,7 @@ class NightModeFacebookEnricher:
         self.legacy = legacy_module
         self.username = username
         self.password = password
-        self.logger = logger
+        self.logger = self._coerce_logger(logger)
         self.session = None
         self._owns_session = False
         self.use_shared_session = use_shared_session
@@ -734,6 +743,18 @@ class NightModeFacebookEnricher:
 
     def __exit__(self, exc_type, exc, tb) -> None:
         self.close()
+
+    @staticmethod
+    def _coerce_logger(logger: LoggerFn) -> LoggerFn:
+        try:
+            if logger and callable(logger):
+                return logger
+            info_fn = getattr(logger, "info", None) if logger else None
+            if callable(info_fn):
+                return info_fn
+        except Exception:
+            pass
+        return logger
 
     def _ensure_session(self):
         if self._session_failed:
