@@ -5,6 +5,7 @@ This module isolates Night Mode tweaks so daytime paths stay unchanged.
 
 from __future__ import annotations
 
+import os
 import re
 import time
 import urllib.parse
@@ -194,6 +195,149 @@ def _shutdown_all_drivers() -> None:
 
 
 atexit.register(_shutdown_all_drivers)
+
+
+def _bool_env(name: str, default: bool = False) -> bool:
+    val = os.environ.get(name)
+    if val is None:
+        return default
+    return str(val).strip().lower() not in ("0", "false", "no", "off", "")
+
+
+def _get_night_fb_profile_dir() -> str:
+    """
+    Resolve a stable Chrome profile directory for Night FB.
+    Preference: env NIGHT_FB_PROFILE_DIR; fallback to sibling 'Lead Machine Code/night_fb_profile'.
+    """
+    env_path = os.environ.get("NIGHT_FB_PROFILE_DIR")
+    if env_path:
+        return os.path.abspath(env_path)
+    try:
+        # Repo layout has siblings: "Lead Machine VS Code" (assets) and "Lead Machine Code" (shared code/venv).
+        base = Path(__file__).resolve().parent.parent / "Lead Machine Code" / "night_fb_profile"
+        return str(base)
+    except Exception:
+        return str(Path(__file__).resolve().parent / "night_fb_profile")
+
+
+def _has_cookie(driver, name: str) -> bool:
+    try:
+        return bool(driver.get_cookie(name))
+    except Exception:
+        return False
+
+
+def _is_driver_authenticated(driver) -> bool:
+    """
+    Treat presence of c_user cookie as authenticated FB session.
+    """
+    return _has_cookie(driver, "c_user")
+
+
+def _create_fb_driver_night_mode(headless: bool, logger: LoggerFn = None):
+    """
+    Night-Mode-only Chrome driver with persistent profile to reuse FB auth.
+    """
+    profile_dir = _get_night_fb_profile_dir()
+    try:
+        os.makedirs(profile_dir, exist_ok=True)
+    except Exception:
+        pass
+
+    chrome_options = ChromeOptions()
+    if headless:
+        try:
+            chrome_options.add_argument("--headless=new")
+        except Exception:
+            chrome_options.add_argument("--headless")
+    chrome_options.add_argument("--disable-gpu")
+    chrome_options.add_argument("--window-size=1920x1080")
+    chrome_options.add_argument("--disable-extensions")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+    chrome_options.add_argument(f"--user-data-dir={profile_dir}")
+    chrome_options.add_argument("--profile-directory=Default")
+    chrome_options.page_load_strategy = "eager"
+    prefs = {"profile.managed_default_content_settings.images": 2}
+    chrome_options.add_experimental_option("prefs", prefs)
+
+    _log(logger, f"[Night FB] Using Chrome profile dir: {profile_dir} (profile 'Default', headless={headless})")
+    driver = _start_chromedriver_with_retry(chrome_options)
+    return driver
+
+
+class NightPersistentFacebookSession:
+    """
+    Minimal session wrapper that relies on persistent Chrome profile auth (c_user cookie).
+    Avoids legacy login flows.
+    """
+
+    def __init__(self, driver_factory, headless: bool, logger: LoggerFn = None, wait_seconds: float = 90.0):
+        self.driver_factory = driver_factory
+        self.headless = headless
+        self.logger = logger
+        self.wait_seconds = wait_seconds
+        self.driver = None
+
+    def close(self):
+        try:
+            if self.driver:
+                self.driver.quit()
+        except Exception:
+            pass
+        self.driver = None
+
+    def _wait_for_manual_login(self, driver) -> None:
+        deadline = time.time() + max(self.wait_seconds, 1.0)
+        while time.time() < deadline:
+            if _is_driver_authenticated(driver):
+                return
+            time.sleep(3.0)
+        raise FacebookDriverError("Manual login timed out; no c_user cookie detected.")
+
+    def ensure_logged_in(self):
+        if self.driver:
+            try:
+                _ = self.driver.current_url
+            except Exception:
+                self.driver = None
+        if self.driver and _is_driver_authenticated(self.driver):
+            return self.driver
+
+        self.driver = self.driver_factory()
+        try:
+            self.driver.get("https://www.facebook.com/")
+        except Exception as exc:
+            raise FacebookDriverError(f"Failed to load Facebook homepage: {exc}")
+
+        authed = _is_driver_authenticated(self.driver)
+        mode_label = "headless" if self.headless else "headed"
+        _log(self.logger, f"[Night FB] Auth check after FB homepage ({mode_label}): authed={authed}")
+
+        if authed:
+            return self.driver
+
+        if self.headless:
+            raise FacebookDriverError("Headless session unauthenticated (no c_user cookie present).")
+
+        _log(self.logger, "[Night FB] Awaiting manual login to establish session (headed mode)...")
+        self._wait_for_manual_login(self.driver)
+        return self.driver
+
+    def navigate(self, url: str):
+        driver = self.ensure_logged_in()
+        driver.get(url)
+        return driver
+
+    def refresh_session(self):
+        try:
+            if self.driver:
+                self.driver.quit()
+        except Exception:
+            pass
+        self.driver = None
+        return self.ensure_logged_in()
 
 
 def _start_chromedriver_with_retry(chrome_options):
@@ -525,6 +669,9 @@ class NightModeFacebookEnricher:
         self.use_shared_session = use_shared_session
         self._anon_driver = None
         self._unearthed_driver = None
+        self.headless = _bool_env("NIGHT_FB_HEADLESS", default=False)
+        self._session_failed = False
+        self._session_failed_reason = ""
 
     def __enter__(self) -> "NightModeFacebookEnricher":
         try:
@@ -537,10 +684,14 @@ class NightModeFacebookEnricher:
         self.close()
 
     def _ensure_session(self):
+        if self._session_failed:
+            raise FacebookDriverError(self._session_failed_reason or "Facebook session previously failed.")
         if self.session is not None:
             try:
-                self._ensure_driver_alive(self.session)
-                return self.session
+                if isinstance(self.session, NightPersistentFacebookSession):
+                    self.session.ensure_logged_in()
+                    return self.session
+                raise FacebookDriverError("Legacy Facebook session not allowed for Night Mode.")
             except FacebookDriverError:
                 try:
                     self.session.close()
@@ -551,23 +702,17 @@ class NightModeFacebookEnricher:
             _log(self.logger, "[Night FB] Missing FB credentials; running without live session.")
             return None
         try:
-            if self.use_shared_session:
-                get_shared = getattr(self.legacy, "get_shared_facebook_session", None)
-                if callable(get_shared):
-                    self.session = get_shared(self.username, self.password, logger=self.logger)
-                    self._owns_session = False
-            if self.session is None:
-                manager_cls = getattr(self.legacy, "FacebookSessionManager", None)
-                driver_factory = getattr(self.legacy, "setup_facebook_driver", None)
-                if manager_cls and driver_factory:
-                    _log(self.logger, "[FB] Creating new ChromeDriver session for Night FB (shared=False).")
-                    self.session = manager_cls(self.username, self.password, driver_factory, logger=self.logger)
-                    self._owns_session = True
-            if self.session:
-                self._ensure_driver_alive(self.session)
-        except FacebookDriverError:
+            driver_factory = lambda: _create_fb_driver_night_mode(self.headless, logger=self.logger)
+            self.session = NightPersistentFacebookSession(driver_factory, headless=self.headless, logger=self.logger)
+            self._owns_session = True
+            self.session.ensure_logged_in()
+        except FacebookDriverError as exc:
+            self._session_failed = True
+            self._session_failed_reason = str(exc)
             raise
         except Exception as exc:  # pragma: no cover - defensive
+            self._session_failed = True
+            self._session_failed_reason = str(exc)
             _log(self.logger, f"[Night FB] Failed to start Facebook session: {exc}")
             self.session = None
         return self.session
@@ -619,6 +764,8 @@ class NightModeFacebookEnricher:
                 except Exception as exc:
                     raise FacebookDriverError(f"Refreshed driver is still unavailable: {exc}")
             except Exception as exc:
+                self._session_failed = True
+                self._session_failed_reason = str(exc)
                 raise FacebookDriverError(f"Failed to refresh FB session: {exc}")
         else:
             raise FacebookDriverError("No refresh_session available to recreate driver.")
@@ -626,12 +773,23 @@ class NightModeFacebookEnricher:
     def _ensure_driver_alive(self, session):
         if session is None:
             raise FacebookDriverError("Facebook session not initialized.")
+        if isinstance(session, NightPersistentFacebookSession):
+            try:
+                driver = session.ensure_logged_in()
+                _ = driver.current_url
+                if not _is_driver_authenticated(driver):
+                    raise FacebookDriverError("Facebook session unauthenticated (missing c_user cookie).")
+                return session
+            except Exception as exc:
+                raise FacebookDriverError(f"Failed to ensure Facebook login: {exc}")
         try:
             driver = session.ensure_logged_in() if hasattr(session, "ensure_logged_in") else session.navigate("about:blank")
         except Exception as exc:
             raise FacebookDriverError(f"Failed to ensure Facebook login: {exc}")
         try:
             _ = driver.current_url
+            if not _is_driver_authenticated(driver):
+                raise FacebookDriverError("Facebook session unauthenticated (missing c_user cookie).")
         except Exception:
             self._refresh_driver(session)
         return session
