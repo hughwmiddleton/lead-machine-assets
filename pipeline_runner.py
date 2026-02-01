@@ -1172,6 +1172,10 @@ def run_facebook_global_pass_nightmode(
         df["FB_Status"] = ""
     else:
         df["FB_Status"] = df["FB_Status"].fillna("")
+    # Clear pandas NA values in FB-relevant string columns to avoid ambiguous boolean checks.
+    for col in ("Facebook_URL", "Facebook URL", "Social Link", "External Links", "Email", "Email_All"):
+        if col in df.columns:
+            df[col] = df[col].fillna("")
     df["__row_id"] = range(len(df))
     _ensure_string_columns(
         df,
