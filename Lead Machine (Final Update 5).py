@@ -9087,19 +9087,27 @@ class NightModeWorker(QtCore.QThread):
     log_signal = QtCore.pyqtSignal(str)
     finished_signal = QtCore.pyqtSignal(int)
 
-    def __init__(self, command: list[str], workdir: str, env: Optional[dict] = None, parent=None):
+    def __init__(self, command: list[str], workdir: str, env: Optional[dict] = None, secrets: Optional[list[str]] = None, parent=None):
         super().__init__(parent)
         self.command = command
         self.workdir = workdir
         self.env = env
+        self.secrets = [s for s in (secrets or []) if s]
         self._process = None
         self._stop_requested = False
+
+    def _mask(self, text: str) -> str:
+        masked = text or ""
+        for secret in self.secrets:
+            if secret:
+                masked = masked.replace(secret, "***")
+        return masked
 
     def run(self):
         exit_code = -1
         try:
             pretty_cmd = " ".join(self.command)
-            self.log_signal.emit(f"[Night Mode] Running: {pretty_cmd}")
+            self.log_signal.emit(f"[Night Mode] Running: {self._mask(pretty_cmd)}")
             self._process = subprocess.Popen(
                 self.command,
                 cwd=self.workdir,
@@ -9117,17 +9125,17 @@ class NightModeWorker(QtCore.QThread):
                 if ready:
                     line = stdout.readline()
                     if line:
-                        self.log_signal.emit(line.rstrip("\n"))
+                        self.log_signal.emit(self._mask(line.rstrip("\n")))
                         continue
                 if self._process.poll() is not None:
                     if ready:
                         for line in stdout:
-                            self.log_signal.emit(line.rstrip("\n"))
+                            self.log_signal.emit(self._mask(line.rstrip("\n")))
                     break
             if self._process:
                 exit_code = self._process.wait()
         except Exception as exc:
-            self.log_signal.emit(f"[Night Mode] Error: {exc}")
+            self.log_signal.emit(f"[Night Mode] Error: {self._mask(str(exc))}")
         self.finished_signal.emit(exit_code)
 
     def stop(self):
@@ -9146,6 +9154,7 @@ class NightModeTab(QtWidgets.QWidget):
         self.worker = None
         self.jobs = []
         self._bootstrap_stage = None  # None | "headless" | "headed" | "final_headless"
+        self._log_buffer: list[str] = []
         self._build_ui()
 
     def _build_ui(self):
@@ -9555,15 +9564,17 @@ class NightModeTab(QtWidgets.QWidget):
         env = os.environ.copy()
         fb_user = self.fb_user_edit.text().strip()
         fb_pass = self.fb_pass_edit.text().strip()
+        secrets_to_mask = []
         if fb_user:
             env["FB_USERNAME"] = fb_user
             self._append_log(f"[Night Mode] FB username provided (len={len(fb_user)})")
         if fb_pass:
             env["FB_PASSWORD"] = fb_pass
+            secrets_to_mask.append(fb_pass)
         # Force Night Mode FB to use persistent profile and selected headless/headed mode.
         env["NIGHT_FB_PROFILE_DIR"] = "/Users/hughmiddleton/Lead Machine/Lead Machine Code/night_fb_profile"
         env["NIGHT_FB_HEADLESS"] = "1" if headless else "0"
-        self.worker = NightModeWorker(cmd, workdir=base_dir, env=env)
+        self.worker = NightModeWorker(cmd, workdir=base_dir, env=env, secrets=secrets_to_mask)
         self.worker.log_signal.connect(self._append_log)
         self.worker.finished_signal.connect(self._on_finished)
         self.worker.start()
@@ -9577,22 +9588,26 @@ class NightModeTab(QtWidgets.QWidget):
 
     def _on_finished(self, exit_code: int):
         stage = self._bootstrap_stage
-        headless_attempt = (stage == "headless" or stage == "final_headless")
         if exit_code != 0 and stage == "headless":
-            # Headless failed; try headed bootstrap once.
+            if self._auth_failure_seen():
+                QtWidgets.QMessageBox.information(
+                    self,
+                    "Night Mode Facebook",
+                    "Headless run could not use the saved Facebook session.\nA headed browser will open so you can log in once.\nAfter login, return and the run will continue.",
+                )
+                self._bootstrap_stage = "headed"
+                self._launch_night_mode(headless=False)
+                return
+        if exit_code == 0 and stage == "headed":
+            if self._auth_success_seen():
+                self._bootstrap_stage = "final_headless"
+                self._launch_night_mode(headless=True)
+                return
             QtWidgets.QMessageBox.information(
                 self,
                 "Night Mode Facebook",
-                "Headless run could not use the saved Facebook session.\nA headed browser will open so you can log in once.\nAfter login, return and the run will continue.",
+                "Facebook login was not detected in the headed run. Please log in and try again.",
             )
-            self._bootstrap_stage = "headed"
-            self._launch_night_mode(headless=False)
-            return
-        if exit_code == 0 and stage == "headed":
-            # Headed succeeded; rerun headless to keep unattended behaviour.
-            self._bootstrap_stage = "final_headless"
-            self._launch_night_mode(headless=True)
-            return
 
         status = "completed" if exit_code == 0 else f"finished with errors (code {exit_code})"
         self.status_label.setText(f"Status: {status}")
@@ -9607,10 +9622,33 @@ class NightModeTab(QtWidgets.QWidget):
         self.master_live_spin.setEnabled(enabled and self.master_live_checkbox.isChecked())
 
     def _append_log(self, message: str):
-        self.log_console.appendPlainText(message)
+        msg = message or ""
+        self._log_buffer.append(msg)
+        if len(self._log_buffer) > 300:
+            self._log_buffer = self._log_buffer[-300:]
+        self.log_console.appendPlainText(msg)
         scrollbar = self.log_console.verticalScrollBar()
         if scrollbar:
             scrollbar.setValue(scrollbar.maximum())
+
+    def _auth_failure_seen(self) -> bool:
+        phrases = [
+            "headless session unauthenticated",
+            "missing c_user cookie",
+            "manual login timed out",
+            "facebook session unauthenticated",
+            "[night fb] headless session unauthenticated",
+        ]
+        buf = "\n".join(self._log_buffer).lower()
+        return any(p in buf for p in phrases)
+
+    def _auth_success_seen(self) -> bool:
+        phrases = [
+            "auth check after fb homepage (headed): authed=true",
+            "auth check after facebook homepage (headed): authed=true",
+        ]
+        buf = "\n".join(self._log_buffer).lower()
+        return any(p in buf for p in phrases)
 
     def _clear_log(self):
         self.log_console.clear()
