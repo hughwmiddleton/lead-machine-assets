@@ -8447,6 +8447,189 @@ def scrape_csv(input_csv, output_csv, fb_username, fb_password, max_emails=None,
         print(f"[Final Checker] Failed safely: {e}")
     _prompt_origin_auto_validate(checked_path or output_csv)
 
+
+def scrape_csv_anonymous(input_csv, output_csv, max_emails=None):
+    """Anonymous/no-login Facebook scrape that only follows explicit Facebook URLs."""
+    existing_data = pd.DataFrame()
+    if os.path.exists(output_csv):
+        try:
+            existing_data = pd.read_csv(output_csv)
+        except Exception:
+            existing_data = pd.DataFrame()
+    existing_data = _ensure_dataframe_column(existing_data, "url", "Social Link")
+    existing_data = _ensure_dataframe_column(existing_data, "emails", "Email")
+    existing_data = _canonicalize_release_date_columns(existing_data)
+    data = pd.read_csv(input_csv)
+    data.columns = [col.strip() for col in data.columns]
+    results = []
+    emails_found = 0
+    processed_urls = set()
+
+    def _fb_log(msg: str):
+        try:
+            print(msg)
+        except Exception:
+            pass
+
+    if not existing_data.empty and "url" in existing_data.columns:
+        processed_urls = {
+            value.strip()
+            for value in existing_data["url"].astype(str).tolist()
+            if isinstance(value, str) and value.strip()
+        }
+    exclude_urls = {"https://www.facebook.com/triplejunearthed/", "https://www.facebook.com/abc/"}
+    exclude_urls_lower = {url.lower() for url in exclude_urls}
+    facebook_rows = []
+    for index, row in data.iterrows():
+        artist_name = ""
+        try:
+            artist_name = str(row.get("Artist Name", "")).strip()
+        except Exception:
+            try:
+                artist_name = str(row["Artist Name"]).strip()
+            except Exception:
+                artist_name = ""
+        links = _extract_social_links(row)
+        preexisting_emails = _extract_existing_emails(row, links)
+        existing_contact_url = ""
+        for candidate_link in links or []:
+            lowered = candidate_link.lower()
+            if "facebook.com" not in lowered:
+                existing_contact_url = candidate_link
+                break
+        if not existing_contact_url and links:
+            existing_contact_url = links[0]
+
+        if preexisting_emails:
+            payload, _ = _build_email_result(row, "", preexisting_emails, preferred_url=existing_contact_url)
+            if payload:
+                results.append(payload)
+
+        if row_has_email(row, email_column="Email"):
+            print(f"[FB Scraper] Row {index + 1}: skipping '{artist_name}' because Email column is already populated.")
+            continue
+
+        if not links:
+            continue
+
+        for candidate in links:
+            url = candidate.strip()
+            if not url:
+                continue
+            url_lower = url.lower()
+            if url_lower in exclude_urls_lower or url in processed_urls:
+                continue
+            if "facebook.com" in url_lower:
+                facebook_rows.append((row, url, preexisting_emails))
+                break
+    if not facebook_rows:
+        if results:
+            results_df = pd.DataFrame(results)
+            results_df = _ensure_dataframe_column(results_df, "url")
+            results_df = _ensure_dataframe_column(results_df, "emails")
+            results_df = _canonicalize_release_date_columns(results_df)
+            combined_data = pd.concat([existing_data, results_df]).drop_duplicates(subset=['url', 'emails'])
+            combined_data = _finalize_facebook_output_dataframe(combined_data)
+            combined_data.to_csv(output_csv, index=False)
+            print(f"Scraping completed. Results saved to {output_csv}")
+            final_csv_path = output_csv
+            from final_checker import run_final_checker
+            checked_path = final_csv_path
+            try:
+                checked_path = run_final_checker(final_csv_path)
+                print(f"[Final Checker] Completed → {checked_path}")
+            except Exception as e:
+                print(f"[Final Checker] Failed safely: {e}")
+            _prompt_origin_auto_validate(checked_path or output_csv)
+        else:
+            print("No Facebook pages to process.")
+        return
+
+    driver = None
+    session_counter = 0
+    remaining_rows = []
+    try:
+        driver = setup_facebook_driver()
+        for idx, (row, url, known_emails) in enumerate(facebook_rows):
+            if not url:
+                continue
+            preexisting_emails = list(known_emails or [])
+            try:
+                print(f"Scraping Facebook page (anon): {url}")
+                driver.get(url)
+                try:
+                    current_url = (driver.current_url or "").lower()
+                    if "facebook.com/login" in current_url or "facebook.com/reg" in current_url:
+                        print("[FB Scraper] Login wall detected; skipping.")
+                        continue
+                except Exception:
+                    pass
+                navigated = False
+                try:
+                    navigated = _goto_facebook_about(driver, url, timeout=5)
+                except Exception:
+                    navigated = False
+                if not navigated:
+                    print(f"[FB Scraper] About navigation skipped/failed for {url}; scanning current page.")
+                time.sleep(1.0)
+                WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.TAG_NAME, 'body')))
+                soup = BeautifulSoup(driver.page_source, 'html.parser')
+                emails = list(preexisting_emails)
+                body_text = soup.get_text(" ", strip=True)
+                if body_text:
+                    emails.extend(extract_emails(body_text))
+                for anchor in soup.select('a[href^="mailto:"]'):
+                    href = anchor.get("href") or ""
+                    if href.startswith("mailto:"):
+                        addr = href.split("mailto:")[-1].split("?", 1)[0]
+                        if addr:
+                            emails.append(addr)
+                payload, unique_emails = _build_email_result(row, url, emails, preferred_url=url)
+                if payload:
+                    results.append(payload)
+                    emails_found += len(unique_emails)
+                    if max_emails is not None and emails_found >= max_emails:
+                        remaining_rows = facebook_rows[idx + 1 :]
+                        break
+            except Exception as e:
+                print(f"Error scraping {url}: {e}")
+                if preexisting_emails:
+                    payload, _ = _build_email_result(row, url, preexisting_emails, preferred_url=url)
+                    if payload:
+                        results.append(payload)
+            processed_urls.add(url)
+            time.sleep(random.uniform(1, 2))
+        else:
+            remaining_rows = []
+    finally:
+        if driver:
+            try:
+                driver.quit()
+            except Exception:
+                pass
+
+    for row, url, known_emails in remaining_rows:
+        if known_emails:
+            payload, _ = _build_email_result(row, url, known_emails, preferred_url=url)
+            if payload:
+                results.append(payload)
+    results_df = pd.DataFrame(results)
+    results_df = _ensure_dataframe_column(results_df, "url")
+    results_df = _ensure_dataframe_column(results_df, "emails")
+    results_df = _canonicalize_release_date_columns(results_df)
+    combined_data = pd.concat([existing_data, results_df]).drop_duplicates(subset=['url', 'emails'])
+    combined_data = _finalize_facebook_output_dataframe(combined_data)
+    combined_data.to_csv(output_csv, index=False)
+    print(f"Scraping completed. Results saved to {output_csv}")
+    final_csv_path = output_csv
+    from final_checker import run_final_checker
+    try:
+        checked_path = run_final_checker(final_csv_path)
+        print(f"[Final Checker] Completed → {checked_path}")
+    except Exception as e:
+        print(f"[Final Checker] Failed safely: {e}")
+    _prompt_origin_auto_validate(checked_path or output_csv)
+
 # =============================================================================
 # PyQt5 GUI Code
 # =============================================================================
@@ -8563,17 +8746,21 @@ class ArtistScraperThread(QtCore.QThread):
 class FacebookScraperThread(QtCore.QThread):
     log_signal = QtCore.pyqtSignal(str)
     finished_signal = QtCore.pyqtSignal()
-    def __init__(self, input_csv, output_csv, fb_username, fb_password, max_emails, parent=None):
+    def __init__(self, input_csv, output_csv, fb_username, fb_password, max_emails, parent=None, anonymous_mode: bool = False):
         super().__init__(parent)
         self.input_csv = input_csv
         self.output_csv = output_csv
         self.fb_username = fb_username
         self.fb_password = fb_password
         self.max_emails = max_emails
+        self.anonymous_mode = anonymous_mode
     def run(self):
         self.log_signal.emit("Starting Facebook scraping...")
         try:
-            scrape_csv(self.input_csv, self.output_csv, self.fb_username, self.fb_password, self.max_emails)
+            if self.anonymous_mode:
+                scrape_csv_anonymous(self.input_csv, self.output_csv, self.max_emails)
+            else:
+                scrape_csv(self.input_csv, self.output_csv, self.fb_username, self.fb_password, self.max_emails)
             self.log_signal.emit("Facebook scraping completed.")
         except Exception as e:
             self.log_signal.emit(f"Error in Facebook scraping: {e}")
@@ -9951,6 +10138,10 @@ class MainWindow(QtWidgets.QMainWindow):
         fb_layout.addWidget(fb_pass_label)
         fb_layout.addWidget(self.fb_password_edit)
         layout.addLayout(fb_layout)
+        fb_anon_default = str(os.environ.get("FB_GUI_ANON", "1")).strip().lower() in ("1", "true", "yes", "on")
+        self.fb_anon_checkbox = QtWidgets.QCheckBox("Anonymous mode (no login)")
+        self.fb_anon_checkbox.setChecked(fb_anon_default)
+        layout.addWidget(self.fb_anon_checkbox)
         max_emails_layout = QtWidgets.QHBoxLayout()
         max_emails_label = QtWidgets.QLabel("Max Emails (optional):")
         self.max_emails_edit = QtWidgets.QLineEdit()
@@ -10145,15 +10336,19 @@ class MainWindow(QtWidgets.QMainWindow):
         output_csv = self.output_csv_edit.text().strip()
         fb_username = self.fb_username_edit.text().strip()
         fb_password = self.fb_password_edit.text().strip()
+        fb_anonymous = bool(self.fb_anon_checkbox.isChecked())
         max_emails_text = self.max_emails_edit.text().strip()
         max_emails = int(max_emails_text) if max_emails_text.isdigit() else None
-        if not input_csv or not output_csv or not fb_username or not fb_password:
-            self.fb_log.append("Please fill in all required fields for Facebook scraping.")
+        if not input_csv or not output_csv:
+            self.fb_log.append("Please fill in input and output CSV paths for Facebook scraping.")
+            return
+        if not fb_anonymous and (not fb_username or not fb_password):
+            self.fb_log.append("Please provide Facebook username and password, or enable Anonymous mode.")
             return
         self.fb_start_button.setEnabled(False)
         self.fb_progress_bar.setVisible(True)
         self.fb_log.append("Initiating Facebook scraping...")
-        self.fb_thread = FacebookScraperThread(input_csv, output_csv, fb_username, fb_password, max_emails)
+        self.fb_thread = FacebookScraperThread(input_csv, output_csv, fb_username, fb_password, max_emails, anonymous_mode=fb_anonymous)
         self.fb_thread.log_signal.connect(self.update_fb_log)
         self.fb_thread.finished_signal.connect(self.facebook_scraping_finished)
         self.fb_thread.start()
