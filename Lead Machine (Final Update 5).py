@@ -9145,6 +9145,7 @@ class NightModeTab(QtWidgets.QWidget):
         super().__init__(parent)
         self.worker = None
         self.jobs = []
+        self._bootstrap_stage = None  # None | "headless" | "headed" | "final_headless"
         self._build_ui()
 
     def _build_ui(self):
@@ -9488,6 +9489,10 @@ class NightModeTab(QtWidgets.QWidget):
         if self.worker and self.worker.isRunning():
             QtWidgets.QMessageBox.information(self, "Night Mode", "Night Mode is already running.")
             return
+        self._bootstrap_stage = "headless"
+        self._launch_night_mode(headless=True)
+
+    def _launch_night_mode(self, headless: bool):
         config_path = self.config_path_edit.text().strip()
         config_path_to_use = ""
         if self.jobs:
@@ -9543,7 +9548,8 @@ class NightModeTab(QtWidgets.QWidget):
             cmd.append("--with-sc-meta")
 
         self.log_console.clear()
-        self.status_label.setText("Status: running")
+        mode_label = "headless" if headless else "headed"
+        self.status_label.setText(f"Status: running ({mode_label})")
         self.start_button.setEnabled(False)
         self.stop_button.setEnabled(True)
         env = os.environ.copy()
@@ -9551,8 +9557,12 @@ class NightModeTab(QtWidgets.QWidget):
         fb_pass = self.fb_pass_edit.text().strip()
         if fb_user:
             env["FB_USERNAME"] = fb_user
+            self._append_log(f"[Night Mode] FB username provided (len={len(fb_user)})")
         if fb_pass:
             env["FB_PASSWORD"] = fb_pass
+        # Force Night Mode FB to use persistent profile and selected headless/headed mode.
+        env["NIGHT_FB_PROFILE_DIR"] = "/Users/hughmiddleton/Lead Machine/Lead Machine Code/night_fb_profile"
+        env["NIGHT_FB_HEADLESS"] = "1" if headless else "0"
         self.worker = NightModeWorker(cmd, workdir=base_dir, env=env)
         self.worker.log_signal.connect(self._append_log)
         self.worker.finished_signal.connect(self._on_finished)
@@ -9566,11 +9576,30 @@ class NightModeTab(QtWidgets.QWidget):
         self.stop_button.setEnabled(False)
 
     def _on_finished(self, exit_code: int):
+        stage = self._bootstrap_stage
+        headless_attempt = (stage == "headless" or stage == "final_headless")
+        if exit_code != 0 and stage == "headless":
+            # Headless failed; try headed bootstrap once.
+            QtWidgets.QMessageBox.information(
+                self,
+                "Night Mode Facebook",
+                "Headless run could not use the saved Facebook session.\nA headed browser will open so you can log in once.\nAfter login, return and the run will continue.",
+            )
+            self._bootstrap_stage = "headed"
+            self._launch_night_mode(headless=False)
+            return
+        if exit_code == 0 and stage == "headed":
+            # Headed succeeded; rerun headless to keep unattended behaviour.
+            self._bootstrap_stage = "final_headless"
+            self._launch_night_mode(headless=True)
+            return
+
         status = "completed" if exit_code == 0 else f"finished with errors (code {exit_code})"
         self.status_label.setText(f"Status: {status}")
         self.start_button.setEnabled(True)
         self.stop_button.setEnabled(False)
         self.worker = None
+        self._bootstrap_stage = None
 
     def _toggle_master_live_controls(self):
         enabled = self.master_enrich_checkbox.isChecked()
