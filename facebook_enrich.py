@@ -1076,7 +1076,7 @@ def select_best_fb_candidate(
     return cand, best[0], base_score, cat_boost
 
 
-def _shared_fb_log(logger, message: str) -> None:
+def _shared_fb_log(logger, message: str, suppress_console: bool = False) -> None:
     if not message:
         return
     if logger and hasattr(logger, "info"):
@@ -1091,6 +1091,8 @@ def _shared_fb_log(logger, message: str) -> None:
             return
         except Exception:
             pass
+    if suppress_console:
+        return
     try:
         print(message)
     except Exception:
@@ -1144,6 +1146,7 @@ def select_best_facebook_candidate(
     candidates: List[FbCandidate],
     search_name: str,
     logger=None,
+    suppress_console: bool = False,
 ) -> Optional[FbCandidate]:
     """
     Shared selector for FB candidates used by daytime and Night Mode enrichment.
@@ -1158,9 +1161,9 @@ def select_best_facebook_candidate(
     filtered = [c for c in candidates if not is_junk_facebook_candidate(c)]
     junk_count = len(candidates) - len(filtered)
     if junk_count:
-        _shared_fb_log(logger, f"[FB Shared] Filtered {junk_count} junk FB candidate(s) for '{search_name}'")
+        _shared_fb_log(logger, f"[FB Shared] Filtered {junk_count} junk FB candidate(s) for '{search_name}'", suppress_console=suppress_console)
     if not filtered:
-        _shared_fb_log(logger, f"[FB Shared] All FB candidates for '{search_name}' were junk; no usable FB page.")
+        _shared_fb_log(logger, f"[FB Shared] All FB candidates for '{search_name}' were junk; no usable FB page.", suppress_console=suppress_console)
         return None
 
     best = None
@@ -1179,12 +1182,12 @@ def select_best_facebook_candidate(
             best = (adjusted, base_score, cat_boost, cand)
 
     if best is None:
-        _shared_fb_log(logger, f"[FB Shared] No valid FB candidates for '{search_name}' after scoring.")
+        _shared_fb_log(logger, f"[FB Shared] No valid FB candidates for '{search_name}' after scoring.", suppress_console=suppress_console)
         return None
 
     candidate = best[3]
     if is_junk_facebook_candidate(candidate):
-        _shared_fb_log(logger, f"[FB Shared] Best candidate for '{search_name}' turned out to be junk after scoring; dropping.")
+        _shared_fb_log(logger, f"[FB Shared] Best candidate for '{search_name}' turned out to be junk after scoring; dropping.", suppress_console=suppress_console)
         return None
 
     return candidate

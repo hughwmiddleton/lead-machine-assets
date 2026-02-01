@@ -665,14 +665,14 @@ def _select_best_candidate_loose(artist_name: str, candidates: List["facebook_en
     selector = getattr(facebook_enrich, "select_best_facebook_candidate", None)
     if callable(selector):
         try:
-            best = selector(candidates, artist_name, logger=None)
+            best = selector(candidates, artist_name, logger=None, suppress_console=True)
             if best:
                 return best
         except Exception:
             pass
     try:
         best, *_ = facebook_enrich.select_best_fb_candidate(
-            artist_name, candidates, suppress_console=True, logger=self.logger
+            artist_name, candidates, suppress_console=True, logger=None
         )
         if best:
             return best
@@ -1011,7 +1011,7 @@ class NightModeFacebookEnricher:
         selector = getattr(facebook_enrich, "select_best_facebook_candidate", None) if facebook_enrich is not None else None
         if callable(selector):
             try:
-                candidate = selector(candidates, artist, logger=self.logger)
+                candidate = selector(candidates, artist, logger=self.logger, suppress_console=True)
             except Exception:
                 candidate = None
         if not candidate:
@@ -1253,6 +1253,7 @@ class NightModeFacebookEnricher:
                             location,
                             log_fn=self.logger,
                             log_prefix="[Night FB]",
+                            suppress_console=True,
                         )
                 if not page_url:
                     page_url = self._search_for_page(artist_name, location, allow_anon=allow_anon) or ""

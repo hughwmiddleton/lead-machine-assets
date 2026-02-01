@@ -6789,7 +6789,13 @@ def fb_extract_emails_from_html(html: str) -> list[str]:
     return sorted(emails)
 
 
-def fb_scrape_emails_from_page(driver, page_url: str, log_fn=None, log_prefix: str = "[FB Enrich]") -> list[str]:
+def fb_scrape_emails_from_page(
+    driver,
+    page_url: str,
+    log_fn=None,
+    log_prefix: str = "[FB Enrich]",
+    suppress_console: bool = False,
+) -> list[str]:
     """
     Open a Facebook page in Selenium and return any emails found.
     """
@@ -6804,6 +6810,8 @@ def fb_scrape_emails_from_page(driver, page_url: str, log_fn=None, log_prefix: s
                 log_fn(msg)
             except Exception:
                 pass
+        if suppress_console:
+            return
         print(msg)
 
     if not page_url:
@@ -6856,7 +6864,14 @@ def _fb_is_real_page_url(url: str) -> bool:
     return False
 
 
-def fb_find_page_and_emails_by_name(driver, artist_name: str, location: str = "", log_fn=None, log_prefix: str = "[FB Enrich]") -> tuple[str, list[str]]:
+def fb_find_page_and_emails_by_name(
+    driver,
+    artist_name: str,
+    location: str = "",
+    log_fn=None,
+    log_prefix: str = "[FB Enrich]",
+    suppress_console: bool = False,
+) -> tuple[str, list[str]]:
     """
     Use Facebook search to locate a page for an artist and scrape emails.
     Returns (page_url, emails). If nothing found, returns ("", []).
@@ -6965,6 +6980,8 @@ def fb_find_page_and_emails_by_name(driver, artist_name: str, location: str = ""
                 log_fn(msg)
             except Exception:
                 pass
+        if suppress_console:
+            return
         print(msg)
 
     artist_name = (artist_name or "").strip()
@@ -7589,7 +7606,13 @@ def fb_find_page_and_emails_by_name(driver, artist_name: str, location: str = ""
 
     _log(f"[FB Enrich] Best FB candidate for '{artist_name}' -> '{best_name}' (final_score={best_score:.2f}, base_score={best_base_score:.2f}, cat_boost={best_cat_boost:.2f}, category='{cat_display}')")
     candidate_url = normalize_external_url(best_url)
-    emails = fb_scrape_emails_from_page(driver, candidate_url, log_fn=_log)
+    emails = fb_scrape_emails_from_page(
+        driver,
+        candidate_url,
+        log_fn=_log,
+        log_prefix=log_prefix,
+        suppress_console=suppress_console,
+    )
     return candidate_url, emails
 
 def _fb_scoring_sanity_tests():
