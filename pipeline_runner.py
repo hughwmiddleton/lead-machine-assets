@@ -70,9 +70,29 @@ def _safe_log(logger: LoggerFn, message: str) -> None:
 
 def _safe_log_console(logger: LoggerFn, message: str) -> None:
     """
-    Log via provided logger and also echo to stdout for real-time GUI visibility.
+    Log via provided logger when available; otherwise fall back to module logger
+    or stdout. Avoid double-emitting the same message.
     """
-    _safe_log(logger, message)
+    if not message:
+        return
+
+    try:
+        if logger:
+            if callable(logger):  # bound logger method such as logger.info
+                logger(message)
+                return
+            if hasattr(logger, "info") and callable(getattr(logger, "info", None)):
+                logger.info(message)
+                return
+    except Exception:
+        pass
+
+    try:
+        _LOGGER.info(message)
+        return
+    except Exception:
+        pass
+
     try:
         print(message)
     except Exception:
