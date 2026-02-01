@@ -352,7 +352,7 @@ def _start_chromedriver_with_retry(chrome_options):
     """
     Start ChromeDriver with a one-time reinstall if the first launch fails.
     """
-    last_exc: Exception | None = None
+    last_exc: Optional[Exception] = None
     for _ in range(2):
         driver_path = ChromeDriverManager().install()
         try:

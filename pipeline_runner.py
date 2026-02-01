@@ -19,7 +19,7 @@ import time
 import datetime
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Union
 
 import pandas as pd
 
@@ -112,7 +112,7 @@ def _ensure_parent(path: str) -> None:
         os.makedirs(parent, exist_ok=True)
 
 
-def _read_seed_list(seed_path: str | None) -> List[str]:
+def _read_seed_list(seed_path: Optional[str]) -> List[str]:
     if not seed_path:
         return []
     path = os.path.abspath(seed_path)
@@ -526,7 +526,7 @@ def _build_final_export_frame(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=FINAL_EXPORT_COLUMNS)
 
 
-def build_final_export_view(input_csv_path: Path | str, output_csv_path: Path | str, logger: Optional[logging.Logger] = None) -> None:
+def build_final_export_view(input_csv_path: Union[Path, str], output_csv_path: Union[Path, str], logger: Optional[logging.Logger] = None) -> None:
     """
     Read the enriched/master CSV and write a client-facing final export view.
     """
@@ -579,9 +579,9 @@ def _build_woodpecker_frame(final_df: pd.DataFrame) -> pd.DataFrame:
 
 
 def write_final_and_woodpecker_exports(
-    input_csv_path: Path | str,
-    final_export_csv_path: Path | str,
-    woodpecker_export_csv_path: Path | str,
+    input_csv_path: Union[Path, str],
+    final_export_csv_path: Union[Path, str],
+    woodpecker_export_csv_path: Union[Path, str],
     logger: Optional[logging.Logger] = None,
 ) -> None:
     export_logger = logger or logging.getLogger(__name__)
