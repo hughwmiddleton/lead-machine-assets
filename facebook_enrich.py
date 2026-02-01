@@ -1041,22 +1041,22 @@ def select_best_fb_candidate(
 
         corp_hit, corp_token, corp_field = _corporate_hit(name_lc, url_lc, category_lc)
         if corp_hit:
-            if not suppress_console:
-                _shared_fb_log(
-                    logger,
-                    "[FB Enrich] Rejecting FB candidate '%s' for '%s' due to corporate token '%s' in %s"
-                    % (cand.name or cand.url, artist_name, corp_token or "<unknown>", corp_field or "name/url/category"),
-                )
+            _shared_fb_log(
+                logger,
+                "[FB Enrich] Rejecting FB candidate '%s' for '%s' due to corporate token '%s' in %s"
+                % (cand.name or cand.url, artist_name, corp_token or "<unknown>", corp_field or "name/url/category"),
+                suppress_console=suppress_console,
+            )
             continue
 
         music_flag = is_music_page(name_lc, url_lc, category_lc)
         if not music_flag:
-            if not suppress_console:
-                _shared_fb_log(
-                    logger,
-                    "[FB Enrich] Skipping non-music FB candidate '%s' for '%s' (category='%s')"
-                    % (cand.name or cand.url, artist_name, cand.category or "<none>"),
-                )
+            _shared_fb_log(
+                logger,
+                "[FB Enrich] Skipping non-music FB candidate '%s' for '%s' (category='%s')"
+                % (cand.name or cand.url, artist_name, cand.category or "<none>"),
+                suppress_console=suppress_console,
+            )
             continue
         scored = score_fb_candidate(artist_name, cand.name, cand.url, cand.category)
         if scored is None:
@@ -1066,11 +1066,11 @@ def select_best_fb_candidate(
             best = (final_score, base_score, cat_boost, cand)
             best_is_music = music_flag
     if best is None or best[0] < MIN_FINAL_SCORE or not best_is_music:
-        if not suppress_console:
-            _shared_fb_log(
-                logger,
-                "[FB Enrich] No high-confidence music FB match for '%s'." % artist_name,
-            )
+        _shared_fb_log(
+            logger,
+            "[FB Enrich] No high-confidence music FB match for '%s'." % artist_name,
+            suppress_console=suppress_console,
+        )
         return None, best[0] if best else float("-inf"), best[1] if best else 0.0, best[2] if best else 0.0
     _, base_score, cat_boost, cand = best
     return cand, best[0], base_score, cat_boost
