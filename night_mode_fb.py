@@ -587,8 +587,18 @@ def _is_garbage_fb_candidate(title: str, url: str, category: Optional[str]) -> b
     url_l = (url or "").lower()
     category_l = (category or "").lower() if category else ""
 
-    if any(tok in url_l for tok in ("business.facebook.com", "/latest/", "/composer", "/latest/composer")):
+    if "business.facebook.com" in url_l:
         return True
+    if "/latest/composer" in url_l:
+        return True
+    if "/composer" in url_l:
+        try:
+            parsed = urllib.parse.urlparse(url_l)
+            netloc_l = (parsed.netloc or "").lower()
+            if netloc_l.startswith("business.") or "business." in netloc_l:
+                return True
+        except Exception:
+            return True
 
     junk_title_tokens = (
         "unread",
@@ -598,12 +608,15 @@ def _is_garbage_fb_candidate(title: str, url: str, category: Optional[str]) -> b
         "page's visibility",
         "page visibility",
         "notifications",
-        "insights",
     )
     if any(tok in title_l for tok in junk_title_tokens):
         return True
+    if "insights" in title_l and "business.facebook.com" in url_l:
+        return True
+    if "insights" in title_l and any(tok in title_l for tok in junk_title_tokens):
+        return True
 
-    if re.fullmatch(r"\\d+[hdm]?", category_l or "") and any(tok in title_l for tok in ("unread", "followers", "notifications", "mark as read")):
+    if re.fullmatch(r"\d+[hdm]?", category_l or "") and any(tok in title_l for tok in ("unread", "followers", "notifications", "mark as read")):
         return True
 
     return False
