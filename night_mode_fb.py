@@ -686,18 +686,31 @@ class NightModeFacebookEnricher:
     def _ensure_session(self):
         if self._session_failed:
             raise FacebookDriverError(self._session_failed_reason or "Facebook session previously failed.")
-        if self.session is not None:
+        if self.use_shared_session:
+            raise FacebookDriverError("Legacy/shared Facebook session is not allowed for Night Mode.")
+
+        if isinstance(self.session, NightPersistentFacebookSession):
+            driver = getattr(self.session, "driver", None)
             try:
-                if isinstance(self.session, NightPersistentFacebookSession):
-                    self.session.ensure_logged_in()
-                    return self.session
-                raise FacebookDriverError("Legacy Facebook session not allowed for Night Mode.")
-            except FacebookDriverError:
-                try:
-                    self.session.close()
-                except Exception:
-                    pass
-                self.session = None
+                if driver:
+                    _ = driver.current_url
+                    if _is_driver_authenticated(driver):
+                        _log(self.logger, "[Night FB] Reusing existing authenticated driver (persistent profile).")
+                        return self.session
+            except Exception:
+                pass
+            try:
+                self.session.close()
+            except Exception:
+                pass
+            self.session = None
+        elif self.session is not None:
+            try:
+                self.session.close()
+            except Exception:
+                pass
+            self.session = None
+
         if not self.username or not self.password:
             _log(self.logger, "[Night FB] Missing FB credentials; running without live session.")
             return None
@@ -706,6 +719,7 @@ class NightModeFacebookEnricher:
             self.session = NightPersistentFacebookSession(driver_factory, headless=self.headless, logger=self.logger)
             self._owns_session = True
             self.session.ensure_logged_in()
+            return self.session
         except FacebookDriverError as exc:
             self._session_failed = True
             self._session_failed_reason = str(exc)
@@ -715,7 +729,6 @@ class NightModeFacebookEnricher:
             self._session_failed_reason = str(exc)
             _log(self.logger, f"[Night FB] Failed to start Facebook session: {exc}")
             self.session = None
-        return self.session
 
     def close(self) -> None:
         if self.session and self._owns_session:

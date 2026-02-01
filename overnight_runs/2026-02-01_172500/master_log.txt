@@ -1,0 +1,362 @@
+2026-02-01 17:25:21,286 [INFO] [Master] Wrote merged raw CSV: overnight_runs/2026-02-01_172500/master_raw.csv (rows=10)
+2026-02-01 17:25:21,286 [INFO] [Master Enrich] Starting cross-directory enrichment for overnight_runs/2026-02-01_172500/master_raw.csv
+2026-02-01 17:25:23,320 [INFO] [Enricher] Loading seed CSV: overnight_runs/2026-02-01_172500/master_raw.csv
+2026-02-01 17:25:23,325 [INFO] [Deduper] Removed 0 duplicate rows (kept 10 unique rows)
+2026-02-01 17:25:23,330 [INFO] [Enricher] Starting enrichment for 10 rows...
+2026-02-01 17:25:23,330 [INFO] [Enricher] Live search enabled=True max=50
+2026-02-01 17:25:23,330 [INFO] [Enricher] SoundCloud live check for 'Lande Hekt' (current SC link missing).
+2026-02-01 17:25:23,330 [INFO] [Enricher] SoundCloud Enrich: searching for '"Lande Hekt" "Lucky Now"'
+2026-02-01 17:25:23,331 [INFO] [Enricher] SoundCloud live search: https://soundcloud.com/search/people?q=%22Lande+Hekt%22+%22Lucky+Now%22
+2026-02-01 17:25:24,056 [INFO] [Enricher] SoundCloud search: no candidates found for https://soundcloud.com/search/people?q=%22Lande+Hekt%22+%22Lucky+Now%22
+2026-02-01 17:25:26,537 [INFO] [Enricher] SoundCloud live search: https://soundcloud.com/search/people?q=%22Lande+Hekt%22+%22Lucky+Now%22+lucky+now
+2026-02-01 17:25:27,240 [INFO] [Enricher] SoundCloud search: no candidates found for https://soundcloud.com/search/people?q=%22Lande+Hekt%22+%22Lucky+Now%22+lucky+now
+2026-02-01 17:25:27,645 [INFO] [Enricher] SoundCloud people search: no confident match, trying universal search...
+2026-02-01 17:25:27,646 [INFO] [Enricher] SoundCloud universal search fallback: https://soundcloud.com/search?q=%22Lande+Hekt%22+%22Lucky+Now%22
+2026-02-01 17:25:28,440 [INFO] [Enricher] SoundCloud search: no candidates found for https://soundcloud.com/search?q=%22Lande+Hekt%22+%22Lucky+Now%22
+2026-02-01 17:25:28,890 [INFO] [Enricher] SoundCloud Enrich: primary search found no safe match for 'Lande Hekt', trying artist-only query 'Lande Hekt'.
+2026-02-01 17:25:28,891 [INFO] [Enricher] SoundCloud live search: https://soundcloud.com/search/people?q=Lande+Hekt
+2026-02-01 17:25:29,400 [INFO] [Enricher] SoundCloud search: no candidates found for https://soundcloud.com/search/people?q=Lande+Hekt
+2026-02-01 17:25:29,916 [INFO] [Enricher] SoundCloud API fallback provided candidates.
+2026-02-01 17:25:29,918 [INFO] [Enricher] SoundCloud Enrich: best match 'Lande Hekt' (https://soundcloud.com/landehekt-music), confidence=1.00
+2026-02-01 17:25:29,918 [INFO] [Enricher] Fetching soundcloud profile: https://soundcloud.com/landehekt-music
+2026-02-01 17:25:30,938 [INFO] [Enricher] soundcloud profile failed: 403 Client Error: Forbidden for url: https://soundcloud.com/landehekt-music
+2026-02-01 17:25:30,939 [INFO] [Enricher] Bandcamp live search: https://bandcamp.com/search?q=%22Lande+Hekt%22+%22Lucky+Now%22&item_type=b
+2026-02-01 17:25:31,006 [INFO] [Enricher] Bandcamp search failed: 403 Client Error: Forbidden for url: https://bandcamp.com/search?q=%22Lande+Hekt%22+%22Lucky+Now%22&item_type=b
+2026-02-01 17:25:31,007 [INFO] [Enricher] Bandcamp live search: https://bandcamp.com/search?q=Lande+Hekt+%22Lucky+Now%22&item_type=b
+2026-02-01 17:25:31,067 [INFO] [Enricher] Bandcamp search failed: 403 Client Error: Forbidden for url: https://bandcamp.com/search?q=Lande+Hekt+%22Lucky+Now%22&item_type=b
+2026-02-01 17:25:31,068 [INFO] [Enricher] Bandcamp live search: https://bandcamp.com/search?q=Lande+Hekt&item_type=b
+2026-02-01 17:25:31,133 [INFO] [Enricher] Bandcamp search failed: 403 Client Error: Forbidden for url: https://bandcamp.com/search?q=Lande+Hekt&item_type=b
+2026-02-01 17:25:31,134 [INFO] [Enricher] Bandcamp Enrich: no safe match for 'Lande Hekt' (best_confidence=0.00), skipping.
+2026-02-01 17:25:31,134 [INFO] [Enricher] SoundCloud Enrich: skipping 'Lande Hekt' (already attempted).
+2026-02-01 17:25:31,134 [INFO] [Enricher] Last.fm live search: https://www.last.fm/search?q=%22Lande+Hekt%22+%22Lucky+Now%22&type=artist
+2026-02-01 17:25:31,771 [INFO] [Enricher] Last.fm Enrich: candidate 'Lucky Now' for 'Lande Hekt' has confidence=0.21.
+2026-02-01 17:25:31,771 [INFO] [Enricher] Last.fm Enrich: no safe match for 'Lande Hekt', trying artist-only query 'Lande Hekt'.
+2026-02-01 17:25:32,744 [INFO] [Enricher] Last.fm Enrich: fallback candidate 'Lande Hekt' for 'Lande Hekt' has confidence=1.00.
+2026-02-01 17:25:32,745 [INFO] [Enricher] Fetching lastfm profile: https://www.last.fm/music/Lande+Hekt
+2026-02-01 17:25:32,940 [INFO] [FB Enrich] Selenium FB search URL: https://www.facebook.com/search/pages/?q=Lande+Hekt
+2026-02-01 17:25:37,508 [INFO] [FB Enrich] Rejecting FB candidate 'Mount Barney, QLD' for 'Lande Hekt' due to corporate token 'bar' in name.
+2026-02-01 17:25:37,511 [INFO] [FB Enrich] Rejecting FB candidate 'Mount Barney, QLD' for 'Lande Hekt' due to corporate token 'bar' in name.
+2026-02-01 17:25:39,915 [INFO] [FB Enrich] Rejecting FB page 'https://www.facebook.com/hugh.middleton1' for 'Lande Hekt' after scrape: no music signals found (final gate).
+2026-02-01 17:25:39,922 [INFO] [Enricher] SoundCloud live check for 'Binta' (current SC link missing).
+2026-02-01 17:25:39,923 [INFO] [Enricher] SoundCloud Enrich: searching for '"Binta" "Make Up"'
+2026-02-01 17:25:39,923 [INFO] [Enricher] SoundCloud live search: https://soundcloud.com/search/people?q=%22Binta%22+%22Make+Up%22
+2026-02-01 17:25:40,767 [INFO] [Enricher] SoundCloud search: no candidates found for https://soundcloud.com/search/people?q=%22Binta%22+%22Make+Up%22
+2026-02-01 17:25:41,320 [INFO] [Enricher] SoundCloud API fallback provided candidates.
+2026-02-01 17:25:41,323 [INFO] [Enricher] SoundCloud live search: https://soundcloud.com/search/people?q=%22Binta%22+%22Make+Up%22+make+up
+2026-02-01 17:25:42,153 [INFO] [Enricher] SoundCloud search: no candidates found for https://soundcloud.com/search/people?q=%22Binta%22+%22Make+Up%22+make+up
+2026-02-01 17:25:42,680 [INFO] [Enricher] SoundCloud API fallback provided candidates.
+2026-02-01 17:25:42,681 [INFO] [Enricher] SoundCloud people search: no confident match, trying universal search...
+2026-02-01 17:25:42,681 [INFO] [Enricher] SoundCloud universal search fallback: https://soundcloud.com/search?q=%22Binta%22+%22Make+Up%22
+2026-02-01 17:25:43,594 [INFO] [Enricher] SoundCloud search: no candidates found for https://soundcloud.com/search?q=%22Binta%22+%22Make+Up%22
+2026-02-01 17:25:44,024 [INFO] [Enricher] SoundCloud API fallback provided candidates.
+2026-02-01 17:25:44,025 [INFO] [Enricher] SoundCloud Enrich: primary search found no safe match for 'Binta', trying artist-only query 'Binta'.
+2026-02-01 17:25:44,025 [INFO] [Enricher] SoundCloud live search: https://soundcloud.com/search/people?q=Binta
+2026-02-01 17:25:45,439 [INFO] [Enricher] SoundCloud search: no candidates found for https://soundcloud.com/search/people?q=Binta
+2026-02-01 17:25:45,991 [INFO] [Enricher] SoundCloud API fallback provided candidates.
+2026-02-01 17:25:45,993 [INFO] [Enricher] SoundCloud Enrich: no safe match for 'Binta' (best_confidence=0.32), skipping.
+2026-02-01 17:25:45,993 [INFO] [Enricher] Bandcamp live search: https://bandcamp.com/search?q=%22Binta%22+%22Make+Up%22&item_type=b
+2026-02-01 17:25:46,062 [INFO] [Enricher] Bandcamp search failed: 403 Client Error: Forbidden for url: https://bandcamp.com/search?q=%22Binta%22+%22Make+Up%22&item_type=b
+2026-02-01 17:25:46,062 [INFO] [Enricher] Bandcamp live search: https://bandcamp.com/search?q=Binta+%22Make+Up%22&item_type=b
+2026-02-01 17:25:46,126 [INFO] [Enricher] Bandcamp search failed: 403 Client Error: Forbidden for url: https://bandcamp.com/search?q=Binta+%22Make+Up%22&item_type=b
+2026-02-01 17:25:46,126 [INFO] [Enricher] Bandcamp live search: https://bandcamp.com/search?q=Binta&item_type=b
+2026-02-01 17:25:46,185 [INFO] [Enricher] Bandcamp search failed: 403 Client Error: Forbidden for url: https://bandcamp.com/search?q=Binta&item_type=b
+2026-02-01 17:25:46,185 [INFO] [Enricher] Bandcamp Enrich: no safe match for 'Binta' (best_confidence=0.00), skipping.
+2026-02-01 17:25:46,185 [INFO] [Enricher] SoundCloud Enrich: skipping 'Binta' (already attempted).
+2026-02-01 17:25:46,185 [INFO] [Enricher] Last.fm live search: https://www.last.fm/search?q=%22Binta%22+%22Make+Up%22&type=artist
+2026-02-01 17:25:46,938 [INFO] [Enricher] Last.fm Enrich: candidate 'Make Up' for 'Binta' has confidence=0.17.
+2026-02-01 17:25:46,938 [INFO] [Enricher] Last.fm Enrich: no safe match for 'Binta', trying artist-only query 'Binta'.
+2026-02-01 17:25:47,800 [INFO] [Enricher] Last.fm Enrich: fallback candidate 'Binta' for 'Binta' has confidence=1.00.
+2026-02-01 17:25:47,800 [INFO] [Enricher] Fetching lastfm profile: https://www.last.fm/music/Binta
+2026-02-01 17:25:48,050 [INFO] [FB Enrich] Selenium FB search URL: https://www.facebook.com/search/pages/?q=Binta
+2026-02-01 17:25:52,274 [INFO] [FB Enrich] Rejecting FB page 'https://www.facebook.com/profile.php?id=100083096473770' for 'Binta' after scrape: no music signals found (final gate).
+2026-02-01 17:25:52,373 [INFO] [Enricher] SoundCloud live check for 'Charlie Noordewier' (current SC link missing).
+2026-02-01 17:25:52,374 [INFO] [Enricher] SoundCloud Enrich: searching for '"Charlie Noordewier" "Joy and Despair"'
+2026-02-01 17:25:52,374 [INFO] [Enricher] SoundCloud live search: https://soundcloud.com/search/people?q=%22Charlie+Noordewier%22+%22Joy+and+Despair%22
+2026-02-01 17:25:53,631 [INFO] [Enricher] SoundCloud search: no candidates found for https://soundcloud.com/search/people?q=%22Charlie+Noordewier%22+%22Joy+and+Despair%22
+2026-02-01 17:25:54,051 [INFO] [Enricher] SoundCloud live search: https://soundcloud.com/search/people?q=%22Charlie+Noordewier%22+%22Joy+and+Despair%22+joy+and+despair
+2026-02-01 17:25:54,760 [INFO] [Enricher] SoundCloud search: no candidates found for https://soundcloud.com/search/people?q=%22Charlie+Noordewier%22+%22Joy+and+Despair%22+joy+and+despair
+2026-02-01 17:25:55,191 [INFO] [Enricher] SoundCloud people search: no confident match, trying universal search...
+2026-02-01 17:25:55,191 [INFO] [Enricher] SoundCloud universal search fallback: https://soundcloud.com/search?q=%22Charlie+Noordewier%22+%22Joy+and+Despair%22
+2026-02-01 17:25:56,990 [INFO] [Enricher] SoundCloud search: no candidates found for https://soundcloud.com/search?q=%22Charlie+Noordewier%22+%22Joy+and+Despair%22
+2026-02-01 17:25:57,357 [INFO] [Enricher] SoundCloud Enrich: primary search found no safe match for 'Charlie Noordewier', trying artist-only query 'Charlie Noordewier'.
+2026-02-01 17:25:57,358 [INFO] [Enricher] SoundCloud live search: https://soundcloud.com/search/people?q=Charlie+Noordewier
+2026-02-01 17:25:58,190 [INFO] [Enricher] SoundCloud search: no candidates found for https://soundcloud.com/search/people?q=Charlie+Noordewier
+2026-02-01 17:25:58,691 [INFO] [Enricher] SoundCloud API fallback provided candidates.
+2026-02-01 17:25:58,693 [INFO] [Enricher] SoundCloud Enrich: best match 'Charlie Noordewier' (https://soundcloud.com/charlie-noordewier), confidence=1.00
+2026-02-01 17:25:58,693 [INFO] [Enricher] Fetching soundcloud profile: https://soundcloud.com/charlie-noordewier
+2026-02-01 17:26:01,670 [INFO] [Enricher] soundcloud profile failed: 403 Client Error: Forbidden for url: https://soundcloud.com/charlie-noordewier
+2026-02-01 17:26:01,672 [INFO] [Enricher] Bandcamp live search: https://bandcamp.com/search?q=%22Charlie+Noordewier%22+%22Joy+and+Despair%22&item_type=b
+2026-02-01 17:26:01,734 [INFO] [Enricher] Bandcamp search failed: 403 Client Error: Forbidden for url: https://bandcamp.com/search?q=%22Charlie+Noordewier%22+%22Joy+and+Despair%22&item_type=b
+2026-02-01 17:26:01,734 [INFO] [Enricher] Bandcamp live search: https://bandcamp.com/search?q=Charlie+Noordewier+%22Joy+and+Despair%22&item_type=b
+2026-02-01 17:26:01,796 [INFO] [Enricher] Bandcamp search failed: 403 Client Error: Forbidden for url: https://bandcamp.com/search?q=Charlie+Noordewier+%22Joy+and+Despair%22&item_type=b
+2026-02-01 17:26:01,796 [INFO] [Enricher] Bandcamp live search: https://bandcamp.com/search?q=Charlie+Noordewier&item_type=b
+2026-02-01 17:26:01,855 [INFO] [Enricher] Bandcamp search failed: 403 Client Error: Forbidden for url: https://bandcamp.com/search?q=Charlie+Noordewier&item_type=b
+2026-02-01 17:26:01,855 [INFO] [Enricher] Bandcamp Enrich: no safe match for 'Charlie Noordewier' (best_confidence=0.00), skipping.
+2026-02-01 17:26:01,855 [INFO] [Enricher] SoundCloud Enrich: skipping 'Charlie Noordewier' (already attempted).
+2026-02-01 17:26:01,855 [INFO] [Enricher] Last.fm live search: https://www.last.fm/search?q=%22Charlie+Noordewier%22+%22Joy+and+Despair%22&type=artist
+2026-02-01 17:26:02,719 [INFO] [Enricher] Last.fm Enrich: candidate 'Joy and Despair' for 'Charlie Noordewier' has confidence=0.36.
+2026-02-01 17:26:02,719 [INFO] [Enricher] Last.fm Enrich: no safe match for 'Charlie Noordewier', trying artist-only query 'Charlie Noordewier'.
+2026-02-01 17:26:03,495 [INFO] [Enricher] Last.fm Enrich: fallback candidate 'Charlie Noordewier' for 'Charlie Noordewier' has confidence=1.00.
+2026-02-01 17:26:03,495 [INFO] [Enricher] Fetching lastfm profile: https://www.last.fm/music/Charlie+Noordewier
+2026-02-01 17:26:03,672 [INFO] [Enricher] No actionable data on lastfm profile: https://www.last.fm/music/Charlie+Noordewier
+2026-02-01 17:26:03,673 [INFO] [FB Enrich] Selenium FB search URL: https://www.facebook.com/search/pages/?q=Charlie+Noordewier
+2026-02-01 17:26:07,613 [INFO] [FB Enrich] Confirmed music page for 'Charlie Noordewier' with FB category 'Musician/band'.
+2026-02-01 17:26:07,613 [INFO] [FB Enrich] Best FB candidate for 'Charlie Noordewier' -> 'Charlie Noordewier' (final_score=1.50, base_score=1.50, cat_boost=0.00, category='<none>')
+2026-02-01 17:26:07,613 [INFO] [FB Enrich] Scraping Facebook page: https://www.facebook.com/profile.php?id=61579245274275
+2026-02-01 17:26:09,656 [INFO] [FB Enrich] No emails found on https://www.facebook.com/profile.php?id=61579245274275
+2026-02-01 17:26:09,663 [INFO] [Enricher] Row 3/10: no enrichment for 'Charlie Noordewier'.
+2026-02-01 17:26:09,664 [INFO] [Enricher] SoundCloud live check for 'Pesolife' (current SC link missing).
+2026-02-01 17:26:09,664 [INFO] [Enricher] SoundCloud Enrich: searching for '"Pesolife" "BURY ME"'
+2026-02-01 17:26:09,664 [INFO] [Enricher] SoundCloud live search: https://soundcloud.com/search/people?q=%22Pesolife%22+%22BURY+ME%22
+2026-02-01 17:26:10,419 [INFO] [Enricher] SoundCloud search: no candidates found for https://soundcloud.com/search/people?q=%22Pesolife%22+%22BURY+ME%22
+2026-02-01 17:26:10,864 [INFO] [Enricher] SoundCloud API fallback provided candidates.
+2026-02-01 17:26:10,865 [INFO] [Enricher] SoundCloud live search: https://soundcloud.com/search/people?q=%22Pesolife%22+%22BURY+ME%22+bury+me
+2026-02-01 17:26:11,757 [INFO] [Enricher] SoundCloud search: no candidates found for https://soundcloud.com/search/people?q=%22Pesolife%22+%22BURY+ME%22+bury+me
+2026-02-01 17:26:12,229 [INFO] [Enricher] SoundCloud API fallback provided candidates.
+2026-02-01 17:26:12,230 [INFO] [Enricher] SoundCloud people search: no confident match, trying universal search...
+2026-02-01 17:26:12,230 [INFO] [Enricher] SoundCloud universal search fallback: https://soundcloud.com/search?q=%22Pesolife%22+%22BURY+ME%22
+2026-02-01 17:26:15,071 [INFO] [Enricher] SoundCloud search: no candidates found for https://soundcloud.com/search?q=%22Pesolife%22+%22BURY+ME%22
+2026-02-01 17:26:15,485 [INFO] [Enricher] SoundCloud API fallback provided candidates.
+2026-02-01 17:26:15,487 [INFO] [Enricher] SoundCloud Enrich: primary search found no safe match for 'Pesolife', trying artist-only query 'Pesolife'.
+2026-02-01 17:26:15,487 [INFO] [Enricher] SoundCloud live search: https://soundcloud.com/search/people?q=Pesolife
+2026-02-01 17:26:16,312 [INFO] [Enricher] SoundCloud search: no candidates found for https://soundcloud.com/search/people?q=Pesolife
+2026-02-01 17:26:16,706 [INFO] [Enricher] SoundCloud API fallback provided candidates.
+2026-02-01 17:26:16,708 [INFO] [Enricher] SoundCloud Enrich: best match 'Pesolife' (https://soundcloud.com/pesolife), confidence=1.00
+2026-02-01 17:26:16,708 [INFO] [Enricher] Fetching soundcloud profile: https://soundcloud.com/pesolife
+2026-02-01 17:26:19,686 [INFO] [Enricher] soundcloud profile failed: 403 Client Error: Forbidden for url: https://soundcloud.com/pesolife
+2026-02-01 17:26:19,687 [INFO] [Enricher] Bandcamp live search: https://bandcamp.com/search?q=%22Pesolife%22+%22BURY+ME%22&item_type=b
+2026-02-01 17:26:19,753 [INFO] [Enricher] Bandcamp search failed: 403 Client Error: Forbidden for url: https://bandcamp.com/search?q=%22Pesolife%22+%22BURY+ME%22&item_type=b
+2026-02-01 17:26:19,753 [INFO] [Enricher] Bandcamp live search: https://bandcamp.com/search?q=Pesolife+%22BURY+ME%22&item_type=b
+2026-02-01 17:26:19,810 [INFO] [Enricher] Bandcamp search failed: 403 Client Error: Forbidden for url: https://bandcamp.com/search?q=Pesolife+%22BURY+ME%22&item_type=b
+2026-02-01 17:26:19,811 [INFO] [Enricher] Bandcamp live search: https://bandcamp.com/search?q=Pesolife&item_type=b
+2026-02-01 17:26:19,866 [INFO] [Enricher] Bandcamp search failed: 403 Client Error: Forbidden for url: https://bandcamp.com/search?q=Pesolife&item_type=b
+2026-02-01 17:26:19,866 [INFO] [Enricher] Bandcamp Enrich: no safe match for 'Pesolife' (best_confidence=0.00), skipping.
+2026-02-01 17:26:19,866 [INFO] [Enricher] SoundCloud Enrich: skipping 'Pesolife' (already attempted).
+2026-02-01 17:26:19,867 [INFO] [Enricher] Last.fm live search: https://www.last.fm/search?q=%22Pesolife%22+%22BURY+ME%22&type=artist
+2026-02-01 17:26:20,645 [INFO] [Enricher] Last.fm Enrich: candidate 'Bury Me With You' for 'Pesolife' has confidence=0.17.
+2026-02-01 17:26:20,645 [INFO] [Enricher] Last.fm Enrich: no safe match for 'Pesolife', trying artist-only query 'Pesolife'.
+2026-02-01 17:26:22,496 [INFO] [Enricher] Last.fm Enrich: fallback candidate 'Pesolife' for 'Pesolife' has confidence=1.00.
+2026-02-01 17:26:22,497 [INFO] [Enricher] Fetching lastfm profile: https://www.last.fm/music/Pesolife
+2026-02-01 17:26:22,654 [INFO] [Enricher] No actionable data on lastfm profile: https://www.last.fm/music/Pesolife
+2026-02-01 17:26:22,655 [INFO] [FB Enrich] Selenium FB search URL: https://www.facebook.com/search/pages/?q=Pesolife
+2026-02-01 17:26:26,300 [INFO] [FB Enrich] Rejecting FB page 'https://www.facebook.com/Pesolife?__tn__=%3C' for 'Pesolife' after scrape: no music signals found (final gate).
+2026-02-01 17:26:26,305 [INFO] [Enricher] Row 4/10: no enrichment for 'Pesolife'.
+2026-02-01 17:26:26,308 [INFO] [Enricher] SoundCloud live check for 'Mars Meddo' (current SC link missing).
+2026-02-01 17:26:26,309 [INFO] [Enricher] SoundCloud Enrich: searching for '"Mars Meddo" "OBSESSED"'
+2026-02-01 17:26:26,309 [INFO] [Enricher] SoundCloud live search: https://soundcloud.com/search/people?q=%22Mars+Meddo%22+%22OBSESSED%22
+2026-02-01 17:26:29,027 [INFO] [Enricher] SoundCloud search: no candidates found for https://soundcloud.com/search/people?q=%22Mars+Meddo%22+%22OBSESSED%22
+2026-02-01 17:26:29,440 [INFO] [Enricher] SoundCloud API fallback provided candidates.
+2026-02-01 17:26:29,441 [INFO] [Enricher] SoundCloud Enrich: best match 'Mars Meddo' (https://soundcloud.com/marsmeddo), confidence=1.00
+2026-02-01 17:26:29,442 [INFO] [Enricher] Fetching soundcloud profile: https://soundcloud.com/marsmeddo
+2026-02-01 17:26:30,409 [INFO] [Enricher] soundcloud profile failed: 403 Client Error: Forbidden for url: https://soundcloud.com/marsmeddo
+2026-02-01 17:26:30,410 [INFO] [Enricher] Bandcamp live search: https://bandcamp.com/search?q=%22Mars+Meddo%22+%22OBSESSED%22&item_type=b
+2026-02-01 17:26:30,476 [INFO] [Enricher] Bandcamp search failed: 403 Client Error: Forbidden for url: https://bandcamp.com/search?q=%22Mars+Meddo%22+%22OBSESSED%22&item_type=b
+2026-02-01 17:26:30,476 [INFO] [Enricher] Bandcamp live search: https://bandcamp.com/search?q=Mars+Meddo+%22OBSESSED%22&item_type=b
+2026-02-01 17:26:30,538 [INFO] [Enricher] Bandcamp search failed: 403 Client Error: Forbidden for url: https://bandcamp.com/search?q=Mars+Meddo+%22OBSESSED%22&item_type=b
+2026-02-01 17:26:30,538 [INFO] [Enricher] Bandcamp live search: https://bandcamp.com/search?q=Mars+Meddo&item_type=b
+2026-02-01 17:26:30,599 [INFO] [Enricher] Bandcamp search failed: 403 Client Error: Forbidden for url: https://bandcamp.com/search?q=Mars+Meddo&item_type=b
+2026-02-01 17:26:30,600 [INFO] [Enricher] Bandcamp Enrich: no safe match for 'Mars Meddo' (best_confidence=0.00), skipping.
+2026-02-01 17:26:30,600 [INFO] [Enricher] SoundCloud Enrich: skipping 'Mars Meddo' (already attempted).
+2026-02-01 17:26:30,600 [INFO] [Enricher] Last.fm live search: https://www.last.fm/search?q=%22Mars+Meddo%22+%22OBSESSED%22&type=artist
+2026-02-01 17:26:31,371 [INFO] [Enricher] Last.fm Enrich: candidate 'Pesolife, Mars Meddo' for 'Mars Meddo' has confidence=0.69.
+2026-02-01 17:26:31,371 [INFO] [Enricher] Last.fm Enrich: no safe match for 'Mars Meddo', trying artist-only query 'Mars Meddo'.
+2026-02-01 17:26:32,435 [INFO] [Enricher] Last.fm Enrich: fallback candidate 'Mars Meddo' for 'Mars Meddo' has confidence=1.00.
+2026-02-01 17:26:32,436 [INFO] [Enricher] Fetching lastfm profile: https://www.last.fm/music/Mars+Meddo
+2026-02-01 17:26:32,664 [INFO] [Enricher] No actionable data on lastfm profile: https://www.last.fm/music/Mars+Meddo
+2026-02-01 17:26:32,665 [INFO] [FB Enrich] Selenium FB search URL: https://www.facebook.com/search/pages/?q=Mars+Meddo
+2026-02-01 17:26:34,535 [INFO] [FB Enrich] No FB search candidates for 'Mars Meddo'; trying slug fallback 'https://www.facebook.com/marsmeddo'.
+2026-02-01 17:26:34,536 [INFO] [FB Enrich] Trying uncertain music FB candidate 'Mars Meddo' for 'Mars Meddo' (category='artist', base_score=1.00).
+2026-02-01 17:26:36,806 [INFO] [FB Enrich] Confirmed music page for 'Mars Meddo' with FB category 'Musician/band'.
+2026-02-01 17:26:36,806 [INFO] [FB Enrich] Best FB candidate for 'Mars Meddo' -> 'Mars Meddo' (final_score=1.00, base_score=1.00, cat_boost=0.00, category='artist')
+2026-02-01 17:26:36,807 [INFO] [FB Enrich] Scraping Facebook page: https://www.facebook.com/marsmeddo
+2026-02-01 17:26:38,562 [INFO] [FB Enrich] No emails found on https://www.facebook.com/marsmeddo
+2026-02-01 17:26:38,620 [INFO] [Enricher] Row 5/10: no enrichment for 'Mars Meddo'.
+2026-02-01 17:26:38,622 [INFO] [Enricher] SoundCloud live check for 'Ellur' (current SC link missing).
+2026-02-01 17:26:38,622 [INFO] [Enricher] SoundCloud Enrich: searching for '"Ellur" "Dream Of Mine"'
+2026-02-01 17:26:38,622 [INFO] [Enricher] SoundCloud live search: https://soundcloud.com/search/people?q=%22Ellur%22+%22Dream+Of+Mine%22
+2026-02-01 17:26:39,340 [INFO] [Enricher] SoundCloud search: no candidates found for https://soundcloud.com/search/people?q=%22Ellur%22+%22Dream+Of+Mine%22
+2026-02-01 17:26:39,764 [INFO] [Enricher] SoundCloud API fallback provided candidates.
+2026-02-01 17:26:39,765 [INFO] [Enricher] SoundCloud live search: https://soundcloud.com/search/people?q=%22Ellur%22+%22Dream+Of+Mine%22+dream+of+mine
+2026-02-01 17:26:42,549 [INFO] [Enricher] SoundCloud search: no candidates found for https://soundcloud.com/search/people?q=%22Ellur%22+%22Dream+Of+Mine%22+dream+of+mine
+2026-02-01 17:26:43,021 [INFO] [Enricher] SoundCloud API fallback provided candidates.
+2026-02-01 17:26:43,022 [INFO] [Enricher] SoundCloud people search: no confident match, trying universal search...
+2026-02-01 17:26:43,022 [INFO] [Enricher] SoundCloud universal search fallback: https://soundcloud.com/search?q=%22Ellur%22+%22Dream+Of+Mine%22
+2026-02-01 17:26:43,907 [INFO] [Enricher] SoundCloud search: no candidates found for https://soundcloud.com/search?q=%22Ellur%22+%22Dream+Of+Mine%22
+2026-02-01 17:26:44,289 [INFO] [Enricher] SoundCloud API fallback provided candidates.
+2026-02-01 17:26:44,290 [INFO] [Enricher] SoundCloud Enrich: primary search found no safe match for 'Ellur', trying artist-only query 'Ellur'.
+2026-02-01 17:26:44,290 [INFO] [Enricher] SoundCloud live search: https://soundcloud.com/search/people?q=Ellur
+2026-02-01 17:26:45,066 [INFO] [Enricher] SoundCloud search: no candidates found for https://soundcloud.com/search/people?q=Ellur
+2026-02-01 17:26:45,462 [INFO] [Enricher] SoundCloud API fallback provided candidates.
+2026-02-01 17:26:45,464 [INFO] [Enricher] SoundCloud Enrich: best match 'Ellur' (https://soundcloud.com/ellurr), confidence=1.00
+2026-02-01 17:26:45,464 [INFO] [Enricher] Fetching soundcloud profile: https://soundcloud.com/ellurr
+2026-02-01 17:26:46,939 [INFO] [Enricher] soundcloud profile failed: 403 Client Error: Forbidden for url: https://soundcloud.com/ellurr
+2026-02-01 17:26:46,939 [INFO] [Enricher] Bandcamp live search: https://bandcamp.com/search?q=%22Ellur%22+%22Dream+Of+Mine%22&item_type=b
+2026-02-01 17:26:46,998 [INFO] [Enricher] Bandcamp search failed: 403 Client Error: Forbidden for url: https://bandcamp.com/search?q=%22Ellur%22+%22Dream+Of+Mine%22&item_type=b
+2026-02-01 17:26:46,999 [INFO] [Enricher] Bandcamp live search: https://bandcamp.com/search?q=Ellur+%22Dream+Of+Mine%22&item_type=b
+2026-02-01 17:26:47,059 [INFO] [Enricher] Bandcamp search failed: 403 Client Error: Forbidden for url: https://bandcamp.com/search?q=Ellur+%22Dream+Of+Mine%22&item_type=b
+2026-02-01 17:26:47,059 [INFO] [Enricher] Bandcamp live search: https://bandcamp.com/search?q=Ellur&item_type=b
+2026-02-01 17:26:47,119 [INFO] [Enricher] Bandcamp search failed: 403 Client Error: Forbidden for url: https://bandcamp.com/search?q=Ellur&item_type=b
+2026-02-01 17:26:47,120 [INFO] [Enricher] Bandcamp Enrich: no safe match for 'Ellur' (best_confidence=0.00), skipping.
+2026-02-01 17:26:47,120 [INFO] [Enricher] SoundCloud Enrich: skipping 'Ellur' (already attempted).
+2026-02-01 17:26:47,120 [INFO] [Enricher] Last.fm live search: https://www.last.fm/search?q=%22Ellur%22+%22Dream+Of+Mine%22&type=artist
+2026-02-01 17:26:48,025 [INFO] [Enricher] Last.fm Enrich: candidate 'Dream City Film Club' for 'Ellur' has confidence=0.32.
+2026-02-01 17:26:48,026 [INFO] [Enricher] Last.fm Enrich: no safe match for 'Ellur', trying artist-only query 'Ellur'.
+2026-02-01 17:26:48,914 [INFO] [Enricher] Last.fm Enrich: fallback candidate 'Ellur' for 'Ellur' has confidence=1.00.
+2026-02-01 17:26:48,914 [INFO] [Enricher] Fetching lastfm profile: https://www.last.fm/music/Ellur
+2026-02-01 17:26:49,092 [INFO] [FB Enrich] Selenium FB search URL: https://www.facebook.com/search/pages/?q=Ellur
+2026-02-01 17:26:50,986 [INFO] [FB Enrich] Rejecting FB candidate 'https://www.facebook.com/ellur.store?__tn__=%3C' for 'Ellur' due to corporate token 'store' in name.
+2026-02-01 17:26:50,987 [INFO] [FB Enrich] Rejecting FB candidate 'Ellur Store' for 'Ellur' due to corporate token 'store' in name.
+2026-02-01 17:26:50,988 [INFO] [FB Enrich] Rejecting FB candidate 'https://www.facebook.com/ellur.store?__tn__=%3C' for 'Ellur' due to corporate token 'store' in name.
+2026-02-01 17:26:50,990 [INFO] [FB Enrich] Rejecting FB candidate 'https://www.facebook.com/ellur.store?__tn__=%3C' for 'Ellur' due to corporate token 'store' in name.
+2026-02-01 17:26:50,990 [INFO] [FB Enrich] Rejecting FB candidate 'Ellur Store' for 'Ellur' due to corporate token 'store' in name.
+2026-02-01 17:26:53,628 [INFO] [FB Enrich] Confirmed music page for 'Ellur' with FB category 'Musician'.
+2026-02-01 17:26:53,629 [INFO] [FB Enrich] Best FB candidate for 'Ellur' -> 'Ellur' (final_score=1.50, base_score=1.50, cat_boost=0.00, category='<none>')
+2026-02-01 17:26:53,629 [INFO] [FB Enrich] Scraping Facebook page: https://www.facebook.com/ellurrrr
+2026-02-01 17:26:55,722 [INFO] [FB Enrich] No emails found on https://www.facebook.com/ellurrrr
+2026-02-01 17:26:55,729 [INFO] [Enricher] SoundCloud live check for 'Kibo' (current SC link missing).
+2026-02-01 17:26:55,729 [INFO] [Enricher] SoundCloud Enrich: searching for '"Kibo" "Headside In Da Skiez (Babycham Supernova)"'
+2026-02-01 17:26:55,729 [INFO] [Enricher] SoundCloud live search: https://soundcloud.com/search/people?q=%22Kibo%22+%22Headside+In+Da+Skiez+%28Babycham+Supernova%29%22
+2026-02-01 17:26:56,422 [INFO] [Enricher] SoundCloud search: no candidates found for https://soundcloud.com/search/people?q=%22Kibo%22+%22Headside+In+Da+Skiez+%28Babycham+Supernova%29%22
+2026-02-01 17:26:56,886 [INFO] [Enricher] SoundCloud live search: https://soundcloud.com/search/people?q=%22Kibo%22+%22Headside+In+Da+Skiez+%28Babycham+Supernova%29%22+headside+in+da+skiez
+2026-02-01 17:26:57,587 [INFO] [Enricher] SoundCloud search: no candidates found for https://soundcloud.com/search/people?q=%22Kibo%22+%22Headside+In+Da+Skiez+%28Babycham+Supernova%29%22+headside+in+da+skiez
+2026-02-01 17:26:58,008 [INFO] [Enricher] SoundCloud people search: no confident match, trying universal search...
+2026-02-01 17:26:58,009 [INFO] [Enricher] SoundCloud universal search fallback: https://soundcloud.com/search?q=%22Kibo%22+%22Headside+In+Da+Skiez+%28Babycham+Supernova%29%22
+2026-02-01 17:26:58,442 [INFO] [Enricher] SoundCloud search: no candidates found for https://soundcloud.com/search?q=%22Kibo%22+%22Headside+In+Da+Skiez+%28Babycham+Supernova%29%22
+2026-02-01 17:26:58,810 [INFO] [Enricher] SoundCloud Enrich: primary search found no safe match for 'Kibo', trying artist-only query 'Kibo'.
+2026-02-01 17:26:58,810 [INFO] [Enricher] SoundCloud live search: https://soundcloud.com/search/people?q=Kibo
+2026-02-01 17:26:59,571 [INFO] [Enricher] SoundCloud search: no candidates found for https://soundcloud.com/search/people?q=Kibo
+2026-02-01 17:27:00,028 [INFO] [Enricher] SoundCloud API fallback provided candidates.
+2026-02-01 17:27:00,032 [INFO] [Enricher] SoundCloud Enrich: best match 'Kibo' (https://soundcloud.com/zkibo), confidence=1.00
+2026-02-01 17:27:00,032 [INFO] [Enricher] Fetching soundcloud profile: https://soundcloud.com/zkibo
+2026-02-01 17:27:03,002 [INFO] [Enricher] soundcloud profile failed: 403 Client Error: Forbidden for url: https://soundcloud.com/zkibo
+2026-02-01 17:27:03,004 [INFO] [Enricher] Bandcamp live search: https://bandcamp.com/search?q=%22Kibo%22+%22Headside+In+Da+Skiez+%28Babycham+Supernova%29%22&item_type=b
+2026-02-01 17:27:03,061 [INFO] [Enricher] Bandcamp search failed: 403 Client Error: Forbidden for url: https://bandcamp.com/search?q=%22Kibo%22+%22Headside+In+Da+Skiez+%28Babycham+Supernova%29%22&item_type=b
+2026-02-01 17:27:03,061 [INFO] [Enricher] Bandcamp live search: https://bandcamp.com/search?q=Kibo+%22Headside+In+Da+Skiez+%28Babycham+Supernova%29%22&item_type=b
+2026-02-01 17:27:03,121 [INFO] [Enricher] Bandcamp search failed: 403 Client Error: Forbidden for url: https://bandcamp.com/search?q=Kibo+%22Headside+In+Da+Skiez+%28Babycham+Supernova%29%22&item_type=b
+2026-02-01 17:27:03,122 [INFO] [Enricher] Bandcamp live search: https://bandcamp.com/search?q=Kibo&item_type=b
+2026-02-01 17:27:03,180 [INFO] [Enricher] Bandcamp search failed: 403 Client Error: Forbidden for url: https://bandcamp.com/search?q=Kibo&item_type=b
+2026-02-01 17:27:03,181 [INFO] [Enricher] Bandcamp Enrich: no safe match for 'Kibo' (best_confidence=0.00), skipping.
+2026-02-01 17:27:03,181 [INFO] [Enricher] SoundCloud Enrich: skipping 'Kibo' (already attempted).
+2026-02-01 17:27:03,181 [INFO] [Enricher] Last.fm live search: https://www.last.fm/search?q=%22Kibo%22+%22Headside+In+Da+Skiez+%28Babycham+Supernova%29%22&type=artist
+2026-02-01 17:27:03,963 [INFO] [Enricher] Last.fm Enrich: candidate 'Headside In Da Skiez (Babycham Supernova)' for 'Kibo' has confidence=0.18.
+2026-02-01 17:27:03,963 [INFO] [Enricher] Last.fm Enrich: no safe match for 'Kibo', trying artist-only query 'Kibo'.
+2026-02-01 17:27:04,840 [INFO] [Enricher] Last.fm Enrich: fallback candidate 'Kibo' for 'Kibo' has confidence=1.00.
+2026-02-01 17:27:04,840 [INFO] [Enricher] Fetching lastfm profile: https://www.last.fm/music/Kibo
+2026-02-01 17:27:05,025 [INFO] [FB Enrich] Selenium FB search URL: https://www.facebook.com/search/pages/?q=Kibo
+2026-02-01 17:27:10,231 [INFO] [FB Enrich] Rejecting FB page 'https://www.facebook.com/KimGordonOfficial?__tn__=%3C' for 'Kibo' after scrape: no music signals found (final gate).
+2026-02-01 17:27:10,236 [INFO] [Enricher] SoundCloud live check for 'Dominic Wright' (current SC link missing).
+2026-02-01 17:27:10,236 [INFO] [Enricher] SoundCloud Enrich: searching for '"Dominic Wright" "Love You All The Same"'
+2026-02-01 17:27:10,236 [INFO] [Enricher] SoundCloud live search: https://soundcloud.com/search/people?q=%22Dominic+Wright%22+%22Love+You+All+The+Same%22
+2026-02-01 17:27:10,992 [INFO] [Enricher] SoundCloud search: no candidates found for https://soundcloud.com/search/people?q=%22Dominic+Wright%22+%22Love+You+All+The+Same%22
+2026-02-01 17:27:11,436 [INFO] [Enricher] SoundCloud live search: https://soundcloud.com/search/people?q=%22Dominic+Wright%22+%22Love+You+All+The+Same%22+love+you+all+the+same
+2026-02-01 17:27:12,162 [INFO] [Enricher] SoundCloud search: no candidates found for https://soundcloud.com/search/people?q=%22Dominic+Wright%22+%22Love+You+All+The+Same%22+love+you+all+the+same
+2026-02-01 17:27:12,629 [INFO] [Enricher] SoundCloud people search: no confident match, trying universal search...
+2026-02-01 17:27:12,629 [INFO] [Enricher] SoundCloud universal search fallback: https://soundcloud.com/search?q=%22Dominic+Wright%22+%22Love+You+All+The+Same%22
+2026-02-01 17:27:13,540 [INFO] [Enricher] SoundCloud search: no candidates found for https://soundcloud.com/search?q=%22Dominic+Wright%22+%22Love+You+All+The+Same%22
+2026-02-01 17:27:13,904 [INFO] [Enricher] SoundCloud Enrich: primary search found no safe match for 'Dominic Wright', trying artist-only query 'Dominic Wright'.
+2026-02-01 17:27:13,904 [INFO] [Enricher] SoundCloud live search: https://soundcloud.com/search/people?q=Dominic+Wright
+2026-02-01 17:27:14,650 [INFO] [Enricher] SoundCloud search: no candidates found for https://soundcloud.com/search/people?q=Dominic+Wright
+2026-02-01 17:27:15,093 [INFO] [Enricher] SoundCloud API fallback provided candidates.
+2026-02-01 17:27:15,093 [INFO] [Enricher] SoundCloud Enrich: best match 'Dominic Wright' (https://soundcloud.com/dominicwright-music), confidence=1.00
+2026-02-01 17:27:15,094 [INFO] [Enricher] Fetching soundcloud profile: https://soundcloud.com/dominicwright-music
+2026-02-01 17:27:16,106 [INFO] [Enricher] soundcloud profile failed: 403 Client Error: Forbidden for url: https://soundcloud.com/dominicwright-music
+2026-02-01 17:27:16,107 [INFO] [Enricher] Bandcamp live search: https://bandcamp.com/search?q=%22Dominic+Wright%22+%22Love+You+All+The+Same%22&item_type=b
+2026-02-01 17:27:16,170 [INFO] [Enricher] Bandcamp search failed: 403 Client Error: Forbidden for url: https://bandcamp.com/search?q=%22Dominic+Wright%22+%22Love+You+All+The+Same%22&item_type=b
+2026-02-01 17:27:16,170 [INFO] [Enricher] Bandcamp live search: https://bandcamp.com/search?q=Dominic+Wright+%22Love+You+All+The+Same%22&item_type=b
+2026-02-01 17:27:16,232 [INFO] [Enricher] Bandcamp search failed: 403 Client Error: Forbidden for url: https://bandcamp.com/search?q=Dominic+Wright+%22Love+You+All+The+Same%22&item_type=b
+2026-02-01 17:27:16,232 [INFO] [Enricher] Bandcamp live search: https://bandcamp.com/search?q=Dominic+Wright&item_type=b
+2026-02-01 17:27:16,294 [INFO] [Enricher] Bandcamp search failed: 403 Client Error: Forbidden for url: https://bandcamp.com/search?q=Dominic+Wright&item_type=b
+2026-02-01 17:27:16,295 [INFO] [Enricher] Bandcamp Enrich: no safe match for 'Dominic Wright' (best_confidence=0.00), skipping.
+2026-02-01 17:27:16,295 [INFO] [Enricher] SoundCloud Enrich: skipping 'Dominic Wright' (already attempted).
+2026-02-01 17:27:16,295 [INFO] [Enricher] Last.fm live search: https://www.last.fm/search?q=%22Dominic+Wright%22+%22Love+You+All+The+Same%22&type=artist
+2026-02-01 17:27:17,195 [INFO] [Enricher] Last.fm Enrich: candidate 'You say "I love you boy" But I know you…' for 'Dominic Wright' has confidence=0.16.
+2026-02-01 17:27:17,195 [INFO] [Enricher] Last.fm Enrich: no safe match for 'Dominic Wright', trying artist-only query 'Dominic Wright'.
+2026-02-01 17:27:18,175 [INFO] [Enricher] Last.fm Enrich: fallback candidate 'Dominic Wright' for 'Dominic Wright' has confidence=1.00.
+2026-02-01 17:27:18,176 [INFO] [Enricher] Fetching lastfm profile: https://www.last.fm/music/Dominic+Wright
+2026-02-01 17:27:18,394 [INFO] [Enricher] No actionable data on lastfm profile: https://www.last.fm/music/Dominic+Wright
+2026-02-01 17:27:18,395 [INFO] [FB Enrich] Selenium FB search URL: https://www.facebook.com/search/pages/?q=Dominic+Wright
+2026-02-01 17:27:22,558 [INFO] [FB Enrich] Rejecting FB page 'https://www.facebook.com/profile.php?id=61577750396620' for 'Dominic Wright' after scrape: no music signals found (final gate).
+2026-02-01 17:27:22,667 [INFO] [Enricher] Row 8/10: no enrichment for 'Dominic Wright'.
+2026-02-01 17:27:22,668 [INFO] [Enricher] SoundCloud live check for 'Shy One' (current SC link missing).
+2026-02-01 17:27:22,668 [INFO] [Enricher] SoundCloud Enrich: searching for '"Shy One" "I Can Tell"'
+2026-02-01 17:27:22,668 [INFO] [Enricher] SoundCloud live search: https://soundcloud.com/search/people?q=%22Shy+One%22+%22I+Can+Tell%22
+2026-02-01 17:27:23,368 [INFO] [Enricher] SoundCloud search: no candidates found for https://soundcloud.com/search/people?q=%22Shy+One%22+%22I+Can+Tell%22
+2026-02-01 17:27:23,777 [INFO] [Enricher] SoundCloud live search: https://soundcloud.com/search/people?q=%22Shy+One%22+%22I+Can+Tell%22+i+can+tell
+2026-02-01 17:27:24,290 [INFO] [Enricher] SoundCloud search: no candidates found for https://soundcloud.com/search/people?q=%22Shy+One%22+%22I+Can+Tell%22+i+can+tell
+2026-02-01 17:27:24,785 [INFO] [Enricher] SoundCloud API fallback provided candidates.
+2026-02-01 17:27:24,785 [INFO] [Enricher] SoundCloud people search: no confident match, trying universal search...
+2026-02-01 17:27:24,785 [INFO] [Enricher] SoundCloud universal search fallback: https://soundcloud.com/search?q=%22Shy+One%22+%22I+Can+Tell%22
+2026-02-01 17:27:25,698 [INFO] [Enricher] SoundCloud search: no candidates found for https://soundcloud.com/search?q=%22Shy+One%22+%22I+Can+Tell%22
+2026-02-01 17:27:26,063 [INFO] [Enricher] SoundCloud Enrich: primary search found no safe match for 'Shy One', trying artist-only query 'Shy One'.
+2026-02-01 17:27:26,063 [INFO] [Enricher] SoundCloud live search: https://soundcloud.com/search/people?q=Shy+One
+2026-02-01 17:27:26,591 [INFO] [Enricher] SoundCloud search: no candidates found for https://soundcloud.com/search/people?q=Shy+One
+2026-02-01 17:27:27,102 [INFO] [Enricher] SoundCloud API fallback provided candidates.
+2026-02-01 17:27:27,103 [INFO] [Enricher] SoundCloud Enrich: best match 'Shy One' (https://soundcloud.com/shyonebeats), confidence=1.00
+2026-02-01 17:27:27,103 [INFO] [Enricher] Fetching soundcloud profile: https://soundcloud.com/shyonebeats
+2026-02-01 17:27:28,064 [INFO] [Enricher] soundcloud profile failed: 403 Client Error: Forbidden for url: https://soundcloud.com/shyonebeats
+2026-02-01 17:27:28,066 [INFO] [Enricher] Bandcamp live search: https://bandcamp.com/search?q=%22Shy+One%22+%22I+Can+Tell%22&item_type=b
+2026-02-01 17:27:28,129 [INFO] [Enricher] Bandcamp search failed: 403 Client Error: Forbidden for url: https://bandcamp.com/search?q=%22Shy+One%22+%22I+Can+Tell%22&item_type=b
+2026-02-01 17:27:28,130 [INFO] [Enricher] Bandcamp live search: https://bandcamp.com/search?q=Shy+One+%22I+Can+Tell%22&item_type=b
+2026-02-01 17:27:28,193 [INFO] [Enricher] Bandcamp search failed: 403 Client Error: Forbidden for url: https://bandcamp.com/search?q=Shy+One+%22I+Can+Tell%22&item_type=b
+2026-02-01 17:27:28,193 [INFO] [Enricher] Bandcamp live search: https://bandcamp.com/search?q=Shy+One&item_type=b
+2026-02-01 17:27:28,256 [INFO] [Enricher] Bandcamp search failed: 403 Client Error: Forbidden for url: https://bandcamp.com/search?q=Shy+One&item_type=b
+2026-02-01 17:27:28,257 [INFO] [Enricher] Bandcamp Enrich: no safe match for 'Shy One' (best_confidence=0.00), skipping.
+2026-02-01 17:27:28,257 [INFO] [Enricher] SoundCloud Enrich: skipping 'Shy One' (already attempted).
+2026-02-01 17:27:28,257 [INFO] [Enricher] Last.fm live search: https://www.last.fm/search?q=%22Shy+One%22+%22I+Can+Tell%22&type=artist
+2026-02-01 17:27:29,075 [INFO] [Enricher] Last.fm Enrich: candidate 'Can You Tell Me One Thing' for 'Shy One' has confidence=0.31.
+2026-02-01 17:27:29,075 [INFO] [Enricher] Last.fm Enrich: no safe match for 'Shy One', trying artist-only query 'Shy One'.
+2026-02-01 17:27:29,888 [INFO] [Enricher] Last.fm Enrich: fallback candidate 'Shy One' for 'Shy One' has confidence=1.00.
+2026-02-01 17:27:29,888 [INFO] [Enricher] Fetching lastfm profile: https://www.last.fm/music/Shy+One
+2026-02-01 17:27:30,070 [INFO] [FB Enrich] Selenium FB search URL: https://www.facebook.com/search/pages/?q=Shy+One
+2026-02-01 17:27:43,474 [INFO] [FB Enrich] Rejecting FB page 'https://www.facebook.com/profile.php?id=100090616925380' for 'Shy One' after scrape due to corporate token 'beauty' in category.
+2026-02-01 17:27:43,495 [INFO] [Enricher] SoundCloud live check for 'George Riley' (current SC link missing).
+2026-02-01 17:27:43,495 [INFO] [Enricher] SoundCloud Enrich: searching for '"George Riley" "skin2skin"'
+2026-02-01 17:27:43,495 [INFO] [Enricher] SoundCloud live search: https://soundcloud.com/search/people?q=%22George+Riley%22+%22skin2skin%22
+2026-02-01 17:27:44,182 [INFO] [Enricher] SoundCloud search: no candidates found for https://soundcloud.com/search/people?q=%22George+Riley%22+%22skin2skin%22
+2026-02-01 17:27:44,580 [INFO] [Enricher] SoundCloud live search: https://soundcloud.com/search/people?q=%22George+Riley%22+%22skin2skin%22+skin2skin
+2026-02-01 17:27:45,328 [INFO] [Enricher] SoundCloud search: no candidates found for https://soundcloud.com/search/people?q=%22George+Riley%22+%22skin2skin%22+skin2skin
+2026-02-01 17:27:45,808 [INFO] [Enricher] SoundCloud API fallback provided candidates.
+2026-02-01 17:27:45,809 [INFO] [Enricher] SoundCloud people search: no confident match, trying universal search...
+2026-02-01 17:27:45,809 [INFO] [Enricher] SoundCloud universal search fallback: https://soundcloud.com/search?q=%22George+Riley%22+%22skin2skin%22
+2026-02-01 17:27:46,622 [INFO] [Enricher] SoundCloud search: no candidates found for https://soundcloud.com/search?q=%22George+Riley%22+%22skin2skin%22
+2026-02-01 17:27:46,990 [INFO] [Enricher] SoundCloud Enrich: primary search found no safe match for 'George Riley', trying artist-only query 'George Riley'.
+2026-02-01 17:27:46,991 [INFO] [Enricher] SoundCloud live search: https://soundcloud.com/search/people?q=George+Riley
+2026-02-01 17:27:48,310 [INFO] [Enricher] SoundCloud search: no candidates found for https://soundcloud.com/search/people?q=George+Riley
+2026-02-01 17:27:48,778 [INFO] [Enricher] SoundCloud API fallback provided candidates.
+2026-02-01 17:27:48,779 [INFO] [Enricher] SoundCloud Enrich: best match 'George Riley' (https://soundcloud.com/georgeriley-music), confidence=1.00
+2026-02-01 17:27:48,779 [INFO] [Enricher] Fetching soundcloud profile: https://soundcloud.com/georgeriley-music
+2026-02-01 17:27:49,759 [INFO] [Enricher] soundcloud profile failed: 403 Client Error: Forbidden for url: https://soundcloud.com/georgeriley-music
+2026-02-01 17:27:49,760 [INFO] [Enricher] Bandcamp live search: https://bandcamp.com/search?q=%22George+Riley%22+%22skin2skin%22&item_type=b
+2026-02-01 17:27:49,819 [INFO] [Enricher] Bandcamp search failed: 403 Client Error: Forbidden for url: https://bandcamp.com/search?q=%22George+Riley%22+%22skin2skin%22&item_type=b
+2026-02-01 17:27:49,819 [INFO] [Enricher] Bandcamp live search: https://bandcamp.com/search?q=George+Riley+%22skin2skin%22&item_type=b
+2026-02-01 17:27:49,915 [INFO] [Enricher] Bandcamp search failed: 403 Client Error: Forbidden for url: https://bandcamp.com/search?q=George+Riley+%22skin2skin%22&item_type=b
+2026-02-01 17:27:49,917 [INFO] [Enricher] Bandcamp live search: https://bandcamp.com/search?q=George+Riley&item_type=b
+2026-02-01 17:27:50,017 [INFO] [Enricher] Bandcamp search failed: 403 Client Error: Forbidden for url: https://bandcamp.com/search?q=George+Riley&item_type=b
+2026-02-01 17:27:50,017 [INFO] [Enricher] Bandcamp Enrich: no safe match for 'George Riley' (best_confidence=0.00), skipping.
+2026-02-01 17:27:50,018 [INFO] [Enricher] SoundCloud Enrich: skipping 'George Riley' (already attempted).
+2026-02-01 17:27:50,018 [INFO] [Enricher] Last.fm live search: https://www.last.fm/search?q=%22George+Riley%22+%22skin2skin%22&type=artist
+2026-02-01 17:27:51,192 [INFO] [Enricher] Last.fm Enrich: candidate 'George Riley' for 'George Riley' has confidence=1.00.
+2026-02-01 17:27:51,192 [INFO] [Enricher] Fetching lastfm profile: https://www.last.fm/music/George+Riley
+2026-02-01 17:27:51,376 [INFO] [FB Enrich] Skipping Facebook enrichment for 'George Riley' (already has Facebook/email from seed or directory enrichment).
+2026-02-01 17:27:51,386 [INFO] [Enricher] Enriched CSV written to overnight_runs/2026-02-01_172500/master_enriched.csv
+2026-02-01 17:27:51,597 [INFO] [Master Enrich] Completed cross-directory enrichment -> overnight_runs/2026-02-01_172500/master_enriched.csv
+2026-02-01 17:27:51,606 [INFO] [Enrich] Starting enrichment for overnight_runs/2026-02-01_172500/master_enriched.csv
+2026-02-01 17:27:51,622 [INFO] [Auto-Validate] Loaded 10 rows, validating 0 selected rows...
+2026-02-01 17:27:51,622 [INFO] [Auto-Validate] Completed. Upgraded: 0, Blocked: 0. Output: overnight_runs/2026-02-01_172500/master_pre_fb.csv
+2026-02-01 17:27:51,634 [INFO] [Enrich] Completed enrichment -> overnight_runs/2026-02-01_172500/master_pre_fb.csv
+2026-02-01 17:27:51,634 [INFO] [Night FB] FB username missing; Night FB will run unauthenticated.
+2026-02-01 17:27:51,637 [INFO] [FB Night] Missing FB credentials; passing through without enrichment.
+2026-02-01 17:27:51,640 [INFO] [Master] Facebook global pass completed: overnight_runs/2026-02-01_172500/master_post_fb.csv
+2026-02-01 17:27:51,640 [INFO] [Enrich] Starting enrichment for overnight_runs/2026-02-01_172500/master_post_fb.csv
+2026-02-01 17:27:51,644 [INFO] [Auto-Validate] Loaded 10 rows, validating 1 selected rows...
+2026-02-01 17:27:51,645 [INFO] [Auto-Validate] Completed. Upgraded: 0, Blocked: 0. Output: overnight_runs/2026-02-01_172500/master_enriched_deduped.csv
+2026-02-01 17:27:51,653 [INFO] [Enrich] Completed enrichment -> overnight_runs/2026-02-01_172500/master_enriched_deduped.csv
+2026-02-01 17:27:51,653 [INFO] [Master] Validation completed: overnight_runs/2026-02-01_172500/master_enriched_deduped.csv
+2026-02-01 17:27:51,653 [INFO] [Master] Exporting client-facing CSV: overnight_runs/2026-02-01_172500/master_enriched_deduped.csv -> overnight_runs/2026-02-01_172500/master_export_leads.csv
+2026-02-01 17:27:51,653 [INFO] [Exporter] Export profile=full_dump: input rows=10, exported rows=10
+2026-02-01 17:27:51,653 [INFO] [Master] Export wrote 10 rows to overnight_runs/2026-02-01_172500/master_export_leads.csv
+2026-02-01 17:27:51,673 [INFO] [Final Export] rows_kept=10 needs_review=0 -> overnight_runs/2026-02-01_172500/final_export.csv
+2026-02-01 17:27:51,674 [INFO] [Woodpecker Export] rows_with_email=0 needs_review=0 -> overnight_runs/2026-02-01_172500/woodpecker_export.csv
+2026-02-01 17:27:51,674 [INFO] [Master] Exported client-facing leads CSV: overnight_runs/2026-02-01_172500/master_export_leads.csv
+2026-02-01 17:27:51,674 [INFO] [Master] Exported final export view CSV: overnight_runs/2026-02-01_172500/final_export.csv
+2026-02-01 17:27:51,674 [INFO] [Master] Exported Woodpecker CSV: overnight_runs/2026-02-01_172500/woodpecker_export.csv

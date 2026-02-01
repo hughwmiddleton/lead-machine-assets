@@ -1,0 +1,4 @@
+2026-02-01 17:18:11,814 [INFO] Starting scrape for job spotify_freshfinds_uk_indie_2025-12-01
+2026-02-01 17:18:12,957 [INFO] [Directory] Running job for directory=spotify slug= job_id=spotify_freshfinds_uk_indie_2025-12-01
+2026-02-01 17:18:12,957 [INFO] [Spotify] Spotify credentials not configured. Set SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET.
+2026-02-01 17:18:12,960 [INFO] Completed job spotify_freshfinds_uk_indie_2025-12-01 (raw only; master enrichment pending)

@@ -1,0 +1,9 @@
+{
+  "job_id": "bandcamp_us_emo_discover_2025-12-01",
+  "raw_csv": "overnight_runs/2026-02-01_171811/bandcamp_us_emo_discover_2025-12-01/raw.csv",
+  "enriched_csv": "overnight_runs/2026-02-01_171811/bandcamp_us_emo_discover_2025-12-01/enriched.csv",
+  "input_seed_csv": "input/Bandcamp_us_emo_seed.csv",
+  "status": "running",
+  "error_count": 0,
+  "last_update": "2026-02-01T06:18:12.960599+00:00"
+}

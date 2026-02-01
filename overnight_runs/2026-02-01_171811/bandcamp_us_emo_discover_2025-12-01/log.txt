@@ -1,0 +1,2 @@
+2026-02-01 17:18:12,960 [INFO] Starting scrape for job bandcamp_us_emo_discover_2025-12-01
+2026-02-01 17:18:12,960 [INFO] [Directory] Running job for directory=bandcamp slug= job_id=bandcamp_us_emo_discover_2025-12-01

@@ -1,0 +1,26 @@
+{
+  "export_mode": "both",
+  "jobs": [
+    {
+      "directory": "spotify",
+      "mode": "playlist",
+      "input_seed_csv": "https://open.spotify.com/playlist/37i9dQZF1DX7AqyNZFu97s?si=a87017b2cd3646d2",
+      "target_valid_leads": 10,
+      "max_hours": 0,
+      "job_id": "job_spotify_1"
+    }
+  ],
+  "facebook": {
+    "auto_resume_after_captcha": false,
+    "cooldown_seconds": 600,
+    "max_auto_resume_attempts": 1,
+    "max_rows_per_run": 100
+  },
+  "master_enrichment": {
+    "enabled": true
+  },
+  "soundcloud_meta_enricher": {
+    "enabled": false
+  },
+  "last_update": "2026-02-01T06:23:54.902827+00:00"
+}

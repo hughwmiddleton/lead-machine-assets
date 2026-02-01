@@ -1,0 +1,11 @@
+{
+  "job_id": "spotify_freshfinds_uk_indie_2025-12-01",
+  "raw_csv": "overnight_runs/2026-02-01_171811/spotify_freshfinds_uk_indie_2025-12-01/raw.csv",
+  "enriched_csv": "overnight_runs/2026-02-01_171811/spotify_freshfinds_uk_indie_2025-12-01/raw.csv",
+  "input_seed_csv": "input/Spotify_uk_indie_seed.csv",
+  "status": "completed",
+  "error_count": 0,
+  "last_update": "2026-02-01T06:18:12.960018+00:00",
+  "current_row_index": 0,
+  "valid_leads_so_far": 0
+}

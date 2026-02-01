@@ -1,0 +1,11 @@
+{
+  "fb_last_index": 9,
+  "fb_completed": 10,
+  "fb_attempted_total": 9,
+  "fb_captcha_flag": false,
+  "fb_total_rows": 10,
+  "fb_resume_input": "/Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/overnight_runs/2026-02-01_174343/master_pre_fb.csv",
+  "fb_run_completed": true,
+  "fb_limit_reached": false,
+  "timestamp": "2026-02-01T06:49:56.438197+00:00"
+}

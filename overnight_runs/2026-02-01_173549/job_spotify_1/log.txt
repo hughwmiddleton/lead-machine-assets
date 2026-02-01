@@ -1,0 +1,65 @@
+2026-02-01 17:35:49,782 [INFO] Starting scrape for job job_spotify_1
+2026-02-01 17:35:49,939 [INFO] [Directory] Running job for directory=spotify slug= job_id=job_spotify_1
+2026-02-01 17:35:49,939 [INFO] [Spotify] Starting playlist discovery for 10 artists.
+2026-02-01 17:35:49,939 [INFO] [Spotify] Using playlist from input field: 37i9dQZF1DX7AqyNZFu97s
+2026-02-01 17:35:50,920 [INFO] [Spotify] Unable to fetch playlist metadata for 37i9dQZF1DX7AqyNZFu97s: Spotify API error 404: {"error": {"status": 404, "message": "Resource not found" } }
+2026-02-01 17:35:50,921 [INFO] [Spotify] Attempting API playlist fetch for 37i9dQZF1DX7AqyNZFu97s...
+2026-02-01 17:35:51,608 [INFO] [Spotify] API playlist fetch failed for 37i9dQZF1DX7AqyNZFu97s: Spotify API error 404: {"error": {"status": 404, "message": "Resource not found" } }
+2026-02-01 17:35:51,608 [INFO] [Spotify] Falling back to HTML playlist scrape for 37i9dQZF1DX7AqyNZFu97s...
+2026-02-01 17:35:51,608 [INFO] [Spotify HTML] Starting scrape for https://open.spotify.com/playlist/37i9dQZF1DX7AqyNZFu97s
+2026-02-01 17:35:57,236 [INFO] [Spotify HTML] Extracted 20 artists via HTML.
+2026-02-01 17:35:57,236 [INFO] [Spotify] Scanned 0 tracks across playlists. Unique artists: 10
+2026-02-01 17:35:57,697 [INFO] [Spotify S1] genre fallback: related-artists lookup failed for artist_id=3RU6wsoh0bm0gZFHJiYRmq: Spotify API error 404: {"error": {"status": 404, "message": "Not Found" } }
+2026-02-01 17:35:58,187 [INFO] [Spotify S1] selected track 'Lucky Now' for artist 'Lande Hekt' (artist_id=3RU6wsoh0bm0gZFHJiYRmq, track_id=n/a)
+2026-02-01 17:35:58,188 [INFO] [Spotify S1] selected track 'Make Up' for artist 'Binta' (artist_id=3b7sumHiRjBxU4R71H3KfI, track_id=n/a)
+2026-02-01 17:35:58,344 [INFO] [Spotify S1] genre fallback: related-artists lookup failed for artist_id=0SDfEluak7Z8ML7o1K2Ljk: Spotify API error 404: {"error": {"status": 404, "message": "Not Found" } }
+2026-02-01 17:35:58,867 [INFO] [Spotify S1] selected track 'Joy and Despair' for artist 'Charlie Noordewier' (artist_id=0SDfEluak7Z8ML7o1K2Ljk, track_id=n/a)
+2026-02-01 17:35:58,869 [INFO] [Spotify S1] selected track 'BURY ME' for artist 'Pesolife' (artist_id=7f9jDhglsest0HQ921acyT, track_id=n/a)
+2026-02-01 17:35:58,869 [INFO] [Spotify S1] playlist candidates for artist 'Mars Meddo' are duplicates; trying API fallback for a unique track
+2026-02-01 17:35:59,086 [INFO] [Spotify S1] uniqueness fallback: using top track 'OBSESSED' for artist_id=7pC4Rmm7gHq5Ey2I7tvTtX
+2026-02-01 17:35:59,086 [INFO] [Spotify S1] selected track 'OBSESSED' for artist 'Mars Meddo' (artist_id=7pC4Rmm7gHq5Ey2I7tvTtX, track_id=2qvQ9lW0eM4A9PW7j8DXEQ)
+2026-02-01 17:35:59,239 [INFO] [Spotify S1] genre fallback: related-artists lookup failed for artist_id=4uG8VYp1GLQpZVokfG2Ui7: Spotify API error 404: {"error": {"status": 404, "message": "Not Found" } }
+2026-02-01 17:35:59,616 [INFO] [Spotify S1] selected track 'Dream Of Mine' for artist 'Ellur' (artist_id=4uG8VYp1GLQpZVokfG2Ui7, track_id=n/a)
+2026-02-01 17:35:59,616 [INFO] [Spotify S1] selected track 'Headside In Da Skiez (Babycham Supernova)' for artist 'Kibo' (artist_id=1htekGIYpgIzz9EDeufPwn, track_id=n/a)
+2026-02-01 17:35:59,769 [INFO] [Spotify S1] genre fallback: related-artists lookup failed for artist_id=6JPpKyhX2EmJD1QqKrU9UE: Spotify API error 404: {"error": {"status": 404, "message": "Not Found" } }
+2026-02-01 17:36:00,207 [INFO] [Spotify S1] selected track 'Love You All The Same' for artist 'Dominic Wright' (artist_id=6JPpKyhX2EmJD1QqKrU9UE, track_id=n/a)
+2026-02-01 17:36:00,208 [INFO] [Spotify S1] selected track 'I Can Tell' for artist 'Shy One' (artist_id=6FafP4LIlZnnYNacDoW7yZ, track_id=n/a)
+2026-02-01 17:36:00,208 [INFO] [Spotify S1] playlist candidates for artist 'George Riley' are duplicates; trying API fallback for a unique track
+2026-02-01 17:36:00,419 [INFO] [Spotify S1] uniqueness fallback: using top track 'skin2skin' for artist_id=76rh78p0cww0l4OqgKabLQ
+2026-02-01 17:36:00,419 [INFO] [Spotify S1] selected track 'skin2skin' for artist 'George Riley' (artist_id=76rh78p0cww0l4OqgKabLQ, track_id=2MPYwuSCgp9gHAuWn6uglw)
+2026-02-01 17:36:00,420 [INFO] [Spotify] Discovery complete — returning 10 rows.
+2026-02-01 17:36:00,420 [INFO] [Spotify] Starting About-page enrichment...
+2026-02-01 17:36:00,649 [INFO] [Spotify About] __NEXT_DATA__ missing for artist 3RU6wsoh0bm0gZFHJiYRmq
+2026-02-01 17:36:00,649 [INFO] [Spotify About] No socials found for artist 3RU6wsoh0bm0gZFHJiYRmq
+2026-02-01 17:36:01,563 [INFO] [Spotify About] __NEXT_DATA__ missing for artist 3b7sumHiRjBxU4R71H3KfI
+2026-02-01 17:36:01,564 [INFO] [Spotify About] No socials found for artist 3b7sumHiRjBxU4R71H3KfI
+2026-02-01 17:36:02,485 [INFO] [Spotify About] __NEXT_DATA__ missing for artist 0SDfEluak7Z8ML7o1K2Ljk
+2026-02-01 17:36:02,485 [INFO] [Spotify About] No socials found for artist 0SDfEluak7Z8ML7o1K2Ljk
+2026-02-01 17:36:03,387 [INFO] [Spotify About] __NEXT_DATA__ missing for artist 7f9jDhglsest0HQ921acyT
+2026-02-01 17:36:03,388 [INFO] [Spotify About] No socials found for artist 7f9jDhglsest0HQ921acyT
+2026-02-01 17:36:04,323 [INFO] [Spotify About] __NEXT_DATA__ missing for artist 7pC4Rmm7gHq5Ey2I7tvTtX
+2026-02-01 17:36:04,323 [INFO] [Spotify About] No socials found for artist 7pC4Rmm7gHq5Ey2I7tvTtX
+2026-02-01 17:36:05,232 [INFO] [Spotify About] __NEXT_DATA__ missing for artist 4uG8VYp1GLQpZVokfG2Ui7
+2026-02-01 17:36:05,232 [INFO] [Spotify About] No socials found for artist 4uG8VYp1GLQpZVokfG2Ui7
+2026-02-01 17:36:06,166 [INFO] [Spotify About] __NEXT_DATA__ missing for artist 1htekGIYpgIzz9EDeufPwn
+2026-02-01 17:36:06,167 [INFO] [Spotify About] No socials found for artist 1htekGIYpgIzz9EDeufPwn
+2026-02-01 17:36:07,107 [INFO] [Spotify About] __NEXT_DATA__ missing for artist 6JPpKyhX2EmJD1QqKrU9UE
+2026-02-01 17:36:07,107 [INFO] [Spotify About] No socials found for artist 6JPpKyhX2EmJD1QqKrU9UE
+2026-02-01 17:36:08,024 [INFO] [Spotify About] __NEXT_DATA__ missing for artist 6FafP4LIlZnnYNacDoW7yZ
+2026-02-01 17:36:08,024 [INFO] [Spotify About] No socials found for artist 6FafP4LIlZnnYNacDoW7yZ
+2026-02-01 17:36:08,938 [INFO] [Spotify About] __NEXT_DATA__ missing for artist 76rh78p0cww0l4OqgKabLQ
+2026-02-01 17:36:08,939 [INFO] [Spotify About] No socials found for artist 76rh78p0cww0l4OqgKabLQ
+2026-02-01 17:36:09,640 [INFO] [Spotify] About-page enrichment completed.
+2026-02-01 17:36:09,641 [INFO] [Spotify] Starting website -> email enrichment...
+2026-02-01 17:36:09,641 [INFO] [WebsiteEmail] Row 1/10: 0 website candidates
+2026-02-01 17:36:09,642 [INFO] [WebsiteEmail] Row 2/10: 0 website candidates
+2026-02-01 17:36:09,642 [INFO] [WebsiteEmail] Row 3/10: 0 website candidates
+2026-02-01 17:36:09,642 [INFO] [WebsiteEmail] Row 4/10: 0 website candidates
+2026-02-01 17:36:09,642 [INFO] [WebsiteEmail] Row 5/10: 0 website candidates
+2026-02-01 17:36:09,642 [INFO] [WebsiteEmail] Row 6/10: 0 website candidates
+2026-02-01 17:36:09,643 [INFO] [WebsiteEmail] Row 7/10: 0 website candidates
+2026-02-01 17:36:09,643 [INFO] [WebsiteEmail] Row 8/10: 0 website candidates
+2026-02-01 17:36:09,643 [INFO] [WebsiteEmail] Row 9/10: 0 website candidates
+2026-02-01 17:36:09,643 [INFO] [WebsiteEmail] Row 10/10: 0 website candidates
+2026-02-01 17:36:09,643 [INFO] [Spotify] Website -> email enrichment completed.
+2026-02-01 17:36:09,657 [INFO] Completed job job_spotify_1 (raw only; master enrichment pending)
