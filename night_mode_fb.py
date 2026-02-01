@@ -579,7 +579,37 @@ def _night_fb_has_music_signals(soup: BeautifulSoup, meta: Optional[Dict[str, st
     return any(token in page_text for token in ("musician", "artist", "band", "music", "singer", "producer", "dj"))
 
 
-def _parse_search_candidates(html: str) -> List["facebook_enrich.FbCandidate"]:
+def _is_garbage_fb_candidate(title: str, url: str, category: Optional[str]) -> bool:
+    """
+    Filter out business/notification-style FB search results that are not real pages.
+    """
+    title_l = (title or "").lower()
+    url_l = (url or "").lower()
+    category_l = (category or "").lower() if category else ""
+
+    if any(tok in url_l for tok in ("business.facebook.com", "/latest/", "/composer", "/latest/composer")):
+        return True
+
+    junk_title_tokens = (
+        "unread",
+        "mark as read",
+        "followers are most active",
+        "scheduling a post",
+        "page's visibility",
+        "page visibility",
+        "notifications",
+        "insights",
+    )
+    if any(tok in title_l for tok in junk_title_tokens):
+        return True
+
+    if re.fullmatch(r"\\d+[hdm]?", category_l or "") and any(tok in title_l for tok in ("unread", "followers", "notifications", "mark as read")):
+        return True
+
+    return False
+
+
+def _parse_search_candidates(html: str, logger: LoggerFn = None) -> List["facebook_enrich.FbCandidate"]:
     if facebook_enrich is None or not html:
         return []
     soup = BeautifulSoup(html, "html.parser")
@@ -595,6 +625,15 @@ def _parse_search_candidates(html: str) -> List["facebook_enrich.FbCandidate"]:
             continue
         name = anchor.get_text(" ", strip=True) or href
         category = facebook_enrich.extract_fb_category(anchor, page_name=name) if hasattr(facebook_enrich, "extract_fb_category") else ""
+        if _is_garbage_fb_candidate(name, href, category):
+            try:
+                short_title = (name or "").strip()
+                if len(short_title) > 120:
+                    short_title = short_title[:117] + "..."
+                _log(logger, f"[Night FB] Rejecting FB candidate due to business/notification UI: title='{short_title}' url='{href}'")
+            except Exception:
+                pass
+            continue
         candidates.append(facebook_enrich.FbCandidate(name=name, url=href, category=category or ""))
     return _dedupe_candidates(candidates)
 
@@ -932,7 +971,7 @@ class NightModeFacebookEnricher:
             except Exception as exc2:  # pragma: no cover - defensive
                 _log(self.logger, f"[Night FB] Search navigation failed after refresh: {exc2}")
                 raise FacebookDriverError(str(exc2))
-        candidates = _parse_search_candidates(html)
+        candidates = _parse_search_candidates(html, logger=self.logger)
         candidate = None
         selector = getattr(facebook_enrich, "select_best_facebook_candidate", None) if facebook_enrich is not None else None
         if callable(selector):
