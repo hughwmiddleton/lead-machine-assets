@@ -9629,10 +9629,6 @@ class NightModeTab(QtWidgets.QWidget):
         self._log_buffer.append(msg)
         if len(self._log_buffer) > 300:
             self._log_buffer = self._log_buffer[-300:]
-        # buffer for auth detection (already masked upstream)
-        self._log_buffer.append(msg)
-        if len(self._log_buffer) > 300:
-            self._log_buffer = self._log_buffer[-300:]
         self.log_console.appendPlainText(msg)
         scrollbar = self.log_console.verticalScrollBar()
         if scrollbar:
