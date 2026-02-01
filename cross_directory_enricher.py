@@ -3080,11 +3080,11 @@ class CrossDirectoryEnricherWorker(QThread):
         anon_fb_driver_owned = False
         try:
             if ENABLE_FACEBOOK_ENRICHMENT:
-                try:
-                    if FB_DAYTIME_ANON:
-                        # Anonymous mode: skip manual login prompt and lazy-init later.
-                        fb_driver = None
-                    else:
+                if FB_DAYTIME_ANON:
+                    # Anonymous mode: defer driver creation until needed.
+                    fb_driver = None
+                else:
+                    try:
                         if not enricher_fb_profile_has_cookies():
                             driver = None
                             try:
@@ -3095,6 +3095,7 @@ class CrossDirectoryEnricherWorker(QThread):
                                     pass
                                 message = "[FB Enrich] Please manually log into Facebook in the opened window."
                                 _safe_log(self.log_message.emit, message)
+                                _safe_log(self.log_message.emit, f"[FB Enrich] Using FB profile dir: {ENRICHER_FB_PROFILE}")
                                 try:
                                     input("Press ENTER once logged in…")
                                 except EOFError:
@@ -3108,13 +3109,14 @@ class CrossDirectoryEnricherWorker(QThread):
                                     except Exception:
                                         pass
                         fb_driver = _get_enricher_facebook_driver()
-                except Exception as exc:
-                    _safe_log(
-                        self.log_message.emit,
-                        "[FB Enrich] Failed to start Facebook driver: %s",
-                        exc,
-                    )
-                    fb_driver = None
+                        _safe_log(self.log_message.emit, f"[FB Enrich] Initialized FB driver with profile dir: {ENRICHER_FB_PROFILE}")
+                    except Exception as exc:
+                        _safe_log(
+                            self.log_message.emit,
+                            "[FB Enrich] Failed to start Facebook driver: %s",
+                            exc,
+                        )
+                        fb_driver = None
             if not os.path.exists(self.seed_csv_path):
                 self.log_message.emit(f"[Enricher] Seed CSV not found: {self.seed_csv_path}")
                 self.finished.emit("")
@@ -3277,7 +3279,7 @@ class CrossDirectoryEnricherWorker(QThread):
                         )
                         if applied:
                             enriched = True
-                if ENABLE_FACEBOOK_ENRICHMENT and (fb_driver or FB_DAYTIME_ANON):
+                if ENABLE_FACEBOOK_ENRICHMENT and (fb_driver is not None or FB_DAYTIME_ANON):
                     fb_attempted = False
                     fb_matched = False
                     if not self._platform_attempt_allowed("facebook", artist, "Facebook Enrich"):
@@ -3334,11 +3336,7 @@ class CrossDirectoryEnricherWorker(QThread):
                                 page_url_used = ""
                                 try:
                                     if existing_fb_links:
-                                        fb_candidates = (
-                                            [existing_fb_links]
-                                            if isinstance(existing_fb_links, str)
-                                            else list(existing_fb_links)
-                                        )
+                                        fb_candidates = list(existing_fb_links)
                                         for candidate in fb_candidates:
                                             candidate_norm = normalize_external_url(candidate)
                                             found = fb_scrape_emails_from_page(
@@ -3411,7 +3409,8 @@ class CrossDirectoryEnricherWorker(QThread):
                     fb_driver.quit()
                 except Exception:
                     pass
-            _cleanup_enricher_facebook_driver()
+            if not FB_DAYTIME_ANON:
+                _cleanup_enricher_facebook_driver()
 
     def _init_row_enrichment_state(self) -> None:
         self._row_enrichment_state = {
