@@ -70,8 +70,8 @@ def _safe_log(logger: LoggerFn, message: str) -> None:
 
 def _safe_log_console(logger: LoggerFn, message: str) -> None:
     """
-    Log via provided logger when available; otherwise fall back to module logger
-    or stdout. Avoid double-emitting the same message.
+    Emit the message once: prefer the provided logger; otherwise fall back to stdout.
+    Avoid double-emitting the same message.
     """
     if not message:
         return
@@ -84,12 +84,6 @@ def _safe_log_console(logger: LoggerFn, message: str) -> None:
             if hasattr(logger, "info") and callable(getattr(logger, "info", None)):
                 logger.info(message)
                 return
-    except Exception:
-        pass
-
-    try:
-        _LOGGER.info(message)
-        return
     except Exception:
         pass
 
