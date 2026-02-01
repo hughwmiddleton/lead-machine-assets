@@ -9107,7 +9107,8 @@ class NightModeWorker(QtCore.QThread):
         exit_code = -1
         try:
             pretty_cmd = " ".join(self.command)
-            self.log_signal.emit(f"[Night Mode] Running: {self._mask(pretty_cmd)}")
+            masked_cmd = self._mask(pretty_cmd)
+            self.log_signal.emit(f"[Night Mode] Running: {masked_cmd}")
             self._process = subprocess.Popen(
                 self.command,
                 cwd=self.workdir,
@@ -9502,6 +9503,8 @@ class NightModeTab(QtWidgets.QWidget):
         self._launch_night_mode(headless=True)
 
     def _launch_night_mode(self, headless: bool):
+        # Fresh log buffer per run to avoid stale auth signals.
+        self._log_buffer = []
         config_path = self.config_path_edit.text().strip()
         config_path_to_use = ""
         if self.jobs:
@@ -9623,6 +9626,10 @@ class NightModeTab(QtWidgets.QWidget):
 
     def _append_log(self, message: str):
         msg = message or ""
+        self._log_buffer.append(msg)
+        if len(self._log_buffer) > 300:
+            self._log_buffer = self._log_buffer[-300:]
+        # buffer for auth detection (already masked upstream)
         self._log_buffer.append(msg)
         if len(self._log_buffer) > 300:
             self._log_buffer = self._log_buffer[-300:]
