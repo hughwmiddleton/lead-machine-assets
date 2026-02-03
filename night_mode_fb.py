@@ -604,6 +604,7 @@ def _try_explicit_fb(driver, url: str, logger: LoggerFn = None) -> Tuple[List[st
             _log(logger, f"[Night FB] Explicit FB navigation failed for {url}")
         except Exception:
             pass
+        return [], "no_email_found"
 
     try:
         final_url = (getattr(driver, "current_url", "") or "").lower()
@@ -1217,7 +1218,21 @@ class NightModeFacebookEnricher:
         if session:
             try:
                 self._ensure_driver_alive(session)
-                driver = session.ensure_logged_in() if hasattr(session, "ensure_logged_in") else session.navigate("about:blank")
+
+                maybe_driver = None
+                if hasattr(session, "ensure_logged_in"):
+                    try:
+                        maybe_driver = session.ensure_logged_in()
+                    except Exception:
+                        maybe_driver = None
+
+                # Some session managers return None from ensure_logged_in(); fetch the actual driver handle.
+                driver = (
+                    maybe_driver
+                    or getattr(session, "driver", None)
+                    or getattr(session, "_driver", None)
+                    or (session if hasattr(session, "get") else None)
+                )
             except Exception:
                 driver = None
 
