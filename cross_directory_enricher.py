@@ -3819,7 +3819,7 @@ class CrossDirectoryEnricherWorker(QThread):
                 f"[Enricher] Bandcamp Enrich: best candidate '{profile_url}' for '{artist_name}' has confidence={confidence:.2f}."
             )
             if confidence >= MIN_BC_CONFIDENCE:
-                payload = self._fetch_profile_and_build(profile_url, "bandcamp")
+                payload = self._fetch_profile_and_build(profile_url, "bandcamp", confidence=confidence)
                 if payload:
                     payload.match_score = self._compute_match_score_for_candidate(
                         display_name or profile_url,
@@ -4071,7 +4071,9 @@ class CrossDirectoryEnricherWorker(QThread):
                 return None
         return None
 
-    def _fetch_profile_and_build(self, profile_url: str, source_dir: str) -> Optional[EnrichmentPayload]:
+    def _fetch_profile_and_build(
+        self, profile_url: str, source_dir: str, confidence: Optional[float] = None
+    ) -> Optional[EnrichmentPayload]:
         self.log_message.emit(f"[Enricher] Fetching {source_dir} profile: {profile_url}")
         html = self._fetch_url(profile_url, label=f"{source_dir} profile")
         if not html:
@@ -4079,6 +4081,7 @@ class CrossDirectoryEnricherWorker(QThread):
         socials, websites, emails, link_hubs = _extract_links_from_profile(
             html, source_dir, profile_url
         )
+        live_key = f"{source_dir}_live"
         if not (socials or websites or emails or link_hubs):
             if source_dir == "soundcloud":
                 # Still return a payload so we can record the matched SoundCloud profile URL even if no external links.
@@ -4089,8 +4092,26 @@ class CrossDirectoryEnricherWorker(QThread):
                 self.log_message.emit(
                     f"[Enricher] No actionable data on {source_dir} profile: {profile_url}"
                 )
+                if (
+                    source_dir == "bandcamp"
+                    and confidence is not None
+                    and confidence >= MIN_BC_CONFIDENCE
+                ):
+                    canonical_url = _canonicalise_bandcamp_url(profile_url) or profile_url
+                    payload = EnrichmentPayload(
+                        socials=set(),
+                        websites=set(),
+                        emails=set(),
+                        link_hubs=set(),
+                        source_dir=live_key,
+                        source_url=canonical_url,
+                        source_detail=_format_source_display(live_key),
+                    )
+                    self.log_message.emit(
+                        f"[Enricher] Bandcamp: safe match but no actionable fields; returning url-only payload url={canonical_url}"
+                    )
+                    return payload
                 return None
-        live_key = f"{source_dir}_live"
         payload = EnrichmentPayload(
             socials=socials,
             websites=websites,
