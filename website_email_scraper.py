@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import re
 import time
-from typing import Callable, Dict, Iterable, List, Optional, Sequence, Set
+from typing import Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 from urllib.parse import urljoin, urlparse
 
 import requests
@@ -98,17 +98,14 @@ def enrich_rows_with_website_emails(
             row["Email_Source_URL"] = email_source_url
             path_lower = urlparse(email_source_url or "").path.lower()
             generic_hit = any(token in path_lower for token in GENERIC_PATH_KEYWORDS)
+            primary = _choose_primary_email(emails_found, email_types)
+            row["Email"] = primary
+            row["Email_All"] = ";".join(emails_found)
+            row["Email_Type"] = email_types.get(primary, "")
             if generic_hit:
-                row["Email"] = ""
-                row["Email_All"] = ";".join(emails_found)
-                row["Email_Type"] = email_types.get(emails_found[0], "")
                 row["Email Source"] = "Seed directory (generic contact page)"
                 row["Needs_Review"] = "TRUE"
             else:
-                primary = _choose_primary_email(emails_found, email_types)
-                row["Email"] = primary
-                row["Email_All"] = ";".join(emails_found)
-                row["Email_Type"] = email_types.get(primary, "")
                 row["Email Source"] = "Seed directory (site/email scrape)"
 
             # Debug/logging for repeated emails across different artists to catch smearing.
