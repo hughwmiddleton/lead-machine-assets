@@ -588,6 +588,56 @@ def _is_fb_login_or_security_url(url: str) -> bool:
     return any(path.startswith(p) for p in bad_paths)
 
 
+def _try_explicit_fb(driver, url: str, logger: LoggerFn = None) -> Tuple[List[str], Optional[str]]:
+    """
+    Returns: (emails, reason)
+    reason is None if emails found, else one of:
+      redirect_login, checkpoint_or_consent, not_found, no_email_found
+    """
+    if not driver or not url:
+        return [], "no_email_found"
+
+    try:
+        driver.get(url)
+    except Exception:
+        try:
+            _log(logger, f"[Night FB] Explicit FB navigation failed for {url}")
+        except Exception:
+            pass
+
+    try:
+        final_url = (getattr(driver, "current_url", "") or "").lower()
+    except Exception:
+        final_url = (url or "").lower()
+
+    try:
+        page_source_raw = getattr(driver, "page_source", "") or ""
+    except Exception:
+        page_source_raw = ""
+    page_source = page_source_raw.lower()
+
+    if ("login" in final_url) or ("/login.php" in final_url) or ("device-based" in page_source) or ("log in" in page_source and "facebook" in page_source):
+        return [], "redirect_login"
+
+    if any(tok in final_url for tok in ("checkpoint", "consent")) or any(tok in page_source for tok in ("checkpoint", "consent", "cookie", "privacy")):
+        return [], "checkpoint_or_consent"
+
+    not_found_phrases = (
+        "page isn\u2019t available",
+        "page isn't available",
+        "content isn't available",
+        "not available right now",
+    )
+    if any(phrase in page_source for phrase in not_found_phrases):
+        return [], "not_found"
+
+    emails = _extract_emails_from_html(page_source_raw)
+    if emails:
+        return emails, None
+
+    return [], "no_email_found"
+
+
 def _night_fb_has_music_signals(soup: BeautifulSoup, meta: Optional[Dict[str, str]] = None) -> bool:
     if soup is None:
         return False
@@ -1155,6 +1205,36 @@ class NightModeFacebookEnricher:
         _log(self.logger, f"[Night FB] extracted email(s) {emails} from {page_url}")
         return target_row
 
+    def _diagnose_explicit_fb_failure(self, url: str, allow_anon: bool) -> Tuple[List[str], Optional[str]]:
+        driver = None
+        try:
+            session = self._ensure_session()
+        except FacebookDriverError:
+            session = None
+        except Exception:
+            session = None
+
+        if session:
+            try:
+                self._ensure_driver_alive(session)
+                driver = session.ensure_logged_in() if hasattr(session, "ensure_logged_in") else session.navigate("about:blank")
+            except Exception:
+                driver = None
+
+        if (not driver) and allow_anon:
+            try:
+                driver = self._get_anon_driver()
+            except Exception:
+                driver = None
+
+        if not driver:
+            return [], "no_email_found"
+
+        try:
+            return _try_explicit_fb(driver, url, logger=self.logger)
+        except Exception:
+            return [], "no_email_found"
+
     def _enrich_row_unearthed_legacy(
         self,
         result: Dict[str, str],
@@ -1284,7 +1364,22 @@ class NightModeFacebookEnricher:
                     result = self._apply_night_fb_result(result, best_result, emails, page_url)
                     return result
                 else:
-                    _log(self.logger, "[Night FB] Explicit FB URLs produced no results; falling back to search.")
+                    reason_code: Optional[str] = None
+                    diag_emails: List[str] = []
+                    probe_url = fb_urls[0] if fb_urls else ""
+                    if probe_url:
+                        diag_emails, reason_code = self._diagnose_explicit_fb_failure(probe_url, allow_anon=allow_anon)
+                    if diag_emails:
+                        page_url = _normalise_fb_url(probe_url)
+                        night_result = self._build_result(diag_emails, str(result.get("Email_All", "") or ""), page_url, artist_name)
+                        if night_result:
+                            result = self._apply_night_fb_result(result, night_result, diag_emails, page_url)
+                            return result
+                    if reason_code:
+                        result["FB_Status"] = f"explicit_fail:{reason_code}"
+                        _log(self.logger, f"[Night FB] Explicit FB URL had no emails (reason={reason_code}); falling back to search.")
+                    else:
+                        _log(self.logger, "[Night FB] Explicit FB URLs produced no results; falling back to search.")
 
             if not page_url:
                 session = self._ensure_session()
