@@ -13,6 +13,9 @@ Row = Dict[str, str]
 LoggerFn = Callable[[str], None]
 ProgressFn = Callable[[int, int], None]
 
+DEBUG_EMAIL_SMEAR = False  # Set True to log suspected repeat-email smearing.
+_email_seen_counter: Dict[str, int] = {}
+
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 SOCIAL_DOMAINS = {
     "instagram.com",
@@ -38,6 +41,7 @@ USER_AGENT = (
 REQUEST_TIMEOUT = 10
 CONTACT_KEYWORDS = ("contact", "about", "connect", "book", "booking")
 MAX_CONTACT_FOLLOWUPS = 2
+GENERIC_PATH_KEYWORDS = ("/contact", "/about", "/support", "/privacy", "/terms", "/imprint", "/legal")
 
 
 def enrich_rows_with_website_emails(
@@ -63,6 +67,7 @@ def enrich_rows_with_website_emails(
             logger(f"[WebsiteEmail] Row {idx}/{total}: {len(websites)} website candidates")
         emails_found: List[str] = []
         email_types: Dict[str, str] = {}
+        email_source_url = ""
         seen_urls: Set[str] = set()
         for site in websites:
             normalized = _normalize_url(site)
@@ -77,19 +82,50 @@ def enrich_rows_with_website_emails(
                 continue
             emails = _extract_emails_from_html(html)
             if not emails:
-                emails = _follow_contact_links_and_extract(session, html, normalized, logger)
+                emails, follow_url = _follow_contact_links_and_extract(session, html, normalized, logger)
+                if emails and follow_url:
+                    email_source_url = follow_url
             for email in emails:
                 if email not in emails_found:
                     emails_found.append(email)
                     email_types[email] = _classify_email(email)
             if emails_found:
+                if not email_source_url:
+                    email_source_url = normalized
                 break  # stop at first successful site
 
         if emails_found and not row.get("Email"):
-            primary = _choose_primary_email(emails_found, email_types)
-            row["Email"] = primary
-            row["Email_All"] = ";".join(emails_found)
-            row["Email_Type"] = email_types.get(primary, "")
+            row["Email_Source_URL"] = email_source_url
+            path_lower = urlparse(email_source_url or "").path.lower()
+            generic_hit = any(token in path_lower for token in GENERIC_PATH_KEYWORDS)
+            if generic_hit:
+                row["Email"] = ""
+                row["Email_All"] = ";".join(emails_found)
+                row["Email_Type"] = email_types.get(emails_found[0], "")
+                row["Email Source"] = "Seed directory (generic contact page)"
+                row["Needs_Review"] = "TRUE"
+            else:
+                primary = _choose_primary_email(emails_found, email_types)
+                row["Email"] = primary
+                row["Email_All"] = ";".join(emails_found)
+                row["Email_Type"] = email_types.get(primary, "")
+                row["Email Source"] = "Seed directory (site/email scrape)"
+
+            # Debug/logging for repeated emails across different artists to catch smearing.
+            for email in emails_found:
+                normalized_email = email.strip().lower()
+                if not normalized_email:
+                    continue
+                _email_seen_counter[normalized_email] = _email_seen_counter.get(normalized_email, 0) + 1
+                if DEBUG_EMAIL_SMEAR and _email_seen_counter[normalized_email] > 1:
+                    artist_name = str(row.get("Artist Name") or row.get("artist_name") or "").strip()
+                    source_url = email_source_url or normalized
+                    logger_fn = logger or (lambda _: None)
+                    logger_fn(
+                        f"[EmailSmear?] repeat_email={normalized_email} artist={artist_name!r} "
+                        f"source_url={source_url} email_source=seed_directory "
+                        f"emails_found={emails_found}"
+                    )
 
         _emit_progress(progress_callback, idx, total)
 
@@ -100,6 +136,8 @@ def _ensure_email_fields(row: Row) -> None:
     row.setdefault("Email", "")
     row.setdefault("Email_All", "")
     row.setdefault("Email_Type", "")
+    row.setdefault("Email_Source_URL", "")
+    row.setdefault("Needs_Review", "")
 
 
 def _collect_candidate_websites(row: Row) -> List[str]:
@@ -166,10 +204,11 @@ def _follow_contact_links_and_extract(
     html: str,
     base_url: str,
     logger: Optional[LoggerFn],
-) -> List[str]:
+) -> Tuple[List[str], str]:
     if not html:
-        return []
+        return ([], "")
     emails: List[str] = []
+    source_url = ""
     soup = BeautifulSoup(html, "html.parser")
     base_domain = urlparse(base_url).netloc
     links: List[str] = []
@@ -199,9 +238,11 @@ def _follow_contact_links_and_extract(
         for email in new_emails:
             if email not in emails:
                 emails.append(email)
+        if new_emails and not source_url:
+            source_url = link
         if emails:
             break
-    return emails
+    return (emails, source_url)
 
 
 def _classify_email(email: str) -> str:

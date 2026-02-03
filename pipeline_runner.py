@@ -523,7 +523,30 @@ def _build_final_export_frame(df: pd.DataFrame) -> pd.DataFrame:
             }
         )
 
-    return pd.DataFrame(rows, columns=FINAL_EXPORT_COLUMNS)
+    df_out = pd.DataFrame(rows, columns=FINAL_EXPORT_COLUMNS)
+
+    # Safety gate: only flag repeated seed-directory emails (do not blank them).
+    if not df_out.empty and "Primary Email" in df_out.columns and "Email Source" in df_out.columns:
+        email_series = df_out["Primary Email"].fillna("").astype(str).str.strip()
+        email_source_series = df_out["Email Source"].fillna("").astype(str).str.lower()
+        seed_mask = email_source_series.str.startswith("seed directory")
+        seed_emails = email_series.where(seed_mask)
+        email_counts = seed_emails.str.lower().value_counts()
+        flagged_emails = [email for email, count in email_counts.items() if email and count >= 5]
+        if flagged_emails:
+            mask = seed_mask & email_series.str.lower().isin(flagged_emails)
+            df_out.loc[mask, "Needs_Review"] = "TRUE"
+            df_out.loc[mask, "Email Source"] = "Seed directory (repeat email)"
+            try:
+                unique_artists = sorted(set(df_out.loc[mask, "Artist Name"]))
+                print(
+                    f"[Final Export] Safety gate: repeated seed-directory emails {flagged_emails} "
+                    f"across {len(unique_artists)} artists; marked Needs_Review."
+                )
+            except Exception:
+                pass
+
+    return df_out
 
 
 def build_final_export_view(input_csv_path: Union[Path, str], output_csv_path: Union[Path, str], logger: Optional[logging.Logger] = None) -> None:
