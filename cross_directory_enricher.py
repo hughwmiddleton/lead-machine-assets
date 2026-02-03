@@ -4076,7 +4076,8 @@ class CrossDirectoryEnricherWorker(QThread):
     ) -> Optional[EnrichmentPayload]:
         self.log_message.emit(f"[Enricher] Fetching {source_dir} profile: {profile_url}")
         html = self._fetch_url(profile_url, label=f"{source_dir} profile")
-        if not html:
+        fetched_ok = bool(html)
+        if not fetched_ok:
             return None
         socials, websites, emails, link_hubs = _extract_links_from_profile(
             html, source_dir, profile_url
@@ -4096,6 +4097,7 @@ class CrossDirectoryEnricherWorker(QThread):
                     source_dir == "bandcamp"
                     and confidence is not None
                     and confidence >= MIN_BC_CONFIDENCE
+                    and fetched_ok
                 ):
                     canonical_url = _canonicalise_bandcamp_url(profile_url) or profile_url
                     payload = EnrichmentPayload(
@@ -4103,9 +4105,9 @@ class CrossDirectoryEnricherWorker(QThread):
                         websites=set(),
                         emails=set(),
                         link_hubs=set(),
-                        source_dir=live_key,
+                        source_dir=source_dir,
                         source_url=canonical_url,
-                        source_detail=_format_source_display(live_key),
+                        source_detail=_format_source_display(source_dir),
                     )
                     self.log_message.emit(
                         f"[Enricher] Bandcamp: safe match but no actionable fields; returning url-only payload url={canonical_url}"
