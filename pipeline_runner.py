@@ -672,6 +672,7 @@ def _build_woodpecker_frame(final_df: pd.DataFrame) -> pd.DataFrame:
     for col in WOODPECKER_EXPORT_COLUMNS:
         if col not in df.columns:
             df[col] = ""
+    # All Emails column is derived from canonical Email_All during export prep.
     email_mask_source = "All Emails" if "All Emails" in df.columns else "Primary Email"
     mask = df[email_mask_source].fillna("").astype(str).str.strip() != ""
     filtered = df.loc[mask].copy()
@@ -1395,7 +1396,6 @@ def run_facebook_global_pass_nightmode(
             if pd.isna(email_all_val):
                 email_all_val = ""
             email_all_clean = str(email_all_val or "").strip()
-            email_clean = str(row.get("Email", "") or "").strip()
             has_email = bool(email_all_clean)
 
             fb_status_val_raw = str(row.get("FB_Status", "") or "").strip()
@@ -1404,7 +1404,7 @@ def run_facebook_global_pass_nightmode(
             if has_email:
                 _safe_log_console(
                     logger,
-                    f"[Night FB] Skipping row {idx} ('{artist_label}') – email already present (Email='{email_clean}', Email_All='{email_all_clean}').",
+                    f"[Night FB] Skipping row {idx} ('{artist_label}') – email already present (Email_All='{email_all_clean}').",
                 )
                 state.update(
                     {
