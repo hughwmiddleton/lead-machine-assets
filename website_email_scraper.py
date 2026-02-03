@@ -107,6 +107,12 @@ def enrich_rows_with_website_emails(
                 row["Needs_Review"] = "TRUE"
             else:
                 row["Email Source"] = "Seed directory (site/email scrape)"
+            if DEBUG_EMAIL_SMEAR and logger:
+                artist_name = str(row.get("Artist Name") or row.get("artist_name") or "").strip()
+                logger(
+                    f"[WebsiteEmail][Assign] artist={artist_name!r} primary={primary} "
+                    f"source_url={row['Email_Source_URL']} site={normalized}"
+                )
 
             # Debug/logging for repeated emails across different artists to catch smearing.
             for email in emails_found:
@@ -217,7 +223,7 @@ def _follow_contact_links_and_extract(
         candidate = href.lower()
         if not any(keyword in candidate for keyword in CONTACT_KEYWORDS) and not any(keyword in text for keyword in CONTACT_KEYWORDS):
             continue
-        normalized = urljoin(base_url, href)
+        normalized = _normalize_url(urljoin(base_url, href))
         if urlparse(normalized).netloc != base_domain:
             continue
         links.append(normalized)
@@ -236,7 +242,7 @@ def _follow_contact_links_and_extract(
             if email not in emails:
                 emails.append(email)
         if new_emails and not source_url:
-            source_url = link
+            source_url = _normalize_url(link)
         if emails:
             break
     return (emails, source_url)
