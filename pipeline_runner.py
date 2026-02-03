@@ -38,6 +38,82 @@ _LOGGER = logging.getLogger(__name__)
 EMAIL_PRIORITY_COLS: Sequence[str] = ("Email", "Email_All", "Directory_Email", "Unearthed_Email")
 
 
+def _is_valid_email_shape(email: str) -> bool:
+    """Basic, permissive email shape validation."""
+    if not email or " " in email:
+        return False
+    if email.count("@") != 1:
+        return False
+    local, domain = email.split("@", 1)
+    if not local or not domain:
+        return False
+    if "." not in domain:
+        return False
+    return True
+
+
+def normalize_emails(value) -> List[str]:
+    """
+    Split on commas, semicolons, whitespace, newlines. Lowercase, strip, validate
+    basic email shape, dedupe, and return sorted list for stable output.
+    """
+    text = "" if value is None else str(value)
+    parts = re.split(r"[\s,;]+", text)
+    seen: set[str] = set()
+    cleaned: List[str] = []
+    for part in parts:
+        email = part.strip().lower()
+        if not email:
+            continue
+        if not _is_valid_email_shape(email):
+            continue
+        if email not in seen:
+            seen.add(email)
+            cleaned.append(email)
+    return sorted(cleaned)
+
+
+def emails_to_string(emails: List[str]) -> str:
+    """Return ", ".join(emails) or empty string."""
+    return ", ".join(emails) if emails else ""
+
+
+def _consolidate_email_all(df: pd.DataFrame) -> pd.DataFrame:
+    """Populate Email_All as canonical, normalized union of known email fields."""
+    if df is None or df.empty:
+        return df
+
+    legacy_fields: Sequence[str] = (
+        "Email_All",
+        "Email",
+        "Emails",
+        "email",
+        "emails",
+        "Email Address",
+        "Directory_Email",
+        "Unearthed_Email",
+    )
+
+    for field in legacy_fields:
+        if field not in df.columns:
+            continue
+        df[field] = df[field].fillna("")
+
+    if "Email_All" not in df.columns:
+        df["Email_All"] = ""
+
+    def _build_email_all(row: pd.Series) -> str:
+        collected: List[str] = []
+        for field in legacy_fields:
+            if field in row:
+                collected.extend(normalize_emails(row.get(field, "")))
+        unique_sorted = sorted(set(collected)) if collected else []
+        return emails_to_string(unique_sorted)
+
+    df["Email_All"] = df.apply(_build_email_all, axis=1)
+    return df
+
+
 def _load_legacy_module():
     """
     Load the main Lead Machine module without triggering its __main__ entrypoint.
@@ -596,7 +672,8 @@ def _build_woodpecker_frame(final_df: pd.DataFrame) -> pd.DataFrame:
     for col in WOODPECKER_EXPORT_COLUMNS:
         if col not in df.columns:
             df[col] = ""
-    mask = df["Primary Email"].fillna("").astype(str).str.strip() != ""
+    email_mask_source = "All Emails" if "All Emails" in df.columns else "Primary Email"
+    mask = df[email_mask_source].fillna("").astype(str).str.strip() != ""
     filtered = df.loc[mask].copy()
     return filtered.loc[:, list(WOODPECKER_EXPORT_COLUMNS)]
 
@@ -606,6 +683,7 @@ def write_final_and_woodpecker_exports(
     final_export_csv_path: Union[Path, str],
     woodpecker_export_csv_path: Union[Path, str],
     logger: Optional[logging.Logger] = None,
+    consolidated_df: Optional[pd.DataFrame] = None,
 ) -> None:
     export_logger = logger or logging.getLogger(__name__)
     input_path = Path(input_csv_path)
@@ -613,7 +691,12 @@ def write_final_and_woodpecker_exports(
         export_logger.warning("[Final Export] Input not found: %s", input_path)
         return
     try:
-        df = pd.read_csv(input_path, dtype=str, keep_default_na=False)
+        if consolidated_df is not None:
+            df = consolidated_df.copy()
+        else:
+            df = pd.read_csv(input_path, dtype=str, keep_default_na=False)
+            df = df.fillna("")
+            df = _consolidate_email_all(df)
     except Exception as exc:
         export_logger.error("[Final Export] Failed to read %s: %s", input_path, exc)
         return
@@ -923,6 +1006,14 @@ def run_enrichment(raw_csv_path: str, enriched_output_path: str, logger: LoggerF
     except Exception as exc:  # pragma: no cover - defensive fallback
         _safe_log(logger, f"[Enrich] Final checker failed safely: {exc}")
         final_path = result_path
+    # Canonicalize Email_All once post-enrichment for downstream consumers.
+    try:
+        df_final = pd.read_csv(final_path, dtype=str, keep_default_na=False)
+        df_final = df_final.fillna("")
+        df_final = _consolidate_email_all(df_final)
+        df_final.to_csv(final_path, index=False)
+    except Exception as exc:  # pragma: no cover - defensive
+        _safe_log(logger, f"[Enrich] Email consolidation failed safely: {exc}")
 
     _safe_log(logger, f"[Enrich] Completed enrichment -> {final_path}")
     return final_path
@@ -970,6 +1061,8 @@ def run_facebook_global_pass(
     fb_password = os.environ.get("FB_PASSWORD", "").strip()
 
     df = pd.read_csv(input_csv)
+    df = df.fillna("")
+    df = _consolidate_email_all(df)
     # Normalize FB_Status column (empty string default). Preserve legacy lowercase if present.
     if "FB_Status" not in df.columns and "fb_status" in df.columns:
         df.rename(columns={"fb_status": "FB_Status"}, inplace=True)
@@ -980,10 +1073,10 @@ def run_facebook_global_pass(
     df["__row_id"] = range(len(df))
 
     def _eligible(row: pd.Series) -> bool:
-        email_val = row.get("Email", "")
-        if pd.isna(email_val):
-            email_val = ""
-        if skip_rows_with_email and str(email_val or "").strip():
+        email_all_val = row.get("Email_All", "")
+        if pd.isna(email_all_val):
+            email_all_val = ""
+        if skip_rows_with_email and str(email_all_val or "").strip():
             return False
         if skip_rows_with_no_facebook_clue and not _has_facebook_clue(row):
             return False
@@ -1189,6 +1282,8 @@ def run_facebook_global_pass_nightmode(
     # Use existing output if present so resumes keep prior enrichments.
     base_path = output_csv if output_csv and os.path.exists(output_csv) else input_csv
     df = pd.read_csv(base_path)
+    df = df.fillna("")
+    df = _consolidate_email_all(df)
     if "FB_Status" not in df.columns and "fb_status" in df.columns:
         df.rename(columns={"fb_status": "FB_Status"}, inplace=True)
     if "FB_Status" not in df.columns:
@@ -1296,15 +1391,12 @@ def run_facebook_global_pass_nightmode(
 
             artist_label = row.get("Artist Name", "") or row.get("Artist", "") or "<unknown>"
 
-            email_val = row.get("Email", "")
-            if pd.isna(email_val):
-                email_val = ""
             email_all_val = row.get("Email_All", "")
             if pd.isna(email_all_val):
                 email_all_val = ""
-            email_clean = str(email_val or "").strip()
             email_all_clean = str(email_all_val or "").strip()
-            has_email = bool(email_clean or email_all_clean)
+            email_clean = str(row.get("Email", "") or "").strip()
+            has_email = bool(email_all_clean)
 
             fb_status_val_raw = str(row.get("FB_Status", "") or "").strip()
             fb_status_val = fb_status_val_raw.lower()
@@ -1529,16 +1621,18 @@ def export_master_leads(
 
     _ensure_parent(output_csv)
     row_count = 0
+    consolidated_df: Optional[pd.DataFrame] = None
     try:
         from final_checker import filter_rows_for_export
 
-        with open(input_csv, "r", encoding="utf-8", newline="") as infile, open(
-            output_csv, "w", encoding="utf-8", newline=""
-        ) as outfile:
-            reader = csv.DictReader(infile)
+        consolidated_df = pd.read_csv(input_csv, dtype=str, keep_default_na=False)
+        consolidated_df = consolidated_df.fillna("")
+        consolidated_df = _consolidate_email_all(consolidated_df)
+        rows = consolidated_df.to_dict(orient="records")
+
+        with open(output_csv, "w", encoding="utf-8", newline="") as outfile:
             writer = csv.DictWriter(outfile, fieldnames=columns)
             writer.writeheader()
-            rows = [row for row in reader if row is not None]
             filtered_rows = filter_rows_for_export(export_profile or "studio_safe", rows)
             for row in filtered_rows:
                 writer.writerow({col: row.get(col, "") for col in columns})
@@ -1565,6 +1659,7 @@ def export_master_leads(
             final_export_csv_path=final_export_csv,
             woodpecker_export_csv_path=woodpecker_export_csv,
             logger=export_logger,
+            consolidated_df=consolidated_df,
         )
     except Exception as exc:  # pragma: no cover - defensive
         export_logger.error("[Master] Final export view failed safely: %s", exc)
