@@ -244,28 +244,6 @@ def _is_driver_authenticated(driver) -> bool:
     return _has_cookie(driver, "c_user")
 
 
-def _session_looks_healthy(driver) -> bool:
-    """
-    Quick FB session health probe to catch login/verification walls.
-    """
-    try:
-        driver.get("https://www.facebook.com/")
-        current_url = (getattr(driver, "current_url", "") or "").lower()
-        page_source = (getattr(driver, "page_source", "") or "").lower()
-    except Exception:
-        return False
-
-    bad_url_tokens = ("login", "checkpoint", "recover", "consent", "two_factor", "two-factor", "mfa")
-    if any(tok in current_url for tok in bad_url_tokens):
-        return False
-
-    bad_html_tokens = ("checkpoint", "consent", "log in", "two-factor", "security check")
-    if any(tok in page_source for tok in bad_html_tokens):
-        return False
-
-    return True
-
-
 def _create_fb_driver_night_mode(headless: bool, logger: LoggerFn = None):
     """
     Night-Mode-only Chrome driver with persistent profile to reuse FB auth.
@@ -348,18 +326,6 @@ class NightPersistentFacebookSession:
         _log(self.logger, f"[Night FB] Auth check after FB homepage ({mode_label}): authed={authed}")
 
         if authed:
-            if not _session_looks_healthy(self.driver):
-                _log(self.logger, "[Night FB] Session unhealthy; restarting driver once...")
-                try:
-                    self.driver.quit()
-                except Exception:
-                    pass
-                try:
-                    self.driver = self.driver_factory()
-                except Exception:
-                    pass
-                if not _session_looks_healthy(self.driver):
-                    _log(self.logger, "[Night FB] Session still unhealthy; continuing but FB results may be limited.")
             return self.driver
 
         if self.headless:
