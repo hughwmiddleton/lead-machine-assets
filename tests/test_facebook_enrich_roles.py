@@ -45,3 +45,11 @@ def test_is_musician_page_negative_labels() -> None:
 def test_normalize_role_text_strips_accents_and_whitespace() -> None:
     assert facebook_enrich.normalize_role_text("  Músico/banda  ") == "musico/banda"
     assert facebook_enrich.normalize_role_text("Musicien · Groupe") == "musicien · groupe"
+
+
+def test_business_composer_urls_marked_junk() -> None:
+    cand = facebook_enrich.FbCandidate(
+        name="Legit Looking Page",
+        url="https://business.facebook.com/latest/composer/?notif_id=123&notif_t=abc",
+    )
+    assert facebook_enrich.is_junk_facebook_candidate(cand)
