@@ -657,13 +657,8 @@ def _parse_search_candidates(html: str, logger: LoggerFn = None, search_name: Op
         name = anchor.get_text(" ", strip=True) or href
         category = facebook_enrich.extract_fb_category(anchor, page_name=name) if hasattr(facebook_enrich, "extract_fb_category") else ""
         if _is_garbage_fb_candidate(name, href, category):
-            try:
-                short_title = (name or "").strip()
-                if len(short_title) > 120:
-                    short_title = short_title[:117] + "..."
-                _log(logger, f"[Night FB] Rejecting FB candidate due to business/notification UI: title='{short_title}' url='{href}'")
-            except Exception:
-                pass
+            # T001: business/notification/composer junk is filtered early via is_junk_fb_candidate_url().
+            # Keep this guard (defensive) but avoid legacy logging / double-logging.
             continue
         candidates.append(facebook_enrich.FbCandidate(name=name, url=href, category=category or ""))
     deduped = _dedupe_candidates(candidates)

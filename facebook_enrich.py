@@ -1103,12 +1103,12 @@ def is_junk_facebook_candidate(candidate: FbCandidate) -> bool:
     name = (getattr(candidate, "name", "") or "").strip().lower()
     cat = (getattr(candidate, "category", "") or "").strip().lower()
     url = (getattr(candidate, "url", "") or "").strip().lower()
+    # Shared junk filter for business/notification/composer FB URLs
     if is_junk_fb_candidate_url(url):
         return True
     parsed = urlparse(url)
     netloc = parsed.netloc or ""
     path = parsed.path or ""
-    query = parsed.query or ""
 
     if name == "facebook":
         return True
