@@ -2138,6 +2138,42 @@ def _normalise_url(value: str) -> Optional[str]:
     return urllib.parse.urlunparse((parsed.scheme, netloc, path, "", parsed.query, ""))
 
 
+def _canonicalise_bandcamp_url(value: str) -> str:
+    """
+    Bandcamp-only canonicalizer: keep scheme+host+path, drop query/fragment, force https.
+    Non-Bandcamp URLs are returned unchanged.
+    """
+    if not value:
+        return ""
+    raw_value = value.strip()
+    if not raw_value:
+        return ""
+    value = raw_value
+    # Ensure we have a scheme so urlsplit works consistently.
+    if value.startswith("//"):
+        value = "https:" + value
+    if "://" not in value:
+        value = f"https://{value.lstrip('/')}"
+    try:
+        parsed = urllib.parse.urlsplit(value)
+    except Exception:
+        return raw_value
+
+    netloc = (parsed.netloc or "").lower()
+    if netloc.startswith("www."):
+        netloc = netloc[4:]
+    # Only canonicalise Bandcamp hosts; otherwise, return the original value untouched.
+    if not netloc.endswith("bandcamp.com"):
+        return raw_value
+
+    path = re.sub(r"/+", "/", parsed.path or "")
+    if path == "/":
+        path = ""
+
+    # Force https and strip query/fragment.
+    return urllib.parse.urlunsplit(("https", netloc, path, "", ""))
+
+
 def _split_pipe_cell(value, is_email: bool = False) -> Set[str]:
     if value is None:
         return set()
@@ -3617,8 +3653,13 @@ class CrossDirectoryEnricherWorker(QThread):
             candidate_priority = SOURCE_PRIORITY.get(candidate_key, 999)
             if not current_key or candidate_priority < current_priority:
                 display_value = payload.source_detail or _format_source_display(candidate_key)
+                source_url = payload.source_url or ""
+                if candidate_key.startswith("bandcamp"):
+                    canonical = _canonicalise_bandcamp_url(source_url)
+                    if canonical:
+                        source_url = canonical
                 df.at[row_idx, "Source Directory"] = display_value
-                df.at[row_idx, "Source URL"] = payload.source_url or ""
+                df.at[row_idx, "Source URL"] = source_url
 
     def _apply_structured_fields(
         self,
