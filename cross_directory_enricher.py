@@ -4097,7 +4097,6 @@ class CrossDirectoryEnricherWorker(QThread):
                     source_dir == "bandcamp"
                     and confidence is not None
                     and confidence >= MIN_BC_CONFIDENCE
-                    and fetched_ok
                 ):
                     canonical_url = _canonicalise_bandcamp_url(profile_url) or profile_url
                     payload = EnrichmentPayload(
