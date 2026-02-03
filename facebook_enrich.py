@@ -1103,17 +1103,12 @@ def is_junk_facebook_candidate(candidate: FbCandidate) -> bool:
     name = (getattr(candidate, "name", "") or "").strip().lower()
     cat = (getattr(candidate, "category", "") or "").strip().lower()
     url = (getattr(candidate, "url", "") or "").strip().lower()
+    if is_junk_fb_candidate_url(url):
+        return True
     parsed = urlparse(url)
     netloc = parsed.netloc or ""
     path = parsed.path or ""
     query = parsed.query or ""
-
-    if "business.facebook.com" in netloc:
-        return True
-    if "/latest/composer" in path:
-        return True
-    if "notif_id=" in query or "notif_t=" in query:
-        return True
 
     if name == "facebook":
         return True
@@ -1151,6 +1146,37 @@ def is_music_like_category(category: str, logger=None, debug_logging_enabled: bo
     if debug_logging_enabled and not match and ("music" in cl):
         _debug_log_unknown_role(logger, None, category)
     return match
+
+
+def is_junk_fb_candidate_url(url: str) -> bool:
+    """
+    Shared junk filter for obvious business/notification/composer Facebook URLs.
+    """
+    if not url:
+        return False
+    url_l = (url or "").lower()
+    junk_substrings = (
+        "business.facebook.com",
+        "/latest/composer",
+        "notif_id=",
+        "notif_t=",
+    )
+    if any(token in url_l for token in junk_substrings):
+        return True
+    try:
+        parsed = urlparse(url_l)
+        netloc = parsed.netloc or ""
+        path = parsed.path or ""
+        query = parsed.query or ""
+        if "business.facebook.com" in netloc:
+            return True
+        if "/latest/composer" in path:
+            return True
+        if "notif_id=" in query or "notif_t=" in query:
+            return True
+    except Exception:
+        return False
+    return False
 
 
 def select_best_facebook_candidate(

@@ -51,6 +51,7 @@ from facebook_enrich import (
     _corporate_hit,
     _looks_corporate,
     _looks_music_related,
+    is_junk_fb_candidate_url,
 )
 
 # ---------------------------------------------------------------------------
@@ -1130,6 +1131,7 @@ class FacebookSearchClient:
             return None
         seen_urls: Set[str] = set()
         candidates: List[FbCandidate] = []
+        dropped_business = 0
         anchor_candidates = list(soup.select("a[href]")) + list(soup.select('a[role="link"][href*="facebook.com"]')) + list(
             soup.select('div[role="article"] a[href*="facebook.com"]')
         )
@@ -1143,6 +1145,13 @@ class FacebookSearchClient:
             normalised = _normalise_url(absolute.split("?", 1)[0])
             if not normalised or "facebook.com" not in normalised:
                 continue
+            try:
+                if is_junk_fb_candidate_url(normalised):
+                    dropped_business += 1
+                    _safe_log(self.logger, "Dropped junk FB candidate url=%r reason=business_notif", normalised)
+                    continue
+            except Exception:
+                pass
             if normalised in seen_urls:
                 continue
             parsed = urllib.parse.urlparse(normalised)
@@ -1298,6 +1307,13 @@ class FacebookSearchClient:
             seen_urls.add(normalised)
 
         if not candidates:
+            if dropped_business:
+                _safe_log(
+                    self.logger,
+                    "[FB Enrich] No non-junk FB candidates for '%s' after dropping %s junk business UI hits.",
+                    artist_name,
+                    dropped_business,
+                )
             slug = normalize_fb_name(artist_name).replace(" ", "")
             if slug and len(slug) >= 4:
                 fallback_url = f"https://www.facebook.com/{urllib.parse.quote(slug)}"

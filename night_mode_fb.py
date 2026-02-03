@@ -32,9 +32,11 @@ try:
 except Exception:  # pragma: no cover - defensive import
     facebook_enrich = None  # type: ignore
 try:
-    from facebook_enrich import is_fb_login_redirect  # type: ignore
+    from facebook_enrich import is_fb_login_redirect, is_junk_fb_candidate_url  # type: ignore
 except Exception:  # pragma: no cover - defensive
     def is_fb_login_redirect(url: str) -> bool:  # type: ignore
+        return False
+    def is_junk_fb_candidate_url(url: str) -> bool:  # type: ignore
         return False
 
 LoggerFn = Optional[Union[Callable[[str], None], logging.Logger]]
@@ -630,18 +632,26 @@ def _is_garbage_fb_candidate(title: str, url: str, category: Optional[str]) -> b
     return False
 
 
-def _parse_search_candidates(html: str, logger: LoggerFn = None) -> List["facebook_enrich.FbCandidate"]:
+def _parse_search_candidates(html: str, logger: LoggerFn = None, search_name: Optional[str] = None) -> List["facebook_enrich.FbCandidate"]:
     if facebook_enrich is None or not html:
         return []
     soup = BeautifulSoup(html, "html.parser")
     anchors = soup.select("a[href]") if soup else []
     candidates: List[facebook_enrich.FbCandidate] = []
+    dropped_business = 0
     for anchor in anchors:
         href = anchor.get("href") or ""
         if "facebook.com" not in href:
             continue
         if "search/" in href and "facebook.com/search/" in href:
             continue
+        try:
+            if is_junk_fb_candidate_url(href):
+                dropped_business += 1
+                _log(logger, f"[Night FB] Dropped junk FB candidate url={href!r} reason=business_notif")
+                continue
+        except Exception:
+            pass
         if _is_junk_fb_candidate(href):
             continue
         name = anchor.get_text(" ", strip=True) or href
@@ -656,7 +666,11 @@ def _parse_search_candidates(html: str, logger: LoggerFn = None) -> List["facebo
                 pass
             continue
         candidates.append(facebook_enrich.FbCandidate(name=name, url=href, category=category or ""))
-    return _dedupe_candidates(candidates)
+    deduped = _dedupe_candidates(candidates)
+    if not deduped and dropped_business:
+        label = f" for '{search_name}'" if search_name else ""
+        _log(logger, f"[Night FB] No non-junk FB candidates{label} after dropping {dropped_business} junk business UI hits.")
+    return deduped
 
 
 def _select_best_candidate_loose(artist_name: str, candidates: List["facebook_enrich.FbCandidate"]) -> Optional["facebook_enrich.FbCandidate"]:
@@ -1006,7 +1020,7 @@ class NightModeFacebookEnricher:
             except Exception as exc2:  # pragma: no cover - defensive
                 _log(self.logger, f"[Night FB] Search navigation failed after refresh: {exc2}")
                 raise FacebookDriverError(str(exc2))
-        candidates = _parse_search_candidates(html, logger=self.logger)
+        candidates = _parse_search_candidates(html, logger=self.logger, search_name=artist)
         candidate = None
         selector = getattr(facebook_enrich, "select_best_facebook_candidate", None) if facebook_enrich is not None else None
         if callable(selector):

@@ -7011,6 +7011,7 @@ def fb_find_page_and_emails_by_name(
     fallback_candidates: list[tuple[float, float, float, str, str, str, str, bool]] = []
     generic_candidates: list[tuple[float, float, float, str, str, str, str, bool]] = []
     fb_candidates: list[FbCandidate] = []
+    dropped_business = 0
     blocked_tokens = [
         "games", "game",
         "creations",
@@ -7154,6 +7155,7 @@ def fb_find_page_and_emails_by_name(
         looks_like_music_fallback,
         score_fb_candidate,
         select_best_facebook_candidate,
+        is_junk_fb_candidate_url,
     )
 
     def _is_corporate_page(name: str, url: str, category: str | None) -> bool:
@@ -7222,6 +7224,10 @@ def fb_find_page_and_emails_by_name(
         text = a.get_text(" ", strip=True) or ""
         if href.startswith("/"):
             href = "https://www.facebook.com" + href
+        if is_junk_fb_candidate_url(href):
+            dropped_business += 1
+            _log(f"[FB Enrich] Dropped junk FB candidate url={href!r} reason=business_notif")
+            continue
         if not _fb_is_real_page_url(href):
             continue
         try:
@@ -7482,6 +7488,8 @@ def fb_find_page_and_emails_by_name(
         )
         using_generic = True
     else:
+        if dropped_business:
+            _log(f"[FB Enrich] No non-junk FB candidates for '{artist_name}' after dropping {dropped_business} junk business UI hits.")
         slug = normalize_name(artist_name).replace(" ", "")
         if slug and len(slug) >= 4:
             fallback_url = f"https://www.facebook.com/{quote(slug)}"
