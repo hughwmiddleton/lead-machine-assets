@@ -84,7 +84,7 @@ def enrich_rows_with_website_emails(
             if not emails:
                 emails, follow_url = _follow_contact_links_and_extract(session, html, normalized, logger)
                 if emails and follow_url:
-                    email_source_url = follow_url
+                    email_source_url = _normalize_url(follow_url)
             for email in emails:
                 if email not in emails_found:
                     emails_found.append(email)
@@ -94,10 +94,10 @@ def enrich_rows_with_website_emails(
                     email_source_url = normalized
                 break  # stop at first successful site
 
-        if emails_found and not row.get("Email"):
-            row["Email_Source_URL"] = email_source_url
+        if emails_found and not str(row.get("Email") or "").strip():
+            row["Email_Source_URL"] = _normalize_url(email_source_url)
             path_lower = urlparse(email_source_url or "").path.lower()
-            generic_hit = any(token in path_lower for token in GENERIC_PATH_KEYWORDS)
+            generic_hit = any(path_lower.startswith(token) for token in GENERIC_PATH_KEYWORDS)
             primary = _choose_primary_email(emails_found, email_types)
             row["Email"] = primary
             row["Email_All"] = ";".join(emails_found)
