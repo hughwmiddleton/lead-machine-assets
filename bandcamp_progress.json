@@ -1483,5 +1483,53 @@
       "https://gaiband888.bandcamp.com",
       "https://district105.bandcamp.com"
     ]
+  },
+  "discover:https://bandcamp.com/discover/vietnam+rock?s=new": {
+    "scraped_artist_urls": [
+      "https://saigonsoulrevival.bandcamp.com",
+      "https://pocalipse.bandcamp.com",
+      "https://paulwall.bandcamp.com",
+      "https://versdesociete.bandcamp.com",
+      "https://videocvlt.bandcamp.com",
+      "https://luiszapiola.bandcamp.com",
+      "https://mieuxrecording.bandcamp.com",
+      "https://hroestergaardsaigon.bandcamp.com",
+      "https://lounds.bandcamp.com",
+      "https://xoimusic.bandcamp.com",
+      "https://junoskye.bandcamp.com",
+      "https://hahuyen.bandcamp.com",
+      "https://bannhacmoi.bandcamp.com",
+      "https://maswaki.bandcamp.com",
+      "https://njusht.bandcamp.com",
+      "https://alexbaranov.bandcamp.com",
+      "https://seven-four-surfers.bandcamp.com",
+      "https://skeletongoode.bandcamp.com",
+      "https://thedreamwalker.bandcamp.com",
+      "https://giangrecords.bandcamp.com"
+    ]
+  },
+  "https://bandcamp.com/discover/vietnam+rock?s=new": {
+    "scraped_artist_urls": [
+      "https://saigonsoulrevival.bandcamp.com",
+      "https://pocalipse.bandcamp.com",
+      "https://paulwall.bandcamp.com",
+      "https://versdesociete.bandcamp.com",
+      "https://videocvlt.bandcamp.com",
+      "https://luiszapiola.bandcamp.com",
+      "https://mieuxrecording.bandcamp.com",
+      "https://hroestergaardsaigon.bandcamp.com",
+      "https://lounds.bandcamp.com",
+      "https://xoimusic.bandcamp.com",
+      "https://junoskye.bandcamp.com",
+      "https://hahuyen.bandcamp.com",
+      "https://bannhacmoi.bandcamp.com",
+      "https://maswaki.bandcamp.com",
+      "https://njusht.bandcamp.com",
+      "https://alexbaranov.bandcamp.com",
+      "https://seven-four-surfers.bandcamp.com",
+      "https://skeletongoode.bandcamp.com",
+      "https://thedreamwalker.bandcamp.com",
+      "https://giangrecords.bandcamp.com"
+    ]
   }
 }
