@@ -743,6 +743,7 @@ def run_master_enrichment(
     logger: LoggerFn = None,
     enable_live_search: bool = True,
     max_live_searches: Optional[int] = None,
+    night_mode: bool = False,
 ) -> str:
     """
     Run the cross-directory enricher on a single combined CSV.
@@ -777,6 +778,7 @@ def run_master_enrichment(
             enable_live_search=enable_live_search,
             max_live_searches=max_live,
             logger=logger,
+            night_mode=night_mode,
         )
     except Exception as exc:
         _safe_log(logger, f"[Master Enrich] Enricher failed safely: {exc}")

@@ -3114,6 +3114,8 @@ class CrossDirectoryEnricherWorker(QThread):
         parent=None,
     ) -> None:
         super().__init__(parent)
+        # Night Mode toggle; default off so daytime behaviour is unchanged.
+        self.night_mode: bool = False
         self.seed_csv_path = seed_csv_path
         self.output_csv_path = output_csv_path
         self.bandcamp_csv_path = bandcamp_csv_path
@@ -4104,7 +4106,7 @@ class CrossDirectoryEnricherWorker(QThread):
                 resp = self.session.get(url, timeout=HTTP_TIMEOUT)
                 status = getattr(resp, "status_code", None)
                 text = getattr(resp, "text", "")
-                if "soundcloud" in label.lower():
+                if getattr(self, "night_mode", False) and "soundcloud" in label.lower():
                     if _sc_is_blocked(status, text):
                         self._flag_sc_blocked(status_code=status, html=text)
                         return None
@@ -4112,7 +4114,7 @@ class CrossDirectoryEnricherWorker(QThread):
                 return text
             except requests.HTTPError as exc:
                 status = exc.response.status_code if exc.response is not None else None
-                if "soundcloud" in label.lower():
+                if getattr(self, "night_mode", False) and "soundcloud" in label.lower():
                     html = exc.response.text if exc.response is not None else ""
                     if _sc_is_blocked(status, html):
                         self._flag_sc_blocked(status_code=status, html=html)
@@ -4524,6 +4526,7 @@ def run_cross_directory_enrichment(
     enable_live_search: bool = True,
     max_live_searches: int = LIVE_SEARCH_MAX_ATTEMPTS,
     logger=None,
+    night_mode: bool = False,
 ) -> str:
     """
     Headless wrapper around the existing CrossDirectoryEnricherWorker for programmatic use.
@@ -4554,6 +4557,7 @@ def run_cross_directory_enrichment(
         enable_live_search=enable_live_search,
         max_live_searches=max_live_searches,
     )
+    worker.night_mode = bool(night_mode)
 
     # Bypass Qt event loop by providing simple emit stubs.
     worker.log_message = type("obj", (), {"emit": _log})
