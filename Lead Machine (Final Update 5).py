@@ -4442,10 +4442,23 @@ def _sc_track_release_iso(track: dict) -> tuple:
     return ("", "")
 
 
-def _sc_fetch_latest_track_rss(session, user_id) -> dict:
+def _sc_norm_user_id(user_id) -> str:
     if not user_id:
+        return ""
+    if isinstance(user_id, int):
+        return str(user_id)
+    s = str(user_id).strip()
+    if "soundcloud:users:" in s:
+        s = s.split("soundcloud:users:")[-1]
+    match = re.search("(\\d+)", s)
+    return match.group(1) if match else ""
+
+
+def _sc_fetch_latest_track_rss(session, user_id) -> dict:
+    uid = _sc_norm_user_id(user_id)
+    if not uid:
         return {}
-    rss_url = f"https://feeds.soundcloud.com/users/soundcloud:users:{user_id}/sounds.rss"
+    rss_url = f"https://feeds.soundcloud.com/users/soundcloud:users:{uid}/sounds.rss"
     try:
         resp = session.get(rss_url, timeout=SC_REQUEST_TIMEOUT, headers=_rand_headers())
         resp.raise_for_status()
@@ -4489,12 +4502,13 @@ def _sc_fetch_latest_track_metadata(session, client_id: str, user_id) -> dict:
     Fetch the user's most recent track via the public API so we can
     capture title, release date, and tags without relying on Selenium.
     """
-    if not client_id or not user_id:
+    uid = _sc_norm_user_id(user_id)
+    if not client_id or not uid:
         return {}
     global _SC_TRACKS_FORBIDDEN, _SC_TRACKS_FORBIDDEN_LOGGED
     if _SC_TRACKS_FORBIDDEN:
-        return _sc_fetch_latest_track_rss(session, user_id)
-    api_url = f"https://api-v2.soundcloud.com/users/{user_id}/tracks"
+        return _sc_fetch_latest_track_rss(session, uid)
+    api_url = f"https://api-v2.soundcloud.com/users/{uid}/tracks"
     params = {
         "client_id": client_id,
         "limit": 1,
@@ -4508,7 +4522,7 @@ def _sc_fetch_latest_track_metadata(session, client_id: str, user_id) -> dict:
             if not _SC_TRACKS_FORBIDDEN_LOGGED:
                 print("[warn] SoundCloud tracks API 403; switching to RSS fallback")
                 _SC_TRACKS_FORBIDDEN_LOGGED = True
-            return _sc_fetch_latest_track_rss(session, user_id)
+            return _sc_fetch_latest_track_rss(session, uid)
         resp.raise_for_status()
         payload = resp.json() or {}
     except Exception as exc:
@@ -4517,7 +4531,7 @@ def _sc_fetch_latest_track_metadata(session, client_id: str, user_id) -> dict:
             if not _SC_TRACKS_FORBIDDEN_LOGGED:
                 print("[warn] SoundCloud tracks API 403; switching to RSS fallback")
                 _SC_TRACKS_FORBIDDEN_LOGGED = True
-            return _sc_fetch_latest_track_rss(session, user_id)
+            return _sc_fetch_latest_track_rss(session, uid)
         print(f"[warn] SoundCloud latest-track API failed for user_id={user_id}: {exc}")
         return {}
     collection = []
@@ -4589,7 +4603,7 @@ def _sc_fetch_api_profile(session, handle: str) -> dict:
                         profile["external_urls"].append(url)
         except Exception as exc:
             print(f"[warn] SoundCloud web profiles failed for {handle}: {exc}")
-    latest_track = _sc_fetch_latest_track_metadata(session, client_id, user_id or user_urn)
+    latest_track = _sc_fetch_latest_track_metadata(session, client_id, user_id)
     if latest_track:
         profile["latest_track_title"] = latest_track.get("title") or ""
         profile["latest_track_release_date"] = latest_track.get("release_date") or ""
