@@ -6741,6 +6741,8 @@ def scrape_soundcloud(website_url, seed_tags=None, pages_per_tag=SOUNDCLOUD_PAGE
                     "genre": artist.get("primary_genre", ""),
                     "external_urls": http_links,
                     "emails": email_fallback,
+                    "latest_track_title": artist.get("latest_release_title", ""),
+                    "latest_track_release_date": artist.get("latest_release_date", ""),
                 }
                 row, external_urls, emails = _sc_build_row(
                     handle=handle_slug,
