@@ -265,6 +265,7 @@ _SC_RSS_DEBUG_LOGGED = False
 _SC_CLIENT_ID_LOCK = threading.Lock()
 _SC_CLIENT_ID = None
 _SC_HANDLE_UID_MAP = {}
+_SC_HANDLE_USEROBJ_MAP = {}
 SC_CLIENT_ID_CANDIDATES = ["MaZ7bR62GvbulJgV8EUjQnHfbZGDEKaI"]
 SOCIAL_HOSTS = (
     "linktr.ee", "beacons.ai", "bandcamp.com", "carrd.co", "flow.page",
@@ -678,6 +679,10 @@ def sc_fetch_people_handles_v2(query: Optional[str], place: Optional[str], clien
                 continue
             if uid_raw:
                 _SC_HANDLE_UID_MAP[handle] = uid_raw
+            if isinstance(item, dict):
+                _SC_HANDLE_USEROBJ_MAP[handle] = item
+                if SC_DEBUG_LATEST:
+                    print(f"[scdbg] userobj cached handle={handle} keys={len(item.keys())}")
             if place:
                 place_clean = place.strip().lower()
                 city = (item.get("city") or "").strip()
@@ -4579,6 +4584,113 @@ def _sc_fetch_latest_track_metadata(session, client_id: str, user_id, handle: st
     return rss_track or {}
 
 
+def _sc_latest_track_from_userobj(session, handle: str) -> dict:
+    userobj = _SC_HANDLE_USEROBJ_MAP.get(handle)
+    if not isinstance(userobj, dict):
+        return {}
+    client_id = _sc_get_client_id(session)
+    if not client_id:
+        return {}
+    track_id = None
+    track_permalink = ""
+
+    def walk(obj):
+        nonlocal track_id, track_permalink
+        if track_id and track_permalink:
+            return
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                key = (k or "").lower()
+                if track_id is None and key in ("track_id", "latest_track_id", "last_track_id", "trackid"):
+                    if isinstance(v, int) or (isinstance(v, str) and v.isdigit()):
+                        track_id = int(v)
+                if track_id is None and "track" in key and isinstance(v, dict):
+                    vid = v.get("id")
+                    if isinstance(vid, int):
+                        track_id = vid
+                    if not track_permalink:
+                        url_candidate = v.get("permalink_url") or v.get("permalink") or v.get("uri") or ""
+                        if isinstance(url_candidate, str) and "soundcloud.com/" in url_candidate:
+                            if re.search(r"soundcloud\.com/[^/]+/[^/]+", url_candidate):
+                                track_permalink = url_candidate
+                if not track_permalink and isinstance(v, str) and "soundcloud.com/" in v:
+                    if re.search(r"soundcloud\.com/[^/]+/[^/]+", v):
+                        track_permalink = v
+                if track_id and track_permalink:
+                    return
+                walk(v)
+                if track_id and track_permalink:
+                    return
+        elif isinstance(obj, list):
+            for item in obj:
+                if track_id and track_permalink:
+                    break
+                walk(item)
+
+    walk(userobj)
+
+    if track_id and SC_DEBUG_LATEST:
+        print(f"[scdbg] userobj track-id handle={handle} track_id={track_id}")
+    if not track_id and track_permalink and SC_DEBUG_LATEST:
+        print(f"[scdbg] userobj track-link handle={handle} url={track_permalink}")
+
+    def fetch_track(tid):
+        try:
+            resp = session.get(
+                f"https://api-v2.soundcloud.com/tracks/{tid}",
+                params={"client_id": client_id},
+                timeout=SC_REQUEST_TIMEOUT,
+                headers=_rand_headers(),
+            )
+            if resp.status_code != 200 and SC_DEBUG_LATEST:
+                print(f"[scdbg] track fetch non-200 handle={handle} track_id={tid} status={resp.status_code}")
+            resp.raise_for_status()
+            track = resp.json() or {}
+        except Exception as exc:
+            if SC_DEBUG_LATEST:
+                print(f"[scdbg] track fetch failed handle={handle} track_id={tid} err={exc}")
+            return {}
+        iso_date, precision = _sc_track_release_iso(track)
+        tags = _norm_tokens(track.get("tag_list") or track.get("tags") or "")
+        return {
+            "title": track.get("title") or "",
+            "release_date": iso_date,
+            "precision": precision,
+            "genre": track.get("genre") or "",
+            "tags": tags[:8],
+            "source": "track",
+        }
+
+    if track_id:
+        return fetch_track(track_id)
+
+    if track_permalink:
+        try:
+            resp = session.get(
+                "https://api-v2.soundcloud.com/resolve",
+                params={"url": track_permalink, "client_id": client_id},
+                timeout=SC_REQUEST_TIMEOUT,
+                headers=_rand_headers(),
+            )
+            resp.raise_for_status()
+            data = resp.json() or {}
+        except Exception:
+            return {}
+        resolved_id = None
+        if isinstance(data, dict):
+            if data.get("kind") == "track" and data.get("id") is not None:
+                resolved_id = data.get("id")
+            elif isinstance(data.get("id"), int):
+                resolved_id = data.get("id")
+        if resolved_id is not None:
+            if isinstance(resolved_id, str) and resolved_id.isdigit():
+                resolved_id = int(resolved_id)
+            if SC_DEBUG_LATEST:
+                print(f"[scdbg] userobj resolved track handle={handle} track_id={resolved_id}")
+            return fetch_track(resolved_id)
+    return {}
+
+
 def _sc_fetch_api_profile(session, handle: str) -> dict:
     fallback_uid = _SC_HANDLE_UID_MAP.get(handle) or ""
     client_id = _sc_get_client_id(session)
@@ -4859,6 +4971,8 @@ def extract_sc_links(session: requests.Session, handle: str) -> dict:
             polite_sleep()
 
     if (challenge_page or _SC_ROOT_FORBIDDEN or not profile_html) and not external_urls:
+        if SC_DEBUG_LATEST:
+            print(f"[scdbg] fallback trigger handle={handle} challenge={challenge_page} root_forbid={_SC_ROOT_FORBIDDEN} profile_html={bool(profile_html)}")
         fb_urls, fb_emails = _sc_fetch_user_fallback_links(session, handle)
         if fb_urls or fb_emails:
             external_urls.update(fb_urls)
@@ -4911,6 +5025,35 @@ def extract_sc_links(session: requests.Session, handle: str) -> dict:
         latest_genre = api_profile.get("latest_track_genre") or latest_genre
         latest_tags = api_profile.get("latest_track_tags") or latest_tags
         latest_source = api_profile.get("latest_track_source") or latest_source
+
+    uid_hint = _SC_HANDLE_UID_MAP.get(handle)
+    if uid_hint and (not latest_title or not latest_release):
+        if SC_DEBUG_LATEST:
+            print(f"[scdbg] latest-track via uid_map handle={handle} uid_hint={uid_hint}")
+        lt = _sc_fetch_latest_track_metadata(session, _sc_get_client_id(session), uid_hint, handle)
+        if lt:
+            if not latest_title and lt.get("title"):
+                latest_title = lt.get("title")
+            if not latest_release and lt.get("release_date"):
+                latest_release = lt.get("release_date")
+                latest_precision = latest_precision or lt.get("precision") or ""
+            if not latest_tags and lt.get("tags"):
+                latest_tags = lt.get("tags")
+            if not latest_source and lt.get("source"):
+                latest_source = lt.get("source")
+
+    if not latest_title or not latest_release:
+        lt_obj = _sc_latest_track_from_userobj(session, handle)
+        if lt_obj:
+            if not latest_title and lt_obj.get("title"):
+                latest_title = lt_obj.get("title")
+            if not latest_release and lt_obj.get("release_date"):
+                latest_release = lt_obj.get("release_date")
+                latest_precision = latest_precision or lt_obj.get("precision") or ""
+            if not latest_tags and lt_obj.get("tags"):
+                latest_tags = lt_obj.get("tags")
+            if not latest_source and lt_obj.get("source"):
+                latest_source = lt_obj.get("source")
 
     norm_exts = []
     seen_norm = set()
@@ -6478,6 +6621,7 @@ def scrape_soundcloud(website_url, seed_tags=None, pages_per_tag=SOUNDCLOUD_PAGE
                       max_handles=None, min_yield=3, dry_run=False):
     print("[init] SoundCloud scraper starting…")
     _SC_HANDLE_UID_MAP.clear()
+    _SC_HANDLE_USEROBJ_MAP.clear()
     driver = setup_driver()
     try:
         discovery_session = build_hardened_session()
