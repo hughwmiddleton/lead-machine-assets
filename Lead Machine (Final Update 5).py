@@ -260,9 +260,7 @@ CONFIG = {}
 SC_ABOUT_FIRST = CONFIG.get("SC_ABOUT_FIRST", True)
 SC_EXPAND_1HOP = CONFIG.get("SC_EXPAND_1HOP", True)
 _SC_ROOT_FORBIDDEN = False
-_SC_TRACKS_FORBIDDEN = False
 _SC_ROOT_FORBIDDEN_LOGGED = False
-_SC_TRACKS_FORBIDDEN_LOGGED = False
 _SC_RSS_DEBUG_LOGGED = False
 _SC_CLIENT_ID_LOCK = threading.Lock()
 _SC_CLIENT_ID = None
@@ -4465,22 +4463,21 @@ def _sc_fetch_latest_track_rss(session, user_id, handle: str = "") -> dict:
     rss_url = f"https://feeds.soundcloud.com/users/soundcloud:users:{uid}/sounds.rss"
     try:
         resp = session.get(rss_url, timeout=SC_REQUEST_TIMEOUT, headers=_rand_headers())
-        global _SC_RSS_DEBUG_LOGGED
-        if SC_DEBUG_LATEST and not _SC_RSS_DEBUG_LOGGED:
-            print(f"[scdbg] rss status={resp.status_code} url={rss_url}")
-            _SC_RSS_DEBUG_LOGGED = True
+        print(f"[scdbg] rss fetch handle={handle} uid={uid} status={resp.status_code} bytes={len(resp.content or b'')} url={rss_url}")
         resp.raise_for_status()
         import xml.etree.ElementTree as ET
         from email.utils import parsedate_to_datetime
 
         root = ET.fromstring(resp.text)
+        item_count = len(list(root.findall(".//item")))
+        print(f"[scdbg] rss items handle={handle} uid={uid} count={item_count}")
         first_item = None
         for item in root.findall(".//item"):
             first_item = item
             break
         if first_item is None:
             if SC_DEBUG_LATEST:
-                print(f"[scdbg] rss empty uid={uid} handle={handle}")
+                print(f"[scdbg] rss empty uid={uid} handle={handle} items={item_count}")
             return {}
         title = (first_item.findtext("title") or "").strip()
         pub_date_raw = (first_item.findtext("pubDate") or "").strip()
@@ -4496,7 +4493,7 @@ def _sc_fetch_latest_track_rss(session, user_id, handle: str = "") -> dict:
                 iso_date = ""
                 precision = ""
         if SC_DEBUG_LATEST:
-            print(f"[scdbg] rss item title=\"{title[:60]}\" pubDate=\"{pub_date_raw}\"")
+            print(f"[scdbg] rss item title=\"{title[:60]}\" pubDate=\"{pub_date_raw}\" items={item_count}")
         return {
             "title": title,
             "release_date": iso_date,
@@ -4517,11 +4514,20 @@ def _sc_fetch_latest_track_metadata(session, client_id: str, user_id, handle: st
     capture title, release date, and tags without relying on Selenium.
     """
     uid = _sc_norm_user_id(user_id)
-    if not client_id or not uid:
+    if not uid:
+        print(f"[scdbg] latest-track missing uid user_id={user_id} handle={handle}")
         return {}
-    global _SC_TRACKS_FORBIDDEN, _SC_TRACKS_FORBIDDEN_LOGGED
-    if _SC_TRACKS_FORBIDDEN:
-        return _sc_fetch_latest_track_rss(session, uid, handle)
+
+    rss_track = _sc_fetch_latest_track_rss(session, uid, handle)
+    if rss_track and (rss_track.get("title") or rss_track.get("release_date") or rss_track.get("genre") or rss_track.get("tags")):
+        rss_track["source"] = "rss"
+        return rss_track
+    else:
+        print(f"[scdbg] rss empty uid={uid} handle={handle}; attempting tracks API")
+
+    if not client_id:
+        return rss_track or {}
+
     api_url = f"https://api-v2.soundcloud.com/users/{uid}/tracks"
     params = {
         "client_id": client_id,
@@ -4532,22 +4538,16 @@ def _sc_fetch_latest_track_metadata(session, client_id: str, user_id, handle: st
     try:
         resp = session.get(api_url, params=params, timeout=SC_REQUEST_TIMEOUT, headers=_rand_headers())
         if resp.status_code == 403:
-            _SC_TRACKS_FORBIDDEN = True
-            if not _SC_TRACKS_FORBIDDEN_LOGGED:
-                print("[warn] SoundCloud tracks API 403; switching to RSS fallback")
-                _SC_TRACKS_FORBIDDEN_LOGGED = True
-            return _sc_fetch_latest_track_rss(session, uid, handle)
+            print(f"[warn] SoundCloud tracks API 403 handle={handle or uid}; continuing without API tracks")
+            return rss_track or {}
         resp.raise_for_status()
         payload = resp.json() or {}
     except Exception as exc:
         if "403" in str(exc):
-            _SC_TRACKS_FORBIDDEN = True
-            if not _SC_TRACKS_FORBIDDEN_LOGGED:
-                print("[warn] SoundCloud tracks API 403; switching to RSS fallback")
-                _SC_TRACKS_FORBIDDEN_LOGGED = True
-            return _sc_fetch_latest_track_rss(session, uid, handle)
+            print(f"[warn] SoundCloud tracks API 403 handle={handle or uid}; continuing without API tracks")
+            return rss_track or {}
         print(f"[warn] SoundCloud latest-track API failed for user_id={user_id}: {exc}")
-        return {}
+        return rss_track or {}
     collection = []
     if isinstance(payload, dict):
         collection = payload.get("collection") or []
@@ -4564,8 +4564,9 @@ def _sc_fetch_latest_track_metadata(session, client_id: str, user_id, handle: st
             "precision": precision or "day" if iso_date else "",
             "genre": track.get("genre") or "",
             "tags": tag_tokens[:8],
+            "source": "api",
         }
-    return {}
+    return rss_track or {}
 
 
 def _sc_fetch_api_profile(session, handle: str) -> dict:
@@ -4599,6 +4600,7 @@ def _sc_fetch_api_profile(session, handle: str) -> dict:
         "latest_track_precision": "",
         "latest_track_genre": "",
         "latest_track_tags": [],
+        "latest_track_source": "",
     }
     user_urn = data.get("urn") or ""
     user_id = data.get("id") or ""
@@ -4628,7 +4630,66 @@ def _sc_fetch_api_profile(session, handle: str) -> dict:
         profile["latest_track_precision"] = latest_track.get("precision") or ""
         profile["latest_track_genre"] = latest_track.get("genre") or ""
         profile["latest_track_tags"] = latest_track.get("tags") or []
+        profile["latest_track_source"] = latest_track.get("source") or ""
     return profile
+
+
+def _sc_fetch_user_fallback_links(session, handle: str):
+    urls, emails = set(), set()
+    client_id = _sc_get_client_id(session)
+    if not client_id or not handle:
+        return urls, emails
+    try:
+        resolve_resp = session.get(
+            "https://api-v2.soundcloud.com/resolve",
+            params={"url": f"https://soundcloud.com/{handle}", "client_id": client_id},
+            timeout=SC_REQUEST_TIMEOUT,
+            headers=_rand_headers(),
+        )
+        resolve_resp.raise_for_status()
+        data = resolve_resp.json() or {}
+        uid = _sc_norm_user_id(data.get("id") or data.get("urn") or data.get("permalink_url") or "")
+    except Exception as exc:
+        print(f"[warn] SoundCloud user fallback resolve failed for {handle}: {exc}")
+        return urls, emails
+
+    desc = (data.get("description") or "").strip()
+    if desc:
+        urls.update(URL_RE.findall(desc))
+        _sc_collect_emails_from_text(emails, desc)
+    website = data.get("website") or ""
+    if website:
+        urls.add(website)
+
+    if uid:
+        try:
+            user_resp = session.get(
+                f"https://api-v2.soundcloud.com/users/{uid}",
+                params={"client_id": client_id},
+                timeout=SC_REQUEST_TIMEOUT,
+                headers=_rand_headers(),
+            )
+            user_resp.raise_for_status()
+            user_data = user_resp.json() or {}
+            web_profiles = user_data.get("web_profiles") or user_data.get("website_profiles") or []
+            if isinstance(web_profiles, list):
+                for item in web_profiles:
+                    if isinstance(item, str):
+                        urls.add(item)
+                    elif isinstance(item, dict):
+                        u = item.get("url") or item.get("service") or ""
+                        if u:
+                            urls.add(u)
+            website = user_data.get("website") or ""
+            if website:
+                urls.add(website)
+            desc2 = user_data.get("description") or ""
+            if desc2 and desc2 != desc:
+                urls.update(URL_RE.findall(desc2))
+                _sc_collect_emails_from_text(emails, desc2)
+        except Exception as exc:
+            print(f"[warn] SoundCloud user fallback fetch failed for {handle}: {exc}")
+    return urls, emails
 
 
 def extract_sc_links(session: requests.Session, handle: str) -> dict:
@@ -4656,6 +4717,7 @@ def extract_sc_links(session: requests.Session, handle: str) -> dict:
     latest_precision = ""
     latest_genre = ""
     latest_tags = []
+    latest_source = ""
     root_url = f"https://soundcloud.com/{handle}"
     about_url = f"{root_url}/about"
     print(f"[dbg] fetching {about_url}")
@@ -4681,75 +4743,83 @@ def extract_sc_links(session: requests.Session, handle: str) -> dict:
     finally:
         polite_sleep()
 
+    challenge_page = False
     if html:
-        doc = get_soup(html)
-        name_el = doc.select_one("h1, .profileHeaderInfo__userName, .profileHeaderInfo__content")
-        if name_el:
-            text = name_el.get_text(strip=True)
-            if text:
-                display_name = text
+        lowered = html.lower()
+        doc = None
+        if any(term in lowered for term in ("captcha", "verify you are human", "enable javascript", "cloudflare", "attention required", "enable cookies")):
+            print(f"[warn] sc about challenge page handle={handle}; skipping about parse")
+            challenge_page = True
+        else:
+            doc = get_soup(html)
+        if doc:
+            name_el = doc.select_one("h1, .profileHeaderInfo__userName, .profileHeaderInfo__content")
+            if name_el:
+                text = name_el.get_text(strip=True)
+                if text:
+                    display_name = text
 
-        for snippet in _sc_extract_contact_text_sections(doc):
-            _record_contact_text(snippet)
+            for snippet in _sc_extract_contact_text_sections(doc):
+                _record_contact_text(snippet)
 
-        for a in doc.select(
-            'a[href^="mailto:"], '
-            'a[href*="instagram.com"], a[href*="facebook.com"], '
-            'a[href*="linktr.ee"], a[href*="bandcamp.com"], '
-            'a[href*="youtube.com"], a[href*="tiktok.com"], '
-            'a[href*="twitter.com"], a[href*="x.com"], '
-            'a[href*="beacons.ai"], a[href*="carrd.co"], '
-            'a[href*="flow.page"]'
-        ):
-            href = (a.get("href") or "").strip()
-            if not href:
-                continue
-            if href.startswith("mailto:"):
-                emails.add(href.replace("mailto:", "").split("?", 1)[0])
-            else:
-                external_urls.add(href)
+            for a in doc.select(
+                'a[href^="mailto:"], '
+                'a[href*="instagram.com"], a[href*="facebook.com"], '
+                'a[href*="linktr.ee"], a[href*="bandcamp.com"], '
+                'a[href*="youtube.com"], a[href*="tiktok.com"], '
+                'a[href*="twitter.com"], a[href*="x.com"], '
+                'a[href*="beacons.ai"], a[href*="carrd.co"], '
+                'a[href*="flow.page"]'
+            ):
+                href = (a.get("href") or "").strip()
+                if not href:
+                    continue
+                if href.startswith("mailto:"):
+                    emails.add(href.replace("mailto:", "").split("?", 1)[0])
+                else:
+                    external_urls.add(href)
 
-        for script in doc.find_all("script"):
-            txt = script.string or ""
-            if not txt or ("http" not in txt and "sameAs" not in txt):
-                continue
-            external_urls.update(URL_RE.findall(txt))
-            try:
-                data = json.loads(txt)
-            except Exception:
-                continue
-            stack = [data]
-            while stack:
-                cur = stack.pop()
-                if isinstance(cur, dict):
-                    for key, value in cur.items():
-                        if isinstance(value, (list, tuple)) and key and key.lower() in ("sameas", "externalurls", "externallinks", "external_url", "socials"):
-                            for item in value:
-                                if isinstance(item, str) and item.startswith("http"):
-                                    external_urls.add(item)
-                        elif isinstance(value, (dict, list)):
-                            stack.append(value)
-                        elif isinstance(value, str) and value.startswith("http"):
-                            external_urls.add(value)
-                elif isinstance(cur, list):
+            for script in doc.find_all("script"):
+                txt = script.string or ""
+                if not txt or ("http" not in txt and "sameAs" not in txt):
+                    continue
+                external_urls.update(URL_RE.findall(txt))
+                try:
+                    data = json.loads(txt)
+                except Exception:
+                    continue
+                stack = [data]
+                while stack:
+                    cur = stack.pop()
+                    if isinstance(cur, dict):
+                        for key, value in cur.items():
+                            if isinstance(value, (list, tuple)) and key and key.lower() in ("sameas", "externalurls", "externallinks", "external_url", "socials"):
+                                for item in value:
+                                    if isinstance(item, str) and item.startswith("http"):
+                                        external_urls.add(item)
+                            elif isinstance(value, (dict, list)):
+                                stack.append(value)
+                            elif isinstance(value, str) and value.startswith("http"):
+                                external_urls.add(value)
+                    elif isinstance(cur, list):
                         stack.extend(cur)
-        if not external_urls:
-            external_urls.update(URL_RE.findall(html))
-        bio_el = (
-            doc.select_one(".profileHeaderInfo__bio")
-            or doc.select_one(".about__description")
-            or doc.select_one("[data-testid='profile-bio']")
-        )
-        if bio_el:
-            bio_text = bio_el.get_text(" ", strip=True)
-            _record_contact_text(bio_text)
-        # plain-text email fallback (bios often list contact without mailto)
-        text_blob = ""
-        try:
-            text_blob = doc.get_text(" ", strip=True)
-        except Exception:
+            if not external_urls:
+                external_urls.update(URL_RE.findall(html))
+            bio_el = (
+                doc.select_one(".profileHeaderInfo__bio")
+                or doc.select_one(".about__description")
+                or doc.select_one("[data-testid='profile-bio']")
+            )
+            if bio_el:
+                bio_text = bio_el.get_text(" ", strip=True)
+                _record_contact_text(bio_text)
+            # plain-text email fallback (bios often list contact without mailto)
             text_blob = ""
-        _record_contact_text(text_blob)
+            try:
+                text_blob = doc.get_text(" ", strip=True)
+            except Exception:
+                text_blob = ""
+            _record_contact_text(text_blob)
 
     global _SC_ROOT_FORBIDDEN, _SC_ROOT_FORBIDDEN_LOGGED
     if not _SC_ROOT_FORBIDDEN:
@@ -4768,6 +4838,13 @@ def extract_sc_links(session: requests.Session, handle: str) -> dict:
             print(f"[warn] {handle} profile fetch failed: {exc}")
         finally:
             polite_sleep()
+
+    if (challenge_page or (_SC_ROOT_FORBIDDEN and not profile_html)) and not external_urls:
+        fb_urls, fb_emails = _sc_fetch_user_fallback_links(session, handle)
+        if fb_urls or fb_emails:
+            external_urls.update(fb_urls)
+            emails.update(fb_emails)
+            print(f"[info] sc api-user fallback handle={handle} urls={len(fb_urls)} emails={len(fb_emails)}")
 
     if profile_html:
         profile_doc = get_soup(profile_html)
@@ -4814,6 +4891,7 @@ def extract_sc_links(session: requests.Session, handle: str) -> dict:
         latest_precision = api_profile.get("latest_track_precision") or latest_precision
         latest_genre = api_profile.get("latest_track_genre") or latest_genre
         latest_tags = api_profile.get("latest_track_tags") or latest_tags
+        latest_source = api_profile.get("latest_track_source") or latest_source
 
     norm_exts = []
     seen_norm = set()
@@ -4842,6 +4920,7 @@ def extract_sc_links(session: requests.Session, handle: str) -> dict:
         "latest_track_precision": latest_precision,
         "latest_track_genre": latest_genre,
         "latest_track_tags": latest_tags,
+        "latest_track_source": latest_source or ("rss" if latest_title or latest_release else ""),
     }
     if payload["external_urls"] or payload["emails"]:
         SC_ABOUT_CACHE.set(handle, payload)
@@ -4870,7 +4949,8 @@ def _sc_fetch_contact_payload(handle: str) -> dict:
     links_len = len(data.get("external_urls", []) or [])
     elapsed = data.get("elapsed_ms", elapsed_ms)
     site_flag = int(data.get("aggregator_expanded", data.get("_aggregator_tried", 0)))
-    print(f"[sc] handle={handle} links={links_len} email={emails_len} site={site_flag} ms={elapsed}")
+    tracks_source = data.get("latest_track_source") or "none"
+    print(f"[sc] handle={handle} links={links_len} email={emails_len} site={site_flag} tracks_source={tracks_source} ms={elapsed}")
     return {
         "data": data,
         "elapsed_ms": elapsed,
