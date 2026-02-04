@@ -3492,10 +3492,9 @@ class CrossDirectoryEnricherWorker(QThread):
             field = "SC_Status"
         elif "final_status" in df.columns:
             field = "final_status"
-        elif "FB_Status" in df.columns:
-            field = "FB_Status"
         if field:
             df.at[row_idx, field] = "blocked_403"
+        # Even if no writable field is present, treat the row as handled so callers short-circuit.
         return True
 
     def _set_platform_state(self, platform: str, status: str) -> None:
