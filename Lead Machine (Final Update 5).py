@@ -4505,12 +4505,14 @@ def _sc_fetch_latest_track_rss(session, user_id, handle: str = "") -> dict:
                 precision = ""
         if SC_DEBUG_LATEST:
             print(f"[scdbg] rss item title=\"{title[:60]}\" pubDate=\"{pub_date_raw}\" items={item_count}")
+        track_url = (first_item.findtext("link") or "").strip()
         return {
             "title": title,
             "release_date": iso_date,
             "precision": precision,
             "genre": "",
             "tags": [],
+            "permalink_url": track_url,
         }
     except Exception as exc:
         if SC_DEBUG_LATEST:
@@ -4535,6 +4537,7 @@ def _sc_fetch_latest_track_metadata(session, client_id: str, user_id, handle: st
     rss_track = _sc_fetch_latest_track_rss(session, uid, handle)
     if rss_track and (rss_track.get("title") or rss_track.get("release_date") or rss_track.get("genre") or rss_track.get("tags")):
         rss_track["source"] = "rss"
+        rss_track["permalink_url"] = rss_track.get("permalink_url") or ""
         return rss_track
     else:
         if SC_DEBUG_LATEST:
@@ -4580,8 +4583,35 @@ def _sc_fetch_latest_track_metadata(session, client_id: str, user_id, handle: st
             "genre": track.get("genre") or "",
             "tags": tag_tokens[:8],
             "source": "api",
+            "permalink_url": track.get("permalink_url") or "",
         }
     return rss_track or {}
+
+
+def _sc_resolve_track_from_url(session, track_url: str, handle: str = "") -> dict:
+    client_id = _sc_get_client_id(session)
+    if not client_id or not track_url:
+        return {}
+    try:
+        resp = session.get(
+            "https://api-v2.soundcloud.com/resolve",
+            params={"url": track_url, "client_id": client_id},
+            timeout=SC_REQUEST_TIMEOUT,
+            headers=_rand_headers(),
+        )
+        resp.raise_for_status()
+        data = resp.json() or {}
+    except Exception:
+        return {}
+    if not isinstance(data, dict) or data.get("kind") != "track":
+        return {}
+    _sc_track_release_iso(data)
+    tags = _norm_tokens(data.get("tag_list") or data.get("tags") or "")
+    return {
+        "genre": data.get("genre") or "",
+        "tags": tags[:8],
+        "source": "resolve",
+    }
 
 
 def _sc_latest_track_from_userobj(session, handle: str) -> dict:
@@ -4728,6 +4758,8 @@ def _sc_fetch_api_profile(session, handle: str) -> dict:
         "latest_track_genre": "",
         "latest_track_tags": [],
         "latest_track_source": "",
+        "latest_track_permalink": "",
+        "latest_track_url": "",
     }
     user_urn = data.get("urn") or ""
     user_id = data.get("id") or fallback_uid or ""
@@ -4758,6 +4790,8 @@ def _sc_fetch_api_profile(session, handle: str) -> dict:
         profile["latest_track_genre"] = latest_track.get("genre") or ""
         profile["latest_track_tags"] = latest_track.get("tags") or []
         profile["latest_track_source"] = latest_track.get("source") or ""
+        profile["latest_track_permalink"] = latest_track.get("permalink_url") or ""
+        profile["latest_track_url"] = latest_track.get("permalink_url") or ""
     return profile
 
 
@@ -4847,6 +4881,7 @@ def extract_sc_links(session: requests.Session, handle: str) -> dict:
     latest_genre = ""
     latest_tags = []
     latest_source = ""
+    latest_track_url = ""
     root_url = f"https://soundcloud.com/{handle}"
     about_url = f"{root_url}/about"
     print(f"[dbg] fetching {about_url}")
@@ -5025,6 +5060,8 @@ def extract_sc_links(session: requests.Session, handle: str) -> dict:
         latest_genre = api_profile.get("latest_track_genre") or latest_genre
         latest_tags = api_profile.get("latest_track_tags") or latest_tags
         latest_source = api_profile.get("latest_track_source") or latest_source
+        if not latest_track_url:
+            latest_track_url = api_profile.get("latest_track_permalink") or api_profile.get("latest_track_url") or latest_track_url
 
     uid_hint = _SC_HANDLE_UID_MAP.get(handle)
     if uid_hint and (not latest_title or not latest_release):
@@ -5041,6 +5078,8 @@ def extract_sc_links(session: requests.Session, handle: str) -> dict:
                 latest_tags = lt.get("tags")
             if not latest_source and lt.get("source"):
                 latest_source = lt.get("source")
+            if not latest_track_url and lt.get("permalink_url"):
+                latest_track_url = lt.get("permalink_url")
 
     if not latest_title or not latest_release:
         lt_obj = _sc_latest_track_from_userobj(session, handle)
@@ -5054,6 +5093,19 @@ def extract_sc_links(session: requests.Session, handle: str) -> dict:
                 latest_tags = lt_obj.get("tags")
             if not latest_source and lt_obj.get("source"):
                 latest_source = lt_obj.get("source")
+
+    tracks_source = latest_source or ("rss" if latest_title or latest_release else "")
+    if tracks_source == "rss" and (not latest_genre or not latest_tags):
+        rss_track_url = latest_track_url or ""
+        if rss_track_url:
+            resolved = _sc_resolve_track_from_url(session, rss_track_url, handle)
+            if resolved:
+                if not latest_genre and resolved.get("genre"):
+                    latest_genre = resolved.get("genre")
+                if not latest_tags and resolved.get("tags"):
+                    latest_tags = resolved.get("tags")
+                if not latest_source and resolved.get("source"):
+                    latest_source = resolved.get("source")
 
     norm_exts = []
     seen_norm = set()
@@ -5083,6 +5135,8 @@ def extract_sc_links(session: requests.Session, handle: str) -> dict:
         "latest_track_genre": latest_genre,
         "latest_track_tags": latest_tags,
         "latest_track_source": latest_source or ("rss" if latest_title or latest_release else ""),
+        "latest_track_permalink": latest_track_url,
+        "latest_track_url": latest_track_url,
     }
     if payload["external_urls"] or payload["emails"]:
         SC_ABOUT_CACHE.set(handle, payload)
