@@ -5308,6 +5308,22 @@ def _sc_build_row(handle: str, payload: dict, soundcloud_link: str, fallback_nam
         "soundcloud_link": soundcloud_link,
     }
     row = export_soundcloud_row(row_data)
+    # Promote latest track genre to artist primary genre (non-destructive)
+    def _normalize_primary_genre(value: str) -> str:
+        if not value or not isinstance(value, str):
+            return ""
+        cleaned = value.replace("_", " ")
+        cleaned = re.sub(r"[\u2600-\u27BF]|[\U00010000-\U0010FFFF]", "", cleaned)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip().lower()
+        return cleaned[:32]
+
+    if not primary_genre_value:
+        latest_genre = payload.get("latest_track_genre") or ""
+        latest_tags = payload.get("latest_track_tags") or []
+        promo_candidate = latest_genre or (latest_tags[0] if latest_tags else "")
+        promo_candidate = _normalize_primary_genre(promo_candidate)
+        if promo_candidate:
+            primary_genre_value = promo_candidate
     row["Location"] = location_value
     row["Primary Genre"] = primary_genre_value
     row["Song Title"] = (song_title or "").strip()
