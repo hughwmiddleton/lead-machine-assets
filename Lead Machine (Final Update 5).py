@@ -4760,6 +4760,7 @@ def _sc_fetch_api_profile(session, handle: str) -> dict:
         "latest_track_source": "",
         "latest_track_permalink": "",
         "latest_track_url": "",
+        "user_genre": (data.get("genre") or "").strip(),
     }
     user_urn = data.get("urn") or ""
     user_id = data.get("id") or fallback_uid or ""
@@ -5047,7 +5048,7 @@ def extract_sc_links(session: requests.Session, handle: str) -> dict:
             display_name = api_profile["display_name"]
         user_city = api_profile.get("city") or user_city
         user_country = api_profile.get("country") or user_country
-        user_genre = api_profile.get("genre") or user_genre
+        user_genre = api_profile.get("user_genre") or api_profile.get("genre") or user_genre
         external_urls.update(api_profile.get("external_urls") or [])
         profile_description = api_profile.get("description") or ""
         if profile_description:
@@ -5125,6 +5126,7 @@ def extract_sc_links(session: requests.Session, handle: str) -> dict:
         "city": user_city,
         "country": user_country,
         "genre": user_genre,
+        "user_genre": user_genre,
         "elapsed_ms": elapsed_ms,
         "aggregator_expanded": int(did_expand),
         "bio_text": bio_text,
@@ -5378,6 +5380,11 @@ def _sc_build_row(handle: str, payload: dict, soundcloud_link: str, fallback_nam
         promo_candidate = _normalize_primary_genre(promo_candidate)
         if promo_candidate:
             primary_genre_value = promo_candidate
+    if not primary_genre_value:
+        user_genre = payload.get("user_genre") or payload.get("genre") or ""
+        user_genre = _normalize_primary_genre(user_genre)
+        if user_genre:
+            primary_genre_value = user_genre
     row["Location"] = location_value
     row["Primary Genre"] = primary_genre_value
     row["Song Title"] = (song_title or "").strip()
@@ -7071,6 +7078,9 @@ def scrape_soundcloud(website_url, seed_tags=None, pages_per_tag=SOUNDCLOUD_PAGE
                     "city": "",
                     "country": "",
                     "genre": artist.get("primary_genre", ""),
+                    "user_genre": artist.get("primary_genre", ""),
+                    "latest_track_genre": "",
+                    "latest_track_tags": [],
                     "external_urls": http_links,
                     "emails": email_fallback,
                     "latest_track_title": artist.get("latest_track_title", "") or artist.get("latest_release_title", ""),
