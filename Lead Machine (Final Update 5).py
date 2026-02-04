@@ -258,6 +258,10 @@ _SC_GENRE_DENY = {"melbourne", "naarm", "australia"}
 CONFIG = {}
 SC_ABOUT_FIRST = CONFIG.get("SC_ABOUT_FIRST", True)
 SC_EXPAND_1HOP = CONFIG.get("SC_EXPAND_1HOP", True)
+_SC_ROOT_FORBIDDEN = False
+_SC_TRACKS_FORBIDDEN = False
+_SC_ROOT_FORBIDDEN_LOGGED = False
+_SC_TRACKS_FORBIDDEN_LOGGED = False
 _SC_CLIENT_ID_LOCK = threading.Lock()
 _SC_CLIENT_ID = None
 SC_CLIENT_ID_CANDIDATES = ["MaZ7bR62GvbulJgV8EUjQnHfbZGDEKaI"]
@@ -4438,6 +4442,48 @@ def _sc_track_release_iso(track: dict) -> tuple:
     return ("", "")
 
 
+def _sc_fetch_latest_track_rss(session, user_id) -> dict:
+    if not user_id:
+        return {}
+    rss_url = f"https://feeds.soundcloud.com/users/soundcloud:users:{user_id}/sounds.rss"
+    try:
+        resp = session.get(rss_url, timeout=SC_REQUEST_TIMEOUT, headers=_rand_headers())
+        resp.raise_for_status()
+        import xml.etree.ElementTree as ET
+        from email.utils import parsedate_to_datetime
+
+        root = ET.fromstring(resp.text)
+        first_item = None
+        for item in root.findall(".//item"):
+            first_item = item
+            break
+        if first_item is None:
+            return {}
+        title = (first_item.findtext("title") or "").strip()
+        pub_date_raw = (first_item.findtext("pubDate") or "").strip()
+        iso_date = ""
+        precision = ""
+        if pub_date_raw:
+            try:
+                dt = parsedate_to_datetime(pub_date_raw)
+                if dt:
+                    iso_date = dt.date().isoformat()
+                    precision = "day"
+            except Exception:
+                iso_date = ""
+                precision = ""
+        return {
+            "title": title,
+            "release_date": iso_date,
+            "precision": precision,
+            "genre": "",
+            "tags": [],
+        }
+    except Exception as exc:
+        print(f"[warn] SoundCloud RSS fallback failed for user_id={user_id}: {exc}")
+        return {}
+
+
 def _sc_fetch_latest_track_metadata(session, client_id: str, user_id) -> dict:
     """
     Fetch the user's most recent track via the public API so we can
@@ -4445,6 +4491,9 @@ def _sc_fetch_latest_track_metadata(session, client_id: str, user_id) -> dict:
     """
     if not client_id or not user_id:
         return {}
+    global _SC_TRACKS_FORBIDDEN, _SC_TRACKS_FORBIDDEN_LOGGED
+    if _SC_TRACKS_FORBIDDEN:
+        return _sc_fetch_latest_track_rss(session, user_id)
     api_url = f"https://api-v2.soundcloud.com/users/{user_id}/tracks"
     params = {
         "client_id": client_id,
@@ -4454,9 +4503,21 @@ def _sc_fetch_latest_track_metadata(session, client_id: str, user_id) -> dict:
     }
     try:
         resp = session.get(api_url, params=params, timeout=SC_REQUEST_TIMEOUT, headers=_rand_headers())
+        if resp.status_code == 403:
+            _SC_TRACKS_FORBIDDEN = True
+            if not _SC_TRACKS_FORBIDDEN_LOGGED:
+                print("[warn] SoundCloud tracks API 403; switching to RSS fallback")
+                _SC_TRACKS_FORBIDDEN_LOGGED = True
+            return _sc_fetch_latest_track_rss(session, user_id)
         resp.raise_for_status()
         payload = resp.json() or {}
     except Exception as exc:
+        if "403" in str(exc):
+            _SC_TRACKS_FORBIDDEN = True
+            if not _SC_TRACKS_FORBIDDEN_LOGGED:
+                print("[warn] SoundCloud tracks API 403; switching to RSS fallback")
+                _SC_TRACKS_FORBIDDEN_LOGGED = True
+            return _sc_fetch_latest_track_rss(session, user_id)
         print(f"[warn] SoundCloud latest-track API failed for user_id={user_id}: {exc}")
         return {}
     collection = []
@@ -4658,15 +4719,23 @@ def extract_sc_links(session: requests.Session, handle: str) -> dict:
             text_blob = ""
         _record_contact_text(text_blob)
 
-    try:
-        root_resp = session.get(root_url, timeout=(6, 12), headers=_rand_headers())
-        print(f"[dbg] fetched root {handle} status={root_resp.status_code} len={len(root_resp.text)}")
-        root_resp.raise_for_status()
-        profile_html = root_resp.text
-    except Exception as exc:
-        print(f"[warn] {handle} profile fetch failed: {exc}")
-    finally:
-        polite_sleep()
+    global _SC_ROOT_FORBIDDEN, _SC_ROOT_FORBIDDEN_LOGGED
+    if not _SC_ROOT_FORBIDDEN:
+        try:
+            root_resp = session.get(root_url, timeout=(6, 12), headers=_rand_headers())
+            print(f"[dbg] fetched root {handle} status={root_resp.status_code} len={len(root_resp.text)}")
+            if root_resp.status_code == 403:
+                _SC_ROOT_FORBIDDEN = True
+                if not _SC_ROOT_FORBIDDEN_LOGGED:
+                    print("[warn] SoundCloud root fetch 403; disabling root fetches for this run")
+                    _SC_ROOT_FORBIDDEN_LOGGED = True
+            else:
+                root_resp.raise_for_status()
+                profile_html = root_resp.text
+        except Exception as exc:
+            print(f"[warn] {handle} profile fetch failed: {exc}")
+        finally:
+            polite_sleep()
 
     if profile_html:
         profile_doc = get_soup(profile_html)
@@ -6556,8 +6625,8 @@ def scrape_soundcloud(website_url, seed_tags=None, pages_per_tag=SOUNDCLOUD_PAGE
                     release_date=release_date_value,
                     sounds_like=sounds_like_value,
                     fallback_tags=combined_tags,
-                    fallback_external=None,
-                    fallback_emails=None,
+                    fallback_external=list((contact_data or {}).get("external_urls") or []),
+                    fallback_emails=list((contact_data or {}).get("emails") or []),
                 )
                 _sc_log_csv_row(handle, row, external_urls, emails)
                 if dry_run:
@@ -6669,8 +6738,8 @@ def scrape_soundcloud(website_url, seed_tags=None, pages_per_tag=SOUNDCLOUD_PAGE
                     release_date="" if release_date_value.lower() == "not present" else release_date_value,
                     sounds_like=sounds_like_value,
                     fallback_tags=artist.get("genres", []),
-                    fallback_external=None,
-                    fallback_emails=None
+                    fallback_external=http_links,
+                    fallback_emails=email_fallback
                 )
                 _sc_log_csv_row(handle_slug, row, external_urls, emails)
                 sc_rows.append(row)
