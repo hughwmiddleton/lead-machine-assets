@@ -160,6 +160,23 @@ GENERIC_SOCIAL_HANDLES = {
     "instagram.com": {"last_fm", "last.fm"},
 }
 
+_SC_HEALTHCHECK_LOGGED = False
+
+
+def _sc_is_blocked(status_code, html) -> bool:
+    if status_code == 403:
+        return True
+    src = (html or "").lower()
+    return any(tok in src for tok in (
+        "access denied",
+        "error 403",
+        "forbidden",
+        "cloudflare",
+        "attention required",
+        "please enable cookies",
+    ))
+
+
 DIRECTORY_FIELD_MAP: Dict[str, Dict[str, Tuple[str, ...]]] = {
     "bandcamp": {
         "primary_genre": (
@@ -3304,6 +3321,9 @@ class CrossDirectoryEnricherWorker(QThread):
                         f"[Enricher] SoundCloud live check for '{artist}' (current SC link missing)."
                     )
                     sc_payload = self._live_search_soundcloud(artist)
+                    if self._mark_sc_blocked_row(seed_df, row_idx):
+                        self._update_progress(position, total)
+                        continue
                     if sc_payload:
                         applied = self._apply_payload_guarded(
                             seed_df, row_idx, sc_payload, artist, spotify_id=spotify_id
@@ -3315,6 +3335,9 @@ class CrossDirectoryEnricherWorker(QThread):
                 if self.enable_live_search:
                     skip_soundcloud = bool(_coerce_directory_value(seed_df.at[row_idx, "SoundCloud Link"]))
                     payload = self._live_lookup(artist, skip_soundcloud=skip_soundcloud)
+                    if self._mark_sc_blocked_row(seed_df, row_idx):
+                        self._update_progress(position, total)
+                        continue
                     if payload:
                         applied = self._apply_payload_guarded(
                             seed_df, row_idx, payload, artist, spotify_id=spotify_id
@@ -3447,6 +3470,31 @@ class CrossDirectoryEnricherWorker(QThread):
             "lastfm": "pending",
             "facebook": "pending",
         }
+        self._sc_blocked_for_row = False
+
+    def _flag_sc_blocked(self, status_code: Optional[int] = None, html: str = "") -> None:
+        global _SC_HEALTHCHECK_LOGGED
+        self._sc_blocked_for_row = True
+        if not _SC_HEALTHCHECK_LOGGED:
+            self.log_message.emit(
+                "[Night SC] Healthcheck: blocked_403 detected (SoundCloud returned 403/blocked page). Marking SC rows as blocked_403."
+            )
+            _SC_HEALTHCHECK_LOGGED = True
+        self._set_platform_state("soundcloud", "skipped")
+
+    def _mark_sc_blocked_row(self, df: pd.DataFrame, row_idx) -> bool:
+        if not getattr(self, "_sc_blocked_for_row", False):
+            return False
+        field = None
+        if "SC_Status" in df.columns:
+            field = "SC_Status"
+        elif "final_status" in df.columns:
+            field = "final_status"
+        elif "FB_Status" in df.columns:
+            field = "FB_Status"
+        if field:
+            df.at[row_idx, field] = "blocked_403"
+        return True
 
     def _set_platform_state(self, platform: str, status: str) -> None:
         if not hasattr(self, "_row_enrichment_state"):
@@ -4054,10 +4102,21 @@ class CrossDirectoryEnricherWorker(QThread):
             attempt += 1
             try:
                 resp = self.session.get(url, timeout=HTTP_TIMEOUT)
+                status = getattr(resp, "status_code", None)
+                text = getattr(resp, "text", "")
+                if "soundcloud" in label.lower():
+                    if _sc_is_blocked(status, text):
+                        self._flag_sc_blocked(status_code=status, html=text)
+                        return None
                 resp.raise_for_status()
-                return resp.text
+                return text
             except requests.HTTPError as exc:
                 status = exc.response.status_code if exc.response is not None else None
+                if "soundcloud" in label.lower():
+                    html = exc.response.text if exc.response is not None else ""
+                    if _sc_is_blocked(status, html):
+                        self._flag_sc_blocked(status_code=status, html=html)
+                        return None
                 if status and 500 <= status < 600 and attempt < max_attempts:
                     self.log_message.emit(
                         f"[Enricher] {label} {status} for {url} (attempt {attempt}/{max_attempts}), retrying..."
@@ -4118,7 +4177,7 @@ class CrossDirectoryEnricherWorker(QThread):
             websites=websites,
             emails=emails,
             link_hubs=link_hubs,
-            source_dir=live_key,
+            source_dir=source_dir,
             source_url=profile_url,
             source_detail=_format_source_display(live_key),
         )
