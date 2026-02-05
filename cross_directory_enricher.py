@@ -172,6 +172,118 @@ _SC_CHALLENGE_TOKENS = (
     "check your browser",
     "are you a human",
 )
+NIGHT_SC_BUDGET_SECONDS_DEFAULT = 6
+NIGHT_SC_MAX_FETCHES_DEFAULT = 3
+
+
+@dataclass
+class _NightSCAttempt:
+    handle: str = ""
+    profile_url: str = ""
+    confidence: float = 0.0
+    http_status: Optional[int] = None
+    fetches: int = 0
+    start_time: float = field(default_factory=time.time)
+    reason: str = ""
+    status: str = ""
+    saw_403: bool = False
+    challenge: bool = False
+    budget_exceeded: bool = False
+    cached_snapshot: Optional[Dict[str, Any]] = None
+    cached_payload: Optional[Any] = None
+    match_score: float = 0.0
+    finalized: bool = False
+
+    max_seconds: float = NIGHT_SC_BUDGET_SECONDS_DEFAULT
+    max_fetches: int = NIGHT_SC_MAX_FETCHES_DEFAULT
+
+    def elapsed_ms(self) -> int:
+        return int((time.time() - self.start_time) * 1000)
+
+    def budget_ok(self) -> bool:
+        if self.budget_exceeded:
+            return False
+        now = time.time()
+        if self.max_seconds and (now - self.start_time) > self.max_seconds:
+            self.budget_exceeded = True
+            self.reason = self.reason or "budget_exceeded"
+            return False
+        if self.max_fetches is not None and self.fetches >= self.max_fetches:
+            self.budget_exceeded = True
+            self.reason = self.reason or "budget_exceeded"
+            return False
+        return True
+
+    def note_fetch(self) -> bool:
+        if not self.budget_ok():
+            return False
+        self.fetches += 1
+        if self.max_fetches is not None and self.fetches > self.max_fetches:
+            self.budget_exceeded = True
+            self.reason = self.reason or "budget_exceeded"
+            return False
+        return True
+
+
+def _night_sc_budget_seconds() -> float:
+    try:
+        return max(0.0, float(os.environ.get("NIGHT_SC_BUDGET_SECONDS", NIGHT_SC_BUDGET_SECONDS_DEFAULT)))
+    except Exception:
+        return float(NIGHT_SC_BUDGET_SECONDS_DEFAULT)
+
+
+def _night_sc_max_fetches() -> int:
+    try:
+        return max(0, int(os.environ.get("NIGHT_SC_MAX_FETCHES", NIGHT_SC_MAX_FETCHES_DEFAULT)))
+    except Exception:
+        return NIGHT_SC_MAX_FETCHES_DEFAULT
+
+
+def _night_sc_cache_keys(handle: str = "", profile_url: str = "") -> List[str]:
+    keys: List[str] = []
+    handle_key = (handle or "").strip().lower()
+    if handle_key:
+        keys.append(f"handle::{handle_key}")
+    url_norm = _normalise_url(profile_url or "")
+    if url_norm:
+        parsed = urllib.parse.urlparse(url_norm)
+        parts = [p for p in parsed.path.split("/") if p]
+        if parts:
+            url_norm = f"https://soundcloud.com/{parts[0]}"
+        keys.append(f"url::{url_norm}")
+    return keys
+
+
+def _snapshot_payload(payload: Optional[Any]) -> Optional[Dict[str, Any]]:
+    if payload is None:
+        return None
+    return {
+        "socials": sorted(payload.socials),
+        "websites": sorted(payload.websites),
+        "emails": sorted(payload.emails),
+        "link_hubs": sorted(payload.link_hubs),
+        "source_dir": payload.source_dir,
+        "source_url": payload.source_url,
+        "source_detail": payload.source_detail,
+        "match_score": getattr(payload, "match_score", 0.0),
+        "candidate_name": getattr(payload, "candidate_name", ""),
+    }
+
+
+def _payload_from_snapshot(snapshot: Optional[Dict[str, Any]]) -> Optional[Any]:
+    if not snapshot:
+        return None
+    return EnrichmentPayload(
+        socials=set(snapshot.get("socials") or []),
+        websites=set(snapshot.get("websites") or []),
+        emails=set(snapshot.get("emails") or []),
+        link_hubs=set(snapshot.get("link_hubs") or []),
+        source_dir=snapshot.get("source_dir") or "soundcloud",
+        source_url=snapshot.get("source_url") or "",
+        source_detail=snapshot.get("source_detail") or _format_source_display("soundcloud_live"),
+        match_score=float(snapshot.get("match_score") or 0.0),
+        candidate_name=snapshot.get("candidate_name") or "",
+    )
 
 
 def _sc_is_blocked(status_code, html) -> bool:
@@ -3218,6 +3330,8 @@ class CrossDirectoryEnricherWorker(QThread):
         self.total_rows = 0
         self._live_context: Dict[str, Any] = {}
         self._row_enrichment_state: Dict[str, str] = {}
+        self._night_sc_cache: Dict[str, Dict[str, Any]] = {}
+        self._active_night_sc_attempt: Optional[_NightSCAttempt] = None
 
     def run(self) -> None:
         try:
@@ -3286,6 +3400,9 @@ class CrossDirectoryEnricherWorker(QThread):
                 self.log_message.emit(dedupe_message)
             total = len(seed_df.index)
             self.total_rows = total
+            if getattr(self, "night_mode", False):
+                # Reset per-run SoundCloud cache for deterministic Night Mode attempts.
+                self._night_sc_cache = {}
             if total == 0:
                 self.log_message.emit("[Enricher] Seed CSV has no rows; nothing to do.")
                 self.finished.emit("")
@@ -3306,6 +3423,11 @@ class CrossDirectoryEnricherWorker(QThread):
                 if column not in seed_df.columns:
                     seed_df[column] = ""
                 seed_df[column] = seed_df[column].fillna("").astype(str)
+            if getattr(self, "night_mode", False):
+                for column in ("SC_Status", "SC_Reason", "SC_Fetches", "SC_ms"):
+                    if column not in seed_df.columns:
+                        seed_df[column] = ""
+                    seed_df[column] = seed_df[column].fillna("")
             # Keep optional link fields as strings to avoid dtype warnings when updating.
             for column in ("SoundCloud Link",):
                 if column in seed_df.columns:
@@ -3410,10 +3532,30 @@ class CrossDirectoryEnricherWorker(QThread):
                     self.log_message.emit(
                         f"[Enricher] SoundCloud live check for '{artist}' (current SC link missing)."
                     )
-                    sc_payload = self._live_search_soundcloud(artist)
-                    if self._mark_sc_blocked_row(seed_df, row_idx):
+                    sc_payload: Optional[EnrichmentPayload] = None
+                    sc_attempt: Optional[_NightSCAttempt] = None
+                    sc_cached_applied = False
+                    if getattr(self, "night_mode", False):
+                        sc_payload, sc_attempt = self._night_mode_soundcloud_search(artist)
+                        if sc_attempt and sc_attempt.cached_payload and sc_payload is None:
+                            sc_payload = sc_attempt.cached_payload
+                        if sc_attempt and sc_attempt.cached_snapshot:
+                            sc_cached_applied = self._apply_sc_snapshot_to_row(
+                                seed_df, row_idx, sc_attempt.cached_snapshot, artist, spotify_id=spotify_id
+                            )
+                            if sc_cached_applied and "soundcloud" not in sources_logged:
+                                sources_logged.append("soundcloud")
+                            if sc_cached_applied:
+                                enriched = True
+                    else:
+                        sc_payload = self._live_search_soundcloud(artist)
+                    if not getattr(self, "night_mode", False) and self._mark_sc_blocked_row(seed_df, row_idx):
                         self._update_progress(position, total)
                         continue
+                    applied = False
+                    payload_for_finalize: Optional[EnrichmentPayload] = None
+                    if sc_cached_applied and sc_attempt and sc_attempt.cached_payload:
+                        payload_for_finalize = sc_attempt.cached_payload
                     if sc_payload:
                         applied = self._apply_payload_guarded(
                             seed_df, row_idx, sc_payload, artist, spotify_id=spotify_id
@@ -3422,10 +3564,15 @@ class CrossDirectoryEnricherWorker(QThread):
                             enriched = True
                             if "soundcloud" not in sources_logged:
                                 sources_logged.append("soundcloud")
+                            payload_for_finalize = sc_payload
+                    if payload_for_finalize is None and sc_attempt and sc_attempt.status == "skipped_already_attempted":
+                        payload_for_finalize = sc_attempt.cached_payload
+                    if getattr(self, "night_mode", False):
+                        self._finalize_night_sc(seed_df, row_idx, sc_attempt, payload_for_finalize, artist)
                 if self.enable_live_search:
                     skip_soundcloud = bool(_coerce_directory_value(seed_df.at[row_idx, "SoundCloud Link"]))
                     payload = self._live_lookup(artist, skip_soundcloud=skip_soundcloud)
-                    if self._mark_sc_blocked_row(seed_df, row_idx):
+                    if not getattr(self, "night_mode", False) and self._mark_sc_blocked_row(seed_df, row_idx):
                         self._update_progress(position, total)
                         continue
                     if payload:
@@ -3876,7 +4023,7 @@ class CrossDirectoryEnricherWorker(QThread):
             if source == "bandcamp":
                 payload = self._live_search_bandcamp(artist_name)
             elif source == "soundcloud":
-                if skip_soundcloud:
+                if skip_soundcloud or getattr(self, "night_mode", False):
                     continue
                 payload = self._live_search_soundcloud(artist_name)
             elif source == "lastfm":
@@ -4019,8 +4166,161 @@ class CrossDirectoryEnricherWorker(QThread):
         self._set_platform_state("bandcamp", "skipped")
         return None
 
+    def _start_night_sc_attempt(self) -> _NightSCAttempt:
+        attempt = _NightSCAttempt(
+            start_time=time.time(),
+            max_seconds=_night_sc_budget_seconds(),
+            max_fetches=_night_sc_max_fetches(),
+        )
+        self._active_night_sc_attempt = attempt
+        return attempt
+
+    def _night_mode_soundcloud_search(self, artist_name: str) -> Tuple[Optional[EnrichmentPayload], Optional[_NightSCAttempt]]:
+        if not getattr(self, "night_mode", False):
+            return self._live_search_soundcloud(artist_name), None
+        attempt = self._start_night_sc_attempt()
+        try:
+            payload = self._live_search_soundcloud(artist_name)
+            return payload, attempt
+        finally:
+            self._active_night_sc_attempt = None
+
+    def _apply_sc_snapshot_to_row(
+        self,
+        df: pd.DataFrame,
+        row_idx,
+        snapshot: Optional[Dict[str, Any]],
+        artist_name: str,
+        spotify_id: str = "",
+    ) -> bool:
+        payload = _payload_from_snapshot((snapshot or {}).get("payload"))
+        if not payload:
+            return False
+        # Preserve stored match_score/candidate_name for deterministic reuse.
+        payload.match_score = float((snapshot or {}).get("match_score") or getattr(payload, "match_score", 0.0) or 0.0)
+        payload.candidate_name = (snapshot or {}).get("candidate_name") or getattr(payload, "candidate_name", "")
+        return self._apply_payload_guarded(df, row_idx, payload, artist_name, spotify_id=spotify_id)
+
+    def _write_sc_status_columns(
+        self,
+        df: pd.DataFrame,
+        row_idx,
+        status: str,
+        reason: str,
+        fetches: int,
+        elapsed_ms: int,
+    ) -> None:
+        if "SC_Status" in df.columns:
+            df.at[row_idx, "SC_Status"] = status
+        if "SC_Reason" in df.columns:
+            df.at[row_idx, "SC_Reason"] = reason
+        if "SC_Fetches" in df.columns:
+            df.at[row_idx, "SC_Fetches"] = fetches
+        if "SC_ms" in df.columns:
+            df.at[row_idx, "SC_ms"] = elapsed_ms
+
+    def _cache_night_sc_snapshot(
+        self,
+        attempt: _NightSCAttempt,
+        status: str,
+        reason: str,
+        payload: Optional[EnrichmentPayload],
+    ) -> None:
+        keys = _night_sc_cache_keys(attempt.handle, attempt.profile_url)
+        if not keys:
+            return
+        snapshot = {
+            "status": status,
+            "reason": reason,
+            "fetches": attempt.fetches,
+            "ms": attempt.elapsed_ms(),
+            "http": attempt.http_status,
+            "confidence": attempt.confidence,
+            "payload": _snapshot_payload(payload),
+            "match_score": attempt.match_score,
+            "candidate_name": getattr(payload, "candidate_name", "") if payload else "",
+        }
+        for key in keys:
+            self._night_sc_cache[key] = snapshot
+
+    def _night_sc_cache_lookup(self, handle: str, profile_url: str) -> Optional[Dict[str, Any]]:
+        if not getattr(self, "night_mode", False):
+            return None
+        for key in _night_sc_cache_keys(handle, profile_url):
+            cached = self._night_sc_cache.get(key)
+            if cached:
+                return cached
+        return None
+
+    def _finalize_night_sc(
+        self,
+        df: pd.DataFrame,
+        row_idx,
+        attempt: Optional[_NightSCAttempt],
+        payload: Optional[EnrichmentPayload],
+        artist_name: str,
+    ) -> None:
+        if not attempt or attempt.finalized:
+            return
+        attempt.finalized = True
+        attempt.budget_ok()  # Refresh budget flag based on elapsed time.
+        effective_payload = payload or attempt.cached_payload
+        actionable = _payload_actionable(effective_payload)
+        if actionable is None:
+            actionable = False
+        confidence = float(attempt.confidence or getattr(effective_payload, "match_score", 0.0) or 0.0)
+        http_status = attempt.http_status
+        if http_status is None:
+            http_status = getattr(self, "_last_http_status", None)
+        status = attempt.status or ""
+        reason = attempt.reason or ""
+        if status == "skipped_already_attempted":
+            pass
+        elif attempt.challenge:
+            status = "non_actionable_challenge"
+            reason = reason or "challenge_page"
+        elif attempt.budget_exceeded:
+            status = "blocked_403" if attempt.saw_403 else "no_confident_match"
+            reason = reason or "budget_exceeded"
+        elif attempt.saw_403 and actionable is not True:
+            status = "blocked_403"
+            reason = reason or "api_403"
+        elif actionable:
+            status = "actionable"
+        else:
+            status = "no_confident_match"
+        if not reason and status == "no_confident_match":
+            reason = "no_match"
+        attempt.status = status
+        attempt.reason = reason
+        self._write_sc_status_columns(df, row_idx, status, reason, attempt.fetches, attempt.elapsed_ms())
+        try:
+            self.log_message.emit(
+                "[Night SC] Final status: %s handle=%s http=%s confidence=%.2f ms=%s fetches=%s reason=%s"
+                % (
+                    status,
+                    attempt.handle or "<unknown>",
+                    http_status if http_status is not None else "",
+                    confidence,
+                    attempt.elapsed_ms(),
+                    attempt.fetches,
+                    reason or "",
+                )
+            )
+        except Exception:
+            pass
+        self._cache_night_sc_snapshot(attempt, status, reason, effective_payload)
     def _live_search_soundcloud(self, artist_name: str) -> Optional[EnrichmentPayload]:
+        active_attempt = self._active_night_sc_attempt if getattr(self, "night_mode", False) else None
         if not self._platform_attempt_allowed("soundcloud", artist_name, "SoundCloud Enrich"):
+            if active_attempt:
+                active_attempt.status = "skipped_already_attempted"
+                active_attempt.reason = "row_already_attempted"
+            return None
+        if active_attempt and not active_attempt.budget_ok():
+            active_attempt.status = "no_confident_match"
+            active_attempt.budget_exceeded = True
+            active_attempt.reason = active_attempt.reason or "budget_exceeded"
             return None
         if not self._increment_live_counter():
             self.log_message.emit("[Enricher] SoundCloud live search skipped (limit reached).")
@@ -4098,9 +4398,33 @@ class CrossDirectoryEnricherWorker(QThread):
                     f"[Enricher] SoundCloud Enrich: no safe match for '{artist_name}' "
                     f"(best_confidence={best_score:.2f}), skipping."
                 )
+                if active_attempt:
+                    active_attempt.confidence = best_score
+                    active_attempt.status = "no_confident_match"
                 self._set_platform_state("soundcloud", "skipped")
                 return None
         profile_url = best_candidate["profile_url"]
+        if active_attempt:
+            active_attempt.confidence = best_candidate.get("score", 0.0)
+            active_attempt.handle = _sc_handle_from_profile_url(profile_url) or best_candidate.get("handle") or ""
+            active_attempt.profile_url = profile_url
+            cached = self._night_sc_cache_lookup(active_attempt.handle, profile_url)
+            if cached:
+                active_attempt.cached_snapshot = cached
+                active_attempt.cached_payload = _payload_from_snapshot(cached.get("payload"))
+                active_attempt.status = "skipped_already_attempted"
+                active_attempt.reason = cached.get("reason") or "cache_hit"
+                active_attempt.http_status = cached.get("http", active_attempt.http_status)
+                active_attempt.fetches = cached.get("fetches", active_attempt.fetches)
+                active_attempt.confidence = float(cached.get("confidence", active_attempt.confidence or 0.0))
+                active_attempt.match_score = float(cached.get("match_score") or 0.0)
+                self._set_platform_state("soundcloud", "skipped")
+                return active_attempt.cached_payload
+            if not active_attempt.budget_ok():
+                active_attempt.budget_exceeded = True
+                active_attempt.status = "no_confident_match"
+                active_attempt.reason = active_attempt.reason or "budget_exceeded"
+                return None
 
         def _payload_from_t007(data: Dict[str, Any]) -> EnrichmentPayload:
             socials: Set[str] = set()
@@ -4154,6 +4478,8 @@ class CrossDirectoryEnricherWorker(QThread):
                 f"[Enricher] SoundCloud Enrich: engine=t007 handle={handle or '<unknown>'} url={profile_url}"
             )
             self._fetch_url(profile_url, label="soundcloud profile preflight", max_attempts=1)
+            if active_attempt and active_attempt.budget_exceeded:
+                return None
             if getattr(self, "_sc_blocked_for_row", False):
                 return None
             sc_helper = _get_t007_sc_helper()
@@ -4179,6 +4505,11 @@ class CrossDirectoryEnricherWorker(QThread):
                     "[Enricher] SoundCloud Enrich: engine=t007 missing handle, falling back to legacy."
                 )
         if payload is None:
+            if active_attempt and not active_attempt.budget_ok():
+                active_attempt.budget_exceeded = True
+                active_attempt.status = "no_confident_match"
+                active_attempt.reason = active_attempt.reason or "budget_exceeded"
+                return None
             payload = self._fetch_profile_and_build(profile_url, "soundcloud")
         fetch_ok_flag = getattr(self, "_last_fetch_ok", None)
         actionable_flag = _payload_actionable(payload)
@@ -4200,8 +4531,12 @@ class CrossDirectoryEnricherWorker(QThread):
                 extract_domain(best_candidate.get("profile_url") or ""),
             )
             payload.candidate_name = best_candidate.get("display_name") or best_candidate.get("handle") or ""
+            if active_attempt:
+                active_attempt.match_score = payload.match_score
             self._set_platform_state("soundcloud", "matched")
             return payload
+        if active_attempt and not active_attempt.status:
+            active_attempt.status = "no_confident_match"
         self._set_platform_state("soundcloud", "skipped")
         return None
 
@@ -4309,29 +4644,50 @@ class CrossDirectoryEnricherWorker(QThread):
         self._last_fetch_ok: Optional[bool] = None
         self._last_http_status: Optional[int] = None
         attempt = 0
+        active_sc_attempt = self._active_night_sc_attempt if getattr(self, "night_mode", False) else None
         while attempt < max_attempts:
             attempt += 1
             try:
+                if active_sc_attempt and "soundcloud" in label.lower():
+                    if not active_sc_attempt.note_fetch():
+                        self._last_fetch_ok = False
+                        self._last_http_status = active_sc_attempt.http_status
+                        return None
                 resp = self.session.get(url, timeout=HTTP_TIMEOUT)
                 status = getattr(resp, "status_code", None)
                 text = getattr(resp, "text", "")
                 self._last_http_status = status
+                if active_sc_attempt and "soundcloud" in label.lower():
+                    active_sc_attempt.http_status = status
+                    if status == 403:
+                        active_sc_attempt.saw_403 = True
+                        self._last_fetch_ok = False
+                        return None
                 if getattr(self, "night_mode", False) and "soundcloud" in label.lower():
                     if status == 403 and "profile" in label.lower() and "soundcloud.com" in url and "/about" not in url:
                         about_url = url.rstrip("/") + "/about"
                         try:
+                            if active_sc_attempt and not active_sc_attempt.note_fetch():
+                                self._last_fetch_ok = False
+                                return None
                             about_resp = self.session.get(about_url, timeout=HTTP_TIMEOUT)
                             about_status = getattr(about_resp, "status_code", None)
                             about_text = getattr(about_resp, "text", "")
                             if about_status == 200:
                                 if _sc_is_challenge_page(about_text):
                                     self._last_fetch_ok = False
+                                    if active_sc_attempt:
+                                        active_sc_attempt.challenge = True
+                                        active_sc_attempt.reason = active_sc_attempt.reason or "challenge_page"
+                                        active_sc_attempt.http_status = about_status
                                     self._last_http_status = about_status
                                     self.log_message.emit(
                                         "[Night SC] Root 403; about returned challenge page, treating as non-actionable."
                                     )
                                     return None
                                 self._last_fetch_ok = True
+                                if active_sc_attempt:
+                                    active_sc_attempt.http_status = about_status
                                 self._last_http_status = about_status
                                 self.log_message.emit(
                                     "[Night SC] Root 403; using about page fallback."
@@ -4339,25 +4695,48 @@ class CrossDirectoryEnricherWorker(QThread):
                                 return about_text
                             if _sc_is_blocked(about_status, about_text):
                                 self._last_fetch_ok = False
+                                if active_sc_attempt:
+                                    active_sc_attempt.saw_403 = True
+                                    active_sc_attempt.http_status = about_status
                                 self._flag_sc_blocked(status_code=about_status, html=about_text)
                                 return None
                         except Exception:
                             pass
                     if _sc_is_blocked(status, text):
                         self._last_fetch_ok = False
+                        if active_sc_attempt:
+                            active_sc_attempt.saw_403 = True
+                            active_sc_attempt.http_status = status
                         self._flag_sc_blocked(status_code=status, html=text)
                         return None
+                if getattr(self, "night_mode", False) and "soundcloud" in label.lower() and _sc_is_challenge_page(text):
+                    self._last_fetch_ok = False
+                    if active_sc_attempt:
+                        active_sc_attempt.challenge = True
+                        active_sc_attempt.reason = active_sc_attempt.reason or "challenge_page"
+                    return None
                 resp.raise_for_status()
                 self._last_fetch_ok = True
+                if active_sc_attempt and "soundcloud" in label.lower():
+                    active_sc_attempt.http_status = status
                 return text
             except requests.HTTPError as exc:
                 status = exc.response.status_code if exc.response is not None else None
                 self._last_http_status = status
+                if active_sc_attempt and "soundcloud" in label.lower():
+                    active_sc_attempt.http_status = status
                 if getattr(self, "night_mode", False) and "soundcloud" in label.lower():
                     html = exc.response.text if exc.response is not None else ""
                     if _sc_is_blocked(status, html):
                         self._last_fetch_ok = False
+                        if active_sc_attempt:
+                            active_sc_attempt.saw_403 = True
                         self._flag_sc_blocked(status_code=status, html=html)
+                        return None
+                    if status == 403:
+                        if active_sc_attempt:
+                            active_sc_attempt.saw_403 = True
+                        self._last_fetch_ok = False
                         return None
                 if status and 500 <= status < 600 and attempt < max_attempts:
                     self.log_message.emit(
@@ -4440,6 +4819,10 @@ class CrossDirectoryEnricherWorker(QThread):
         """
         Primary SoundCloud search path: people search endpoint keeps results scoped to artist profiles.
         """
+        active_attempt = self._active_night_sc_attempt if getattr(self, "night_mode", False) else None
+        if active_attempt and not active_attempt.budget_ok():
+            active_attempt.budget_exceeded = True
+            return []
         quoted = urllib.parse.quote_plus(artist_query)
         url = f"https://soundcloud.com/search/people?q={quoted}"
         self.log_message.emit(f"[Enricher] SoundCloud live search: {url}")
@@ -4456,6 +4839,10 @@ class CrossDirectoryEnricherWorker(QThread):
         """
         Broader fallback: generic search page that may include tracks/playlists; we filter to profile links.
         """
+        active_attempt = self._active_night_sc_attempt if getattr(self, "night_mode", False) else None
+        if active_attempt and not active_attempt.budget_ok():
+            active_attempt.budget_exceeded = True
+            return []
         quoted = urllib.parse.quote_plus(artist_query)
         url = f"https://soundcloud.com/search?q={quoted}"
         self.log_message.emit(f"[Enricher] SoundCloud universal search fallback: {url}")
@@ -4566,7 +4953,16 @@ class CrossDirectoryEnricherWorker(QThread):
         return candidates
 
     def _soundcloud_api_user_search(self, artist_query: str, limit: int = 8) -> List[Dict[str, Any]]:
-        client_id = _sc_get_client_id(self.session)
+        active_attempt = self._active_night_sc_attempt if getattr(self, "night_mode", False) else None
+        if active_attempt and not active_attempt.budget_ok():
+            active_attempt.budget_exceeded = True
+            return []
+        client_id = _SC_CLIENT_ID_CACHE
+        if not client_id:
+            if getattr(self, "night_mode", False):
+                self.log_message.emit("[Night SC] Skipping SoundCloud API fallback (no client_id cached).")
+                return []
+            client_id = _sc_get_client_id(self.session)
         if not client_id:
             self.log_message.emit("[Enricher] SoundCloud API fallback unavailable (no client_id).")
             return []
@@ -4576,11 +4972,15 @@ class CrossDirectoryEnricherWorker(QThread):
             "limit": limit,
         }
         try:
-            resp = self.session.get(
-                "https://api-v2.soundcloud.com/search/users",
-                params=params,
-                timeout=HTTP_TIMEOUT,
-            )
+            if active_attempt and not active_attempt.note_fetch():
+                return []
+            resp = self.session.get("https://api-v2.soundcloud.com/search/users", params=params, timeout=HTTP_TIMEOUT)
+            status = getattr(resp, "status_code", None)
+            if active_attempt:
+                active_attempt.http_status = status
+                if status == 403:
+                    active_attempt.saw_403 = True
+                    return []
             resp.raise_for_status()
             payload = resp.json() or {}
         except Exception as exc:

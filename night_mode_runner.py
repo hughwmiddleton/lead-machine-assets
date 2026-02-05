@@ -448,6 +448,22 @@ def run_night_mode(
     fb_max_rows_per_run = fb_max_rows_config if fb_max_rows_override is None else fb_max_rows_override
     if fb_max_rows_per_run is None:
         fb_max_rows_per_run = 100
+    # Night Mode SoundCloud budgets (Night Mode only; legacy unaffected).
+    sc_cfg = config.get("soundcloud", {}) or {}
+    try:
+        sc_budget_seconds = float(sc_cfg.get("night_sc_budget_seconds", 6))
+    except Exception:
+        sc_budget_seconds = 6.0
+    try:
+        sc_max_fetches = int(sc_cfg.get("night_sc_max_fetches", 3))
+    except Exception:
+        sc_max_fetches = 3
+    if sc_budget_seconds < 0:
+        sc_budget_seconds = 0.0
+    if sc_max_fetches < 0:
+        sc_max_fetches = 0
+    os.environ["NIGHT_SC_BUDGET_SECONDS"] = str(sc_budget_seconds)
+    os.environ["NIGHT_SC_MAX_FETCHES"] = str(sc_max_fetches)
     try:
         fb_max_rows_per_run = int(fb_max_rows_per_run)
     except Exception:
