@@ -23,6 +23,7 @@ export SPOTIFY_REDIRECT_URI="http://127.0.0.1:8080/callback"
 export SPOTIFY_REFRESH_TOKEN="AQB1vtP347IrhWrFAScJ_TwBSK0ZTiEdAbhxrmGf82vqmZIANMZdpLqnkpUDsEjGK9HZGGVfkfB9D915m28IK5CCAFFTMBwLd63n0UVmoYSSkjs_F8qXHJeDG-I0UgwrtAU"
 unset SC_DEBUG_LATEST
 export FB_DEBUG_CANDIDATES=1
+export NIGHT_SC_DEBUG=1
 
 # Night Mode SoundCloud engine switch (default is "current")
 export NIGHTMODE_SC_ENGINE="t007"

@@ -303,6 +303,8 @@ def _sc_is_blocked(status_code, html) -> bool:
 def _sc_is_challenge_page(html: str) -> bool:
     if not html:
         return False
+    if len(html.strip()) < 200:
+        return False
     lower = html.lower()
     return any(token in lower for token in _SC_CHALLENGE_TOKENS)
 
@@ -4170,25 +4172,62 @@ class CrossDirectoryEnricherWorker(QThread):
     def _night_sc_http_get(self, url: str, label: str, attempt: _NightSCAttempt) -> Tuple[Optional[int], str]:
         if not attempt.note_fetch():
             return (None, "")
+        debug = os.getenv("NIGHT_SC_DEBUG")
+        resp = None
+        status: Optional[int] = None
+        text: str = ""
+        blocked = False
+        challenge = False
+
+        def _log_debug(body: str) -> None:
+            if not debug:
+                return
+            try:
+                parsed = urlparse(url)
+                host_path = f"{parsed.netloc}{parsed.path}"
+                snippet = re.sub(r"\\s+", " ", body or "")[:80]
+                self.log_message.emit(
+                    f"[Night SC][debug] label={label} url={host_path} status={status} len={len(body or '')} blocked={blocked} challenge={challenge} body=\"{snippet}\""
+                )
+            except Exception:
+                pass
+
         try:
             resp = self.session.get(url, timeout=HTTP_TIMEOUT)
             status = getattr(resp, "status_code", None)
             text = getattr(resp, "text", "") or ""
             attempt.http_status = status
+            blocked = _sc_is_blocked(status, text)
+            challenge = _sc_is_challenge_page(text)
             if status == 403:
                 attempt.saw_403 = True
+                _log_debug(text)
                 return (status, "")
-            if _sc_is_blocked(status, text):
+            if blocked:
                 attempt.saw_403 = True
+                _log_debug(text)
                 return (status, "")
-            if _sc_is_challenge_page(text):
+            if challenge:
                 attempt.challenge = True
                 attempt.reason = attempt.reason or "challenge_page"
+                _log_debug(text)
+                return (status, "")
+            if status == 200 and not text.strip():
+                attempt.reason = attempt.reason or "empty_body"
+                _log_debug(text)
                 return (status, "")
             resp.raise_for_status()
+            _log_debug(text)
             return (status, text)
         except Exception:
-            return (None, "")
+            if attempt.reason == "":
+                attempt.reason = "http_error"
+            if status is None:
+                status = attempt.http_status
+            else:
+                attempt.http_status = attempt.http_status or status
+            _log_debug("")
+            return (attempt.http_status, "")
 
     def _night_sc_search_candidates(
         self,
@@ -4235,10 +4274,7 @@ class CrossDirectoryEnricherWorker(QThread):
             url = f"https://soundcloud.com/search?q={urllib.parse.quote_plus(sc_query)}"
             status, html = self._night_sc_http_get(url, "Night SC universal search", attempt)
             if not html:
-                if attempt.challenge or attempt.saw_403 or attempt.budget_exceeded:
-                    return best_candidate
-                else:
-                    return best_candidate
+                return best_candidate
             if not attempt.budget_exceeded:
                 candidates = self._parse_soundcloud_search_results(html, url)
                 candidate = self._pick_best_soundcloud_candidate(
@@ -4319,6 +4355,8 @@ class CrossDirectoryEnricherWorker(QThread):
             if payload:
                 payload.match_score = 1.0
                 payload.candidate_name = artist_name
+                attempt.confidence = 1.0
+                attempt.match_score = 1.0
             applied = False
             if payload:
                 applied = self._apply_payload_guarded(df, row_idx, payload, artist_name, spotify_id=spotify_id)
@@ -4463,7 +4501,8 @@ class CrossDirectoryEnricherWorker(QThread):
             pass
         elif attempt.challenge:
             status = "non_actionable_challenge"
-            reason = reason or "challenge_page"
+            if not reason or reason == "no_candidate":
+                reason = "challenge_page"
         elif attempt.budget_exceeded:
             status = "blocked_403" if attempt.saw_403 else "no_confident_match"
             reason = reason or "budget_exceeded"
