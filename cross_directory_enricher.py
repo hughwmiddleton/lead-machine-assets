@@ -4141,6 +4141,8 @@ class CrossDirectoryEnricherWorker(QThread):
         actionable_flag = _payload_actionable(payload)
         if fetch_ok_flag is False and actionable_flag is None:
             actionable_flag = False
+        if payload is None and fetch_ok_flag:
+            actionable_flag = False
         outcome_suffix = _format_outcome_suffix(
             fetch_ok=fetch_ok_flag,
             actionable=actionable_flag,
