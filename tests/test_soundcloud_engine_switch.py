@@ -1,8 +1,11 @@
 import os
+import types
+import importlib.util
 import unittest
 from unittest import mock
 
 import pandas as pd
+import requests
 
 import cross_directory_enricher as enricher
 from cross_directory_enricher import (
@@ -17,6 +20,8 @@ class SoundCloudEngineSwitchTests(unittest.TestCase):
     def setUp(self) -> None:
         # Reset once-per-run flag so tests remain isolated.
         enricher._SC_HEALTHCHECK_LOGGED = False
+        enricher._T007_SC_HELPER = None
+        enricher._T007_SC_HELPER_LOADED = False
 
     def _make_worker(self) -> CrossDirectoryEnricherWorker:
         worker = CrossDirectoryEnricherWorker("seed.csv", "output.csv")
@@ -74,3 +79,50 @@ class SoundCloudEngineSwitchTests(unittest.TestCase):
         self.assertIsNotNone(payload)
         self.assertEqual(fetch_calls["count"], 1)
         self.assertEqual(payload.source_url, candidate["profile_url"])
+
+    def test_fetch_url_respects_max_attempts(self) -> None:
+        worker = self._make_worker()
+        worker.session = mock.Mock()
+
+        class FakeResp:
+            def __init__(self, status_code: int):
+                self.status_code = status_code
+                self.text = "error"
+
+            def raise_for_status(self):
+                raise requests.HTTPError(response=self)
+
+        worker.session.get.side_effect = [FakeResp(500), FakeResp(500)]
+        worker._fetch_url("http://example.com", "test", max_attempts=1)
+        self.assertEqual(worker.session.get.call_count, 1)
+
+        worker.session.get.reset_mock()
+        worker.session.get.side_effect = [FakeResp(500), FakeResp(500)]
+        worker._fetch_url("http://example.com", "test")
+        self.assertEqual(worker.session.get.call_count, 2)
+
+    def test_t007_helper_cached_once(self) -> None:
+        calls = {"spec": 0, "exec": 0}
+
+        def fake_spec(*args, **kwargs):
+            calls["spec"] += 1
+            spec = mock.Mock()
+
+            def exec_module(mod):
+                calls["exec"] += 1
+                mod._sc_fetch_contact_payload = lambda handle: {"data": {"emails": [], "external_urls": []}}
+
+            loader = mock.Mock()
+            loader.exec_module.side_effect = exec_module
+            spec.loader = loader
+            return spec
+
+        with mock.patch.object(importlib.util, "spec_from_file_location", side_effect=fake_spec), mock.patch.object(
+            importlib.util, "module_from_spec", side_effect=lambda spec: types.SimpleNamespace()
+        ):
+            helper1 = enricher._get_t007_sc_helper()
+            helper2 = enricher._get_t007_sc_helper()
+
+        self.assertEqual(calls["spec"], 1)
+        self.assertEqual(calls["exec"], 1)
+        self.assertIs(helper1, helper2)

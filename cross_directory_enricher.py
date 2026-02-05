@@ -161,6 +161,8 @@ GENERIC_SOCIAL_HANDLES = {
 }
 
 _SC_HEALTHCHECK_LOGGED = False
+_T007_SC_HELPER = None
+_T007_SC_HELPER_LOADED = False
 
 
 def _sc_is_blocked(status_code, html) -> bool:
@@ -472,6 +474,30 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MULTI_VALUE_SEPARATOR = ", "
 FACEBOOK_HELPERS_PATH = os.path.join(BASE_DIR, "Lead Machine (Final Update 5).py")
 ENRICHER_FB_PROFILE = os.path.join(os.path.expanduser("~"), "LeadMachine", "fb_enricher_profile")
+
+
+def _get_t007_sc_helper():
+    """
+    Load the T007 SoundCloud helper once to avoid repeated execution of the large helper module.
+    Returns the cached helper (or None) on subsequent calls.
+    """
+    global _T007_SC_HELPER, _T007_SC_HELPER_LOADED
+    if _T007_SC_HELPER_LOADED:
+        return _T007_SC_HELPER
+    _T007_SC_HELPER_LOADED = True
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "lead_machine_final_update_5_sc", os.path.join(BASE_DIR, "Lead Machine (Final Update 5).py")
+        )
+        if spec and spec.loader:
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            _T007_SC_HELPER = getattr(module, "_sc_fetch_contact_payload", None)
+    except Exception:
+        _T007_SC_HELPER = None
+    return _T007_SC_HELPER
+
+
 _FB_DRIVER = None
 _FB_DRIVER_LOCK = threading.Lock()
 setup_facebook_driver = None
@@ -4114,25 +4140,28 @@ class CrossDirectoryEnricherWorker(QThread):
             self._fetch_url(profile_url, label="soundcloud profile preflight", max_attempts=1)
             if getattr(self, "_sc_blocked_for_row", False):
                 return None
-            try:
-                spec = importlib.util.spec_from_file_location(
-                    "lead_machine_final_update_5_sc", os.path.join(BASE_DIR, "Lead Machine (Final Update 5).py")
-                )
-                sc_helper = None
-                if spec and spec.loader:
-                    module = importlib.util.module_from_spec(spec)
-                    spec.loader.exec_module(module)
-                    sc_helper = getattr(module, "_sc_fetch_contact_payload", None)
-                if sc_helper and handle:
+            sc_helper = _get_t007_sc_helper()
+            if sc_helper and handle:
+                try:
                     sc_result = sc_helper(handle) or {}
-                    sc_data = sc_result.get("data") or {}
+                    sc_data = sc_result.get("data") if isinstance(sc_result, dict) else {}
+                    if sc_data is None:
+                        sc_data = {}
                     payload = _payload_from_t007(sc_data)
                     self._last_fetch_ok = True
-            except Exception as exc:
+                except Exception as exc:
+                    self.log_message.emit(
+                        f"[Enricher] SoundCloud Enrich: engine=t007 fallback to legacy ({exc})"
+                    )
+                    payload = None
+            elif not sc_helper:
                 self.log_message.emit(
-                    f"[Enricher] SoundCloud Enrich: engine=t007 fallback to legacy ({exc})"
+                    "[Enricher] SoundCloud Enrich: engine=t007 helper unavailable, falling back to legacy."
                 )
-                payload = None
+            elif not handle:
+                self.log_message.emit(
+                    "[Enricher] SoundCloud Enrich: engine=t007 missing handle, falling back to legacy."
+                )
         if payload is None:
             payload = self._fetch_profile_and_build(profile_url, "soundcloud")
         fetch_ok_flag = getattr(self, "_last_fetch_ok", None)
