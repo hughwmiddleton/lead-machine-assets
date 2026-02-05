@@ -225,6 +225,12 @@ SC_HEADERS_BASE = {
 LASTFM_API_KEY = os.environ.get("LASTFM_API_KEY", "").strip()
 LASTFM_API_BASE = "https://ws.audioscrobbler.com/2.0/"
 LASTFM_MAX_SIMILAR_PER_SEED = 200  # soft ceiling per seed
+SPOTIFY_TOKEN_URL = "https://accounts.spotify.com/api/token"
+_SPOTIFY_ACCESS_TOKEN = ""
+_SPOTIFY_ACCESS_TOKEN_EXPIRY = 0.0
+_SPOTIFY_TOKEN_LOCK = threading.Lock()
+SPOTIFY_ARTIST_GENRE_CACHE: dict[str, list[str]] = {}
+_SPOTIFY_CACHE_LOCK = threading.Lock()
 
 
 def _rand_headers():
@@ -5292,6 +5298,113 @@ def _sc_collect_emails_from_text(bucket: set, text: str):
             bucket.add(cleaned)
 
 
+def _spotify_artist_id_from_url(url: str) -> str:
+    if not url or "spotify.com" not in url:
+        return ""
+    try:
+        parsed = urlparse(url.strip())
+    except Exception:
+        return ""
+    netloc = (parsed.netloc or "").lower()
+    if "spotify.com" not in netloc:
+        return ""
+    parts = (parsed.path or "").split("/")
+    for idx, part in enumerate(parts):
+        if part == "artist" and idx + 1 < len(parts):
+            candidate = parts[idx + 1].split("?")[0].split("#")[0].strip()
+            if candidate:
+                return candidate
+            return ""
+    return ""
+
+
+def _spotify_get_access_token(force_refresh: bool = False) -> str:
+    global _SPOTIFY_ACCESS_TOKEN, _SPOTIFY_ACCESS_TOKEN_EXPIRY
+    now = time.time()
+    with _SPOTIFY_TOKEN_LOCK:
+        if not force_refresh and _SPOTIFY_ACCESS_TOKEN and now < (_SPOTIFY_ACCESS_TOKEN_EXPIRY - 30):
+            return _SPOTIFY_ACCESS_TOKEN
+        client_id = os.getenv("SPOTIFY_CLIENT_ID", "").strip()
+        client_secret = os.getenv("SPOTIFY_CLIENT_SECRET", "").strip()
+        refresh_token = os.getenv("SPOTIFY_REFRESH_TOKEN", "").strip()
+        if not (client_id and client_secret and refresh_token):
+            return ""
+        try:
+            resp = requests.post(
+                SPOTIFY_TOKEN_URL,
+                data={"grant_type": "refresh_token", "refresh_token": refresh_token},
+                auth=(client_id, client_secret),
+                timeout=10,
+            )
+        except Exception:
+            return ""
+        if resp.status_code != 200:
+            return ""
+        try:
+            payload = resp.json()
+        except Exception:
+            return ""
+        access_token = payload.get("access_token") or ""
+        expires_in = payload.get("expires_in") or 0
+        if access_token:
+            _SPOTIFY_ACCESS_TOKEN = access_token
+            _SPOTIFY_ACCESS_TOKEN_EXPIRY = now + max(60, int(expires_in or 0))
+        return access_token
+
+
+def _spotify_get_artist_genres(artist_id: str) -> list[str]:
+    if not artist_id:
+        return []
+    with _SPOTIFY_CACHE_LOCK:
+        if artist_id in SPOTIFY_ARTIST_GENRE_CACHE:
+            return SPOTIFY_ARTIST_GENRE_CACHE[artist_id]
+    token = _spotify_get_access_token()
+    if not token:
+        with _SPOTIFY_CACHE_LOCK:
+            SPOTIFY_ARTIST_GENRE_CACHE[artist_id] = []
+        return []
+    url = f"https://api.spotify.com/v1/artists/{artist_id}"
+    headers = {"Authorization": f"Bearer {token}"}
+    retried_401 = False
+    retried_429 = False
+    genres: list[str] = []
+    while True:
+        try:
+            resp = requests.get(url, headers=headers, timeout=10)
+        except Exception:
+            resp = None
+        if resp is None:
+            break
+        if resp.status_code == 200:
+            try:
+                data = resp.json()
+                genre_list = data.get("genres") or []
+                genres = [g for g in genre_list if isinstance(g, str)]
+            except Exception:
+                genres = []
+            break
+        if resp.status_code == 401 and not retried_401:
+            retried_401 = True
+            new_token = _spotify_get_access_token(force_refresh=True)
+            if not new_token:
+                break
+            headers["Authorization"] = f"Bearer {new_token}"
+            continue
+        if resp.status_code == 429 and not retried_429:
+            retried_429 = True
+            retry_after = 0
+            try:
+                retry_after = float(resp.headers.get("Retry-After", 0))
+            except Exception:
+                retry_after = 0
+            time.sleep(min(10, retry_after if retry_after > 0 else 2))
+            continue
+        break
+    with _SPOTIFY_CACHE_LOCK:
+        SPOTIFY_ARTIST_GENRE_CACHE[artist_id] = genres
+    return genres
+
+
 def _sc_build_row(handle: str, payload: dict, soundcloud_link: str, fallback_name: str = "",
                   fallback_location: str = "", song_title: str = "", release_date: str = "",
                   sounds_like: str = "", fallback_tags=None, fallback_external=None, fallback_emails=None):
@@ -5385,6 +5498,22 @@ def _sc_build_row(handle: str, payload: dict, soundcloud_link: str, fallback_nam
         user_genre = _normalize_primary_genre(user_genre)
         if user_genre:
             primary_genre_value = user_genre
+    if not primary_genre_value:
+        spotify_artist_id = ""
+        spotify_candidates = list(payload.get("external_urls") or [])
+        if not spotify_candidates:
+            social_links_raw = row.get("Social Link") or ""
+            spotify_candidates.extend([token.strip() for token in social_links_raw.split(";") if token.strip()])
+        for candidate in spotify_candidates:
+            spotify_artist_id = _spotify_artist_id_from_url(candidate)
+            if spotify_artist_id:
+                break
+        if spotify_artist_id:
+            spotify_genres = _spotify_get_artist_genres(spotify_artist_id)
+            if spotify_genres:
+                spotify_primary = _normalize_primary_genre(spotify_genres[0])
+                if spotify_primary:
+                    primary_genre_value = spotify_primary
     row["Location"] = location_value
     row["Primary Genre"] = primary_genre_value
     row["Song Title"] = (song_title or "").strip()
