@@ -163,6 +163,15 @@ GENERIC_SOCIAL_HANDLES = {
 _SC_HEALTHCHECK_LOGGED = False
 _T007_SC_HELPER = None
 _T007_SC_HELPER_LOADED = False
+_SC_CHALLENGE_TOKENS = (
+    "enable cookies",
+    "please enable cookies",
+    "before we continue",
+    "attention required",
+    "captcha",
+    "check your browser",
+    "are you a human",
+)
 
 
 def _sc_is_blocked(status_code, html) -> bool:
@@ -177,6 +186,13 @@ def _sc_is_blocked(status_code, html) -> bool:
         "attention required",
         "please enable cookies",
     ))
+
+
+def _sc_is_challenge_page(html: str) -> bool:
+    if not html:
+        return False
+    lower = html.lower()
+    return any(token in lower for token in _SC_CHALLENGE_TOKENS)
 
 
 DIRECTORY_FIELD_MAP: Dict[str, Dict[str, Tuple[str, ...]]] = {
@@ -4301,6 +4317,32 @@ class CrossDirectoryEnricherWorker(QThread):
                 text = getattr(resp, "text", "")
                 self._last_http_status = status
                 if getattr(self, "night_mode", False) and "soundcloud" in label.lower():
+                    if status == 403 and "profile" in label.lower() and "soundcloud.com" in url and "/about" not in url:
+                        about_url = url.rstrip("/") + "/about"
+                        try:
+                            about_resp = self.session.get(about_url, timeout=HTTP_TIMEOUT)
+                            about_status = getattr(about_resp, "status_code", None)
+                            about_text = getattr(about_resp, "text", "")
+                            if about_status == 200:
+                                if _sc_is_challenge_page(about_text):
+                                    self._last_fetch_ok = False
+                                    self._last_http_status = about_status
+                                    self.log_message.emit(
+                                        "[Night SC] Root 403; about returned challenge page, treating as non-actionable."
+                                    )
+                                    return None
+                                self._last_fetch_ok = True
+                                self._last_http_status = about_status
+                                self.log_message.emit(
+                                    "[Night SC] Root 403; using about page fallback."
+                                )
+                                return about_text
+                            if _sc_is_blocked(about_status, about_text):
+                                self._last_fetch_ok = False
+                                self._flag_sc_blocked(status_code=about_status, html=about_text)
+                                return None
+                        except Exception:
+                            pass
                     if _sc_is_blocked(status, text):
                         self._last_fetch_ok = False
                         self._flag_sc_blocked(status_code=status, html=text)
