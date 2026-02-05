@@ -6,6 +6,7 @@ from __future__ import annotations
 import os
 import re
 import unicodedata
+from collections import defaultdict
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
@@ -521,10 +522,14 @@ def dedupe_pre_auto_validate(df: pd.DataFrame, source_dir_col: str, night_mode: 
     return deduped
 
 
-def _select_rows_to_validate(df: pd.DataFrame, scope: str, match_col: str, status_col: str) -> List[int]:
+def _select_rows_to_validate(df: pd.DataFrame, scope: str, match_col: str, status_col: str) -> Tuple[List[int], Dict[str, int]]:
     scope = (scope or "uncertain_only").strip().lower()
+    reasons: Dict[str, int] = defaultdict(int)
     if scope == "all":
-        return list(df.index)
+        indices = list(df.index)
+        if indices:
+            reasons["scope_all"] += len(indices)
+        return indices, reasons
     selected: List[int] = []
     score_series = pd.to_numeric(df.get(match_col, 0), errors="coerce").fillna(0.0)
     status_series = df.get(status_col, "").fillna("").astype(str)
@@ -533,10 +538,12 @@ def _select_rows_to_validate(df: pd.DataFrame, scope: str, match_col: str, statu
         status = _normalise_status(status_series.iloc[idx]) if idx < len(status_series) else ""
         if status in {"REVIEW", "BLOCKED", "BLOCK"}:
             selected.append(idx)
+            reasons["status_flagged"] += 1
             continue
         if UNCERTAIN_SCORE_LOW <= score <= UNCERTAIN_SCORE_HIGH:
             selected.append(idx)
-    return selected
+            reasons["uncertain_score"] += 1
+    return selected, reasons
 
 
 def _update_status_with_origin(row: pd.Series, result: OriginMatchResult) -> Tuple[str, float]:
@@ -620,8 +627,13 @@ def run_auto_validate(
 
     match_col = "match_score_overall"
     status_col = "final_status"
-    validate_indices = _select_rows_to_validate(df, validate_scope, match_col, status_col)
+    validate_indices, selection_reasons = _select_rows_to_validate(df, validate_scope, match_col, status_col)
     _log(logger, f"[Auto-Validate] Loaded {len(df)} rows, validating {len(validate_indices)} selected rows...")
+    if selection_reasons:
+        reason_summary = ", ".join(f"{key}={selection_reasons[key]}" for key in sorted(selection_reasons))
+    else:
+        reason_summary = "none"
+    _log(logger, f"[Auto-Validate] Selection reasons: {reason_summary}")
 
     html_cache: Dict[str, Optional[str]] = {}
     session = requests.Session()
