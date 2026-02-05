@@ -649,6 +649,28 @@ class EnrichmentPayload:
         return " | ".join(part for part in parts if part) or (self.source_dir or "")
 
 
+def _format_outcome_suffix(
+    fetch_ok: Optional[bool] = None,
+    actionable: Optional[bool] = None,
+    http_status: Optional[int] = None,
+) -> str:
+    parts = []
+    if fetch_ok is not None:
+        parts.append(f"fetch_ok={fetch_ok}")
+    if http_status is not None:
+        parts.append(f"http={http_status}")
+    if actionable is not None:
+        parts.append(f"actionable={actionable}")
+    return f" | {' '.join(parts)}" if parts else ""
+
+
+def _payload_actionable(payload: Optional[EnrichmentPayload]) -> Optional[bool]:
+    if payload is None:
+        return None
+    has_fields = bool(payload.socials or payload.websites or payload.emails or payload.link_hubs)
+    return has_fields
+
+
 @dataclass
 class DirectoryIndex:
     source: str
@@ -3478,8 +3500,14 @@ class CrossDirectoryEnricherWorker(QThread):
         global _SC_HEALTHCHECK_LOGGED
         self._sc_blocked_for_row = True
         if not _SC_HEALTHCHECK_LOGGED:
+            suffix = _format_outcome_suffix(
+                fetch_ok=False,
+                actionable=False,
+                http_status=status_code if status_code is not None else 403,
+            )
             self.log_message.emit(
-                "[Night SC] Healthcheck: blocked_403 detected (SoundCloud returned 403/blocked page). Marking SC rows as blocked_403."
+                "[Night SC] Healthcheck: blocked_403 detected (SoundCloud returned 403/blocked page). "
+                f"Marking SC rows as blocked_403.{suffix}"
             )
             _SC_HEALTHCHECK_LOGGED = True
         self._set_platform_state("soundcloud", "skipped")
@@ -3864,11 +3892,23 @@ class CrossDirectoryEnricherWorker(QThread):
                     return (None, 0.0, 0.0)
             confidence = _bandcamp_confidence(artist_name, display_name, profile_url, song_title=song_title if query != artist_name else "")
             rank_confidence = _locale_rank_score(confidence, display_name, profile_url)
-            self.log_message.emit(
-                f"[Enricher] Bandcamp Enrich: best candidate '{profile_url}' for '{artist_name}' has confidence={confidence:.2f}."
-            )
+            payload: Optional[EnrichmentPayload] = None
+            outcome_suffix = ""
             if confidence >= MIN_BC_CONFIDENCE:
                 payload = self._fetch_profile_and_build(profile_url, "bandcamp", confidence=confidence)
+                fetch_ok_flag = getattr(self, "_last_fetch_ok", None)
+                actionable_flag = _payload_actionable(payload)
+                if fetch_ok_flag is False and actionable_flag is None:
+                    actionable_flag = False
+                outcome_suffix = _format_outcome_suffix(
+                    fetch_ok=fetch_ok_flag,
+                    actionable=actionable_flag,
+                    http_status=getattr(self, "_last_http_status", None),
+                )
+            self.log_message.emit(
+                f"[Enricher] Bandcamp Enrich: best candidate '{profile_url}' for '{artist_name}' has confidence={confidence:.2f}{outcome_suffix}"
+            )
+            if confidence >= MIN_BC_CONFIDENCE:
                 if payload:
                     payload.match_score = self._compute_match_score_for_candidate(
                         display_name or profile_url,
@@ -3992,11 +4032,20 @@ class CrossDirectoryEnricherWorker(QThread):
                 )
                 self._set_platform_state("soundcloud", "skipped")
                 return None
+        payload = self._fetch_profile_and_build(best_candidate["profile_url"], "soundcloud")
+        fetch_ok_flag = getattr(self, "_last_fetch_ok", None)
+        actionable_flag = _payload_actionable(payload)
+        if fetch_ok_flag is False and actionable_flag is None:
+            actionable_flag = False
+        outcome_suffix = _format_outcome_suffix(
+            fetch_ok=fetch_ok_flag,
+            actionable=actionable_flag,
+            http_status=getattr(self, "_last_http_status", None),
+        )
         self.log_message.emit(
             f"[Enricher] SoundCloud Enrich: best match '{best_candidate.get('display_name') or best_candidate.get('handle')}' "
-            f"({best_candidate.get('profile_url')}), confidence={best_candidate.get('score'):.2f}"
+            f"({best_candidate.get('profile_url')}), confidence={best_candidate.get('score'):.2f}{outcome_suffix}"
         )
-        payload = self._fetch_profile_and_build(best_candidate["profile_url"], "soundcloud")
         if payload:
             payload.match_score = self._compute_match_score_for_candidate(
                 best_candidate.get("display_name") or best_candidate.get("handle") or "",
@@ -4088,6 +4137,18 @@ class CrossDirectoryEnricherWorker(QThread):
             self._set_platform_state("lastfm", "skipped")
             return None
         payload = self._fetch_profile_and_build(profile_url, "lastfm")
+        fetch_ok_flag = getattr(self, "_last_fetch_ok", None)
+        actionable_flag = _payload_actionable(payload)
+        if fetch_ok_flag is False and actionable_flag is None:
+            actionable_flag = False
+        outcome_suffix = _format_outcome_suffix(
+            fetch_ok=fetch_ok_flag,
+            actionable=actionable_flag,
+            http_status=getattr(self, "_last_http_status", None),
+        )
+        self.log_message.emit(
+            f"[Enricher] Last.fm Enrich: candidate '{display_name or profile_url}' for '{artist_name}' has confidence={best_score:.2f}{outcome_suffix}"
+        )
         if payload:
             payload.match_score = best_match_score
             payload.candidate_name = display_name or ""
@@ -4097,6 +4158,9 @@ class CrossDirectoryEnricherWorker(QThread):
         return None
 
     def _fetch_url(self, url: str, label: str) -> Optional[str]:
+        # Track the most recent fetch outcome for instrumentation.
+        self._last_fetch_ok: Optional[bool] = None
+        self._last_http_status: Optional[int] = None
         max_attempts = 2
         attempt = 0
         while attempt < max_attempts:
@@ -4105,17 +4169,22 @@ class CrossDirectoryEnricherWorker(QThread):
                 resp = self.session.get(url, timeout=HTTP_TIMEOUT)
                 status = getattr(resp, "status_code", None)
                 text = getattr(resp, "text", "")
+                self._last_http_status = status
                 if getattr(self, "night_mode", False) and "soundcloud" in label.lower():
                     if _sc_is_blocked(status, text):
+                        self._last_fetch_ok = False
                         self._flag_sc_blocked(status_code=status, html=text)
                         return None
                 resp.raise_for_status()
+                self._last_fetch_ok = True
                 return text
             except requests.HTTPError as exc:
                 status = exc.response.status_code if exc.response is not None else None
+                self._last_http_status = status
                 if getattr(self, "night_mode", False) and "soundcloud" in label.lower():
                     html = exc.response.text if exc.response is not None else ""
                     if _sc_is_blocked(status, html):
+                        self._last_fetch_ok = False
                         self._flag_sc_blocked(status_code=status, html=html)
                         return None
                 if status and 500 <= status < 600 and attempt < max_attempts:
@@ -4124,10 +4193,15 @@ class CrossDirectoryEnricherWorker(QThread):
                     )
                     time.sleep(1.0)
                     continue
-                self.log_message.emit(f"[Enricher] {label} failed: {exc}")
+                self._last_fetch_ok = False
+                suffix = _format_outcome_suffix(fetch_ok=False, actionable=None, http_status=status)
+                self.log_message.emit(f"[Enricher] {label} failed: {exc}{suffix}")
                 return None
             except Exception as exc:
-                self.log_message.emit(f"[Enricher] {label} failed: {exc}")
+                self._last_fetch_ok = False
+                self._last_http_status = None
+                suffix = _format_outcome_suffix(fetch_ok=False)
+                self.log_message.emit(f"[Enricher] {label} failed: {exc}{suffix}")
                 return None
         return None
 
@@ -4143,15 +4217,20 @@ class CrossDirectoryEnricherWorker(QThread):
             html, source_dir, profile_url
         )
         live_key = f"{source_dir}_live"
-        if not (socials or websites or emails or link_hubs):
+        fetch_ok_flag = getattr(self, "_last_fetch_ok", fetched_ok)
+        http_status = getattr(self, "_last_http_status", None)
+        actionable_found = bool(socials or websites or emails or link_hubs)
+        if not actionable_found:
             if source_dir == "soundcloud":
                 # Still return a payload so we can record the matched SoundCloud profile URL even if no external links.
                 self.log_message.emit(
                     f"[Enricher] No outbound links on SoundCloud profile, keeping profile URL: {profile_url}"
+                    f"{_format_outcome_suffix(fetch_ok=fetch_ok_flag, actionable=False, http_status=http_status)}"
                 )
             else:
                 self.log_message.emit(
                     f"[Enricher] No actionable data on {source_dir} profile: {profile_url}"
+                    f"{_format_outcome_suffix(fetch_ok=fetch_ok_flag, actionable=False, http_status=http_status)}"
                 )
                 if (
                     source_dir == "bandcamp"
@@ -4170,6 +4249,7 @@ class CrossDirectoryEnricherWorker(QThread):
                     )
                     self.log_message.emit(
                         f"[Enricher] Bandcamp: safe match but no actionable fields; returning url-only payload url={canonical_url}"
+                        f"{_format_outcome_suffix(fetch_ok=fetch_ok_flag, actionable=False, http_status=http_status)}"
                     )
                     return payload
                 return None
