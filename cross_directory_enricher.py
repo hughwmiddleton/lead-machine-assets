@@ -2612,6 +2612,30 @@ def _sc_handle_from_url(url: str) -> str:
         return ""
 
 
+def _sc_handle_from_profile_url(url: str) -> Optional[str]:
+    """
+    Extract a SoundCloud handle from a profile URL, ignoring query/fragment noise.
+    Returns None when the URL is not a SoundCloud profile.
+    """
+    if not url:
+        return None
+    try:
+        normalised = _normalise_url(url)
+        if not normalised:
+            return None
+        parsed = urllib.parse.urlparse(normalised)
+        host = parsed.netloc.lower()
+        if host.startswith("www."):
+            host = host[4:]
+        if host != "soundcloud.com":
+            return None
+        path = parsed.path.split("?", 1)[0]
+        handle = path.strip("/").split("/")[0]
+        return handle.lower() or None
+    except Exception:
+        return None
+
+
 def _sc_normalise_text(value: str) -> str:
     cleaned = _normalise_for_soundcloud(value or "")
     return cleaned.lower().strip()
@@ -3965,6 +3989,8 @@ class CrossDirectoryEnricherWorker(QThread):
         if not sc_query:
             self._set_platform_state("soundcloud", "skipped")
             return None
+        engine = os.getenv("NIGHTMODE_SC_ENGINE", "current").lower()
+        use_t007_engine = bool(getattr(self, "night_mode", False) and engine == "t007")
         location_hint = _clean_cell(getattr(self, "_live_context", {}).get("location", ""))
         track_hint = _clean_cell(getattr(self, "_live_context", {}).get("track", ""))
         genre_hint = _clean_cell(getattr(self, "_live_context", {}).get("genre", ""))
@@ -4032,7 +4058,83 @@ class CrossDirectoryEnricherWorker(QThread):
                 )
                 self._set_platform_state("soundcloud", "skipped")
                 return None
-        payload = self._fetch_profile_and_build(best_candidate["profile_url"], "soundcloud")
+        profile_url = best_candidate["profile_url"]
+
+        def _payload_from_t007(data: Dict[str, Any]) -> EnrichmentPayload:
+            socials: Set[str] = set()
+            websites: Set[str] = set()
+            emails: Set[str] = set()
+            link_hubs: Set[str] = set()
+            extra_social_hosts = ("spotify.com", "bandcamp.com")
+            for email in data.get("emails") or []:
+                addr = (email or "").strip().lower()
+                if addr:
+                    emails.add(addr)
+            for url in data.get("external_urls") or []:
+                normalised = _normalise_url(url)
+                if not normalised or _is_noise_url(normalised):
+                    continue
+                parsed = urllib.parse.urlparse(normalised)
+                host = parsed.netloc.lower()
+                path_lower = (parsed.path or "").lower()
+                if host.startswith("www."):
+                    host = host[4:]
+                if host.endswith("soundcloud.com"):
+                    continue
+                if host in LINK_HUB_HOSTS:
+                    link_hubs.add(normalised)
+                    websites.add(normalised)
+                    continue
+                if any(host.endswith(domain) for domain in SOCIAL_HOST_WHITELIST) or any(
+                    host.endswith(domain) for domain in extra_social_hosts
+                ):
+                    socials.add(normalised)
+                    continue
+                if host in JUNK_WEBSITE_HOSTS:
+                    continue
+                if any(keyword in path_lower for keyword in JUNK_WEBSITE_PATH_KEYWORDS):
+                    continue
+                websites.add(normalised)
+            return EnrichmentPayload(
+                socials=socials,
+                websites=websites,
+                emails=emails,
+                link_hubs=link_hubs,
+                source_dir="soundcloud",
+                source_url=profile_url,
+                source_detail=_format_source_display("soundcloud_live"),
+            )
+
+        payload: Optional[EnrichmentPayload] = None
+        if use_t007_engine:
+            handle = _sc_handle_from_profile_url(profile_url) or best_candidate.get("handle") or ""
+            self.log_message.emit(
+                f"[Enricher] SoundCloud Enrich: engine=t007 handle={handle or '<unknown>'} url={profile_url}"
+            )
+            self._fetch_url(profile_url, label="soundcloud profile preflight", max_attempts=1)
+            if getattr(self, "_sc_blocked_for_row", False):
+                return None
+            try:
+                spec = importlib.util.spec_from_file_location(
+                    "lead_machine_final_update_5_sc", os.path.join(BASE_DIR, "Lead Machine (Final Update 5).py")
+                )
+                sc_helper = None
+                if spec and spec.loader:
+                    module = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(module)
+                    sc_helper = getattr(module, "_sc_fetch_contact_payload", None)
+                if sc_helper and handle:
+                    sc_result = sc_helper(handle) or {}
+                    sc_data = sc_result.get("data") or {}
+                    payload = _payload_from_t007(sc_data)
+                    self._last_fetch_ok = True
+            except Exception as exc:
+                self.log_message.emit(
+                    f"[Enricher] SoundCloud Enrich: engine=t007 fallback to legacy ({exc})"
+                )
+                payload = None
+        if payload is None:
+            payload = self._fetch_profile_and_build(profile_url, "soundcloud")
         fetch_ok_flag = getattr(self, "_last_fetch_ok", None)
         actionable_flag = _payload_actionable(payload)
         if fetch_ok_flag is False and actionable_flag is None:
@@ -4157,11 +4259,10 @@ class CrossDirectoryEnricherWorker(QThread):
         self._set_platform_state("lastfm", "skipped")
         return None
 
-    def _fetch_url(self, url: str, label: str) -> Optional[str]:
+    def _fetch_url(self, url: str, label: str, max_attempts: int = 2) -> Optional[str]:
         # Track the most recent fetch outcome for instrumentation.
         self._last_fetch_ok: Optional[bool] = None
         self._last_http_status: Optional[int] = None
-        max_attempts = 2
         attempt = 0
         while attempt < max_attempts:
             attempt += 1
