@@ -24,6 +24,9 @@ export SPOTIFY_REFRESH_TOKEN="AQB1vtP347IrhWrFAScJ_TwBSK0ZTiEdAbhxrmGf82vqmZIANM
 unset SC_DEBUG_LATEST
 export FB_DEBUG_CANDIDATES=1
 
+# Night Mode SoundCloud engine switch (default is "current")
+export NIGHTMODE_SC_ENGINE="t007"
+
 # (Optional) Install dependencies if needed
 # pip install pandas tqdm selenium beautifulsoup4 webdriver_manager PyQt5
 
