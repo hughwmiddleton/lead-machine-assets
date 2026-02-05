@@ -7427,6 +7427,8 @@ def fb_find_page_and_emails_by_name(
     log_fn=None,
     log_prefix: str = "[FB Enrich]",
     suppress_console: bool = False,
+    allow_soft_pass_category: bool = False,
+    soft_pass_category_allowlist: Optional[List[str]] = None,
 ) -> tuple[str, list[str]]:
     """
     Use Facebook search to locate a page for an artist and scrape emails.
@@ -7485,6 +7487,20 @@ def fb_find_page_and_emails_by_name(
         if any(token in cat for token in NON_MUSIC_CORPORATE):
             return -3.0
         return 0.0
+
+    def _category_is_music_like(category: str) -> bool:
+        allowlist = soft_pass_category_allowlist or [
+            "musician",
+            "musician/band",
+            "band",
+            "artist",
+            "singer",
+            "producer",
+            "dj",
+            "music",
+        ]
+        cat = (category or "").strip().lower()
+        return any(tok in cat for tok in allowlist)
 
     def extract_fb_category(result_element, page_name: str = "") -> tuple[str | None, str | None]:
         """
@@ -8165,8 +8181,11 @@ def fb_find_page_and_emails_by_name(
         _log(f"[FB Enrich] Failed to parse FB page '{best_url}' for '{artist_name}': {exc}")
 
     if not page_music:
-        _log(f"[FB Enrich] Rejecting FB page '{best_url}' for '{artist_name}' after scrape: no music signals found (final gate).")
-        return "", []
+        if allow_soft_pass_category and _category_is_music_like(page_category_text or best_category_raw):
+            _log(f"[FB Enrich] Soft-pass music gate by category allowlist: category='{page_category_text or best_category_raw}' url='{best_url}'")
+        else:
+            _log(f"[FB Enrich] Rejecting FB page '{best_url}' for '{artist_name}' after scrape: no music signals found (final gate).")
+            return "", []
 
     _log(f"[FB Enrich] Best FB candidate for '{artist_name}' -> '{best_name}' (final_score={best_score:.2f}, base_score={best_base_score:.2f}, cat_boost={best_cat_boost:.2f}, category='{cat_display}')")
     candidate_url = normalize_external_url(best_url)
