@@ -800,6 +800,22 @@ def _fetch_fb_about_variants(base_url: str) -> List[str]:
 def _night_fb_has_music_signals(soup: BeautifulSoup, meta: Optional[Dict[str, str]] = None) -> bool:
     if soup is None:
         return False
+
+    def _log_music(signals: List[str], score: int) -> None:
+        if os.getenv("FB_DEBUG_MUSIC_SIGNALS") != "1":
+            return
+        url = ""
+        if meta:
+            url = str(meta.get("url") or "")
+        _log(None, f"[Night FB][music] url='{url}' signals={','.join(signals) or '-'} score={score}")
+
+    def _link_looks_music(anchor) -> bool:
+        text = (anchor.get_text(" ", strip=True) or "").lower()
+        if any(tok in text for tok in ("music", "song", "single", "album", "ep", "dj", "producer", "official video", "official audio")):
+            return True
+        parent_text = (anchor.parent.get_text(" ", strip=True) or "").lower() if anchor and anchor.parent else ""
+        return any(tok in parent_text for tok in ("music", "song", "single", "album", "ep", "dj", "producer"))
+
     aria_values = [(el.get("aria-label") or "") for el in soup.select("[aria-label]")]
     if facebook_enrich is not None:
         for aria_val in aria_values:
@@ -835,7 +851,91 @@ def _night_fb_has_music_signals(soup: BeautifulSoup, meta: Optional[Dict[str, st
         return True
 
     page_text = (soup.get_text(" ", strip=True) or "").lower()
-    return any(token in page_text for token in ("musician", "artist", "band", "music", "singer", "producer", "dj"))
+    keyword_hit = any(token in page_text for token in ("musician", "artist", "band", "music", "singer", "producer", "dj"))
+    if keyword_hit:
+        return True
+
+    score = 0
+    signals: List[str] = []
+
+    music_platform_patterns = (
+        "spotify.com/artist",
+        "spotify.com/track",
+        "soundcloud.com",
+        "bandcamp.com",
+        "music.apple.com",
+    )
+    youtube_patterns = ("youtube.com/channel", "youtube.com/watch", "youtu.be/")
+
+    for anchor in soup.find_all("a", href=True):
+        href = (anchor.get("href") or "").lower()
+        if any(pat in href for pat in music_platform_patterns):
+            score += 3
+            signals.append("platform_link")
+            break
+        if any(pat in href for pat in youtube_patterns):
+            if _link_looks_music(anchor):
+                score += 3
+                signals.append("platform_link")
+                break
+
+    aria_music_hits = [val for val in aria_values if "music" in (val or "").lower() or "song" in (val or "").lower()]
+    text_music_sections = []
+    if page_text:
+        for phrase in ("top songs", "popular songs", "singles & eps", "singles and eps"):
+            if phrase in page_text:
+                text_music_sections.append(phrase)
+    if aria_music_hits or text_music_sections:
+        score += 2
+        signals.append("fb_music_module")
+
+    platform_keywords_present = "platform_link" in signals or any(tok in page_text for tok in ("spotify", "soundcloud", "bandcamp", "apple music", "youtube"))
+    release_phrases = (
+        "new single",
+        "new ep",
+        "new album",
+        "debut single",
+        "out now",
+        "streaming now",
+        "listen on spotify",
+    )
+    if page_text:
+        title_slug = _slugify(str(meta.get("title") or "")) if meta else ""
+        for phrase in release_phrases:
+            if phrase in page_text:
+                if platform_keywords_present or (title_slug and title_slug in page_text):
+                    score += 1
+                    signals.append("release_language")
+                    break
+
+    try:
+        import json  # local import to avoid global dependency cost
+
+        for script in soup.find_all("script", attrs={"type": "application/ld+json"}):
+            raw_json = script.string or script.get_text() or ""
+            if not raw_json:
+                continue
+            parsed = json.loads(raw_json)
+            objs = parsed if isinstance(parsed, list) else [parsed]
+            for obj in objs:
+                if not isinstance(obj, dict):
+                    continue
+                obj_type = obj.get("@type") or obj.get("type")
+                if isinstance(obj_type, list):
+                    type_vals = [str(t).lower() for t in obj_type]
+                else:
+                    type_vals = [str(obj_type).lower()] if obj_type else []
+                if any(t in ("musicgroup", "musicrecording", "musicalbum") for t in type_vals):
+                    score += 2
+                    signals.append("ld_json_music")
+                    raise StopIteration
+    except StopIteration:
+        pass
+    except Exception:
+        pass
+
+    _log_music(signals, score)
+    return score >= 2
 
 
 def _is_garbage_fb_candidate(title: str, url: str, category: Optional[str]) -> bool:

@@ -1,0 +1,41 @@
+{
+  "selector": "div[role=\"main\"] div[role=\"feed\"]",
+  "containers_found": 1,
+  "anchors_in_scope": 18,
+  "candidates_pre_url_gate": 18,
+  "candidates_post_url_gate": 9,
+  "pre_urls": [
+    "https://www.facebook.com/profile.php?id=61554027368639&__tn__=%3C",
+    "https://www.facebook.com/profile.php?id=61554027368639",
+    "https://www.facebook.com/profile.php?id=61554696500093&__tn__=%3C",
+    "https://www.facebook.com/profile.php?id=61554696500093",
+    "https://www.facebook.com/profile.php?id=61559695630614&__tn__=%3C",
+    "https://www.facebook.com/profile.php?id=61559695630614",
+    "https://www.facebook.com/profile.php?id=100057338685925&__tn__=%3C",
+    "https://www.facebook.com/profile.php?id=100057338685925",
+    "https://www.facebook.com/lysofiagroup?__tn__=%3C",
+    "https://www.facebook.com/lysofiagroup",
+    "https://www.facebook.com/Sofiaclothes.ly?__tn__=%3C",
+    "https://www.facebook.com/Sofiaclothes.ly",
+    "https://www.facebook.com/LyAurbandress?__tn__=%3C",
+    "https://www.facebook.com/LyAurbandress",
+    "https://www.facebook.com/profile.php?id=61576006547890&__tn__=%3C",
+    "https://www.facebook.com/profile.php?id=61576006547890",
+    "https://www.facebook.com/Sofia250ly?__tn__=%3C",
+    "https://www.facebook.com/Sofia250ly"
+  ],
+  "post_urls": [
+    "https://www.facebook.com/profile.php?id=61554027368639",
+    "https://www.facebook.com/profile.php?id=61554696500093",
+    "https://www.facebook.com/profile.php?id=61559695630614",
+    "https://www.facebook.com/profile.php?id=100057338685925",
+    "https://www.facebook.com/lysofiagroup",
+    "https://www.facebook.com/Sofiaclothes.ly",
+    "https://www.facebook.com/LyAurbandress",
+    "https://www.facebook.com/profile.php?id=61576006547890",
+    "https://www.facebook.com/Sofia250ly"
+  ],
+  "warnings": [],
+  "timestamp": 1770384996,
+  "search_name": "Sofia Ly"
+}
