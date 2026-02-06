@@ -833,23 +833,39 @@ def _parse_search_candidates(html: str, logger: LoggerFn = None, search_name: Op
     raw_candidates = candidates
     rejected_gate_samples: List[str] = []
     candidates = []
+    hard_gate_rejected = 0
     for cand in raw_candidates:
-        url_val = getattr(cand, "url", "")
-        if fb_is_allowed_profile_candidate_url(url_val):
+        url_val = (getattr(cand, "url", "") or "").strip()
+
+        if not url_val:
+            if gate_debug and len(rejected_gate_samples) < 5:
+                rejected_gate_samples.append(f"{url_val!r} reason=missing_url")
+            continue
+
+        try:
+            passes_gate = fb_is_allowed_profile_candidate_url(url_val)
+        except Exception:
+            passes_gate = False
+
+        if passes_gate:
             candidates.append(cand)
             continue
+
+        hard_gate_rejected += 1
         if gate_debug and len(rejected_gate_samples) < 5:
-            rejected_gate_samples.append(url_val)
+            rejected_gate_samples.append(f"{url_val!r} reason=hard_gate")
     deduped = _dedupe_candidates(candidates)
     # Stable preference for music-hinted candidates without changing scoring math.
     deduped = sorted(deduped, key=lambda c: 0 if getattr(c, "music_hint", False) else 1)
     if gate_debug:
         # Quick sanity: grep FB gate logs for /watch, /reel, /events/, notif_id to ensure the hard gate is holding.
-        before = len(raw_candidates)
-        after = len(candidates)
-        _log(logger, f"[Night FB][Gate] candidates before={before} after={after} rejected={before - after}")
+        raw_count = len(raw_candidates)
+        post_gate_count = len(deduped)
+        _log(logger, f"[Night FB][Gate] raw={raw_count} hard_rejected={hard_gate_rejected} after={post_gate_count}")
+        assert hard_gate_rejected <= raw_count
+        assert post_gate_count <= raw_count
         for sample in rejected_gate_samples:
-            _log(logger, f"[Night FB][Gate] rejected url={sample!r}")
+            _log(logger, f"[Night FB][Gate][reject] {sample}")
     if os.getenv("FB_DEBUG_CANDIDATES") == "1":
         preview = deduped[:5]
         lines = [
