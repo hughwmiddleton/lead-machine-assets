@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import unicodedata
 import urllib.parse
@@ -1177,6 +1178,39 @@ def is_junk_fb_candidate_url(url: str) -> bool:
     except Exception:
         return False
     return False
+
+
+def fb_reason_code_split(url: str, existing_reason: str) -> str:
+    """
+    Split legacy 'business_notif' reason into notif_ui vs business_ui buckets.
+    """
+    if existing_reason != "business_notif":
+        return existing_reason
+    url_lower = (url or "").lower()
+    if not url_lower:
+        return existing_reason
+
+    business_tokens = ("business.facebook.com", "/latest/composer", "/business/")
+    notif_tokens = ("ref=notif", "notif_id", "notif_t", "/notifications", "/events/", "/watch", "/reel", "/afad")
+
+    if any(tok in url_lower for tok in business_tokens):
+        return "business_ui"
+    if any(tok in url_lower for tok in notif_tokens):
+        return "notif_ui"
+    return existing_reason
+
+
+def _fb_reason_code_split_self_check() -> None:
+    assert fb_reason_code_split("https://facebook.com/watch/abc", "business_notif") == "notif_ui"
+    assert fb_reason_code_split("https://facebook.com/notifications/?ref=notif", "business_notif") == "notif_ui"
+    assert fb_reason_code_split("https://business.facebook.com/latest/composer/123", "business_notif") == "business_ui"
+    assert fb_reason_code_split("https://facebook.com/business/somepage", "business_notif") == "business_ui"
+    assert fb_reason_code_split("https://facebook.com/someartist", "business_notif") == "business_notif"
+    assert fb_reason_code_split("https://facebook.com/watch/abc", "other_reason") == "other_reason"
+
+
+if os.getenv("FB_DEBUG_REASON_SPLIT") == "1":
+    _fb_reason_code_split_self_check()
 
 
 def select_best_facebook_candidate(

@@ -52,6 +52,7 @@ from facebook_enrich import (
     _looks_corporate,
     _looks_music_related,
     is_junk_fb_candidate_url,
+    fb_reason_code_split,
 )
 
 # ---------------------------------------------------------------------------
@@ -1343,7 +1344,8 @@ class FacebookSearchClient:
             try:
                 if is_junk_fb_candidate_url(normalised):
                     dropped_business += 1
-                    _safe_log(self.logger, "Dropped junk FB candidate url=%r reason=business_notif", normalised)
+                    reason = fb_reason_code_split(normalised, "business_notif")
+                    _safe_log(self.logger, "Dropped junk FB candidate url=%r reason=%s", normalised, reason)
                     continue
             except Exception:
                 pass

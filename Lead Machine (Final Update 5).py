@@ -7728,6 +7728,7 @@ def fb_find_page_and_emails_by_name(
         score_fb_candidate,
         select_best_facebook_candidate,
         is_junk_fb_candidate_url,
+        fb_reason_code_split,
     )
 
     def _is_corporate_page(name: str, url: str, category: str | None) -> bool:
@@ -7798,7 +7799,8 @@ def fb_find_page_and_emails_by_name(
             href = "https://www.facebook.com" + href
         if is_junk_fb_candidate_url(href):
             dropped_business += 1
-            _log(f"[FB Enrich] Dropped junk FB candidate url={href!r} reason=business_notif")
+            reason = fb_reason_code_split(href, "business_notif")
+            _log(f"[FB Enrich] Dropped junk FB candidate url={href!r} reason={reason}")
             continue
         if not _fb_is_real_page_url(href):
             continue

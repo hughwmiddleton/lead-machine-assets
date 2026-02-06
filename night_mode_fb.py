@@ -32,12 +32,14 @@ try:
 except Exception:  # pragma: no cover - defensive import
     facebook_enrich = None  # type: ignore
 try:
-    from facebook_enrich import is_fb_login_redirect, is_junk_fb_candidate_url  # type: ignore
+    from facebook_enrich import is_fb_login_redirect, is_junk_fb_candidate_url, fb_reason_code_split  # type: ignore
 except Exception:  # pragma: no cover - defensive
     def is_fb_login_redirect(url: str) -> bool:  # type: ignore
         return False
     def is_junk_fb_candidate_url(url: str) -> bool:  # type: ignore
         return False
+    def fb_reason_code_split(url: str, existing_reason: str) -> str:  # type: ignore
+        return existing_reason
 
 LoggerFn = Optional[Union[Callable[[str], None], logging.Logger]]
 
@@ -797,7 +799,8 @@ def _parse_search_candidates(html: str, logger: LoggerFn = None, search_name: Op
         try:
             if is_junk_fb_candidate_url(href):
                 dropped_business += 1
-                _log(logger, f"[Night FB] Dropped junk FB candidate url={href!r} reason=business_notif")
+                reason = fb_reason_code_split(href, "business_notif")
+                _log(logger, f"[Night FB] Dropped junk FB candidate url={href!r} reason={reason}")
                 continue
         except Exception:
             pass
@@ -1215,7 +1218,8 @@ class NightModeFacebookEnricher:
             return None
         url_lower = url.lower()
         if ("business.facebook.com" in url_lower) or ("/latest/composer" in url_lower) or ("notif_id=" in url_lower):
-            _log(self.logger, f"[Night FB] Dropped junk FB candidate url={url!r} reason=business_notif (post-select)")
+            reason = fb_reason_code_split(url, "business_notif")
+            _log(self.logger, f"[Night FB] Dropped junk FB candidate url={url!r} reason={reason} (post-select)")
             return None
 
         name = getattr(candidate, "name", None)
