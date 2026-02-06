@@ -629,6 +629,9 @@ if os.getenv("FB_DEBUG_CAND_URL_GATE") == "1":
         assert not _fb_is_candidate_url_allowed("https://www.facebook.com/groups/foo")
         assert not _fb_is_candidate_url_allowed("https://www.facebook.com/someband/about")
         assert not _fb_is_candidate_url_allowed("https://www.facebook.com/profile.php?id=12&foo=1")
+        assert _normalise_fb_url("https://www.facebook.com/shelaibd")
+        assert _normalise_fb_url("https://www.facebook.com/profile.php?id=61554027368639")
+        assert _normalise_fb_url("https://web.facebook.com/someband")
     except Exception:
         pass
 
@@ -1243,25 +1246,51 @@ class NightModeFacebookEnricher:
             ordered_candidates.append(cand)
 
         gate_debug = os.getenv("FB_DEBUG_CANDIDATES") == "1"
+        url_flow_debug = gate_debug or os.getenv("FB_DEBUG_CAND_URL_FLOW") == "1"
 
         for cand in ordered_candidates:
-            fb_url = _candidate_url(cand)
-            url = _normalise_fb_url(fb_url or "")
-            if (not url) or _is_junk_fb_candidate(url):
+            raw_url = _candidate_url(cand)
+            norm_url = _normalise_fb_url(raw_url or "")
+            is_junk = bool(norm_url) and _is_junk_fb_candidate(norm_url)
+
+            if url_flow_debug:
+                try:
+                    allowlisted_probe = _fb_is_candidate_url_allowed(norm_url) if norm_url else False
+                except Exception as exc:
+                    allowlisted_probe = f"error:{exc}"
+                _log(
+                    self.logger,
+                    f"[Night FB][debug] cand_url_flow raw={raw_url!r} norm={norm_url!r} junk={is_junk} allowlisted={allowlisted_probe}"
+                )
+
+            if not raw_url:
                 debug_payload = f" cand={cand!r}" if gate_debug else ""
-                _log(self.logger, f"[Night FB] Candidate missing URL for '{artist}', skipping.{debug_payload}")
+                _log(self.logger, f"[Night FB] Candidate URL missing for '{artist}', skipping.{debug_payload}")
                 continue
-            url_lower = url.lower()
-            if ("business.facebook.com" in url_lower) or ("/latest/composer" in url_lower) or ("notif_id=" in url_lower):
-                reason = fb_reason_code_split(url, "business_notif")
-                _log(self.logger, f"[Night FB] Dropped junk FB candidate url={url!r} reason={reason} (post-select)")
+
+            if not norm_url:
+                debug_payload = f" raw_url={raw_url!r} cand={cand!r}" if gate_debug else ""
+                _log(self.logger, f"[Night FB] Candidate URL normalize_failed for '{artist}', skipping.{debug_payload}")
                 continue
+
+            if is_junk:
+                reason = fb_reason_code_split(norm_url, "business_notif")
+                _log(self.logger, f"[Night FB] Dropped junk FB candidate url={norm_url!r} reason={reason} (post-select)")
+                if gate_debug:
+                    _log(self.logger, f"[Night FB] Candidate URL junk for '{artist}', skipping. reason={reason} raw_url={raw_url!r} cand={cand!r}")
+                continue
+
             try:
-                if not _fb_is_candidate_url_allowed(url):
-                    _log(self.logger, f"[Night FB] Rejected FB candidate url={url!r} due to allowlist.")
+                if not _fb_is_candidate_url_allowed(norm_url):
+                    msg = f"[Night FB] Rejected FB candidate url={norm_url!r} due to allowlist."
+                    if gate_debug:
+                        msg += f" raw_url={raw_url!r} cand={cand!r}"
+                    _log(self.logger, msg)
                     continue
             except Exception:
-                pass
+                if gate_debug:
+                    _log(self.logger, f"[Night FB] Allowlist check errored for url={norm_url!r}, skipping cand={cand!r}")
+                continue
 
             name = getattr(cand, "name", None)
             category = getattr(cand, "category", None)
@@ -1269,8 +1298,8 @@ class NightModeFacebookEnricher:
                 name = name or cand.get("name")
                 category = category or cand.get("category")
 
-            _log(self.logger, f"[Night FB] Selected FB candidate '{name or url}' -> {url} (category='{category or ''}')")
-            return url
+            _log(self.logger, f"[Night FB] Selected FB candidate '{name or norm_url}' -> {norm_url} (category='{category or ''}')")
+            return norm_url
 
         _log(self.logger, f"[Night FB] No usable FB candidates for '{artist}' after URL validation.")
         return None
