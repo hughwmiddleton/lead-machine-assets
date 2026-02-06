@@ -74,11 +74,6 @@ FALLBACK_SOCIAL_DOMAINS = {
     "facebook.com": "facebook",
     "twitter.com": "twitter",
     "x.com": "twitter",
-    "tiktok.com": "website",
-    "youtube.com": "website",
-    "youtu.be": "website",
-    "soundcloud.com": "website",
-    "bandcamp.com": "website",
 }
 LOCATION_KEYS = ("city", "hometown", "origin", "location")
 GENRE_KEYS = ("genres", "genreNames", "genre_names")
@@ -307,12 +302,15 @@ def enrich_spotify_rows_with_about_links(
             continue
 
         payload = _fetch_about_payload(session, artist_id, logger)
-        if payload is not None:
-            _ABOUT_CACHE[artist_id] = payload
-            if payload:
-                _apply_enrichment(row, payload)
-            else:
-                _apply_socials(row, {})
+        if payload is None:
+            if HTTP_REQUEST_DELAY:
+                time.sleep(HTTP_REQUEST_DELAY)
+            _emit_progress(progress_callback, idx, total)
+            continue
+
+        _ABOUT_CACHE[artist_id] = payload
+        if payload:
+            _apply_enrichment(row, payload)
         else:
             _apply_socials(row, {})
         if HTTP_REQUEST_DELAY:

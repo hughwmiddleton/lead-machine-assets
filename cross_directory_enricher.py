@@ -4175,8 +4175,6 @@ class CrossDirectoryEnricherWorker(QThread):
         if getattr(self, "_night_sc_breaker_tripped", False):
             attempt.challenge = True
             attempt.reason = attempt.reason or "challenge_page"
-            attempt.status = attempt.status or "non_actionable_challenge"
-            attempt.confidence = attempt.confidence or 0.0
             try:
                 parsed = urlparse(url)
                 host_path = f"{parsed.netloc}{parsed.path}"

@@ -392,7 +392,10 @@ class NightPersistentFacebookSession:
                     pass
                 try:
                     self.driver = self.driver_factory()
-                    healthy_retry, reason_retry = _session_looks_healthy(self.driver)
+                    try:
+                        healthy_retry, reason_retry = _session_looks_healthy(self.driver)
+                    except Exception:
+                        healthy_retry, reason_retry = False, "exception"
                     if not healthy_retry:
                         _log(self.logger, f"[Night FB] Session still unhealthy; continuing but FB results may be limited. reason={reason_retry}")
                 except Exception:
