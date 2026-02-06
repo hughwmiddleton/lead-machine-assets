@@ -779,6 +779,16 @@ def _fetch_fb_about_variants(base_url: str) -> List[str]:
     normalized = (base_url or "").strip().rstrip("/")
     if not normalized:
         return []
+    parsed = urllib.parse.urlparse(normalized)
+    if parsed.path == "/profile.php":
+        qs = urllib.parse.parse_qs(parsed.query, keep_blank_values=False)
+        fb_id = (qs.get("id") or [None])[0]
+        if fb_id and str(fb_id).isdigit():
+            return [
+                f"https://www.facebook.com/profile.php?id={fb_id}&sk=about_contact_and_basic_info",
+                f"https://www.facebook.com/profile.php?id={fb_id}&sk=about",
+            ]
+        return []
     variants = [
         f"{normalized}/about_contact_and_basic_info",
         f"{normalized}/about_details",
@@ -1394,7 +1404,18 @@ class NightModeFacebookEnricher:
                 _log(self.logger, f"[Night FB] Soft-pass music gate by category allowlist: category='{meta_category}' url='{resolved_url}'")
             else:
                 _log(self.logger, f"[Night FB] No music signals detected on FB page {resolved_url}, skipping.")
-                return None
+                night_result = self._build_result(
+                    [],
+                    str(row.get("Email_All", "") or ""),
+                    resolved_url,
+                    artist_name,
+                    allow_empty=True,
+                )
+                if night_result:
+                    night_result.email_source = ""
+                    night_result.about_attempted = "no"
+                    night_result.about_result = "no_music_signals"
+                return night_result, []
 
         about_attempted = "no"
         about_result = ""
@@ -1449,10 +1470,11 @@ class NightModeFacebookEnricher:
         email_source: str = "main",
         about_attempted: str = "no",
         about_result: str = "",
+        allow_empty: bool = False,
     ) -> Optional[NightModeFacebookResult]:
-        if not emails:
+        if not emails and not allow_empty:
             return None
-        primary = _choose_primary_email(emails, artist_name)
+        primary = _choose_primary_email(emails, artist_name) if emails else None
         merged_all = _merge_email_all(email_all_existing, emails)
         email_type = "fb_night"
         return NightModeFacebookResult(
@@ -1468,6 +1490,8 @@ class NightModeFacebookEnricher:
     def _apply_night_fb_result(
         self, target_row: Dict[str, str], night_result: NightModeFacebookResult, emails: List[str], page_url: str
     ) -> Dict[str, str]:
+        if not night_result:
+            return target_row
         target_row["Email"] = night_result.email or target_row.get("Email", "")
         target_row["Email_All"] = night_result.email_all
         target_row["Email_Type"] = night_result.email_type
