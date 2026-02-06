@@ -244,26 +244,49 @@ def _is_driver_authenticated(driver) -> bool:
     return _has_cookie(driver, "c_user")
 
 
-def _session_looks_healthy(driver) -> bool:
+def _session_looks_healthy(driver) -> Tuple[bool, str]:
     """
     Quick FB session health probe to catch login/verification walls.
+    Returns (healthy, reason_code).
     """
     try:
         driver.get("https://www.facebook.com/")
+        time.sleep(0.6)
         current_url = (getattr(driver, "current_url", "") or "").lower()
         page_source = (getattr(driver, "page_source", "") or "").lower()
+        time.sleep(0.4)
+        # second sampling to reduce transient blanks
+        current_url = (getattr(driver, "current_url", "") or "").lower() or current_url
+        page_source = (getattr(driver, "page_source", "") or "").lower() or page_source
     except Exception:
-        return False
+        return False, "exception"
 
-    bad_url_tokens = ("login", "checkpoint", "recover", "consent", "two_factor", "two-factor", "mfa")
-    if any(tok in current_url for tok in bad_url_tokens):
-        return False
+    bad_url_tokens = (
+        ("login", "redirect_login"),
+        ("checkpoint", "checkpoint"),
+        ("consent", "consent"),
+        ("recover", "recover"),
+        ("two_factor", "two_factor"),
+        ("two-factor", "two_factor"),
+        ("mfa", "two_factor"),
+    )
+    for token, reason in bad_url_tokens:
+        if token in current_url:
+            return False, reason
 
-    bad_html_tokens = ("checkpoint", "consent", "log in", "two-factor", "security check")
-    if any(tok in page_source for tok in bad_html_tokens):
-        return False
+    bad_html_tokens = (
+        ("checkpoint", "checkpoint"),
+        ("consent", "consent"),
+        ("log in", "redirect_login"),
+        ("two-factor", "two_factor"),
+        ("security check", "checkpoint"),
+        ("captcha", "captcha"),
+    )
+    for token, reason in bad_html_tokens:
+        if token in page_source:
+            return False, reason
 
-    return True
+    return True, ""
 
 
 def _create_fb_driver_night_mode(headless: bool, logger: LoggerFn = None):
@@ -350,19 +373,28 @@ class NightPersistentFacebookSession:
         if authed:
             old_driver = self.driver
             try:
-                healthy = _session_looks_healthy(self.driver)
+                healthy, reason = _session_looks_healthy(self.driver)
             except Exception:
-                healthy = False
+                healthy, reason = False, "exception"
             if not healthy:
-                _log(self.logger, "[Night FB] Session unhealthy; restarting driver once...")
+                # Try a neutral authed page before restarting.
+                try:
+                    self.driver.get("https://www.facebook.com/me")
+                    time.sleep(1.0)
+                    healthy, reason = _session_looks_healthy(self.driver)
+                except Exception:
+                    healthy, reason = False, reason or "exception"
+            if not healthy:
+                _log(self.logger, f"[Night FB] Session unhealthy; restarting driver once... reason={reason}")
                 try:
                     self.driver.quit()
                 except Exception:
                     pass
                 try:
                     self.driver = self.driver_factory()
-                    if not _session_looks_healthy(self.driver):
-                        _log(self.logger, "[Night FB] Session still unhealthy; continuing but FB results may be limited.")
+                    healthy_retry, reason_retry = _session_looks_healthy(self.driver)
+                    if not healthy_retry:
+                        _log(self.logger, f"[Night FB] Session still unhealthy; continuing but FB results may be limited. reason={reason_retry}")
                 except Exception:
                     _log(self.logger, "[Night FB] Session restart failed; continuing but FB results may be limited.")
                     self.driver = old_driver

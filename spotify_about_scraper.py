@@ -68,6 +68,18 @@ NON_WEBSITE_DOMAINS = {
     "linktr.ee",
     "beacons.ai",
 }
+FALLBACK_SOCIAL_DOMAINS = {
+    "instagram.com": "instagram",
+    "instagr.am": "instagram",
+    "facebook.com": "facebook",
+    "twitter.com": "twitter",
+    "x.com": "twitter",
+    "tiktok.com": "website",
+    "youtube.com": "website",
+    "youtu.be": "website",
+    "soundcloud.com": "website",
+    "bandcamp.com": "website",
+}
 LOCATION_KEYS = ("city", "hometown", "origin", "location")
 GENRE_KEYS = ("genres", "genreNames", "genre_names")
 
@@ -198,6 +210,69 @@ def _extract_socials_from_soup(soup: Optional[BeautifulSoup]) -> Dict[str, str]:
     return results
 
 
+def _fallback_socials_from_html(page_html: str, existing: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    socials = dict(existing or _empty_socials())
+    if not page_html:
+        return socials
+    soup = BeautifulSoup(page_html, "html.parser")
+    anchors = soup.find_all("a", href=True)
+    for anchor in anchors:
+        href = (anchor.get("href") or "").strip()
+        if not href:
+            continue
+        if href.startswith("//"):
+            href = "https:" + href
+        normalized = href.split("?")[0].strip()
+        if not normalized:
+            continue
+        lowered = normalized.lower()
+        if lowered.startswith("javascript:") or lowered.startswith("#") or lowered.startswith("mailto:"):
+            continue
+        parsed = urlparse(normalized)
+        domain = (parsed.netloc or "").lower()
+        if not parsed.scheme or not domain:
+            continue
+        mapped = None
+        for key, target in FALLBACK_SOCIAL_DOMAINS.items():
+            if key in domain:
+                mapped = target
+                break
+        if not mapped:
+            continue
+        if mapped == "instagram" and not socials.get("instagram"):
+            socials["instagram"] = normalized
+        elif mapped == "facebook" and not socials.get("facebook"):
+            socials["facebook"] = normalized
+        elif mapped == "twitter" and not socials.get("twitter"):
+            socials["twitter"] = normalized
+        elif mapped == "website" and not socials.get("website"):
+            socials["website"] = normalized
+    return socials
+
+
+def _detect_cookie_wall(html: str) -> Optional[str]:
+    if not html:
+        return None
+    lowered = html.lower()
+    tokens = (
+        "enable cookies",
+        "please enable cookies",
+        "enable javascript",
+        "turn on javascript",
+        "javascript is required",
+        "verify you are human",
+        "are you human",
+        "unusual traffic",
+        "robot check",
+        "captcha",
+        "cloudflare",
+        "bot detection",
+    )
+    if any(tok in lowered for tok in tokens):
+        return "cookie_wall_or_bot"
+    return None
+
+
 # Updated to drive enrichment from the base artist page JSON instead of /about.
 def enrich_spotify_rows_with_about_links(
     rows: List[Row],
@@ -232,9 +307,12 @@ def enrich_spotify_rows_with_about_links(
             continue
 
         payload = _fetch_about_payload(session, artist_id, logger)
-        if payload:
+        if payload is not None:
             _ABOUT_CACHE[artist_id] = payload
-            _apply_enrichment(row, payload)
+            if payload:
+                _apply_enrichment(row, payload)
+            else:
+                _apply_socials(row, {})
         else:
             _apply_socials(row, {})
         if HTTP_REQUEST_DELAY:
@@ -271,7 +349,11 @@ def _fetch_about_payload(
 
     next_data = _extract_next_data_from_soup(soup)
     if not next_data:
-        _log(logger, f"[Spotify About] __NEXT_DATA__ missing for artist {artist_id}")
+        wall_reason = _detect_cookie_wall(html)
+        payload["socials"] = _fallback_socials_from_html(html, payload["socials"])
+        payload["status"] = "non_actionable"
+        payload["reason"] = wall_reason or "next_data_missing"
+        _log(logger, f"[Spotify About] __NEXT_DATA__ missing for artist {artist_id} reason={payload['reason']}")
     else:
         profile = _extract_profile_blob(next_data)
         if not profile:

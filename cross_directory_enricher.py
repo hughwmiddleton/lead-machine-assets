@@ -3334,6 +3334,8 @@ class CrossDirectoryEnricherWorker(QThread):
         self._row_enrichment_state: Dict[str, str] = {}
         self._night_sc_cache: Dict[str, Dict[str, Any]] = {}
         self._active_night_sc_attempt: Optional[_NightSCAttempt] = None
+        self._night_sc_challenge_streak: int = 0
+        self._night_sc_breaker_tripped: bool = False
 
     def run(self) -> None:
         try:
@@ -4170,6 +4172,18 @@ class CrossDirectoryEnricherWorker(QThread):
             self._active_night_sc_attempt = None
 
     def _night_sc_http_get(self, url: str, label: str, attempt: _NightSCAttempt) -> Tuple[Optional[int], str]:
+        if getattr(self, "_night_sc_breaker_tripped", False):
+            attempt.challenge = True
+            attempt.reason = attempt.reason or "challenge_page"
+            attempt.status = attempt.status or "non_actionable_challenge"
+            attempt.confidence = attempt.confidence or 0.0
+            try:
+                parsed = urlparse(url)
+                host_path = f"{parsed.netloc}{parsed.path}"
+                self.log_message.emit(f"[Night SC] Circuit breaker active; skipping fetch label={label} url={host_path}")
+            except Exception:
+                pass
+            return (None, "")
         if not attempt.note_fetch():
             return (None, "")
         debug = os.getenv("NIGHT_SC_DEBUG")
@@ -4178,6 +4192,22 @@ class CrossDirectoryEnricherWorker(QThread):
         text: str = ""
         blocked = False
         challenge = False
+
+        def _record_challenge(hit: bool) -> None:
+            try:
+                if not hasattr(self, "_night_sc_challenge_streak"):
+                    self._night_sc_challenge_streak = 0
+                if hit:
+                    self._night_sc_challenge_streak += 1
+                else:
+                    self._night_sc_challenge_streak = 0
+                if hit and self._night_sc_challenge_streak >= 3 and not getattr(self, "_night_sc_breaker_tripped", False):
+                    self._night_sc_breaker_tripped = True
+                    self.log_message.emit(
+                        "[Night SC] Circuit breaker tripped after repeated challenge pages; skipping SoundCloud for this run."
+                    )
+            except Exception:
+                pass
 
         def _log_debug(body: str) -> None:
             if not debug:
@@ -4202,22 +4232,27 @@ class CrossDirectoryEnricherWorker(QThread):
             if status == 403:
                 attempt.saw_403 = True
                 _log_debug(text)
+                _record_challenge(False)
                 return (status, "")
             if blocked:
                 attempt.saw_403 = True
                 _log_debug(text)
+                _record_challenge(False)
                 return (status, "")
             if challenge:
                 attempt.challenge = True
                 attempt.reason = attempt.reason or "challenge_page"
                 _log_debug(text)
+                _record_challenge(True)
                 return (status, "")
             if status == 200 and not text.strip():
                 attempt.reason = attempt.reason or "empty_body"
                 _log_debug(text)
+                _record_challenge(False)
                 return (status, "")
             resp.raise_for_status()
             _log_debug(text)
+            _record_challenge(False)
             return (status, text)
         except Exception:
             if attempt.reason == "":
@@ -4227,6 +4262,7 @@ class CrossDirectoryEnricherWorker(QThread):
             else:
                 attempt.http_status = attempt.http_status or status
             _log_debug("")
+            _record_challenge(False)
             return (attempt.http_status, "")
 
     def _night_sc_search_candidates(
