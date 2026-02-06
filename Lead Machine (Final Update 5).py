@@ -7729,6 +7729,7 @@ def fb_find_page_and_emails_by_name(
         select_best_facebook_candidate,
         is_junk_fb_candidate_url,
         fb_reason_code_split,
+        _fb_extract_candidates_from_search_dom,
     )
 
     def _is_corporate_page(name: str, url: str, category: str | None) -> bool:
@@ -7786,143 +7787,30 @@ def fb_find_page_and_emails_by_name(
         if not _has_music_signals(page_text, outbound_links, category, page_html):
             return False
         return True
-    anchor_candidates = list(soup.find_all("a", href=True)) + list(soup.select('a[role="link"][href*="facebook.com"]')) + list(
-        soup.select('div[role="article"] a[href*="facebook.com"]')
-    )
     strong_cat_tokens = ("musician", "band", "artist", "singer", "songwriter", "music", "recording artist")
-    for a in anchor_candidates:
-        href = (a.get("href") or "").strip()
+    dom_candidates = facebook_enrich._fb_extract_candidates_from_search_dom(
+        html,
+        logger=_log,
+        debug=os.getenv("FB_DEBUG_DOM_GATE") == "1",
+        search_name=artist_name,
+    )
+    for cand in dom_candidates:
+        href = (cand.url or "").strip()
         if not href:
             continue
-        text = a.get_text(" ", strip=True) or ""
-        if href.startswith("/"):
-            href = "https://www.facebook.com" + href
-        if is_junk_fb_candidate_url(href):
-            dropped_business += 1
-            reason = fb_reason_code_split(href, "business_notif")
-            _log(f"[FB Enrich] Dropped junk FB candidate url={href!r} reason={reason}")
-            continue
-        if not _fb_is_real_page_url(href):
-            continue
+        text = (cand.name or "").strip()
+        category_raw = (getattr(cand, "category", "") or "").strip()
+        aria_label = getattr(cand, "aria_label", "") or ""
         try:
             parsed = urlparse(href)
             username = (parsed.path or "").strip("/").split("/")[0] if parsed.path else ""
         except Exception:
             username = ""
-        parent = a.find_parent(["div", "span"])
-        aria_label = a.get("aria-label") or ""
-        category_raw = ""
-        if aria_label and any(tok in aria_label.lower() for tok in music_tokens):
-            text = aria_label
+        if not category_raw and aria_label and any(tok in aria_label.lower() for tok in music_tokens):
             category_raw = aria_label
-        extracted_cat, category_norm = extract_fb_category(parent, text)
-        category_raw = category_raw or extracted_cat
-        if not category_raw:
-            for probe in (aria_label, text):
-                if probe and any(tok in probe.lower() for tok in music_tokens):
-                    category_raw = probe
-                    break
-        if not category_raw and parent:
-            try:
-                card_blob = parent.get_text(" ", strip=True)
-                if card_blob and any(tok in card_blob.lower() for tok in music_tokens):
-                    category_raw = card_blob
-            except Exception:
-                pass
-        if not category_raw:
-            ancestor = parent.find_parent(["div", "section", "article"]) if parent else None
-            if ancestor:
-                try:
-                    blob = ancestor.get_text(" ", strip=True)
-                    if blob and any(tok in blob.lower() for tok in music_tokens):
-                        category_raw = blob
-                except Exception:
-                    pass
-        if not category_raw:
-            shells = []
-            try:
-                shells.append(a.get_text(" ", strip=True))
-            except Exception:
-                pass
-            for node in (parent, getattr(parent, "parent", None), getattr(getattr(parent, "parent", None), "parent", None)):
-                if not node:
-                    continue
-                try:
-                    shells.append(node.get_text(" ", strip=True))
-                except Exception:
-                    continue
-            for blob in shells:
-                if blob and any(tok in (blob or "").lower() for tok in music_tokens):
-                    category_raw = blob
-                    break
-        if not category_raw:
-            try:
-                for sib in a.next_siblings:
-                    try:
-                        text_blob = getattr(sib, "get_text", lambda *_: str(sib))(" ", strip=True)
-                    except Exception:
-                        continue
-                    if text_blob and any(tok in text_blob.lower() for tok in music_tokens):
-                        category_raw = text_blob
-                        break
-                    parent_sib = getattr(sib, "parent", None)
-                    if parent_sib:
-                        try:
-                            text_blob = parent_sib.get_text(" ", strip=True)
-                        except Exception:
-                            text_blob = ""
-                        if text_blob and any(tok in text_blob.lower() for tok in music_tokens):
-                            category_raw = text_blob
-                            break
-            except Exception:
-                pass
-        if not category_raw:
-            try:
-                container = a.find_parent(["div", "section", "article"])
-                if container:
-                    text_blob = container.get_text(" ", strip=True)
-                    if text_blob and any(tok in text_blob.lower() for tok in music_tokens):
-                        category_raw = text_blob
-            except Exception:
-                pass
-        if not category_raw:
-            try:
-                for span in a.find_all("span"):
-                    span_text = span.get_text(" ", strip=True)
-                    if span_text and any(tok in span_text.lower() for tok in music_tokens):
-                        category_raw = span_text
-                        break
-                if not category_raw and parent:
-                    for span in parent.find_all("span"):
-                        span_text = span.get_text(" ", strip=True)
-                        if span_text and any(tok in span_text.lower() for tok in music_tokens):
-                            category_raw = span_text
-                            break
-            except Exception:
-                pass
-        if not category_raw:
-            context_blobs = []
-            try:
-                context_blobs.append(a.get_text(" ", strip=True))
-            except Exception:
-                pass
-            for node in (parent, getattr(parent, "parent", None), getattr(getattr(parent, "parent", None), "parent", None)):
-                if not node:
-                    continue
-                try:
-                    context_blobs.append(node.get_text(" ", strip=True))
-                except Exception:
-                    continue
-            try:
-                container = a.find_parent(["div", "section", "article"])
-                if container:
-                    context_blobs.append(container.get_text(" ", strip=True))
-            except Exception:
-                pass
-            for blob in context_blobs:
-                if blob and any(tok in blob.lower() for tok in music_tokens):
-                    category_raw = blob
-                    break
+        if not category_raw and text and any(tok in text.lower() for tok in music_tokens):
+            category_raw = text
+        category_norm = normalize_name(category_raw)
         fallback_name = text or username or href
         name_lc = (fallback_name or "").lower()
         url_lc = (href or "").lower()
@@ -7986,7 +7874,6 @@ def fb_find_page_and_emails_by_name(
         if not corporate_hit and score > 0:
             cat_boost = compute_fb_category_boost(category_norm)
             score += cat_boost
-        # Prefer entries whose category explicitly contains music tokens.
         music_cat_bonus = 0.5 if any(tok in category_lc for tok in music_tokens) else 0.0
         score_with_bonus = max(score + music_cat_bonus, 0.01)
         entry = (
@@ -8007,7 +7894,7 @@ def fb_find_page_and_emails_by_name(
             and (
                 name_score >= 0.1
                 or (artist_norm and artist_norm.split() and artist_norm.split()[0] in name_lc)
-                or (artist_norm and artist_norm.split() and artist_norm.split()[0] in url_lc)
+                or (artist_norm and artist_norm.split()[0] in url_lc)
             )
         ):
             fallback_candidates.append(entry)

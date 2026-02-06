@@ -54,6 +54,7 @@ from facebook_enrich import (
     is_junk_fb_candidate_url,
     fb_reason_code_split,
     fb_is_allowed_profile_candidate_url,
+    _fb_extract_candidates_from_search_dom,
 )
 
 # ---------------------------------------------------------------------------
@@ -1326,197 +1327,22 @@ class FacebookSearchClient:
                 exc,
             )
             return None
-        seen_urls: Set[str] = set()
-        candidates: List[FbCandidate] = []
+        candidates = facebook_enrich._fb_extract_candidates_from_search_dom(
+            page_html,
+            logger=self.logger,
+            debug=os.getenv("FB_DEBUG_DOM_GATE") == "1",
+            search_name=artist_name,
+        )
         dropped_business = 0
-        gate_before = 0
+        gate_before = len(candidates)
         gate_reject_count = 0
         gate_reject_samples: List[str] = []
         gate_debug = os.getenv("FB_DEBUG_CAND_GATE") == "1"
-        anchor_candidates = list(soup.select("a[href]")) + list(soup.select('a[role="link"][href*="facebook.com"]')) + list(
-            soup.select('div[role="article"] a[href*="facebook.com"]')
-        )
-        for anchor in anchor_candidates:
-            href = cell_to_str(anchor.get("href"))
-            if "facebook.com" not in href:
-                continue
-            if any(fragment in href for fragment in ("sharer.php", "logout.php", "login.php", "l.php")):
-                continue
-            absolute = urllib.parse.urljoin(FACEBOOK_SEARCH_URL, href)
-            normalised_with_query = _normalise_url(absolute)
-            normalised = _normalise_url(absolute.split("?", 1)[0])
-            dedupe_key = normalised_with_query
-            if not normalised_with_query or "facebook.com" not in normalised_with_query:
-                continue
-            if not normalised or "facebook.com" not in normalised:
-                continue
-            gate_before += 1
-            try:
-                if is_junk_fb_candidate_url(normalised_with_query):
-                    dropped_business += 1
-                    reason = fb_reason_code_split(normalised_with_query, "business_notif")
-                    _safe_log(self.logger, "Dropped junk FB candidate url=%r reason=%s", normalised_with_query, reason)
-                    continue
-            except Exception:
-                pass
-            if not fb_is_allowed_profile_candidate_url(normalised_with_query):
-                gate_reject_count += 1
-                if gate_debug and len(gate_reject_samples) < 5:
-                    gate_reject_samples.append(normalised_with_query)
-                continue
-            if dedupe_key in seen_urls:
-                continue
-            parsed = urllib.parse.urlparse(normalised)
-            path_parts = [part for part in parsed.path.split("/") if part]
-            if not path_parts:
-                continue
-            if path_parts[0] in {"search", "plugins", "dialog", "privacy"}:
-                continue
-            name_text = cell_to_str(anchor.get_text(" ", strip=True) or anchor.get("aria-label"))
-            # Prefer aria-label if it contains music cues.
-            aria_label = cell_to_str(anchor.get("aria-label"))
-            if is_fb_creator_category(aria_label):
-                continue
-            if aria_label and any(tok in aria_label.lower() for tok in MUSIC_TOKENS):
-                name_text = aria_label
-                category_raw = aria_label
-            else:
-                category_raw = ""
-            fallback_name = name_text or (path_parts[0] if path_parts else "") or normalised
-            parent = anchor.find_parent(["div", "span"])
-            category_raw = category_raw or extract_fb_category(parent, name_text) or ""
-            if not category_raw:
-                for probe in (aria_label, name_text):
-                    if probe and any(tok in probe.lower() for tok in MUSIC_TOKENS):
-                        category_raw = probe
-                        break
-            if not category_raw and parent:
-                try:
-                    card_blob = parent.get_text(" ", strip=True)
-                    if card_blob and any(tok in card_blob.lower() for tok in MUSIC_TOKENS):
-                        category_raw = card_blob
-                except Exception:
-                    pass
-            if not category_raw:
-                ancestor = parent.find_parent(["div", "section", "article"]) if parent else None
-                if ancestor:
-                    try:
-                        blob = ancestor.get_text(" ", strip=True)
-                        if blob and any(tok in blob.lower() for tok in MUSIC_TOKENS):
-                            category_raw = blob
-                    except Exception:
-                        pass
-            if not category_raw:
-                shells = []
-                try:
-                    shells.append(anchor.get_text(" ", strip=True))
-                except Exception:
-                    pass
-                for node in (parent, getattr(parent, "parent", None), getattr(getattr(parent, "parent", None), "parent", None)):
-                    if not node:
-                        continue
-                    try:
-                        shells.append(node.get_text(" ", strip=True))
-                    except Exception:
-                        continue
-            for blob in shells:
-                if blob and any(tok in (blob or "").lower() for tok in MUSIC_TOKENS):
-                    category_raw = blob
-                    break
-            if not category_raw:
-                try:
-                    for sib in anchor.next_siblings:
-                        try:
-                            text_blob = getattr(sib, "get_text", lambda *_: str(sib))(" ", strip=True)
-                        except Exception:
-                            continue
-                        if text_blob and any(tok in text_blob.lower() for tok in MUSIC_TOKENS):
-                            category_raw = text_blob
-                            break
-                        parent_sib = getattr(sib, "parent", None)
-                        if parent_sib:
-                            try:
-                                text_blob = parent_sib.get_text(" ", strip=True)
-                            except Exception:
-                                text_blob = ""
-                            if text_blob and any(tok in text_blob.lower() for tok in MUSIC_TOKENS):
-                                category_raw = text_blob
-                                break
-                except Exception:
-                    pass
-            if not category_raw:
-                try:
-                    for span in anchor.find_all("span"):
-                        span_text = span.get_text(" ", strip=True)
-                        if span_text and any(tok in span_text.lower() for tok in MUSIC_TOKENS):
-                            category_raw = span_text
-                            break
-                    if not category_raw and parent:
-                        for span in parent.find_all("span"):
-                            span_text = span.get_text(" ", strip=True)
-                            if span_text and any(tok in span_text.lower() for tok in MUSIC_TOKENS):
-                                category_raw = span_text
-                                break
-                except Exception:
-                    pass
-            # Last resort: pull any music-tagged text from nearest ancestors/siblings into category.
-            if not category_raw:
-                context_blobs: List[str] = []
-                try:
-                    context_blobs.append(anchor.get_text(" ", strip=True))
-                except Exception:
-                    pass
-                for node in (parent, getattr(parent, "parent", None), getattr(getattr(parent, "parent", None), "parent", None)):
-                    if not node:
-                        continue
-                    try:
-                        context_blobs.append(node.get_text(" ", strip=True))
-                    except Exception:
-                        continue
-                try:
-                    container = anchor.find_parent(["div", "section", "article"])
-                    if container:
-                        context_blobs.append(container.get_text(" ", strip=True))
-                except Exception:
-                    pass
-                for blob in context_blobs:
-                    if blob and any(tok in blob.lower() for tok in MUSIC_TOKENS):
-                        category_raw = blob
-                        break
-            # If we still have no explicit category, see if any nearby text carries music cues and reuse it.
-            context_blobs: List[str] = [category_raw or "", aria_label or "", name_text or "", fallback_name or ""]
-            try:
-                if parent:
-                    context_blobs.append(parent.get_text(" ", strip=True))
-                    anc = parent.find_parent(["div", "section", "article"])
-                    if anc:
-                        context_blobs.append(anc.get_text(" ", strip=True))
-            except Exception:
-                pass
-            try:
-                for sib in anchor.next_siblings:
-                    try:
-                        context_blobs.append(getattr(sib, "get_text", lambda *_: str(sib))(" ", strip=True))
-                    except Exception:
-                        continue
-            except Exception:
-                pass
-            for blob in context_blobs:
-                if blob and any(tok in blob.lower() for tok in MUSIC_TOKENS):
-                    if not category_raw:
-                        category_raw = blob
-                    break
-            if is_fb_creator_category(category_raw):
-                continue
-            cand.category = category_raw
-            candidates.append(
-                FbCandidate(
-                    name=fallback_name,
-                    url=normalised_with_query,
-                    category=category_raw,
-                )
-            )
-            seen_urls.add(dedupe_key)
+        seen_urls: Set[str] = {
+            _normalise_url((getattr(c, "url", "") or "").split("?", 1)[0])
+            for c in candidates
+            if getattr(c, "url", "")
+        }
 
         if not candidates:
             if dropped_business:

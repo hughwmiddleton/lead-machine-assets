@@ -795,77 +795,27 @@ def _is_garbage_fb_candidate(title: str, url: str, category: Optional[str]) -> b
 def _parse_search_candidates(html: str, logger: LoggerFn = None, search_name: Optional[str] = None) -> List["facebook_enrich.FbCandidate"]:
     if facebook_enrich is None or not html:
         return []
-    soup = BeautifulSoup(html, "html.parser")
-    anchors = soup.select("a[href]") if soup else []
-    candidates: List[facebook_enrich.FbCandidate] = []
-    dropped_business = 0
-    gate_debug = os.getenv("FB_DEBUG_CAND_GATE") == "1"
-    for anchor in anchors:
-        href = anchor.get("href") or ""
-        if "facebook.com" not in href:
-            continue
-        if "search/" in href and "facebook.com/search/" in href:
-            continue
-        try:
-            if is_junk_fb_candidate_url(href):
-                dropped_business += 1
-                reason = fb_reason_code_split(href, "business_notif")
-                _log(logger, f"[Night FB] Dropped junk FB candidate url={href!r} reason={reason}")
-                continue
-        except Exception:
-            pass
-        if _is_junk_fb_candidate(href):
-            continue
-        name = anchor.get_text(" ", strip=True) or href
-        aria_label = anchor.get("aria-label") or ""
-        category = facebook_enrich.extract_fb_category(anchor, page_name=name) if hasattr(facebook_enrich, "extract_fb_category") else ""
-        if _is_garbage_fb_candidate(name, href, category):
-            # T001: business/notification/composer junk is filtered early via is_junk_fb_candidate_url().
-            # Keep this guard (defensive) but avoid legacy logging / double-logging.
-            continue
-        cand = facebook_enrich.FbCandidate(name=name, url=href, category=category or "")
-        music_hint = _category_is_music_like(category) or _category_is_music_like(aria_label)
+
+    candidates = facebook_enrich._fb_extract_candidates_from_search_dom(
+        html,
+        logger=logger,
+        debug=os.getenv("FB_DEBUG_DOM_GATE") == "1",
+        search_name=search_name or "",
+    )
+
+    # Add lightweight music hint for stable sorting (no scoring change).
+    for cand in candidates:
+        aria = getattr(cand, "aria_label", "") or ""
+        cat = getattr(cand, "category", "") or ""
+        music_hint = _category_is_music_like(cat) or _category_is_music_like(aria)
         try:
             setattr(cand, "music_hint", bool(music_hint))
         except Exception:
             pass
-        candidates.append(cand)
-    raw_candidates = candidates
-    rejected_gate_samples: List[str] = []
-    candidates = []
-    hard_gate_rejected = 0
-    for cand in raw_candidates:
-        url_val = (getattr(cand, "url", "") or "").strip()
 
-        if not url_val:
-            if gate_debug and len(rejected_gate_samples) < 5:
-                rejected_gate_samples.append(f"{url_val!r} reason=missing_url")
-            continue
-
-        try:
-            passes_gate = fb_is_allowed_profile_candidate_url(url_val)
-        except Exception:
-            passes_gate = False
-
-        if passes_gate:
-            candidates.append(cand)
-            continue
-
-        hard_gate_rejected += 1
-        if gate_debug and len(rejected_gate_samples) < 5:
-            rejected_gate_samples.append(f"{url_val!r} reason=hard_gate")
     deduped = _dedupe_candidates(candidates)
-    # Stable preference for music-hinted candidates without changing scoring math.
     deduped = sorted(deduped, key=lambda c: 0 if getattr(c, "music_hint", False) else 1)
-    if gate_debug:
-        # Quick sanity: grep FB gate logs for /watch, /reel, /events/, notif_id to ensure the hard gate is holding.
-        raw_count = len(raw_candidates)
-        post_gate_count = len(deduped)
-        _log(logger, f"[Night FB][Gate] raw={raw_count} hard_rejected={hard_gate_rejected} after={post_gate_count}")
-        assert hard_gate_rejected <= raw_count
-        assert post_gate_count <= raw_count
-        for sample in rejected_gate_samples:
-            _log(logger, f"[Night FB][Gate][reject] {sample}")
+
     if os.getenv("FB_DEBUG_CANDIDATES") == "1":
         preview = deduped[:5]
         lines = [
@@ -874,9 +824,7 @@ def _parse_search_candidates(html: str, logger: LoggerFn = None, search_name: Op
         ]
         for line in lines:
             _log(logger, line)
-    if not deduped and dropped_business:
-        label = f" for '{search_name}'" if search_name else ""
-        _log(logger, f"[Night FB] No non-junk FB candidates{label} after dropping {dropped_business} junk business UI hits.")
+
     return deduped
 
 

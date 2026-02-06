@@ -359,47 +359,13 @@ def _fb_search_candidates_live(driver, artist_name: str) -> List[FbCandidate]:
         print(f"[diag] FB search failed for '{artist_name}': {exc}")
         return []
 
-    soup = BeautifulSoup(driver.page_source or "", "html.parser")
-    candidates: List[FbCandidate] = []
-    seen_urls = set()
-    for anchor in soup.find_all("a", href=True):
-        href = (anchor.get("href") or "").strip()
-        if not href:
-            continue
-        if href.startswith("/"):
-            href = "https://www.facebook.com" + href
-        if "facebook.com" not in href:
-            continue
-        try:
-            parsed = urlparse(href)
-            path = (parsed.path or "").lower()
-        except Exception:
-            path = ""
-        if "/search/" in path or "/help" in path or "/login" in path:
-            continue
-        name_text = anchor.get_text(" ", strip=True) or ""
-        if not name_text:
-            continue
-        if href in seen_urls:
-            continue
-        seen_urls.add(href)
-        # Try to derive a nearby short category text
-        category_text = ""
-        parent = anchor.find_parent(["div", "span"])
-        if parent:
-            if extract_fb_category:
-                try:
-                    category_text = extract_fb_category(parent, name_text) or ""
-                except Exception:
-                    category_text = ""
-            if not category_text:
-                snippets = [t.strip() for t in parent.stripped_strings if t.strip()]
-                for snippet in snippets:
-                    if snippet != name_text and 0 < len(snippet) <= 80:
-                        category_text = snippet
-                        break
-        candidates.append(FbCandidate(name=name_text, url=href, category=category_text))
-    return candidates
+    dom_candidates = facebook_enrich._fb_extract_candidates_from_search_dom(
+        driver.page_source or "",
+        logger=print,
+        debug=os.getenv("FB_DEBUG_DOM_GATE") == "1",
+        search_name=artist_name,
+    )
+    return dom_candidates
 
 
 def run_csv_diagnostics(seed_path: str, limit: Optional[int] = None) -> None:

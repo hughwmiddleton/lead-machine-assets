@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
+import time
 import unicodedata
 import urllib.parse
 from urllib.parse import urlparse
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
+
+from bs4 import BeautifulSoup
 
 # Blocks of common FB UI/notification text that should be ignored entirely.
 NOISY_FB_TOKENS = [
@@ -1286,6 +1290,204 @@ def _fb_reason_code_split_self_check() -> None:
 
 if os.getenv("FB_DEBUG_REASON_SPLIT") == "1":
     _fb_reason_code_split_self_check()
+
+
+def _fb_extract_candidates_from_search_dom(html_or_driver, logger=None, debug: bool = False, search_name: str = "") -> List[FbCandidate]:
+    """
+    DOM-scoped extractor for Facebook search candidates.
+    - Restricts anchor collection to known search-result containers.
+    - Normalizes + dedupes hrefs.
+    - Applies existing hard URL gate (fb_is_allowed_profile_candidate_url).
+    - Emits structured diagnostics.
+    """
+    def _emit(msg: str) -> None:
+        if not msg:
+            return
+        if logger and hasattr(logger, "info"):
+            try:
+                logger.info(msg)
+                return
+            except Exception:
+                pass
+        if callable(logger):
+            try:
+                logger(msg)
+                return
+            except Exception:
+                pass
+        try:
+            print(msg)
+        except Exception:
+            pass
+
+    html = ""
+    driver = None
+    if hasattr(html_or_driver, "page_source"):
+        driver = html_or_driver
+        try:
+            html = html_or_driver.page_source or ""
+        except Exception:
+            html = ""
+    elif isinstance(html_or_driver, str):
+        html = html_or_driver
+    else:
+        html = ""
+
+    if not html:
+        return []
+
+    soup = BeautifulSoup(html, "html.parser")
+    all_anchor_count = len(soup.select("a[href]")) if soup else 0
+
+    container_selectors: List[str] = [
+        "div[role=\"main\"] div[aria-label*=\"Search results\"]",
+        "div[role=\"main\"] section[aria-label*=\"Search results\"]",
+        "div[role=\"main\"] [data-pagelet^=\"SearchResults\"]",
+        "div[role=\"main\"] div[role=\"feed\"]",
+        "div[role=\"main\"] div[role=\"article\"]",
+    ]
+
+    chosen_selector = "NONE"
+    containers = []
+    for selector in container_selectors:
+        try:
+            containers = soup.select(selector)
+        except Exception:
+            containers = []
+        if containers:
+            chosen_selector = selector
+            break
+
+    gate_debug_env = os.getenv("FB_DEBUG_DOM_GATE", "0")
+    allow_fallback = debug or gate_debug_env in ("1", "2")
+
+    if not containers and not allow_fallback:
+        _emit(
+            f"[FB Shared][DOM Gate] chosen_container_selector=NONE containers_found=0 anchors_in_scope=0 "
+            f"candidates_pre_url_gate=0 candidates_post_url_gate=0 dropped_by_dom_gate={all_anchor_count} "
+            f"reason=dom_gate_no_container search_name='{search_name or ''}'"
+        )
+        return []
+
+    scoped_anchors = []
+    if containers:
+        for container in containers:
+            try:
+                scoped_anchors.extend(container.select("a[href]"))
+            except Exception:
+                continue
+    else:
+        # Fallback: legacy wide scrape (debug only)
+        try:
+            scoped_anchors = soup.select("a[href]")
+        except Exception:
+            scoped_anchors = []
+        chosen_selector = "FALLBACK_ALL_ANCHORS"
+
+    anchors_in_scope = len(scoped_anchors)
+
+    def _normalize_href(href: str) -> str:
+        href = (href or "").strip()
+        if not href:
+            return ""
+        try:
+            href = urllib.parse.urljoin("https://www.facebook.com", href)
+        except Exception:
+            pass
+        href = href.split("#", 1)[0]
+        return href
+
+    raw_candidates: List[FbCandidate] = []
+    dedupe_seen = set()
+    for anchor in scoped_anchors:
+        href_raw = anchor.get("href") or ""
+        href = _normalize_href(href_raw)
+        if not href or "facebook.com" not in href:
+            continue
+        if href in dedupe_seen:
+            continue
+        dedupe_seen.add(href)
+        try:
+            parsed = urllib.parse.urlparse(href)
+            path = (parsed.path or "").lower()
+            if "/search/" in path or "/help" in path or "/login" in path:
+                continue
+        except Exception:
+            pass
+        name = anchor.get_text(" ", strip=True) or href
+        aria_label = anchor.get("aria-label") or ""
+        category = extract_fb_category(anchor, page_name=name) if hasattr(anchor, "find_all") else ""
+        if not category and aria_label and not is_fb_creator_category(aria_label):
+            category = aria_label
+        raw_candidates.append(FbCandidate(name=name, url=href, category=category or ""))
+        try:
+            setattr(raw_candidates[-1], "aria_label", aria_label)
+        except Exception:
+            pass
+
+    candidates_pre_url_gate = len(raw_candidates)
+
+    gate_reject = 0
+    filtered: List[FbCandidate] = []
+    for cand in raw_candidates:
+        url_val = (cand.url or "").strip()
+        if not url_val:
+            gate_reject += 1
+            continue
+        try:
+            if is_junk_fb_candidate_url(url_val):
+                gate_reject += 1
+                continue
+        except Exception:
+            pass
+        try:
+            if not fb_is_allowed_profile_candidate_url(url_val):
+                gate_reject += 1
+                continue
+        except Exception:
+            gate_reject += 1
+            continue
+        filtered.append(cand)
+
+    candidates_post_url_gate = len(filtered)
+    dropped_by_dom_gate = max(0, all_anchor_count - anchors_in_scope)
+
+    _emit(
+        f"[FB Shared][DOM Gate] chosen_container_selector={chosen_selector} containers_found={len(containers)} "
+        f"anchors_in_scope={anchors_in_scope} candidates_pre_url_gate={candidates_pre_url_gate} "
+        f"candidates_post_url_gate={candidates_post_url_gate} dropped_by_dom_gate={dropped_by_dom_gate} "
+        f"search_name='{search_name or ''}'"
+    )
+
+    if gate_debug_env in ("1", "2"):
+        warnings = []
+        bad_tokens = ("/notifications", "/watch", "/reel", "/events/", "notif_id", "notif_t")
+        for cand in filtered:
+            url_l = (cand.url or "").lower()
+            if any(tok in url_l for tok in bad_tokens):
+                warnings.append(url_l)
+        artifact = {
+            "selector": chosen_selector,
+            "containers_found": len(containers),
+            "anchors_in_scope": anchors_in_scope,
+            "candidates_pre_url_gate": candidates_pre_url_gate,
+            "candidates_post_url_gate": candidates_post_url_gate,
+            "pre_urls": [c.url for c in raw_candidates[:20]],
+            "post_urls": [c.url for c in filtered[:20]],
+            "warnings": warnings,
+            "timestamp": int(time.time()),
+            "search_name": search_name or "",
+        }
+        try:
+            fname = f"fb_dom_gate_debug_{int(time.time())}.json"
+            with open(fname, "w", encoding="utf-8") as fh:
+                json.dump(artifact, fh, indent=2)
+        except Exception:
+            pass
+        if warnings and gate_debug_env == "2":
+            raise AssertionError(f"FB DOM gate warnings: {warnings}")
+
+    return filtered
 
 
 def _fb_candidate_gate_self_check() -> None:
