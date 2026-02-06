@@ -1305,35 +1305,41 @@ def _fb_is_candidate_url_allowed(url: str) -> bool:
         parsed = urllib.parse.urlparse(url)
     except Exception:
         return False
-    host = (parsed.netloc or "").lower()
+    host = (parsed.netloc or "").lower().strip()
     if host.startswith("m."):
         host = host[2:]
-    if host not in {"facebook.com", "www.facebook.com", "facebook.co", "facebook.co.uk", "facebook.net"} and "facebook.com" not in host:
+    allowed_hosts = {"facebook.com", "www.facebook.com", "web.facebook.com"}
+    if not (host in allowed_hosts or host.endswith(".facebook.com")):
         return False
 
-    path = (parsed.path or "").strip("/")
-    segments = [seg for seg in path.split("/") if seg]
+    path = parsed.path or ""
+    segments = [seg for seg in path.strip("/").split("/") if seg]
     query = parsed.query or ""
-    lowered_blob = f"{path}?{query}".lower() if query else path.lower()
-
-    reject_tokens = ("/groups", "/watch", "/reel", "/events", "/notifications", "/afad")
-    if any(lowered_blob.startswith(tok) for tok in reject_tokens):
-        return False
-    if any(tok in query.lower() for tok in ("ref=notif", "notif_id", "notif_t")):
-        return False
+    lowered_query = query.lower()
 
     if not segments:
         return False
 
-    if len(segments) == 1 and segments[0] != "profile.php":
-        return True
+    reserved = {"groups", "watch", "reel", "events", "notifications", "afad"}
+    if segments[0].lower() in reserved:
+        return False
 
-    if segments[0] == "profile.php":
+    if any(tok in lowered_query for tok in ("ref=notif", "notif_id", "notif_t")):
+        return False
+
+    if segments[0].lower() == "profile.php":
+        if len(segments) != 1:
+            return False
         qs = urllib.parse.parse_qs(query or "", keep_blank_values=False)
         if set(qs.keys()) != {"id"}:
             return False
         ids = qs.get("id", [])
         return len(ids) == 1 and ids[0].isdigit()
+
+    # Strict username: exactly one segment, no query params.
+    if len(segments) == 1:
+        # username paths must have no query parameters
+        return query == ""
 
     return False
 
@@ -1424,6 +1430,18 @@ def _fb_extract_candidates_from_search_dom(html_or_driver, logger=None, debug: b
 
     anchors_in_scope = len(scoped_anchors)
 
+    if os.getenv("FB_DEBUG_DOM_GATE_HREFS") == "1":
+        hrefs = []
+        for a in scoped_anchors:
+            try:
+                h = (a.get("href") or "").replace("\n", "").replace("\t", "").strip()
+            except Exception:
+                h = ""
+            if h:
+                hrefs.append(h)
+        sample = " | ".join(hrefs[:20])
+        _emit(f"[FB Shared][DOM Gate] href_sample_count={len(hrefs)} href_sample={sample}")
+
     def _normalize_href(href: str) -> str:
         href = (href or "").strip()
         if not href:
@@ -1489,7 +1507,7 @@ def _fb_extract_candidates_from_search_dom(html_or_driver, logger=None, debug: b
     _emit(
         f"[FB Shared][DOM Gate] chosen_container_selector={chosen_selector} containers_found={len(containers)} "
         f"anchors_in_scope={anchors_in_scope} candidates_pre_url_gate={candidates_pre_url_gate} "
-        f"candidates_post_url_gate={candidates_post_url_gate} dropped_by_dom_gate={dropped_by_dom_gate} "
+        f"candidates_post_url_gate={candidates_post_url_gate} url_gate_rejected={gate_reject} dropped_by_dom_gate={dropped_by_dom_gate} "
         f"search_name='{search_name or ''}'"
     )
 
@@ -1538,6 +1556,14 @@ def _fb_candidate_gate_self_check() -> None:
 
 if os.getenv("FB_DEBUG_CAND_GATE_ASSERT") == "1":
     _fb_candidate_gate_self_check()
+if os.getenv("FB_DEBUG_CAND_URL_GATE") == "1":
+    assert _fb_is_candidate_url_allowed("https://www.facebook.com/someband")
+    assert _fb_is_candidate_url_allowed("https://www.facebook.com/profile.php?id=123456")
+    assert not _fb_is_candidate_url_allowed("https://www.facebook.com/groups/")
+    assert not _fb_is_candidate_url_allowed("https://www.facebook.com/groups/foo")
+    assert not _fb_is_candidate_url_allowed("https://www.facebook.com/someband/about")
+    assert not _fb_is_candidate_url_allowed("https://www.facebook.com/profile.php?id=12&foo=1")
+    assert not _fb_is_candidate_url_allowed("https://www.facebook.com/someband?__tn__=%2Cd")
 
 
 def select_best_facebook_candidate(
