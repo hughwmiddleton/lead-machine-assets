@@ -1180,6 +1180,81 @@ def is_junk_fb_candidate_url(url: str) -> bool:
     return False
 
 
+def fb_is_allowed_profile_candidate_url(url: str) -> bool:
+    """
+    Deterministic hard gate.
+    True only if url is an allowed FB profile URL shape:
+      - https://www.facebook.com/<username>[/]
+      - https://www.facebook.com/profile.php?id=<digits> (and ONLY id param)
+    Explicitly rejects known junk surfaces.
+    """
+    if not url:
+        return False
+    raw = (url or "").strip()
+    if not raw:
+        return False
+    try:
+        parsed = urllib.parse.urlparse(raw)
+    except Exception:
+        return False
+
+    scheme = (parsed.scheme or "").lower()
+    if scheme and scheme not in ("http", "https"):
+        return False
+
+    host = (parsed.netloc or "").lower()
+    if not host:
+        return False
+    host_norm = "facebook.com" if host == "m.facebook.com" else host
+    allowed_hosts = {"facebook.com", "www.facebook.com", "m.facebook.com"}
+    if host_norm not in allowed_hosts and host not in allowed_hosts:
+        return False
+    if host.startswith("business.") or "business.facebook.com" in host:
+        return False
+
+    path = parsed.path or ""
+    query = parsed.query or ""
+    lowered_blob = f"{path}?{query}".lower() if query else path.lower()
+    reject_tokens = (
+        "/events/",
+        "/watch",
+        "/reel",
+        "/afad",
+        "/notifications",
+        "ref=notif",
+        "notif_id",
+        "notif_t",
+        "business.facebook.com",
+        "/latest/composer",
+        "/business/",
+    )
+    if any(tok in lowered_blob for tok in reject_tokens):
+        return False
+
+    path_clean = path.rstrip("/")
+    segments = [seg for seg in path.split("/") if seg]
+
+    if path_clean.lower() == "/profile.php":
+        qs = urllib.parse.parse_qs(query, keep_blank_values=False)
+        if set(qs.keys()) != {"id"}:
+            return False
+        ids = qs.get("id", [])
+        if len(ids) != 1:
+            return False
+        id_value = ids[0]
+        return bool(id_value and id_value.isdigit())
+
+    if len(segments) == 1:
+        username = segments[0]
+        if not username or username.lower() == "profile.php":
+            return False
+        if query:
+            return False
+        return True
+
+    return False
+
+
 def fb_reason_code_split(url: str, existing_reason: str) -> str:
     """
     Split legacy 'business_notif' reason into notif_ui vs business_ui buckets.
@@ -1211,6 +1286,22 @@ def _fb_reason_code_split_self_check() -> None:
 
 if os.getenv("FB_DEBUG_REASON_SPLIT") == "1":
     _fb_reason_code_split_self_check()
+
+
+def _fb_candidate_gate_self_check() -> None:
+    assert fb_is_allowed_profile_candidate_url("https://www.facebook.com/someband")
+    assert fb_is_allowed_profile_candidate_url("https://www.facebook.com/someband/")
+    assert fb_is_allowed_profile_candidate_url("https://www.facebook.com/profile.php?id=1234567890")
+    assert not fb_is_allowed_profile_candidate_url("https://www.facebook.com/watch?v=123")
+    assert not fb_is_allowed_profile_candidate_url("https://www.facebook.com/events/birthdays")
+    assert not fb_is_allowed_profile_candidate_url("https://www.facebook.com/reel/123")
+    assert not fb_is_allowed_profile_candidate_url("https://www.facebook.com/notifications")
+    assert not fb_is_allowed_profile_candidate_url("https://www.facebook.com/profile.php?id=123&foo=bar")
+    assert not fb_is_allowed_profile_candidate_url("https://business.facebook.com/somepage")
+
+
+if os.getenv("FB_DEBUG_CAND_GATE_ASSERT") == "1":
+    _fb_candidate_gate_self_check()
 
 
 def select_best_facebook_candidate(

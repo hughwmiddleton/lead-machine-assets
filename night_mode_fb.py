@@ -32,7 +32,12 @@ try:
 except Exception:  # pragma: no cover - defensive import
     facebook_enrich = None  # type: ignore
 try:
-    from facebook_enrich import is_fb_login_redirect, is_junk_fb_candidate_url, fb_reason_code_split  # type: ignore
+    from facebook_enrich import (
+        is_fb_login_redirect,
+        is_junk_fb_candidate_url,
+        fb_reason_code_split,
+        fb_is_allowed_profile_candidate_url,
+    )  # type: ignore
 except Exception:  # pragma: no cover - defensive
     def is_fb_login_redirect(url: str) -> bool:  # type: ignore
         return False
@@ -40,6 +45,8 @@ except Exception:  # pragma: no cover - defensive
         return False
     def fb_reason_code_split(url: str, existing_reason: str) -> str:  # type: ignore
         return existing_reason
+    def fb_is_allowed_profile_candidate_url(url: str) -> bool:  # type: ignore
+        return False
 
 LoggerFn = Optional[Union[Callable[[str], None], logging.Logger]]
 
@@ -790,6 +797,7 @@ def _parse_search_candidates(html: str, logger: LoggerFn = None, search_name: Op
     anchors = soup.select("a[href]") if soup else []
     candidates: List[facebook_enrich.FbCandidate] = []
     dropped_business = 0
+    gate_debug = os.getenv("FB_DEBUG_CAND_GATE") == "1"
     for anchor in anchors:
         href = anchor.get("href") or ""
         if "facebook.com" not in href:
@@ -820,9 +828,26 @@ def _parse_search_candidates(html: str, logger: LoggerFn = None, search_name: Op
         except Exception:
             pass
         candidates.append(cand)
+    raw_candidates = candidates
+    rejected_gate_samples: List[str] = []
+    candidates = []
+    for cand in raw_candidates:
+        url_val = getattr(cand, "url", "")
+        if fb_is_allowed_profile_candidate_url(url_val):
+            candidates.append(cand)
+            continue
+        if gate_debug and len(rejected_gate_samples) < 5:
+            rejected_gate_samples.append(url_val)
     deduped = _dedupe_candidates(candidates)
     # Stable preference for music-hinted candidates without changing scoring math.
     deduped = sorted(deduped, key=lambda c: 0 if getattr(c, "music_hint", False) else 1)
+    if gate_debug:
+        # Quick sanity: grep FB gate logs for /watch, /reel, /events/, notif_id to ensure the hard gate is holding.
+        before = len(raw_candidates)
+        after = len(candidates)
+        _log(logger, f"[Night FB][Gate] candidates before={before} after={after} rejected={before - after}")
+        for sample in rejected_gate_samples:
+            _log(logger, f"[Night FB][Gate] rejected url={sample!r}")
     if os.getenv("FB_DEBUG_CANDIDATES") == "1":
         preview = deduped[:5]
         lines = [
@@ -1234,7 +1259,15 @@ class NightModeFacebookEnricher:
     def _scrape_single_fb_candidate(
         self, fb_url: str, row: Dict[str, str], artist_name: str, allow_anon: bool = False
     ) -> Optional[Tuple[NightModeFacebookResult, List[str]]]:
-        candidate_url = _normalise_fb_url(fb_url or "")
+        raw_fb_url = fb_url or ""
+        if raw_fb_url.startswith("/"):
+            raw_fb_url = "https://www.facebook.com" + raw_fb_url
+        gate_debug = os.getenv("FB_DEBUG_CAND_GATE") == "1"
+        if not fb_is_allowed_profile_candidate_url(raw_fb_url):
+            if gate_debug:
+                _log(self.logger, f"[Night FB][Gate] rejected url={raw_fb_url!r} before scrape")
+            return None
+        candidate_url = _normalise_fb_url(raw_fb_url or "")
         if not candidate_url:
             return None
         if _is_junk_fb_candidate(candidate_url):

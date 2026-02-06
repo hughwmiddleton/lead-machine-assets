@@ -53,6 +53,7 @@ from facebook_enrich import (
     _looks_music_related,
     is_junk_fb_candidate_url,
     fb_reason_code_split,
+    fb_is_allowed_profile_candidate_url,
 )
 
 # ---------------------------------------------------------------------------
@@ -1328,6 +1329,10 @@ class FacebookSearchClient:
         seen_urls: Set[str] = set()
         candidates: List[FbCandidate] = []
         dropped_business = 0
+        gate_before = 0
+        gate_reject_count = 0
+        gate_reject_samples: List[str] = []
+        gate_debug = os.getenv("FB_DEBUG_CAND_GATE") == "1"
         anchor_candidates = list(soup.select("a[href]")) + list(soup.select('a[role="link"][href*="facebook.com"]')) + list(
             soup.select('div[role="article"] a[href*="facebook.com"]')
         )
@@ -1338,17 +1343,26 @@ class FacebookSearchClient:
             if any(fragment in href for fragment in ("sharer.php", "logout.php", "login.php", "l.php")):
                 continue
             absolute = urllib.parse.urljoin(FACEBOOK_SEARCH_URL, href)
+            normalised_with_query = _normalise_url(absolute)
             normalised = _normalise_url(absolute.split("?", 1)[0])
+            if not normalised_with_query or "facebook.com" not in normalised_with_query:
+                continue
             if not normalised or "facebook.com" not in normalised:
                 continue
+            gate_before += 1
             try:
-                if is_junk_fb_candidate_url(normalised):
+                if is_junk_fb_candidate_url(normalised_with_query):
                     dropped_business += 1
-                    reason = fb_reason_code_split(normalised, "business_notif")
-                    _safe_log(self.logger, "Dropped junk FB candidate url=%r reason=%s", normalised, reason)
+                    reason = fb_reason_code_split(normalised_with_query, "business_notif")
+                    _safe_log(self.logger, "Dropped junk FB candidate url=%r reason=%s", normalised_with_query, reason)
                     continue
             except Exception:
                 pass
+            if not fb_is_allowed_profile_candidate_url(normalised_with_query):
+                gate_reject_count += 1
+                if gate_debug and len(gate_reject_samples) < 5:
+                    gate_reject_samples.append(normalised_with_query)
+                continue
             if normalised in seen_urls:
                 continue
             parsed = urllib.parse.urlparse(normalised)
@@ -1497,7 +1511,7 @@ class FacebookSearchClient:
             candidates.append(
                 FbCandidate(
                     name=fallback_name,
-                    url=normalised,
+                    url=normalised_with_query,
                     category=category_raw,
                 )
             )
@@ -1514,7 +1528,8 @@ class FacebookSearchClient:
             slug = normalize_fb_name(artist_name).replace(" ", "")
             if slug and len(slug) >= 4:
                 fallback_url = f"https://www.facebook.com/{urllib.parse.quote(slug)}"
-                if fallback_url not in seen_urls:
+                gate_before += 1
+                if fallback_url not in seen_urls and fb_is_allowed_profile_candidate_url(fallback_url):
                     candidates.append(
                         FbCandidate(
                             name=artist_name,
@@ -1529,6 +1544,10 @@ class FacebookSearchClient:
                         artist_name,
                         fallback_url,
                     )
+                elif gate_debug and fallback_url not in seen_urls:
+                    gate_reject_count += 1
+                    if len(gate_reject_samples) < 5:
+                        gate_reject_samples.append(fallback_url)
             if not candidates:
                 _safe_log(
                     self.logger,
@@ -1536,6 +1555,18 @@ class FacebookSearchClient:
                     artist_name,
                 )
                 return None
+
+        if gate_debug:
+            # Quick sanity: grep FB gate logs for /watch, /reel, /events/, notif_id to confirm junk candidates stop earlier.
+            _safe_log(
+                self.logger,
+                "[FB Enrich][Gate] candidates before=%s after=%s rejected=%s",
+                gate_before,
+                len(candidates),
+                gate_reject_count,
+            )
+            for sample in gate_reject_samples:
+                _safe_log(self.logger, "[FB Enrich][Gate] rejected url=%r", sample)
 
         strong_music_candidates: List[Tuple[float, float, float, bool, bool, FbCandidate]] = []
         fallback_candidates: List[Tuple[float, float, float, bool, bool, FbCandidate]] = []
