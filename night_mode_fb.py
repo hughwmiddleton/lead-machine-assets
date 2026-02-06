@@ -34,6 +34,7 @@ try:
         is_junk_fb_candidate_url,
         fb_reason_code_split,
         fb_is_allowed_profile_candidate_url,
+        _fb_is_candidate_url_allowed,
     )  # type: ignore
 except Exception:  # pragma: no cover - defensive
     facebook_enrich = None  # type: ignore
@@ -49,6 +50,10 @@ except Exception:  # pragma: no cover - defensive
 
     def fb_is_allowed_profile_candidate_url(url: str) -> bool:  # type: ignore
         return False
+
+    def _fb_is_candidate_url_allowed(url: str) -> bool:  # type: ignore
+        return True
+
 
 LoggerFn = Optional[Union[Callable[[str], None], logging.Logger]]
 
@@ -594,6 +599,38 @@ def _dedupe_candidates(candidates: Iterable["facebook_enrich.FbCandidate"]) -> L
         seen.add(key)
         deduped.append(cand)
     return deduped
+
+
+def _candidate_url(cand) -> str:
+    """
+    Safely extract URL from FbCandidate or dict-like candidate.
+    Strips whitespace/newlines; returns '' if missing.
+    """
+    url = ""
+    if hasattr(cand, "url"):
+        try:
+            url = getattr(cand, "url", "") or ""
+        except Exception:
+            url = ""
+    elif isinstance(cand, dict):
+        for key in ("url", "href", "link"):
+            if key in cand and cand.get(key):
+                url = cand.get(key) or ""
+                break
+    url = (url or "").replace("\n", "").replace("\t", "").strip()
+    return url
+
+
+if os.getenv("FB_DEBUG_CAND_URL_GATE") == "1":
+    assert _candidate_url(type("X", (), {"url": "https://www.facebook.com/someband"})()) == "https://www.facebook.com/someband"
+    assert _candidate_url({"url": "https://www.facebook.com/someband"}) == "https://www.facebook.com/someband"
+    try:
+        assert not _fb_is_candidate_url_allowed("https://www.facebook.com/someband?__tn__=%2Cd")
+        assert not _fb_is_candidate_url_allowed("https://www.facebook.com/groups/foo")
+        assert not _fb_is_candidate_url_allowed("https://www.facebook.com/someband/about")
+        assert not _fb_is_candidate_url_allowed("https://www.facebook.com/profile.php?id=12&foo=1")
+    except Exception:
+        pass
 
 
 def _is_junk_fb_candidate(url: str) -> bool:
@@ -1197,32 +1234,46 @@ class NightModeFacebookEnricher:
             _log(self.logger, f"[Night FB] No non-junk FB candidates for '{artist}', skipping Facebook.")
             return None
 
-        fb_url = None
-        if hasattr(candidate, "url"):
-            fb_url = getattr(candidate, "url", None)
-        elif isinstance(candidate, dict):
-            fb_url = candidate.get("url") or candidate.get("page_url")
-        elif isinstance(candidate, str):
-            fb_url = candidate
+        ordered_candidates = []
+        if candidate:
+            ordered_candidates.append(candidate)
+        for cand in candidates:
+            if cand is candidate:
+                continue
+            ordered_candidates.append(cand)
 
-        url = _normalise_fb_url(fb_url or "")
-        if (not url) or _is_junk_fb_candidate(url):
-            _log(self.logger, f"[Night FB] Candidate missing URL for '{artist}', skipping.")
-            return None
-        url_lower = url.lower()
-        if ("business.facebook.com" in url_lower) or ("/latest/composer" in url_lower) or ("notif_id=" in url_lower):
-            reason = fb_reason_code_split(url, "business_notif")
-            _log(self.logger, f"[Night FB] Dropped junk FB candidate url={url!r} reason={reason} (post-select)")
-            return None
+        gate_debug = os.getenv("FB_DEBUG_CANDIDATES") == "1"
 
-        name = getattr(candidate, "name", None)
-        category = getattr(candidate, "category", None)
-        if isinstance(candidate, dict):
-            name = name or candidate.get("name")
-            category = category or candidate.get("category")
+        for cand in ordered_candidates:
+            fb_url = _candidate_url(cand)
+            url = _normalise_fb_url(fb_url or "")
+            if (not url) or _is_junk_fb_candidate(url):
+                debug_payload = f" cand={cand!r}" if gate_debug else ""
+                _log(self.logger, f"[Night FB] Candidate missing URL for '{artist}', skipping.{debug_payload}")
+                continue
+            url_lower = url.lower()
+            if ("business.facebook.com" in url_lower) or ("/latest/composer" in url_lower) or ("notif_id=" in url_lower):
+                reason = fb_reason_code_split(url, "business_notif")
+                _log(self.logger, f"[Night FB] Dropped junk FB candidate url={url!r} reason={reason} (post-select)")
+                continue
+            try:
+                if not _fb_is_candidate_url_allowed(url):
+                    _log(self.logger, f"[Night FB] Rejected FB candidate url={url!r} due to allowlist.")
+                    continue
+            except Exception:
+                pass
 
-        _log(self.logger, f"[Night FB] Selected FB candidate '{name or url}' -> {url} (category='{category or ''}')")
-        return url
+            name = getattr(cand, "name", None)
+            category = getattr(cand, "category", None)
+            if isinstance(cand, dict):
+                name = name or cand.get("name")
+                category = category or cand.get("category")
+
+            _log(self.logger, f"[Night FB] Selected FB candidate '{name or url}' -> {url} (category='{category or ''}')")
+            return url
+
+        _log(self.logger, f"[Night FB] No usable FB candidates for '{artist}' after URL validation.")
+        return None
 
     def _scrape_single_fb_candidate(
         self, fb_url: str, row: Dict[str, str], artist_name: str, allow_anon: bool = False
