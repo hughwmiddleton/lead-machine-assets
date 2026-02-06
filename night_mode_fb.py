@@ -28,10 +28,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from webdriver_manager.chrome import ChromeDriverManager
 
 try:
-    import facebook_enrich
-except Exception:  # pragma: no cover - defensive import
-    facebook_enrich = None  # type: ignore
-try:
+    import facebook_enrich  # type: ignore
     from facebook_enrich import (
         is_fb_login_redirect,
         is_junk_fb_candidate_url,
@@ -39,12 +36,17 @@ try:
         fb_is_allowed_profile_candidate_url,
     )  # type: ignore
 except Exception:  # pragma: no cover - defensive
-    def is_fb_login_redirect(url: str) -> bool:  # type: ignore
+    facebook_enrich = None  # type: ignore
+
+    def is_fb_login_redirect(*args, **kwargs):  # type: ignore
         return False
-    def is_junk_fb_candidate_url(url: str) -> bool:  # type: ignore
+
+    def is_junk_fb_candidate_url(*args, **kwargs):  # type: ignore
         return False
+
     def fb_reason_code_split(url: str, existing_reason: str) -> str:  # type: ignore
         return existing_reason
+
     def fb_is_allowed_profile_candidate_url(url: str) -> bool:  # type: ignore
         return False
 

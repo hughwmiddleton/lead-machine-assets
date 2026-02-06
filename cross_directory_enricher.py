@@ -1345,6 +1345,7 @@ class FacebookSearchClient:
             absolute = urllib.parse.urljoin(FACEBOOK_SEARCH_URL, href)
             normalised_with_query = _normalise_url(absolute)
             normalised = _normalise_url(absolute.split("?", 1)[0])
+            dedupe_key = normalised_with_query
             if not normalised_with_query or "facebook.com" not in normalised_with_query:
                 continue
             if not normalised or "facebook.com" not in normalised:
@@ -1363,7 +1364,7 @@ class FacebookSearchClient:
                 if gate_debug and len(gate_reject_samples) < 5:
                     gate_reject_samples.append(normalised_with_query)
                 continue
-            if normalised in seen_urls:
+            if dedupe_key in seen_urls:
                 continue
             parsed = urllib.parse.urlparse(normalised)
             path_parts = [part for part in parsed.path.split("/") if part]
@@ -1515,7 +1516,7 @@ class FacebookSearchClient:
                     category=category_raw,
                 )
             )
-            seen_urls.add(normalised)
+            seen_urls.add(dedupe_key)
 
         if not candidates:
             if dropped_business:
@@ -1528,8 +1529,9 @@ class FacebookSearchClient:
             slug = normalize_fb_name(artist_name).replace(" ", "")
             if slug and len(slug) >= 4:
                 fallback_url = f"https://www.facebook.com/{urllib.parse.quote(slug)}"
+                fallback_key = _normalise_url(fallback_url)
                 gate_before += 1
-                if fallback_url not in seen_urls and fb_is_allowed_profile_candidate_url(fallback_url):
+                if fallback_key not in seen_urls and fb_is_allowed_profile_candidate_url(fallback_url):
                     candidates.append(
                         FbCandidate(
                             name=artist_name,
@@ -1537,14 +1539,14 @@ class FacebookSearchClient:
                             category="",
                         )
                     )
-                    seen_urls.add(fallback_url)
+                    seen_urls.add(fallback_key)
                     _safe_log(
                         self.logger,
                         "[FB Enrich] No FB search candidates for '%s'; trying slug fallback '%s'.",
                         artist_name,
                         fallback_url,
                     )
-                elif gate_debug and fallback_url not in seen_urls:
+                elif gate_debug and fallback_key not in seen_urls:
                     gate_reject_count += 1
                     if len(gate_reject_samples) < 5:
                         gate_reject_samples.append(fallback_url)
