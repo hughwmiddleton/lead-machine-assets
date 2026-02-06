@@ -1,0 +1,41 @@
+{
+  "selector": "div[role=\"main\"] div[role=\"feed\"]",
+  "containers_found": 1,
+  "anchors_in_scope": 18,
+  "candidates_pre_url_gate": 18,
+  "candidates_post_url_gate": 9,
+  "pre_urls": [
+    "https://www.facebook.com/kori.gr?__tn__=%3C",
+    "https://www.facebook.com/kori.gr",
+    "https://www.facebook.com/korionlineshop?__tn__=%3C",
+    "https://www.facebook.com/korionlineshop",
+    "https://www.facebook.com/profile.php?id=100085966930241&__tn__=%3C",
+    "https://www.facebook.com/profile.php?id=100085966930241",
+    "https://www.facebook.com/koriboutique.au?__tn__=%3C",
+    "https://www.facebook.com/koriboutique.au",
+    "https://www.facebook.com/profile.php?id=100083355222085&__tn__=%3C",
+    "https://www.facebook.com/profile.php?id=100083355222085",
+    "https://www.facebook.com/profile.php?id=61550651311177&__tn__=%3C",
+    "https://www.facebook.com/profile.php?id=61550651311177",
+    "https://www.facebook.com/profile.php?id=100095412874883&__tn__=%3C",
+    "https://www.facebook.com/profile.php?id=100095412874883",
+    "https://www.facebook.com/koriwrld?__tn__=%3C",
+    "https://www.facebook.com/koriwrld",
+    "https://www.facebook.com/profile.php?id=61550589726234&__tn__=%3C",
+    "https://www.facebook.com/profile.php?id=61550589726234"
+  ],
+  "post_urls": [
+    "https://www.facebook.com/kori.gr",
+    "https://www.facebook.com/korionlineshop",
+    "https://www.facebook.com/profile.php?id=100085966930241",
+    "https://www.facebook.com/koriboutique.au",
+    "https://www.facebook.com/profile.php?id=100083355222085",
+    "https://www.facebook.com/profile.php?id=61550651311177",
+    "https://www.facebook.com/profile.php?id=100095412874883",
+    "https://www.facebook.com/koriwrld",
+    "https://www.facebook.com/profile.php?id=61550589726234"
+  ],
+  "warnings": [],
+  "timestamp": 1770374512,
+  "search_name": "Kori"
+}

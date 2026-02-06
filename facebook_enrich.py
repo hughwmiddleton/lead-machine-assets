@@ -1292,6 +1292,52 @@ if os.getenv("FB_DEBUG_REASON_SPLIT") == "1":
     _fb_reason_code_split_self_check()
 
 
+def _fb_is_candidate_url_allowed(url: str) -> bool:
+    """
+    Strict allowlist for FB search candidates:
+      - https://www.facebook.com/<username>
+      - https://www.facebook.com/profile.php?id=<digits>
+    Rejects /groups, /watch, /reel, /events, /notifications, /afad and notif params.
+    """
+    if not url:
+        return False
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except Exception:
+        return False
+    host = (parsed.netloc or "").lower()
+    if host.startswith("m."):
+        host = host[2:]
+    if host not in {"facebook.com", "www.facebook.com", "facebook.co", "facebook.co.uk", "facebook.net"} and "facebook.com" not in host:
+        return False
+
+    path = (parsed.path or "").strip("/")
+    segments = [seg for seg in path.split("/") if seg]
+    query = parsed.query or ""
+    lowered_blob = f"{path}?{query}".lower() if query else path.lower()
+
+    reject_tokens = ("/groups", "/watch", "/reel", "/events", "/notifications", "/afad")
+    if any(lowered_blob.startswith(tok) for tok in reject_tokens):
+        return False
+    if any(tok in query.lower() for tok in ("ref=notif", "notif_id", "notif_t")):
+        return False
+
+    if not segments:
+        return False
+
+    if len(segments) == 1 and segments[0] != "profile.php":
+        return True
+
+    if segments[0] == "profile.php":
+        qs = urllib.parse.parse_qs(query or "", keep_blank_values=False)
+        if set(qs.keys()) != {"id"}:
+            return False
+        ids = qs.get("id", [])
+        return len(ids) == 1 and ids[0].isdigit()
+
+    return False
+
+
 def _fb_extract_candidates_from_search_dom(html_or_driver, logger=None, debug: bool = False, search_name: str = "") -> List[FbCandidate]:
     """
     DOM-scoped extractor for Facebook search candidates.
@@ -1359,13 +1405,12 @@ def _fb_extract_candidates_from_search_dom(html_or_driver, logger=None, debug: b
             break
 
     gate_debug_env = os.getenv("FB_DEBUG_DOM_GATE", "0")
-    allow_fallback = debug or gate_debug_env in ("1", "2")
 
-    if not containers and not allow_fallback:
+    if not containers:
         _emit(
             f"[FB Shared][DOM Gate] chosen_container_selector=NONE containers_found=0 anchors_in_scope=0 "
             f"candidates_pre_url_gate=0 candidates_post_url_gate=0 dropped_by_dom_gate={all_anchor_count} "
-            f"reason=dom_gate_no_container search_name='{search_name or ''}'"
+            f"reason=dom_container_missing search_name='{search_name or ''}'"
         )
         return []
 
@@ -1376,13 +1421,6 @@ def _fb_extract_candidates_from_search_dom(html_or_driver, logger=None, debug: b
                 scoped_anchors.extend(container.select("a[href]"))
             except Exception:
                 continue
-    else:
-        # Fallback: legacy wide scrape (debug only)
-        try:
-            scoped_anchors = soup.select("a[href]")
-        except Exception:
-            scoped_anchors = []
-        chosen_selector = "FALLBACK_ALL_ANCHORS"
 
     anchors_in_scope = len(scoped_anchors)
 
@@ -1440,11 +1478,7 @@ def _fb_extract_candidates_from_search_dom(html_or_driver, logger=None, debug: b
                 continue
         except Exception:
             pass
-        try:
-            if not fb_is_allowed_profile_candidate_url(url_val):
-                gate_reject += 1
-                continue
-        except Exception:
+        if not _fb_is_candidate_url_allowed(url_val):
             gate_reject += 1
             continue
         filtered.append(cand)
@@ -1522,7 +1556,11 @@ def select_best_facebook_candidate(
     if not candidates:
         return None
 
-    filtered = [c for c in candidates if not is_junk_facebook_candidate(c)]
+    filtered = [
+        c
+        for c in candidates
+        if (not is_junk_facebook_candidate(c)) and _fb_is_candidate_url_allowed(getattr(c, "url", ""))
+    ]
     junk_count = len(candidates) - len(filtered)
     if junk_count:
         _shared_fb_log(logger, f"[FB Shared] Filtered {junk_count} junk FB candidate(s) for '{search_name}'", suppress_console=suppress_console)

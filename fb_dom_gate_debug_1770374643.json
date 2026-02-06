@@ -1,0 +1,41 @@
+{
+  "selector": "div[role=\"main\"] div[role=\"feed\"]",
+  "containers_found": 1,
+  "anchors_in_scope": 18,
+  "candidates_pre_url_gate": 18,
+  "candidates_post_url_gate": 9,
+  "pre_urls": [
+    "https://www.facebook.com/XanaduAccessory?__tn__=%3C",
+    "https://www.facebook.com/XanaduAccessory",
+    "https://www.facebook.com/aplace.where.dreams.come.true?__tn__=%3C",
+    "https://www.facebook.com/aplace.where.dreams.come.true",
+    "https://www.facebook.com/XanaduMusical?__tn__=%3C",
+    "https://www.facebook.com/XanaduMusical",
+    "https://www.facebook.com/XanaduPL?__tn__=%3C",
+    "https://www.facebook.com/XanaduPL",
+    "https://www.facebook.com/Xanadu.fb.gg?__tn__=%3C",
+    "https://www.facebook.com/Xanadu.fb.gg",
+    "https://www.facebook.com/Xanaducakes?__tn__=%3C",
+    "https://www.facebook.com/Xanaducakes",
+    "https://www.facebook.com/xanadurollerparty?__tn__=%3C",
+    "https://www.facebook.com/xanadurollerparty",
+    "https://www.facebook.com/XanaduRealtyOfficial?__tn__=%3C",
+    "https://www.facebook.com/XanaduRealtyOfficial",
+    "https://www.facebook.com/XANADU.XD?__tn__=%3C",
+    "https://www.facebook.com/XANADU.XD"
+  ],
+  "post_urls": [
+    "https://www.facebook.com/XanaduAccessory",
+    "https://www.facebook.com/aplace.where.dreams.come.true",
+    "https://www.facebook.com/XanaduMusical",
+    "https://www.facebook.com/XanaduPL",
+    "https://www.facebook.com/Xanadu.fb.gg",
+    "https://www.facebook.com/Xanaducakes",
+    "https://www.facebook.com/xanadurollerparty",
+    "https://www.facebook.com/XanaduRealtyOfficial",
+    "https://www.facebook.com/XANADU.XD"
+  ],
+  "warnings": [],
+  "timestamp": 1770374643,
+  "search_name": "Xanadu"
+}

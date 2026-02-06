@@ -7788,7 +7788,7 @@ def fb_find_page_and_emails_by_name(
             return False
         return True
     strong_cat_tokens = ("musician", "band", "artist", "singer", "songwriter", "music", "recording artist")
-    dom_candidates = facebook_enrich._fb_extract_candidates_from_search_dom(
+    dom_candidates = _fb_extract_candidates_from_search_dom(
         html,
         logger=_log,
         debug=os.getenv("FB_DEBUG_DOM_GATE") == "1",

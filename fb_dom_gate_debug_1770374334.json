@@ -1,0 +1,35 @@
+{
+  "selector": "div[role=\"main\"] div[role=\"feed\"]",
+  "containers_found": 1,
+  "anchors_in_scope": 14,
+  "candidates_pre_url_gate": 14,
+  "candidates_post_url_gate": 7,
+  "pre_urls": [
+    "https://www.facebook.com/profile.php?id=100087411763208&__tn__=%3C",
+    "https://www.facebook.com/profile.php?id=100087411763208",
+    "https://www.facebook.com/littlestarsdogtraining?__tn__=%3C",
+    "https://www.facebook.com/littlestarsdogtraining",
+    "https://www.facebook.com/profile.php?id=100086445675385&__tn__=%3C",
+    "https://www.facebook.com/profile.php?id=100086445675385",
+    "https://www.facebook.com/marygav52?__tn__=%3C",
+    "https://www.facebook.com/marygav52",
+    "https://www.facebook.com/LittleStarsDogHotel?__tn__=%3C",
+    "https://www.facebook.com/LittleStarsDogHotel",
+    "https://www.facebook.com/profile.php?id=100082947681938&__tn__=%3C",
+    "https://www.facebook.com/profile.php?id=100082947681938",
+    "https://www.facebook.com/TobyTheLittleStarDog?__tn__=%3C",
+    "https://www.facebook.com/TobyTheLittleStarDog"
+  ],
+  "post_urls": [
+    "https://www.facebook.com/profile.php?id=100087411763208",
+    "https://www.facebook.com/littlestarsdogtraining",
+    "https://www.facebook.com/profile.php?id=100086445675385",
+    "https://www.facebook.com/marygav52",
+    "https://www.facebook.com/LittleStarsDogHotel",
+    "https://www.facebook.com/profile.php?id=100082947681938",
+    "https://www.facebook.com/TobyTheLittleStarDog"
+  ],
+  "warnings": [],
+  "timestamp": 1770374334,
+  "search_name": "Little Dog Star"
+}

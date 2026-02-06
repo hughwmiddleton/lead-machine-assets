@@ -1,0 +1,21 @@
+{
+  "selector": "FALLBACK_ALL_ANCHORS",
+  "containers_found": 0,
+  "anchors_in_scope": 16,
+  "candidates_pre_url_gate": 6,
+  "candidates_post_url_gate": 1,
+  "pre_urls": [
+    "https://www.facebook.com/",
+    "https://www.facebook.com/reel/?s=tab",
+    "https://www.facebook.com/marketplace/?ref=app_tab",
+    "https://www.facebook.com/groups/",
+    "https://www.facebook.com/gaming/play/?store_visit_source=gaming_tab",
+    "https://www.facebook.com/messages/t/"
+  ],
+  "post_urls": [
+    "https://www.facebook.com/groups/"
+  ],
+  "warnings": [],
+  "timestamp": 1770374365,
+  "search_name": "Niamh McCrystal"
+}

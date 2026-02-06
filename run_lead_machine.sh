@@ -29,6 +29,7 @@ export NIGHT_SC_DEBUG=1
 export NIGHTMODE_SC_ENGINE="t007"
 export FB_DEBUG_CAND_GATE=1
 export FB_DEBUG_CAND_GATE_ASSERT=1
+export FB_DEBUG_DOM_GATE=1 
 
 # (Optional) Install dependencies if needed
 # pip install pandas tqdm selenium beautifulsoup4 webdriver_manager PyQt5
