@@ -73,12 +73,15 @@ _FB_JUNK_HOSTS = (
     "developers.facebook.com",
     "about.meta.com",
     "meta.com",
-    "www.facebook.com",  # home/redirects treated as junk for selection purposes
 )
 _FB_JUNK_PATH_TOKENS = (
-    "/about_contact_and_basic_info",
-    "/help/",
-    "/meta-pay",
+    "/events/",
+    "/watch",
+    "/reel",
+    "/afad",
+    "/notifications",
+    "/latest/composer",
+    "/business/",
 )
 
 
@@ -184,8 +187,33 @@ def _normalise_fb_url(url: str) -> str:
     cleaned = url.strip()
     if cleaned.startswith("/"):
         cleaned = "https://www.facebook.com" + cleaned
-    cleaned = cleaned.split("?", 1)[0].rstrip("/")
-    return cleaned
+    try:
+        parsed = urllib.parse.urlparse(cleaned)
+    except Exception:
+        return ""
+
+    scheme = parsed.scheme or "https"
+    host = (parsed.netloc or "www.facebook.com").lower()
+    if host in ("facebook.com", "web.facebook.com", "m.facebook.com", "touch.facebook.com"):
+        host = "www.facebook.com"
+    path = parsed.path or ""
+    query = parsed.query or ""
+
+    if path.lower() == "/profile.php":
+        qs = urllib.parse.parse_qs(query, keep_blank_values=False)
+        ids = qs.get("id", [])
+        if not ids:
+            return ""
+        profile_id = (ids[0] or "").strip()
+        if not profile_id.isdigit():
+            return ""
+        return urllib.parse.urlunparse((scheme, host, "/profile.php", "", f"id={profile_id}", ""))
+
+    path = path.rstrip("/")
+    if not path:
+        return ""
+
+    return urllib.parse.urlunparse((scheme, host, path, "", "", ""))
 
 
 def _purge_wdm_cache(driver_path: str) -> None:
@@ -632,6 +660,11 @@ if os.getenv("FB_DEBUG_CAND_URL_GATE") == "1":
         assert _normalise_fb_url("https://www.facebook.com/shelaibd")
         assert _normalise_fb_url("https://www.facebook.com/profile.php?id=61554027368639")
         assert _normalise_fb_url("https://web.facebook.com/someband")
+        assert _normalise_fb_url("https://www.facebook.com/profile.php?id=61554027368639&__tn__=%3C") == "https://www.facebook.com/profile.php?id=61554027368639"
+        assert _fb_is_candidate_url_allowed("https://www.facebook.com/profile.php?id=61554027368639") is True
+        assert _is_junk_fb_candidate("https://www.facebook.com/shelaibd") is False
+        assert _is_junk_fb_candidate("https://www.facebook.com/watch") is True
+        assert _is_junk_fb_candidate("https://www.facebook.com/notifications/?notif_id=123") is True
     except Exception:
         pass
 
@@ -642,16 +675,22 @@ def _is_junk_fb_candidate(url: str) -> bool:
     try:
         parsed = urllib.parse.urlparse(url)
     except Exception:
-        return False
+        return True
     host = (parsed.netloc or "").lower()
     path = (parsed.path or "").lower()
+    query = (parsed.query or "").lower()
+
     if any(host == h or host.endswith(h) for h in _FB_JUNK_HOSTS):
         return True
-    if any(tok in path for tok in _FB_JUNK_PATH_TOKENS):
+    if host.startswith("business.facebook.com"):
+        return True
+    if path in ("", "/", "/home"):
+        return True
+    if any(path.startswith(tok) for tok in _FB_JUNK_PATH_TOKENS):
         return True
     if "l.php" in path:
         return True
-    if host.startswith("www.facebook.com") and path in ("", "/", "/home"):
+    if "ref=notif" in query or "notif_id=" in query or "notif_t=" in query:
         return True
     return False
 
