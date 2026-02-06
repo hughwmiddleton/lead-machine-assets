@@ -803,8 +803,10 @@ def _parse_search_candidates(html: str, logger: LoggerFn = None, search_name: Op
         search_name=search_name or "",
     )
 
+    raw_candidates = list(candidates)
+
     # Add lightweight music hint for stable sorting (no scoring change).
-    for cand in candidates:
+    for cand in raw_candidates:
         aria = getattr(cand, "aria_label", "") or ""
         cat = getattr(cand, "category", "") or ""
         music_hint = _category_is_music_like(cat) or _category_is_music_like(aria)
@@ -813,7 +815,7 @@ def _parse_search_candidates(html: str, logger: LoggerFn = None, search_name: Op
         except Exception:
             pass
 
-    deduped = _dedupe_candidates(candidates)
+    deduped = _dedupe_candidates(raw_candidates)
     deduped = sorted(deduped, key=lambda c: 0 if getattr(c, "music_hint", False) else 1)
 
     if os.getenv("FB_DEBUG_CANDIDATES") == "1":
