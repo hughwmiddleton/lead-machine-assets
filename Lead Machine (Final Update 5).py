@@ -10069,9 +10069,8 @@ class NightModeTab(QtWidgets.QWidget):
         if fb_pass:
             env["FB_PASSWORD"] = fb_pass
             secrets_to_mask.append(fb_pass)
-        # Force Night Mode FB to use persistent profile and selected headless/headed mode.
+        # Force Night Mode FB to use persistent profile (mode controlled by env/defaults).
         env["NIGHT_FB_PROFILE_DIR"] = "/Users/hughmiddleton/Lead Machine/Lead Machine Code/night_fb_profile"
-        env["NIGHT_FB_HEADLESS"] = "1" if headless else "0"
         self.worker = NightModeWorker(cmd, workdir=base_dir, env=env, secrets=secrets_to_mask)
         self.worker.log_signal.connect(self._append_log)
         self.worker.finished_signal.connect(self._on_finished)

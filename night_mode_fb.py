@@ -11,6 +11,7 @@ import time
 import urllib.parse
 import shutil
 from pathlib import Path
+import sys
 import atexit
 import weakref
 from dataclasses import dataclass
@@ -256,6 +257,17 @@ def _bool_env(name: str, default: bool = False) -> bool:
     if val is None:
         return default
     return str(val).strip().lower() not in ("0", "false", "no", "off", "")
+
+
+def _is_linux() -> bool:
+    try:
+        return sys.platform.startswith("linux")
+    except Exception:
+        return False
+
+
+def _display_env_present() -> bool:
+    return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
 
 
 def _get_night_fb_profile_dir() -> str:
@@ -1106,17 +1118,42 @@ class NightModeFacebookEnricher:
         self.use_shared_session = use_shared_session
         self._anon_driver = None
         self._unearthed_driver = None
+        self._headless_env_raw = os.environ.get("NIGHT_FB_HEADLESS")
         self.headless = _bool_env("NIGHT_FB_HEADLESS", default=False)
         self.allow_headed_recovery = _bool_env("NIGHT_FB_HEADED_RECOVERY", default=False)
         self.skip_on_checkpoint = _bool_env("NIGHT_FB_SKIP_ON_CHECKPOINT", default=True)
+        self.require_display = _bool_env("NIGHT_FB_REQUIRE_DISPLAY", default=False)
         self._headed_recovery_attempted = False
         self._skip_fb_due_to_checkpoint = False
+        self._skip_fb_due_to_display = False
         self._session_failed = False
         self._session_failed_reason = ""
         self._last_selected_candidate_context: Optional[Dict[str, Any]] = None
 
+        if (not self.headless) and self.require_display and _is_linux() and (not _display_env_present()):
+            self._skip_fb_due_to_display = True
+            _log(
+                self.logger,
+                "[Night FB] Skipping FB: headed mode requires display but DISPLAY/WAYLAND missing; set NIGHT_FB_HEADLESS=1 or disable NIGHT_FB_REQUIRE_DISPLAY.",
+            )
+
+        mode_label = "headless" if self.headless else "headed"
+        profile_dir = _get_night_fb_profile_dir()
+        headless_env_label = self._headless_env_raw if self._headless_env_raw is not None else "<unset>"
+        _log(
+            self.logger,
+            f"[Night FB] Starting session mode={mode_label} profile_dir={profile_dir} headless_env={headless_env_label} require_display={self.require_display} os={sys.platform}",
+        )
+        if _bool_env("NIGHT_FB_DEBUG_MODE", default=False):
+            _log(
+                self.logger,
+                f"[Night FB][debug] resolved_headless={self.headless} headed_recovery={self.allow_headed_recovery} skip_on_checkpoint={self.skip_on_checkpoint} require_display={self.require_display}",
+            )
+
     def __enter__(self) -> "NightModeFacebookEnricher":
         try:
+            if self._skip_fb_due_to_display:
+                return self
             self._ensure_session()
         except FacebookDriverError as exc:
             _log(self.logger, f"[Night FB] Failed to start FB session: {exc}")
@@ -1926,6 +1963,11 @@ class NightModeFacebookEnricher:
             except Exception:
                 pass
             return str(value or "").strip()
+
+        if self._skip_fb_due_to_display:
+            result["FB_Status"] = result.get("FB_Status", "") or "skipped_no_display"
+            result["FB_Reason"] = "no_display_env"
+            return result
 
         if self._skip_fb_due_to_checkpoint:
             return self._mark_row_checkpoint(result)
