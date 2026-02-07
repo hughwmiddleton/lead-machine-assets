@@ -378,6 +378,8 @@ class NightPersistentFacebookSession:
         self.logger = logger
         self.wait_seconds = wait_seconds
         self.driver = None
+        self.last_health_reason: str = ""
+        self.last_health_ok: bool = True
 
     def close(self):
         try:
@@ -420,6 +422,8 @@ class NightPersistentFacebookSession:
                 healthy, reason = _session_looks_healthy(self.driver)
             except Exception:
                 healthy, reason = False, "exception"
+            self.last_health_ok = healthy
+            self.last_health_reason = reason or ""
             if not healthy:
                 # Try a neutral authed page before restarting.
                 try:
@@ -428,6 +432,8 @@ class NightPersistentFacebookSession:
                     healthy, reason = _session_looks_healthy(self.driver)
                 except Exception:
                     healthy, reason = False, reason or "exception"
+                self.last_health_ok = healthy
+                self.last_health_reason = reason or ""
             if not healthy:
                 _log(self.logger, f"[Night FB] Session unhealthy; restarting driver once... reason={reason}")
                 try:
@@ -440,6 +446,8 @@ class NightPersistentFacebookSession:
                         healthy_retry, reason_retry = _session_looks_healthy(self.driver)
                     except Exception:
                         healthy_retry, reason_retry = False, "exception"
+                    self.last_health_ok = healthy_retry
+                    self.last_health_reason = reason_retry or ""
                     if not healthy_retry:
                         _log(self.logger, f"[Night FB] Session still unhealthy; continuing but FB results may be limited. reason={reason_retry}")
                 except Exception:
@@ -448,10 +456,14 @@ class NightPersistentFacebookSession:
             return self.driver
 
         if self.headless:
+            self.last_health_ok = False
+            self.last_health_reason = "unauthenticated"
             raise FacebookDriverError("Headless session unauthenticated (no c_user cookie present).")
 
         _log(self.logger, "[Night FB] Awaiting manual login to establish session (headed mode)...")
         self._wait_for_manual_login(self.driver)
+        self.last_health_ok = True
+        self.last_health_reason = ""
         return self.driver
 
     def navigate(self, url: str):
@@ -1095,6 +1107,10 @@ class NightModeFacebookEnricher:
         self._anon_driver = None
         self._unearthed_driver = None
         self.headless = _bool_env("NIGHT_FB_HEADLESS", default=False)
+        self.allow_headed_recovery = _bool_env("NIGHT_FB_HEADED_RECOVERY", default=False)
+        self.skip_on_checkpoint = _bool_env("NIGHT_FB_SKIP_ON_CHECKPOINT", default=True)
+        self._headed_recovery_attempted = False
+        self._skip_fb_due_to_checkpoint = False
         self._session_failed = False
         self._session_failed_reason = ""
         self._last_selected_candidate_context: Optional[Dict[str, Any]] = None
@@ -1133,6 +1149,11 @@ class NightModeFacebookEnricher:
                 if driver:
                     _ = driver.current_url
                     if _is_driver_authenticated(driver):
+                        try:
+                            self.session.last_health_ok = True  # type: ignore[attr-defined]
+                            self.session.last_health_reason = ""  # type: ignore[attr-defined]
+                        except Exception:
+                            pass
                         _log(self.logger, "[Night FB] Reusing existing authenticated driver (persistent profile).")
                         return self.session
             except Exception:
@@ -1323,11 +1344,86 @@ class NightModeFacebookEnricher:
         source_job = str(row.get("__source_job", "") or "").lower()
         return ("unearthed" in source_dir) or ("unearthed" in source_job)
 
+    def _mark_row_checkpoint(self, row: Dict[str, str]) -> Dict[str, str]:
+        """Mark a row as skipped due to FB checkpoint."""
+        result = dict(row or {})
+        result["FB_Status"] = "skipped_checkpoint"
+        result["FB_Reason"] = "checkpoint"
+        return result
+
     def _is_unearthed_source(self, row: Dict[str, str]) -> bool:
         source_dir = str(row.get("Source Directory", "") or "").strip().lower()
         source_tag = str(row.get("Source Tag", "") or "").strip().lower()
         source_job = str(row.get("__source_job", "") or "").strip().lower()
         return any("unearthed" in val for val in (source_dir, source_tag, source_job))
+
+    def _maybe_recover_or_skip_on_checkpoint(self) -> bool:
+        """
+        Detect checkpoint blocks; optionally attempt one headed recovery; otherwise fail-fast.
+        Returns True if it's safe to proceed with FB enrichment, False if the run should skip FB.
+        """
+        if self._skip_fb_due_to_checkpoint:
+            return False
+
+        reason = ""
+        healthy = True
+        session = None
+        try:
+            session = self._ensure_session()
+            if session:
+                healthy = bool(getattr(session, "last_health_ok", True))
+                reason = str(getattr(session, "last_health_reason", "") or "")
+        except FacebookDriverError as exc:
+            reason = self._session_failed_reason or str(exc)
+            if "checkpoint" not in reason.lower():
+                # Not a checkpoint; propagate to let normal error handling occur.
+                raise
+            healthy = False
+
+        if session is None:
+            # Anonymous/legacy path; no checkpoint state available.
+            return True
+
+        if healthy or reason.lower() != "checkpoint":
+            return True
+
+        # Checkpoint detected.
+        if not self.skip_on_checkpoint:
+            _log(self.logger, "[Night FB] Checkpoint detected but skip is disabled; continuing cautiously.")
+            return True
+
+        if self.allow_headed_recovery and (not self._headed_recovery_attempted):
+            self._headed_recovery_attempted = True
+            _log(self.logger, "[Night FB] Checkpoint detected; attempting headed recovery once...")
+            try:
+                if self.session and self._owns_session:
+                    try:
+                        self.session.close()
+                    except Exception:
+                        pass
+                self.session = None
+                self._owns_session = False
+                self.headless = False  # force headed retry using same profile
+                self._session_failed = False
+                self._session_failed_reason = ""
+                session = self._ensure_session()
+                healthy = bool(getattr(session, "last_health_ok", True)) if session else False
+                reason = str(getattr(session, "last_health_reason", "") or "")
+                if healthy or reason.lower() != "checkpoint":
+                    _log(self.logger, "[Night FB] Headed recovery succeeded; continuing with FB enrichment.")
+                    return True
+            except FacebookDriverError:
+                # fall through to skip
+                reason = "checkpoint"
+            except Exception:
+                reason = "checkpoint"
+
+        if self.allow_headed_recovery and self._headed_recovery_attempted:
+            _log(self.logger, "[Night FB] Checkpoint persists after headed recovery; skipping FB for remainder of run.")
+        else:
+            _log(self.logger, "[Night FB] Checkpoint detected; skipping FB for remainder of run (headed recovery disabled).")
+        self._skip_fb_due_to_checkpoint = True
+        return False
 
     def _search_for_page(self, artist: str, location: str, allow_anon: bool = False) -> Optional[str]:
         self._last_selected_candidate_context = None
@@ -1831,6 +1927,9 @@ class NightModeFacebookEnricher:
                 pass
             return str(value or "").strip()
 
+        if self._skip_fb_due_to_checkpoint:
+            return self._mark_row_checkpoint(result)
+
         existing_email = _clean_val(result.get("Email", ""))
         if existing_email:
             if not result.get("FB_Status"):
@@ -1845,6 +1944,8 @@ class NightModeFacebookEnricher:
         is_unearthed = self._is_unearthed_source(result)
 
         try:
+            if not self._maybe_recover_or_skip_on_checkpoint():
+                return self._mark_row_checkpoint(result)
             page_url = ""
             emails: List[str] = []
             if is_unearthed:
