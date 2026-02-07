@@ -14,7 +14,7 @@ from pathlib import Path
 import atexit
 import weakref
 from dataclasses import dataclass
-from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 import logging
 from typing import Union
 
@@ -1097,6 +1097,7 @@ class NightModeFacebookEnricher:
         self.headless = _bool_env("NIGHT_FB_HEADLESS", default=False)
         self._session_failed = False
         self._session_failed_reason = ""
+        self._last_selected_candidate_context: Optional[Dict[str, Any]] = None
 
     def __enter__(self) -> "NightModeFacebookEnricher":
         try:
@@ -1244,19 +1245,20 @@ class NightModeFacebookEnricher:
             self._refresh_driver(session)
         return session
 
-    def _fetch_html_with_url(self, url: str) -> Tuple[Optional[str], Optional[str]]:
+    def _fetch_html_with_url(self, url: str, goto_about: bool = True) -> Tuple[Optional[str], Optional[str]]:
         session = self._ensure_session()
         if not session:
             return None, None
         self._ensure_driver_alive(session)
         def _navigate_once() -> Tuple[Optional[str], Optional[str]]:
             driver = session.navigate(url)
-            goto_about = getattr(self.legacy, "_goto_facebook_about", None)
-            if callable(goto_about):
-                try:
-                    goto_about(driver, url, timeout=5.0)
-                except Exception:
-                    pass
+            if goto_about:
+                goto_about_fn = getattr(self.legacy, "_goto_facebook_about", None)
+                if callable(goto_about_fn):
+                    try:
+                        goto_about_fn(driver, url, timeout=5.0)
+                    except Exception:
+                        pass
             time.sleep(1.0)
             current_url = getattr(driver, "current_url", None) or url
             return driver.page_source, current_url
@@ -1288,7 +1290,7 @@ class NightModeFacebookEnricher:
 
         return html, current_url
 
-    def _fetch_html_with_url_anon(self, url: str) -> Tuple[Optional[str], Optional[str]]:
+    def _fetch_html_with_url_anon(self, url: str, goto_about: bool = True) -> Tuple[Optional[str], Optional[str]]:
         try:
             driver = self._get_anon_driver()
         except Exception as exc:
@@ -1296,12 +1298,13 @@ class NightModeFacebookEnricher:
             return None, None
         try:
             driver.get(url)
-            goto_about = getattr(self.legacy, "_goto_facebook_about", None)
-            if callable(goto_about):
-                try:
-                    goto_about(driver, url, timeout=5.0)
-                except Exception:
-                    pass
+            if goto_about:
+                goto_about_fn = getattr(self.legacy, "_goto_facebook_about", None)
+                if callable(goto_about_fn):
+                    try:
+                        goto_about_fn(driver, url, timeout=5.0)
+                    except Exception:
+                        pass
             time.sleep(1.0)
             current_url = getattr(driver, "current_url", None) or url
             if is_fb_login_redirect(current_url) or _is_fb_login_or_security_url(current_url):
@@ -1312,7 +1315,7 @@ class NightModeFacebookEnricher:
             return None, None
 
     def _fetch_html(self, url: str) -> Optional[str]:
-        html, _ = self._fetch_html_with_url(url)
+        html, _ = self._fetch_html_with_url(url, goto_about=True)
         return html
 
     def _should_allow_anonymous(self, row: Dict[str, str]) -> bool:
@@ -1327,6 +1330,7 @@ class NightModeFacebookEnricher:
         return any("unearthed" in val for val in (source_dir, source_tag, source_job))
 
     def _search_for_page(self, artist: str, location: str, allow_anon: bool = False) -> Optional[str]:
+        self._last_selected_candidate_context = None
         session = self._ensure_session()
         if not session and not allow_anon:
             return None
@@ -1451,14 +1455,68 @@ class NightModeFacebookEnricher:
                 name = name or cand.get("name")
                 category = category or cand.get("category")
 
+            base_score = 0.0
+            try:
+                if facebook_enrich is not None and callable(getattr(facebook_enrich, "score_fb_candidate", None)):
+                    scored = facebook_enrich.score_fb_candidate(artist, name, norm_url, category)
+                    if scored:
+                        _, base_score, _ = scored
+            except Exception:
+                base_score = 0.0
+            self._last_selected_candidate_context = {
+                "url": norm_url,
+                "name": name or "",
+                "category": category or "",
+                "base_score": base_score,
+            }
             _log(self.logger, f"[Night FB] Selected FB candidate '{name or norm_url}' -> {norm_url} (category='{category or ''}')")
             return norm_url
 
         _log(self.logger, f"[Night FB] No usable FB candidates for '{artist}' after URL validation.")
         return None
 
+    def _can_identity_soft_pass(self, artist_name: str, page_name: str, resolved_url: str, base_score: float) -> bool:
+        """
+        Conservative identity soft-pass for already-selected candidates.
+        Requirements:
+          - base_score >= 1.0
+          - page/title closely matches artist name
+          - URL is a simple page slug or profile.php?id=<digits>
+          - URL is not a business/junk UI path
+        """
+        if base_score < 1.0:
+            return False
+        artist_slug = _slugify(artist_name)
+        page_slug = _slugify(page_name)
+        if not artist_slug or not page_slug:
+            return False
+        if not (artist_slug == page_slug or artist_slug in page_slug or page_slug in artist_slug):
+            return False
+        try:
+            parsed = urllib.parse.urlparse(resolved_url or "")
+        except Exception:
+            return False
+        path = (parsed.path or "").rstrip("/")
+        if path.startswith("/profile.php"):
+            qs = urllib.parse.parse_qs(parsed.query or "", keep_blank_values=False)
+            profile_id = (qs.get("id") or [""])[0]
+            if not profile_id.isdigit():
+                return False
+        else:
+            parts = [p for p in path.split("/") if p]
+            if len(parts) != 1:
+                return False
+        if _is_junk_fb_candidate(resolved_url):
+            return False
+        return True
+
     def _scrape_single_fb_candidate(
-        self, fb_url: str, row: Dict[str, str], artist_name: str, allow_anon: bool = False
+        self,
+        fb_url: str,
+        row: Dict[str, str],
+        artist_name: str,
+        allow_anon: bool = False,
+        candidate_context: Optional[Dict[str, Any]] = None,
     ) -> Optional[Tuple[NightModeFacebookResult, List[str]]]:
         raw_fb_url = fb_url or ""
         if raw_fb_url.startswith("/"):
@@ -1478,9 +1536,9 @@ class NightModeFacebookEnricher:
             _log(self.logger, f"[Night FB] Ignoring login/redirect page: {candidate_url}")
             return None
 
-        html, resolved_url = self._fetch_html_with_url(candidate_url)
+        html, resolved_url = self._fetch_html_with_url(candidate_url, goto_about=False)
         if (not html) and allow_anon:
-            html, resolved_url = self._fetch_html_with_url_anon(candidate_url)
+            html, resolved_url = self._fetch_html_with_url_anon(candidate_url, goto_about=False)
         if not html:
             return None
         resolved_url = _normalise_fb_url(resolved_url or candidate_url)
@@ -1490,43 +1548,36 @@ class NightModeFacebookEnricher:
 
         soup = BeautifulSoup(html, "html.parser")
         meta_category = ""
+        page_title = ""
         try:
             meta_tag = soup.find("meta", attrs={"property": "og:description"}) or soup.find("meta", attrs={"name": "description"})
             meta_category = (meta_tag.get("content") or "").strip()
         except Exception:
             meta_category = ""
-        has_music_signals = _night_fb_has_music_signals(soup, {"url": resolved_url})
+        try:
+            title_tag = soup.find("meta", attrs={"property": "og:title"}) or soup.find("title")
+            page_title = (title_tag.get("content") if title_tag and title_tag.has_attr("content") else title_tag.get_text()) if title_tag else ""
+        except Exception:
+            page_title = ""
+
+        has_music_signals_main = _night_fb_has_music_signals(soup, {"url": resolved_url})
         emails = _extract_emails_from_html(html or "")
-        gate_soft_pass = False
-        if not has_music_signals and not emails:
-            if _category_is_music_like(meta_category):
-                gate_soft_pass = True
-                _log(self.logger, f"[Night FB] Soft-pass music gate by category allowlist: category='{meta_category}' url='{resolved_url}'")
-            else:
-                _log(self.logger, f"[Night FB] No music signals detected on FB page {resolved_url}, skipping.")
-                night_result = self._build_result(
-                    [],
-                    str(row.get("Email_All", "") or ""),
-                    resolved_url,
-                    artist_name,
-                    allow_empty=True,
-                )
-                if night_result:
-                    night_result.email_source = ""
-                    night_result.about_attempted = "no"
-                    night_result.about_result = "no_music_signals"
-                return night_result, []
 
         about_attempted = "no"
         about_result = ""
         email_source = "main" if emails else ""
-        if not emails:
+        has_music_signals = has_music_signals_main
+
+        need_about_fetch = (not has_music_signals) or (not emails)
+        if need_about_fetch:
+            if not has_music_signals:
+                _log(self.logger, f"[Night FB] No music signals on main page {resolved_url}, checking About tab...")
             about_attempted = "yes"
             for about_url in _fetch_fb_about_variants(resolved_url):
                 try:
-                    about_html, about_resolved = self._fetch_html_with_url(about_url)
+                    about_html, about_resolved = self._fetch_html_with_url(about_url, goto_about=False)
                     if (not about_html) and allow_anon:
-                        about_html, about_resolved = self._fetch_html_with_url_anon(about_url)
+                        about_html, about_resolved = self._fetch_html_with_url_anon(about_url, goto_about=False)
                 except Exception:
                     about_html, about_resolved = "", about_url
                 final_about = _normalise_fb_url(about_resolved or about_url)
@@ -1541,25 +1592,61 @@ class NightModeFacebookEnricher:
                 if any(p in lower_html for p in not_found_phrases):
                     about_result = "not_found"
                     continue
-                about_emails = _extract_emails_from_html(about_html or "")
-                if about_emails:
-                    emails = about_emails
-                    email_source = about_url.rsplit("/", 1)[-1] or "about"
-                    about_result = "emails_found"
+
+                about_soup = BeautifulSoup(about_html or "", "html.parser") if about_html else None
+                if (not has_music_signals) and about_soup:
+                    if _night_fb_has_music_signals(about_soup, {"url": final_about}):
+                        has_music_signals = True
+                        about_result = "music_signals"
+                        _log(self.logger, f"[Night FB] Music signals found on About tab {final_about}.")
+                if not emails:
+                    about_emails = _extract_emails_from_html(about_html or "")
+                    if about_emails:
+                        emails = about_emails
+                        email_source = about_url.rsplit("/", 1)[-1] or "about"
+                        about_result = "emails_found"
+                if has_music_signals and emails:
                     break
-                about_result = "no_email" if about_result == "" else about_result
+                if not about_result:
+                    about_result = "no_email"
             if not about_result:
                 about_result = "fetch_error" if not emails else "emails_found"
 
-        night_result = self._build_result(emails, str(row.get("Email_All", "") or ""), resolved_url, artist_name)
+        gate_soft_pass_category = False
+        gate_soft_pass_identity = False
+        if not has_music_signals and not emails:
+            if _category_is_music_like(meta_category):
+                gate_soft_pass_category = True
+                _log(self.logger, f"[Night FB] Soft-pass music gate by category allowlist: category='{meta_category}' url='{resolved_url}'")
+            else:
+                ctx = candidate_context or {}
+                ctx_url = _normalise_fb_url(str(ctx.get("url") or ""))
+                base_score = float(ctx.get("base_score") or 0.0)
+                if ctx_url and ctx_url == resolved_url:
+                    page_name_for_identity = page_title or str(ctx.get("name") or "")
+                    if self._can_identity_soft_pass(artist_name, page_name_for_identity, resolved_url, base_score):
+                        gate_soft_pass_identity = True
+                        _log(self.logger, "[FB Enrich] Soft-pass music gate: strong identity match, no explicit anti-signals")
+                if not gate_soft_pass_identity:
+                    _log(self.logger, f"[Night FB] No music signals detected on FB page {resolved_url}, skipping.")
+
+        night_result = self._build_result(
+            emails,
+            str(row.get("Email_All", "") or ""),
+            resolved_url,
+            artist_name,
+            allow_empty=has_music_signals or emails or gate_soft_pass_category or gate_soft_pass_identity,
+        )
+        if not night_result:
+            return None
         night_result.email_source = email_source
         night_result.about_attempted = about_attempted
-        night_result.about_result = about_result
-        if gate_soft_pass:
+        night_result.about_result = about_result or ("soft_pass_identity" if gate_soft_pass_identity else "soft_pass_category" if gate_soft_pass_category else "")
+        if gate_soft_pass_category:
             row["FB_Gate"] = "soft_pass_category"
-        if night_result:
-            return night_result, emails
-        return None
+        if gate_soft_pass_identity:
+            row["FB_Gate"] = "soft_pass_identity"
+        return night_result, emails
 
     def _build_result(
         self,
@@ -1820,7 +1907,13 @@ class NightModeFacebookEnricher:
                 if not page_url:
                     page_url = self._search_for_page(artist_name, location, allow_anon=allow_anon) or ""
                     if page_url:
-                        candidate = self._scrape_single_fb_candidate(page_url, result, artist_name, allow_anon=allow_anon)
+                        candidate = self._scrape_single_fb_candidate(
+                            page_url,
+                            result,
+                            artist_name,
+                            allow_anon=allow_anon,
+                            candidate_context=self._last_selected_candidate_context,
+                        )
                         if candidate:
                             night_result, emails = candidate
                             page_url = night_result.facebook_url or page_url
