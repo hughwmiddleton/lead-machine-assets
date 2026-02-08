@@ -122,6 +122,24 @@ def _split_multi(value: str) -> List[str]:
     return [p.strip() for p in parts if p and p.strip()]
 
 
+def _unpack_fb_candidate(candidate):
+    """
+    Normalizes candidate return from _scrape_single_fb_candidate.
+    Supports old 2-tuple and new 4-tuple shapes, and tolerates None.
+    Returns: (night_result, emails, driver_kind, outcome)
+    """
+    if not candidate:
+        return None, [], "unknown", "fetch_error"
+    try:
+        if len(candidate) == 2:
+            night_result, emails = candidate
+            return night_result, emails, "unknown", "fetch_error"
+        night_result, emails, driver_kind, outcome = candidate
+        return night_result, emails, driver_kind, outcome
+    except Exception:
+        return None, [], "unknown", "fetch_error"
+
+
 def _extract_fb_urls_for_night_mode(row):
     fields = [
         "Social Link",
@@ -1181,6 +1199,14 @@ class NightModeFacebookEnricher:
         self._session_failed = False
         self._session_failed_reason = ""
         self._last_selected_candidate_context: Optional[Dict[str, Any]] = None
+        self._pass_a_counts = {
+            "attempted": 0,
+            "found_email": 0,
+            "no_email_on_page": 0,
+            "login_wall": 0,
+            "fetch_error": 0,
+            "skipped_no_fb_url": 0,
+        }
 
         if (not self.headless) and self.require_display and _is_linux() and (not _display_env_present()):
             self._skip_fb_due_to_display = True
@@ -1312,6 +1338,24 @@ class NightModeFacebookEnricher:
             return self._unearthed_driver
         self._unearthed_driver = _create_fb_driver_public(headless=True)
         return self._unearthed_driver
+
+    def _pass_a_bump(self, key: str) -> None:
+        if key in self._pass_a_counts:
+            self._pass_a_counts[key] += 1
+
+    def _pass_a_log_row(self, artist: str, url: str, driver_kind: str, outcome: str, reason: str) -> None:
+        safe_artist = artist or "<unknown>"
+        safe_url = url or "<none>"
+        safe_driver = driver_kind or "unknown"
+        safe_outcome = outcome or "unknown"
+        safe_reason = reason or ""
+        _log(
+            self.logger,
+            f'[Night FB][PASS A] artist="{safe_artist}" url="{safe_url}" mode="legacy_anon_probe" driver="{safe_driver}" outcome="{safe_outcome}" reason="{safe_reason}"',
+        )
+
+    def get_pass_a_counts(self) -> Dict[str, int]:
+        return dict(self._pass_a_counts)
 
     def _refresh_driver(self, session) -> None:
         _log(self.logger, "[FB] Driver appears dead, recreating a fresh instance...")
@@ -1712,7 +1756,7 @@ class NightModeFacebookEnricher:
         artist_name: str,
         allow_anon: bool = False,
         candidate_context: Optional[Dict[str, Any]] = None,
-    ) -> Optional[Tuple[NightModeFacebookResult, List[str]]]:
+    ) -> Optional[Tuple[NightModeFacebookResult, List[str], str, str]]:
         raw_fb_url = fb_url or ""
         if raw_fb_url.startswith("/"):
             raw_fb_url = "https://www.facebook.com" + raw_fb_url
@@ -1731,15 +1775,23 @@ class NightModeFacebookEnricher:
             _log(self.logger, f"[Night FB] Ignoring login/redirect page: {candidate_url}")
             return None
 
+        used_driver_kind = "session"
+        outcome_hint = "fetch_error"
+
         html, resolved_url = self._fetch_html_with_url(candidate_url, goto_about=False)
+        if html:
+            outcome_hint = "fetched"
         if (not html) and allow_anon:
             html, resolved_url = self._fetch_html_with_url_anon(candidate_url, goto_about=False)
+            used_driver_kind = "anon_fallback"
+            if html and outcome_hint != "fetched":
+                outcome_hint = "fetched"
         if not html:
             return None
         resolved_url = _normalise_fb_url(resolved_url or candidate_url)
         if _is_fb_login_or_security_url(resolved_url):
             _log(self.logger, f"[Night FB] Ignoring login/redirect page: {resolved_url}")
-            return None
+            return None, [], used_driver_kind, "login_wall"
 
         soup = BeautifulSoup(html, "html.parser")
         meta_category = ""
@@ -1841,7 +1893,8 @@ class NightModeFacebookEnricher:
             row["FB_Gate"] = "soft_pass_category"
         if gate_soft_pass_identity:
             row["FB_Gate"] = "soft_pass_identity"
-        return night_result, emails
+        outcome_hint = "found_email" if emails else "no_email_on_page"
+        return night_result, emails, used_driver_kind, outcome_hint
 
     def _build_result(
         self,
@@ -1940,6 +1993,20 @@ class NightModeFacebookEnricher:
         artist_name: str,
         fb_urls: List[str],
     ) -> Dict[str, str]:
+        def _map_unearthed_outcome(emails: List[str], status: str) -> Tuple[str, str]:
+            """
+            Map legacy Unearthed scrape status to PASS A counters/log reasons.
+            Outcome values must match PASS A summary buckets.
+            """
+            if emails:
+                return "found_email", "explicit_url"
+            status_norm = (status or "").lower()
+            if status_norm in ("login_redirect", "checkpoint"):
+                return "login_wall", "anon_login_wall"
+            if status_norm in ("error", "fetch_error"):
+                return "fetch_error", "legacy_error"
+            return "no_email_on_page", "legacy_no_email"
+
         # Always prefer explicit URLs first.
         if fb_urls:
             try:
@@ -1949,7 +2016,11 @@ class NightModeFacebookEnricher:
                 _log(self.logger, f"[Night FB][Unearthed] Could not start public FB driver: {exc}")
                 return result
             for fb_url in fb_urls:
+                self._pass_a_bump("attempted")
                 emails, status, resolved_url = _scrape_fb_page_unearthed_legacy(driver, fb_url, logger=self.logger)
+                outcome, reason = _map_unearthed_outcome(emails, status)
+                self._pass_a_bump(outcome)
+                self._pass_a_log_row(artist_name, resolved_url or fb_url, "legacy_unearthed_anon", outcome, reason)
                 if emails:
                     night_result = self._build_result(emails, str(result.get("Email_All", "") or ""), resolved_url or fb_url, artist_name)
                     if night_result:
@@ -1977,7 +2048,11 @@ class NightModeFacebookEnricher:
                 result["FB_Status"] = "unearthed_driver_error"
                 _log(self.logger, f"[Night FB][Unearthed] Could not start public FB driver for blind search: {exc}")
                 return result
+            self._pass_a_bump("attempted")
             emails, status, resolved_url = _scrape_fb_page_unearthed_legacy(driver, page_url, logger=self.logger)
+            outcome, reason = _map_unearthed_outcome(emails, status)
+            self._pass_a_bump(outcome)
+            self._pass_a_log_row(artist_name, resolved_url or page_url, "legacy_unearthed_anon", outcome, reason)
             if emails:
                 night_result = self._build_result(emails, str(result.get("Email_All", "") or ""), resolved_url or page_url, artist_name)
                 if night_result:
@@ -1996,8 +2071,12 @@ class NightModeFacebookEnricher:
 
         last_status = "no_emails"
         for fb_url in fb_urls:
+            self._pass_a_bump("attempted")
             emails, status, resolved_url = _scrape_fb_page_unearthed_legacy(driver, fb_url, logger=self.logger)
             last_status = status or "no_emails"
+            outcome, reason = _map_unearthed_outcome(emails, status)
+            self._pass_a_bump(outcome)
+            self._pass_a_log_row(artist_name, resolved_url or fb_url, "legacy_unearthed_anon", outcome, reason)
             if emails:
                 night_result = self._build_result(emails, str(result.get("Email_All", "") or ""), resolved_url or fb_url, artist_name)
                 if night_result:
@@ -2062,22 +2141,107 @@ class NightModeFacebookEnricher:
                 return self._enrich_row_unearthed_legacy(result, artist_name, fb_urls)
 
             allow_anon = self._should_allow_anonymous(result)
-            if fb_urls:
+            # PASS A: explicit URL attempts (instrumentation only)
+            outcome_rank = {"found_email": 0, "login_wall": 1, "fetch_error": 2, "no_email_on_page": 3}
+            best_outcome = None
+            best_reason = ""
+            best_driver = ""
+            best_page_url = ""
+
+            if not fb_urls:
+                if not result.get("FB_Status"):
+                    result["FB_Status"] = "pass_a_skipped_no_fb_url"
+                if not result.get("FB_Reason"):
+                    result["FB_Reason"] = "skipped_no_fb_url"
+                self._pass_a_bump("skipped_no_fb_url")
+                self._pass_a_log_row(artist_name, "", "none", "skipped_no_fb_url", "skipped_no_fb_url")
+            else:
                 _log(self.logger, f"[Night FB] Using explicit FB URLs: {fb_urls}")
-                candidates: List[Tuple[NightModeFacebookResult, List[str]]] = []
                 for direct_url in fb_urls:
+                    driver_kind = "session"
+                    outcome_for_log = "fetch_error"
+                    reason_for_log = ""
+                    self._pass_a_bump("attempted")
                     try:
                         candidate = self._scrape_single_fb_candidate(direct_url, result, artist_name, allow_anon=allow_anon)
-                    except Exception:
+                    except Exception as exc:
                         candidate = None
-                    if candidate:
-                        candidates.append(candidate)
-                if candidates:
-                    best_result, emails = candidates[0]
-                    page_url = best_result.facebook_url or (fb_urls[0] if fb_urls else "")
-                    result = self._apply_night_fb_result(result, best_result, emails, page_url)
-                    return result
+                        driver_kind = "unknown"
+                        outcome_for_log = "fetch_error"
+                        reason_for_log = f"session_exception:{exc.__class__.__name__}"
+                    night_result, emails, driver_kind, candidate_outcome = _unpack_fb_candidate(candidate)
+                    if night_result is not None or candidate_outcome == "login_wall":
+                        if night_result is None:
+                            outcome_for_log = candidate_outcome
+                            if candidate_outcome == "login_wall":
+                                reason_for_log = "session_login_wall" if not driver_kind.startswith("anon") else "anon_login_wall"
+                                current_rank = outcome_rank.get("login_wall", 99)
+                                if best_outcome is None or current_rank < outcome_rank.get(best_outcome, 99):
+                                    best_outcome = "login_wall"
+                                    best_reason = reason_for_log
+                                    best_driver = driver_kind
+                                    best_page_url = _normalise_fb_url(direct_url)
+                            else:
+                                reason_for_log = f"{driver_kind}_exception:unknown"
+                                self._pass_a_bump("fetch_error")
+                                if best_outcome is None:
+                                    best_outcome = "fetch_error"
+                                    best_reason = reason_for_log
+                                    best_driver = driver_kind
+                                    best_page_url = _normalise_fb_url(direct_url)
+                        else:
+                            outcome_for_log = candidate_outcome
+                            if candidate_outcome == "found_email":
+                                reason_for_log = "explicit_url"
+                            elif candidate_outcome == "no_email_on_page":
+                                reason_for_log = "session_fetch_ok_no_email" if not driver_kind.startswith("anon") else "anon_fetch_ok_no_email"
+                            elif candidate_outcome == "login_wall":
+                                reason_for_log = "session_login_wall" if not driver_kind.startswith("anon") else "anon_login_wall"
+                            else:
+                                reason_for_log = f"{driver_kind}_exception:unknown"
+                            if emails:
+                                page_url = night_result.facebook_url or _normalise_fb_url(direct_url)
+                                result = self._apply_night_fb_result(result, night_result, emails, page_url)
+                                result["FB_Status"] = "pass_a_found_email"
+                                result["FB_Reason"] = "explicit_url"
+                                self._pass_a_bump("found_email")
+                                self._pass_a_log_row(artist_name, page_url, driver_kind, "found_email", reason_for_log)
+                                return result
+                            else:
+                                page_url = night_result.facebook_url or _normalise_fb_url(direct_url)
+                                current_rank = outcome_rank.get(candidate_outcome, 99)
+                                if best_outcome is None or current_rank < outcome_rank.get(best_outcome, 99):
+                                    best_outcome = candidate_outcome
+                                    best_reason = reason_for_log
+                                    best_driver = driver_kind
+                                    best_page_url = page_url
+                    else:
+                        if not reason_for_log:
+                            reason_for_log = "session_exception:unknown" if driver_kind == "session" else f"{driver_kind}_exception:unknown"
+                        self._pass_a_bump("fetch_error")
+                        if best_outcome is None:
+                            best_outcome = "fetch_error"
+                            best_reason = reason_for_log
+                            best_driver = driver_kind
+                            best_page_url = _normalise_fb_url(direct_url)
+                    self._pass_a_log_row(artist_name, direct_url, driver_kind, outcome_for_log, reason_for_log)
+
+                if best_outcome:
+                    if best_outcome == "login_wall":
+                        result["FB_Status"] = "pass_a_login_wall"
+                        result["FB_Reason"] = best_reason or ("anon_login_wall" if best_driver.startswith("anon") else "session_login_wall")
+                        self._pass_a_bump("login_wall")
+                    elif best_outcome == "fetch_error":
+                        result["FB_Status"] = "pass_a_fetch_error"
+                        result["FB_Reason"] = best_reason or ("anon_exception:unknown" if best_driver.startswith("anon") else "session_exception:unknown")
+                        self._pass_a_bump("fetch_error")
+                    else:
+                        result["FB_Status"] = "pass_a_no_email_on_page"
+                        result["FB_Reason"] = best_reason or ("anon_fetch_ok_no_email" if best_driver.startswith("anon") else "session_fetch_ok_no_email")
+                        self._pass_a_bump("no_email_on_page")
+                    page_url = best_page_url or page_url
                 else:
+                    # Diagnostics fallback for first URL
                     reason_code: Optional[str] = None
                     diag_emails: List[str] = []
                     probe_url = fb_urls[0] if fb_urls else ""
@@ -2088,12 +2252,23 @@ class NightModeFacebookEnricher:
                         night_result = self._build_result(diag_emails, str(result.get("Email_All", "") or ""), page_url, artist_name)
                         if night_result:
                             result = self._apply_night_fb_result(result, night_result, diag_emails, page_url)
+                            result["FB_Status"] = "pass_a_found_email"
+                            result["FB_Reason"] = "explicit_url"
+                            self._pass_a_bump("found_email")
+                            self._pass_a_log_row(artist_name, page_url, "anon" if allow_anon else "session", "found_email", "explicit_url")
                             return result
                     if reason_code:
-                        result["FB_Status"] = f"explicit_fail:{reason_code}"
+                        result["FB_Status"] = "pass_a_login_wall" if reason_code.startswith("redirect") else "pass_a_no_email_on_page"
+                        result["FB_Reason"] = "anon_login_wall" if "login" in reason_code else "anon_fetch_ok_no_email"
+                        self._pass_a_bump("login_wall" if "login" in reason_code else "no_email_on_page")
                         _log(self.logger, f"[Night FB] Explicit FB URL had no emails (reason={reason_code}); falling back to search.")
-                    else:
+                    elif not result.get("FB_Status"):
                         _log(self.logger, "[Night FB] Explicit FB URLs produced no results; falling back to search.")
+                        if not result.get("FB_Status"):
+                            result["FB_Status"] = "pass_a_no_email_on_page"
+                            result["FB_Reason"] = "session_fetch_ok_no_email"
+                            self._pass_a_bump("no_email_on_page")
+                    _log(self.logger, "[Night FB] Falling back to PASS B (search) after PASS A.")
 
             if not page_url:
                 session = self._ensure_session()
@@ -2124,8 +2299,8 @@ class NightModeFacebookEnricher:
                             allow_anon=allow_anon,
                             candidate_context=self._last_selected_candidate_context,
                         )
-                        if candidate:
-                            night_result, emails = candidate
+                        night_result, emails, _, _ = _unpack_fb_candidate(candidate)
+                        if night_result:
                             page_url = night_result.facebook_url or page_url
                             result = self._apply_night_fb_result(result, night_result, emails, page_url)
                             return result

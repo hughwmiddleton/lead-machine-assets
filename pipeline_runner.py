@@ -1385,6 +1385,16 @@ def run_facebook_global_pass_nightmode(
         use_shared_session=False,
     )
 
+    def _write_state_with_pass_a(extra: Dict[str, Any]) -> None:
+        try:
+            counts = fb_helper.get_pass_a_counts()
+            extra = dict(extra or {})
+            extra.update({f"pass_a_{k}": v for k, v in counts.items()})
+        except Exception:
+            pass
+        state.update(extra)
+        _write_fb_state(state_path, state)
+
     with fb_helper:
         for idx, row in df.iterrows():
             if idx <= last_index:
@@ -1418,7 +1428,7 @@ def run_facebook_global_pass_nightmode(
                         "fb_resume_input": os.path.abspath(input_csv),
                     }
                 )
-                _write_fb_state(state_path, state)
+                _write_state_with_pass_a(state)
                 continue
 
             terminal_statuses = {"no_candidates", "unearthed_no_emails"}
@@ -1437,7 +1447,7 @@ def run_facebook_global_pass_nightmode(
                         "fb_resume_input": os.path.abspath(input_csv),
                     }
                 )
-                _write_fb_state(state_path, state)
+                _write_state_with_pass_a(state)
                 continue
 
             facebook_url_hint = str(row.get("Facebook_URL", "") or "").strip()
@@ -1461,7 +1471,7 @@ def run_facebook_global_pass_nightmode(
                         "fb_resume_input": os.path.abspath(input_csv),
                     }
                 )
-                _write_fb_state(state_path, state)
+                _write_state_with_pass_a(state)
                 continue
 
             if processed_this_run > 0:
@@ -1502,7 +1512,7 @@ def run_facebook_global_pass_nightmode(
                             "fb_resume_input": os.path.abspath(input_csv),
                         }
                     )
-                    _write_fb_state(state_path, state)
+                    _write_state_with_pass_a(state)
                     break
                 _safe_log_console(logger, f"[FB Night] Night FB enrich failed at row {idx}: {exc}")
                 enriched = None
@@ -1532,7 +1542,7 @@ def run_facebook_global_pass_nightmode(
                     "fb_resume_input": os.path.abspath(input_csv),
                 }
             )
-            _write_fb_state(state_path, state)
+            _write_state_with_pass_a(state)
 
             if max_rows_per_run and processed_this_run >= max_rows_per_run:
                 limit_reached = True
@@ -1552,7 +1562,22 @@ def run_facebook_global_pass_nightmode(
             "fb_resume_input": os.path.abspath(input_csv),
         }
     )
-    _write_fb_state(state_path, state)
+    _write_state_with_pass_a(state)
+
+    try:
+        counts = fb_helper.get_pass_a_counts()
+    except Exception:
+        counts = {}
+    _safe_log_console(
+        logger,
+        "[FB Night][PASS A Summary] "
+        f"attempted={counts.get('attempted',0)} "
+        f"found_email={counts.get('found_email',0)} "
+        f"no_email_on_page={counts.get('no_email_on_page',0)} "
+        f"login_wall={counts.get('login_wall',0)} "
+        f"fetch_error={counts.get('fetch_error',0)} "
+        f"skipped_no_fb_url={counts.get('skipped_no_fb_url',0)}",
+    )
 
     df.drop(columns=["__row_id"], inplace=True, errors="ignore")
     df.to_csv(output_csv, index=False)
