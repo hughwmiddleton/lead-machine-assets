@@ -3496,27 +3496,17 @@ class CrossDirectoryEnricherWorker(QThread):
                                                 fb_emails = found
                                                 page_url_used = candidate_norm
                                                 break
-                                    elif fb_find_page_and_emails_by_name:
-                                        page_url_used, fb_emails = fb_find_page_and_emails_by_name(
-                                            fb_driver,
-                                            artist,
-                                            location=cell_to_str(row.get("Location") or row.get("location")),
-                                            log_fn=self.log_message.emit,
+                                    else:
+                                        # No explicit FB URL; legacy FB Enrich pass does nothing.
+                                        self.log_message.emit(
+                                            f"[FB Enrich] Skipping '{artist}' – no explicit Facebook URL present."
                                         )
-                                        try:
-                                            current_url = (fb_driver.current_url or "").lower()
-                                            if "facebook.com/login" in current_url:
-                                                self.log_message.emit(
-                                                    "[FB Enrich] Facebook login wall detected for this page; enrichment skipped (not logged in)."
-                                                )
-                                                fb_emails = []
-                                                page_url_used = ""
-                                        except Exception:
-                                            pass
                                 except Exception as exc:
                                     self.log_message.emit(
                                         f"[FB Enrich] Error enriching row {position}/{total} ({artist}): {exc}"
                                     )
+                                if "FB_Status" not in seed_df.columns:
+                                    seed_df["FB_Status"] = ""
                                 if fb_emails:
                                     current_email = cell_to_str(seed_df.at[row_idx, "Email"])
                                     if not current_email:
@@ -3524,8 +3514,19 @@ class CrossDirectoryEnricherWorker(QThread):
                                     if not existing_fb_links and page_url_used:
                                         if not seed_df.at[row_idx, "Social Link"]:
                                             seed_df.at[row_idx, "Social Link"] = page_url_used
+                                    if page_url_used and not seed_df.at[row_idx, "Facebook_URL"]:
+                                        seed_df.at[row_idx, "Facebook_URL"] = page_url_used
+                                    seed_df.at[row_idx, "Email_All"] = _merge_email_all(
+                                        seed_df.at[row_idx, "Email_All"], fb_emails
+                                    )
+                                    seed_df.at[row_idx, "Email_Type"] = "fb_enrich"
+                                    seed_df.at[row_idx, "FB_Status"] = seed_df.at[row_idx, "FB_Status"] or "found_email"
                                     enriched = True
                                     fb_matched = True
+                                elif existing_fb_links:
+                                    seed_df.at[row_idx, "FB_Status"] = seed_df.at[row_idx, "FB_Status"] or "no_email_on_page"
+                                else:
+                                    seed_df.at[row_idx, "FB_Status"] = seed_df.at[row_idx, "FB_Status"] or "no_fb_url"
                     if fb_attempted and not fb_matched:
                         self._set_platform_state("facebook", "skipped")
                     elif fb_matched:
