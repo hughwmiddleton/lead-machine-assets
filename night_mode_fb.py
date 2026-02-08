@@ -345,6 +345,43 @@ def _session_looks_healthy(driver) -> Tuple[bool, str]:
     return True, ""
 
 
+def _is_session_death_exc(exc: BaseException) -> bool:
+    """Lightweight detector for dead Selenium sessions/windows."""
+    try:
+        msg = (str(exc) or "").lower()
+    except Exception:
+        return False
+    death_tokens = ("no such window", "web view not found", "invalid session id")
+    return any(tok in msg for tok in death_tokens)
+
+
+def _looks_like_fb_warning_or_block(html: Optional[str], url: str = "") -> Optional[str]:
+    """
+    Conservative detector for FB warning/interstitial pages that should trip a run-level breaker.
+    Returns a short reason string or None.
+    """
+    if not html:
+        return None
+    lower = (html or "").lower()
+    patterns = (
+        ("suspicious", "activity"),
+        ("temporarily blocked",),
+        ("you're blocked",),
+        ("you’re blocked",),
+        ("try again later",),
+        ("security check",),
+        ("confirm it's you",),
+        ("confirm it’s you",),
+        ("unusual activity",),
+        ("help us confirm", "captcha"),
+        ("help us confirm", "security"),
+    )
+    for parts in patterns:
+        if all(p in lower for p in parts):
+            return "warning_interstitial"
+    return None
+
+
 def _create_fb_driver_night_mode(headless: bool, logger: LoggerFn = None):
     """
     Night-Mode-only Chrome driver with persistent profile to reuse FB auth.
@@ -478,10 +515,23 @@ class NightPersistentFacebookSession:
         self.last_health_reason = ""
         return self.driver
 
-    def navigate(self, url: str):
+    def navigate(self, url: str, logger: LoggerFn = None):
+        log_target = logger if logger is not None else self.logger
         driver = self.ensure_logged_in()
-        driver.get(url)
-        return driver
+        try:
+            driver.get(url)
+            return driver
+        except Exception as exc:
+            if _is_session_death_exc(exc):
+                _log(log_target, f"[Night FB] Driver session died during navigate; refreshing and retrying url={url!r} error={exc}")
+                try:
+                    driver = self.refresh_session()
+                    driver.get(url)
+                    return driver
+                except Exception as exc2:
+                    _log(log_target, f"[Night FB] Driver retry after refresh failed url={url!r}; err={exc2}")
+                    raise FacebookDriverError(f"driver_session_died url={url!r}: {exc2}")
+            raise
 
     def refresh_session(self):
         try:
@@ -1126,6 +1176,8 @@ class NightModeFacebookEnricher:
         self._headed_recovery_attempted = False
         self._skip_fb_due_to_checkpoint = False
         self._skip_fb_due_to_display = False
+        self._skip_fb_due_to_warning = False
+        self._skip_fb_due_to_warning_reason = ""
         self._session_failed = False
         self._session_failed_reason = ""
         self._last_selected_candidate_context: Optional[Dict[str, Any]] = None
@@ -1345,6 +1397,16 @@ class NightModeFacebookEnricher:
             except Exception:
                 pass
             return None, current_url
+
+        warning_reason = _looks_like_fb_warning_or_block(html, current_url)
+        if warning_reason:
+            self._skip_fb_due_to_warning = True
+            self._skip_fb_due_to_warning_reason = warning_reason
+            _log(
+                self.logger,
+                f"[Night FB] Circuit breaker: detected {warning_reason} page; skipping FB for remainder of run. url={current_url!r}"
+            )
+            raise FacebookDriverError(f"fb_circuit_breaker:{warning_reason}")
 
         return html, current_url
 
@@ -1969,6 +2031,11 @@ class NightModeFacebookEnricher:
             result["FB_Reason"] = "no_display_env"
             return result
 
+        if self._skip_fb_due_to_warning:
+            result["FB_Status"] = result.get("FB_Status", "") or "skipped_warning"
+            result["FB_Reason"] = self._skip_fb_due_to_warning_reason or "warning_interstitial"
+            return result
+
         if self._skip_fb_due_to_checkpoint:
             return self._mark_row_checkpoint(result)
 
@@ -2080,6 +2147,15 @@ class NightModeFacebookEnricher:
                         result["FB_Status"] = "ok"
             return result
         except FacebookDriverError as exc:
+            exc_msg = str(exc) or ""
+            if exc_msg.startswith("fb_circuit_breaker:"):
+                reason = exc_msg.split("fb_circuit_breaker:", 1)[-1] or "warning_interstitial"
+                self._skip_fb_due_to_warning = True
+                self._skip_fb_due_to_warning_reason = reason
+                result["FB_Status"] = "skipped_warning"
+                result["FB_Reason"] = reason
+                _log(self.logger, f"[Night FB] Circuit breaker tripped ({reason}); skipping FB for remainder of run.")
+                return result
             result["FB_Status"] = "driver_error"
             _log(self.logger, f"[Night FB] Driver error while enriching '{result.get('Artist Name', '') or '<unknown>'}': {exc}")
             return result
