@@ -2015,9 +2015,11 @@ class NightModeFacebookEnricher:
                 result["FB_Status"] = "unearthed_driver_error"
                 _log(self.logger, f"[Night FB][Unearthed] Could not start public FB driver: {exc}")
                 return result
+            last_status = "no_emails"
             for fb_url in fb_urls:
                 self._pass_a_bump("attempted")
                 emails, status, resolved_url = _scrape_fb_page_unearthed_legacy(driver, fb_url, logger=self.logger)
+                last_status = status or "no_emails"
                 outcome, reason = _map_unearthed_outcome(emails, status)
                 self._pass_a_bump(outcome)
                 self._pass_a_log_row(artist_name, resolved_url or fb_url, "legacy_unearthed_anon", outcome, reason)
@@ -2029,7 +2031,9 @@ class NightModeFacebookEnricher:
                     else:
                         result["FB_Status"] = "unearthed_no_emails"
                     return result
-            # If explicit URLs failed, fall back to search.
+            if not result.get("FB_Status"):
+                result["FB_Status"] = f"unearthed_{last_status}"
+            return result
 
         # If no FB URL present, fall back to a cautious blind search (previously we skipped).
         if not fb_urls:
@@ -2061,34 +2065,6 @@ class NightModeFacebookEnricher:
                     return result
             result["FB_Status"] = status or "unearthed_no_emails"
             return result
-
-        try:
-            driver = self._get_unearthed_driver()
-        except Exception as exc:
-            result["FB_Status"] = "unearthed_driver_error"
-            _log(self.logger, f"[Night FB][Unearthed] Could not start public FB driver: {exc}")
-            return result
-
-        last_status = "no_emails"
-        for fb_url in fb_urls:
-            self._pass_a_bump("attempted")
-            emails, status, resolved_url = _scrape_fb_page_unearthed_legacy(driver, fb_url, logger=self.logger)
-            last_status = status or "no_emails"
-            outcome, reason = _map_unearthed_outcome(emails, status)
-            self._pass_a_bump(outcome)
-            self._pass_a_log_row(artist_name, resolved_url or fb_url, "legacy_unearthed_anon", outcome, reason)
-            if emails:
-                night_result = self._build_result(emails, str(result.get("Email_All", "") or ""), resolved_url or fb_url, artist_name)
-                if night_result:
-                    result = self._apply_night_fb_result(result, night_result, emails, resolved_url or fb_url)
-                    result["FB_Status"] = "ok_unearthed_legacy"
-                else:
-                    result["FB_Status"] = "unearthed_no_emails"
-                return result
-
-        if not result.get("FB_Status"):
-            result["FB_Status"] = f"unearthed_{last_status}"
-        return result
 
     def enrich_row_with_facebook_night(self, row: Dict[str, str], row_index: Optional[int] = None) -> Dict[str, str]:
         """Night-Mode-only FB enrichment for a single row."""
