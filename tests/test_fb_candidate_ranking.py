@@ -1,6 +1,8 @@
 from types import SimpleNamespace
 
 import night_mode_fb
+import importlib.util
+from pathlib import Path
 
 
 def _cand(name: str, url: str, category: str = "", aria: str = ""):
@@ -85,3 +87,34 @@ def test_sanitize_drops_very_long_category():
 def test_sanitize_keeps_valid_categories():
     assert night_mode_fb._sanitize_fb_category_text("Musician/band") == "Musician/band"
     assert night_mode_fb._sanitize_fb_category_text("Artist") == "Artist"
+
+
+def _load_legacy_module():
+    path = Path(__file__).resolve().parents[1] / "Lead Machine (Final Update 5).py"
+    spec = importlib.util.spec_from_file_location("lead_machine_legacy", path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_legacy_sanitize_drops_reminder():
+    lm = _load_legacy_module()
+    assert lm._legacy_sanitize_fb_category_text("Reminder: You have an event coming up soon") is None
+
+
+def test_legacy_resolve_prefers_candidate_when_scraped_is_reminder():
+    lm = _load_legacy_module()
+    sanitized, final_cat = lm._resolve_fb_page_category(
+        "Reminder: You have an event coming up soon",
+        "Musician/band",
+    )
+    assert sanitized is None
+    assert final_cat == "Musician/band"
+
+
+def test_legacy_resolve_prefers_scraped_when_valid():
+    lm = _load_legacy_module()
+    sanitized, final_cat = lm._resolve_fb_page_category("Artist", "Musician/band")
+    assert sanitized == "Artist"
+    assert final_cat == "Artist"

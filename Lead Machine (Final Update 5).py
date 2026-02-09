@@ -7420,6 +7420,41 @@ def _fb_is_real_page_url(url: str) -> bool:
     return False
 
 
+def _legacy_sanitize_fb_category_text(cat: Optional[str]) -> Optional[str]:
+    """
+    Mirror night_mode_fb._sanitize_fb_category_text to drop noisy FB category strings.
+    """
+    if not cat:
+        return None
+    try:
+        cleaned = str(cat).strip()
+    except Exception:
+        cleaned = ""
+    if not cleaned:
+        return None
+    lowered = cleaned.lower()
+    if len(cleaned) > 80:
+        return None
+    if lowered.startswith("reminder"):
+        return None
+    if lowered.startswith("you have an event"):
+        return None
+    return cleaned
+
+
+def _resolve_fb_page_category(scraped_cat: Optional[str], candidate_cat: Optional[str]) -> tuple[Optional[str], str]:
+    """
+    Clean + sanitize scraped FB category text and decide the category used for gating/logging.
+    Returns (sanitized_scraped, chosen_category_for_gate_and_logs).
+    """
+    from facebook_enrich import clean_fb_category_text
+
+    cleaned_scraped = clean_fb_category_text(scraped_cat) if scraped_cat else None
+    sanitized_scraped = _legacy_sanitize_fb_category_text(cleaned_scraped)
+    final_category = sanitized_scraped or (candidate_cat or "")
+    return sanitized_scraped, final_category
+
+
 def fb_find_page_and_emails_by_name(
     driver,
     artist_name: str,
@@ -8023,7 +8058,13 @@ def fb_find_page_and_emails_by_name(
                 og_title = soup.find("meta", attrs={"property": "og:title"})
                 if og_title:
                     page_category_text = _add_block(og_title.get("content") or "")
+            raw_page_category = page_category_text
             page_category_text = clean_fb_category_text(page_category_text) if page_category_text else None
+            page_category_text, cat_for_gate = _resolve_fb_page_category(page_category_text, best_category_raw)
+            if raw_page_category and page_category_text is None:
+                _log(f"[FB Enrich][CategorySanitize] dropped noisy scraped category raw={raw_page_category!r}")
+            else:
+                cat_for_gate = page_category_text or best_category_raw or ""
             if not page_category_text and raw_html_lc and "artist" in raw_html_lc:
                 if not any(bad in raw_html_lc for bad in non_music_artist_tokens):
                     page_category_text = "Artist"
@@ -8050,7 +8091,7 @@ def fb_find_page_and_emails_by_name(
             page_music = _is_music_page_final(
                 (best_name or ""),
                 (best_url or ""),
-                page_category_text or best_category_raw,
+                cat_for_gate,
                 page_text_combined,
                 outbound_links,
                 page_html,
@@ -8060,8 +8101,9 @@ def fb_find_page_and_emails_by_name(
                 if looks_like_music_fallback(page_text_blocks, artist_name):
                     page_music = True
                     _log(f"[FB Enrich] Falling back to text-based music detection for '{artist_name}' (no FB category; matched name+music tokens)")
-            if page_category_text and page_music:
-                _log(f"[FB Enrich] Confirmed music page for '{artist_name}' with FB category '{page_category_text}'.")
+            if page_music:
+                cat_display = page_category_text or best_category_raw or "<none>"
+                _log(f"[FB Enrich] Confirmed music page for '{artist_name}' with FB category '{cat_display}'.")
         except Exception:
             page_category_text = None
             page_music = False

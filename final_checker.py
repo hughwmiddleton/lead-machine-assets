@@ -214,7 +214,7 @@ def filter_rows_for_export(profile: str, rows: Iterable[dict]) -> List[dict]:
     for row in rows:
         status = _normalise_status(row.get("final_status", ""))
         email_all = str(row.get("Email_All", "") or "").strip()
-        has_email = "@" in email_all
+        has_email = "@" in email_all or "@" in str(row.get("Email", "") or "")
         source_dir = str(
             row.get("Source Directory")
             or row.get("Source_Directory")
