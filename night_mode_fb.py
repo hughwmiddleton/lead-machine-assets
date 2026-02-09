@@ -709,6 +709,18 @@ def _scrape_fb_page_unearthed_legacy(driver, fb_url: str, logger: LoggerFn = Non
         return [], "error", url
 
 
+def _is_fb_share_url_str(url: str) -> bool:
+    if not url:
+        return False
+    u = str(url).strip().lower()
+    return any(tok in u for tok in (
+        "facebook.com/share/",
+        "m.facebook.com/share/",
+        "web.facebook.com/share/",
+        "touch.facebook.com/share/",
+    ))
+
+
 def _dedupe_candidates(candidates: Iterable["facebook_enrich.FbCandidate"]) -> List["facebook_enrich.FbCandidate"]:
     seen = set()
     deduped: List["facebook_enrich.FbCandidate"] = []
@@ -2020,7 +2032,8 @@ class NightModeFacebookEnricher:
                 self._pass_a_bump("attempted")
                 emails, status, resolved_url = _scrape_fb_page_unearthed_legacy(driver, fb_url, logger=self.logger)
                 last_status = status or "no_emails"
-                outcome, reason = _map_unearthed_outcome(emails, status)
+                outcome, base_reason = _map_unearthed_outcome(emails, status)
+                reason = "share_url" if _is_fb_share_url_str(fb_url) else base_reason
                 self._pass_a_bump(outcome)
                 self._pass_a_log_row(artist_name, resolved_url or fb_url, "legacy_unearthed_anon", outcome, reason)
                 if emails:
@@ -2054,7 +2067,8 @@ class NightModeFacebookEnricher:
                 return result
             self._pass_a_bump("attempted")
             emails, status, resolved_url = _scrape_fb_page_unearthed_legacy(driver, page_url, logger=self.logger)
-            outcome, reason = _map_unearthed_outcome(emails, status)
+            outcome, base_reason = _map_unearthed_outcome(emails, status)
+            reason = "share_url" if _is_fb_share_url_str(page_url) else base_reason
             self._pass_a_bump(outcome)
             self._pass_a_log_row(artist_name, resolved_url or page_url, "legacy_unearthed_anon", outcome, reason)
             if emails:
