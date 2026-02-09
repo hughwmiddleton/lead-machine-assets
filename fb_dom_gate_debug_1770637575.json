@@ -1,0 +1,29 @@
+{
+  "selector": "div[role=\"main\"] div[role=\"feed\"]",
+  "containers_found": 1,
+  "anchors_in_scope": 10,
+  "candidates_pre_url_gate": 10,
+  "candidates_post_url_gate": 5,
+  "pre_urls": [
+    "https://www.facebook.com/profile.php?id=100087411763208&__tn__=%3C",
+    "https://www.facebook.com/profile.php?id=100087411763208",
+    "https://www.facebook.com/littlestarsdogtraining?__tn__=%3C",
+    "https://www.facebook.com/littlestarsdogtraining",
+    "https://www.facebook.com/profile.php?id=100086445675385&__tn__=%3C",
+    "https://www.facebook.com/profile.php?id=100086445675385",
+    "https://www.facebook.com/marygav52?__tn__=%3C",
+    "https://www.facebook.com/marygav52",
+    "https://www.facebook.com/LittleStarsDogHotel?__tn__=%3C",
+    "https://www.facebook.com/LittleStarsDogHotel"
+  ],
+  "post_urls": [
+    "https://www.facebook.com/profile.php?id=100087411763208",
+    "https://www.facebook.com/littlestarsdogtraining",
+    "https://www.facebook.com/profile.php?id=100086445675385",
+    "https://www.facebook.com/marygav52",
+    "https://www.facebook.com/LittleStarsDogHotel"
+  ],
+  "warnings": [],
+  "timestamp": 1770637575,
+  "search_name": "Little Dog Star"
+}

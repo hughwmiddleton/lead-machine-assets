@@ -85,6 +85,35 @@ _FB_JUNK_PATH_TOKENS = (
     "/business/",
 )
 
+_FB_RANK_WEIGHTS = {
+    "cat_musician_band": 60,
+    "cat_artist": 40,
+    "cat_music": 30,
+    "music_keyword": 30,
+    "page_url": 20,
+    "exact_name": 20,
+    "near_name": 10,
+    "profile_penalty": -40,
+    "non_music_category": -30,
+    "name_mismatch": -20,
+}
+
+_FB_SERVICE_CATEGORY_TOKENS = (
+    "salon",
+    "real estate",
+    "agency",
+    "marketing",
+    "cafe",
+    "restaurant",
+    "bar",
+    "consulting",
+    "store",
+    "shop",
+    "boutique",
+    "media",
+    "school",
+)
+
 
 class FacebookDriverError(RuntimeError):
     """Raised when the Facebook driver/session is unavailable or dead."""
@@ -772,6 +801,257 @@ if os.getenv("FB_DEBUG_CAND_URL_GATE") == "1":
     except Exception:
         pass
 
+
+def _candidate_tokens(text: str) -> List[str]:
+    return re.findall(r"[a-z0-9]+", (text or "").lower())
+
+
+def _is_profile_url(url: str) -> bool:
+    url_l = (url or "").lower()
+    if "profile.php" in url_l:
+        return True
+    try:
+        parsed = urllib.parse.urlparse(url_l)
+        path = parsed.path or ""
+        if path.startswith("/people/"):
+            return True
+    except Exception:
+        return False
+    return False
+
+
+def _is_page_style_url(url: str) -> bool:
+    if not url:
+        return False
+    if _is_profile_url(url):
+        return False
+    try:
+        parsed = urllib.parse.urlparse(url)
+        path = parsed.path or ""
+        parts = [p for p in path.split("/") if p]
+        if not parts:
+            return False
+        if parts[0] in ("people",):
+            return False
+        # /<slug>
+        if len(parts) == 1:
+            return True
+        # /p/<slug> or /pages/<name>/<id>
+        if parts[0] in ("p", "pages"):
+            return True
+        return False
+    except Exception:
+        return False
+
+
+def _candidate_name_match(artist_name: str, cand_name: str) -> str:
+    artist_slug = _slugify(artist_name)
+    name_slug = _slugify(cand_name)
+    if artist_slug and name_slug and artist_slug == name_slug:
+        return "exact"
+    artist_tokens = set(_candidate_tokens(artist_name))
+    cand_tokens = set(_candidate_tokens(cand_name))
+    if not artist_tokens or not cand_tokens:
+        return "none"
+    overlap = len(artist_tokens & cand_tokens)
+    union = len(artist_tokens | cand_tokens) or 1
+    jaccard = overlap / union
+    if jaccard >= 0.75 or artist_slug and artist_slug in name_slug or name_slug and name_slug in artist_slug:
+        return "near"
+    if jaccard <= 0.25:
+        return "mismatch"
+    return "weak"
+
+
+def _candidate_category_flags(category: str, aria_label: str = "") -> Dict[str, bool]:
+    cat = (category or "").lower()
+    aria = (aria_label or "").lower()
+    music_cat = any(tok in cat for tok in ("musician/band", "artist", "music"))
+    artist_cat = "artist" in cat
+    musician_band = "musician/band" in cat
+    music_keyword = any(tok in (cat + " " + aria) for tok in ("music", "musician", "band", "artist", "dj", "producer", "singer"))
+    non_music = any(tok in cat for tok in _FB_SERVICE_CATEGORY_TOKENS)
+    return {
+        "music_cat": music_cat,
+        "artist_cat": artist_cat,
+        "musician_band_cat": musician_band,
+        "music_keyword": music_keyword,
+        "non_music_cat": non_music,
+    }
+
+
+def _score_fb_candidate_night(artist_name: str, cand) -> Tuple[int, List[str], Dict[str, Any]]:
+    """
+    Compute simple, controllable score for a candidate.
+    Returns (score, breakdown_tokens, feature_dict).
+    """
+    name = getattr(cand, "name", "") or (cand.get("name") if isinstance(cand, dict) else "") or ""
+    url = _candidate_url(cand)
+    category = getattr(cand, "category", "") or (cand.get("category") if isinstance(cand, dict) else "") or ""
+    aria_label = getattr(cand, "aria_label", "") or (cand.get("aria_label") if isinstance(cand, dict) else "") or ""
+
+    flags = _candidate_category_flags(category, aria_label)
+    is_profile = _is_profile_url(url)
+    is_page = _is_page_style_url(url)
+    match_level = _candidate_name_match(artist_name, name)
+
+    score = 0
+    breakdown: List[str] = []
+    weights = _FB_RANK_WEIGHTS
+
+    if flags["musician_band_cat"]:
+        score += weights["cat_musician_band"]
+        breakdown.append("+musician_band")
+    elif flags["artist_cat"]:
+        score += weights["cat_artist"]
+        breakdown.append("+artist_cat")
+    elif flags["music_cat"]:
+        score += weights["cat_music"]
+        breakdown.append("+music_cat")
+
+    if flags["music_keyword"]:
+        score += weights["music_keyword"]
+        breakdown.append("+music_kw")
+
+    if is_page:
+        score += weights["page_url"]
+        breakdown.append("+page_url")
+    if is_profile:
+        score += weights["profile_penalty"]
+        breakdown.append("-profile")
+
+    if flags["non_music_cat"]:
+        if not (flags["music_cat"] or flags["music_keyword"] or flags["musician_band_cat"] or flags["artist_cat"]):
+            score += weights["non_music_category"]
+            breakdown.append("-service_cat")
+
+    if match_level == "exact":
+        score += weights["exact_name"]
+        breakdown.append("+exact_match")
+    elif match_level == "near":
+        score += weights["near_name"]
+        breakdown.append("+near_match")
+    elif match_level == "mismatch":
+        score += weights["name_mismatch"]
+        breakdown.append("-name_mismatch")
+
+    features = {
+        "name": name,
+        "url": url,
+        "category": category,
+        "aria_label": aria_label,
+        "is_profile": is_profile,
+        "is_page": is_page,
+        "match_level": match_level,
+        "music_cat": flags["music_cat"],
+        "artist_cat": flags["artist_cat"],
+        "musician_band_cat": flags["musician_band_cat"],
+        "music_keyword": flags["music_keyword"],
+        "non_music_category": flags["non_music_cat"],
+    }
+    return score, breakdown, features
+
+
+def _rank_candidates_for_preview(artist_name: str, candidates: List["facebook_enrich.FbCandidate"]) -> List[Dict[str, Any]]:
+    ranked = []
+    for idx, cand in enumerate(candidates or []):
+        score, breakdown, features = _score_fb_candidate_night(artist_name, cand)
+        ranked.append(
+            {
+                "idx": idx,
+                "candidate": cand,
+                "score": score,
+                "breakdown": breakdown,
+                "features": features,
+            }
+        )
+
+    def _tie_key(item: Dict[str, Any]):
+        feat = item["features"]
+        match_rank = {"exact": 0, "near": 1, "weak": 2, "mismatch": 3, "none": 4}.get(feat.get("match_level") or "none", 4)
+        return (
+            -int(item["score"]),
+            -int(feat.get("musician_band_cat") or False),
+            -int(feat.get("music_cat") or False),
+            -int(feat.get("artist_cat") or False),
+            -int(feat.get("is_page") or False),
+            int(feat.get("is_profile") or False),
+            match_rank,
+            item["idx"],
+        )
+
+    ranked.sort(key=_tie_key)
+    return ranked
+
+
+def _order_candidates_for_selection(
+    primary_candidate,
+    candidates: List["facebook_enrich.FbCandidate"],
+    ranked_candidates: List["facebook_enrich.FbCandidate"],
+    ranking_enabled: bool,
+) -> List["facebook_enrich.FbCandidate"]:
+    """
+    Build a deterministic, duplicate-free candidate order for post-gate evaluation.
+    """
+    ordered: List["facebook_enrich.FbCandidate"] = []
+    seen_ids = set()
+
+    def _add(c):
+        cid = id(c)
+        if cid in seen_ids:
+            return
+        seen_ids.add(cid)
+        ordered.append(c)
+
+    if ranking_enabled and ranked_candidates:
+        for c in ranked_candidates:
+            _add(c)
+        for c in candidates or []:
+            _add(c)
+    else:
+        if primary_candidate:
+            _add(primary_candidate)
+        for c in candidates or []:
+            if c is primary_candidate:
+                continue
+            _add(c)
+    return ordered
+
+
+def _maybe_log_rank_preview(artist: str, candidates: List["facebook_enrich.FbCandidate"], chosen_current: Optional["facebook_enrich.FbCandidate"], logger: LoggerFn = None) -> None:
+    if candidates is None:
+        return
+    try:
+        preview_n = int(os.getenv("FB_CANDIDATE_RANKING_PREVIEW_N") or 5)
+    except Exception:
+        preview_n = 5
+    ranked = _rank_candidates_for_preview(artist, candidates)
+    if not ranked:
+        return
+    flag_enabled = _bool_env("FB_CANDIDATE_RANKING", default=False)
+    debug = _bool_env("FB_CANDIDATE_RANKING_DEBUG", default=False)
+    chosen_label = getattr(chosen_current, "name", None) or getattr(chosen_current, "url", None) if chosen_current else ""
+
+    _log(logger, f"[Night FB][Rank Preview] query=\"{artist}\" top={preview_n} flag={int(flag_enabled)}")
+    for i, item in enumerate(ranked[:preview_n], start=1):
+        feat = item["features"]
+        breakdown = " ".join(item["breakdown"]) or "-"
+        name = (feat.get("name") or "").strip() or feat.get("url") or ""
+        cat = feat.get("category") or ""
+        match = feat.get("match_level") or "none"
+        is_profile = feat.get("is_profile")
+        is_page = feat.get("is_page")
+        music_cat = feat.get("music_cat")
+        score = item["score"]
+        line = (
+            f"{i}) name=\"{name}\" cat=\"{cat}\" is_profile={bool(is_profile)} page_url={bool(is_page)} "
+            f"music_cat={bool(music_cat)} name_match={match} score={score} ({breakdown})"
+        )
+        if debug:
+            line += f" url={feat.get('url')}"
+        _log(logger, f"[Night FB][Rank Preview] {line}")
+    if chosen_label:
+        _log(logger, f'[Night FB][Rank Preview] chosen_current="{chosen_label}"')
 
 def _is_junk_fb_candidate(url: str) -> bool:
     if not url:
@@ -1637,17 +1917,20 @@ class NightModeFacebookEnricher:
             candidate = search_result
             if isinstance(search_result, list):
                 candidate = next((c for c in search_result if c), None)
+
+        baseline_candidate = candidate  # reflects pre-flag selection
+        ranking_enabled = _bool_env("FB_CANDIDATE_RANKING", default=False)
+        ranked_for_preview = _rank_candidates_for_preview(artist, candidates)
+        ranked_candidates: List["facebook_enrich.FbCandidate"] = [item["candidate"] for item in ranked_for_preview] if ranking_enabled else []
+        if ranking_enabled and ranked_candidates:
+            candidate = ranked_candidates[0]
+
         if not candidate:
             _log(self.logger, f"[Night FB] No non-junk FB candidates for '{artist}', skipping Facebook.")
+            _maybe_log_rank_preview(artist, candidates, None, logger=self.logger)
             return None
 
-        ordered_candidates = []
-        if candidate:
-            ordered_candidates.append(candidate)
-        for cand in candidates:
-            if cand is candidate:
-                continue
-            ordered_candidates.append(cand)
+        ordered_candidates = _order_candidates_for_selection(candidate, candidates, ranked_candidates, ranking_enabled)
 
         gate_debug = os.getenv("FB_DEBUG_CANDIDATES") == "1"
         url_flow_debug = gate_debug or os.getenv("FB_DEBUG_CAND_URL_FLOW") == "1"
@@ -1720,10 +2003,12 @@ class NightModeFacebookEnricher:
                 "category": category or "",
                 "base_score": base_score,
             }
+            _maybe_log_rank_preview(artist, candidates, baseline_candidate, logger=self.logger)
             _log(self.logger, f"[Night FB] Selected FB candidate '{name or norm_url}' -> {norm_url} (category='{category or ''}')")
             return norm_url
 
         _log(self.logger, f"[Night FB] No usable FB candidates for '{artist}' after URL validation.")
+        _maybe_log_rank_preview(artist, candidates, None, logger=self.logger)
         return None
 
     def _can_identity_soft_pass(self, artist_name: str, page_name: str, resolved_url: str, base_score: float) -> bool:

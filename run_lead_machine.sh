@@ -33,6 +33,10 @@ export FB_DEBUG_CAND_GATE_ASSERT=1
 export FB_DEBUG_DOM_GATE=1 
 export FB_DEBUG_DOM_GATE_HREFS=1
 export PYTHONFAULTHANDLER=1
+# FB candidate ranking (NEW)
+export FB_CANDIDATE_RANKING=1
+export FB_CANDIDATE_RANKING_PREVIEW_N=8
+unset FB_CANDIDATE_RANKING_DEBUG=1
 unset FB_ALLOW_AUTOMATED_LOGIN
 
 # (Optional) Install dependencies if needed

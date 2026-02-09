@@ -1,0 +1,12 @@
+{
+  "selector": "div[role=\"main\"] div[role=\"feed\"]",
+  "containers_found": 1,
+  "anchors_in_scope": 0,
+  "candidates_pre_url_gate": 0,
+  "candidates_post_url_gate": 0,
+  "pre_urls": [],
+  "post_urls": [],
+  "warnings": [],
+  "timestamp": 1770637538,
+  "search_name": "paradise fell."
+}
