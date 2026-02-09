@@ -817,14 +817,12 @@ def _run_unearthed_full_pipeline(job_config: Dict[str, Any], raw_output_path: st
         fb_username = os.environ.get("FB_USERNAME", "").strip()
         fb_password = os.environ.get("FB_PASSWORD", "").strip()
         allow_auto_login = str(os.environ.get("FB_ALLOW_AUTOMATED_LOGIN", "") or "").strip().lower() in ("1", "true", "yes")
-        if fb_username and fb_password:
+        get_shared = getattr(module, "get_shared_facebook_session", None)
+        if fb_username and fb_password and callable(get_shared):
             if allow_auto_login:
-                get_shared = getattr(module, "get_shared_facebook_session", None)
-                if callable(get_shared):
-                    fb_session = get_shared(fb_username, fb_password, logger=logger)
+                fb_session = get_shared(fb_username, fb_password, logger=logger)
             else:
-                if callable(getattr(module, "get_shared_facebook_session", None)):
-                    _safe_log(logger, "[Unearthed] FB creds supplied but automated login is disabled (set FB_ALLOW_AUTOMATED_LOGIN=1 to enable); proceeding without shared session.")
+                _safe_log(logger, "[Unearthed] FB creds supplied but automated login is disabled (set FB_ALLOW_AUTOMATED_LOGIN=1 to enable); proceeding without shared session.")
     except Exception:
         fb_session = None
 

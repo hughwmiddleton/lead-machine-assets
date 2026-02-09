@@ -33,7 +33,7 @@ export FB_DEBUG_CAND_GATE_ASSERT=1
 export FB_DEBUG_DOM_GATE=1 
 export FB_DEBUG_DOM_GATE_HREFS=1
 export PYTHONFAULTHANDLER=1
-
+unset FB_ALLOW_AUTOMATED_LOGIN
 
 # (Optional) Install dependencies if needed
 # pip install pandas tqdm selenium beautifulsoup4 webdriver_manager PyQt5
