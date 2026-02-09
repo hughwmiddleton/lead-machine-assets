@@ -8059,12 +8059,9 @@ def fb_find_page_and_emails_by_name(
                 if og_title:
                     page_category_text = _add_block(og_title.get("content") or "")
             raw_page_category = page_category_text
-            page_category_text = clean_fb_category_text(page_category_text) if page_category_text else None
-            page_category_text, cat_for_gate = _resolve_fb_page_category(page_category_text, best_category_raw)
+            page_category_text, cat_for_gate = _resolve_fb_page_category(raw_page_category, best_category_raw)
             if raw_page_category and page_category_text is None:
                 _log(f"[FB Enrich][CategorySanitize] dropped noisy scraped category raw={raw_page_category!r}")
-            else:
-                cat_for_gate = page_category_text or best_category_raw or ""
             if not page_category_text and raw_html_lc and "artist" in raw_html_lc:
                 if not any(bad in raw_html_lc for bad in non_music_artist_tokens):
                     page_category_text = "Artist"
@@ -8102,7 +8099,7 @@ def fb_find_page_and_emails_by_name(
                     page_music = True
                     _log(f"[FB Enrich] Falling back to text-based music detection for '{artist_name}' (no FB category; matched name+music tokens)")
             if page_music:
-                cat_display = page_category_text or best_category_raw or "<none>"
+                cat_display = cat_for_gate or "<none>"
                 _log(f"[FB Enrich] Confirmed music page for '{artist_name}' with FB category '{cat_display}'.")
         except Exception:
             page_category_text = None
