@@ -8174,6 +8174,10 @@ class FacebookSessionManager:
         self.ensure_driver()
         if self.logged_in:
             return self.driver
+        allow_auto_login = str(os.environ.get("FB_ALLOW_AUTOMATED_LOGIN", "") or "").strip().lower() in ("1", "true", "yes")
+        if not allow_auto_login:
+            self._log("[FB Session] Automated login disabled (FB_ALLOW_AUTOMATED_LOGIN not set); skipping credential typing.")
+            return self.driver
         login_facebook(self.driver, self.username, self.password)
         self.logged_in = True
         self._capture_main_window()
