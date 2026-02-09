@@ -1050,6 +1050,8 @@ def _maybe_log_rank_preview(artist: str, candidates: List["facebook_enrich.FbCan
         if debug:
             line += f" url={feat.get('url')}"
         _log(logger, f"[Night FB][Rank Preview] {line}")
+        if cat and (len(cat) > 80 or cat.lower().startswith("reminder")):
+            _log(logger, f"[Night FB][Rank Preview][warn] suspicious category text len={len(cat)} cat={cat!r}")
     if chosen_label:
         _log(logger, f'[Night FB][Rank Preview] chosen_current="{chosen_label}"')
 
@@ -1919,11 +1921,10 @@ class NightModeFacebookEnricher:
                 candidate = next((c for c in search_result if c), None)
 
         baseline_candidate = candidate  # reflects pre-flag selection
-        ranking_enabled = _bool_env("FB_CANDIDATE_RANKING", default=False)
+        # Phase 1 only: ranking is computed for preview/logs but does NOT change selection/order.
+        ranking_enabled = False
         ranked_for_preview = _rank_candidates_for_preview(artist, candidates)
-        ranked_candidates: List["facebook_enrich.FbCandidate"] = [item["candidate"] for item in ranked_for_preview] if ranking_enabled else []
-        if ranking_enabled and ranked_candidates:
-            candidate = ranked_candidates[0]
+        ranked_candidates: List["facebook_enrich.FbCandidate"] = []
 
         if not candidate:
             _log(self.logger, f"[Night FB] No non-junk FB candidates for '{artist}', skipping Facebook.")
