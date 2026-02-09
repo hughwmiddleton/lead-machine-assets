@@ -71,3 +71,17 @@ def test_order_candidates_unique_and_stable():
     ordered_flag_on = night_mode_fb._order_candidates_for_selection(a, [a, b, c], ranked, True)
     assert ordered_flag_on[:2] == ranked  # ranked order preserved
     assert len({id(x) for x in ordered_flag_on}) == len(ordered_flag_on)
+
+
+def test_sanitize_drops_reminder_prefix():
+    assert night_mode_fb._sanitize_fb_category_text("Reminder: You have an event coming up soon") is None
+
+
+def test_sanitize_drops_very_long_category():
+    long_value = "x" * 81
+    assert night_mode_fb._sanitize_fb_category_text(long_value) is None
+
+
+def test_sanitize_keeps_valid_categories():
+    assert night_mode_fb._sanitize_fb_category_text("Musician/band") == "Musician/band"
+    assert night_mode_fb._sanitize_fb_category_text("Artist") == "Artist"

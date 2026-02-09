@@ -151,6 +151,28 @@ def _split_multi(value: str) -> List[str]:
     return [p.strip() for p in parts if p and p.strip()]
 
 
+def _sanitize_fb_category_text(cat: Optional[str]) -> Optional[str]:
+    """
+    Phase 1: sanitize noisy FB category strings.
+    """
+    if not cat:
+        return None
+    try:
+        cleaned = str(cat).strip()
+    except Exception:
+        cleaned = ""
+    if not cleaned:
+        return None
+    lowered = cleaned.lower()
+    if len(cleaned) > 80:
+        return None
+    if lowered.startswith("reminder"):
+        return None
+    if lowered.startswith("you have an event"):
+        return None
+    return cleaned
+
+
 def _unpack_fb_candidate(candidate):
     """
     Normalizes candidate return from _scrape_single_fb_candidate.
@@ -863,8 +885,9 @@ def _candidate_name_match(artist_name: str, cand_name: str) -> str:
     return "weak"
 
 
-def _candidate_category_flags(category: str, aria_label: str = "") -> Dict[str, bool]:
-    cat = (category or "").lower()
+def _candidate_category_flags(category: Optional[str], aria_label: str = "") -> Dict[str, bool]:
+    cat_clean = _sanitize_fb_category_text(category) or ""
+    cat = cat_clean.lower()
     aria = (aria_label or "").lower()
     music_cat = any(tok in cat for tok in ("musician/band", "artist", "music"))
     artist_cat = "artist" in cat
@@ -887,7 +910,8 @@ def _score_fb_candidate_night(artist_name: str, cand) -> Tuple[int, List[str], D
     """
     name = getattr(cand, "name", "") or (cand.get("name") if isinstance(cand, dict) else "") or ""
     url = _candidate_url(cand)
-    category = getattr(cand, "category", "") or (cand.get("category") if isinstance(cand, dict) else "") or ""
+    raw_category = getattr(cand, "category", "") or (cand.get("category") if isinstance(cand, dict) else "") or ""
+    category = _sanitize_fb_category_text(raw_category) or ""
     aria_label = getattr(cand, "aria_label", "") or (cand.get("aria_label") if isinstance(cand, dict) else "") or ""
 
     flags = _candidate_category_flags(category, aria_label)
@@ -939,6 +963,7 @@ def _score_fb_candidate_night(artist_name: str, cand) -> Tuple[int, List[str], D
         "name": name,
         "url": url,
         "category": category,
+        "category_raw": raw_category,
         "aria_label": aria_label,
         "is_profile": is_profile,
         "is_page": is_page,
@@ -1038,6 +1063,7 @@ def _maybe_log_rank_preview(artist: str, candidates: List["facebook_enrich.FbCan
         breakdown = " ".join(item["breakdown"]) or "-"
         name = (feat.get("name") or "").strip() or feat.get("url") or ""
         cat = feat.get("category") or ""
+        raw_cat = feat.get("category_raw") or cat
         match = feat.get("match_level") or "none"
         is_profile = feat.get("is_profile")
         is_page = feat.get("is_page")
@@ -1050,8 +1076,8 @@ def _maybe_log_rank_preview(artist: str, candidates: List["facebook_enrich.FbCan
         if debug:
             line += f" url={feat.get('url')}"
         _log(logger, f"[Night FB][Rank Preview] {line}")
-        if cat and (len(cat) > 80 or cat.lower().startswith("reminder")):
-            _log(logger, f"[Night FB][Rank Preview][warn] suspicious category text len={len(cat)} cat={cat!r}")
+        if raw_cat and (len(raw_cat) > 80 or raw_cat.lower().startswith("reminder") or raw_cat.lower().startswith("you have an event")):
+            _log(logger, f"[Night FB][Rank Preview][warn] suspicious category text len={len(raw_cat)} cat={raw_cat!r}")
     if chosen_label:
         _log(logger, f'[Night FB][Rank Preview] chosen_current="{chosen_label}"')
 
@@ -1103,9 +1129,10 @@ def _category_is_music_like(category: Optional[str]) -> bool:
     """
     Lightweight allowlist for categories that clearly indicate a music page.
     """
-    if not category:
+    cat_clean = _sanitize_fb_category_text(category)
+    if not cat_clean:
         return False
-    cat = (category or "").strip().lower()
+    cat = cat_clean.lower()
     tokens = ("musician", "musician/band", "band", "artist", "singer", "producer", "dj", "music")
     return any(tok in cat for tok in tokens)
 
@@ -1330,7 +1357,8 @@ def _is_garbage_fb_candidate(title: str, url: str, category: Optional[str]) -> b
     """
     title_l = (title or "").lower()
     url_l = (url or "").lower()
-    category_l = (category or "").lower() if category else ""
+    category_clean = _sanitize_fb_category_text(category)
+    category_l = (category_clean or "").lower()
 
     if "business.facebook.com" in url_l:
         return True
@@ -1383,7 +1411,17 @@ def _parse_search_candidates(html: str, logger: LoggerFn = None, search_name: Op
     # Add lightweight music hint for stable sorting (no scoring change).
     for cand in raw_candidates:
         aria = getattr(cand, "aria_label", "") or ""
-        cat = getattr(cand, "category", "") or ""
+        raw_cat = getattr(cand, "category", "") or ""
+        sanitized_cat = _sanitize_fb_category_text(raw_cat)
+        if raw_cat and sanitized_cat is None:
+            # Phase 1: sanitize noisy FB category strings.
+            _log(logger, f"[Night FB][CategorySanitize] dropped noisy category len={len(raw_cat)} raw={raw_cat!r}")
+        cat = sanitized_cat or ""
+        try:
+            setattr(cand, "_raw_category", raw_cat)
+            setattr(cand, "category", cat)
+        except Exception:
+            pass
         music_hint = _category_is_music_like(cat) or _category_is_music_like(aria)
         try:
             setattr(cand, "music_hint", bool(music_hint))
@@ -1425,7 +1463,8 @@ def _select_best_candidate_loose(artist_name: str, candidates: List["facebook_en
     except Exception:
         pass
     for cand in candidates:
-        cat = (cand.category or "").lower()
+        cat_clean = _sanitize_fb_category_text(getattr(cand, "category", "") or "")
+        cat = (cat_clean or "").lower()
         if any(tok in cat for tok in ("artist", "musician", "musician/band", "band", "music", "dj", "producer")):
             return cand
     return candidates[0] if candidates else None
@@ -1985,10 +2024,11 @@ class NightModeFacebookEnricher:
                 continue
 
             name = getattr(cand, "name", None)
-            category = getattr(cand, "category", None)
+            raw_category = getattr(cand, "_raw_category", None) or getattr(cand, "category", None)
             if isinstance(cand, dict):
                 name = name or cand.get("name")
-                category = category or cand.get("category")
+                raw_category = raw_category or cand.get("category")
+            category = _sanitize_fb_category_text(raw_category) or ""
 
             base_score = 0.0
             try:
@@ -2002,10 +2042,14 @@ class NightModeFacebookEnricher:
                 "url": norm_url,
                 "name": name or "",
                 "category": category or "",
+                "category_raw": raw_category or "",
                 "base_score": base_score,
             }
             _maybe_log_rank_preview(artist, candidates, baseline_candidate, logger=self.logger)
-            _log(self.logger, f"[Night FB] Selected FB candidate '{name or norm_url}' -> {norm_url} (category='{category or ''}')")
+            raw_suffix = ""
+            if raw_category and category != raw_category:
+                raw_suffix = f" raw_cat={raw_category!r}"
+            _log(self.logger, f"[Night FB] Selected FB candidate '{name or norm_url}' -> {norm_url} (category='{category or ''}'){raw_suffix}")
             return norm_url
 
         _log(self.logger, f"[Night FB] No usable FB candidates for '{artist}' after URL validation.")
