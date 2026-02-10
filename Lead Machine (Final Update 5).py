@@ -8294,14 +8294,6 @@ def fb_find_page_and_emails_by_name(
     except Exception as exc:
         _log(f"[FB Enrich] Failed to parse FB page '{best_url}' for '{artist_name}': {exc}")
 
-    if not page_music:
-        if allow_soft_pass_category and _category_is_music_like(page_category_text or best_category_raw):
-            _log(f"[FB Enrich] Soft-pass music gate by category allowlist: category='{page_category_text or best_category_raw}' url='{best_url}'")
-        else:
-            _log(f"[FB Enrich] Rejecting FB page '{best_url}' for '{artist_name}' after scrape: no music signals found (final gate).")
-            return "", []
-
-    _log(f"[FB Enrich] Best FB candidate for '{artist_name}' -> '{best_name}' (final_score={best_score:.2f}, base_score={best_base_score:.2f}, cat_boost={best_cat_boost:.2f}, category='{cat_display}')")
     candidate_url = normalize_external_url(best_url)
     emails = fb_scrape_emails_from_page(
         driver,
@@ -8310,6 +8302,21 @@ def fb_find_page_and_emails_by_name(
         log_prefix=log_prefix,
         suppress_console=suppress_console,
     )
+
+    # If we pulled a contact email, accept even when music signals were missed (email is a strong artist signal).
+    if not page_music and emails:
+        if os.getenv("FB_DEBUG_EMAIL_OVERRIDE") == "1":
+            _log(f"[FB Enrich][EmailOverrideDebug] url='{best_url}' cat_raw='{best_category_raw}' allow_soft_pass={bool(allow_soft_pass_category)}")
+        _log(f"[FB Enrich] Accepting FB page by email override (music gate failed): url='{candidate_url}' emails={len(emails)}")
+        return candidate_url, emails
+    if not page_music:
+        if allow_soft_pass_category and _category_is_music_like(page_category_text or best_category_raw):
+            _log(f"[FB Enrich] Soft-pass music gate by category allowlist: category='{page_category_text or best_category_raw}' url='{best_url}'")
+        else:
+            _log(f"[FB Enrich] Rejecting FB page '{best_url}' for '{artist_name}' after scrape: no music signals found (final gate).")
+            return "", []
+
+    _log(f"[FB Enrich] Best FB candidate for '{artist_name}' -> '{best_name}' (final_score={best_score:.2f}, base_score={best_base_score:.2f}, cat_boost={best_cat_boost:.2f}, category='{cat_display}')")
     return candidate_url, emails
 
 def _fb_scoring_sanity_tests():
