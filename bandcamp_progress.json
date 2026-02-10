@@ -1531,5 +1531,53 @@
       "https://thedreamwalker.bandcamp.com",
       "https://giangrecords.bandcamp.com"
     ]
+  },
+  "discover:https://bandcamp.com/discover/canada+rock?s=new": {
+    "scraped_artist_urls": [
+      "https://aradiafaire.bandcamp.com",
+      "https://joshrudiger.bandcamp.com",
+      "https://mellonella.bandcamp.com",
+      "https://geniusgenius.bandcamp.com",
+      "https://desespoirdemo.bandcamp.com",
+      "https://goodjarrrecords.bandcamp.com",
+      "https://thebandblacktea.bandcamp.com",
+      "https://weirdnightmare.bandcamp.com",
+      "https://mikerugg.bandcamp.com",
+      "https://gabrielolteanu.bandcamp.com",
+      "https://dollguts.bandcamp.com",
+      "https://pureheaven.bandcamp.com",
+      "https://bradgoldsmith.bandcamp.com",
+      "https://aout75.bandcamp.com",
+      "https://antagonik.bandcamp.com",
+      "https://sgcolin.bandcamp.com",
+      "https://endofthread.bandcamp.com",
+      "https://starshipexperience.bandcamp.com",
+      "https://moonshape.bandcamp.com",
+      "https://warmbelly.bandcamp.com"
+    ]
+  },
+  "https://bandcamp.com/discover/canada+rock?s=new": {
+    "scraped_artist_urls": [
+      "https://aradiafaire.bandcamp.com",
+      "https://joshrudiger.bandcamp.com",
+      "https://mellonella.bandcamp.com",
+      "https://geniusgenius.bandcamp.com",
+      "https://desespoirdemo.bandcamp.com",
+      "https://goodjarrrecords.bandcamp.com",
+      "https://thebandblacktea.bandcamp.com",
+      "https://weirdnightmare.bandcamp.com",
+      "https://mikerugg.bandcamp.com",
+      "https://gabrielolteanu.bandcamp.com",
+      "https://dollguts.bandcamp.com",
+      "https://pureheaven.bandcamp.com",
+      "https://bradgoldsmith.bandcamp.com",
+      "https://aout75.bandcamp.com",
+      "https://antagonik.bandcamp.com",
+      "https://sgcolin.bandcamp.com",
+      "https://endofthread.bandcamp.com",
+      "https://starshipexperience.bandcamp.com",
+      "https://moonshape.bandcamp.com",
+      "https://warmbelly.bandcamp.com"
+    ]
   }
 }

@@ -2490,6 +2490,87 @@ def _bandcamp_location_match_(profile_loc: str, api_hint: str, requested_label: 
     api_norm = _norm_text_(api_hint).replace("-", " ")
     profile_compact = profile_norm.replace(" ", "")
     api_compact = api_norm.replace(" ", "")
+    canada_subdiv_phrases = {
+        "alberta",
+        "british columbia",
+        "manitoba",
+        "new brunswick",
+        "newfoundland",
+        "newfoundland and labrador",
+        "labrador",
+        "nova scotia",
+        "ontario",
+        "prince edward island",
+        "quebec",
+        "saskatchewan",
+        "northwest territories",
+        "nunavut",
+        "yukon",
+    }
+    canada_subdiv_tokens = {
+        "ab",
+        "bc",
+        "mb",
+        "nb",
+        "ns",
+        "nl",
+        "pei",
+        "qc",
+        "on",
+        "sk",
+        "nt",
+        "nu",
+        "yt",
+        "alberta",
+        "manitoba",
+        "brunswick",
+        "newfoundland",
+        "labrador",
+        "nova",
+        "scotia",
+        "ontario",
+        "prince",
+        "edward",
+        "island",
+        "quebec",
+        "saskatchewan",
+        "northwest",
+        "territories",
+        "nunavut",
+        "yukon",
+        "columbia",  # used only in combination checks
+        "british",    # used only in combination checks
+    }
+
+    def _has_canadian_subdivision(text: str, tokens: set[str]) -> bool:
+        if not text and not tokens:
+            return False
+        lowered = text or ""
+        for phrase in canada_subdiv_phrases:
+            if phrase in lowered:
+                return True
+        combo_sets = [
+            {"british", "columbia"},
+            {"nova", "scotia"},
+            {"prince", "edward", "island"},
+            {"new", "brunswick"},
+            {"newfoundland", "labrador"},
+            {"northwest", "territories"},
+        ]
+        for combo in combo_sets:
+            if combo.issubset(tokens):
+                return True
+        if tokens.intersection(canada_subdiv_tokens):
+            return True
+        return False
+
+    requested_is_canada = False
+    label_hint_norms = [requested_label or "", requested_hint or ""]
+    for value in label_hint_norms:
+        normed = _norm_text_(value)
+        if "canada" in normed:
+            requested_is_canada = True
+            break
     alias_corrections = {
         "au tralia": "australia",
         "autralia": "australia",
@@ -2551,13 +2632,45 @@ def _bandcamp_location_match_(profile_loc: str, api_hint: str, requested_label: 
             return True
         if hint_compact and (hint_compact in profile_compact or hint_compact in api_compact):
             return True
+    # Country-level fallback: if filter mentions Canada, accept province/territory-only locations.
+    if requested_is_canada:
+        profile_tokens = {tok for tok in profile_norm.split() if len(tok) >= 2}
+        api_tokens = {tok for tok in api_norm.split() if len(tok) >= 2}
+        if _has_canadian_subdivision(profile_norm, profile_tokens) or _has_canadian_subdivision(api_norm, api_tokens):
+            return True
     # Fallback: token overlap of two or more characters to avoid over-pruning on partial matches.
     profile_tokens = {tok for tok in profile_norm.split() if len(tok) >= 2}
     requested_tokens = {tok for tok in (requested_label or "").lower().replace(",", " ").split() if len(tok) >= 2}
     requested_tokens.update({tok for tok in (requested_hint or "").lower().replace(",", " ").split() if len(tok) >= 2})
     if profile_tokens and requested_tokens and profile_tokens.intersection(requested_tokens):
         return True
+    if os.environ.get("BC_DEBUG_LOCATION") == "1":
+        debug_payload = {
+            "filter_raw": requested_label or requested_hint or "",
+            "requested_tokens": sorted(requested_tokens),
+            "profile_raw": profile_loc,
+            "profile_norm": profile_norm,
+            "profile_tokens": sorted(profile_tokens),
+            "api_hint_raw": api_hint,
+            "api_norm": api_norm,
+            "api_tokens": sorted(api_tokens) if 'api_tokens' in locals() else [],
+            "reason": "no_match"
+        }
+        try:
+            print(f"BC_DEBUG_LOCATION: {json.dumps(debug_payload, ensure_ascii=False)}")
+        except Exception:
+            print(f"BC_DEBUG_LOCATION: {debug_payload}")
     return False
+
+
+def _test_bandcamp_location_match():
+    """Lightweight regression checks for _bandcamp_location_match_."""
+    assert _bandcamp_location_match_("Montreal, Québec", "", "canada", "canada")
+    assert _bandcamp_location_match_("Halifax, Nova Scotia", "", "canada", "canada")
+    assert _bandcamp_location_match_("Port Coquitlam, British Columbia", "", "canada", "canada")
+    assert not _bandcamp_location_match_("Paris, Île-de-France", "", "canada", "canada")
+    assert _bandcamp_location_match_("Montreal, Québec", "", "quebec", "quebec")
+    print("_test_bandcamp_location_match passed")
 
 _BANDCAMP_CONTACT_PRIORITY = [
     ("linktr.ee", "linktree", "beacons.ai", "solo.to", "carrd.co", "band.link"),
