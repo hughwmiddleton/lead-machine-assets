@@ -879,13 +879,14 @@ def is_fb_creator_category(text: Optional[str]) -> bool:
     return any(tok in normalized for tok in FB_CREATOR_CATEGORY_TOKENS)
 
 
-def extract_fb_category(card_el, page_name: str = "") -> Optional[str]:
+def _extract_fb_category_candidates(card_el, page_name: str = "") -> Tuple[Optional[str], List[str]]:
     """
     Extract the short grey category string from a FB search result container.
+    Returns (primary_category, all_candidates) where candidates preserve discovery order.
     Accepts a BeautifulSoup element (e.g., the anchor's parent).
     """
     if card_el is None:
-        return None
+        return None, []
     seen = set()
 
     def _clean(text: str) -> str:
@@ -949,15 +950,28 @@ def extract_fb_category(card_el, page_name: str = "") -> Optional[str]:
     except Exception:
         candidates = []
 
+    primary: Optional[str] = None
     for candidate in candidates:
         lower = candidate.lower()
         if is_fb_creator_category(lower):
             continue
         if "/" in candidate or any(tok in lower for tok in ("band", "music", "artist", "dj", "musician", "singer", "songwriter", "performer", "vocalist")):
-            return candidate
+            primary = candidate
+            break
         if len(candidate.split()) <= 6:
-            return candidate
-    return candidates[0] if candidates else None
+            primary = candidate
+            break
+    if primary is None and candidates:
+        primary = candidates[0]
+    return primary, candidates
+
+
+def extract_fb_category(card_el, page_name: str = "") -> Optional[str]:
+    """
+    Backwards-compatible wrapper returning only the primary category text.
+    """
+    primary, _ = _extract_fb_category_candidates(card_el, page_name=page_name)
+    return primary
 
 
 def _base_name_score(artist_norm: str, name_norm: str, username_norm: str) -> float:
@@ -1454,8 +1468,14 @@ def _fb_extract_candidates_from_search_dom(html_or_driver, logger=None, debug: b
         return href
 
     raw_candidates: List[FbCandidate] = []
+    seen_anchors = set()
     dedupe_seen = set()
     for anchor in scoped_anchors:
+        anchor_id = id(anchor)
+        if anchor_id in seen_anchors:
+            continue
+        seen_anchors.add(anchor_id)
+
         href_raw = anchor.get("href") or ""
         href = _normalize_href(href_raw)
         if not href or "facebook.com" not in href:
@@ -1472,14 +1492,42 @@ def _fb_extract_candidates_from_search_dom(html_or_driver, logger=None, debug: b
             pass
         name = anchor.get_text(" ", strip=True) or href
         aria_label = anchor.get("aria-label") or ""
-        category = extract_fb_category(anchor, page_name=name) if hasattr(anchor, "find_all") else ""
+        category = ""
+        category_candidates: List[str] = []
+        if hasattr(anchor, "find_all"):
+            category_el = getattr(anchor, "parent", None)
+            if category_el is None and hasattr(anchor, "find_parent"):
+                try:
+                    category_el = anchor.find_parent("div")
+                except Exception:
+                    category_el = None
+            if category_el is None:
+                category_el = anchor
+            category, category_candidates = _extract_fb_category_candidates(category_el, page_name=name)
         if not category and aria_label and not is_fb_creator_category(aria_label):
             category = aria_label
-        raw_candidates.append(FbCandidate(name=name, url=href, category=category or ""))
+        if aria_label and aria_label not in category_candidates:
+            category_candidates.append(aria_label)
+
+        secondary_text = ""
+        for cat_text in category_candidates:
+            if not cat_text:
+                continue
+            if category and cat_text == category:
+                continue
+            if name and cat_text.strip().lower() == name.strip().lower():
+                continue
+            secondary_text = cat_text
+            break
+
+        fb_cand = FbCandidate(name=name, url=href, category=category or "")
         try:
-            setattr(raw_candidates[-1], "aria_label", aria_label)
+            setattr(fb_cand, "aria_label", aria_label)
+            setattr(fb_cand, "category_candidates", category_candidates)
+            setattr(fb_cand, "secondary_text", secondary_text)
         except Exception:
             pass
+        raw_candidates.append(fb_cand)
 
     candidates_pre_url_gate = len(raw_candidates)
 

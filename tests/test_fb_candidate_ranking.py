@@ -5,8 +5,8 @@ import importlib.util
 from pathlib import Path
 
 
-def _cand(name: str, url: str, category: str = "", aria: str = ""):
-    obj = SimpleNamespace(name=name, url=url, category=category, aria_label=aria)
+def _cand(name: str, url: str, category: str = "", aria: str = "", secondary: str = ""):
+    obj = SimpleNamespace(name=name, url=url, category=category, aria_label=aria, secondary_text=secondary)
     return obj
 
 
@@ -87,6 +87,84 @@ def test_sanitize_drops_very_long_category():
 def test_sanitize_keeps_valid_categories():
     assert night_mode_fb._sanitize_fb_category_text("Musician/band") == "Musician/band"
     assert night_mode_fb._sanitize_fb_category_text("Artist") == "Artist"
+
+
+def test_category_equal_name_is_dropped_in_parse():
+    html = """
+    <div role="main">
+      <div aria-label="Search results">
+        <a href="https://www.facebook.com/sofialy" aria-label="Profile">Sofia Ly</a>
+        <div class="subtitle">Sofia Lý</div>
+      </div>
+    </div>
+    """
+    cands = night_mode_fb._parse_search_candidates(html, logger=None, search_name="Sofia Ly")
+    assert cands
+    assert getattr(cands[0], "category", "") == ""
+
+
+def test_music_hint_from_aria_label_when_category_missing():
+    html = """
+    <div role="main">
+      <div aria-label="Search results">
+        <a href="https://www.facebook.com/djmoon" aria-label="Musician/band">DJ Moon</a>
+      </div>
+    </div>
+    """
+    cands = night_mode_fb._parse_search_candidates(html, logger=None, search_name="DJ Moon")
+    assert cands
+    assert getattr(cands[0], "music_hint", False) is True
+
+
+def test_profile_music_hint_softens_penalty():
+    artist = "Sofia Ly"
+    profile = _cand("Sofia Ly", "https://www.facebook.com/profile.php?id=12345", "", aria="Musician/band")
+    page = _cand("Sofia Ly Fan Club", "https://www.facebook.com/sofialyfanclub", "Community")
+    ranked = night_mode_fb._rank_candidates_for_preview(artist, [page, profile])
+    assert ranked[0]["candidate"] is profile
+
+
+def test_parse_search_candidates_uses_card_category_and_music_hint():
+    html = """
+    <div role="main">
+      <div aria-label="Search results">
+        <div class="card">
+          <a href="https://www.facebook.com/someband" aria-label="">Some Band</a>
+          <div class="subtitle">Musician/band</div>
+        </div>
+      </div>
+    </div>
+    """
+    cands = night_mode_fb._parse_search_candidates(html, logger=None, search_name="Some Band")
+    assert len(cands) == 1
+    cand = cands[0]
+    assert getattr(cand, "category", "") == "Musician/band"
+    assert getattr(cand, "music_hint", False) is True
+
+
+def test_parse_search_candidates_does_not_duplicate_anchors():
+    html = """
+    <div role="main">
+      <div aria-label="Search results">
+        <div class="card">
+          <a href="https://www.facebook.com/page.one">Page One</a>
+          <div class="subtitle">Musician/band</div>
+        </div>
+        <div class="card">
+          <a href="https://www.facebook.com/page.two">Page Two</a>
+          <div class="subtitle">Artist</div>
+        </div>
+      </div>
+    </div>
+    """
+    cands = night_mode_fb._parse_search_candidates(html, logger=None, search_name="Page")
+    assert len(cands) == 2
+
+
+def test_is_profile_url_handles_queries_and_people_paths():
+    assert night_mode_fb._is_profile_url("https://www.facebook.com/profile.php?id=123&__tn__=%3C")
+    assert night_mode_fb._is_profile_url("https://www.facebook.com/people/some-name/1234567890")
+    assert night_mode_fb._is_profile_url("https://www.facebook.com/people/some-name/1234567890?sk=about")
 
 
 def _load_legacy_module():

@@ -114,6 +114,49 @@ _FB_SERVICE_CATEGORY_TOKENS = (
     "school",
 )
 
+_MUSIC_ROLE_TOKENS = (
+    "musician/band",
+    "musician",
+    "band",
+    "artist",
+    "music",
+    "singer",
+    "producer",
+    "dj",
+    "rapper",
+    "songwriter",
+    "record label",
+)
+
+
+def _pick_descriptor_from_candidates(name: str, candidates: List[str], aria_label: str, primary_category: str) -> str:
+    """
+    Prefer descriptor/subtitle text that carries music hints.
+    Falls back to the first non-name candidate if no music tokens are present.
+    """
+    for text in candidates or []:
+        if not text:
+            continue
+        if primary_category and text == primary_category:
+            continue
+        if _category_looks_like_name(name, text):
+            continue
+        if _text_has_music_tokens(text):
+            return text
+
+    if _text_has_music_tokens(aria_label):
+        return aria_label
+
+    for text in candidates or []:
+        if not text:
+            continue
+        if primary_category and text == primary_category:
+            continue
+        if _category_looks_like_name(name, text):
+            continue
+        return text
+    return ""
+
 
 class FacebookDriverError(RuntimeError):
     """Raised when the Facebook driver/session is unavailable or dead."""
@@ -171,6 +214,31 @@ def _sanitize_fb_category_text(cat: Optional[str]) -> Optional[str]:
     if lowered.startswith("you have an event"):
         return None
     return cleaned
+
+
+def _normalize_name_like(text: str) -> str:
+    """
+    Normalize text for loose name/category comparisons: lowercase + strip punctuation/spaces.
+    """
+    return re.sub(r"[^a-z0-9]+", "", (text or "").lower().strip())
+
+
+def _category_looks_like_name(name: Optional[str], category: Optional[str]) -> bool:
+    """
+    Return True when the category text is effectively the same as the page name.
+    Intended to drop bogus categories such as `category='Sofia Ly'`.
+    """
+    if not name or not category:
+        return False
+    name_norm = _normalize_name_like(name)
+    cat_norm = _normalize_name_like(category)
+    if not name_norm or not cat_norm:
+        return False
+    if name_norm == cat_norm:
+        return True
+    if name_norm.startswith(cat_norm) or cat_norm.startswith(name_norm):
+        return True
+    return False
 
 
 def _unpack_fb_candidate(candidate):
@@ -835,6 +903,8 @@ def _is_profile_url(url: str) -> bool:
     try:
         parsed = urllib.parse.urlparse(url_l)
         path = parsed.path or ""
+        if re.match(r"^/people/[^/]+/\d+(?:/.*)?$", path):
+            return True
         if path.startswith("/people/"):
             return True
     except Exception:
@@ -885,14 +955,16 @@ def _candidate_name_match(artist_name: str, cand_name: str) -> str:
     return "weak"
 
 
-def _candidate_category_flags(category: Optional[str], aria_label: str = "") -> Dict[str, bool]:
+def _candidate_category_flags(category: Optional[str], aria_label: str = "", secondary_text: str = "") -> Dict[str, bool]:
     cat_clean = _sanitize_fb_category_text(category) or ""
     cat = cat_clean.lower()
     aria = (aria_label or "").lower()
+    secondary = (secondary_text or "").lower()
+    blob = " ".join(part for part in (cat, aria, secondary) if part)
     music_cat = any(tok in cat for tok in ("musician/band", "artist", "music"))
     artist_cat = "artist" in cat
     musician_band = "musician/band" in cat
-    music_keyword = any(tok in (cat + " " + aria) for tok in ("music", "musician", "band", "artist", "dj", "producer", "singer"))
+    music_keyword = any(tok in blob for tok in _MUSIC_ROLE_TOKENS)
     non_music = any(tok in cat for tok in _FB_SERVICE_CATEGORY_TOKENS)
     return {
         "music_cat": music_cat,
@@ -913,11 +985,13 @@ def _score_fb_candidate_night(artist_name: str, cand) -> Tuple[int, List[str], D
     raw_category = getattr(cand, "category", "") or (cand.get("category") if isinstance(cand, dict) else "") or ""
     category = _sanitize_fb_category_text(raw_category) or ""
     aria_label = getattr(cand, "aria_label", "") or (cand.get("aria_label") if isinstance(cand, dict) else "") or ""
+    secondary_text = getattr(cand, "secondary_text", "") or (cand.get("secondary_text") if isinstance(cand, dict) else "") or ""
 
-    flags = _candidate_category_flags(category, aria_label)
+    flags = _candidate_category_flags(category, aria_label, secondary_text)
     is_profile = _is_profile_url(url)
     is_page = _is_page_style_url(url)
     match_level = _candidate_name_match(artist_name, name)
+    has_music_signals = flags["music_cat"] or flags["music_keyword"] or flags["musician_band_cat"] or flags["artist_cat"]
 
     score = 0
     breakdown: List[str] = []
@@ -941,8 +1015,13 @@ def _score_fb_candidate_night(artist_name: str, cand) -> Tuple[int, List[str], D
         score += weights["page_url"]
         breakdown.append("+page_url")
     if is_profile:
-        score += weights["profile_penalty"]
-        breakdown.append("-profile")
+        profile_penalty = weights["profile_penalty"]
+        if match_level in ("exact", "near") and has_music_signals:
+            profile_penalty = int(profile_penalty / 4)  # soften but keep pages preferred
+            breakdown.append("-profile_soft")
+        else:
+            breakdown.append("-profile")
+        score += profile_penalty
 
     if flags["non_music_cat"]:
         if not (flags["music_cat"] or flags["music_keyword"] or flags["musician_band_cat"] or flags["artist_cat"]):
@@ -965,6 +1044,7 @@ def _score_fb_candidate_night(artist_name: str, cand) -> Tuple[int, List[str], D
         "category": category,
         "category_raw": raw_category,
         "aria_label": aria_label,
+        "secondary_text": secondary_text,
         "is_profile": is_profile,
         "is_page": is_page,
         "match_level": match_level,
@@ -1133,8 +1213,13 @@ def _category_is_music_like(category: Optional[str]) -> bool:
     if not cat_clean:
         return False
     cat = cat_clean.lower()
-    tokens = ("musician", "musician/band", "band", "artist", "singer", "producer", "dj", "music")
-    return any(tok in cat for tok in tokens)
+    return any(tok in cat for tok in _MUSIC_ROLE_TOKENS)
+
+
+def _text_has_music_tokens(text: Optional[str]) -> bool:
+    if not text:
+        return False
+    return any(tok in (text or "").lower() for tok in _MUSIC_ROLE_TOKENS)
 
 
 def _try_explicit_fb(driver, url: str, logger: LoggerFn = None) -> Tuple[List[str], Optional[str]]:
@@ -1410,19 +1495,38 @@ def _parse_search_candidates(html: str, logger: LoggerFn = None, search_name: Op
 
     # Add lightweight music hint for stable sorting (no scoring change).
     for cand in raw_candidates:
+        name = getattr(cand, "name", "") or ""
         aria = getattr(cand, "aria_label", "") or ""
         raw_cat = getattr(cand, "category", "") or ""
+        raw_cat_candidates = getattr(cand, "category_candidates", None) or getattr(cand, "_raw_category_candidates", []) or []
+        secondary_text = getattr(cand, "secondary_text", "") or ""
+
         sanitized_cat = _sanitize_fb_category_text(raw_cat)
         if raw_cat and sanitized_cat is None:
             # Phase 1: sanitize noisy FB category strings.
             _log(logger, f"[Night FB][CategorySanitize] dropped noisy category len={len(raw_cat)} raw={raw_cat!r}")
         cat = sanitized_cat or ""
+        if cat and _category_looks_like_name(name, cat):
+            cat = ""
+        if cat and cat.lower() in ("profile", "timeline"):
+            cat = ""
+
+        descriptor = secondary_text or _pick_descriptor_from_candidates(name, raw_cat_candidates, aria, cat)
+        descriptor_sanitized = _sanitize_fb_category_text(descriptor) or ""
+        descriptor_has_music = _text_has_music_tokens(descriptor_sanitized)
+
+        if descriptor_sanitized and descriptor_has_music and not _category_looks_like_name(name, descriptor_sanitized):
+            if not cat or not _text_has_music_tokens(cat):
+                cat = descriptor_sanitized if descriptor_sanitized else cat
+
         try:
             setattr(cand, "_raw_category", raw_cat)
+            setattr(cand, "_raw_category_candidates", raw_cat_candidates)
             setattr(cand, "category", cat)
+            setattr(cand, "secondary_text", descriptor or secondary_text or "")
         except Exception:
             pass
-        music_hint = _category_is_music_like(cat) or _category_is_music_like(aria)
+        music_hint = _category_is_music_like(cat) or _category_is_music_like(aria) or _category_is_music_like(descriptor)
         try:
             setattr(cand, "music_hint", bool(music_hint))
         except Exception:
@@ -1430,6 +1534,27 @@ def _parse_search_candidates(html: str, logger: LoggerFn = None, search_name: Op
 
     deduped = _dedupe_candidates(raw_candidates)
     deduped = sorted(deduped, key=lambda c: 0 if getattr(c, "music_hint", False) else 1)
+
+    if os.getenv("FB_DEBUG_CAND_META") == "1":
+        try:
+            debug_n = int(os.getenv("FB_DEBUG_CAND_META_N") or 5)
+        except Exception:
+            debug_n = 5
+        for idx, c in enumerate(deduped[:debug_n], start=1):
+            _log(
+                logger,
+                "[Night FB][cand_meta] %d) name=%r raw_cat=%r cat_candidates=%r aria_label=%r secondary=%r final_cat=%r music_hint=%s"
+                % (
+                    idx,
+                    getattr(c, "name", ""),
+                    getattr(c, "_raw_category", None),
+                    (getattr(c, "_raw_category_candidates", None) or [])[:5],
+                    getattr(c, "aria_label", None),
+                    getattr(c, "secondary_text", None),
+                    getattr(c, "category", None),
+                    bool(getattr(c, "music_hint", False)),
+                ),
+            )
 
     if os.getenv("FB_DEBUG_CANDIDATES") == "1":
         preview = deduped[:5]
