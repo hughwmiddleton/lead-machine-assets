@@ -2483,7 +2483,61 @@ def _bandcamp_collect_contacts(artist_dict: dict) -> list:
             deduped.append(link)
     return deduped
 
+_BC_GENRE_FILTER_TOKENS = {
+    "rock",
+    "pop",
+    "punk",
+    "metal",
+    "jazz",
+    "blues",
+    "country",
+    "electronic",
+    "hip hop",
+    "rap",
+    "reggae",
+    "ambient",
+    "experimental",
+    "indie",
+    "alternative",
+    "classical",
+    "folk",
+    "rnb",
+    "soul",
+}
+
+def _bc_decode_filter(s: str | None) -> str | None:
+    if not s:
+        return s
+    try:
+        from urllib.parse import unquote
+        decoded = unquote(s)
+    except Exception:
+        decoded = s
+    decoded = decoded.replace("+", " ")
+    return decoded
+
+def _bc_sanitize_location_filter(label: str | None) -> str:
+    raw_label = label or ""
+    decoded_label = _bc_decode_filter(raw_label) or ""
+    sanitized_label = decoded_label.strip()
+    norm = _norm_text_(sanitized_label)
+    if norm in _BC_GENRE_FILTER_TOKENS:
+        sanitized_label = ""
+    if os.environ.get("BC_DEBUG_FILTER_SRC") == "1":
+        debug_payload = {
+            "raw_label": raw_label,
+            "decoded_label": decoded_label,
+            "sanitized_label": sanitized_label,
+        }
+        try:
+            print(f"BC_DEBUG_FILTER_SRC: {json.dumps(debug_payload, ensure_ascii=False)}")
+        except Exception:
+            print(f"BC_DEBUG_FILTER_SRC: {debug_payload}")
+    return sanitized_label
+
 def _bandcamp_location_match_(profile_loc: str, api_hint: str, requested_label: str | None, requested_hint: str | None) -> bool:
+    requested_label = _bc_decode_filter(requested_label)
+    requested_hint = _bc_decode_filter(requested_hint)
     if not requested_label and not requested_hint:
         return True
     profile_norm = _norm_text_(profile_loc).replace("-", " ")
@@ -2674,7 +2728,16 @@ def _test_bandcamp_location_match():
     assert _bandcamp_location_match_("Montreal, Québec", "", "quebec", "quebec")
     assert _bandcamp_location_match_("Halifax, Nova Scotia", "", "rock nova-", "rock nova-")
     assert _bandcamp_location_match_("Halifax, Nova Scotia", "", "nova-scotia", "nova-scotia")
+    assert _bandcamp_location_match_("Québec", "", "qu%C3%A9bec", "qu%C3%A9bec")
+    assert _bandcamp_location_match_("Montreal, Québec", "", "qu%C3%A9bec", "qu%C3%A9bec")
+    assert not _bandcamp_location_match_("Montreal, Québec", "", "rock", "rock")
     print("_test_bandcamp_location_match passed")
+
+def _test_bandcamp_location_filter_sanitizer():
+    assert _bc_sanitize_location_filter("rock") == ""
+    assert _bc_sanitize_location_filter("nova scotia") == "nova scotia"
+    assert _bc_sanitize_location_filter("qu%C3%A9bec") == "québec"
+    print("_test_bandcamp_location_filter_sanitizer passed")
 
 _BANDCAMP_CONTACT_PRIORITY = [
     ("linktr.ee", "linktree", "beacons.ai", "solo.to", "carrd.co", "band.link"),
@@ -2741,6 +2804,7 @@ def _bandcamp_location_label_from_url(url: str) -> dict:
         return {"display_label": "", "hint": ""}
     params = _bandcamp_parse_discover_params(url)
     loc_value = params.get("loc") or ""
+    loc_value_decoded = _bc_decode_filter(loc_value) or ""
     display_label = ""
     try:
         session = build_hardened_session()
@@ -2761,14 +2825,16 @@ def _bandcamp_location_label_from_url(url: str) -> dict:
     except Exception:
         display_label = ""
     if not display_label and loc_value and not loc_value.isdigit():
-        display_label = loc_value
+        display_label = loc_value_decoded or loc_value
     hint = ""
     if display_label:
         hint = display_label
     elif loc_value.isdigit():
         hint = f"loc:{loc_value}"
     elif loc_value:
-        hint = loc_value
+        hint = loc_value_decoded or loc_value
+    display_label = _bc_decode_filter(display_label) or ""
+    hint = _bc_decode_filter(hint) or ""
     return {"display_label": display_label, "hint": hint}
 
 
@@ -2848,7 +2914,7 @@ def scrape_bandcamp(
     if normalized_search_domain not in {"artists", "tracks"}:
         normalized_search_domain = "artists"
     effective_search_domain = normalized_search_domain if normalized_mode == "search" else ""
-    normalized_search_location = (search_location_filter or "").strip()
+    normalized_search_location = _bc_sanitize_location_filter(search_location_filter)
 
     existing_csv = _bandcamp_mode_output_csv_path(
         existing_csv,
@@ -2907,11 +2973,11 @@ def scrape_bandcamp(
     loc_guess = ""
     if url_input and _bandcamp_is_discover_url(url_input):
         loc_meta = _bandcamp_location_label_from_url(url_input)
-        requested_label = loc_meta.get("display_label", "") or ""
-        requested_hint = loc_meta.get("hint", "") or ""
+        requested_label = _bc_sanitize_location_filter(loc_meta.get("display_label", "") or "")
+        requested_hint = _bc_sanitize_location_filter(loc_meta.get("hint", "") or "")
         if not requested_hint:
             params = _bandcamp_parse_discover_params(url_input)
-            requested_hint = params.get("loc") or params.get("location") or ""
+            requested_hint = _bc_sanitize_location_filter(params.get("loc") or params.get("location") or "")
         parsed = urlparse(url_input)
         segments = [seg for seg in (parsed.path or "").split("/") if seg]
         if len(segments) >= 2 and segments[0] == "discover":
@@ -2919,6 +2985,7 @@ def scrape_bandcamp(
             slug_parts = [part for part in re.split(r"[+\\s]+", slug) if part]
         if len(slug_parts) >= 2:
             loc_guess = " ".join(slug_parts[:-1]).strip()
+            loc_guess = _bc_sanitize_location_filter(loc_guess)
             if loc_guess and not requested_hint:
                 requested_hint = loc_guess
         # Also include the slug-derived location as a hint so spacing/label issues don't prune everything.
@@ -2931,6 +2998,8 @@ def scrape_bandcamp(
                 requested_hint = f"{requested_hint} {loc_guess}".strip()
             elif requested_label and loc_guess.lower() not in requested_label.lower():
                 requested_hint = loc_guess
+        requested_label = _bc_sanitize_location_filter(requested_label)
+        requested_hint = _bc_sanitize_location_filter(requested_hint)
         if requested_label or requested_hint:
             print(f"Bandcamp: applying location filter -> {requested_label or requested_hint}")
     elif normalized_mode == "search" and normalized_search_location:
