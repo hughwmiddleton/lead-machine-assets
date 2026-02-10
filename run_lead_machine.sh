@@ -36,6 +36,7 @@ unset FB_DEBUG_DOM_GATE_HREFS
 # Keep ranking preview on (already in your logs, but make sure it stays)
 export FB_CANDIDATE_RANKING=1
 export FB_CANDIDATE_RANKING_PREVIEW_N=10
+export FB_DEBUG_EMAIL_OVERRIDE=1
 unset FB_CANDIDATE_RANKING_DEBUG
 
 # Leave these off unless you’re diagnosing final music gate internals
