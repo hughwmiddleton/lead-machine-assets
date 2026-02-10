@@ -2640,8 +2640,10 @@ def _bandcamp_location_match_(profile_loc: str, api_hint: str, requested_label: 
             return True
     # Fallback: token overlap of two or more characters to avoid over-pruning on partial matches.
     profile_tokens = {tok for tok in profile_norm.split() if len(tok) >= 2}
-    requested_tokens = {tok for tok in (requested_label or "").lower().replace(",", " ").split() if len(tok) >= 2}
-    requested_tokens.update({tok for tok in (requested_hint or "").lower().replace(",", " ").split() if len(tok) >= 2})
+    req_label_norm = _norm_text_(requested_label or "").replace("-", " ").replace(",", " ")
+    req_hint_norm = _norm_text_(requested_hint or "").replace("-", " ").replace(",", " ")
+    requested_tokens = {tok for tok in req_label_norm.split() if len(tok) >= 2}
+    requested_tokens.update({tok for tok in req_hint_norm.split() if len(tok) >= 2})
     if profile_tokens and requested_tokens and profile_tokens.intersection(requested_tokens):
         return True
     if os.environ.get("BC_DEBUG_LOCATION") == "1":
@@ -2670,6 +2672,8 @@ def _test_bandcamp_location_match():
     assert _bandcamp_location_match_("Port Coquitlam, British Columbia", "", "canada", "canada")
     assert not _bandcamp_location_match_("Paris, Île-de-France", "", "canada", "canada")
     assert _bandcamp_location_match_("Montreal, Québec", "", "quebec", "quebec")
+    assert _bandcamp_location_match_("Halifax, Nova Scotia", "", "rock nova-", "rock nova-")
+    assert _bandcamp_location_match_("Halifax, Nova Scotia", "", "nova-scotia", "nova-scotia")
     print("_test_bandcamp_location_match passed")
 
 _BANDCAMP_CONTACT_PRIORITY = [

@@ -1579,5 +1579,53 @@
       "https://moonshape.bandcamp.com",
       "https://warmbelly.bandcamp.com"
     ]
+  },
+  "https://bandcamp.com/discover/rock+nova-scotia?s=new": {
+    "scraped_artist_urls": [
+      "https://somebodyelsesblues.bandcamp.com",
+      "https://overnightmusic.bandcamp.com",
+      "https://bearbonesbluesband.bandcamp.com",
+      "https://petermullock.bandcamp.com",
+      "https://underthebus.bandcamp.com",
+      "https://moonshape.bandcamp.com",
+      "https://thegreenreflectors.bandcamp.com",
+      "https://andrewnewton.bandcamp.com",
+      "https://willykidd.bandcamp.com",
+      "https://toddmichalik.bandcamp.com",
+      "https://twillis.bandcamp.com",
+      "https://dulseactivity.bandcamp.com",
+      "https://elliotwilcoxohearn.bandcamp.com",
+      "https://conductorheavy.bandcamp.com",
+      "https://puffin.bandcamp.com",
+      "https://remedy262.bandcamp.com",
+      "https://roadsignsns.bandcamp.com",
+      "https://hazelblitz.bandcamp.com",
+      "https://reverbranch.bandcamp.com",
+      "https://burntblackmusic.bandcamp.com"
+    ]
+  },
+  "discover:https://bandcamp.com/discover/rock+nova-scotia?s=new": {
+    "scraped_artist_urls": [
+      "https://somebodyelsesblues.bandcamp.com",
+      "https://overnightmusic.bandcamp.com",
+      "https://bearbonesbluesband.bandcamp.com",
+      "https://petermullock.bandcamp.com",
+      "https://underthebus.bandcamp.com",
+      "https://moonshape.bandcamp.com",
+      "https://thegreenreflectors.bandcamp.com",
+      "https://andrewnewton.bandcamp.com",
+      "https://willykidd.bandcamp.com",
+      "https://toddmichalik.bandcamp.com",
+      "https://twillis.bandcamp.com",
+      "https://dulseactivity.bandcamp.com",
+      "https://elliotwilcoxohearn.bandcamp.com",
+      "https://conductorheavy.bandcamp.com",
+      "https://puffin.bandcamp.com",
+      "https://remedy262.bandcamp.com",
+      "https://roadsignsns.bandcamp.com",
+      "https://hazelblitz.bandcamp.com",
+      "https://reverbranch.bandcamp.com",
+      "https://burntblackmusic.bandcamp.com"
+    ]
   }
 }

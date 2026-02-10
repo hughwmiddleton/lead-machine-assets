@@ -38,7 +38,7 @@ export FB_CANDIDATE_RANKING=1
 export FB_CANDIDATE_RANKING_PREVIEW_N=8
 unset FB_CANDIDATE_RANKING_DEBUG=1
 unset FB_ALLOW_AUTOMATED_LOGIN
-export BC_DEBUG_LOCATION=1
+unset BC_DEBUG_LOCATION=1
 
 # (Optional) Install dependencies if needed
 # pip install pandas tqdm selenium beautifulsoup4 webdriver_manager PyQt5
