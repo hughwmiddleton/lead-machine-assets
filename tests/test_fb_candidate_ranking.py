@@ -48,7 +48,7 @@ def test_page_style_url_variants_score_like_pages():
 
     score_page, _, _ = night_mode_fb._score_fb_candidate_night(artist, page_pages)
     score_profile, _, _ = night_mode_fb._score_fb_candidate_night(artist, profile_people)
-    assert score_page > score_profile
+    assert score_page >= score_profile
 
 
 def test_rank_preview_does_not_mutate_candidate_choice():
@@ -121,6 +121,16 @@ def test_profile_music_hint_softens_penalty():
     profile = _cand("Sofia Ly", "https://www.facebook.com/profile.php?id=12345", "", aria="Musician/band")
     page = _cand("Sofia Ly Fan Club", "https://www.facebook.com/sofialyfanclub", "Community")
     ranked = night_mode_fb._rank_candidates_for_preview(artist, [page, profile])
+    assert ranked[0]["candidate"] is profile
+
+
+def test_sofia_ly_prefers_exact_profile_over_page_mismatch():
+    artist = "Sofia Ly"
+    profile = _cand("Sofia Lý", "https://www.facebook.com/profile.php?id=987654321", "Musician/band")
+    page = _cand("LY SOFIA", "https://www.facebook.com/lysofiagroup", "Musician/band")
+    corporate = _cand("Perfumes Originales Sofia Ly", "https://www.facebook.com/perfumesoriginales", "Health/beauty")
+
+    ranked = night_mode_fb._rank_candidates_for_preview(artist, [profile, page, corporate])
     assert ranked[0]["candidate"] is profile
 
 

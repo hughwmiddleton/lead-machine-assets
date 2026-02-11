@@ -10,6 +10,7 @@ import re
 import time
 import urllib.parse
 import shutil
+import unicodedata
 from pathlib import Path
 import sys
 import atexit
@@ -90,10 +91,10 @@ _FB_RANK_WEIGHTS = {
     "cat_artist": 40,
     "cat_music": 30,
     "music_keyword": 30,
-    "page_url": 20,
+    "page_url": 0,
     "exact_name": 20,
-    "near_name": 10,
-    "profile_penalty": -40,
+    "near_name": 12,
+    "profile_penalty": 0,
     "non_music_category": -30,
     "name_mismatch": -20,
 }
@@ -184,7 +185,9 @@ def _log(logger: LoggerFn, message: str) -> None:
 
 
 def _slugify(text: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "", (text or "").strip().lower())
+    normalized = unicodedata.normalize("NFKD", (text or "").strip().lower())
+    normalized = "".join(ch for ch in normalized if not unicodedata.combining(ch))
+    return re.sub(r"[^a-z0-9]+", "", normalized)
 
 
 def _split_multi(value: str) -> List[str]:
@@ -1053,6 +1056,7 @@ def _score_fb_candidate_night(artist_name: str, cand) -> Tuple[int, List[str], D
         "musician_band_cat": flags["musician_band_cat"],
         "music_keyword": flags["music_keyword"],
         "non_music_category": flags["non_music_cat"],
+        "music_hint": flags["music_cat"] or flags["music_keyword"] or flags["musician_band_cat"] or flags["artist_cat"],
     }
     return score, breakdown, features
 
@@ -1076,12 +1080,12 @@ def _rank_candidates_for_preview(artist_name: str, candidates: List["facebook_en
         match_rank = {"exact": 0, "near": 1, "weak": 2, "mismatch": 3, "none": 4}.get(feat.get("match_level") or "none", 4)
         return (
             -int(item["score"]),
+            match_rank,
             -int(feat.get("musician_band_cat") or False),
             -int(feat.get("music_cat") or False),
             -int(feat.get("artist_cat") or False),
             -int(feat.get("is_page") or False),
             int(feat.get("is_profile") or False),
-            match_rank,
             item["idx"],
         )
 
@@ -1123,7 +1127,13 @@ def _order_candidates_for_selection(
     return ordered
 
 
-def _maybe_log_rank_preview(artist: str, candidates: List["facebook_enrich.FbCandidate"], chosen_current: Optional["facebook_enrich.FbCandidate"], logger: LoggerFn = None) -> None:
+def _maybe_log_rank_preview(
+    artist: str,
+    candidates: List["facebook_enrich.FbCandidate"],
+    chosen_current: Optional["facebook_enrich.FbCandidate"],
+    logger: LoggerFn = None,
+    selected_by: str = "",
+) -> None:
     if candidates is None:
         return
     try:
@@ -1137,7 +1147,8 @@ def _maybe_log_rank_preview(artist: str, candidates: List["facebook_enrich.FbCan
     debug = _bool_env("FB_CANDIDATE_RANKING_DEBUG", default=False)
     chosen_label = getattr(chosen_current, "name", None) or getattr(chosen_current, "url", None) if chosen_current else ""
 
-    _log(logger, f"[Night FB][Rank Preview] query=\"{artist}\" top={preview_n} flag={int(flag_enabled)}")
+    log_selected_by = selected_by or ("ranked_sort" if flag_enabled else "")
+    _log(logger, f"[Night FB][Rank Preview] query=\"{artist}\" top={preview_n} flag={int(flag_enabled)} selected_by=\"{log_selected_by}\"")
     for i, item in enumerate(ranked[:preview_n], start=1):
         feat = item["features"]
         breakdown = " ".join(item["breakdown"]) or "-"
@@ -1148,10 +1159,11 @@ def _maybe_log_rank_preview(artist: str, candidates: List["facebook_enrich.FbCan
         is_profile = feat.get("is_profile")
         is_page = feat.get("is_page")
         music_cat = feat.get("music_cat")
+        music_hint = bool(feat.get("music_hint"))
         score = item["score"]
         line = (
-            f"{i}) name=\"{name}\" cat=\"{cat}\" is_profile={bool(is_profile)} page_url={bool(is_page)} "
-            f"music_cat={bool(music_cat)} name_match={match} score={score} ({breakdown})"
+            f"{i}) name=\"{name}\" cat=\"{cat}\" cat_raw=\"{raw_cat}\" is_profile={bool(is_profile)} page_url={bool(is_page)} "
+            f"music_hint={music_hint} name_match={match} score={score} ({breakdown})"
         )
         if debug:
             line += f" url={feat.get('url')}"
@@ -2071,30 +2083,17 @@ class NightModeFacebookEnricher:
                 _log(self.logger, f"[Night FB] Search navigation failed after refresh: {exc2}")
                 raise FacebookDriverError(str(exc2))
         candidates = _parse_search_candidates(html, logger=self.logger, search_name=artist)
-        candidate = None
-        selector = getattr(facebook_enrich, "select_best_facebook_candidate", None) if facebook_enrich is not None else None
-        if callable(selector):
-            try:
-                candidate = selector(candidates, artist, logger=self.logger, suppress_console=True)
-            except Exception:
-                candidate = None
-        if not candidate:
-            search_result = _select_best_candidate_loose(artist, candidates)
-            candidate = search_result
-            if isinstance(search_result, list):
-                candidate = next((c for c in search_result if c), None)
-
-        baseline_candidate = candidate  # reflects pre-flag selection
-        # Phase 1 only: ranking is computed for preview/logs but does NOT change selection/order.
-        ranking_enabled = False
         ranked_for_preview = _rank_candidates_for_preview(artist, candidates)
-        ranked_candidates: List["facebook_enrich.FbCandidate"] = []
+        ranked_candidates: List["facebook_enrich.FbCandidate"] = [item["candidate"] for item in ranked_for_preview]
+        candidate = ranked_candidates[0] if ranked_candidates else None
+        selected_by = "ranked_sort"
 
         if not candidate:
             _log(self.logger, f"[Night FB] No non-junk FB candidates for '{artist}', skipping Facebook.")
-            _maybe_log_rank_preview(artist, candidates, None, logger=self.logger)
+            _maybe_log_rank_preview(artist, candidates, None, logger=self.logger, selected_by=selected_by)
             return None
 
+        ranking_enabled = True
         ordered_candidates = _order_candidates_for_selection(candidate, candidates, ranked_candidates, ranking_enabled)
 
         gate_debug = os.getenv("FB_DEBUG_CANDIDATES") == "1"
@@ -2170,15 +2169,15 @@ class NightModeFacebookEnricher:
                 "category_raw": raw_category or "",
                 "base_score": base_score,
             }
-            _maybe_log_rank_preview(artist, candidates, baseline_candidate, logger=self.logger)
+            _maybe_log_rank_preview(artist, candidates, cand, logger=self.logger, selected_by=selected_by)
             raw_suffix = ""
             if raw_category and category != raw_category:
                 raw_suffix = f" raw_cat={raw_category!r}"
-            _log(self.logger, f"[Night FB] Selected FB candidate '{name or norm_url}' -> {norm_url} (category='{category or ''}'){raw_suffix}")
+            _log(self.logger, f"[Night FB] Selected FB candidate '{name or norm_url}' -> {norm_url} (category='{category or ''}'){raw_suffix} selected_by={selected_by}")
             return norm_url
 
         _log(self.logger, f"[Night FB] No usable FB candidates for '{artist}' after URL validation.")
-        _maybe_log_rank_preview(artist, candidates, None, logger=self.logger)
+        _maybe_log_rank_preview(artist, candidates, None, logger=self.logger, selected_by=selected_by)
         return None
 
     def _can_identity_soft_pass(self, artist_name: str, page_name: str, resolved_url: str, base_score: float) -> bool:

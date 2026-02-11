@@ -10,7 +10,7 @@ import unicodedata
 import urllib.parse
 from urllib.parse import urlparse
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from bs4 import BeautifulSoup
 
@@ -1642,28 +1642,104 @@ def select_best_facebook_candidate(
         _shared_fb_log(logger, f"[FB Shared] All FB candidates for '{search_name}' were junk; no usable FB page.", suppress_console=suppress_console)
         return None
 
-    best = None
+    ranked: List[Tuple[float, float, float, float, FbCandidate, Dict[str, Any]]] = []
     for cand in filtered:
         scored = score_fb_candidate(search_name, cand.name, cand.url, cand.category)
         if scored is None:
             continue
         final_score, base_score, cat_boost = scored
         music_bonus = 0.0
-        if is_music_like_category(getattr(cand, "category", ""), logger=logger, debug_logging_enabled=True):
+        category_val = getattr(cand, "category", "")
+        if is_music_like_category(category_val, logger=logger, debug_logging_enabled=True):
             music_bonus += MUSIC_CATEGORY_BOOST
         if getattr(cand, "is_music_page", False):
             music_bonus += MUSIC_FLAG_BOOST
         adjusted = final_score + music_bonus
-        if best is None or adjusted > best[0]:
-            best = (adjusted, base_score, cat_boost, cand)
+        ranked.append(
+            (
+                adjusted,
+                base_score,
+                cat_boost,
+                music_bonus,
+                cand,
+                {
+                    "name": getattr(cand, "name", "") or "",
+                    "url": getattr(cand, "url", "") or "",
+                    "category_raw": getattr(cand, "category", "") or "",
+                    "music_hint": bool(getattr(cand, "music_hint", False)),
+                },
+            )
+        )
 
-    if best is None:
+    if not ranked:
         _shared_fb_log(logger, f"[FB Shared] No valid FB candidates for '{search_name}' after scoring.", suppress_console=suppress_console)
         return None
 
-    candidate = best[3]
+    def _is_profile(url: str) -> bool:
+        url_l = (url or "").lower()
+        return "profile.php" in url_l or "/people/" in url_l
+
+    def _is_page(url: str) -> bool:
+        try:
+            parsed = urlparse(url or "")
+        except Exception:
+            return False
+        path = (parsed.path or "").strip("/").split("/")
+        if not path:
+            return False
+        if path[0] in ("pages", "p"):
+            return True
+        return not _is_profile(url)
+
+    def _rank_key(item: Tuple[float, float, float, float, FbCandidate, Dict[str, Any]]):
+        total, base, _, _, cand, _ = item
+        url_val = getattr(cand, "url", "") or ""
+        music_hint = bool(getattr(cand, "music_hint", False))
+        return (
+            -total,
+            -base,
+            -int(music_hint),
+            -int(_is_page(url_val)),
+            int(_is_profile(url_val)),
+            getattr(cand, "name", "") or "",
+        )
+
+    ranked.sort(key=_rank_key)
+
+    debug_rank = os.getenv("FB_DEBUG_RANK_SORT") == "1" or os.getenv("FB_CANDIDATE_RANKING") == "1"
+    if debug_rank:
+        _shared_fb_log(
+            logger,
+            f"[FB Shared][Rank Preview] query='{search_name}' candidates={len(ranked)} selected_by='ranked_sort'",
+            suppress_console=suppress_console,
+        )
+        for idx, item in enumerate(ranked[:10], start=1):
+            total, base, cat_boost, music_bonus, cand, meta = item
+            url_val = getattr(cand, "url", "") or ""
+            name_val = getattr(cand, "name", "") or url_val
+            raw_cat = meta.get("category_raw", "")
+            is_profile = _is_profile(url_val)
+            is_page = _is_page(url_val)
+            breakdown = f"base={base:.2f} cat={cat_boost:.2f} music_bonus={music_bonus:.2f}"
+            _shared_fb_log(
+                logger,
+                f"[FB Shared][Rank Preview] {idx}) name='{name_val}' url='{url_val}' cat_raw='{raw_cat}' "
+                f"is_profile={is_profile} is_page={is_page} music_hint={meta.get('music_hint')} total_score={total:.2f} {breakdown}",
+                suppress_console=suppress_console,
+            )
+
+    candidate = ranked[0][4]
     if is_junk_facebook_candidate(candidate):
         _shared_fb_log(logger, f"[FB Shared] Best candidate for '{search_name}' turned out to be junk after scoring; dropping.", suppress_console=suppress_console)
         return None
+
+    if debug_rank:
+        top = ranked[0]
+        _shared_fb_log(
+            logger,
+            f"[FB Shared] Selected FB candidate selected_by='ranked_sort' name='{getattr(candidate, 'name', '') or getattr(candidate, 'url', '')}' "
+            f"url='{getattr(candidate, 'url', '')}' total_score={top[0]:.2f} base={top[1]:.2f} cat_boost={top[2]:.2f} music_bonus={top[3]:.2f}",
+            suppress_console=suppress_console,
+        )
 
     return candidate

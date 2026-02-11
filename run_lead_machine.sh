@@ -28,41 +28,41 @@ unset SC_DEBUG_LATEST
 export FB_DEBUG_CAND_META=1
 export FB_DEBUG_CAND_META_N=12
 export FB_DEBUG_CANDIDATES=1
+export FB_DEBUG_DOM_GATE_HREFS=1
+export FB_DEBUG_DOM_GATE_HREFS_N=50
 
-# Optional: show DOM gate summary (handy if it says container missing)
+
+# DOM gate visibility (keep ON for this run)
 export FB_DEBUG_DOM_GATE=1
 unset FB_DEBUG_DOM_GATE_HREFS
 
-# Keep ranking preview on (already in your logs, but make sure it stays)
+# Ranking (this is the important part)
+export FB_DEBUG_RANK_SORT=1
 export FB_CANDIDATE_RANKING=1
 export FB_CANDIDATE_RANKING_PREVIEW_N=10
-export FB_DEBUG_EMAIL_OVERRIDE=1
-unset FB_CANDIDATE_RANKING_DEBUG
 
-# Leave these off unless you’re diagnosing final music gate internals
+# Email override (debug only)
+export FB_DEBUG_EMAIL_OVERRIDE=1
+
+# Leave deep music-gate internals OFF
 unset FB_DEBUG_CAND_GATE
 unset FB_DEBUG_MUSIC_SIGNALS
 unset FB_DEBUG_CAND_GATE_ASSERT
+unset FB_CANDIDATE_RANKING_DEBUG
 
-# FB automated login (only if you WANT Unearthed to share session)
-# If you don’t want FB automation, keep it unset.
-# export FB_ALLOW_AUTOMATED_LOGIN=1
+# FB automation — leave OFF for safety
 unset FB_ALLOW_AUTOMATED_LOGIN
 
-# SoundCloud debug (fine to keep if you're actively debugging SC challenge)
+# SoundCloud (fine to keep)
 export NIGHT_SC_DEBUG=1
-
-export PYTHONFAULTHANDLER=1
-export BC_DEBUG_LOCATION=1
-export BC_DEBUG_FILTER_SRC=1
-
-# Night Mode SoundCloud engine switch
 export NIGHTMODE_SC_ENGINE="t007"
 
-# --- Bandcamp ---
+# Bandcamp debug (fine)
 export BC_DEBUG_LOCATION=1
 export BC_DEBUG_FILTER_SRC=1
 
+# Always useful
+export PYTHONFAULTHANDLER=1
 
 # (Optional) Install dependencies if needed
 # pip install pandas tqdm selenium beautifulsoup4 webdriver_manager PyQt5
