@@ -34,7 +34,6 @@ export FB_DEBUG_DOM_GATE_HREFS_N=50
 
 # DOM gate visibility (keep ON for this run)
 export FB_DEBUG_DOM_GATE=1
-unset FB_DEBUG_DOM_GATE_HREFS
 
 # Ranking (this is the important part)
 export FB_DEBUG_RANK_SORT=1
@@ -60,6 +59,9 @@ export NIGHTMODE_SC_ENGINE="t007"
 # Bandcamp debug (fine)
 export BC_DEBUG_LOCATION=1
 export BC_DEBUG_FILTER_SRC=1
+
+# Run Qt headless to avoid macOS pasteboard/display errors in non-GUI environments.
+export QT_QPA_PLATFORM=offscreen
 
 # Always useful
 export PYTHONFAULTHANDLER=1

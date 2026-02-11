@@ -28,6 +28,7 @@ import logging
 from pathlib import Path
 from typing import Optional, Tuple
 
+from fb_email_override import should_accept_email_override
 # ---------------------------
 # Dependency Check and Installation
 # ---------------------------
@@ -8303,12 +8304,24 @@ def fb_find_page_and_emails_by_name(
         suppress_console=suppress_console,
     )
 
-    # If we pulled a contact email, accept even when music signals were missed (email is a strong artist signal).
+    # If we pulled a contact email, consider override only if identity/music hints are present.
     if not page_music and emails:
-        if os.getenv("FB_DEBUG_EMAIL_OVERRIDE") == "1":
-            _log(f"[FB Enrich][EmailOverrideDebug] url='{best_url}' cat_raw='{best_category_raw}' allow_soft_pass={bool(allow_soft_pass_category)}")
-        _log(f"[FB Enrich] Accepting FB page by email override (music gate failed): url='{candidate_url}' emails={len(emails)}")
-        return candidate_url, emails
+        override_accept, override_reason = should_accept_email_override(
+            artist_name,
+            {"name": best_name, "category": best_category_raw, "base_score": best_base_score},
+            {
+                "has_music_signals": page_music,
+                "category": page_category_text or best_category_raw,
+                "music_hint": bool(allow_soft_pass_category and _category_is_music_like(page_category_text or best_category_raw)),
+                "score": best_score,
+            },
+        )
+        if override_accept:
+            if os.getenv("FB_DEBUG_EMAIL_OVERRIDE") == "1":
+                _log(f"[FB Enrich][EmailOverrideDebug] url='{best_url}' cat_raw='{best_category_raw}' allow_soft_pass={bool(allow_soft_pass_category)} reason={override_reason}")
+            _log(f"[FB Enrich][EmailOverrideAccept] url='{candidate_url}' emails={len(emails)} reason={override_reason}")
+            return candidate_url, emails
+        _log(f"[FB Enrich][EmailOverrideReject] url='{candidate_url}' emails={len(emails)} reason={override_reason} category='{page_category_text or best_category_raw}'")
     if not page_music:
         if allow_soft_pass_category and _category_is_music_like(page_category_text or best_category_raw):
             _log(f"[FB Enrich] Soft-pass music gate by category allowlist: category='{page_category_text or best_category_raw}' url='{best_url}'")

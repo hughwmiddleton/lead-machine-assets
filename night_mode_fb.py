@@ -20,6 +20,8 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tupl
 import logging
 from typing import Union
 
+from fb_email_override import should_accept_email_override
+
 from bs4 import BeautifulSoup
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options as ChromeOptions
@@ -1669,6 +1671,7 @@ class NightModeFacebookEnricher:
         self._session_failed = False
         self._session_failed_reason = ""
         self._last_selected_candidate_context: Optional[Dict[str, Any]] = None
+        self._last_search_candidates: List[Dict[str, Any]] = []
         self._pass_a_counts = {
             "attempted": 0,
             "found_email": 0,
@@ -2040,6 +2043,7 @@ class NightModeFacebookEnricher:
 
     def _search_for_page(self, artist: str, location: str, allow_anon: bool = False) -> Optional[str]:
         self._last_selected_candidate_context = None
+        self._last_search_candidates = []
         session = self._ensure_session()
         if not session and not allow_anon:
             return None
@@ -2099,6 +2103,8 @@ class NightModeFacebookEnricher:
         gate_debug = os.getenv("FB_DEBUG_CANDIDATES") == "1"
         url_flow_debug = gate_debug or os.getenv("FB_DEBUG_CAND_URL_FLOW") == "1"
         debug_detail = url_flow_debug
+
+        collected_contexts: List[Tuple[Dict[str, Any], Any]] = []
 
         for cand in ordered_candidates:
             raw_url = _candidate_url(cand)
@@ -2162,19 +2168,28 @@ class NightModeFacebookEnricher:
                         _, base_score, _ = scored
             except Exception:
                 base_score = 0.0
-            self._last_selected_candidate_context = {
+            context = {
                 "url": norm_url,
                 "name": name or "",
                 "category": category or "",
                 "category_raw": raw_category or "",
                 "base_score": base_score,
             }
-            _maybe_log_rank_preview(artist, candidates, cand, logger=self.logger, selected_by=selected_by)
+            collected_contexts.append((context, cand))
+
+        if collected_contexts:
+            first_ctx, first_cand = collected_contexts[0]
+            self._last_selected_candidate_context = first_ctx
+            self._last_search_candidates = [ctx for ctx, _ in collected_contexts]
+            _maybe_log_rank_preview(artist, candidates, first_cand, logger=self.logger, selected_by=selected_by)
             raw_suffix = ""
-            if raw_category and category != raw_category:
-                raw_suffix = f" raw_cat={raw_category!r}"
-            _log(self.logger, f"[Night FB] Selected FB candidate '{name or norm_url}' -> {norm_url} (category='{category or ''}'){raw_suffix} selected_by={selected_by}")
-            return norm_url
+            if first_ctx.get("category_raw") and first_ctx.get("category") != first_ctx.get("category_raw"):
+                raw_suffix = f" raw_cat={first_ctx.get('category_raw')!r}"
+            _log(
+                self.logger,
+                f"[Night FB] Selected FB candidate '{first_ctx.get('name') or first_ctx.get('url')}' -> {first_ctx.get('url')} (category='{first_ctx.get('category') or ''}'){raw_suffix} selected_by={selected_by}",
+            )
+            return first_ctx.get("url")
 
         _log(self.logger, f"[Night FB] No usable FB candidates for '{artist}' after URL validation.")
         _maybe_log_rank_preview(artist, candidates, None, logger=self.logger, selected_by=selected_by)
@@ -2259,6 +2274,12 @@ class NightModeFacebookEnricher:
             _log(self.logger, f"[Night FB] Ignoring login/redirect page: {resolved_url}")
             return None, [], used_driver_kind, "login_wall"
 
+        lower_html = (html or "").lower()
+        not_found_phrases = ("page isn\u2019t available", "page isn't available", "content isn't available", "not available right now")
+        if any(p in lower_html for p in not_found_phrases):
+            _log(self.logger, f"[Night FB][PageUnavailable] {resolved_url}")
+            return None, [], used_driver_kind, "content_unavailable"
+
         soup = BeautifulSoup(html, "html.parser")
         meta_category = ""
         page_title = ""
@@ -2324,6 +2345,37 @@ class NightModeFacebookEnricher:
                     about_result = "no_email"
             if not about_result:
                 about_result = "fetch_error" if not emails else "emails_found"
+
+        if about_result == "not_found" and not emails and not has_music_signals:
+            _log(self.logger, f"[Night FB][PageUnavailable] {resolved_url} (about tab)")
+            outcome_hint = "content_unavailable"
+
+        # Email override gating when music signals are missing.
+        email_override_decision = True
+        email_override_reason = ""
+        if emails and not has_music_signals:
+            extracted = {
+                "has_music_signals": has_music_signals,
+                "category": meta_category,
+                "descriptor": page_title,
+                "music_hint": bool(candidate_context and candidate_context.get("category") and _category_is_music_like(candidate_context.get("category"))),
+                "score": candidate_context.get("base_score") if candidate_context else 0.0,
+            }
+            email_override_decision, email_override_reason = should_accept_email_override(
+                artist_name,
+                {
+                    "name": page_title,
+                    "category": meta_category,
+                    "raw_category": meta_category,
+                    "base_score": candidate_context.get("base_score") if candidate_context else 0.0,
+                },
+                extracted_signals=extracted,
+            )
+            if email_override_decision:
+                _log(self.logger, f"[Night FB][EmailOverrideAccept] url='{resolved_url}' reason='{email_override_reason}' emails={len(emails)} category='{meta_category}' name='{page_title}'")
+            else:
+                _log(self.logger, f"[Night FB][EmailOverrideReject] url='{resolved_url}' reason='{email_override_reason}' emails={len(emails)} category='{meta_category}' name='{page_title}'")
+                emails = []
 
         gate_soft_pass_category = False
         gate_soft_pass_identity = False
@@ -2625,6 +2677,13 @@ class NightModeFacebookEnricher:
                                     best_reason = reason_for_log
                                     best_driver = driver_kind
                                     best_page_url = _normalise_fb_url(direct_url)
+                            elif candidate_outcome == "content_unavailable":
+                                reason_for_log = "content_unavailable"
+                                if best_outcome is None:
+                                    best_outcome = "content_unavailable"
+                                    best_reason = reason_for_log
+                                    best_driver = driver_kind
+                                    best_page_url = _normalise_fb_url(direct_url)
                             else:
                                 reason_for_log = f"{driver_kind}_exception:unknown"
                                 self._pass_a_bump("fetch_error")
@@ -2743,11 +2802,37 @@ class NightModeFacebookEnricher:
                             allow_anon=allow_anon,
                             candidate_context=self._last_selected_candidate_context,
                         )
-                        night_result, emails, _, _ = _unpack_fb_candidate(candidate)
+                        night_result, emails, _, candidate_outcome = _unpack_fb_candidate(candidate)
                         if night_result:
                             page_url = night_result.facebook_url or page_url
                             result = self._apply_night_fb_result(result, night_result, emails, page_url)
                             return result
+                        if candidate_outcome == "content_unavailable":
+                            fallback_candidates = self._last_search_candidates[1:] if len(self._last_search_candidates) > 1 else []
+                            for idx, ctx in enumerate(fallback_candidates, start=2):
+                                alt_url = ctx.get("url")
+                                if not alt_url:
+                                    continue
+                                _log(self.logger, f"[Night FB][PageUnavailable] primary candidate unavailable; trying fallback {idx} -> {alt_url}")
+                                alt_candidate = self._scrape_single_fb_candidate(
+                                    alt_url,
+                                    result,
+                                    artist_name,
+                                    allow_anon=allow_anon,
+                                    candidate_context=ctx,
+                                )
+                                alt_result, alt_emails, _, alt_outcome = _unpack_fb_candidate(alt_candidate)
+                                if alt_result:
+                                    page_url = alt_result.facebook_url or alt_url
+                                    result = self._apply_night_fb_result(result, alt_result, alt_emails, page_url)
+                                    return result
+                                if alt_outcome != "content_unavailable":
+                                    break
+                            if not result.get("FB_Status"):
+                                result["FB_Status"] = "content_unavailable"
+                                result["FB_Reason"] = "content_unavailable"
+                                _log(self.logger, f"[Night FB][PageUnavailable] No usable FB candidates for '{artist_name}' after content-unavailable fallbacks.")
+                                return result
                     if not result.get("FB_Status"):
                         result["FB_Status"] = "no_candidates"
                     _log(self.logger, f"[Night FB] No usable FB candidates for '{artist_name}', marking FB_Status='no_candidates'.")
