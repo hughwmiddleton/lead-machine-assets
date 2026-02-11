@@ -28,17 +28,19 @@ unset SC_DEBUG_LATEST
 export FB_DEBUG_CAND_META=1
 export FB_DEBUG_CAND_META_N=12
 export FB_DEBUG_CANDIDATES=1
-export FB_DEBUG_DOM_GATE_HREFS=1
-export FB_DEBUG_DOM_GATE_HREFS_N=50
 
-
-# DOM gate visibility (keep ON for this run)
+# DOM gate visibility (keep ON)
 export FB_DEBUG_DOM_GATE=1
+unset FB_DEBUG_DOM_GATE_HREFS
+unset FB_DEBUG_DOM_GATE_HREFS_N
 
-# Ranking (this is the important part)
+# Ranking (the important part)
 export FB_DEBUG_RANK_SORT=1
 export FB_CANDIDATE_RANKING=1
 export FB_CANDIDATE_RANKING_PREVIEW_N=10
+
+# Phase 2 refine pass (recommended for validation)
+export FB_REFINE_QUERY=1
 
 # Email override (debug only)
 export FB_DEBUG_EMAIL_OVERRIDE=1
@@ -52,7 +54,7 @@ unset FB_CANDIDATE_RANKING_DEBUG
 # FB automation — leave OFF for safety
 unset FB_ALLOW_AUTOMATED_LOGIN
 
-# SoundCloud (fine to keep)
+# SoundCloud (fine)
 export NIGHT_SC_DEBUG=1
 export NIGHTMODE_SC_ENGINE="t007"
 
@@ -60,8 +62,8 @@ export NIGHTMODE_SC_ENGINE="t007"
 export BC_DEBUG_LOCATION=1
 export BC_DEBUG_FILTER_SRC=1
 
-# Run Qt headless to avoid macOS pasteboard/display errors in non-GUI environments.
-export QT_QPA_PLATFORM=offscreen
+# Qt GUI should use the default (cocoa) platform plugin so the window is visible.
+unset QT_QPA_PLATFORM
 
 # Always useful
 export PYTHONFAULTHANDLER=1

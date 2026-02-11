@@ -891,17 +891,23 @@ def _extract_fb_category_candidates(card_el, page_name: str = "") -> Tuple[Optio
     def _clean(text: str) -> str:
         return re.sub(r"\s+", " ", text or "").strip()
 
-    def _strip_engagement_noise(text: str) -> str:
+    def _is_engagement_noise(text: str) -> bool:
         """
-        Drop follower/review counters often appended to aria labels.
+        Drop follower/like/review counters while keeping descriptive tokens.
         """
-        lowered = text.lower()
-        if any(tok in lowered for tok in ("followers", "follower", "reviews", "review", "rating", "likes")):
-            return ""
-        # Patterns like "4.8 (10 reviews)" or "4.8★"
-        if re.match(r"\d+(\.\d+)?\s*\(?\d*\s*reviews?\)?", lowered):
-            return ""
-        return text
+        lowered = (text or "").strip().lower()
+        if not lowered:
+            return False
+        number = r"\d+(?:[.,]\d+)?"
+        if re.match(rf"^{number}\s*[km]?\s*(followers?|follower|likes?)$", lowered):
+            return True
+        if re.match(rf"^{number}\s*(?:reviews?|ratings?)$", lowered):
+            return True
+        if re.match(rf"^{number}\s*(?:/5)?\s*\(\s*{number}\s*reviews?\s*\)$", lowered):
+            return True
+        if re.match(rf"^{number}\s*(?:★|stars?)\s*(?:\(\s*{number}\s*reviews?\s*\))?$", lowered):
+            return True
+        return False
 
     def _tokenize(text: str) -> List[str]:
         if not text:
@@ -909,8 +915,8 @@ def _extract_fb_category_candidates(card_el, page_name: str = "") -> Tuple[Optio
         parts = re.split(r"[·|]", text)
         tokens: List[str] = []
         for part in parts:
-            token = _strip_engagement_noise(_clean(part))
-            if not token:
+            token = _clean(part)
+            if not token or _is_engagement_noise(token):
                 continue
             if is_fb_creator_category(token):
                 continue
@@ -921,8 +927,27 @@ def _extract_fb_category_candidates(card_el, page_name: str = "") -> Tuple[Optio
             tokens.append(token)
         return tokens
 
-    seen = set()
+    seen_tokens: set[str] = set()
+    seen_blobs: set[str] = set()
     tokens: List[str] = []
+
+    def _add_tokens_from_text(raw_text: str) -> None:
+        blob = _clean(raw_text)
+        if not blob:
+            return
+        blob_key = blob.lower()
+        if blob_key in seen_blobs:
+            return
+        seen_blobs.add(blob_key)
+        for token in _tokenize(blob):
+            token_key = token.lower()
+            if not token_key or token_key == (page_name or "").strip().lower():
+                continue
+            if token_key in seen_tokens:
+                continue
+            seen_tokens.add(token_key)
+            tokens.append(token)
+
     try:
         containers = [
             card_el,
@@ -934,48 +959,21 @@ def _extract_fb_category_candidates(card_el, page_name: str = "") -> Tuple[Optio
                 continue
             # Inline text near the anchor.
             for node in container.stripped_strings:
-                val = _clean(node)
-                if not val:
-                    continue
-                for token in _tokenize(val):
-                    if not token or token.lower() == (page_name or "").strip().lower():
-                        continue
-                    if token in seen:
-                        continue
-                    seen.add(token)
-                    tokens.append(token)
+                _add_tokens_from_text(node)
             # Short text from nearby spans/divs (often the grey label).
             for sub in container.find_all(["span", "div"], limit=12):
                 text = _clean(getattr(sub, "get_text", lambda *_: "")(" ", strip=True))
-                if not text:
-                    continue
-                for token in _tokenize(text):
-                    if not token or token in seen:
-                        continue
-                    seen.add(token)
-                    tokens.append(token)
+                _add_tokens_from_text(text)
             # Attributes sometimes hold the label.
             for attr in ("aria-label", "title"):
                 text = _clean(getattr(container, "get", lambda *_: "")(attr, ""))
-                if not text:
-                    continue
-                for token in _tokenize(text):
-                    if not token or token in seen:
-                        continue
-                    seen.add(token)
-                    tokens.append(token)
+                _add_tokens_from_text(text)
         for sib in getattr(card_el, "next_siblings", []) or []:
             try:
                 text = _clean(getattr(sib, "get_text", lambda *_: "")(" ", strip=True))
             except Exception:
                 text = ""
-            if not text:
-                continue
-            for token in _tokenize(text):
-                if not token or token in seen:
-                    continue
-                seen.add(token)
-                tokens.append(token)
+            _add_tokens_from_text(text)
     except Exception:
         tokens = []
 
@@ -1582,8 +1580,6 @@ def _fb_extract_candidates_from_search_dom(html_or_driver, logger=None, debug: b
             category, descriptor, category_candidates = None, None, []
         if not category and aria_label and not is_fb_creator_category(aria_label):
             category = aria_label
-        if aria_label and aria_label not in category_candidates and len(aria_label) <= 80:
-            category_candidates.append(aria_label)
 
         secondary_text = ""
         for cat_text in category_candidates:
@@ -1601,8 +1597,9 @@ def _fb_extract_candidates_from_search_dom(html_or_driver, logger=None, debug: b
             setattr(fb_cand, "aria_label", aria_label)
             setattr(fb_cand, "category_candidates", category_candidates)
             setattr(fb_cand, "secondary_text", secondary_text)
-            setattr(fb_cand, "descriptor", descriptor or secondary_text)
-            setattr(fb_cand, "category_tokens", category_candidates)
+            descriptor_val = descriptor or secondary_text
+            setattr(fb_cand, "descriptor", descriptor_val)
+            setattr(fb_cand, "category_tokens", list(category_candidates))
         except Exception:
             pass
         raw_candidates.append(fb_cand)

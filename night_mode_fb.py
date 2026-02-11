@@ -92,14 +92,13 @@ _FB_RANK_WEIGHTS = {
     "primary_music": 70,
     "descriptor_music": 40,
     "any_music_token": 30,
-    "page_url": 0,
     "exact_name": 20,
     "near_name": 10,
+    "name_mismatch": -25,
     "profile_penalty": -15,
     "profile_penalty_music": -5,
     "service_only": -45,
     "service_mixed": -15,
-    "name_mismatch": -25,
 }
 
 _FB_SERVICE_CATEGORY_TOKENS = (
@@ -1055,9 +1054,6 @@ def _score_fb_candidate_night(artist_name: str, cand) -> Tuple[int, List[str], D
         score += weights["any_music_token"]
         breakdown.append("+music_token")
 
-    if is_page:
-        score += weights["page_url"]
-        breakdown.append("+page_url")
     if is_profile:
         profile_penalty = weights["profile_penalty_music"] if has_music_signals else weights["profile_penalty"]
         breakdown.append("-profile_music" if has_music_signals else "-profile")
@@ -2105,38 +2101,35 @@ class NightModeFacebookEnricher:
             encoded_q = urllib.parse.quote_plus(query_str)
             search_url = f"https://www.facebook.com/search/pages/?q={encoded_q}"
             _log(self.logger, f"[Night FB] Searching Facebook for '{query_str}' -> {search_url}")
-            html_local = None
-
-            def _do_nav():
-                drv = session.navigate(search_url) if session else self._get_anon_driver().get(search_url) or self._get_anon_driver()
+            def _nav_with_session() -> str:
+                drv = session.navigate(search_url)
                 time.sleep(1.5)
-                return drv.page_source if hasattr(drv, "page_source") else self._anon_driver.page_source
+                return getattr(drv, "page_source", "")
 
+            def _nav_anon() -> str:
+                driver = self._get_anon_driver()
+                driver.get(search_url)
+                time.sleep(1.5)
+                return getattr(driver, "page_source", "")
+
+            nav_fn = _nav_with_session if session else _nav_anon
             try:
-                if session:
-                    html_local = _do_nav()
-                else:
-                    driver = self._get_anon_driver()
-                    driver.get(search_url)
-                    time.sleep(1.5)
-                    html_local = driver.page_source
+                return nav_fn()
             except Exception as exc:  # pragma: no cover - defensive
                 _log(self.logger, f"[Night FB] Search navigation failed (will refresh session): {exc}")
-                try:
-                    if session:
+                if session:
+                    try:
                         self._refresh_driver(session)
-                        html_local = _do_nav()
-                    else:
-                        driver = self._get_anon_driver()
-                        driver.get(search_url)
-                        time.sleep(1.5)
-                        html_local = driver.page_source
-                except FacebookDriverError as exc2:
-                    raise exc2
-                except Exception as exc2:  # pragma: no cover - defensive
-                    _log(self.logger, f"[Night FB] Search navigation failed after refresh: {exc2}")
-                    raise FacebookDriverError(str(exc2))
-            return html_local
+                    except FacebookDriverError as exc2:
+                        raise exc2
+            nav_fn = _nav_with_session if session else _nav_anon
+            try:
+                return nav_fn()
+            except FacebookDriverError as exc2:
+                raise exc2
+            except Exception as exc2:  # pragma: no cover - defensive
+                _log(self.logger, f"[Night FB] Search navigation failed after refresh: {exc2}")
+                raise FacebookDriverError(str(exc2))
 
         primary_query = " ".join(part for part in (artist, location) if part).strip()
         if not primary_query:
