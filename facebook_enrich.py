@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, NavigableString, Tag
 
 # Blocks of common FB UI/notification text that should be ignored entirely.
 NOISY_FB_TOKENS = [
@@ -899,13 +899,15 @@ def _extract_fb_category_candidates(card_el, page_name: str = "") -> Tuple[Optio
         if not lowered:
             return False
         number = r"\d+(?:[.,]\d+)?"
-        if re.match(rf"^{number}\s*[km]?\s*(followers?|follower|likes?)$", lowered):
+        if re.match(rf"^{number}\s*[km]?\s*(followers?|follower|likes?|members?)$", lowered):
             return True
-        if re.match(rf"^{number}\s*(?:reviews?|ratings?)$", lowered):
+        if re.match(rf"^{number}\s*(?:reviews?|ratings?|comments?|views?)$", lowered):
             return True
         if re.match(rf"^{number}\s*(?:/5)?\s*\(\s*{number}\s*reviews?\s*\)$", lowered):
             return True
         if re.match(rf"^{number}\s*(?:★|stars?)\s*(?:\(\s*{number}\s*reviews?\s*\))?$", lowered):
+            return True
+        if "always open" in lowered or lowered in ("open now", "closed now", "temporarily closed"):
             return True
         return False
 
@@ -948,32 +950,122 @@ def _extract_fb_category_candidates(card_el, page_name: str = "") -> Tuple[Optio
             seen_tokens.add(token_key)
             tokens.append(token)
 
+    # Identify the anchor and a likely card container so we can pull the subtitle line(s) that
+    # appear directly under the name in the search result card.
+    anchor = card_el if isinstance(card_el, Tag) and card_el.name == "a" else None
+    if anchor is None and hasattr(card_el, "find"):
+        try:
+            anchor = card_el.find("a", href=True)
+        except Exception:
+            anchor = None
+
+    target_href = ""
     try:
-        containers = [
-            card_el,
-            getattr(card_el, "parent", None),
-            getattr(card_el, "parent", None) and getattr(card_el.parent, "parent", None),
-        ]
-        for container in containers:
+        target_href = (anchor.get("href") or "").split("#", 1)[0] if anchor else ""
+    except Exception:
+        target_href = ""
+
+    ancestors = []
+    cur = card_el
+    for _ in range(6):
+        if not cur:
+            break
+        ancestors.append(cur)
+        cur = getattr(cur, "parent", None)
+
+    card_container = None
+    for anc in ancestors:
+        try:
+            role_val = (anc.get("role") or "").lower()
+            aria_val = (anc.get("aria-label") or "").lower()
+        except Exception:
+            role_val = ""
+            aria_val = ""
+        if role_val in ("article", "listitem", "feed", "main", "region"):
+            card_container = anc
+            break
+        if "search result" in aria_val:
+            card_container = anc
+            break
+        try:
+            if anc.name in ("article", "section", "li") or anc.get("data-pagelet"):
+                card_container = anc
+                break
+        except Exception:
+            continue
+    if card_container is None and ancestors:
+        card_container = ancestors[0]
+
+    def _collect_following_text(max_lines: int = 4) -> None:
+        """
+        Walk forward from the anchor and grab the first few textual lines until we hit
+        a different anchor (likely the next card).
+        """
+        if anchor is None:
+            return
+        lines_added = 0
+        for el in anchor.next_elements:
+            if lines_added >= max_lines:
+                break
+            if isinstance(el, Tag) and el.name == "a":
+                try:
+                    other_href = (el.get("href") or "").split("#", 1)[0]
+                except Exception:
+                    other_href = ""
+                if other_href and other_href != target_href:
+                    break  # crossed into another card
+                continue
+            if isinstance(el, NavigableString):
+                text = _clean(str(el))
+                if not text:
+                    continue
+                before = len(tokens)
+                _add_tokens_from_text(text)
+                if len(tokens) > before:
+                    lines_added += 1
+
+    try:
+        # 1) Immediate subtitle lines after the anchor (best signal for "Musician/band", etc.)
+        _collect_following_text(max_lines=4)
+
+        # 2) Scrape short text blocks inside the likely card container and its close ancestors.
+        container_chain_candidates = [card_el, getattr(card_el, "parent", None), card_container, anchor]
+        container_chain: List[Tag] = []
+        seen_ids = set()
+        for node in container_chain_candidates:
+            if node is None:
+                continue
+            node_id = id(node)
+            if node_id in seen_ids:
+                continue
+            seen_ids.add(node_id)
+            container_chain.append(node)
+
+        for container in container_chain:
             if not container:
                 continue
-            # Inline text near the anchor.
-            for node in container.stripped_strings:
-                _add_tokens_from_text(node)
-            # Short text from nearby spans/divs (often the grey label).
-            for sub in container.find_all(["span", "div"], limit=12):
-                text = _clean(getattr(sub, "get_text", lambda *_: "")(" ", strip=True))
-                _add_tokens_from_text(text)
             # Attributes sometimes hold the label.
             for attr in ("aria-label", "title"):
                 text = _clean(getattr(container, "get", lambda *_: "")(attr, ""))
                 _add_tokens_from_text(text)
-        for sib in getattr(card_el, "next_siblings", []) or []:
-            try:
-                text = _clean(getattr(sib, "get_text", lambda *_: "")(" ", strip=True))
-            except Exception:
-                text = ""
-            _add_tokens_from_text(text)
+
+            # Inline text near the anchor/card.
+            for node in container.stripped_strings:
+                _add_tokens_from_text(node)
+
+            # Short text from nearby spans/divs (often the grey label). Limit to avoid sweeping entire feeds.
+            for sub in container.find_all(["span", "div"], limit=20):
+                try:
+                    # Skip blocks that clearly belong to another anchor/card.
+                    if anchor and sub is not anchor and sub.find("a", href=True):
+                        hrefs = {(_clean(a.get("href") or "").split("#", 1)[0]) for a in sub.find_all("a", href=True)}
+                        if hrefs and (not target_href or any(h and h != target_href for h in hrefs)):
+                            continue
+                except Exception:
+                    pass
+                text = _clean(getattr(sub, "get_text", lambda *_: "")(" ", strip=True))
+                _add_tokens_from_text(text)
+
     except Exception:
         tokens = []
 
@@ -1034,6 +1126,15 @@ def _extract_fb_category_candidates(card_el, page_name: str = "") -> Tuple[Optio
             if descriptor is not None and _contains_music(token) and not _contains_music(primary or ""):
                 descriptor = token
                 break
+
+    if descriptor is None:
+        # Prefer a music token as descriptor when only a single label was found.
+        for token in tokens:
+            if _contains_music(token):
+                descriptor = token
+                break
+        if descriptor is None and tokens:
+            descriptor = tokens[0] if not _looks_like_name(tokens[0]) else (tokens[1] if len(tokens) > 1 else None)
 
     return primary, descriptor, tokens
 

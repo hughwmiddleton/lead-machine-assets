@@ -10,6 +10,11 @@ def _cand(name: str, url: str, category: str = "", aria: str = "", secondary: st
     return obj
 
 
+def _load_fixture(name: str) -> str:
+    fixtures = Path(__file__).resolve().parent / "fixtures"
+    return (fixtures / name).read_text(encoding="utf-8")
+
+
 def test_ranking_prefers_music_page_over_profile():
     artist = "Zipporah"
     c1 = _cand("Zipporah.co.ph", "https://www.facebook.com/zipporahcoph", "Local service")
@@ -233,3 +238,25 @@ def test_legacy_resolve_prefers_scraped_when_valid():
     sanitized, final_cat = lm._resolve_fb_page_category("Artist", "Musician/band")
     assert sanitized == "Artist"
     assert final_cat == "Artist"
+
+
+def test_search_card_ranking_prefers_music_over_store():
+    html = _load_fixture("fb_search_cards_sofia.html")
+    candidates = night_mode_fb._parse_search_candidates(html, logger=None, search_name="Sofia Ly")
+    assert len(candidates) == 2
+
+    ranked = night_mode_fb._rank_candidates_for_preview("Sofia Ly", candidates)
+    assert ranked[0]["candidate"].name == "SofiaLy"
+
+    store = next(c for c in candidates if getattr(c, "name", "") == "LY SOFIA")
+    music = next(c for c in candidates if getattr(c, "name", "") == "SofiaLy")
+    assert getattr(music, "music_hint", False) is True
+
+    flags_store = night_mode_fb._candidate_category_flags(
+        getattr(store, "category", ""),
+        getattr(store, "aria_label", ""),
+        getattr(store, "secondary_text", ""),
+        descriptor=getattr(store, "descriptor", ""),
+        category_tokens=getattr(store, "category_tokens", []),
+    )
+    assert flags_store["service_only"] is True
