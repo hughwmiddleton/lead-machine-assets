@@ -34,6 +34,33 @@ def test_ranking_handles_name_match_and_non_music_category():
     assert score2 > score1
 
 
+def test_service_only_loses_to_music_even_with_exact_name():
+    artist = "Shelailai"
+    service = _cand("Shelailai", "https://www.facebook.com/shelailai", "Product/service")
+    music = _cand("Shelailai Music", "https://www.facebook.com/shelailaimusic", "Musician/Band")
+    ranked = night_mode_fb._rank_candidates_for_preview(artist, [service, music])
+    assert ranked[0]["candidate"] is music
+
+
+def test_mixed_service_and_music_beats_pure_service():
+    artist = "Nova"
+    service = _cand("Nova", "https://www.facebook.com/nova", "Product/service")
+    mixed = _cand("Nova Band", "https://www.facebook.com/novaband", "Product/service", secondary="Musician/Band")
+    ranked = night_mode_fb._rank_candidates_for_preview(artist, [service, mixed])
+    assert ranked[0]["candidate"] is mixed
+    score_service, _, _ = night_mode_fb._score_fb_candidate_night(artist, service)
+    score_mixed, _, _ = night_mode_fb._score_fb_candidate_night(artist, mixed)
+    assert score_mixed > score_service
+
+
+def test_page_beats_profile_when_signals_equal():
+    artist = "Echo Star"
+    page = _cand("Echo Star", "https://www.facebook.com/echostar", "Musician/Band")
+    profile = _cand("Echo Star", "https://www.facebook.com/profile.php?id=123456", "Musician/Band")
+    ranked = night_mode_fb._rank_candidates_for_preview(artist, [profile, page])
+    assert ranked[0]["candidate"] is page
+
+
 def test_page_style_url_variants_score_like_pages():
     artist = "Echo Star"
     page_slug = _cand("Echo Star", "https://www.facebook.com/echostar", "Musician/Band")

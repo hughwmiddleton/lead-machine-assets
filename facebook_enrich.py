@@ -879,20 +879,50 @@ def is_fb_creator_category(text: Optional[str]) -> bool:
     return any(tok in normalized for tok in FB_CREATOR_CATEGORY_TOKENS)
 
 
-def _extract_fb_category_candidates(card_el, page_name: str = "") -> Tuple[Optional[str], List[str]]:
+def _extract_fb_category_candidates(card_el, page_name: str = "") -> Tuple[Optional[str], Optional[str], List[str]]:
     """
-    Extract the short grey category string from a FB search result container.
-    Returns (primary_category, all_candidates) where candidates preserve discovery order.
+    Extract structured category/descriptor tokens from a FB search result container.
+    Returns (primary_category, descriptor, tokens) where tokens preserve discovery order.
     Accepts a BeautifulSoup element (e.g., the anchor's parent).
     """
     if card_el is None:
-        return None, []
-    seen = set()
+        return None, None, []
 
     def _clean(text: str) -> str:
         return re.sub(r"\s+", " ", text or "").strip()
 
-    candidates: List[str] = []
+    def _strip_engagement_noise(text: str) -> str:
+        """
+        Drop follower/review counters often appended to aria labels.
+        """
+        lowered = text.lower()
+        if any(tok in lowered for tok in ("followers", "follower", "reviews", "review", "rating", "likes")):
+            return ""
+        # Patterns like "4.8 (10 reviews)" or "4.8★"
+        if re.match(r"\d+(\.\d+)?\s*\(?\d*\s*reviews?\)?", lowered):
+            return ""
+        return text
+
+    def _tokenize(text: str) -> List[str]:
+        if not text:
+            return []
+        parts = re.split(r"[·|]", text)
+        tokens: List[str] = []
+        for part in parts:
+            token = _strip_engagement_noise(_clean(part))
+            if not token:
+                continue
+            if is_fb_creator_category(token):
+                continue
+            if is_noisy_fb_text_block(token):
+                continue
+            if len(token) > 80:
+                continue
+            tokens.append(token)
+        return tokens
+
+    seen = set()
+    tokens: List[str] = []
     try:
         containers = [
             card_el,
@@ -905,72 +935,116 @@ def _extract_fb_category_candidates(card_el, page_name: str = "") -> Tuple[Optio
             # Inline text near the anchor.
             for node in container.stripped_strings:
                 val = _clean(node)
-                if not val or val.lower() == (page_name or "").strip().lower():
+                if not val:
                     continue
-                if val in seen or len(val) > 80:
-                    continue
-                if is_fb_creator_category(val):
-                    continue
-                if is_noisy_fb_text_block(val):
-                    continue
-                seen.add(val)
-                candidates.append(val)
+                for token in _tokenize(val):
+                    if not token or token.lower() == (page_name or "").strip().lower():
+                        continue
+                    if token in seen:
+                        continue
+                    seen.add(token)
+                    tokens.append(token)
             # Short text from nearby spans/divs (often the grey label).
             for sub in container.find_all(["span", "div"], limit=12):
                 text = _clean(getattr(sub, "get_text", lambda *_: "")(" ", strip=True))
-                if text and text not in seen and len(text) <= 80:
-                    if is_fb_creator_category(text):
+                if not text:
+                    continue
+                for token in _tokenize(text):
+                    if not token or token in seen:
                         continue
-                    if is_noisy_fb_text_block(text):
-                        continue
-                    seen.add(text)
-                    candidates.append(text)
+                    seen.add(token)
+                    tokens.append(token)
             # Attributes sometimes hold the label.
             for attr in ("aria-label", "title"):
                 text = _clean(getattr(container, "get", lambda *_: "")(attr, ""))
-                if text and text not in seen and len(text) <= 80:
-                    if is_fb_creator_category(text):
+                if not text:
+                    continue
+                for token in _tokenize(text):
+                    if not token or token in seen:
                         continue
-                    if is_noisy_fb_text_block(text):
-                        continue
-                    seen.add(text)
-                    candidates.append(text)
+                    seen.add(token)
+                    tokens.append(token)
         for sib in getattr(card_el, "next_siblings", []) or []:
             try:
                 text = _clean(getattr(sib, "get_text", lambda *_: "")(" ", strip=True))
             except Exception:
                 text = ""
-            if text and text not in seen and len(text) <= 80:
-                if is_fb_creator_category(text):
+            if not text:
+                continue
+            for token in _tokenize(text):
+                if not token or token in seen:
                     continue
-                if is_noisy_fb_text_block(text):
-                    continue
-                seen.add(text)
-                candidates.append(text)
+                seen.add(token)
+                tokens.append(token)
     except Exception:
-        candidates = []
+        tokens = []
+
+    def _looks_like_name(val: str) -> bool:
+        return normalize_fb_name(val) == normalize_fb_name(page_name)
+
+    def _contains_music(val: str) -> bool:
+        val_l = (val or "").lower()
+        music_tokens = (
+            "musician/band",
+            "musician",
+            "band",
+            "artist",
+            "music artist",
+            "music",
+            "singer",
+            "vocalist",
+            "rapper",
+            "mc",
+            "dj",
+            "producer",
+            "beatmaker",
+            "songwriter",
+            "composer",
+            "recording artist",
+            "performer",
+            "entertainer",
+            "record label",
+            "music group",
+            "orchestra",
+            "choir",
+            "collective",
+        )
+        return any(tok in val_l for tok in music_tokens)
 
     primary: Optional[str] = None
-    for candidate in candidates:
-        lower = candidate.lower()
-        if is_fb_creator_category(lower):
-            continue
-        if "/" in candidate or any(tok in lower for tok in ("band", "music", "artist", "dj", "musician", "singer", "songwriter", "performer", "vocalist")):
-            primary = candidate
+    descriptor: Optional[str] = None
+
+    for token in tokens:
+        if _contains_music(token):
+            primary = token
             break
-        if len(candidate.split()) <= 6:
-            primary = candidate
+        if not _looks_like_name(token):
+            primary = token
             break
-    if primary is None and candidates:
-        primary = candidates[0]
-    return primary, candidates
+
+    if primary is None and tokens:
+        primary = tokens[0]
+
+    if tokens:
+        for token in tokens:
+            if token == primary:
+                continue
+            if _looks_like_name(token):
+                continue
+            if descriptor is None:
+                descriptor = token
+            if descriptor is not None and _contains_music(token) and not _contains_music(primary or ""):
+                descriptor = token
+                break
+
+    return primary, descriptor, tokens
 
 
 def extract_fb_category(card_el, page_name: str = "") -> Optional[str]:
     """
     Backwards-compatible wrapper returning only the primary category text.
     """
-    primary, _ = _extract_fb_category_candidates(card_el, page_name=page_name)
+    primary, _, _ = _extract_fb_category_candidates(card_el, page_name=page_name)
     return primary
 
 
@@ -1503,10 +1577,12 @@ def _fb_extract_candidates_from_search_dom(html_or_driver, logger=None, debug: b
                     category_el = None
             if category_el is None:
                 category_el = anchor
-            category, category_candidates = _extract_fb_category_candidates(category_el, page_name=name)
+            category, descriptor, category_candidates = _extract_fb_category_candidates(category_el, page_name=name)
+        else:
+            category, descriptor, category_candidates = None, None, []
         if not category and aria_label and not is_fb_creator_category(aria_label):
             category = aria_label
-        if aria_label and aria_label not in category_candidates:
+        if aria_label and aria_label not in category_candidates and len(aria_label) <= 80:
             category_candidates.append(aria_label)
 
         secondary_text = ""
@@ -1525,6 +1601,8 @@ def _fb_extract_candidates_from_search_dom(html_or_driver, logger=None, debug: b
             setattr(fb_cand, "aria_label", aria_label)
             setattr(fb_cand, "category_candidates", category_candidates)
             setattr(fb_cand, "secondary_text", secondary_text)
+            setattr(fb_cand, "descriptor", descriptor or secondary_text)
+            setattr(fb_cand, "category_tokens", category_candidates)
         except Exception:
             pass
         raw_candidates.append(fb_cand)
