@@ -2390,6 +2390,8 @@ class NightModeFacebookEnricher:
         self._skip_fb_due_to_checkpoint = False
         self._checkpoint_guard_enabled = _bool_env("NIGHT_FB_CHECKPOINT_GUARD", default=False)
         self._search_disabled_due_to_checkpoint = False
+        self._checkpoint_warned_this_row = False
+        self._checkpoint_limited_active = False
         self._skip_fb_due_to_display = False
         self._skip_fb_due_to_warning = False
         self._skip_fb_due_to_warning_reason = ""
@@ -2829,6 +2831,7 @@ class NightModeFacebookEnricher:
     def _search_for_page(self, artist: str, location: str, allow_anon: bool = False) -> Optional[str]:
         self._last_selected_candidate_context = None
         self._last_search_candidates = []
+        self._checkpoint_limited_active = False
         if self._search_disabled_due_to_checkpoint:
             _log(self.logger, "[Night FB] search disabled due to checkpoint; skipping FB search.")
             return None
@@ -2845,6 +2848,52 @@ class NightModeFacebookEnricher:
         except Exception:
             quality_threshold = 25
         v2_enabled = _bool_env("FB_SEARCH_HARVEST_V2", default=False)
+
+        def _build_slug_fallback_context() -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
+            slug = _slugify(artist)
+            fallback_url = f"https://www.facebook.com/{slug}" if slug else ""
+            if not fallback_url or (not _fb_is_candidate_url_allowed(fallback_url)):
+                return None, None
+            try:
+                fb_cand_cls = getattr(facebook_enrich, "FbCandidate", None)
+                fallback_candidate = fb_cand_cls(name=artist, url=fallback_url, category="slug_fallback") if fb_cand_cls else {"name": artist, "url": fallback_url, "category": "slug_fallback"}
+            except Exception:
+                fallback_candidate = {"name": artist, "url": fallback_url, "category": "slug_fallback"}
+            if quality_gate_enabled:
+                try:
+                    fallback_score, _fallback_reasons, _ = _score_candidate_min_quality(artist, fallback_candidate)
+                    if fallback_score < quality_threshold:
+                        return None, None
+                except Exception:
+                    return None, None
+            base_score = 0.0
+            try:
+                if facebook_enrich is not None and callable(getattr(facebook_enrich, "score_fb_candidate", None)):
+                    scored = facebook_enrich.score_fb_candidate(artist, artist, fallback_url, "slug_fallback")
+                    if scored:
+                        _, base_score, _ = scored
+            except Exception:
+                base_score = 0.0
+            context = {
+                "url": fallback_url,
+                "name": artist,
+                "category": "slug_fallback",
+                "category_raw": "slug_fallback",
+                "base_score": base_score,
+            }
+            return fallback_url, context
+
+        checkpoint_limited = bool(session_unhealthy and "checkpoint" in (session_reason or "").lower())
+        if checkpoint_limited:
+            self._checkpoint_limited_active = True
+            if not self._checkpoint_warned_this_row:
+                _log(self.logger, "[Night FB][WARN] checkpoint active; skipping search/refine; using fallback only.")
+                self._checkpoint_warned_this_row = True
+            fallback_url, fallback_context = _build_slug_fallback_context()
+            if fallback_context:
+                self._last_selected_candidate_context = fallback_context
+                self._last_search_candidates = [fallback_context]
+            return fallback_url
 
         def _fetch_search_html(query_str: str) -> Tuple[Optional[str], Optional[Any]]:
             encoded_q = urllib.parse.quote_plus(query_str)
@@ -3478,6 +3527,7 @@ class NightModeFacebookEnricher:
         original_row = dict(row or {})
         result = dict(original_row)
         result["FB_Status"] = result.get("FB_Status", "") or ""
+        self._checkpoint_warned_this_row = False
 
         def _clean_val(value: str) -> str:
             try:
@@ -3689,57 +3739,69 @@ class NightModeFacebookEnricher:
                             suppress_console=True,
                             allow_soft_pass_category=True,
                         )
-                if not page_url:
-                    page_url = self._search_for_page(artist_name, location, allow_anon=allow_anon) or ""
-                    if self._search_disabled_due_to_checkpoint:
-                        if not result.get("FB_Status"):
-                            result["FB_Status"] = "checkpoint_search_disabled"
-                            result["FB_Reason"] = "checkpoint"
-                        _log(self.logger, "[Night FB] search disabled due to checkpoint; skipping FB search.")
-                        return result
-                    if page_url:
-                        candidate = self._scrape_single_fb_candidate(
-                            page_url,
-                            result,
-                            artist_name,
-                            allow_anon=allow_anon,
-                            candidate_context=self._last_selected_candidate_context,
-                        )
-                        night_result, emails, _, candidate_outcome = _unpack_fb_candidate(candidate)
-                        if night_result:
-                            page_url = night_result.facebook_url or page_url
-                            result = self._apply_night_fb_result(result, night_result, emails, page_url)
-                            return result
-                        if candidate_outcome == "content_unavailable":
-                            fallback_candidates = self._last_search_candidates[1:] if len(self._last_search_candidates) > 1 else []
-                            for idx, ctx in enumerate(fallback_candidates, start=2):
-                                alt_url = ctx.get("url")
-                                if not alt_url:
-                                    continue
-                                _log(self.logger, f"[Night FB][PageUnavailable] primary candidate unavailable; trying fallback {idx} -> {alt_url}")
-                                alt_candidate = self._scrape_single_fb_candidate(
-                                    alt_url,
-                                    result,
-                                    artist_name,
-                                    allow_anon=allow_anon,
-                                    candidate_context=ctx,
-                                )
-                                alt_result, alt_emails, _, alt_outcome = _unpack_fb_candidate(alt_candidate)
-                                if alt_result:
-                                    page_url = alt_result.facebook_url or alt_url
-                                    result = self._apply_night_fb_result(result, alt_result, alt_emails, page_url)
-                                    return result
-                                if alt_outcome != "content_unavailable":
-                                    break
-                            if not result.get("FB_Status"):
-                                result["FB_Status"] = "content_unavailable"
-                                result["FB_Reason"] = "content_unavailable"
-                                _log(self.logger, f"[Night FB][PageUnavailable] No usable FB candidates for '{artist_name}' after content-unavailable fallbacks.")
-                                return result
+            if not page_url:
+                page_url = self._search_for_page(artist_name, location, allow_anon=allow_anon) or ""
+                if self._search_disabled_due_to_checkpoint:
                     if not result.get("FB_Status"):
-                        result["FB_Status"] = "no_candidates"
-                    _log(self.logger, f"[Night FB] No usable FB candidates for '{artist_name}', marking FB_Status='no_candidates'.")
+                        result["FB_Status"] = "checkpoint_search_disabled"
+                        result["FB_Reason"] = "checkpoint"
+                    _log(self.logger, "[Night FB] search disabled due to checkpoint; skipping FB search.")
                     return result
+                if self._checkpoint_limited_active and not page_url:
+                    if not result.get("FB_Status") or result.get("FB_Status") == "no_candidates":
+                        result["FB_Status"] = "checkpoint_limited"
+                    if not result.get("FB_Reason"):
+                        result["FB_Reason"] = "checkpoint"
+                    return result
+                if page_url:
+                    candidate = self._scrape_single_fb_candidate(
+                        page_url,
+                        result,
+                        artist_name,
+                        allow_anon=allow_anon,
+                        candidate_context=self._last_selected_candidate_context,
+                    )
+                    night_result, emails, _, candidate_outcome = _unpack_fb_candidate(candidate)
+                    if night_result:
+                        page_url = night_result.facebook_url or page_url
+                        result = self._apply_night_fb_result(result, night_result, emails, page_url)
+                        if self._checkpoint_limited_active and not result.get("FB_Reason"):
+                            result["FB_Reason"] = "checkpoint"
+                        return result
+                    if candidate_outcome == "content_unavailable":
+                        fallback_candidates = self._last_search_candidates[1:] if len(self._last_search_candidates) > 1 else []
+                        for idx, ctx in enumerate(fallback_candidates, start=2):
+                            alt_url = ctx.get("url")
+                            if not alt_url:
+                                continue
+                            _log(self.logger, f"[Night FB][PageUnavailable] primary candidate unavailable; trying fallback {idx} -> {alt_url}")
+                            alt_candidate = self._scrape_single_fb_candidate(
+                                alt_url,
+                                result,
+                                artist_name,
+                                allow_anon=allow_anon,
+                                candidate_context=ctx,
+                            )
+                            alt_result, alt_emails, _, alt_outcome = _unpack_fb_candidate(alt_candidate)
+                            if alt_result:
+                                page_url = alt_result.facebook_url or alt_url
+                                result = self._apply_night_fb_result(result, alt_result, alt_emails, page_url)
+                                if self._checkpoint_limited_active and not result.get("FB_Reason"):
+                                    result["FB_Reason"] = "checkpoint"
+                                return result
+                            if alt_outcome != "content_unavailable":
+                                break
+                        if not result.get("FB_Status"):
+                            result["FB_Status"] = "content_unavailable"
+                            result["FB_Reason"] = "content_unavailable"
+                            _log(self.logger, f"[Night FB][PageUnavailable] No usable FB candidates for '{artist_name}' after content-unavailable fallbacks.")
+                            return result
+                if not result.get("FB_Status"):
+                    result["FB_Status"] = "checkpoint_limited" if self._checkpoint_limited_active else "no_candidates"
+                if self._checkpoint_limited_active and not result.get("FB_Reason"):
+                    result["FB_Reason"] = "checkpoint"
+                _log(self.logger, f"[Night FB] No usable FB candidates for '{artist_name}', marking FB_Status='{result.get('FB_Status')}'.")
+                return result
             night_result = self._build_result(emails, str(result.get("Email_All", "") or ""), page_url, artist_name)
             if night_result:
                 result = self._apply_night_fb_result(result, night_result, emails, page_url)

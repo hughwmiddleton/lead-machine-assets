@@ -62,6 +62,8 @@ unset FB_ALLOW_AUTOMATED_LOGIN
 # FB NEW FEATURES (CORE TEST)
 # =====================================================
 
+unset FB_REFINE_QUERY
+
 # T016 — DOM Gate V2 (IMPORTANT)
 export FB_SEARCH_HARVEST_V2=1
 
