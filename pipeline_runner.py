@@ -989,6 +989,10 @@ def run_enrichment(raw_csv_path: str, enriched_output_path: str, logger: LoggerF
     _safe_log(logger, f"[Enrich] Starting enrichment for {raw_csv_path}")
     _ensure_parent(enriched_output_path)
     result_path = enriched_output_path
+    def _write_empty_enriched(headers: Optional[Sequence[str]] = None) -> None:
+        df_empty = pd.DataFrame(columns=list(headers) if headers is not None else [])
+        df_empty.to_csv(enriched_output_path, index=False)
+
     try:
         result_path = origin_validator.run_auto_validate(
             raw_csv_path,
@@ -999,7 +1003,14 @@ def run_enrichment(raw_csv_path: str, enriched_output_path: str, logger: LoggerF
         )
     except Exception as exc:  # pragma: no cover - defensive fallback
         _safe_log(logger, f"[Enrich] Auto-validate failed safely: {exc}")
-        shutil.copyfile(raw_csv_path, enriched_output_path)
+        if os.path.exists(raw_csv_path):
+            shutil.copyfile(raw_csv_path, enriched_output_path)
+        else:
+            try:
+                headers = list(pd.read_csv(raw_csv_path, nrows=0).columns)
+            except Exception:
+                headers = list(DEFAULT_EXPORT_COLUMNS) if "DEFAULT_EXPORT_COLUMNS" in globals() else []
+            _write_empty_enriched(headers)
         result_path = enriched_output_path
 
     final_path = result_path
@@ -1403,9 +1414,15 @@ def run_facebook_global_pass_nightmode(
         failed, fail_reason = (fb_helper.get_session_failure() if hasattr(fb_helper, "get_session_failure") else (False, ""))  # type: ignore[attr-defined]
         if failed:
             _safe_log_console(logger, f"[FB Night] Skipping FB pass: session failed to start ({fail_reason or 'unknown'})")
+            return df
+
+        failure_logged = False
         for idx, row in df.iterrows():
+            failed, fail_reason = (fb_helper.get_session_failure() if hasattr(fb_helper, "get_session_failure") else (False, ""))  # type: ignore[attr-defined]
             if failed:
-                _safe_log_console(logger, "[FB Night] FB session unavailable; skipping remaining rows.")
+                if not failure_logged:
+                    _safe_log_console(logger, f"[FB Night] FB session unavailable; stopping early ({fail_reason or 'unknown'}).")
+                    failure_logged = True
                 break
             if idx <= last_index:
                 continue

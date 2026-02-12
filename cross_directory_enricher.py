@@ -3269,8 +3269,16 @@ class CrossDirectoryEnricherWorker(QThread):
                 # Reset per-run SoundCloud cache for deterministic Night Mode attempts.
                 self._night_sc_cache = {}
             if total == 0:
-                self.log_message.emit("[Enricher] Seed CSV has no rows; nothing to do.")
-                self.finished.emit("")
+                _ensure_parent_dir(self.output_csv_path)
+                try:
+                    seed_df.head(0).to_csv(self.output_csv_path, index=False, encoding="utf-8-sig")
+                except Exception:
+                    # Defensive fallback: write truly empty file if header write fails.
+                    pd.DataFrame().to_csv(self.output_csv_path, index=False, encoding="utf-8-sig")
+                self.log_message.emit(
+                    f"[Enricher] Seed CSV has no rows; wrote empty output with headers -> {self.output_csv_path}"
+                )
+                self.finished.emit(self.output_csv_path)
                 return
             required_columns = [
                 "Social Link",

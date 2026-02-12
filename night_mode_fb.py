@@ -544,12 +544,75 @@ def _get_night_fb_profile_dir() -> str:
     env_path = os.environ.get("NIGHT_FB_PROFILE_DIR")
     if env_path:
         return os.path.abspath(env_path)
-    try:
-        # Repo layout has siblings: "Lead Machine VS Code" (assets) and "Lead Machine Code" (shared code/venv).
-        base = Path(__file__).resolve().parent.parent / "Lead Machine Code" / "night_fb_profile"
-        return str(base)
-    except Exception:
-        return str(Path(__file__).resolve().parent / "night_fb_profile")
+
+    base_file = Path(__file__).resolve()
+
+    def _profile_dir_candidates(from_file: Path) -> List[str]:
+        """Generate plausible profile dir candidates while walking ancestors."""
+        candidates: List[str] = []
+        seen: set[str] = set()
+        for ancestor in from_file.parents:
+            # Look for sibling "Lead Machine Code" at each level.
+            sibling_root = ancestor.parent / "Lead Machine Code"
+            cand = sibling_root / "night_fb_profile"
+            cand_str = str(cand)
+            if cand_str not in seen:
+                candidates.append(cand_str)
+                seen.add(cand_str)
+            # If we're already inside "Lead Machine Code", also consider its own night_fb_profile.
+            if ancestor.name == "Lead Machine Code":
+                self_cand = ancestor / "night_fb_profile"
+                self_cand_str = str(self_cand)
+                if self_cand_str not in seen:
+                    candidates.append(self_cand_str)
+                    seen.add(self_cand_str)
+        return candidates
+
+    def _pick_existing_profile_dir(candidates: Iterable[str]) -> Tuple[Optional[str], List[str]]:
+        existing = [c for c in candidates if os.path.isdir(c)]
+        return (existing[0] if existing else None, existing)
+
+    candidates = _profile_dir_candidates(base_file)
+    selected, existing_candidates = _pick_existing_profile_dir(candidates)
+
+    if existing_candidates and len(existing_candidates) > 1:
+        logging.getLogger(__name__).warning(
+            "[Night FB] Multiple profile dir candidates found; using %s; others: %s",
+            selected,
+            ", ".join(existing_candidates[1:]),
+        )
+
+    if selected:
+        return selected
+
+    # Fallback: local directory beside this file.
+    return str(base_file.parent / "night_fb_profile")
+
+
+def _night_fb_profile_dir_self_check(logger: LoggerFn = None) -> str:
+    """Debug helper to print resolved profile dir + Default/lock presence."""
+    profile_dir = _get_night_fb_profile_dir()
+    default_exists = os.path.isdir(os.path.join(profile_dir, "Default"))
+    singleton_lock = os.path.exists(os.path.join(profile_dir, "SingletonLock"))
+    _log(
+        logger,
+        f"[Night FB] Profile dir self-check: dir={profile_dir} Default_exists={default_exists} SingletonLock_present={singleton_lock}",
+    )
+    return profile_dir
+
+# Manual smoke test (run outside prod jobs):
+# NIGHT_FB_CHROMEDRIVER_LOG=/tmp/night_fb_chromedriver.log python3 - <<'PY'
+# from night_mode_fb import _night_fb_profile_dir_self_check, _create_fb_driver_night_mode
+# _night_fb_profile_dir_self_check(print)
+# try:
+#     d = _create_fb_driver_night_mode(headless=False, logger=print)
+#     print("driver_ready", bool(d))
+# finally:
+#     try:
+#         d.quit()
+#     except Exception:
+#         pass
+# PY
 
 
 def _has_cookie(driver, name: str) -> bool:
@@ -676,7 +739,10 @@ def _create_fb_driver_night_mode(headless: bool, logger: LoggerFn = None):
     prefs = {"profile.managed_default_content_settings.images": 2}
     chrome_options.add_experimental_option("prefs", prefs)
 
-    _log(logger, f"[Night FB] Using Chrome profile dir: {profile_dir} (profile 'Default', headless={headless})")
+    _log(
+        logger,
+        f"[Night FB] Using Chrome profile dir: {profile_dir} (profile 'Default', headless={headless})",
+    )
     driver = _start_chromedriver_with_retry(
         chrome_options,
         logger=logger,
@@ -857,7 +923,11 @@ def _start_chromedriver_with_retry(
     attempt_opts: ChromeOptions = chrome_options
     attempt_profile = profile_dir
 
-    for attempt in range(3):  # two standard tries + optional temp profile recovery
+    attempt = 0
+    max_attempts = 2  # two standard tries; a third is added only if temp recovery triggers
+
+    while attempt < max_attempts:
+        attempt += 1
         driver_path = ChromeDriverManager().install()
 
         log_path = os.environ.get("NIGHT_FB_CHROMEDRIVER_LOG")
@@ -880,7 +950,7 @@ def _start_chromedriver_with_retry(
             return driver
         except Exception as exc:
             last_exc = exc
-            _log(logger, f"[Night FB] ChromeDriver launch failed (attempt {attempt+1}): {exc}")
+            _log(logger, f"[Night FB] ChromeDriver launch failed (attempt {attempt}): {exc}")
 
             if enable_temp_profile_fallback and (not recovery_attempted) and _should_temp_recover(exc):
                 recovery_attempted = True
@@ -888,13 +958,14 @@ def _start_chromedriver_with_retry(
                 _log(logger, f"[Night FB] Retrying Chrome startup with temporary profile dir: {temp_profile_dir}")
                 attempt_opts = _clone_chrome_options(chrome_options, override_profile_dir=temp_profile_dir)
                 attempt_profile = temp_profile_dir
+                max_attempts = attempt + 1  # allow one extra attempt for the temp profile
+                _purge_wdm_cache(driver_path)
                 continue
 
             _purge_wdm_cache(driver_path)
 
-    if last_exc:
-        raise last_exc
-    raise FacebookDriverError("Failed to start ChromeDriver.")
+    reason = str(last_exc) if last_exc else "unknown_error"
+    raise FacebookDriverError(f"Failed to start ChromeDriver after {attempt} attempts: {reason}")
 
 
 def _create_fb_driver_public(headless: bool = True):
