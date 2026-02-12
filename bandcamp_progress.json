@@ -1825,5 +1825,53 @@
       "https://theesoreheads.bandcamp.com",
       "https://bestregardsmtl.bandcamp.com"
     ]
+  },
+  "https://bandcamp.com/discover/england+punk?s=new": {
+    "scraped_artist_urls": [
+      "https://jesouhaite.bandcamp.com",
+      "https://jarvismackey.bandcamp.com",
+      "https://bearfffbear.bandcamp.com",
+      "https://captainhippiepantscoronavirusrants.bandcamp.com",
+      "https://mortalkarcass.bandcamp.com",
+      "https://rippedoutnehc.bandcamp.com",
+      "https://rumlad.bandcamp.com",
+      "https://dammitdistro.bandcamp.com",
+      "https://easydread.bandcamp.com",
+      "https://ramonamarx.bandcamp.com",
+      "https://fishfeelpain.bandcamp.com",
+      "https://thementheycouldnthang.bandcamp.com",
+      "https://punk4thehomeless.bandcamp.com",
+      "https://factoryfloordiy.bandcamp.com",
+      "https://aggroculturepv.bandcamp.com",
+      "https://petethepoet.bandcamp.com",
+      "https://thealdorabritainrecords.bandcamp.com",
+      "https://pigfuckingsick.bandcamp.com",
+      "https://disgracelandpunk.bandcamp.com",
+      "https://coldshowershc.bandcamp.com"
+    ]
+  },
+  "discover:https://bandcamp.com/discover/england+punk?s=new": {
+    "scraped_artist_urls": [
+      "https://jesouhaite.bandcamp.com",
+      "https://jarvismackey.bandcamp.com",
+      "https://bearfffbear.bandcamp.com",
+      "https://captainhippiepantscoronavirusrants.bandcamp.com",
+      "https://mortalkarcass.bandcamp.com",
+      "https://rippedoutnehc.bandcamp.com",
+      "https://rumlad.bandcamp.com",
+      "https://dammitdistro.bandcamp.com",
+      "https://easydread.bandcamp.com",
+      "https://ramonamarx.bandcamp.com",
+      "https://fishfeelpain.bandcamp.com",
+      "https://thementheycouldnthang.bandcamp.com",
+      "https://punk4thehomeless.bandcamp.com",
+      "https://factoryfloordiy.bandcamp.com",
+      "https://aggroculturepv.bandcamp.com",
+      "https://petethepoet.bandcamp.com",
+      "https://thealdorabritainrecords.bandcamp.com",
+      "https://pigfuckingsick.bandcamp.com",
+      "https://disgracelandpunk.bandcamp.com",
+      "https://coldshowershc.bandcamp.com"
+    ]
   }
 }

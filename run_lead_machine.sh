@@ -92,6 +92,7 @@ unset FB_DEBUG_EMAIL_OVERRIDE
 # =====================================================
 unset NIGHT_SC_DEBUG
 unset NIGHTMODE_SC_ENGINE
+export SC_ADAPTIVE_ABOUT_DISABLE=1
 
 
 # =====================================================

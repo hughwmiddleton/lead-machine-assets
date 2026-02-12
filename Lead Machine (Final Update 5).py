@@ -202,6 +202,9 @@ SC_MAX_WORKERS = 8
 SC_CACHE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "soundcloud_about_cache.json")
 SC_CACHE_MAX_AGE_DAYS = 7
 SC_DEBUG_LATEST = bool(os.getenv("SC_DEBUG_LATEST"))
+SC_ADAPTIVE_ABOUT_DISABLE = bool(os.getenv("SC_ADAPTIVE_ABOUT_DISABLE"))
+SC_ABOUT_CHALLENGE_WINDOW = int(os.getenv("SC_ABOUT_CHALLENGE_WINDOW", "5"))
+SC_ABOUT_CHALLENGE_THRESHOLD = float(os.getenv("SC_ABOUT_CHALLENGE_THRESHOLD", "0.60"))
 
 UAS = [
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0 Safari/537.36",
@@ -260,6 +263,15 @@ def build_hardened_session():
 
 def polite_sleep(min_ms=120, max_ms=240):
     time.sleep(random.uniform(min_ms / 1000.0, max_ms / 1000.0))
+
+
+def _sc_stat_inc(key: str, n: int = 1):
+    global _SC_RUN_STATS
+    if _SC_RUN_STATS is None:
+        return
+    with _SC_RUN_LOCK:
+        _SC_RUN_STATS[key] = int(_SC_RUN_STATS.get(key, 0)) + int(n)
+
 SC_LINK_BATCH_SIZE = 25
 SYMBOL_CAT = {"So", "Cs"}
 _SC_GENRE_DENY = {"melbourne", "naarm", "australia"}
@@ -273,6 +285,10 @@ _SC_CLIENT_ID_LOCK = threading.Lock()
 _SC_CLIENT_ID = None
 _SC_HANDLE_UID_MAP = {}
 _SC_HANDLE_USEROBJ_MAP = {}
+_SC_RUN_LOCK = threading.Lock()
+_SC_RUN_STATS = None
+_SC_ABOUT_DISABLED = False
+_SC_ABOUT_DISABLE_LOGGED = False
 SC_CLIENT_ID_CANDIDATES = ["MaZ7bR62GvbulJgV8EUjQnHfbZGDEKaI"]
 SOCIAL_HOSTS = (
     "linktr.ee", "beacons.ai", "bandcamp.com", "carrd.co", "flow.page",
@@ -4819,12 +4835,14 @@ def _sc_fetch_latest_track_metadata(session, client_id: str, user_id, handle: st
         resp = session.get(api_url, params=params, timeout=SC_REQUEST_TIMEOUT, headers=_rand_headers())
         if resp.status_code == 403:
             print(f"[warn] SoundCloud tracks API 403 handle={handle or uid}; continuing without API tracks")
+            _sc_stat_inc("tracks_api_403")
             return rss_track or {}
         resp.raise_for_status()
         payload = resp.json() or {}
     except Exception as exc:
         if "403" in str(exc):
             print(f"[warn] SoundCloud tracks API 403 handle={handle or uid}; continuing without API tracks")
+            _sc_stat_inc("tracks_api_403")
             return rss_track or {}
         print(f"[warn] SoundCloud latest-track API failed for user_id={user_id}: {exc}")
         return rss_track or {}
@@ -5119,6 +5137,7 @@ def _sc_fetch_user_fallback_links(session, handle: str):
 
 
 def extract_sc_links(session: requests.Session, handle: str) -> dict:
+    global _SC_ABOUT_DISABLED, _SC_ABOUT_DISABLE_LOGGED
     cached = SC_ABOUT_CACHE.get(handle)
     if cached:
         cached_data = cached.get("data", {}) or {}
@@ -5160,15 +5179,19 @@ def extract_sc_links(session: requests.Session, handle: str) -> dict:
         contact_text_seen.add(normalized)
         _sc_collect_emails_from_text(emails, normalized)
 
-    try:
-        resp = session.get(about_url, timeout=(6, 12), headers=_rand_headers())
-        print(f"[dbg] fetched {handle} status={resp.status_code} len={len(resp.text)}")
-        resp.raise_for_status()
-        html = resp.text
-    except Exception as exc:
-        print(f"[warn] {handle} about fetch failed: {exc}")
-    finally:
-        polite_sleep()
+    if SC_ADAPTIVE_ABOUT_DISABLE and _SC_ABOUT_DISABLED:
+        html = ""
+    else:
+        _sc_stat_inc("about_attempts")
+        try:
+            resp = session.get(about_url, timeout=(6, 12), headers=_rand_headers())
+            print(f"[dbg] fetched {handle} status={resp.status_code} len={len(resp.text)}")
+            resp.raise_for_status()
+            html = resp.text
+        except Exception as exc:
+            print(f"[warn] {handle} about fetch failed: {exc}")
+        finally:
+            polite_sleep()
 
     challenge_page = False
     doc = None
@@ -5177,6 +5200,19 @@ def extract_sc_links(session: requests.Session, handle: str) -> dict:
         if any(term in lowered for term in ("captcha", "verify you are human", "enable javascript", "cloudflare", "attention required", "enable cookies")):
             print(f"[warn] sc about challenge page handle={handle}; skipping about parse")
             challenge_page = True
+            _sc_stat_inc("about_challenges")
+            if SC_ADAPTIVE_ABOUT_DISABLE:
+                with _SC_RUN_LOCK:
+                    attempts = int((_SC_RUN_STATS or {}).get("about_attempts", 0))
+                    challenges = int((_SC_RUN_STATS or {}).get("about_challenges", 0))
+                if attempts and attempts >= SC_ABOUT_CHALLENGE_WINDOW:
+                    rate = challenges / attempts
+                    if rate >= SC_ABOUT_CHALLENGE_THRESHOLD and not _SC_ABOUT_DISABLED:
+                        _SC_ABOUT_DISABLED = True
+                        _sc_stat_inc("about_disabled", 1)
+                        if not _SC_ABOUT_DISABLE_LOGGED:
+                            print(f"SoundCloud: about disabled for this run (challenge_rate={rate:.2f} attempts={attempts} challenges={challenges})")
+                            _SC_ABOUT_DISABLE_LOGGED = True
         else:
             doc = get_soup(html)
 
@@ -5260,6 +5296,7 @@ def extract_sc_links(session: requests.Session, handle: str) -> dict:
                 if not _SC_ROOT_FORBIDDEN_LOGGED:
                     print("[warn] SoundCloud root fetch 403; disabling root fetches for this run")
                     _SC_ROOT_FORBIDDEN_LOGGED = True
+                _sc_stat_inc("root_403")
             else:
                 root_resp.raise_for_status()
                 profile_html = root_resp.text
@@ -5276,6 +5313,7 @@ def extract_sc_links(session: requests.Session, handle: str) -> dict:
             external_urls.update(fb_urls)
             emails.update(fb_emails)
             print(f"[info] sc api-user fallback handle={handle} urls={len(fb_urls)} emails={len(fb_emails)}")
+            _sc_stat_inc("api_user_fallback_used")
 
     if profile_html:
         profile_doc = get_soup(profile_html)
@@ -5379,12 +5417,20 @@ def extract_sc_links(session: requests.Session, handle: str) -> dict:
         seen_norm.add(normalized)
         norm_exts.append(normalized)
 
+    website_url = ""
+    for url in norm_exts:
+        host = (urlparse(url).hostname or "").lower()
+        if host and host not in _SC_SOCIAL_DOMAINS:
+            website_url = url
+            break
+
     elapsed_ms = int(round((time.perf_counter() - t0) * 1000))
     payload = {
         "handle": handle,
         "display_name": display_name,
         "external_urls": norm_exts,
         "emails": sorted(emails),
+        "website": website_url,
         "city": user_city,
         "country": user_country,
         "genre": user_genre,
@@ -5427,16 +5473,19 @@ def _sc_fetch_contact_payload(handle: str) -> dict:
     elapsed_ms = int(round((time.perf_counter() - started) * 1000))
     emails_len = len(data.get("emails", []) or [])
     links_len = len(data.get("external_urls", []) or [])
+    website = 1 if data.get("website") else 0
     elapsed = data.get("elapsed_ms", elapsed_ms)
     site_flag = int(data.get("aggregator_expanded", data.get("_aggregator_tried", 0)))
     tracks_source = data.get("latest_track_source") or "none"
-    print(f"[sc] handle={handle} links={links_len} email={emails_len} site={site_flag} tracks_source={tracks_source} ms={elapsed}")
+    print(f"[sc] handle={handle} links={links_len} email={emails_len} site={site_flag or website} tracks_source={tracks_source} ms={elapsed}")
+    if tracks_source == "rss":
+        _sc_stat_inc("rss_used")
     return {
         "data": data,
         "elapsed_ms": elapsed,
         "links": links_len,
         "emails": emails_len,
-        "site": site_flag,
+        "site": site_flag or website,
         "error": error,
     }
 
@@ -5471,7 +5520,7 @@ def _sc_has_contact_links(entry) -> bool:
     payload = entry.get("data") if isinstance(entry, dict) else entry
     if not isinstance(payload, dict):
         return False
-    return bool(payload.get("emails") or payload.get("external_urls"))
+    return bool(payload.get("emails") or payload.get("external_urls") or payload.get("website"))
 
 
 def _sc_collect_contact_links(handle_jobs: list, min_yield: int) -> tuple:
@@ -7084,6 +7133,22 @@ def scrape_soundcloud(website_url, seed_tags=None, pages_per_tag=SOUNDCLOUD_PAGE
     print("[init] SoundCloud scraper starting…")
     _SC_HANDLE_UID_MAP.clear()
     _SC_HANDLE_USEROBJ_MAP.clear()
+    global _SC_RUN_STATS, _SC_ROOT_FORBIDDEN, _SC_ROOT_FORBIDDEN_LOGGED, _SC_ABOUT_DISABLED, _SC_ABOUT_DISABLE_LOGGED
+    _SC_ROOT_FORBIDDEN = False
+    _SC_ROOT_FORBIDDEN_LOGGED = False
+    _SC_ABOUT_DISABLED = False
+    _SC_ABOUT_DISABLE_LOGGED = False
+    _SC_RUN_STATS = {
+        "handles_total": 0,
+        "actionable_written": 0,
+        "about_attempts": 0,
+        "about_challenges": 0,
+        "about_disabled": 0,
+        "root_403": 0,
+        "tracks_api_403": 0,
+        "api_user_fallback_used": 0,
+        "rss_used": 0,
+    }
     driver = setup_driver()
     try:
         discovery_session = build_hardened_session()
@@ -7229,6 +7294,7 @@ def scrape_soundcloud(website_url, seed_tags=None, pages_per_tag=SOUNDCLOUD_PAGE
             dedup_handles = dedup_handles[:max_handles]
 
         print(f"SoundCloud: total artist handles to visit {len(dedup_handles)}")
+        _sc_stat_inc("handles_total", len(dedup_handles))
         if dedup_handles[:5]:
             print(f"SoundCloud: first 5 handles -> {[h for h, _ in dedup_handles[:5]]}")
 
@@ -7290,7 +7356,7 @@ def scrape_soundcloud(website_url, seed_tags=None, pages_per_tag=SOUNDCLOUD_PAGE
                 contact_payload = contact_map.get(handle, {})
                 contact_data = contact_payload.get("data")
                 if not _sc_has_contact_links(contact_payload):
-                    print(f"skip[{idx}] no links: {handle}")
+                    print(f"skip[{idx}] no links/email/site: {handle}")
                     continue
                 contact_song_title = ""
                 contact_release_date = ""
@@ -7372,6 +7438,7 @@ def scrape_soundcloud(website_url, seed_tags=None, pages_per_tag=SOUNDCLOUD_PAGE
                     continue
                 sc_rows.append(row)
                 actionable_count += 1
+                _sc_stat_inc("actionable_written")
                 if actionable_count >= ACTIONABLE_LIMIT:
                     break
                 time.sleep(random.uniform(0.2, 0.6))
@@ -7509,10 +7576,24 @@ def scrape_soundcloud(website_url, seed_tags=None, pages_per_tag=SOUNDCLOUD_PAGE
                 })
 
                 actionable_count += 1
+                _sc_stat_inc("actionable_written")
                 if actionable_count >= ACTIONABLE_LIMIT:
                     break
                 time.sleep(random.uniform(1.0, 2.0))
         print(f"SoundCloud: total actionable artists written {actionable_count}")
+        stats = _SC_RUN_STATS or {}
+        print(
+            "SoundCloud summary: "
+            f"handles={stats.get('handles_total', 0)} "
+            f"actionable={stats.get('actionable_written', 0)} "
+            f"about_attempts={stats.get('about_attempts', 0)} "
+            f"about_challenges={stats.get('about_challenges', 0)} "
+            f"about_disabled={1 if _SC_ABOUT_DISABLED else 0} "
+            f"root_403={stats.get('root_403', 0)} "
+            f"tracks_api_403={stats.get('tracks_api_403', 0)} "
+            f"rss_used={stats.get('rss_used', 0)} "
+            f"api_user_fallback_used={stats.get('api_user_fallback_used', 0)}"
+        )
     finally:
         try:
             discovery_session.close()
