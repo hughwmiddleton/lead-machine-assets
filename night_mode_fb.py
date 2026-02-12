@@ -15,6 +15,8 @@ from pathlib import Path
 import sys
 import atexit
 import weakref
+import subprocess
+import tempfile
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 import logging
@@ -435,6 +437,105 @@ def _display_env_present() -> bool:
     return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
 
 
+def _binary_version(binary_path: str) -> Optional[str]:
+    try:
+        out = subprocess.check_output([binary_path, "--version"], stderr=subprocess.STDOUT, text=True, timeout=5)
+        return (out or "").strip()
+    except Exception:
+        return None
+
+
+def _detect_chrome_binary() -> Tuple[Optional[str], Optional[str]]:
+    """Best-effort detection of Chrome binary path + version (platform-aware, non-fatal)."""
+    candidates = []
+    env_override = os.environ.get("CHROME_BINARY") or os.environ.get("GOOGLE_CHROME_BIN") or os.environ.get("GOOGLE_CHROME_SHIM")
+    if env_override:
+        candidates.append(env_override)
+
+    # Common macOS locations first (since this code runs on macOS).
+    candidates.extend(
+        [
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "/Applications/Google Chrome Beta.app/Contents/MacOS/Google Chrome Beta",
+            "/Applications/Google Chrome Dev.app/Contents/MacOS/Google Chrome Dev",
+        ]
+    )
+
+    # Standard CLI binaries (Linux-style or custom PATH entries).
+    candidates.extend(
+        [
+            "google-chrome",
+            "google-chrome-stable",
+            "chrome",
+            "chromium",
+            "chromium-browser",
+        ]
+    )
+
+    for candidate in candidates:
+        if not candidate:
+            continue
+        path = candidate
+        if not os.path.isabs(candidate):
+            path = shutil.which(candidate) or candidate
+        if not os.path.exists(path):
+            continue
+        return path, _binary_version(path)
+    return None, None
+
+
+def _profile_dir_state(profile_dir: str) -> Tuple[bool, List[str]]:
+    exists = os.path.isdir(profile_dir)
+    lock_files = [
+        "SingletonLock",
+        "SingletonCookie",
+        "SingletonSocket",
+        "Lock",
+        "lockfile",
+    ]
+    present = [name for name in lock_files if os.path.exists(os.path.join(profile_dir, name))]
+    return exists, present
+
+
+def _chromedriver_version(driver_path: str) -> Optional[str]:
+    if not driver_path:
+        return None
+    try:
+        out = subprocess.check_output([driver_path, "--version"], stderr=subprocess.STDOUT, text=True, timeout=5)
+        return (out or "").strip()
+    except Exception:
+        return None
+
+
+def _clone_chrome_options(chrome_options: ChromeOptions, override_profile_dir: Optional[str] = None) -> ChromeOptions:
+    """Lightweight clone helper to swap profile dirs without mutating the original."""
+    new_opts = ChromeOptions()
+    try:
+        for arg in getattr(chrome_options, "arguments", []) or []:
+            if override_profile_dir and (arg.startswith("--user-data-dir=") or arg.startswith("--profile-directory=")):
+                continue
+            new_opts.add_argument(arg)
+    except Exception:
+        pass
+
+    if override_profile_dir:
+        new_opts.add_argument(f"--user-data-dir={override_profile_dir}")
+        new_opts.add_argument("--profile-directory=Default")
+
+    try:
+        experimental = getattr(chrome_options, "_experimental_options", {}) or {}
+        for key, value in experimental.items():
+            new_opts.add_experimental_option(key, value)
+    except Exception:
+        pass
+
+    try:
+        new_opts.page_load_strategy = chrome_options.page_load_strategy
+    except Exception:
+        pass
+    return new_opts
+
+
 def _get_night_fb_profile_dir() -> str:
     """
     Resolve a stable Chrome profile directory for Night FB.
@@ -576,7 +677,12 @@ def _create_fb_driver_night_mode(headless: bool, logger: LoggerFn = None):
     chrome_options.add_experimental_option("prefs", prefs)
 
     _log(logger, f"[Night FB] Using Chrome profile dir: {profile_dir} (profile 'Default', headless={headless})")
-    driver = _start_chromedriver_with_retry(chrome_options)
+    driver = _start_chromedriver_with_retry(
+        chrome_options,
+        logger=logger,
+        profile_dir=profile_dir,
+        enable_temp_profile_fallback=True,
+    )
     return driver
 
 
@@ -708,21 +814,84 @@ class NightPersistentFacebookSession:
         return self.ensure_logged_in()
 
 
-def _start_chromedriver_with_retry(chrome_options):
+def _start_chromedriver_with_retry(
+    chrome_options: ChromeOptions,
+    logger: LoggerFn = None,
+    profile_dir: Optional[str] = None,
+    enable_temp_profile_fallback: bool = False,
+):
     """
-    Start ChromeDriver with a one-time reinstall if the first launch fails.
+    Start ChromeDriver with a one-time reinstall; optionally retry with a temp profile when startup flaps.
     """
+
+    def _log_preflight(driver_path: str, opts: ChromeOptions, profile: Optional[str]) -> None:
+        chrome_bin, chrome_version = _detect_chrome_binary()
+        driver_version = _chromedriver_version(driver_path)
+        profile_exists, profile_locks = _profile_dir_state(profile or "") if profile else (False, [])
+        _log(
+            logger,
+            "[Night FB][preflight] "
+            f"chrome_binary={chrome_bin or '<auto>'} "
+            f"chrome_version={chrome_version or '<unknown>'} "
+            f"chromedriver={driver_path} "
+            f"chromedriver_version={driver_version or '<unknown>'} "
+            f"profile_dir={profile or '<none>'} "
+            f"profile_exists={profile_exists} profile_locks={profile_locks} "
+            f"args={getattr(opts, 'arguments', [])}"
+        )
+
+    def _should_temp_recover(exc: BaseException) -> bool:
+        msg = (str(exc) or "").lower()
+        tokens = (
+            "user data directory is already in use",
+            "chrome failed to start",
+            "devtoolsactiveport",
+            "chrome instance exited",
+        )
+        return any(tok in msg for tok in tokens)
+
     last_exc: Optional[Exception] = None
-    for _ in range(2):
+    temp_profile_dir: Optional[str] = None
+    recovery_attempted = False
+
+    attempt_opts: ChromeOptions = chrome_options
+    attempt_profile = profile_dir
+
+    for attempt in range(3):  # two standard tries + optional temp profile recovery
         driver_path = ChromeDriverManager().install()
+
+        log_path = os.environ.get("NIGHT_FB_CHROMEDRIVER_LOG")
+        service_args = ["--verbose"]
+        if log_path:
+            _log(logger, f"[Night FB][preflight] chromedriver verbose log -> {log_path}")
         try:
-            service = ChromeService(driver_path)
-            driver = webdriver.Chrome(service=service, options=chrome_options)
+            service = ChromeService(driver_path, log_output=log_path, service_args=service_args)
+        except TypeError:
+            # Older selenium versions may not support log_output; fall back silently.
+            service = ChromeService(driver_path, service_args=service_args)
+
+        _log_preflight(driver_path, attempt_opts, attempt_profile)
+
+        try:
+            driver = webdriver.Chrome(service=service, options=attempt_opts)
             _register_driver_cleanup(driver)
+            if temp_profile_dir:
+                atexit.register(lambda: shutil.rmtree(temp_profile_dir, ignore_errors=True))
             return driver
         except Exception as exc:
             last_exc = exc
+            _log(logger, f"[Night FB] ChromeDriver launch failed (attempt {attempt+1}): {exc}")
+
+            if enable_temp_profile_fallback and (not recovery_attempted) and _should_temp_recover(exc):
+                recovery_attempted = True
+                temp_profile_dir = tempfile.mkdtemp(prefix="night_fb_profile_")
+                _log(logger, f"[Night FB] Retrying Chrome startup with temporary profile dir: {temp_profile_dir}")
+                attempt_opts = _clone_chrome_options(chrome_options, override_profile_dir=temp_profile_dir)
+                attempt_profile = temp_profile_dir
+                continue
+
             _purge_wdm_cache(driver_path)
+
     if last_exc:
         raise last_exc
     raise FacebookDriverError("Failed to start ChromeDriver.")
@@ -749,7 +918,7 @@ def _create_fb_driver_public(headless: bool = True):
     chrome_options.page_load_strategy = "eager"
     prefs = {"profile.managed_default_content_settings.images": 2}
     chrome_options.add_experimental_option("prefs", prefs)
-    return _start_chromedriver_with_retry(chrome_options)
+    return _start_chromedriver_with_retry(chrome_options, logger=None, profile_dir=None, enable_temp_profile_fallback=False)
 
 
 def _extract_emails_from_html(html: str) -> List[str]:
@@ -1828,6 +1997,8 @@ class NightModeFacebookEnricher:
         self._skip_fb_due_to_warning_reason = ""
         self._session_failed = False
         self._session_failed_reason = ""
+        self._skip_fb_due_to_session_failure = False
+        self._skip_fb_due_to_session_failure_reason = ""
         self._last_selected_candidate_context: Optional[Dict[str, Any]] = None
         self._last_search_candidates: List[Dict[str, Any]] = []
         self._pass_a_counts = {
@@ -1865,6 +2036,10 @@ class NightModeFacebookEnricher:
                 return self
             self._ensure_session()
         except FacebookDriverError as exc:
+            self._session_failed = True
+            self._session_failed_reason = str(exc)
+            self._skip_fb_due_to_session_failure = True
+            self._skip_fb_due_to_session_failure_reason = str(exc)
             _log(self.logger, f"[Night FB] Failed to start FB session: {exc}")
         return self
 
@@ -1882,6 +2057,10 @@ class NightModeFacebookEnricher:
         except Exception:
             pass
         return logger
+
+    def get_session_failure(self) -> Tuple[bool, str]:
+        """Return (failed, reason) for outer orchestrators to decide whether to skip FB entirely."""
+        return bool(self._skip_fb_due_to_session_failure or self._session_failed), self._session_failed_reason or self._skip_fb_due_to_session_failure_reason or ""
 
     def _ensure_session(self):
         if self._session_failed:
@@ -1928,10 +2107,14 @@ class NightModeFacebookEnricher:
         except FacebookDriverError as exc:
             self._session_failed = True
             self._session_failed_reason = str(exc)
+            self._skip_fb_due_to_session_failure = True
+            self._skip_fb_due_to_session_failure_reason = str(exc)
             raise
         except Exception as exc:  # pragma: no cover - defensive
             self._session_failed = True
             self._session_failed_reason = str(exc)
+            self._skip_fb_due_to_session_failure = True
+            self._skip_fb_due_to_session_failure_reason = str(exc)
             _log(self.logger, f"[Night FB] Failed to start Facebook session: {exc}")
             self.session = None
 
@@ -2838,6 +3021,11 @@ class NightModeFacebookEnricher:
             except Exception:
                 pass
             return str(value or "").strip()
+
+        if self._skip_fb_due_to_session_failure or self._session_failed:
+            result["FB_Status"] = result.get("FB_Status", "") or "driver_error"
+            result["FB_Reason"] = self._session_failed_reason or self._skip_fb_due_to_session_failure_reason or "session_start_failed"
+            return result
 
         if self._skip_fb_due_to_display:
             result["FB_Status"] = result.get("FB_Status", "") or "skipped_no_display"

@@ -1400,7 +1400,13 @@ def run_facebook_global_pass_nightmode(
         _write_fb_state(state_path, state)
 
     with fb_helper:
+        failed, fail_reason = (fb_helper.get_session_failure() if hasattr(fb_helper, "get_session_failure") else (False, ""))  # type: ignore[attr-defined]
+        if failed:
+            _safe_log_console(logger, f"[FB Night] Skipping FB pass: session failed to start ({fail_reason or 'unknown'})")
         for idx, row in df.iterrows():
+            if failed:
+                _safe_log_console(logger, "[FB Night] FB session unavailable; skipping remaining rows.")
+                break
             if idx <= last_index:
                 continue
             completed_rows += 1
