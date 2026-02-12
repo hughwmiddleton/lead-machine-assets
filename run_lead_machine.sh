@@ -39,8 +39,8 @@ export FB_DEBUG_CAND_META_N=12
 export FB_DEBUG_CANDIDATES=1
 
 export FB_DEBUG_DOM_GATE=1
-unset FB_DEBUG_DOM_GATE_HREFS
-unset FB_DEBUG_DOM_GATE_HREFS_N
+export FB_DEBUG_DOM_GATE_HREFS
+export FB_DEBUG_DOM_GATE_HREFS_N
 
 export FB_DEBUG_RANK_SORT=1
 export FB_CANDIDATE_RANKING=1
@@ -72,6 +72,12 @@ export NIGHT_FB_MIN_QUALITY_SCORE=25
 
 # Checkpoint guard (important for this test)
 export NIGHT_FB_CHECKPOINT_GUARD=1
+
+# Stable Night FB profile (prevents profile drift + lock weirdness)
+export NIGHT_FB_PROFILE_DIR="/Users/hughmiddleton/Lead Machine/Lead Machine Code/night_fb_profile"
+
+# Optional verbose driver logs (turn on only when debugging)
+# export NIGHT_FB_CHROMEDRIVER_LOG=/tmp/night_fb_chromedriver.log
 
 # Disable email override (we want real behaviour)
 unset FB_DEBUG_EMAIL_OVERRIDE

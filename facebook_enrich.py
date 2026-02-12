@@ -1580,7 +1580,7 @@ def _fb_extract_candidates_from_search_dom(html_or_driver, logger=None, debug: b
         return []
 
     soup = BeautifulSoup(html, "html.parser")
-    all_anchor_count = len(soup.select("a[href]")) if soup else 0
+    all_anchor_count = len(soup.select("a")) if soup else 0
 
     container_selectors: List[str] = [
         "div[role=\"main\"] div[role=\"feed\"]",
@@ -1607,6 +1607,122 @@ def _fb_extract_candidates_from_search_dom(html_or_driver, logger=None, debug: b
             break
 
     gate_debug_env = os.getenv("FB_DEBUG_DOM_GATE", "0")
+
+    def _normalize_href(href: str) -> str:
+        href = (href or "").strip()
+        if not href:
+            return ""
+        href_lower = href.lower()
+        if href_lower.startswith("javascript:") or href.startswith("#"):
+            return ""
+        try:
+            href = urllib.parse.urljoin("https://www.facebook.com", href)
+        except Exception:
+            pass
+        href = href.split("#", 1)[0]
+        return href
+
+    def _gather_candidate_elements(container_list: List[Tag]) -> List[Tag]:
+        scoped: List[Tag] = []
+        seen_ids = set()
+        for container in container_list:
+            for selector in ("a", 'a[role="link"]'):
+                try:
+                    found = container.select(selector)
+                except Exception:
+                    found = []
+                for el in found:
+                    el_id = id(el)
+                    if el_id in seen_ids:
+                        continue
+                    seen_ids.add(el_id)
+                    scoped.append(el)
+        return scoped
+
+    def _extract_candidates_from_elements(elements: List[Tag]) -> Tuple[List[FbCandidate], int]:
+        raw: List[FbCandidate] = []
+        href_seen = set()
+        unique_elements = set()
+
+        for element in elements:
+            unique_elements.add(id(element))
+
+            anchor = element
+            try:
+                href_raw = anchor.get("href") or ""
+            except Exception:
+                href_raw = ""
+
+            if not href_raw:
+                try:
+                    nested = anchor.select_one("a[href]")
+                except Exception:
+                    nested = None
+                if nested:
+                    anchor = nested
+                    try:
+                        href_raw = nested.get("href") or ""
+                    except Exception:
+                        href_raw = ""
+
+            href = _normalize_href(href_raw)
+            if not href or "facebook.com" not in href:
+                continue
+            if href in href_seen:
+                continue
+            href_seen.add(href)
+
+            try:
+                parsed = urllib.parse.urlparse(href)
+                path = (parsed.path or "").lower()
+                if "/search/" in path or "/help" in path or "/login" in path:
+                    continue
+            except Exception:
+                pass
+
+            name = anchor.get_text(" ", strip=True) or href
+            aria_label = anchor.get("aria-label") or ""
+            category = ""
+            category_candidates: List[str] = []
+            if hasattr(anchor, "find_all"):
+                category_el = getattr(anchor, "parent", None)
+                if category_el is None and hasattr(anchor, "find_parent"):
+                    try:
+                        category_el = anchor.find_parent("div")
+                    except Exception:
+                        category_el = None
+                if category_el is None:
+                    category_el = anchor
+                category, descriptor, category_candidates = _extract_fb_category_candidates(category_el, page_name=name)
+            else:
+                category, descriptor, category_candidates = None, None, []
+            if not category and aria_label and not is_fb_creator_category(aria_label):
+                category = aria_label
+
+            secondary_text = ""
+            for cat_text in category_candidates:
+                if not cat_text:
+                    continue
+                if category and cat_text == category:
+                    continue
+                if name and cat_text.strip().lower() == name.strip().lower():
+                    continue
+                secondary_text = cat_text
+                break
+
+            fb_cand = FbCandidate(name=name, url=href, category=category or "")
+            try:
+                setattr(fb_cand, "aria_label", aria_label)
+                setattr(fb_cand, "category_candidates", category_candidates)
+                setattr(fb_cand, "secondary_text", secondary_text)
+                descriptor_val = descriptor or secondary_text
+                setattr(fb_cand, "descriptor", descriptor_val)
+                setattr(fb_cand, "category_tokens", list(category_candidates))
+            except Exception:
+                pass
+            raw.append(fb_cand)
+
+        return raw, len(unique_elements)
 
     if not containers:
         try:
@@ -1636,144 +1752,72 @@ def _fb_extract_candidates_from_search_dom(html_or_driver, logger=None, debug: b
             )
             return []
 
-    scoped_anchors: List[Tag] = []
-    if containers:
-        for container in containers:
-            try:
-                scoped_anchors.extend(container.select("a[href]"))
-            except Exception:
-                continue
+    # Gather anchors/role links inside chosen containers (dedup by element id).
+    candidate_elements: List[Tag] = _gather_candidate_elements(containers)
+    anchors_in_scope_container = len(candidate_elements)
 
-    anchors_in_scope = len(scoped_anchors)
-
-    # Optional DOM fallback: when too few anchors are found in scoped containers, augment using
-    # broader selectors while filtering obvious nav/header/footer anchors.
     fallback_enabled = os.getenv("NIGHT_FB_DOM_FALLBACK") == "1"
-    if fallback_enabled and anchors_in_scope < 2:
-        fallback_selectors = [
-            'article[role="article"] a[href]',
-            'div[role="feed"] a[href]',
-            'div[role="main"] a[href]',
+    fallback_used = False
+
+    def _is_nav_like(anchor: Tag) -> bool:
+        try:
+            parent_with_aria = anchor.find_parent(attrs={"aria-label": True})
+        except Exception:
+            parent_with_aria = None
+        aria_val = ""
+        if parent_with_aria is not None:
+            try:
+                aria_val = parent_with_aria.get("aria-label") or ""
+            except Exception:
+                aria_val = ""
+        aria_lower = aria_val.lower()
+        return any(tok in aria_lower for tok in ("navigation", "header", "footer"))
+
+    # First pass: only inside the scoped containers.
+    raw_candidates, _ = _extract_candidates_from_elements(candidate_elements)
+    candidates_pre_url_gate = len(raw_candidates)
+
+    if candidates_pre_url_gate == 0:
+        _emit(
+            f"[FB Shared][DOM Gate] reason=zero_usable_hrefs_in_scope containers_found={len(containers)} "
+            f"anchors_in_scope={anchors_in_scope_container} candidates_pre_url_gate=0 "
+            f"fallback={1 if fallback_enabled else 0} search_name='{search_name or ''}'"
+        )
+
+    # Optional DOM fallback: only when container extraction produced zero usable hrefs.
+    if fallback_enabled and candidates_pre_url_gate == 0:
+        fallback_container_selectors = [
+            'article[role="article"]',
+            'div[role="feed"]',
+            'div[role="main"]',
         ]
 
-        def _is_nav_like(anchor: Tag) -> bool:
+        fallback_containers: List[Tag] = []
+        for fb_selector in fallback_container_selectors:
             try:
-                parent_with_aria = anchor.find_parent(attrs={"aria-label": True})
+                fallback_containers.extend(soup.select(fb_selector))
             except Exception:
-                parent_with_aria = None
-            aria_val = ""
-            if parent_with_aria is not None:
-                try:
-                    aria_val = parent_with_aria.get("aria-label") or ""
-                except Exception:
-                    aria_val = ""
-            aria_lower = aria_val.lower()
-            return any(tok in aria_lower for tok in ("navigation", "header", "footer"))
-
-        for fb_selector in fallback_selectors:
-            try:
-                fallback_anchors = soup.select(fb_selector)
-            except Exception:
-                fallback_anchors = []
-
-            filtered = [a for a in fallback_anchors if not _is_nav_like(a)]
-            if filtered:
-                scoped_anchors.extend(filtered)
-                chosen_selector = f"{chosen_selector} + fallback:{fb_selector}"
-                fallback_reason = fallback_reason or "low_anchor_fallback"
-            anchors_in_scope = len(scoped_anchors)
-            if anchors_in_scope >= 2:
-                break
-
-    if os.getenv("FB_DEBUG_DOM_GATE_HREFS") == "1":
-        hrefs = []
-        for a in scoped_anchors:
-            try:
-                h = (a.get("href") or "").replace("\n", "").replace("\t", "").strip()
-            except Exception:
-                h = ""
-            if h:
-                hrefs.append(h)
-        sample = " | ".join(hrefs[:20])
-        _emit(f"[FB Shared][DOM Gate] href_sample_count={len(hrefs)} href_sample={sample}")
-
-    def _normalize_href(href: str) -> str:
-        href = (href or "").strip()
-        if not href:
-            return ""
-        try:
-            href = urllib.parse.urljoin("https://www.facebook.com", href)
-        except Exception:
-            pass
-        href = href.split("#", 1)[0]
-        return href
-
-    raw_candidates: List[FbCandidate] = []
-    seen_anchors = set()
-    dedupe_seen = set()
-    for anchor in scoped_anchors:
-        anchor_id = id(anchor)
-        if anchor_id in seen_anchors:
-            continue
-        seen_anchors.add(anchor_id)
-
-        href_raw = anchor.get("href") or ""
-        href = _normalize_href(href_raw)
-        if not href or "facebook.com" not in href:
-            continue
-        if href in dedupe_seen:
-            continue
-        dedupe_seen.add(href)
-        try:
-            parsed = urllib.parse.urlparse(href)
-            path = (parsed.path or "").lower()
-            if "/search/" in path or "/help" in path or "/login" in path:
                 continue
-        except Exception:
-            pass
-        name = anchor.get_text(" ", strip=True) or href
-        aria_label = anchor.get("aria-label") or ""
-        category = ""
-        category_candidates: List[str] = []
-        if hasattr(anchor, "find_all"):
-            category_el = getattr(anchor, "parent", None)
-            if category_el is None and hasattr(anchor, "find_parent"):
-                try:
-                    category_el = anchor.find_parent("div")
-                except Exception:
-                    category_el = None
-            if category_el is None:
-                category_el = anchor
-            category, descriptor, category_candidates = _extract_fb_category_candidates(category_el, page_name=name)
-        else:
-            category, descriptor, category_candidates = None, None, []
-        if not category and aria_label and not is_fb_creator_category(aria_label):
-            category = aria_label
 
-        secondary_text = ""
-        for cat_text in category_candidates:
-            if not cat_text:
-                continue
-            if category and cat_text == category:
-                continue
-            if name and cat_text.strip().lower() == name.strip().lower():
-                continue
-            secondary_text = cat_text
-            break
+        fallback_elements = _gather_candidate_elements(fallback_containers)
+        fallback_elements = [el for el in fallback_elements if not _is_nav_like(el)]
 
-        fb_cand = FbCandidate(name=name, url=href, category=category or "")
-        try:
-            setattr(fb_cand, "aria_label", aria_label)
-            setattr(fb_cand, "category_candidates", category_candidates)
-            setattr(fb_cand, "secondary_text", secondary_text)
-            descriptor_val = descriptor or secondary_text
-            setattr(fb_cand, "descriptor", descriptor_val)
-            setattr(fb_cand, "category_tokens", list(category_candidates))
-        except Exception:
-            pass
-        raw_candidates.append(fb_cand)
+        seen_ids = {id(el) for el in candidate_elements}
+        for el in fallback_elements:
+            el_id = id(el)
+            if el_id in seen_ids:
+                continue
+            seen_ids.add(el_id)
+            candidate_elements.append(el)
 
-    candidates_pre_url_gate = len(raw_candidates)
+        anchors_in_scope_container = len(candidate_elements)
+        raw_candidates, _ = _extract_candidates_from_elements(candidate_elements)
+        candidates_pre_url_gate = len(raw_candidates)
+        fallback_used = bool(candidate_elements)
+        if fallback_used:
+            fallback_reason = fallback_reason or "zero_anchor_fallback"
+
+    anchors_in_scope = len(candidate_elements)
 
     gate_reject = 0
     filtered: List[FbCandidate] = []
