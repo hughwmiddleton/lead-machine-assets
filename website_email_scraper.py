@@ -99,8 +99,8 @@ def enrich_rows_with_website_emails(
             path_lower = urlparse(email_source_url or "").path.lower()
             generic_hit = any(path_lower.startswith(token) for token in GENERIC_PATH_KEYWORDS)
             primary = _choose_primary_email(emails_found, email_types)
-            row["Email"] = primary
-            row["Email_All"] = ";".join(emails_found)
+            row["Seed_Directory_Email"] = primary
+            row["Seed_Directory_Email_All"] = ";".join(emails_found)
             row["Email_Type"] = email_types.get(primary, "")
             if generic_hit:
                 row["Email Source"] = "Seed directory (generic contact page)"

@@ -83,6 +83,16 @@ def _consolidate_email_all(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return df
 
+    # Strip seed-directory scraped emails from Email/Email_All before consolidation.
+    if "Email Source" in df.columns:
+        source_series = df["Email Source"].fillna("").astype(str).str.lower()
+        seed_mask = source_series.str.startswith("seed directory")
+        if seed_mask.any():
+            if "Email" in df.columns:
+                df.loc[seed_mask, "Email"] = ""
+            if "Email_All" in df.columns:
+                df.loc[seed_mask, "Email_All"] = ""
+
     legacy_fields: Sequence[str] = (
         "Email_All",
         "Email",
