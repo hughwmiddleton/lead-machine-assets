@@ -260,3 +260,14 @@ def test_search_card_ranking_prefers_music_over_store():
         category_tokens=getattr(store, "category_tokens", []),
     )
     assert flags_store["service_only"] is True
+
+
+def test_profile_php_music_page_treated_as_page_not_profile():
+    artist = "Test Artist"
+    profile_page_like = _cand("Test Artist", "https://www.facebook.com/profile.php?id=123456789", "Musician/band")
+
+    score, breakdown, features = night_mode_fb._score_fb_candidate_night(artist, profile_page_like)
+
+    assert features["is_page"] is True
+    assert features["is_profile"] is False
+    assert all(tok not in breakdown for tok in ("-profile", "-profile_music"))

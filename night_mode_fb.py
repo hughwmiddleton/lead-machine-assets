@@ -964,6 +964,32 @@ def _is_page_style_url(url: str) -> bool:
         return False
 
 
+def _is_page_like_category(category: str, descriptor: str, category_tokens: Iterable[str], music_hint: bool = False) -> bool:
+    """
+    Heuristic: treat certain category/descriptor/token blobs as page-like even when the URL uses profile.php.
+    """
+    pieces = [category or "", descriptor or ""]
+    pieces.extend([t or "" for t in category_tokens or []])
+    blobs = " ".join(p.strip().lower() for p in pieces if p)
+    page_tokens = (
+        "musician/band",
+        "musician",
+        "artist",
+        "band",
+        "music",
+        "record label",
+        "music artist",
+        "public figure",
+        "official page",
+        "fan page",
+    )
+    if any(tok in blobs for tok in page_tokens):
+        return True
+    if music_hint and blobs:
+        return True
+    return False
+
+
 def _candidate_name_match(artist_name: str, cand_name: str) -> str:
     artist_slug = _slugify(artist_name)
     name_slug = _slugify(cand_name)
@@ -1035,8 +1061,15 @@ def _score_fb_candidate_night(artist_name: str, cand) -> Tuple[int, List[str], D
     category_tokens = getattr(cand, "category_tokens", None) or []
 
     flags = _candidate_category_flags(category, aria_label, secondary_text, descriptor=descriptor, category_tokens=category_tokens)
+    page_like = _is_page_like_category(category, descriptor, category_tokens, music_hint=flags["music_any"])
     is_profile = _is_profile_url(url)
-    is_page = _is_page_style_url(url)
+    page_style_url = _is_page_style_url(url)
+    is_page = page_style_url
+    if page_like and is_profile:
+        is_profile = False
+        is_page = True
+    elif page_like:
+        is_page = True
     match_level = _candidate_name_match(artist_name, name)
     has_music_signals = flags["music_any"]
 
@@ -1087,6 +1120,7 @@ def _score_fb_candidate_night(artist_name: str, cand) -> Tuple[int, List[str], D
         "category_tokens": list(category_tokens),
         "is_profile": is_profile,
         "is_page": is_page,
+        "is_page_style_url": page_style_url,
         "match_level": match_level,
         "music_primary": flags["music_primary"],
         "music_descriptor": flags["music_descriptor"],
@@ -1095,6 +1129,81 @@ def _score_fb_candidate_night(artist_name: str, cand) -> Tuple[int, List[str], D
         "service_only": flags["service_only"],
     }
     return score, breakdown, features
+
+
+def _score_candidate_min_quality(artist: str, cand) -> Tuple[int, List[str], Dict[str, Any]]:
+    """
+    Lightweight, explainable heuristic to catch obviously-bad top candidates before scraping.
+    Returns (score, reasons, meta).
+    """
+    name = getattr(cand, "name", "") or (cand.get("name") if isinstance(cand, dict) else "") or ""
+    url = _candidate_url(cand)
+    category = _sanitize_fb_category_text(getattr(cand, "category", "") or (cand.get("category") if isinstance(cand, dict) else "") or "") or ""
+    descriptor = getattr(cand, "descriptor", "") or (cand.get("descriptor") if isinstance(cand, dict) else "") or ""
+    aria_label = getattr(cand, "aria_label", "") or (cand.get("aria_label") if isinstance(cand, dict) else "") or ""
+    category_tokens = getattr(cand, "category_tokens", None) or (cand.get("category_tokens") if isinstance(cand, dict) else []) or []
+
+    score = 0
+    reasons: List[str] = []
+
+    try:
+        if _is_junk_fb_candidate(url):
+            score -= 50
+            reasons.append("-junk_surface")
+    except Exception:
+        pass
+
+    if _is_page_style_url(url):
+        score += 10
+        reasons.append("+page_style_url")
+    if _is_profile_url(url):
+        score -= 5
+        reasons.append("-profile_url")
+
+    match_level = _candidate_name_match(artist, name)
+    if match_level == "exact":
+        score += 25
+        reasons.append("+exact_match")
+    elif match_level == "near":
+        score += 15
+        reasons.append("+near_match")
+    elif match_level == "weak":
+        score += 5
+        reasons.append("+weak_match")
+    elif match_level == "mismatch":
+        score -= 25
+        reasons.append("-name_mismatch")
+
+    music_hint_fields = " ".join([category, descriptor, aria_label])
+    has_music_hint = _text_has_music_tokens(music_hint_fields)
+    category_tokens_blob = " ".join(category_tokens) if isinstance(category_tokens, (list, tuple, set)) else str(category_tokens)
+    has_music_tokens_in_category_tokens = _text_has_music_tokens(category_tokens_blob)
+    if has_music_hint:
+        score += 20
+        reasons.append("+music_hint")
+    if has_music_tokens_in_category_tokens:
+        score += 10
+        reasons.append("+music_token_category")
+
+    blob = " ".join([category, descriptor, aria_label, category_tokens_blob]).lower()
+    has_service = any(tok in blob for tok in _FB_SERVICE_CATEGORY_TOKENS)
+    if has_service and not (has_music_hint or has_music_tokens_in_category_tokens):
+        score -= 15
+        reasons.append("-service_only")
+
+    meta = {
+        "name": name,
+        "url": url,
+        "category": category,
+        "descriptor": descriptor,
+        "aria_label": aria_label,
+        "category_tokens": list(category_tokens) if isinstance(category_tokens, (list, tuple, set)) else category_tokens,
+        "match_level": match_level,
+        "music_hint": has_music_hint,
+        "music_tokens_in_category_tokens": has_music_tokens_in_category_tokens,
+        "service_only": has_service and not (has_music_hint or has_music_tokens_in_category_tokens),
+    }
+    return score, reasons, meta
 
 
 def _rank_candidates_for_preview(artist_name: str, candidates: List["facebook_enrich.FbCandidate"]) -> List[Dict[str, Any]]:
@@ -1120,6 +1229,7 @@ def _rank_candidates_for_preview(artist_name: str, candidates: List["facebook_en
             -int(feat.get("music_primary") or False),
             -int(feat.get("music_descriptor") or False),
             -int(feat.get("music_any") or False),
+            -int(feat.get("is_page_style_url") or False),
             -int(feat.get("is_page") or False),
             int(feat.get("is_profile") or False),
             item["idx"],
@@ -1711,6 +1821,8 @@ class NightModeFacebookEnricher:
         self.require_display = _bool_env("NIGHT_FB_REQUIRE_DISPLAY", default=False)
         self._headed_recovery_attempted = False
         self._skip_fb_due_to_checkpoint = False
+        self._checkpoint_guard_enabled = _bool_env("NIGHT_FB_CHECKPOINT_GUARD", default=False)
+        self._search_disabled_due_to_checkpoint = False
         self._skip_fb_due_to_display = False
         self._skip_fb_due_to_warning = False
         self._skip_fb_due_to_warning_reason = ""
@@ -2050,6 +2162,11 @@ class NightModeFacebookEnricher:
             return True
 
         # Checkpoint detected.
+        if self._checkpoint_guard_enabled and not self._search_disabled_due_to_checkpoint:
+            self._search_disabled_due_to_checkpoint = True
+            _log(self.logger, "[Night FB] search disabled due to checkpoint")
+            return True
+
         if not self.skip_on_checkpoint:
             _log(self.logger, "[Night FB] Checkpoint detected but skip is disabled; continuing cautiously.")
             return True
@@ -2090,12 +2207,20 @@ class NightModeFacebookEnricher:
     def _search_for_page(self, artist: str, location: str, allow_anon: bool = False) -> Optional[str]:
         self._last_selected_candidate_context = None
         self._last_search_candidates = []
+        if self._search_disabled_due_to_checkpoint:
+            _log(self.logger, "[Night FB] search disabled due to checkpoint; skipping FB search.")
+            return None
         session = self._ensure_session()
         if not session and not allow_anon:
             return None
         if session:
             self._ensure_driver_alive(session)
         refine_enabled = os.getenv("FB_REFINE_QUERY") == "1"
+        quality_gate_enabled = _bool_env("NIGHT_FB_MIN_QUALITY_GATE", default=False)
+        try:
+            quality_threshold = int(os.getenv("NIGHT_FB_MIN_QUALITY_SCORE") or 25)
+        except Exception:
+            quality_threshold = 25
 
         def _fetch_search_html(query_str: str) -> Optional[str]:
             encoded_q = urllib.parse.quote_plus(query_str)
@@ -2136,6 +2261,13 @@ class NightModeFacebookEnricher:
             return None
         html = _fetch_search_html(primary_query)
 
+        def _run_refine_queries() -> List["facebook_enrich.FbCandidate"]:
+            refine_candidates: List["facebook_enrich.FbCandidate"] = []
+            for refine_query in (f"{artist} musician", f"{artist} band"):
+                html_refined = _fetch_search_html(refine_query)
+                refine_candidates.extend(_parse_search_candidates(html_refined, logger=self.logger, search_name=artist))
+            return refine_candidates
+
         candidates = _parse_search_candidates(html, logger=self.logger, search_name=artist)
         ranked_for_preview = _rank_candidates_for_preview(artist, candidates)
 
@@ -2147,18 +2279,56 @@ class NightModeFacebookEnricher:
                 need_refine = True
 
         if need_refine:
-            refine_candidates: List["facebook_enrich.FbCandidate"] = []
-            for refine_query in (f"{artist} musician", f"{artist} band"):
-                html_refined = _fetch_search_html(refine_query)
-                refine_candidates.extend(_parse_search_candidates(html_refined, logger=self.logger, search_name=artist))
+            refine_candidates = _run_refine_queries()
             if refine_candidates:
                 candidates = _dedupe_candidates(list(candidates) + refine_candidates)
-                ranked_for_preview = _rank_candidates_for_preview(artist, candidates)
+            ranked_for_preview = _rank_candidates_for_preview(artist, candidates)
+            if refine_candidates:
                 _log(self.logger, f"[Night FB] Refine query enabled; merged {len(refine_candidates)} refined candidates.")
 
         ranked_candidates: List["facebook_enrich.FbCandidate"] = [item["candidate"] for item in ranked_for_preview]
         candidate = ranked_candidates[0] if ranked_candidates else None
         selected_by = "ranked_sort"
+
+        if quality_gate_enabled and candidate:
+            refine_forced = False
+            while True:
+                score_val, reasons, _meta = _score_candidate_min_quality(artist, candidate)
+                if score_val >= quality_threshold:
+                    break
+                label = getattr(candidate, "name", None) or getattr(candidate, "url", None) or "<unknown>"
+                _log(self.logger, f"[Night FB][QualityGate] rejected '{label}' score={score_val} reasons={' '.join(reasons) or '-'} threshold={quality_threshold}")
+                if not refine_forced:
+                    refine_forced = True
+                    forced_refine_candidates = _run_refine_queries()
+                    _log(self.logger, "[Night FB][QualityGate] forcing refine queries due to low top-candidate score.")
+                    if forced_refine_candidates:
+                        candidates = _dedupe_candidates(list(candidates) + forced_refine_candidates)
+                    ranked_for_preview = _rank_candidates_for_preview(artist, candidates)
+                    ranked_candidates = [item["candidate"] for item in ranked_for_preview]
+                    candidate = ranked_candidates[0] if ranked_candidates else None
+                    if candidate:
+                        continue
+                slug = _slugify(artist)
+                fallback_url = f"https://www.facebook.com/{slug}" if slug else ""
+                fallback_candidate = None
+                if fallback_url and _fb_is_candidate_url_allowed(fallback_url):
+                    try:
+                        fb_cand_cls = getattr(facebook_enrich, "FbCandidate", None)
+                        fallback_candidate = fb_cand_cls(name=artist, url=fallback_url, category="slug_fallback") if fb_cand_cls else {"name": artist, "url": fallback_url, "category": "slug_fallback"}
+                    except Exception:
+                        fallback_candidate = {"name": artist, "url": fallback_url, "category": "slug_fallback"}
+                if fallback_candidate is not None:
+                    fallback_score, fallback_reasons, _ = _score_candidate_min_quality(artist, fallback_candidate)
+                    if fallback_score >= quality_threshold:
+                        _log(self.logger, f"[Night FB][QualityGate] using slug fallback '{fallback_url}' score={fallback_score} reasons={' '.join(fallback_reasons) or '-'} threshold={quality_threshold}")
+                        candidate = fallback_candidate
+                        candidates = [fallback_candidate]
+                        ranked_for_preview = _rank_candidates_for_preview(artist, candidates)
+                        ranked_candidates = [fallback_candidate]
+                        break
+                _log(self.logger, "[Night FB][QualityGate] No acceptable FB candidates after quality gate; skipping FB search.")
+                return None
 
         if not candidate:
             _log(self.logger, f"[Night FB] No non-junk FB candidates for '{artist}', skipping Facebook.")
@@ -2700,6 +2870,11 @@ class NightModeFacebookEnricher:
                 return self._mark_row_checkpoint(result)
             page_url = ""
             emails: List[str] = []
+            if not fb_urls and self._search_disabled_due_to_checkpoint:
+                result["FB_Status"] = "checkpoint_search_disabled"
+                result["FB_Reason"] = "checkpoint"
+                _log(self.logger, "[Night FB] search disabled due to checkpoint; skipping FB search.")
+                return result
             if is_unearthed:
                 _log(self.logger, "[Night FB] Detected Unearthed row -> using legacy no-login FB scrape.")
                 return self._enrich_row_unearthed_legacy(result, artist_name, fb_urls)
@@ -2862,6 +3037,12 @@ class NightModeFacebookEnricher:
                         )
                 if not page_url:
                     page_url = self._search_for_page(artist_name, location, allow_anon=allow_anon) or ""
+                    if self._search_disabled_due_to_checkpoint:
+                        if not result.get("FB_Status"):
+                            result["FB_Status"] = "checkpoint_search_disabled"
+                            result["FB_Reason"] = "checkpoint"
+                        _log(self.logger, "[Night FB] search disabled due to checkpoint; skipping FB search.")
+                        return result
                     if page_url:
                         candidate = self._scrape_single_fb_candidate(
                             page_url,

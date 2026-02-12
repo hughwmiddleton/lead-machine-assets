@@ -2517,6 +2517,29 @@ def _bc_decode_filter(s: str | None) -> str | None:
     decoded = decoded.replace("+", " ")
     return decoded
 
+def _bc_canonicalize_location(value: str | None) -> str:
+    """
+    Canonical form for location comparison:
+    - NFKC normalize and strip combining marks
+    - lowercase
+    - collapse any whitespace (including NBSP) and punctuation separators to a single space
+    - remove spaces entirely for the comparison key
+    """
+    if not value:
+        return ""
+    normalized = unicodedata.normalize("NFKC", value)
+    normalized = "".join(ch for ch in normalized if not unicodedata.combining(ch))
+    normalized = normalized.lower()
+    normalized = re.sub(r"[\u00A0]", " ", normalized)  # collapse NBSP
+    normalized = re.sub(r"[\s,;|/\-]+", " ", normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    canonical = normalized.replace(" ", "")
+    alias_fixes = {
+        "mancheter": "manchester",
+        "britol": "bristol",
+    }
+    return alias_fixes.get(canonical, canonical)
+
 def _bc_sanitize_location_filter(label: str | None) -> str:
     raw_label = label or ""
     decoded_label = _bc_decode_filter(raw_label) or ""
@@ -2543,8 +2566,12 @@ def _bandcamp_location_match_(profile_loc: str, api_hint: str, requested_label: 
         return True
     profile_norm = _norm_text_(profile_loc).replace("-", " ")
     api_norm = _norm_text_(api_hint).replace("-", " ")
-    profile_compact = profile_norm.replace(" ", "")
-    api_compact = api_norm.replace(" ", "")
+    profile_norm_compact = profile_norm.replace(" ", "")
+    api_norm_compact = api_norm.replace(" ", "")
+    profile_canon = _bc_canonicalize_location(profile_loc)
+    api_canon = _bc_canonicalize_location(api_hint)
+    label_canon = _bc_canonicalize_location(requested_label)
+    hint_canon = _bc_canonicalize_location(requested_hint)
     canada_subdiv_phrases = {
         "alberta",
         "british columbia",
@@ -2627,9 +2654,9 @@ def _bandcamp_location_match_(profile_loc: str, api_hint: str, requested_label: 
             requested_is_canada = True
             break
     alias_corrections = {
-        "au tralia": "australia",
-        "autralia": "australia",
-        "austra lia": "australia",
+        _bc_canonicalize_location("au tralia"): "australia",
+        _bc_canonicalize_location("autralia"): "australia",
+        _bc_canonicalize_location("austra lia"): "australia",
     }
 
     def _canonical_variants(text: str) -> set[str]:
@@ -2637,11 +2664,13 @@ def _bandcamp_location_match_(profile_loc: str, api_hint: str, requested_label: 
             return set()
         norm = _norm_text_(text).replace("-", " ")
         compact = norm.replace(" ", "")
-        variants = {norm, compact}
-        if norm in alias_corrections:
-            variants.add(alias_corrections[norm])
-        if compact in alias_corrections:
-            variants.add(alias_corrections[compact])
+        canon = _bc_canonicalize_location(text)
+        variants = {norm, compact, canon}
+        for candidate in (canon, compact, norm.replace(" ", "")):
+            alias = alias_corrections.get(candidate)
+            if alias:
+                alias_norm = _norm_text_(alias).replace("-", " ")
+                variants.update({alias_norm, alias_norm.replace(" ", ""), _bc_canonicalize_location(alias)})
         return {v for v in variants if v}
     # Simple synonym/alias support for common regions (not exhaustive).
     def _uk_match(text: str) -> bool:
@@ -2665,27 +2694,31 @@ def _bandcamp_location_match_(profile_loc: str, api_hint: str, requested_label: 
         label_norm_clean = label_norm.replace("-", " ")
         label_compact = label_norm_clean.replace(" ", "")
         for variant in _canonical_variants(requested_label):
-            if variant in profile_norm or variant in api_norm or variant in profile_compact or variant in api_compact:
+            if variant in profile_norm or variant in api_norm or variant in profile_norm_compact or variant in api_norm_compact or variant in profile_canon or variant in api_canon:
                 return True
         if label_norm_clean and (label_norm_clean in profile_norm or label_norm_clean in api_norm):
             return True
+        if label_compact and (label_compact in profile_norm_compact or label_compact in api_norm_compact or label_compact in profile_canon or label_compact in api_canon):
+            return True
         # Extra tolerance for UK-region filters that surface localized labels (e.g., "England, Uk").
         if label_norm_clean and _uk_match(label_norm_clean) and (_uk_match(profile_norm) or _uk_match(api_norm)):
-            return True
-        if label_compact and (label_compact in profile_compact or label_compact in api_compact):
             return True
     if requested_hint:
         hint_norm = _norm_text_(requested_hint)
         hint_norm_clean = hint_norm.replace("-", " ")
         hint_compact = hint_norm_clean.replace(" ", "")
         for variant in _canonical_variants(requested_hint):
-            if variant in profile_norm or variant in api_norm or variant in profile_compact or variant in api_compact:
+            if variant in profile_norm or variant in api_norm or variant in profile_norm_compact or variant in api_norm_compact or variant in profile_canon or variant in api_canon:
                 return True
         if hint_norm_clean and (hint_norm_clean in profile_norm or hint_norm_clean in api_norm):
             return True
+        if hint_compact and (hint_compact in profile_norm_compact or hint_compact in api_norm_compact or hint_compact in profile_canon or hint_compact in api_canon):
+            return True
         if hint_norm_clean and _uk_match(hint_norm_clean) and (_uk_match(profile_norm) or _uk_match(api_norm)):
             return True
-        if hint_compact and (hint_compact in profile_compact or hint_compact in api_compact):
+    # Canonical compact contains check for either label or hint.
+    for compact_filter in (label_canon, hint_canon):
+        if compact_filter and (compact_filter in profile_canon or compact_filter in api_canon):
             return True
     # Country-level fallback: if filter mentions Canada, accept province/territory-only locations.
     if requested_is_canada:
@@ -2705,11 +2738,14 @@ def _bandcamp_location_match_(profile_loc: str, api_hint: str, requested_label: 
         debug_payload = {
             "filter_raw": requested_label or requested_hint or "",
             "requested_tokens": sorted(requested_tokens),
+            "filter_canon": label_canon or hint_canon,
             "profile_raw": profile_loc,
             "profile_norm": profile_norm,
+            "profile_canon": profile_canon,
             "profile_tokens": sorted(profile_tokens),
             "api_hint_raw": api_hint,
             "api_norm": api_norm,
+            "api_canon": api_canon,
             "api_tokens": sorted(api_tokens) if 'api_tokens' in locals() else [],
             "reason": "no_match"
         }
@@ -2732,6 +2768,8 @@ def _test_bandcamp_location_match():
     assert _bandcamp_location_match_("Québec", "", "qu%C3%A9bec", "qu%C3%A9bec")
     assert _bandcamp_location_match_("Montreal, Québec", "", "qu%C3%A9bec", "qu%C3%A9bec")
     assert not _bandcamp_location_match_("Montreal, Québec", "", "rock", "rock")
+    assert _bandcamp_location_match_("Manchester, Uk", "", "manchester", "manchester")
+    assert _bandcamp_location_match_("Bristol, Uk", "", "bri tol", "bri tol")
     print("_test_bandcamp_location_match passed")
 
 def _test_bandcamp_location_filter_sanitizer():
@@ -2739,6 +2777,13 @@ def _test_bandcamp_location_filter_sanitizer():
     assert _bc_sanitize_location_filter("nova scotia") == "nova scotia"
     assert _bc_sanitize_location_filter("qu%C3%A9bec") == "québec"
     print("_test_bandcamp_location_filter_sanitizer passed")
+
+def _test_bc_location_canonicalization():
+    canon = _bc_canonicalize_location
+    assert canon("manche ter") == canon("manchester")
+    assert canon("Bri tol") == canon("Bristol")
+    assert canon("Manchester, Uk").startswith(canon("manchester")) or canon("manchester") in canon("Manchester, Uk")
+    print("_test_bc_location_canonicalization passed")
 
 _BANDCAMP_CONTACT_PRIORITY = [
     ("linktr.ee", "linktree", "beacons.ai", "solo.to", "carrd.co", "band.link"),
@@ -2983,7 +3028,7 @@ def scrape_bandcamp(
         segments = [seg for seg in (parsed.path or "").split("/") if seg]
         if len(segments) >= 2 and segments[0] == "discover":
             slug = segments[1]
-            slug_parts = [part for part in re.split(r"[+\\s]+", slug) if part]
+            slug_parts = [part for part in re.split(r"[+\s]+", slug) if part]
         if len(slug_parts) >= 2:
             loc_guess = " ".join(slug_parts[:-1]).strip()
             loc_guess = _bc_sanitize_location_filter(loc_guess)
@@ -3157,6 +3202,7 @@ def scrape_bandcamp(
         sample_kept = ""
         sample_rejected = ""
         stop_processing = False
+        debug_location_samples = {"kept": [], "rejected": []}
 
         def process_artist(candidate, artist_dict):
             nonlocal kept_after_location, sample_kept, sample_rejected, rejected_location, stop_processing, search_skipped_old, search_skipped_location
@@ -3171,6 +3217,18 @@ def scrape_bandcamp(
                 hint_norm = _norm_text_(api_hint)
                 if label_norm and label_norm in hint_norm:
                     location_ok = True
+            if os.environ.get("BC_DEBUG_LOCATION") == "1":
+                debug_entry = {
+                    "raw_filter": requested_label or requested_hint or "",
+                    "canon_filter": _bc_canonicalize_location(requested_label or requested_hint),
+                    "raw_tile_loc": profile_location or api_hint or "",
+                    "canon_tile_loc": _bc_canonicalize_location(profile_location or api_hint),
+                    "api_hint": api_hint,
+                    "match": location_ok,
+                }
+                bucket = "kept" if location_ok else "rejected"
+                if len(debug_location_samples.get(bucket, [])) < 3:
+                    debug_location_samples[bucket].append(debug_entry)
             if not location_ok:
                 # For search runs with a user-provided location filter, allow entries with missing locations
                 # to pass through so we don't over-prune track searches that rarely expose locations.
@@ -3277,6 +3335,17 @@ def scrape_bandcamp(
             print(f"Bandcamp: kept sample -> {sample_kept}")
         if sample_rejected:
             print(f"Bandcamp: rejected (location) sample -> {sample_rejected}")
+        if os.environ.get("BC_DEBUG_LOCATION") == "1":
+            for entry in debug_location_samples.get("kept", []):
+                try:
+                    print(f"BC_DEBUG_LOCATION: keep {json.dumps(entry, ensure_ascii=False)}")
+                except Exception:
+                    print(f"BC_DEBUG_LOCATION: keep {entry}")
+            for entry in debug_location_samples.get("rejected", []):
+                try:
+                    print(f"BC_DEBUG_LOCATION: reject {json.dumps(entry, ensure_ascii=False)}")
+                except Exception:
+                    print(f"BC_DEBUG_LOCATION: reject {entry}")
         if kept_after_location == 0 and requested_label:
             print("Bandcamp: warning – no profiles matched requested location. Consider widening filters.")
 

@@ -1,0 +1,49 @@
+{
+  "export_mode": "both",
+  "jobs": [
+    {
+      "directory": "bandcamp",
+      "mode": "discover",
+      "input_seed_csv": "https://bandcamp.com/discover/manchester+rock?s=new",
+      "target_valid_leads": 20,
+      "max_hours": 0,
+      "job_id": "job_bandcamp_1"
+    },
+    {
+      "directory": "bandcamp",
+      "mode": "discover",
+      "input_seed_csv": "https://bandcamp.com/discover/england+rock?s=new",
+      "target_valid_leads": 20,
+      "max_hours": 0,
+      "job_id": "job_bandcamp_2"
+    },
+    {
+      "directory": "bandcamp",
+      "mode": "discover",
+      "input_seed_csv": "https://bandcamp.com/discover/bristol+rock?s=new",
+      "target_valid_leads": 20,
+      "max_hours": 0,
+      "job_id": "job_bandcamp_3"
+    },
+    {
+      "directory": "bandcamp",
+      "mode": "discover",
+      "input_seed_csv": "https://bandcamp.com/discover/brighton+rock?s=new",
+      "target_valid_leads": 20,
+      "max_hours": 0,
+      "job_id": "job_bandcamp_4"
+    }
+  ],
+  "facebook": {
+    "auto_resume_after_captcha": true,
+    "cooldown_seconds": 600,
+    "max_auto_resume_attempts": 1,
+    "max_rows_per_run": 100
+  },
+  "master_enrichment": {
+    "enabled": true
+  },
+  "soundcloud_meta_enricher": {
+    "enabled": false
+  }
+}

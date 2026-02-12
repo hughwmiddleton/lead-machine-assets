@@ -21,55 +21,75 @@ export SPOTIFY_CLIENT_ID="d32944f1a2414cd7a1681b4759f6a402"
 export SPOTIFY_CLIENT_SECRET="27188b55b8d94604a9a2172092e19416"
 export SPOTIFY_REDIRECT_URI="http://127.0.0.1:8080/callback"
 export SPOTIFY_REFRESH_TOKEN="AQB1vtP347IrhWrFAScJ_TwBSK0ZTiEdAbhxrmGf82vqmZIANMZdpLqnkpUDsEjGK9HZGGVfkfB9D915m28IK5CCAFFTMBwLd63n0UVmoYSSkjs_F8qXHJeDG-I0UgwrtAU"
-# --- General ---
+# =====================================================
+# GENERAL
+# =====================================================
 unset SC_DEBUG_LATEST
+export PYTHONFAULTHANDLER=1
 
-# FB: show candidate meta + rank preview
+# Qt GUI visible (macOS cocoa)
+unset QT_QPA_PLATFORM
+
+
+# =====================================================
+# FB DEBUG (High Signal, Low Noise)
+# =====================================================
 export FB_DEBUG_CAND_META=1
 export FB_DEBUG_CAND_META_N=12
 export FB_DEBUG_CANDIDATES=1
 
-# DOM gate visibility (keep ON)
 export FB_DEBUG_DOM_GATE=1
 unset FB_DEBUG_DOM_GATE_HREFS
 unset FB_DEBUG_DOM_GATE_HREFS_N
 
-# Ranking (the important part)
 export FB_DEBUG_RANK_SORT=1
 export FB_CANDIDATE_RANKING=1
 export FB_CANDIDATE_RANKING_PREVIEW_N=10
 
-# Phase 2 refine pass (recommended for validation)
+# Refine pass ON (needed for quality gate validation)
 export FB_REFINE_QUERY=1
 
-# Email override (debug only)
-export FB_DEBUG_EMAIL_OVERRIDE=1
-
-# Leave deep music-gate internals OFF
+# Leave deep internals OFF
 unset FB_DEBUG_CAND_GATE
 unset FB_DEBUG_MUSIC_SIGNALS
 unset FB_DEBUG_CAND_GATE_ASSERT
 unset FB_CANDIDATE_RANKING_DEBUG
 
-# FB automation — leave OFF for safety
+# No automated login typing
 unset FB_ALLOW_AUTOMATED_LOGIN
 
-# SoundCloud (fine)
-export NIGHT_SC_DEBUG=1
-export NIGHTMODE_SC_ENGINE="t007"
 
-# Bandcamp debug (fine)
+# =====================================================
+# FB NEW FEATURES (CORE TEST)
+# =====================================================
+
+# DOM fallback (important)
+export NIGHT_FB_DOM_FALLBACK=1
+
+# Minimum quality gate
+export NIGHT_FB_MIN_QUALITY_GATE=1
+export NIGHT_FB_MIN_QUALITY_SCORE=25
+
+# Checkpoint guard (important for this test)
+export NIGHT_FB_CHECKPOINT_GUARD=1
+
+# Disable email override (we want real behaviour)
+unset FB_DEBUG_EMAIL_OVERRIDE
+
+
+# =====================================================
+# SoundCloud (OFF to reduce noise)
+# =====================================================
+unset NIGHT_SC_DEBUG
+unset NIGHTMODE_SC_ENGINE
+
+
+# =====================================================
+# Bandcamp (minimal debug)
+# =====================================================
+unset BC_DEBUG_FILTER_SRC
 export BC_DEBUG_LOCATION=1
-export BC_DEBUG_FILTER_SRC=1
 
-# Qt GUI should use the default (cocoa) platform plugin so the window is visible.
-unset QT_QPA_PLATFORM
-
-# Always useful
-export PYTHONFAULTHANDLER=1
-
-# (Optional) Install dependencies if needed
-# pip install pandas tqdm selenium beautifulsoup4 webdriver_manager PyQt5
-
-# Run the Lead Machine program from the updated source directory.
+# ---------------------------
+# Run (use your normal runner)
 python3 "Lead Machine (Final Update 5).py"

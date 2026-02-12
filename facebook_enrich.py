@@ -926,6 +926,10 @@ def _extract_fb_category_candidates(card_el, page_name: str = "") -> Tuple[Optio
                 continue
             if len(token) > 80:
                 continue
+            # Drop obvious CTA/JSON noise tokens that occasionally leak into subtitles.
+            lowered = token.lower()
+            if ("{" in token and "}" in token and len(token) > 40) or lowered in ("follow", "message", "search", "book now"):
+                continue
             tokens.append(token)
         return tokens
 
@@ -1579,15 +1583,20 @@ def _fb_extract_candidates_from_search_dom(html_or_driver, logger=None, debug: b
     all_anchor_count = len(soup.select("a[href]")) if soup else 0
 
     container_selectors: List[str] = [
-        "div[role=\"main\"] div[aria-label*=\"Search results\"]",
+        "div[role=\"main\"] div[role=\"feed\"]",
+        "div[role=\"main\"] div[aria-label=\"Search results\"]",
+        "div[aria-label=\"Search results\"]",
+        "div[role=\"main\"]",
+        # Legacy/extra fallbacks kept for robustness
         "div[role=\"main\"] section[aria-label*=\"Search results\"]",
         "div[role=\"main\"] [data-pagelet^=\"SearchResults\"]",
-        "div[role=\"main\"] div[role=\"feed\"]",
+        "div[role=\"main\"] div[aria-label*=\"Search results\"]",
         "div[role=\"main\"] div[role=\"article\"]",
     ]
 
     chosen_selector = "NONE"
     containers = []
+    fallback_reason = ""
     for selector in container_selectors:
         try:
             containers = soup.select(selector)
@@ -1600,14 +1609,34 @@ def _fb_extract_candidates_from_search_dom(html_or_driver, logger=None, debug: b
     gate_debug_env = os.getenv("FB_DEBUG_DOM_GATE", "0")
 
     if not containers:
-        _emit(
-            f"[FB Shared][DOM Gate] chosen_container_selector=NONE containers_found=0 anchors_in_scope=0 "
-            f"candidates_pre_url_gate=0 candidates_post_url_gate=0 dropped_by_dom_gate={all_anchor_count} "
-            f"reason=dom_container_missing search_name='{search_name or ''}'"
-        )
-        return []
+        try:
+            # Conservative fallbacks: a standalone Search results region or article cards.
+            fallback_region = soup.find(attrs={"aria-label": re.compile(r"^Search results$", re.I)})
+        except Exception:
+            fallback_region = None
 
-    scoped_anchors = []
+        if fallback_region:
+            containers = [fallback_region]
+            chosen_selector = "aria-label=Search results (fallback)"
+            fallback_reason = "fallback_aria_label"
+        else:
+            try:
+                containers = soup.select('[role="article"]')
+            except Exception:
+                containers = []
+            if containers:
+                chosen_selector = "[role=article] (fallback)"
+                fallback_reason = "fallback_article"
+
+        if not containers:
+            _emit(
+                f"[FB Shared][DOM Gate] chosen_container_selector=NONE containers_found=0 anchors_in_scope=0 "
+                f"candidates_pre_url_gate=0 candidates_post_url_gate=0 dropped_by_dom_gate={all_anchor_count} "
+                f"reason=dom_container_missing search_name='{search_name or ''}'"
+            )
+            return []
+
+    scoped_anchors: List[Tag] = []
     if containers:
         for container in containers:
             try:
@@ -1616,6 +1645,45 @@ def _fb_extract_candidates_from_search_dom(html_or_driver, logger=None, debug: b
                 continue
 
     anchors_in_scope = len(scoped_anchors)
+
+    # Optional DOM fallback: when too few anchors are found in scoped containers, augment using
+    # broader selectors while filtering obvious nav/header/footer anchors.
+    fallback_enabled = os.getenv("NIGHT_FB_DOM_FALLBACK") == "1"
+    if fallback_enabled and anchors_in_scope < 2:
+        fallback_selectors = [
+            'article[role="article"] a[href]',
+            'div[role="feed"] a[href]',
+            'div[role="main"] a[href]',
+        ]
+
+        def _is_nav_like(anchor: Tag) -> bool:
+            try:
+                parent_with_aria = anchor.find_parent(attrs={"aria-label": True})
+            except Exception:
+                parent_with_aria = None
+            aria_val = ""
+            if parent_with_aria is not None:
+                try:
+                    aria_val = parent_with_aria.get("aria-label") or ""
+                except Exception:
+                    aria_val = ""
+            aria_lower = aria_val.lower()
+            return any(tok in aria_lower for tok in ("navigation", "header", "footer"))
+
+        for fb_selector in fallback_selectors:
+            try:
+                fallback_anchors = soup.select(fb_selector)
+            except Exception:
+                fallback_anchors = []
+
+            filtered = [a for a in fallback_anchors if not _is_nav_like(a)]
+            if filtered:
+                scoped_anchors.extend(filtered)
+                chosen_selector = f"{chosen_selector} + fallback:{fb_selector}"
+                fallback_reason = fallback_reason or "low_anchor_fallback"
+            anchors_in_scope = len(scoped_anchors)
+            if anchors_in_scope >= 2:
+                break
 
     if os.getenv("FB_DEBUG_DOM_GATE_HREFS") == "1":
         hrefs = []
@@ -1732,7 +1800,7 @@ def _fb_extract_candidates_from_search_dom(html_or_driver, logger=None, debug: b
         f"[FB Shared][DOM Gate] chosen_container_selector={chosen_selector} containers_found={len(containers)} "
         f"anchors_in_scope={anchors_in_scope} candidates_pre_url_gate={candidates_pre_url_gate} "
         f"candidates_post_url_gate={candidates_post_url_gate} url_gate_rejected={gate_reject} dropped_by_dom_gate={dropped_by_dom_gate} "
-        f"search_name='{search_name or ''}'"
+        f"reason={fallback_reason or 'container_match'} search_name='{search_name or ''}'"
     )
 
     if gate_debug_env in ("1", "2"):
