@@ -635,15 +635,19 @@ def _clone_chrome_options(chrome_options: ChromeOptions, override_profile_dir: O
     return new_opts
 
 
-def _get_night_fb_profile_dir() -> str:
-    """
-    Resolve a stable Chrome profile directory for Night FB.
-    Preference: env NIGHT_FB_PROFILE_DIR; fallback to sibling 'Lead Machine Code/night_fb_profile'.
-    """
-    env_path = os.environ.get("NIGHT_FB_PROFILE_DIR")
-    if env_path:
-        return os.path.abspath(env_path)
+_night_fb_profile_dir_logged: bool = False
 
+
+def _normalize_profile_path(path: str) -> str:
+    expanded = os.path.expanduser(os.path.expandvars(path))
+    try:
+        return str(Path(expanded).resolve())
+    except Exception:
+        return os.path.abspath(expanded)
+
+
+def _infer_night_fb_profile_dir() -> str:
+    """Infer the Night FB profile directory without reading the env."""
     base_file = Path(__file__).resolve()
 
     def _profile_dir_candidates(from_file: Path) -> List[str]:
@@ -672,14 +676,7 @@ def _get_night_fb_profile_dir() -> str:
         return (existing[0] if existing else None, existing)
 
     candidates = _profile_dir_candidates(base_file)
-    selected, existing_candidates = _pick_existing_profile_dir(candidates)
-
-    if existing_candidates and len(existing_candidates) > 1:
-        logging.getLogger(__name__).warning(
-            "[Night FB] Multiple profile dir candidates found; using %s; others: %s",
-            selected,
-            ", ".join(existing_candidates[1:]),
-        )
+    selected, _existing_candidates = _pick_existing_profile_dir(candidates)
 
     if selected:
         return selected
@@ -688,9 +685,37 @@ def _get_night_fb_profile_dir() -> str:
     return str(base_file.parent / "night_fb_profile")
 
 
+def _resolve_night_fb_profile_dir(logger: LoggerFn = None) -> str:
+    """Resolve and log the Night FB Chrome profile directory once per run."""
+    global _night_fb_profile_dir_logged
+    env_raw = os.environ.get("NIGHT_FB_PROFILE_DIR") or ""
+
+    if env_raw.strip():
+        chosen_raw = env_raw.strip()
+        env_set = True
+    else:
+        chosen_raw = _infer_night_fb_profile_dir()
+        env_set = False
+
+    resolved_path = _normalize_profile_path(chosen_raw)
+    try:
+        os.makedirs(resolved_path, exist_ok=True)
+    except Exception:
+        pass
+
+    if not _night_fb_profile_dir_logged:
+        if env_set:
+            _log(logger, f"[Night FB] Using Chrome profile dir: {resolved_path}")
+        else:
+            _log(logger, f"[Night FB][WARN] NIGHT_FB_PROFILE_DIR not set; using inferred path: {resolved_path}")
+        _night_fb_profile_dir_logged = True
+
+    return resolved_path
+
+
 def _night_fb_profile_dir_self_check(logger: LoggerFn = None) -> str:
     """Debug helper to print resolved profile dir + Default/lock presence."""
-    profile_dir = _get_night_fb_profile_dir()
+    profile_dir = _resolve_night_fb_profile_dir(logger)
     default_exists = os.path.isdir(os.path.join(profile_dir, "Default"))
     singleton_lock = os.path.exists(os.path.join(profile_dir, "SingletonLock"))
     _log(
@@ -993,7 +1018,7 @@ def _create_fb_driver_night_mode(headless: bool, logger: LoggerFn = None):
     """
     Night-Mode-only Chrome driver with persistent profile to reuse FB auth.
     """
-    profile_dir = _get_night_fb_profile_dir()
+    profile_dir = _resolve_night_fb_profile_dir(logger)
     try:
         os.makedirs(profile_dir, exist_ok=True)
     except Exception:
@@ -1016,11 +1041,6 @@ def _create_fb_driver_night_mode(headless: bool, logger: LoggerFn = None):
     chrome_options.page_load_strategy = "eager"
     prefs = {"profile.managed_default_content_settings.images": 2}
     chrome_options.add_experimental_option("prefs", prefs)
-
-    _log(
-        logger,
-        f"[Night FB] Using Chrome profile dir: {profile_dir} (profile 'Default', headless={headless})",
-    )
     driver = _start_chromedriver_with_retry(
         chrome_options,
         logger=logger,
@@ -2397,11 +2417,11 @@ class NightModeFacebookEnricher:
             )
 
         mode_label = "headless" if self.headless else "headed"
-        profile_dir = _get_night_fb_profile_dir()
+        profile_dir = _resolve_night_fb_profile_dir(self.logger)
         headless_env_label = self._headless_env_raw if self._headless_env_raw is not None else "<unset>"
         _log(
             self.logger,
-            f"[Night FB] Starting session mode={mode_label} profile_dir={profile_dir} headless_env={headless_env_label} require_display={self.require_display} os={sys.platform}",
+            f"[Night FB] Starting session mode={mode_label} headless_env={headless_env_label} require_display={self.require_display} os={sys.platform}",
         )
         if _bool_env("NIGHT_FB_DEBUG_MODE", default=False):
             _log(
