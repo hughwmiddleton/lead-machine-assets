@@ -17,6 +17,7 @@ import atexit
 import weakref
 import subprocess
 import tempfile
+import random
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 import logging
@@ -31,6 +32,7 @@ from selenium.webdriver.chrome.service import Service as ChromeService
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
+from selenium.common.exceptions import NoSuchElementException, StaleElementReferenceException, TimeoutException
 from webdriver_manager.chrome import ChromeDriverManager
 
 try:
@@ -209,6 +211,103 @@ def _log(logger: LoggerFn, message: str) -> None:
         print(message)
     except Exception:
         pass
+
+
+def _find_first(driver, css_selector: str):
+    """Best-effort single element lookup; never raises."""
+    try:
+        elements = driver.find_elements(By.CSS_SELECTOR, css_selector)
+        return elements[0] if elements else None
+    except Exception:
+        return None
+
+
+def _find_all(driver, css_selector: str) -> List:
+    """Best-effort multi element lookup; never raises."""
+    try:
+        return driver.find_elements(By.CSS_SELECTOR, css_selector)
+    except Exception:
+        return []
+
+
+def _normalize_fb_href(href: str) -> str:
+    href = (href or "").strip()
+    if not href:
+        return ""
+    href_lower = href.lower()
+    if href_lower.startswith("javascript:") or href.startswith("#"):
+        return ""
+    try:
+        href = urllib.parse.urljoin("https://www.facebook.com", href)
+    except Exception:
+        pass
+    href = href.split("#", 1)[0]
+    return href
+
+
+def _is_candidate_usable(href: str) -> bool:
+    href = _normalize_fb_href(href)
+    if not href or "facebook.com" not in href:
+        return False
+    try:
+        if is_junk_fb_candidate_url(href):
+            return False
+    except Exception:
+        pass
+    try:
+        return _fb_is_candidate_url_allowed(href)
+    except Exception:
+        return False
+
+
+def _extract_anchor_hrefs(container) -> Tuple[List[str], List]:
+    """
+    Extract raw anchor hrefs inside a container (dedup by element id + href).
+    Returns (hrefs, elements).
+    """
+    if container is None:
+        return [], []
+    anchors = []
+    seen_ids = set()
+    for selector in ("a", 'a[role=\"link\"]'):
+        try:
+            found = container.find_elements(By.CSS_SELECTOR, selector)
+        except Exception:
+            found = []
+        for el in found:
+            try:
+                el_id = el.id
+            except Exception:
+                el_id = id(el)
+            if el_id in seen_ids:
+                continue
+            seen_ids.add(el_id)
+            anchors.append(el)
+
+    hrefs = []
+    href_seen = set()
+    for el in anchors:
+        try:
+            raw_href = el.get_attribute("href") or ""
+        except Exception:
+            raw_href = ""
+        href = _normalize_fb_href(raw_href)
+        if not href or "facebook.com" not in href:
+            continue
+        if href in href_seen:
+            continue
+        href_seen.add(href)
+        hrefs.append(href)
+    return hrefs, anchors
+
+
+def _count_usable(container) -> int:
+    hrefs, _ = _extract_anchor_hrefs(container)
+    usable = 0
+    for href in hrefs:
+        if _is_candidate_usable(href):
+            usable += 1
+    return usable
 
 
 def _slugify(text: str) -> str:
@@ -709,6 +808,162 @@ def _looks_like_fb_warning_or_block(html: Optional[str], url: str = "") -> Optio
         if all(p in lower for p in parts):
             return "warning_interstitial"
     return None
+
+
+def _harvest_search_candidates_v2(driver, logger: LoggerFn = None, search_name: str = "") -> List["facebook_enrich.FbCandidate"]:
+    """
+    Resilient FB search candidate harvester (feature-flagged).
+    - Prefers feed container, falls back to search results, then main.
+    - Waits for usable anchors, retries with small scrolls, applies existing URL gate.
+    - Returns candidates enriched via existing parser but scoped to chosen container URLs.
+    """
+    if driver is None:
+        return []
+
+    feed_selector = 'div[role="main"] div[role="feed"]'
+    search_selector = 'div[aria-label="Search results"]'
+    main_selector = 'div[role="main"]'
+
+    wait_hit = "timeout"
+    scroll_retries = 0
+
+    def _wait_condition(drv):
+        try:
+            feed_el = _find_first(drv, feed_selector)
+            search_el = _find_first(drv, search_selector)
+            usable_feed = _count_usable(feed_el)
+            usable_search = _count_usable(search_el)
+            if usable_feed > 0:
+                return "feed"
+            if usable_search > 0:
+                return "search_results"
+            return False
+        except StaleElementReferenceException:
+            return False
+
+    wait_seconds = random.uniform(8.0, 12.0)
+    try:
+        wait_hit = WebDriverWait(driver, wait_seconds).until(_wait_condition)
+    except TimeoutException:
+        wait_hit = "timeout"
+    except Exception:
+        wait_hit = "timeout"
+
+    def _refresh_counts():
+        feed_containers = _find_all(driver, feed_selector)
+        search_containers = _find_all(driver, search_selector)
+        feed_container = feed_containers[0] if feed_containers else None
+        search_container = search_containers[0] if search_containers else None
+
+        feed_hrefs, feed_elements = _extract_anchor_hrefs(feed_container)
+        search_hrefs, search_elements = _extract_anchor_hrefs(search_container)
+
+        usable_feed = sum(1 for href in feed_hrefs if _is_candidate_usable(href))
+        usable_search = sum(1 for href in search_hrefs if _is_candidate_usable(href))
+
+        return {
+            "feed_container": feed_container,
+            "search_container": search_container,
+            "feed_hrefs": feed_hrefs,
+            "search_hrefs": search_hrefs,
+            "usable_feed": usable_feed,
+            "usable_search": usable_search,
+            "anchors_in_scope_feed": len(feed_elements),
+            "anchors_in_scope_search": len(search_elements),
+            "containers_found_feed": len(feed_containers),
+            "containers_found_search": len(search_containers),
+        }
+
+    counts = _refresh_counts()
+
+    if counts["usable_feed"] == 0 and counts["usable_search"] == 0:
+        for attempt in range(2):
+            try:
+                driver.execute_script("window.scrollBy(0, 700);")
+            except Exception:
+                pass
+            time.sleep(random.uniform(0.3, 0.6))
+            scroll_retries = attempt + 1
+            counts = _refresh_counts()
+            if counts["usable_feed"] > 0 or counts["usable_search"] > 0:
+                break
+
+    chosen_selector = "NONE"
+    chosen_container = None
+    chosen_hrefs: List[str] = []
+    anchors_in_scope_chosen = 0
+
+    if counts["usable_feed"] > 0:
+        chosen_selector = 'div[role="main"] div[role="feed"]'
+        chosen_container = counts["feed_container"]
+        chosen_hrefs = counts["feed_hrefs"]
+        anchors_in_scope_chosen = counts["anchors_in_scope_feed"]
+    elif counts["usable_search"] > 0:
+        chosen_selector = 'div[aria-label="Search results"]'
+        chosen_container = counts["search_container"]
+        chosen_hrefs = counts["search_hrefs"]
+        anchors_in_scope_chosen = counts["anchors_in_scope_search"]
+    else:
+        main_container = _find_first(driver, main_selector)
+        if main_container is not None:
+            main_hrefs, main_elements = _extract_anchor_hrefs(main_container)
+            usable_main = sum(1 for href in main_hrefs if _is_candidate_usable(href))
+            if usable_main > 0:
+                chosen_selector = 'div[role="main"]'
+                chosen_container = main_container
+                chosen_hrefs = main_hrefs
+                anchors_in_scope_chosen = len(main_elements)
+
+        if chosen_container is None:
+            total_anchors = len(_find_all(driver, "a"))
+            _log(
+                logger,
+                "[Night FB][DOM Gate V2] "
+                f"harvest_version=v2 wait_hit={wait_hit} containers_found_feed={counts['containers_found_feed']} "
+                f"containers_found_search={counts['containers_found_search']} scroll_retries={scroll_retries} "
+                f"anchors_in_scope_feed={counts['anchors_in_scope_feed']} anchors_in_scope_search={counts['anchors_in_scope_search']} "
+                f"candidates_pre_url_gate=0 candidates_post_url_gate=0 dropped_by_dom_gate={total_anchors} "
+                f"url_gate_rejected=0 chosen_container_selector=NONE search_name='{search_name or ''}'"
+            )
+            return []
+
+    candidates_pre_url_gate = len(set(chosen_hrefs))
+    filtered_hrefs: List[str] = []
+    gate_reject = 0
+    seen_href: set = set()
+    for href in chosen_hrefs:
+        if href in seen_href:
+            continue
+        seen_href.add(href)
+        if not _is_candidate_usable(href):
+            gate_reject += 1
+            continue
+        filtered_hrefs.append(href)
+
+    candidates_post_url_gate = len(filtered_hrefs)
+
+    total_anchors_all = len(_find_all(driver, "a"))
+    dropped_by_dom_gate = max(0, total_anchors_all - anchors_in_scope_chosen)
+
+    # Reuse existing parser for enrichment, then scope to selected hrefs for parity with v1 objects.
+    enriched_candidates = _parse_search_candidates(getattr(driver, "page_source", ""), logger=logger, search_name=search_name)
+    href_set = { _normalize_fb_href(h) for h in filtered_hrefs }
+    filtered_candidates = [
+        cand for cand in enriched_candidates if _normalize_fb_href(getattr(cand, "url", "")) in href_set
+    ]
+
+    _log(
+        logger,
+        "[Night FB][DOM Gate V2] "
+        f"harvest_version=v2 wait_hit={wait_hit} containers_found_feed={counts['containers_found_feed']} "
+        f"containers_found_search={counts['containers_found_search']} scroll_retries={scroll_retries} "
+        f"anchors_in_scope_feed={counts['anchors_in_scope_feed']} anchors_in_scope_search={counts['anchors_in_scope_search']} "
+        f"candidates_pre_url_gate={candidates_pre_url_gate} candidates_post_url_gate={candidates_post_url_gate} "
+        f"dropped_by_dom_gate={dropped_by_dom_gate} url_gate_rejected={gate_reject} "
+        f"chosen_container_selector={chosen_selector} search_name='{search_name or ''}'"
+    )
+
+    return filtered_candidates
 
 
 def _create_fb_driver_night_mode(headless: bool, logger: LoggerFn = None):
@@ -2475,21 +2730,22 @@ class NightModeFacebookEnricher:
             quality_threshold = int(os.getenv("NIGHT_FB_MIN_QUALITY_SCORE") or 25)
         except Exception:
             quality_threshold = 25
+        v2_enabled = _bool_env("FB_SEARCH_HARVEST_V2", default=False)
 
-        def _fetch_search_html(query_str: str) -> Optional[str]:
+        def _fetch_search_html(query_str: str) -> Tuple[Optional[str], Optional[Any]]:
             encoded_q = urllib.parse.quote_plus(query_str)
             search_url = f"https://www.facebook.com/search/pages/?q={encoded_q}"
             _log(self.logger, f"[Night FB] Searching Facebook for '{query_str}' -> {search_url}")
-            def _nav_with_session() -> str:
+            def _nav_with_session() -> Tuple[str, Any]:
                 drv = session.navigate(search_url)
                 time.sleep(1.5)
-                return getattr(drv, "page_source", "")
+                return getattr(drv, "page_source", ""), drv
 
-            def _nav_anon() -> str:
+            def _nav_anon() -> Tuple[str, Any]:
                 driver = self._get_anon_driver()
                 driver.get(search_url)
                 time.sleep(1.5)
-                return getattr(driver, "page_source", "")
+                return getattr(driver, "page_source", ""), driver
 
             nav_fn = _nav_with_session if session else _nav_anon
             try:
@@ -2513,16 +2769,32 @@ class NightModeFacebookEnricher:
         primary_query = " ".join(part for part in (artist, location) if part).strip()
         if not primary_query:
             return None
-        html = _fetch_search_html(primary_query)
+        html, nav_driver = _fetch_search_html(primary_query)
+
+        # Optional self-check: confirm shared URL gate predicate.
+        if _bool_env("FB_DEBUG_CAND_GATE_ASSERT", default=False):
+            try:
+                assert _fb_is_candidate_url_allowed is facebook_enrich._fb_is_candidate_url_allowed  # type: ignore
+            except Exception:
+                pass
+
+        def _harvest_candidates(html_val: str, driver_obj, search_label: str) -> List["facebook_enrich.FbCandidate"]:
+            if v2_enabled and driver_obj is not None:
+                try:
+                    return _harvest_search_candidates_v2(driver_obj, logger=self.logger, search_name=search_label)
+                except Exception:
+                    # Defensive: fall back to V1 if V2 path fails.
+                    pass
+            return _parse_search_candidates(html_val, logger=self.logger, search_name=search_label)
 
         def _run_refine_queries() -> List["facebook_enrich.FbCandidate"]:
             refine_candidates: List["facebook_enrich.FbCandidate"] = []
             for refine_query in (f"{artist} musician", f"{artist} band"):
-                html_refined = _fetch_search_html(refine_query)
-                refine_candidates.extend(_parse_search_candidates(html_refined, logger=self.logger, search_name=artist))
+                html_refined, drv_refined = _fetch_search_html(refine_query)
+                refine_candidates.extend(_harvest_candidates(html_refined, drv_refined, artist))
             return refine_candidates
 
-        candidates = _parse_search_candidates(html, logger=self.logger, search_name=artist)
+        candidates = _harvest_candidates(html, nav_driver, artist)
         ranked_for_preview = _rank_candidates_for_preview(artist, candidates)
 
         need_refine = False

@@ -30,7 +30,6 @@ export PYTHONFAULTHANDLER=1
 # Qt GUI visible (macOS cocoa)
 unset QT_QPA_PLATFORM
 
-
 # =====================================================
 # FB DEBUG (High Signal, Low Noise)
 # =====================================================
@@ -39,8 +38,8 @@ export FB_DEBUG_CAND_META_N=12
 export FB_DEBUG_CANDIDATES=1
 
 export FB_DEBUG_DOM_GATE=1
-export FB_DEBUG_DOM_GATE_HREFS
-export FB_DEBUG_DOM_GATE_HREFS_N
+unset FB_DEBUG_DOM_GATE_HREFS
+unset FB_DEBUG_DOM_GATE_HREFS_N
 
 export FB_DEBUG_RANK_SORT=1
 export FB_CANDIDATE_RANKING=1
@@ -63,7 +62,10 @@ unset FB_ALLOW_AUTOMATED_LOGIN
 # FB NEW FEATURES (CORE TEST)
 # =====================================================
 
-# DOM fallback (important)
+# T016 — DOM Gate V2 (IMPORTANT)
+export FB_SEARCH_HARVEST_V2=1
+
+# Existing DOM fallback (keep ON)
 export NIGHT_FB_DOM_FALLBACK=1
 
 # Minimum quality gate
@@ -76,7 +78,7 @@ export NIGHT_FB_CHECKPOINT_GUARD=1
 # Stable Night FB profile (prevents profile drift + lock weirdness)
 export NIGHT_FB_PROFILE_DIR="/Users/hughmiddleton/Lead Machine/Lead Machine Code/night_fb_profile"
 
-# Optional verbose driver logs (turn on only when debugging)
+# Optional verbose driver logs (turn on only when debugging deeply)
 # export NIGHT_FB_CHROMEDRIVER_LOG=/tmp/night_fb_chromedriver.log
 
 # Disable email override (we want real behaviour)
@@ -96,6 +98,8 @@ unset NIGHTMODE_SC_ENGINE
 unset BC_DEBUG_FILTER_SRC
 export BC_DEBUG_LOCATION=1
 
-# ---------------------------
-# Run (use your normal runner)
+
+# =====================================================
+# RUN
+# =====================================================
 python3 "Lead Machine (Final Update 5).py"
