@@ -189,9 +189,35 @@ def _guard_against_email_smear(df: pd.DataFrame, logger: Optional[logging.Logger
 
     total_counts: Dict[str, int] = {}
     email_job_counts: Dict[str, Dict[str, int]] = {}
+    email_job_evidence: Dict[str, Dict[str, int]] = {}
+
+    def _row_evidence_score(row: pd.Series, job_lower: str, primary_url: str) -> int:
+        primary_url_lower = primary_url.lower()
+        score = 0
+
+        if "soundcloud" in job_lower:
+            if "soundcloud.com" in primary_url_lower:
+                score += 1
+            if _cell_str(row.get("SoundCloud Link")):
+                score += 1
+            if "soundcloud.com" in _cell_str(row.get("Source URL")).lower():
+                score += 1
+
+        if "bandcamp" in job_lower:
+            if primary_url_lower.endswith(".bandcamp.com") or "bandcamp.com" in primary_url_lower:
+                score += 1
+
+        if "facebook" in job_lower and ("facebook.com" in primary_url_lower):
+            score += 1
+
+        return score
 
     for _, row in work.iterrows():
         job = _cell_str(row.get("__source_job"))
+        job_lower = job.lower()
+        primary_url = _primary_url_from_row(row)
+        evidence_score = _row_evidence_score(row, job_lower, primary_url)
+
         row_emails: set[str] = set()
         for col in email_cols:
             row_emails.update(pipeline_runner.normalize_emails(_cell_str(row.get(col))))
@@ -201,6 +227,9 @@ def _guard_against_email_smear(df: pd.DataFrame, logger: Optional[logging.Logger
             total_counts[email] = total_counts.get(email, 0) + 1
             job_counts = email_job_counts.setdefault(email, {})
             job_counts[job] = job_counts.get(job, 0) + 1
+            if evidence_score:
+                evidence_counts = email_job_evidence.setdefault(email, {})
+                evidence_counts[job] = evidence_counts.get(job, 0) + evidence_score
 
     suspect_emails = {email for email, count in total_counts.items() if count >= max(1, int(min_repeats))}
     if not suspect_emails:
@@ -210,10 +239,14 @@ def _guard_against_email_smear(df: pd.DataFrame, logger: Optional[logging.Logger
 
     for email in sorted(suspect_emails):
         jobs = email_job_counts.get(email, {})
+        evidence = email_job_evidence.get(email, {})
         if len(jobs) <= 1:
             continue
-        # Origin job: highest frequency, then alphabetical.
-        origin_job = sorted(jobs.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
+        evidence_values = [evidence.get(job, 0) for job in jobs]
+        if any(val > 0 for val in evidence_values):
+            origin_job = sorted(jobs.keys(), key=lambda job: (-evidence.get(job, 0), -jobs[job], job))[0]
+        else:
+            origin_job = sorted(jobs.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
 
         for idx, row in work.iterrows():
             job = _cell_str(row.get("__source_job"))
@@ -245,7 +278,9 @@ def _guard_against_email_smear(df: pd.DataFrame, logger: Optional[logging.Logger
             work.at[idx, "Email Source"] = "Quarantined (smear guard)"
             rows_cleared[email] += 1
 
-        jobs_summary = ", ".join(f"{job}:{count}" for job, count in sorted(jobs.items()))
+        jobs_summary = ", ".join(
+            f"{job}:{count}/{evidence.get(job, 0)}" for job, count in sorted(jobs.items())
+        )
         cleared = rows_cleared.get(email, 0)
         msg = (
             f"[SmearGuard] email={email} total={total_counts.get(email, 0)} "

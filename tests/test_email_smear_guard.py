@@ -46,3 +46,47 @@ def test_guard_against_email_smear_clears_cross_job_rows():
     assert suspect_rows["Suspect_Email_All"].str.contains(email).all()
     assert (suspect_rows["Needs_Review"] == "TRUE").all()
     assert (suspect_rows["Email Source"] == "Quarantined (smear guard)").all()
+
+
+def test_guard_prefers_soundcloud_evidence_over_bandcamp_frequency():
+    email = "sc@example.com"
+
+    soundcloud_rows = [
+        {
+            "Artist Name": f"sc{i}",
+            "Email": email,
+            "Email_All": email,
+            "SoundCloud Link": f"https://soundcloud.com/artist{i}",
+            "Source URL": f"https://soundcloud.com/artist{i}/track",
+            "__source_job": "job_soundcloud_2",
+        }
+        for i in range(3)
+    ]
+
+    bandcamp_rows = [
+        {
+            "Artist Name": f"bc{i}",
+            "Email": email,
+            "Email_All": email,
+            "Source URL": f"https://bandcamp.com/artist{i}/album",
+            "__source_job": "job_bandcamp_1",
+        }
+        for i in range(5)
+    ]
+
+    smeared = pd.DataFrame(soundcloud_rows + bandcamp_rows)
+
+    guarded = _guard_against_email_smear(smeared, logger=None, min_repeats=5)
+
+    sc_mask = guarded["__source_job"] == "job_soundcloud_2"
+    bc_mask = guarded["__source_job"] == "job_bandcamp_1"
+
+    # Origin should stay on SoundCloud rows.
+    assert (guarded.loc[sc_mask, "Email"] == email).all()
+    assert (guarded.loc[sc_mask, "Email_All"] == email).all()
+
+    # Bandcamp rows should be cleared and marked for review.
+    assert (guarded.loc[bc_mask, "Email"] == "").all()
+    assert (guarded.loc[bc_mask, "Email_All"] == "").all()
+    assert (guarded.loc[bc_mask, "Needs_Review"] == "TRUE").all()
+    assert (guarded.loc[bc_mask, "Email Source"] == "Quarantined (smear guard)").all()
