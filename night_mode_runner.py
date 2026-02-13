@@ -150,7 +150,17 @@ def _coalesce_emails(df: pd.DataFrame) -> pd.DataFrame:
         email_col = df["Email"].fillna("").astype(str)
         mask_all = email_all.str.strip() == ""
         df.loc[mask_all, "Email_All"] = email_col[mask_all]
-    email_series = df[existing].bfill(axis=1).iloc[:, 0].fillna("").astype(str)
+
+    # Cast to object before bfill to avoid pandas string-array backfill bug
+    # that was smearing a single email across all rows.
+    email_series = (
+        df[existing]
+        .astype(object)
+        .bfill(axis=1)
+        .iloc[:, 0]
+        .fillna("")
+        .astype(str)
+    )
     df["Email"] = email_series.str.strip()
     return df
 
@@ -176,6 +186,11 @@ def _guard_against_email_smear(df: pd.DataFrame, logger: Optional[logging.Logger
         return df
 
     work = df.copy(deep=True)
+    # Preserve any pre-merge email signals, if present, so origin detection
+    # can ignore values that were accidentally smeared after the scrape.
+    orig_email_col = "__email_orig"
+    orig_email_all_col = "__email_all_orig"
+    has_orig = orig_email_col in work.columns or orig_email_all_col in work.columns
 
     for col in ("Suspect_Email", "Suspect_Email_All", "Needs_Review", "Email Source"):
         if col not in work.columns:
@@ -219,8 +234,18 @@ def _guard_against_email_smear(df: pd.DataFrame, logger: Optional[logging.Logger
         evidence_score = _row_evidence_score(row, job_lower, primary_url)
 
         row_emails: set[str] = set()
-        for col in email_cols:
-            row_emails.update(pipeline_runner.normalize_emails(_cell_str(row.get(col))))
+        # Prefer original email fields when available to avoid counting
+        # values that were introduced by an upstream smear.
+        if has_orig:
+            row_emails.update(
+                pipeline_runner.normalize_emails(_cell_str(row.get(orig_email_col)))
+            )
+            row_emails.update(
+                pipeline_runner.normalize_emails(_cell_str(row.get(orig_email_all_col)))
+            )
+        if not row_emails:
+            for col in email_cols:
+                row_emails.update(pipeline_runner.normalize_emails(_cell_str(row.get(col))))
         if not row_emails:
             continue
         for email in row_emails:
@@ -251,8 +276,16 @@ def _guard_against_email_smear(df: pd.DataFrame, logger: Optional[logging.Logger
         for idx, row in work.iterrows():
             job = _cell_str(row.get("__source_job"))
             row_emails: set[str] = set()
-            for col in email_cols:
-                row_emails.update(pipeline_runner.normalize_emails(_cell_str(row.get(col))))
+            if has_orig:
+                row_emails.update(
+                    pipeline_runner.normalize_emails(_cell_str(row.get(orig_email_col)))
+                )
+                row_emails.update(
+                    pipeline_runner.normalize_emails(_cell_str(row.get(orig_email_all_col)))
+                )
+            if not row_emails:
+                for col in email_cols:
+                    row_emails.update(pipeline_runner.normalize_emails(_cell_str(row.get(col))))
             if email not in row_emails:
                 continue
             if job == origin_job:
@@ -607,6 +640,12 @@ def _merge_raw_master(run_dir: str, job_states: List[Dict[str, Any]], logger: lo
         try:
             df = pd.read_csv(path)
             df["__source_job"] = job_id
+            # Keep a copy of the per-job email fields before any merge/consolidation
+            # so SmearGuard can rely on the originals if a later step smears values.
+            if "Email" in df.columns:
+                df["__email_orig"] = df["Email"]
+            if "Email_All" in df.columns:
+                df["__email_all_orig"] = df["Email_All"]
             frames.append(df)
         except Exception as exc:
             logger.warning("[Master] Skipping %s due to read error: %s", path, exc)
@@ -619,6 +658,10 @@ def _merge_raw_master(run_dir: str, job_states: List[Dict[str, Any]], logger: lo
             combined[col] = combined[col].fillna("").astype(str).apply(_strip_excluded_urls)
     combined = _coalesce_emails(combined)
     combined = _guard_against_email_smear(combined, logger=logger, min_repeats=5)
+    # Drop helper columns before writing the master file.
+    for helper_col in ("__email_orig", "__email_all_orig"):
+        if helper_col in combined.columns:
+            combined = combined.drop(columns=[helper_col])
     try:
         unearthed_mask = combined.get("Source Directory", pd.Series(dtype=str)).astype(str).str.contains("unearthed", case=False, na=False)
         sample = combined.loc[unearthed_mask, ["Artist Name", "Source Directory", "Email", "Email_All"]].head()

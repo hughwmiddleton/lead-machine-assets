@@ -341,7 +341,17 @@ def _coalesce_emails(df: pd.DataFrame) -> pd.DataFrame:
         email_col = df["Email"].fillna("").astype(str)
         mask_all = email_all.str.strip() == ""
         df.loc[mask_all, "Email_All"] = email_col[mask_all]
-    email_series = df[existing].bfill(axis=1).iloc[:, 0].fillna("").astype(str)
+
+    # Use object dtype during bfill to avoid pandas string-array backfill bug
+    # that can smear a single email across all rows.
+    email_series = (
+        df[existing]
+        .astype(object)
+        .bfill(axis=1)
+        .iloc[:, 0]
+        .fillna("")
+        .astype(str)
+    )
     df["Email"] = email_series.str.strip()
     return df
 
