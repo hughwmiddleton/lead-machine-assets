@@ -198,6 +198,22 @@ def _ensure_parent(path: str) -> None:
         os.makedirs(parent, exist_ok=True)
 
 
+def _cell_str(v) -> str:
+    if v is None:
+        return ""
+    try:
+        is_na = pd.isna(v)
+    except Exception:
+        return str(v)
+    try:
+        if bool(is_na):
+            return ""
+    except Exception:
+        return str(v)
+    return str(v)
+
+
+
 def _read_seed_list(seed_path: Optional[str]) -> List[str]:
     if not seed_path:
         return []
@@ -1069,6 +1085,36 @@ def _has_facebook_clue(row: pd.Series) -> bool:
     return bool(name)
 
 
+def _should_skip_row_due_to_email(
+    row: pd.Series, skip_rows_with_email: bool = True, logger: LoggerFn = _LOGGER
+) -> bool:
+    if not skip_rows_with_email:
+        return False
+
+    email_all_val = _cell_str(row.get("Email_All"))
+    has_email = bool(email_all_val.strip())
+
+    email_source = _cell_str(row.get("Email Source"))
+    needs_review = _cell_str(row.get("Needs_Review")).lower()
+    suspect_email = _cell_str(row.get("Suspect_Email"))
+    suspect_email_all = _cell_str(row.get("Suspect_Email_All"))
+
+    quarantine_override = (
+        email_source == "Quarantined (repeat email)"
+        or needs_review == "true"
+        or bool(suspect_email.strip() or suspect_email_all.strip())
+    )
+
+    if quarantine_override:
+        if has_email:
+            row_id = row.get("__row_id", row.name)
+            artist = _cell_str(row.get("Artist Name"))
+            _safe_log(logger, f"[Night FB] Quarantine override: forcing attempt for row {row_id} ('{artist}') despite email fields present.")
+        return False
+
+    return has_email
+
+
 def run_facebook_global_pass(
     input_csv: str,
     output_csv: str,
@@ -1101,10 +1147,7 @@ def run_facebook_global_pass(
     df["__row_id"] = range(len(df))
 
     def _eligible(row: pd.Series) -> bool:
-        email_all_val = row.get("Email_All", "")
-        if pd.isna(email_all_val):
-            email_all_val = ""
-        if skip_rows_with_email and str(email_all_val or "").strip():
+        if _should_skip_row_due_to_email(row, skip_rows_with_email, _LOGGER):
             return False
         if skip_rows_with_no_facebook_clue and not _has_facebook_clue(row):
             return False

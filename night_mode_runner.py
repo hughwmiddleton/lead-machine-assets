@@ -170,6 +170,21 @@ def _log_quarantine(message: str, logger: Optional[logging.Logger]) -> None:
         pass
 
 
+def _cell_str(v) -> str:
+    if v is None:
+        return ""
+    try:
+        is_na = pd.isna(v)
+    except Exception:
+        return str(v)
+    try:
+        if bool(is_na):
+            return ""
+    except Exception:
+        return str(v)
+    return str(v)
+
+
 def quarantine_repeated_emails(df: pd.DataFrame, min_repeats: int = 5, logger: Optional[logging.Logger] = None) -> pd.DataFrame:
     """
     Quarantine highly repeated emails so Night FB can attempt recovery.
@@ -203,11 +218,15 @@ def quarantine_repeated_emails(df: pd.DataFrame, min_repeats: int = 5, logger: O
 
     email_counts: Dict[str, int] = {}
     first_seen: Dict[str, Tuple[int, str, str]] = {}
+    email_has_soundcloud_origin: Dict[str, bool] = {}
 
     for idx, row in work.iterrows():
+        row_job = _cell_str(row.get("__source_job"))
+        row_dir = _cell_str(row.get("Source Directory"))
+        row_dir_lower = row_dir.lower()
         emails = set(
-            pipeline_runner.normalize_emails(row.get("Email_All", ""))
-            + pipeline_runner.normalize_emails(row.get("Email", ""))
+            pipeline_runner.normalize_emails(_cell_str(row.get("Email_All")))
+            + pipeline_runner.normalize_emails(_cell_str(row.get("Email")))
         )
         if not emails:
             continue
@@ -216,9 +235,13 @@ def quarantine_repeated_emails(df: pd.DataFrame, min_repeats: int = 5, logger: O
             if email not in first_seen:
                 first_seen[email] = (
                     idx,
-                    str(row.get("__source_job", "") or ""),
-                    str(row.get("Source Directory", "") or ""),
+                    row_job,
+                    row_dir,
                 )
+            if "soundcloud" in row_dir_lower:
+                email_has_soundcloud_origin[email] = True
+            elif email not in email_has_soundcloud_origin:
+                email_has_soundcloud_origin[email] = False
 
     repeated = {email: count for email, count in email_counts.items() if count >= max(1, int(min_repeats))}
     if not repeated:
@@ -229,32 +252,31 @@ def quarantine_repeated_emails(df: pd.DataFrame, min_repeats: int = 5, logger: O
 
     for idx, row in work.iterrows():
         row_emails = set(
-            pipeline_runner.normalize_emails(row.get("Email_All", ""))
-            + pipeline_runner.normalize_emails(row.get("Email", ""))
+            pipeline_runner.normalize_emails(_cell_str(row.get("Email_All")))
+            + pipeline_runner.normalize_emails(_cell_str(row.get("Email")))
         )
         repeated_here = [email for email in row_emails if email in repeated]
         if not repeated_here:
             continue
 
-        row_job = str(row.get("__source_job", "") or "")
-        row_dir = str(row.get("Source Directory", "") or "").lower()
+        row_job = _cell_str(row.get("__source_job"))
+        row_dir_lower = _cell_str(row.get("Source Directory")).lower()
 
         # Decide keep/clear per email once, then aggregate.
         decisions = []
         for email in repeated_here:
-            _, origin_job, origin_dir = first_seen[email]
-            origin_dir_lower = str(origin_dir or "").lower()
-            is_soundcloud_origin = "soundcloud" in origin_dir_lower
-            keep_email = row_job == origin_job or (is_soundcloud_origin and "soundcloud" in row_dir)
+            _, origin_job, _ = first_seen[email]
+            has_sc_origin = email_has_soundcloud_origin.get(email, False)
+            keep_email = ("soundcloud" in row_dir_lower) if has_sc_origin else (row_job == origin_job)
             decisions.append((email, keep_email))
 
         keep_any = any(keep for _, keep in decisions)
 
-        suspect_email_val = str(row.get("Email", "") or "")
-        suspect_email_all_val = str(row.get("Email_All", "") or "")
-        if suspect_email_val:
+        suspect_email_val = _cell_str(row.get("Email"))
+        suspect_email_all_val = _cell_str(row.get("Email_All"))
+        if suspect_email_val != "":
             work.at[idx, "Suspect_Email"] = suspect_email_val
-        if suspect_email_all_val:
+        if suspect_email_all_val != "":
             work.at[idx, "Suspect_Email_All"] = suspect_email_all_val
 
         if not keep_any:
