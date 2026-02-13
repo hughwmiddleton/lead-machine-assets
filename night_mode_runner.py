@@ -282,9 +282,10 @@ def quarantine_repeated_emails(df: pd.DataFrame, min_repeats: int = 5, logger: O
         suspect_email_all_val = _cell_str(row.get("Email_All"))
         if suspect_email_val != "":
             work.at[idx, "Suspect_Email"] = suspect_email_val
-        if suspect_email_all_val != "":
-            existing_suspect_all = _cell_str(work.at[idx, "Suspect_Email_All"])
-            merged_suspect_all = pipeline_runner._append_suspect_email_all(existing_suspect_all, suspect_email_all_val)
+        combined_suspect_all = ";".join([val for val in (suspect_email_all_val, suspect_email_val) if val])
+        if combined_suspect_all:
+            existing_suspect_all = _cell_str(row.get("Suspect_Email_All"))
+            merged_suspect_all = pipeline_runner._append_suspect_email_all(existing_suspect_all, combined_suspect_all)
             work.at[idx, "Suspect_Email_All"] = merged_suspect_all
 
         if not keep_any:

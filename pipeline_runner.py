@@ -78,10 +78,23 @@ def _merge_email_lists(existing: Union[str, Sequence[str]], new_values: Union[st
     seen: set[str] = set()
 
     def _ingest(raw) -> None:
-        for email in normalize_emails(raw):
-            if email not in seen:
-                seen.add(email)
-                merged.append(email)
+        if raw is None:
+            return
+        # Treat iterable containers (except strings) as multiple inputs.
+        if isinstance(raw, (list, tuple, set)):
+            items = list(raw)
+        else:
+            items = [raw]
+        for item in items:
+            try:
+                if pd.isna(item):
+                    continue
+            except Exception:
+                pass
+            for email in normalize_emails(item):
+                if email not in seen:
+                    seen.add(email)
+                    merged.append(email)
 
     _ingest(existing)
     _ingest(new_values)
@@ -136,72 +149,6 @@ def _set_email_all(df: pd.DataFrame, idx: int, new_emails: Union[str, Sequence[s
     _log_email_all_change(idx, artist, existing_val, merged_str, source, logger)
     _guard_email_all_sources(df.loc[idx], merged_str, logger)
     return merged_str
-
-def _merge_email_lists(existing: Union[str, Sequence[str]], new_values: Union[str, Sequence[str]]) -> List[str]:
-    """Merge email-like values with normalization + dedupe."""
-    merged: List[str] = []
-    seen: set[str] = set()
-
-    def _ingest(raw) -> None:
-        for email in normalize_emails(raw):
-            if email not in seen:
-                seen.add(email)
-                merged.append(email)
-
-    _ingest(existing)
-    _ingest(new_values)
-    return merged
-
-
-def _append_suspect_email_all(current: str, addition: str) -> str:
-    """Append a suspect email_all value while keeping order/dedupe."""
-    merged = _merge_email_lists(current, addition)
-    return ";".join(merged)
-
-
-def _log_email_all_change(row_idx: int, artist: str, before: str, after: str, source: str, logger: LoggerFn = None) -> None:
-    """Emit debug log for Email_All mutations when enabled."""
-    if os.getenv("EMAIL_ALL_LOG", "1") not in {"1", "true", "TRUE"}:
-        return
-    msg = (
-        f"[EmailAll][{source}] row={row_idx} artist='{artist}' "
-        f"before='{before[:120]}' after='{after[:120]}'"
-    )
-    _safe_log(logger or _LOGGER.info, msg)
-
-
-def _guard_email_all_sources(row: pd.Series, email_all: str, logger: LoggerFn = None) -> None:
-    """Debug-only guard: warn if Email_All contains emails not present in row-local sources."""
-    if os.getenv("EMAIL_ALL_GUARD", "0") not in {"1", "true", "TRUE"}:
-        return
-    sources = []
-    for col in row.index:
-        if "Email" not in col:
-            continue
-        if col in {"Email_All", "Suspect_Email_All"}:
-            continue
-        sources.extend(normalize_emails(_cell_str(row.get(col))))
-    source_set = set(sources)
-    for email in normalize_emails(email_all):
-        if email not in source_set:
-            artist = _cell_str(row.get("Artist Name"))
-            _safe_log(
-                logger or _LOGGER.error,
-                f"[EmailAll][GUARD] email_not_in_sources='{email}' row={row.get('__row_id', row.name)} artist='{artist}'",
-            )
-
-
-def _set_email_all(df: pd.DataFrame, idx: int, new_emails: Union[str, Sequence[str]], source: str, logger: LoggerFn = None) -> str:
-    """Centralized Email_All setter with merge + logging + guard."""
-    existing_val = _cell_str(df.at[idx, "Email_All"] if "Email_All" in df.columns else "")
-    merged_list = _merge_email_lists(existing_val, new_emails)
-    merged_str = ";".join(merged_list)
-    df.at[idx, "Email_All"] = merged_str
-    artist = _cell_str(df.at[idx, "Artist Name"]) if "Artist Name" in df.columns else ""
-    _log_email_all_change(idx, artist, existing_val, merged_str, source, logger)
-    _guard_email_all_sources(df.loc[idx], merged_str, logger)
-    return merged_str
-
 
 def emails_to_string(emails: List[str]) -> str:
     """Return ", ".join(emails) or empty string."""
@@ -1226,35 +1173,25 @@ def _has_facebook_clue(row: pd.Series) -> bool:
     name = str(name or "").strip()
     return bool(name)
 
+def _is_quarantined_repeat(row: pd.Series) -> bool:
+    email_source = _cell_str(row.get("Email Source"))
+    suspect_email = _cell_str(row.get("Suspect_Email"))
+    suspect_email_all = _cell_str(row.get("Suspect_Email_All"))
+    email_val = _cell_str(row.get("Email"))
+    email_all_val = _cell_str(row.get("Email_All"))
+    suspect_present = bool(suspect_email or suspect_email_all)
+    cleared_email_fields = (email_val == "" and email_all_val == "")
+    return email_source == "Quarantined (repeat email)" or (cleared_email_fields and suspect_present)
+
 
 def _should_skip_row_due_to_email(
     row: pd.Series, skip_rows_with_email: bool = True, logger: LoggerFn = _LOGGER
 ) -> bool:
-    if not skip_rows_with_email:
-        return False
-
-    email_all_val = _cell_str(row.get("Email_All"))
-    has_email = bool(email_all_val.strip())
-
-    email_source = _cell_str(row.get("Email Source"))
-    needs_review = _cell_str(row.get("Needs_Review")).lower()
-    suspect_email = _cell_str(row.get("Suspect_Email"))
-    suspect_email_all = _cell_str(row.get("Suspect_Email_All"))
-
-    quarantine_override = (
-        email_source == "Quarantined (repeat email)"
-        or needs_review == "true"
-        or bool(suspect_email.strip() or suspect_email_all.strip())
-    )
-
-    if quarantine_override:
-        if has_email:
-            row_id = row.get("__row_id", row.name)
-            artist = _cell_str(row.get("Artist Name"))
-            _safe_log(logger, f"[Night FB] Quarantine override: forcing attempt for row {row_id} ('{artist}') despite email fields present.")
-        return False
-
-    return has_email
+    email_all_clean = str(row.get("Email_All") or "").strip()
+    has_email_raw = bool(email_all_clean)
+    quarantined_repeat = _is_quarantined_repeat(row)
+    has_email_effective = has_email_raw and not quarantined_repeat
+    return bool(skip_rows_with_email and has_email_effective)
 
 
 def run_facebook_global_pass(
@@ -1631,14 +1568,16 @@ def run_facebook_global_pass_nightmode(
             if pd.isna(email_all_val):
                 email_all_val = ""
             email_all_clean = str(email_all_val or "").strip()
-            # Honor quarantine override + suspect fields to allow FB even when Email_All present.
-            skip_due_to_email = _should_skip_row_due_to_email(row, skip_rows_with_email, logger)
-            has_email_effective = skip_due_to_email
+            has_email_raw = bool(email_all_clean)
+            quarantined_repeat = _is_quarantined_repeat(row)
+            has_email_effective = has_email_raw and not quarantined_repeat
 
             fb_status_val_raw = str(row.get("FB_Status", "") or "").strip()
             fb_status_val = fb_status_val_raw.lower()
 
-            if has_email_effective:
+            should_skip_due_to_email = _should_skip_row_due_to_email(row, skip_rows_with_email, logger)
+
+            if should_skip_due_to_email:
                 _safe_log_console(
                     logger,
                     f"[Night FB] Skipping row {idx} ('{artist_label}') – email already present (Email_All='{email_all_clean}').",
@@ -1679,12 +1618,12 @@ def run_facebook_global_pass_nightmode(
             has_clue = _has_facebook_clue(row)
             final_fb_statuses = {"login_redirect", "no_candidates", "ok", "found"} | terminal_statuses
             should_run_night_fb = (not has_email_effective) and (fb_status_val not in final_fb_statuses)
-            if has_email_effective or fb_status_val in final_fb_statuses or not has_clue or not should_run_night_fb:
-                if has_email_effective or fb_status_val in final_fb_statuses:
+            if should_skip_due_to_email or fb_status_val in final_fb_statuses or not has_clue or not should_run_night_fb:
+                if should_skip_due_to_email or fb_status_val in final_fb_statuses:
                     email_state = "present" if has_email_effective else "missing"
                     _safe_log_console(
                         logger,
-                        f"[Night FB] Skipping FB lookup for '{artist_label}' (FB_Status='{fb_status_val_raw}', email='{email_state}').",
+                        f"[Night FB] Skipping FB lookup for '{artist_label}' (FB_Status='{fb_status_val_raw}', email='{email_state}', skipped_due_to_email={int(should_skip_due_to_email)}).",
                     )
                 state.update(
                     {

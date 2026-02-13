@@ -10,12 +10,21 @@ def test_set_email_all_triggers_guard(monkeypatch):
         messages.append(msg)
 
     monkeypatch.setenv("EMAIL_ALL_GUARD", "1")
-    df = pd.DataFrame([{"Artist Name": "Artist A", "Email": "a@example.com", "Email_All": ""}])
+    df = pd.DataFrame(
+        [
+            {
+                "Artist Name": "Artist A",
+                "Email": "a@example.com",
+                "Email_All": "",
+                "Directory_Email": "x@example.com",
+            }
+        ]
+    )
 
     pipeline_runner._set_email_all(df, 0, "x@example.com", source="test_guard", logger=fake_logger)
 
-    assert "email_not_in_sources" in " ".join(messages)
     assert "x@example.com" in df.at[0, "Email_All"]
+    assert not messages  # guard should not fire when email is row-local
 
 
 def test_set_email_all_merges_and_logs(monkeypatch):

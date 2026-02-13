@@ -22,6 +22,7 @@ export SPOTIFY_CLIENT_SECRET="27188b55b8d94604a9a2172092e19416"
 export SPOTIFY_REDIRECT_URI="http://127.0.0.1:8080/callback"
 export SPOTIFY_REFRESH_TOKEN="AQB1vtP347IrhWrFAScJ_TwBSK0ZTiEdAbhxrmGf82vqmZIANMZdpLqnkpUDsEjGK9HZGGVfkfB9D915m28IK5CCAFFTMBwLd63n0UVmoYSSkjs_F8qXHJeDG-I0UgwrtAU"
 # =====================================================
+#!/bin/bash
 # GENERAL
 # =====================================================
 unset SC_DEBUG_LATEST
@@ -29,6 +30,15 @@ export PYTHONFAULTHANDLER=1
 
 # Qt GUI visible (macOS cocoa)
 unset QT_QPA_PLATFORM
+
+# =====================================================
+# EMAIL_ALL / QUARANTINE DEBUG (new)
+# =====================================================
+export EMAIL_ALL_LOG=1
+export EMAIL_ALL_GUARD=1
+
+# Anchor wait tuning (new)
+export FB_ANCHOR_WAIT_S=6
 
 # =====================================================
 # FB DEBUG (High Signal, Low Noise)
@@ -57,12 +67,9 @@ unset FB_CANDIDATE_RANKING_DEBUG
 # No automated login typing
 unset FB_ALLOW_AUTOMATED_LOGIN
 
-
 # =====================================================
-# FB NEW FEATURES (CORE TEST)
+# FB FEATURES (CORE TEST)
 # =====================================================
-
-unset FB_REFINE_QUERY
 
 # T016 — DOM Gate V2 (IMPORTANT)
 export FB_SEARCH_HARVEST_V2=1
@@ -74,7 +81,7 @@ export NIGHT_FB_DOM_FALLBACK=1
 export NIGHT_FB_MIN_QUALITY_GATE=1
 export NIGHT_FB_MIN_QUALITY_SCORE=25
 
-# Checkpoint guard (important for this test)
+# Checkpoint guard
 export NIGHT_FB_CHECKPOINT_GUARD=1
 
 # Stable Night FB profile (prevents profile drift + lock weirdness)
@@ -86,7 +93,6 @@ export NIGHT_FB_PROFILE_DIR="/Users/hughmiddleton/Lead Machine/Lead Machine Code
 # Disable email override (we want real behaviour)
 unset FB_DEBUG_EMAIL_OVERRIDE
 
-
 # =====================================================
 # SoundCloud (OFF to reduce noise)
 # =====================================================
@@ -94,13 +100,11 @@ unset NIGHT_SC_DEBUG
 unset NIGHTMODE_SC_ENGINE
 export SC_ADAPTIVE_ABOUT_DISABLE=1
 
-
 # =====================================================
 # Bandcamp (minimal debug)
 # =====================================================
 unset BC_DEBUG_FILTER_SRC
 export BC_DEBUG_LOCATION=1
-
 
 # =====================================================
 # RUN

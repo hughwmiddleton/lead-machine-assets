@@ -21,7 +21,16 @@ def demo_quarantine():
 
 
 def demo_email_all_logging():
-    df = pd.DataFrame([{"Artist Name": "Logger", "Email_All": "a@example.com"}])
+    df = pd.DataFrame(
+        [
+            {
+                "Artist Name": "Logger",
+                "Email_All": "a@example.com",
+                "Directory_Email": "a@example.com",
+                "Spotify_Email": "b@example.com",
+            }
+        ]
+    )
     pipeline_runner._set_email_all(df, 0, ["a@example.com", "b@example.com"], source="harness", logger=print)
     print("== Email_All after merge ==", df.at[0, "Email_All"])
 

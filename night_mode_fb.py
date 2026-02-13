@@ -357,6 +357,7 @@ def _wait_for_anchor_population(
     container = _find_first(driver, container_selector)
     _, anchors_initial = _extract_anchor_hrefs(container)
     deadline = started + max(timeout, 0.1)
+    anchors_after = anchors_initial
     while time.time() < deadline:
         container = _find_first(driver, container_selector)
         _, anchors = _extract_anchor_hrefs(container)
@@ -364,11 +365,14 @@ def _wait_for_anchor_population(
             elapsed_ms = (time.time() - started) * 1000.0
             _log(
                 logger,
-                f\"[FB AnchorWait] anchor_waited=1 selector='{container_selector}' anchors_before={len(anchors_initial)} anchors_after={len(anchors)} waited_ms={elapsed_ms:.0f} ctx={context or {}}\",\n+            )
+                f"[FB AnchorWait] anchor_waited=1 selector='{container_selector}' anchors_before={len(anchors_initial)} "
+                f"anchors_after={len(anchors)} waited_ms={elapsed_ms:.0f} ctx={context or {}}",
+            )
             return True, len(anchors_initial), len(anchors), elapsed_ms
+        anchors_after = anchors
         time.sleep(max(poll_seconds, 0.1))
     elapsed_ms = (time.time() - started) * 1000.0
-    return False, len(anchors_initial), len(anchors_initial), elapsed_ms
+    return False, len(anchors_initial), len(anchors_after), elapsed_ms
 
 
 def _slugify(text: str) -> str:
