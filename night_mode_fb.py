@@ -310,6 +310,67 @@ def _count_usable(container) -> int:
     return usable
 
 
+def _safe_current_url(driver) -> str:
+    try:
+        return driver.current_url
+    except Exception:
+        return ""
+
+
+def _container_html_preview(container, max_chars: int = 500) -> tuple[int, str]:
+    if container is None:
+        return 0, ""
+    try:
+        html = container.get_attribute("innerHTML") or ""
+    except Exception:
+        return 0, ""
+    html = html.strip()
+    if not html:
+        return 0, ""
+    if len(html) > max_chars:
+        return len(html), html[:max_chars] + "...(truncated)"
+    return len(html), html
+
+
+def _has_checkpoint_overlay(driver) -> bool:
+    try:
+        html = (driver.page_source or "").lower()
+    except Exception:
+        return False
+    tokens = ("checkpoint", "consent", "cookie", "privacy", "login")
+    return any(tok in html for tok in tokens)
+
+
+def _wait_for_anchor_population(
+    driver,
+    container_selector: str,
+    min_anchors: int = 1,
+    timeout: float = 6.0,
+    poll_seconds: float = 0.4,
+    logger: LoggerFn = None,
+    context: Optional[Dict[str, Any]] = None,
+) -> Tuple[bool, int, int, float]:
+    """
+    Wait for anchors to populate inside a container; returns tuple(success, anchors_before, anchors_after, waited_ms).
+    """
+    started = time.time()
+    container = _find_first(driver, container_selector)
+    _, anchors_initial = _extract_anchor_hrefs(container)
+    deadline = started + max(timeout, 0.1)
+    while time.time() < deadline:
+        container = _find_first(driver, container_selector)
+        _, anchors = _extract_anchor_hrefs(container)
+        if len(anchors) >= max(min_anchors, 1):
+            elapsed_ms = (time.time() - started) * 1000.0
+            _log(
+                logger,
+                f\"[FB AnchorWait] anchor_waited=1 selector='{container_selector}' anchors_before={len(anchors_initial)} anchors_after={len(anchors)} waited_ms={elapsed_ms:.0f} ctx={context or {}}\",\n+            )
+            return True, len(anchors_initial), len(anchors), elapsed_ms
+        time.sleep(max(poll_seconds, 0.1))
+    elapsed_ms = (time.time() - started) * 1000.0
+    return False, len(anchors_initial), len(anchors_initial), elapsed_ms
+
+
 def _slugify(text: str) -> str:
     normalized = unicodedata.normalize("NFKD", (text or "").strip().lower())
     normalized = "".join(ch for ch in normalized if not unicodedata.combining(ch))
@@ -911,6 +972,38 @@ def _harvest_search_candidates_v2(
 
         counts = _refresh_counts()
 
+        waited_for_population = False
+        anchor_wait_meta: Dict[str, Any] = {}
+        if counts["anchors_in_scope_search"] == 0 and counts["containers_found_search"] > 0:
+            success, before_ct, after_ct, waited_ms = _wait_for_anchor_population(
+                driver,
+                search_selector,
+                min_anchors=2,
+                timeout=float(os.getenv("FB_ANCHOR_WAIT_S", 6)),
+                poll_seconds=0.5,
+                logger=logger,
+                context={"path": "search", "row_id": row_index, "artist": search_name},
+            )
+            if success:
+                counts = _refresh_counts()
+            waited_for_population = waited_for_population or success
+            anchor_wait_meta = {"waited_ms": waited_ms, "anchors_before": before_ct, "anchors_after": after_ct}
+
+        if counts["anchors_in_scope_feed"] == 0 and counts["containers_found_feed"] > 0:
+            success, before_ct, after_ct, waited_ms = _wait_for_anchor_population(
+                driver,
+                feed_selector,
+                min_anchors=2,
+                timeout=float(os.getenv("FB_ANCHOR_WAIT_S", 6)),
+                poll_seconds=0.5,
+                logger=logger,
+                context={"path": "feed", "row_id": row_index, "artist": search_name},
+            )
+            if success:
+                counts = _refresh_counts()
+            waited_for_population = waited_for_population or success
+            anchor_wait_meta = anchor_wait_meta or {"waited_ms": waited_ms, "anchors_before": before_ct, "anchors_after": after_ct}
+
         if counts["usable_feed"] == 0 and counts["usable_search"] == 0:
             for attempt in range(2):
                 try:
@@ -951,6 +1044,11 @@ def _harvest_search_candidates_v2(
 
             if chosen_container is None:
                 total_anchors = len(_find_all(driver, "a"))
+                search_len, search_preview = _container_html_preview(counts["search_container"])
+                feed_len, feed_preview = _container_html_preview(counts["feed_container"])
+                overlay_present = 1 if _has_checkpoint_overlay(driver) else 0
+                page_url = _safe_current_url(driver)
+                preview = search_preview or feed_preview
                 _log(
                     logger,
                     "[Night FB][DOM Gate V2] "
@@ -959,7 +1057,10 @@ def _harvest_search_candidates_v2(
                     f"anchors_in_scope_feed={counts['anchors_in_scope_feed']} anchors_in_scope_search={counts['anchors_in_scope_search']} "
                     f"candidates_pre_url_gate=0 candidates_post_url_gate=0 dropped_by_dom_gate={total_anchors} "
                     f"url_gate_rejected=0 chosen_container_selector=NONE search_name='{search_name or ''}' "
-                    f"session_unhealthy={session_unhealthy_flag} session_reason={session_reason_clean}"
+                    f"session_unhealthy={session_unhealthy_flag} session_reason={session_reason_clean} "
+                    f"anchor_waited={int(waited_for_population)} search_html_len={search_len} feed_html_len={feed_len} "
+                    f"overlay_present={overlay_present} page_url='{page_url}' preview='{preview}' "
+                    f"anchor_wait_meta={anchor_wait_meta}"
                 )
                 return []
 
@@ -997,7 +1098,8 @@ def _harvest_search_candidates_v2(
             f"candidates_pre_url_gate={candidates_pre_url_gate} candidates_post_url_gate={candidates_post_url_gate} "
             f"dropped_by_dom_gate={dropped_by_dom_gate} url_gate_rejected={gate_reject} "
             f"chosen_container_selector={chosen_selector} search_name='{search_name or ''}' "
-            f"session_unhealthy={session_unhealthy_flag} session_reason={session_reason_clean}"
+            f"session_unhealthy={session_unhealthy_flag} session_reason={session_reason_clean} "
+            f"anchor_waited={int(waited_for_population)}"
         )
 
         return filtered_candidates
@@ -3238,6 +3340,17 @@ class NightModeFacebookEnricher:
         email_source = "main" if emails else ""
         has_music_signals = has_music_signals_main
 
+        def _coerce_str(val) -> str:
+            try:
+                return str(val or "").strip()
+            except Exception:
+                return ""
+
+        seed_fb_raw = row.get("Facebook_URL") or row.get("Facebook URL") or row.get("Facebook Url") or row.get("FB_URL")
+        seed_fb_norm = _normalise_fb_url(_coerce_str(seed_fb_raw)) if seed_fb_raw else ""
+        seed_url_match = bool(seed_fb_norm and resolved_url and _normalise_fb_url(resolved_url) == seed_fb_norm)
+        artist_location = _coerce_str(row.get("Country_Derived") or row.get("Country") or row.get("Location"))
+
         need_about_fetch = (not has_music_signals) or (not emails)
         if need_about_fetch:
             if not has_music_signals:
@@ -3296,6 +3409,8 @@ class NightModeFacebookEnricher:
                 "descriptor": page_title,
                 "music_hint": bool(candidate_context and candidate_context.get("category") and _category_is_music_like(candidate_context.get("category"))),
                 "score": candidate_context.get("base_score") if candidate_context else 0.0,
+                "seed_url_match": seed_url_match,
+                "artist_location": artist_location,
             }
             email_override_decision, email_override_reason = should_accept_email_override(
                 artist_name,

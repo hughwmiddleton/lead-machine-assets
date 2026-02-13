@@ -283,13 +283,22 @@ def quarantine_repeated_emails(df: pd.DataFrame, min_repeats: int = 5, logger: O
         if suspect_email_val != "":
             work.at[idx, "Suspect_Email"] = suspect_email_val
         if suspect_email_all_val != "":
-            work.at[idx, "Suspect_Email_All"] = suspect_email_all_val
+            existing_suspect_all = _cell_str(work.at[idx, "Suspect_Email_All"])
+            merged_suspect_all = pipeline_runner._append_suspect_email_all(existing_suspect_all, suspect_email_all_val)
+            work.at[idx, "Suspect_Email_All"] = merged_suspect_all
 
         if not keep_any:
             work.at[idx, "Email"] = ""
             work.at[idx, "Email_All"] = ""
             work.at[idx, "Needs_Review"] = "TRUE"
             work.at[idx, "Email Source"] = "Quarantined (repeat email)"
+            artist = _cell_str(row.get("Artist Name"))
+            _log_quarantine(
+                f"[Quarantine][Row] cleared_for_fb row={idx} artist='{artist}' "
+                f"old_email='{suspect_email_val}' old_email_all='{suspect_email_all_val}' "
+                f"suspect_email_all_after='{work.at[idx, 'Suspect_Email_All']}'",
+                logger,
+            )
 
         for email, keep_email in decisions:
             if keep_email:

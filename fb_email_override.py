@@ -44,6 +44,23 @@ MUSIC_ROLE_TOKENS = (
     "record label",
 )
 
+MUSIC_MARKER_TOKENS = (
+    "band",
+    "music",
+    "musician",
+    "singer",
+    "dj",
+    "producer",
+    "rapper",
+    "songwriter",
+    "album",
+    "single",
+    "ep",
+    "tour",
+    "record label",
+    "records",
+)
+
 
 def _to_lower(text: Any) -> str:
     try:
@@ -86,6 +103,18 @@ def _coerce_score(*vals: Any) -> float:
     return 0.0
 
 
+def _locations_overlap(a: Any, b: Any) -> bool:
+    a_norm = _normalize_name(a)
+    b_norm = _normalize_name(b)
+    if not a_norm or not b_norm:
+        return False
+    return a_norm in b_norm or b_norm in a_norm
+
+
+def _has_music_marker(text: Any) -> bool:
+    return _text_has_any(text, MUSIC_MARKER_TOKENS)
+
+
 def should_accept_email_override(
     query: str,
     cand: Mapping[str, Any] | Any,
@@ -118,22 +147,26 @@ def should_accept_email_override(
         or _text_has_any(category, MUSIC_ROLE_TOKENS)
         or _text_has_any(extracted.get("descriptor", ""), MUSIC_ROLE_TOKENS)
     )
-    service_category = _text_has_any(category, SERVICE_CATEGORY_TOKENS)
+    music_marker = _has_music_marker(category) or _has_music_marker(extracted.get("descriptor", ""))
     name_match = extracted.get("name_match") or _classify_name_match(query, name)
+    seed_url_match = bool(extracted.get("seed_url_match"))
+    artist_location = extracted.get("artist_location") or ""
+    page_location = extracted.get("page_location") or ""
+    location_overlap = _locations_overlap(artist_location, page_location)
 
     if has_music_signals:
         return True, "email_override_accept:music_signals"
 
-    if service_category and not music_hint:
-        return False, "email_override_reject:service_category"
-
     if name_match == "mismatch":
         return False, "email_override_reject:name_mismatch"
 
-    if music_hint:
+    if music_hint or music_marker:
         return True, "email_override_accept:music_hint"
 
-    if name_match in ("exact", "near") and score > 0:
+    strong_identity = name_match in ("exact", "near") and score >= 1.0
+    secondary_confidence = music_marker or seed_url_match or location_overlap or score >= 1.25
+
+    if strong_identity and secondary_confidence:
         return True, "email_override_accept:identity_softpass"
 
-    return False, "email_override_reject:no_identity"
+    return False, "email_override_reject:weak_nonmusic_match"

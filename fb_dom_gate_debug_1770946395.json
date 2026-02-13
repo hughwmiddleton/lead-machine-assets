@@ -1,0 +1,17 @@
+{
+  "selector": "div[role=\"main\"] div[role=\"feed\"]",
+  "containers_found": 1,
+  "anchors_in_scope": 2,
+  "candidates_pre_url_gate": 2,
+  "candidates_post_url_gate": 1,
+  "pre_urls": [
+    "https://www.facebook.com/LewisPughOceans?__tn__=%3C",
+    "https://www.facebook.com/LewisPughOceans"
+  ],
+  "post_urls": [
+    "https://www.facebook.com/LewisPughOceans"
+  ],
+  "warnings": [],
+  "timestamp": 1770946395,
+  "search_name": "Lewis Pugh"
+}

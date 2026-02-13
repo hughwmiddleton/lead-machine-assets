@@ -95,8 +95,8 @@ def normalize_primary_genre(raw_genre: str) -> str:
 
 
 def looks_like_label_or_show(row: dict) -> bool:
-    name = (row.get("Artist Name") or "").lower()
-    title = (row.get("Song Title") or "").lower()
+    name = _safe_lower(row.get("Artist Name"))
+    title = _safe_lower(row.get("Song Title"))
     label_words = [
         "recordings",
         "records",
@@ -122,6 +122,22 @@ def _has_valid_email(row: dict) -> bool:
         if "@" in val:
             return True
     return False
+
+
+def _cell_text(value) -> str:
+    try:
+        if pd.isna(value):
+            return ""
+    except Exception:
+        pass
+    try:
+        return str(value or "")
+    except Exception:
+        return ""
+
+
+def _safe_lower(value) -> str:
+    return _cell_text(value).lower()
 
 
 def _parse_release_year(value: str) -> Optional[int]:

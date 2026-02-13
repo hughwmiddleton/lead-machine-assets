@@ -72,6 +72,136 @@ def normalize_emails(value) -> List[str]:
             cleaned.append(email)
     return sorted(cleaned)
 
+def _merge_email_lists(existing: Union[str, Sequence[str]], new_values: Union[str, Sequence[str]]) -> List[str]:
+    """Merge email-like values with normalization + dedupe."""
+    merged: List[str] = []
+    seen: set[str] = set()
+
+    def _ingest(raw) -> None:
+        for email in normalize_emails(raw):
+            if email not in seen:
+                seen.add(email)
+                merged.append(email)
+
+    _ingest(existing)
+    _ingest(new_values)
+    return merged
+
+
+def _append_suspect_email_all(current: str, addition: str) -> str:
+    """Append a suspect email_all value while keeping order/dedupe."""
+    merged = _merge_email_lists(current, addition)
+    return ";".join(merged)
+
+
+def _log_email_all_change(row_idx: int, artist: str, before: str, after: str, source: str, logger: LoggerFn = None) -> None:
+    """Emit debug log for Email_All mutations when enabled."""
+    if os.getenv("EMAIL_ALL_LOG", "1") not in {"1", "true", "TRUE"}:
+        return
+    msg = (
+        f"[EmailAll][{source}] row={row_idx} artist='{artist}' "
+        f"before='{before[:120]}' after='{after[:120]}'"
+    )
+    _safe_log(logger or _LOGGER.info, msg)
+
+
+def _guard_email_all_sources(row: pd.Series, email_all: str, logger: LoggerFn = None) -> None:
+    """Debug-only guard: warn if Email_All contains emails not present in row-local sources."""
+    if os.getenv("EMAIL_ALL_GUARD", "0") not in {"1", "true", "TRUE"}:
+        return
+    sources = []
+    for col in row.index:
+        if "Email" not in col:
+            continue
+        if col in {"Email_All", "Suspect_Email_All"}:
+            continue
+        sources.extend(normalize_emails(_cell_str(row.get(col))))
+    source_set = set(sources)
+    for email in normalize_emails(email_all):
+        if email not in source_set:
+            artist = _cell_str(row.get("Artist Name"))
+            _safe_log(
+                logger or _LOGGER.error,
+                f"[EmailAll][GUARD] email_not_in_sources='{email}' row={row.get('__row_id', row.name)} artist='{artist}'",
+            )
+
+
+def _set_email_all(df: pd.DataFrame, idx: int, new_emails: Union[str, Sequence[str]], source: str, logger: LoggerFn = None) -> str:
+    """Centralized Email_All setter with merge + logging + guard."""
+    existing_val = _cell_str(df.at[idx, "Email_All"] if "Email_All" in df.columns else "")
+    merged_list = _merge_email_lists(existing_val, new_emails)
+    merged_str = ";".join(merged_list)
+    df.at[idx, "Email_All"] = merged_str
+    artist = _cell_str(df.at[idx, "Artist Name"]) if "Artist Name" in df.columns else ""
+    _log_email_all_change(idx, artist, existing_val, merged_str, source, logger)
+    _guard_email_all_sources(df.loc[idx], merged_str, logger)
+    return merged_str
+
+def _merge_email_lists(existing: Union[str, Sequence[str]], new_values: Union[str, Sequence[str]]) -> List[str]:
+    """Merge email-like values with normalization + dedupe."""
+    merged: List[str] = []
+    seen: set[str] = set()
+
+    def _ingest(raw) -> None:
+        for email in normalize_emails(raw):
+            if email not in seen:
+                seen.add(email)
+                merged.append(email)
+
+    _ingest(existing)
+    _ingest(new_values)
+    return merged
+
+
+def _append_suspect_email_all(current: str, addition: str) -> str:
+    """Append a suspect email_all value while keeping order/dedupe."""
+    merged = _merge_email_lists(current, addition)
+    return ";".join(merged)
+
+
+def _log_email_all_change(row_idx: int, artist: str, before: str, after: str, source: str, logger: LoggerFn = None) -> None:
+    """Emit debug log for Email_All mutations when enabled."""
+    if os.getenv("EMAIL_ALL_LOG", "1") not in {"1", "true", "TRUE"}:
+        return
+    msg = (
+        f"[EmailAll][{source}] row={row_idx} artist='{artist}' "
+        f"before='{before[:120]}' after='{after[:120]}'"
+    )
+    _safe_log(logger or _LOGGER.info, msg)
+
+
+def _guard_email_all_sources(row: pd.Series, email_all: str, logger: LoggerFn = None) -> None:
+    """Debug-only guard: warn if Email_All contains emails not present in row-local sources."""
+    if os.getenv("EMAIL_ALL_GUARD", "0") not in {"1", "true", "TRUE"}:
+        return
+    sources = []
+    for col in row.index:
+        if "Email" not in col:
+            continue
+        if col in {"Email_All", "Suspect_Email_All"}:
+            continue
+        sources.extend(normalize_emails(_cell_str(row.get(col))))
+    source_set = set(sources)
+    for email in normalize_emails(email_all):
+        if email not in source_set:
+            artist = _cell_str(row.get("Artist Name"))
+            _safe_log(
+                logger or _LOGGER.error,
+                f"[EmailAll][GUARD] email_not_in_sources='{email}' row={row.get('__row_id', row.name)} artist='{artist}'",
+            )
+
+
+def _set_email_all(df: pd.DataFrame, idx: int, new_emails: Union[str, Sequence[str]], source: str, logger: LoggerFn = None) -> str:
+    """Centralized Email_All setter with merge + logging + guard."""
+    existing_val = _cell_str(df.at[idx, "Email_All"] if "Email_All" in df.columns else "")
+    merged_list = _merge_email_lists(existing_val, new_emails)
+    merged_str = ";".join(merged_list)
+    df.at[idx, "Email_All"] = merged_str
+    artist = _cell_str(df.at[idx, "Artist Name"]) if "Artist Name" in df.columns else ""
+    _log_email_all_change(idx, artist, existing_val, merged_str, source, logger)
+    _guard_email_all_sources(df.loc[idx], merged_str, logger)
+    return merged_str
+
 
 def emails_to_string(emails: List[str]) -> str:
     """Return ", ".join(emails) or empty string."""
@@ -121,6 +251,11 @@ def _consolidate_email_all(df: pd.DataFrame) -> pd.DataFrame:
         return emails_to_string(unique_sorted)
 
     df["Email_All"] = df.apply(_build_email_all, axis=1)
+    try:
+        for idx in range(len(df.index)):
+            _set_email_all(df, idx, df.at[idx, "Email_All"], source="consolidate", logger=_LOGGER.info)
+    except Exception:
+        pass
     return df
 
 
@@ -1043,8 +1178,15 @@ def run_enrichment(raw_csv_path: str, enriched_output_path: str, logger: LoggerF
     try:
         checked_path = final_checker.run_final_checker(result_path)
         if checked_path and os.path.exists(checked_path):
-            shutil.copyfile(checked_path, enriched_output_path)
-            final_path = enriched_output_path
+            try:
+                same_file = os.path.exists(enriched_output_path) and os.path.samefile(checked_path, enriched_output_path)
+            except Exception:
+                same_file = False
+            if same_file:
+                final_path = enriched_output_path
+            else:
+                shutil.copyfile(checked_path, enriched_output_path)
+                final_path = enriched_output_path
         else:
             final_path = result_path
     except Exception as exc:  # pragma: no cover - defensive fallback
@@ -1327,6 +1469,7 @@ def run_facebook_global_pass_nightmode(
     long_break_every: int = 80,
     long_break_range: tuple[float, float] = (120.0, 360.0),
     logger: LoggerFn = None,
+    skip_rows_with_email: bool = True,
 ) -> FacebookGlobalPassStatus:
     """
     Night Mode–specific global FB enrichment pass.
@@ -1488,12 +1631,14 @@ def run_facebook_global_pass_nightmode(
             if pd.isna(email_all_val):
                 email_all_val = ""
             email_all_clean = str(email_all_val or "").strip()
-            has_email = bool(email_all_clean)
+            # Honor quarantine override + suspect fields to allow FB even when Email_All present.
+            skip_due_to_email = _should_skip_row_due_to_email(row, skip_rows_with_email, logger)
+            has_email_effective = skip_due_to_email
 
             fb_status_val_raw = str(row.get("FB_Status", "") or "").strip()
             fb_status_val = fb_status_val_raw.lower()
 
-            if has_email:
+            if has_email_effective:
                 _safe_log_console(
                     logger,
                     f"[Night FB] Skipping row {idx} ('{artist_label}') – email already present (Email_All='{email_all_clean}').",
@@ -1533,10 +1678,10 @@ def run_facebook_global_pass_nightmode(
             facebook_url_hint = str(row.get("Facebook_URL", "") or "").strip()
             has_clue = _has_facebook_clue(row)
             final_fb_statuses = {"login_redirect", "no_candidates", "ok", "found"} | terminal_statuses
-            should_run_night_fb = (not has_email) and (fb_status_val not in final_fb_statuses)
-            if has_email or fb_status_val in final_fb_statuses or not has_clue or not should_run_night_fb:
-                if has_email or fb_status_val in final_fb_statuses:
-                    email_state = "present" if has_email else "missing"
+            should_run_night_fb = (not has_email_effective) and (fb_status_val not in final_fb_statuses)
+            if has_email_effective or fb_status_val in final_fb_statuses or not has_clue or not should_run_night_fb:
+                if has_email_effective or fb_status_val in final_fb_statuses:
+                    email_state = "present" if has_email_effective else "missing"
                     _safe_log_console(
                         logger,
                         f"[Night FB] Skipping FB lookup for '{artist_label}' (FB_Status='{fb_status_val_raw}', email='{email_state}').",
@@ -1599,7 +1744,9 @@ def run_facebook_global_pass_nightmode(
 
             if enriched:
                 _maybe_set_email(df, idx, enriched.get("Email"))
-                for col in ("Email_All", "Email_Type", "Facebook_URL"):
+                if "Email_All" in enriched:
+                    _set_email_all(df, idx, enriched.get("Email_All", ""), source="fb_global_pass", logger=logger)
+                for col in ("Email_Type", "Facebook_URL"):
                     if col in enriched:
                         df.at[idx, col] = enriched.get(col, "")
                 status_val = str(enriched.get("FB_Status", "") or "")
