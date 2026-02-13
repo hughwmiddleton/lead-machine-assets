@@ -213,6 +213,8 @@ def quarantine_repeated_emails(df: pd.DataFrame, min_repeats: int = 5, logger: O
             "Email Source",
             "__source_job",
             "Source Directory",
+            "Directory_Email",
+            "Unearthed_Email",
         ],
     )
 
@@ -268,29 +270,55 @@ def quarantine_repeated_emails(df: pd.DataFrame, min_repeats: int = 5, logger: O
         # Decide keep/clear per email once, then aggregate.
         decisions = []
         for email in repeated_here:
-            _, origin_job, _ = first_seen[email]
+            origin_idx, origin_job, _ = first_seen[email]
             has_sc_origin = email_has_soundcloud_origin.get(email, False)
             if has_sc_origin:
                 keep_email = ("soundcloud" in row_dir_lower) or ("soundcloud" in row_job_lower)
             else:
-                keep_email = row_job == origin_job
+                keep_email = idx == origin_idx
             decisions.append((email, keep_email))
 
         keep_any = any(keep for _, keep in decisions)
 
         suspect_email_val = _cell_str(row.get("Email"))
         suspect_email_all_val = _cell_str(row.get("Email_All"))
+        suspect_directory_email_val = _cell_str(row.get("Directory_Email"))
+        suspect_unearthed_email_val = _cell_str(row.get("Unearthed_Email"))
         if suspect_email_val != "":
             work.at[idx, "Suspect_Email"] = suspect_email_val
-        combined_suspect_all = ";".join([val for val in (suspect_email_all_val, suspect_email_val) if val])
+        combined_suspect_all = ";".join(
+            [
+                val
+                for val in (
+                    suspect_email_all_val,
+                    suspect_email_val,
+                    suspect_directory_email_val,
+                    suspect_unearthed_email_val,
+                )
+                if val
+            ]
+        )
         if combined_suspect_all:
             existing_suspect_all = _cell_str(row.get("Suspect_Email_All"))
             merged_suspect_all = pipeline_runner._append_suspect_email_all(existing_suspect_all, combined_suspect_all)
             work.at[idx, "Suspect_Email_All"] = merged_suspect_all
 
         if not keep_any:
-            work.at[idx, "Email"] = ""
-            work.at[idx, "Email_All"] = ""
+            email_cols_to_clear = [
+                "Email",
+                "Email_All",
+                "Directory_Email",
+                "Unearthed_Email",
+                "Email Address",
+                "Primary Email",
+                "All Emails",
+                "emails",
+                "email",
+                "Emails",
+            ]
+            for col in email_cols_to_clear:
+                if col in work.columns:
+                    work.at[idx, col] = ""
             work.at[idx, "Needs_Review"] = "TRUE"
             work.at[idx, "Email Source"] = "Quarantined (repeat email)"
             artist = _cell_str(row.get("Artist Name"))
@@ -677,7 +705,7 @@ def run_night_mode(
             master_pre_fb = _merge_master(run_dir, job_states, logger)
         if master_pre_fb and os.path.exists(master_pre_fb):
             try:
-                df_master = pd.read_csv(master_pre_fb)
+                df_master = pd.read_csv(master_pre_fb, dtype=str, keep_default_na=False).fillna("")
                 df_master = quarantine_repeated_emails(df_master, min_repeats=5, logger=logger)
                 df_master.to_csv(master_pre_fb, index=False)
             except Exception as exc:

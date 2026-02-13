@@ -160,6 +160,15 @@ def _consolidate_email_all(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return df
 
+    def _is_quarantined(row: pd.Series) -> bool:
+        source_val = _cell_str(row.get("Email Source"))
+        suspect_all_val = _cell_str(row.get("Suspect_Email_All"))
+        needs_review_val = _cell_str(row.get("Needs_Review"))
+        source_is_quarantined = source_val.lower().startswith("quarantined") if source_val else False
+        needs_review_flag = needs_review_val.strip().upper() in ("TRUE", "1", "YES", "Y")
+        needs_review_quarantine = needs_review_flag and bool(suspect_all_val)
+        return source_is_quarantined or needs_review_quarantine
+
     # Strip seed-directory scraped emails from Email/Email_All before consolidation.
     if "Email Source" in df.columns:
         source_series = df["Email Source"].fillna("").astype(str).str.lower()
@@ -190,6 +199,8 @@ def _consolidate_email_all(df: pd.DataFrame) -> pd.DataFrame:
         df["Email_All"] = ""
 
     def _build_email_all(row: pd.Series) -> str:
+        if _is_quarantined(row):
+            return _cell_str(row.get("Email_All"))
         collected: List[str] = []
         for field in legacy_fields:
             if field in row:
@@ -200,6 +211,8 @@ def _consolidate_email_all(df: pd.DataFrame) -> pd.DataFrame:
     df["Email_All"] = df.apply(_build_email_all, axis=1)
     try:
         for idx in range(len(df.index)):
+            if _is_quarantined(df.loc[idx]):
+                continue
             _set_email_all(df, idx, df.at[idx, "Email_All"], source="consolidate", logger=_LOGGER.info)
     except Exception:
         pass
