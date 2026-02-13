@@ -155,6 +155,113 @@ def _coalesce_emails(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _guard_against_email_smear(df: pd.DataFrame, logger: Optional[logging.Logger] = None, min_repeats: int = 5) -> pd.DataFrame:
+    """Clear obviously smeared emails across unrelated jobs in raw merge output.
+
+    - Flags any email value that appears across >= min_repeats rows.
+    - If that email spans multiple __source_job values, pick an origin job based on
+      highest frequency (tie-break: alphabetical) and clear the email fields on
+      rows from other jobs.
+    - Cleared rows keep suspects and are marked for manual review.
+    - Emits concise log lines prefixed with [SmearGuard].
+    """
+    if df is None or df.empty:
+        return df
+
+    if "__source_job" not in df.columns:
+        return df
+
+    email_cols = [col for col in ("Email", "Email_All") if col in df.columns]
+    if not email_cols:
+        return df
+
+    work = df.copy(deep=True)
+
+    for col in ("Suspect_Email", "Suspect_Email_All", "Needs_Review", "Email Source"):
+        if col not in work.columns:
+            work[col] = ""
+
+    _ensure_string_columns(
+        work,
+        email_cols
+        + ["__source_job", "Suspect_Email", "Suspect_Email_All", "Needs_Review", "Email Source"],
+    )
+
+    total_counts: Dict[str, int] = {}
+    email_job_counts: Dict[str, Dict[str, int]] = {}
+
+    for _, row in work.iterrows():
+        job = _cell_str(row.get("__source_job"))
+        row_emails: set[str] = set()
+        for col in email_cols:
+            row_emails.update(pipeline_runner.normalize_emails(_cell_str(row.get(col))))
+        if not row_emails:
+            continue
+        for email in row_emails:
+            total_counts[email] = total_counts.get(email, 0) + 1
+            job_counts = email_job_counts.setdefault(email, {})
+            job_counts[job] = job_counts.get(job, 0) + 1
+
+    suspect_emails = {email for email, count in total_counts.items() if count >= max(1, int(min_repeats))}
+    if not suspect_emails:
+        return work
+
+    rows_cleared: Dict[str, int] = {email: 0 for email in suspect_emails}
+
+    for email in sorted(suspect_emails):
+        jobs = email_job_counts.get(email, {})
+        if len(jobs) <= 1:
+            continue
+        # Origin job: highest frequency, then alphabetical.
+        origin_job = sorted(jobs.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
+
+        for idx, row in work.iterrows():
+            job = _cell_str(row.get("__source_job"))
+            row_emails: set[str] = set()
+            for col in email_cols:
+                row_emails.update(pipeline_runner.normalize_emails(_cell_str(row.get(col))))
+            if email not in row_emails:
+                continue
+            if job == origin_job:
+                continue
+
+            suspect_email_val = _cell_str(row.get("Email")) if "Email" in work.columns else ""
+            suspect_email_all_val = _cell_str(row.get("Email_All")) if "Email_All" in work.columns else ""
+
+            if suspect_email_val:
+                work.at[idx, "Suspect_Email"] = suspect_email_val or email
+            elif not _cell_str(row.get("Suspect_Email")):
+                work.at[idx, "Suspect_Email"] = email
+
+            combined_suspect_all = pipeline_runner._append_suspect_email_all(
+                _cell_str(row.get("Suspect_Email_All")), suspect_email_all_val or suspect_email_val or email
+            )
+            work.at[idx, "Suspect_Email_All"] = combined_suspect_all
+
+            for col in email_cols:
+                work.at[idx, col] = ""
+
+            work.at[idx, "Needs_Review"] = "TRUE"
+            work.at[idx, "Email Source"] = "Quarantined (smear guard)"
+            rows_cleared[email] += 1
+
+        jobs_summary = ", ".join(f"{job}:{count}" for job, count in sorted(jobs.items()))
+        cleared = rows_cleared.get(email, 0)
+        msg = (
+            f"[SmearGuard] email={email} total={total_counts.get(email, 0)} "
+            f"jobs=[{jobs_summary}] origin_job={origin_job} rows_cleared={cleared}"
+        )
+        try:
+            if logger:
+                logger.info(msg)
+            else:
+                logging.getLogger(__name__).info(msg)
+        except Exception:
+            pass
+
+    return work
+
+
 def _log_quarantine(message: str, logger: Optional[logging.Logger]) -> None:
     if not message:
         return
@@ -476,6 +583,7 @@ def _merge_raw_master(run_dir: str, job_states: List[Dict[str, Any]], logger: lo
         if col in combined.columns:
             combined[col] = combined[col].fillna("").astype(str).apply(_strip_excluded_urls)
     combined = _coalesce_emails(combined)
+    combined = _guard_against_email_smear(combined, logger=logger, min_repeats=5)
     try:
         unearthed_mask = combined.get("Source Directory", pd.Series(dtype=str)).astype(str).str.contains("unearthed", case=False, na=False)
         sample = combined.loc[unearthed_mask, ["Artist Name", "Source Directory", "Email", "Email_All"]].head()
