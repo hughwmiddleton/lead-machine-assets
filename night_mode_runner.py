@@ -222,6 +222,7 @@ def quarantine_repeated_emails(df: pd.DataFrame, min_repeats: int = 5, logger: O
 
     for idx, row in work.iterrows():
         row_job = _cell_str(row.get("__source_job"))
+        row_job_lower = row_job.lower()
         row_dir = _cell_str(row.get("Source Directory"))
         row_dir_lower = row_dir.lower()
         emails = set(
@@ -238,7 +239,8 @@ def quarantine_repeated_emails(df: pd.DataFrame, min_repeats: int = 5, logger: O
                     row_job,
                     row_dir,
                 )
-            if "soundcloud" in row_dir_lower:
+            has_sc_signal = ("soundcloud" in row_dir_lower) or ("soundcloud" in row_job_lower)
+            if has_sc_signal:
                 email_has_soundcloud_origin[email] = True
             elif email not in email_has_soundcloud_origin:
                 email_has_soundcloud_origin[email] = False
@@ -260,6 +262,7 @@ def quarantine_repeated_emails(df: pd.DataFrame, min_repeats: int = 5, logger: O
             continue
 
         row_job = _cell_str(row.get("__source_job"))
+        row_job_lower = row_job.lower()
         row_dir_lower = _cell_str(row.get("Source Directory")).lower()
 
         # Decide keep/clear per email once, then aggregate.
@@ -267,7 +270,10 @@ def quarantine_repeated_emails(df: pd.DataFrame, min_repeats: int = 5, logger: O
         for email in repeated_here:
             _, origin_job, _ = first_seen[email]
             has_sc_origin = email_has_soundcloud_origin.get(email, False)
-            keep_email = ("soundcloud" in row_dir_lower) if has_sc_origin else (row_job == origin_job)
+            if has_sc_origin:
+                keep_email = ("soundcloud" in row_dir_lower) or ("soundcloud" in row_job_lower)
+            else:
+                keep_email = row_job == origin_job
             decisions.append((email, keep_email))
 
         keep_any = any(keep for _, keep in decisions)
