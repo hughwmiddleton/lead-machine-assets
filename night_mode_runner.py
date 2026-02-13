@@ -155,6 +155,131 @@ def _coalesce_emails(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _log_quarantine(message: str, logger: Optional[logging.Logger]) -> None:
+    if not message:
+        return
+    try:
+        if logger and hasattr(logger, "info"):
+            logger.info(message)
+            return
+    except Exception:
+        pass
+    try:
+        logging.getLogger(__name__).info(message)
+    except Exception:
+        pass
+
+
+def quarantine_repeated_emails(df: pd.DataFrame, min_repeats: int = 5, logger: Optional[logging.Logger] = None) -> pd.DataFrame:
+    """
+    Quarantine highly repeated emails so Night FB can attempt recovery.
+
+    - Identifies emails that appear across >= min_repeats rows (Email or Email_All).
+    - Preserves the repeated values in Suspect_Email / Suspect_Email_All.
+    - Clears Email / Email_All only on rows that are unlikely sources so FB can run.
+    - Heuristic for keeping source rows:
+        * row __source_job matches the job where the email first appeared, OR
+        * the email originated on a SoundCloud row and the current row is SoundCloud.
+    - Marks quarantined rows with Needs_Review="TRUE" and Email Source="Quarantined (repeat email)".
+    - Emits a summary log per repeated email.
+    """
+    if df is None or df.empty:
+        return df
+
+    work = df.copy(deep=True)
+    _ensure_string_columns(
+        work,
+        [
+            "Email",
+            "Email_All",
+            "Suspect_Email",
+            "Suspect_Email_All",
+            "Needs_Review",
+            "Email Source",
+            "__source_job",
+            "Source Directory",
+        ],
+    )
+
+    email_counts: Dict[str, int] = {}
+    first_seen: Dict[str, Tuple[int, str, str]] = {}
+
+    for idx, row in work.iterrows():
+        emails = set(
+            pipeline_runner.normalize_emails(row.get("Email_All", ""))
+            + pipeline_runner.normalize_emails(row.get("Email", ""))
+        )
+        if not emails:
+            continue
+        for email in emails:
+            email_counts[email] = email_counts.get(email, 0) + 1
+            if email not in first_seen:
+                first_seen[email] = (
+                    idx,
+                    str(row.get("__source_job", "") or ""),
+                    str(row.get("Source Directory", "") or ""),
+                )
+
+    repeated = {email: count for email, count in email_counts.items() if count >= max(1, int(min_repeats))}
+    if not repeated:
+        return work
+
+    cleared_counter: Dict[str, int] = {email: 0 for email in repeated}
+    kept_counter: Dict[str, int] = {email: 0 for email in repeated}
+
+    for idx, row in work.iterrows():
+        row_emails = set(
+            pipeline_runner.normalize_emails(row.get("Email_All", ""))
+            + pipeline_runner.normalize_emails(row.get("Email", ""))
+        )
+        repeated_here = [email for email in row_emails if email in repeated]
+        if not repeated_here:
+            continue
+
+        row_job = str(row.get("__source_job", "") or "")
+        row_dir = str(row.get("Source Directory", "") or "").lower()
+
+        # Decide keep/clear per email once, then aggregate.
+        decisions = []
+        for email in repeated_here:
+            _, origin_job, origin_dir = first_seen[email]
+            origin_dir_lower = str(origin_dir or "").lower()
+            is_soundcloud_origin = "soundcloud" in origin_dir_lower
+            keep_email = row_job == origin_job or (is_soundcloud_origin and "soundcloud" in row_dir)
+            decisions.append((email, keep_email))
+
+        keep_any = any(keep for _, keep in decisions)
+
+        suspect_email_val = str(row.get("Email", "") or "")
+        suspect_email_all_val = str(row.get("Email_All", "") or "")
+        if suspect_email_val:
+            work.at[idx, "Suspect_Email"] = suspect_email_val
+        if suspect_email_all_val:
+            work.at[idx, "Suspect_Email_All"] = suspect_email_all_val
+
+        if not keep_any:
+            work.at[idx, "Email"] = ""
+            work.at[idx, "Email_All"] = ""
+            work.at[idx, "Needs_Review"] = "TRUE"
+            work.at[idx, "Email Source"] = "Quarantined (repeat email)"
+
+        for email, keep_email in decisions:
+            if keep_email:
+                kept_counter[email] += 1
+            else:
+                cleared_counter[email] += 1
+
+    for email, count in repeated.items():
+        rows_cleared = cleared_counter.get(email, 0)
+        rows_kept = kept_counter.get(email, 0)
+        _log_quarantine(
+            f"[Quarantine] email={email} count={count} rows_cleared={rows_cleared} rows_kept={rows_kept}",
+            logger,
+        )
+
+    return work
+
+
 def _dedupe_master(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
@@ -513,6 +638,13 @@ def run_night_mode(
         else:
             master_pre_fb = _merge_master(run_dir, job_states, logger)
         if master_pre_fb and os.path.exists(master_pre_fb):
+            try:
+                df_master = pd.read_csv(master_pre_fb)
+                df_master = quarantine_repeated_emails(df_master, min_repeats=5, logger=logger)
+                df_master.to_csv(master_pre_fb, index=False)
+            except Exception as exc:
+                logger.warning("[Master] Quarantine repeated emails failed safely: %s", exc)
+
             master_post_fb = os.path.join(run_dir, "master_post_fb.csv")
             fb_state_path = os.path.join(run_dir, FACEBOOK_STATE_FILENAME)
             fb_state = _load_state(fb_state_path)
