@@ -1873,5 +1873,33 @@
       "https://disgracelandpunk.bandcamp.com",
       "https://coldshowershc.bandcamp.com"
     ]
+  },
+  "https://bandcamp.com/discover/glasgow+folk?s=new": {
+    "scraped_artist_urls": [
+      "https://astrobloc.bandcamp.com",
+      "https://sonoftherighthand-music.bandcamp.com",
+      "https://bigtelephone.bandcamp.com",
+      "https://miguelgirao.bandcamp.com",
+      "https://tomrichardson1.bandcamp.com",
+      "https://lizziereid.bandcamp.com",
+      "https://chairmancow.bandcamp.com",
+      "https://inyal.bandcamp.com",
+      "https://kurdistankurdistan.bandcamp.com",
+      "https://kingribmusic.bandcamp.com"
+    ]
+  },
+  "discover:https://bandcamp.com/discover/glasgow+folk?s=new": {
+    "scraped_artist_urls": [
+      "https://astrobloc.bandcamp.com",
+      "https://sonoftherighthand-music.bandcamp.com",
+      "https://bigtelephone.bandcamp.com",
+      "https://miguelgirao.bandcamp.com",
+      "https://tomrichardson1.bandcamp.com",
+      "https://lizziereid.bandcamp.com",
+      "https://chairmancow.bandcamp.com",
+      "https://inyal.bandcamp.com",
+      "https://kurdistankurdistan.bandcamp.com",
+      "https://kingribmusic.bandcamp.com"
+    ]
   }
 }
