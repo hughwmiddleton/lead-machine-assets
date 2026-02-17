@@ -30,6 +30,9 @@ def _ensure_manifest_skeleton(manifest: Dict[str, Any], run_dir: str, cfg_hash: 
     enrich_phase = phases.setdefault("enrich", {})
     enrich_phase.setdefault("status", "pending")
     enrich_phase.setdefault("outputs", {})
+    contact_phase = phases.setdefault("contact", {})
+    contact_phase.setdefault("status", "pending")
+    contact_phase.setdefault("outputs", {})
     return manifest
 
 
@@ -328,5 +331,167 @@ def run_enrich_phase(config: Any, run_dir: str, seed_result: Dict[str, Any], res
     pre_rows = _record_output(outputs, "master_pre_fb", master_pre_fb, df=df_master)
     enrich_phase["status"] = "completed" if pre_rows > 0 else "failed"
     manifest["phases"]["enrich"] = enrich_phase
+    write_manifest(manifest_path, manifest)
+    return manifest
+
+
+def run_contact_phase(config: Any, run_dir: str, enrich_manifest: Dict[str, Any], resume: bool = False) -> Dict[str, Any]:
+    """
+    Phase 3: Facebook global pass + final validation + exports.
+
+    Mirrors the v1 ordering while persisting state to the v2 manifest.
+    """
+
+    cfg = _coerce_config(config)
+    cfg_hash = config_hash(cfg)
+    manifest_path = os.path.join(run_dir, "run_manifest_v2.json")
+
+    existing_manifest: Dict[str, Any] = {}
+    if os.path.exists(manifest_path):
+        try:
+            existing_manifest = load_manifest(manifest_path)
+        except ValueError:
+            existing_manifest = {}
+    if not existing_manifest and enrich_manifest:
+        existing_manifest = enrich_manifest
+
+    manifest = _ensure_manifest_skeleton(existing_manifest or {}, run_dir, cfg_hash)
+    phases = manifest.setdefault("phases", {})
+    contact_phase = phases.setdefault("contact", {})
+    outputs = contact_phase.setdefault("outputs", {})
+
+    os.makedirs(run_dir, exist_ok=True)
+
+    master_pre_fb_path = os.path.join(run_dir, "master_pre_fb.csv")
+    master_post_fb_path = os.path.join(run_dir, "master_post_fb.csv")
+    master_final_path = os.path.join(run_dir, "master_final.csv")
+    master_export_path = os.path.join(run_dir, "master_export_leads.csv")
+    final_export_path = os.path.join(run_dir, "final_export.csv")
+    woodpecker_export_path = os.path.join(run_dir, "woodpecker_export.csv")
+    fb_state_path = os.path.join(run_dir, "facebook_state.json")
+
+    existing_post_df: Optional[pd.DataFrame] = None
+    post_rows = _safe_count_rows(master_post_fb_path)
+    final_rows = _safe_count_rows(master_final_path)
+    export_rows = _safe_count_rows(master_export_path)
+    if post_rows > 0:
+        try:
+            existing_post_df = pd.read_csv(master_post_fb_path, dtype=str, keep_default_na=False)
+            schema_valid, _, _ = validate_schema(existing_post_df, phase="post_fb")
+        except Exception:
+            schema_valid = False
+    else:
+        schema_valid = False
+
+    required_outputs_exist = post_rows > 0 and final_rows > 0 and export_rows > 0
+    manifest_for_skip = {
+        "config_hash": manifest.get("config_hash"),
+        "phases": {"contact": {"status": contact_phase.get("status")}},
+    }
+
+    if resume and should_skip_phase(
+        manifest_for_skip,
+        phase="contact",
+        current_config_hash=cfg_hash,
+        required_outputs_exist=required_outputs_exist,
+        schema_valid=schema_valid,
+    ):
+        _record_output(outputs, "master_post_fb", master_post_fb_path, df=existing_post_df)
+        _record_output(outputs, "master_final", master_final_path)
+        _record_output(outputs, "master_export_leads", master_export_path)
+        _record_output(outputs, "final_export", final_export_path)
+        _record_output(outputs, "woodpecker_export", woodpecker_export_path)
+        contact_phase["status"] = "skipped_cached"
+        manifest["phases"]["contact"] = contact_phase
+        write_manifest(manifest_path, manifest)
+        return manifest
+
+    if not os.path.exists(master_pre_fb_path):
+        contact_phase["status"] = "failed"
+        manifest["phases"]["contact"] = contact_phase
+        write_manifest(manifest_path, manifest)
+        return manifest
+
+    log_path = os.path.join(run_dir, "contact_log_v2.txt")
+    logger = night_mode_runner._setup_logger(log_path, "contact_v2")
+
+    try:
+        pipeline_runner.run_facebook_global_pass_nightmode(
+            master_pre_fb_path,
+            master_post_fb_path,
+            state_path=fb_state_path,
+            logger=logger.info,
+        )
+    except Exception:
+        # Fall back to the pre-FB file if the pass fails.
+        try:
+            pd.read_csv(master_pre_fb_path, dtype=str, keep_default_na=False).to_csv(master_post_fb_path, index=False)
+        except Exception:
+            contact_phase["status"] = "failed"
+            manifest["phases"]["contact"] = contact_phase
+            write_manifest(manifest_path, manifest)
+            return manifest
+
+    if not os.path.exists(master_post_fb_path):
+        try:
+            pd.read_csv(master_pre_fb_path, dtype=str, keep_default_na=False).to_csv(master_post_fb_path, index=False)
+        except Exception:
+            contact_phase["status"] = "failed"
+            manifest["phases"]["contact"] = contact_phase
+            write_manifest(manifest_path, manifest)
+            return manifest
+
+    try:
+        fb_df = pd.read_csv(master_post_fb_path, dtype=str, keep_default_na=False).fillna("")
+    except Exception:
+        fb_df = None
+
+    _record_output(outputs, "master_post_fb", master_post_fb_path, df=fb_df)
+
+    try:
+        pipeline_runner.run_enrichment(
+            master_post_fb_path,
+            master_final_path,
+            logger=logger.info,
+            night_mode=True,
+        )
+    except Exception:
+        # Best-effort fallback
+        try:
+            pd.read_csv(master_post_fb_path, dtype=str, keep_default_na=False).to_csv(master_final_path, index=False)
+        except Exception:
+            contact_phase["status"] = "failed"
+            manifest["phases"]["contact"] = contact_phase
+            write_manifest(manifest_path, manifest)
+            return manifest
+
+    try:
+        final_df = pd.read_csv(master_final_path, dtype=str, keep_default_na=False).fillna("")
+    except Exception:
+        final_df = None
+
+    final_rows = _record_output(outputs, "master_final", master_final_path, df=final_df)
+
+    try:
+        pipeline_runner.export_master_leads(
+            input_csv=master_final_path,
+            output_csv=master_export_path,
+            logger=logger,
+            export_profile=(cfg.get("export_profile") or "full_dump"),
+            final_export_csv=final_export_path,
+            woodpecker_export_csv=woodpecker_export_path,
+        )
+    except Exception:
+        contact_phase["status"] = "failed"
+        manifest["phases"]["contact"] = contact_phase
+        write_manifest(manifest_path, manifest)
+        return manifest
+
+    _record_output(outputs, "master_export_leads", master_export_path)
+    _record_output(outputs, "final_export", final_export_path)
+    _record_output(outputs, "woodpecker_export", woodpecker_export_path)
+
+    contact_phase["status"] = "completed" if final_rows > 0 else "failed"
+    manifest["phases"]["contact"] = contact_phase
     write_manifest(manifest_path, manifest)
     return manifest
