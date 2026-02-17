@@ -4,19 +4,19 @@ This module is intentionally minimal and self-contained. It reuses the
 existing v1 job execution helpers without altering their behaviour.
 """
 
+import hashlib
 import json
 import os
-import hashlib
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
-from night_mode_v2.manifest import write_manifest, load_manifest, config_hash
 from night_mode_v2.cache_policy import should_skip_phase
+from night_mode_v2.manifest import config_hash, load_manifest, write_manifest
 from night_mode_v2.schema_registry import validate_schema
 
-import pipeline_runner
 import night_mode_runner
+import pipeline_runner
 
 
 def _ensure_manifest_skeleton(manifest: Dict[str, Any], run_dir: str, cfg_hash: str) -> Dict[str, Any]:
@@ -27,6 +27,9 @@ def _ensure_manifest_skeleton(manifest: Dict[str, Any], run_dir: str, cfg_hash: 
     seed_phase = phases.setdefault("seed", {})
     seed_phase.setdefault("status", "pending")
     seed_phase.setdefault("jobs", {})
+    enrich_phase = phases.setdefault("enrich", {})
+    enrich_phase.setdefault("status", "pending")
+    enrich_phase.setdefault("outputs", {})
     return manifest
 
 
@@ -181,3 +184,149 @@ def run_seed_phase(config_path: str, run_dir: str, resume: bool = False) -> Dict
 def run_seed_only(config_path: str, run_dir: str, resume: bool = False) -> Dict[str, Any]:
     return run_seed_phase(config_path, run_dir, resume=resume)
 
+
+def _coerce_config(config: Any) -> Dict[str, Any]:
+    if isinstance(config, str):
+        return _load_config(config)
+    return dict(config or {})
+
+
+def _build_job_states(seed_jobs: Dict[str, Any]) -> List[Dict[str, Any]]:
+    job_states: List[Dict[str, Any]] = []
+    for job_id, job_info in (seed_jobs or {}).items():
+        state = dict(job_info or {})
+        state.setdefault("job_id", job_id)
+        job_states.append(state)
+    return job_states
+
+
+def _record_output(outputs: Dict[str, Any], name: str, path: Optional[str], df: Optional[pd.DataFrame] = None) -> int:
+    row_count = _safe_count_rows(path) if path else 0
+    entry: Dict[str, Any] = {"path": path or "", "row_count": int(row_count)}
+    if df is not None:
+        try:
+            entry["schema_hash"] = _schema_hash_from_df(df)
+        except Exception:
+            pass
+    outputs[name] = entry
+    return int(row_count)
+
+
+def run_enrich_phase(config: Any, run_dir: str, seed_result: Dict[str, Any], resume: bool = False) -> Dict[str, Any]:
+    """
+    Phase 2: merge raw outputs, run master enrichment, run validation, then quarantine.
+
+    This mirrors the v1 master pipeline while persisting state to the v2 manifest.
+    """
+    cfg = _coerce_config(config)
+    cfg_hash = config_hash(cfg)
+    manifest_path = os.path.join(run_dir, "run_manifest_v2.json")
+
+    existing_manifest: Dict[str, Any] = {}
+    if os.path.exists(manifest_path):
+        try:
+            existing_manifest = load_manifest(manifest_path)
+        except ValueError:
+            existing_manifest = {}
+    if not existing_manifest and seed_result:
+        existing_manifest = seed_result
+
+    manifest = _ensure_manifest_skeleton(existing_manifest or {}, run_dir, cfg_hash)
+    phases = manifest.setdefault("phases", {})
+    seed_phase = phases.get("seed", {})
+    enrich_phase = phases.setdefault("enrich", {})
+    outputs = enrich_phase.setdefault("outputs", {})
+
+    os.makedirs(run_dir, exist_ok=True)
+
+    master_raw_path = os.path.join(run_dir, "master_raw.csv")
+    master_enriched_path = os.path.join(run_dir, "master_enriched.csv")
+    master_pre_fb_path = os.path.join(run_dir, "master_pre_fb.csv")
+
+    existing_pre_df: Optional[pd.DataFrame] = None
+    existing_raw_count = _safe_count_rows(master_raw_path)
+    existing_enriched_count = _safe_count_rows(master_enriched_path)
+    existing_pre_count = _safe_count_rows(master_pre_fb_path)
+    if existing_pre_count > 0:
+        try:
+            existing_pre_df = pd.read_csv(master_pre_fb_path)
+        except Exception:
+            existing_pre_df = None
+    schema_valid = False
+    if existing_pre_df is not None:
+        try:
+            schema_valid, _, _ = validate_schema(existing_pre_df, phase="pre_fb")
+        except Exception:
+            schema_valid = False
+
+    required_outputs_exist = all(count > 0 for count in (existing_raw_count, existing_enriched_count, existing_pre_count))
+    should_skip = resume and manifest.get("config_hash") == cfg_hash and required_outputs_exist and schema_valid
+
+    if should_skip:
+        _record_output(outputs, "master_raw", master_raw_path)
+        _record_output(outputs, "master_enriched", master_enriched_path)
+        _record_output(outputs, "master_pre_fb", master_pre_fb_path, df=existing_pre_df)
+        enrich_phase["status"] = "skipped_cached"
+        manifest["phases"]["enrich"] = enrich_phase
+        write_manifest(manifest_path, manifest)
+        return manifest
+
+    job_states = _build_job_states(seed_phase.get("jobs", {}))
+
+    log_path = os.path.join(run_dir, "master_log_v2.txt")
+    logger = night_mode_runner._setup_logger(log_path, "master_v2")
+
+    merge_fn = getattr(night_mode_runner, "_merge_raw_master", None)
+    master_raw = merge_fn(run_dir, job_states, logger) if callable(merge_fn) else None
+    raw_rows = _record_output(outputs, "master_raw", master_raw)
+    if not master_raw or raw_rows == 0:
+        enrich_phase["status"] = "failed"
+        manifest["phases"]["enrich"] = enrich_phase
+        write_manifest(manifest_path, manifest)
+        return manifest
+
+    master_enrich_cfg = cfg.get("master_enrichment", {}) or {}
+    live_search_enabled = master_enrich_cfg.get("enable_live_search", True)
+    max_live_searches_raw = master_enrich_cfg.get("max_live_searches")
+    try:
+        max_live_searches = int(max_live_searches_raw) if max_live_searches_raw is not None else None
+    except Exception:
+        max_live_searches = None
+    if max_live_searches is not None and max_live_searches < 0:
+        max_live_searches = 0
+
+    master_enriched = pipeline_runner.run_master_enrichment(
+        master_raw,
+        master_enriched_path,
+        logger=logger.info,
+        enable_live_search=live_search_enabled,
+        max_live_searches=max_live_searches,
+        night_mode=True,
+    )
+    enriched_rows = _record_output(outputs, "master_enriched", master_enriched)
+    if not master_enriched or enriched_rows == 0:
+        enrich_phase["status"] = "failed"
+        manifest["phases"]["enrich"] = enrich_phase
+        write_manifest(manifest_path, manifest)
+        return manifest
+
+    master_pre_fb = pipeline_runner.run_enrichment(
+        master_enriched,
+        master_pre_fb_path,
+        logger=logger.info,
+        night_mode=True,
+    )
+
+    df_master: Optional[pd.DataFrame] = None
+    try:
+        df_master = pd.read_csv(master_pre_fb, dtype=str, keep_default_na=False).fillna("")
+        df_master = night_mode_runner.quarantine_repeated_emails(df_master, min_repeats=5, logger=logger)
+        df_master.to_csv(master_pre_fb, index=False)
+    except Exception:
+        df_master = None
+
+    pre_rows = _record_output(outputs, "master_pre_fb", master_pre_fb, df=df_master)
+    enrich_phase["status"] = "completed" if pre_rows > 0 else "failed"
+    manifest["phases"]["enrich"] = enrich_phase
+    write_manifest(manifest_path, manifest)
+    return manifest
