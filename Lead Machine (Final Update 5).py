@@ -10050,6 +10050,7 @@ class NightModeTab(QtWidgets.QWidget):
         self.jobs = []
         self._bootstrap_stage = None  # None | "headless" | "headed" | "final_headless"
         self._log_buffer: list[str] = []
+        self._phased_enabled = False
         self._build_ui()
 
     def _build_ui(self):
@@ -10112,8 +10113,11 @@ class NightModeTab(QtWidgets.QWidget):
         options_layout.addWidget(self.export_mode_combo)
         self.resume_checkbox = QtWidgets.QCheckBox("Resume unfinished jobs")
         self.stop_on_failure_checkbox = QtWidgets.QCheckBox("Stop on first failure")
+        self.phased_checkbox = QtWidgets.QCheckBox("Use phased runner (v2)")
+        self.phased_checkbox.setToolTip("Runs Night Mode via the v2 phased runner (seed \u2192 enrich \u2192 contact).")
         options_layout.addWidget(self.resume_checkbox)
         options_layout.addWidget(self.stop_on_failure_checkbox)
+        options_layout.addWidget(self.phased_checkbox)
         options_layout.addStretch()
         layout.addLayout(options_layout)
 
@@ -10306,6 +10310,7 @@ class NightModeTab(QtWidgets.QWidget):
             "export_mode": self.export_mode_combo.currentText().strip(),
             "jobs": self.jobs,
         }
+        config["phased"] = self.phased_checkbox.isChecked()
         config["facebook"] = {
             "auto_resume_after_captcha": self.fb_auto_resume_checkbox.isChecked(),
             "cooldown_seconds": int(self.fb_cooldown_spin.value()),
@@ -10359,6 +10364,9 @@ class NightModeTab(QtWidgets.QWidget):
             idx = self.export_mode_combo.findText(export_mode)
             if idx >= 0:
                 self.export_mode_combo.setCurrentIndex(idx)
+        phased_value = config.get("phased")
+        if phased_value is not None:
+            self.phased_checkbox.setChecked(bool(phased_value))
         fb_cfg = config.get("facebook", {}) or {}
         self.fb_auto_resume_checkbox.setChecked(bool(fb_cfg.get("auto_resume_after_captcha", False)))
         try:
@@ -10393,6 +10401,7 @@ class NightModeTab(QtWidgets.QWidget):
         if self.worker and self.worker.isRunning():
             QtWidgets.QMessageBox.information(self, "Night Mode", "Night Mode is already running.")
             return
+        self._phased_enabled = self.phased_checkbox.isChecked()
         self._bootstrap_stage = "headless"
         self._launch_night_mode(headless=True)
 
@@ -10406,6 +10415,7 @@ class NightModeTab(QtWidgets.QWidget):
                 "export_mode": self.export_mode_combo.currentText().strip(),
                 "jobs": self.jobs,
             }
+            config["phased"] = self._phased_enabled
             config["facebook"] = {
                 "auto_resume_after_captcha": self.fb_auto_resume_checkbox.isChecked(),
                 "cooldown_seconds": int(self.fb_cooldown_spin.value()),
@@ -10442,6 +10452,9 @@ class NightModeTab(QtWidgets.QWidget):
             cmd.append("--resume")
         if self.stop_on_failure_checkbox.isChecked():
             cmd.append("--stop-on-failure")
+        phased_enabled = self._phased_enabled
+        if phased_enabled:
+            cmd.append("--phased")
         run_root = self.run_root_edit.text().strip()
         if run_root:
             cmd.extend(["--run-root", run_root])
