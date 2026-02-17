@@ -994,6 +994,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Night Mode runner for Lead Machine")
     parser.add_argument("--config", required=True, help="Path to overnight_jobs.json config file")
     parser.add_argument("--resume", action="store_true", help="Resume the latest overnight run")
+    parser.add_argument(
+        "--phased",
+        action="store_true",
+        default=False,
+        help="Run Night Mode via v2 phased runner (opt-in).",
+    )
     parser.add_argument("--stop-on-failure", action="store_true", help="Abort all jobs if any job fails")
     parser.add_argument(
         "--export-mode",
@@ -1031,19 +1037,36 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[List[str]] = None) -> None:
     parser = _build_arg_parser()
     args = parser.parse_args(argv)
-    result = run_night_mode(
-        config_path=args.config,
-        resume=args.resume,
-        stop_on_failure=args.stop_on_failure,
-        export_mode_override=args.export_mode,
-        export_profile_override=args.export_profile,
-        run_root=args.run_root,
-        fb_auto_resume_override=args.fb_auto_resume,
-        fb_cooldown_override=args.fb_cooldown_seconds,
-        fb_max_attempts_override=args.fb_max_auto_resume_attempts,
-        fb_max_rows_override=args.fb_max_rows_per_run,
-        with_sc_meta=args.with_sc_meta,
-    )
+    if args.phased:
+        from night_mode_v2.phased_runner import run_phased_night_mode
+
+        result = run_phased_night_mode(
+            config_path=args.config,
+            run_root=args.run_root,
+            resume=args.resume,
+            stop_on_failure=args.stop_on_failure,
+            export_mode=args.export_mode,
+            export_profile=args.export_profile,
+            fb_auto_resume_override=args.fb_auto_resume,
+            fb_cooldown_override=args.fb_cooldown_seconds,
+            fb_max_attempts_override=args.fb_max_auto_resume_attempts,
+            fb_max_rows_override=args.fb_max_rows_per_run,
+            with_sc_meta=args.with_sc_meta,
+        )
+    else:
+        result = run_night_mode(
+            config_path=args.config,
+            resume=args.resume,
+            stop_on_failure=args.stop_on_failure,
+            export_mode_override=args.export_mode,
+            export_profile_override=args.export_profile,
+            run_root=args.run_root,
+            fb_auto_resume_override=args.fb_auto_resume,
+            fb_cooldown_override=args.fb_cooldown_seconds,
+            fb_max_attempts_override=args.fb_max_auto_resume_attempts,
+            fb_max_rows_override=args.fb_max_rows_per_run,
+            with_sc_meta=args.with_sc_meta,
+        )
     print(json.dumps(result, indent=2))
 
 

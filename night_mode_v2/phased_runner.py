@@ -335,7 +335,7 @@ def run_enrich_phase(config: Any, run_dir: str, seed_result: Dict[str, Any], res
     return manifest
 
 
-def run_contact_phase(config: Any, run_dir: str, enrich_manifest: Dict[str, Any], resume: bool = False) -> Dict[str, Any]:
+def run_contact_phase(config: Any, run_dir: str, enrich_manifest: Dict[str, Any], resume: bool = False, **kwargs) -> Dict[str, Any]:
     """
     Phase 3: Facebook global pass + final validation + exports.
 
@@ -495,3 +495,35 @@ def run_contact_phase(config: Any, run_dir: str, enrich_manifest: Dict[str, Any]
     manifest["phases"]["contact"] = contact_phase
     write_manifest(manifest_path, manifest)
     return manifest
+
+
+def run_phased_night_mode(
+    config_path: str,
+    run_dir: Optional[str] = None,
+    run_root: Optional[str] = None,
+    resume: bool = False,
+    stop_on_failure: bool = False,
+    export_mode: Optional[str] = None,
+    export_profile: Optional[str] = None,
+    fb_auto_resume_override: Optional[bool] = None,
+    fb_cooldown_override: Optional[int] = None,
+    fb_max_attempts_override: Optional[int] = None,
+    fb_max_rows_override: Optional[int] = None,
+    with_sc_meta: bool = False,
+    **kwargs,
+) -> Dict[str, Any]:
+    """
+    Minimal CLI entrypoint for phased Night Mode runs.
+
+    Mirrors the v1 signature so callers can forward CLI args verbatim.
+    """
+    # Preserve v1 semantics for run directory discovery/creation.
+    root = run_root or run_dir or "overnight_runs"
+    run_dir_path, _ = night_mode_runner._ensure_run_dir(resume=resume, run_root=root)
+
+    cfg = _load_config(config_path)
+
+    seed_manifest = run_seed_phase(config_path, run_dir_path, resume=resume)
+    enrich_manifest = run_enrich_phase(cfg, run_dir_path, seed_manifest, resume=resume)
+    contact_manifest = run_contact_phase(cfg, run_dir_path, enrich_manifest, resume=resume)
+    return contact_manifest
