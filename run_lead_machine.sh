@@ -56,7 +56,7 @@ export FB_CANDIDATE_RANKING=1
 export FB_CANDIDATE_RANKING_PREVIEW_N=10
 
 # Refine pass ON (needed for quality gate validation)
-export FB_REFINE_QUERY=1
+unset FB_REFINE_QUERY=1
 
 # Leave deep internals OFF
 unset FB_DEBUG_CAND_GATE
@@ -104,7 +104,7 @@ export SC_ADAPTIVE_ABOUT_DISABLE=1
 # Bandcamp (minimal debug)
 # =====================================================
 unset BC_DEBUG_FILTER_SRC
-export BC_DEBUG_LOCATION=1
+unset BC_DEBUG_LOCATION=1
 
 # =====================================================
 # RUN
