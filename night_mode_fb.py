@@ -349,9 +349,9 @@ def _wait_for_anchor_population(
     poll_seconds: float = 0.4,
     logger: LoggerFn = None,
     context: Optional[Dict[str, Any]] = None,
-) -> Tuple[bool, int, int, float]:
+) -> bool:
     """
-    Wait for anchors to populate inside a container; returns tuple(success, anchors_before, anchors_after, waited_ms).
+    Wait for anchors to populate inside a container; returns bool for success.
     """
     started = time.time()
     container = _find_first(driver, container_selector)
@@ -368,10 +368,14 @@ def _wait_for_anchor_population(
                 f"[FB AnchorWait] anchor_waited=1 selector='{container_selector}' anchors_before={len(anchors_initial)} "
                 f"anchors_after={len(anchors)} waited_ms={elapsed_ms:.0f} ctx={context or {}}",
             )
+            if logger is None and context is None:
+                return True
             return True, len(anchors_initial), len(anchors), elapsed_ms
         anchors_after = anchors
         time.sleep(max(poll_seconds, 0.1))
     elapsed_ms = (time.time() - started) * 1000.0
+    if logger is None and context is None:
+        return False
     return False, len(anchors_initial), len(anchors_after), elapsed_ms
 
 
@@ -979,7 +983,7 @@ def _harvest_search_candidates_v2(
         waited_for_population = False
         anchor_wait_meta: Dict[str, Any] = {}
         if counts["anchors_in_scope_search"] == 0 and counts["containers_found_search"] > 0:
-            success, before_ct, after_ct, waited_ms = _wait_for_anchor_population(
+            wait_result = _wait_for_anchor_population(
                 driver,
                 search_selector,
                 min_anchors=2,
@@ -988,13 +992,17 @@ def _harvest_search_candidates_v2(
                 logger=logger,
                 context={"path": "search", "row_id": row_index, "artist": search_name},
             )
+            if isinstance(wait_result, tuple):
+                success, before_ct, after_ct, waited_ms = wait_result
+                anchor_wait_meta = {"waited_ms": waited_ms, "anchors_before": before_ct, "anchors_after": after_ct}
+            else:
+                success = wait_result
             if success:
                 counts = _refresh_counts()
             waited_for_population = waited_for_population or success
-            anchor_wait_meta = {"waited_ms": waited_ms, "anchors_before": before_ct, "anchors_after": after_ct}
 
         if counts["anchors_in_scope_feed"] == 0 and counts["containers_found_feed"] > 0:
-            success, before_ct, after_ct, waited_ms = _wait_for_anchor_population(
+            wait_result = _wait_for_anchor_population(
                 driver,
                 feed_selector,
                 min_anchors=2,
@@ -1003,10 +1011,15 @@ def _harvest_search_candidates_v2(
                 logger=logger,
                 context={"path": "feed", "row_id": row_index, "artist": search_name},
             )
+            if isinstance(wait_result, tuple):
+                success, before_ct, after_ct, waited_ms = wait_result
+                if not anchor_wait_meta:
+                    anchor_wait_meta = {"waited_ms": waited_ms, "anchors_before": before_ct, "anchors_after": after_ct}
+            else:
+                success = wait_result
             if success:
                 counts = _refresh_counts()
             waited_for_population = waited_for_population or success
-            anchor_wait_meta = anchor_wait_meta or {"waited_ms": waited_ms, "anchors_before": before_ct, "anchors_after": after_ct}
 
         if counts["usable_feed"] == 0 and counts["usable_search"] == 0:
             for attempt in range(2):

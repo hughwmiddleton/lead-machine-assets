@@ -146,7 +146,10 @@ def _set_email_all(df: pd.DataFrame, idx: int, new_emails: Union[str, Sequence[s
     merged_str = ";".join(merged_list)
     df.at[idx, "Email_All"] = merged_str
     artist = _cell_str(df.at[idx, "Artist Name"]) if "Artist Name" in df.columns else ""
-    _log_email_all_change(idx, artist, existing_val, merged_str, source, logger)
+    log_enabled = os.getenv("EMAIL_ALL_LOG") in {"1", "true", "TRUE"}
+    if log_enabled:
+        _log_email_all_change(idx, artist, existing_val, merged_str, source, logger)
+    # Guard may emit its own logs only when EMAIL_ALL_GUARD is enabled and a suspicious merge occurs.
     _guard_email_all_sources(df.loc[idx], merged_str, logger)
     return merged_str
 
@@ -1211,9 +1214,23 @@ def _should_skip_row_due_to_email(
     row: pd.Series, skip_rows_with_email: bool = True, logger: LoggerFn = _LOGGER
 ) -> bool:
     email_all_clean = str(row.get("Email_All") or "").strip()
+    suspect_email = _cell_str(row.get("Suspect_Email"))
+    suspect_email_all = _cell_str(row.get("Suspect_Email_All"))
+    suspect_present = bool(suspect_email or suspect_email_all)
     has_email_raw = bool(email_all_clean)
     quarantined_repeat = _is_quarantined_repeat(row)
-    has_email_effective = has_email_raw and not quarantined_repeat
+    # Suspect email flags override Email_All presence; treat as no usable email.
+    has_email_effective = has_email_raw and not quarantined_repeat and not suspect_present
+
+    if quarantined_repeat and has_email_raw:
+        row_id = row.get("__row_id", row.name)
+        artist = _cell_str(row.get("Artist Name"))
+        _safe_log(
+            logger,
+            f"[FB SkipGate] allowing quarantined repeat-email row {row_id} ('{artist}') despite Email_All present",
+        )
+        return False
+
     return bool(skip_rows_with_email and has_email_effective)
 
 
