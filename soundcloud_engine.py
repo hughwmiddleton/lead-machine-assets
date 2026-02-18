@@ -1402,6 +1402,35 @@ class SoundCloudEngine:
         _sc_stat_inc(key, n)
 
     # Public API --------------------------------------------------------
+    def search_people_v2(
+        self,
+        query: str,
+        place: Optional[str],
+        max_results: int = 50,
+        logger=None,
+    ) -> List[str]:
+        """
+        Light wrapper around the v2 people search API used by the seed scraper.
+        Exposed so live enrichment can share the same pathway.
+        """
+        if not query:
+            return []
+        client_id = _sc_get_client_id(self.session)
+        return sc_fetch_people_handles_v2(
+            query=query,
+            place=place,
+            client_id=client_id,
+            session=self.session,
+            logger=logger,
+            max_results=max_results,
+        )
+
+    def people_search_candidates_v2(
+        self, query: str, place: Optional[str], max_results: int = 50
+    ) -> List[Dict[str, str]]:
+        """Return scored candidate dicts for v2 people search."""
+        return _people_search_candidates(query, place or "", max_results, self.session)
+
     def people_search(self, query: str, place: Optional[str], max_results: int) -> List[str]:
         if not query:
             return []

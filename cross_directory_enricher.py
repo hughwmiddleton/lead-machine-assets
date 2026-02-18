@@ -4181,6 +4181,7 @@ class CrossDirectoryEnricherWorker(QThread):
         artist_name: str,
         sc_query: str,
         location_hint: str,
+        place_hint: str,
         genre_hint: str,
         track_hint: str,
         attempt: _NightSCAttempt,
@@ -4199,6 +4200,33 @@ class CrossDirectoryEnricherWorker(QThread):
             if curr_score > cand_score + 0.02:
                 return False
             return cand_rank > curr_rank
+
+        # Prefer v2 API people search (shared with seed scraper); fall back to HTML only when empty/error.
+        api_place = (place_hint or location_hint or "").strip() or None
+        try:
+            source_tag = "country" if api_place and api_place != (location_hint or "").strip() else ("location" if api_place else "none")
+        except Exception:
+            source_tag = "unknown"
+        if api_place is not None:
+            self.log_message.emit(f"[Night SC] API people search place='{api_place}' source={source_tag}")
+        try:
+            api_candidates = _SC_SHARED_ENGINE.people_search_candidates_v2(
+                artist_name, api_place, max_results=12
+            )
+            self.log_message.emit(
+                f"[Night SC] API people search -> handles={len(api_candidates)} query='{artist_name}' place='{api_place or ''}'"
+            )
+            if api_candidates:
+                candidate = self._pick_best_soundcloud_candidate(
+                    artist_name, api_candidates, location_hint, genre_hint
+                )
+                if candidate:
+                    return candidate
+                self.log_message.emit("[Night SC] API people search produced handles but no acceptable candidate; falling back to HTML search.")
+            else:
+                self.log_message.emit("[Night SC] API people search returned 0 handles; falling back to HTML search.")
+        except Exception as exc:
+            self.log_message.emit(f"[Night SC] API people search error ({exc}); falling back to HTML search.")
 
         for query in _build_soundcloud_queries(sc_query, track_hint, location_hint):
             url = f"https://soundcloud.com/search/people?q={urllib.parse.quote_plus(query)}"
@@ -4340,6 +4368,8 @@ class CrossDirectoryEnricherWorker(QThread):
         song_title = _clean_cell(getattr(self, "_live_context", {}).get("song_title", ""))
         sc_query = _clean_soundcloud_query(build_search_query(artist_name, song_title))
         location_hint = _clean_cell(getattr(self, "_live_context", {}).get("location", ""))
+        country_hint = _clean_cell(df.at[row_idx, "Country_Derived"]) if "Country_Derived" in df.columns else _clean_cell(df.at[row_idx, "Country"]) if "Country" in df.columns else ""
+        place_hint = country_hint or location_hint
         track_hint = _clean_cell(getattr(self, "_live_context", {}).get("track", ""))
         genre_hint = _clean_cell(getattr(self, "_live_context", {}).get("genre", ""))
         # If a seed SoundCloud Link is present, prefer it and skip search.
@@ -4381,7 +4411,7 @@ class CrossDirectoryEnricherWorker(QThread):
             attempt.reason = "no_query"
             self._finalize_night_sc(df, row_idx, attempt, None, artist_name)
             return False
-        best_candidate = self._night_sc_search_candidates(artist_name, sc_query, location_hint, genre_hint, track_hint, attempt)
+        best_candidate = self._night_sc_search_candidates(artist_name, sc_query, location_hint, place_hint, genre_hint, track_hint, attempt)
         if not best_candidate:
             attempt.status = "no_confident_match"
             attempt.reason = "no_candidate"
