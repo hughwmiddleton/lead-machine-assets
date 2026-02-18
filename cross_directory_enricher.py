@@ -3197,6 +3197,8 @@ class CrossDirectoryEnricherWorker(QThread):
         self.session = _build_session()
         self.live_search_attempts = 0
         self._notified_limit = False
+        self._sc_live_enrich_disabled: bool = False
+        self._sc_live_enrich_disabled_reason: str = ""
         self.total_rows = 0
         self._live_context: Dict[str, Any] = {}
         self._row_enrichment_state: Dict[str, str] = {}
@@ -3219,6 +3221,9 @@ class CrossDirectoryEnricherWorker(QThread):
 
     def _run_impl(self) -> None:
         fb_driver = None
+        # Reset SoundCloud live-enrich fail-fast flag for each run.
+        self._sc_live_enrich_disabled = False
+        self._sc_live_enrich_disabled_reason = ""
         try:
             if ENABLE_FACEBOOK_ENRICHMENT:
                 try:
@@ -3409,30 +3414,43 @@ class CrossDirectoryEnricherWorker(QThread):
                         )
                 # Even if another source enriched the row, optionally try SoundCloud live lookup to attach a profile link/socials when missing.
                 if self.enable_live_search and not _coerce_directory_value(seed_df.at[row_idx, "SoundCloud Link"]):
-                    self.log_message.emit(
-                        f"[Enricher] SoundCloud live check for '{artist}' (current SC link missing)."
-                    )
-                    if getattr(self, "night_mode", False):
-                        sc_applied = self._night_sc_attempt_row(seed_df, row_idx, artist, spotify_id=spotify_id)
-                        if sc_applied:
-                            enriched = True
-                            if "soundcloud" not in sources_logged:
-                                sources_logged.append("soundcloud")
+                    if getattr(self, "_sc_live_enrich_disabled", False):
+                        reason = self._sc_live_enrich_disabled_reason or "first_challenge_page"
+                        self.log_message.emit(
+                            f"[Enricher][SC] Live enrichment disabled (reason={reason}); skipping live SC check for '{artist}'."
+                        )
+                        # Keep processing other platforms for this row.
                     else:
-                        sc_payload = self._live_search_soundcloud(artist)
-                        if self._mark_sc_blocked_row(seed_df, row_idx):
-                            self._update_progress(position, total)
-                            continue
-                        if sc_payload:
-                            applied = self._apply_payload_guarded(
-                                seed_df, row_idx, sc_payload, artist, spotify_id=spotify_id
-                            )
-                            if applied:
+                        self.log_message.emit(
+                            f"[Enricher] SoundCloud live check for '{artist}' (current SC link missing)."
+                        )
+                        if getattr(self, "night_mode", False):
+                            sc_applied = self._night_sc_attempt_row(seed_df, row_idx, artist, spotify_id=spotify_id)
+                            if "SC_Status" in seed_df.columns or "SC_Reason" in seed_df.columns:
+                                sc_status = _coerce_directory_value(seed_df.at[row_idx, "SC_Status"]) if "SC_Status" in seed_df.columns else ""
+                                sc_reason = _coerce_directory_value(seed_df.at[row_idx, "SC_Reason"]) if "SC_Reason" in seed_df.columns else ""
+                                self._note_sc_challenge(sc_status, sc_reason)
+                            if sc_applied:
                                 enriched = True
+                                if "soundcloud" not in sources_logged:
+                                    sources_logged.append("soundcloud")
+                        else:
+                            sc_payload = self._live_search_soundcloud(artist)
+                            if self._mark_sc_blocked_row(seed_df, row_idx):
+                                self._update_progress(position, total)
+                                continue
+                            if sc_payload:
+                                applied = self._apply_payload_guarded(
+                                    seed_df, row_idx, sc_payload, artist, spotify_id=spotify_id
+                                )
+                                if applied:
+                                    enriched = True
                                 if "soundcloud" not in sources_logged:
                                     sources_logged.append("soundcloud")
                 if self.enable_live_search:
                     skip_soundcloud = bool(_coerce_directory_value(seed_df.at[row_idx, "SoundCloud Link"]))
+                    if getattr(self, "_sc_live_enrich_disabled", False):
+                        skip_soundcloud = True
                     payload = self._live_lookup(artist, skip_soundcloud=skip_soundcloud)
                     if not getattr(self, "night_mode", False) and self._mark_sc_blocked_row(seed_df, row_idx):
                         self._update_progress(position, total)
@@ -3605,6 +3623,24 @@ class CrossDirectoryEnricherWorker(QThread):
         if not hasattr(self, "_row_enrichment_state"):
             self._row_enrichment_state = {}
         self._row_enrichment_state[platform] = status
+
+    def _disable_sc_live_enrich(self, reason: str = "first_challenge_page") -> None:
+        if getattr(self, "_sc_live_enrich_disabled", False):
+            return
+        self._sc_live_enrich_disabled = True
+        self._sc_live_enrich_disabled_reason = reason or "first_challenge_page"
+        try:
+            self.log_message.emit(
+                "[Enricher][SC] First challenge page detected; disabling SC live enrichment for remainder of enrichment run (cache-only still allowed)."
+            )
+        except Exception:
+            pass
+
+    def _note_sc_challenge(self, status: str = "", reason: str = "", challenge_flag: bool = False) -> None:
+        status_l = (status or "").strip().lower()
+        reason_l = (reason or "").strip().lower()
+        if status_l == "non_actionable_challenge" or reason_l == "challenge_page" or challenge_flag:
+            self._disable_sc_live_enrich("first_challenge_page")
 
     def _platform_attempt_allowed(self, platform: str, artist_name: str, label: str) -> bool:
         state = getattr(self, "_row_enrichment_state", {}).get(platform)
@@ -4209,6 +4245,7 @@ class CrossDirectoryEnricherWorker(QThread):
             if status == "non_actionable_challenge":
                 attempt.challenge = True
                 attempt.reason = attempt.reason or "challenge_page"
+                self._note_sc_challenge(status, data.get("reason"), data.get("challenge_page"))
                 try:
                     if not hasattr(self, "_night_sc_challenge_streak"):
                         self._night_sc_challenge_streak = 0
@@ -4514,6 +4551,13 @@ class CrossDirectoryEnricherWorker(QThread):
             pass
         self._cache_night_sc_snapshot(attempt, status, reason, effective_payload)
     def _live_search_soundcloud(self, artist_name: str) -> Optional[EnrichmentPayload]:
+        if getattr(self, "_sc_live_enrich_disabled", False):
+            reason = self._sc_live_enrich_disabled_reason or "first_challenge_page"
+            self.log_message.emit(
+                f"[Enricher][SC] Live enrichment disabled (reason={reason}); skipping live SC check for '{artist_name}'."
+            )
+            self._set_platform_state("soundcloud", "skipped")
+            return None
         if not self._platform_attempt_allowed("soundcloud", artist_name, "SoundCloud Enrich"):
             return None
         if not self._increment_live_counter():
@@ -4672,13 +4716,18 @@ class CrossDirectoryEnricherWorker(QThread):
                 self.log_message.emit(
                     "[Enricher] SoundCloud Enrich: engine=t007 missing handle, falling back to legacy."
                 )
-        if payload is None:
-            if _night_sc_engine_enabled():
-                handle = _sc_handle_from_profile_url(profile_url) or best_candidate.get("handle") or ""
-                if handle:
-                    sc_data = _SC_SHARED_ENGINE.fetch_profile(handle) or {}
-                    payload = _payload_from_t007(sc_data)
-                    self._last_fetch_ok = True
+            if payload is None:
+                if _night_sc_engine_enabled():
+                    handle = _sc_handle_from_profile_url(profile_url) or best_candidate.get("handle") or ""
+                    if handle:
+                        sc_data = _SC_SHARED_ENGINE.fetch_profile(handle) or {}
+                        self._note_sc_challenge(
+                            sc_data.get("status"),
+                            sc_data.get("reason"),
+                            sc_data.get("challenge_page"),
+                        )
+                        payload = _payload_from_t007(sc_data)
+                        self._last_fetch_ok = True
             if payload is None:
                 payload = self._fetch_profile_and_build(profile_url, "soundcloud")
         fetch_ok_flag = getattr(self, "_last_fetch_ok", None)
