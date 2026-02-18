@@ -990,7 +990,7 @@ def _harvest_search_candidates_v2(
                 timeout=float(os.getenv("FB_ANCHOR_WAIT_S", 6)),
                 poll_seconds=0.5,
                 logger=logger,
-                context={"path": "search", "row_id": row_index, "artist": search_name},
+                context={"path": "search", "artist": search_name},
             )
             if isinstance(wait_result, tuple):
                 success, before_ct, after_ct, waited_ms = wait_result
@@ -1009,7 +1009,7 @@ def _harvest_search_candidates_v2(
                 timeout=float(os.getenv("FB_ANCHOR_WAIT_S", 6)),
                 poll_seconds=0.5,
                 logger=logger,
-                context={"path": "feed", "row_id": row_index, "artist": search_name},
+                context={"path": "feed", "artist": search_name},
             )
             if isinstance(wait_result, tuple):
                 success, before_ct, after_ct, waited_ms = wait_result

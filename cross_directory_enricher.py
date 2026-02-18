@@ -4185,6 +4185,7 @@ class CrossDirectoryEnricherWorker(QThread):
         genre_hint: str,
         track_hint: str,
         attempt: _NightSCAttempt,
+        country_hint: str = "",
     ) -> Optional[Dict[str, Any]]:
         best_candidate: Optional[Dict[str, Any]] = None
 
@@ -4202,13 +4203,50 @@ class CrossDirectoryEnricherWorker(QThread):
             return cand_rank > curr_rank
 
         # Prefer v2 API people search (shared with seed scraper); fall back to HTML only when empty/error.
-        api_place = (place_hint or location_hint or "").strip() or None
-        try:
-            source_tag = "country" if api_place and api_place != (location_hint or "").strip() else ("location" if api_place else "none")
-        except Exception:
-            source_tag = "unknown"
-        if api_place is not None:
-            self.log_message.emit(f"[Night SC] API people search place='{api_place}' source={source_tag}")
+        alias_map = {
+            "uk": "United Kingdom",
+            "usa": "United States",
+            "us": "United States",
+            "uae": "United Arab Emirates",
+        }
+
+        def _map_place(token: str) -> Optional[str]:
+            cleaned = (token or "").strip()
+            if not cleaned:
+                return None
+            alias_key = re.sub(r"[^a-z]", "", cleaned.lower())
+            mapped = alias_map.get(alias_key)
+            return mapped or cleaned
+
+        api_place: Optional[str] = None
+        source_tag = "none"
+        country_clean = (country_hint or "").strip()
+        location_clean = (location_hint or "").strip()
+
+        if country_clean:
+            mapped = _map_place(country_clean)
+            if mapped and len(mapped) >= 3:
+                api_place = mapped
+                source_tag = "country"
+
+        if api_place is None and location_clean:
+            if "," in location_clean:
+                rhs = location_clean.split(",")[-1]
+                mapped = _map_place(rhs)
+                if mapped and len(mapped) >= 3:
+                    api_place = mapped
+                    source_tag = "location_derived"
+            if api_place is None:
+                mapped = _map_place(location_clean)
+                if mapped and len(mapped) >= 3:
+                    api_place = mapped
+                    source_tag = "location_raw"
+
+        if api_place is None or len(api_place) < 3:
+            api_place = None
+            source_tag = "none"
+
+        self.log_message.emit(f"[Night SC] API people search place='{api_place or ''}' source={source_tag}")
         try:
             api_candidates = _SC_SHARED_ENGINE.people_search_candidates_v2(
                 artist_name, api_place, max_results=12
@@ -4224,6 +4262,9 @@ class CrossDirectoryEnricherWorker(QThread):
                     return candidate
                 self.log_message.emit("[Night SC] API people search produced handles but no acceptable candidate; falling back to HTML search.")
             else:
+                if source_tag in {"location_derived", "location_raw"}:
+                    self.log_message.emit("[Night SC] API people search returned 0 handles for location-based place; skipping HTML fallback.")
+                    return None
                 self.log_message.emit("[Night SC] API people search returned 0 handles; falling back to HTML search.")
         except Exception as exc:
             self.log_message.emit(f"[Night SC] API people search error ({exc}); falling back to HTML search.")
@@ -4411,7 +4452,16 @@ class CrossDirectoryEnricherWorker(QThread):
             attempt.reason = "no_query"
             self._finalize_night_sc(df, row_idx, attempt, None, artist_name)
             return False
-        best_candidate = self._night_sc_search_candidates(artist_name, sc_query, location_hint, place_hint, genre_hint, track_hint, attempt)
+        best_candidate = self._night_sc_search_candidates(
+            artist_name,
+            sc_query,
+            location_hint,
+            place_hint,
+            genre_hint,
+            track_hint,
+            attempt,
+            country_hint=country_hint,
+        )
         if not best_candidate:
             attempt.status = "no_confident_match"
             attempt.reason = "no_candidate"
