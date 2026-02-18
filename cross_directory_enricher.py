@@ -4274,6 +4274,21 @@ class CrossDirectoryEnricherWorker(QThread):
             self.log_message.emit(
                 f"[Night SC] API people search -> handles={len(api_candidates)} query='{artist_name}' place='{api_place or ''}'"
             )
+            if not api_candidates and api_place:
+                try:
+                    self.log_message.emit(
+                        f"[Night SC] API people search returned 0 handles for place='{api_place}'; retrying without place filter."
+                    )
+                except Exception:
+                    pass
+                retry_candidates = _SC_SHARED_ENGINE.people_search_candidates_v2(
+                    artist_name, None, max_results=12
+                )
+                self.log_message.emit(
+                    f"[Night SC] API people search -> handles={len(retry_candidates)} query='{artist_name}' place=''"
+                )
+                if retry_candidates:
+                    api_candidates = retry_candidates
             if api_candidates:
                 candidate_source = "api"
                 candidate = self._pick_best_soundcloud_candidate(
