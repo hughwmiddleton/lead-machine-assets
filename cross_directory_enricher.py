@@ -17,6 +17,7 @@ import urllib.parse
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
+from soundcloud_engine import SoundCloudEngine
 import pandas as pd
 import requests
 from bs4 import BeautifulSoup
@@ -607,6 +608,12 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MULTI_VALUE_SEPARATOR = ", "
 FACEBOOK_HELPERS_PATH = os.path.join(BASE_DIR, "Lead Machine (Final Update 5).py")
 ENRICHER_FB_PROFILE = os.path.join(os.path.expanduser("~"), "LeadMachine", "fb_enricher_profile")
+_SC_SHARED_ENGINE = SoundCloudEngine(debug=bool(os.getenv("NIGHT_SC_DEBUG")))
+
+
+def _night_sc_engine_enabled() -> bool:
+    mode = (os.getenv("NIGHTMODE_SC_ENGINE", "shared") or "shared").strip().lower()
+    return mode not in {"legacy", "current", "off"}
 
 
 def _get_t007_sc_helper():
@@ -4193,6 +4200,72 @@ class CrossDirectoryEnricherWorker(QThread):
         profile_url: str,
         attempt: _NightSCAttempt,
     ) -> Tuple[Optional[EnrichmentPayload], bool]:
+        handle = _sc_handle_from_profile_url(profile_url) if profile_url else ""
+        if _night_sc_engine_enabled() and handle:
+            if not attempt.note_fetch():
+                return (None, False)
+            data = _SC_SHARED_ENGINE.fetch_profile(handle) or {}
+            status = data.get("status", "")
+            if status == "non_actionable_challenge":
+                attempt.challenge = True
+                attempt.reason = attempt.reason or "challenge_page"
+                try:
+                    if not hasattr(self, "_night_sc_challenge_streak"):
+                        self._night_sc_challenge_streak = 0
+                    self._night_sc_challenge_streak += 1
+                    if self._night_sc_challenge_streak >= 3 and not getattr(self, "_night_sc_breaker_tripped", False):
+                        self._night_sc_breaker_tripped = True
+                        self.log_message.emit("[Night SC] Circuit breaker tripped after repeated challenge pages; skipping SoundCloud for this run.")
+                except Exception:
+                    pass
+                return (None, False)
+            if status == "blocked_403":
+                attempt.saw_403 = True
+                attempt.reason = attempt.reason or "api_403"
+                return (None, False)
+            attempt.http_status = 200
+            socials: Set[str] = set()
+            websites: Set[str] = set()
+            emails: Set[str] = set()
+            link_hubs: Set[str] = set()
+            for email in data.get("emails") or []:
+                if email and isinstance(email, str):
+                    emails.add(email.strip())
+            for url in data.get("external_urls") or []:
+                parsed = urllib.parse.urlparse(url)
+                host = (parsed.netloc or "").lower()
+                path_lower = (parsed.path or "").lower()
+                if host.endswith("soundcloud.com"):
+                    continue
+                if host in LINK_HUB_HOSTS:
+                    link_hubs.add(url)
+                    websites.add(url)
+                    continue
+                if any(host.endswith(domain) for domain in SOCIAL_HOST_WHITELIST):
+                    socials.add(url)
+                    continue
+                if host in JUNK_WEBSITE_HOSTS:
+                    continue
+                if any(keyword in path_lower for keyword in JUNK_WEBSITE_PATH_KEYWORDS):
+                    continue
+                websites.add(url)
+            website = data.get("website")
+            if website:
+                websites.add(website)
+            payload = EnrichmentPayload(
+                socials=socials,
+                websites=websites,
+                emails=emails,
+                link_hubs=link_hubs,
+                source_dir="soundcloud",
+                source_url=profile_url or f"https://soundcloud.com/{handle}",
+                source_detail=_format_source_display("soundcloud_live"),
+            )
+            try:
+                self._night_sc_challenge_streak = 0
+            except Exception:
+                pass
+            return (payload, bool(_payload_actionable(payload)))
         status, html = self._night_sc_http_get(profile_url, "Night SC profile", attempt)
         if attempt.challenge:
             return (None, False)
@@ -4283,6 +4356,8 @@ class CrossDirectoryEnricherWorker(QThread):
         attempt.profile_url = profile_url
         attempt.confidence = float(best_candidate.get("score", 0.0) or 0.0)
         attempt.match_score = attempt.confidence
+        if _night_sc_engine_enabled() and os.getenv("NIGHT_SC_DEBUG"):
+            self.log_message.emit(f"[Night SC] Rediscovery chose handle={handle or '<unknown>'} url={profile_url}")
         cached = self._night_sc_cache_lookup(handle, profile_url)
         if cached:
             attempt.cached_snapshot = cached
@@ -4598,7 +4673,14 @@ class CrossDirectoryEnricherWorker(QThread):
                     "[Enricher] SoundCloud Enrich: engine=t007 missing handle, falling back to legacy."
                 )
         if payload is None:
-            payload = self._fetch_profile_and_build(profile_url, "soundcloud")
+            if _night_sc_engine_enabled():
+                handle = _sc_handle_from_profile_url(profile_url) or best_candidate.get("handle") or ""
+                if handle:
+                    sc_data = _SC_SHARED_ENGINE.fetch_profile(handle) or {}
+                    payload = _payload_from_t007(sc_data)
+                    self._last_fetch_ok = True
+            if payload is None:
+                payload = self._fetch_profile_and_build(profile_url, "soundcloud")
         fetch_ok_flag = getattr(self, "_last_fetch_ok", None)
         actionable_flag = _payload_actionable(payload)
         if fetch_ok_flag is False and actionable_flag is None:
@@ -4859,6 +4941,24 @@ class CrossDirectoryEnricherWorker(QThread):
         """
         Primary SoundCloud search path: people search endpoint keeps results scoped to artist profiles.
         """
+        if _night_sc_engine_enabled():
+            engine_cands = _SC_SHARED_ENGINE.find_candidates(artist_query, None, max_results=12)
+            # Map into existing shape
+            mapped = []
+            for cand in engine_cands:
+                mapped.append(
+                    {
+                        "profile_url": cand.get("profile_url") or f"https://soundcloud.com/{cand.get('handle','')}",
+                        "handle": cand.get("handle") or "",
+                        "display_name": cand.get("display_name") or cand.get("handle") or "",
+                        "location": cand.get("location") or cand.get("context") or "",
+                        "context": cand.get("context") or "",
+                        "score": cand.get("score", 0),
+                        "rank_score": cand.get("rank_score", cand.get("score", 0)),
+                    }
+                )
+            if mapped:
+                return mapped
         quoted = urllib.parse.quote_plus(artist_query)
         url = f"https://soundcloud.com/search/people?q={quoted}"
         self.log_message.emit(f"[Enricher] SoundCloud live search: {url}")

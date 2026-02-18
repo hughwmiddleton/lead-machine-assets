@@ -87,6 +87,7 @@ if __name__ == "__main__":
 # Now import the dependencies
 # ---------------------------
 import os
+from soundcloud_engine import SoundCloudEngine
 import atexit
 import html
 import time
@@ -289,6 +290,7 @@ _SC_RUN_LOCK = threading.Lock()
 _SC_RUN_STATS = None
 _SC_ABOUT_DISABLED = False
 _SC_ABOUT_DISABLE_LOGGED = False
+_SC_ENGINE = SoundCloudEngine()
 SC_CLIENT_ID_CANDIDATES = ["MaZ7bR62GvbulJgV8EUjQnHfbZGDEKaI"]
 SOCIAL_HOSTS = (
     "linktr.ee", "beacons.ai", "bandcamp.com", "carrd.co", "flow.page",
@@ -522,16 +524,8 @@ def _extract_handles_generic(html: str):
 
 def scrape_handles_from_people_search(session, url: str, limit=None):
     query, place = sc_parse_people_search_url(url)
-    client_id = _sc_get_client_id(session)
     max_results = limit if isinstance(limit, int) and limit > 0 else 50
-    handles = sc_fetch_people_handles_v2(
-        query=query,
-        place=place,
-        client_id=client_id,
-        session=session,
-        logger=None,
-        max_results=max_results,
-    )
+    handles = _SC_ENGINE.people_search(query=query, place=place, max_results=max_results)
     if limit and isinstance(limit, int) and limit > 0:
         handles = handles[:limit]
     return handles
@@ -761,15 +755,7 @@ def discover_handles(session, source_url: str, limit=None):
     if "/search/people" in lowered:
         query, place = sc_parse_people_search_url(source_url)
         print(f"SoundCloud: people search detected -> query='{query}' place='{place}' (using v2 API)")
-        client_id = _sc_get_client_id(session)
-        handles = sc_fetch_people_handles_v2(
-            query=query,
-            place=place,
-            client_id=client_id,
-            session=session,
-            logger=None,
-            max_results=limit or 50,
-        )
+        handles = _SC_ENGINE.people_search(query=query, place=place, max_results=limit or 50)
         print(f"SoundCloud: people search -> {len(handles)} handles (query='{query}' place='{place}')")
         return handles
     if "/tags/" in lowered:
@@ -5462,22 +5448,20 @@ def _sc_thread_session() -> requests.Session:
 
 
 def _sc_fetch_contact_payload(handle: str) -> dict:
-    session = _sc_thread_session()
     started = time.perf_counter()
     error = ""
     try:
-        data = extract_sc_links(session, handle)
+        data = _SC_ENGINE.fetch_profile(handle) or {}
     except Exception as exc:
         error = str(exc)
-        data = {"emails": [], "external_urls": [], "aggregator_expanded": 0}
+        data = {"emails": [], "external_urls": [], "aggregator_expanded": 0, "status": "error", "reason": error}
     elapsed_ms = int(round((time.perf_counter() - started) * 1000))
     emails_len = len(data.get("emails", []) or [])
     links_len = len(data.get("external_urls", []) or [])
     website = 1 if data.get("website") else 0
     elapsed = data.get("elapsed_ms", elapsed_ms)
     site_flag = int(data.get("aggregator_expanded", data.get("_aggregator_tried", 0)))
-    tracks_source = data.get("latest_track_source") or "none"
-    print(f"[sc] handle={handle} links={links_len} email={emails_len} site={site_flag or website} tracks_source={tracks_source} ms={elapsed}")
+    tracks_source = data.get("latest_track_source") or data.get("tracks_source") or "none"
     if tracks_source == "rss":
         _sc_stat_inc("rss_used")
     return {
@@ -7149,6 +7133,13 @@ def scrape_soundcloud(website_url, seed_tags=None, pages_per_tag=SOUNDCLOUD_PAGE
         "api_user_fallback_used": 0,
         "rss_used": 0,
     }
+    # Keep shared engine stats in sync for summary parity.
+    _SC_ENGINE.reset_run_stats()
+    try:
+        import soundcloud_engine as sc_mod  # local import to avoid cycle at module load
+        sc_mod._SC_RUN_STATS = _SC_RUN_STATS
+    except Exception:
+        pass
     driver = setup_driver()
     try:
         discovery_session = build_hardened_session()
@@ -7200,14 +7191,7 @@ def scrape_soundcloud(website_url, seed_tags=None, pages_per_tag=SOUNDCLOUD_PAGE
             search_cap = max_handles or max_artists
             handles = []
             try:
-                handles = sc_fetch_people_handles_v2(
-                    query=query,
-                    place=place,
-                    client_id=_sc_get_client_id(discovery_session),
-                    session=discovery_session,
-                    logger=None,
-                    max_results=search_cap or 50,
-                )
+                handles = _SC_ENGINE.people_search(query=query, place=place, max_results=search_cap or 50)
             except Exception as exc:
                 print(f"SoundCloud: people search API fetch failed: {exc}")
             if search_cap:
@@ -7451,47 +7435,51 @@ def scrape_soundcloud(website_url, seed_tags=None, pages_per_tag=SOUNDCLOUD_PAGE
                 profile_url, source_tag, seed_primary_genre = _sc_unpack3(cand)
                 if not profile_url:
                     continue
-                artist = _sc_parse_profile(driver, profile_url, seed_primary_genre=seed_primary_genre or source_tag)
-                if not artist:
+                handle = _sc_handle_from_profile(profile_url)
+                if not _sc_is_valid_handle(handle):
+                    print(f"skip[{idx}] invalid handle: {profile_url}")
                     continue
-                artist["source_tag"] = source_tag
-                if SOUNDCLOUD_MIN_CONTACT_REQUIREMENT and not _sc_is_actionable(artist):
+                contact_payload = _sc_fetch_contact_payload(handle)
+                contact_data = contact_payload.get("data")
+                if not _sc_has_contact_links(contact_payload):
+                    print(f"skip[{idx}] no links/email/site: {handle}")
                     continue
-                artist_profile_link = (artist.get("profile_url") or profile_url or "").strip()
-
-                contact_links = []
-                if artist.get("website"):
-                    contact_links.append(artist["website"])
-                for s in artist.get("socials", {}).values():
-                    if s:
-                        contact_links.append(s)
-                if artist.get("email"):
-                    contact_links.append(f"mailto:{artist['email']}")
-                contact_links = list(dict.fromkeys([x for x in contact_links if x]))
-                contact_links = [
-                    link for link in contact_links
-                    if urlparse(link).netloc.lower() not in _SC_CONSENT_HOSTS
-                ]
-
-                artist_name_value = artist.get("artist_name", "").strip()
-                if not (artist_name_value and contact_links):
-                    continue
-
-                location_value = artist.get("location", "")
-                song_title_value = artist.get("latest_release_title", "")
-                sounds_like_value = artist.get("sounds_like", "")
-                release_date_value = artist.get("latest_release_date", "") or "not present"
-
-                try:
-                    current_url = ""
+                contact_song_title = ""
+                contact_release_date = ""
+                contact_tags = []
+                contact_sounds_like = ""
+                if isinstance(contact_data, dict):
+                    contact_song_title = (contact_data.get("latest_track_title") or "").strip()
+                    contact_release_date = (contact_data.get("latest_track_release_date") or "").strip()
+                    tags_candidate = contact_data.get("latest_track_tags") or []
+                    if isinstance(tags_candidate, (list, tuple)):
+                        contact_tags = [tag for tag in tags_candidate if isinstance(tag, str)]
+                    contact_sounds_like = (contact_data.get("sounds_like") or "").strip()
+                    if not contact_sounds_like:
+                        contact_sounds_like = _sc_sounds_like_from_bio(contact_data.get("bio_text", ""))
+                location_text, bio_text, profile_soup = _sc_profile_basics(driver, profile_url, timeout=10)
+                title, date_iso, prec, genres = _sc_quick_first_track_meta(driver, profile_url, timeout=12, hop=True)
+                soup_name = profile_soup
+                if soup_name is None:
                     try:
-                        current_url = driver.current_url
-                    except Exception:
-                        current_url = ""
-                    if current_url.rstrip("/") != profile_url.rstrip("/"):
                         driver.get(profile_url)
-                        WebDriverWait(driver, 6).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
-                    meta = _sc_extract_profile_meta(driver)
+                        WebDriverWait(driver, 8).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+                        soup_name = BeautifulSoup(driver.page_source, "html.parser")
+                    except Exception:
+                        soup_name = None
+                fallback_name = handle.replace("-", " ").replace("_", " ").title()
+                if soup_name:
+                    try:
+                        og = soup_name.select_one('meta[property="og:title"]')
+                        if og and og.get("content"):
+                            candidate_name = og["content"].strip()
+                            if candidate_name:
+                                fallback_name = candidate_name[:200]
+                    except Exception:
+                        pass
+                sounds_like_value = _sc_sounds_like_from_bio(bio_text)
+                try:
+                    meta = _sc_extract_profile_meta(driver, soup_override=soup_name)
                 except Exception:
                     meta = {
                         "artist_name": "",
@@ -7501,87 +7489,63 @@ def scrape_soundcloud(website_url, seed_tags=None, pages_per_tag=SOUNDCLOUD_PAGE
                         "release_date": "not present",
                         "sounds_like": ""
                     }
-
-                artist_name_value = (meta.get("artist_name") or artist_name_value).strip()
-                location_value = meta.get("location") or location_value or ""
-                song_title_value = meta.get("song_title") or song_title_value or ""
-                sounds_like_value = meta.get("sounds_like") or sounds_like_value or ""
+                fallback_name = (meta.get("artist_name") or fallback_name or "").strip()
+                fallback_location = meta.get("location") or location_text or ""
+                song_title_value = (meta.get("song_title") or contact_song_title or title or "").strip()
+                if meta.get("sounds_like"):
+                    sounds_like_value = meta["sounds_like"]
+                elif contact_sounds_like:
+                    sounds_like_value = contact_sounds_like
                 meta_release = meta.get("release_date") or ""
-                if meta_release and meta_release.lower() != "not present":
-                    release_date_value = meta_release
-                elif not release_date_value:
-                    release_date_value = "not present"
-
-                meta_primary = (meta.get("primary_genre") or "").strip()
-                primary_genre_value = meta_primary or (artist.get("primary_genre", "") or "")
-                if isinstance(primary_genre_value, str) and primary_genre_value:
-                    primary_genre_value = primary_genre_value.title()
-
-                http_links = [
-                    link for link in contact_links
-                    if isinstance(link, str)
-                    and link.startswith(("http://", "https://"))
-                    and link.lower() != "http://firefox.com"
-                ]
-                email_fallback = [artist.get("email")] if artist.get("email") else []
-                handle_slug = _sc_handle_from_profile(profile_url) or artist_name_value or ""
-                payload_override = {
-                    "display_name": artist_name_value,
-                    "city": "",
-                    "country": "",
-                    "genre": artist.get("primary_genre", ""),
-                    "user_genre": artist.get("primary_genre", ""),
-                    "latest_track_genre": "",
-                    "latest_track_tags": [],
-                    "external_urls": http_links,
-                    "emails": email_fallback,
-                    "latest_track_title": artist.get("latest_track_title", "") or artist.get("latest_release_title", ""),
-                    "latest_track_release_date": artist.get("latest_track_release_date", "") or artist.get("latest_release_date", ""),
-                }
+                release_date_value = meta_release if meta_release and meta_release.lower() != "not present" else (contact_release_date or date_iso or "")
+                combined_tags = list(genres or [])
+                if contact_tags:
+                    combined_tags.extend(contact_tags)
+                row_payload = contact_data or {}
+                if fallback_name and isinstance(row_payload, dict):
+                    row_payload = dict(row_payload)
+                    row_payload["display_name"] = fallback_name
                 row, external_urls, emails = _sc_build_row(
-                    handle=handle_slug,
-                    payload=payload_override,
-                    soundcloud_link=artist_profile_link,
-                    fallback_name=artist_name_value,
-                    fallback_location=location_value,
+                    handle=handle,
+                    payload=row_payload,
+                    soundcloud_link=profile_url,
+                    fallback_name=fallback_name,
+                    fallback_location=fallback_location,
                     song_title=song_title_value,
-                    release_date="" if release_date_value.lower() == "not present" else release_date_value,
+                    release_date=release_date_value,
                     sounds_like=sounds_like_value,
-                    fallback_tags=artist.get("genres", []),
-                    fallback_external=http_links,
-                    fallback_emails=email_fallback
+                    fallback_tags=combined_tags,
+                    fallback_external=list((contact_data or {}).get("external_urls") or []),
+                    fallback_emails=list((contact_data or {}).get("emails") or []),
                 )
-                _sc_log_csv_row(handle_slug, row, external_urls, emails)
+                _sc_log_csv_row(handle, row, external_urls, emails)
                 sc_rows.append(row)
-
-                socials = artist.get("socials", {})
                 enriched_rows.append({
-                    "Artist Name": artist_name_value,
-                    "Profile URL": artist.get("profile_url", ""),
-                    "Website": artist.get("website", ""),
-                    "Email": artist.get("email", ""),
-                    "Instagram": socials.get("instagram", ""),
-                    "Twitter": socials.get("twitter", ""),
-                    "Facebook": socials.get("facebook", ""),
-                    "Linktree": socials.get("linktree", ""),
-                    "YouTube": socials.get("youtube", ""),
-                    "Location": artist.get("location", ""),
-                    "Genres": "; ".join(artist.get("genres", [])),
-                    "Latest Release": artist.get("latest_release_title", ""),
-                    "Latest Release Date": artist.get("latest_release_date", ""),
-                    "Latest Release Precision": artist.get("latest_release_precision", ""),
-                    "Sounds Like": artist.get("sounds_like", ""),
-                    "Primary Genre": primary_genre_value,
-                    "Source Tag": artist.get("source_tag", "")
+                    "Artist Name": fallback_name,
+                    "Profile URL": profile_url,
+                    "Website": row_payload.get("website", ""),
+                    "Email": ", ".join(emails),
+                    "Instagram": "",
+                    "Twitter": "",
+                    "Facebook": "",
+                    "Linktree": "",
+                    "YouTube": "",
+                    "Location": fallback_location,
+                    "Genres": "; ".join(combined_tags),
+                    "Latest Release": song_title_value,
+                    "Latest Release Date": release_date_value,
+                    "Latest Release Precision": prec,
+                    "Sounds Like": sounds_like_value,
+                    "Primary Genre": row.get("Primary Genre", ""),
+                    "Source Tag": source_tag
                 })
-
                 actionable_count += 1
                 _sc_stat_inc("actionable_written")
                 if actionable_count >= ACTIONABLE_LIMIT:
                     break
-                time.sleep(random.uniform(1.0, 2.0))
+                time.sleep(random.uniform(0.4, 0.9))
         print(f"SoundCloud: total actionable artists written {actionable_count}")
-        stats = _SC_RUN_STATS or {}
+        stats = _SC_ENGINE.run_stats or {}
         print(
             "SoundCloud summary: "
             f"handles={stats.get('handles_total', 0)} "
