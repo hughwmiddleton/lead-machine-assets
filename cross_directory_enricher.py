@@ -3210,6 +3210,14 @@ class CrossDirectoryEnricherWorker(QThread):
         self._active_night_sc_attempt: Optional[_NightSCAttempt] = None
         self._night_sc_challenge_streak: int = 0
         self._night_sc_breaker_tripped: bool = False
+        self._sc_rss_only_mode: bool = False
+        self._sc_html_challenge_count: int = 0
+        self._sc_rss_fail_streak: int = 0
+        self._sc_rss_only_logged: bool = False
+        self._sc_rss_only_mode: bool = False
+        self._sc_html_challenge_count: int = 0
+        self._sc_rss_fail_streak: int = 0
+        self._sc_rss_only_logged: bool = False
 
     def run(self) -> None:
         try:
@@ -3228,6 +3236,10 @@ class CrossDirectoryEnricherWorker(QThread):
         # Reset SoundCloud live-enrich fail-fast flag for each run.
         self._sc_live_enrich_disabled = False
         self._sc_live_enrich_disabled_reason = ""
+        self._sc_rss_only_mode = False
+        self._sc_html_challenge_count = 0
+        self._sc_rss_fail_streak = 0
+        self._sc_rss_only_logged = False
         try:
             if ENABLE_FACEBOOK_ENRICHMENT:
                 try:
@@ -3645,12 +3657,44 @@ class CrossDirectoryEnricherWorker(QThread):
         except Exception:
             pass
 
+    def _sc_enter_rss_only_mode(self) -> None:
+        if getattr(self, "_sc_rss_only_mode", False):
+            return
+        self._sc_rss_only_mode = True
+        try:
+            if not getattr(self, "_sc_rss_only_logged", False):
+                self.log_message.emit(
+                    "[Night SC] Entering RSS-only mode for remainder of run (challenge pages detected)."
+                )
+                self._sc_rss_only_logged = True
+        except Exception:
+            pass
+
+    def _sc_record_html_challenge(self) -> None:
+        try:
+            self._sc_html_challenge_count += 1
+            if self._sc_html_challenge_count >= 3:
+                self._sc_enter_rss_only_mode()
+        except Exception:
+            pass
+
+    def _sc_record_rss_result(self, success: bool) -> None:
+        try:
+            if success:
+                self._sc_rss_fail_streak = 0
+                return
+            self._sc_rss_fail_streak += 1
+            if self._sc_rss_fail_streak >= 3 and not getattr(self, "_sc_live_enrich_disabled", False):
+                self._night_sc_breaker_tripped = True
+                self._disable_sc_live_enrich("breaker_tripped")
+        except Exception:
+            pass
+
     def _note_sc_challenge(self, status: str = "", reason: str = "", challenge_flag: bool = False) -> None:
         status_l = (status or "").strip().lower()
         reason_l = (reason or "").strip().lower()
         if status_l == "non_actionable_challenge" or reason_l == "challenge_page" or challenge_flag:
-            if getattr(self, "_night_sc_breaker_tripped", False):
-                self._disable_sc_live_enrich("breaker_tripped")
+            self._sc_record_html_challenge()
             return
 
     def _platform_attempt_allowed(self, platform: str, artist_name: str, label: str) -> bool:
@@ -4105,15 +4149,12 @@ class CrossDirectoryEnricherWorker(QThread):
             self._active_night_sc_attempt = None
 
     def _night_sc_http_get(self, url: str, label: str, attempt: _NightSCAttempt) -> Tuple[Optional[int], str]:
-        if getattr(self, "_night_sc_breaker_tripped", False):
+        if getattr(self, "_sc_live_enrich_disabled", False):
             attempt.challenge = True
-            attempt.reason = attempt.reason or "challenge_page"
-            try:
-                parsed = urlparse(url)
-                host_path = f"{parsed.netloc}{parsed.path}"
-                self.log_message.emit(f"[Night SC] Circuit breaker active; skipping fetch label={label} url={host_path}")
-            except Exception:
-                pass
+            attempt.reason = attempt.reason or "breaker_tripped"
+            return (None, "")
+        if getattr(self, "_sc_rss_only_mode", False):
+            attempt.reason = attempt.reason or "rss_only_mode"
             return (None, "")
         if not attempt.note_fetch():
             return (None, "")
@@ -4130,13 +4171,9 @@ class CrossDirectoryEnricherWorker(QThread):
                     self._night_sc_challenge_streak = 0
                 if hit:
                     self._night_sc_challenge_streak += 1
+                    self._sc_record_html_challenge()
                 else:
                     self._night_sc_challenge_streak = 0
-                if hit and self._night_sc_challenge_streak >= 3 and not getattr(self, "_night_sc_breaker_tripped", False):
-                    self._night_sc_breaker_tripped = True
-                    self.log_message.emit(
-                        "[Night SC] Circuit breaker tripped after repeated challenge pages; skipping SoundCloud for this run."
-                    )
             except Exception:
                 pass
 
@@ -4314,6 +4351,10 @@ class CrossDirectoryEnricherWorker(QThread):
         except Exception as exc:
             self.log_message.emit(f"[Night SC] API people search error ({exc}); falling back to HTML search.")
 
+        if getattr(self, "_sc_rss_only_mode", False):
+            attempt.candidate_source = candidate_source
+            return best_candidate
+
         long_flag, long_metrics = _is_long_or_spammy_name(artist_name)
         if not api_candidates and long_flag:
             char_len, token_count, digit_ratio = long_metrics
@@ -4394,14 +4435,7 @@ class CrossDirectoryEnricherWorker(QThread):
                     attempt.challenge = True
                     attempt.reason = attempt.reason or "challenge_page"
                     self._note_sc_challenge(status, data.get("reason"), data.get("challenge_page"))
-                    try:
-                        if not hasattr(self, "_night_sc_challenge_streak"):
-                            self._night_sc_challenge_streak = 0
-                        self._night_sc_challenge_streak += 1
-                        if self._night_sc_challenge_streak >= 3 and not getattr(self, "_night_sc_breaker_tripped", False):
-                            self._night_sc_breaker_tripped = True
-                            self.log_message.emit("[Night SC] Circuit breaker tripped after repeated challenge pages; skipping SoundCloud for this run.")
-                    except Exception:
+                    if getattr(self, "_sc_rss_only_mode", False):
                         pass
                     return (None, False)
                 if status == "blocked_403":
@@ -4454,6 +4488,9 @@ class CrossDirectoryEnricherWorker(QThread):
                 return (payload, bool(_payload_actionable(payload)))
         if not engine_enabled or engine_failed:
             attempt.profile_source = "legacy_html"
+        if getattr(self, "_sc_rss_only_mode", False):
+            attempt.profile_source = attempt.profile_source or "rss_only"
+            return (None, False)
         status, html = self._night_sc_http_get(profile_url, "Night SC profile", attempt)
         if attempt.challenge:
             return (None, False)
@@ -4478,6 +4515,48 @@ class CrossDirectoryEnricherWorker(QThread):
         )
         actionable = _payload_actionable(payload) or False
         return (payload, actionable)
+
+    def _sc_build_rss_payload(
+        self,
+        handle: str,
+        base_payload: Optional[EnrichmentPayload],
+    ) -> Tuple[Optional[EnrichmentPayload], bool]:
+        if not handle:
+            self._sc_record_rss_result(False)
+            return (None, False)
+        rss_payload: Optional[EnrichmentPayload] = None
+        try:
+            uid = sc_engine._sc_resolve_handle_uid(_SC_SHARED_ENGINE.session, handle)
+            client_id = sc_engine._sc_get_client_id(_SC_SHARED_ENGINE.session)
+            track = sc_engine._sc_fetch_latest_track_metadata(_SC_SHARED_ENGINE.session, client_id, uid, handle)
+            if not track:
+                track = sc_engine._sc_fetch_latest_track_rss(_SC_SHARED_ENGINE.session, uid, handle)
+                if track and track.get("permalink_url"):
+                    track.setdefault("source", "rss")
+            permalink = track.get("permalink_url") or "" if track else ""
+            if track:
+                try:
+                    sc_engine._sc_stat_inc("rss_used", 1)
+                except Exception:
+                    pass
+                websites = set(getattr(base_payload, "websites", set()) if base_payload else set())
+                if permalink:
+                    websites.add(permalink)
+                rss_payload = base_payload or EnrichmentPayload(
+                    socials=set(),
+                    websites=websites,
+                    emails=set(),
+                    link_hubs=set(),
+                    source_dir="soundcloud",
+                    source_url=f"https://soundcloud.com/{handle}",
+                    source_detail=_format_source_display("soundcloud_live"),
+                )
+                rss_payload.websites = websites
+        except Exception:
+            rss_payload = None
+        success = bool(rss_payload and (_payload_actionable(rss_payload) or rss_payload.websites))
+        self._sc_record_rss_result(success)
+        return (rss_payload if success else None, success)
 
     def _night_sc_attempt_row(
         self,
@@ -4519,6 +4598,23 @@ class CrossDirectoryEnricherWorker(QThread):
                 self._finalize_night_sc(df, row_idx, attempt, None, artist_name)
                 return False
             payload, actionable = self._night_sc_fetch_profile_payload(attempt.profile_url, attempt)
+            if getattr(self, "night_mode", False) and (handle := (attempt.handle or _sc_handle_from_profile_url(attempt.profile_url) or "")):
+                if (getattr(self, "_sc_rss_only_mode", False) or (attempt.saw_403 and (attempt.reason or "").startswith("api_403"))) and not payload:
+                    if attempt.saw_403 and (attempt.reason or "").startswith("api_403"):
+                        try:
+                            self.log_message.emit(
+                                f"[Night SC] api_403 on engine fetch; attempting RSS fallback for handle={handle}."
+                            )
+                        except Exception:
+                            pass
+                    rss_payload, rss_ok = self._sc_build_rss_payload(handle, payload)
+                    if rss_payload:
+                        payload = rss_payload
+                        actionable = _payload_actionable(payload) or bool(payload.websites or payload.socials or payload.emails)
+                        attempt.reason = attempt.reason or "rss_fallback"
+                        attempt.saw_403 = False
+                    elif getattr(self, "_sc_rss_only_mode", False):
+                        attempt.reason = attempt.reason or "rss_only_mode"
             if payload:
                 payload.match_score = 1.0
                 payload.candidate_name = artist_name
@@ -4569,64 +4665,31 @@ class CrossDirectoryEnricherWorker(QThread):
             self._finalize_night_sc(df, row_idx, attempt, attempt.cached_payload if applied else attempt.cached_payload, artist_name)
             return bool(applied)
         payload, actionable = self._night_sc_fetch_profile_payload(profile_url, attempt)
-        # Night-only: if engine/profile fetch hit api_403, attempt a single RSS-based extraction before finalizing.
-        if getattr(self, "night_mode", False) and attempt.saw_403 and (attempt.reason or "").startswith("api_403"):
-            if handle:
+        if getattr(self, "night_mode", False) and handle:
+            needs_rss = False
+            if attempt.saw_403 and (attempt.reason or "").startswith("api_403"):
                 try:
                     self.log_message.emit(
                         f"[Night SC] api_403 on engine fetch; attempting RSS fallback for handle={handle}."
                     )
                 except Exception:
                     pass
-                rss_payload = None
-                try:
-                    uid = sc_engine._sc_resolve_handle_uid(_SC_SHARED_ENGINE.session, handle)
-                    client_id = sc_engine._sc_get_client_id(_SC_SHARED_ENGINE.session)
-                    track = sc_engine._sc_fetch_latest_track_metadata(_SC_SHARED_ENGINE.session, client_id, uid, handle)
-                    # If metadata path produced no track (e.g., API 403 and RSS metadata filtered out), try a raw RSS pull.
-                    if not track:
-                        track = sc_engine._sc_fetch_latest_track_rss(_SC_SHARED_ENGINE.session, uid, handle)
-                        if track and track.get("permalink_url"):
-                            track.setdefault("source", "rss")
-                    permalink = track.get("permalink_url") or "" if track else ""
-                    if track:
-                        try:
-                            sc_engine._sc_stat_inc("rss_used", 1)
-                        except Exception:
-                            pass
-                        websites = set(getattr(payload, "websites", set()) if payload else set())
-                        if permalink:
-                            websites.add(permalink)
-                        rss_payload = payload or EnrichmentPayload(
-                            socials=set(),
-                            websites=websites,
-                            emails=set(),
-                            link_hubs=set(),
-                            source_dir="soundcloud",
-                            source_url=profile_url,
-                            source_detail=_format_source_display("soundcloud_live"),
-                        )
-                        rss_payload.websites = websites
-                    if os.getenv("NIGHT_SC_DEBUG"):
-                        try:
-                            result = "hit" if track else "miss"
-                            self.log_message.emit(
-                                f"[Night SC] RSS fallback {result} handle={handle} uid={uid or '<none>'} permalink={permalink or '<none>'}"
-                            )
-                        except Exception:
-                            pass
-                except Exception:
-                    rss_payload = None
-                if rss_payload and (_payload_actionable(rss_payload) or rss_payload.websites):
+                needs_rss = True
+            if getattr(self, "_sc_rss_only_mode", False) and not payload:
+                needs_rss = True
+            if needs_rss:
+                rss_payload, rss_ok = self._sc_build_rss_payload(handle, payload)
+                if rss_payload:
                     payload = rss_payload
                     actionable = _payload_actionable(payload) or bool(payload.websites or payload.socials or payload.emails)
-                    # RSS recovered something useful; ensure we don't finalize as api_403/blocked.
-                    attempt.reason = "rss_fallback"
+                    attempt.reason = attempt.reason or "rss_fallback"
                     attempt.saw_403 = False
                     try:
                         attempt.http_status = attempt.http_status or 200
                     except Exception:
                         pass
+                elif getattr(self, "_sc_rss_only_mode", False):
+                    attempt.reason = attempt.reason or "rss_only_mode"
         if payload:
             payload.match_score = self._compute_match_score_for_candidate(
                 best_candidate.get("display_name") or best_candidate.get("handle") or "",
