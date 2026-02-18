@@ -4524,6 +4524,11 @@ class CrossDirectoryEnricherWorker(QThread):
         if not handle:
             self._sc_record_rss_result(False)
             return (None, False)
+        try:
+            # Count the attempt up front so used_rss reflects every RSS try, even failures.
+            sc_engine._sc_stat_inc("rss_used", 1)
+        except Exception:
+            pass
         rss_payload: Optional[EnrichmentPayload] = None
         try:
             uid = sc_engine._sc_resolve_handle_uid(_SC_SHARED_ENGINE.session, handle)
@@ -4535,10 +4540,6 @@ class CrossDirectoryEnricherWorker(QThread):
                     track.setdefault("source", "rss")
             permalink = track.get("permalink_url") or "" if track else ""
             if track:
-                try:
-                    sc_engine._sc_stat_inc("rss_used", 1)
-                except Exception:
-                    pass
                 websites = set(getattr(base_payload, "websites", set()) if base_payload else set())
                 if permalink:
                     websites.add(permalink)
@@ -4574,6 +4575,70 @@ class CrossDirectoryEnricherWorker(QThread):
         place_hint = country_hint or location_hint
         track_hint = _clean_cell(getattr(self, "_live_context", {}).get("track", ""))
         genre_hint = _clean_cell(getattr(self, "_live_context", {}).get("genre", ""))
+
+        # Force RSS-only path: skip HTML/profile fetches and try RSS directly for every row when enabled.
+        if getattr(self, "_sc_rss_only_mode", False):
+            attempt.reason = attempt.reason or "rss_only_mode"
+            attempt.profile_source = "rss_only"
+            handle = ""
+            profile_url = ""
+            # Prefer chosen handle from API people search; avoid HTML fallback entirely.
+            if sc_query:
+                best_candidate = self._night_sc_search_candidates(
+                    artist_name,
+                    sc_query,
+                    location_hint,
+                    place_hint,
+                    genre_hint,
+                    track_hint,
+                    attempt,
+                    country_hint=country_hint,
+                )
+                if best_candidate:
+                    handle = best_candidate.get("handle") or _sc_handle_from_profile_url(best_candidate.get("profile_url") or "") or ""
+                    profile_url = best_candidate.get("profile_url") or profile_url
+                    attempt.confidence = float(best_candidate.get("score", 0.0) or 0.0)
+                    attempt.match_score = attempt.confidence
+            # If still empty, fall back to explicit link/handle on the row.
+            if not handle and sc_link and "soundcloud.com" in sc_link.lower():
+                profile_url = _normalise_url(sc_link) or sc_link
+                handle = _sc_handle_from_profile_url(profile_url) or ""
+            attempt.handle = handle
+            attempt.profile_url = profile_url or (handle and f"https://soundcloud.com/{handle}") or ""
+
+            payload: Optional[EnrichmentPayload] = None
+            rss_ok = False
+            if handle:
+                rss_payload, rss_ok = self._sc_build_rss_payload(handle, None)
+                payload = rss_payload
+                attempt.reason = "rss_success" if rss_ok else "rss_fail"
+            else:
+                attempt.reason = "rss_unavailable"
+            try:
+                flags = _SC_SHARED_ENGINE.get_run_flags()
+            except Exception:
+                flags = {}
+            try:
+                self.log_message.emit(
+                    "[Night SC] rss_only=1 handle=%s url=%s attempted=%s outcome=%s used_rss=%s"
+                    % (
+                        handle or "<missing>",
+                        attempt.profile_url or "",
+                        int(bool(handle)),
+                        "success" if rss_ok else ("fail" if handle else "unavailable"),
+                        int(flags.get("used_rss", 0)),
+                    )
+                )
+            except Exception:
+                pass
+            if payload:
+                payload.match_score = payload.match_score or attempt.match_score or 1.0
+                payload.candidate_name = artist_name
+                applied = self._apply_payload_guarded(df, row_idx, payload, artist_name, spotify_id=spotify_id)
+            else:
+                applied = False
+            self._finalize_night_sc(df, row_idx, attempt, payload if applied else payload, artist_name)
+            return bool(applied)
         # If a seed SoundCloud Link is present, prefer it and skip search.
         if sc_link and "soundcloud.com" in sc_link.lower():
             attempt.profile_url = _normalise_url(sc_link) or sc_link
