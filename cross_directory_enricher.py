@@ -4637,7 +4637,7 @@ class CrossDirectoryEnricherWorker(QThread):
                 applied = self._apply_payload_guarded(df, row_idx, payload, artist_name, spotify_id=spotify_id)
             else:
                 applied = False
-            self._finalize_night_sc(df, row_idx, attempt, payload if applied else payload, artist_name)
+            self._finalize_night_sc(df, row_idx, attempt, payload if applied else None, artist_name)
             return bool(applied)
         # If a seed SoundCloud Link is present, prefer it and skip search.
         if sc_link and "soundcloud.com" in sc_link.lower():
@@ -4654,7 +4654,7 @@ class CrossDirectoryEnricherWorker(QThread):
                 attempt.confidence = float(cached.get("confidence", attempt.confidence or 0.0))
                 attempt.match_score = float(cached.get("match_score") or 0.0)
                 applied = self._apply_sc_snapshot_to_row(df, row_idx, cached, artist_name, spotify_id=spotify_id)
-                self._finalize_night_sc(df, row_idx, attempt, attempt.cached_payload if applied else attempt.cached_payload, artist_name)
+                self._finalize_night_sc(df, row_idx, attempt, attempt.cached_payload if applied else None, artist_name)
                 return bool(applied)
             if not attempt.budget_ok():
                 attempt.budget_exceeded = True
@@ -4688,7 +4688,7 @@ class CrossDirectoryEnricherWorker(QThread):
             applied = False
             if payload:
                 applied = self._apply_payload_guarded(df, row_idx, payload, artist_name, spotify_id=spotify_id)
-            self._finalize_night_sc(df, row_idx, attempt, payload if applied else payload, artist_name)
+            self._finalize_night_sc(df, row_idx, attempt, payload if applied else None, artist_name)
             return applied
         if not sc_query:
             attempt.status = "no_confident_match"
@@ -4727,7 +4727,7 @@ class CrossDirectoryEnricherWorker(QThread):
             attempt.http_status = cached.get("http", attempt.http_status)
             attempt.fetches = cached.get("fetches", attempt.fetches)
             applied = self._apply_sc_snapshot_to_row(df, row_idx, cached, artist_name, spotify_id=spotify_id)
-            self._finalize_night_sc(df, row_idx, attempt, attempt.cached_payload if applied else attempt.cached_payload, artist_name)
+            self._finalize_night_sc(df, row_idx, attempt, attempt.cached_payload if applied else None, artist_name)
             return bool(applied)
         payload, actionable = self._night_sc_fetch_profile_payload(profile_url, attempt)
         if getattr(self, "night_mode", False) and handle:
@@ -4765,10 +4765,7 @@ class CrossDirectoryEnricherWorker(QThread):
         applied = False
         if payload:
             applied = self._apply_payload_guarded(df, row_idx, payload, artist_name, spotify_id=spotify_id)
-        if not applied:
-            payload_to_cache = payload if payload else None
-        else:
-            payload_to_cache = payload
+        payload_to_cache = payload if applied else None
         self._finalize_night_sc(df, row_idx, attempt, payload_to_cache, artist_name)
         return applied
 
