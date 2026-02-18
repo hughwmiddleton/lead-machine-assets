@@ -3633,9 +3633,14 @@ class CrossDirectoryEnricherWorker(QThread):
         self._sc_live_enrich_disabled = True
         self._sc_live_enrich_disabled_reason = reason or "first_challenge_page"
         try:
-            self.log_message.emit(
-                "[Enricher][SC] First challenge page detected; disabling SC live enrichment for remainder of enrichment run (cache-only still allowed)."
-            )
+            if self._sc_live_enrich_disabled_reason == "breaker_tripped":
+                self.log_message.emit(
+                    "[Enricher][SC] Circuit breaker tripped; disabling SC live enrichment for remainder of enrichment run (cache-only still allowed)."
+                )
+            else:
+                self.log_message.emit(
+                    "[Enricher][SC] First challenge page detected; disabling SC live enrichment for remainder of enrichment run (cache-only still allowed)."
+                )
         except Exception:
             pass
 
@@ -3643,7 +3648,9 @@ class CrossDirectoryEnricherWorker(QThread):
         status_l = (status or "").strip().lower()
         reason_l = (reason or "").strip().lower()
         if status_l == "non_actionable_challenge" or reason_l == "challenge_page" or challenge_flag:
-            self._disable_sc_live_enrich("first_challenge_page")
+            if getattr(self, "_night_sc_breaker_tripped", False):
+                self._disable_sc_live_enrich("breaker_tripped")
+            return
 
     def _platform_attempt_allowed(self, platform: str, artist_name: str, label: str) -> bool:
         state = getattr(self, "_row_enrichment_state", {}).get(platform)
@@ -4326,6 +4333,7 @@ class CrossDirectoryEnricherWorker(QThread):
         handle = _sc_handle_from_profile_url(profile_url) if profile_url else ""
         engine_enabled = _night_sc_engine_enabled() and handle
         engine_failed = False
+        data: Optional[Dict[str, Any]] = None
         if engine_enabled:
             if not attempt.note_fetch():
                 return (None, False)
@@ -4338,6 +4346,8 @@ class CrossDirectoryEnricherWorker(QThread):
                 except Exception:
                     pass
                 data = None
+            if data is None and not engine_failed:
+                engine_failed = True
             if data is not None:
                 attempt.profile_source = "engine"
                 status = data.get("status", "")
