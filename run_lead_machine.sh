@@ -96,8 +96,8 @@ unset FB_DEBUG_EMAIL_OVERRIDE
 # =====================================================
 # SoundCloud (OFF to reduce noise)
 # =====================================================
-unset NIGHT_SC_DEBUG
-unset NIGHTMODE_SC_ENGINE
+export NIGHT_SC_DEBUG=1
+export NIGHTMODE_SC_ENGINE=shared
 export SC_ADAPTIVE_ABOUT_DISABLE=1
 
 # =====================================================

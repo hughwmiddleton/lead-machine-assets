@@ -851,11 +851,18 @@ def extract_sc_links(session: requests.Session, handle: str) -> dict:
         cached_data = cached.get("data", {}) or {}
         exts = [u for u in (cached_data.get("external_urls") or []) if u and u.lower() != "http://firefox.com"]
         emails = cached_data.get("emails") or []
+        website_cached = cached_data.get("website") or ""
         has_required = all(key in cached_data for key in SC_ABOUT_CACHE_REQUIRED_KEYS)
         if cached_data and (exts or emails) and has_required:
             cached_data["external_urls"] = exts
             cached_data["status"] = "actionable" if (exts or emails or cached_data.get("website")) else "no_contacts"
             cached_data["reason"] = "cache_hit"
+            cached_data["challenge_page"] = False
+            return _sc_postprocess_payload(cached_data)
+        if cached_data and (exts or emails or website_cached):
+            cached_data["external_urls"] = exts
+            cached_data["reason"] = "cache_hit_partial"
+            cached_data["status"] = "actionable" if (exts or emails or website_cached) else "no_contacts"
             cached_data["challenge_page"] = False
             return _sc_postprocess_payload(cached_data)
 
