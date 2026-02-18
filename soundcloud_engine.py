@@ -427,6 +427,36 @@ def _sc_norm_user_id(user_id) -> str:
     return match.group(1) if match else ""
 
 
+def _sc_resolve_handle_uid(session, handle: str) -> str:
+    if not handle:
+        return ""
+    cached = _SC_HANDLE_UID_MAP.get(handle)
+    if cached:
+        uid = _sc_norm_user_id(cached)
+        if uid and uid != cached:
+            _SC_HANDLE_UID_MAP[handle] = uid
+        return uid
+    client_id = _sc_get_client_id(session)
+    if not client_id:
+        return ""
+    try:
+        resp = session.get(
+            "https://api-v2.soundcloud.com/resolve",
+            params={"url": f"https://soundcloud.com/{handle}", "client_id": client_id},
+            timeout=SC_REQUEST_TIMEOUT,
+            headers=_rand_headers(),
+        )
+        resp.raise_for_status()
+        data = resp.json() or {}
+        uid = _sc_norm_user_id(data.get("id") or data.get("urn") or "")
+        if uid:
+            _SC_HANDLE_UID_MAP[handle] = uid
+            return uid
+    except Exception:
+        pass
+    return ""
+
+
 def _sc_track_release_iso(track: dict) -> tuple:
     if not isinstance(track, dict):
         return ("", "")
@@ -585,6 +615,9 @@ def _sc_fetch_api_profile(session, handle: str) -> dict:
             data = {"username": handle, "id": fallback_uid}
         else:
             return {}
+    uid_norm = _sc_norm_user_id(data.get("id") or data.get("urn") or fallback_uid)
+    if handle and uid_norm:
+        _SC_HANDLE_UID_MAP[handle] = uid_norm
     profile = {
         "display_name": data.get("full_name") or data.get("username"),
         "city": data.get("city") or "",
@@ -603,7 +636,7 @@ def _sc_fetch_api_profile(session, handle: str) -> dict:
         "user_genre": (data.get("genre") or "").strip(),
     }
     user_urn = data.get("urn") or ""
-    user_id = data.get("id") or fallback_uid or ""
+    user_id = uid_norm or data.get("id") or fallback_uid or ""
     user_identifier = user_id or user_urn or fallback_uid
     if user_urn:
         try:
@@ -650,6 +683,8 @@ def _sc_fetch_user_fallback_links(session, handle: str):
         uid = _sc_norm_user_id(data.get("id") or data.get("urn") or "")
     except Exception:
         return urls, emails
+    if handle and uid:
+        _SC_HANDLE_UID_MAP[handle] = uid
 
     desc = (data.get("description") or "").strip()
     if desc:

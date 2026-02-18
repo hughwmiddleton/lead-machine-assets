@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 from soundcloud_engine import SoundCloudEngine
+import soundcloud_engine as sc_engine
 import pandas as pd
 import requests
 from bs4 import BeautifulSoup
@@ -4222,6 +4223,16 @@ class CrossDirectoryEnricherWorker(QThread):
                 return False
             return cand_rank > curr_rank
 
+        def _is_long_or_spammy_name(name: str) -> Tuple[bool, Tuple[int, int, float]]:
+            cleaned = name or ""
+            token_count = len(re.findall(r"[A-Za-z0-9]+", cleaned))
+            char_len = len(cleaned.strip())
+            alnum_chars = len(re.findall(r"[A-Za-z0-9]", cleaned))
+            digit_count = len(re.findall(r"[0-9]", cleaned))
+            digit_ratio = float(digit_count) / float(max(1, alnum_chars))
+            flag = char_len >= 60 or token_count >= 10 or digit_ratio >= 0.25
+            return flag, (char_len, token_count, digit_ratio)
+
         # Prefer v2 API people search (shared with seed scraper); fall back to HTML only when empty/error.
         alias_map = {
             "uk": "United Kingdom",
@@ -4303,6 +4314,19 @@ class CrossDirectoryEnricherWorker(QThread):
         except Exception as exc:
             self.log_message.emit(f"[Night SC] API people search error ({exc}); falling back to HTML search.")
 
+        long_flag, long_metrics = _is_long_or_spammy_name(artist_name)
+        if not api_candidates and long_flag:
+            char_len, token_count, digit_ratio = long_metrics
+            try:
+                self.log_message.emit(
+                    f"[Night SC] Skipping HTML fallback for long/spammy artist name (len={char_len}, tokens={token_count}, digit_ratio={digit_ratio:.2f})."
+                )
+            except Exception:
+                pass
+            attempt.reason = attempt.reason or "no_candidates_long_name"
+            attempt.candidate_source = candidate_source
+            return None
+
         for query in _build_soundcloud_queries(sc_query, track_hint, location_hint):
             url = f"https://soundcloud.com/search/people?q={urllib.parse.quote_plus(query)}"
             status, html = self._night_sc_http_get(url, "Night SC search", attempt)
@@ -4382,7 +4406,8 @@ class CrossDirectoryEnricherWorker(QThread):
                     return (None, False)
                 if status == "blocked_403":
                     attempt.saw_403 = True
-                    attempt.reason = attempt.reason or "api_403"
+                    # Force a consistent reason so RSS fallback triggers even if an earlier step set a different reason.
+                    attempt.reason = "api_403"
                     return (None, False)
                 attempt.http_status = 200
                 socials: Set[str] = set()
@@ -4544,6 +4569,64 @@ class CrossDirectoryEnricherWorker(QThread):
             self._finalize_night_sc(df, row_idx, attempt, attempt.cached_payload if applied else attempt.cached_payload, artist_name)
             return bool(applied)
         payload, actionable = self._night_sc_fetch_profile_payload(profile_url, attempt)
+        # Night-only: if engine/profile fetch hit api_403, attempt a single RSS-based extraction before finalizing.
+        if getattr(self, "night_mode", False) and attempt.saw_403 and (attempt.reason or "").startswith("api_403"):
+            if handle:
+                try:
+                    self.log_message.emit(
+                        f"[Night SC] api_403 on engine fetch; attempting RSS fallback for handle={handle}."
+                    )
+                except Exception:
+                    pass
+                rss_payload = None
+                try:
+                    uid = sc_engine._sc_resolve_handle_uid(_SC_SHARED_ENGINE.session, handle)
+                    client_id = sc_engine._sc_get_client_id(_SC_SHARED_ENGINE.session)
+                    track = sc_engine._sc_fetch_latest_track_metadata(_SC_SHARED_ENGINE.session, client_id, uid, handle)
+                    # If metadata path produced no track (e.g., API 403 and RSS metadata filtered out), try a raw RSS pull.
+                    if not track:
+                        track = sc_engine._sc_fetch_latest_track_rss(_SC_SHARED_ENGINE.session, uid, handle)
+                        if track and track.get("permalink_url"):
+                            track.setdefault("source", "rss")
+                    permalink = track.get("permalink_url") or "" if track else ""
+                    if track:
+                        try:
+                            sc_engine._sc_stat_inc("rss_used", 1)
+                        except Exception:
+                            pass
+                        websites = set(getattr(payload, "websites", set()) if payload else set())
+                        if permalink:
+                            websites.add(permalink)
+                        rss_payload = payload or EnrichmentPayload(
+                            socials=set(),
+                            websites=websites,
+                            emails=set(),
+                            link_hubs=set(),
+                            source_dir="soundcloud",
+                            source_url=profile_url,
+                            source_detail=_format_source_display("soundcloud_live"),
+                        )
+                        rss_payload.websites = websites
+                    if os.getenv("NIGHT_SC_DEBUG"):
+                        try:
+                            result = "hit" if track else "miss"
+                            self.log_message.emit(
+                                f"[Night SC] RSS fallback {result} handle={handle} uid={uid or '<none>'} permalink={permalink or '<none>'}"
+                            )
+                        except Exception:
+                            pass
+                except Exception:
+                    rss_payload = None
+                if rss_payload and (_payload_actionable(rss_payload) or rss_payload.websites):
+                    payload = rss_payload
+                    actionable = _payload_actionable(payload) or bool(payload.websites or payload.socials or payload.emails)
+                    # RSS recovered something useful; ensure we don't finalize as api_403/blocked.
+                    attempt.reason = "rss_fallback"
+                    attempt.saw_403 = False
+                    try:
+                        attempt.http_status = attempt.http_status or 200
+                    except Exception:
+                        pass
         if payload:
             payload.match_score = self._compute_match_score_for_candidate(
                 best_candidate.get("display_name") or best_candidate.get("handle") or "",

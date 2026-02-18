@@ -1876,30 +1876,50 @@
   },
   "https://bandcamp.com/discover/glasgow+folk?s=new": {
     "scraped_artist_urls": [
-      "https://astrobloc.bandcamp.com",
+      "https://amyduncan.bandcamp.com",
       "https://sonoftherighthand-music.bandcamp.com",
-      "https://bigtelephone.bandcamp.com",
-      "https://miguelgirao.bandcamp.com",
-      "https://tomrichardson1.bandcamp.com",
-      "https://lizziereid.bandcamp.com",
-      "https://chairmancow.bandcamp.com",
       "https://inyal.bandcamp.com",
+      "https://mjohnhenry.bandcamp.com",
+      "https://alistott.bandcamp.com",
+      "https://lacunasmusicsociety.bandcamp.com",
+      "https://thewillowtrio.bandcamp.com",
+      "https://miguelgirao.bandcamp.com",
+      "https://kingribmusic.bandcamp.com",
+      "https://sheilakcameron.bandcamp.com",
+      "https://astrobloc.bandcamp.com",
+      "https://jackborrill.bandcamp.com",
+      "https://tomrichardson1.bandcamp.com",
       "https://kurdistankurdistan.bandcamp.com",
-      "https://kingribmusic.bandcamp.com"
+      "https://petermcmahon.bandcamp.com",
+      "https://contylia.bandcamp.com",
+      "https://chairmancow.bandcamp.com",
+      "https://lizziereid.bandcamp.com",
+      "https://loversturntomonsters.bandcamp.com",
+      "https://bigtelephone.bandcamp.com"
     ]
   },
   "discover:https://bandcamp.com/discover/glasgow+folk?s=new": {
     "scraped_artist_urls": [
-      "https://astrobloc.bandcamp.com",
+      "https://amyduncan.bandcamp.com",
       "https://sonoftherighthand-music.bandcamp.com",
-      "https://bigtelephone.bandcamp.com",
-      "https://miguelgirao.bandcamp.com",
-      "https://tomrichardson1.bandcamp.com",
-      "https://lizziereid.bandcamp.com",
-      "https://chairmancow.bandcamp.com",
       "https://inyal.bandcamp.com",
+      "https://mjohnhenry.bandcamp.com",
+      "https://alistott.bandcamp.com",
+      "https://lacunasmusicsociety.bandcamp.com",
+      "https://thewillowtrio.bandcamp.com",
+      "https://miguelgirao.bandcamp.com",
+      "https://kingribmusic.bandcamp.com",
+      "https://sheilakcameron.bandcamp.com",
+      "https://astrobloc.bandcamp.com",
+      "https://jackborrill.bandcamp.com",
+      "https://tomrichardson1.bandcamp.com",
       "https://kurdistankurdistan.bandcamp.com",
-      "https://kingribmusic.bandcamp.com"
+      "https://petermcmahon.bandcamp.com",
+      "https://contylia.bandcamp.com",
+      "https://chairmancow.bandcamp.com",
+      "https://lizziereid.bandcamp.com",
+      "https://loversturntomonsters.bandcamp.com",
+      "https://bigtelephone.bandcamp.com"
     ]
   }
 }
