@@ -178,6 +178,7 @@ _SC_CHALLENGE_TOKENS = (
 )
 NIGHT_SC_BUDGET_SECONDS_DEFAULT = 6
 NIGHT_SC_MAX_FETCHES_DEFAULT = 3
+_NIGHT_SC_PIPELINE_LOGGED = False
 
 
 @dataclass
@@ -197,6 +198,8 @@ class _NightSCAttempt:
     cached_payload: Optional[Any] = None
     match_score: float = 0.0
     finalized: bool = False
+    candidate_source: str = "none"
+    profile_source: str = "none"
 
     max_seconds: float = NIGHT_SC_BUDGET_SECONDS_DEFAULT
     max_fetches: int = NIGHT_SC_MAX_FETCHES_DEFAULT
@@ -4066,6 +4069,15 @@ class CrossDirectoryEnricherWorker(QThread):
         return None
 
     def _start_night_sc_attempt(self) -> _NightSCAttempt:
+        global _NIGHT_SC_PIPELINE_LOGGED
+        if getattr(self, "night_mode", False) and not _NIGHT_SC_PIPELINE_LOGGED:
+            try:
+                self.log_message.emit(
+                    "[Night SC] using day-mode candidate pipeline: SoundCloudEngine.people_search_candidates_v2 + HTML fallback"
+                )
+            except Exception:
+                pass
+            _NIGHT_SC_PIPELINE_LOGGED = True
         attempt = _NightSCAttempt(
             start_time=time.time(),
             max_seconds=_night_sc_budget_seconds(),
@@ -4188,6 +4200,7 @@ class CrossDirectoryEnricherWorker(QThread):
         country_hint: str = "",
     ) -> Optional[Dict[str, Any]]:
         best_candidate: Optional[Dict[str, Any]] = None
+        candidate_source = "none"
 
         def _is_better_candidate(candidate: Dict[str, Any], current: Optional[Dict[str, Any]]) -> bool:
             if not candidate:
@@ -4255,16 +4268,15 @@ class CrossDirectoryEnricherWorker(QThread):
                 f"[Night SC] API people search -> handles={len(api_candidates)} query='{artist_name}' place='{api_place or ''}'"
             )
             if api_candidates:
+                candidate_source = "api"
                 candidate = self._pick_best_soundcloud_candidate(
                     artist_name, api_candidates, location_hint, genre_hint
                 )
                 if candidate:
+                    attempt.candidate_source = candidate_source
                     return candidate
                 self.log_message.emit("[Night SC] API people search produced handles but no acceptable candidate; falling back to HTML search.")
             else:
-                if source_tag in {"location_derived", "location_raw"}:
-                    self.log_message.emit("[Night SC] API people search returned 0 handles for location-based place; skipping HTML fallback.")
-                    return None
                 self.log_message.emit("[Night SC] API people search returned 0 handles; falling back to HTML search.")
         except Exception as exc:
             self.log_message.emit(f"[Night SC] API people search error ({exc}); falling back to HTML search.")
@@ -4279,6 +4291,8 @@ class CrossDirectoryEnricherWorker(QThread):
             if attempt.budget_exceeded:
                 break
             candidates = self._parse_soundcloud_search_results(html, url)
+            if candidates and candidate_source == "none":
+                candidate_source = "html"
             candidate = self._pick_best_soundcloud_candidate(
                 artist_name, candidates, location_hint, genre_hint
             )
@@ -4290,14 +4304,18 @@ class CrossDirectoryEnricherWorker(QThread):
             url = f"https://soundcloud.com/search?q={urllib.parse.quote_plus(sc_query)}"
             status, html = self._night_sc_http_get(url, "Night SC universal search", attempt)
             if not html:
+                attempt.candidate_source = candidate_source
                 return best_candidate
             if not attempt.budget_exceeded:
                 candidates = self._parse_soundcloud_search_results(html, url)
+                if candidates and candidate_source == "none":
+                    candidate_source = "html"
                 candidate = self._pick_best_soundcloud_candidate(
                     artist_name, candidates, location_hint, genre_hint
                 )
                 if candidate and _is_better_candidate(candidate, best_candidate):
                     best_candidate = candidate
+        attempt.candidate_source = candidate_source
         return best_candidate
 
     def _night_sc_fetch_profile_payload(
@@ -4306,72 +4324,86 @@ class CrossDirectoryEnricherWorker(QThread):
         attempt: _NightSCAttempt,
     ) -> Tuple[Optional[EnrichmentPayload], bool]:
         handle = _sc_handle_from_profile_url(profile_url) if profile_url else ""
-        if _night_sc_engine_enabled() and handle:
+        engine_enabled = _night_sc_engine_enabled() and handle
+        engine_failed = False
+        if engine_enabled:
             if not attempt.note_fetch():
                 return (None, False)
-            data = _SC_SHARED_ENGINE.fetch_profile(handle) or {}
-            status = data.get("status", "")
-            if status == "non_actionable_challenge":
-                attempt.challenge = True
-                attempt.reason = attempt.reason or "challenge_page"
-                self._note_sc_challenge(status, data.get("reason"), data.get("challenge_page"))
+            try:
+                data = _SC_SHARED_ENGINE.fetch_profile(handle) or {}
+            except Exception as exc:
+                engine_failed = True
                 try:
-                    if not hasattr(self, "_night_sc_challenge_streak"):
-                        self._night_sc_challenge_streak = 0
-                    self._night_sc_challenge_streak += 1
-                    if self._night_sc_challenge_streak >= 3 and not getattr(self, "_night_sc_breaker_tripped", False):
-                        self._night_sc_breaker_tripped = True
-                        self.log_message.emit("[Night SC] Circuit breaker tripped after repeated challenge pages; skipping SoundCloud for this run.")
+                    self.log_message.emit(f"[Night SC] Engine fetch_profile error ({exc}); falling back to legacy HTML.")
                 except Exception:
                     pass
-                return (None, False)
-            if status == "blocked_403":
-                attempt.saw_403 = True
-                attempt.reason = attempt.reason or "api_403"
-                return (None, False)
-            attempt.http_status = 200
-            socials: Set[str] = set()
-            websites: Set[str] = set()
-            emails: Set[str] = set()
-            link_hubs: Set[str] = set()
-            for email in data.get("emails") or []:
-                if email and isinstance(email, str):
-                    emails.add(email.strip())
-            for url in data.get("external_urls") or []:
-                parsed = urllib.parse.urlparse(url)
-                host = (parsed.netloc or "").lower()
-                path_lower = (parsed.path or "").lower()
-                if host.endswith("soundcloud.com"):
-                    continue
-                if host in LINK_HUB_HOSTS:
-                    link_hubs.add(url)
+                data = None
+            if data is not None:
+                attempt.profile_source = "engine"
+                status = data.get("status", "")
+                if status == "non_actionable_challenge":
+                    attempt.challenge = True
+                    attempt.reason = attempt.reason or "challenge_page"
+                    self._note_sc_challenge(status, data.get("reason"), data.get("challenge_page"))
+                    try:
+                        if not hasattr(self, "_night_sc_challenge_streak"):
+                            self._night_sc_challenge_streak = 0
+                        self._night_sc_challenge_streak += 1
+                        if self._night_sc_challenge_streak >= 3 and not getattr(self, "_night_sc_breaker_tripped", False):
+                            self._night_sc_breaker_tripped = True
+                            self.log_message.emit("[Night SC] Circuit breaker tripped after repeated challenge pages; skipping SoundCloud for this run.")
+                    except Exception:
+                        pass
+                    return (None, False)
+                if status == "blocked_403":
+                    attempt.saw_403 = True
+                    attempt.reason = attempt.reason or "api_403"
+                    return (None, False)
+                attempt.http_status = 200
+                socials: Set[str] = set()
+                websites: Set[str] = set()
+                emails: Set[str] = set()
+                link_hubs: Set[str] = set()
+                for email in data.get("emails") or []:
+                    if email and isinstance(email, str):
+                        emails.add(email.strip())
+                for url in data.get("external_urls") or []:
+                    parsed = urllib.parse.urlparse(url)
+                    host = (parsed.netloc or "").lower()
+                    path_lower = (parsed.path or "").lower()
+                    if host.endswith("soundcloud.com"):
+                        continue
+                    if host in LINK_HUB_HOSTS:
+                        link_hubs.add(url)
+                        websites.add(url)
+                        continue
+                    if any(host.endswith(domain) for domain in SOCIAL_HOST_WHITELIST):
+                        socials.add(url)
+                        continue
+                    if host in JUNK_WEBSITE_HOSTS:
+                        continue
+                    if any(keyword in path_lower for keyword in JUNK_WEBSITE_PATH_KEYWORDS):
+                        continue
                     websites.add(url)
-                    continue
-                if any(host.endswith(domain) for domain in SOCIAL_HOST_WHITELIST):
-                    socials.add(url)
-                    continue
-                if host in JUNK_WEBSITE_HOSTS:
-                    continue
-                if any(keyword in path_lower for keyword in JUNK_WEBSITE_PATH_KEYWORDS):
-                    continue
-                websites.add(url)
-            website = data.get("website")
-            if website:
-                websites.add(website)
-            payload = EnrichmentPayload(
-                socials=socials,
-                websites=websites,
-                emails=emails,
-                link_hubs=link_hubs,
-                source_dir="soundcloud",
-                source_url=profile_url or f"https://soundcloud.com/{handle}",
-                source_detail=_format_source_display("soundcloud_live"),
-            )
-            try:
-                self._night_sc_challenge_streak = 0
-            except Exception:
-                pass
-            return (payload, bool(_payload_actionable(payload)))
+                website = data.get("website")
+                if website:
+                    websites.add(website)
+                payload = EnrichmentPayload(
+                    socials=socials,
+                    websites=websites,
+                    emails=emails,
+                    link_hubs=link_hubs,
+                    source_dir="soundcloud",
+                    source_url=profile_url or f"https://soundcloud.com/{handle}",
+                    source_detail=_format_source_display("soundcloud_live"),
+                )
+                try:
+                    self._night_sc_challenge_streak = 0
+                except Exception:
+                    pass
+                return (payload, bool(_payload_actionable(payload)))
+        if not engine_enabled or engine_failed:
+            attempt.profile_source = "legacy_html"
         status, html = self._night_sc_http_get(profile_url, "Night SC profile", attempt)
         if attempt.challenge:
             return (None, False)
@@ -4614,6 +4646,34 @@ class CrossDirectoryEnricherWorker(QThread):
         attempt.status = status
         attempt.reason = reason
         self._write_sc_status_columns(df, row_idx, status, reason, attempt.fetches, attempt.elapsed_ms())
+        if getattr(self, "night_mode", False):
+            try:
+                flags = _SC_SHARED_ENGINE.get_run_flags()
+            except Exception:
+                flags = {
+                    "root_fetch_disabled": 0,
+                    "about_disabled": 0,
+                    "tracks_api_blocked": 0,
+                    "used_user_api": 0,
+                    "used_rss": 0,
+                }
+            candidate_src = getattr(attempt, "candidate_source", "none") or "none"
+            profile_src = getattr(attempt, "profile_source", "none") or "none"
+            try:
+                self.log_message.emit(
+                    "[Night SC] candidate_source=%s profile_source=%s root_fetch_disabled=%d about_disabled=%d tracks_api_blocked=%d used_user_api=%d used_rss=%d"
+                    % (
+                        candidate_src,
+                        profile_src,
+                        int(flags.get("root_fetch_disabled", 0)),
+                        int(flags.get("about_disabled", 0)),
+                        int(flags.get("tracks_api_blocked", 0)),
+                        int(flags.get("used_user_api", 0)),
+                        int(flags.get("used_rss", 0)),
+                    )
+                )
+            except Exception:
+                pass
         try:
             self.log_message.emit(
                 "[Night SC] Final status: %s handle=%s http=%s confidence=%.2f ms=%s fetches=%s reason=%s"

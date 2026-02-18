@@ -1379,6 +1379,19 @@ class SoundCloudEngine:
     def run_stats(self) -> Dict[str, int]:
         return _SC_RUN_STATS or {}
 
+    def get_run_flags(self) -> Dict[str, int]:
+        """
+        Read-only run-state snapshot for logging; does not mutate engine behaviour.
+        """
+        stats = self.run_stats or {}
+        return {
+            "root_fetch_disabled": int(bool(_SC_ROOT_FORBIDDEN)),
+            "about_disabled": int(bool(_SC_ABOUT_DISABLED)),
+            "tracks_api_blocked": int(bool(stats.get("tracks_api_403", 0))),
+            "used_user_api": int(bool(stats.get("api_user_fallback_used", 0))),
+            "used_rss": int(bool(stats.get("rss_used", 0))),
+        }
+
     def reset_run_stats(self):
         global _SC_RUN_STATS, _SC_ABOUT_DISABLED, _SC_ABOUT_DISABLE_LOGGED, _SC_ROOT_FORBIDDEN, _SC_ROOT_FORBIDDEN_LOGGED, _ENGINE_SESSION
         _SC_RUN_STATS = {
