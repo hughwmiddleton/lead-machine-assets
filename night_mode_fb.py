@@ -3158,7 +3158,7 @@ class NightModeFacebookEnricher:
         if self.slow_mode_active:
             refine_query_list = refine_query_list[:1]
 
-        def _run_refine_queries() -> List["facebook_enrich.FbCandidate"]:
+        def _run_refine_queries(diagnostics: Optional[Dict[str, Any]] = None) -> List["facebook_enrich.FbCandidate"]:
             refine_candidates: List["facebook_enrich.FbCandidate"] = []
             for refine_query in refine_query_list:
                 html_refined, drv_refined = _fetch_search_html(refine_query)
@@ -3171,7 +3171,7 @@ class NightModeFacebookEnricher:
                         v2_enabled=v2_enabled,
                         session_unhealthy=session_unhealthy,
                         session_reason=session_reason,
-                        diagnostics=None,
+                        diagnostics=diagnostics,
                     )
                 )
             return refine_candidates
@@ -3202,12 +3202,14 @@ class NightModeFacebookEnricher:
                 need_refine = True
 
         if need_refine:
-            refine_candidates = _run_refine_queries()
+            refine_candidates = _run_refine_queries(diagnostics=diagnostics)
             if refine_candidates:
                 candidates = _dedupe_candidates(list(candidates) + refine_candidates)
             ranked_for_preview = _rank_candidates_for_preview(artist, candidates)
             if refine_candidates:
                 _log(self.logger, f"[Night FB] Refine query enabled; merged {len(refine_candidates)} refined candidates.")
+
+        soft_blocked = soft_blocked or bool(diagnostics.get("overlay_soft_block"))
 
         ranked_candidates: List["facebook_enrich.FbCandidate"] = [item["candidate"] for item in ranked_for_preview]
         candidate = ranked_candidates[0] if ranked_candidates else None
@@ -3215,6 +3217,7 @@ class NightModeFacebookEnricher:
 
         if quality_gate_enabled and candidate:
             refine_forced = False
+            overlay_skip_logged = False
             while True:
                 score_val, reasons, _meta = _score_candidate_min_quality(artist, candidate)
                 if score_val >= quality_threshold:
@@ -3222,18 +3225,23 @@ class NightModeFacebookEnricher:
                 label = getattr(candidate, "name", None) or getattr(candidate, "url", None) or "<unknown>"
                 _log(self.logger, f"[Night FB][QualityGate] rejected '{label}' score={score_val} reasons={' '.join(reasons) or '-'} threshold={quality_threshold}")
                 if soft_blocked:
-                    if not refine_forced:
+                    if not overlay_skip_logged:
                         _log(self.logger, "[Night FB] Skipping refine due to overlay soft block.")
+                        overlay_skip_logged = True
                     refine_forced = True
                 elif not refine_forced:
                     refine_forced = True
-                    forced_refine_candidates = _run_refine_queries()
+                    forced_refine_candidates = _run_refine_queries(diagnostics=diagnostics)
                     _log(self.logger, "[Night FB][QualityGate] forcing refine queries due to low top-candidate score.")
                     if forced_refine_candidates:
                         candidates = _dedupe_candidates(list(candidates) + forced_refine_candidates)
                     ranked_for_preview = _rank_candidates_for_preview(artist, candidates)
                     ranked_candidates = [item["candidate"] for item in ranked_for_preview]
                     candidate = ranked_candidates[0] if ranked_candidates else None
+                    soft_blocked = soft_blocked or bool(diagnostics.get("overlay_soft_block"))
+                    if soft_blocked and not overlay_skip_logged:
+                        _log(self.logger, "[Night FB] Skipping refine due to overlay soft block.")
+                        overlay_skip_logged = True
                     if candidate:
                         continue
                 if self.slow_mode_active and not soft_blocked:
