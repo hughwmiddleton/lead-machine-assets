@@ -4615,6 +4615,10 @@ class CrossDirectoryEnricherWorker(QThread):
         track_hint = _clean_cell(getattr(self, "_live_context", {}).get("track", ""))
         genre_hint = _clean_cell(getattr(self, "_live_context", {}).get("genre", ""))
 
+        # Per-row guards for RSS-first and single fallback.
+        sc_rss_first_attempted = False
+        sc_fallback_used = False
+
         # Force RSS-only path: skip HTML/profile fetches and try RSS directly for every row when enabled.
         if getattr(self, "_sc_rss_only_mode", False):
             attempt.challenge = False
@@ -4716,7 +4720,59 @@ class CrossDirectoryEnricherWorker(QThread):
                 attempt.reason = "budget_exceeded"
                 self._finalize_night_sc(df, row_idx, attempt, None, artist_name)
                 return False
-            payload, actionable = self._night_sc_fetch_profile_payload(attempt.profile_url, attempt)
+            payload: Optional[EnrichmentPayload] = None
+            actionable = False
+
+            handle_for_rss = attempt.handle or _sc_handle_from_profile_url(attempt.profile_url or "") or ""
+            if handle_for_rss:
+                sc_rss_first_attempted = True
+                attempt.profile_source = attempt.profile_source or "rss_first"
+                rss_payload, rss_ok = self._sc_build_rss_payload(handle_for_rss, None)
+                attempt.status = "rss_success" if rss_ok else "rss_fail"
+                attempt.reason = attempt.status
+                try:
+                    flags = _SC_SHARED_ENGINE.get_run_flags()
+                except Exception:
+                    flags = {}
+                rss_used_total = _sc_get_rss_used_total()
+                flags_used_rss = int(flags.get("used_rss", 0))
+                try:
+                    self.log_message.emit(
+                        "[Night SC] rss_first=1 handle=%s url=%s rss_attempted=1 outcome=%s flags_used_rss=%d rss_used_total=%d"
+                        % (
+                            handle_for_rss or "<missing>",
+                            attempt.profile_url or "",
+                            attempt.status,
+                            flags_used_rss,
+                            int(rss_used_total or 0),
+                        )
+                    )
+                except Exception:
+                    pass
+                if rss_payload and rss_ok:
+                    rss_payload.match_score = rss_payload.match_score or attempt.match_score or 1.0
+                    rss_payload.candidate_name = artist_name
+                    applied = self._apply_payload_guarded(df, row_idx, rss_payload, artist_name, spotify_id=spotify_id)
+                    self._finalize_night_sc(df, row_idx, attempt, rss_payload if applied else None, artist_name)
+                    return bool(applied)
+
+            fallback_allowed = (
+                not getattr(self, "_sc_rss_only_mode", False)
+                and not sc_fallback_used
+                and not attempt.challenge
+                and getattr(self, "_sc_html_challenge_count", 0) < 1
+            )
+            if fallback_allowed:
+                sc_fallback_used = True
+                if sc_rss_first_attempted:
+                    attempt.status = ""
+                    attempt.reason = ""
+                payload, actionable = self._night_sc_fetch_profile_payload(attempt.profile_url, attempt)
+            else:
+                if sc_rss_first_attempted:
+                    self._finalize_night_sc(df, row_idx, attempt, None, artist_name)
+                    return False
+                payload, actionable = (None, False)
 
             # If RSS-only tripped mid-row due to a challenge, reroute this row immediately to RSS.
             if attempt.challenge and getattr(self, "_sc_rss_only_mode", False):
@@ -4820,6 +4876,46 @@ class CrossDirectoryEnricherWorker(QThread):
         attempt.match_score = attempt.confidence
         if _night_sc_engine_enabled() and os.getenv("NIGHT_SC_DEBUG"):
             self.log_message.emit(f"[Night SC] Rediscovery chose handle={handle or '<unknown>'} url={profile_url}")
+
+        payload: Optional[EnrichmentPayload] = None
+        actionable = False
+
+        if handle:
+            sc_rss_first_attempted = True
+            attempt.profile_source = attempt.profile_source or "rss_first"
+            rss_payload, rss_ok = self._sc_build_rss_payload(handle, None)
+            attempt.status = "rss_success" if rss_ok else "rss_fail"
+            attempt.reason = attempt.status
+            try:
+                flags = _SC_SHARED_ENGINE.get_run_flags()
+            except Exception:
+                flags = {}
+            rss_used_total = _sc_get_rss_used_total()
+            flags_used_rss = int(flags.get("used_rss", 0))
+            try:
+                self.log_message.emit(
+                    "[Night SC] rss_first=1 handle=%s url=%s rss_attempted=1 outcome=%s flags_used_rss=%d rss_used_total=%d"
+                    % (
+                        handle or "<missing>",
+                        profile_url or "",
+                        attempt.status,
+                        flags_used_rss,
+                        int(rss_used_total or 0),
+                    )
+                )
+            except Exception:
+                pass
+            if rss_payload and rss_ok:
+                rss_payload.match_score = self._compute_match_score_for_candidate(
+                    best_candidate.get("display_name") or best_candidate.get("handle") or "",
+                    song_title,
+                    extract_domain(profile_url),
+                )
+                rss_payload.candidate_name = best_candidate.get("display_name") or best_candidate.get("handle") or ""
+                applied = self._apply_payload_guarded(df, row_idx, rss_payload, artist_name, spotify_id=spotify_id)
+                self._finalize_night_sc(df, row_idx, attempt, rss_payload if applied else None, artist_name)
+                return bool(applied)
+
         cached = self._night_sc_cache_lookup(handle, profile_url)
         if cached:
             attempt.cached_snapshot = cached
@@ -4831,7 +4927,23 @@ class CrossDirectoryEnricherWorker(QThread):
             applied = self._apply_sc_snapshot_to_row(df, row_idx, cached, artist_name, spotify_id=spotify_id)
             self._finalize_night_sc(df, row_idx, attempt, attempt.cached_payload if applied else None, artist_name)
             return bool(applied)
-        payload, actionable = self._night_sc_fetch_profile_payload(profile_url, attempt)
+        fallback_allowed = (
+            not getattr(self, "_sc_rss_only_mode", False)
+            and not sc_fallback_used
+            and not attempt.challenge
+            and getattr(self, "_sc_html_challenge_count", 0) < 1
+        )
+        if fallback_allowed:
+            sc_fallback_used = True
+            if sc_rss_first_attempted:
+                attempt.status = ""
+                attempt.reason = ""
+            payload, actionable = self._night_sc_fetch_profile_payload(profile_url, attempt)
+        else:
+            if sc_rss_first_attempted:
+                self._finalize_night_sc(df, row_idx, attempt, None, artist_name)
+                return False
+            payload, actionable = (None, False)
 
         # If RSS-only tripped mid-row due to a challenge, reroute this row immediately to RSS.
         if attempt.challenge and getattr(self, "_sc_rss_only_mode", False):
