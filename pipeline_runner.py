@@ -1678,8 +1678,15 @@ def run_facebook_global_pass_nightmode(
                 _write_state_with_pass_a(state)
                 continue
 
+            multiplier = 1.0
+            try:
+                if hasattr(fb_helper, "get_slow_mode_multiplier"):
+                    multiplier = max(1.0, float(fb_helper.get_slow_mode_multiplier()))
+            except Exception:
+                multiplier = 1.0
+
             if processed_this_run > 0:
-                delay = random.uniform(*per_row_delay_range) if per_row_delay_range else 0.0
+                delay = (random.uniform(*per_row_delay_range) if per_row_delay_range else 0.0) * multiplier
                 _safe_log_console(logger, f"[FB Night] Sleeping {delay:.2f}s before next row (index={idx}).")
                 _safe_sleep(delay)
 
@@ -1687,11 +1694,11 @@ def run_facebook_global_pass_nightmode(
             attempted_total += 1
 
             if short_break_every > 0 and processed_this_run % short_break_every == 0:
-                pause = random.uniform(*short_break_range) if short_break_range else 0.0
+                pause = (random.uniform(*short_break_range) if short_break_range else 0.0) * multiplier
                 _safe_log_console(logger, f"[FB Night] Short break for {pause:.2f}s after {processed_this_run} rows.")
                 _safe_sleep(pause)
             if long_break_every > 0 and processed_this_run % long_break_every == 0:
-                pause = random.uniform(*long_break_range) if long_break_range else 0.0
+                pause = (random.uniform(*long_break_range) if long_break_range else 0.0) * multiplier
                 _safe_log_console(logger, f"[FB Night] Long break for {pause:.2f}s after {processed_this_run} rows.")
                 _safe_sleep(pause)
 

@@ -336,7 +336,7 @@ def _has_checkpoint_overlay(driver) -> bool:
         html = (driver.page_source or "").lower()
     except Exception:
         return False
-    tokens = ("checkpoint", "consent", "cookie", "privacy", "login")
+    tokens = ("checkpoint", "consent", "security check")
     return any(tok in html for tok in tokens)
 
 
@@ -913,6 +913,7 @@ def _harvest_search_candidates_v2(
     search_name: str = "",
     session_unhealthy: Optional[bool] = None,
     session_reason: str = "",
+    diagnostics: Optional[Dict[str, Any]] = None,
 ) -> List["facebook_enrich.FbCandidate"]:
     """
     Resilient FB search candidate harvester (feature-flagged).
@@ -982,6 +983,7 @@ def _harvest_search_candidates_v2(
             }
 
         counts = _refresh_counts()
+        overlay_present = 1 if _has_checkpoint_overlay(driver) else 0
 
         waited_for_population = False
         anchor_wait_meta: Dict[str, Any] = {}
@@ -1066,7 +1068,6 @@ def _harvest_search_candidates_v2(
                 total_anchors = len(_find_all(driver, "a"))
                 search_len, search_preview = _container_html_preview(counts["search_container"])
                 feed_len, feed_preview = _container_html_preview(counts["feed_container"])
-                overlay_present = 1 if _has_checkpoint_overlay(driver) else 0
                 page_url = _safe_current_url(driver)
                 preview = search_preview or feed_preview
                 _log(
@@ -1082,6 +1083,14 @@ def _harvest_search_candidates_v2(
                     f"overlay_present={overlay_present} page_url='{page_url}' preview='{preview}' "
                     f"anchor_wait_meta={anchor_wait_meta}"
                 )
+                if overlay_present and counts["anchors_in_scope_feed"] == 0 and counts["anchors_in_scope_search"] == 0:
+                    logged_already = False
+                    if diagnostics is not None:
+                        logged_already = bool(diagnostics.get("overlay_soft_block_logged"))
+                        diagnostics["overlay_soft_block"] = True
+                        diagnostics["overlay_soft_block_logged"] = True
+                    if not logged_already:
+                        _log(logger, "[Night FB] Overlay/zero-anchors detected; treating as soft block and slowing down.")
                 return []
 
         candidates_pre_url_gate = len(set(chosen_hrefs))
@@ -1186,6 +1195,9 @@ class NightPersistentFacebookSession:
         self.driver = None
         self.last_health_reason: str = ""
         self.last_health_ok: bool = True
+        # Checkpoint resilience
+        self.checkpoint_restart_count: int = 0
+        self.checkpoint_cooldown_done: bool = False
 
     def close(self):
         try:
@@ -1241,24 +1253,53 @@ class NightPersistentFacebookSession:
                 self.last_health_ok = healthy
                 self.last_health_reason = reason or ""
             if not healthy:
-                _log(self.logger, f"[Night FB] Session unhealthy; restarting driver once... reason={reason}")
-                try:
-                    self.driver.quit()
-                except Exception:
-                    pass
-                try:
-                    self.driver = self.driver_factory()
+                if (reason or "").lower() == "checkpoint" and authed:
+                    if self.checkpoint_restart_count == 0:
+                        self.checkpoint_restart_count += 1
+                        try:
+                            self.driver.quit()
+                        except Exception:
+                            pass
+                        try:
+                            self.driver = self.driver_factory()
+                            try:
+                                healthy_retry, reason_retry = _session_looks_healthy(self.driver)
+                            except Exception:
+                                healthy_retry, reason_retry = False, "exception"
+                            self.last_health_ok = healthy_retry
+                            self.last_health_reason = reason_retry or ""
+                        except Exception:
+                            _log(self.logger, "[Night FB] Session restart failed; continuing but FB results may be limited.")
+                            self.driver = old_driver
+                        if not self.checkpoint_cooldown_done:
+                            cooldown_s = random.uniform(30.0, 60.0)
+                            _log(self.logger, f"[Night FB] Session checkpoint restart limited to 1 per run; entering cooldown for {cooldown_s:.0f}s.")
+                            time.sleep(cooldown_s)
+                            _log(self.logger, "[Night FB] Cooldown complete after checkpoint restart; continuing at reduced pace.")
+                            self.checkpoint_cooldown_done = True
+                    else:
+                        # Do not restart again; allow downstream protection to act
+                        self.last_health_ok = False
+                        self.last_health_reason = reason or "checkpoint"
+                else:
+                    _log(self.logger, f"[Night FB] Session unhealthy; restarting driver once... reason={reason}")
                     try:
-                        healthy_retry, reason_retry = _session_looks_healthy(self.driver)
+                        self.driver.quit()
                     except Exception:
-                        healthy_retry, reason_retry = False, "exception"
-                    self.last_health_ok = healthy_retry
-                    self.last_health_reason = reason_retry or ""
-                    if not healthy_retry:
-                        _log(self.logger, f"[Night FB] Session still unhealthy; continuing but FB results may be limited. reason={reason_retry}")
-                except Exception:
-                    _log(self.logger, "[Night FB] Session restart failed; continuing but FB results may be limited.")
-                    self.driver = old_driver
+                        pass
+                    try:
+                        self.driver = self.driver_factory()
+                        try:
+                            healthy_retry, reason_retry = _session_looks_healthy(self.driver)
+                        except Exception:
+                            healthy_retry, reason_retry = False, "exception"
+                        self.last_health_ok = healthy_retry
+                        self.last_health_reason = reason_retry or ""
+                        if not healthy_retry:
+                            _log(self.logger, f"[Night FB] Session still unhealthy; continuing but FB results may be limited. reason={reason_retry}")
+                    except Exception:
+                        _log(self.logger, "[Night FB] Session restart failed; continuing but FB results may be limited.")
+                        self.driver = old_driver
             return self.driver
 
         if self.headless:
@@ -2406,6 +2447,7 @@ def _harvest_candidates(
     v2_enabled: bool = False,
     session_unhealthy: Optional[bool] = None,
     session_reason: str = "",
+    diagnostics: Optional[Dict[str, Any]] = None,
 ) -> List["facebook_enrich.FbCandidate"]:
     """
     Unified search harvester that prefers V2 when enabled and a driver is present,
@@ -2419,6 +2461,7 @@ def _harvest_candidates(
                 search_name=search_label,
                 session_unhealthy=session_unhealthy,
                 session_reason=session_reason,
+                diagnostics=diagnostics,
             )
         except Exception:
             # Defensive: V2 already logged; fall back to V1 parser.
@@ -2531,6 +2574,14 @@ class NightModeFacebookEnricher:
             "skipped_no_fb_url": 0,
         }
         self._session_state_logged = False
+        # Slow mode / resilience
+        self.slow_mode_active: bool = False
+        self.slow_mode_multiplier: float = 1.0
+        self.slow_mode_reason: str = ""
+        self.session_unhealthy_count: int = 0
+        self.checkpoint_events: int = 0
+        self.login_wall_events: int = 0
+        self.protective_shutdown: bool = False
 
         if (not self.headless) and self.require_display and _is_linux() and (not _display_env_present()):
             self._skip_fb_due_to_display = True
@@ -2603,6 +2654,10 @@ class NightModeFacebookEnricher:
             reason = str(getattr(session, "last_health_reason", "") or "")
         except Exception:
             reason = ""
+        if unhealthy:
+            self.session_unhealthy_count += 1
+            # Enter slow mode gently on first unhealthy detection.
+            self._enter_slow_mode(reason or "session_unhealthy", max(self.slow_mode_multiplier, 1.5))
         return authed, unhealthy, reason
 
     def _log_session_state_once(self, session) -> None:
@@ -2617,6 +2672,35 @@ class NightModeFacebookEnricher:
             f"[Night FB][session_state] authed={1 if authed else 0} unhealthy={1 if unhealthy else 0} reason={reason or ''} v2={1 if v2_enabled else 0}",
         )
         self._session_state_logged = True
+
+    def _enter_slow_mode(self, reason: str, multiplier: float) -> None:
+        try:
+            multiplier = float(multiplier)
+        except Exception:
+            multiplier = self.slow_mode_multiplier or 1.0
+        if multiplier <= (self.slow_mode_multiplier or 1.0) + 1e-9:
+            return
+        self.slow_mode_multiplier = multiplier
+        self.slow_mode_active = True
+        self.slow_mode_reason = reason or self.slow_mode_reason
+        _log(self.logger, f"[Night FB] Entering slow mode (reason={reason}) multiplier={multiplier:.1f}.")
+
+    def _register_checkpoint_event(self) -> None:
+        self.checkpoint_events += 1
+        self._enter_slow_mode("checkpoint", max(self.slow_mode_multiplier, 1.5))
+        if not self.protective_shutdown and self.checkpoint_events >= 2:
+            self.protective_shutdown = True
+            self._skip_fb_due_to_checkpoint = True
+            self._search_disabled_due_to_checkpoint = True
+            _log(self.logger, "[Night FB] Entering protective shutdown mode (checkpoint persistence detected).")
+
+    def _register_login_wall(self) -> None:
+        self.login_wall_events += 1
+        if not self.protective_shutdown:
+            self.protective_shutdown = True
+            self._skip_fb_due_to_checkpoint = True
+            self._search_disabled_due_to_checkpoint = True
+            _log(self.logger, "[Night FB] Protective shutdown triggered by login wall; skipping FB for remainder of run.")
 
     def _ensure_session(self):
         if self._session_failed:
@@ -2731,6 +2815,12 @@ class NightModeFacebookEnricher:
 
     def get_pass_a_counts(self) -> Dict[str, int]:
         return dict(self._pass_a_counts)
+
+    def get_slow_mode_multiplier(self) -> float:
+        try:
+            return float(self.slow_mode_multiplier or 1.0)
+        except Exception:
+            return 1.0
 
     def _refresh_driver(self, session) -> None:
         _log(self.logger, "[FB] Driver appears dead, recreating a fresh instance...")
@@ -2906,6 +2996,7 @@ class NightModeFacebookEnricher:
             return True
 
         # Checkpoint detected.
+        self._register_checkpoint_event()  # register once per detected checkpoint
         if self._checkpoint_guard_enabled and not self._search_disabled_due_to_checkpoint:
             self._search_disabled_due_to_checkpoint = True
             _log(self.logger, "[Night FB] search disabled due to checkpoint")
@@ -3007,6 +3098,7 @@ class NightModeFacebookEnricher:
         checkpoint_limited = bool(session_unhealthy and "checkpoint" in (session_reason or "").lower())
         if checkpoint_limited:
             self._checkpoint_limited_active = True
+            self._register_checkpoint_event()
             if not self._checkpoint_warned_this_row:
                 _log(self.logger, "[Night FB][WARN] checkpoint active; skipping search/refine; using fallback only.")
                 self._checkpoint_warned_this_row = True
@@ -3062,9 +3154,13 @@ class NightModeFacebookEnricher:
             except Exception:
                 pass
 
+        refine_query_list = [f"{artist} musician", f"{artist} band"]
+        if self.slow_mode_active:
+            refine_query_list = refine_query_list[:1]
+
         def _run_refine_queries() -> List["facebook_enrich.FbCandidate"]:
             refine_candidates: List["facebook_enrich.FbCandidate"] = []
-            for refine_query in (f"{artist} musician", f"{artist} band"):
+            for refine_query in refine_query_list:
                 html_refined, drv_refined = _fetch_search_html(refine_query)
                 refine_candidates.extend(
                     _harvest_candidates(
@@ -3075,10 +3171,12 @@ class NightModeFacebookEnricher:
                         v2_enabled=v2_enabled,
                         session_unhealthy=session_unhealthy,
                         session_reason=session_reason,
+                        diagnostics=None,
                     )
                 )
             return refine_candidates
 
+        diagnostics: Dict[str, Any] = {}
         candidates = _harvest_candidates(
             html,
             nav_driver,
@@ -3087,11 +3185,16 @@ class NightModeFacebookEnricher:
             v2_enabled=v2_enabled,
             session_unhealthy=session_unhealthy,
             session_reason=session_reason,
+            diagnostics=diagnostics,
         )
         ranked_for_preview = _rank_candidates_for_preview(artist, candidates)
 
         need_refine = False
-        if refine_enabled:
+        if diagnostics.get("overlay_soft_block"):
+            self._enter_slow_mode("overlay_zero_anchors", max(self.slow_mode_multiplier, 1.5))
+            # Skip refine cascade when soft-blocked; rely on slug/candidate fallback.
+            need_refine = False
+        elif refine_enabled:
             top_score = ranked_for_preview[0]["score"] if ranked_for_preview else 0
             music_present = any(item["features"].get("music_any") for item in ranked_for_preview)
             if (not music_present) and top_score <= 0:
@@ -3128,6 +3231,9 @@ class NightModeFacebookEnricher:
                     candidate = ranked_candidates[0] if ranked_candidates else None
                     if candidate:
                         continue
+                if self.slow_mode_active:
+                    # In slow mode, avoid additional refine cascades; fall through to slug/skip logic.
+                    break
                 slug = _slugify(artist)
                 fallback_url = f"https://www.facebook.com/{slug}" if slug else ""
                 fallback_candidate = None
@@ -3687,6 +3793,11 @@ class NightModeFacebookEnricher:
             result["FB_Reason"] = self._skip_fb_due_to_warning_reason or "warning_interstitial"
             return result
 
+        if self.protective_shutdown:
+            result["FB_Status"] = result.get("FB_Status", "") or "skipped_checkpoint"
+            result["FB_Reason"] = result.get("FB_Reason", "") or "checkpoint"
+            return result
+
         if self._skip_fb_due_to_checkpoint:
             return self._mark_row_checkpoint(result)
 
@@ -3814,6 +3925,7 @@ class NightModeFacebookEnricher:
                     if best_outcome == "login_wall":
                         result["FB_Status"] = "pass_a_login_wall"
                         result["FB_Reason"] = best_reason or ("anon_login_wall" if best_driver.startswith("anon") else "session_login_wall")
+                        self._register_login_wall()
                         self._pass_a_bump("login_wall")
                     elif best_outcome == "fetch_error":
                         result["FB_Status"] = "pass_a_fetch_error"
@@ -3944,6 +4056,7 @@ class NightModeFacebookEnricher:
                 if _is_fb_login_or_security_url(page_url):
                     result["FB_Status"] = "login_redirect"
                     result["Facebook_URL"] = ""
+                    self._register_login_wall()
                     _log(self.logger, f"[Night FB] Detected login redirect for '{artist_name}' -> {page_url}, marking FB_Status='login_redirect'.")
                 else:
                     if not result.get("FB_Status"):
