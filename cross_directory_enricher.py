@@ -4756,12 +4756,35 @@ class CrossDirectoryEnricherWorker(QThread):
                     self._finalize_night_sc(df, row_idx, attempt, rss_payload if applied else None, artist_name)
                     return bool(applied)
 
+            try:
+                flags = _SC_SHARED_ENGINE.get_run_flags()
+            except Exception:
+                flags = {}
+            root_fetch_disabled = int(flags.get("root_fetch_disabled", 0) or 0)
+            tracks_api_blocked = int(flags.get("tracks_api_blocked", 0) or 0)
+            engine_unstable = (
+                root_fetch_disabled == 1
+                or tracks_api_blocked == 1
+                or getattr(self, "_sc_html_challenge_count", 0) > 0
+            )
             fallback_allowed = (
                 not getattr(self, "_sc_rss_only_mode", False)
                 and not sc_fallback_used
                 and not attempt.challenge
-                and getattr(self, "_sc_html_challenge_count", 0) < 1
+                and not engine_unstable
             )
+            if sc_rss_first_attempted and not fallback_allowed and engine_unstable:
+                try:
+                    self.log_message.emit(
+                        "[Night SC] fallback_blocked=1 reason=engine_unstable root_fetch_disabled=%d tracks_api_blocked=%d html_challenges=%d"
+                        % (
+                            root_fetch_disabled,
+                            tracks_api_blocked,
+                            getattr(self, "_sc_html_challenge_count", 0),
+                        )
+                    )
+                except Exception:
+                    pass
             if fallback_allowed:
                 sc_fallback_used = True
                 if sc_rss_first_attempted:
@@ -4927,12 +4950,35 @@ class CrossDirectoryEnricherWorker(QThread):
             applied = self._apply_sc_snapshot_to_row(df, row_idx, cached, artist_name, spotify_id=spotify_id)
             self._finalize_night_sc(df, row_idx, attempt, attempt.cached_payload if applied else None, artist_name)
             return bool(applied)
+        try:
+            flags = _SC_SHARED_ENGINE.get_run_flags()
+        except Exception:
+            flags = {}
+        root_fetch_disabled = int(flags.get("root_fetch_disabled", 0) or 0)
+        tracks_api_blocked = int(flags.get("tracks_api_blocked", 0) or 0)
+        engine_unstable = (
+            root_fetch_disabled == 1
+            or tracks_api_blocked == 1
+            or getattr(self, "_sc_html_challenge_count", 0) > 0
+        )
         fallback_allowed = (
             not getattr(self, "_sc_rss_only_mode", False)
             and not sc_fallback_used
             and not attempt.challenge
-            and getattr(self, "_sc_html_challenge_count", 0) < 1
+            and not engine_unstable
         )
+        if sc_rss_first_attempted and not fallback_allowed and engine_unstable:
+            try:
+                self.log_message.emit(
+                    "[Night SC] fallback_blocked=1 reason=engine_unstable root_fetch_disabled=%d tracks_api_blocked=%d html_challenges=%d"
+                    % (
+                        root_fetch_disabled,
+                        tracks_api_blocked,
+                        getattr(self, "_sc_html_challenge_count", 0),
+                    )
+                )
+            except Exception:
+                pass
         if fallback_allowed:
             sc_fallback_used = True
             if sc_rss_first_attempted:
