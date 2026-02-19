@@ -4443,6 +4443,12 @@ class CrossDirectoryEnricherWorker(QThread):
         profile_url: str,
         attempt: _NightSCAttempt,
     ) -> Tuple[Optional[EnrichmentPayload], bool]:
+        # In RSS-only mode we must avoid any profile fetching that could trigger challenges.
+        if getattr(self, "_sc_rss_only_mode", False):
+            attempt.profile_source = "rss_only"
+            attempt.challenge = False
+            attempt.reason = attempt.reason or "rss_only_mode"
+            return (None, False)
         handle = _sc_handle_from_profile_url(profile_url) if profile_url else ""
         engine_enabled = _night_sc_engine_enabled() and handle
         engine_failed = False
@@ -4611,10 +4617,12 @@ class CrossDirectoryEnricherWorker(QThread):
 
         # Force RSS-only path: skip HTML/profile fetches and try RSS directly for every row when enabled.
         if getattr(self, "_sc_rss_only_mode", False):
+            attempt.challenge = False
             attempt.reason = attempt.reason or "rss_only_mode"
             attempt.profile_source = "rss_only"
             handle = ""
             profile_url = ""
+
             # Prefer chosen handle from API people search; avoid HTML fallback entirely.
             if sc_query:
                 best_candidate = self._night_sc_search_candidates(
@@ -4632,46 +4640,57 @@ class CrossDirectoryEnricherWorker(QThread):
                     profile_url = best_candidate.get("profile_url") or profile_url
                     attempt.confidence = float(best_candidate.get("score", 0.0) or 0.0)
                     attempt.match_score = attempt.confidence
+
             # If still empty, fall back to explicit link/handle on the row.
             if not handle and sc_link and "soundcloud.com" in sc_link.lower():
                 profile_url = _normalise_url(sc_link) or sc_link
                 handle = _sc_handle_from_profile_url(profile_url) or ""
+
             attempt.handle = handle
             attempt.profile_url = profile_url or (handle and f"https://soundcloud.com/{handle}") or ""
 
             payload: Optional[EnrichmentPayload] = None
             rss_ok = False
+            rss_attempted = bool(handle)
+
             if handle:
+                # Always attempt RSS when a handle is available; _sc_build_rss_payload increments rss_used even on failure.
                 rss_payload, rss_ok = self._sc_build_rss_payload(handle, None)
                 payload = rss_payload
-                attempt.reason = "rss_success" if rss_ok else "rss_fail"
+                attempt.status = "rss_success" if rss_ok else "rss_fail"
+                attempt.reason = attempt.status
             else:
+                attempt.status = "rss_unavailable"
                 attempt.reason = "rss_unavailable"
+
             try:
                 flags = _SC_SHARED_ENGINE.get_run_flags()
             except Exception:
                 flags = {}
             rss_used_total = _sc_get_rss_used_total()
+            flags_used_rss = int(flags.get("used_rss", 0))
             try:
                 self.log_message.emit(
-                    "[Night SC] rss_only=1 handle=%s url=%s attempted=%s outcome=%s used_rss=%s rss_used_total=%d"
+                    "[Night SC] rss_only=1 handle=%s url=%s rss_attempted=%d outcome=%s flags_used_rss=%d rss_used_total=%d"
                     % (
-                        handle or "<missing>",
+                        attempt.handle or handle or "<missing>",
                         attempt.profile_url or "",
-                        int(bool(handle)),
-                        "success" if rss_ok else ("fail" if handle else "unavailable"),
-                        int(flags.get("used_rss", 0)),
-                        int(rss_used_total),
+                        int(rss_attempted),
+                        attempt.status,
+                        flags_used_rss,
+                        int(rss_used_total or 0),
                     )
                 )
             except Exception:
                 pass
+
             if payload:
                 payload.match_score = payload.match_score or attempt.match_score or 1.0
                 payload.candidate_name = artist_name
                 applied = self._apply_payload_guarded(df, row_idx, payload, artist_name, spotify_id=spotify_id)
             else:
                 applied = False
+
             self._finalize_night_sc(df, row_idx, attempt, payload if applied else None, artist_name)
             return bool(applied)
         # If a seed SoundCloud Link is present, prefer it and skip search.
@@ -4893,7 +4912,26 @@ class CrossDirectoryEnricherWorker(QThread):
             http_status = getattr(self, "_last_http_status", None)
         status = attempt.status or ""
         reason = attempt.reason or ""
+        # Preserve RSS-only outcome labelling and avoid HTML challenge/status mappings when RSS-only is active.
+        if attempt.profile_source == "rss_only" or getattr(self, "_sc_rss_only_mode", False):
+            if not status:
+                if actionable:
+                    status = "rss_success"
+                elif reason:
+                    status = reason
+                else:
+                    status = "rss_fail"
+            if not reason:
+                if actionable:
+                    reason = "rss_success"
+                else:
+                    reason = status
+            attempt.status = status
+            attempt.reason = reason
+        rss_labeled = bool((status or "").startswith("rss_"))
         if status == "skipped_already_attempted":
+            pass
+        elif rss_labeled:
             pass
         elif attempt.challenge:
             status = "non_actionable_challenge"
