@@ -3187,10 +3187,11 @@ class NightModeFacebookEnricher:
             session_reason=session_reason,
             diagnostics=diagnostics,
         )
+        soft_blocked = bool(diagnostics.get("overlay_soft_block"))
         ranked_for_preview = _rank_candidates_for_preview(artist, candidates)
 
         need_refine = False
-        if diagnostics.get("overlay_soft_block"):
+        if soft_blocked:
             self._enter_slow_mode("overlay_zero_anchors", max(self.slow_mode_multiplier, 1.5))
             # Skip refine cascade when soft-blocked; rely on slug/candidate fallback.
             need_refine = False
@@ -3220,7 +3221,11 @@ class NightModeFacebookEnricher:
                     break
                 label = getattr(candidate, "name", None) or getattr(candidate, "url", None) or "<unknown>"
                 _log(self.logger, f"[Night FB][QualityGate] rejected '{label}' score={score_val} reasons={' '.join(reasons) or '-'} threshold={quality_threshold}")
-                if not refine_forced:
+                if soft_blocked:
+                    if not refine_forced:
+                        _log(self.logger, "[Night FB] Skipping refine due to overlay soft block.")
+                    refine_forced = True
+                elif not refine_forced:
                     refine_forced = True
                     forced_refine_candidates = _run_refine_queries()
                     _log(self.logger, "[Night FB][QualityGate] forcing refine queries due to low top-candidate score.")
@@ -3231,7 +3236,7 @@ class NightModeFacebookEnricher:
                     candidate = ranked_candidates[0] if ranked_candidates else None
                     if candidate:
                         continue
-                if self.slow_mode_active:
+                if self.slow_mode_active and not soft_blocked:
                     # In slow mode, avoid additional refine cascades; fall through to slug/skip logic.
                     break
                 slug = _slugify(artist)
