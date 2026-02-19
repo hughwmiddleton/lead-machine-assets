@@ -33,7 +33,6 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.common.exceptions import NoSuchElementException, StaleElementReferenceException, TimeoutException
-from webdriver_manager.chrome import ChromeDriverManager
 
 try:
     import facebook_enrich  # type: ignore
@@ -552,10 +551,12 @@ def _normalise_fb_url(url: str) -> str:
     return urllib.parse.urlunparse((scheme, host, path, "", "", ""))
 
 
-def _purge_wdm_cache(driver_path: str) -> None:
+def _purge_wdm_cache(driver_path: Optional[str]) -> None:
     """
     Remove webdriver_manager's cache folder for a given driver path to self-heal bad downloads.
     """
+    if not driver_path:
+        return
     try:
         path = Path(driver_path).resolve()
         cache_dir = path.parent.parent
@@ -665,10 +666,12 @@ def _profile_dir_state(profile_dir: str) -> Tuple[bool, List[str]]:
     return exists, present
 
 
-def _chromedriver_version(driver_path: str) -> Optional[str]:
+def _chromedriver_version(driver_path: Optional[str]) -> Optional[str]:
     if not driver_path:
-        return None
+        return "<selenium_manager>"
     try:
+        if not os.path.exists(driver_path):
+            return "<selenium_manager>"
         out = subprocess.check_output([driver_path, "--version"], stderr=subprocess.STDOUT, text=True, timeout=5)
         return (out or "").strip()
     except Exception:
@@ -1307,16 +1310,17 @@ def _start_chromedriver_with_retry(
     Start ChromeDriver with a one-time reinstall; optionally retry with a temp profile when startup flaps.
     """
 
-    def _log_preflight(driver_path: str, opts: ChromeOptions, profile: Optional[str]) -> None:
+    def _log_preflight(driver_path: Optional[str], opts: ChromeOptions, profile: Optional[str]) -> None:
         chrome_bin, chrome_version = _detect_chrome_binary()
         driver_version = _chromedriver_version(driver_path)
+        driver_display = driver_path or "<selenium_manager>"
         profile_exists, profile_locks = _profile_dir_state(profile or "") if profile else (False, [])
         _log(
             logger,
             "[Night FB][preflight] "
             f"chrome_binary={chrome_bin or '<auto>'} "
             f"chrome_version={chrome_version or '<unknown>'} "
-            f"chromedriver={driver_path} "
+            f"chromedriver={driver_display} "
             f"chromedriver_version={driver_version or '<unknown>'} "
             f"profile_dir={profile or '<none>'} "
             f"profile_exists={profile_exists} profile_locks={profile_locks} "
@@ -1345,17 +1349,18 @@ def _start_chromedriver_with_retry(
 
     while attempt < max_attempts:
         attempt += 1
-        driver_path = ChromeDriverManager().install()
+        driver_path: Optional[str] = None
 
         log_path = os.environ.get("NIGHT_FB_CHROMEDRIVER_LOG")
-        service_args = ["--verbose"]
-        if log_path:
-            _log(logger, f"[Night FB][preflight] chromedriver verbose log -> {log_path}")
         try:
-            service = ChromeService(driver_path, log_output=log_path, service_args=service_args)
+            if log_path:
+                _log(logger, f"[Night FB][preflight] chromedriver verbose log -> {log_path}")
+                service = ChromeService(log_output=log_path)
+            else:
+                service = ChromeService()
         except TypeError:
             # Older selenium versions may not support log_output; fall back silently.
-            service = ChromeService(driver_path, service_args=service_args)
+            service = ChromeService()
 
         _log_preflight(driver_path, attempt_opts, attempt_profile)
 
@@ -1376,10 +1381,7 @@ def _start_chromedriver_with_retry(
                 attempt_opts = _clone_chrome_options(chrome_options, override_profile_dir=temp_profile_dir)
                 attempt_profile = temp_profile_dir
                 max_attempts = attempt + 1  # allow one extra attempt for the temp profile
-                _purge_wdm_cache(driver_path)
                 continue
-
-            _purge_wdm_cache(driver_path)
 
     reason = str(last_exc) if last_exc else "unknown_error"
     raise FacebookDriverError(f"Failed to start ChromeDriver after {attempt} attempts: {reason}")
