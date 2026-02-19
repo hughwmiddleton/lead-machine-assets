@@ -3232,7 +3232,13 @@ class NightModeFacebookEnricher:
                 elif not refine_forced:
                     refine_forced = True
                     forced_refine_candidates = _run_refine_queries(diagnostics=diagnostics)
-                    _log(self.logger, "[Night FB][QualityGate] forcing refine queries due to low top-candidate score.")
+                    soft_blocked = soft_blocked or bool(diagnostics.get("overlay_soft_block"))
+                    if soft_blocked:
+                        if not overlay_skip_logged:
+                            _log(self.logger, "[Night FB] Skipping refine due to overlay soft block.")
+                            overlay_skip_logged = True
+                    else:
+                        _log(self.logger, "[Night FB][QualityGate] forcing refine queries due to low top-candidate score.")
                     if forced_refine_candidates:
                         candidates = _dedupe_candidates(list(candidates) + forced_refine_candidates)
                     ranked_for_preview = _rank_candidates_for_preview(artist, candidates)
