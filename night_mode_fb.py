@@ -19,9 +19,8 @@ import subprocess
 import tempfile
 import random
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple, Union
 import logging
-from typing import Union
 
 from fb_email_override import should_accept_email_override
 
@@ -257,6 +256,241 @@ def _is_candidate_usable(href: str) -> bool:
         return _fb_is_candidate_url_allowed(href)
     except Exception:
         return False
+
+
+def _is_role_link_url_plausible(href: str) -> bool:
+    """Light pre-filter for URLs harvested from non-anchor role-link elements."""
+    if not href:
+        return False
+    lowered = href.lower()
+    if "/pages/" in lowered or "/people/" in lowered or "/profile.php" in lowered:
+        return True
+    slug_match = re.match(r"https?://(?:www\\.)?facebook\\.com/[^/?#]+/?$", lowered)
+    return bool(slug_match)
+
+
+def _extract_role_link_candidates(el, apply_prefilter: bool = True) -> List[str]:
+    """
+    Extract plausible URLs from [role="link"] elements.
+    Prefers descendant anchors, then href-like attributes.
+    """
+    if el is None:
+        return []
+
+    candidates: List[str] = []
+
+    # Descendant anchors first (common case).
+    try:
+        for anchor in el.find_elements(By.CSS_SELECTOR, "a[href]"):
+            href = _normalize_fb_href(anchor.get_attribute("href") or "")
+            if href and "facebook.com" in href:
+                candidates.append(href)
+                break  # first hit is enough
+    except Exception:
+        pass
+
+    attr_names = (
+        "href",
+        "data-href",
+        "data-url",
+        "data-lynx-uri",
+        "data-target-href",
+        "data-redirect",
+        "data-redirect-url",
+        "data-uri",
+        "data-store",
+    )
+    for name in attr_names:
+        try:
+            raw = el.get_attribute(name) or ""
+        except Exception:
+            raw = ""
+        href = _normalize_fb_href(raw)
+        if href and "facebook.com" in href:
+            candidates.append(href)
+
+    deduped: List[str] = []
+    seen: Set[str] = set()
+    for href in candidates:
+        if href and href not in seen:
+            seen.add(href)
+            deduped.append(href)
+
+    if not apply_prefilter:
+        return deduped
+    return [href for href in deduped if _is_role_link_url_plausible(href)]
+
+
+def _safe_attribute_map(el) -> Dict[str, str]:
+    """
+    Best-effort attribute map for href-like scanning.
+    Only used in debug/low-yield fallback; keep lightweight.
+    """
+    attrs: Dict[str, str] = {}
+    if el is None:
+        return attrs
+    try:
+        raw_attrs = el.get_property("attributes")
+        if isinstance(raw_attrs, (list, tuple)):
+            for item in raw_attrs:
+                try:
+                    name = item.get("name") if hasattr(item, "get") else getattr(item, "name", None)
+                    value = item.get("value") if hasattr(item, "get") else getattr(item, "value", None)
+                except Exception:
+                    name = None
+                    value = None
+                if name and value:
+                    attrs[str(name)] = str(value)
+        elif isinstance(raw_attrs, dict):
+            for name, value in raw_attrs.items():
+                if name and value:
+                    attrs[str(name)] = str(value)
+    except Exception:
+        pass
+
+    # Fallback to common attributes if the NamedNodeMap path failed.
+    if not attrs:
+        for name in (
+            "href",
+            "data-href",
+            "data-url",
+            "data-lynx-uri",
+            "data-target-href",
+            "data-redirect",
+            "data-redirect-url",
+            "data-uri",
+            "data-store",
+            "rel",
+            "aria-label",
+        ):
+            try:
+                value = el.get_attribute(name)
+            except Exception:
+                value = None
+            if value:
+                attrs[name] = str(value)
+    return attrs
+
+
+def _extract_href_like_strings(value: str) -> List[str]:
+    """Conservative extractor for href-ish strings within an attribute value."""
+    results: List[str] = []
+    text = str(value or "")
+    if not text:
+        return results
+
+    url_pattern = re.compile(r"https?://[^\"'\\s>]+", re.IGNORECASE)
+    for match in url_pattern.findall(text):
+        if "facebook.com" in match:
+            results.append(match)
+
+    if text.startswith("/"):
+        results.append(text)
+    return results
+
+
+def _scan_href_like_attributes(container, max_nodes: int = 150, max_candidates: int = 50) -> List[str]:
+    """
+    Debug-only, low-yield fallback: scan early DOM nodes for href-like attribute values.
+    """
+    results: List[str] = []
+    if container is None or max_nodes <= 0 or max_candidates <= 0:
+        return results
+    try:
+        nodes = container.find_elements(By.CSS_SELECTOR, "*")
+    except Exception:
+        nodes = []
+
+    seen: Set[str] = set()
+    for el in nodes[:max_nodes]:
+        attrs = _safe_attribute_map(el)
+        for val in attrs.values():
+            for hrefish in _extract_href_like_strings(val):
+                href = _normalize_fb_href(hrefish)
+                if not href or "facebook.com" not in href:
+                    continue
+                if href in seen:
+                    continue
+                seen.add(href)
+                results.append(href)
+                if len(results) >= max_candidates:
+                    return results
+    return results
+
+
+def _collect_container_candidates_v2(container, apply_role_link_prefilter: bool = True) -> Dict[str, Any]:
+    """
+    Expanded candidate extraction for Night FB DOM Gate v2.
+    Returns dict with hrefs + counts to keep the caller lightweight.
+    """
+    data: Dict[str, Any] = {
+        "hrefs": [],
+        "anchors_in_scope": 0,
+        "role_links_in_scope": 0,
+        "links_in_scope_total": 0,
+        "count_a_href": 0,
+        "count_a_role_link_href": 0,
+        "count_role_link": 0,
+        "usable_count": 0,
+    }
+    if container is None:
+        return data
+
+    try:
+        anchor_elements = container.find_elements(By.CSS_SELECTOR, "a[href]")
+    except Exception:
+        anchor_elements = []
+    try:
+        role_anchor_elements = container.find_elements(By.CSS_SELECTOR, 'a[role="link"][href]')
+    except Exception:
+        role_anchor_elements = []
+    try:
+        role_link_elements = container.find_elements(By.CSS_SELECTOR, '[role="link"]')
+    except Exception:
+        role_link_elements = []
+
+    anchor_ids: Set[str] = set()
+    for el in anchor_elements + role_anchor_elements:
+        try:
+            anchor_ids.add(el.id)
+        except Exception:
+            anchor_ids.add(str(id(el)))
+
+    data["count_a_href"] = len(anchor_elements)
+    data["count_a_role_link_href"] = len(role_anchor_elements)
+    data["count_role_link"] = len(role_link_elements)
+    data["anchors_in_scope"] = len(anchor_ids)
+    data["role_links_in_scope"] = len(role_link_elements)
+
+    seen_urls: Set[str] = set()
+    hrefs: List[str] = []
+
+    for el in anchor_elements:
+        try:
+            href = _normalize_fb_href(el.get_attribute("href") or "")
+        except Exception:
+            href = ""
+        if not href or "facebook.com" not in href:
+            continue
+        if href in seen_urls:
+            continue
+        seen_urls.add(href)
+        hrefs.append(href)
+
+    for el in role_link_elements:
+        for href in _extract_role_link_candidates(el, apply_prefilter=apply_role_link_prefilter):
+            if not href or href in seen_urls:
+                continue
+            seen_urls.add(href)
+            hrefs.append(href)
+
+    data["hrefs"] = hrefs
+    try:
+        data["usable_count"] = sum(1 for href in hrefs if _is_candidate_usable(href))
+    except Exception:
+        data["usable_count"] = 0
+    data["links_in_scope_total"] = data["anchors_in_scope"] + data["role_links_in_scope"]
+    return data
 
 
 def _extract_anchor_hrefs(container) -> Tuple[List[str], List]:
@@ -926,6 +1160,12 @@ def _harvest_search_candidates_v2(
 
     session_unhealthy_flag = 1 if session_unhealthy else 0
     session_reason_clean = (session_reason or "").strip()
+    debug_dom_gate = bool(int(os.getenv("FB_DEBUG_DOM_GATE", "0") or "0"))
+    role_link_prefilter = bool(int(os.getenv("FB_ROLE_LINK_PREFILTER", "1") or "1"))
+    attr_scan_allowed = debug_dom_gate or bool(int(os.getenv("FB_DOM_ATTR_SCAN", "0") or "0"))
+    attr_scan_nodes = int(os.getenv("FB_DOM_ATTR_SCAN_N", "150") or "150")
+    attr_scan_max = int(os.getenv("FB_DOM_ATTR_SCAN_MAX", "50") or "50")
+    low_yield_threshold = 3
 
     try:
         feed_selector = 'div[role="main"] div[role="feed"]'
@@ -962,22 +1202,20 @@ def _harvest_search_candidates_v2(
             search_containers = _find_all(driver, search_selector)
             feed_container = feed_containers[0] if feed_containers else None
             search_container = search_containers[0] if search_containers else None
-
-            feed_hrefs, feed_elements = _extract_anchor_hrefs(feed_container)
-            search_hrefs, search_elements = _extract_anchor_hrefs(search_container)
-
-            usable_feed = sum(1 for href in feed_hrefs if _is_candidate_usable(href))
-            usable_search = sum(1 for href in search_hrefs if _is_candidate_usable(href))
+            feed_data = _collect_container_candidates_v2(feed_container, apply_role_link_prefilter=role_link_prefilter)
+            search_data = _collect_container_candidates_v2(search_container, apply_role_link_prefilter=role_link_prefilter)
 
             return {
                 "feed_container": feed_container,
                 "search_container": search_container,
-                "feed_hrefs": feed_hrefs,
-                "search_hrefs": search_hrefs,
-                "usable_feed": usable_feed,
-                "usable_search": usable_search,
-                "anchors_in_scope_feed": len(feed_elements),
-                "anchors_in_scope_search": len(search_elements),
+                "feed_hrefs": feed_data.get("hrefs", []),
+                "search_hrefs": search_data.get("hrefs", []),
+                "usable_feed": feed_data.get("usable_count", 0),
+                "usable_search": search_data.get("usable_count", 0),
+                "anchors_in_scope_feed": feed_data.get("anchors_in_scope", 0),
+                "anchors_in_scope_search": search_data.get("anchors_in_scope", 0),
+                "links_in_scope_total_feed": feed_data.get("links_in_scope_total", 0),
+                "links_in_scope_total_search": search_data.get("links_in_scope_total", 0),
                 "containers_found_feed": len(feed_containers),
                 "containers_found_search": len(search_containers),
             }
@@ -1040,62 +1278,117 @@ def _harvest_search_candidates_v2(
 
         chosen_selector = "NONE"
         chosen_container = None
-        chosen_hrefs: List[str] = []
-        anchors_in_scope_chosen = 0
+        chosen_data: Dict[str, Any] = {}
 
-        if counts["usable_feed"] > 0:
-            chosen_selector = 'div[role="main"] div[role="feed"]'
+        feed_data = _collect_container_candidates_v2(counts["feed_container"], apply_role_link_prefilter=role_link_prefilter)
+        search_data = _collect_container_candidates_v2(counts["search_container"], apply_role_link_prefilter=role_link_prefilter)
+        main_container = None
+        main_data: Dict[str, Any] = {}
+
+        if feed_data.get("usable_count", 0) > 0 or feed_data.get("hrefs"):
+            chosen_selector = feed_selector
             chosen_container = counts["feed_container"]
-            chosen_hrefs = counts["feed_hrefs"]
-            anchors_in_scope_chosen = counts["anchors_in_scope_feed"]
-        elif counts["usable_search"] > 0:
-            chosen_selector = 'div[aria-label="Search results"]'
+            chosen_data = feed_data
+        elif search_data.get("usable_count", 0) > 0 or search_data.get("hrefs"):
+            chosen_selector = search_selector
             chosen_container = counts["search_container"]
-            chosen_hrefs = counts["search_hrefs"]
-            anchors_in_scope_chosen = counts["anchors_in_scope_search"]
+            chosen_data = search_data
         else:
             main_container = _find_first(driver, main_selector)
-            if main_container is not None:
-                main_hrefs, main_elements = _extract_anchor_hrefs(main_container)
-                usable_main = sum(1 for href in main_hrefs if _is_candidate_usable(href))
-                if usable_main > 0:
-                    chosen_selector = 'div[role="main"]'
-                    chosen_container = main_container
-                    chosen_hrefs = main_hrefs
-                    anchors_in_scope_chosen = len(main_elements)
+            main_data = _collect_container_candidates_v2(main_container, apply_role_link_prefilter=role_link_prefilter)
+            if main_data.get("hrefs"):
+                chosen_selector = main_selector
+                chosen_container = main_container
+                chosen_data = main_data
 
-            if chosen_container is None:
-                total_anchors = len(_find_all(driver, "a"))
-                search_len, search_preview = _container_html_preview(counts["search_container"])
-                feed_len, feed_preview = _container_html_preview(counts["feed_container"])
-                page_url = _safe_current_url(driver)
-                preview = search_preview or feed_preview
-                _log(
-                    logger,
-                    "[Night FB][DOM Gate V2] "
-                    f"harvest_version=v2 wait_hit={wait_hit} containers_found_feed={counts['containers_found_feed']} "
-                    f"containers_found_search={counts['containers_found_search']} scroll_retries={scroll_retries} "
-                    f"anchors_in_scope_feed={counts['anchors_in_scope_feed']} anchors_in_scope_search={counts['anchors_in_scope_search']} "
-                    f"candidates_pre_url_gate=0 candidates_post_url_gate=0 dropped_by_dom_gate={total_anchors} "
-                    f"url_gate_rejected=0 chosen_container_selector=NONE search_name='{search_name or ''}' "
-                    f"session_unhealthy={session_unhealthy_flag} session_reason={session_reason_clean} "
-                    f"anchor_waited={int(waited_for_population)} search_html_len={search_len} feed_html_len={feed_len} "
-                    f"overlay_present={overlay_present} page_url='{page_url}' preview='{preview}' "
-                    f"anchor_wait_meta={anchor_wait_meta}"
-                )
-                if overlay_present and counts["anchors_in_scope_feed"] == 0 and counts["anchors_in_scope_search"] == 0:
-                    logged_already = False
-                    if diagnostics is not None:
-                        logged_already = bool(diagnostics.get("overlay_soft_block_logged"))
-                        diagnostics["overlay_soft_block"] = True
-                        diagnostics["overlay_soft_block_logged"] = True
-                    if not logged_already:
-                        _log(logger, "[Night FB] Overlay/zero-anchors detected; treating as soft block and slowing down.")
-                return []
+        # If initial pick is sparse, try alternates: search results, main, feed.
+        if (chosen_data.get("hrefs") or []) and len(chosen_data.get("hrefs", [])) < low_yield_threshold:
+            if main_container is None:
+                main_container = _find_first(driver, main_selector)
+                if not main_data:
+                    main_data = _collect_container_candidates_v2(main_container, apply_role_link_prefilter=role_link_prefilter)
+            fallback_order = [
+                (search_selector, counts["search_container"], search_data),
+                (main_selector, main_container, main_data),
+                (feed_selector, counts["feed_container"], feed_data),
+            ]
+            for selector_name, container_obj, data_obj in fallback_order:
+                if data_obj and len(data_obj.get("hrefs", [])) >= low_yield_threshold:
+                    chosen_selector = selector_name
+                    chosen_container = container_obj
+                    chosen_data = data_obj
+                    break
+            # If still low, pick the richest container available.
+            if len(chosen_data.get("hrefs", [])) < low_yield_threshold:
+                best_entry = None
+                best_len = -1
+                for selector_name, container_obj, data_obj in fallback_order:
+                    href_len = len(data_obj.get("hrefs", [])) if data_obj else 0
+                    if href_len > best_len:
+                        best_len = href_len
+                        best_entry = (selector_name, container_obj, data_obj)
+                if best_entry is not None and best_entry[2] is not None:
+                    chosen_selector, chosen_container, chosen_data = best_entry
 
-        candidates_pre_url_gate = len(set(chosen_hrefs))
+        if chosen_container is None:
+            total_anchors = len(_find_all(driver, "a"))
+            search_len, search_preview = _container_html_preview(counts["search_container"])
+            feed_len, feed_preview = _container_html_preview(counts["feed_container"])
+            page_url = _safe_current_url(driver)
+            preview = search_preview or feed_preview
+            _log(
+                logger,
+                "[Night FB][DOM Gate V2] "
+                f"harvest_version=v2 wait_hit={wait_hit} containers_found_feed={counts['containers_found_feed']} "
+                f"containers_found_search={counts['containers_found_search']} scroll_retries={scroll_retries} "
+                f"anchors_in_scope_feed={counts['anchors_in_scope_feed']} anchors_in_scope_search={counts['anchors_in_scope_search']} "
+                f"links_in_scope_total_feed={counts.get('links_in_scope_total_feed', 0)} "
+                f"links_in_scope_total_search={counts.get('links_in_scope_total_search', 0)} "
+                f"candidates_pre_url_gate=0 candidates_post_url_gate=0 dropped_by_dom_gate={total_anchors} "
+                f"url_gate_rejected=0 chosen_container_selector=NONE search_name='{search_name or ''}' "
+                f"session_unhealthy={session_unhealthy_flag} session_reason={session_reason_clean} "
+                f"anchor_waited={int(waited_for_population)} search_html_len={search_len} feed_html_len={feed_len} "
+                f"overlay_present={overlay_present} page_url='{page_url}' preview='{preview}' "
+                f"anchor_wait_meta={anchor_wait_meta}"
+            )
+            if overlay_present and counts["anchors_in_scope_feed"] == 0 and counts["anchors_in_scope_search"] == 0:
+                logged_already = False
+                if diagnostics is not None:
+                    logged_already = bool(diagnostics.get("overlay_soft_block_logged"))
+                    diagnostics["overlay_soft_block"] = True
+                    diagnostics["overlay_soft_block_logged"] = True
+                if not logged_already:
+                    _log(logger, "[Night FB] Overlay/zero-anchors detected; treating as soft block and slowing down.")
+            return []
+
+        chosen_hrefs: List[str] = chosen_data.get("hrefs", [])[:]
+        anchors_in_scope_chosen = chosen_data.get("anchors_in_scope", 0)
+
+        # Debug-only, low-yield attribute scan to pull extra href-like strings.
+        if len(chosen_hrefs) < low_yield_threshold and attr_scan_allowed:
+            extra_hrefs = _scan_href_like_attributes(
+                chosen_container, max_nodes=attr_scan_nodes, max_candidates=attr_scan_max
+            )
+            seen = set(chosen_hrefs)
+            for href in extra_hrefs:
+                if href in seen:
+                    continue
+                seen.add(href)
+                chosen_hrefs.append(href)
+
+        deduped_pre_gate: List[str] = []
+        pre_seen: Set[str] = set()
+        for href in chosen_hrefs:
+            if href in pre_seen:
+                continue
+            pre_seen.add(href)
+            deduped_pre_gate.append(href)
+        chosen_hrefs = deduped_pre_gate
+
+        candidates_pre_url_gate = len(chosen_hrefs)
         filtered_hrefs: List[str] = []
         gate_reject = 0
+        rejected_samples: List[str] = []
         seen_href: set = set()
         for href in chosen_hrefs:
             if href in seen_href:
@@ -1103,6 +1396,8 @@ def _harvest_search_candidates_v2(
             seen_href.add(href)
             if not _is_candidate_usable(href):
                 gate_reject += 1
+                if debug_dom_gate and len(rejected_samples) < 10:
+                    rejected_samples.append(href)
                 continue
             filtered_hrefs.append(href)
 
@@ -1118,12 +1413,33 @@ def _harvest_search_candidates_v2(
             cand for cand in enriched_candidates if _normalize_fb_href(getattr(cand, "url", "")) in href_set
         ]
 
+        if debug_dom_gate and (candidates_pre_url_gate < low_yield_threshold or candidates_post_url_gate == 0):
+            sample_urls = chosen_hrefs[:10]
+            rejected_sample_urls = rejected_samples[:10]
+            _log(
+                logger,
+                "[Night FB][DOM Gate V2][debug] "
+                f"chosen_container_selector={chosen_selector} "
+                f"count_a_href={chosen_data.get('count_a_href', 0)} "
+                f"count_a_role_link_href={chosen_data.get('count_a_role_link_href', 0)} "
+                f"count_role_link={chosen_data.get('count_role_link', 0)} "
+                f"anchors_in_scope={chosen_data.get('anchors_in_scope', 0)} "
+                f"role_links_in_scope={chosen_data.get('role_links_in_scope', 0)} "
+                f"links_in_scope_total={chosen_data.get('links_in_scope_total', 0)} "
+                f"candidates_pre_url_gate={candidates_pre_url_gate} "
+                f"candidates_post_url_gate={candidates_post_url_gate} "
+                f"sample_pre_url={sample_urls} "
+                f"sample_rejected={rejected_sample_urls}"
+            )
+
         _log(
             logger,
             "[Night FB][DOM Gate V2] "
             f"harvest_version=v2 wait_hit={wait_hit} containers_found_feed={counts['containers_found_feed']} "
             f"containers_found_search={counts['containers_found_search']} scroll_retries={scroll_retries} "
             f"anchors_in_scope_feed={counts['anchors_in_scope_feed']} anchors_in_scope_search={counts['anchors_in_scope_search']} "
+            f"links_in_scope_total_feed={counts.get('links_in_scope_total_feed', 0)} "
+            f"links_in_scope_total_search={counts.get('links_in_scope_total_search', 0)} "
             f"candidates_pre_url_gate={candidates_pre_url_gate} candidates_post_url_gate={candidates_post_url_gate} "
             f"dropped_by_dom_gate={dropped_by_dom_gate} url_gate_rejected={gate_reject} "
             f"chosen_container_selector={chosen_selector} search_name='{search_name or ''}' "
