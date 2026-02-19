@@ -4717,6 +4717,54 @@ class CrossDirectoryEnricherWorker(QThread):
                 self._finalize_night_sc(df, row_idx, attempt, None, artist_name)
                 return False
             payload, actionable = self._night_sc_fetch_profile_payload(attempt.profile_url, attempt)
+
+            # If RSS-only tripped mid-row due to a challenge, reroute this row immediately to RSS.
+            if attempt.challenge and getattr(self, "_sc_rss_only_mode", False):
+                attempt.challenge = False
+                attempt.profile_source = "rss_only"
+                reroute_handle = attempt.handle or _sc_handle_from_profile_url(attempt.profile_url or "") or (
+                    _sc_handle_from_profile_url(sc_link) if sc_link else ""
+                )
+                reroute_payload: Optional[EnrichmentPayload] = None
+                rss_ok = False
+                rss_attempted = bool(reroute_handle)
+                if reroute_handle:
+                    reroute_payload, rss_ok = self._sc_build_rss_payload(reroute_handle, None)
+                    attempt.status = "rss_success" if rss_ok else "rss_fail"
+                    attempt.reason = attempt.status
+                else:
+                    attempt.status = "rss_unavailable"
+                    attempt.reason = "rss_unavailable"
+                attempt.handle = reroute_handle or attempt.handle
+                attempt.profile_url = attempt.profile_url or (reroute_handle and f"https://soundcloud.com/{reroute_handle}") or ""
+                try:
+                    flags = _SC_SHARED_ENGINE.get_run_flags()
+                except Exception:
+                    flags = {}
+                rss_used_total = _sc_get_rss_used_total()
+                flags_used_rss = int(flags.get("used_rss", 0))
+                try:
+                    self.log_message.emit(
+                        "[Night SC] rss_only=1 reroute=1 handle=%s url=%s rss_attempted=%d outcome=%s flags_used_rss=%d rss_used_total=%d"
+                        % (
+                            reroute_handle or "<missing>",
+                            attempt.profile_url or "",
+                            int(rss_attempted),
+                            attempt.status,
+                            flags_used_rss,
+                            int(rss_used_total or 0),
+                        )
+                    )
+                except Exception:
+                    pass
+                if reroute_payload:
+                    reroute_payload.match_score = reroute_payload.match_score or attempt.match_score or 1.0
+                    reroute_payload.candidate_name = artist_name
+                    applied = self._apply_payload_guarded(df, row_idx, reroute_payload, artist_name, spotify_id=spotify_id)
+                else:
+                    applied = False
+                self._finalize_night_sc(df, row_idx, attempt, reroute_payload if applied else None, artist_name)
+                return bool(applied)
             if getattr(self, "night_mode", False) and (handle := (attempt.handle or _sc_handle_from_profile_url(attempt.profile_url) or "")):
                 if (getattr(self, "_sc_rss_only_mode", False) or (attempt.saw_403 and (attempt.reason or "").startswith("api_403"))) and not payload:
                     if attempt.saw_403 and (attempt.reason or "").startswith("api_403"):
@@ -4784,6 +4832,54 @@ class CrossDirectoryEnricherWorker(QThread):
             self._finalize_night_sc(df, row_idx, attempt, attempt.cached_payload if applied else None, artist_name)
             return bool(applied)
         payload, actionable = self._night_sc_fetch_profile_payload(profile_url, attempt)
+
+        # If RSS-only tripped mid-row due to a challenge, reroute this row immediately to RSS.
+        if attempt.challenge and getattr(self, "_sc_rss_only_mode", False):
+            attempt.challenge = False
+            attempt.profile_source = "rss_only"
+            reroute_handle = attempt.handle or _sc_handle_from_profile_url(profile_url or "") or (
+                _sc_handle_from_profile_url(sc_link) if sc_link else ""
+            )
+            reroute_payload: Optional[EnrichmentPayload] = None
+            rss_ok = False
+            rss_attempted = bool(reroute_handle)
+            if reroute_handle:
+                reroute_payload, rss_ok = self._sc_build_rss_payload(reroute_handle, None)
+                attempt.status = "rss_success" if rss_ok else "rss_fail"
+                attempt.reason = attempt.status
+            else:
+                attempt.status = "rss_unavailable"
+                attempt.reason = "rss_unavailable"
+            attempt.handle = reroute_handle or attempt.handle
+            attempt.profile_url = attempt.profile_url or profile_url or (reroute_handle and f"https://soundcloud.com/{reroute_handle}") or ""
+            try:
+                flags = _SC_SHARED_ENGINE.get_run_flags()
+            except Exception:
+                flags = {}
+            rss_used_total = _sc_get_rss_used_total()
+            flags_used_rss = int(flags.get("used_rss", 0))
+            try:
+                self.log_message.emit(
+                    "[Night SC] rss_only=1 reroute=1 handle=%s url=%s rss_attempted=%d outcome=%s flags_used_rss=%d rss_used_total=%d"
+                    % (
+                        reroute_handle or "<missing>",
+                        attempt.profile_url or "",
+                        int(rss_attempted),
+                        attempt.status,
+                        flags_used_rss,
+                        int(rss_used_total or 0),
+                    )
+                )
+            except Exception:
+                pass
+            if reroute_payload:
+                reroute_payload.match_score = reroute_payload.match_score or attempt.match_score or 1.0
+                reroute_payload.candidate_name = artist_name
+                applied = self._apply_payload_guarded(df, row_idx, reroute_payload, artist_name, spotify_id=spotify_id)
+            else:
+                applied = False
+            self._finalize_night_sc(df, row_idx, attempt, reroute_payload if applied else None, artist_name)
+            return bool(applied)
         if getattr(self, "night_mode", False) and handle:
             needs_rss = False
             if attempt.saw_403 and (attempt.reason or "").startswith("api_403"):
