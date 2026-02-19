@@ -620,6 +620,39 @@ def _night_sc_engine_enabled() -> bool:
     return mode not in {"legacy", "current", "off"}
 
 
+def _sc_get_rss_used_total() -> int:
+    try:
+        stats_candidates = []
+        try:
+            stats_candidates.append(getattr(SoundCloudEngine, "_SC_RUN_STATS", None))
+        except Exception:
+            stats_candidates.append(None)
+        try:
+            stats_candidates.append(getattr(_SC_SHARED_ENGINE, "_SC_RUN_STATS", None))
+        except Exception:
+            stats_candidates.append(None)
+        try:
+            stats_candidates.append(getattr(_SC_SHARED_ENGINE, "run_stats", None))
+        except Exception:
+            stats_candidates.append(None)
+        for stats in stats_candidates:
+            try:
+                if callable(stats):
+                    stats = stats()
+                if stats is not None:
+                    return int((stats or {}).get("rss_used", 0) or 0)
+            except Exception:
+                continue
+        # Last resort: derive from run flags if available.
+        try:
+            flags = _SC_SHARED_ENGINE.get_run_flags()
+            return 1 if int(flags.get("used_rss", 0)) else 0
+        except Exception:
+            return 0
+    except Exception:
+        return 0
+
+
 def _get_t007_sc_helper():
     """
     Load the T007 SoundCloud helper once to avoid repeated execution of the large helper module.
@@ -4618,15 +4651,17 @@ class CrossDirectoryEnricherWorker(QThread):
                 flags = _SC_SHARED_ENGINE.get_run_flags()
             except Exception:
                 flags = {}
+            rss_used_total = _sc_get_rss_used_total()
             try:
                 self.log_message.emit(
-                    "[Night SC] rss_only=1 handle=%s url=%s attempted=%s outcome=%s used_rss=%s"
+                    "[Night SC] rss_only=1 handle=%s url=%s attempted=%s outcome=%s used_rss=%s rss_used_total=%d"
                     % (
                         handle or "<missing>",
                         attempt.profile_url or "",
                         int(bool(handle)),
                         "success" if rss_ok else ("fail" if handle else "unavailable"),
                         int(flags.get("used_rss", 0)),
+                        int(rss_used_total),
                     )
                 )
             except Exception:
@@ -4890,11 +4925,12 @@ class CrossDirectoryEnricherWorker(QThread):
                     "used_user_api": 0,
                     "used_rss": 0,
                 }
+            rss_used_total = _sc_get_rss_used_total()
             candidate_src = getattr(attempt, "candidate_source", "none") or "none"
             profile_src = getattr(attempt, "profile_source", "none") or "none"
             try:
                 self.log_message.emit(
-                    "[Night SC] candidate_source=%s profile_source=%s root_fetch_disabled=%d about_disabled=%d tracks_api_blocked=%d used_user_api=%d used_rss=%d"
+                    "[Night SC] candidate_source=%s profile_source=%s root_fetch_disabled=%d about_disabled=%d tracks_api_blocked=%d used_user_api=%d used_rss=%d rss_used_total=%d"
                     % (
                         candidate_src,
                         profile_src,
@@ -4903,6 +4939,7 @@ class CrossDirectoryEnricherWorker(QThread):
                         int(flags.get("tracks_api_blocked", 0)),
                         int(flags.get("used_user_api", 0)),
                         int(flags.get("used_rss", 0)),
+                        int(rss_used_total),
                     )
                 )
             except Exception:

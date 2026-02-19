@@ -104,7 +104,7 @@ export SC_ADAPTIVE_ABOUT_DISABLE=1
 # Bandcamp (minimal debug)
 # =====================================================
 unset BC_DEBUG_FILTER_SRC
-unset BC_DEBUG_LOCATION=1
+unset BC_DEBUG_LOCATION
 
 # =====================================================
 # RUN
