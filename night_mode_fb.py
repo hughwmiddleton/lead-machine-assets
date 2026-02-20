@@ -4172,6 +4172,10 @@ class NightModeFacebookEnricher:
             best_page_url = ""
 
             if not fb_urls:
+                if not result.get("FB_Status"):
+                    result["FB_Status"] = "pass_a_skipped_no_fb_url"
+                if not result.get("FB_Reason"):
+                    result["FB_Reason"] = "skipped_no_fb_url"
                 _log(self.logger, "[Night FB][PASS A] skipped (no explicit FB URL); proceeding to v2 search")
             else:
                 _log(self.logger, f"[Night FB] Using explicit FB URLs: {fb_urls}")
