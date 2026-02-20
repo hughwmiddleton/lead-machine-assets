@@ -415,6 +415,13 @@ LINK_HUB_HOSTS = {
     "beacons.ai",
     "bio.link",
     "lnk.bio",
+    "bio.site",
+    "flow.page",
+    "solo.to",
+    "withkoji.com",
+    "carrd.co",
+    "taplink.cc",
+    "linkin.bio",
 }
 
 SOCIAL_PRIORITY = [
@@ -2495,6 +2502,106 @@ def _parse_release_date(value: str) -> Optional[datetime.date]:
     return None
 
 
+_EMAIL_REGEX = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}")
+
+
+def _extract_emails_from_html_text(html: str) -> Set[str]:
+    """
+    Lightweight full-document email scan with basic obfuscation normalisation.
+    Only used for Bandcamp fallback so we keep it conservative.
+    """
+    emails: Set[str] = set()
+    if not html:
+        return emails
+    try:
+        soup = BeautifulSoup(html, "html.parser")
+        text = soup.get_text(" ", strip=True)
+    except Exception:
+        text = html
+    if not text:
+        return emails
+
+    def _normalise_obfuscations(blob: str) -> str:
+        cleaned = blob
+        cleaned = re.sub(r"\\s*\\[\\s*at\\s*\\]\\s*", "@", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\\s*\\(\\s*at\\s*\\)\\s*", "@", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\\s+at\\s+", "@", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\\s*\\[\\s*dot\\s*\\]\\s*", ".", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\\s*\\(\\s*dot\\s*\\)\\s*", ".", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\\s+dot\\s+", ".", cleaned, flags=re.IGNORECASE)
+        return cleaned
+
+    normalised_text = _normalise_obfuscations(text)
+    for match in _EMAIL_REGEX.findall(normalised_text):
+        candidate = match.strip().lower()
+        if not candidate or candidate.count("@") != 1:
+            continue
+        local, _, domain = candidate.partition("@")
+        if len(local) < 2 or len(domain) < 4 or "." not in domain:
+            continue
+        emails.add(candidate)
+    return emails
+
+
+def _bandcamp_pick_internal_follow_url(soup: BeautifulSoup, profile_url: str) -> Optional[str]:
+    """Pick a single /contact or /about URL on the same host."""
+    if not soup or not profile_url:
+        return None
+    try:
+        host = urllib.parse.urlparse(profile_url).netloc.lower()
+    except Exception:
+        return None
+    candidates: List[Tuple[int, str]] = []
+    for anchor in soup.find_all("a", href=True):
+        href = (anchor.get("href") or "").strip()
+        if not href or href.startswith("#") or href.lower().startswith("javascript:"):
+            continue
+        absolute = urllib.parse.urljoin(profile_url, href)
+        try:
+            parsed = urllib.parse.urlparse(absolute)
+        except Exception:
+            continue
+        if parsed.scheme not in ("http", "https"):
+            continue
+        if parsed.netloc.lower() != host:
+            continue
+        path = (parsed.path or "").lower()
+        if path.startswith("/contact"):
+            candidates.append((0, absolute))
+        elif path.startswith("/about"):
+            candidates.append((1, absolute))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item[0])
+    return candidates[0][1]
+
+
+def _bandcamp_pick_first_track_url(soup: BeautifulSoup, profile_url: str) -> Optional[str]:
+    """Return first same-host track URL (one-time fallback)."""
+    if not soup or not profile_url:
+        return None
+    try:
+        host = urllib.parse.urlparse(profile_url).netloc.lower()
+    except Exception:
+        return None
+    for anchor in soup.find_all("a", href=True):
+        href = (anchor.get("href") or "").strip()
+        if not href or href.startswith("#") or href.lower().startswith("javascript:"):
+            continue
+        absolute = urllib.parse.urljoin(profile_url, href)
+        try:
+            parsed = urllib.parse.urlparse(absolute)
+        except Exception:
+            continue
+        if parsed.scheme not in ("http", "https"):
+            continue
+        if parsed.netloc.lower() != host:
+            continue
+        if "/track/" in (parsed.path or "").lower():
+            return absolute
+    return None
+
+
 def _extract_links_from_profile(
     html: str,
     source_dir: str,
@@ -3904,7 +4011,16 @@ class CrossDirectoryEnricherWorker(QThread):
             # Drop placeholder noise socials when nothing useful remains.
             df.at[row_idx, "Social Link"] = ""
         if sites_all:
-            ordered_sites = sorted(sites_all)
+            def _site_sort(url: str) -> Tuple[int, str]:
+                host = ""
+                try:
+                    host = urllib.parse.urlparse(url).netloc.lower()
+                except Exception:
+                    pass
+                hub_rank = 0 if host in LINK_HUB_HOSTS else 1
+                return (hub_rank, url)
+
+            ordered_sites = sorted(sites_all, key=_site_sort)
             if MAX_WEBSITES:
                 ordered_sites = ordered_sites[:MAX_WEBSITES]
             df.at[row_idx, "External Links"] = MULTI_VALUE_SEPARATOR.join(ordered_sites)
@@ -5640,10 +5756,58 @@ class CrossDirectoryEnricherWorker(QThread):
         socials, websites, emails, link_hubs = _extract_links_from_profile(
             html, source_dir, profile_url
         )
-        live_key = f"{source_dir}_live"
-        fetch_ok_flag = getattr(self, "_last_fetch_ok", fetched_ok)
-        http_status = getattr(self, "_last_http_status", None)
+        profile_fetch_ok = getattr(self, "_last_fetch_ok", fetched_ok)
+        profile_http_status = getattr(self, "_last_http_status", None)
+
+        # Bandcamp-only fallbacks to lift actionable rate without altering thresholds.
+        if (
+            source_dir == "bandcamp"
+            and not (socials or websites or emails or link_hubs)
+        ):
+            soup = BeautifulSoup(html, "html.parser")
+            emails |= _extract_emails_from_html_text(html)
+
+            # Re-check after text email scan.
+            actionable_found = bool(socials or websites or emails or link_hubs)
+            if not actionable_found:
+                contact_url = _bandcamp_pick_internal_follow_url(soup, profile_url)
+                if contact_url:
+                    contact_html = self._fetch_url(contact_url, label="bandcamp contact")
+                    if contact_html:
+                        c_socials, c_sites, c_emails, c_hubs = _extract_links_from_profile(
+                            contact_html, "bandcamp", contact_url
+                        )
+                        c_emails |= _extract_emails_from_html_text(contact_html)
+                        socials |= c_socials
+                        websites |= c_sites
+                        emails |= c_emails
+                        link_hubs |= c_hubs
+                        self.log_message.emit(
+                            f"[Enricher] Bandcamp contact/about follow succeeded: {contact_url}"
+                        )
+
+            actionable_found = bool(socials or websites or emails or link_hubs)
+            if not actionable_found:
+                track_url = _bandcamp_pick_first_track_url(soup, profile_url)
+                if track_url:
+                    track_html = self._fetch_url(track_url, label="bandcamp track")
+                    if track_html:
+                        t_socials, t_sites, t_emails, t_hubs = _extract_links_from_profile(
+                            track_html, "bandcamp", track_url
+                        )
+                        t_emails |= _extract_emails_from_html_text(track_html)
+                        socials |= t_socials
+                        websites |= t_sites
+                        emails |= t_emails
+                        link_hubs |= t_hubs
+                        self.log_message.emit(
+                            f"[Enricher] Bandcamp track fallback used: {track_url}"
+                        )
+
         actionable_found = bool(socials or websites or emails or link_hubs)
+        live_key = f"{source_dir}_live"
+        fetch_ok_flag = profile_fetch_ok
+        http_status = profile_http_status
         if not actionable_found:
             if source_dir == "soundcloud":
                 # Still return a payload so we can record the matched SoundCloud profile URL even if no external links.
