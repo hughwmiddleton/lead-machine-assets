@@ -7,3 +7,6 @@ soundcloud_about_cache.json
 # Python cache
 __pycache__/
 *.pyc
+
+# FB DOM gate debug dumps
+fb_dom_gate_debug_*.json
