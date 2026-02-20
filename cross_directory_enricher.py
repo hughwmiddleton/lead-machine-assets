@@ -424,6 +424,8 @@ LINK_HUB_HOSTS = {
     "linkin.bio",
 }
 
+_EMAIL_REGEX = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+
 SOCIAL_PRIORITY = [
     "facebook.com",
     "m.facebook.com",
@@ -2314,6 +2316,12 @@ def _social_sort_key(url: str) -> Tuple[int, str]:
     return (len(SOCIAL_PRIORITY), url)
 
 
+def _website_sort_key(url: str) -> Tuple[int, str]:
+    host = _host(url)
+    is_hub = 0 if host in LINK_HUB_HOSTS else 1
+    return (is_hub, url)
+
+
 def _prioritise_facebook_first(urls: Iterable[str]) -> List[str]:
     facebook: List[str] = []
     non_facebook: List[str] = []
@@ -2660,6 +2668,111 @@ def _extract_links_from_profile(
                 continue
             websites.add(normalised)
     return socials, websites, emails, link_hubs
+
+
+def _extract_emails_from_html_text(html: str) -> Set[str]:
+    emails: Set[str] = set()
+    if not html:
+        return emails
+    text = ""
+    try:
+        soup = BeautifulSoup(html, "html.parser")
+        text = soup.get_text(" ", strip=True)
+    except Exception:
+        if isinstance(html, str):
+            text = html
+    if not text:
+        return emails
+    normalized = text
+    replacements = (
+        (r"\\s*\\[\\s*at\\s*\\]\\s*", "@"),
+        (r"\\s*\\(\\s*at\\s*\\)\\s*", "@"),
+        (r"\\s+at\\s+", "@"),
+        (r"\\s*\\[\\s*dot\\s*\\]\\s*", "."),
+        (r"\\s*\\(\\s*dot\\s*\\)\\s*", "."),
+        (r"\\s+dot\\s+", "."),
+    )
+    for pattern, replacement in replacements:
+        normalized = re.sub(pattern, replacement, normalized, flags=re.IGNORECASE)
+    for match in _EMAIL_REGEX.findall(normalized):
+        cleaned = match.strip().lower()
+        if not cleaned:
+            continue
+        if cleaned.count("@") != 1:
+            continue
+        local, _, domain = cleaned.partition("@")
+        if len(local) < 2 or len(domain) < 4 or "." not in domain:
+            continue
+        if ".." in cleaned:
+            cleaned = cleaned.replace("..", ".")
+        if cleaned:
+            emails.add(cleaned)
+    return emails
+
+
+def _bandcamp_pick_internal_follow_url(
+    soup: Optional[BeautifulSoup], profile_url: str
+) -> Optional[str]:
+    if not soup or not profile_url:
+        return None
+    try:
+        profile_host = urllib.parse.urlparse(profile_url).netloc.lower()
+    except Exception:
+        profile_host = ""
+    if not profile_host:
+        return None
+    anchors = soup.find_all("a", href=True)
+    for target_path in ("/contact", "/about"):
+        for anchor in anchors:
+            href = (anchor.get("href") or "").strip()
+            if not href:
+                continue
+            absolute = urllib.parse.urljoin(profile_url, href)
+            try:
+                parsed = urllib.parse.urlparse(absolute)
+            except Exception:
+                continue
+            if parsed.scheme not in ("http", "https"):
+                continue
+            if parsed.netloc.lower() != profile_host:
+                continue
+            path = re.sub(r"/+$", "", parsed.path or "/") or "/"
+            if path.endswith(target_path):
+                absolute_clean, _ = urllib.parse.urldefrag(absolute)
+                return absolute_clean or absolute
+    return None
+
+
+def _bandcamp_pick_first_track_url(
+    soup: Optional[BeautifulSoup], profile_url: str
+) -> Optional[str]:
+    if not soup or not profile_url:
+        return None
+    try:
+        profile_host = urllib.parse.urlparse(profile_url).netloc.lower()
+    except Exception:
+        profile_host = ""
+    if not profile_host:
+        return None
+    anchors = soup.find_all("a", href=True)
+    for anchor in anchors:
+        href = (anchor.get("href") or "").strip()
+        if not href:
+            continue
+        absolute = urllib.parse.urljoin(profile_url, href)
+        try:
+            parsed = urllib.parse.urlparse(absolute)
+        except Exception:
+            continue
+        if parsed.scheme not in ("http", "https"):
+            continue
+        if parsed.netloc.lower() != profile_host:
+            continue
+        path = parsed.path.lower()
+        if "/track/" in path:
+            absolute_clean, _ = urllib.parse.urldefrag(absolute)
+            return absolute_clean or absolute
+    return None
 
 
 def _scrape_link_hub_socials(session: requests.Session, hub_url: str) -> Set[str]:
@@ -4011,16 +4124,7 @@ class CrossDirectoryEnricherWorker(QThread):
             # Drop placeholder noise socials when nothing useful remains.
             df.at[row_idx, "Social Link"] = ""
         if sites_all:
-            def _site_sort(url: str) -> Tuple[int, str]:
-                host = ""
-                try:
-                    host = urllib.parse.urlparse(url).netloc.lower()
-                except Exception:
-                    pass
-                hub_rank = 0 if host in LINK_HUB_HOSTS else 1
-                return (hub_rank, url)
-
-            ordered_sites = sorted(sites_all, key=_site_sort)
+            ordered_sites = sorted(sites_all, key=_website_sort_key)
             if MAX_WEBSITES:
                 ordered_sites = ordered_sites[:MAX_WEBSITES]
             df.at[row_idx, "External Links"] = MULTI_VALUE_SEPARATOR.join(ordered_sites)
@@ -5758,52 +5862,96 @@ class CrossDirectoryEnricherWorker(QThread):
         )
         profile_fetch_ok = getattr(self, "_last_fetch_ok", fetched_ok)
         profile_http_status = getattr(self, "_last_http_status", None)
-
-        # Bandcamp-only fallbacks to lift actionable rate without altering thresholds.
-        if (
-            source_dir == "bandcamp"
-            and not (socials or websites or emails or link_hubs)
-        ):
-            soup = BeautifulSoup(html, "html.parser")
-            emails |= _extract_emails_from_html_text(html)
-
-            # Re-check after text email scan.
-            actionable_found = bool(socials or websites or emails or link_hubs)
-            if not actionable_found:
-                contact_url = _bandcamp_pick_internal_follow_url(soup, profile_url)
-                if contact_url:
+        profile_soup: Optional[BeautifulSoup] = None
+        if source_dir == "bandcamp":
+            try:
+                profile_soup = BeautifulSoup(html, "html.parser")
+            except Exception:
+                profile_soup = None
+            contact_follow_done = False
+            track_follow_done = False
+            if not (socials or websites or emails or link_hubs):
+                emails |= _extract_emails_from_html_text(html)
+            if not (socials or websites or emails or link_hubs):
+                contact_url = _bandcamp_pick_internal_follow_url(profile_soup, profile_url)
+                if contact_url and not contact_follow_done:
+                    contact_follow_done = True
+                    before_counts = (
+                        len(socials),
+                        len(websites),
+                        len(emails),
+                        len(link_hubs),
+                    )
                     contact_html = self._fetch_url(contact_url, label="bandcamp contact")
                     if contact_html:
-                        c_socials, c_sites, c_emails, c_hubs = _extract_links_from_profile(
+                        contact_socials, contact_websites, contact_emails, contact_link_hubs = _extract_links_from_profile(
                             contact_html, "bandcamp", contact_url
                         )
-                        c_emails |= _extract_emails_from_html_text(contact_html)
-                        socials |= c_socials
-                        websites |= c_sites
-                        emails |= c_emails
-                        link_hubs |= c_hubs
+                        socials |= contact_socials
+                        websites |= contact_websites
+                        emails |= contact_emails
+                        emails |= _extract_emails_from_html_text(contact_html)
+                        link_hubs |= contact_link_hubs
+                    after_counts = (
+                        len(socials),
+                        len(websites),
+                        len(emails),
+                        len(link_hubs),
+                    )
+                    contact_actionable = after_counts != before_counts
+                    contact_suffix = _format_outcome_suffix(
+                        fetch_ok=getattr(self, "_last_fetch_ok", None),
+                        actionable=contact_actionable,
+                        http_status=getattr(self, "_last_http_status", None),
+                    )
+                    if contact_actionable:
                         self.log_message.emit(
-                            f"[Enricher] Bandcamp contact/about follow succeeded: {contact_url}"
+                            f"[Enricher] Bandcamp contact/about follow succeeded: {contact_url}{contact_suffix}"
                         )
-
-            actionable_found = bool(socials or websites or emails or link_hubs)
-            if not actionable_found:
-                track_url = _bandcamp_pick_first_track_url(soup, profile_url)
-                if track_url:
+                    else:
+                        self.log_message.emit(
+                            f"[Enricher] Bandcamp contact/about follow attempted (no actionable found): {contact_url}{contact_suffix}"
+                        )
+            if not (socials or websites or emails or link_hubs):
+                track_url = _bandcamp_pick_first_track_url(profile_soup, profile_url)
+                if track_url and not track_follow_done:
+                    track_follow_done = True
+                    before_counts = (
+                        len(socials),
+                        len(websites),
+                        len(emails),
+                        len(link_hubs),
+                    )
                     track_html = self._fetch_url(track_url, label="bandcamp track")
                     if track_html:
-                        t_socials, t_sites, t_emails, t_hubs = _extract_links_from_profile(
+                        track_socials, track_websites, track_emails, track_link_hubs = _extract_links_from_profile(
                             track_html, "bandcamp", track_url
                         )
-                        t_emails |= _extract_emails_from_html_text(track_html)
-                        socials |= t_socials
-                        websites |= t_sites
-                        emails |= t_emails
-                        link_hubs |= t_hubs
+                        socials |= track_socials
+                        websites |= track_websites
+                        emails |= track_emails
+                        emails |= _extract_emails_from_html_text(track_html)
+                        link_hubs |= track_link_hubs
+                    after_counts = (
+                        len(socials),
+                        len(websites),
+                        len(emails),
+                        len(link_hubs),
+                    )
+                    track_actionable = after_counts != before_counts
+                    track_suffix = _format_outcome_suffix(
+                        fetch_ok=getattr(self, "_last_fetch_ok", None),
+                        actionable=track_actionable,
+                        http_status=getattr(self, "_last_http_status", None),
+                    )
+                    if track_actionable:
                         self.log_message.emit(
-                            f"[Enricher] Bandcamp track fallback used: {track_url}"
+                            f"[Enricher] Bandcamp track follow succeeded: {track_url}{track_suffix}"
                         )
-
+                    else:
+                        self.log_message.emit(
+                            f"[Enricher] Bandcamp track follow attempted (no actionable found): {track_url}{track_suffix}"
+                        )
         actionable_found = bool(socials or websites or emails or link_hubs)
         live_key = f"{source_dir}_live"
         fetch_ok_flag = profile_fetch_ok
