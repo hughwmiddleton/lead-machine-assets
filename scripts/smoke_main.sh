@@ -10,6 +10,7 @@ fail()  { printf '[FAIL] %s\n' "$*" >&2; EXIT_CODE=2; }
 
 EXIT_CODE=0
 WARNINGS=()
+declare -a runner_env=()
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -207,6 +208,15 @@ except Exception as exc:
     print(f"TRIM_MSG={sh_quote(f'failed to load config: {exc}')}")
     sys.exit(0)
 
+# scan candidates before mutation
+candidates = collect_candidates(data)
+if candidates:
+    print(f"Trim candidate paths (top {min(30, len(candidates))}):", file=sys.stderr)
+    for path, desc in candidates[:30]:
+        print(f" - {path}: {desc}", file=sys.stderr)
+else:
+    print("Trim candidate paths: none", file=sys.stderr)
+
 # top-level list keys
 if isinstance(data, dict):
     for key in list(data.keys()):
@@ -215,14 +225,6 @@ if isinstance(data, dict):
             state["trimmed_any"] = True
 
 walk(data)
-
-candidates = collect_candidates(data)
-if candidates:
-    print(f"Trim candidate paths (top {min(30, len(candidates))}):", file=sys.stderr)
-    for path, desc in candidates[:30]:
-        print(f" - {path}: {desc}", file=sys.stderr)
-else:
-    print("Trim candidate paths: none", file=sys.stderr)
 
 if not state["trimmed_any"]:
     msg = "no seed lists or csv paths found; using original config"
@@ -293,8 +295,6 @@ check_py "night_mode_runner.py"
 check_py "night_mode_fb.py"
 check_py "cross_directory_enricher.py"
 
-runner_env=()
-
 if [[ -n ${NIGHT_FB_PROFILE_DIR:-} ]]; then
   if [[ -d "$NIGHT_FB_PROFILE_DIR" ]]; then
     log "FB profile enabled: $NIGHT_FB_PROFILE_DIR"
@@ -319,7 +319,7 @@ SMOKE_CONSOLE="$RUN_ROOT/smoke_console.txt"
 log "Starting runner (MAX_ROWS=${MAX_ROWS:-10})"
 
 set +e
-env "${runner_env[@]}" python3 night_mode_runner.py \
+env ${runner_env[@]+"${runner_env[@]}"} python3 night_mode_runner.py \
   --config "$CONFIG" \
   --export-mode both \
   --phased \

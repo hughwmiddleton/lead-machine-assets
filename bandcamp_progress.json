@@ -1921,5 +1921,33 @@
       "https://loversturntomonsters.bandcamp.com",
       "https://bigtelephone.bandcamp.com"
     ]
+  },
+  "https://bandcamp.com/discover/ireland+rock": {
+    "scraped_artist_urls": [
+      "https://fontainesdc.bandcamp.com",
+      "https://davidkitt.bandcamp.com",
+      "https://thedeadlians.bandcamp.com",
+      "https://carparkscifi.bandcamp.com",
+      "https://dylanflynnandthedeadpoets.bandcamp.com",
+      "https://nobother.bandcamp.com",
+      "https://daviddebarra.bandcamp.com",
+      "https://johnbassett.bandcamp.com",
+      "https://welcometomusiccity.bandcamp.com",
+      "https://sprintsmusic.bandcamp.com"
+    ]
+  },
+  "discover:https://bandcamp.com/discover/ireland+rock": {
+    "scraped_artist_urls": [
+      "https://fontainesdc.bandcamp.com",
+      "https://davidkitt.bandcamp.com",
+      "https://thedeadlians.bandcamp.com",
+      "https://carparkscifi.bandcamp.com",
+      "https://dylanflynnandthedeadpoets.bandcamp.com",
+      "https://nobother.bandcamp.com",
+      "https://daviddebarra.bandcamp.com",
+      "https://johnbassett.bandcamp.com",
+      "https://welcometomusiccity.bandcamp.com",
+      "https://sprintsmusic.bandcamp.com"
+    ]
   }
 }

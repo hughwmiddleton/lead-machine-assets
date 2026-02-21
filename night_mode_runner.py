@@ -21,6 +21,7 @@ import re
 import sys
 import time
 import traceback
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
@@ -55,6 +56,36 @@ EXCLUDED_URL_SUBSTRINGS = (
     "tiktok.com/@triplejradio",
     "youtube.com/abcaustralia",
 )
+
+
+@dataclass
+class SmokeStats:
+    jobs_attempted: int = 0
+    jobs_merged: int = 0
+    jobs_skipped: List[Dict[str, str]] = field(default_factory=list)
+    raw_rows: int = 0
+    enrichment_ran: bool = False
+    enrichment_rows: int = 0
+    sc_challenge_detected: int = 0
+    sc_breaker_tripped: bool = False
+    sc_live_disabled_reason: str = ""
+    bandcamp_http_403_count: int = 0
+    lastfm_http_406_count: int = 0
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "jobs_attempted": self.jobs_attempted,
+            "jobs_merged": self.jobs_merged,
+            "jobs_skipped": self.jobs_skipped,
+            "raw_rows": self.raw_rows,
+            "enrichment_ran": self.enrichment_ran,
+            "enrichment_rows": self.enrichment_rows,
+            "sc_challenge_detected": self.sc_challenge_detected,
+            "sc_breaker_tripped": self.sc_breaker_tripped,
+            "sc_live_disabled_reason": self.sc_live_disabled_reason,
+            "bandcamp_http_403_count": self.bandcamp_http_403_count,
+            "lastfm_http_406_count": self.lastfm_http_406_count,
+        }
 
 
 def _strip_excluded_urls(url_val: str) -> str:
@@ -92,6 +123,76 @@ def _setup_logger(log_path: str, job_id: str) -> logging.Logger:
         logger.addHandler(file_handler)
 
     return logger
+
+
+def _update_stats_from_log(stats: Optional[SmokeStats], message: str) -> None:
+    if not stats or not message:
+        return
+    lower = message.lower()
+    if "bandcamp" in lower and "403" in lower:
+        stats.bandcamp_http_403_count += 1
+    if "last.fm" in lower and "406" in lower:
+        stats.lastfm_http_406_count += 1
+    if ("challenge" in lower and "[sc" in lower) or "rss-only mode" in lower:
+        stats.sc_challenge_detected += 1
+    if "circuit breaker tripped" in lower and "[sc" in lower:
+        stats.sc_breaker_tripped = True
+    if "live enrichment disabled" in lower and "reason=" in lower and not stats.sc_live_disabled_reason:
+        match = re.search(r"reason=([^)\\s]+)", message)
+        if match:
+            stats.sc_live_disabled_reason = match.group(1)
+
+
+def _wrap_logger_for_stats(logger_fn, stats: Optional[SmokeStats]):
+    def _log(msg: str) -> None:
+        try:
+            if logger_fn:
+                logger_fn(msg)
+        finally:
+            try:
+                _update_stats_from_log(stats, msg)
+            except Exception:
+                pass
+    return _log
+
+
+def _emit_smoke_summary(stats: SmokeStats, logger: logging.Logger) -> None:
+    degraded_reasons: List[str] = []
+    if stats.jobs_skipped:
+        degraded_reasons.append("job raw CSV read errors")
+    if stats.raw_rows == 0:
+        degraded_reasons.append("master_raw has zero rows")
+    if stats.bandcamp_http_403_count:
+        degraded_reasons.append("bandcamp 403s")
+    if stats.lastfm_http_406_count:
+        degraded_reasons.append("lastfm 406s")
+    if stats.sc_breaker_tripped or stats.sc_challenge_detected:
+        degraded_reasons.append("soundcloud challenges/breaker")
+    if stats.sc_live_disabled_reason:
+        degraded_reasons.append(f"sc_live_disabled={stats.sc_live_disabled_reason}")
+
+    result_line = "SMOKE RESULT: PASS"
+    if degraded_reasons:
+        result_line += f" (DEGRADED: {', '.join(degraded_reasons)})"
+
+    summary_lines = [
+        "Smoke Summary:",
+        f" - jobs attempted: {stats.jobs_attempted}",
+        f" - jobs merged: {stats.jobs_merged}",
+        f" - jobs skipped (read errors): {len(stats.jobs_skipped)}",
+        f" - master_raw rows: {stats.raw_rows}",
+        f" - enrichment ran: {'yes' if stats.enrichment_ran else 'no'}",
+        f" - enrichment rows: {stats.enrichment_rows}",
+        f" - SC challenges: {stats.sc_challenge_detected}",
+        f" - SC breaker tripped: {stats.sc_breaker_tripped}",
+        f" - SC live disabled reason: {stats.sc_live_disabled_reason or 'n/a'}",
+        f" - Bandcamp HTTP 403 count: {stats.bandcamp_http_403_count}",
+        f" - Last.fm HTTP 406 count: {stats.lastfm_http_406_count}",
+    ]
+
+    logger.info(result_line)
+    for line in summary_lines:
+        logger.info(line)
 
 
 def _load_json(path: str) -> Dict[str, Any]:
@@ -625,7 +726,9 @@ def _merge_master(run_dir: str, job_states: List[Dict[str, Any]], logger: loggin
     return master_path
 
 
-def _merge_raw_master(run_dir: str, job_states: List[Dict[str, Any]], logger: logging.Logger) -> Optional[str]:
+def _merge_raw_master(
+    run_dir: str, job_states: List[Dict[str, Any]], logger: logging.Logger, stats: Optional[SmokeStats] = None
+) -> Optional[str]:
     raw_paths = []
     for state in job_states:
         raw_path = state.get("raw_csv") or ""
@@ -649,9 +752,13 @@ def _merge_raw_master(run_dir: str, job_states: List[Dict[str, Any]], logger: lo
             frames.append(df)
         except Exception as exc:
             logger.warning("[Master] Skipping %s due to read error: %s", path, exc)
+            if stats is not None:
+                stats.jobs_skipped.append({"path": path, "reason": str(exc)})
     if not frames:
         logger.warning("[Master] No data available after reading raw files.")
         return None
+    if stats is not None:
+        stats.jobs_merged = len(frames)
     combined = pd.concat(frames, ignore_index=True, sort=False)
     for col in ("Source URL", "SoundCloud Link", "Social Link", "External Links", "Facebook_URL"):
         if col in combined.columns:
@@ -672,6 +779,8 @@ def _merge_raw_master(run_dir: str, job_states: List[Dict[str, Any]], logger: lo
     master_path = os.path.join(run_dir, "master_raw.csv")
     combined.to_csv(master_path, index=False)
     logger.info("[Master] Wrote merged raw CSV: %s (rows=%s)", master_path, len(combined.index))
+    if stats is not None:
+        stats.raw_rows = len(combined.index)
     return master_path
 
 
@@ -797,7 +906,9 @@ def run_night_mode(
     fb_max_rows_override: Optional[int] = None,
     with_sc_meta: bool = False,
 ) -> Dict[str, Any]:
+    stats = SmokeStats()
     config = _load_json(config_path)
+    stats.jobs_attempted = len(config.get("jobs", []))
     export_mode = (export_mode_override or config.get("export_mode") or DEFAULT_EXPORT_MODE).strip().lower()
     if export_mode not in {"per_directory", "combined", "both"}:
         export_mode = DEFAULT_EXPORT_MODE
@@ -871,22 +982,30 @@ def run_night_mode(
     master_pre_fb = None
     master_post_fb = None
     master_final = None
+    master_logger: Optional[logging.Logger] = None
     if export_mode in {"combined", "both"}:
         logger = _setup_logger(os.path.join(run_dir, "master_log.txt"), "master")
+        master_logger = logger
+        stats_logger = _wrap_logger_for_stats(logger.info, stats)
         if master_enrichment_enabled:
-            master_raw = _merge_raw_master(run_dir, job_states, logger)
+            master_raw = _merge_raw_master(run_dir, job_states, logger, stats=stats)
             if master_raw and os.path.exists(master_raw):
                 master_enriched = os.path.join(run_dir, "master_enriched.csv")
                 master_enriched = run_master_enrichment(
                     master_raw,
                     master_enriched,
-                    logger=logger.info,
+                    logger=stats_logger,
                     enable_live_search=master_live_search_enabled,
                     max_live_searches=master_max_live_searches,
                     night_mode=True,
                 )
                 master_pre_fb = os.path.join(run_dir, "master_pre_fb.csv")
-                master_pre_fb = run_enrichment(master_enriched, master_pre_fb, logger=logger.info, night_mode=True)
+                master_pre_fb = run_enrichment(master_enriched, master_pre_fb, logger=stats_logger, night_mode=True)
+                stats.enrichment_ran = True
+                try:
+                    stats.enrichment_rows = _count_rows(master_pre_fb)
+                except Exception:
+                    pass
         else:
             master_pre_fb = _merge_master(run_dir, job_states, logger)
         if master_pre_fb and os.path.exists(master_pre_fb):
@@ -978,6 +1097,9 @@ def run_night_mode(
             else:
                 master_final = master_post_fb
 
+    summary_logger = master_logger or _setup_logger(os.path.join(run_dir, "master_log.txt"), "master")
+    _emit_smoke_summary(stats, summary_logger)
+
     return {
         "run_dir": run_dir,
         "jobs": job_states,
@@ -987,6 +1109,7 @@ def run_night_mode(
         "master_post_fb": master_post_fb,
         "master_csv": master_final,
         "export_mode": export_mode,
+        "smoke_stats": stats.as_dict(),
     }
 
 
