@@ -69,6 +69,204 @@ fi
 
 log "Using config: $CONFIG"
 
+SMOKE_TRIM_CONFIG="${SMOKE_TRIM_CONFIG:-1}"
+SMOKE_SEED_CAP="${SMOKE_SEED_CAP:-10}"
+
+TRIM_OK=0
+TRIM_CONFIG="$CONFIG"
+TRIM_MSG="trim not attempted"
+TRIM_CSV=""
+TRIM_WARN=""
+
+if [[ "$SMOKE_TRIM_CONFIG" != "0" ]]; then
+  log "Attempting smoke trim (seed cap=$SMOKE_SEED_CAP)"
+  trim_output=$(python3 - "$CONFIG" "$RUN_ROOT" "$SMOKE_SEED_CAP" <<'PY'
+import csv, json, os, sys
+
+config_path, run_root, cap_raw = sys.argv[1:4]
+
+def sh_quote(val: str) -> str:
+    return "'" + val.replace("'", "'\"'\"'") + "'"
+
+try:
+    cap = int(cap_raw)
+    if cap < 0:
+        raise ValueError
+except Exception:
+    print("TRIM_OK=0")
+    print("TRIM_MSG='SMOKE_SEED_CAP must be a non-negative integer'")
+    sys.exit(0)
+
+trim_config_path = os.path.join(run_root, "smoke_config_trimmed.json")
+trim_csv_path = os.path.join(run_root, "smoke_seed_trimmed.csv")
+config_dir = os.path.dirname(config_path)
+
+seed_keys = {"seeds", "rows", "artists", "items", "input_rows", "seed_rows", "jobs"}
+path_suffixes = (".csv", ".tsv", ".jsonl", ".txt")
+
+state = {
+    "warnings": [],
+    "csv_count": 0,
+    "csv_replaced": False,
+    "trimmed_any": False,
+}
+
+def resolve_csv_path(path: str) -> str:
+    path = os.path.expanduser(path)
+    if not os.path.isabs(path):
+        path = os.path.normpath(os.path.join(config_dir, path))
+    return path
+
+def trim_csv(src: str) -> bool:
+    try:
+        with open(src, newline='', encoding='utf-8') as f:
+            reader = list(csv.reader(f))
+    except Exception as exc:
+        state["warnings"].append(f"could not read csv {src}: {exc}")
+        return False
+    if not reader:
+        state["warnings"].append(f"csv {src} is empty")
+        return False
+    header, *data = reader
+    out_rows = data[:cap]
+    try:
+        with open(trim_csv_path, "w", newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow(header)
+            writer.writerows(out_rows)
+    except Exception as exc:
+        state["warnings"].append(f"failed writing trimmed csv: {exc}")
+        return False
+    return True
+
+def walk(node):
+    if isinstance(node, dict):
+        for k, v in list(node.items()):
+            k_lower = str(k).lower()
+
+            if k_lower in seed_keys and isinstance(v, list):
+                if len(v) > cap:
+                    node[k] = v[:cap]
+                    state["trimmed_any"] = True
+                continue
+
+            if isinstance(v, str) and v.strip().lower().endswith(path_suffixes):
+                state["csv_count"] += 1
+                if not state["csv_replaced"]:
+                    src = resolve_csv_path(v)
+                    if trim_csv(src):
+                        node[k] = trim_csv_path
+                        state["trimmed_any"] = True
+                        state["csv_replaced"] = True
+                else:
+                    state["warnings"].append("multiple CSV paths detected; only first trimmed")
+                continue
+
+            if isinstance(v, (dict, list)):
+                walk(v)
+
+    elif isinstance(node, list):
+        for item in node:
+            if isinstance(item, (dict, list)):
+                walk(item)
+
+def collect_candidates(node, path=""):
+    candidates = []
+
+    def join_path(base, part):
+        if base == "":
+            return str(part)
+        if isinstance(part, int):
+            return f"{base}[{part}]"
+        return f"{base}.{part}"
+
+    if isinstance(node, dict):
+        for k, v in node.items():
+            p = join_path(path, k)
+            if isinstance(v, list):
+                if len(v) > 10:
+                    candidates.append((p, f"list len={len(v)}"))
+                for idx, item in enumerate(v):
+                    if isinstance(item, (dict, list)):
+                        candidates.extend(collect_candidates(item, join_path(p, idx)))
+            elif isinstance(v, dict):
+                candidates.extend(collect_candidates(v, p))
+            elif isinstance(v, str) and v.lower().strip().endswith(path_suffixes):
+                candidates.append((p, "path-like string"))
+    elif isinstance(node, list):
+        for idx, item in enumerate(node):
+            candidates.extend(collect_candidates(item, join_path(path, idx)))
+
+    return candidates
+
+try:
+    with open(config_path, encoding='utf-8') as f:
+        data = json.load(f)
+except Exception as exc:
+    print("TRIM_OK=0")
+    print(f"TRIM_MSG={sh_quote(f'failed to load config: {exc}')}")
+    sys.exit(0)
+
+# top-level list keys
+if isinstance(data, dict):
+    for key in list(data.keys()):
+        if str(key).lower() in seed_keys and isinstance(data[key], list) and len(data[key]) > cap:
+            data[key] = data[key][:cap]
+            state["trimmed_any"] = True
+
+walk(data)
+
+candidates = collect_candidates(data)
+if candidates:
+    print(f"Trim candidate paths (top {min(30, len(candidates))}):", file=sys.stderr)
+    for path, desc in candidates[:30]:
+        print(f" - {path}: {desc}", file=sys.stderr)
+else:
+    print("Trim candidate paths: none", file=sys.stderr)
+
+if not state["trimmed_any"]:
+    msg = "no seed lists or csv paths found; using original config"
+    if state["warnings"]:
+        msg += " (warnings: " + "; ".join(state["warnings"]) + ")"
+    print("TRIM_OK=0")
+    print(f"TRIM_MSG={sh_quote(msg)}")
+    sys.exit(0)
+
+try:
+    with open(trim_config_path, "w", encoding='utf-8') as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+except Exception as exc:
+    print("TRIM_OK=0")
+    print(f"TRIM_MSG={sh_quote(f'failed to write trimmed config: {exc}')}")
+    sys.exit(0)
+
+print("TRIM_OK=1")
+print(f"TRIM_CONFIG={sh_quote(trim_config_path)}")
+print("TRIM_CSV=" + (sh_quote(trim_csv_path) if state["csv_replaced"] else "''"))
+print("TRIM_WARN=" + (sh_quote('; '.join(state["warnings"])) if state["warnings"] else "''"))
+print("TRIM_MSG='trim succeeded'")
+PY
+  )
+
+  eval "$trim_output"
+
+  if [[ "$TRIM_OK" -eq 1 ]]; then
+    CONFIG="$TRIM_CONFIG"
+    log "Trimming succeeded; using trimmed config: $CONFIG"
+    log "Seed cap applied: $SMOKE_SEED_CAP"
+    if [[ -n "$TRIM_CSV" ]]; then
+      log "Trimmed CSV: $TRIM_CSV"
+    fi
+    if [[ -n "$TRIM_WARN" ]]; then
+      warn "$TRIM_WARN"
+    fi
+  else
+    warn "Trimming failed/unsupported; using original config ($TRIM_MSG)"
+  fi
+else
+  log "Smoke trim skipped (SMOKE_TRIM_CONFIG=0); using original config"
+fi
+
 check_py() {
   local target="$1"
   local path="$PROJECT_ROOT/$target"
