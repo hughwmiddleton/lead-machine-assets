@@ -523,6 +523,7 @@ LASTFM_BRAND_KEYWORDS = (
 PROFILE_URL_CANDIDATES = (
     "Source URL",
     "Profile URL",
+    "Bandcamp_URL",
     "Profile",
     "Artist URL",
     "Artist Link",
@@ -562,6 +563,7 @@ SEED_LINK_COLUMNS = (
     "SoundCloud URL",
     "Bandcamp Link",
     "Bandcamp URL",
+    "Bandcamp_URL",
     "Last.fm URL",
     "LastFM URL",
     "Source URL",
@@ -601,6 +603,7 @@ DIRECTORY_WEBSITE_COLUMNS = (
     "Linktree",
     "Link Tree",
     "Linktr.ee",
+    "Bandcamp_URL",
     "Bandcamp Link",
     "SoundCloud Link",
     "SoundCloud URL",
@@ -3633,6 +3636,7 @@ class CrossDirectoryEnricherWorker(QThread):
                 # Reset per-run SoundCloud cache for deterministic Night Mode attempts.
                 self._night_sc_cache = {}
             if total == 0:
+                seed_df = self._ensure_bandcamp_output_columns(seed_df)
                 _ensure_parent_dir(self.output_csv_path)
                 try:
                     seed_df.head(0).to_csv(self.output_csv_path, index=False, encoding="utf-8-sig")
@@ -3654,16 +3658,30 @@ class CrossDirectoryEnricherWorker(QThread):
                 "Primary Genre",
                 "Release Date",
                 "Facebook_URL",
+                "Bandcamp_URL",
             ]
             # Bandcamp status columns (diagnostic)
-            for bc_col in ("BC_Status", "BC_Mode", "BC_Attempts", "BC_403_Count"):
+            bc_diag_columns = ("BC_Status", "BC_Mode", "BC_Attempts", "BC_403_Count")
+            for bc_col in bc_diag_columns:
                 if bc_col not in seed_df.columns:
                     seed_df[bc_col] = ""
+                seed_df[bc_col] = seed_df[bc_col].fillna("").astype(str)
             match_score_column = "Match_Score"
             for column in required_columns:
                 if column not in seed_df.columns:
                     seed_df[column] = ""
                 seed_df[column] = seed_df[column].fillna("").astype(str)
+            # Canonical Bandcamp column + backfill from existing profile URLs (Bandcamp seeds).
+            bandcamp_url_col = "Bandcamp_URL"
+            profile_url_col = "Profile URL"
+            seed_df[bandcamp_url_col] = seed_df[bandcamp_url_col].apply(_canonicalise_bandcamp_url)
+            if profile_url_col in seed_df.columns:
+                profile_canon = seed_df[profile_url_col].fillna("").astype(str).apply(_canonicalise_bandcamp_url)
+                profile_is_bandcamp = profile_canon.str.contains("bandcamp.com", case=False, na=False)
+                needs_bandcamp = seed_df[bandcamp_url_col].fillna("").astype(str).str.strip() == ""
+                copy_mask = profile_is_bandcamp & needs_bandcamp
+                if copy_mask.any():
+                    seed_df.loc[copy_mask, bandcamp_url_col] = profile_canon[copy_mask]
             if getattr(self, "night_mode", False):
                 for column in ("SC_Status", "SC_Reason", "SC_Fetches", "SC_ms"):
                     if column not in seed_df.columns:
@@ -3804,10 +3822,17 @@ class CrossDirectoryEnricherWorker(QThread):
                                 if "soundcloud" not in sources_logged:
                                     sources_logged.append("soundcloud")
                 if self.enable_live_search:
+                    bandcamp_url_present = False
+                    if "Bandcamp_URL" in seed_df.columns:
+                        bandcamp_url_present = bool(_coerce_directory_value(seed_df.at[row_idx, "Bandcamp_URL"]))
                     skip_soundcloud = bool(_coerce_directory_value(seed_df.at[row_idx, "SoundCloud Link"]))
                     if getattr(self, "_sc_live_enrich_disabled", False):
                         skip_soundcloud = True
-                    payload = self._live_lookup(artist, skip_soundcloud=skip_soundcloud)
+                    payload = self._live_lookup(
+                        artist,
+                        skip_soundcloud=skip_soundcloud,
+                        skip_bandcamp=bandcamp_url_present,
+                    )
                     if not getattr(self, "night_mode", False) and self._mark_sc_blocked_row(seed_df, row_idx):
                         self._update_progress(position, total)
                         continue
@@ -3950,6 +3975,7 @@ class CrossDirectoryEnricherWorker(QThread):
                 if self._bc_search_breaker_tripped:
                     summary_parts.append(f"breaker=1 reason={self._bc_search_breaker_reason or 'unknown'}")
                 self.log_message.emit(f"[Enricher] Bandcamp summary: " + " ".join(summary_parts))
+            seed_df = self._ensure_bandcamp_output_columns(seed_df)
             _ensure_parent_dir(self.output_csv_path)
             try:
                 seed_df.to_csv(self.output_csv_path, index=False, encoding="utf-8-sig")
@@ -3971,6 +3997,26 @@ class CrossDirectoryEnricherWorker(QThread):
         }
         self._sc_blocked_for_row = False
         self._last_bc_row_stats = {}
+
+    def _ensure_bandcamp_output_columns(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Guarantee Bandcamp output + diagnostic columns exist and are string typed.
+        Also canonicalise and backfill Bandcamp_URL from Profile URL when applicable.
+        """
+        bc_cols = ["Bandcamp_URL", "BC_Status", "BC_Mode", "BC_Attempts", "BC_403_Count"]
+        for col in bc_cols:
+            if col not in df.columns:
+                df[col] = ""
+            df[col] = df[col].fillna("").astype(str)
+        df["Bandcamp_URL"] = df["Bandcamp_URL"].apply(_canonicalise_bandcamp_url)
+        if "Profile URL" in df.columns:
+            profile_canon = df["Profile URL"].fillna("").astype(str).apply(_canonicalise_bandcamp_url)
+            needs_bandcamp = df["Bandcamp_URL"].fillna("").astype(str).str.strip() == ""
+            profile_is_bandcamp = profile_canon.str.contains("bandcamp.com", case=False, na=False)
+            mask = needs_bandcamp & profile_is_bandcamp
+            if mask.any():
+                df.loc[mask, "Bandcamp_URL"] = profile_canon[mask]
+        return df
 
     # ---------------- Bandcamp resilience helpers ----------------
     def _bc_reset_row_stats(self) -> None:
@@ -4318,6 +4364,17 @@ class CrossDirectoryEnricherWorker(QThread):
             df.at[row_idx, "Email"] = MULTI_VALUE_SEPARATOR.join(sorted(emails_all))
         if (
             payload.source_dir
+            and payload.source_dir.startswith("bandcamp")
+            and payload.source_url
+            and "Bandcamp_URL" in df.columns
+        ):
+            canonical_bc = _canonicalise_bandcamp_url(payload.source_url)
+            if canonical_bc and "bandcamp.com" in canonical_bc.lower():
+                current_bc = _coerce_directory_value(df.at[row_idx, "Bandcamp_URL"])
+                if not current_bc:
+                    df.at[row_idx, "Bandcamp_URL"] = canonical_bc
+        if (
+            payload.source_dir
             and payload.source_dir.startswith("soundcloud")
             and payload.source_url
             and "SoundCloud Link" in df.columns
@@ -4398,19 +4455,39 @@ class CrossDirectoryEnricherWorker(QThread):
             updated = True
         return updated
 
-    def _live_lookup(self, artist_name: str, skip_soundcloud: bool = False) -> Optional[EnrichmentPayload]:
+    def _live_lookup(
+        self,
+        artist_name: str,
+        skip_soundcloud: bool = False,
+        skip_bandcamp: bool = False,
+    ) -> Optional[EnrichmentPayload]:
         if not artist_name:
             return None
         self._bc_reset_row_stats()
+        if skip_bandcamp:
+            self._last_bc_row_stats.update(
+                {
+                    "status": "skipped_existing_url",
+                    "mode": "skip",
+                    "attempts": self._last_bc_row_stats.get("attempts", 0),
+                    "http_403": self._last_bc_row_stats.get("http_403", 0),
+                }
+            )
+            self._set_platform_state("bandcamp", "skipped")
         if self.max_live_searches > 0 and self.live_search_attempts >= self.max_live_searches:
             if not self._notified_limit:
                 self.log_message.emit(
                     "[Enricher] Live search limit reached; skipping live lookups"
                 )
                 self._notified_limit = True
+            if not skip_bandcamp:
+                self._last_bc_row_stats.update({"status": "skipped_live_limit", "mode": "skip"})
             return None
         best_payload: Optional[EnrichmentPayload] = None
-        for source in ("bandcamp", "soundcloud", "lastfm"):
+        sources: Tuple[str, ...] = ("bandcamp", "soundcloud", "lastfm")
+        if skip_bandcamp:
+            sources = ("soundcloud", "lastfm")
+        for source in sources:
             payload = None
             if source == "bandcamp":
                 payload = self._live_search_bandcamp(artist_name)
