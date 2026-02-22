@@ -10,6 +10,7 @@ import json
 import math
 import os
 import re
+import random
 import threading
 import time
 import unicodedata
@@ -74,6 +75,18 @@ MIN_BC_CONFIDENCE = 0.92
 MIN_LF_CONFIDENCE = 0.9
 STRICT_MATCHING = True
 MATCH_THRESHOLD = 0.7
+
+# Bandcamp live-search resilience (T0X1)
+BC_SEARCH_RETRY_MAX = 3
+BC_BACKOFF_BASE = 0.6
+BC_BACKOFF_MAX = 4.0
+BC_QUERY_GAP_MIN = 0.2
+BC_QUERY_GAP_MAX = 0.6
+BC_BREAKER_CONSEC_403 = 5
+BC_BREAKER_RATE_THRESHOLD = 0.8
+BC_BREAKER_MIN_ATTEMPTS = 10
+BC_FALLBACK_MAX_PER_RUN = 12
+BC_FALLBACK_MAX_SLUGS = 4
 
 ENABLE_FACEBOOK_ENRICHMENT = True
 FACEBOOK_SEARCH_URL = "https://www.facebook.com/search/pages/"
@@ -1042,6 +1055,36 @@ def _build_session() -> requests.Session:
             "Connection": "close",
         }
     )
+    return session
+
+
+# ---------------------------------------------------------------------------
+# Bandcamp-specific HTTP profile (polite, reusable)
+# ---------------------------------------------------------------------------
+_BC_UAS = [
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_5_1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_5_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15",
+]
+
+
+def _build_bandcamp_session() -> requests.Session:
+    session = requests.Session()
+    ua = random.choice(_BC_UAS)
+    session.headers.update(
+        {
+            "User-Agent": ua,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-AU,en;q=0.9",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Referer": "https://bandcamp.com/",
+            "Connection": "keep-alive",
+        }
+    )
+    adapter = requests.adapters.HTTPAdapter(pool_connections=16, pool_maxsize=32, max_retries=0)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
     return session
 
 
@@ -2988,6 +3031,33 @@ def _bandcamp_confidence(artist_name: str, display_name: str, profile_url: str, 
     return max(0.0, min(score, 1.0))
 
 
+def _bc_slug_candidates(artist_name: str) -> List[str]:
+    """
+    Conservative slug guesses for https://{slug}.bandcamp.com
+    - lower, accent-free, alnum only
+    - space joiners: none or hyphen
+    - drop leading 'the ' variant
+    """
+    norm = normalize_name(artist_name)
+    if not norm:
+        return []
+    words = [re.sub(r"[^a-z0-9]+", "", w) for w in norm.split() if re.sub(r"[^a-z0-9]+", "", w)]
+    if not words:
+        return []
+    variants = []
+    def _push(parts):
+        slug = "".join(parts)
+        if slug and slug not in variants:
+            variants.append(slug)
+        hy = "-".join(parts)
+        if hy and hy not in variants:
+            variants.append(hy)
+    _push(words)
+    if words[0] == "the" and len(words) > 1:
+        _push(words[1:])
+    return variants[:BC_FALLBACK_MAX_SLUGS]
+
+
 def _lastfm_confidence(artist_name: str, candidate_name: str) -> float:
     artist_norm = normalize_name(artist_name)
     cand_norm = normalize_name(candidate_name)
@@ -3452,6 +3522,7 @@ class CrossDirectoryEnricherWorker(QThread):
         self.enable_live_search = enable_live_search
         self.max_live_searches = max_live_searches
         self.session = _build_session()
+        self._bc_session = _build_bandcamp_session()
         self.live_search_attempts = 0
         self._notified_limit = False
         self._sc_live_enrich_disabled: bool = False
@@ -3471,6 +3542,18 @@ class CrossDirectoryEnricherWorker(QThread):
         self._sc_html_challenge_count: int = 0
         self._sc_rss_fail_streak: int = 0
         self._sc_rss_only_logged: bool = False
+        # Bandcamp run-state
+        self._bc_search_attempts: int = 0
+        self._bc_total_403: int = 0
+        self._bc_consecutive_403: int = 0
+        self._bc_search_breaker_tripped: bool = False
+        self._bc_search_breaker_reason: str = ""
+        self._bc_fallback_used: int = 0
+        self._bc_fallback_matches: int = 0
+        self._bc_matches: int = 0
+        self._bc_no_match: int = 0
+        self._bc_breaker_logged: bool = False
+        self._last_bc_row_stats: Dict[str, Any] = {}
 
     def run(self) -> None:
         try:
@@ -3572,6 +3655,10 @@ class CrossDirectoryEnricherWorker(QThread):
                 "Release Date",
                 "Facebook_URL",
             ]
+            # Bandcamp status columns (diagnostic)
+            for bc_col in ("BC_Status", "BC_Mode", "BC_Attempts", "BC_403_Count"):
+                if bc_col not in seed_df.columns:
+                    seed_df[bc_col] = ""
             match_score_column = "Match_Score"
             for column in required_columns:
                 if column not in seed_df.columns:
@@ -3730,6 +3817,17 @@ class CrossDirectoryEnricherWorker(QThread):
                         )
                         if applied:
                             enriched = True
+                    # Persist Bandcamp diagnostics (per-row)
+                    bc_stats = getattr(self, "_last_bc_row_stats", {}) or {}
+                    if bc_stats:
+                        if "BC_Status" in seed_df.columns:
+                            seed_df.at[row_idx, "BC_Status"] = bc_stats.get("status", "")
+                        if "BC_Mode" in seed_df.columns:
+                            seed_df.at[row_idx, "BC_Mode"] = bc_stats.get("mode", "")
+                        if "BC_Attempts" in seed_df.columns:
+                            seed_df.at[row_idx, "BC_Attempts"] = bc_stats.get("attempts", "")
+                        if "BC_403_Count" in seed_df.columns:
+                            seed_df.at[row_idx, "BC_403_Count"] = bc_stats.get("http_403", "")
                 if ENABLE_FACEBOOK_ENRICHMENT and fb_driver:
                     fb_attempted = False
                     fb_matched = False
@@ -3838,6 +3936,20 @@ class CrossDirectoryEnricherWorker(QThread):
                         f"[Enricher] Row {position}/{total}: no enrichment for {artist!r}."
                     )
                 self._update_progress(position, total)
+            # Bandcamp per-run summary (low noise)
+            if self._bc_search_attempts:
+                summary_parts = [
+                    f"attempts={self._bc_search_attempts}",
+                    f"matches={self._bc_matches}",
+                    f"no_match={self._bc_no_match}",
+                    f"403s={self._bc_total_403}",
+                ]
+                if self._bc_fallback_used:
+                    summary_parts.append(f"fallback_used={self._bc_fallback_used}")
+                    summary_parts.append(f"fallback_matches={self._bc_fallback_matches}")
+                if self._bc_search_breaker_tripped:
+                    summary_parts.append(f"breaker=1 reason={self._bc_search_breaker_reason or 'unknown'}")
+                self.log_message.emit(f"[Enricher] Bandcamp summary: " + " ".join(summary_parts))
             _ensure_parent_dir(self.output_csv_path)
             try:
                 seed_df.to_csv(self.output_csv_path, index=False, encoding="utf-8-sig")
@@ -3858,6 +3970,78 @@ class CrossDirectoryEnricherWorker(QThread):
             "facebook": "pending",
         }
         self._sc_blocked_for_row = False
+        self._last_bc_row_stats = {}
+
+    # ---------------- Bandcamp resilience helpers ----------------
+    def _bc_reset_row_stats(self) -> None:
+        self._last_bc_row_stats = {
+            "status": "pending",
+            "mode": "",
+            "attempts": 0,
+            "http_403": 0,
+        }
+
+    def _bc_record_attempt(self, status_code: Optional[int]) -> None:
+        self._bc_search_attempts += 1
+        if status_code == 403:
+            self._bc_total_403 += 1
+            self._bc_consecutive_403 += 1
+            self._last_bc_row_stats["http_403"] = self._last_bc_row_stats.get("http_403", 0) + 1
+        else:
+            self._bc_consecutive_403 = 0
+        self._last_bc_row_stats["attempts"] = self._last_bc_row_stats.get("attempts", 0) + 1
+        # Breaker logic: consecutive 403s OR high 403 rate after enough attempts.
+        if not self._bc_search_breaker_tripped:
+            if self._bc_consecutive_403 >= BC_BREAKER_CONSEC_403:
+                self._bc_search_breaker_tripped = True
+                self._bc_search_breaker_reason = f"consecutive_403>={BC_BREAKER_CONSEC_403}"
+            elif (
+                self._bc_search_attempts >= BC_BREAKER_MIN_ATTEMPTS
+                and self._bc_total_403 / max(1, self._bc_search_attempts) >= BC_BREAKER_RATE_THRESHOLD
+            ):
+                self._bc_search_breaker_tripped = True
+                self._bc_search_breaker_reason = f"403_rate>={BC_BREAKER_RATE_THRESHOLD:.2f}"
+
+    def _bc_should_skip_search(self) -> bool:
+        return self._bc_search_breaker_tripped
+
+    def _bc_gap(self) -> None:
+        time.sleep(random.uniform(BC_QUERY_GAP_MIN, BC_QUERY_GAP_MAX))
+
+    def _bc_backoff_sleep(self, attempt: int) -> None:
+        delay = min(BC_BACKOFF_MAX, BC_BACKOFF_BASE * (2 ** max(0, attempt - 1)))
+        jitter = random.uniform(0, 0.35)
+        time.sleep(delay + jitter)
+
+    def _bc_http_get(self, url: str, label: str = "Bandcamp search") -> Tuple[Optional[str], Optional[int]]:
+        """
+        Perform a polite GET with bounded retries for Bandcamp endpoints.
+        Returns (html, status_code).
+        """
+        attempt = 0
+        last_status = None
+        while attempt < BC_SEARCH_RETRY_MAX:
+            attempt += 1
+            try:
+                resp = self._bc_session.get(url, timeout=HTTP_TIMEOUT)
+                last_status = getattr(resp, "status_code", None)
+                self._bc_record_attempt(last_status)
+                if last_status == 200:
+                    return resp.text, last_status
+                if last_status in (403, 429) or (last_status and last_status >= 500):
+                    if attempt < BC_SEARCH_RETRY_MAX:
+                        self._bc_backoff_sleep(attempt)
+                        continue
+                    return None, last_status
+                # Other non-OK -> no retry to avoid noise
+                return None, last_status
+            except requests.RequestException:
+                self._bc_record_attempt(None)
+                if attempt < BC_SEARCH_RETRY_MAX:
+                    self._bc_backoff_sleep(attempt)
+                    continue
+                return None, None
+        return None, last_status
 
     def _flag_sc_blocked(self, status_code: Optional[int] = None, html: str = "") -> None:
         global _SC_HEALTHCHECK_LOGGED
@@ -4217,6 +4401,7 @@ class CrossDirectoryEnricherWorker(QThread):
     def _live_lookup(self, artist_name: str, skip_soundcloud: bool = False) -> Optional[EnrichmentPayload]:
         if not artist_name:
             return None
+        self._bc_reset_row_stats()
         if self.max_live_searches > 0 and self.live_search_attempts >= self.max_live_searches:
             if not self._notified_limit:
                 self.log_message.emit(
@@ -4256,25 +4441,39 @@ class CrossDirectoryEnricherWorker(QThread):
         return True
 
     def _live_search_bandcamp(self, artist_name: str) -> Optional[EnrichmentPayload]:
+        # Skip if already attempted for this row
         if not self._platform_attempt_allowed("bandcamp", artist_name, "Bandcamp Enrich"):
+            self._last_bc_row_stats["status"] = "skipped"
+            return None
+        if self._bc_should_skip_search():
+            reason = self._bc_search_breaker_reason or "breaker_active"
+            if not self._bc_breaker_logged:
+                self.log_message.emit(
+                    f"[Enricher] Bandcamp: circuit breaker active ({reason}); skipping further live searches this run."
+                )
+                self._bc_breaker_logged = True
+            self._last_bc_row_stats.update({"status": "skipped_circuit_breaker", "mode": "skip"})
+            self._set_platform_state("bandcamp", "skipped")
             return None
         if not self._increment_live_counter():
             self._set_platform_state("bandcamp", "skipped")
+            self._last_bc_row_stats["status"] = "skipped_live_limit"
             return None
+
         song_title = _clean_cell(getattr(self, "_live_context", {}).get("song_title", ""))
         queries = build_bandcamp_queries(artist_name, song_title)
 
         def _search(query: str) -> Tuple[Optional[EnrichmentPayload], float, float]:
             quoted = urllib.parse.quote_plus(query)
             url = f"https://bandcamp.com/search?q={quoted}&item_type=b"
-            self.log_message.emit(f"[Enricher] Bandcamp live search: {url}")
-            html = self._fetch_url(url, label="Bandcamp search")
+            html, status = self._bc_http_get(url, label="Bandcamp search")
+            if status == 403 and self._bc_search_breaker_tripped:
+                return (None, 0.0, 0.0)
             if not html:
                 return (None, 0.0, 0.0)
             soup = BeautifulSoup(html, "html.parser")
             first_link = soup.select_one("li.searchresult a.itemurl, li.searchresult a[href*='bandcamp.com']")
             if not first_link:
-                self.log_message.emit("[Enricher] Bandcamp search: no results found.")
                 return (None, 0.0, 0.0)
             display_name = ""
             parent_li = first_link.find_parent("li")
@@ -4288,7 +4487,6 @@ class CrossDirectoryEnricherWorker(QThread):
                 display_name = first_link.get_text(" ", strip=True)
             profile_url = (first_link.get("href") or "").strip()
             if not profile_url:
-                self.log_message.emit("[Enricher] Bandcamp search result missing href.")
                 return (None, 0.0, 0.0)
             artist_norm = normalize_name(artist_name)
             bc_name_norm = normalize_name(display_name)
@@ -4306,29 +4504,14 @@ class CrossDirectoryEnricherWorker(QThread):
                     or bc_name_norm in artist_norm
                     or prefix_match
                 ):
-                    self.log_message.emit(
-                        f"[Enricher] Bandcamp candidate '{display_name or profile_url}' rejected for artist '{artist_name}' (name mismatch)."
-                    )
                     return (None, 0.0, 0.0)
-            confidence = _bandcamp_confidence(artist_name, display_name, profile_url, song_title=song_title if query != artist_name else "")
+            confidence = _bandcamp_confidence(
+                artist_name, display_name, profile_url, song_title=song_title if query != artist_name else ""
+            )
             rank_confidence = _locale_rank_score(confidence, display_name, profile_url)
             payload: Optional[EnrichmentPayload] = None
-            outcome_suffix = ""
             if confidence >= MIN_BC_CONFIDENCE:
                 payload = self._fetch_profile_and_build(profile_url, "bandcamp", confidence=confidence)
-                fetch_ok_flag = getattr(self, "_last_fetch_ok", None)
-                actionable_flag = _payload_actionable(payload)
-                if fetch_ok_flag is False and actionable_flag is None:
-                    actionable_flag = False
-                outcome_suffix = _format_outcome_suffix(
-                    fetch_ok=fetch_ok_flag,
-                    actionable=actionable_flag,
-                    http_status=getattr(self, "_last_http_status", None),
-                )
-            self.log_message.emit(
-                f"[Enricher] Bandcamp Enrich: best candidate '{profile_url}' for '{artist_name}' has confidence={confidence:.2f}{outcome_suffix}"
-            )
-            if confidence >= MIN_BC_CONFIDENCE:
                 if payload:
                     payload.match_score = self._compute_match_score_for_candidate(
                         display_name or profile_url,
@@ -4336,14 +4519,13 @@ class CrossDirectoryEnricherWorker(QThread):
                         extract_domain(profile_url),
                     )
                     payload.candidate_name = display_name or ""
-                return (payload, confidence, rank_confidence)
-            return (None, confidence, rank_confidence)
+            return (payload, confidence, rank_confidence)
 
         best_payload: Optional[EnrichmentPayload] = None
         best_score = 0.0
         best_rank_score = 0.0
         best_match_score = 0.0
-        for query in queries:
+        for idx, query in enumerate(queries):
             payload, confidence, rank_confidence = _search(query)
             candidate_match = getattr(payload, "match_score", 0.0) if payload else 0.0
             if payload and (
@@ -4363,14 +4545,108 @@ class CrossDirectoryEnricherWorker(QThread):
                 best_rank_score = max(best_rank_score, rank_confidence)
             if best_payload and best_score >= 0.95 and '"' in query:
                 break
+            if idx < len(queries) - 1:
+                self._bc_gap()
+
         if best_payload:
             self._set_platform_state("bandcamp", "matched")
+            self._last_bc_row_stats.update(
+                {"status": "ok", "mode": "search", "attempts": self._last_bc_row_stats.get("attempts", 0)}
+            )
+            self._bc_matches += 1
+            self.log_message.emit(
+                f"[Enricher] Bandcamp: status=ok mode=search attempts={self._last_bc_row_stats.get('attempts', 0)} 403={self._last_bc_row_stats.get('http_403', 0)} artist='{artist_name}'"
+            )
             return best_payload
+
+        # If search failed or breaker tripped mid-run, try slug fallback (bounded).
+        fallback_payload = None
+        if self._bc_fallback_used < BC_FALLBACK_MAX_PER_RUN:
+            fallback_payload = self._bc_slug_fallback(artist_name, song_title)
+            if fallback_payload:
+                self._bc_fallback_matches += 1
+        if fallback_payload:
+            self._set_platform_state("bandcamp", "matched")
+            self._last_bc_row_stats.update(
+                {"status": "fallback_ok", "mode": "fallback_guess", "attempts": self._last_bc_row_stats.get("attempts", 0)}
+            )
+            self._bc_matches += 1
+            self.log_message.emit(
+                f"[Enricher] Bandcamp: status=fallback_ok mode=fallback_guess attempts={self._last_bc_row_stats.get('attempts', 0)} 403={self._last_bc_row_stats.get('http_403', 0)} artist='{artist_name}'"
+            )
+            return fallback_payload
+
+        # Record breaker log once if tripped during this row.
+        if self._bc_search_breaker_tripped and self._bc_search_breaker_reason:
+            if not self._bc_breaker_logged:
+                self.log_message.emit(
+                    f"[Enricher] Bandcamp: circuit breaker engaged (reason={self._bc_search_breaker_reason}, attempts={self._bc_search_attempts}, 403s={self._bc_total_403}). Skipping further BC searches this run."
+                )
+                self._bc_breaker_logged = True
+
         best_confidence_display = max(best_score, best_rank_score)
+        status_label = "blocked_403" if self._bc_consecutive_403 or self._bc_total_403 else "no_match"
+        mode_label = "search" if not self._bc_search_breaker_tripped else "skip"
+        if fallback_payload is None and self._bc_fallback_used >= BC_FALLBACK_MAX_PER_RUN:
+            mode_label = "fallback_exhausted"
+        self._last_bc_row_stats.update(
+            {
+                "status": status_label if status_label != "blocked_403" or best_confidence_display == 0 else status_label,
+                "mode": mode_label,
+                "attempts": self._last_bc_row_stats.get("attempts", 0),
+            }
+        )
+        self._bc_no_match += 1
         self.log_message.emit(
-            f"[Enricher] Bandcamp Enrich: no safe match for '{artist_name}' (best_confidence={best_confidence_display:.2f}), skipping."
+            f"[Enricher] Bandcamp: status={self._last_bc_row_stats.get('status','no_match')} mode={mode_label} attempts={self._last_bc_row_stats.get('attempts', 0)} 403={self._last_bc_row_stats.get('http_403', 0)} artist='{artist_name}'"
         )
         self._set_platform_state("bandcamp", "skipped")
+        return None
+
+    def _bc_slug_fallback(self, artist_name: str, song_title: str) -> Optional[EnrichmentPayload]:
+        """
+        Conservative fallback: test a few band subdomain guesses and verify with confidence gate.
+        """
+        slugs = _bc_slug_candidates(artist_name)
+        if not slugs:
+            return None
+        used = 0
+        for slug in slugs:
+            if self._bc_fallback_used >= BC_FALLBACK_MAX_PER_RUN:
+                break
+            used += 1
+            self._bc_fallback_used += 1
+            url = f"https://{slug}.bandcamp.com/"
+            html, status = self._bc_http_get(url, label="Bandcamp slug")
+            if status == 403 and self._bc_search_breaker_tripped:
+                break
+            if status and status != 200:
+                continue
+            title_text = ""
+            if html:
+                try:
+                    soup = BeautifulSoup(html, "html.parser")
+                    title_el = soup.find("title")
+                    if title_el:
+                        title_text = title_el.get_text(" ", strip=True)
+                    if not title_text:
+                        h1 = soup.find("h1")
+                        if h1:
+                            title_text = h1.get_text(" ", strip=True)
+                except Exception:
+                    title_text = ""
+            display_name = title_text or slug
+            confidence = _bandcamp_confidence(artist_name, display_name, url, song_title=song_title)
+            if confidence >= MIN_BC_CONFIDENCE:
+                payload = self._fetch_profile_and_build(url, "bandcamp", confidence=confidence)
+                if payload:
+                    payload.match_score = self._compute_match_score_for_candidate(
+                        display_name or url,
+                        song_title,
+                        extract_domain(url),
+                    )
+                    payload.candidate_name = display_name or ""
+                    return payload
         return None
 
     def _start_night_sc_attempt(self) -> _NightSCAttempt:
