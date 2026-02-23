@@ -921,7 +921,7 @@ def run_master_enrichment(
         run_dir = Path(output_csv_path).resolve().parent
         if bandcamp_path_final:
             _safe_log(logger, f"[Master] Bandcamp directory CSV -> {bandcamp_path_final} (explicit)")
-        elif not night_mode:
+        else:
             try:
                 BC_DETECT_RETRIES = 6
                 BC_DETECT_SLEEP_S = 1.0
@@ -980,8 +980,6 @@ def run_master_enrichment(
                     _safe_log(logger, f"[Master] Bandcamp directory CSV -> (none) in {run_dir} (attempts={BC_DETECT_RETRIES})")
             except Exception as exc:
                 _safe_log(logger, f"[Master] Bandcamp directory CSV detection failed: {type(exc).__name__}: {exc}")
-        else:
-            _safe_log(logger, f"[Master] Bandcamp directory CSV -> (none) in {run_dir}")
         _safe_log(logger, f"[Master] Passing bandcamp_csv_path={bandcamp_path_final or ''}")
 
         max_live = getattr(cross_directory_enricher, "LIVE_SEARCH_MAX_ATTEMPTS", 50)
