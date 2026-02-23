@@ -371,7 +371,24 @@ else
 fi
 
 if [[ -n "$MASTER_RAW" ]]; then
-  log "master_raw.csv header:"; head -n 1 "$MASTER_RAW" || true
+log "master_raw.csv header:"; head -n 1 "$MASTER_RAW" || true
+
+# Guard against newline-only raw CSVs
+bad_raws=()
+while IFS= read -r f; do
+  size=$(stat -f%z "$f" 2>/dev/null || stat -c%s "$f" 2>/dev/null || echo 0)
+  header=$(head -n 1 "$f" 2>/dev/null || echo "")
+  if [[ "$size" -eq 1 || -z "${header//[$' \t\r\n']}" ]]; then
+    bad_raws+=("$f:$size")
+  fi
+done < <(find "$RUN_ROOT" -type f -name "raw.csv" -print)
+if [[ ${#bad_raws[@]} -gt 0 ]]; then
+  printf '[FAIL] Detected empty-header raw CSV(s):\n' >&2
+  for r in "${bad_raws[@]}"; do
+    printf '  %s\n' "$r" >&2
+  done
+  exit 2
+fi
 fi
 
 if grep -qi "row_index is not defined" "$SMOKE_CONSOLE" ${CONTACT_LOG:+"$CONTACT_LOG"}; then

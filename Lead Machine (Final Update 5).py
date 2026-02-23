@@ -773,6 +773,44 @@ def _ensure_parent_dir(path: str):
     except Exception:
         pass
 
+
+def _atomic_write_dataframe(df: pd.DataFrame, path: str):
+    """Write DataFrame atomically to path via temp file + fsync."""
+    target = Path(path)
+    _ensure_parent_dir(str(target))
+    tmp_path = target.with_suffix(target.suffix + ".tmp")
+    try:
+        with open(tmp_path, "w", newline="", encoding="utf-8-sig") as handle:
+            df.to_csv(handle, index=False)
+            try:
+                handle.flush()
+                os.fsync(handle.fileno())
+            except OSError:
+                pass
+        os.replace(tmp_path, target)
+    except Exception:
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except Exception:
+            pass
+        raise
+
+
+def _safe_atomic_write_csv(df, path: str, fallback_columns: list[str], reason: str = ""):
+    """
+    Pandas writes a lone newline when a DataFrame has zero columns; guard with fallback headers.
+    Always writes via atomic temp+replace to avoid partial files.
+    """
+    if df is None:
+        df = pd.DataFrame(columns=fallback_columns)
+    elif not isinstance(df, pd.DataFrame):
+        df = pd.DataFrame(df)
+    if not getattr(df, "columns", None) or len(df.columns) == 0:
+        df = pd.DataFrame(columns=fallback_columns)
+    print(f"[CSV WRITE]{' ' + reason if reason else ''} rows={len(df)} cols={len(df.columns)} path={path}")
+    _atomic_write_dataframe(df, path)
+
 def _write_empty_csv_with_headers(path: str):
     _ensure_parent_dir(path)
     headers = [
@@ -1335,7 +1373,6 @@ def scrape_artist_profile(driver, profile_url, fb_driver=None):
     return social_links, location, song_title, sounds_like, artist_name, release_date, primary_genre_value, unearthed_genre_raw, email_value
 
 def save_to_csv(data, filename):
-    _ensure_parent_dir(filename)
     headers = [
         'Artist Name', 'Location', 'Song Title', 'Sounds Like', 'Social Link', 'SoundCloud Link',
         'Played on triple J', 'Played on Unearthed', 'Release Date', 'Primary Genre', 'Unearthed_Genre_Raw', 'Bandcamp_Source_Mode', 'Bandcamp_Search_Domain', 'Date Added', 'Email'
@@ -1343,7 +1380,7 @@ def save_to_csv(data, filename):
     current_date = datetime.datetime.now().strftime("%Y-%m-%d")
 
     if not data:
-        pd.DataFrame(columns=headers).to_csv(filename, index=False, encoding="utf-8-sig")
+        _atomic_write_dataframe(pd.DataFrame(columns=headers), filename)
         print(f"Created empty CSV with headers at {filename}")
         return
 
@@ -1410,7 +1447,7 @@ def save_to_csv(data, filename):
         combined["Song Title"] = combined["Song Title"].apply(_dedupe_song_title_value)
     if not combined.empty:
         combined = combined.drop_duplicates(subset=['Artist Name', 'Social Link'])
-    combined.to_csv(filename, index=False, encoding="utf-8-sig")
+    _atomic_write_dataframe(combined, filename)
     print(f"Data saved to {filename}")
 
 
@@ -3442,8 +3479,7 @@ def scrape_bandcamp(
     else:
         # Ensure the pipeline still produces a tangible CSV, even if location filters prune everything.
         save_to_csv([], existing_csv)
-    if enriched_rows:
-        _bandcamp_write_enriched_csv(enriched_rows, existing_csv)
+    _bandcamp_write_enriched_csv(enriched_rows, existing_csv)
 
 def _bandcamp_base_from_page(page_url: str) -> str:
     if not page_url:
@@ -4437,7 +4473,7 @@ def _bandcamp_write_enriched_csv(rows, existing_csv):
     combined = combined.drop_duplicates(subset="__dedupe_key")
     combined = combined.drop(columns="__dedupe_key")
     combined = combined[columns]
-    combined.to_csv(enriched_path, index=False, encoding="utf-8-sig")
+    _atomic_write_dataframe(combined, enriched_path)
 
 # ---------------------------
 # SoundCloud Helpers
@@ -9105,7 +9141,8 @@ def scrape_csv(input_csv, output_csv, fb_username, fb_password, max_emails=None,
             results_df = _canonicalize_release_date_columns(results_df)
             combined_data = pd.concat([existing_data, results_df]).drop_duplicates(subset=['url', 'emails'])
             combined_data = _finalize_facebook_output_dataframe(combined_data)
-            combined_data.to_csv(output_csv, index=False)
+            fallback_cols = list(existing_data.columns) if isinstance(existing_data, pd.DataFrame) and len(getattr(existing_data, "columns", [])) else ["url", "emails"]
+            _safe_atomic_write_csv(combined_data, output_csv, fallback_cols, reason="facebook_results")
             print(f"Scraping completed. Results saved to {output_csv}")
             final_csv_path = output_csv
             from final_checker import run_final_checker
@@ -9192,7 +9229,8 @@ def scrape_csv(input_csv, output_csv, fb_username, fb_password, max_emails=None,
     results_df = _canonicalize_release_date_columns(results_df)
     combined_data = pd.concat([existing_data, results_df]).drop_duplicates(subset=['url', 'emails'])
     combined_data = _finalize_facebook_output_dataframe(combined_data)
-    combined_data.to_csv(output_csv, index=False)
+    fallback_cols = list(existing_data.columns) if isinstance(existing_data, pd.DataFrame) and len(getattr(existing_data, "columns", [])) else ["url", "emails"]
+    _safe_atomic_write_csv(combined_data, output_csv, fallback_cols, reason="facebook_results")
     print(f"Scraping completed. Results saved to {output_csv}")
     final_csv_path = output_csv
     from final_checker import run_final_checker
@@ -9280,17 +9318,17 @@ class ArtistScraperThread(QtCore.QThread):
                 if not rows:
                     self.log_signal.emit("Spotify scraping returned no rows.")
                 else:
-                    try:
-                        existing_df = pd.read_csv(self.output_csv) if os.path.exists(self.output_csv) else pd.DataFrame()
-                    except Exception:
-                        existing_df = pd.DataFrame()
-                    new_df = pd.DataFrame(rows)
                     spotify_columns = [
                         "Artist Name", "Location", "Song Title", "Sounds Like", "Social Link",
                         "SoundCloud Link", "Played on triple J", "Played on Unearthed",
                         "Release Date", "Primary Genre", "Date Added", "External Links", "Email",
                         "Spotify_URL", "Spotify_Artist_ID", "Spotify_Website_URL"
                     ]
+                    try:
+                        existing_df = pd.read_csv(self.output_csv) if os.path.exists(self.output_csv) else pd.DataFrame()
+                    except Exception:
+                        existing_df = pd.DataFrame()
+                    new_df = pd.DataFrame(rows, columns=spotify_columns)
                     for col in spotify_columns:
                         if col not in new_df.columns:
                             new_df[col] = ""
@@ -9306,8 +9344,8 @@ class ArtistScraperThread(QtCore.QThread):
                     if not column_order:
                         column_order = spotify_columns
                     combined = combined[column_order]
-                    _ensure_parent_dir(self.output_csv)
-                    combined.to_csv(self.output_csv, index=False, encoding="utf-8-sig")
+                    fallback_cols = column_order if column_order else spotify_columns
+                    _safe_atomic_write_csv(combined, self.output_csv, fallback_cols, reason="spotify_gui")
                     self.log_signal.emit(f"Spotify scraping completed with {len(new_df)} rows.")
             else:
                 scrape_website(self.website_url, existing_csv=self.output_csv, max_artists=self.max_artists)

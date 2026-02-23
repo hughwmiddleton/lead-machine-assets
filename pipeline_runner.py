@@ -319,6 +319,44 @@ def _ensure_parent(path: str) -> None:
         os.makedirs(parent, exist_ok=True)
 
 
+def _atomic_write_dataframe(df: pd.DataFrame, path: str) -> None:
+    """Atomic CSV write via temp file + fsync."""
+    target = Path(path)
+    _ensure_parent(str(target))
+    tmp_path = target.with_suffix(target.suffix + ".tmp")
+    try:
+        with open(tmp_path, "w", newline="", encoding="utf-8-sig") as handle:
+            df.to_csv(handle, index=False)
+            try:
+                handle.flush()
+                os.fsync(handle.fileno())
+            except OSError:
+                pass
+        os.replace(tmp_path, target)
+    except Exception:
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except Exception:
+            pass
+        raise
+
+
+def _safe_atomic_write_csv(df, path: str, fallback_columns: List[str], reason: str = "") -> None:
+    """
+    Guard against pandas emitting a lone newline when DataFrame has zero columns.
+    Ensures headers exist, then writes atomically.
+    """
+    if df is None:
+        df = pd.DataFrame(columns=fallback_columns)
+    elif not isinstance(df, pd.DataFrame):
+        df = pd.DataFrame(df)
+    if not getattr(df, "columns", None) or len(df.columns) == 0:
+        df = pd.DataFrame(columns=fallback_columns)
+    print(f"[CSV WRITE]{' ' + reason if reason else ''} rows={len(df)} cols={len(df.columns)} path={path}")
+    _atomic_write_dataframe(df, path)
+
+
 def _cell_str(v) -> str:
     if v is None:
         return ""
@@ -399,11 +437,31 @@ def _maybe_set_email(df: pd.DataFrame, idx: int, new_email: Optional[str]) -> No
     df.at[idx, "Email"] = new_clean
 
 
+RAW_FALLBACK_COLUMNS: List[str] = [
+    "Artist Name",
+    "Location",
+    "Song Title",
+    "Sounds Like",
+    "Social Link",
+    "SoundCloud Link",
+    "Release Date",
+    "Primary Genre",
+    "Date Added",
+    "External Links",
+    "Email",
+    "Source Directory",
+]
+
+
 def _write_rows_to_csv(rows: Iterable[Any], path: str, source_directory: str = "") -> str:
     _ensure_parent(path)
     materialized: List[Any] = list(rows or [])
+    fallback_cols = RAW_FALLBACK_COLUMNS.copy()
     if not materialized:
-        pd.DataFrame().to_csv(path, index=False)
+        df = pd.DataFrame(columns=fallback_cols)
+        if source_directory:
+            df["Source Directory"] = source_directory
+        _safe_atomic_write_csv(df, path, fallback_cols, reason=f"job={source_directory or 'unknown'}")
         return path
     if isinstance(materialized[0], dict):
         columns = []
@@ -421,7 +479,8 @@ def _write_rows_to_csv(rows: Iterable[Any], path: str, source_directory: str = "
         df = pd.DataFrame(materialized)
     if source_directory and "Source Directory" not in df.columns:
         df["Source Directory"] = source_directory
-    df.to_csv(path, index=False)
+    fallback_cols = list(df.columns) if len(getattr(df, "columns", [])) else fallback_cols
+    _safe_atomic_write_csv(df, path, fallback_cols, reason=f"job={source_directory or 'unknown'}")
     return path
 
 
