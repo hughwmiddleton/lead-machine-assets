@@ -38,6 +38,29 @@ _LOGGER = logging.getLogger(__name__)
 EMAIL_PRIORITY_COLS: Sequence[str] = ("Email", "Email_All", "Directory_Email", "Unearthed_Email")
 
 
+def _safe_count_rows(csv_path: Union[str, Path]) -> int:
+    """Cheap row counter that avoids loading the whole CSV; returns total data rows (excludes header if present)."""
+    try:
+        with open(csv_path, "rb") as f:
+            count = sum(1 for _ in f)
+        return max(0, count - 1) if count > 0 else 0
+    except Exception:
+        return 0
+
+
+def _count_csv_rows(csv_path: Path) -> int:
+    """
+    Lightweight row counter for CSVs; counts lines minus header.
+    Returns -1 on error.
+    """
+    try:
+        with open(csv_path, "r", encoding="utf-8-sig", errors="ignore") as f:
+            count = sum(1 for _ in f)
+        return max(0, count - 1) if count > 0 else 0
+    except Exception:
+        return -1
+
+
 def _is_valid_email_shape(email: str) -> bool:
     """Basic, permissive email shape validation."""
     if not email or " " in email:
@@ -878,6 +901,7 @@ def run_master_enrichment(
     enable_live_search: bool = True,
     max_live_searches: Optional[int] = None,
     night_mode: bool = False,
+    bandcamp_csv_path: Optional[str] = None,
 ) -> str:
     """
     Run the cross-directory enricher on a single combined CSV.
@@ -893,6 +917,33 @@ def run_master_enrichment(
         return output_csv_path
 
     try:
+        bandcamp_path_final = bandcamp_csv_path or ""
+        run_dir = Path(output_csv_path).resolve().parent
+        if bandcamp_path_final:
+            _safe_log(logger, f"[Master] Bandcamp directory CSV -> {bandcamp_path_final} (explicit)")
+        elif not night_mode:
+            try:
+                candidates = sorted(run_dir.glob("job_bandcamp_*/bandcamp_enriched.csv"))
+                best_path = None
+                best_rows = -1
+                for path in candidates:
+                    rows = _count_csv_rows(path)
+                    if rows < 0:
+                        continue
+                    if rows > best_rows:
+                        best_rows = rows
+                        best_path = path
+                if best_path and best_rows >= 0:
+                    bandcamp_path_final = best_path.as_posix()
+                    _safe_log(logger, f"[Master] Bandcamp directory CSV -> {bandcamp_path_final} (rows={best_rows})")
+                else:
+                    _safe_log(logger, f"[Master] Bandcamp directory CSV -> (none) in {run_dir}")
+            except Exception as exc:
+                _safe_log(logger, f"[Master] Bandcamp directory CSV detection failed: {type(exc).__name__}: {exc}")
+        else:
+            _safe_log(logger, f"[Master] Bandcamp directory CSV -> (none) in {run_dir}")
+        _safe_log(logger, f"[Master] Passing bandcamp_csv_path={bandcamp_path_final or ''}")
+
         max_live = getattr(cross_directory_enricher, "LIVE_SEARCH_MAX_ATTEMPTS", 50)
         if max_live_searches is not None:
             try:
@@ -905,7 +956,7 @@ def run_master_enrichment(
         cross_directory_enricher.run_cross_directory_enrichment(
             seed_csv_path,
             output_csv_path,
-            bandcamp_csv_path="",
+            bandcamp_csv_path=bandcamp_path_final or "",
             soundcloud_csv_path="",
             unearthed_csv_path="",
             lastfm_csv_path="",

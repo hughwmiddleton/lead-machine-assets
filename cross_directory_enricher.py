@@ -82,11 +82,13 @@ BC_BACKOFF_BASE = 0.6
 BC_BACKOFF_MAX = 4.0
 BC_QUERY_GAP_MIN = 0.2
 BC_QUERY_GAP_MAX = 0.6
+BC_ENABLE_SEARCH_ENDPOINT = False
 BC_BREAKER_CONSEC_403 = 5
 BC_BREAKER_RATE_THRESHOLD = 0.8
 BC_BREAKER_MIN_ATTEMPTS = 10
 BC_FALLBACK_MAX_PER_RUN = 12
 BC_FALLBACK_MAX_SLUGS = 4
+BC_DISCOVER_MAX_FETCHES = 25
 
 ENABLE_FACEBOOK_ENRICHMENT = True
 FACEBOOK_SEARCH_URL = "https://www.facebook.com/search/pages/"
@@ -3557,6 +3559,9 @@ class CrossDirectoryEnricherWorker(QThread):
         self._bc_no_match: int = 0
         self._bc_breaker_logged: bool = False
         self._last_bc_row_stats: Dict[str, Any] = {}
+        self._bc_discover_cache: Dict[str, List[Tuple[str, str]]] = {}
+        self._bc_discover_fetches: int = 0
+        self._directory_indexes: Dict[str, DirectoryIndex] = {}
 
     def run(self) -> None:
         try:
@@ -3579,6 +3584,9 @@ class CrossDirectoryEnricherWorker(QThread):
         self._sc_html_challenge_count = 0
         self._sc_rss_fail_streak = 0
         self._sc_rss_only_logged = False
+        # Bandcamp discover per-run state
+        self._bc_discover_cache = {}
+        self._bc_discover_fetches = 0
         try:
             if ENABLE_FACEBOOK_ENRICHMENT:
                 try:
@@ -3707,6 +3715,7 @@ class CrossDirectoryEnricherWorker(QThread):
                 directory_indexes["soundcloud"] = _load_directory_csv(self.soundcloud_csv_path, "SoundCloud")
             if self.lastfm_csv_path:
                 directory_indexes["lastfm"] = _load_directory_csv(self.lastfm_csv_path, "Last.fm")
+            self._directory_indexes = directory_indexes
             self.log_message.emit(f"[Enricher] Starting enrichment for {total} rows...")
             self.log_message.emit(
                 f"[Enricher] Live search enabled={self.enable_live_search} max={self.max_live_searches}"
@@ -4059,7 +4068,12 @@ class CrossDirectoryEnricherWorker(QThread):
         jitter = random.uniform(0, 0.35)
         time.sleep(delay + jitter)
 
-    def _bc_http_get(self, url: str, label: str = "Bandcamp search") -> Tuple[Optional[str], Optional[int]]:
+    def _bc_http_get(
+        self,
+        url: str,
+        label: str = "Bandcamp search",
+        count_breaker: bool = True,
+    ) -> Tuple[Optional[str], Optional[int]]:
         """
         Perform a polite GET with bounded retries for Bandcamp endpoints.
         Returns (html, status_code).
@@ -4071,7 +4085,8 @@ class CrossDirectoryEnricherWorker(QThread):
             try:
                 resp = self._bc_session.get(url, timeout=HTTP_TIMEOUT)
                 last_status = getattr(resp, "status_code", None)
-                self._bc_record_attempt(last_status)
+                if count_breaker:
+                    self._bc_record_attempt(last_status)
                 if last_status == 200:
                     return resp.text, last_status
                 if last_status in (403, 429) or (last_status and last_status >= 500):
@@ -4082,12 +4097,277 @@ class CrossDirectoryEnricherWorker(QThread):
                 # Other non-OK -> no retry to avoid noise
                 return None, last_status
             except requests.RequestException:
-                self._bc_record_attempt(None)
+                if count_breaker:
+                    self._bc_record_attempt(None)
                 if attempt < BC_SEARCH_RETRY_MAX:
                     self._bc_backoff_sleep(attempt)
                     continue
                 return None, None
         return None, last_status
+
+    def _bc_discover_http_get(self, url: str, label: str = "Bandcamp discover") -> Tuple[Optional[str], Optional[int]]:
+        """
+        Fetch Bandcamp Discover HTML without touching the search breaker counters.
+        Bounded by BC_DISCOVER_MAX_FETCHES for the entire run.
+        """
+        if self._bc_discover_fetches >= BC_DISCOVER_MAX_FETCHES:
+            return None, None
+        self._bc_discover_fetches += 1
+        try:
+            resp = self._bc_session.get(url, timeout=HTTP_TIMEOUT)
+            status = getattr(resp, "status_code", None)
+            if status != 200:
+                return None, status
+            return resp.text, status
+        except requests.RequestException:
+            return None, None
+
+    @staticmethod
+    def _bc_slugify(value: str) -> str:
+        if not value:
+            return ""
+        norm = normalize_name(value)
+        slug = re.sub(r"[^a-z0-9]+", "-", norm).strip("-")
+        return slug
+
+    def _bc_location_slug(self, location: str) -> str:
+        clean_loc = _clean_cell(location)
+        if not clean_loc:
+            return ""
+        parts = [p.strip() for p in clean_loc.split(",") if p.strip()]
+        coarse = parts[-1] if parts else clean_loc
+        slug = self._bc_slugify(coarse)
+        if not slug:
+            slug = self._bc_slugify(clean_loc)
+        return slug
+
+    def _bc_build_discover_urls(self, primary_genre: str, location: str) -> List[str]:
+        genre_slug = self._bc_slugify(primary_genre)
+        loc_slug = self._bc_location_slug(location)
+        urls: List[str] = []
+        if genre_slug and loc_slug:
+            urls.append(f"https://bandcamp.com/discover/{loc_slug}+{genre_slug}?s=new")
+        if genre_slug:
+            urls.append(f"https://bandcamp.com/discover/{genre_slug}?s=new")
+        return urls[:2]
+
+    @staticmethod
+    def _bc_extract_discover_candidates(html: str) -> List[Tuple[str, str]]:
+        """
+        Parse discover HTML and return (display_name, profile_url) tuples.
+        """
+        if not html:
+            return []
+        soup = BeautifulSoup(html, "html.parser")
+        candidates: List[Tuple[str, str]] = []
+        seen_hosts: Set[str] = set()
+        # Prefer structured tiles when present.
+        tiles = soup.select("li.results-grid-item, div.results-grid-item, li[data-band-id], li[data-band-url]")
+        if not tiles:
+            tiles = soup.select("li, div")
+        for tile in tiles:
+            if len(candidates) >= 30:
+                break
+            # Use explicit attrs first.
+            band_url = tile.get("data-band-url") or tile.get("data-band-url-href")
+            display = tile.get("data-band-name") or ""
+            link_el = None
+            if not band_url:
+                link_el = tile.select_one("a[href*='bandcamp.com']")
+                if link_el:
+                    band_url = link_el.get("href") or ""
+            if not band_url:
+                continue
+            band_url = band_url.strip()
+            if not band_url:
+                continue
+            canon = _canonicalise_bandcamp_url(band_url)
+            if not canon or "bandcamp.com" not in canon:
+                continue
+            try:
+                parsed = urllib.parse.urlsplit(canon)
+                host = parsed.netloc
+            except Exception:
+                host = ""
+            if not host or host in seen_hosts:
+                continue
+            seen_hosts.add(host)
+            profile_url = f"https://{host}/"
+            if not display:
+                if tile:
+                    heading = tile.select_one(".heading, .result-info, .title")
+                    if heading:
+                        display = heading.get_text(" ", strip=True)
+                if not display and link_el:
+                    display = link_el.get_text(" ", strip=True)
+                if not display:
+                    display = host.split(".")[0]
+            candidates.append((display, profile_url))
+        if not candidates:
+            # Fallback: crawl anchors to avoid empty result when markup changes.
+            anchors = soup.select("a[href*='bandcamp.com']")
+            for anchor in anchors:
+                if len(candidates) >= 30:
+                    break
+                href = anchor.get("href") or ""
+                canon = _canonicalise_bandcamp_url(href)
+                if not canon or "bandcamp.com" not in canon:
+                    continue
+                try:
+                    parsed = urllib.parse.urlsplit(canon)
+                    host = parsed.netloc
+                except Exception:
+                    host = ""
+                if not host or host in seen_hosts:
+                    continue
+                seen_hosts.add(host)
+                profile_url = f"https://{host}/"
+                display = anchor.get("data-band-name") or anchor.get_text(" ", strip=True) or host.split(".")[0]
+                candidates.append((display, profile_url))
+        return candidates[:30]
+
+    def _bc_discover_enrich(
+        self,
+        artist_name: str,
+        song_title: str,
+        location: str,
+        primary_genre: str,
+    ) -> Tuple[Optional[EnrichmentPayload], bool]:
+        urls = self._bc_build_discover_urls(primary_genre, location)
+        if not urls:
+            return None, False
+        saw_403 = False
+        for idx, url in enumerate(urls):
+            if idx > 0:
+                self._bc_gap()
+            cached = self._bc_discover_cache.get(url)
+            if cached is None:
+                if self._bc_discover_fetches >= BC_DISCOVER_MAX_FETCHES:
+                    break
+                html, status = self._bc_discover_http_get(url, label="Bandcamp discover")
+                if status == 403:
+                    # Treat discover 403 as non-fatal; continue to next url.
+                    self._bc_discover_cache[url] = []
+                    saw_403 = True
+                    continue
+                if not html:
+                    self._bc_discover_cache[url] = []
+                    continue
+                cached = self._bc_extract_discover_candidates(html)
+                self._bc_discover_cache[url] = cached
+            candidates = cached or []
+            for display_name, profile_url in candidates:
+                confidence = _bandcamp_confidence(artist_name, display_name, profile_url, song_title=song_title)
+                if confidence < MIN_BC_CONFIDENCE:
+                    continue
+                payload = self._fetch_profile_and_build(profile_url, "bandcamp", confidence=confidence)
+                if payload:
+                    payload.match_score = self._compute_match_score_for_candidate(
+                        display_name or profile_url,
+                        song_title,
+                        extract_domain(profile_url),
+                    )
+                    payload.candidate_name = display_name or ""
+                    return payload, saw_403
+        return None, saw_403
+
+    def _make_minimal_payload_for_url(
+        self,
+        profile_url: str,
+        display_name: str,
+        confidence: float,
+        song_title: str = "",
+    ) -> EnrichmentPayload:
+        payload = EnrichmentPayload(
+            socials=set(),
+            websites=set(),
+            emails=set(),
+            link_hubs=set(),
+            source_dir="bandcamp_directory",
+            source_url=_canonicalise_bandcamp_url(profile_url),
+            source_detail="Bandcamp Directory",
+            match_score=self._compute_match_score_for_candidate(
+                display_name or profile_url,
+                song_title,
+                extract_domain(profile_url),
+            ),
+            candidate_name=display_name or "",
+        )
+        payload.match_score = payload.match_score or 0.0
+        # carry confidence into payload even though we didn't fetch page
+        payload.confidence = confidence  # type: ignore[attr-defined]
+        return payload
+
+    def _bc_directory_fallback(self, artist_name: str, song_title: str) -> Optional[EnrichmentPayload]:
+        """
+        Offline-first Bandcamp enrich using the loaded Bandcamp directory index.
+        Avoids hitting bandcamp.com when discover/search are blocked.
+        """
+        index = getattr(self, "_directory_indexes", {}).get("bandcamp") if hasattr(self, "_directory_indexes") else None
+        if not index:
+            return None
+        key = normalise_artist_name(artist_name)
+        candidates = _dedupe_rows(index.lookup_artist(key))
+        if not candidates:
+            shortlist: List[Dict[str, Any]] = []
+            for idx, (artist_key, rows) in enumerate(index.rows_by_artist.items()):
+                if idx >= 1000:
+                    break
+                if not artist_key:
+                    continue
+                if key and (key in artist_key or artist_key in key):
+                    shortlist.extend(rows)
+                else:
+                    try:
+                        if key and difflib.SequenceMatcher(None, key, artist_key).ratio() >= 0.82:
+                            shortlist.extend(rows)
+                    except Exception:
+                        pass
+                if len(shortlist) >= 200:
+                    break
+            candidates = shortlist[:200]
+        best_payload: Optional[EnrichmentPayload] = None
+        best_conf = 0.0
+        best_match = 0.0
+        url_only_logged = False
+        for row in candidates:
+            profile_url = _canonicalise_bandcamp_url(_extract_profile_url(row) or "")
+            if not profile_url or "bandcamp.com" not in profile_url:
+                continue
+            display_name = _clean_cell(
+                row.get("Artist Name")
+                or row.get("artist")
+                or row.get("Name")
+                or ""
+            )
+            confidence = _bandcamp_confidence(artist_name, display_name or profile_url, profile_url, song_title=song_title)
+            if confidence < MIN_BC_CONFIDENCE:
+                continue
+            payload = self._fetch_profile_and_build(profile_url, "bandcamp", confidence=confidence)
+            if not payload:
+                # Fall back to URL-only payload when profile fetch is blocked.
+                if not url_only_logged:
+                    try:
+                        self.log_message.emit(
+                            f"[Enricher] Bandcamp: directory candidate matched but profile fetch blocked; emitting URL-only payload for '{artist_name}' -> {profile_url}"
+                        )
+                    except Exception:
+                        pass
+                    url_only_logged = True
+                payload = self._make_minimal_payload_for_url(profile_url, display_name, confidence, song_title=song_title)
+                if not payload or not payload.source_url:
+                    continue
+            payload.match_score = self._compute_match_score_for_candidate(
+                display_name or profile_url,
+                song_title,
+                extract_domain(profile_url),
+            )
+            payload.candidate_name = display_name or ""
+            if confidence > best_conf or (abs(confidence - best_conf) <= 0.005 and payload.match_score > best_match):
+                best_payload = payload
+                best_conf = confidence
+                best_match = payload.match_score
+        return best_payload
 
     def _flag_sc_blocked(self, status_code: Optional[int] = None, html: str = "") -> None:
         global _SC_HEALTHCHECK_LOGGED
@@ -4522,108 +4802,129 @@ class CrossDirectoryEnricherWorker(QThread):
         if not self._platform_attempt_allowed("bandcamp", artist_name, "Bandcamp Enrich"):
             self._last_bc_row_stats["status"] = "skipped"
             return None
-        if self._bc_should_skip_search():
-            reason = self._bc_search_breaker_reason or "breaker_active"
-            if not self._bc_breaker_logged:
-                self.log_message.emit(
-                    f"[Enricher] Bandcamp: circuit breaker active ({reason}); skipping further live searches this run."
-                )
-                self._bc_breaker_logged = True
-            self._last_bc_row_stats.update({"status": "skipped_circuit_breaker", "mode": "skip"})
-            self._set_platform_state("bandcamp", "skipped")
-            return None
         if not self._increment_live_counter():
             self._set_platform_state("bandcamp", "skipped")
             self._last_bc_row_stats["status"] = "skipped_live_limit"
             return None
 
         song_title = _clean_cell(getattr(self, "_live_context", {}).get("song_title", ""))
-        queries = build_bandcamp_queries(artist_name, song_title)
+        location_hint = _clean_cell(getattr(self, "_live_context", {}).get("location", ""))
+        primary_genre_hint = _clean_cell(getattr(self, "_live_context", {}).get("genre", ""))
 
-        def _search(query: str) -> Tuple[Optional[EnrichmentPayload], float, float]:
-            quoted = urllib.parse.quote_plus(query)
-            url = f"https://bandcamp.com/search?q={quoted}&item_type=b"
-            html, status = self._bc_http_get(url, label="Bandcamp search")
-            if status == 403 and self._bc_search_breaker_tripped:
-                return (None, 0.0, 0.0)
-            if not html:
-                return (None, 0.0, 0.0)
-            soup = BeautifulSoup(html, "html.parser")
-            first_link = soup.select_one("li.searchresult a.itemurl, li.searchresult a[href*='bandcamp.com']")
-            if not first_link:
-                return (None, 0.0, 0.0)
-            display_name = ""
-            parent_li = first_link.find_parent("li")
-            if parent_li:
-                name_el = parent_li.select_one(".heading") or parent_li.select_one("div.heading")
-                if name_el:
-                    display_name = name_el.get_text(" ", strip=True)
-                if not display_name:
-                    display_name = parent_li.get_text(" ", strip=True)
-            if not display_name:
-                display_name = first_link.get_text(" ", strip=True)
-            profile_url = (first_link.get("href") or "").strip()
-            if not profile_url:
-                return (None, 0.0, 0.0)
-            artist_norm = normalize_name(artist_name)
-            bc_name_norm = normalize_name(display_name)
-            if artist_norm and bc_name_norm:
-                prefix_artist = artist_norm.split()[0] if artist_norm.split() else ""
-                prefix_bc = bc_name_norm.split()[0] if bc_name_norm.split() else ""
-                prefix_match = (
-                    prefix_artist
-                    and prefix_bc
-                    and (prefix_artist.startswith(prefix_bc[:4]) or prefix_bc.startswith(prefix_artist[:4]))
-                )
-                if not (
-                    artist_norm == bc_name_norm
-                    or artist_norm in bc_name_norm
-                    or bc_name_norm in artist_norm
-                    or prefix_match
-                ):
-                    return (None, 0.0, 0.0)
-            confidence = _bandcamp_confidence(
-                artist_name, display_name, profile_url, song_title=song_title if query != artist_name else ""
+        search_allowed = BC_ENABLE_SEARCH_ENDPOINT and not self._bc_should_skip_search()
+
+        # 1) Directory-based fallback (discover substitute, no network)
+        directory_payload = self._bc_directory_fallback(artist_name, song_title)
+        if directory_payload:
+            self._set_platform_state("bandcamp", "matched")
+            self._last_bc_row_stats.update(
+                {
+                    "status": "fallback_ok",
+                    "mode": "directory_discover",
+                    "attempts": self._last_bc_row_stats.get("attempts", 0),
+                }
             )
-            rank_confidence = _locale_rank_score(confidence, display_name, profile_url)
-            payload: Optional[EnrichmentPayload] = None
-            if confidence >= MIN_BC_CONFIDENCE:
-                payload = self._fetch_profile_and_build(profile_url, "bandcamp", confidence=confidence)
-                if payload:
-                    payload.match_score = self._compute_match_score_for_candidate(
-                        display_name or profile_url,
-                        song_title,
-                        extract_domain(profile_url),
-                    )
-                    payload.candidate_name = display_name or ""
-            return (payload, confidence, rank_confidence)
+            self._bc_matches += 1
+            self.log_message.emit(
+                f"[Enricher] Bandcamp: status=fallback_ok mode=directory_discover attempts={self._last_bc_row_stats.get('attempts', 0)} 403={self._last_bc_row_stats.get('http_403', 0)} artist='{artist_name}'"
+            )
+            return directory_payload
 
+        # 2) Optional /search (breaker only applies here)
         best_payload: Optional[EnrichmentPayload] = None
         best_score = 0.0
         best_rank_score = 0.0
         best_match_score = 0.0
-        for idx, query in enumerate(queries):
-            payload, confidence, rank_confidence = _search(query)
-            candidate_match = getattr(payload, "match_score", 0.0) if payload else 0.0
-            if payload and (
-                candidate_match > best_match_score
-                or confidence > best_score
-                or (
-                    abs(confidence - best_score) <= 0.02
-                    and rank_confidence > best_rank_score
+        if search_allowed:
+            queries = build_bandcamp_queries(artist_name, song_title)
+
+            def _search(query: str) -> Tuple[Optional[EnrichmentPayload], float, float, Optional[int]]:
+                quoted = urllib.parse.quote_plus(query)
+                url = f"https://bandcamp.com/search?q={quoted}&item_type=b"
+                html, status = self._bc_http_get(url, label="Bandcamp search", count_breaker=True)
+                if status == 403:
+                    self._bc_search_breaker_tripped = True
+                    if not self._bc_search_breaker_reason:
+                        self._bc_search_breaker_reason = "http_403"
+                    return (None, 0.0, 0.0, status)
+                if self._bc_search_breaker_tripped:
+                    return (None, 0.0, 0.0, status)
+                if not html:
+                    return (None, 0.0, 0.0, status)
+                soup = BeautifulSoup(html, "html.parser")
+                first_link = soup.select_one("li.searchresult a.itemurl, li.searchresult a[href*='bandcamp.com']")
+                if not first_link:
+                    return (None, 0.0, 0.0, status)
+                display_name = ""
+                parent_li = first_link.find_parent("li")
+                if parent_li:
+                    name_el = parent_li.select_one(".heading") or parent_li.select_one("div.heading")
+                    if name_el:
+                        display_name = name_el.get_text(" ", strip=True)
+                    if not display_name:
+                        display_name = parent_li.get_text(" ", strip=True)
+                if not display_name:
+                    display_name = first_link.get_text(" ", strip=True)
+                profile_url = (first_link.get("href") or "").strip()
+                if not profile_url:
+                    return (None, 0.0, 0.0, status)
+                artist_norm = normalize_name(artist_name)
+                bc_name_norm = normalize_name(display_name)
+                if artist_norm and bc_name_norm:
+                    prefix_artist = artist_norm.split()[0] if artist_norm.split() else ""
+                    prefix_bc = bc_name_norm.split()[0] if bc_name_norm.split() else ""
+                    prefix_match = (
+                        prefix_artist
+                        and prefix_bc
+                        and (prefix_artist.startswith(prefix_bc[:4]) or prefix_bc.startswith(prefix_artist[:4]))
+                    )
+                    if not (
+                        artist_norm == bc_name_norm
+                        or artist_norm in bc_name_norm
+                        or bc_name_norm in artist_norm
+                        or prefix_match
+                    ):
+                        return (None, 0.0, 0.0, status)
+                confidence = _bandcamp_confidence(
+                    artist_name, display_name, profile_url, song_title=song_title if query != artist_name else ""
                 )
-            ):
-                best_payload = payload
-                best_score = confidence
-                best_rank_score = rank_confidence
-                best_match_score = candidate_match
-            else:
-                best_score = max(best_score, confidence)
-                best_rank_score = max(best_rank_score, rank_confidence)
-            if best_payload and best_score >= 0.95 and '"' in query:
-                break
-            if idx < len(queries) - 1:
-                self._bc_gap()
+                rank_confidence = _locale_rank_score(confidence, display_name, profile_url)
+                payload: Optional[EnrichmentPayload] = None
+                if confidence >= MIN_BC_CONFIDENCE:
+                    payload = self._fetch_profile_and_build(profile_url, "bandcamp", confidence=confidence)
+                    if payload:
+                        payload.match_score = self._compute_match_score_for_candidate(
+                            display_name or profile_url,
+                            song_title,
+                            extract_domain(profile_url),
+                        )
+                        payload.candidate_name = display_name or ""
+                return (payload, confidence, rank_confidence, status)
+
+            for idx, query in enumerate(queries):
+                payload, confidence, rank_confidence, status_code = _search(query)
+                candidate_match = getattr(payload, "match_score", 0.0) if payload else 0.0
+                if payload and (
+                    candidate_match > best_match_score
+                    or confidence > best_score
+                    or (
+                        abs(confidence - best_score) <= 0.02
+                        and rank_confidence > best_rank_score
+                    )
+                ):
+                    best_payload = payload
+                    best_score = confidence
+                    best_rank_score = rank_confidence
+                    best_match_score = candidate_match
+                else:
+                    best_score = max(best_score, confidence)
+                    best_rank_score = max(best_rank_score, rank_confidence)
+                if status_code == 403 or self._bc_search_breaker_tripped:
+                    break
+                if best_payload and best_score >= 0.95 and '"' in query:
+                    break
+                if idx < len(queries) - 1:
+                    self._bc_gap()
 
         if best_payload:
             self._set_platform_state("bandcamp", "matched")
@@ -4636,7 +4937,7 @@ class CrossDirectoryEnricherWorker(QThread):
             )
             return best_payload
 
-        # If search failed or breaker tripped mid-run, try slug fallback (bounded).
+        # If discover/search failed, try slug fallback (bounded).
         fallback_payload = None
         if self._bc_fallback_used < BC_FALLBACK_MAX_PER_RUN:
             fallback_payload = self._bc_slug_fallback(artist_name, song_title)
@@ -4662,10 +4963,10 @@ class CrossDirectoryEnricherWorker(QThread):
                 self._bc_breaker_logged = True
 
         best_confidence_display = max(best_score, best_rank_score)
-        status_label = "blocked_403" if self._bc_consecutive_403 or self._bc_total_403 else "no_match"
-        mode_label = "search" if not self._bc_search_breaker_tripped else "skip"
-        if fallback_payload is None and self._bc_fallback_used >= BC_FALLBACK_MAX_PER_RUN:
-            mode_label = "fallback_exhausted"
+        status_label = "blocked_403" if (search_allowed and (self._bc_consecutive_403 or self._bc_total_403)) else "no_match"
+        mode_label = "directory_discover"
+        if search_allowed and self._last_bc_row_stats.get("attempts", 0) > 0:
+            mode_label = "search"
         self._last_bc_row_stats.update(
             {
                 "status": status_label if status_label != "blocked_403" or best_confidence_display == 0 else status_label,
@@ -4694,9 +4995,9 @@ class CrossDirectoryEnricherWorker(QThread):
             used += 1
             self._bc_fallback_used += 1
             url = f"https://{slug}.bandcamp.com/"
-            html, status = self._bc_http_get(url, label="Bandcamp slug")
-            if status == 403 and self._bc_search_breaker_tripped:
-                break
+            html, status = self._bc_http_get(url, label="Bandcamp slug", count_breaker=False)
+            if status == 403:
+                continue
             if status and status != 200:
                 continue
             title_text = ""
