@@ -923,21 +923,61 @@ def run_master_enrichment(
             _safe_log(logger, f"[Master] Bandcamp directory CSV -> {bandcamp_path_final} (explicit)")
         elif not night_mode:
             try:
-                candidates = sorted(run_dir.glob("job_bandcamp_*/bandcamp_enriched.csv"))
-                best_path = None
-                best_rows = -1
-                for path in candidates:
-                    rows = _count_csv_rows(path)
-                    if rows < 0:
-                        continue
-                    if rows > best_rows:
-                        best_rows = rows
-                        best_path = path
-                if best_path and best_rows >= 0:
-                    bandcamp_path_final = best_path.as_posix()
-                    _safe_log(logger, f"[Master] Bandcamp directory CSV -> {bandcamp_path_final} (rows={best_rows})")
+                BC_DETECT_RETRIES = 6
+                BC_DETECT_SLEEP_S = 1.0
+
+                def _select_best(paths: List[Path]) -> Tuple[Optional[Path], int]:
+                    best = None
+                    best_rows_local = -1
+                    for candidate in sorted(paths):
+                        rows_local = -1
+                        try:
+                            with candidate.open("r", encoding="utf-8", errors="ignore") as handle:
+                                line_count = sum(1 for _ in handle)
+                            rows_local = max(0, line_count - 1)
+                        except Exception:
+                            rows_local = -1
+                        if best is None or rows_local > best_rows_local:
+                            best_rows_local = rows_local
+                            best = candidate
+                    return best, best_rows_local
+
+                chosen_path: Optional[Path] = None
+                selected_kind: Optional[str] = None
+                best_rows: int = -1
+                attempts_used: int = 0
+
+                for attempt in range(BC_DETECT_RETRIES):
+                    attempts_used = attempt + 1
+                    enriched = list(run_dir.glob("job_bandcamp_*/bandcamp_enriched.csv"))
+                    raw = list(run_dir.glob("job_bandcamp_*/raw.csv"))
+
+                    if enriched:
+                        chosen_path, best_rows = _select_best(enriched)
+                        selected_kind = "enriched"
+                    elif raw:
+                        chosen_path, best_rows = _select_best(raw)
+                        selected_kind = "raw"
+                    else:
+                        chosen_path = None
+                        selected_kind = None
+                        best_rows = -1
+
+                    if chosen_path is not None:
+                        break
+                    if attempt < BC_DETECT_RETRIES - 1:
+                        time.sleep(BC_DETECT_SLEEP_S)
+
+                if chosen_path is not None:
+                    bandcamp_path_final = chosen_path.as_posix()
+                    rows_text = best_rows if best_rows >= 0 else "?"
+                    attempts_text = f", attempts={attempts_used}" if attempts_used > 1 else ""
+                    _safe_log(
+                        logger,
+                        f"[Master] Bandcamp directory CSV -> {bandcamp_path_final} (rows={rows_text}, kind={selected_kind}{attempts_text})",
+                    )
                 else:
-                    _safe_log(logger, f"[Master] Bandcamp directory CSV -> (none) in {run_dir}")
+                    _safe_log(logger, f"[Master] Bandcamp directory CSV -> (none) in {run_dir} (attempts={BC_DETECT_RETRIES})")
             except Exception as exc:
                 _safe_log(logger, f"[Master] Bandcamp directory CSV detection failed: {type(exc).__name__}: {exc}")
         else:
