@@ -76,6 +76,22 @@ MIN_LF_CONFIDENCE = 0.9
 STRICT_MATCHING = True
 MATCH_THRESHOLD = 0.7
 
+# Last.fm live search resilience (T0X2)
+LASTFM_HEADERS = {
+    "User-Agent": USER_AGENT,
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+    "Referer": "https://www.last.fm/",
+}
+LF_SEARCH_RETRY_MAX = 3
+LF_BACKOFF_BASE = 0.7
+LF_BACKOFF_MAX = 6.0
+LF_BREAKER_CONSEC_406 = 5
+LF_BREAKER_COOLDOWN_S = 10 * 60
+
 # Bandcamp live-search resilience (T0X1)
 BC_SEARCH_RETRY_MAX = 3
 BC_BACKOFF_BASE = 0.6
@@ -3561,6 +3577,10 @@ class CrossDirectoryEnricherWorker(QThread):
         self._last_bc_row_stats: Dict[str, Any] = {}
         self._bc_discover_cache: Dict[str, List[Tuple[str, str]]] = {}
         self._bc_discover_fetches: int = 0
+        # Last.fm breaker state
+        self._lf_consecutive_406: int = 0
+        self._lf_breaker_until: float = 0.0
+        self._lf_breaker_logged: bool = False
         self._directory_indexes: Dict[str, DirectoryIndex] = {}
 
     def run(self) -> None:
@@ -6342,7 +6362,7 @@ class CrossDirectoryEnricherWorker(QThread):
             self._set_platform_state("lastfm", "skipped")
             return None
         self.log_message.emit(f"[Enricher] Last.fm live search: {url}")
-        html = self._fetch_url(url, label="Last.fm search")
+        html = self._fetch_url(url, label="Last.fm search", max_attempts=LF_SEARCH_RETRY_MAX)
         if not html:
             self._set_platform_state("lastfm", "skipped")
             return None
@@ -6373,7 +6393,7 @@ class CrossDirectoryEnricherWorker(QThread):
             )
             quoted_fb = urllib.parse.quote_plus(fallback_query)
             fb_url = f"https://www.last.fm/search?q={quoted_fb}&type=artist"
-            fb_html = self._fetch_url(fb_url, label="Last.fm search (fallback)")
+            fb_html = self._fetch_url(fb_url, label="Last.fm search (fallback)", max_attempts=LF_SEARCH_RETRY_MAX)
             if fb_html:
                 fb_soup = BeautifulSoup(fb_html, "html.parser")
                 fb_link = fb_soup.select_one("a[href*='/music/']")
@@ -6430,19 +6450,64 @@ class CrossDirectoryEnricherWorker(QThread):
         self._set_platform_state("lastfm", "skipped")
         return None
 
-    def _fetch_url(self, url: str, label: str, max_attempts: int = 2) -> Optional[str]:
+    def _fetch_url(
+        self,
+        url: str,
+        label: str,
+        max_attempts: int = 2,
+        headers: Optional[Dict[str, str]] = None,
+    ) -> Optional[str]:
         # Track the most recent fetch outcome for instrumentation.
         self._last_fetch_ok: Optional[bool] = None
         self._last_http_status: Optional[int] = None
+        is_lastfm = "last.fm" in url.lower()
+        headers_name = "default"
+        if is_lastfm and headers is None:
+            headers = LASTFM_HEADERS
+            headers_name = "lastfm_html"
+        elif headers is not None:
+            headers_name = "custom"
+
+        now = time.time()
+        if is_lastfm and self._lf_breaker_until and now < self._lf_breaker_until:
+            if not self._lf_breaker_logged:
+                cooldown = int(self._lf_breaker_until - now)
+                try:
+                    self.log_message.emit(
+                        f"[Enricher][LF] Circuit breaker active; skipping {label}. cooldown_s={cooldown}"
+                    )
+                except Exception:
+                    pass
+                self._lf_breaker_logged = True
+            self._last_fetch_ok = False
+            self._last_http_status = None
+            return None
+
         attempt = 0
         while attempt < max_attempts:
             attempt += 1
             try:
-                resp = self.session.get(url, timeout=HTTP_TIMEOUT)
+                resp = self.session.get(url, timeout=HTTP_TIMEOUT, headers=headers)
                 status = getattr(resp, "status_code", None)
-                text = getattr(resp, "text", "")
+                text = ""
                 self._last_http_status = status
+                if is_lastfm and status == 406:
+                    self._lf_consecutive_406 += 1
+                elif is_lastfm:
+                    self._lf_consecutive_406 = 0
+                    if status and status < 400:
+                        self._lf_breaker_until = 0.0
+                    self._lf_breaker_logged = False
+                if is_lastfm:
+                    try:
+                        self.log_message.emit(
+                            f"[Enricher][LF] {label}: status={status} attempt={attempt}/{max_attempts} headers={headers_name}"
+                        )
+                    except Exception:
+                        pass
                 if getattr(self, "night_mode", False) and "soundcloud" in label.lower():
+                    if text == "":
+                        text = getattr(resp, "text", "")
                     if status == 403 and "profile" in label.lower() and "soundcloud.com" in url and "/about" not in url:
                         about_url = url.rstrip("/") + "/about"
                         try:
@@ -6474,11 +6539,30 @@ class CrossDirectoryEnricherWorker(QThread):
                         self._flag_sc_blocked(status_code=status, html=text)
                         return None
                 resp.raise_for_status()
+                if text == "":
+                    text = getattr(resp, "text", "")
                 self._last_fetch_ok = True
                 return text
             except requests.HTTPError as exc:
                 status = exc.response.status_code if exc.response is not None else None
                 self._last_http_status = status
+                if is_lastfm and status == 406:
+                    self._lf_consecutive_406 += 1
+                    if attempt < max_attempts:
+                        delay = min(LF_BACKOFF_MAX, LF_BACKOFF_BASE * (2 ** max(0, attempt - 1)) + random.uniform(0, 0.35))
+                        time.sleep(delay)
+                        continue
+                    if self._lf_consecutive_406 >= LF_BREAKER_CONSEC_406 and not self._lf_breaker_until:
+                        self._lf_breaker_until = time.time() + LF_BREAKER_COOLDOWN_S
+                        try:
+                            self.log_message.emit(
+                                f"[Enricher][LF] Circuit breaker tripped after consecutive 406s={self._lf_consecutive_406}; cooling down for {LF_BREAKER_COOLDOWN_S}s."
+                            )
+                        except Exception:
+                            pass
+                    suffix = _format_outcome_suffix(fetch_ok=False, actionable=None, http_status=status)
+                    self.log_message.emit(f"[Enricher][LF] {label} failed with 406 (no HTML){suffix}")
+                    return None
                 if getattr(self, "night_mode", False) and "soundcloud" in label.lower():
                     html = exc.response.text if exc.response is not None else ""
                     if _sc_is_blocked(status, html):
@@ -6507,7 +6591,8 @@ class CrossDirectoryEnricherWorker(QThread):
         self, profile_url: str, source_dir: str, confidence: Optional[float] = None
     ) -> Optional[EnrichmentPayload]:
         self.log_message.emit(f"[Enricher] Fetching {source_dir} profile: {profile_url}")
-        html = self._fetch_url(profile_url, label=f"{source_dir} profile")
+        attempts = LF_SEARCH_RETRY_MAX if source_dir == "lastfm" else 2
+        html = self._fetch_url(profile_url, label=f"{source_dir} profile", max_attempts=attempts)
         fetched_ok = bool(html)
         if not fetched_ok:
             return None
