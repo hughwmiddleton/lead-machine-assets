@@ -93,6 +93,12 @@ LF_PACING_DELAY_S = 0.25
 LF_BREAKER_CONSEC_406 = 10
 LF_BREAKER_COOLDOWN_S = 10 * 60
 
+
+def _lf_sleep() -> None:
+    """Jittered pacing for Last.fm searches to reduce 406s."""
+    delay = LF_PACING_DELAY_S + random.uniform(0, LF_PACING_DELAY_S)
+    time.sleep(delay)
+
 # Bandcamp live-search resilience (T0X1)
 BC_SEARCH_RETRY_MAX = 3
 BC_BACKOFF_BASE = 0.6
@@ -993,6 +999,56 @@ def build_search_query(artist_name: str, song_title: str | None) -> str:
     if artist_name and song_title:
         return f'"{artist_name}" "{song_title}"'
     return artist_name
+
+
+def _sanitize_lastfm_track_title(title: str) -> str:
+    """Clean and shorten track titles to avoid Last.fm/WAF rejection.
+
+    Steps:
+    1) Trim and collapse whitespace.
+    2) Split on common joiners (with surrounding whitespace) and keep first segment.
+    3) Replace heavy/fancy punctuation with simple spaces; strip quotes/brackets.
+    4) Hard cap to 60 chars; drop results that are too short or non-alphanumeric.
+    """
+
+    if not isinstance(title, str):
+        return ""
+
+    working = title.strip()
+    if not working:
+        return ""
+
+    # Split on obvious multi-part separators before other replacements.
+    split_pattern = r"\s*(?:\|\s*|/\s*|-\s+|—\s+|–\s+|:\s*|;\s*)"
+    parts = re.split(split_pattern, working, maxsplit=1)
+    working = parts[0]
+
+    # Replace ellipsis variants and heavyweight separators with spaces.
+    working = working.replace("…", " ")
+    working = re.sub(r"\.\.\.+", " ", working)
+    working = re.sub(r"[|/•—–:;]", " ", working)
+
+    # Remove quotes and brackets that add noise but little value to search.
+    working = re.sub(r"[\(\)\[\]{}<>\"']", "", working)
+
+    # Collapse whitespace and cap length.
+    working = " ".join(working.split())
+    if len(working) > 60:
+        working = working[:60]
+
+    # Junk guard: skip numeric-heavy or very short fragments.
+    alpha_ct = len(re.findall(r"[A-Za-z]", working))
+    digit_ct = len(re.findall(r"[0-9]", working))
+    if alpha_ct < 4:
+        return ""
+    if digit_ct >= alpha_ct and digit_ct >= 3:
+        return ""
+
+    # Guard against junk results (empty, too short, or no alphanumerics).
+    if len(working) < 2 or not re.search(r"[A-Za-z0-9]", working):
+        return ""
+
+    return working
 
 
 def build_bandcamp_queries(artist_name: str, track_title: Optional[str] = None) -> List[str]:
@@ -6355,80 +6411,112 @@ class CrossDirectoryEnricherWorker(QThread):
     def _live_search_lastfm(self, artist_name: str) -> Optional[EnrichmentPayload]:
         if not self._platform_attempt_allowed("lastfm", artist_name, "Last.fm Enrich"):
             return None
-        song_title = _clean_cell(getattr(self, "_live_context", {}).get("song_title", ""))
-        primary_query = build_search_query(artist_name, song_title)
+        song_title_raw = _clean_cell(getattr(self, "_live_context", {}).get("song_title", ""))
+        sanitized_title = _sanitize_lastfm_track_title(song_title_raw)
+        if sanitized_title and sanitized_title != song_title_raw.strip():
+            orig = (song_title_raw or "").strip()
+            cleaned = sanitized_title
+            if len(orig) > 80:
+                orig = orig[:80]
+            if len(cleaned) > 80:
+                cleaned = cleaned[:80]
+            try:
+                self.log_message.emit(
+                    f"[Enricher][LF] Sanitized track title: orig='{orig}' -> cleaned='{cleaned}'"
+                )
+            except Exception:
+                pass
+
+        use_track = bool(sanitized_title)
+        primary_query = build_search_query(artist_name, sanitized_title) if use_track else artist_name
         quoted = urllib.parse.quote_plus(primary_query)
         url = f"https://www.last.fm/search?q={quoted}&type=artist"
         if not self._increment_live_counter():
             self._set_platform_state("lastfm", "skipped")
             return None
         self.log_message.emit(f"[Enricher] Last.fm live search: {url}")
+
         # Light pacing to reduce Last.fm 406 throttling during bulk enrichment.
         time.sleep(LF_PACING_DELAY_S)
-        html = self._fetch_url(url, label="Last.fm search", max_attempts=LF_SEARCH_RETRY_MAX)
-        if not html:
-            self._set_platform_state("lastfm", "skipped")
-            return None
-        soup = BeautifulSoup(html, "html.parser")
-        first_link = soup.select_one("a[href*='/music/']")
-        if not first_link:
-            self.log_message.emit("[Enricher] Last.fm search: no artist results.")
-            self._set_platform_state("lastfm", "skipped")
-            return None
-        display_name = first_link.get_text(" ", strip=True)
-        profile_url = (first_link.get("href") or "").strip()
-        if profile_url.startswith("/"):
-            profile_url = f"https://www.last.fm{profile_url}"
-        confidence = _lastfm_confidence(artist_name, display_name)
-        rank_confidence = _locale_rank_score(confidence, display_name, profile_url)
-        best_match_score = self._compute_match_score_for_candidate(
-            display_name, song_title, extract_domain(profile_url)
+
+        def _parse_first_candidate(html_doc: str, log_no_results: bool) -> Optional[Tuple[str, str, float, float, float]]:
+            if not html_doc:
+                return None
+            soup = BeautifulSoup(html_doc, "html.parser")
+            first_link = soup.select_one("a[href*='/music/']")
+            if not first_link:
+                if log_no_results:
+                    self.log_message.emit("[Enricher] Last.fm search: no artist results.")
+                return None
+            disp = first_link.get_text(" ", strip=True)
+            prof = (first_link.get("href") or "").strip()
+            if prof.startswith("/"):
+                prof = f"https://www.last.fm{prof}"
+            score = _lastfm_confidence(artist_name, disp)
+            rank = _locale_rank_score(score, disp, prof)
+            match_score = self._compute_match_score_for_candidate(
+                disp, sanitized_title or song_title_raw, extract_domain(prof)
+            )
+            self.log_message.emit(
+                f"[Enricher] Last.fm Enrich: candidate '{disp or prof}' for '{artist_name}' has confidence={score:.2f}."
+            )
+            return disp, prof, score, rank, match_score
+
+        html: Optional[str] = None
+        primary_status: Optional[int] = None
+        if use_track:
+            _lf_sleep()
+            html = self._fetch_url(url, label="Last.fm search", max_attempts=1)
+            primary_status = getattr(self, "_last_http_status", None)
+            if not html and primary_status != 406:
+                # Retry non-406/transient failures with normal budget.
+                _lf_sleep()
+                html = self._fetch_url(url, label="Last.fm search", max_attempts=LF_SEARCH_RETRY_MAX)
+
+        best_score = 0.0
+        best_rank_score = 0.0
+        best_match_score = 0.0
+        display_name = ""
+        profile_url = ""
+
+        primary_candidate = _parse_first_candidate(html, log_no_results=True) if html else None
+        if primary_candidate:
+            display_name, profile_url, best_score, best_rank_score, best_match_score = primary_candidate
+
+        # Decide if fallback is needed.
+        fallback_needed = (
+            (not use_track)
+            or (not html)
+            or (best_score < MIN_LF_CONFIDENCE and use_track and primary_query != artist_name)
         )
-        self.log_message.emit(
-            f"[Enricher] Last.fm Enrich: candidate '{display_name or profile_url}' for '{artist_name}' has confidence={confidence:.2f}."
-        )
-        best_score = confidence
-        best_rank_score = rank_confidence
-        if confidence < MIN_LF_CONFIDENCE and song_title and primary_query != artist_name:
+
+        if fallback_needed:
             fallback_query = artist_name
             self.log_message.emit(
                 f"[Enricher] Last.fm Enrich: no safe match for '{artist_name}', trying artist-only query '{fallback_query}'."
             )
             quoted_fb = urllib.parse.quote_plus(fallback_query)
             fb_url = f"https://www.last.fm/search?q={quoted_fb}&type=artist"
-            # Light pacing to reduce Last.fm 406 throttling during bulk enrichment.
-            time.sleep(LF_PACING_DELAY_S)
-            fb_html = self._fetch_url(fb_url, label="Last.fm search (fallback)", max_attempts=LF_SEARCH_RETRY_MAX)
-            if fb_html:
-                fb_soup = BeautifulSoup(fb_html, "html.parser")
-                fb_link = fb_soup.select_one("a[href*='/music/']")
-                if fb_link:
-                    fb_display = fb_link.get_text(" ", strip=True)
-                    fb_profile = (fb_link.get("href") or "").strip()
-                    if fb_profile.startswith("/"):
-                        fb_profile = f"https://www.last.fm{fb_profile}"
-                    fb_conf = _lastfm_confidence(artist_name, fb_display)
-                    fb_rank = _locale_rank_score(fb_conf, fb_display, fb_profile)
-                    fb_match_score = self._compute_match_score_for_candidate(
-                        fb_display, song_title, extract_domain(fb_profile)
-                    )
-                    self.log_message.emit(
-                        f"[Enricher] Last.fm Enrich: fallback candidate '{fb_display or fb_profile}' for '{artist_name}' has confidence={fb_conf:.2f}."
-                    )
-                    if (
-                        fb_match_score > best_match_score
-                        or fb_conf > best_score
-                        or (
-                            abs(fb_conf - best_score) <= 0.02
-                            and fb_rank > best_rank_score
-                        )
-                    ):
-                        display_name = fb_display
-                        profile_url = fb_profile
-                        best_score = fb_conf
-                        best_rank_score = fb_rank
-                        best_match_score = fb_match_score
-        if best_score < MIN_LF_CONFIDENCE:
+            _lf_sleep()
+            fb_html = self._fetch_url(fb_url, label="Last.fm search (fallback)", max_attempts=1)
+            fb_status = getattr(self, "_last_http_status", None)
+            if not fb_html and fb_status != 406:
+                _lf_sleep()
+                fb_html = self._fetch_url(fb_url, label="Last.fm search (fallback)", max_attempts=LF_SEARCH_RETRY_MAX)
+            fallback_candidate = _parse_first_candidate(fb_html, log_no_results=False) if fb_html else None
+            if fallback_candidate:
+                fb_display, fb_profile, fb_conf, fb_rank, fb_match_score = fallback_candidate
+                if (
+                    fb_match_score > best_match_score
+                    or fb_conf > best_score
+                    or (abs(fb_conf - best_score) <= 0.02 and fb_rank > best_rank_score)
+                ):
+                    display_name = fb_display
+                    profile_url = fb_profile
+                    best_score = fb_conf
+                    best_rank_score = fb_rank
+                    best_match_score = fb_match_score
+        if best_score < MIN_LF_CONFIDENCE or not profile_url:
             self.log_message.emit(
                 f"[Enricher] Last.fm Enrich: no safe match for '{artist_name}' (best_confidence={best_score:.2f}), skipping."
             )
