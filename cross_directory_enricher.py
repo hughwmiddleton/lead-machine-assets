@@ -90,13 +90,20 @@ LF_SEARCH_RETRY_MAX = 3
 LF_BACKOFF_BASE = 0.7
 LF_BACKOFF_MAX = 6.0
 LF_PACING_DELAY_S = 0.25
-LF_BREAKER_CONSEC_406 = 10
-LF_BREAKER_COOLDOWN_S = 10 * 60
+LF_UNHEALTHY_PACING_MIN_S = 2.0
+LF_UNHEALTHY_PACING_MAX_S = 4.0
+LF_COOLDOWN_CONSEC_406 = 2
+LF_COOLDOWN_MIN_S = 12.0
+LF_COOLDOWN_STEP_S = 6.0
+LF_COOLDOWN_MAX_S = 60.0
 
 
-def _lf_sleep() -> None:
-    """Jittered pacing for Last.fm searches to reduce 406s."""
-    delay = LF_PACING_DELAY_S + random.uniform(0, LF_PACING_DELAY_S)
+def _lf_sleep(unhealthy: bool = False) -> None:
+    """Jittered pacing for Last.fm searches; longer when Last.fm seems unhappy."""
+    if unhealthy:
+        delay = LF_UNHEALTHY_PACING_MIN_S + random.uniform(0, LF_UNHEALTHY_PACING_MAX_S - LF_UNHEALTHY_PACING_MIN_S)
+    else:
+        delay = LF_PACING_DELAY_S + random.uniform(0, LF_PACING_DELAY_S)
     time.sleep(delay)
 
 # Bandcamp live-search resilience (T0X1)
@@ -3634,10 +3641,11 @@ class CrossDirectoryEnricherWorker(QThread):
         self._last_bc_row_stats: Dict[str, Any] = {}
         self._bc_discover_cache: Dict[str, List[Tuple[str, str]]] = {}
         self._bc_discover_fetches: int = 0
-        # Last.fm breaker state
+        # Last.fm health state
         self._lf_consecutive_406: int = 0
-        self._lf_breaker_until: float = 0.0
-        self._lf_breaker_logged: bool = False
+        self._lf_cooldown_until: float = 0.0  # monotonic timestamp
+        self._lf_cooldown_logged: bool = False
+        self._lf_cooldown_skip_logged: bool = False
         self._directory_indexes: Dict[str, DirectoryIndex] = {}
 
     def run(self) -> None:
@@ -4544,6 +4552,52 @@ class CrossDirectoryEnricherWorker(QThread):
             self.log_message.emit(f"{prefix} {label}: skipping '{artist_name}' (already attempted).")
             return False
         return True
+
+    # -----------------------------
+    # Last.fm health helpers (soft-degrade)
+    # -----------------------------
+    def _lf_now(self) -> float:
+        return time.monotonic()
+
+    def _lf_in_cooldown(self, now: Optional[float] = None) -> bool:
+        now = self._lf_now() if now is None else now
+        return bool(self._lf_cooldown_until and now < self._lf_cooldown_until)
+
+    def _lf_clear_cooldown(self) -> None:
+        if self._lf_cooldown_until:
+            self._lf_cooldown_until = 0.0
+        self._lf_cooldown_logged = False
+        self._lf_cooldown_skip_logged = False
+
+    def _lf_enter_cooldown(self) -> None:
+        now = self._lf_now()
+        base = LF_COOLDOWN_MIN_S + max(0, self._lf_consecutive_406 - LF_COOLDOWN_CONSEC_406) * LF_COOLDOWN_STEP_S
+        duration = min(LF_COOLDOWN_MAX_S, max(LF_COOLDOWN_MIN_S, base))
+        new_until = now + duration
+        if self._lf_cooldown_until and self._lf_cooldown_until > now:
+            new_until = min(now + LF_COOLDOWN_MAX_S, max(self._lf_cooldown_until, new_until))
+        entering = not self._lf_in_cooldown(now)
+        self._lf_cooldown_until = new_until
+        if entering and not self._lf_cooldown_logged:
+            cooldown = int(max(1.0, self._lf_cooldown_until - now))
+            try:
+                self.log_message.emit(
+                    f"[Enricher][LF] Entering soft cooldown after consecutive 406s={self._lf_consecutive_406}; cooldown_s={cooldown}"
+                )
+            except Exception:
+                pass
+            self._lf_cooldown_logged = True
+        if entering:
+            self._lf_cooldown_skip_logged = False
+
+    def _lf_mark_406(self) -> None:
+        self._lf_consecutive_406 += 1
+        if self._lf_consecutive_406 >= LF_COOLDOWN_CONSEC_406:
+            self._lf_enter_cooldown()
+
+    def _lf_mark_success(self) -> None:
+        self._lf_consecutive_406 = 0
+        self._lf_clear_cooldown()
 
     def _compute_match_score_for_candidate(
         self,
@@ -6409,6 +6463,24 @@ class CrossDirectoryEnricherWorker(QThread):
         return None
 
     def _live_search_lastfm(self, artist_name: str) -> Optional[EnrichmentPayload]:
+        if self._lf_cooldown_until and not self._lf_in_cooldown():
+            try:
+                self.log_message.emit("[Enricher][LF] Soft cooldown complete; resuming Last.fm.")
+            except Exception:
+                pass
+            self._lf_clear_cooldown()
+        if self._lf_in_cooldown():
+            if not self._lf_cooldown_skip_logged:
+                cooldown = int(max(1.0, self._lf_cooldown_until - self._lf_now()))
+                try:
+                    self.log_message.emit(
+                        f"[Enricher][LF] Soft cooldown active; skipping Last.fm search. cooldown_s={cooldown}"
+                    )
+                except Exception:
+                    pass
+                self._lf_cooldown_skip_logged = True
+            self._set_platform_state("lastfm", "skipped")
+            return None
         if not self._platform_attempt_allowed("lastfm", artist_name, "Last.fm Enrich"):
             return None
         song_title_raw = _clean_cell(getattr(self, "_live_context", {}).get("song_title", ""))
@@ -6440,9 +6512,7 @@ class CrossDirectoryEnricherWorker(QThread):
             self._set_platform_state("lastfm", "skipped")
             return None
         self.log_message.emit(f"[Enricher] Last.fm live search: {url}")
-
-        # Light pacing to reduce Last.fm 406 throttling during bulk enrichment.
-        time.sleep(LF_PACING_DELAY_S)
+        lf_unhealthy = self._lf_in_cooldown() or self._lf_consecutive_406 > 0
 
         def _parse_first_candidate(html_doc: str, log_no_results: bool) -> Optional[Tuple[str, str, float, float, float]]:
             if not html_doc:
@@ -6470,13 +6540,9 @@ class CrossDirectoryEnricherWorker(QThread):
         html: Optional[str] = None
         primary_status: Optional[int] = None
         if use_track and sanitized_title:
-            _lf_sleep()
+            _lf_sleep(lf_unhealthy)
             html = self._fetch_url(url, label="Last.fm search", max_attempts=1)
             primary_status = getattr(self, "_last_http_status", None)
-            if not html and primary_status != 406:
-                # Retry non-406/transient failures with normal budget.
-                _lf_sleep()
-                html = self._fetch_url(url, label="Last.fm search", max_attempts=LF_SEARCH_RETRY_MAX)
 
         best_score = 0.0
         best_rank_score = 0.0
@@ -6487,6 +6553,32 @@ class CrossDirectoryEnricherWorker(QThread):
         primary_candidate = _parse_first_candidate(html, log_no_results=True) if html else None
         if primary_candidate:
             display_name, profile_url, best_score, best_rank_score, best_match_score = primary_candidate
+        # Optional no-quotes variant when the initial quoted search returned HTML but no safe match.
+        if (
+            use_track
+            and sanitized_title
+            and primary_status == 200
+            and html
+            and (best_score < MIN_LF_CONFIDENCE or not profile_url)
+        ):
+            no_quote_query = f"{artist_name} {sanitized_title}".strip()
+            quoted_no_quotes = urllib.parse.quote_plus(no_quote_query)
+            no_quote_url = f"https://www.last.fm/search?q={quoted_no_quotes}&type=artist"
+            _lf_sleep(self._lf_in_cooldown() or self._lf_consecutive_406 > 0)
+            no_html = self._fetch_url(no_quote_url, label="Last.fm search (no-quotes)", max_attempts=1)
+            no_candidate = _parse_first_candidate(no_html, log_no_results=False) if no_html else None
+            if no_candidate:
+                n_disp, n_prof, n_conf, n_rank, n_match = no_candidate
+                if (
+                    n_match > best_match_score
+                    or n_conf > best_score
+                    or (abs(n_conf - best_score) <= 0.02 and n_rank > best_rank_score)
+                ):
+                    display_name = n_disp
+                    profile_url = n_prof
+                    best_score = n_conf
+                    best_rank_score = n_rank
+                    best_match_score = n_match
 
         # Decide if fallback is needed.
         fallback_needed = (
@@ -6502,12 +6594,12 @@ class CrossDirectoryEnricherWorker(QThread):
             )
             quoted_fb = urllib.parse.quote_plus(fallback_query)
             fb_url = f"https://www.last.fm/search?q={quoted_fb}&type=artist"
-            _lf_sleep()
+            _lf_sleep(self._lf_in_cooldown() or self._lf_consecutive_406 > 0)
             fb_html = self._fetch_url(fb_url, label="Last.fm search (fallback)", max_attempts=1)
             fb_status = getattr(self, "_last_http_status", None)
-            if not fb_html and fb_status != 406:
-                _lf_sleep()
-                fb_html = self._fetch_url(fb_url, label="Last.fm search (fallback)", max_attempts=LF_SEARCH_RETRY_MAX)
+            if fb_status == 406 or (not fb_html and fb_status == 406):
+                # Shape fallback failed; mark unhealthy and skip upcoming rows.
+                self._lf_enter_cooldown()
             fallback_candidate = _parse_first_candidate(fb_html, log_no_results=False) if fb_html else None
             if fallback_candidate:
                 fb_display, fb_profile, fb_conf, fb_rank, fb_match_score = fallback_candidate
@@ -6567,19 +6659,21 @@ class CrossDirectoryEnricherWorker(QThread):
             headers_name = "custom"
 
         now = time.time()
-        if is_lastfm and self._lf_breaker_until and now < self._lf_breaker_until:
-            if not self._lf_breaker_logged:
-                cooldown = int(self._lf_breaker_until - now)
-                try:
-                    self.log_message.emit(
-                        f"[Enricher][LF] Circuit breaker active; skipping {label}. cooldown_s={cooldown}"
-                    )
-                except Exception:
-                    pass
-                self._lf_breaker_logged = True
-            self._last_fetch_ok = False
-            self._last_http_status = None
-            return None
+        if is_lastfm:
+            now_mono = self._lf_now()
+            if self._lf_in_cooldown(now_mono):
+                if not self._lf_cooldown_skip_logged:
+                    cooldown = int(max(1.0, self._lf_cooldown_until - now_mono))
+                    try:
+                        self.log_message.emit(
+                            f"[Enricher][LF] Soft cooldown active; skipping Last.fm search. cooldown_s={cooldown}"
+                        )
+                    except Exception:
+                        pass
+                    self._lf_cooldown_skip_logged = True
+                self._last_fetch_ok = False
+                self._last_http_status = None
+                return None
 
         attempt = 0
         while attempt < max_attempts:
@@ -6590,12 +6684,10 @@ class CrossDirectoryEnricherWorker(QThread):
                 text = ""
                 self._last_http_status = status
                 if is_lastfm and status == 406:
-                    self._lf_consecutive_406 += 1
+                    pass
                 elif is_lastfm:
-                    self._lf_consecutive_406 = 0
                     if status and status < 400:
-                        self._lf_breaker_until = 0.0
-                    self._lf_breaker_logged = False
+                        self._lf_mark_success()
                 if is_lastfm:
                     try:
                         self.log_message.emit(
@@ -6645,19 +6737,12 @@ class CrossDirectoryEnricherWorker(QThread):
                 status = exc.response.status_code if exc.response is not None else None
                 self._last_http_status = status
                 if is_lastfm and status == 406:
-                    self._lf_consecutive_406 += 1
+                    self._lf_mark_406()
                     if attempt < max_attempts:
                         delay = min(LF_BACKOFF_MAX, LF_BACKOFF_BASE * (2 ** max(0, attempt - 1)) + random.uniform(0, 0.35))
                         time.sleep(delay)
                         continue
-                    if self._lf_consecutive_406 >= LF_BREAKER_CONSEC_406 and not self._lf_breaker_until:
-                        self._lf_breaker_until = time.time() + LF_BREAKER_COOLDOWN_S
-                        try:
-                            self.log_message.emit(
-                                f"[Enricher][LF] Circuit breaker tripped after consecutive 406s={self._lf_consecutive_406}; cooling down for {LF_BREAKER_COOLDOWN_S}s."
-                            )
-                        except Exception:
-                            pass
+                    self._lf_enter_cooldown()
                     suffix = _format_outcome_suffix(fetch_ok=False, actionable=None, http_status=status)
                     self.log_message.emit(f"[Enricher][LF] {label} failed with 406 (no HTML){suffix}")
                     return None

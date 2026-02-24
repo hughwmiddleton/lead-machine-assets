@@ -50,35 +50,42 @@ def test_lastfm_406_retries_then_succeeds(monkeypatch):
     assert len(sleeps) == 2
 
 
-def test_lastfm_breaker_trips_after_consecutive_406(monkeypatch):
+def test_lastfm_soft_cooldown_after_consecutive_406(monkeypatch):
     worker = _build_worker()
-    monkeypatch.setattr(cde, "LF_BREAKER_CONSEC_406", 2)
-    monkeypatch.setattr(cde, "LF_BREAKER_COOLDOWN_S", 1)
+    monkeypatch.setattr(cde, "LF_COOLDOWN_CONSEC_406", 2)
+    monkeypatch.setattr(cde, "LF_COOLDOWN_MIN_S", 10)
+    monkeypatch.setattr(cde, "LF_COOLDOWN_MAX_S", 60)
     statuses: List[int] = [406, 406]
 
     def fake_get(url, timeout=None, headers=None):
         status = statuses.pop(0)
         return _DummyResp(status)
 
-    sleeps = []
+    logs: List[str] = []
+    worker.log_message = SimpleNamespace(emit=lambda msg: logs.append(msg))
+
     now = [1000.0]
+
+    def fake_mono():
+        return now[0]
 
     def fake_time():
         return now[0]
 
     def fake_sleep(s):
-        sleeps.append(s)
         now[0] += s
 
     monkeypatch.setattr(worker.session, "get", fake_get)
     monkeypatch.setattr(time, "time", fake_time)
+    monkeypatch.setattr(time, "monotonic", fake_mono)
     monkeypatch.setattr(time, "sleep", fake_sleep)
 
     html = worker._fetch_url("https://www.last.fm/search?q=test&type=artist", "Last.fm search", max_attempts=2)
     assert html is None
-    assert worker._lf_breaker_until > fake_time()
+    assert worker._lf_cooldown_until > fake_mono()
+    assert any("Entering soft cooldown" in msg for msg in logs)
+    assert all("cooling down for 600s" not in msg for msg in logs)
 
-    # Next call should short-circuit due to breaker without hitting network.
     called = {"count": 0}
 
     def fail_get(*args, **kwargs):
@@ -246,3 +253,75 @@ def test_lastfm_sanitizer_empty_skips_primary_and_goes_fallback_only(monkeypatch
     assert payload is not None
     assert calls == [("Last.fm search (fallback)", 1)]
     assert any("Skipping track query (sanitized empty); using artist-only." in msg for msg in logs)
+
+
+def test_lastfm_no_quotes_variant_on_low_confidence(monkeypatch):
+    worker = _build_worker()
+    worker._live_context = {"song_title": "Good Track", "artist": "Artist Q"}
+    calls: List[tuple] = []
+
+    def fake_fetch(url, label=None, max_attempts=None, headers=None):
+        calls.append((label, max_attempts))
+        if label == "Last.fm search":
+            worker._last_http_status = 200
+            worker._last_fetch_ok = True
+            # Mismatch name to keep confidence low (< MIN_LF_CONFIDENCE)
+            return "<a href='/music/not-artist'>Not Artist</a>"
+        if label == "Last.fm search (no-quotes)":
+            worker._last_http_status = 200
+            worker._last_fetch_ok = True
+            return "<a href='/music/artist-q'>Artist Q</a>"
+        if label == "Last.fm search (fallback)":
+            worker._last_http_status = 200
+            worker._last_fetch_ok = True
+            return "<a href='/music/artist-q'>Artist Q</a>"
+        return None
+
+    def fake_profile(profile_url, source_dir, confidence=None):
+        return cde.EnrichmentPayload(
+            socials=set(), websites=set(), emails=set(), link_hubs=set(), source_dir=source_dir, source_url=profile_url
+        )
+
+    monkeypatch.setattr(worker, "_fetch_url", fake_fetch)
+    monkeypatch.setattr(worker, "_fetch_profile_and_build", fake_profile)
+    monkeypatch.setattr(time, "sleep", lambda s: None)
+
+    payload = worker._live_search_lastfm("Artist Q")
+    assert payload is not None
+    assert ("Last.fm search", 1) in calls
+    assert ("Last.fm search (no-quotes)", 1) in calls
+    # Fallback should not be necessary because no-quotes provided a match.
+    assert ("Last.fm search (fallback)", 1) not in calls
+
+
+def test_lastfm_no_quotes_not_triggered_on_406(monkeypatch):
+    worker = _build_worker()
+    worker._live_context = {"song_title": "Good Track", "artist": "Artist Q"}
+    calls: List[tuple] = []
+
+    def fake_fetch(url, label=None, max_attempts=None, headers=None):
+        calls.append((label, max_attempts))
+        if label == "Last.fm search":
+            worker._last_http_status = 406
+            worker._last_fetch_ok = False
+            return None
+        if label == "Last.fm search (fallback)":
+            worker._last_http_status = 200
+            worker._last_fetch_ok = True
+            return "<a href='/music/artist-q'>Artist Q</a>"
+        return None
+
+    def fake_profile(profile_url, source_dir, confidence=None):
+        return cde.EnrichmentPayload(
+            socials=set(), websites=set(), emails=set(), link_hubs=set(), source_dir=source_dir, source_url=profile_url
+        )
+
+    monkeypatch.setattr(worker, "_fetch_url", fake_fetch)
+    monkeypatch.setattr(worker, "_fetch_profile_and_build", fake_profile)
+    monkeypatch.setattr(time, "sleep", lambda s: None)
+
+    payload = worker._live_search_lastfm("Artist Q")
+    assert payload is not None
+    # Should not attempt no-quotes variant when primary was 406.
+    assert ("Last.fm search (no-quotes)", 1) not in calls
+    assert ("Last.fm search (fallback)", 1) in calls
