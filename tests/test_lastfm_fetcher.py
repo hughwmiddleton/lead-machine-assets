@@ -192,7 +192,7 @@ def test_lastfm_fallback_406_does_not_retry(monkeypatch):
 
 def test_lastfm_sanitizer_numeric_heavy_skips_track(monkeypatch):
     worker = _build_worker()
-    worker._live_context = {"song_title": "2026/01/30 Bowstring Brewyard, Raleigh, NC", "artist": "Artist Z"}
+    worker._live_context = {"song_title": "2026/01/30", "artist": "Artist Z"}
     calls = []
 
     def fake_fetch(url, label=None, max_attempts=None, headers=None):
@@ -216,3 +216,33 @@ def test_lastfm_sanitizer_numeric_heavy_skips_track(monkeypatch):
     assert len(calls) == 1
     assert calls[0][1] == "Last.fm search (fallback)"
     assert calls[0][2] == 1
+
+
+def test_lastfm_sanitizer_empty_skips_primary_and_goes_fallback_only(monkeypatch):
+    worker = _build_worker()
+    worker._live_context = {"song_title": "12345", "artist": "Artist Z"}
+    calls = []
+    logs: List[str] = []
+
+    worker.log_message = SimpleNamespace(emit=lambda msg: logs.append(msg))
+
+    def fake_fetch(url, label=None, max_attempts=None, headers=None):
+        calls.append((label, max_attempts))
+        worker._last_http_status = 200
+        worker._last_fetch_ok = True
+        return "<a href='/music/artist-z'>Artist Z</a>"
+
+    def fake_profile(profile_url, source_dir, confidence=None):
+        return cde.EnrichmentPayload(
+            socials=set(), websites=set(), emails=set(), link_hubs=set(), source_dir=source_dir, source_url=profile_url
+        )
+
+    monkeypatch.setattr(worker, "_fetch_url", fake_fetch)
+    monkeypatch.setattr(worker, "_fetch_profile_and_build", fake_profile)
+    monkeypatch.setattr(time, "sleep", lambda s: None)
+
+    payload = worker._live_search_lastfm("Artist Z")
+
+    assert payload is not None
+    assert calls == [("Last.fm search (fallback)", 1)]
+    assert any("Skipping track query (sanitized empty); using artist-only." in msg for msg in logs)

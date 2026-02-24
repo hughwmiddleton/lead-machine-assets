@@ -6426,6 +6426,11 @@ class CrossDirectoryEnricherWorker(QThread):
                 )
             except Exception:
                 pass
+        elif not sanitized_title and song_title_raw:
+            try:
+                self.log_message.emit("[Enricher][LF] Skipping track query (sanitized empty); using artist-only.")
+            except Exception:
+                pass
 
         use_track = bool(sanitized_title)
         primary_query = build_search_query(artist_name, sanitized_title) if use_track else artist_name
@@ -6464,7 +6469,7 @@ class CrossDirectoryEnricherWorker(QThread):
 
         html: Optional[str] = None
         primary_status: Optional[int] = None
-        if use_track:
+        if use_track and sanitized_title:
             _lf_sleep()
             html = self._fetch_url(url, label="Last.fm search", max_attempts=1)
             primary_status = getattr(self, "_last_http_status", None)
