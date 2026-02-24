@@ -368,7 +368,9 @@ def _safe_atomic_write_csv(df, path: str, fallback_columns: List[str], reason: s
         df = pd.DataFrame(columns=fallback_columns)
     elif not isinstance(df, pd.DataFrame):
         df = pd.DataFrame(df)
-    if not getattr(df, "columns", None) or len(df.columns) == 0:
+    columns = getattr(df, "columns", None)
+    columns_count = len(columns) if columns is not None else 0
+    if columns_count == 0:
         df = pd.DataFrame(columns=fallback_columns)
     print(
         f"[CSV WRITE]{' ' + reason if reason else ''} rows={len(df)} cols={len(df.columns)} path={path}"
@@ -1396,7 +1398,15 @@ def run_directory_job(job_config: Dict[str, Any], raw_output_path: str, logger: 
             return str(final_path)
 
         raise ValueError(f"Unsupported directory: {directory}")
-    except Exception:
+    except Exception as exc:
+        _safe_log(logger, f"[Directory] Job failed for directory={directory}: {type(exc).__name__}: {exc}")
+        try:
+            if hasattr(logger, "exception") and callable(getattr(logger, "exception", None)):
+                logger.exception("[Directory] Job failure traceback", exc_info=exc)
+            else:
+                _LOGGER.exception("[Directory] Job failure traceback", exc_info=exc)
+        except Exception:
+            pass
         _remove_if_exists(tmp_path)
         raise
 
