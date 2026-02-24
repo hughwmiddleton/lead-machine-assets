@@ -89,7 +89,8 @@ LASTFM_HEADERS = {
 LF_SEARCH_RETRY_MAX = 3
 LF_BACKOFF_BASE = 0.7
 LF_BACKOFF_MAX = 6.0
-LF_BREAKER_CONSEC_406 = 5
+LF_PACING_DELAY_S = 0.25
+LF_BREAKER_CONSEC_406 = 10
 LF_BREAKER_COOLDOWN_S = 10 * 60
 
 # Bandcamp live-search resilience (T0X1)
@@ -6362,6 +6363,8 @@ class CrossDirectoryEnricherWorker(QThread):
             self._set_platform_state("lastfm", "skipped")
             return None
         self.log_message.emit(f"[Enricher] Last.fm live search: {url}")
+        # Light pacing to reduce Last.fm 406 throttling during bulk enrichment.
+        time.sleep(LF_PACING_DELAY_S)
         html = self._fetch_url(url, label="Last.fm search", max_attempts=LF_SEARCH_RETRY_MAX)
         if not html:
             self._set_platform_state("lastfm", "skipped")
@@ -6393,6 +6396,8 @@ class CrossDirectoryEnricherWorker(QThread):
             )
             quoted_fb = urllib.parse.quote_plus(fallback_query)
             fb_url = f"https://www.last.fm/search?q={quoted_fb}&type=artist"
+            # Light pacing to reduce Last.fm 406 throttling during bulk enrichment.
+            time.sleep(LF_PACING_DELAY_S)
             fb_html = self._fetch_url(fb_url, label="Last.fm search (fallback)", max_attempts=LF_SEARCH_RETRY_MAX)
             if fb_html:
                 fb_soup = BeautifulSoup(fb_html, "html.parser")
