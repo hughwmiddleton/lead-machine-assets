@@ -38,6 +38,19 @@ _LOGGER = logging.getLogger(__name__)
 EMAIL_PRIORITY_COLS: Sequence[str] = ("Email", "Email_All", "Directory_Email", "Unearthed_Email")
 
 
+@dataclass
+class AtomicCSVResult:
+    final_path: Path
+    tmp_path: Path
+    row_count: int
+    raw_bytes: int
+
+
+def _should_keep_tmp_on_failure() -> bool:
+    flag = os.getenv("KEEP_TMP_ON_FAILURE", "")
+    return flag in {"1", "true", "TRUE"}
+
+
 def _safe_count_rows(csv_path: Union[str, Path]) -> int:
     """Cheap row counter that avoids loading the whole CSV; returns total data rows (excludes header if present)."""
     try:
@@ -319,6 +332,16 @@ def _ensure_parent(path: str) -> None:
         os.makedirs(parent, exist_ok=True)
 
 
+def _estimate_min_header_bytes(columns: Sequence[str]) -> Optional[int]:
+    """Best-effort minimum byte count for a CSV header line using utf-8-sig."""
+    try:
+        header = ",".join([str(c) for c in columns]) if columns is not None else ""
+        header_line = f"{header}\n"
+        return len(header_line.encode("utf-8-sig"))
+    except Exception:
+        return None
+
+
 def _fsync_path(path: Path) -> None:
     """Best-effort fsync to ensure contents hit disk before replace."""
     try:
@@ -328,16 +351,30 @@ def _fsync_path(path: Path) -> None:
         pass
 
 
-def _atomic_write_dataframe(df: pd.DataFrame, path: str) -> Tuple[int, int]:
-    """Atomic CSV write via temp file + fsync. Returns (row_count, bytes_written)."""
-    target = Path(path)
-    _ensure_parent(str(target))
-    tmp_path = target.with_name(f"{target.stem}.tmp{target.suffix}")
-    if tmp_path.exists():
-        try:
-            tmp_path.unlink()
-        except Exception:
-            pass
+def _safe_atomic_write_csv(df, path: str, fallback_columns: List[str], reason: str = "") -> AtomicCSVResult:
+    """
+    Guard against pandas emitting a lone newline when DataFrame has zero columns.
+    Ensures headers exist, writes to <final>.tmp in the same directory, fsyncs, verifies,
+    then atomically replaces the final path.
+    """
+    if df is None:
+        df = pd.DataFrame(columns=fallback_columns)
+    elif not isinstance(df, pd.DataFrame):
+        df = pd.DataFrame(df)
+
+    columns = getattr(df, "columns", None)
+    columns_count = len(columns) if columns is not None else 0
+    if columns_count == 0:
+        df = pd.DataFrame(columns=fallback_columns)
+
+    final_path = Path(path)
+    tmp_path = _derive_tmp_csv_path(final_path)
+    _ensure_parent(str(tmp_path))
+    keep_tmp = _should_keep_tmp_on_failure()
+    row_count = len(df.index)
+    header_min_bytes = _estimate_min_header_bytes(list(df.columns))
+
+    _remove_if_exists(tmp_path)
     try:
         with open(tmp_path, "w", newline="", encoding="utf-8-sig") as handle:
             df.to_csv(handle, index=False)
@@ -346,36 +383,42 @@ def _atomic_write_dataframe(df: pd.DataFrame, path: str) -> Tuple[int, int]:
                 os.fsync(handle.fileno())
             except OSError:
                 pass
+
+        tmp_bytes = tmp_path.stat().st_size if tmp_path.exists() else 0
+        if tmp_bytes <= 0 or (header_min_bytes is not None and tmp_bytes < header_min_bytes):
+            raise IOError(f"Temp CSV invalid (bytes={tmp_bytes}, header_min={header_min_bytes})")
+
         _fsync_path(tmp_path)
-        os.replace(tmp_path, target)
-        bytes_written = target.stat().st_size if target.exists() else 0
-        return len(df.index), int(bytes_written)
+        os.replace(tmp_path, final_path)
+
+        if not final_path.exists():
+            raise IOError("Atomic replace completed but final CSV missing")
+
+        final_bytes = final_path.stat().st_size if final_path.exists() else 0
+        if final_bytes <= 0 or (header_min_bytes is not None and final_bytes < header_min_bytes):
+            _LOGGER.error(
+                "[CSV WRITE] Final verification failed rows=%s bytes=%s header_min=%s path=%s",
+                row_count,
+                final_bytes,
+                header_min_bytes,
+                final_path,
+            )
+            _remove_if_exists(final_path)
+            _remove_if_exists(tmp_path)
+            raise IOError("Final CSV verification failed")
+
+        _LOGGER.info(
+            "[CSV WRITE]%s rows=%s bytes=%s path=%s",
+            f" {reason}" if reason else "",
+            row_count,
+            final_bytes,
+            final_path,
+        )
+        return AtomicCSVResult(final_path=final_path, tmp_path=tmp_path, row_count=row_count, raw_bytes=int(final_bytes))
     except Exception:
-        try:
-            if tmp_path.exists():
-                tmp_path.unlink()
-        except Exception:
-            pass
+        if tmp_path.exists() and not keep_tmp:
+            _remove_if_exists(tmp_path)
         raise
-
-
-def _safe_atomic_write_csv(df, path: str, fallback_columns: List[str], reason: str = "") -> None:
-    """
-    Guard against pandas emitting a lone newline when DataFrame has zero columns.
-    Ensures headers exist, then writes atomically.
-    """
-    if df is None:
-        df = pd.DataFrame(columns=fallback_columns)
-    elif not isinstance(df, pd.DataFrame):
-        df = pd.DataFrame(df)
-    columns = getattr(df, "columns", None)
-    columns_count = len(columns) if columns is not None else 0
-    if columns_count == 0:
-        df = pd.DataFrame(columns=fallback_columns)
-    print(
-        f"[CSV WRITE]{' ' + reason if reason else ''} rows={len(df)} cols={len(df.columns)} path={path}"
-    )
-    _atomic_write_dataframe(df, path)
 
 
 def _derive_tmp_csv_path(final_path: Union[str, Path]) -> Path:
@@ -392,6 +435,21 @@ def _remove_if_exists(path: Path) -> None:
         return
     except Exception:
         pass
+
+
+def _cleanup_leftover_tmp(tmp_path: Path, job_label: str) -> None:
+    if not tmp_path.exists():
+        return
+    try:
+        tmp_path.unlink()
+        _LOGGER.warning("[CSV CLEANUP] Leftover tmp CSV removed for job=%s path=%s", job_label, tmp_path)
+    except Exception as exc:
+        _LOGGER.warning(
+            "[CSV CLEANUP] Leftover tmp CSV present for job=%s path=%s (cleanup failed: %s)",
+            job_label,
+            tmp_path,
+            exc,
+        )
 
 
 def _read_csv_header_columns(tmp_path: Path) -> List[str]:
@@ -441,33 +499,24 @@ def _count_csv_data_rows(tmp_path: Path) -> int:
     return 0
 
 
-def _finalize_tmp_csv(tmp_path: Path, final_path: Path) -> Tuple[int, int]:
+def _finalize_tmp_csv(tmp_path: Path, final_path: Path) -> AtomicCSVResult:
     """
     Validate and atomically promote tmp CSV to final_path using lightweight streaming.
-    Returns (row_count, raw_bytes).
+    Returns AtomicCSVResult describing the finalised file.
     """
     if not tmp_path.exists():
         raise FileNotFoundError(f"Expected temp CSV missing: {tmp_path}")
 
+    keep_tmp = _should_keep_tmp_on_failure()
+
     try:
         columns = _read_csv_header_columns(tmp_path)
-    except Exception:
-        _remove_if_exists(tmp_path)
-        raise
+        if not columns:
+            raise ValueError("Seed job produced CSV with no columns")
 
-    if not columns:
-        _remove_if_exists(tmp_path)
-        raise ValueError("Seed job produced CSV with no columns")
-
-    try:
         row_count = _count_csv_data_rows(tmp_path)
-    except Exception:
-        _remove_if_exists(tmp_path)
-        raise
-
-    if row_count == 0:
-        # ensure header-only
-        try:
+        if row_count == 0:
+            # ensure header-only
             with open(tmp_path, "w", newline="", encoding="utf-8-sig") as handle:
                 writer = csv.writer(handle)
                 writer.writerow(columns)
@@ -476,14 +525,39 @@ def _finalize_tmp_csv(tmp_path: Path, final_path: Path) -> Tuple[int, int]:
                     os.fsync(handle.fileno())
                 except OSError:
                     pass
-        except Exception:
-            _remove_if_exists(tmp_path)
-            raise
 
-    _fsync_path(tmp_path)
-    os.replace(tmp_path, final_path)
-    raw_bytes = final_path.stat().st_size if final_path.exists() else 0
-    return int(row_count), int(raw_bytes)
+        header_min_bytes = _estimate_min_header_bytes(columns)
+        tmp_bytes = tmp_path.stat().st_size if tmp_path.exists() else 0
+        if tmp_bytes <= 0 or (header_min_bytes is not None and tmp_bytes < header_min_bytes):
+            raise IOError(f"Temp CSV invalid (bytes={tmp_bytes}, header_min={header_min_bytes})")
+
+        _fsync_path(tmp_path)
+        os.replace(tmp_path, final_path)
+
+        final_bytes = final_path.stat().st_size if final_path.exists() else 0
+        if final_bytes <= 0 or (header_min_bytes is not None and final_bytes < header_min_bytes):
+            _LOGGER.error(
+                "[CSV FINALIZE] Verification failed rows=%s bytes=%s header_min=%s path=%s",
+                row_count,
+                final_bytes,
+                header_min_bytes,
+                final_path,
+            )
+            _remove_if_exists(final_path)
+            _remove_if_exists(tmp_path)
+            raise IOError("Final CSV verification failed")
+
+        _LOGGER.info(
+            "[CSV FINALIZE] promoted tmp rows=%s bytes=%s path=%s",
+            row_count,
+            final_bytes,
+            final_path,
+        )
+        return AtomicCSVResult(final_path=final_path, tmp_path=tmp_path, row_count=int(row_count), raw_bytes=int(final_bytes))
+    except Exception:
+        if tmp_path.exists() and not keep_tmp:
+            _remove_if_exists(tmp_path)
+        raise
 
 
 def _cell_str(v) -> str:
@@ -582,7 +656,7 @@ RAW_FALLBACK_COLUMNS: List[str] = [
 ]
 
 
-def _write_rows_to_csv(rows: Iterable[Any], path: str, source_directory: str = "") -> str:
+def _write_rows_to_csv(rows: Iterable[Any], path: str, source_directory: str = "") -> AtomicCSVResult:
     _ensure_parent(path)
     materialized: List[Any] = list(rows or [])
     fallback_cols = RAW_FALLBACK_COLUMNS.copy()
@@ -590,8 +664,7 @@ def _write_rows_to_csv(rows: Iterable[Any], path: str, source_directory: str = "
         df = pd.DataFrame(columns=fallback_cols)
         if source_directory:
             df["Source Directory"] = source_directory
-        _safe_atomic_write_csv(df, path, fallback_cols, reason=f"job={source_directory or 'unknown'}")
-        return path
+        return _safe_atomic_write_csv(df, path, fallback_cols, reason=f"job={source_directory or 'unknown'}")
     if isinstance(materialized[0], dict):
         columns = []
         for row in materialized:
@@ -609,8 +682,7 @@ def _write_rows_to_csv(rows: Iterable[Any], path: str, source_directory: str = "
     if source_directory and "Source Directory" not in df.columns:
         df["Source Directory"] = source_directory
     fallback_cols = list(df.columns) if len(getattr(df, "columns", [])) else fallback_cols
-    _safe_atomic_write_csv(df, path, fallback_cols, reason=f"job={source_directory or 'unknown'}")
-    return path
+    return _safe_atomic_write_csv(df, path, fallback_cols, reason=f"job={source_directory or 'unknown'}")
 
 
 FINAL_EXPORT_COLUMNS: Sequence[str] = [
@@ -1305,8 +1377,12 @@ def run_directory_job(job_config: Dict[str, Any], raw_output_path: str, logger: 
     directory = (job_config.get("directory") or "").strip().lower()
     target_count = int(job_config.get("target_valid_leads") or job_config.get("target_count") or 0)
     mode = (job_config.get("mode") or "").strip().lower()
+    job_label = job_config.get("job_id") or job_config.get("slug") or directory or "unknown"
 
     _safe_log(logger, f"[Directory] Running job for directory={directory} slug={job_config.get('slug', '')} job_id={job_config.get('job_id', '')}")
+
+    result_path: Optional[str] = None
+    success = False
 
     try:
         if "unearthed" in directory:
@@ -1316,21 +1392,24 @@ def run_directory_job(job_config: Dict[str, Any], raw_output_path: str, logger: 
             except Exception:
                 full_csv = None
             if full_csv:
-                _finalize_tmp_csv(tmp_path, final_path)
-                return str(final_path)
-            _safe_log(logger, f"[Unearthed] Falling back to listing-only scrape_website for job: {job_config}")
-            url = job_config.get("input_seed_csv") or job_config.get("seed") or job_config.get("url") or ""
-            if not url:
-                url = getattr(module, "UNEARTHED_DEFAULT_URL", "")
-            module.scrape_website(
-                url,
-                existing_csv=output_path,
-                max_artists=target_count or 200,
-            )
-            _finalize_tmp_csv(tmp_path, final_path)
-            return str(final_path)
+                finalize_result = _finalize_tmp_csv(tmp_path, final_path)
+                result_path = str(finalize_result.final_path)
+                success = True
+            else:
+                _safe_log(logger, f"[Unearthed] Falling back to listing-only scrape_website for job: {job_config}")
+                url = job_config.get("input_seed_csv") or job_config.get("seed") or job_config.get("url") or ""
+                if not url:
+                    url = getattr(module, "UNEARTHED_DEFAULT_URL", "")
+                module.scrape_website(
+                    url,
+                    existing_csv=output_path,
+                    max_artists=target_count or 200,
+                )
+                finalize_result = _finalize_tmp_csv(tmp_path, final_path)
+                result_path = str(finalize_result.final_path)
+                success = True
 
-        if directory == "spotify":
+        elif directory == "spotify":
             params = {
                 "playlist_ids": job_config.get("playlist_ids"),
                 "search_term": job_config.get("search_term") or job_config.get("input_seed_csv") or "",
@@ -1338,11 +1417,11 @@ def run_directory_job(job_config: Dict[str, Any], raw_output_path: str, logger: 
                 "spotify_client_secret": job_config.get("spotify_client_secret") or os.environ.get("SPOTIFY_CLIENT_SECRET"),
             }
             rows = module.scrape_spotify(target_count, params, logger=logger)
-            _write_rows_to_csv(rows, output_path, source_directory="spotify")
-            _finalize_tmp_csv(tmp_path, final_path)
-            return str(final_path)
+            write_result = _write_rows_to_csv(rows, final_path.as_posix(), source_directory="spotify")
+            result_path = str(write_result.final_path)
+            success = True
 
-        if directory == "bandcamp":
+        elif directory == "bandcamp":
             seed = (
                 job_config.get("bandcamp_seed")
                 or job_config.get("input_seed_csv")
@@ -1363,10 +1442,11 @@ def run_directory_job(job_config: Dict[str, Any], raw_output_path: str, logger: 
                 search_domain=job_config.get("search_domain", "artists"),
                 search_location_filter=job_config.get("search_location", ""),
             )
-            _finalize_tmp_csv(tmp_path, final_path)
-            return str(final_path)
+            finalize_result = _finalize_tmp_csv(tmp_path, final_path)
+            result_path = str(finalize_result.final_path)
+            success = True
 
-        if directory == "soundcloud":
+        elif directory == "soundcloud":
             url = job_config.get("soundcloud_url") or job_config.get("input_seed_csv") or job_config.get("seed") or ""
             module.scrape_soundcloud(
                 url,
@@ -1378,10 +1458,11 @@ def run_directory_job(job_config: Dict[str, Any], raw_output_path: str, logger: 
                 min_yield=job_config.get("min_yield", 3),
                 dry_run=bool(job_config.get("dry_run", False)),
             )
-            _finalize_tmp_csv(tmp_path, final_path)
-            return str(final_path)
+            finalize_result = _finalize_tmp_csv(tmp_path, final_path)
+            result_path = str(finalize_result.final_path)
+            success = True
 
-        if directory == "lastfm":
+        elif directory == "lastfm":
             seeds = _read_seed_list(job_config.get("input_seed_csv"))
             module.scrape_lastfm_similar(
                 seeds,
@@ -1389,15 +1470,19 @@ def run_directory_job(job_config: Dict[str, Any], raw_output_path: str, logger: 
                 max_artists=target_count or getattr(module, "LASTFM_MAX_SIMILAR_PER_SEED", 200),
                 log_fn=logger,
             )
-            _finalize_tmp_csv(tmp_path, final_path)
-            return str(final_path)
+            finalize_result = _finalize_tmp_csv(tmp_path, final_path)
+            result_path = str(finalize_result.final_path)
+            success = True
 
-        if directory == "unearthed":
+        elif directory == "unearthed":
             _run_unearthed_full_pipeline(job_config, output_path, module, logger)
-            _finalize_tmp_csv(tmp_path, final_path)
-            return str(final_path)
+            finalize_result = _finalize_tmp_csv(tmp_path, final_path)
+            result_path = str(finalize_result.final_path)
+            success = True
 
-        raise ValueError(f"Unsupported directory: {directory}")
+        else:
+            raise ValueError(f"Unsupported directory: {directory}")
+
     except Exception as exc:
         _safe_log(logger, f"[Directory] Job failed for directory={directory}: {type(exc).__name__}: {exc}")
         try:
@@ -1407,8 +1492,14 @@ def run_directory_job(job_config: Dict[str, Any], raw_output_path: str, logger: 
                 _LOGGER.exception("[Directory] Job failure traceback", exc_info=exc)
         except Exception:
             pass
-        _remove_if_exists(tmp_path)
+        if not _should_keep_tmp_on_failure():
+            _remove_if_exists(tmp_path)
         raise
+    finally:
+        if success:
+            _cleanup_leftover_tmp(tmp_path, job_label)
+
+    return result_path if result_path is not None else str(final_path)
 
 
 def run_enrichment(raw_csv_path: str, enriched_output_path: str, logger: LoggerFn = None, night_mode: bool = False) -> str:
