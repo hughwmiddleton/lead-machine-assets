@@ -729,31 +729,54 @@ def _merge_master(run_dir: str, job_states: List[Dict[str, Any]], logger: loggin
 def _merge_raw_master(
     run_dir: str, job_states: List[Dict[str, Any]], logger: logging.Logger, stats: Optional[SmokeStats] = None
 ) -> Optional[str]:
-    raw_paths = []
-    for state in job_states:
-        raw_path = state.get("raw_csv") or ""
-        if raw_path and os.path.exists(raw_path):
-            raw_paths.append((state.get("job_id", ""), raw_path))
-    if not raw_paths:
-        logger.warning("[Master] No raw CSVs found to merge.")
-        return None
+    def _log_skip(job_id: str, path: str, raw_bytes: int, reason: str, exc: Optional[Exception] = None) -> None:
+        msg = f"[Master] Skipping {path} (job={job_id}) bytes={raw_bytes} reason={reason}"
+        if exc:
+            logger.warning("%s: %s", msg, exc)
+        else:
+            logger.warning("%s", msg)
+        if stats is not None:
+            stats.jobs_skipped.append({"path": path, "reason": reason, "bytes": raw_bytes, "job_id": job_id})
+
+    def _load_job_csv(job_id: str, path: str) -> Optional[pd.DataFrame]:
+        if not path or not os.path.exists(path):
+            _log_skip(job_id, path, 0, "missing file")
+            return None
+        try:
+            raw_bytes = os.path.getsize(path)
+        except Exception:
+            raw_bytes = 0
+        if raw_bytes <= 1:
+            _log_skip(job_id, path, raw_bytes, "empty/too small")
+            return None
+        try:
+            df_local = pd.read_csv(path)
+            return df_local
+        except pd.errors.EmptyDataError as exc:
+            _log_skip(job_id, path, raw_bytes, "pandas EmptyDataError", exc)
+            return None
+        except pd.errors.ParserError as exc:
+            _log_skip(job_id, path, raw_bytes, "pandas ParserError", exc)
+            return None
+        except Exception as exc:
+            _log_skip(job_id, path, raw_bytes, f"{exc.__class__.__name__}", exc)
+            return None
 
     frames = []
-    for job_id, path in raw_paths:
-        try:
-            df = pd.read_csv(path)
-            df["__source_job"] = job_id
-            # Keep a copy of the per-job email fields before any merge/consolidation
-            # so SmearGuard can rely on the originals if a later step smears values.
-            if "Email" in df.columns:
-                df["__email_orig"] = df["Email"]
-            if "Email_All" in df.columns:
-                df["__email_all_orig"] = df["Email_All"]
-            frames.append(df)
-        except Exception as exc:
-            logger.warning("[Master] Skipping %s due to read error: %s", path, exc)
-            if stats is not None:
-                stats.jobs_skipped.append({"path": path, "reason": str(exc)})
+    for state in job_states:
+        job_id = state.get("job_id", "")
+        path = state.get("raw_csv") or ""
+        df = _load_job_csv(job_id, path)
+        if df is None:
+            continue
+        df["__source_job"] = job_id
+        # Keep a copy of the per-job email fields before any merge/consolidation
+        # so SmearGuard can rely on the originals if a later step smears values.
+        if "Email" in df.columns:
+            df["__email_orig"] = df["Email"]
+        if "Email_All" in df.columns:
+            df["__email_all_orig"] = df["Email_All"]
+        frames.append(df)
     if not frames:
         logger.warning("[Master] No data available after reading raw files.")
         return None

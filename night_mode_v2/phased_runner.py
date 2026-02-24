@@ -56,6 +56,16 @@ def _load_config(config_path: str) -> Dict[str, Any]:
     with open(config_path, "r", encoding="utf-8") as f:
         return json.load(f)
 
+def _job_status_path(job_dir: str) -> str:
+    return os.path.join(job_dir, "job_status.json")
+
+
+def _write_job_status(job_dir: str, payload: Dict[str, Any]) -> None:
+    path = _job_status_path(job_dir)
+    os.makedirs(job_dir, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, sort_keys=True)
+
 
 def run_seed_phase(config_path: str, run_dir: str, resume: bool = False) -> Dict[str, Any]:
     config = _load_config(config_path)
@@ -85,6 +95,23 @@ def run_seed_phase(config_path: str, run_dir: str, resume: bool = False) -> Dict
         job_dir = os.path.join(run_dir, job_id)
         os.makedirs(job_dir, exist_ok=True)
         raw_csv = os.path.join(job_dir, "raw.csv")
+        raw_tmp = os.path.join(job_dir, "raw.tmp.csv")
+        _write_job_status(
+            job_dir,
+            {
+                "job_id": job_id,
+                "status": "running",
+                "row_count": 0,
+                "raw_exists": False,
+                "raw_bytes": 0,
+                "error": "",
+            },
+        )
+        if os.path.exists(raw_tmp):
+            try:
+                os.remove(raw_tmp)
+            except Exception:
+                pass
 
         required_outputs_exist = os.path.exists(raw_csv)
         schema_valid = False
@@ -121,7 +148,11 @@ def run_seed_phase(config_path: str, run_dir: str, resume: bool = False) -> Dict
             if not schema_hash and df_for_schema is not None:
                 schema_hash = _schema_hash_from_df(df_for_schema)
             status = job_entry.get("status") or "completed"
+            raw_exists = os.path.exists(raw_csv)
+            raw_bytes = os.path.getsize(raw_csv) if raw_exists else 0
+            error_msg = job_entry.get("error", "")
         else:
+            error_msg = ""
             try:
                 try:
                     pipeline_runner.run_directory_job(job, raw_csv, logger=None)
@@ -133,11 +164,14 @@ def run_seed_phase(config_path: str, run_dir: str, resume: bool = False) -> Dict
                         stop_on_failure=False,
                         per_job_validate=False,
                     )
-            except Exception:
+            except Exception as exc:
                 # Best effort: mark failure and continue.
                 row_count = _safe_count_rows(raw_csv)
                 schema_hash = ""
                 status = "failed"
+                raw_exists = os.path.exists(raw_csv)
+                raw_bytes = os.path.getsize(raw_csv) if raw_exists else 0
+                error_msg = f"{exc.__class__.__name__}: {exc}"
             else:
                 try:
                     df_for_schema = pd.read_csv(raw_csv) if os.path.exists(raw_csv) else None
@@ -152,6 +186,18 @@ def run_seed_phase(config_path: str, run_dir: str, resume: bool = False) -> Dict
                     schema_hash = ""
 
                 status = "completed" if row_count > 0 else "failed"
+                raw_exists = os.path.exists(raw_csv)
+                raw_bytes = os.path.getsize(raw_csv) if raw_exists else 0
+                if status == "failed" and not error_msg:
+                    if not raw_exists:
+                        error_msg = "raw.csv missing"
+                    elif row_count == 0:
+                        error_msg = "zero rows"
+
+        if status == "completed" and (not raw_exists or row_count <= 0):
+            status = "failed"
+            if not error_msg:
+                error_msg = "raw.csv missing" if not raw_exists else "zero rows"
 
         seed_jobs[job_id] = {
             "status": status,
@@ -160,6 +206,18 @@ def run_seed_phase(config_path: str, run_dir: str, resume: bool = False) -> Dict
             "row_count": int(row_count),
             "schema_hash": schema_hash or "",
         }
+
+        _write_job_status(
+            job_dir,
+            {
+                "job_id": job_id,
+                "status": status,
+                "row_count": int(row_count),
+                "raw_exists": bool(raw_exists),
+                "raw_bytes": int(raw_bytes),
+                "error": error_msg or "",
+            },
+        )
 
         if status == "completed":
             completed_jobs += 1

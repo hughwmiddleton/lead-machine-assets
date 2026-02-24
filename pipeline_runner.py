@@ -19,7 +19,7 @@ import time
 import datetime
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Union
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 import pandas as pd
 
@@ -319,11 +319,25 @@ def _ensure_parent(path: str) -> None:
         os.makedirs(parent, exist_ok=True)
 
 
-def _atomic_write_dataframe(df: pd.DataFrame, path: str) -> None:
-    """Atomic CSV write via temp file + fsync."""
+def _fsync_path(path: Path) -> None:
+    """Best-effort fsync to ensure contents hit disk before replace."""
+    try:
+        with open(path, "rb") as handle:
+            os.fsync(handle.fileno())
+    except Exception:
+        pass
+
+
+def _atomic_write_dataframe(df: pd.DataFrame, path: str) -> Tuple[int, int]:
+    """Atomic CSV write via temp file + fsync. Returns (row_count, bytes_written)."""
     target = Path(path)
     _ensure_parent(str(target))
-    tmp_path = target.with_suffix(target.suffix + ".tmp")
+    tmp_path = target.with_name(f"{target.stem}.tmp{target.suffix}")
+    if tmp_path.exists():
+        try:
+            tmp_path.unlink()
+        except Exception:
+            pass
     try:
         with open(tmp_path, "w", newline="", encoding="utf-8-sig") as handle:
             df.to_csv(handle, index=False)
@@ -332,7 +346,10 @@ def _atomic_write_dataframe(df: pd.DataFrame, path: str) -> None:
                 os.fsync(handle.fileno())
             except OSError:
                 pass
+        _fsync_path(tmp_path)
         os.replace(tmp_path, target)
+        bytes_written = target.stat().st_size if target.exists() else 0
+        return len(df.index), int(bytes_written)
     except Exception:
         try:
             if tmp_path.exists():
@@ -353,8 +370,118 @@ def _safe_atomic_write_csv(df, path: str, fallback_columns: List[str], reason: s
         df = pd.DataFrame(df)
     if not getattr(df, "columns", None) or len(df.columns) == 0:
         df = pd.DataFrame(columns=fallback_columns)
-    print(f"[CSV WRITE]{' ' + reason if reason else ''} rows={len(df)} cols={len(df.columns)} path={path}")
+    print(
+        f"[CSV WRITE]{' ' + reason if reason else ''} rows={len(df)} cols={len(df.columns)} path={path}"
+    )
     _atomic_write_dataframe(df, path)
+
+
+def _derive_tmp_csv_path(final_path: Union[str, Path]) -> Path:
+    target = Path(final_path)
+    if target.name == "raw.csv":
+        return target.with_name("raw.tmp.csv")
+    return target.with_name(f"{target.stem}.tmp{target.suffix}")
+
+
+def _remove_if_exists(path: Path) -> None:
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return
+    except Exception:
+        pass
+
+
+def _read_csv_header_columns(tmp_path: Path) -> List[str]:
+    """Return header columns from a CSV by reading only the first row."""
+    last_exc: Optional[Exception] = None
+    for enc in ("utf-8-sig", "utf-8"):
+        try:
+            with open(tmp_path, "r", newline="", encoding=enc) as handle:
+                reader = csv.reader(handle)
+                for row in reader:
+                    return row
+                return []
+        except UnicodeDecodeError as exc:
+            last_exc = exc
+            continue
+        except Exception as exc:
+            last_exc = exc
+            break
+    if last_exc:
+        raise last_exc
+    return []
+
+
+def _count_csv_data_rows(tmp_path: Path) -> int:
+    """Count data rows (excluding header) via streaming csv.reader."""
+    last_exc: Optional[Exception] = None
+    for enc in ("utf-8-sig", "utf-8"):
+        try:
+            with open(tmp_path, "r", newline="", encoding=enc) as handle:
+                reader = csv.reader(handle)
+                try:
+                    next(reader)
+                except StopIteration:
+                    return 0
+                row_count = 0
+                for _ in reader:
+                    row_count += 1
+                return row_count
+        except UnicodeDecodeError as exc:
+            last_exc = exc
+            continue
+        except Exception as exc:
+            last_exc = exc
+            break
+    if last_exc:
+        raise last_exc
+    return 0
+
+
+def _finalize_tmp_csv(tmp_path: Path, final_path: Path) -> Tuple[int, int]:
+    """
+    Validate and atomically promote tmp CSV to final_path using lightweight streaming.
+    Returns (row_count, raw_bytes).
+    """
+    if not tmp_path.exists():
+        raise FileNotFoundError(f"Expected temp CSV missing: {tmp_path}")
+
+    try:
+        columns = _read_csv_header_columns(tmp_path)
+    except Exception:
+        _remove_if_exists(tmp_path)
+        raise
+
+    if not columns:
+        _remove_if_exists(tmp_path)
+        raise ValueError("Seed job produced CSV with no columns")
+
+    try:
+        row_count = _count_csv_data_rows(tmp_path)
+    except Exception:
+        _remove_if_exists(tmp_path)
+        raise
+
+    if row_count == 0:
+        # ensure header-only
+        try:
+            with open(tmp_path, "w", newline="", encoding="utf-8-sig") as handle:
+                writer = csv.writer(handle)
+                writer.writerow(columns)
+                try:
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                except OSError:
+                    pass
+        except Exception:
+            _remove_if_exists(tmp_path)
+            raise
+
+    _fsync_path(tmp_path)
+    os.replace(tmp_path, final_path)
+    raw_bytes = final_path.stat().st_size if final_path.exists() else 0
+    return int(row_count), int(raw_bytes)
 
 
 def _cell_str(v) -> str:
@@ -1166,6 +1293,12 @@ def run_directory_job(job_config: Dict[str, Any], raw_output_path: str, logger: 
     This wrapper intentionally keeps the surface area small and delegates
     behaviour to the existing scrapers without changing their defaults.
     """
+    final_path = Path(raw_output_path)
+    tmp_path = _derive_tmp_csv_path(final_path)
+    _remove_if_exists(tmp_path)
+    _ensure_parent(str(tmp_path))
+    output_path = tmp_path.as_posix()
+
     module = _load_legacy_module()
     directory = (job_config.get("directory") or "").strip().lower()
     target_count = int(job_config.get("target_valid_leads") or job_config.get("target_count") or 0)
@@ -1173,86 +1306,99 @@ def run_directory_job(job_config: Dict[str, Any], raw_output_path: str, logger: 
 
     _safe_log(logger, f"[Directory] Running job for directory={directory} slug={job_config.get('slug', '')} job_id={job_config.get('job_id', '')}")
 
-    if "unearthed" in directory:
-        # Try full Unearthed pipeline with contact/email pass first.
-        try:
-            full_csv = _run_unearthed_full_pipeline(job_config, raw_output_path, module, logger)
-        except Exception:
-            full_csv = None
-        if full_csv:
-            return full_csv
-        _safe_log(logger, f"[Unearthed] Falling back to listing-only scrape_website for job: {job_config}")
-        url = job_config.get("input_seed_csv") or job_config.get("seed") or job_config.get("url") or ""
-        if not url:
-            url = getattr(module, "UNEARTHED_DEFAULT_URL", "")
-        module.scrape_website(
-            url,
-            existing_csv=raw_output_path,
-            max_artists=target_count or 200,
-        )
-        return raw_output_path
+    try:
+        if "unearthed" in directory:
+            # Try full Unearthed pipeline with contact/email pass first.
+            try:
+                full_csv = _run_unearthed_full_pipeline(job_config, output_path, module, logger)
+            except Exception:
+                full_csv = None
+            if full_csv:
+                _finalize_tmp_csv(tmp_path, final_path)
+                return str(final_path)
+            _safe_log(logger, f"[Unearthed] Falling back to listing-only scrape_website for job: {job_config}")
+            url = job_config.get("input_seed_csv") or job_config.get("seed") or job_config.get("url") or ""
+            if not url:
+                url = getattr(module, "UNEARTHED_DEFAULT_URL", "")
+            module.scrape_website(
+                url,
+                existing_csv=output_path,
+                max_artists=target_count or 200,
+            )
+            _finalize_tmp_csv(tmp_path, final_path)
+            return str(final_path)
 
-    if directory == "spotify":
-        params = {
-            "playlist_ids": job_config.get("playlist_ids"),
-            "search_term": job_config.get("search_term") or job_config.get("input_seed_csv") or "",
-            "spotify_client_id": job_config.get("spotify_client_id") or os.environ.get("SPOTIFY_CLIENT_ID"),
-            "spotify_client_secret": job_config.get("spotify_client_secret") or os.environ.get("SPOTIFY_CLIENT_SECRET"),
-        }
-        rows = module.scrape_spotify(target_count, params, logger=logger)
-        return _write_rows_to_csv(rows, raw_output_path, source_directory="spotify")
+        if directory == "spotify":
+            params = {
+                "playlist_ids": job_config.get("playlist_ids"),
+                "search_term": job_config.get("search_term") or job_config.get("input_seed_csv") or "",
+                "spotify_client_id": job_config.get("spotify_client_id") or os.environ.get("SPOTIFY_CLIENT_ID"),
+                "spotify_client_secret": job_config.get("spotify_client_secret") or os.environ.get("SPOTIFY_CLIENT_SECRET"),
+            }
+            rows = module.scrape_spotify(target_count, params, logger=logger)
+            _write_rows_to_csv(rows, output_path, source_directory="spotify")
+            _finalize_tmp_csv(tmp_path, final_path)
+            return str(final_path)
 
-    if directory == "bandcamp":
-        seed = (
-            job_config.get("bandcamp_seed")
-            or job_config.get("input_seed_csv")
-            or job_config.get("seed")
-            or job_config.get("url")
-            or ""
-        )
-        progress_path = os.path.join(os.path.dirname(os.path.abspath(raw_output_path)), "bandcamp_progress.json")
-        module.scrape_bandcamp(
-            seed,
-            pages_per_tag=job_config.get("pages_per_tag", getattr(module, "BANDCAMP_PAGES_PER_TAG", 5)),
-            existing_csv=raw_output_path,
-            max_artists=target_count or getattr(module, "BANDCAMP_TARGET_ROWS", 200),
-            progress_path=progress_path,
-            mode=mode or "discover",
-            max_pages=job_config.get("max_pages"),
-            max_items=job_config.get("max_items"),
-            search_domain=job_config.get("search_domain", "artists"),
-            search_location_filter=job_config.get("search_location", ""),
-        )
-        return raw_output_path
+        if directory == "bandcamp":
+            seed = (
+                job_config.get("bandcamp_seed")
+                or job_config.get("input_seed_csv")
+                or job_config.get("seed")
+                or job_config.get("url")
+                or ""
+            )
+            progress_path = os.path.join(os.path.dirname(os.path.abspath(output_path)), "bandcamp_progress.json")
+            module.scrape_bandcamp(
+                seed,
+                pages_per_tag=job_config.get("pages_per_tag", getattr(module, "BANDCAMP_PAGES_PER_TAG", 5)),
+                existing_csv=output_path,
+                max_artists=target_count or getattr(module, "BANDCAMP_TARGET_ROWS", 200),
+                progress_path=progress_path,
+                mode=mode or "discover",
+                max_pages=job_config.get("max_pages"),
+                max_items=job_config.get("max_items"),
+                search_domain=job_config.get("search_domain", "artists"),
+                search_location_filter=job_config.get("search_location", ""),
+            )
+            _finalize_tmp_csv(tmp_path, final_path)
+            return str(final_path)
 
-    if directory == "soundcloud":
-        url = job_config.get("soundcloud_url") or job_config.get("input_seed_csv") or job_config.get("seed") or ""
-        module.scrape_soundcloud(
-            url,
-            seed_tags=job_config.get("seed_tags"),
-            pages_per_tag=job_config.get("pages_per_tag", getattr(module, "SOUNDCLOUD_PAGES_PER_TAG", 5)),
-            existing_csv=raw_output_path,
-            max_artists=target_count or 200,
-            max_handles=job_config.get("max_handles"),
-            min_yield=job_config.get("min_yield", 3),
-            dry_run=bool(job_config.get("dry_run", False)),
-        )
-        return raw_output_path
+        if directory == "soundcloud":
+            url = job_config.get("soundcloud_url") or job_config.get("input_seed_csv") or job_config.get("seed") or ""
+            module.scrape_soundcloud(
+                url,
+                seed_tags=job_config.get("seed_tags"),
+                pages_per_tag=job_config.get("pages_per_tag", getattr(module, "SOUNDCLOUD_PAGES_PER_TAG", 5)),
+                existing_csv=output_path,
+                max_artists=target_count or 200,
+                max_handles=job_config.get("max_handles"),
+                min_yield=job_config.get("min_yield", 3),
+                dry_run=bool(job_config.get("dry_run", False)),
+            )
+            _finalize_tmp_csv(tmp_path, final_path)
+            return str(final_path)
 
-    if directory == "lastfm":
-        seeds = _read_seed_list(job_config.get("input_seed_csv"))
-        module.scrape_lastfm_similar(
-            seeds,
-            existing_csv=raw_output_path,
-            max_artists=target_count or getattr(module, "LASTFM_MAX_SIMILAR_PER_SEED", 200),
-            log_fn=logger,
-        )
-        return raw_output_path
+        if directory == "lastfm":
+            seeds = _read_seed_list(job_config.get("input_seed_csv"))
+            module.scrape_lastfm_similar(
+                seeds,
+                existing_csv=output_path,
+                max_artists=target_count or getattr(module, "LASTFM_MAX_SIMILAR_PER_SEED", 200),
+                log_fn=logger,
+            )
+            _finalize_tmp_csv(tmp_path, final_path)
+            return str(final_path)
 
-    if directory == "unearthed":
-        return _run_unearthed_full_pipeline(job_config, raw_output_path, module, logger)
+        if directory == "unearthed":
+            _run_unearthed_full_pipeline(job_config, output_path, module, logger)
+            _finalize_tmp_csv(tmp_path, final_path)
+            return str(final_path)
 
-    raise ValueError(f"Unsupported directory: {directory}")
+        raise ValueError(f"Unsupported directory: {directory}")
+    except Exception:
+        _remove_if_exists(tmp_path)
+        raise
 
 
 def run_enrichment(raw_csv_path: str, enriched_output_path: str, logger: LoggerFn = None, night_mode: bool = False) -> str:
