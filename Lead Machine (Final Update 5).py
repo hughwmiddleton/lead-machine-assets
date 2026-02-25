@@ -806,7 +806,9 @@ def _safe_atomic_write_csv(df, path: str, fallback_columns: list[str], reason: s
         df = pd.DataFrame(columns=fallback_columns)
     elif not isinstance(df, pd.DataFrame):
         df = pd.DataFrame(df)
-    if not getattr(df, "columns", None) or len(df.columns) == 0:
+    # Avoid truthiness on Index (bool(Index) raises ValueError); check length explicitly.
+    cols = getattr(df, "columns", None)
+    if cols is None or len(cols) == 0:
         df = pd.DataFrame(columns=fallback_columns)
     print(f"[CSV WRITE]{' ' + reason if reason else ''} rows={len(df)} cols={len(df.columns)} path={path}")
     _atomic_write_dataframe(df, path)

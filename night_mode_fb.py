@@ -2889,6 +2889,9 @@ class NightModeFacebookEnricher:
             "fetch_error": 0,
             "skipped_no_fb_url": 0,
         }
+        # Per-run reject cache to avoid re-selecting clearly bad pages (name mismatch, non-music, etc.).
+        self._fb_reject_cache: Dict[str, Set[str]] = {}
+        self._fb_reject_cache_global: Set[str] = set()
         self._session_state_logged = False
         # Slow mode / resilience
         self.slow_mode_active: bool = False
@@ -2988,6 +2991,51 @@ class NightModeFacebookEnricher:
             f"[Night FB][session_state] authed={1 if authed else 0} unhealthy={1 if unhealthy else 0} reason={reason or ''} v2={1 if v2_enabled else 0}",
         )
         self._session_state_logged = True
+
+    def _fb_reject_key(self, artist: str) -> str:
+        return _slugify(artist)
+
+    def _fb_mark_rejected(self, artist: str, url: str, reason: str = "") -> None:
+        norm_url = _normalise_fb_url(url or "")
+        if not norm_url:
+            return
+        key = self._fb_reject_key(artist)
+        cache = self._fb_reject_cache.setdefault(key, set())
+        cache.add(norm_url)
+        self._fb_reject_cache_global.add(norm_url)
+        if reason:
+            _log(self.logger, f"[Night FB] Cached reject url='{norm_url}' artist='{artist}' reason='{reason}'")
+
+    def _fb_is_rejected(self, artist: str, url: str) -> bool:
+        norm_url = _normalise_fb_url(url or "")
+        if not norm_url:
+            return False
+        key = self._fb_reject_key(artist)
+        return norm_url in self._fb_reject_cache.get(key, set()) or norm_url in self._fb_reject_cache_global
+
+    def _choose_ranked_candidate(
+        self, artist: str, ranked_items: List[Dict[str, Any]]
+    ) -> Tuple[Optional["facebook_enrich.FbCandidate"], str]:
+        """
+        Pick the first viable ranked candidate, skipping any cached rejects and
+        preferring name-matching pages over clear mismatches.
+        """
+        fallback_mismatch = None
+        for item in ranked_items or []:
+            cand = item.get("candidate")
+            raw_url = _candidate_url(cand)
+            norm_url = _normalise_fb_url(raw_url)
+            if norm_url and self._fb_is_rejected(artist, norm_url):
+                _log(self.logger, f"[Night FB] Skipping cached rejected FB candidate url='{norm_url}' for '{artist}'.")
+                continue
+            match_level = item.get("features", {}).get("match_level") or "none"
+            if match_level != "mismatch":
+                return cand, "ranked_sort"
+            if fallback_mismatch is None:
+                fallback_mismatch = cand
+        if fallback_mismatch:
+            return fallback_mismatch, "mismatch_fallback"
+        return None, "no_viable_candidate"
 
     def _enter_slow_mode(self, reason: str, multiplier: float) -> None:
         try:
@@ -3458,7 +3506,17 @@ class NightModeFacebookEnricher:
                 _log(self.logger, f"[Night FB] Search navigation failed after refresh: {exc2}")
                 raise FacebookDriverError(str(exc2))
 
-        primary_query = " ".join(part for part in (artist, location) if part).strip()
+        def _normalize_location_for_query(raw: str) -> str:
+            raw = (raw or "").strip()
+            if not raw:
+                return ""
+            parts = [p.strip() for p in re.split(r"[,|/]+", raw) if p.strip()]
+            if len(parts) >= 2:
+                return " ".join(parts[:2])
+            return raw
+
+        location_query = _normalize_location_for_query(location)
+        primary_query = " ".join(part for part in (artist, location_query) if part).strip()
         if not primary_query:
             return None
         html, nav_driver = _fetch_search_html(primary_query)
@@ -3471,6 +3529,8 @@ class NightModeFacebookEnricher:
                 pass
 
         refine_query_list = [f"{artist} musician", f"{artist} band"]
+        if location_query:
+            refine_query_list.insert(0, f"{artist} {location_query}")
         if self.slow_mode_active:
             refine_query_list = refine_query_list[:1]
 
@@ -3528,8 +3588,11 @@ class NightModeFacebookEnricher:
         soft_blocked = soft_blocked or bool(diagnostics.get("overlay_soft_block"))
 
         ranked_candidates: List["facebook_enrich.FbCandidate"] = [item["candidate"] for item in ranked_for_preview]
-        candidate = ranked_candidates[0] if ranked_candidates else None
-        selected_by = "ranked_sort"
+        candidate, selected_by = self._choose_ranked_candidate(artist, ranked_for_preview)
+        if not candidate:
+            _log(self.logger, f"[Night FB] No viable FB candidates for '{artist}' after reject-cache and mismatch guard.")
+            _maybe_log_rank_preview(artist, candidates, None, logger=self.logger, selected_by=selected_by)
+            return None
 
         if quality_gate_enabled and candidate:
             refine_forced = False
@@ -3607,6 +3670,11 @@ class NightModeFacebookEnricher:
         for cand in ordered_candidates:
             raw_url = _candidate_url(cand)
             norm_url = _normalise_fb_url(raw_url or "")
+
+            if norm_url and self._fb_is_rejected(artist, norm_url):
+                if debug_detail:
+                    _log(self.logger, f"[Night FB] Skipping cached rejected FB candidate url={norm_url!r} for '{artist}'.")
+                continue
 
             is_junk = bool(norm_url) and _is_junk_fb_candidate(norm_url)
 
@@ -3756,6 +3824,7 @@ class NightModeFacebookEnricher:
 
         used_driver_kind = "session"
         outcome_hint = "fetch_error"
+        reject_reason = ""
 
         html, resolved_url = self._fetch_html_with_url(candidate_url, goto_about=False)
         if html:
@@ -3887,6 +3956,7 @@ class NightModeFacebookEnricher:
             else:
                 _log(self.logger, f"[Night FB][EmailOverrideReject] url='{resolved_url}' reason='{email_override_reason}' emails={len(emails)} category='{meta_category}' name='{page_title}'")
                 emails = []
+                reject_reason = email_override_reason or "email_override_reject"
 
         gate_soft_pass_category = False
         gate_soft_pass_identity = False
@@ -3905,6 +3975,7 @@ class NightModeFacebookEnricher:
                         _log(self.logger, "[FB Enrich] Soft-pass music gate: strong identity match, no explicit anti-signals")
                 if not gate_soft_pass_identity:
                     _log(self.logger, f"[Night FB] No music signals detected on FB page {resolved_url}, skipping.")
+                    reject_reason = reject_reason or "no_music_signals"
 
         night_result = self._build_result(
             emails,
@@ -3923,6 +3994,10 @@ class NightModeFacebookEnricher:
         if gate_soft_pass_identity:
             row["FB_Gate"] = "soft_pass_identity"
         outcome_hint = "found_email" if emails else "no_email_on_page"
+        if night_result is None:
+            if reject_reason:
+                self._fb_mark_rejected(artist_name, resolved_url or candidate_url, reject_reason)
+            return None, emails, used_driver_kind, reject_reason or outcome_hint
         return night_result, emails, used_driver_kind, outcome_hint
 
     def _build_result(

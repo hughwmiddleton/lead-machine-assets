@@ -271,3 +271,30 @@ def test_profile_php_music_page_treated_as_page_not_profile():
     assert features["is_page"] is True
     assert features["is_profile"] is False
     assert all(tok not in breakdown for tok in ("-profile", "-profile_music"))
+
+
+def test_reject_cache_skips_mismatch_candidate(monkeypatch):
+    enricher = night_mode_fb.NightModeFacebookEnricher(
+        legacy_module=None,
+        username="",
+        password="",
+        logger=None,
+        use_shared_session=False,
+    )
+    bad = _cand("DJ Virginia", "https://www.facebook.com/djvirginia", "Musician/band")
+    good = _cand("Willow Heights", "https://www.facebook.com/willowheightsmusic", "Musician/band")
+    ranked = [
+        {"candidate": bad, "score": 90, "breakdown": [], "features": {"match_level": "mismatch"}},
+        {"candidate": good, "score": 80, "breakdown": [], "features": {"match_level": "near"}},
+    ]
+    enricher._fb_mark_rejected("Willow Heights", bad.url, "email_override_reject:name_mismatch")
+
+    chosen, selected_by = enricher._choose_ranked_candidate("Willow Heights", ranked)
+    assert chosen is good
+    assert selected_by in {"ranked_sort", "mismatch_fallback"}
+
+    # With only the rejected mismatch candidate left, selection should fail.
+    solo_ranked = [{"candidate": bad, "score": 70, "breakdown": [], "features": {"match_level": "mismatch"}}]
+    chosen_none, reason = enricher._choose_ranked_candidate("Another Artist", solo_ranked)
+    assert chosen_none is None
+    assert reason == "no_viable_candidate"

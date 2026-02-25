@@ -229,6 +229,7 @@ SC_RSS_ONLY_SUCCESS_RESET = int(os.getenv("SC_RSS_ONLY_SUCCESS_RESET", "2"))
 SC_CHALLENGE_ACTIVE_SECONDS = int(os.getenv("SC_CHALLENGE_ACTIVE_SECONDS", "300"))
 SC_BREAKER_MIN_ROWS = int(os.getenv("SC_BREAKER_MIN_ROWS", "12"))
 SC_RSS_FAIL_BREAKER_THRESHOLD = int(os.getenv("SC_RSS_FAIL_BREAKER_THRESHOLD", "4"))
+SC_RSS_BREAKER_COOLDOWN_SECONDS = int(os.getenv("SC_RSS_BREAKER_COOLDOWN_SECONDS", "120"))
 NIGHT_SC_BUDGET_SECONDS_DEFAULT = 6
 NIGHT_SC_MAX_FETCHES_DEFAULT = 3
 _NIGHT_SC_PIPELINE_LOGGED = False
@@ -3628,6 +3629,7 @@ class CrossDirectoryEnricherWorker(QThread):
         self._active_night_sc_attempt: Optional[_NightSCAttempt] = None
         self._night_sc_challenge_streak: int = 0  # consecutive challenge detections
         self._night_sc_breaker_tripped: bool = False
+        self._sc_live_disabled_until: float = 0.0  # soft cooldown window for live SC
         self._sc_rss_only_mode: bool = False
         self._sc_html_challenge_count: int = 0  # total challenges this run
         self._sc_rss_fail_streak: int = 0
@@ -3678,6 +3680,7 @@ class CrossDirectoryEnricherWorker(QThread):
         self._sc_rss_only_mode = False
         self._sc_html_challenge_count = 0
         self._sc_rss_fail_streak = 0
+        self._sc_live_disabled_until = 0.0
         self._sc_rss_only_logged = False
         self._sc_rss_only_entered_at = 0.0
         self._sc_rss_only_rows = 0
@@ -4503,6 +4506,20 @@ class CrossDirectoryEnricherWorker(QThread):
             self._row_enrichment_state = {}
         self._row_enrichment_state[platform] = status
 
+    def _sc_in_live_cooldown(self, now: Optional[float] = None) -> bool:
+        """
+        Return True if SoundCloud live enrichment is temporarily paused by the breaker.
+        Automatically clears the cooldown once it has elapsed.
+        """
+        now = time.time() if now is None else now
+        disabled_until = getattr(self, "_sc_live_disabled_until", 0.0) or 0.0
+        if disabled_until and now >= disabled_until:
+            self._sc_live_disabled_until = 0.0
+            # Reset streak so the next failure sequence must rebuild the breaker.
+            self._sc_rss_fail_streak = 0
+            return False
+        return bool(disabled_until and now < disabled_until)
+
     def _disable_sc_live_enrich(self, reason: str = "first_challenge_page") -> None:
         if getattr(self, "_sc_live_enrich_disabled", False):
             return
@@ -4606,21 +4623,28 @@ class CrossDirectoryEnricherWorker(QThread):
             if (
                 self._sc_rss_fail_streak >= SC_RSS_FAIL_BREAKER_THRESHOLD
                 and min_rows_ok
-                and not getattr(self, "_sc_live_enrich_disabled", False)
             ):
                 self._night_sc_breaker_tripped = True
+                now = time.time()
+                cooldown_s = SC_RSS_BREAKER_COOLDOWN_SECONDS
+                if getattr(self, "_sc_live_disabled_until", 0.0) and self._sc_live_disabled_until > now:
+                    # Extend, but cap to one additional window.
+                    self._sc_live_disabled_until = min(self._sc_live_disabled_until + cooldown_s, now + cooldown_s * 2)
+                else:
+                    self._sc_live_disabled_until = now + cooldown_s
                 try:
+                    cooldown_left = int(max(1.0, self._sc_live_disabled_until - now))
                     self.log_message.emit(
-                        "[Night SC] Circuit breaker: rss_fail_streak=%d rows_seen=%d row=%s"
+                        "[Night SC] Circuit breaker: rss_fail_streak=%d rows_seen=%d row=%s -> entering cooldown for %ds (live SC paused; RSS/cache continue)"
                         % (
                             self._sc_rss_fail_streak,
                             getattr(self, "_sc_rows_seen", 0),
                             row_idx if row_idx is not None else "<unknown>",
+                            cooldown_left,
                         )
                     )
                 except Exception:
                     pass
-                self._disable_sc_live_enrich("breaker_tripped")
         except Exception:
             pass
 
@@ -5716,6 +5740,15 @@ class CrossDirectoryEnricherWorker(QThread):
                 self._sc_maybe_exit_rss_only(row_idx=row_idx)
         except Exception:
             pass
+        if self._sc_in_live_cooldown():
+            try:
+                cooldown_left = int(max(1.0, self._sc_live_disabled_until - time.time()))
+                self.log_message.emit(
+                    f"[Night SC] Live enrichment cooldown active ({cooldown_left}s remaining); skipping SC for '{artist_name}'."
+                )
+            except Exception:
+                pass
+            return False
         attempt = self._start_night_sc_attempt()
         sc_link = _coerce_directory_value(df.at[row_idx, "SoundCloud Link"]) if "SoundCloud Link" in df.columns else ""
         song_title = _clean_cell(getattr(self, "_live_context", {}).get("song_title", ""))
@@ -6388,6 +6421,13 @@ class CrossDirectoryEnricherWorker(QThread):
             reason = self._sc_live_enrich_disabled_reason or "first_challenge_page"
             self.log_message.emit(
                 f"[Enricher][SC] Live enrichment disabled (reason={reason}); skipping live SC check for '{artist_name}'."
+            )
+            self._set_platform_state("soundcloud", "skipped")
+            return None
+        if self._sc_in_live_cooldown():
+            cooldown_left = int(max(1.0, (self._sc_live_disabled_until - time.time())))
+            self.log_message.emit(
+                f"[Enricher][SC] Live enrichment in cooldown ({cooldown_left}s remaining); skipping live SC check for '{artist_name}'."
             )
             self._set_platform_state("soundcloud", "skipped")
             return None
