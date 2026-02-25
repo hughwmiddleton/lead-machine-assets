@@ -4280,6 +4280,8 @@ class NightModeFacebookEnricher:
                 return self._mark_row_checkpoint(result)
             page_url = ""
             emails: List[str] = []
+            # Guard for downstream reject_reason usage during PASS B apply phase.
+            reject_reason = ""
             if not fb_urls and self._search_disabled_due_to_checkpoint:
                 result["FB_Status"] = "checkpoint_search_disabled"
                 result["FB_Reason"] = "checkpoint"
@@ -4484,6 +4486,8 @@ class NightModeFacebookEnricher:
                     night_result, emails, _, candidate_outcome = _unpack_fb_candidate(candidate)
                     if night_result:
                         page_url = night_result.facebook_url or page_url
+                        # Defensive: ensure reject_reason defined before use in fb_reason_hint.
+                        reject_reason = reject_reason or result.get("FB_Reason", "")
                         result = self._apply_night_fb_result(
                             result,
                             night_result,
