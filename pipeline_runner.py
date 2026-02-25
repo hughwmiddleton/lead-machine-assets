@@ -88,6 +88,12 @@ def _is_valid_email_shape(email: str) -> bool:
     return True
 
 
+def _fb_status_is_rejected(status: str) -> bool:
+    """Return True when FB_Status denotes a rejected/mismatched/blocked candidate."""
+    status_norm = (status or "").lower()
+    return any(tok in status_norm for tok in ("reject", "mismatch", "blocked"))
+
+
 def normalize_emails(value) -> List[str]:
     """
     Split on commas, semicolons, whitespace, newlines. Lowercase, strip, validate
@@ -967,6 +973,17 @@ def _build_final_export_frame(df: pd.DataFrame) -> pd.DataFrame:
 
         email = str(row.get("Email", "") or "")
         email_all = str(row.get("Email_All", "") or "")
+
+        # Defensive guard: strip FB-applied emails when FB_Status signals rejection.
+        fb_status_val = str(row.get("FB_Status", "") or "")
+        fb_applied_raw = str(row.get("__fb_emails_applied", "") or "")
+        if _fb_status_is_rejected(fb_status_val) and fb_applied_raw:
+            fb_emails = set(normalize_emails(fb_applied_raw))
+            if fb_emails:
+                email_list = [e for e in normalize_emails(email) if e not in fb_emails]
+                email_all_list = [e for e in normalize_emails(email_all) if e not in fb_emails]
+                email = ";".join(email_list)
+                email_all = ";".join(email_all_list)
         primary_email = _derive_primary_email(email, email_all)
         all_emails = _derive_all_emails(email, email_all)
 
@@ -2124,13 +2141,22 @@ def run_facebook_global_pass_nightmode(
                 enriched = None
 
             if enriched:
-                _maybe_set_email(df, idx, enriched.get("Email"))
-                if "Email_All" in enriched:
-                    _set_email_all(df, idx, enriched.get("Email_All", ""), source="fb_global_pass", logger=logger)
-                for col in ("Email_Type", "Facebook_URL"):
+                status_val = str(enriched.get("FB_Status", "") or "")
+                fb_rejected = _fb_status_is_rejected(status_val)
+                if fb_rejected:
+                    artist_label = row.get("Artist Name", "") or row.get("Artist", "") or "<unknown>"
+                    reason = status_val or str(enriched.get("FB_Reason", "") or "reject")
+                    _safe_log_console(
+                        logger,
+                        f"[FB Guard] Discarding emails from rejected FB page for '{artist_label}' (reason={reason})",
+                    )
+                else:
+                    _maybe_set_email(df, idx, enriched.get("Email"))
+                    if "Email_All" in enriched:
+                        _set_email_all(df, idx, enriched.get("Email_All", ""), source="fb_global_pass", logger=logger)
+                for col in ("Email_Type", "Facebook_URL", "__fb_emails_applied"):
                     if col in enriched:
                         df.at[idx, col] = enriched.get(col, "")
-                status_val = str(enriched.get("FB_Status", "") or "")
                 if not status_val:
                     email_now = enriched.get("Email", "") or ""
                     fb_url_now = enriched.get("Facebook_URL", "") or ""

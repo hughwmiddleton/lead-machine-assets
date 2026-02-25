@@ -690,6 +690,19 @@ def _unpack_fb_candidate(candidate):
         return None, [], "unknown", "fetch_error"
 
 
+def _fb_status_is_rejected(status: str) -> bool:
+    """Return True when FB_Status denotes a rejected/mismatched/blocked candidate."""
+    status_norm = (status or "").lower()
+    return any(tok in status_norm for tok in ("reject", "mismatch", "blocked"))
+
+
+def _fb_status_is_rejected(status: str) -> bool:
+    """Return True when FB_Status denotes a rejected/mismatched/blocked candidate."""
+    status_norm = (status or "").lower()
+    tokens = ("reject", "mismatch", "blocked")
+    return any(tok in status_norm for tok in tokens)
+
+
 def _extract_fb_urls_for_night_mode(row):
     fields = [
         "Social Link",
@@ -4031,6 +4044,18 @@ class NightModeFacebookEnricher:
     ) -> Dict[str, str]:
         if not night_result:
             return target_row
+        fb_status_raw = str(target_row.get("FB_Status", "") or "")
+        fb_reason = str(target_row.get("FB_Reason", "") or "")
+        artist_name = str(target_row.get("Artist Name", "") or target_row.get("Artist", "") or "").strip() or "<unknown>"
+        if _fb_status_is_rejected(fb_status_raw):
+            reason = fb_reason or fb_status_raw or "reject"
+            _log(
+                self.logger,
+                f"[FB Guard] Discarding emails from rejected FB page '{page_url}' for '{artist_name}' (reason={reason})",
+            )
+            # Do not mutate email fields; preserve status/reason already set.
+            return target_row
+
         target_row["Email"] = night_result.email or target_row.get("Email", "")
         target_row["Email_All"] = night_result.email_all
         target_row["Email_Type"] = night_result.email_type
@@ -4042,6 +4067,17 @@ class NightModeFacebookEnricher:
             target_row["FB_About_Attempted"] = night_result.about_attempted
         if night_result.about_result:
             target_row["FB_About_Result"] = night_result.about_result
+        if emails:
+            # Track FB-applied emails for downstream defensive stripping.
+            normalized_emails = []
+            seen = set()
+            for e in emails:
+                email_norm = (e or "").strip().lower()
+                if email_norm and email_norm not in seen:
+                    seen.add(email_norm)
+                    normalized_emails.append(email_norm)
+            if normalized_emails:
+                target_row["__fb_emails_applied"] = ";".join(sorted(normalized_emails))
         if not target_row.get("FB_Status"):
             target_row["FB_Status"] = "ok"
         _log(self.logger, f"[Night FB] extracted email(s) {emails} from {page_url}")

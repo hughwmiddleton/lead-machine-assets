@@ -1153,6 +1153,12 @@ def _build_session() -> requests.Session:
     return session
 
 
+def _fb_status_is_rejected(status: str) -> bool:
+    """Return True when FB_Status denotes a rejected/mismatched/blocked candidate."""
+    status_norm = (status or "").lower()
+    return any(tok in status_norm for tok in ("reject", "mismatch", "blocked"))
+
+
 # ---------------------------------------------------------------------------
 # Bandcamp-specific HTTP profile (polite, reusable)
 # ---------------------------------------------------------------------------
@@ -4045,21 +4051,29 @@ class CrossDirectoryEnricherWorker(QThread):
                                 if "FB_Status" not in seed_df.columns:
                                     seed_df["FB_Status"] = ""
                                 if fb_emails:
-                                    current_email = cell_to_str(seed_df.at[row_idx, "Email"])
-                                    if not current_email:
-                                        seed_df.at[row_idx, "Email"] = fb_emails[0]
-                                    if not existing_fb_links and page_url_used:
-                                        if not seed_df.at[row_idx, "Social Link"]:
-                                            seed_df.at[row_idx, "Social Link"] = page_url_used
-                                    if page_url_used and not seed_df.at[row_idx, "Facebook_URL"]:
-                                        seed_df.at[row_idx, "Facebook_URL"] = page_url_used
-                                    seed_df.at[row_idx, "Email_All"] = _merge_email_all(
-                                        seed_df.at[row_idx, "Email_All"], fb_emails
-                                    )
-                                    seed_df.at[row_idx, "Email_Type"] = "fb_enrich"
-                                    seed_df.at[row_idx, "FB_Status"] = seed_df.at[row_idx, "FB_Status"] or "found_email"
-                                    enriched = True
-                                    fb_matched = True
+                                    fb_status_val = str(seed_df.at[row_idx, "FB_Status"] or "")
+                                    if _fb_status_is_rejected(fb_status_val):
+                                        artist_label = cell_to_str(seed_df.at[row_idx, "Artist Name"]) or "<unknown>"
+                                        self.log_message.emit(
+                                            f"[FB Guard] Discarding emails from rejected FB page '{page_url_used or existing_fb_links[0]}' for '{artist_label}' (reason={fb_status_val})"
+                                        )
+                                    else:
+                                        current_email = cell_to_str(seed_df.at[row_idx, "Email"])
+                                        if not current_email:
+                                            seed_df.at[row_idx, "Email"] = fb_emails[0]
+                                        if not existing_fb_links and page_url_used:
+                                            if not seed_df.at[row_idx, "Social Link"]:
+                                                seed_df.at[row_idx, "Social Link"] = page_url_used
+                                        if page_url_used and not seed_df.at[row_idx, "Facebook_URL"]:
+                                            seed_df.at[row_idx, "Facebook_URL"] = page_url_used
+                                        seed_df.at[row_idx, "Email_All"] = _merge_email_all(
+                                            seed_df.at[row_idx, "Email_All"], fb_emails
+                                        )
+                                        seed_df.at[row_idx, "Email_Type"] = "fb_enrich"
+                                        seed_df.at[row_idx, "__fb_emails_applied"] = ";".join(sorted({e.strip().lower() for e in fb_emails if e}))
+                                        seed_df.at[row_idx, "FB_Status"] = seed_df.at[row_idx, "FB_Status"] or "found_email"
+                                        enriched = True
+                                        fb_matched = True
                                 elif existing_fb_links:
                                     seed_df.at[row_idx, "FB_Status"] = seed_df.at[row_idx, "FB_Status"] or "no_email_on_page"
                                 else:
