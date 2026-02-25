@@ -51,6 +51,36 @@ def test_night_fb_accept_tracks_applied_emails():
     assert updated.get("FB_Status") == "ok"
 
 
+def test_guard_uses_reason_when_status_empty():
+    logs: list[str] = []
+    enricher = NightModeFacebookEnricher(
+        legacy_module=None,
+        username="",
+        password="",
+        logger=logs.append,
+        use_shared_session=False,
+    )
+    row = {"FB_Status": "", "Artist Name": "Reason Test", "Email": "", "Email_All": ""}
+    night_result = NightModeFacebookResult()
+    night_result.email = "fb@test.com"
+    night_result.email_all = "fb@test.com"
+    night_result.email_type = "fb_night"
+    night_result.facebook_url = "https://facebook.com/page"
+
+    updated = enricher._apply_night_fb_result(
+        row,
+        night_result,
+        ["fb@test.com"],
+        "https://facebook.com/page",
+        fb_reason_hint="reject:name_mismatch",
+    )
+
+    assert updated.get("Email") == ""
+    assert updated.get("Email_All") == ""
+    assert "__fb_emails_applied" not in updated
+    assert any("Discarding emails from rejected FB page" in msg for msg in logs)
+
+
 def test_export_strips_rejected_fb_emails_only():
     df = pd.DataFrame(
         [

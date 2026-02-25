@@ -2145,16 +2145,21 @@ def run_facebook_global_pass_nightmode(
                 fb_rejected = _fb_status_is_rejected(status_val)
                 if fb_rejected:
                     artist_label = row.get("Artist Name", "") or row.get("Artist", "") or "<unknown>"
+                    fb_url = enriched.get("Facebook_URL") or (df.at[idx, "Facebook_URL"] if "Facebook_URL" in df.columns else "")
+                    fb_url = str(fb_url or "").strip() or "<unknown>"
                     reason = status_val or str(enriched.get("FB_Reason", "") or "reject")
                     _safe_log_console(
                         logger,
-                        f"[FB Guard] Discarding emails from rejected FB page for '{artist_label}' (reason={reason})",
+                        f"[FB Guard] Discarding emails from rejected FB page '{fb_url}' for '{artist_label}' (reason={reason})",
                     )
                 else:
                     _maybe_set_email(df, idx, enriched.get("Email"))
                     if "Email_All" in enriched:
                         _set_email_all(df, idx, enriched.get("Email_All", ""), source="fb_global_pass", logger=logger)
-                for col in ("Email_Type", "Facebook_URL", "__fb_emails_applied"):
+                cols_to_copy = ["Facebook_URL", "__fb_emails_applied"]
+                if not fb_rejected:
+                    cols_to_copy.append("Email_Type")
+                for col in cols_to_copy:
                     if col in enriched:
                         df.at[idx, col] = enriched.get(col, "")
                 if not status_val:

@@ -693,12 +693,6 @@ def _unpack_fb_candidate(candidate):
 def _fb_status_is_rejected(status: str) -> bool:
     """Return True when FB_Status denotes a rejected/mismatched/blocked candidate."""
     status_norm = (status or "").lower()
-    return any(tok in status_norm for tok in ("reject", "mismatch", "blocked"))
-
-
-def _fb_status_is_rejected(status: str) -> bool:
-    """Return True when FB_Status denotes a rejected/mismatched/blocked candidate."""
-    status_norm = (status or "").lower()
     tokens = ("reject", "mismatch", "blocked")
     return any(tok in status_norm for tok in tokens)
 
@@ -4040,18 +4034,25 @@ class NightModeFacebookEnricher:
         )
 
     def _apply_night_fb_result(
-        self, target_row: Dict[str, str], night_result: NightModeFacebookResult, emails: List[str], page_url: str
+        self,
+        target_row: Dict[str, str],
+        night_result: NightModeFacebookResult,
+        emails: List[str],
+        page_url: str,
+        fb_status_hint: str = "",
+        fb_reason_hint: str = "",
     ) -> Dict[str, str]:
         if not night_result:
             return target_row
-        fb_status_raw = str(target_row.get("FB_Status", "") or "")
-        fb_reason = str(target_row.get("FB_Reason", "") or "")
+        fb_status_raw = str(fb_status_hint or target_row.get("FB_Status", "") or "")
+        fb_reason = str(fb_reason_hint or target_row.get("FB_Reason", "") or "")
         artist_name = str(target_row.get("Artist Name", "") or target_row.get("Artist", "") or "").strip() or "<unknown>"
-        if _fb_status_is_rejected(fb_status_raw):
+        if _fb_status_is_rejected(fb_status_raw) or _fb_status_is_rejected(fb_reason):
             reason = fb_reason or fb_status_raw or "reject"
+            page_label = page_url or "<unknown>"
             _log(
                 self.logger,
-                f"[FB Guard] Discarding emails from rejected FB page '{page_url}' for '{artist_name}' (reason={reason})",
+                f"[FB Guard] Discarding emails from rejected FB page '{page_label}' for '{artist_name}' (reason={reason})",
             )
             # Do not mutate email fields; preserve status/reason already set.
             return target_row
@@ -4167,7 +4168,14 @@ class NightModeFacebookEnricher:
                 if emails:
                     night_result = self._build_result(emails, str(result.get("Email_All", "") or ""), resolved_url or fb_url, artist_name)
                     if night_result:
-                        result = self._apply_night_fb_result(result, night_result, emails, resolved_url or fb_url)
+                        result = self._apply_night_fb_result(
+                            result,
+                            night_result,
+                            emails,
+                            resolved_url or fb_url,
+                            fb_status_hint=result.get("FB_Status", ""),
+                            fb_reason_hint=result.get("FB_Reason", ""),
+                        )
                         result["FB_Status"] = "ok_unearthed_legacy"
                     else:
                         result["FB_Status"] = "unearthed_no_emails"
@@ -4202,7 +4210,14 @@ class NightModeFacebookEnricher:
             if emails:
                 night_result = self._build_result(emails, str(result.get("Email_All", "") or ""), resolved_url or page_url, artist_name)
                 if night_result:
-                    result = self._apply_night_fb_result(result, night_result, emails, resolved_url or page_url)
+                    result = self._apply_night_fb_result(
+                        result,
+                        night_result,
+                        emails,
+                        resolved_url or page_url,
+                        fb_status_hint=result.get("FB_Status", ""),
+                        fb_reason_hint=result.get("FB_Reason", ""),
+                    )
                     result["FB_Status"] = "ok_unearthed_blind"
                     return result
             result["FB_Status"] = status or "unearthed_no_emails"
@@ -4341,7 +4356,14 @@ class NightModeFacebookEnricher:
                                 reason_for_log = f"{driver_kind}_exception:unknown"
                             if emails:
                                 page_url = night_result.facebook_url or _normalise_fb_url(direct_url)
-                                result = self._apply_night_fb_result(result, night_result, emails, page_url)
+                                result = self._apply_night_fb_result(
+                                    result,
+                                    night_result,
+                                    emails,
+                                    page_url,
+                                    fb_status_hint=result.get("FB_Status", ""),
+                                    fb_reason_hint=result.get("FB_Reason", ""),
+                                )
                                 result["FB_Status"] = "pass_a_found_email"
                                 result["FB_Reason"] = "explicit_url"
                                 self._pass_a_bump("found_email")
@@ -4392,7 +4414,14 @@ class NightModeFacebookEnricher:
                         page_url = _normalise_fb_url(probe_url)
                         night_result = self._build_result(diag_emails, str(result.get("Email_All", "") or ""), page_url, artist_name)
                         if night_result:
-                            result = self._apply_night_fb_result(result, night_result, diag_emails, page_url)
+                            result = self._apply_night_fb_result(
+                                result,
+                                night_result,
+                                diag_emails,
+                                page_url,
+                                fb_status_hint=result.get("FB_Status", ""),
+                                fb_reason_hint=result.get("FB_Reason", ""),
+                            )
                             result["FB_Status"] = "pass_a_found_email"
                             result["FB_Reason"] = "explicit_url"
                             self._pass_a_bump("found_email")
@@ -4455,7 +4484,14 @@ class NightModeFacebookEnricher:
                     night_result, emails, _, candidate_outcome = _unpack_fb_candidate(candidate)
                     if night_result:
                         page_url = night_result.facebook_url or page_url
-                        result = self._apply_night_fb_result(result, night_result, emails, page_url)
+                        result = self._apply_night_fb_result(
+                            result,
+                            night_result,
+                            emails,
+                            page_url,
+                            fb_status_hint=result.get("FB_Status", ""),
+                            fb_reason_hint=reject_reason or result.get("FB_Reason", ""),
+                        )
                         if self._checkpoint_limited_active and not result.get("FB_Reason"):
                             result["FB_Reason"] = "checkpoint"
                         return result
@@ -4476,7 +4512,14 @@ class NightModeFacebookEnricher:
                             alt_result, alt_emails, _, alt_outcome = _unpack_fb_candidate(alt_candidate)
                             if alt_result:
                                 page_url = alt_result.facebook_url or alt_url
-                                result = self._apply_night_fb_result(result, alt_result, alt_emails, page_url)
+                                result = self._apply_night_fb_result(
+                                    result,
+                                    alt_result,
+                                    alt_emails,
+                                    page_url,
+                                    fb_status_hint=result.get("FB_Status", ""),
+                                    fb_reason_hint=result.get("FB_Reason", ""),
+                                )
                                 if self._checkpoint_limited_active and not result.get("FB_Reason"):
                                     result["FB_Reason"] = "checkpoint"
                                 return result
@@ -4495,7 +4538,14 @@ class NightModeFacebookEnricher:
                 return result
             night_result = self._build_result(emails, str(result.get("Email_All", "") or ""), page_url, artist_name)
             if night_result:
-                result = self._apply_night_fb_result(result, night_result, emails, page_url)
+                result = self._apply_night_fb_result(
+                    result,
+                    night_result,
+                    emails,
+                    page_url,
+                    fb_status_hint=result.get("FB_Status", ""),
+                    fb_reason_hint=result.get("FB_Reason", ""),
+                )
             else:
                 # Page reached but no emails extracted.
                 if _is_fb_login_or_security_url(page_url):

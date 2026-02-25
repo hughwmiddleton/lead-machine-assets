@@ -4054,8 +4054,9 @@ class CrossDirectoryEnricherWorker(QThread):
                                     fb_status_val = str(seed_df.at[row_idx, "FB_Status"] or "")
                                     if _fb_status_is_rejected(fb_status_val):
                                         artist_label = cell_to_str(seed_df.at[row_idx, "Artist Name"]) or "<unknown>"
+                                        page_label = page_url_used or (existing_fb_links[0] if existing_fb_links else "<unknown>")
                                         self.log_message.emit(
-                                            f"[FB Guard] Discarding emails from rejected FB page '{page_url_used or existing_fb_links[0]}' for '{artist_label}' (reason={fb_status_val})"
+                                            f"[FB Guard] Discarding emails from rejected FB page '{page_label}' for '{artist_label}' (reason={fb_status_val})"
                                         )
                                     else:
                                         current_email = cell_to_str(seed_df.at[row_idx, "Email"])
