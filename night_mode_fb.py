@@ -1781,16 +1781,18 @@ def _create_fb_driver_public(headless: bool = True):
     return _start_chromedriver_with_retry(chrome_options, logger=None, profile_dir=None, enable_temp_profile_fallback=False)
 
 
-def _extract_emails_from_html(html: str) -> List[str]:
+def _extract_emails_from_html(html: str) -> Tuple[List[str], bool]:
     emails: List[str] = []
+    mailto_used = False
     if not html:
-        return emails
+        return emails, mailto_used
     soup = BeautifulSoup(html, "html.parser")
     for anchor in soup.select('a[href^="mailto:"]'):
         href = anchor.get("href") or ""
         addr = href.split("mailto:", 1)[-1].split("?", 1)[0]
         if addr:
             emails.append(addr)
+            mailto_used = True
     text_blob = soup.get_text(" ", strip=True) if soup else ""
     if text_blob:
         emails.extend(match.group(0) for match in EMAIL_REGEX.finditer(text_blob))
@@ -1801,7 +1803,7 @@ def _extract_emails_from_html(html: str) -> List[str]:
         if cleaned and cleaned not in seen:
             seen.add(cleaned)
             unique.append(cleaned)
-    return unique
+    return unique, mailto_used
 
 
 def _choose_primary_email(emails: Sequence[str], artist_slug: str) -> Optional[str]:
@@ -2409,14 +2411,14 @@ def _text_has_music_tokens(text: Optional[str]) -> bool:
     return any(tok in (text or "").lower() for tok in _MUSIC_ROLE_TOKENS)
 
 
-def _try_explicit_fb(driver, url: str, logger: LoggerFn = None) -> Tuple[List[str], Optional[str]]:
+def _try_explicit_fb(driver, url: str, logger: LoggerFn = None) -> Tuple[List[str], Optional[str], str]:
     """
-    Returns: (emails, reason)
+    Returns: (emails, reason, extract_method)
     reason is None if emails found, else one of:
       redirect_login, checkpoint_or_consent, not_found, no_email_found
     """
     if not driver or not url:
-        return [], "no_email_found"
+        return [], "no_email_found", ""
 
     try:
         driver.get(url)
@@ -2425,7 +2427,7 @@ def _try_explicit_fb(driver, url: str, logger: LoggerFn = None) -> Tuple[List[st
             _log(logger, f"[Night FB] Explicit FB navigation failed for {url}")
         except Exception:
             pass
-        return [], "no_email_found"
+        return [], "no_email_found", ""
 
     try:
         final_url = (getattr(driver, "current_url", "") or "").lower()
@@ -2439,10 +2441,10 @@ def _try_explicit_fb(driver, url: str, logger: LoggerFn = None) -> Tuple[List[st
     page_source = page_source_raw.lower()
 
     if ("login" in final_url) or ("/login.php" in final_url) or ("device-based" in page_source) or ("log in" in page_source and "facebook" in page_source):
-        return [], "redirect_login"
+        return [], "redirect_login", ""
 
     if any(tok in final_url for tok in ("checkpoint", "consent")) or any(tok in page_source for tok in ("checkpoint", "consent", "cookie", "privacy")):
-        return [], "checkpoint_or_consent"
+        return [], "checkpoint_or_consent", ""
 
     not_found_phrases = (
         "page isn\u2019t available",
@@ -2451,13 +2453,14 @@ def _try_explicit_fb(driver, url: str, logger: LoggerFn = None) -> Tuple[List[st
         "not available right now",
     )
     if any(phrase in page_source for phrase in not_found_phrases):
-        return [], "not_found"
+        return [], "not_found", ""
 
-    emails = _extract_emails_from_html(page_source_raw)
+    emails, used_mailto = _extract_emails_from_html(page_source_raw)
     if emails:
-        return emails, None
+        method = "mailto" if used_mailto else "regex"
+        return emails, None, method
 
-    return [], "no_email_found"
+    return [], "no_email_found", ""
 
 
 def _fetch_fb_about_variants(base_url: str) -> List[str]:
@@ -2845,6 +2848,8 @@ class NightModeFacebookResult:
     email_type: str = "fb_night"
     facebook_url: str = ""
     email_source: str = ""
+    email_source_url: str = ""
+    email_extract_method: str = ""
     about_attempted: str = "no"
     about_result: str = ""
     accepted: bool = True
@@ -3893,7 +3898,8 @@ class NightModeFacebookEnricher:
             page_title = ""
 
         has_music_signals_main = _night_fb_has_music_signals(soup, {"url": resolved_url})
-        emails = _extract_emails_from_html(html or "")
+        emails, main_mailto = _extract_emails_from_html(html or "")
+        email_method = "mailto" if emails and main_mailto else ("regex" if emails else "")
 
         about_attempted = "no"
         about_result = ""
@@ -3943,9 +3949,10 @@ class NightModeFacebookEnricher:
                         about_result = "music_signals"
                         _log(self.logger, f"[Night FB] Music signals found on About tab {final_about}.")
                 if not emails:
-                    about_emails = _extract_emails_from_html(about_html or "")
+                    about_emails, about_mailto = _extract_emails_from_html(about_html or "")
                     if about_emails:
                         emails = about_emails
+                        email_method = "mailto" if about_mailto else "regex"
                         email_source = about_url.rsplit("/", 1)[-1] or "about"
                         about_result = "emails_found"
                 if has_music_signals and emails:
@@ -4023,6 +4030,7 @@ class NightModeFacebookEnricher:
             accepted=accepted,
             reject_reason=reject_reason,
             candidate_url=resolved_url,
+            email_extract_method=email_method or "regex",
         )
         if not night_result:
             return None
@@ -4056,6 +4064,7 @@ class NightModeFacebookEnricher:
         accepted: bool = True,
         reject_reason: str = "",
         candidate_url: str = "",
+        email_extract_method: str = "",
     ) -> Optional[NightModeFacebookResult]:
         if not emails and not allow_empty:
             return None
@@ -4068,6 +4077,8 @@ class NightModeFacebookEnricher:
             email_type=email_type,
             facebook_url=facebook_url,
             email_source=email_source,
+            email_source_url=facebook_url,
+            email_extract_method=email_extract_method or "regex",
             about_attempted=about_attempted,
             about_result=about_result,
             accepted=accepted,
@@ -4121,6 +4132,25 @@ class NightModeFacebookEnricher:
             target_row["FB_About_Attempted"] = night_result.about_attempted
         if night_result.about_result:
                 target_row["FB_About_Result"] = night_result.about_result
+        # Email provenance
+        def _coerce(val: Any) -> str:
+            try:
+                return str(val or "").strip()
+            except Exception:
+                return ""
+        if _coerce(target_row.get("Email")):
+            if _coerce(target_row.get("Email_Source_URL")) == "":
+                target_row["Email_Source_URL"] = (
+                    page_url
+                    or night_result.email_source_url
+                    or night_result.facebook_url
+                    or target_row.get("Facebook_URL", "")
+                )
+            if _coerce(target_row.get("Email_Source_Type")) == "":
+                target_row["Email_Source_Type"] = "facebook_enrich"
+            if _coerce(target_row.get("Email_Extract_Method")) == "":
+                method = night_result.email_extract_method or "regex"
+                target_row["Email_Extract_Method"] = method
         if emails:
             # Track FB-applied emails for downstream defensive stripping.
             normalized_emails = []
@@ -4142,7 +4172,7 @@ class NightModeFacebookEnricher:
         _log(self.logger, f"[Night FB] extracted email(s) {emails} from {page_url}")
         return target_row
 
-    def _diagnose_explicit_fb_failure(self, url: str, allow_anon: bool) -> Tuple[List[str], Optional[str]]:
+    def _diagnose_explicit_fb_failure(self, url: str, allow_anon: bool) -> Tuple[List[str], Optional[str], str]:
         driver = None
         try:
             session = self._ensure_session()
@@ -4179,12 +4209,12 @@ class NightModeFacebookEnricher:
                 driver = None
 
         if not driver:
-            return [], "no_email_found"
+            return [], "no_email_found", ""
 
         try:
             return _try_explicit_fb(driver, url, logger=self.logger)
         except Exception:
-            return [], "no_email_found"
+            return [], "no_email_found", ""
 
     def _enrich_row_unearthed_legacy(
         self,
@@ -4224,7 +4254,13 @@ class NightModeFacebookEnricher:
                 self._pass_a_bump(outcome)
                 self._pass_a_log_row(artist_name, resolved_url or fb_url, "legacy_unearthed_anon", outcome, reason)
                 if emails:
-                    night_result = self._build_result(emails, str(result.get("Email_All", "") or ""), resolved_url or fb_url, artist_name)
+                    night_result = self._build_result(
+                        emails,
+                        str(result.get("Email_All", "") or ""),
+                        resolved_url or fb_url,
+                        artist_name,
+                        email_extract_method="regex",
+                    )
                     if night_result:
                         result = self._apply_night_fb_result(
                             result,
@@ -4266,7 +4302,13 @@ class NightModeFacebookEnricher:
             self._pass_a_bump(outcome)
             self._pass_a_log_row(artist_name, resolved_url or page_url, "legacy_unearthed_anon", outcome, reason)
             if emails:
-                night_result = self._build_result(emails, str(result.get("Email_All", "") or ""), resolved_url or page_url, artist_name)
+                night_result = self._build_result(
+                    emails,
+                    str(result.get("Email_All", "") or ""),
+                    resolved_url or page_url,
+                    artist_name,
+                    email_extract_method="regex",
+                )
                 if night_result:
                     result = self._apply_night_fb_result(
                         result,
@@ -4469,10 +4511,16 @@ class NightModeFacebookEnricher:
                     diag_emails: List[str] = []
                     probe_url = fb_urls[0] if fb_urls else ""
                     if probe_url:
-                        diag_emails, reason_code = self._diagnose_explicit_fb_failure(probe_url, allow_anon=allow_anon)
+                        diag_emails, reason_code, diag_method = self._diagnose_explicit_fb_failure(probe_url, allow_anon=allow_anon)
                     if diag_emails:
                         page_url = _normalise_fb_url(probe_url)
-                        night_result = self._build_result(diag_emails, str(result.get("Email_All", "") or ""), page_url, artist_name)
+                        night_result = self._build_result(
+                            diag_emails,
+                            str(result.get("Email_All", "") or ""),
+                            page_url,
+                            artist_name,
+                            email_extract_method=diag_method or "regex",
+                        )
                         if night_result:
                             result = self._apply_night_fb_result(
                                 result,
@@ -4598,7 +4646,13 @@ class NightModeFacebookEnricher:
                     result["FB_Reason"] = "checkpoint"
                 _log(self.logger, f"[Night FB] No usable FB candidates for '{artist_name}', marking FB_Status='{result.get('FB_Status')}'.")
                 return result
-            night_result = self._build_result(emails, str(result.get("Email_All", "") or ""), page_url, artist_name)
+            night_result = self._build_result(
+                emails,
+                str(result.get("Email_All", "") or ""),
+                page_url,
+                artist_name,
+                email_extract_method="regex",
+            )
             if night_result:
                 result = self._apply_night_fb_result(
                     result,

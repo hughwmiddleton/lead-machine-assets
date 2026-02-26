@@ -14,9 +14,10 @@ def test_extract_emails_and_primary_selection() -> None:
       </body>
     </html>
     """
-    emails = night_mode_fb._extract_emails_from_html(html)
+    emails, used_mailto = night_mode_fb._extract_emails_from_html(html)
     assert "ericaavenue@gmail.com" in emails
     assert "info@label.com" in emails
+    assert used_mailto is True
     primary = night_mode_fb._choose_primary_email(emails, "ericaavenue")
     assert primary == "ericaavenue@gmail.com"
     merged = night_mode_fb._merge_email_all("bookings@zuso.com", emails)

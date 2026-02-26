@@ -4884,6 +4884,23 @@ class CrossDirectoryEnricherWorker(QThread):
         new_socials = set(payload.socials)
         new_sites = set(payload.websites)
         new_emails = set(payload.emails)
+
+        def _set_email_provenance(source_url: str, source_type: str, method: str = "regex") -> None:
+            if not source_url:
+                return
+            if "Email_Source_URL" not in df.columns:
+                df["Email_Source_URL"] = ""
+            if "Email_Source_Type" not in df.columns:
+                df["Email_Source_Type"] = ""
+            if "Email_Extract_Method" not in df.columns:
+                df["Email_Extract_Method"] = ""
+            if not _coerce_directory_value(df.at[row_idx, "Email_Source_URL"]):
+                df.at[row_idx, "Email_Source_URL"] = source_url
+            if not _coerce_directory_value(df.at[row_idx, "Email_Source_Type"]):
+                df.at[row_idx, "Email_Source_Type"] = source_type
+            if not _coerce_directory_value(df.at[row_idx, "Email_Extract_Method"]):
+                df.at[row_idx, "Email_Extract_Method"] = method
+
         if payload.link_hubs and MAX_LINK_HUB_HOPS_PER_ROW > 0:
             hops = 0
             for hub in payload.link_hubs:
