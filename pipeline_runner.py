@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 import pandas as pd
+from email_provenance import _set_email_with_provenance
 from html_fetcher import close_job_browser
 
 try:  # Shared FB helper; safe fallback if unavailable.
@@ -1759,7 +1760,16 @@ def run_facebook_global_pass(
                             rid_int = int(float(rid))
                         except Exception:
                             continue
-                        _maybe_set_email(updated_df, rid_int, email_val)
+                        source_url = row.get("Email_Source_URL") or fb_url_val or ""
+                        source_type = row.get("Email_Source_Type") or "facebook_enrich"
+                        method = row.get("Email_Extract_Method") or "regex"
+                        _set_email_with_provenance(
+                            (updated_df, rid_int),
+                            email_val,
+                            source_url,
+                            source_type,
+                            method,
+                        )
                         updated_df.at[rid_int, "FB_Status"] = fb_status_val or "ok"
                         if fb_url_val:
                             updated_df.at[rid_int, "Facebook_URL"] = fb_url_val
@@ -2167,7 +2177,16 @@ def run_facebook_global_pass_nightmode(
                         f"[FB Guard] Discarding emails from rejected FB page '{fb_url}' for '{artist_label}' (reason={reason})",
                     )
                 else:
-                    _maybe_set_email(df, idx, enriched.get("Email"))
+                    source_url = enriched.get("Email_Source_URL") or enriched.get("Facebook_URL") or ""
+                    source_type = enriched.get("Email_Source_Type") or "facebook_enrich"
+                    method = enriched.get("Email_Extract_Method") or "regex"
+                    _set_email_with_provenance(
+                        (df, idx),
+                        enriched.get("Email"),
+                        source_url,
+                        source_type,
+                        method,
+                    )
                     if "Email_All" in enriched:
                         _set_email_all(df, idx, enriched.get("Email_All", ""), source="fb_global_pass", logger=logger)
                 cols_to_copy = ["Facebook_URL", "__fb_emails_applied"]

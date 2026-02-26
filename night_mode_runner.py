@@ -720,6 +720,15 @@ def _merge_master(run_dir: str, job_states: List[Dict[str, Any]], logger: loggin
             combined[col] = combined[col].fillna("").astype(str).apply(_strip_excluded_urls)
 
     combined = _coalesce_emails(combined)
+    # Integrity guard: Email must have provenance
+    if "Needs_Review" not in combined.columns:
+        combined["Needs_Review"] = ""
+
+    email_series = combined.get("Email", "").fillna("").astype(str).str.strip()
+    prov_series = combined.get("Email_Source_URL", "").fillna("").astype(str).str.strip()
+
+    mask = (email_series != "") & (prov_series == "")
+    combined.loc[mask, "Needs_Review"] = "TRUE"
     try:
         unearthed_mask = combined.get("Source Directory", pd.Series(dtype=str)).astype(str).str.contains("unearthed", case=False, na=False)
         sample = combined.loc[unearthed_mask, ["Artist Name", "Source Directory", "Email", "Email_All"]].head()
@@ -795,6 +804,15 @@ def _merge_raw_master(
         if col in combined.columns:
             combined[col] = combined[col].fillna("").astype(str).apply(_strip_excluded_urls)
     combined = _coalesce_emails(combined)
+    # Integrity guard: Email must have provenance
+    if "Needs_Review" not in combined.columns:
+        combined["Needs_Review"] = ""
+
+    email_series = combined.get("Email", "").fillna("").astype(str).str.strip()
+    prov_series = combined.get("Email_Source_URL", "").fillna("").astype(str).str.strip()
+
+    mask = (email_series != "") & (prov_series == "")
+    combined.loc[mask, "Needs_Review"] = "TRUE"
     combined = _guard_against_email_smear(combined, logger=logger, min_repeats=5)
     # Email provenance completeness metrics
     if stats is not None:
