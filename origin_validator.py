@@ -13,6 +13,7 @@ from urllib.parse import urlparse
 
 import pandas as pd
 import requests
+from html_fetcher import fetch_html, _detect_soft_block
 from bs4 import BeautifulSoup
 from rapidfuzz import fuzz
 
@@ -126,9 +127,14 @@ def _fetch_html(url: str, session: requests.Session, cache: Dict[str, Optional[s
     if cached is not None:
         return cached
     try:
-        resp = session.get(url, timeout=15)
-        if resp.ok:
-            cache[url] = resp.text
+        result = fetch_html(url, session=session, directory="origin_validator")
+        html = result.get("html") or ""
+        status = result.get("status")
+        mode_used = result.get("mode_used")
+        if html and (status is None or (status or 0) < 400):
+            cache[url] = html
+        elif html and mode_used == "playwright" and not _detect_soft_block(html):
+            cache[url] = html
         else:
             cache[url] = None
         return cache[url]

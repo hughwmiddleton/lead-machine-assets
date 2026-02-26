@@ -14,6 +14,7 @@ from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import urlparse
 
 import requests
+from html_fetcher import fetch_html
 from bs4 import BeautifulSoup
 
 Row = Dict[str, str]
@@ -376,14 +377,34 @@ def _fetch_artist_html(
     logger: Optional[LoggerFn],
 ) -> str:
     try:
-        resp = session.get(artist_url, timeout=HTTP_TIMEOUT)
-    except requests.RequestException as exc:
+        result = fetch_html(
+            artist_url,
+            session=session,
+            directory="spotify",
+            required_selectors=["script#__NEXT_DATA__"],
+            allow_browser_fallback=True,
+            timeout_s=HTTP_TIMEOUT,
+        )
+    except Exception as exc:
         _log(logger, f"[Spotify About] HTTP error for {artist_url}: {exc}")
         return ""
-    if resp.status_code != 200:
-        _log(logger, f"[Spotify About] HTTP {resp.status_code} for {artist_url}")
-        return ""
-    return resp.text
+
+    status = result.get("status")
+    mode_used = result.get("mode_used")
+    html = result.get("html") or ""
+    reason = result.get("reason")
+
+    if mode_used == "requests":
+        if status and status != 200:
+            _log(logger, f"[Spotify About] HTTP {status} for {artist_url}")
+            return ""
+        return html
+
+    if mode_used == "playwright":
+        _log(logger, f"[Spotify About] Playwright fallback used for {artist_url} reason={reason}")
+        return html if html else ""
+
+    return ""
 
 
 # Updated to pull __NEXT_DATA__ via BeautifulSoup for better resilience to markup changes.

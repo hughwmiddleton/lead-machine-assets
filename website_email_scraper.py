@@ -7,6 +7,7 @@ from typing import Callable, Dict, Iterable, List, Optional, Sequence, Set, Tupl
 from urllib.parse import urljoin, urlparse
 
 import requests
+from html_fetcher import fetch_html
 from bs4 import BeautifulSoup
 
 Row = Dict[str, str]
@@ -182,10 +183,20 @@ def _normalize_url(url: str) -> str:
 
 
 def _fetch_html(session: requests.Session, url: str) -> str:
-    response = session.get(url, timeout=REQUEST_TIMEOUT, allow_redirects=True)
-    response.raise_for_status()
-    response.encoding = response.apparent_encoding or response.encoding
-    return response.text or ""
+    result = fetch_html(
+        url,
+        session=session,
+        directory="website_email",
+        required_selectors=None,
+        allow_browser_fallback=True,
+        timeout_s=REQUEST_TIMEOUT,
+    )
+    html = result.get("html") or ""
+    status = result.get("status")
+    if status and status >= 400 and result.get("mode_used") == "requests":
+        # Mirror previous raise_for_status behaviour when requests path failed.
+        raise requests.HTTPError(f"HTTP {status} for {url}")
+    return html
 
 
 def _extract_emails_from_html(html: str) -> List[str]:

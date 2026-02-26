@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 import pandas as pd
+from html_fetcher import close_job_browser
 
 try:  # Shared FB helper; safe fallback if unavailable.
     from facebook_enrich import is_fb_login_redirect  # type: ignore
@@ -1515,6 +1516,10 @@ def run_directory_job(job_config: Dict[str, Any], raw_output_path: str, logger: 
     finally:
         if success:
             _cleanup_leftover_tmp(tmp_path, job_label)
+        try:
+            close_job_browser(job_label)
+        except Exception:
+            pass
 
     return result_path if result_path is not None else str(final_path)
 

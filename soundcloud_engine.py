@@ -33,6 +33,7 @@ from typing import Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, unquote, urlparse
 
 import requests
+from html_fetcher import fetch_html
 from bs4 import BeautifulSoup, FeatureNotFound
 from requests.adapters import HTTPAdapter, Retry
 from dateutil.relativedelta import relativedelta
@@ -938,9 +939,23 @@ def extract_sc_links(session: requests.Session, handle: str) -> dict:
         try:
             resp = session.get(about_url, timeout=(6, 12), headers=_rand_headers())
             resp.raise_for_status()
-            html = resp.text
+            html = resp.text or ""
         except Exception:
-            pass
+            # Playwright fallback only on clear blocks.
+            try:
+                res = fetch_html(
+                    about_url,
+                    session=session,
+                    directory="soundcloud",
+                    allow_browser_fallback=True,
+                    timeout_s=12,
+                )
+                if res.get("mode_used") == "playwright" and (res.get("html") or ""):
+                    html = res.get("html") or ""
+                else:
+                    html = ""
+            except Exception:
+                html = ""
         finally:
             polite_sleep()
 

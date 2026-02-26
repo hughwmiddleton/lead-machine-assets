@@ -23,6 +23,7 @@ import soundcloud_engine as sc_engine
 import pandas as pd
 import requests
 from bs4 import BeautifulSoup
+from html_fetcher import fetch_html, _detect_soft_block
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service as ChromeService
@@ -6860,13 +6861,18 @@ class CrossDirectoryEnricherWorker(QThread):
                 return None
 
         attempt = 0
+        pw_attempted = False
         while attempt < max_attempts:
             attempt += 1
+            allow_pw = attempt == 1
+            status = None
+            text = ""
             try:
                 resp = self.session.get(url, timeout=HTTP_TIMEOUT, headers=headers)
                 status = getattr(resp, "status_code", None)
-                text = ""
+                text = getattr(resp, "text", "") or ""
                 self._last_http_status = status
+
                 if is_lastfm and status == 406:
                     pass
                 elif is_lastfm:
@@ -6879,15 +6885,16 @@ class CrossDirectoryEnricherWorker(QThread):
                         )
                     except Exception:
                         pass
+
                 if getattr(self, "night_mode", False) and "soundcloud" in label.lower():
                     if text == "":
-                        text = getattr(resp, "text", "")
+                        text = getattr(resp, "text", "") or ""
                     if status == 403 and "profile" in label.lower() and "soundcloud.com" in url and "/about" not in url:
                         about_url = url.rstrip("/") + "/about"
                         try:
                             about_resp = self.session.get(about_url, timeout=HTTP_TIMEOUT)
                             about_status = getattr(about_resp, "status_code", None)
-                            about_text = getattr(about_resp, "text", "")
+                            about_text = getattr(about_resp, "text", "") or ""
                             if about_status == 200:
                                 if _sc_is_challenge_page(about_text):
                                     self._last_fetch_ok = False
@@ -6912,18 +6919,51 @@ class CrossDirectoryEnricherWorker(QThread):
                         self._last_fetch_ok = False
                         self._flag_sc_blocked(status_code=status, html=text)
                         return None
+
                 resp.raise_for_status()
                 if text == "":
-                    text = getattr(resp, "text", "")
+                    text = getattr(resp, "text", "") or ""
                 self._last_fetch_ok = True
                 return text
             except requests.HTTPError as exc:
                 status = exc.response.status_code if exc.response is not None else None
                 self._last_http_status = status
+                html = exc.response.text if exc.response is not None else ""
+
+                trigger_pw = allow_pw and (not pw_attempted) and (
+                    status in {403, 406, 429, 503} or _detect_soft_block(html)
+                )
+                if trigger_pw:
+                    pw_attempted = True
+                    old_headers = None
+                    if headers:
+                        old_headers = dict(self.session.headers)
+                        self.session.headers.update(headers)
+                    try:
+                        fallback = fetch_html(
+                            url,
+                            session=self.session,
+                            directory=getattr(self, "source_dir", None) or None,
+                            job_id=None,
+                            required_selectors=None,
+                            allow_browser_fallback=True,
+                            timeout_s=HTTP_TIMEOUT,
+                        )
+                    finally:
+                        if old_headers is not None:
+                            self.session.headers.clear()
+                            self.session.headers.update(old_headers)
+                    if fallback.get("mode_used") == "playwright" and (fallback.get("html") or ""):
+                        self._last_fetch_ok = True
+                        self._last_http_status = fallback.get("status") or status
+                        return fallback.get("html") or ""
+
                 if is_lastfm and status == 406:
                     self._lf_mark_406()
                     if attempt < max_attempts:
-                        delay = min(LF_BACKOFF_MAX, LF_BACKOFF_BASE * (2 ** max(0, attempt - 1)) + random.uniform(0, 0.35))
+                        delay = min(
+                            LF_BACKOFF_MAX, LF_BACKOFF_BASE * (2 ** max(0, attempt - 1)) + random.uniform(0, 0.35)
+                        )
                         time.sleep(delay)
                         continue
                     self._lf_enter_cooldown()
@@ -6931,7 +6971,6 @@ class CrossDirectoryEnricherWorker(QThread):
                     self.log_message.emit(f"[Enricher][LF] {label} failed with 406 (no HTML){suffix}")
                     return None
                 if getattr(self, "night_mode", False) and "soundcloud" in label.lower():
-                    html = exc.response.text if exc.response is not None else ""
                     if _sc_is_blocked(status, html):
                         self._last_fetch_ok = False
                         self._flag_sc_blocked(status_code=status, html=html)
@@ -6947,6 +6986,32 @@ class CrossDirectoryEnricherWorker(QThread):
                 self.log_message.emit(f"[Enricher] {label} failed: {exc}{suffix}")
                 return None
             except Exception as exc:
+                if allow_pw and not pw_attempted:
+                    pw_attempted = True
+                    old_headers = None
+                    if headers:
+                        old_headers = dict(self.session.headers)
+                        self.session.headers.update(headers)
+                    try:
+                        fallback = fetch_html(
+                            url,
+                            session=self.session,
+                            directory=getattr(self, "source_dir", None) or None,
+                            job_id=None,
+                            required_selectors=None,
+                            allow_browser_fallback=True,
+                            timeout_s=HTTP_TIMEOUT,
+                        )
+                        if fallback.get("mode_used") == "playwright" and (fallback.get("html") or ""):
+                            self._last_fetch_ok = True
+                            self._last_http_status = fallback.get("status")
+                            return fallback.get("html") or ""
+                    except Exception:
+                        pass
+                    finally:
+                        if old_headers is not None:
+                            self.session.headers.clear()
+                            self.session.headers.update(old_headers)
                 self._last_fetch_ok = False
                 self._last_http_status = None
                 suffix = _format_outcome_suffix(fetch_ok=False)

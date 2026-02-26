@@ -16,6 +16,7 @@ from typing import Any, Iterable, Literal, Optional, Tuple
 from urllib.parse import urlparse, urlunparse
 
 import requests
+from html_fetcher import fetch_html, _detect_soft_block
 
 
 HUMAN_DATE_PATTERN = re.compile(
@@ -257,13 +258,52 @@ class SoundCloudMetadataClient:
     ) -> tuple[list[str], Optional[str], Optional[str]]:
         try:
             resp = self.session.get(profile_url, timeout=15)
-            if resp.status_code != 200:
-                print(f"[WARN] Profile fetch failed ({resp.status_code}) for {profile_url}")
+            status = getattr(resp, "status_code", None)
+            if status != 200:
+                print(f"[WARN] Profile fetch failed ({status}) for {profile_url}")
+                # Fallback only on clear block-like statuses or soft blocks.
+                if status in {403, 406, 429, 503} or _detect_soft_block(getattr(resp, "text", "")):
+                    try:
+                        fallback = fetch_html(
+                            profile_url,
+                            session=self.session,
+                            directory="soundcloud",
+                            allow_browser_fallback=True,
+                            timeout_s=15,
+                        )
+                        if fallback.get("mode_used") == "playwright" and (fallback.get("html") or ""):
+                            html = fallback.get("html") or ""
+                        else:
+                            return [], None, None
+                    except Exception:
+                        return [], None, None
+                else:
+                    return [], None, None
+            else:
+                html = resp.text or ""
+            if not html:
+                print(f"[WARN] Profile fetch empty for {profile_url}")
                 return [], None, None
             self._respect_rate_limit()
         except Exception as exc:
-            print(f"[WARN] Profile fetch error for {profile_url}: {exc}")
-            return [], None, None
+            # On request error, allow a single Playwright fallback.
+            try:
+                fallback = fetch_html(
+                    profile_url,
+                    session=self.session,
+                    directory="soundcloud",
+                    allow_browser_fallback=True,
+                    timeout_s=15,
+                )
+                if fallback.get("mode_used") == "playwright" and (fallback.get("html") or ""):
+                    html = fallback.get("html") or ""
+                    self._respect_rate_limit()
+                else:
+                    print(f"[WARN] Profile fetch error for {profile_url}: {exc}")
+                    return [], None, None
+            except Exception:
+                print(f"[WARN] Profile fetch error for {profile_url}: {exc}")
+                return [], None, None
 
         parsed = urlparse(profile_url)
         user_segment = [seg for seg in parsed.path.split("/") if seg]
@@ -277,7 +317,7 @@ class SoundCloudMetadataClient:
         track_urls: list[str] = []
         seen: set[str] = set()
 
-        for match in relative_pattern.finditer(resp.text):
+        for match in relative_pattern.finditer(html):
             track_path = match.group(1)
             if not track_path:
                 continue
@@ -289,7 +329,7 @@ class SoundCloudMetadataClient:
                 break
 
         if len(track_urls) < 3:
-            for match in absolute_pattern.finditer(resp.text):
+            for match in absolute_pattern.finditer(html):
                 track_path = match.group(0)
                 if not track_path:
                     continue
@@ -300,8 +340,8 @@ class SoundCloudMetadataClient:
                 if len(track_urls) >= 3:
                     break
 
-        profile_genre = self._extract_profile_genre(resp.text)
-        bio_text = self._extract_profile_bio(resp.text)
+        profile_genre = self._extract_profile_genre(html)
+        bio_text = self._extract_profile_bio(html)
         if not track_urls and not profile_genre:
             print(f"[WARN] No track link found on profile {profile_url}")
         return track_urls, profile_genre, bio_text
