@@ -2908,6 +2908,9 @@ class NightModeFacebookEnricher:
         # Per-run reject cache to avoid re-selecting clearly bad pages (name mismatch, non-music, etc.).
         self._fb_reject_cache: Dict[str, Set[str]] = {}
         self._fb_reject_cache_global: Set[str] = set()
+        # Track FB URLs already accepted for a given artist to avoid cross-artist bleed.
+        self._fb_url_owner: Dict[str, str] = {}
+        self._fb_owner_skip_count: int = 0
         self._session_state_logged = False
         # Slow mode / resilience
         self.slow_mode_active: bool = False
@@ -3037,6 +3040,7 @@ class NightModeFacebookEnricher:
         preferring name-matching pages over clear mismatches.
         """
         fallback_mismatch = None
+        artist_norm = _normalize_name_like(artist)
         for item in ranked_items or []:
             cand = item.get("candidate")
             raw_url = _candidate_url(cand)
@@ -3044,6 +3048,15 @@ class NightModeFacebookEnricher:
             if norm_url and self._fb_is_rejected(artist, norm_url):
                 _log(self.logger, f"[Night FB] Skipping cached rejected FB candidate url='{norm_url}' for '{artist}'.")
                 continue
+            if norm_url:
+                owner = self._fb_url_owner.get(norm_url)
+                if owner and owner != artist_norm:
+                    _log(
+                        self.logger,
+                        f"[Night FB] Skipping FB candidate url='{norm_url}' for '{artist}' (already used by '{owner}').",
+                    )
+                    self._fb_owner_skip_count += 1
+                    continue
             match_level = item.get("features", {}).get("match_level") or "none"
             if match_level != "mismatch":
                 return cand, "ranked_sort"
@@ -3161,6 +3174,8 @@ class NightModeFacebookEnricher:
         except Exception:
             pass
         self._unearthed_driver = None
+        if self._fb_owner_skip_count > 0:
+            _log(self.logger, f"[Night FB] Owner guard skipped {self._fb_owner_skip_count} candidate(s) due to prior artist usage.")
         self._session_state_logged = False
 
     def _get_anon_driver(self):
@@ -4105,7 +4120,7 @@ class NightModeFacebookEnricher:
         if night_result.about_attempted:
             target_row["FB_About_Attempted"] = night_result.about_attempted
         if night_result.about_result:
-            target_row["FB_About_Result"] = night_result.about_result
+                target_row["FB_About_Result"] = night_result.about_result
         if emails:
             # Track FB-applied emails for downstream defensive stripping.
             normalized_emails = []
@@ -4117,6 +4132,11 @@ class NightModeFacebookEnricher:
                     normalized_emails.append(email_norm)
             if normalized_emails:
                 target_row["__fb_emails_applied"] = ";".join(sorted(normalized_emails))
+        # Record ownership of the FB URL to prevent cross-artist reuse of the same page.
+        artist_norm = _normalize_name_like(target_row.get("Artist Name", "") or target_row.get("Artist", "") or "")
+        fb_url_norm = _normalise_fb_url(page_url or night_result.facebook_url or "")
+        if artist_norm and fb_url_norm:
+            self._fb_url_owner.setdefault(fb_url_norm, artist_norm)
         if not target_row.get("FB_Status"):
             target_row["FB_Status"] = "ok"
         _log(self.logger, f"[Night FB] extracted email(s) {emails} from {page_url}")
