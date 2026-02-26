@@ -71,6 +71,8 @@ class SmokeStats:
     sc_live_disabled_reason: str = ""
     bandcamp_http_403_count: int = 0
     lastfm_http_406_count: int = 0
+    emails_missing_source_url: int = 0
+    emails_total: int = 0
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -85,6 +87,8 @@ class SmokeStats:
             "sc_live_disabled_reason": self.sc_live_disabled_reason,
             "bandcamp_http_403_count": self.bandcamp_http_403_count,
             "lastfm_http_406_count": self.lastfm_http_406_count,
+            "emails_missing_source_url": self.emails_missing_source_url,
+            "emails_total": self.emails_total,
         }
 
 
@@ -170,6 +174,8 @@ def _emit_smoke_summary(stats: SmokeStats, logger: logging.Logger) -> None:
         degraded_reasons.append("soundcloud challenges/breaker")
     if stats.sc_live_disabled_reason:
         degraded_reasons.append(f"sc_live_disabled={stats.sc_live_disabled_reason}")
+    if stats.emails_missing_source_url:
+        degraded_reasons.append("emails missing provenance")
 
     result_line = "SMOKE RESULT: PASS"
     if degraded_reasons:
@@ -188,6 +194,8 @@ def _emit_smoke_summary(stats: SmokeStats, logger: logging.Logger) -> None:
         f" - SC live disabled reason: {stats.sc_live_disabled_reason or 'n/a'}",
         f" - Bandcamp HTTP 403 count: {stats.bandcamp_http_403_count}",
         f" - Last.fm HTTP 406 count: {stats.lastfm_http_406_count}",
+        f" - Emails with missing provenance URL: {stats.emails_missing_source_url}",
+        f" - Emails total (raw merged): {stats.emails_total}",
     ]
 
     logger.info(result_line)
@@ -788,6 +796,13 @@ def _merge_raw_master(
             combined[col] = combined[col].fillna("").astype(str).apply(_strip_excluded_urls)
     combined = _coalesce_emails(combined)
     combined = _guard_against_email_smear(combined, logger=logger, min_repeats=5)
+    # Email provenance completeness metrics
+    if stats is not None:
+        email_col = combined.get("Email", pd.Series(dtype=str)).fillna("").astype(str)
+        provenance_col = combined.get("Email_Source_URL", pd.Series(dtype=str)).fillna("").astype(str)
+        stats.emails_total = int((email_col.str.strip() != "").sum())
+        missing_mask = (email_col.str.strip() != "") & (provenance_col.str.strip() == "")
+        stats.emails_missing_source_url = int(missing_mask.sum())
     # Drop helper columns before writing the master file.
     for helper_col in ("__email_orig", "__email_all_orig"):
         if helper_col in combined.columns:

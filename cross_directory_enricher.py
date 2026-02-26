@@ -3778,6 +3778,7 @@ class CrossDirectoryEnricherWorker(QThread):
                 "Facebook_URL",
                 "Bandcamp_URL",
             ]
+            provenance_columns = ("Email_Source_URL", "Email_Source_Type", "Email_Extract_Method")
             # Bandcamp status columns (diagnostic)
             bc_diag_columns = ("BC_Status", "BC_Mode", "BC_Attempts", "BC_403_Count")
             for bc_col in bc_diag_columns:
@@ -3786,6 +3787,10 @@ class CrossDirectoryEnricherWorker(QThread):
                 seed_df[bc_col] = seed_df[bc_col].fillna("").astype(str)
             match_score_column = "Match_Score"
             for column in required_columns:
+                if column not in seed_df.columns:
+                    seed_df[column] = ""
+                seed_df[column] = seed_df[column].fillna("").astype(str)
+            for column in provenance_columns:
                 if column not in seed_df.columns:
                     seed_df[column] = ""
                 seed_df[column] = seed_df[column].fillna("").astype(str)
@@ -4072,6 +4077,12 @@ class CrossDirectoryEnricherWorker(QThread):
                                             seed_df.at[row_idx, "Email_All"], fb_emails
                                         )
                                         seed_df.at[row_idx, "Email_Type"] = "fb_enrich"
+                                        if not cell_to_str(seed_df.at[row_idx, "Email_Source_URL"]):
+                                            seed_df.at[row_idx, "Email_Source_URL"] = page_url_used or ""
+                                        if not cell_to_str(seed_df.at[row_idx, "Email_Source_Type"]):
+                                            seed_df.at[row_idx, "Email_Source_Type"] = "facebook_enrich"
+                                        if not cell_to_str(seed_df.at[row_idx, "Email_Extract_Method"]):
+                                            seed_df.at[row_idx, "Email_Extract_Method"] = "regex"
                                         seed_df.at[row_idx, "__fb_emails_applied"] = ";".join(sorted({e.strip().lower() for e in fb_emails if e}))
                                         seed_df.at[row_idx, "FB_Status"] = seed_df.at[row_idx, "FB_Status"] or "found_email"
                                         enriched = True
@@ -4899,6 +4910,9 @@ class CrossDirectoryEnricherWorker(QThread):
             df.at[row_idx, "External Links"] = ""
         if emails_all:
             df.at[row_idx, "Email"] = MULTI_VALUE_SEPARATOR.join(sorted(emails_all))
+            provenance_url = payload.source_url or ""
+            provenance_type = payload.source_dir or (payload.source_detail or "cross_directory_enricher")
+            _set_email_provenance(provenance_url, provenance_type, method="regex")
         if (
             payload.source_dir
             and payload.source_dir.startswith("bandcamp")
@@ -4950,6 +4964,22 @@ class CrossDirectoryEnricherWorker(QThread):
             if column not in df.columns:
                 return ""
             return _coerce_directory_value(df.at[row_idx, column])
+
+        def _set_email_provenance(source_url: str, source_type: str, method: str = "regex") -> None:
+            if not source_url:
+                return
+            if "Email_Source_URL" not in df.columns:
+                df["Email_Source_URL"] = ""
+            if "Email_Source_Type" not in df.columns:
+                df["Email_Source_Type"] = ""
+            if "Email_Extract_Method" not in df.columns:
+                df["Email_Extract_Method"] = ""
+            if not _coerce_directory_value(df.at[row_idx, "Email_Source_URL"]):
+                df.at[row_idx, "Email_Source_URL"] = source_url
+            if not _coerce_directory_value(df.at[row_idx, "Email_Source_Type"]):
+                df.at[row_idx, "Email_Source_Type"] = source_type
+            if not _coerce_directory_value(df.at[row_idx, "Email_Extract_Method"]):
+                df.at[row_idx, "Email_Extract_Method"] = method
 
         current_location = _current_value("Location")
         if not current_location:
