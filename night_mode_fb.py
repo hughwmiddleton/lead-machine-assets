@@ -775,6 +775,12 @@ def _normalise_fb_url(url: str) -> str:
     path = parsed.path or ""
     query = parsed.query or ""
 
+    # Canonicalize /pg/<name>/... to /<name>
+    if path.lower().startswith("/pg/"):
+        parts = [p for p in path.split("/") if p]
+        slug = parts[1] if len(parts) >= 2 else ""
+        path = f"/{slug}" if slug else "/"
+
     if path.lower() == "/profile.php":
         qs = urllib.parse.parse_qs(query, keep_blank_values=False)
         ids = qs.get("id", [])
@@ -785,7 +791,7 @@ def _normalise_fb_url(url: str) -> str:
             return ""
         return urllib.parse.urlunparse((scheme, host, "/profile.php", "", f"id={profile_id}", ""))
 
-    path = path.rstrip("/")
+    path = path.rstrip("/").lower()
     if not path:
         return ""
 
@@ -2841,6 +2847,9 @@ class NightModeFacebookResult:
     email_source: str = ""
     about_attempted: str = "no"
     about_result: str = ""
+    accepted: bool = True
+    reject_reason: str = ""
+    candidate_url: str = ""
 
 
 class NightModeFacebookEnricher:
@@ -3984,15 +3993,27 @@ class NightModeFacebookEnricher:
                     _log(self.logger, f"[Night FB] No music signals detected on FB page {resolved_url}, skipping.")
                     reject_reason = reject_reason or "no_music_signals"
 
+        accepted = not bool(reject_reason) and bool(has_music_signals or emails or gate_soft_pass_category or gate_soft_pass_identity)
+        if not accepted:
+            # On rejection, strip any collected emails and cache the reject for this run.
+            emails = []
+            self._fb_mark_rejected(artist_name, resolved_url or candidate_url, reject_reason or outcome_hint)
+
         night_result = self._build_result(
             emails,
             str(row.get("Email_All", "") or ""),
             resolved_url,
             artist_name,
-            allow_empty=has_music_signals or emails or gate_soft_pass_category or gate_soft_pass_identity,
+            allow_empty=True if not accepted else has_music_signals or emails or gate_soft_pass_category or gate_soft_pass_identity,
+            accepted=accepted,
+            reject_reason=reject_reason,
+            candidate_url=resolved_url,
         )
         if not night_result:
             return None
+        night_result.accepted = accepted
+        night_result.reject_reason = reject_reason or ""
+        night_result.candidate_url = resolved_url
         night_result.email_source = email_source
         night_result.about_attempted = about_attempted
         night_result.about_result = about_result or ("soft_pass_identity" if gate_soft_pass_identity else "soft_pass_category" if gate_soft_pass_category else "")
@@ -4017,6 +4038,9 @@ class NightModeFacebookEnricher:
         about_attempted: str = "no",
         about_result: str = "",
         allow_empty: bool = False,
+        accepted: bool = True,
+        reject_reason: str = "",
+        candidate_url: str = "",
     ) -> Optional[NightModeFacebookResult]:
         if not emails and not allow_empty:
             return None
@@ -4031,6 +4055,9 @@ class NightModeFacebookEnricher:
             email_source=email_source,
             about_attempted=about_attempted,
             about_result=about_result,
+            accepted=accepted,
+            reject_reason=reject_reason,
+            candidate_url=candidate_url,
         )
 
     def _apply_night_fb_result(
@@ -4043,6 +4070,17 @@ class NightModeFacebookEnricher:
         fb_reason_hint: str = "",
     ) -> Dict[str, str]:
         if not night_result:
+            return target_row
+        if hasattr(night_result, "accepted") and not getattr(night_result, "accepted", True):
+            reason = getattr(night_result, "reject_reason", "") or fb_reason_hint or fb_status_hint or "reject"
+            if reason and not target_row.get("FB_Reason"):
+                target_row["FB_Reason"] = reason
+            if not target_row.get("FB_Status"):
+                target_row["FB_Status"] = "rejected"
+            _log(
+                self.logger,
+                f"[FB Guard] Discarding emails from rejected FB page '{page_url or night_result.facebook_url or '<unknown>'}' for '{target_row.get('Artist Name', '') or target_row.get('Artist', '') or '<unknown>'}' (reason={reason})",
+            )
             return target_row
         fb_status_raw = str(fb_status_hint or target_row.get("FB_Status", "") or "")
         fb_reason = str(fb_reason_hint or target_row.get("FB_Reason", "") or "")

@@ -81,6 +81,40 @@ def test_guard_uses_reason_when_status_empty():
     assert any("Discarding emails from rejected FB page" in msg for msg in logs)
 
 
+def test_rejected_result_does_not_overwrite_existing_email():
+    enricher = NightModeFacebookEnricher(
+        legacy_module=None,
+        username="",
+        password="",
+        logger=None,
+        use_shared_session=False,
+    )
+    row = {
+        "FB_Status": "",
+        "Artist Name": "Already Has Email",
+        "Email": "keep@other.com",
+        "Email_All": "keep@other.com",
+    }
+    night_result = NightModeFacebookResult(
+        email="fb@test.com",
+        email_all="fb@test.com",
+        email_type="fb_night",
+        facebook_url="https://facebook.com/page",
+        accepted=False,
+        reject_reason="no_music_signals",
+        candidate_url="https://facebook.com/page",
+    )
+
+    updated = enricher._apply_night_fb_result(row, night_result, ["fb@test.com"], "https://facebook.com/page")
+
+    assert updated.get("Email") == "keep@other.com"
+    assert updated.get("Email_All") == "keep@other.com"
+    assert "FB_Email_Source" not in updated
+    assert "__fb_emails_applied" not in updated
+    assert updated.get("FB_Status") == "rejected"
+    assert updated.get("FB_Reason") == "no_music_signals"
+
+
 def test_export_strips_rejected_fb_emails_only():
     df = pd.DataFrame(
         [
