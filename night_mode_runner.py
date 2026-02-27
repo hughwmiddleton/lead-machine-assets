@@ -723,6 +723,8 @@ def _merge_master(run_dir: str, job_states: List[Dict[str, Any]], logger: loggin
     # Integrity guard: Email must have provenance
     if "Needs_Review" not in combined.columns:
         combined["Needs_Review"] = ""
+    if "Email_Source_URL" not in combined.columns:
+        combined["Email_Source_URL"] = ""
 
     email_series = combined.get("Email", "").fillna("").astype(str).str.strip()
     prov_series = combined.get("Email_Source_URL", "").fillna("").astype(str).str.strip()
@@ -807,6 +809,8 @@ def _merge_raw_master(
     # Integrity guard: Email must have provenance
     if "Needs_Review" not in combined.columns:
         combined["Needs_Review"] = ""
+    if "Email_Source_URL" not in combined.columns:
+        combined["Email_Source_URL"] = ""
 
     email_series = combined.get("Email", "").fillna("").astype(str).str.strip()
     prov_series = combined.get("Email_Source_URL", "").fillna("").astype(str).str.strip()

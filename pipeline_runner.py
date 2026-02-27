@@ -19,7 +19,7 @@ import time
 import datetime
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union, MutableMapping
 
 import pandas as pd
 from email_provenance import _set_email_with_provenance
@@ -583,6 +583,86 @@ def _cell_str(v) -> str:
     return str(v)
 
 
+def _facebook_about_url(raw_url: str) -> str:
+    """Return a best-effort Facebook About URL for a profile/page link."""
+    url = _cell_str(raw_url).strip()
+    if not url:
+        return ""
+    # Drop hash/query noise and normalize trailing slash before appending.
+    url = url.split("#", 1)[0].split("?", 1)[0].rstrip("/")
+    if url.lower().endswith("/about"):
+        return url
+    return f"{url}/about"
+
+
+def _fill_email_provenance_fields(
+    df: pd.DataFrame,
+    idx: int,
+    source: Optional[MutableMapping[str, Any]] = None,
+    fb_url_hint: str = "",
+    default_source_type: str = "facebook_enrich",
+    default_method: str = "regex",
+) -> None:
+    """
+    Backfill provenance columns on df[idx] using the enrichment payload.
+
+    - Only populates when Email is present.
+    - Prefers explicit payload values; falls back to the About page for a FB URL.
+    - Does not overwrite non-empty existing cells (minimal disturbance).
+    """
+    if df is None or not isinstance(df, pd.DataFrame):
+        return
+    try:
+        if idx not in df.index:
+            return
+    except Exception:
+        return
+
+    email_val = _cell_str(df.at[idx, "Email"] if "Email" in df.columns else "")
+    if not email_val:
+        return
+
+    def _get_from_source(key: str) -> str:
+        if source is None:
+            return ""
+        try:
+            return _cell_str(source.get(key))  # type: ignore[attr-defined]
+        except Exception:
+            return ""
+
+    source_url = _get_from_source("Email_Source_URL")
+    source_type = _get_from_source("Email_Source_Type")
+    method = _get_from_source("Email_Extract_Method")
+
+    fb_url = fb_url_hint or _get_from_source("Facebook_URL")
+    if not fb_url and "Facebook_URL" in df.columns:
+        fb_url = _cell_str(df.at[idx, "Facebook_URL"])
+
+    if not source_url:
+        source_url = _facebook_about_url(fb_url)
+
+    source_type = source_type or default_source_type
+    method = method or default_method
+
+    if source_url:
+        if "Email_Source_URL" not in df.columns:
+            df["Email_Source_URL"] = ""
+        if not _cell_str(df.at[idx, "Email_Source_URL"]):
+            df.at[idx, "Email_Source_URL"] = source_url
+
+    if source_type:
+        if "Email_Source_Type" not in df.columns:
+            df["Email_Source_Type"] = ""
+        if not _cell_str(df.at[idx, "Email_Source_Type"]):
+            df.at[idx, "Email_Source_Type"] = source_type
+
+    if method:
+        if "Email_Extract_Method" not in df.columns:
+            df["Email_Extract_Method"] = ""
+        if not _cell_str(df.at[idx, "Email_Extract_Method"]):
+            df.at[idx, "Email_Extract_Method"] = method
+
+
 
 def _read_seed_list(seed_path: Optional[str]) -> List[str]:
     if not seed_path:
@@ -974,16 +1054,19 @@ def _build_final_export_frame(df: pd.DataFrame) -> pd.DataFrame:
 
     rows: List[Dict[str, str]] = []
     for _, row in filtered.iterrows():
-        final_status = str(row.get("final_status", "") or "").strip()
-        status_normalized = str(row.get("_status_normalized", "") or "").strip()
-        needs_review = status_normalized == "BLOCK"
-
         location = str(row.get("Location", "") or "").strip()
         existing_country = str(row.get("Country_Derived", "") or "").strip()
         country = existing_country or normalize_country_from_location(location)
 
         email = str(row.get("Email", "") or "")
         email_all = str(row.get("Email_All", "") or "")
+
+        final_status = str(row.get("final_status", "") or "").strip()
+        status_normalized = str(row.get("_status_normalized", "") or "").strip()
+        existing_needs_review = str(row.get("Needs_Review", "") or "").strip().upper() == "TRUE"
+        email_source_url_val = str(row.get("Email_Source_URL", "") or "").strip()
+        needs_review_missing_prov = bool(email.strip()) and not email_source_url_val
+        needs_review = status_normalized == "BLOCK" or existing_needs_review or needs_review_missing_prov
 
         # Defensive guard: strip FB-applied emails when FB_Status signals rejection.
         fb_status_val = str(row.get("FB_Status", "") or "")
@@ -1700,6 +1783,14 @@ def run_facebook_global_pass(
         return True
 
     eligible_df = df[df.apply(_eligible, axis=1)].copy()
+    fb_cap_raw = os.getenv("FB_PASS_CAP", "0")
+    try:
+        fb_cap = int(fb_cap_raw or "0")
+    except Exception:
+        fb_cap = 0
+    if fb_cap > 0:
+        _LOGGER.info("[FB Smoke Cap] Limiting FB pass to %s rows", fb_cap)
+        eligible_df = eligible_df.head(fb_cap)
     if eligible_df.empty:
         df.drop(columns=["__row_id"], inplace=True)
         df.to_csv(output_csv, index=False)
@@ -1760,7 +1851,10 @@ def run_facebook_global_pass(
                             rid_int = int(float(rid))
                         except Exception:
                             continue
-                        source_url = row.get("Email_Source_URL") or fb_url_val or ""
+                        source_url = row.get("Email_Source_URL") or ""
+                        if not source_url:
+                            source_url = _facebook_about_url(fb_url_val)
+                        source_url = source_url or fb_url_val or ""
                         source_type = row.get("Email_Source_Type") or "facebook_enrich"
                         method = row.get("Email_Extract_Method") or "regex"
                         _set_email_with_provenance(
@@ -1769,6 +1863,14 @@ def run_facebook_global_pass(
                             source_url,
                             source_type,
                             method,
+                        )
+                        _fill_email_provenance_fields(
+                            updated_df,
+                            rid_int,
+                            source=row,
+                            fb_url_hint=fb_url_val,
+                            default_source_type="facebook_enrich",
+                            default_method=method or "regex",
                         )
                         updated_df.at[rid_int, "FB_Status"] = fb_status_val or "ok"
                         if fb_url_val:
@@ -1932,6 +2034,15 @@ def run_facebook_global_pass_nightmode(
             "FB_Status",
         ),
     )
+
+    fb_cap_raw = os.getenv("FB_PASS_CAP", "0")
+    try:
+        fb_cap = int(fb_cap_raw or "0")
+    except Exception:
+        fb_cap = 0
+    if fb_cap > 0:
+        _safe_log_console(logger, f"[FB Smoke Cap] Limiting FB pass to {fb_cap} rows")
+        df = df.head(fb_cap)
 
     total_rows = len(df.index)
     state = _load_fb_state(state_path)
@@ -2177,7 +2288,11 @@ def run_facebook_global_pass_nightmode(
                         f"[FB Guard] Discarding emails from rejected FB page '{fb_url}' for '{artist_label}' (reason={reason})",
                     )
                 else:
-                    source_url = enriched.get("Email_Source_URL") or enriched.get("Facebook_URL") or ""
+                    source_url = enriched.get("Email_Source_URL") or ""
+                    fb_url_hint = enriched.get("Facebook_URL") or ""
+                    if not source_url:
+                        source_url = _facebook_about_url(fb_url_hint)
+                    source_url = source_url or fb_url_hint or ""
                     source_type = enriched.get("Email_Source_Type") or "facebook_enrich"
                     method = enriched.get("Email_Extract_Method") or "regex"
                     _set_email_with_provenance(
@@ -2186,6 +2301,14 @@ def run_facebook_global_pass_nightmode(
                         source_url,
                         source_type,
                         method,
+                    )
+                    _fill_email_provenance_fields(
+                        df,
+                        idx,
+                        source=enriched,
+                        fb_url_hint=fb_url_hint,
+                        default_source_type=source_type or "facebook_enrich",
+                        default_method=method or "regex",
                     )
                     if "Email_All" in enriched:
                         _set_email_all(df, idx, enriched.get("Email_All", ""), source="fb_global_pass", logger=logger)

@@ -72,6 +72,10 @@ log "Using config: $CONFIG"
 
 SMOKE_TRIM_CONFIG="${SMOKE_TRIM_CONFIG:-1}"
 SMOKE_SEED_CAP="${SMOKE_SEED_CAP:-10}"
+# If user set a seed cap but not an FB cap, mirror it for FB passes to keep smoke fast.
+if [[ -n "${SMOKE_SEED_CAP:-}" && -z "${FB_PASS_CAP:-}" ]]; then
+  export FB_PASS_CAP="$SMOKE_SEED_CAP"
+fi
 
 TRIM_OK=0
 TRIM_CONFIG="$CONFIG"

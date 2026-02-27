@@ -105,3 +105,21 @@ def test_soundcloud_apply_sets_provenance() -> None:
     assert row["Email_Source_URL"] == "https://soundcloud.com/testartist"
     assert row["Email_Source_Type"] == "soundcloud"
     assert row["Email_Extract_Method"] == "regex"
+
+
+def test_fill_email_provenance_fallback_about_url() -> None:
+    df = pd.DataFrame(
+        [
+            {
+                "Email": "fb@example.com",
+                "Facebook_URL": "https://www.facebook.com/testartist",
+                "Email_Source_URL": "",
+                "Email_Source_Type": "",
+                "Email_Extract_Method": "",
+            }
+        ]
+    )
+    pipeline_runner._fill_email_provenance_fields(df, 0, source=None, fb_url_hint=df.at[0, "Facebook_URL"])
+    assert df.at[0, "Email_Source_URL"] == "https://www.facebook.com/testartist/about"
+    assert df.at[0, "Email_Source_Type"] == "facebook_enrich"
+    assert df.at[0, "Email_Extract_Method"] == "regex"
