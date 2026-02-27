@@ -2947,6 +2947,210 @@ def _bandcamp_quick_visit(driver, profile_url: str) -> str:
         print(f"Bandcamp: selenium quick visit failed {profile_url}: {exc}")
         return ""
 
+
+def _bandcamp_is_recent_enough(artist_dict: dict, search_cutoff: datetime.date | None) -> bool:
+    """Return True when artist_dict passes the recency cutoff (or no cutoff)."""
+    if not search_cutoff:
+        return True
+    value = artist_dict.get("latest_release_date", "")
+    if isinstance(value, datetime.date):
+        parsed_date = value
+    else:
+        text = str(value).strip()
+        if not text or text.lower() == "not present":
+            return True
+        try:
+            parsed_date = datetime.date.fromisoformat(text[:10])
+        except Exception:
+            try:
+                iso_text, _ = _parse_any_date_to_iso(text)
+                parsed_date = datetime.date.fromisoformat(iso_text[:10]) if iso_text else None
+            except Exception:
+                parsed_date = None
+    if not parsed_date:
+        return True
+    return parsed_date >= search_cutoff
+
+
+def _bandcamp_process_candidate_profiles(
+    candidate_profiles: list,
+    rows_limit: int,
+    requested_label: str,
+    requested_hint: str,
+    normalized_mode: str,
+    normalized_search_location: str,
+    contacts_required: bool,
+    search_cutoff: datetime.date | None,
+    effective_search_domain: str,
+    driver,
+    *,
+    smoke_cap_active: bool = False,
+    fetch_html_fn=None,
+    parse_html_fn=None,
+    quick_visit_fn=None,
+):
+    """
+    Process Bandcamp candidate profiles with early stop once rows_limit is reached.
+
+    When smoke_cap_active=True, fetches are performed sequentially to avoid
+    unnecessary HTTP/selenium work beyond the capped target.
+    """
+    fetch_html_fn = fetch_html_fn or _bandcamp_fetch_profile_html
+    parse_html_fn = parse_html_fn or _bandcamp_parse_html
+    quick_visit_fn = quick_visit_fn or _bandcamp_quick_visit
+
+    aggregated = {}
+    http_success = 0
+    selenium_used = 0
+    kept_after_location = 0
+    rejected_location = 0
+    sample_kept = ""
+    sample_rejected = ""
+    stop_processing = False
+    debug_location_samples = {"kept": [], "rejected": []}
+    search_skipped_old = 0
+    search_skipped_location = 0
+
+    def process_artist(candidate, artist_dict):
+        nonlocal kept_after_location, sample_kept, sample_rejected, rejected_location, stop_processing, search_skipped_old, search_skipped_location
+        if not artist_dict:
+            return
+        artist_dict["source_tag"] = candidate.get("source_tag", "")
+        profile_location = artist_dict.get("location", "")
+        api_hint = candidate.get("api_location", "")
+        location_ok = _bandcamp_location_match_(profile_location, api_hint, requested_label, requested_hint)
+        if (not location_ok and BANDCAMP_LOCATION_FALLBACK and requested_label and not profile_location):
+            label_norm = _norm_text_(requested_label)
+            hint_norm = _norm_text_(api_hint)
+            if label_norm and label_norm in hint_norm:
+                location_ok = True
+        if os.environ.get("BC_DEBUG_LOCATION") == "1":
+            debug_entry = {
+                "raw_filter": requested_label or requested_hint or "",
+                "canon_filter": _bc_canonicalize_location(requested_label or requested_hint),
+                "raw_tile_loc": profile_location or api_hint or "",
+                "canon_tile_loc": _bc_canonicalize_location(profile_location or api_hint),
+                "api_hint": api_hint,
+                "match": location_ok,
+            }
+            bucket = "kept" if location_ok else "rejected"
+            if len(debug_location_samples.get(bucket, [])) < 3:
+                debug_location_samples[bucket].append(debug_entry)
+        if not location_ok:
+            if normalized_mode == "search" and normalized_search_location and (not profile_location and not api_hint):
+                location_ok = True
+            else:
+                rejected_location += 1
+                if normalized_mode == "search" and normalized_search_location:
+                    search_skipped_location += 1
+                if not sample_rejected:
+                    sample_rejected = f"{artist_dict.get('artist_name', '') or 'unknown'} ({artist_dict.get('location', '') or 'n/a'})"
+                return
+        contacts = _bandcamp_collect_contacts(artist_dict)
+        if contacts_required and not contacts:
+            return
+        tile_info = {
+            "artist": (candidate.get("tile_artist") or "").strip(),
+            "title": (candidate.get("tile_title") or "").strip(),
+        }
+        key = artist_dict["profile_url"].rstrip("/").lower()
+        if normalized_mode == "search" and search_cutoff:
+            if not _bandcamp_is_recent_enough(artist_dict, search_cutoff):
+                search_skipped_old += 1
+                return
+        entry = aggregated.get(key)
+        if entry:
+            existing_contacts = entry.get("contacts") or []
+            if isinstance(existing_contacts, set):
+                existing_contacts = list(existing_contacts)
+            seen_existing = set(existing_contacts)
+            for link in contacts:
+                if link not in seen_existing:
+                    existing_contacts.append(link)
+                    seen_existing.add(link)
+            entry["contacts"] = existing_contacts
+            current = entry["artist"]
+            for field in ["artist_name", "location", "latest_release_title", "latest_release_date", "website", "email"]:
+                if not current.get(field) and artist_dict.get(field):
+                    current[field] = artist_dict[field]
+            entry["artist"] = current
+            if tile_info and any(tile_info.values()) and not entry.get("tile"):
+                entry["tile"] = tile_info
+        else:
+            aggregated[key] = {
+                "artist": artist_dict,
+                "contacts": list(contacts),
+                "tile": tile_info
+            }
+        kept_after_location += 1
+        if not sample_kept:
+            sample_kept = f"{artist_dict.get('artist_name', '')} ({artist_dict.get('location', '')})"
+        if kept_after_location >= rows_limit:
+            stop_processing = True
+
+    fallback_candidates = []
+
+    if smoke_cap_active:
+        for cand in candidate_profiles:
+            if stop_processing:
+                break
+            html = fetch_html_fn(cand["profile_url"])
+            if html:
+                http_success += 1
+                artist_dict = parse_html_fn(cand["profile_url"], html, cand.get("seed_genre", ""))
+                process_artist(cand, artist_dict)
+            else:
+                fallback_candidates.append(cand)
+            if stop_processing:
+                break
+    else:
+        http_workers = min(6, len(candidate_profiles)) or 1
+        with ThreadPoolExecutor(max_workers=http_workers) as executor:
+            future_map = {}
+            for cand in candidate_profiles:
+                if stop_processing:
+                    break
+                fut = executor.submit(fetch_html_fn, cand["profile_url"])
+                future_map[fut] = cand
+            for future in as_completed(future_map):
+                if stop_processing:
+                    break
+                cand = future_map[future]
+                html = future.result()
+                if html:
+                    http_success += 1
+                    artist_dict = parse_html_fn(cand["profile_url"], html, cand.get("seed_genre", ""))
+                    process_artist(cand, artist_dict)
+                else:
+                    fallback_candidates.append(cand)
+                if stop_processing:
+                    break
+
+    for cand in fallback_candidates:
+        if stop_processing:
+            break
+        html = quick_visit_fn(driver, cand["profile_url"])
+        if not html:
+            continue
+        selenium_used += 1
+        artist_dict = parse_html_fn(cand["profile_url"], html, cand.get("seed_genre", ""))
+        process_artist(cand, artist_dict)
+        if stop_processing:
+            break
+
+    return aggregated, {
+        "http_success": http_success,
+        "selenium_used": selenium_used,
+        "kept_after_location": kept_after_location,
+        "rejected_location": rejected_location,
+        "sample_kept": sample_kept,
+        "sample_rejected": sample_rejected,
+        "stop_processing": stop_processing,
+        "debug_location_samples": debug_location_samples,
+        "search_skipped_old": search_skipped_old,
+        "search_skipped_location": search_skipped_location,
+    }
+
 def scrape_bandcamp(
     seed_tags_or_url,
     pages_per_tag=5,
@@ -2963,6 +3167,14 @@ def scrape_bandcamp(
     High-level Bandcamp entry point. Accepts any Bandcamp URL (discover/tag/artist/album/track)
     or the legacy list of tag seeds.
     """
+    def _read_smoke_seed_cap() -> int:
+        raw = os.environ.get("SMOKE_SEED_CAP", "").strip()
+        try:
+            value = int(raw)
+        except Exception:
+            return 0
+        return value if value > 0 else 0
+
     driver = setup_driver()
     url_input = ""
     seed_tags = []
@@ -3015,6 +3227,14 @@ def scrape_bandcamp(
     rows_limit = user_max if user_max else BANDCAMP_TARGET_ROWS or BANDCAMP_PAGES_PER_TAG
     rows_limit = max(rows_limit, 1)
 
+    smoke_seed_cap = _read_smoke_seed_cap()
+    smoke_cap_active = smoke_seed_cap > 0 and normalized_mode == "discover"
+    if smoke_cap_active:
+        capped_rows_limit = min(rows_limit, smoke_seed_cap)
+        if capped_rows_limit != rows_limit:
+            print(f"[Bandcamp Smoke Cap] Limiting target rows to {capped_rows_limit} (from SMOKE_SEED_CAP)")
+        rows_limit = capped_rows_limit
+
     # Let explicit user max drive the candidate cap; default keeps prior heuristic.
     if user_max:
         computed_cap = max(user_max * 5, user_max + 40)
@@ -3024,6 +3244,9 @@ def scrape_bandcamp(
         computed_cap = max(computed_cap, BANDCAMP_MAX_CANDIDATES)
     if user_max:
         computed_cap = max(computed_cap, user_max)
+    # Keep candidate cap aligned with capped rows to avoid extra pages in smoke mode.
+    if smoke_cap_active:
+        computed_cap = min(computed_cap, rows_limit * 2)
     max_candidates = max(computed_cap, rows_limit)
     hit_candidate_cap = False
 
@@ -3122,39 +3345,6 @@ def scrape_bandcamp(
             hit_candidate_cap = True
         return True
 
-    def _parse_release_to_date(value) -> datetime.date | None:
-        if not value:
-            return None
-        if isinstance(value, datetime.date):
-            return value
-        text = str(value).strip()
-        if not text or text.lower() == "not present":
-            return None
-        try:
-            # Try strict ISO first.
-            return datetime.date.fromisoformat(text[:10])
-        except Exception:
-            pass
-        try:
-            iso_text, _ = _parse_any_date_to_iso(text)
-            if iso_text:
-                return datetime.date.fromisoformat(iso_text[:10])
-        except Exception:
-            return None
-        return None
-
-    def _is_recent_enough(artist_dict: dict) -> bool:
-        """
-        Allow entries without a parsable date, but enforce a 2-year cutoff when present.
-        Missing dates are kept so the user can manually review later.
-        """
-        if not search_cutoff:
-            return True
-        parsed_date = _parse_release_to_date(artist_dict.get("latest_release_date", ""))
-        if not parsed_date:
-            return True
-        return parsed_date >= search_cutoff
-
     def collect_tag_candidates(tag_list, params_map=None):
         params_map = params_map or {}
         if not tag_list:
@@ -3235,131 +3425,30 @@ def scrape_bandcamp(
 
         print(f"Bandcamp: total candidate links found {len(candidate_profiles)}")
 
-        aggregated = {}
-        http_success = 0
-        selenium_used = 0
-        kept_after_location = 0
-        rejected_location = 0
-        sample_kept = ""
-        sample_rejected = ""
-        stop_processing = False
-        debug_location_samples = {"kept": [], "rejected": []}
+        aggregated, stats = _bandcamp_process_candidate_profiles(
+            candidate_profiles,
+            rows_limit,
+            requested_label,
+            requested_hint,
+            normalized_mode,
+            normalized_search_location,
+            contacts_required,
+            search_cutoff,
+            effective_search_domain,
+            driver,
+            smoke_cap_active=smoke_cap_active,
+        )
 
-        def process_artist(candidate, artist_dict):
-            nonlocal kept_after_location, sample_kept, sample_rejected, rejected_location, stop_processing, search_skipped_old, search_skipped_location
-            if not artist_dict:
-                return
-            artist_dict["source_tag"] = candidate.get("source_tag", "")
-            profile_location = artist_dict.get("location", "")
-            api_hint = candidate.get("api_location", "")
-            location_ok = _bandcamp_location_match_(profile_location, api_hint, requested_label, requested_hint)
-            if (not location_ok and BANDCAMP_LOCATION_FALLBACK and requested_label and not profile_location):
-                label_norm = _norm_text_(requested_label)
-                hint_norm = _norm_text_(api_hint)
-                if label_norm and label_norm in hint_norm:
-                    location_ok = True
-            if os.environ.get("BC_DEBUG_LOCATION") == "1":
-                debug_entry = {
-                    "raw_filter": requested_label or requested_hint or "",
-                    "canon_filter": _bc_canonicalize_location(requested_label or requested_hint),
-                    "raw_tile_loc": profile_location or api_hint or "",
-                    "canon_tile_loc": _bc_canonicalize_location(profile_location or api_hint),
-                    "api_hint": api_hint,
-                    "match": location_ok,
-                }
-                bucket = "kept" if location_ok else "rejected"
-                if len(debug_location_samples.get(bucket, [])) < 3:
-                    debug_location_samples[bucket].append(debug_entry)
-            if not location_ok:
-                # For search runs with a user-provided location filter, allow entries with missing locations
-                # to pass through so we don't over-prune track searches that rarely expose locations.
-                if normalized_mode == "search" and normalized_search_location and (not profile_location and not api_hint):
-                    location_ok = True
-                else:
-                    rejected_location += 1
-                    if normalized_mode == "search" and normalized_search_location:
-                        search_skipped_location += 1
-                    if not sample_rejected:
-                        sample_rejected = f"{artist_dict.get('artist_name', '') or 'unknown'} ({artist_dict.get('location', '') or 'n/a'})"
-                    return
-            if not location_ok:
-                rejected_location += 1
-                if normalized_mode == "search" and normalized_search_location:
-                    search_skipped_location += 1
-                if not sample_rejected:
-                    sample_rejected = f"{artist_dict.get('artist_name', '') or 'unknown'} ({artist_dict.get('location', '') or 'n/a'})"
-                return
-            contacts = _bandcamp_collect_contacts(artist_dict)
-            if contacts_required and not contacts:
-                return
-            tile_info = {
-                "artist": (candidate.get("tile_artist") or "").strip(),
-                "title": (candidate.get("tile_title") or "").strip(),
-            }
-            key = artist_dict["profile_url"].rstrip("/").lower()
-            if normalized_mode == "search" and search_cutoff:
-                if not _is_recent_enough(artist_dict):
-                    search_skipped_old += 1
-                    return
-            entry = aggregated.get(key)
-            if entry:
-                existing_contacts = entry.get("contacts") or []
-                if isinstance(existing_contacts, set):
-                    existing_contacts = list(existing_contacts)
-                seen_existing = set(existing_contacts)
-                for link in contacts:
-                    if link not in seen_existing:
-                        existing_contacts.append(link)
-                        seen_existing.add(link)
-                entry["contacts"] = existing_contacts
-                current = entry["artist"]
-                for field in ["artist_name", "location", "latest_release_title", "latest_release_date", "website", "email"]:
-                    if not current.get(field) and artist_dict.get(field):
-                        current[field] = artist_dict[field]
-                entry["artist"] = current
-                if tile_info and any(tile_info.values()) and not entry.get("tile"):
-                    entry["tile"] = tile_info
-            else:
-                aggregated[key] = {
-                    "artist": artist_dict,
-                    "contacts": list(contacts),
-                    "tile": tile_info
-                }
-            kept_after_location += 1
-            if not sample_kept:
-                sample_kept = f"{artist_dict.get('artist_name', '')} ({artist_dict.get('location', '')})"
-            if kept_after_location >= rows_limit:
-                stop_processing = True
-
-        http_workers = min(6, len(candidate_profiles)) or 1
-        fallback_candidates = []
-        with ThreadPoolExecutor(max_workers=http_workers) as executor:
-            future_map = {executor.submit(_bandcamp_fetch_profile_html, cand["profile_url"]): cand for cand in candidate_profiles}
-            for future in as_completed(future_map):
-                if stop_processing:
-                    break
-                cand = future_map[future]
-                html = future.result()
-                if html:
-                    http_success += 1
-                    artist_dict = _bandcamp_parse_html(cand["profile_url"], html, cand.get("seed_genre", ""))
-                    process_artist(cand, artist_dict)
-                else:
-                    fallback_candidates.append(cand)
-                if stop_processing:
-                    break
-
-        for cand in fallback_candidates:
-            if stop_processing:
-                break
-            html = _bandcamp_quick_visit(driver, cand["profile_url"])
-            if not html:
-                continue
-            selenium_used += 1
-            artist_dict = _bandcamp_parse_html(cand["profile_url"], html, cand.get("seed_genre", ""))
-            process_artist(cand, artist_dict)
-            if stop_processing:
-                break
+        http_success = stats["http_success"]
+        selenium_used = stats["selenium_used"]
+        kept_after_location = stats["kept_after_location"]
+        rejected_location = stats["rejected_location"]
+        sample_kept = stats["sample_kept"]
+        sample_rejected = stats["sample_rejected"]
+        stop_processing = stats["stop_processing"]
+        debug_location_samples = stats["debug_location_samples"]
+        search_skipped_old = stats["search_skipped_old"]
+        search_skipped_location = stats["search_skipped_location"]
 
         stop_reason = "done"
         if kept_after_location >= rows_limit:
