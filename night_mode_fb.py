@@ -693,7 +693,7 @@ def _unpack_fb_candidate(candidate):
 def _fb_status_is_rejected(status: str) -> bool:
     """Return True when FB_Status denotes a rejected/mismatched/blocked candidate."""
     status_norm = (status or "").lower()
-    tokens = ("reject", "mismatch", "blocked")
+    tokens = ("reject", "blocked")
     return any(tok in status_norm for tok in tokens)
 
 
@@ -2855,6 +2855,10 @@ class NightModeFacebookResult:
     accepted: bool = True
     reject_reason: str = ""
     candidate_url: str = ""
+    match_level: str = ""
+    selected_by: str = ""
+    name_consistency_flag: Optional[int] = None
+    review_reason: str = ""
 
 
 class NightModeFacebookEnricher:
@@ -3702,6 +3706,8 @@ class NightModeFacebookEnricher:
         debug_detail = url_flow_debug
 
         collected_contexts: List[Tuple[Dict[str, Any], Any]] = []
+        chosen_url_norm = _normalise_fb_url(_candidate_url(candidate)) if candidate else ""
+        selected_ctx: Optional[Dict[str, Any]] = None
 
         for cand in ordered_candidates:
             raw_url = _candidate_url(cand)
@@ -3770,18 +3776,29 @@ class NightModeFacebookEnricher:
                         _, base_score, _ = scored
             except Exception:
                 base_score = 0.0
+            # Derive lightweight identity consistency signals for downstream review flagging.
+            try:
+                match_level_ctx = _candidate_name_match(artist, name or "")
+            except Exception:
+                match_level_ctx = ""
             context = {
                 "url": norm_url,
                 "name": name or "",
                 "category": category or "",
                 "category_raw": raw_category or "",
                 "base_score": base_score,
+                "match_level": match_level_ctx,
+                "selected_by": selected_by,
             }
+            if chosen_url_norm and norm_url == chosen_url_norm and selected_ctx is None:
+                selected_ctx = context
             collected_contexts.append((context, cand))
 
         if collected_contexts:
             first_ctx, first_cand = collected_contexts[0]
-            self._last_selected_candidate_context = first_ctx
+            selected_ctx = selected_ctx or first_ctx
+            selected_ctx["selected_by"] = selected_by
+            self._last_selected_candidate_context = selected_ctx
             self._last_search_candidates = [ctx for ctx, _ in collected_contexts]
             _maybe_log_rank_preview(artist, candidates, first_cand, logger=self.logger, selected_by=selected_by)
             raw_suffix = ""
@@ -4040,6 +4057,36 @@ class NightModeFacebookEnricher:
         night_result.email_source = email_source
         night_result.about_attempted = about_attempted
         night_result.about_result = about_result or ("soft_pass_identity" if gate_soft_pass_identity else "soft_pass_category" if gate_soft_pass_category else "")
+        # Propagate confidence metadata for downstream review flagging.
+        match_level_ctx = ""
+        if candidate_context:
+            match_level_ctx = str(candidate_context.get("match_level") or "")
+        name_consistency_flag_ctx: Optional[int] = None
+        try:
+            raw_flag = row.get("name_consistency_flag")
+            if raw_flag is not None and raw_flag != "":
+                name_consistency_flag_ctx = int(raw_flag)
+        except Exception:
+            name_consistency_flag_ctx = None
+        if name_consistency_flag_ctx is None:
+            if match_level_ctx == "mismatch":
+                name_consistency_flag_ctx = 0
+            elif match_level_ctx in ("exact", "near"):
+                name_consistency_flag_ctx = 1
+        selected_by_ctx = ""
+        try:
+            selected_by_ctx = str(candidate_context.get("selected_by") or "")
+        except Exception:
+            selected_by_ctx = ""
+        review_reason = ""
+        if match_level_ctx == "mismatch":
+            review_reason = "fb_low_confidence:mismatch"
+        elif selected_by_ctx == "mismatch_fallback":
+            review_reason = "fb_low_confidence:mismatch_fallback"
+        night_result.match_level = match_level_ctx
+        night_result.selected_by = selected_by_ctx
+        night_result.name_consistency_flag = name_consistency_flag_ctx
+        night_result.review_reason = review_reason
         if gate_soft_pass_category:
             row["FB_Gate"] = "soft_pass_category"
         if gate_soft_pass_identity:
@@ -4146,7 +4193,16 @@ class NightModeFacebookEnricher:
         if night_result.about_attempted:
             target_row["FB_About_Attempted"] = night_result.about_attempted
         if night_result.about_result:
-                target_row["FB_About_Result"] = night_result.about_result
+            target_row["FB_About_Result"] = night_result.about_result
+        # Confidence metadata
+        if getattr(night_result, "match_level", None):
+            target_row["FB_Match_Level"] = night_result.match_level
+        if getattr(night_result, "selected_by", None):
+            target_row["FB_Selected_By"] = night_result.selected_by
+        if getattr(night_result, "name_consistency_flag", None) is not None:
+            target_row["FB_Name_Consistency_Flag"] = night_result.name_consistency_flag
+        if getattr(night_result, "review_reason", None):
+            target_row["FB_Review_Reason"] = night_result.review_reason
         # Email provenance
         def _coerce(val: Any) -> str:
             try:
@@ -4188,7 +4244,7 @@ class NightModeFacebookEnricher:
         fb_url_now = _coerce(target_row.get("Facebook_URL"))
         if not status_locked:
             if email_found and _coerce(target_row.get("Email")):
-                target_row["FB_Status"] = "pass_a_found_email"
+                target_row["FB_Status"] = fb_status_raw if fb_status_raw else "ok"
             elif fb_url_now and fb_status_raw in missing_url_statuses:
                 target_row["FB_Status"] = "ok"
         if not target_row.get("FB_Status"):

@@ -93,7 +93,7 @@ def _is_valid_email_shape(email: str) -> bool:
 def _fb_status_is_rejected(status: str) -> bool:
     """Return True when FB_Status denotes a rejected/mismatched/blocked candidate."""
     status_norm = (status or "").lower()
-    return any(tok in status_norm for tok in ("reject", "mismatch", "blocked"))
+    return any(tok in status_norm for tok in ("reject", "blocked"))
 
 
 def normalize_emails(value) -> List[str]:
@@ -804,6 +804,7 @@ FINAL_EXPORT_COLUMNS: Sequence[str] = [
     "Date Added",
     "final_status",
     "Needs_Review",
+    "FB_Review_Reason",
 ]
 
 WOODPECKER_EXPORT_COLUMNS: Sequence[str] = [
@@ -834,6 +835,7 @@ WOODPECKER_EXPORT_COLUMNS: Sequence[str] = [
     "Date Added",
     "final_status",
     "Needs_Review",
+    "FB_Review_Reason",
 ]
 
 _AU_STATE_TOKENS = ("nsw", "vic", "qld", "wa", "sa", "tas", "act", "nt")
@@ -1066,7 +1068,7 @@ def _build_final_export_frame(df: pd.DataFrame) -> pd.DataFrame:
         existing_needs_review = str(row.get("Needs_Review", "") or "").strip().upper() == "TRUE"
         email_source_url_val = str(row.get("Email_Source_URL", "") or "").strip()
         needs_review_missing_prov = bool(email.strip()) and not email_source_url_val
-        needs_review = status_normalized == "BLOCK" or existing_needs_review or needs_review_missing_prov
+        needs_review = status_normalized in {"BLOCK", "WARN"} or existing_needs_review or needs_review_missing_prov
 
         # Defensive guard: strip FB-applied emails when FB_Status signals rejection.
         fb_status_val = str(row.get("FB_Status", "") or "")
@@ -1097,6 +1099,7 @@ def _build_final_export_frame(df: pd.DataFrame) -> pd.DataFrame:
 
         external_links = str(row.get("External Links", "") or "").strip()
         review_urls = str(row.get("Review_Urls", "") or row.get("Review Urls", "") or "").strip()
+        fb_review_reason = str(row.get("FB_Review_Reason", "") or "").strip()
 
         rows.append(
             {
@@ -1127,6 +1130,7 @@ def _build_final_export_frame(df: pd.DataFrame) -> pd.DataFrame:
                 "Date Added": date_added_norm,
                 "final_status": final_status,
                 "Needs_Review": "TRUE" if needs_review else "FALSE",
+                "FB_Review_Reason": fb_review_reason,
             }
         )
 
@@ -2315,7 +2319,7 @@ def run_facebook_global_pass_nightmode(
                     )
                     if "Email_All" in enriched:
                         _set_email_all(df, idx, enriched.get("Email_All", ""), source="fb_global_pass", logger=logger)
-                cols_to_copy = ["Facebook_URL", "__fb_emails_applied"]
+                cols_to_copy = ["Facebook_URL", "__fb_emails_applied", "FB_Match_Level", "FB_Selected_By", "FB_Name_Consistency_Flag", "FB_Review_Reason"]
                 if not fb_rejected:
                     cols_to_copy.append("Email_Type")
                 for col in cols_to_copy:

@@ -185,6 +185,9 @@ def compute_final_status(
     match_score: float,
 ) -> str:
     existing = _normalise_status(row.get("final_status", ""))
+    if existing == "BLOCK":
+        return "BLOCK"
+
     name_flag = int(flags.get("name_flag", 0) or 0)
     dir_conflict_flag = int(flags.get("dir_conflict_flag", 0) or 0)
     dup_email_flag = int(flags.get("dup_email_flag", 0) or 0)
@@ -198,8 +201,25 @@ def compute_final_status(
     review_urls = str(row.get("Review_Urls", "") or row.get("Review Urls", "") or "").lower()
     review_labelish = any(token in review_urls for token in ("session", "sessions", "radio", "podcast", "dj mix", "dj set"))
 
+    fb_selected_by = str(row.get("FB_Selected_By", "") or "").lower()
+    fb_match_level = str(row.get("FB_Match_Level", "") or "").lower()
+    fb_name_flag_raw = row.get("FB_Name_Consistency_Flag", None)
+    try:
+        fb_name_flag = int(fb_name_flag_raw) if fb_name_flag_raw is not None and fb_name_flag_raw != "" else None
+    except Exception:
+        fb_name_flag = None
+    fb_review_reason = str(row.get("FB_Review_Reason", "") or "").strip()
+    fb_low_confidence = (
+        fb_selected_by == "mismatch_fallback"
+        or fb_match_level == "mismatch"
+        or (fb_name_flag is not None and fb_name_flag == 0)
+        or bool(fb_review_reason)
+    )
+
     strong_identity = match_score >= 0.75 and not name_flag and not dir_conflict_flag and not dup_artist_flag and not labelish
     if strong_identity:
+        if fb_low_confidence:
+            return "WARN"
         if has_email or unearthed_no_emails:
             return "OK"
         return "WARN"
@@ -214,6 +234,9 @@ def compute_final_status(
         return "BLOCK"
     if existing in {"BLOCK", "BLOCKED", "BLOCKED_BY_ORIGIN"} and not (has_email or unearthed_no_emails):
         return "BLOCK"
+
+    if fb_low_confidence:
+        return "WARN"
 
     if unearthed_no_emails and not dir_conflict_flag:
         return "OK"
