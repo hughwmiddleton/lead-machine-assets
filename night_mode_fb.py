@@ -4121,6 +4121,21 @@ class NightModeFacebookEnricher:
             # Do not mutate email fields; preserve status/reason already set.
             return target_row
 
+        def _fb_status_is_terminal(status: str) -> bool:
+            status_norm = (status or "").lower()
+            tokens = (
+                "login_wall",
+                "checkpoint",
+                "rate_limit",
+                "rate-limited",
+                "rate_limited",
+                "driver_error",
+                "captcha",
+                "cooldown",
+                "redirect",
+            )
+            return any(tok in status_norm for tok in tokens)
+
         target_row["Email"] = night_result.email or target_row.get("Email", "")
         target_row["Email_All"] = night_result.email_all
         target_row["Email_Type"] = night_result.email_type
@@ -4167,6 +4182,15 @@ class NightModeFacebookEnricher:
         fb_url_norm = _normalise_fb_url(page_url or night_result.facebook_url or "")
         if artist_norm and fb_url_norm:
             self._fb_url_owner.setdefault(fb_url_norm, artist_norm)
+        status_locked = _fb_status_is_terminal(fb_status_raw) or _fb_status_is_terminal(fb_reason)
+        missing_url_statuses = {"no_fb_url", "pass_a_skipped_no_fb_url", "pass_a_no_email_on_page"}
+        email_found = bool((night_result.email or "").strip() or emails)
+        fb_url_now = _coerce(target_row.get("Facebook_URL"))
+        if not status_locked:
+            if email_found and _coerce(target_row.get("Email")):
+                target_row["FB_Status"] = "pass_a_found_email"
+            elif fb_url_now and fb_status_raw in missing_url_statuses:
+                target_row["FB_Status"] = "ok"
         if not target_row.get("FB_Status"):
             target_row["FB_Status"] = "ok"
         _log(self.logger, f"[Night FB] extracted email(s) {emails} from {page_url}")
