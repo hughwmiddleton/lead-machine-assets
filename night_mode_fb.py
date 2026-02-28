@@ -418,11 +418,94 @@ def _scan_href_like_attributes(container, max_nodes: int = 150, max_candidates: 
     return results
 
 
+def _sanitize_fs_key(text: str, max_len: int = 80) -> str:
+    """
+    Filesystem-safe, bounded key for debug artifacts.
+    """
+    val = (text or "unknown").strip().lower()
+    val = unicodedata.normalize("NFKD", val)
+    val = re.sub(r"[^a-z0-9._-]+", "_", val)
+    val = val.strip("_") or "unknown"
+    if len(val) > max_len:
+        val = val[:max_len]
+    return val
+
+
+def _maybe_dump_dom_gate_debug(
+    run_dir: Optional[str],
+    safe_key: str,
+    chosen_selector: str,
+    selector_stats: List[Dict[str, Any]],
+    sample_hrefs: List[str],
+    container_html: str,
+    logger: LoggerFn = None,
+    max_bytes: int = 50_000,
+) -> None:
+    """
+    Best-effort, bounded debug dump for zero-anchor/candidate situations.
+    """
+    if not run_dir:
+        return
+    try:
+        base = os.path.join(run_dir, "fb_search_debug")
+        os.makedirs(base, exist_ok=True)
+        html_path = os.path.join(base, f"{safe_key}__search.html")
+        meta_path = os.path.join(base, f"{safe_key}__meta.json")
+
+        html = container_html or ""
+        if len(html) > max_bytes:
+            html = html[:max_bytes] + "...(truncated)"
+
+        meta_stats: List[Dict[str, Any]] = []
+        for entry in selector_stats:
+            meta_stats.append(
+                {
+                    "selector": entry.get("selector"),
+                    "containers_found": entry.get("containers_found", 0),
+                    "anchors_in_scope": entry.get("anchors_in_scope", 0),
+                    "role_links_in_scope": entry.get("role_links_in_scope", 0),
+                    "links_in_scope_total": entry.get("links_in_scope_total", 0),
+                    "usable_count": entry.get("usable_count", 0),
+                    "href_samples": (entry.get("hrefs") or [])[:5],
+                }
+            )
+
+        meta = {
+            "chosen_selector": chosen_selector,
+            "sample_hrefs": sample_hrefs[:25],
+            "selectors": meta_stats,
+        }
+
+        try:
+            with open(html_path, "w", encoding="utf-8") as fh:
+                fh.write(html)
+        except Exception:
+            return
+
+        try:
+            import json
+
+            with open(meta_path, "w", encoding="utf-8") as fh:
+                json.dump(meta, fh, indent=2)
+        except Exception:
+            return
+
+        _log(logger, f"[Night FB][DOM Gate V2][debug_dump] html={html_path} meta={meta_path}")
+    except Exception:
+        return
+
+
 def _collect_container_candidates_v2(container, apply_role_link_prefilter: bool = True) -> Dict[str, Any]:
     """
     Expanded candidate extraction for Night FB DOM Gate v2.
     Returns dict with hrefs + counts to keep the caller lightweight.
     """
+    try:
+        max_scan = int(os.getenv("FB_DOM_GATE_MAX_SCAN", "500") or "500")
+    except Exception:
+        max_scan = 500
+    if max_scan <= 0:
+        max_scan = 500
     data: Dict[str, Any] = {
         "hrefs": [],
         "anchors_in_scope": 0,
@@ -450,7 +533,7 @@ def _collect_container_candidates_v2(container, apply_role_link_prefilter: bool 
         role_link_elements = []
 
     anchor_ids: Set[str] = set()
-    for el in anchor_elements + role_anchor_elements:
+    for el in (anchor_elements + role_anchor_elements)[:max_scan]:
         try:
             anchor_ids.add(el.id)
         except Exception:
@@ -459,13 +542,14 @@ def _collect_container_candidates_v2(container, apply_role_link_prefilter: bool 
     data["count_a_href"] = len(anchor_elements)
     data["count_a_role_link_href"] = len(role_anchor_elements)
     data["count_role_link"] = len(role_link_elements)
-    data["anchors_in_scope"] = len(anchor_ids)
-    data["role_links_in_scope"] = len(role_link_elements)
+    # Cap scope counts to processed subset to reflect what we actually scan for performance.
+    data["anchors_in_scope"] = min(len(anchor_ids), max_scan)
+    data["role_links_in_scope"] = min(len(role_link_elements), max_scan)
 
     seen_urls: Set[str] = set()
     hrefs: List[str] = []
 
-    for el in anchor_elements:
+    for el in anchor_elements[:max_scan]:
         try:
             href = _normalize_fb_href(el.get_attribute("href") or "")
         except Exception:
@@ -476,21 +560,125 @@ def _collect_container_candidates_v2(container, apply_role_link_prefilter: bool 
             continue
         seen_urls.add(href)
         hrefs.append(href)
+        if len(hrefs) >= max_scan:
+            break
 
-    for el in role_link_elements:
-        for href in _extract_role_link_candidates(el, apply_prefilter=apply_role_link_prefilter):
-            if not href or href in seen_urls:
-                continue
-            seen_urls.add(href)
-            hrefs.append(href)
+    if len(hrefs) < max_scan:
+        for el in role_link_elements[:max_scan]:
+            for href in _extract_role_link_candidates(el, apply_prefilter=apply_role_link_prefilter):
+                if not href or href in seen_urls:
+                    continue
+                seen_urls.add(href)
+                hrefs.append(href)
+                if len(hrefs) >= max_scan:
+                    break
+            if len(hrefs) >= max_scan:
+                break
 
-    data["hrefs"] = hrefs
+    data["hrefs"] = hrefs[:max_scan]
     try:
         data["usable_count"] = sum(1 for href in hrefs if _is_candidate_usable(href))
     except Exception:
         data["usable_count"] = 0
     data["links_in_scope_total"] = data["anchors_in_scope"] + data["role_links_in_scope"]
     return data
+
+
+def _collect_search_candidates_from_html_v2(html: str) -> Tuple[str, int, int, List[str]]:
+    """
+    Lightweight, non-Selenium mirror of the V2 selector strategy.
+    Used in tests with synthetic HTML fixtures.
+    """
+    if not html:
+        return "NONE", 0, 0, []
+
+    soup = BeautifulSoup(html, "html.parser")
+    selector_order = [
+        'div[role="main"] div[role="feed"]',
+        'div[role="main"] div[aria-label="Search results"]',
+        'div[aria-label="Search results"]',
+        'div[role="main"] section[aria-label*="Search results"]',
+        'div[role="main"] [data-pagelet^="SearchResults"]',
+        'div[role="main"] div[aria-label*="Search results"]',
+        'div[role="main"] div[role="article"]',
+        'div[role="main"]',
+    ]
+
+    stats: List[Dict[str, Any]] = []
+    for sel in selector_order:
+        try:
+            containers = soup.select(sel)
+        except Exception:
+            containers = []
+        container = containers[0] if containers else None
+        anchors_in_scope = 0
+        role_links_in_scope = 0
+        hrefs: List[str] = []
+        if container is not None:
+            try:
+                anchor_elements = container.select("a[href]")
+            except Exception:
+                anchor_elements = []
+            try:
+                role_link_elements = container.select('[role="link"]')
+            except Exception:
+                role_link_elements = []
+            anchors_in_scope = len(anchor_elements)
+            role_links_in_scope = len(role_link_elements)
+
+            seen: Set[str] = set()
+            for el in anchor_elements:
+                try:
+                    href = _normalize_fb_href(el.get("href") or "")
+                except Exception:
+                    href = ""
+                if not href or "facebook.com" not in href:
+                    continue
+                if href in seen:
+                    continue
+                seen.add(href)
+                hrefs.append(href)
+            for el in role_link_elements:
+                try:
+                    href = _normalize_fb_href(el.get("href") or "")
+                except Exception:
+                    href = ""
+                if not href or href in seen:
+                    continue
+                seen.add(href)
+                hrefs.append(href)
+
+        usable_count = 0
+        try:
+            usable_count = sum(1 for h in hrefs if _is_candidate_usable(h))
+        except Exception:
+            usable_count = 0
+
+        stats.append(
+            {
+                "selector": sel,
+                "anchors_in_scope": anchors_in_scope,
+                "role_links_in_scope": role_links_in_scope,
+                "links_in_scope_total": anchors_in_scope + role_links_in_scope,
+                "hrefs": hrefs,
+                "usable_count": usable_count,
+            }
+        )
+
+    def _score_entry(entry: Dict[str, Any]) -> Tuple[int, int, int, int, int]:
+        return (
+            entry.get("usable_count", 0),
+            entry.get("anchors_in_scope", 0),
+            entry.get("role_links_in_scope", 0),
+            entry.get("links_in_scope_total", 0),
+            len(entry.get("hrefs", []) or []),
+        )
+
+    chosen_entry = max(stats, key=_score_entry) if stats else {}
+    chosen_selector = chosen_entry.get("selector", "NONE")
+    anchors_in_scope = chosen_entry.get("anchors_in_scope", 0)
+    candidates_pre_url_gate = len(chosen_entry.get("hrefs", []) or [])
+    return chosen_selector, anchors_in_scope, candidates_pre_url_gate, chosen_entry.get("hrefs", []) or []
 
 
 def _extract_anchor_hrefs(container) -> Tuple[List[str], List]:
@@ -1179,11 +1367,22 @@ def _harvest_search_candidates_v2(
     attr_scan_nodes = int(os.getenv("FB_DOM_ATTR_SCAN_N", "150") or "150")
     attr_scan_max = int(os.getenv("FB_DOM_ATTR_SCAN_MAX", "50") or "50")
     low_yield_threshold = 3
+    run_dir_env = os.getenv("RUN_DIR") or os.getenv("NIGHT_RUN_DIR")
 
     try:
-        feed_selector = 'div[role="main"] div[role="feed"]'
-        search_selector = 'div[aria-label="Search results"]'
-        main_selector = 'div[role="main"]'
+        selector_order = [
+            'div[role="main"] div[role="feed"]',
+            'div[role="main"] div[aria-label="Search results"]',
+            'div[aria-label="Search results"]',
+            'div[role="main"] section[aria-label*="Search results"]',
+            'div[role="main"] [data-pagelet^="SearchResults"]',
+            'div[role="main"] div[aria-label*="Search results"]',
+            'div[role="main"] div[role="article"]',
+            'div[role="main"]',
+        ]
+        feed_selector = selector_order[0]
+        search_selector = selector_order[2]
+        main_selector = selector_order[-1]
 
         wait_hit = "timeout"
         scroll_retries = 0
@@ -1210,17 +1409,41 @@ def _harvest_search_candidates_v2(
         except Exception:
             wait_hit = "timeout"
 
+        def _collect_selector_stats() -> List[Dict[str, Any]]:
+            stats: List[Dict[str, Any]] = []
+            for sel in selector_order:
+                containers = _find_all(driver, sel)
+                container = containers[0] if containers else None
+                data = _collect_container_candidates_v2(container, apply_role_link_prefilter=role_link_prefilter)
+                data.update(
+                    {
+                        "selector": sel,
+                        "containers_found": len(containers),
+                        "container": container,
+                    }
+                )
+                stats.append(data)
+            return stats
+
         def _refresh_counts():
-            feed_containers = _find_all(driver, feed_selector)
-            search_containers = _find_all(driver, search_selector)
-            feed_container = feed_containers[0] if feed_containers else None
-            search_container = search_containers[0] if search_containers else None
-            feed_data = _collect_container_candidates_v2(feed_container, apply_role_link_prefilter=role_link_prefilter)
-            search_data = _collect_container_candidates_v2(search_container, apply_role_link_prefilter=role_link_prefilter)
+            selector_stats = _collect_selector_stats()
+            selector_index = {entry.get("selector"): entry for entry in selector_stats}
+            empty_entry = {
+                "container": None,
+                "hrefs": [],
+                "usable_count": 0,
+                "anchors_in_scope": 0,
+                "role_links_in_scope": 0,
+                "links_in_scope_total": 0,
+                "containers_found": 0,
+            }
+            feed_data = selector_index.get(feed_selector, empty_entry)
+            search_data = selector_index.get(search_selector, empty_entry)
 
             return {
-                "feed_container": feed_container,
-                "search_container": search_container,
+                "selector_stats": selector_stats,
+                "feed_container": feed_data.get("container"),
+                "search_container": search_data.get("container"),
                 "feed_hrefs": feed_data.get("hrefs", []),
                 "search_hrefs": search_data.get("hrefs", []),
                 "usable_feed": feed_data.get("usable_count", 0),
@@ -1229,8 +1452,8 @@ def _harvest_search_candidates_v2(
                 "anchors_in_scope_search": search_data.get("anchors_in_scope", 0),
                 "links_in_scope_total_feed": feed_data.get("links_in_scope_total", 0),
                 "links_in_scope_total_search": search_data.get("links_in_scope_total", 0),
-                "containers_found_feed": len(feed_containers),
-                "containers_found_search": len(search_containers),
+                "containers_found_feed": feed_data.get("containers_found", 0),
+                "containers_found_search": search_data.get("containers_found", 0),
             }
 
         counts = _refresh_counts()
@@ -1289,66 +1512,48 @@ def _harvest_search_candidates_v2(
                 if counts["usable_feed"] > 0 or counts["usable_search"] > 0:
                     break
 
-        chosen_selector = "NONE"
-        chosen_container = None
-        chosen_data: Dict[str, Any] = {}
+        selector_stats = counts.get("selector_stats", [])
 
-        feed_data = _collect_container_candidates_v2(counts["feed_container"], apply_role_link_prefilter=role_link_prefilter)
-        search_data = _collect_container_candidates_v2(counts["search_container"], apply_role_link_prefilter=role_link_prefilter)
-        main_container = None
-        main_data: Dict[str, Any] = {}
+        def _score_entry(entry: Dict[str, Any]) -> Tuple[int, int, int, int, int]:
+            return (
+                entry.get("usable_count", 0),
+                entry.get("anchors_in_scope", 0),
+                entry.get("role_links_in_scope", 0),
+                entry.get("links_in_scope_total", 0),
+                len(entry.get("hrefs", []) or []),
+            )
 
-        if feed_data.get("usable_count", 0) > 0 or feed_data.get("hrefs"):
-            chosen_selector = feed_selector
-            chosen_container = counts["feed_container"]
-            chosen_data = feed_data
-        elif search_data.get("usable_count", 0) > 0 or search_data.get("hrefs"):
-            chosen_selector = search_selector
-            chosen_container = counts["search_container"]
-            chosen_data = search_data
-        else:
-            main_container = _find_first(driver, main_selector)
-            main_data = _collect_container_candidates_v2(main_container, apply_role_link_prefilter=role_link_prefilter)
-            if main_data.get("hrefs"):
-                chosen_selector = main_selector
-                chosen_container = main_container
-                chosen_data = main_data
+        chosen_entry = max(selector_stats, key=_score_entry) if selector_stats else {}
+        chosen_selector = chosen_entry.get("selector", "NONE")
+        chosen_container = chosen_entry.get("container")
+        chosen_data: Dict[str, Any] = chosen_entry or {}
 
-        # If initial pick is sparse, try alternates: search results, main, feed.
-        if (chosen_data.get("hrefs") or []) and len(chosen_data.get("hrefs", [])) < low_yield_threshold:
-            if main_container is None:
-                main_container = _find_first(driver, main_selector)
-                if not main_data:
-                    main_data = _collect_container_candidates_v2(main_container, apply_role_link_prefilter=role_link_prefilter)
-            fallback_order = [
-                (search_selector, counts["search_container"], search_data),
-                (main_selector, main_container, main_data),
-                (feed_selector, counts["feed_container"], feed_data),
-            ]
-            for selector_name, container_obj, data_obj in fallback_order:
-                if data_obj and len(data_obj.get("hrefs", [])) >= low_yield_threshold:
-                    chosen_selector = selector_name
-                    chosen_container = container_obj
-                    chosen_data = data_obj
-                    break
-            # If still low, pick the richest container available.
-            if len(chosen_data.get("hrefs", [])) < low_yield_threshold:
-                best_entry = None
-                best_len = -1
-                for selector_name, container_obj, data_obj in fallback_order:
-                    href_len = len(data_obj.get("hrefs", [])) if data_obj else 0
-                    if href_len > best_len:
-                        best_len = href_len
-                        best_entry = (selector_name, container_obj, data_obj)
-                if best_entry is not None and best_entry[2] is not None:
-                    chosen_selector, chosen_container, chosen_data = best_entry
+        # Low-yield recovery: prefer any selector that meets the threshold, else richest by href count.
+        if (chosen_data.get("hrefs") or []) and len(chosen_data.get("hrefs", [])) < low_yield_threshold and selector_stats:
+            rich_entries = [e for e in selector_stats if len(e.get("hrefs", [])) >= low_yield_threshold]
+            if rich_entries:
+                best_rich = max(rich_entries, key=lambda e: len(e.get("hrefs", [])))
+                chosen_selector = best_rich.get("selector", chosen_selector)
+                chosen_container = best_rich.get("container")
+                chosen_data = best_rich
+            else:
+                richest = max(selector_stats, key=lambda e: len(e.get("hrefs", [])))
+                chosen_selector = richest.get("selector", chosen_selector)
+                chosen_container = richest.get("container")
+                chosen_data = richest
 
         if chosen_container is None:
             total_anchors = len(_find_all(driver, "a"))
             search_len, search_preview = _container_html_preview(counts["search_container"])
             feed_len, feed_preview = _container_html_preview(counts["feed_container"])
-            page_url = _safe_current_url(driver)
             preview = search_preview or feed_preview
+            if not preview:
+                for entry in selector_stats:
+                    if entry.get("container"):
+                        _, preview = _container_html_preview(entry.get("container"))
+                        if preview:
+                            break
+            page_url = _safe_current_url(driver)
             _log(
                 logger,
                 "[Night FB][DOM Gate V2] "
@@ -1363,6 +1568,30 @@ def _harvest_search_candidates_v2(
                 f"anchor_waited={int(waited_for_population)} search_html_len={search_len} feed_html_len={feed_len} "
                 f"overlay_present={overlay_present} page_url='{page_url}' preview='{preview}' "
                 f"anchor_wait_meta={anchor_wait_meta}"
+            )
+            run_dir_env = os.getenv("RUN_DIR") or os.getenv("NIGHT_RUN_DIR")
+            container_html = ""
+            for entry in selector_stats:
+                if entry.get("container"):
+                    try:
+                        container_html = entry["container"].get_attribute("outerHTML") or ""
+                    except Exception:
+                        container_html = ""
+                    if container_html:
+                        break
+            if not container_html:
+                try:
+                    container_html = driver.page_source or ""
+                except Exception:
+                    container_html = ""
+            _maybe_dump_dom_gate_debug(
+                run_dir_env,
+                _sanitize_fs_key(search_name or "unknown"),
+                "NONE",
+                selector_stats,
+                [],
+                container_html,
+                logger=logger,
             )
             if overlay_present and counts["anchors_in_scope_feed"] == 0 and counts["anchors_in_scope_search"] == 0:
                 logged_already = False
@@ -1399,6 +1628,27 @@ def _harvest_search_candidates_v2(
         chosen_hrefs = deduped_pre_gate
 
         candidates_pre_url_gate = len(chosen_hrefs)
+        if anchors_in_scope_chosen == 0 or candidates_pre_url_gate == 0:
+            container_html = ""
+            try:
+                if chosen_container is not None:
+                    container_html = chosen_container.get_attribute("outerHTML") or ""
+            except Exception:
+                container_html = ""
+            if not container_html:
+                try:
+                    container_html = driver.page_source or ""
+                except Exception:
+                    container_html = ""
+            _maybe_dump_dom_gate_debug(
+                run_dir_env,
+                _sanitize_fs_key(search_name or "unknown"),
+                chosen_selector,
+                selector_stats,
+                chosen_hrefs,
+                container_html,
+                logger=logger,
+            )
         filtered_hrefs: List[str] = []
         gate_reject = 0
         rejected_samples: List[str] = []
