@@ -3840,266 +3840,36 @@ class CrossDirectoryEnricherWorker(QThread):
                     f"[Enricher] SoundCloud directory path set -> {self.soundcloud_csv_path}"
                 )
             priority = ["bandcamp", "soundcloud", "lastfm", "unearthed"]
-            for position, row_idx in enumerate(seed_df.index, start=1):
-                row = seed_df.loc[row_idx]
-                had_fb_or_email_from_seed = _row_has_facebook_or_email(row)
-                artist = _clean_cell(row.get("Artist Name"))
-                key = normalise_artist_name(artist)
-                track_key = _extract_seed_track_key(row)
-                seed_song_title = _extract_seed_track_text(row)
-                spotify_domain = extract_domain(_clean_cell(row.get("Spotify_Website_URL", "")))
-                self._live_context = {
-                    "artist": artist,
-                    "location": _clean_cell(row.get("Location")),
-                    "track": track_key,
-                    "genre": _coerce_directory_value(row.get("Primary Genre")) if "Primary Genre" in row else "",
-                    "song_title": seed_song_title,
-                    "spotify_domain": spotify_domain,
-                    "spotify_id": _clean_cell(row.get("Spotify_Artist_ID")),
-                }
-                spotify_id = self._live_context.get("spotify_id", "")
-                self._init_row_enrichment_state()
-                seed_links_by_source = _extract_seed_links_by_source(row)
-                if not key:
-                    self.log_message.emit(
-                        f"[Enricher] Row {position}/{total}: invalid artist name; skipping."
-                    )
-                    self._update_progress(position, total)
-                    continue
-                enriched = False
-                matches_used: List[Tuple[str, Dict[str, Any]]] = []
-                sources_logged: List[str] = []
-                for source in priority:
-                    directory_index = directory_indexes.get(source)
-                    if not directory_index:
-                        continue
-                    url_candidates = list(seed_links_by_source.get(source, ()))
-                    matches = self._find_directory_matches(
-                        directory_index, key, track_key, url_candidates
-                    )
-                    if not matches:
-                        continue
-                    payload, best_row = self._payload_from_directory_matches(
-                        matches, source
-                    )
-                    if not payload:
-                        continue
-                    applied = self._apply_payload_guarded(
-                        seed_df, row_idx, payload, artist, spotify_id=spotify_id
-                    )
-                    if applied:
-                        enriched = True
-                        if best_row:
-                            matches_used.append((source, best_row))
-                        if source not in sources_logged:
-                            sources_logged.append(source)
-                metadata_updated = self._apply_structured_fields(seed_df, row_idx, matches_used)
-                if metadata_updated:
-                    enriched = True
-                    for source, _ in matches_used:
-                        if source not in sources_logged:
-                            sources_logged.append(source)
-                if enriched and sources_logged:
-                    display_sources = ", ".join(
-                        filter(
-                            None,
-                            [_format_source_display(src) or src.title() for src in sources_logged],
-                        )
-                    )
-                    if display_sources:
-                        self.log_message.emit(
-                            f"[Enricher] Row {position}/{total}: matched {artist!r} via {display_sources}."
-                        )
-                # Even if another source enriched the row, optionally try SoundCloud live lookup to attach a profile link/socials when missing.
-                if self.enable_live_search and not _coerce_directory_value(seed_df.at[row_idx, "SoundCloud Link"]):
-                    if getattr(self, "_sc_live_enrich_disabled", False):
-                        reason = self._sc_live_enrich_disabled_reason or "first_challenge_page"
-                        self.log_message.emit(
-                            f"[Enricher][SC] Live enrichment disabled (reason={reason}); skipping live SC check for '{artist}'."
-                        )
-                        # Keep processing other platforms for this row.
-                    else:
-                        self.log_message.emit(
-                            f"[Enricher] SoundCloud live check for '{artist}' (current SC link missing)."
-                        )
-                        if getattr(self, "night_mode", False):
-                            sc_applied = self._night_sc_attempt_row(seed_df, row_idx, artist, spotify_id=spotify_id)
-                            if "SC_Status" in seed_df.columns or "SC_Reason" in seed_df.columns:
-                                sc_status = _coerce_directory_value(seed_df.at[row_idx, "SC_Status"]) if "SC_Status" in seed_df.columns else ""
-                                sc_reason = _coerce_directory_value(seed_df.at[row_idx, "SC_Reason"]) if "SC_Reason" in seed_df.columns else ""
-                                self._note_sc_challenge(sc_status, sc_reason)
-                            if sc_applied:
-                                enriched = True
-                                if "soundcloud" not in sources_logged:
-                                    sources_logged.append("soundcloud")
-                        else:
-                            sc_payload = self._live_search_soundcloud(artist)
-                            if self._mark_sc_blocked_row(seed_df, row_idx):
-                                self._update_progress(position, total)
-                                continue
-                            if sc_payload:
-                                applied = self._apply_payload_guarded(
-                                    seed_df, row_idx, sc_payload, artist, spotify_id=spotify_id
-                                )
-                                if applied:
-                                    enriched = True
-                                if "soundcloud" not in sources_logged:
-                                    sources_logged.append("soundcloud")
-                if self.enable_live_search:
-                    bandcamp_url_present = False
-                    if "Bandcamp_URL" in seed_df.columns:
-                        bandcamp_url_present = bool(_coerce_directory_value(seed_df.at[row_idx, "Bandcamp_URL"]))
-                    skip_soundcloud = bool(_coerce_directory_value(seed_df.at[row_idx, "SoundCloud Link"]))
-                    if getattr(self, "_sc_live_enrich_disabled", False):
-                        skip_soundcloud = True
-                    payload = self._live_lookup(
-                        artist,
-                        skip_soundcloud=skip_soundcloud,
-                        skip_bandcamp=bandcamp_url_present,
-                    )
-                    if not getattr(self, "night_mode", False) and self._mark_sc_blocked_row(seed_df, row_idx):
+            _enrichment_mode = os.getenv("ENRICHMENT_MODE", "row_linear")
+            self.log_message.emit(f"[Enricher] mode={_enrichment_mode}")
+            if _enrichment_mode == "source_phased":
+                self._run_source_phased(seed_df, directory_indexes, priority, fb_driver, total)
+            else:
+                for position, row_idx in enumerate(seed_df.index, start=1):
+                    ctx = self._build_row_context(seed_df, row_idx, position, total)
+                    if not ctx:
                         self._update_progress(position, total)
                         continue
-                    if payload:
-                        applied = self._apply_payload_guarded(
-                            seed_df, row_idx, payload, artist, spotify_id=spotify_id
+                    self._init_row_enrichment_state()
+                    enriched = self._enrich_row_directories(seed_df, row_idx, directory_indexes, priority, ctx)
+                    if self.enable_live_search:
+                        sc_enriched, skip_rest = self._enrich_row_sc_live(seed_df, row_idx, ctx)
+                        enriched |= sc_enriched
+                        if skip_rest:
+                            self._update_progress(position, total)
+                            continue
+                        ll_enriched, skip_rest = self._enrich_row_live_lookup(seed_df, row_idx, ctx)
+                        enriched |= ll_enriched
+                        if skip_rest:
+                            self._update_progress(position, total)
+                            continue
+                    if ENABLE_FACEBOOK_ENRICHMENT and fb_driver:
+                        enriched |= self._enrich_row_facebook(seed_df, row_idx, fb_driver, ctx)
+                    if not enriched:
+                        self.log_message.emit(
+                            f"[Enricher] Row {position}/{total}: no enrichment for {ctx['artist']!r}."
                         )
-                        if applied:
-                            enriched = True
-                    # Persist Bandcamp diagnostics (per-row)
-                    bc_stats = getattr(self, "_last_bc_row_stats", {}) or {}
-                    if bc_stats:
-                        if "BC_Status" in seed_df.columns:
-                            seed_df.at[row_idx, "BC_Status"] = bc_stats.get("status", "")
-                        if "BC_Mode" in seed_df.columns:
-                            seed_df.at[row_idx, "BC_Mode"] = bc_stats.get("mode", "")
-                        if "BC_Attempts" in seed_df.columns:
-                            seed_df.at[row_idx, "BC_Attempts"] = bc_stats.get("attempts", "")
-                        if "BC_403_Count" in seed_df.columns:
-                            seed_df.at[row_idx, "BC_403_Count"] = bc_stats.get("http_403", "")
-                if ENABLE_FACEBOOK_ENRICHMENT and fb_driver:
-                    fb_attempted = False
-                    fb_matched = False
-                    if not self._platform_attempt_allowed("facebook", artist, "Facebook Enrich"):
-                        fb_attempted = False
-                    else:
-                        fb_attempted = True
-                        has_fb_or_email_after_directories = _row_has_facebook_or_email(seed_df.loc[row_idx])
-                        if had_fb_or_email_from_seed or has_fb_or_email_after_directories:
-                            self.log_message.emit(
-                                f"[FB Enrich] Skipping Facebook enrichment for '{artist}' (already has Facebook/email from seed or directory enrichment)."
-                            )
-                        else:
-                            current_social_links = [
-                                cell_to_str(seed_df.at[row_idx, "Social Link"]),
-                                cell_to_str(seed_df.at[row_idx, "External Links"]),
-                                cell_to_str(seed_df.at[row_idx, "Facebook_URL"]),
-                            ]
-                            current_email = cell_to_str(seed_df.at[row_idx, "Email"])
-                            has_fb_link = any(
-                                isinstance(link, str) and "facebook.com" in link.lower()
-                                for link in current_social_links
-                                if link
-                            )
-                            has_email = bool((current_email or "").strip())
-                            if has_fb_link or has_email:
-                                self.log_message.emit(
-                                    f"[FB Enrich] Skipping Facebook enrichment for '{artist}' (already has Facebook/email from directory enrichment)."
-                                )
-                            else:
-                                social_link_val = cell_to_str(row.get("Social Link", ""))
-                                external_link_val = cell_to_str(row.get("External Links", ""))
-                                fb_url_val = cell_to_str(row.get("Facebook_URL", ""))
-                                existing_fb_links: List[str] = []
-                                for blob in (social_link_val, external_link_val, fb_url_val):
-                                    if not blob:
-                                        continue
-                                    parts = [part.strip() for part in blob.split(",") if part.strip()]
-                                    for part in parts:
-                                        if "facebook.com" in part.lower():
-                                            existing_fb_links.append(part)
-                                fb_emails: List[str] = []
-                                page_url_used = ""
-                                try:
-                                    if existing_fb_links:
-                                        fb_candidates = (
-                                            [existing_fb_links]
-                                            if isinstance(existing_fb_links, str)
-                                            else list(existing_fb_links)
-                                        )
-                                        for candidate in fb_candidates:
-                                            candidate_norm = normalize_external_url(candidate)
-                                            found = fb_scrape_emails_from_page(
-                                                fb_driver, candidate_norm, log_fn=self.log_message.emit
-                                            )
-                                            try:
-                                                current_url = (fb_driver.current_url or "").lower()
-                                                if "facebook.com/login" in current_url:
-                                                    self.log_message.emit(
-                                                        "[FB Enrich] Facebook login wall detected for this page; enrichment skipped (not logged in)."
-                                                    )
-                                                    found = []
-                                            except Exception:
-                                                pass
-                                            if found:
-                                                fb_emails = found
-                                                page_url_used = candidate_norm
-                                                break
-                                    else:
-                                        # No explicit FB URL; legacy FB Enrich pass does nothing.
-                                        self.log_message.emit(
-                                            f"[FB Enrich] Skipping '{artist}' – no explicit Facebook URL present."
-                                        )
-                                except Exception as exc:
-                                    self.log_message.emit(
-                                        f"[FB Enrich] Error enriching row {position}/{total} ({artist}): {exc}"
-                                    )
-                                if "FB_Status" not in seed_df.columns:
-                                    seed_df["FB_Status"] = ""
-                                if fb_emails:
-                                    fb_status_val = str(seed_df.at[row_idx, "FB_Status"] or "")
-                                    if _fb_status_is_rejected(fb_status_val):
-                                        artist_label = cell_to_str(seed_df.at[row_idx, "Artist Name"]) or "<unknown>"
-                                        page_label = page_url_used or (existing_fb_links[0] if existing_fb_links else "<unknown>")
-                                        self.log_message.emit(
-                                            f"[FB Guard] Discarding emails from rejected FB page '{page_label}' for '{artist_label}' (reason={fb_status_val})"
-                                        )
-                                    else:
-                                        current_email = cell_to_str(seed_df.at[row_idx, "Email"])
-                                        if not current_email:
-                                            seed_df.at[row_idx, "Email"] = fb_emails[0]
-                                        if not existing_fb_links and page_url_used:
-                                            if not seed_df.at[row_idx, "Social Link"]:
-                                                seed_df.at[row_idx, "Social Link"] = page_url_used
-                                        if page_url_used and not seed_df.at[row_idx, "Facebook_URL"]:
-                                            seed_df.at[row_idx, "Facebook_URL"] = page_url_used
-                                        seed_df.at[row_idx, "Email_All"] = _merge_email_all(
-                                            seed_df.at[row_idx, "Email_All"], fb_emails
-                                        )
-                                        seed_df.at[row_idx, "Email_Type"] = "fb_enrich"
-                                        if not cell_to_str(seed_df.at[row_idx, "Email_Source_URL"]):
-                                            seed_df.at[row_idx, "Email_Source_URL"] = page_url_used or ""
-                                        if not cell_to_str(seed_df.at[row_idx, "Email_Source_Type"]):
-                                            seed_df.at[row_idx, "Email_Source_Type"] = "facebook_enrich"
-                                        if not cell_to_str(seed_df.at[row_idx, "Email_Extract_Method"]):
-                                            seed_df.at[row_idx, "Email_Extract_Method"] = "regex"
-                                        seed_df.at[row_idx, "__fb_emails_applied"] = ";".join(sorted({e.strip().lower() for e in fb_emails if e}))
-                                        seed_df.at[row_idx, "FB_Status"] = seed_df.at[row_idx, "FB_Status"] or "found_email"
-                                        enriched = True
-                                        fb_matched = True
-                                elif existing_fb_links:
-                                    seed_df.at[row_idx, "FB_Status"] = seed_df.at[row_idx, "FB_Status"] or "no_email_on_page"
-                                else:
-                                    seed_df.at[row_idx, "FB_Status"] = seed_df.at[row_idx, "FB_Status"] or "no_fb_url"
-                    if fb_attempted and not fb_matched:
-                        self._set_platform_state("facebook", "skipped")
-                    elif fb_matched:
-                        self._set_platform_state("facebook", "matched")
-                if not enriched:
-                    self.log_message.emit(
-                        f"[Enricher] Row {position}/{total}: no enrichment for {artist!r}."
-                    )
-                self._update_progress(position, total)
+                    self._update_progress(position, total)
             # Bandcamp per-run summary (low noise)
             if self._bc_search_attempts:
                 summary_parts = [
@@ -4136,6 +3906,401 @@ class CrossDirectoryEnricherWorker(QThread):
         }
         self._sc_blocked_for_row = False
         self._last_bc_row_stats = {}
+
+    # ------------------------------------------------------------------
+    # Extracted per-row helpers (used by both row-linear and source-phased)
+    # ------------------------------------------------------------------
+
+    def _build_row_context(self, seed_df, row_idx, position, total):
+        """Build per-row context dict and set self._live_context.
+
+        Returns a dict with row metadata, or None if the artist name is invalid.
+        Does NOT call _init_row_enrichment_state — callers must do that.
+        """
+        row = seed_df.loc[row_idx]
+        had_fb_or_email_from_seed = _row_has_facebook_or_email(row)
+        artist = _clean_cell(row.get("Artist Name"))
+        key = normalise_artist_name(artist)
+        if not key:
+            self.log_message.emit(
+                f"[Enricher] Row {position}/{total}: invalid artist name; skipping."
+            )
+            return None
+        track_key = _extract_seed_track_key(row)
+        seed_song_title = _extract_seed_track_text(row)
+        spotify_domain = extract_domain(_clean_cell(row.get("Spotify_Website_URL", "")))
+        self._live_context = {
+            "artist": artist,
+            "location": _clean_cell(row.get("Location")),
+            "track": track_key,
+            "genre": _coerce_directory_value(row.get("Primary Genre")) if "Primary Genre" in row else "",
+            "song_title": seed_song_title,
+            "spotify_domain": spotify_domain,
+            "spotify_id": _clean_cell(row.get("Spotify_Artist_ID")),
+        }
+        spotify_id = self._live_context.get("spotify_id", "")
+        seed_links_by_source = _extract_seed_links_by_source(row)
+        return {
+            "artist": artist,
+            "key": key,
+            "track_key": track_key,
+            "spotify_id": spotify_id,
+            "seed_links_by_source": seed_links_by_source,
+            "had_fb_or_email_from_seed": had_fb_or_email_from_seed,
+            "position": position,
+            "total": total,
+        }
+
+    def _enrich_row_directories(self, seed_df, row_idx, directory_indexes, priority, ctx):
+        """Directory matching for a single row. Returns True if any enrichment applied."""
+        artist = ctx["artist"]
+        key = ctx["key"]
+        track_key = ctx["track_key"]
+        spotify_id = ctx["spotify_id"]
+        seed_links_by_source = ctx["seed_links_by_source"]
+        position = ctx["position"]
+        total = ctx["total"]
+        enriched = False
+        matches_used: List[Tuple[str, Dict[str, Any]]] = []
+        sources_logged: List[str] = []
+        for source in priority:
+            directory_index = directory_indexes.get(source)
+            if not directory_index:
+                continue
+            url_candidates = list(seed_links_by_source.get(source, ()))
+            matches = self._find_directory_matches(
+                directory_index, key, track_key, url_candidates
+            )
+            if not matches:
+                continue
+            payload, best_row = self._payload_from_directory_matches(
+                matches, source
+            )
+            if not payload:
+                continue
+            applied = self._apply_payload_guarded(
+                seed_df, row_idx, payload, artist, spotify_id=spotify_id
+            )
+            if applied:
+                enriched = True
+                if best_row:
+                    matches_used.append((source, best_row))
+                if source not in sources_logged:
+                    sources_logged.append(source)
+        metadata_updated = self._apply_structured_fields(seed_df, row_idx, matches_used)
+        if metadata_updated:
+            enriched = True
+            for source, _ in matches_used:
+                if source not in sources_logged:
+                    sources_logged.append(source)
+        if enriched and sources_logged:
+            display_sources = ", ".join(
+                filter(
+                    None,
+                    [_format_source_display(src) or src.title() for src in sources_logged],
+                )
+            )
+            if display_sources:
+                self.log_message.emit(
+                    f"[Enricher] Row {position}/{total}: matched {artist!r} via {display_sources}."
+                )
+        return enriched
+
+    def _enrich_row_sc_live(self, seed_df, row_idx, ctx):
+        """Dedicated SoundCloud live check for a single row.
+
+        Returns (enriched: bool, skip_rest: bool).
+        skip_rest=True means the SC blocked flag fired and the caller should
+        skip remaining enrichment for this row.
+        """
+        artist = ctx["artist"]
+        spotify_id = ctx["spotify_id"]
+        if not _coerce_directory_value(seed_df.at[row_idx, "SoundCloud Link"]):
+            if getattr(self, "_sc_live_enrich_disabled", False):
+                reason = self._sc_live_enrich_disabled_reason or "first_challenge_page"
+                self.log_message.emit(
+                    f"[Enricher][SC] Live enrichment disabled (reason={reason}); skipping live SC check for '{artist}'."
+                )
+            else:
+                self.log_message.emit(
+                    f"[Enricher] SoundCloud live check for '{artist}' (current SC link missing)."
+                )
+                if getattr(self, "night_mode", False):
+                    sc_applied = self._night_sc_attempt_row(seed_df, row_idx, artist, spotify_id=spotify_id)
+                    if "SC_Status" in seed_df.columns or "SC_Reason" in seed_df.columns:
+                        sc_status = _coerce_directory_value(seed_df.at[row_idx, "SC_Status"]) if "SC_Status" in seed_df.columns else ""
+                        sc_reason = _coerce_directory_value(seed_df.at[row_idx, "SC_Reason"]) if "SC_Reason" in seed_df.columns else ""
+                        self._note_sc_challenge(sc_status, sc_reason)
+                    if sc_applied:
+                        return (True, False)
+                else:
+                    sc_payload = self._live_search_soundcloud(artist)
+                    if self._mark_sc_blocked_row(seed_df, row_idx):
+                        return (False, True)
+                    if sc_payload:
+                        applied = self._apply_payload_guarded(
+                            seed_df, row_idx, sc_payload, artist, spotify_id=spotify_id
+                        )
+                        if applied:
+                            return (True, False)
+        return (False, False)
+
+    def _enrich_row_live_lookup(self, seed_df, row_idx, ctx):
+        """General live lookup (BC + SC + LF) for a single row.
+
+        Returns (enriched: bool, skip_rest: bool).
+        skip_rest=True means SC blocked and the caller should skip remaining
+        enrichment for this row.
+        """
+        artist = ctx["artist"]
+        spotify_id = ctx["spotify_id"]
+        enriched = False
+        bandcamp_url_present = False
+        if "Bandcamp_URL" in seed_df.columns:
+            bandcamp_url_present = bool(_coerce_directory_value(seed_df.at[row_idx, "Bandcamp_URL"]))
+        skip_soundcloud = bool(_coerce_directory_value(seed_df.at[row_idx, "SoundCloud Link"]))
+        if getattr(self, "_sc_live_enrich_disabled", False):
+            skip_soundcloud = True
+        payload = self._live_lookup(
+            artist,
+            skip_soundcloud=skip_soundcloud,
+            skip_bandcamp=bandcamp_url_present,
+        )
+        if not getattr(self, "night_mode", False) and self._mark_sc_blocked_row(seed_df, row_idx):
+            return (False, True)
+        if payload:
+            applied = self._apply_payload_guarded(
+                seed_df, row_idx, payload, artist, spotify_id=spotify_id
+            )
+            if applied:
+                enriched = True
+        # Persist Bandcamp diagnostics (per-row)
+        bc_stats = getattr(self, "_last_bc_row_stats", {}) or {}
+        if bc_stats:
+            if "BC_Status" in seed_df.columns:
+                seed_df.at[row_idx, "BC_Status"] = bc_stats.get("status", "")
+            if "BC_Mode" in seed_df.columns:
+                seed_df.at[row_idx, "BC_Mode"] = bc_stats.get("mode", "")
+            if "BC_Attempts" in seed_df.columns:
+                seed_df.at[row_idx, "BC_Attempts"] = bc_stats.get("attempts", "")
+            if "BC_403_Count" in seed_df.columns:
+                seed_df.at[row_idx, "BC_403_Count"] = bc_stats.get("http_403", "")
+        return (enriched, False)
+
+    def _enrich_row_facebook(self, seed_df, row_idx, fb_driver, ctx):
+        """Facebook enrichment for a single row. Returns True if enrichment applied."""
+        artist = ctx["artist"]
+        position = ctx["position"]
+        total = ctx["total"]
+        had_fb_or_email_from_seed = ctx["had_fb_or_email_from_seed"]
+        fb_attempted = False
+        fb_matched = False
+        if not self._platform_attempt_allowed("facebook", artist, "Facebook Enrich"):
+            fb_attempted = False
+        else:
+            fb_attempted = True
+            has_fb_or_email_after_directories = _row_has_facebook_or_email(seed_df.loc[row_idx])
+            if had_fb_or_email_from_seed or has_fb_or_email_after_directories:
+                self.log_message.emit(
+                    f"[FB Enrich] Skipping Facebook enrichment for '{artist}' (already has Facebook/email from seed or directory enrichment)."
+                )
+            else:
+                current_social_links = [
+                    cell_to_str(seed_df.at[row_idx, "Social Link"]),
+                    cell_to_str(seed_df.at[row_idx, "External Links"]),
+                    cell_to_str(seed_df.at[row_idx, "Facebook_URL"]),
+                ]
+                current_email = cell_to_str(seed_df.at[row_idx, "Email"])
+                has_fb_link = any(
+                    isinstance(link, str) and "facebook.com" in link.lower()
+                    for link in current_social_links
+                    if link
+                )
+                has_email = bool((current_email or "").strip())
+                if has_fb_link or has_email:
+                    self.log_message.emit(
+                        f"[FB Enrich] Skipping Facebook enrichment for '{artist}' (already has Facebook/email from directory enrichment)."
+                    )
+                else:
+                    row = seed_df.loc[row_idx]
+                    social_link_val = cell_to_str(row.get("Social Link", ""))
+                    external_link_val = cell_to_str(row.get("External Links", ""))
+                    fb_url_val = cell_to_str(row.get("Facebook_URL", ""))
+                    existing_fb_links: List[str] = []
+                    for blob in (social_link_val, external_link_val, fb_url_val):
+                        if not blob:
+                            continue
+                        parts = [part.strip() for part in blob.split(",") if part.strip()]
+                        for part in parts:
+                            if "facebook.com" in part.lower():
+                                existing_fb_links.append(part)
+                    fb_emails: List[str] = []
+                    page_url_used = ""
+                    try:
+                        if existing_fb_links:
+                            fb_candidates = (
+                                [existing_fb_links]
+                                if isinstance(existing_fb_links, str)
+                                else list(existing_fb_links)
+                            )
+                            for candidate in fb_candidates:
+                                candidate_norm = normalize_external_url(candidate)
+                                found = fb_scrape_emails_from_page(
+                                    fb_driver, candidate_norm, log_fn=self.log_message.emit
+                                )
+                                try:
+                                    current_url = (fb_driver.current_url or "").lower()
+                                    if "facebook.com/login" in current_url:
+                                        self.log_message.emit(
+                                            "[FB Enrich] Facebook login wall detected for this page; enrichment skipped (not logged in)."
+                                        )
+                                        found = []
+                                except Exception:
+                                    pass
+                                if found:
+                                    fb_emails = found
+                                    page_url_used = candidate_norm
+                                    break
+                        else:
+                            # No explicit FB URL; legacy FB Enrich pass does nothing.
+                            self.log_message.emit(
+                                f"[FB Enrich] Skipping '{artist}' – no explicit Facebook URL present."
+                            )
+                    except Exception as exc:
+                        self.log_message.emit(
+                            f"[FB Enrich] Error enriching row {position}/{total} ({artist}): {exc}"
+                        )
+                    if "FB_Status" not in seed_df.columns:
+                        seed_df["FB_Status"] = ""
+                    if fb_emails:
+                        fb_status_val = str(seed_df.at[row_idx, "FB_Status"] or "")
+                        if _fb_status_is_rejected(fb_status_val):
+                            artist_label = cell_to_str(seed_df.at[row_idx, "Artist Name"]) or "<unknown>"
+                            page_label = page_url_used or (existing_fb_links[0] if existing_fb_links else "<unknown>")
+                            self.log_message.emit(
+                                f"[FB Guard] Discarding emails from rejected FB page '{page_label}' for '{artist_label}' (reason={fb_status_val})"
+                            )
+                        else:
+                            current_email = cell_to_str(seed_df.at[row_idx, "Email"])
+                            if not current_email:
+                                seed_df.at[row_idx, "Email"] = fb_emails[0]
+                            if not existing_fb_links and page_url_used:
+                                if not seed_df.at[row_idx, "Social Link"]:
+                                    seed_df.at[row_idx, "Social Link"] = page_url_used
+                            if page_url_used and not seed_df.at[row_idx, "Facebook_URL"]:
+                                seed_df.at[row_idx, "Facebook_URL"] = page_url_used
+                            seed_df.at[row_idx, "Email_All"] = _merge_email_all(
+                                seed_df.at[row_idx, "Email_All"], fb_emails
+                            )
+                            seed_df.at[row_idx, "Email_Type"] = "fb_enrich"
+                            if not cell_to_str(seed_df.at[row_idx, "Email_Source_URL"]):
+                                seed_df.at[row_idx, "Email_Source_URL"] = page_url_used or ""
+                            if not cell_to_str(seed_df.at[row_idx, "Email_Source_Type"]):
+                                seed_df.at[row_idx, "Email_Source_Type"] = "facebook_enrich"
+                            if not cell_to_str(seed_df.at[row_idx, "Email_Extract_Method"]):
+                                seed_df.at[row_idx, "Email_Extract_Method"] = "regex"
+                            seed_df.at[row_idx, "__fb_emails_applied"] = ";".join(sorted({e.strip().lower() for e in fb_emails if e}))
+                            seed_df.at[row_idx, "FB_Status"] = seed_df.at[row_idx, "FB_Status"] or "found_email"
+                            fb_matched = True
+                    elif existing_fb_links:
+                        seed_df.at[row_idx, "FB_Status"] = seed_df.at[row_idx, "FB_Status"] or "no_email_on_page"
+                    else:
+                        seed_df.at[row_idx, "FB_Status"] = seed_df.at[row_idx, "FB_Status"] or "no_fb_url"
+        if fb_attempted and not fb_matched:
+            self._set_platform_state("facebook", "skipped")
+        elif fb_matched:
+            self._set_platform_state("facebook", "matched")
+        return fb_matched
+
+    # ------------------------------------------------------------------
+    # Source-phased orchestration (ENRICHMENT_MODE=source_phased)
+    # ------------------------------------------------------------------
+
+    def _run_source_phased(self, seed_df, directory_indexes, priority, fb_driver, total):
+        """Run enrichment in source-phased mode: one source across all rows at a time."""
+        # Phase 0: Directory matching (fast, no network)
+        self._phase_directory_matching(seed_df, directory_indexes, priority, total)
+        # Phase 1: Dedicated SoundCloud live check
+        if self.enable_live_search:
+            self._phase_soundcloud(seed_df, total)
+        # Phase 2: General live lookup (BC + LF; SC mostly skipped since Phase 1 populated it)
+        if self.enable_live_search:
+            self._phase_live_lookup(seed_df, total)
+        # Phase 3: Facebook
+        if ENABLE_FACEBOOK_ENRICHMENT and fb_driver:
+            self._phase_facebook(seed_df, fb_driver, total)
+
+    def _phase_directory_matching(self, seed_df, directory_indexes, priority, total):
+        self.log_message.emit("[Enricher][Directory Phase] Starting...")
+        enriched_count = 0
+        for position, row_idx in enumerate(seed_df.index, start=1):
+            ctx = self._build_row_context(seed_df, row_idx, position, total)
+            if not ctx:
+                self._update_progress(position, total)
+                continue
+            self._init_row_enrichment_state()
+            if self._enrich_row_directories(seed_df, row_idx, directory_indexes, priority, ctx):
+                enriched_count += 1
+            self._update_progress(position, total)
+        self.log_message.emit(f"[Enricher][Directory Phase] Completed {total} rows (enriched={enriched_count})")
+
+    def _phase_soundcloud(self, seed_df, total):
+        self.log_message.emit("[Enricher][SC Phase] Starting...")
+        enriched_count = 0
+        skipped_cooldown = 0
+        skipped_disabled = 0
+        for position, row_idx in enumerate(seed_df.index, start=1):
+            ctx = self._build_row_context(seed_df, row_idx, position, total)
+            if not ctx:
+                continue
+            self._init_row_enrichment_state()
+            if not _coerce_directory_value(seed_df.at[row_idx, "SoundCloud Link"]):
+                if getattr(self, "_sc_live_enrich_disabled", False):
+                    skipped_disabled += 1
+                elif self._sc_in_live_cooldown():
+                    skipped_cooldown += 1
+                else:
+                    sc_enriched, _ = self._enrich_row_sc_live(seed_df, row_idx, ctx)
+                    if sc_enriched:
+                        enriched_count += 1
+        self.log_message.emit(
+            f"[Enricher][SC Phase] Completed {total} rows "
+            f"(enriched={enriched_count}, skipped_cooldown={skipped_cooldown}, "
+            f"skipped_disabled={skipped_disabled})"
+        )
+
+    def _phase_live_lookup(self, seed_df, total):
+        self.log_message.emit("[Enricher][LF Phase] Starting...")
+        enriched_count = 0
+        for position, row_idx in enumerate(seed_df.index, start=1):
+            ctx = self._build_row_context(seed_df, row_idx, position, total)
+            if not ctx:
+                continue
+            self._init_row_enrichment_state()
+            ll_enriched, _ = self._enrich_row_live_lookup(seed_df, row_idx, ctx)
+            if ll_enriched:
+                enriched_count += 1
+        self.log_message.emit(
+            f"[Enricher][LF Phase] Completed {total} rows (enriched={enriched_count})"
+        )
+
+    def _phase_facebook(self, seed_df, fb_driver, total):
+        self.log_message.emit("[Enricher][FB Phase] Starting...")
+        enriched_count = 0
+        skipped_count = 0
+        for position, row_idx in enumerate(seed_df.index, start=1):
+            ctx = self._build_row_context(seed_df, row_idx, position, total)
+            if not ctx:
+                continue
+            self._init_row_enrichment_state()
+            if self._enrich_row_facebook(seed_df, row_idx, fb_driver, ctx):
+                enriched_count += 1
+            else:
+                skipped_count += 1
+            self._update_progress(position, total)
+        self.log_message.emit(
+            f"[Enricher][FB Phase] Completed {total} rows (enriched={enriched_count}, skipped={skipped_count})"
+        )
 
     def _ensure_bandcamp_output_columns(self, df: pd.DataFrame) -> pd.DataFrame:
         """

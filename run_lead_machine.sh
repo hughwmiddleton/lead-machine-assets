@@ -28,6 +28,11 @@ export SPOTIFY_REFRESH_TOKEN="AQB1vtP347IrhWrFAScJ_TwBSK0ZTiEdAbhxrmGf82vqmZIANM
 unset SC_DEBUG_LATEST
 export PYTHONFAULTHANDLER=1
 
+# Enrichment execution mode: "row_linear" (default) or "source_phased"
+# source_phased sweeps each source across all rows before the next source,
+# so time-based cooldowns can expire mid-phase instead of blocking all remaining rows.
+export ENRICHMENT_MODE="row_linear"
+
 # Qt GUI visible (macOS cocoa)
 unset QT_QPA_PLATFORM
 
