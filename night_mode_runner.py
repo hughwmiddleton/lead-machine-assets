@@ -891,9 +891,11 @@ def _process_job(
     try:
         if resume and os.path.exists(state["raw_csv"]):
             logger.info("Resume: raw CSV already exists at %s; skipping scrape step.", state["raw_csv"])
+            pipeline_runner.ensure_final_raw_csv(state["raw_csv"], job_id, logger=logger.info)
         else:
             logger.info("Starting scrape for job %s", job_id)
             run_directory_job(job, state["raw_csv"], logger=logger.info)
+            pipeline_runner.ensure_final_raw_csv(state["raw_csv"], job_id, logger=logger.info)
         state["current_row_index"] = max(_count_rows(state["raw_csv"]) - 1, 0)
         state["valid_leads_so_far"] = state.get("valid_leads_so_far", 0) + state["current_row_index"]
         _write_json(state_path, state)

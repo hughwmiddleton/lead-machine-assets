@@ -395,6 +395,20 @@ if [[ ${#bad_raws[@]} -gt 0 ]]; then
 fi
 fi
 
+# Ensure no temp CSVs remain after successful jobs
+if tmp_left=$(find "$RUN_ROOT" -type f -name "raw.tmp.csv" -print -quit 2>/dev/null); then
+  if [[ -n "$tmp_left" ]]; then
+    fail "Leftover raw.tmp.csv detected (expected none): $tmp_left"
+  fi
+fi
+
+# Each job_* directory should contain a finalized raw.csv
+while IFS= read -r jobdir; do
+  if [[ ! -f "$jobdir/raw.csv" ]]; then
+    fail "raw.csv missing in job directory: $jobdir"
+  fi
+done < <(find "$RUN_ROOT" -maxdepth 2 -type d -name "job_*" -print)
+
 if grep -qi "row_index is not defined" "$SMOKE_CONSOLE" ${CONTACT_LOG:+"$CONTACT_LOG"}; then
   fail "Found 'row_index is not defined' in logs"
 fi

@@ -684,6 +684,32 @@ def _finalize_tmp_csv(tmp_path: Path, final_path: Path) -> AtomicCSVResult:
         raise
 
 
+def ensure_final_raw_csv(raw_output_path: Union[str, Path], job_label: str = "", logger: LoggerFn = None) -> Optional[AtomicCSVResult]:
+    """
+    Promote a per-job temp CSV (raw.tmp.csv) to raw.csv when it is present.
+
+    This is a lightweight guard for resumed jobs or orchestrators that may
+    skip the normal finalize path. Returns the AtomicCSVResult when a tmp file
+    was promoted; otherwise returns None.
+    """
+    final_path = Path(raw_output_path)
+    tmp_path = _derive_tmp_csv_path(final_path)
+
+    if not tmp_path.exists():
+        return None
+
+    try:
+        res = _finalize_tmp_csv(tmp_path, final_path)
+        _safe_log(
+            logger,
+            f"[CSV FINALIZE] job={job_label or final_path.parent.name} promoted {tmp_path.name} -> {final_path.name}",
+        )
+        return res
+    except Exception as exc:  # pragma: no cover - surfaced to caller
+        _safe_log(logger, f"[CSV FINALIZE] job={job_label or final_path.parent.name} failed to promote tmp: {exc}")
+        raise
+
+
 def _cell_str(v) -> str:
     if v is None:
         return ""

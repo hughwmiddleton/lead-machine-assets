@@ -164,6 +164,7 @@ def run_seed_phase(config_path: str, run_dir: str, resume: bool = False) -> Dict
                         stop_on_failure=False,
                         per_job_validate=False,
                     )
+                pipeline_runner.ensure_final_raw_csv(raw_csv, job_id, logger=None)
             except Exception as exc:
                 # Best effort: mark failure and continue.
                 row_count = _safe_count_rows(raw_csv)
