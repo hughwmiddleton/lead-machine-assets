@@ -15,6 +15,18 @@ def _load_fixture(name: str) -> str:
     return (fixtures / name).read_text(encoding="utf-8")
 
 
+def _dummy_driver():
+    class DummyDriver:
+        page_source = "<html></html>"
+        current_url = "https://www.facebook.com"
+
+        def get(self, url):  # pragma: no cover - trivial stub
+            self.current_url = url
+            self.page_source = "<html></html>"
+
+    return DummyDriver()
+
+
 def test_ranking_prefers_music_page_over_profile():
     artist = "Zipporah"
     c1 = _cand("Zipporah.co.ph", "https://www.facebook.com/zipporahcoph", "Local service")
@@ -208,6 +220,121 @@ def test_is_profile_url_handles_queries_and_people_paths():
     assert night_mode_fb._is_profile_url("https://www.facebook.com/people/some-name/1234567890")
     assert night_mode_fb._is_profile_url("https://www.facebook.com/people/some-name/1234567890?sk=about")
 
+
+def test_unsafe_candidate_filtered_before_navigation(monkeypatch):
+    artist = "Aurora Beam"
+    unsafe = _cand("American Dental Institute", "https://www.facebook.com/americandentalinstituteorlando", "Dental clinic")
+    safe = _cand("Aurora Beam", "https://www.facebook.com/aurorabeammusic", "Musician/Band")
+    candidates = [unsafe, safe]
+
+    ranked_for_preview = [
+        {
+            "candidate": unsafe,
+            "score": 70,
+            "breakdown": [],
+            "features": {
+                "category": "Dental clinic",
+                "descriptor": "",
+                "aria_label": "",
+                "secondary_text": "",
+                "category_tokens": ["Dental", "Clinic"],
+                "match_level": "near",
+                "music_any": False,
+                "service_only": True,
+            },
+        },
+        {
+            "candidate": safe,
+            "score": 60,
+            "breakdown": [],
+            "features": {
+                "category": "Musician/Band",
+                "descriptor": "",
+                "aria_label": "",
+                "secondary_text": "",
+                "category_tokens": ["Musician", "Band"],
+                "match_level": "near",
+                "music_any": True,
+                "service_only": False,
+            },
+        },
+    ]
+
+    monkeypatch.setattr(night_mode_fb, "_harvest_candidates", lambda *args, **kwargs: candidates)
+    monkeypatch.setattr(night_mode_fb, "_rank_candidates_for_preview", lambda *args, **kwargs: ranked_for_preview)
+    monkeypatch.setattr(night_mode_fb.NightModeFacebookEnricher, "_get_anon_driver", lambda self: _dummy_driver())
+    monkeypatch.setattr(night_mode_fb.NightModeFacebookEnricher, "_ensure_session", lambda self: None)
+    monkeypatch.setattr(night_mode_fb.time, "sleep", lambda *_: None)
+
+    enricher = night_mode_fb.NightModeFacebookEnricher(
+        legacy_module=None,
+        username="",
+        password="",
+        logger=None,
+        use_shared_session=False,
+    )
+
+    selected = enricher._search_for_page(artist, location="", allow_anon=True)
+    safe_norm = night_mode_fb._normalise_fb_url(safe.url)
+
+    assert selected == safe_norm
+    assert enricher._last_selected_candidate_context["url"] == safe_norm
+    assert len(enricher._last_search_candidates) == 1
+    assert enricher._last_search_candidates[0]["url"] == safe_norm
+
+
+def test_all_unsafe_candidates_skip_scrape(monkeypatch):
+    artist = "Dental Beats"
+    unsafe = _cand("Dental Beats", "https://www.facebook.com/dentalbeats", "Dental clinic")
+    ranked_for_preview = [
+        {
+            "candidate": unsafe,
+            "score": -10,
+            "breakdown": [],
+            "features": {
+                "category": "Dental clinic",
+                "descriptor": "",
+                "aria_label": "",
+                "secondary_text": "",
+                "category_tokens": ["Dental", "Clinic"],
+                "match_level": "near",
+                "music_any": False,
+                "service_only": True,
+            },
+        }
+    ]
+    candidates = [unsafe]
+
+    monkeypatch.setattr(night_mode_fb, "_harvest_candidates", lambda *args, **kwargs: candidates)
+    monkeypatch.setattr(night_mode_fb, "_rank_candidates_for_preview", lambda *args, **kwargs: ranked_for_preview)
+    monkeypatch.setattr(night_mode_fb.NightModeFacebookEnricher, "_get_anon_driver", lambda self: _dummy_driver())
+    monkeypatch.setattr(night_mode_fb.NightModeFacebookEnricher, "_ensure_session", lambda self: None)
+    monkeypatch.setattr(night_mode_fb.NightModeFacebookEnricher, "_should_allow_anonymous", lambda self, row: True)
+    monkeypatch.setattr(night_mode_fb.time, "sleep", lambda *_: None)
+
+    calls = {"count": 0}
+
+    def _spy(self, *args, **kwargs):
+        calls["count"] += 1
+        return None
+
+    monkeypatch.setattr(night_mode_fb.NightModeFacebookEnricher, "_scrape_single_fb_candidate", _spy)
+
+    enricher = night_mode_fb.NightModeFacebookEnricher(
+        legacy_module=None,
+        username="",
+        password="",
+        logger=None,
+        use_shared_session=False,
+    )
+
+    row = {"Artist Name": artist, "Location": "", "FB_Status": "seeded"}
+    result = enricher.enrich_row_with_facebook_night(row.copy())
+
+    assert calls["count"] == 0
+    assert result.get("FB_Reason") == "non_music_category"
+    assert enricher._last_search_reject_score == -10
+    assert enricher._last_search_reject_reason == "non_music_category"
 
 def _load_legacy_module():
     path = Path(__file__).resolve().parents[1] / "Lead Machine (Final Update 5).py"

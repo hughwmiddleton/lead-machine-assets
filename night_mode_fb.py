@@ -3426,6 +3426,165 @@ class NightModeFacebookEnricher:
             return None, "no_safe_match"
         return None, "no_viable_candidate"
 
+    def _select_candidate_url(
+        self,
+        artist: str,
+        primary_candidate,
+        candidates: List["facebook_enrich.FbCandidate"],
+        ranked_candidates: List["facebook_enrich.FbCandidate"],
+        ranked_for_preview: List[Dict[str, Any]],
+        selected_by: str,
+        min_accept_score: int,
+    ) -> Optional[str]:
+        """
+        Finalize candidate selection with safety/allowlist gates before navigation.
+        Returns the normalized URL of the first safe, allowed candidate.
+        """
+        ranking_enabled = True
+        ordered_candidates = _order_candidates_for_selection(primary_candidate, candidates, ranked_candidates, ranking_enabled)
+
+        gate_debug = os.getenv("FB_DEBUG_CANDIDATES") == "1"
+        url_flow_debug = gate_debug or os.getenv("FB_DEBUG_CAND_URL_FLOW") == "1"
+        debug_detail = url_flow_debug
+
+        ranked_lookup = {id(item["candidate"]): item for item in (ranked_for_preview or [])}
+
+        collected_contexts: List[Tuple[Dict[str, Any], Any]] = []
+        chosen_url_norm = _normalise_fb_url(_candidate_url(primary_candidate)) if primary_candidate else ""
+        selected_ctx: Optional[Dict[str, Any]] = None
+
+        for cand in ordered_candidates:
+            ranked_item = ranked_lookup.get(id(cand))
+            if ranked_item is None:
+                try:
+                    score_val, _, computed_features = _score_fb_candidate_night(artist, cand)
+                except Exception:
+                    score_val, computed_features = 0, {}
+                ranked_item = {"candidate": cand, "score": score_val, "features": computed_features}
+
+            is_safe, reject_reason = _candidate_is_safe_enough(ranked_item, min_accept_score)
+            if not is_safe:
+                if debug_detail:
+                    _log(self.logger, f"[Night FB] Skipping unsafe FB candidate url={_candidate_url(cand)!r} reason={reject_reason}")
+                try:
+                    score_val = int(ranked_item.get("score") or 0)
+                except Exception:
+                    score_val = None
+                if score_val is not None:
+                    if self._last_search_reject_score is None or score_val > self._last_search_reject_score:
+                        self._last_search_reject_score = score_val
+                        if reject_reason:
+                            self._last_search_reject_reason = reject_reason
+                        elif not self._last_search_reject_reason:
+                            self._last_search_reject_reason = "no_safe_match"
+                elif reject_reason and (not self._last_search_reject_reason):
+                    self._last_search_reject_reason = reject_reason
+                continue
+
+            raw_url = _candidate_url(cand)
+            norm_url = _normalise_fb_url(raw_url or "")
+
+            if norm_url and self._fb_is_rejected(artist, norm_url):
+                if debug_detail:
+                    _log(self.logger, f"[Night FB] Skipping cached rejected FB candidate url={norm_url!r} for '{artist}'.")
+                continue
+
+            is_junk = bool(norm_url) and _is_junk_fb_candidate(norm_url)
+
+            allowlisted_probe = None
+            if url_flow_debug:
+                try:
+                    allowlisted_probe = _fb_is_candidate_url_allowed(norm_url) if norm_url else False
+                except Exception as exc:
+                    allowlisted_probe = f"error:{exc}"
+                _log(
+                    self.logger,
+                    f"[Night FB][debug] cand_url_flow raw={raw_url!r} norm={norm_url!r} junk={is_junk} allowlisted={allowlisted_probe}"
+                )
+
+            if not raw_url:
+                debug_payload = f" cand={cand!r}" if debug_detail else ""
+                _log(self.logger, f"[Night FB] Candidate URL missing for '{artist}', skipping.{debug_payload}")
+                continue
+
+            if not norm_url:
+                debug_payload = f" raw_url={raw_url!r} cand={cand!r}" if debug_detail else ""
+                _log(self.logger, f"[Night FB] Candidate URL normalize_failed for '{artist}', skipping.{debug_payload}")
+                continue
+
+            if is_junk:
+                reason = fb_reason_code_split(norm_url, "business_notif")
+                _log(self.logger, f"[Night FB] Dropped junk FB candidate url={norm_url!r} reason={reason} (post-select)")
+                if debug_detail:
+                    _log(self.logger, f"[Night FB] Candidate URL junk for '{artist}', skipping. reason={reason} raw_url={raw_url!r} cand={cand!r}")
+                continue
+
+            try:
+                allowlisted_result = allowlisted_probe if isinstance(allowlisted_probe, bool) else _fb_is_candidate_url_allowed(norm_url)
+                if not allowlisted_result:
+                    msg = f"[Night FB] Rejected FB candidate url={norm_url!r} due to allowlist."
+                    if debug_detail:
+                        msg += f" raw_url={raw_url!r} cand={cand!r}"
+                    _log(self.logger, msg)
+                    continue
+            except Exception as exc:
+                if debug_detail:
+                    _log(self.logger, f"[Night FB] Allowlist check errored for url={norm_url!r}, skipping. error={exc} raw_url={raw_url!r} cand={cand!r}")
+                continue
+
+            name = getattr(cand, "name", None)
+            raw_category = getattr(cand, "_raw_category", None) or getattr(cand, "category", None)
+            if isinstance(cand, dict):
+                name = name or cand.get("name")
+                raw_category = raw_category or cand.get("category")
+            category = _sanitize_fb_category_text(raw_category) or ""
+
+            base_score = 0.0
+            try:
+                if facebook_enrich is not None and callable(getattr(facebook_enrich, "score_fb_candidate", None)):
+                    scored = facebook_enrich.score_fb_candidate(artist, name, norm_url, category)
+                    if scored:
+                        _, base_score, _ = scored
+            except Exception:
+                base_score = 0.0
+            # Derive lightweight identity consistency signals for downstream review flagging.
+            try:
+                match_level_ctx = _candidate_name_match(artist, name or "")
+            except Exception:
+                match_level_ctx = ""
+            context = {
+                "url": norm_url,
+                "name": name or "",
+                "category": category or "",
+                "category_raw": raw_category or "",
+                "base_score": base_score,
+                "match_level": match_level_ctx,
+                "selected_by": selected_by,
+            }
+            if chosen_url_norm and norm_url == chosen_url_norm and selected_ctx is None:
+                selected_ctx = context
+            collected_contexts.append((context, cand))
+
+        if collected_contexts:
+            first_ctx, first_cand = collected_contexts[0]
+            selected_ctx = selected_ctx or first_ctx
+            selected_ctx["selected_by"] = selected_by
+            self._last_selected_candidate_context = selected_ctx
+            self._last_search_candidates = [ctx for ctx, _ in collected_contexts]
+            _maybe_log_rank_preview(artist, candidates, first_cand, logger=self.logger, selected_by=selected_by)
+            raw_suffix = ""
+            if first_ctx.get("category_raw") and first_ctx.get("category") != first_ctx.get("category_raw"):
+                raw_suffix = f" raw_cat={first_ctx.get('category_raw')!r}"
+            _log(
+                self.logger,
+                f"[Night FB] Selected FB candidate '{first_ctx.get('name') or first_ctx.get('url')}' -> {first_ctx.get('url')} (category='{first_ctx.get('category') or ''}'){raw_suffix} selected_by={selected_by}",
+            )
+            return first_ctx.get("url")
+
+        _log(self.logger, f"[Night FB] No usable FB candidates for '{artist}' after URL validation.")
+        _maybe_log_rank_preview(artist, candidates, None, logger=self.logger, selected_by=selected_by)
+        return None
+
     def _enter_slow_mode(self, reason: str, multiplier: float) -> None:
         try:
             multiplier = float(multiplier)
@@ -3980,8 +4139,9 @@ class NightModeFacebookEnricher:
 
         soft_blocked = soft_blocked or bool(diagnostics.get("overlay_soft_block"))
 
+        min_accept_score = _min_fb_accept_score()
         ranked_candidates: List["facebook_enrich.FbCandidate"] = [item["candidate"] for item in ranked_for_preview]
-        candidate, selected_by = self._choose_ranked_candidate(artist, ranked_for_preview)
+        candidate, selected_by = self._choose_ranked_candidate(artist, ranked_for_preview, min_accept_score=min_accept_score)
         if not candidate:
             _log(self.logger, f"[Night FB] No viable FB candidates for '{artist}' after reject-cache and mismatch guard.")
             _maybe_log_rank_preview(artist, candidates, None, logger=self.logger, selected_by=selected_by)
@@ -4051,121 +4211,15 @@ class NightModeFacebookEnricher:
             _maybe_log_rank_preview(artist, candidates, None, logger=self.logger, selected_by=selected_by)
             return None
 
-        ranking_enabled = True
-        ordered_candidates = _order_candidates_for_selection(candidate, candidates, ranked_candidates, ranking_enabled)
-
-        gate_debug = os.getenv("FB_DEBUG_CANDIDATES") == "1"
-        url_flow_debug = gate_debug or os.getenv("FB_DEBUG_CAND_URL_FLOW") == "1"
-        debug_detail = url_flow_debug
-
-        collected_contexts: List[Tuple[Dict[str, Any], Any]] = []
-        chosen_url_norm = _normalise_fb_url(_candidate_url(candidate)) if candidate else ""
-        selected_ctx: Optional[Dict[str, Any]] = None
-
-        for cand in ordered_candidates:
-            raw_url = _candidate_url(cand)
-            norm_url = _normalise_fb_url(raw_url or "")
-
-            if norm_url and self._fb_is_rejected(artist, norm_url):
-                if debug_detail:
-                    _log(self.logger, f"[Night FB] Skipping cached rejected FB candidate url={norm_url!r} for '{artist}'.")
-                continue
-
-            is_junk = bool(norm_url) and _is_junk_fb_candidate(norm_url)
-
-            allowlisted_probe = None
-            if url_flow_debug:
-                try:
-                    allowlisted_probe = _fb_is_candidate_url_allowed(norm_url) if norm_url else False
-                except Exception as exc:
-                    allowlisted_probe = f"error:{exc}"
-                _log(
-                    self.logger,
-                    f"[Night FB][debug] cand_url_flow raw={raw_url!r} norm={norm_url!r} junk={is_junk} allowlisted={allowlisted_probe}"
-                )
-
-            if not raw_url:
-                debug_payload = f" cand={cand!r}" if debug_detail else ""
-                _log(self.logger, f"[Night FB] Candidate URL missing for '{artist}', skipping.{debug_payload}")
-                continue
-
-            if not norm_url:
-                debug_payload = f" raw_url={raw_url!r} cand={cand!r}" if debug_detail else ""
-                _log(self.logger, f"[Night FB] Candidate URL normalize_failed for '{artist}', skipping.{debug_payload}")
-                continue
-
-            if is_junk:
-                reason = fb_reason_code_split(norm_url, "business_notif")
-                _log(self.logger, f"[Night FB] Dropped junk FB candidate url={norm_url!r} reason={reason} (post-select)")
-                if debug_detail:
-                    _log(self.logger, f"[Night FB] Candidate URL junk for '{artist}', skipping. reason={reason} raw_url={raw_url!r} cand={cand!r}")
-                continue
-
-            try:
-                allowlisted_result = allowlisted_probe if isinstance(allowlisted_probe, bool) else _fb_is_candidate_url_allowed(norm_url)
-                if not allowlisted_result:
-                    msg = f"[Night FB] Rejected FB candidate url={norm_url!r} due to allowlist."
-                    if debug_detail:
-                        msg += f" raw_url={raw_url!r} cand={cand!r}"
-                    _log(self.logger, msg)
-                    continue
-            except Exception as exc:
-                if debug_detail:
-                    _log(self.logger, f"[Night FB] Allowlist check errored for url={norm_url!r}, skipping. error={exc} raw_url={raw_url!r} cand={cand!r}")
-                continue
-
-            name = getattr(cand, "name", None)
-            raw_category = getattr(cand, "_raw_category", None) or getattr(cand, "category", None)
-            if isinstance(cand, dict):
-                name = name or cand.get("name")
-                raw_category = raw_category or cand.get("category")
-            category = _sanitize_fb_category_text(raw_category) or ""
-
-            base_score = 0.0
-            try:
-                if facebook_enrich is not None and callable(getattr(facebook_enrich, "score_fb_candidate", None)):
-                    scored = facebook_enrich.score_fb_candidate(artist, name, norm_url, category)
-                    if scored:
-                        _, base_score, _ = scored
-            except Exception:
-                base_score = 0.0
-            # Derive lightweight identity consistency signals for downstream review flagging.
-            try:
-                match_level_ctx = _candidate_name_match(artist, name or "")
-            except Exception:
-                match_level_ctx = ""
-            context = {
-                "url": norm_url,
-                "name": name or "",
-                "category": category or "",
-                "category_raw": raw_category or "",
-                "base_score": base_score,
-                "match_level": match_level_ctx,
-                "selected_by": selected_by,
-            }
-            if chosen_url_norm and norm_url == chosen_url_norm and selected_ctx is None:
-                selected_ctx = context
-            collected_contexts.append((context, cand))
-
-        if collected_contexts:
-            first_ctx, first_cand = collected_contexts[0]
-            selected_ctx = selected_ctx or first_ctx
-            selected_ctx["selected_by"] = selected_by
-            self._last_selected_candidate_context = selected_ctx
-            self._last_search_candidates = [ctx for ctx, _ in collected_contexts]
-            _maybe_log_rank_preview(artist, candidates, first_cand, logger=self.logger, selected_by=selected_by)
-            raw_suffix = ""
-            if first_ctx.get("category_raw") and first_ctx.get("category") != first_ctx.get("category_raw"):
-                raw_suffix = f" raw_cat={first_ctx.get('category_raw')!r}"
-            _log(
-                self.logger,
-                f"[Night FB] Selected FB candidate '{first_ctx.get('name') or first_ctx.get('url')}' -> {first_ctx.get('url')} (category='{first_ctx.get('category') or ''}'){raw_suffix} selected_by={selected_by}",
-            )
-            return first_ctx.get("url")
-
-        _log(self.logger, f"[Night FB] No usable FB candidates for '{artist}' after URL validation.")
-        _maybe_log_rank_preview(artist, candidates, None, logger=self.logger, selected_by=selected_by)
-        return None
+        return self._select_candidate_url(
+            artist,
+            candidate,
+            candidates,
+            ranked_candidates,
+            ranked_for_preview,
+            selected_by,
+            min_accept_score,
+        )
 
     def _can_identity_soft_pass(self, artist_name: str, page_name: str, resolved_url: str, base_score: float) -> bool:
         """
@@ -5075,7 +5129,7 @@ class NightModeFacebookEnricher:
                             return result
                 if not result.get("FB_Status"):
                     result["FB_Status"] = "checkpoint_limited" if self._checkpoint_limited_active else "no_candidates"
-                if (not result.get("FB_Reason")) and self._last_search_reject_reason:
+                if self._last_search_reject_reason:
                     result["FB_Reason"] = self._last_search_reject_reason
                     if str(result.get("Needs_Review", "")).strip() == "":
                         result["Needs_Review"] = "FALSE"
