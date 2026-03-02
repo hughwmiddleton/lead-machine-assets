@@ -273,6 +273,8 @@ def fetch_html(
     if trigger_reason and reason == "ok":
         reason = trigger_reason
 
+    if mode_used == "playwright" and html:
+        status = 200
     elapsed_ms = int((time.perf_counter() - t0) * 1000)
     _log_fetch(directory, mode_used, reason, domain, elapsed_ms, url, final_url)
     if mode_used == "playwright" and os.getenv("PLAYWRIGHT_FALLBACK_DEBUG") == "1":

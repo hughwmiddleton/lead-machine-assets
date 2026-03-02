@@ -92,3 +92,33 @@ def test_playwright_disabled(monkeypatch):
     result = html_fetcher.fetch_html("https://example.com", session=session, directory="test")
     assert result["mode_used"] == "requests"
     assert result["reason"] == "status_403"
+
+
+def test_playwright_status_normalized_on_success(monkeypatch):
+    session = _DummySession(lambda url, *_: _DummyResp(406, "blocked", url))
+    monkeypatch.setattr(
+        html_fetcher,
+        "_playwright_fetch",
+        lambda url, job_id, timeout_s: {"html": "<html>ok</html>", "final_url": url + "/pw"},
+    )
+
+    result = html_fetcher.fetch_html("https://example.com", session=session, directory="test")
+
+    assert result["mode_used"] == "playwright"
+    assert result["html"] == "<html>ok</html>"
+    assert result["status"] == 200
+
+
+def test_playwright_status_preserved_when_empty(monkeypatch):
+    session = _DummySession(lambda url, *_: _DummyResp(406, "blocked", url))
+    monkeypatch.setattr(
+        html_fetcher,
+        "_playwright_fetch",
+        lambda url, job_id, timeout_s: {"html": "", "final_url": url},
+    )
+
+    result = html_fetcher.fetch_html("https://example.com", session=session, directory="test")
+
+    assert result["mode_used"] == "playwright"
+    assert result["html"] == ""
+    assert result["status"] == 406
