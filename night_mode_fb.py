@@ -103,6 +103,32 @@ _FB_RANK_WEIGHTS = {
     "service_mixed": -15,
 }
 
+# Conservative acceptance floor for FB V2 selection; env override via MIN_FB_ACCEPT_SCORE or FB_MIN_ACCEPT_SCORE.
+_DEFAULT_MIN_FB_ACCEPT_SCORE = 0
+
+# Hard reject tokens for clearly non-music institutions/services.
+_FB_NON_MUSIC_DENY_TOKENS = (
+    "dental",
+    "dentist",
+    "clinic",
+    "hospital",
+    "medical",
+    "health",
+    "doctor",
+    "laboratory",
+    "pharmacy",
+    "institute",
+    "academy",
+    "university",
+    "college",
+    "school",
+    "education",
+    "training",
+    "course",
+    "institution",
+    "government",
+)
+
 _FB_SERVICE_CATEGORY_TOKENS = (
     "product/service",
     "local service",
@@ -116,6 +142,7 @@ _FB_SERVICE_CATEGORY_TOKENS = (
     "restaurant",
     "cafe",
     "bar",
+    "clinic",
     "salon",
     "spa",
     "real estate",
@@ -840,6 +867,51 @@ def _normalize_name_like(text: str) -> str:
     Normalize text for loose name/category comparisons: lowercase + strip punctuation/spaces.
     """
     return re.sub(r"[^a-z0-9]+", "", (text or "").lower().strip())
+
+
+def _min_fb_accept_score() -> int:
+    try:
+        return int(os.getenv("MIN_FB_ACCEPT_SCORE") or os.getenv("FB_MIN_ACCEPT_SCORE") or _DEFAULT_MIN_FB_ACCEPT_SCORE)
+    except Exception:
+        return _DEFAULT_MIN_FB_ACCEPT_SCORE
+
+
+def _candidate_has_non_music_deny(features: Dict[str, Any]) -> bool:
+    """
+    Hard reject for obvious non-music categories/services when there are no music hints.
+    Requires both a deny token and the absence of music signals to avoid blocking legit bands.
+    """
+    blob_parts = [
+        features.get("category") or "",
+        features.get("descriptor") or "",
+        features.get("aria_label") or "",
+        features.get("secondary_text") or "",
+        " ".join(features.get("category_tokens") or []) if isinstance(features.get("category_tokens"), (list, tuple, set)) else "",
+    ]
+    blob = " ".join(blob_parts).lower()
+    has_deny = any(tok in blob for tok in _FB_NON_MUSIC_DENY_TOKENS)
+    has_music = bool(features.get("music_any"))
+    service_only = bool(features.get("service_only"))
+    return bool(has_deny and (not has_music) and service_only)
+
+
+def _candidate_is_safe_enough(item: Dict[str, Any], min_accept_score: int) -> Tuple[bool, str]:
+    """
+    Apply pre-selection guards to avoid scraping mismatches/non-music pages.
+    Returns (is_safe, reason_if_rejected).
+    """
+    score = int(item.get("score") or 0)
+    features = item.get("features") or {}
+    match_level = features.get("match_level") or "none"
+    music_any = bool(features.get("music_any"))
+
+    if _candidate_has_non_music_deny(features):
+        return False, "non_music_category"
+    if score < min_accept_score:
+        return False, "rank_below_threshold"
+    if match_level == "mismatch" and not music_any:
+        return False, "mismatch_no_music_signal"
+    return True, ""
 
 
 def _category_looks_like_name(name: Optional[str], category: Optional[str]) -> bool:
@@ -3156,6 +3228,8 @@ class NightModeFacebookEnricher:
         self._skip_fb_due_to_session_failure_reason = ""
         self._last_selected_candidate_context: Optional[Dict[str, Any]] = None
         self._last_search_candidates: List[Dict[str, Any]] = []
+        self._last_search_reject_reason: str = ""
+        self._last_search_reject_score: Optional[int] = None
         self._pass_a_counts = {
             "attempted": 0,
             "found_email": 0,
@@ -3292,7 +3366,7 @@ class NightModeFacebookEnricher:
         return norm_url in self._fb_reject_cache.get(key, set()) or norm_url in self._fb_reject_cache_global
 
     def _choose_ranked_candidate(
-        self, artist: str, ranked_items: List[Dict[str, Any]]
+        self, artist: str, ranked_items: List[Dict[str, Any]], min_accept_score: Optional[int] = None
     ) -> Tuple[Optional["facebook_enrich.FbCandidate"], str]:
         """
         Pick the first viable ranked candidate, skipping any cached rejects and
@@ -3300,6 +3374,12 @@ class NightModeFacebookEnricher:
         """
         fallback_mismatch = None
         artist_norm = _normalize_name_like(artist)
+        min_accept_score = _min_fb_accept_score() if min_accept_score is None else int(min_accept_score)
+        # Reset per-call reject context so stale reasons do not leak.
+        self._last_search_reject_reason = ""
+        self._last_search_reject_score = None
+        best_rejected_score: Optional[int] = None
+        best_rejected_reason: str = ""
         for item in ranked_items or []:
             cand = item.get("candidate")
             raw_url = _candidate_url(cand)
@@ -3317,12 +3397,33 @@ class NightModeFacebookEnricher:
                     self._fb_owner_skip_count += 1
                     continue
             match_level = item.get("features", {}).get("match_level") or "none"
+            is_safe, reject_reason = _candidate_is_safe_enough(item, min_accept_score)
+            if not is_safe:
+                try:
+                    score_val = int(item.get("score") or 0)
+                except Exception:
+                    score_val = None
+                if score_val is not None:
+                    if best_rejected_score is None or score_val > best_rejected_score:
+                        best_rejected_score = score_val
+                        best_rejected_reason = reject_reason or "no_safe_match"
+                elif best_rejected_score is None:
+                    best_rejected_reason = reject_reason or "no_safe_match"
+                continue
             if match_level != "mismatch":
                 return cand, "ranked_sort"
             if fallback_mismatch is None:
                 fallback_mismatch = cand
         if fallback_mismatch:
             return fallback_mismatch, "mismatch_fallback"
+        if best_rejected_score is not None:
+            self._last_search_reject_reason = best_rejected_reason or "no_safe_match"
+            self._last_search_reject_score = best_rejected_score
+            _log(
+                self.logger,
+                f"[Night FB][NoSafeMatch] '{artist}' no safe FB candidate (best_score={best_rejected_score}) reason={best_rejected_reason}",
+            )
+            return None, "no_safe_match"
         return None, "no_viable_candidate"
 
     def _enter_slow_mode(self, reason: str, multiplier: float) -> None:
@@ -3697,6 +3798,8 @@ class NightModeFacebookEnricher:
     def _search_for_page(self, artist: str, location: str, allow_anon: bool = False) -> Optional[str]:
         self._last_selected_candidate_context = None
         self._last_search_candidates = []
+        self._last_search_reject_reason = ""
+        self._last_search_reject_score = None
         self._checkpoint_limited_active = False
         if self._search_disabled_due_to_checkpoint:
             _log(self.logger, "[Night FB] search disabled due to checkpoint; skipping FB search.")
@@ -4972,6 +5075,14 @@ class NightModeFacebookEnricher:
                             return result
                 if not result.get("FB_Status"):
                     result["FB_Status"] = "checkpoint_limited" if self._checkpoint_limited_active else "no_candidates"
+                if (not result.get("FB_Reason")) and self._last_search_reject_reason:
+                    result["FB_Reason"] = self._last_search_reject_reason
+                    if str(result.get("Needs_Review", "")).strip() == "":
+                        result["Needs_Review"] = "FALSE"
+                    _log(
+                        self.logger,
+                        f"[Night FB] No safe FB candidate for '{artist_name}' (best_score={self._last_search_reject_score if self._last_search_reject_score is not None else '<unknown>'}) reason={self._last_search_reject_reason}",
+                    )
                 if self._checkpoint_limited_active and not result.get("FB_Reason"):
                     result["FB_Reason"] = "checkpoint"
                 _log(self.logger, f"[Night FB] No usable FB candidates for '{artist_name}', marking FB_Status='{result.get('FB_Status')}'.")

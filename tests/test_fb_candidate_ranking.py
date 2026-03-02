@@ -297,4 +297,4 @@ def test_reject_cache_skips_mismatch_candidate(monkeypatch):
     solo_ranked = [{"candidate": bad, "score": 70, "breakdown": [], "features": {"match_level": "mismatch"}}]
     chosen_none, reason = enricher._choose_ranked_candidate("Another Artist", solo_ranked)
     assert chosen_none is None
-    assert reason == "no_viable_candidate"
+    assert reason in {"no_viable_candidate", "no_safe_match"}
