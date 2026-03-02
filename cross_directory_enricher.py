@@ -4249,22 +4249,32 @@ class CrossDirectoryEnricherWorker(QThread):
         enriched_count = 0
         skipped_cooldown = 0
         skipped_disabled = 0
+        processed_rows = 0
+        stop_reason = ""
         for position, row_idx in enumerate(seed_df.index, start=1):
+            if self.max_live_searches > 0 and self.live_search_attempts >= self.max_live_searches:
+                stop_reason = "max_live"
+                break
+            if self._sc_in_live_cooldown():
+                stop_reason = "cooldown"
+                break
             ctx = self._build_row_context(seed_df, row_idx, position, total)
             if not ctx:
                 continue
+            processed_rows += 1
             self._init_row_enrichment_state()
             if not _coerce_directory_value(seed_df.at[row_idx, "SoundCloud Link"]):
                 if getattr(self, "_sc_live_enrich_disabled", False):
                     skipped_disabled += 1
-                elif self._sc_in_live_cooldown():
-                    skipped_cooldown += 1
                 else:
                     sc_enriched, _ = self._enrich_row_sc_live(seed_df, row_idx, ctx)
                     if sc_enriched:
                         enriched_count += 1
+        if stop_reason:
+            reason_label = "cooldown" if stop_reason == "cooldown" else "max_live"
+            self.log_message.emit(f"[Enricher][SC Phase] Stopped early: {reason_label}")
         self.log_message.emit(
-            f"[Enricher][SC Phase] Completed {total} rows "
+            f"[Enricher][SC Phase] Completed {processed_rows} rows "
             f"(enriched={enriched_count}, skipped_cooldown={skipped_cooldown}, "
             f"skipped_disabled={skipped_disabled})"
         )
@@ -4272,34 +4282,54 @@ class CrossDirectoryEnricherWorker(QThread):
     def _phase_live_lookup(self, seed_df, total):
         self.log_message.emit("[Enricher][LF Phase] Starting...")
         enriched_count = 0
+        processed_rows = 0
+        stop_reason = ""
         for position, row_idx in enumerate(seed_df.index, start=1):
+            if self.max_live_searches > 0 and self.live_search_attempts >= self.max_live_searches:
+                stop_reason = "max_live"
+                break
+            if self._lf_in_cooldown():
+                stop_reason = "cooldown"
+                break
             ctx = self._build_row_context(seed_df, row_idx, position, total)
             if not ctx:
                 continue
+            processed_rows += 1
             self._init_row_enrichment_state()
             ll_enriched, _ = self._enrich_row_live_lookup(seed_df, row_idx, ctx)
             if ll_enriched:
                 enriched_count += 1
+            if not stop_reason and self._lf_in_cooldown():
+                stop_reason = "cooldown"
+                break
+        if stop_reason:
+            reason_label = "cooldown" if stop_reason == "cooldown" else "max_live"
+            self.log_message.emit(f"[Enricher][LF Phase] Stopped early: {reason_label}")
         self.log_message.emit(
-            f"[Enricher][LF Phase] Completed {total} rows (enriched={enriched_count})"
+            f"[Enricher][LF Phase] Completed {processed_rows} rows (enriched={enriched_count})"
         )
 
     def _phase_facebook(self, seed_df, fb_driver, total):
         self.log_message.emit("[Enricher][FB Phase] Starting...")
         enriched_count = 0
         skipped_count = 0
+        processed_rows = 0
+        stop_reason = ""
         for position, row_idx in enumerate(seed_df.index, start=1):
             ctx = self._build_row_context(seed_df, row_idx, position, total)
             if not ctx:
                 continue
+            processed_rows += 1
             self._init_row_enrichment_state()
             if self._enrich_row_facebook(seed_df, row_idx, fb_driver, ctx):
                 enriched_count += 1
             else:
                 skipped_count += 1
             self._update_progress(position, total)
+        if stop_reason:
+            self.log_message.emit(f"[Enricher][FB Phase] Stopped early: {stop_reason}")
         self.log_message.emit(
-            f"[Enricher][FB Phase] Completed {total} rows (enriched={enriched_count}, skipped={skipped_count})"
+            f"[Enricher][FB Phase] Completed {processed_rows} rows (enriched={enriched_count}, skipped={skipped_count})"
         )
 
     def _ensure_bandcamp_output_columns(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -7142,6 +7172,20 @@ class CrossDirectoryEnricherWorker(QThread):
                 self._last_http_status = status
                 html = exc.response.text if exc.response is not None else ""
 
+                if is_lastfm and status == 406:
+                    self._lf_mark_406()
+                    if attempt < max_attempts:
+                        delay = min(
+                            LF_BACKOFF_MAX,
+                            LF_BACKOFF_BASE * (2 ** max(0, attempt - 1)) + random.uniform(0, 0.35),
+                        )
+                        time.sleep(delay)
+                        continue
+                    self._lf_enter_cooldown()
+                    suffix = _format_outcome_suffix(fetch_ok=False, actionable=None, http_status=status)
+                    self.log_message.emit(f"[Enricher][LF] {label} failed with 406 (no HTML){suffix}")
+                    return None
+
                 trigger_pw = allow_pw and (not pw_attempted) and (
                     status in {403, 406, 429, 503} or _detect_soft_block(html)
                 )
@@ -7170,18 +7214,6 @@ class CrossDirectoryEnricherWorker(QThread):
                         self._last_http_status = fallback.get("status") or status
                         return fallback.get("html") or ""
 
-                if is_lastfm and status == 406:
-                    self._lf_mark_406()
-                    if attempt < max_attempts:
-                        delay = min(
-                            LF_BACKOFF_MAX, LF_BACKOFF_BASE * (2 ** max(0, attempt - 1)) + random.uniform(0, 0.35)
-                        )
-                        time.sleep(delay)
-                        continue
-                    self._lf_enter_cooldown()
-                    suffix = _format_outcome_suffix(fetch_ok=False, actionable=None, http_status=status)
-                    self.log_message.emit(f"[Enricher][LF] {label} failed with 406 (no HTML){suffix}")
-                    return None
                 if getattr(self, "night_mode", False) and "soundcloud" in label.lower():
                     if _sc_is_blocked(status, html):
                         self._last_fetch_ok = False
