@@ -15,6 +15,7 @@ import threading
 import time
 import unicodedata
 import urllib.parse
+from collections import Counter, deque
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
@@ -234,6 +235,49 @@ SC_RSS_BREAKER_COOLDOWN_SECONDS = int(os.getenv("SC_RSS_BREAKER_COOLDOWN_SECONDS
 NIGHT_SC_BUDGET_SECONDS_DEFAULT = 6
 NIGHT_SC_MAX_FETCHES_DEFAULT = 3
 _NIGHT_SC_PIPELINE_LOGGED = False
+
+
+def _sc_classify_rss_reason(reason: str) -> str:
+    """
+    Map a granular RSS failure reason to a coarse category used by the breaker.
+    - blocked: signals rate-limit/403/challenge/engine instability
+    - nofeed: profile has no RSS feed or feed is empty/private/missing
+    - other: everything else (treated as non-blocking)
+    """
+    r = (reason or "").strip().lower()
+    if not r:
+        return "other"
+    blocked_tokens = (
+        "blocked",
+        "api_403",
+        "root_403",
+        "tracks_api_blocked",
+        "challenge",
+        "captcha",
+        "engine_unstable",
+        "rate_limit",
+        "429",
+        "403",
+        "timeout",
+        "ssl",
+        "connection",
+    )
+    nofeed_tokens = (
+        "rss_unavailable",
+        "rss_empty",
+        "no_feed",
+        "nofeed",
+        "missing_handle",
+        "no_uid",
+        "private",
+        "not_found",
+        "404",
+    )
+    if any(tok in r for tok in blocked_tokens):
+        return "blocked"
+    if any(tok in r for tok in nofeed_tokens):
+        return "nofeed"
+    return "other"
 
 
 @dataclass
@@ -3640,6 +3684,10 @@ class CrossDirectoryEnricherWorker(QThread):
         self._sc_rss_only_mode: bool = False
         self._sc_html_challenge_count: int = 0  # total challenges this run
         self._sc_rss_fail_streak: int = 0
+        self._sc_rss_fail_streak_blocked: int = 0
+        self._sc_rss_fail_streak_nofeed: int = 0
+        self._sc_rss_fail_counts: Counter = Counter()
+        self._sc_rss_fail_last_reasons = deque(maxlen=5)
         self._sc_rss_only_logged: bool = False
         self._sc_rss_only_entered_at: float = 0.0
         self._sc_rss_only_rows: int = 0
@@ -3687,6 +3735,10 @@ class CrossDirectoryEnricherWorker(QThread):
         self._sc_rss_only_mode = False
         self._sc_html_challenge_count = 0
         self._sc_rss_fail_streak = 0
+        self._sc_rss_fail_streak_blocked = 0
+        self._sc_rss_fail_streak_nofeed = 0
+        self._sc_rss_fail_counts = Counter()
+        self._sc_rss_fail_last_reasons = deque(maxlen=5)
         self._sc_live_disabled_until = 0.0
         self._sc_rss_only_logged = False
         self._sc_rss_only_entered_at = 0.0
@@ -4273,6 +4325,14 @@ class CrossDirectoryEnricherWorker(QThread):
         if stop_reason:
             reason_label = "cooldown" if stop_reason == "cooldown" else "max_live"
             self.log_message.emit(f"[Enricher][SC Phase] Stopped early: {reason_label}")
+            if stop_reason == "cooldown":
+                try:
+                    self.log_message.emit(
+                        "[Enricher][SC Phase] cooldown_summary: %s"
+                        % (self._sc_fail_stats_snapshot(),)
+                    )
+                except Exception:
+                    pass
         self.log_message.emit(
             f"[Enricher][SC Phase] Completed {processed_rows} rows "
             f"(enriched={enriched_count}, skipped_cooldown={skipped_cooldown}, "
@@ -4739,6 +4799,11 @@ class CrossDirectoryEnricherWorker(QThread):
             self._sc_live_disabled_until = 0.0
             # Reset streak so the next failure sequence must rebuild the breaker.
             self._sc_rss_fail_streak = 0
+            self._sc_rss_fail_streak_blocked = 0
+            self._sc_rss_fail_streak_nofeed = 0
+            self._sc_rss_fail_counts = Counter()
+            if hasattr(self, "_sc_rss_fail_last_reasons"):
+                self._sc_rss_fail_last_reasons.clear()
             return False
         return bool(disabled_until and now < disabled_until)
 
@@ -4803,6 +4868,10 @@ class CrossDirectoryEnricherWorker(QThread):
         self._sc_rss_successes = 0
         self._night_sc_challenge_streak = 0
         self._sc_rss_fail_streak = 0
+        self._sc_rss_fail_streak_blocked = 0
+        self._sc_rss_fail_streak_nofeed = 0
+        self._sc_rss_fail_counts = Counter()
+        self._sc_rss_fail_last_reasons.clear()
 
     def _sc_maybe_exit_rss_only(self, row_idx: Optional[int] = None) -> None:
         if not getattr(self, "_sc_rss_only_mode", False):
@@ -4820,6 +4889,15 @@ class CrossDirectoryEnricherWorker(QThread):
                 row_idx=row_idx,
             )
 
+    def _sc_fail_stats_snapshot(self) -> str:
+        counts_summary = dict(getattr(self, "_sc_rss_fail_counts", Counter()).most_common(4))
+        last_reasons = list(getattr(self, "_sc_rss_fail_last_reasons", []))
+        return (
+            f"blocked_streak={getattr(self, '_sc_rss_fail_streak_blocked', 0)} "
+            f"nofeed_streak={getattr(self, '_sc_rss_fail_streak_nofeed', 0)} "
+            f"counts={counts_summary} last={last_reasons}"
+        )
+
     def _sc_record_html_challenge(self) -> None:
         try:
             now = time.time()
@@ -4833,40 +4911,58 @@ class CrossDirectoryEnricherWorker(QThread):
         except Exception:
             pass
 
-    def _sc_record_rss_result(self, success: bool, row_idx: Optional[int] = None) -> None:
+    def _sc_record_rss_result(self, success: bool, reason: str = "", row_idx: Optional[int] = None) -> None:
         try:
+            if not hasattr(self, "_sc_rss_fail_last_reasons"):
+                self._sc_rss_fail_last_reasons = deque(maxlen=5)
+            reason_norm = (reason or "unknown").strip().lower()
             if success:
                 self._sc_rss_fail_streak = 0
+                self._sc_rss_fail_streak_blocked = 0
+                self._sc_rss_fail_streak_nofeed = 0
+                self._sc_rss_fail_counts = Counter()
+                self._sc_rss_fail_last_reasons.clear()
                 self._sc_rss_successes += 1
                 self._sc_maybe_exit_rss_only(row_idx=row_idx)
                 return
-            self._sc_rss_fail_streak += 1
-            min_rows_ok = getattr(self, "_sc_rows_seen", 0) >= SC_BREAKER_MIN_ROWS
-            if (
-                self._sc_rss_fail_streak >= SC_RSS_FAIL_BREAKER_THRESHOLD
-                and min_rows_ok
-            ):
-                self._night_sc_breaker_tripped = True
-                now = time.time()
-                cooldown_s = SC_RSS_BREAKER_COOLDOWN_SECONDS
-                if getattr(self, "_sc_live_disabled_until", 0.0) and self._sc_live_disabled_until > now:
-                    # Extend, but cap to one additional window.
-                    self._sc_live_disabled_until = min(self._sc_live_disabled_until + cooldown_s, now + cooldown_s * 2)
+            else:
+                self._sc_rss_fail_streak += 1
+                self._sc_rss_fail_last_reasons.append(reason_norm)
+                self._sc_rss_fail_counts[reason_norm] += 1
+                category = _sc_classify_rss_reason(reason_norm)
+                self._sc_rss_fail_counts[category] += 1
+                if category == "blocked":
+                    self._sc_rss_fail_streak_blocked += 1
                 else:
-                    self._sc_live_disabled_until = now + cooldown_s
-                try:
-                    cooldown_left = int(max(1.0, self._sc_live_disabled_until - now))
-                    self.log_message.emit(
-                        "[Night SC] Circuit breaker: rss_fail_streak=%d rows_seen=%d row=%s -> entering cooldown for %ds (live SC paused; RSS/cache continue)"
-                        % (
-                            self._sc_rss_fail_streak,
-                            getattr(self, "_sc_rows_seen", 0),
-                            row_idx if row_idx is not None else "<unknown>",
-                            cooldown_left,
+                    self._sc_rss_fail_streak_blocked = 0
+                if category == "nofeed":
+                    self._sc_rss_fail_streak_nofeed += 1
+                else:
+                    self._sc_rss_fail_streak_nofeed = 0
+                min_rows_ok = getattr(self, "_sc_rows_seen", 0) >= SC_BREAKER_MIN_ROWS
+                if (
+                    self._sc_rss_fail_streak_blocked >= SC_RSS_FAIL_BREAKER_THRESHOLD
+                    and min_rows_ok
+                ):
+                    self._night_sc_breaker_tripped = True
+                    now = time.time()
+                    cooldown_s = SC_RSS_BREAKER_COOLDOWN_SECONDS
+                    if getattr(self, "_sc_live_disabled_until", 0.0) and self._sc_live_disabled_until > now:
+                        # Extend, but cap to one additional window.
+                        self._sc_live_disabled_until = min(self._sc_live_disabled_until + cooldown_s, now + cooldown_s * 2)
+                    else:
+                        self._sc_live_disabled_until = now + cooldown_s
+                    try:
+                        cooldown_left = int(max(1.0, self._sc_live_disabled_until - now))
+                        snapshot = self._sc_fail_stats_snapshot()
+                        message = (
+                            f"[Night SC] Circuit breaker: rows_seen={getattr(self, '_sc_rows_seen', 0)} "
+                            f"row={row_idx if row_idx is not None else '<unknown>'} -> entering cooldown for {cooldown_left}s "
+                            f"(live SC paused; RSS/cache continue) {snapshot}"
                         )
-                    )
-                except Exception:
-                    pass
+                        self.log_message.emit(message)
+                    except Exception:
+                        pass
         except Exception:
             pass
 
@@ -5933,10 +6029,10 @@ class CrossDirectoryEnricherWorker(QThread):
         handle: str,
         base_payload: Optional[EnrichmentPayload],
         row_idx: Optional[int] = None,
-    ) -> Tuple[Optional[EnrichmentPayload], bool, bool]:
+    ) -> Tuple[Optional[EnrichmentPayload], bool, bool, str]:
         if not handle:
-            self._sc_record_rss_result(False, row_idx=row_idx)
-            return (None, False, False)
+            self._sc_record_rss_result(False, reason="missing_handle", row_idx=row_idx)
+            return (None, False, False, "missing_handle")
         try:
             # Count the attempt up front so used_rss reflects every RSS try, even failures.
             sc_engine._sc_stat_inc("rss_used", 1)
@@ -5944,18 +6040,24 @@ class CrossDirectoryEnricherWorker(QThread):
             pass
         rss_payload: Optional[EnrichmentPayload] = None
         available = True
+        failure_reason = "rss_fail"
         def _try_fetch() -> Optional[EnrichmentPayload]:
             nonlocal available
+            nonlocal failure_reason
             try:
                 uid = sc_engine._sc_resolve_handle_uid(_SC_SHARED_ENGINE.session, handle)
                 if not uid:
                     available = False
+                    failure_reason = "rss_unavailable"
                 client_id = sc_engine._sc_get_client_id(_SC_SHARED_ENGINE.session)
                 track = sc_engine._sc_fetch_latest_track_metadata(_SC_SHARED_ENGINE.session, client_id, uid, handle)
                 if not track:
                     track = sc_engine._sc_fetch_latest_track_rss(_SC_SHARED_ENGINE.session, uid, handle)
                     if track and track.get("permalink_url"):
                         track.setdefault("source", "rss")
+                flags = _SC_SHARED_ENGINE.get_run_flags() if "_SC_SHARED_ENGINE" in globals() else {}
+                if not track and (flags.get("tracks_api_blocked") or flags.get("root_fetch_disabled")):
+                    failure_reason = "blocked_api"
                 permalink = track.get("permalink_url") or "" if track else ""
                 if track:
                     websites = set(getattr(base_payload, "websites", set()) if base_payload else set())
@@ -5981,8 +6083,11 @@ class CrossDirectoryEnricherWorker(QThread):
             time.sleep(0.35)  # small backoff before one retry
             rss_payload = _try_fetch()
         success = bool(rss_payload and (_payload_actionable(rss_payload) or rss_payload.websites))
-        self._sc_record_rss_result(success, row_idx=row_idx)
-        return (rss_payload if success else None, success, available)
+        if not success and available and failure_reason == "rss_fail":
+            # If we reached here, feed exists but empty / non-actionable.
+            failure_reason = "rss_empty"
+        self._sc_record_rss_result(success, reason=failure_reason, row_idx=row_idx)
+        return (rss_payload if success else None, success, available, failure_reason)
 
     def _night_sc_attempt_row(
         self,
@@ -6061,7 +6166,7 @@ class CrossDirectoryEnricherWorker(QThread):
 
             if handle:
                 # Always attempt RSS when a handle is available; _sc_build_rss_payload increments rss_used even on failure.
-                rss_payload, rss_ok, rss_available = self._sc_build_rss_payload(handle, None, row_idx=row_idx)
+                rss_payload, rss_ok, rss_available, rss_reason = self._sc_build_rss_payload(handle, None, row_idx=row_idx)
                 payload = rss_payload
                 if rss_ok:
                     attempt.status = "rss_success"
@@ -6133,7 +6238,7 @@ class CrossDirectoryEnricherWorker(QThread):
             if handle_for_rss:
                 sc_rss_first_attempted = True
                 attempt.profile_source = attempt.profile_source or "rss_first"
-                rss_payload, rss_ok, rss_available = self._sc_build_rss_payload(handle_for_rss, None, row_idx=row_idx)
+                rss_payload, rss_ok, rss_available, rss_reason = self._sc_build_rss_payload(handle_for_rss, None, row_idx=row_idx)
                 if rss_ok:
                     attempt.status = "rss_success"
                     attempt.reason = "rss_success"
@@ -6218,7 +6323,7 @@ class CrossDirectoryEnricherWorker(QThread):
                 rss_ok = False
                 rss_attempted = bool(reroute_handle)
                 if reroute_handle:
-                    reroute_payload, rss_ok, rss_available = self._sc_build_rss_payload(reroute_handle, None, row_idx=row_idx)
+                    reroute_payload, rss_ok, rss_available, rss_reason = self._sc_build_rss_payload(reroute_handle, None, row_idx=row_idx)
                     if rss_ok:
                         attempt.status = "rss_success"
                         attempt.reason = "rss_success"
@@ -6267,7 +6372,7 @@ class CrossDirectoryEnricherWorker(QThread):
                             )
                         except Exception:
                             pass
-                    rss_payload, rss_ok, rss_available = self._sc_build_rss_payload(handle, payload, row_idx=row_idx)
+                    rss_payload, rss_ok, rss_available, rss_reason = self._sc_build_rss_payload(handle, payload, row_idx=row_idx)
                     if rss_payload and rss_ok:
                         payload = rss_payload
                         actionable = _payload_actionable(payload) or bool(payload.websites or payload.socials or payload.emails)
@@ -6320,7 +6425,7 @@ class CrossDirectoryEnricherWorker(QThread):
         if handle:
             sc_rss_first_attempted = True
             attempt.profile_source = attempt.profile_source or "rss_first"
-            rss_payload, rss_ok, rss_available = self._sc_build_rss_payload(handle, None, row_idx=row_idx)
+            rss_payload, rss_ok, rss_available, rss_reason = self._sc_build_rss_payload(handle, None, row_idx=row_idx)
             if rss_ok:
                 attempt.status = "rss_success"
                 attempt.reason = "rss_success"
@@ -6420,7 +6525,7 @@ class CrossDirectoryEnricherWorker(QThread):
             rss_ok = False
             rss_attempted = bool(reroute_handle)
             if reroute_handle:
-                reroute_payload, rss_ok, rss_available = self._sc_build_rss_payload(reroute_handle, None, row_idx=row_idx)
+                reroute_payload, rss_ok, rss_available, rss_reason = self._sc_build_rss_payload(reroute_handle, None, row_idx=row_idx)
                 if rss_ok:
                     attempt.status = "rss_success"
                     attempt.reason = "rss_success"
@@ -6473,7 +6578,7 @@ class CrossDirectoryEnricherWorker(QThread):
             if getattr(self, "_sc_rss_only_mode", False) and not payload:
                 needs_rss = True
             if needs_rss:
-                rss_payload, rss_ok, rss_available = self._sc_build_rss_payload(handle, payload, row_idx=row_idx)
+                rss_payload, rss_ok, rss_available, rss_reason = self._sc_build_rss_payload(handle, payload, row_idx=row_idx)
                 if rss_payload and rss_ok:
                     payload = rss_payload
                     actionable = _payload_actionable(payload) or bool(payload.websites or payload.socials or payload.emails)

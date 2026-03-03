@@ -61,14 +61,14 @@ def test_breaker_has_grace_period():
     # Failures before grace rows should not trip breaker.
     w._sc_rows_seen = SC_BREAKER_MIN_ROWS - 5
     for _ in range(SC_RSS_FAIL_BREAKER_THRESHOLD):
-        w._sc_record_rss_result(False, row_idx=1)
+        w._sc_record_rss_result(False, reason="rss_unavailable", row_idx=1)
     assert w._night_sc_breaker_tripped is False
     assert w._sc_live_enrich_disabled is False
     # After grace rows, consecutive failures should trip breaker.
     w._sc_rows_seen = SC_BREAKER_MIN_ROWS + 1
     w._sc_rss_fail_streak = 0
     for _ in range(SC_RSS_FAIL_BREAKER_THRESHOLD):
-        w._sc_record_rss_result(False, row_idx=10)
+        w._sc_record_rss_result(False, reason="blocked_api", row_idx=10)
     assert w._night_sc_breaker_tripped is True
     assert w._sc_live_enrich_disabled is False
     assert w._sc_live_disabled_until > time.time()
@@ -78,9 +78,40 @@ def test_breaker_cooldown_expires_and_resets():
     w = _mk_worker()
     w._sc_rows_seen = SC_BREAKER_MIN_ROWS + 1
     for _ in range(SC_RSS_FAIL_BREAKER_THRESHOLD):
-        w._sc_record_rss_result(False, row_idx=5)
+        w._sc_record_rss_result(False, reason="blocked_api", row_idx=5)
     assert w._sc_in_live_cooldown() is True
     # Simulate time passing
     w._sc_live_disabled_until = time.time() - 1
     assert w._sc_in_live_cooldown() is False
     assert w._sc_rss_fail_streak == 0
+
+
+def test_nofeed_does_not_trip_breaker():
+    w = _mk_worker()
+    w._sc_rows_seen = SC_BREAKER_MIN_ROWS + 5
+    for _ in range(SC_RSS_FAIL_BREAKER_THRESHOLD + 2):
+        w._sc_record_rss_result(False, reason="rss_unavailable", row_idx=2)
+    assert w._night_sc_breaker_tripped is False
+    assert w._sc_in_live_cooldown() is False
+    assert w._sc_rss_fail_streak_blocked == 0
+    assert w._sc_rss_fail_streak_nofeed >= SC_RSS_FAIL_BREAKER_THRESHOLD
+
+
+def test_blocked_trips_breaker_after_grace_rows():
+    w = _mk_worker()
+    w._sc_rows_seen = SC_BREAKER_MIN_ROWS + 1
+    for _ in range(SC_RSS_FAIL_BREAKER_THRESHOLD):
+        w._sc_record_rss_result(False, reason="blocked_api", row_idx=3)
+    assert w._night_sc_breaker_tripped is True
+    assert w._sc_in_live_cooldown() is True
+
+
+def test_mixed_reasons_only_trip_on_blocked_streak():
+    w = _mk_worker()
+    w._sc_rows_seen = SC_BREAKER_MIN_ROWS + 1
+    for _ in range(2):
+        w._sc_record_rss_result(False, reason="rss_unavailable", row_idx=4)
+    for _ in range(SC_RSS_FAIL_BREAKER_THRESHOLD):
+        w._sc_record_rss_result(False, reason="blocked_api", row_idx=4)
+    assert w._night_sc_breaker_tripped is True
+    assert w._sc_in_live_cooldown() is True
