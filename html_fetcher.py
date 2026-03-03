@@ -187,15 +187,15 @@ def close_job_browser(job_id: Optional[str]) -> None:
 
 
 def close_all_browsers() -> None:
-    keys = list(_JOB_BROWSERS.keys())
-    for key in keys:
-        close_job_browser(key[0])
+    job_ids = {key[0] for key in list(_JOB_BROWSERS.keys())}
+    for job_id in list(job_ids):
+        close_job_browser(job_id)
 
 
 atexit.register(close_all_browsers)
 
 
-def _playwright_fetch(
+def _playwright_fetch_impl(
     url: str,
     job_id: Optional[str],
     timeout_s: float,
@@ -225,6 +225,24 @@ def _playwright_fetch(
             page.close()
         except Exception:
             pass
+
+
+def _playwright_fetch(
+    url: str,
+    job_id: Optional[str],
+    timeout_s: float,
+    *args,
+    **kwargs,
+) -> Dict[str, Optional[str]]:
+    """
+    Backward-compatible wrapper to tolerate legacy monkeypatches that pass only
+    (url, job_id, timeout_s) without keyword args.
+    """
+    try:
+        return _playwright_fetch_impl(url, job_id, timeout_s, *args, **kwargs)
+    except TypeError:
+        # Likely a monkeypatch with older signature; retry without kwargs.
+        return _playwright_fetch_impl(url, job_id, timeout_s)
 
 
 def fetch_html(
@@ -296,13 +314,17 @@ def fetch_html(
     # Attempt Playwright fallback if enabled.
     if allow_browser_fallback and _PW_ENABLED:
         try:
-            pw_result = _playwright_fetch(
-                url,
-                job_id,
-                timeout_s,
-                persistent_profile_dir=persistent_profile_dir,
-                page_handler=page_handler,
-            )
+            try:
+                pw_result = _playwright_fetch(
+                    url,
+                    job_id,
+                    timeout_s,
+                    persistent_profile_dir=persistent_profile_dir,
+                    page_handler=page_handler,
+                )
+            except TypeError:
+                # Support legacy monkeypatches without kwarg support.
+                pw_result = _playwright_fetch(url, job_id, timeout_s)
             html = pw_result.get("html", "")
             final_url = pw_result.get("final_url", final_url)
             mode_used = "playwright"
@@ -310,8 +332,10 @@ def fetch_html(
             status = status  # keep original status for transparency
         except PlaywrightUnavailable:
             reason = "playwright_error"
+            mode_used = "playwright"
         except Exception:
             reason = "playwright_error"
+            mode_used = "playwright"
 
     if trigger_reason and reason == "ok":
         reason = trigger_reason

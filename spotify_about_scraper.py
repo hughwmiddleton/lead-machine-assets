@@ -81,26 +81,26 @@ GENRE_KEYS = ("genres", "genreNames", "genre_names")
 
 _HTTP_SESSION: Optional[requests.Session] = None
 _ABOUT_CACHE: Dict[str, Dict[str, Any]] = {}
-DEBUG_SPOTIFY_ABOUT = bool(os.environ.get("SPOTIFY_ABOUT_DEBUG"))
+def _env_true(name: str, default: bool = False) -> bool:
+    val = os.environ.get(name)
+    if val is None:
+        return default
+    return val.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+DEBUG_SPOTIFY_ABOUT = _env_true("SPOTIFY_ABOUT_DEBUG", False)
 _DEBUG_SPOTIFY_ABOUT_ONCE = False
 
+
 # Spotify-only persistent Playwright profile (opt-in, safe default inside repo)
 _SPOTIFY_PW_PROFILE_DIR = os.environ.get("SPOTIFY_PW_PROFILE_DIR") or os.path.abspath(
     os.path.join(os.path.dirname(__file__), ".cache", "spotify_pw_profile")
 )
 
 # Opt-in artifacts (HTML snippet / screenshot) when debugging consent walls
-_SPOTIFY_ABOUT_DEBUG_ARTIFACTS = bool(os.environ.get("SPOTIFY_ABOUT_DEBUG_ARTIFACTS"))
+_SPOTIFY_ABOUT_DEBUG_ARTIFACTS = _env_true("SPOTIFY_ABOUT_DEBUG_ARTIFACTS", False)
 _SPOTIFY_ABOUT_ARTIFACT_DIR = os.environ.get("SPOTIFY_ABOUT_ARTIFACT_DIR")
 CONSENT_TIMEOUT_MS = 1800
-
-# Spotify-only persistent Playwright profile (opt-in, safe default inside repo)
-_SPOTIFY_PW_PROFILE_DIR = os.environ.get("SPOTIFY_PW_PROFILE_DIR") or os.path.abspath(
-    os.path.join(os.path.dirname(__file__), ".cache", "spotify_pw_profile")
-)
-
-# Opt-in artifacts (HTML snippet / screenshot) when debugging consent walls
-_SPOTIFY_ABOUT_DEBUG_ARTIFACTS = bool(os.environ.get("SPOTIFY_ABOUT_DEBUG_ARTIFACTS"))
 
 
 def _log(logger: Optional[LoggerFn], message: str) -> None:
