@@ -10,7 +10,7 @@ import json
 import os
 import re
 import time
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 import requests
@@ -84,6 +84,24 @@ _ABOUT_CACHE: Dict[str, Dict[str, Any]] = {}
 DEBUG_SPOTIFY_ABOUT = bool(os.environ.get("SPOTIFY_ABOUT_DEBUG"))
 _DEBUG_SPOTIFY_ABOUT_ONCE = False
 
+# Spotify-only persistent Playwright profile (opt-in, safe default inside repo)
+_SPOTIFY_PW_PROFILE_DIR = os.environ.get("SPOTIFY_PW_PROFILE_DIR") or os.path.abspath(
+    os.path.join(os.path.dirname(__file__), ".cache", "spotify_pw_profile")
+)
+
+# Opt-in artifacts (HTML snippet / screenshot) when debugging consent walls
+_SPOTIFY_ABOUT_DEBUG_ARTIFACTS = bool(os.environ.get("SPOTIFY_ABOUT_DEBUG_ARTIFACTS"))
+_SPOTIFY_ABOUT_ARTIFACT_DIR = os.environ.get("SPOTIFY_ABOUT_ARTIFACT_DIR")
+CONSENT_TIMEOUT_MS = 1800
+
+# Spotify-only persistent Playwright profile (opt-in, safe default inside repo)
+_SPOTIFY_PW_PROFILE_DIR = os.environ.get("SPOTIFY_PW_PROFILE_DIR") or os.path.abspath(
+    os.path.join(os.path.dirname(__file__), ".cache", "spotify_pw_profile")
+)
+
+# Opt-in artifacts (HTML snippet / screenshot) when debugging consent walls
+_SPOTIFY_ABOUT_DEBUG_ARTIFACTS = bool(os.environ.get("SPOTIFY_ABOUT_DEBUG_ARTIFACTS"))
+
 
 def _log(logger: Optional[LoggerFn], message: str) -> None:
     if not logger or not message:
@@ -110,6 +128,19 @@ def _empty_socials() -> Dict[str, str]:
         "twitter": "",
         "website": "",
     }
+
+
+def _maybe_save_artifact(artist_id: str, html: str, fetch_info: Dict[str, Any]) -> None:
+    if not _SPOTIFY_ABOUT_DEBUG_ARTIFACTS or not _SPOTIFY_ABOUT_ARTIFACT_DIR:
+        return
+    try:
+        os.makedirs(_SPOTIFY_ABOUT_ARTIFACT_DIR, exist_ok=True)
+        snippet_path = os.path.join(_SPOTIFY_ABOUT_ARTIFACT_DIR, f"about_{artist_id}_snippet.txt")
+        with open(snippet_path, "w", encoding="utf-8") as fh:
+            fh.write(f"final_url={fetch_info.get('final_url','')}\n")
+            fh.write(html[:5000])
+    except Exception:
+        pass
 
 
 def _log_social_summary(logger: Optional[LoggerFn], artist_id: str, socials: Dict[str, str], cached: bool = False) -> None:
@@ -152,6 +183,49 @@ def _debug_spotify_about(url: str) -> None:
         href = (anchor.get("href") or "").strip()
         text = (anchor.get_text(strip=True) or "")
         print(f"  - {href} | {text}")
+
+
+def _spotify_consent_handler(page, meta: Optional[Dict[str, Any]] = None) -> None:
+    """Best-effort click through Spotify's consent wall. Safe no-op on failure."""
+    meta = meta if isinstance(meta, dict) else {}
+    meta.setdefault("consent_found", False)
+    meta.setdefault("consent_clicked", False)
+    try:
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+    except Exception:
+        class PlaywrightTimeoutError(Exception):
+            pass
+
+    selectors = [
+        "button:has-text(\"Accept\")",
+        "button:has-text(\"Agree\")",
+        "button:has-text(\"I agree\")",
+        "button:has-text(\"Allow all\")",
+        "button:has-text(\"Accept all\")",
+        "text=Accept",
+        "text=Agree",
+    ]
+    for sel in selectors:
+        try:
+            locator_obj = page.locator(sel)
+            locator = getattr(locator_obj, "first", locator_obj)
+            locator.wait_for(state="visible", timeout=CONSENT_TIMEOUT_MS)
+            meta["consent_found"] = True
+            try:
+                locator.click(timeout=CONSENT_TIMEOUT_MS)
+                meta["consent_clicked"] = True
+            except PlaywrightTimeoutError:
+                pass
+            break
+        except PlaywrightTimeoutError:
+            continue
+        except Exception:
+            continue
+    if meta.get("consent_clicked"):
+        try:
+            page.wait_for_timeout(500)
+        except Exception:
+            pass
 
 
 def extract_social_links_from_page(page_html: str) -> Dict[str, str]:
@@ -328,7 +402,7 @@ def _fetch_about_payload(
     logger: Optional[LoggerFn],
 ) -> Dict[str, Any]:
     artist_url = f"https://open.spotify.com/artist/{artist_id}"
-    html = _fetch_artist_html(session, artist_url, logger)
+    html, fetch_info = _fetch_artist_html(session, artist_url, logger)
     if not html:
         return {}
 
@@ -352,7 +426,16 @@ def _fetch_about_payload(
         payload["socials"] = _fallback_socials_from_html(html, payload["socials"])
         payload["status"] = "non_actionable"
         payload["reason"] = wall_reason or "next_data_missing"
-        _log(logger, f"[Spotify About] __NEXT_DATA__ missing for artist {artist_id} reason={payload['reason']}")
+        page_title = _extract_title(html)
+        _log(
+            logger,
+            (
+                f"[Spotify About] __NEXT_DATA__ missing for artist {artist_id} "
+                f"reason={payload['reason']} mode={fetch_info.get('mode')} final_url={fetch_info.get('final_url')} "
+                f"consent_found={fetch_info.get('consent_found')} consent_clicked={fetch_info.get('consent_clicked')} "
+                f"title={page_title or ''}"
+            ),
+        )
     else:
         profile = _extract_profile_blob(next_data)
         if not profile:
@@ -366,6 +449,7 @@ def _fetch_about_payload(
             payload["primary_genre"] = _extract_primary_genre(profile)
 
     _log_social_summary(logger, artist_id, payload.get("socials") or {})
+    _maybe_save_artifact(artist_id, html, fetch_info)
 
     return payload
 
@@ -375,7 +459,8 @@ def _fetch_artist_html(
     session: requests.Session,
     artist_url: str,
     logger: Optional[LoggerFn],
-) -> str:
+) -> Tuple[str, Dict[str, Any]]:
+    meta: Dict[str, Any] = {"consent_found": False, "consent_clicked": False}
     try:
         result = fetch_html(
             artist_url,
@@ -384,27 +469,30 @@ def _fetch_artist_html(
             required_selectors=["script#__NEXT_DATA__"],
             allow_browser_fallback=True,
             timeout_s=HTTP_TIMEOUT,
+            persistent_profile_dir=_SPOTIFY_PW_PROFILE_DIR,
+            page_handler=lambda page: _spotify_consent_handler(page, meta),
         )
     except Exception as exc:
         _log(logger, f"[Spotify About] HTTP error for {artist_url}: {exc}")
-        return ""
+        return "", {"mode": "requests", "reason": "exception", "final_url": artist_url, **meta}
 
     status = result.get("status")
     mode_used = result.get("mode_used")
     html = result.get("html") or ""
     reason = result.get("reason")
+    final_url = result.get("final_url") or artist_url
 
     if mode_used == "requests":
         if status and status != 200:
             _log(logger, f"[Spotify About] HTTP {status} for {artist_url}")
-            return ""
-        return html
+            return "", {"mode": mode_used, "reason": f"http_{status}", "final_url": final_url, **meta}
+        return html, {"mode": mode_used, "reason": reason, "final_url": final_url, **meta}
 
     if mode_used == "playwright":
         _log(logger, f"[Spotify About] Playwright fallback used for {artist_url} reason={reason}")
-        return html if html else ""
+        return html if html else "", {"mode": mode_used, "reason": reason, "final_url": final_url, **meta}
 
-    return ""
+    return html, {"mode": mode_used or "unknown", "reason": reason, "final_url": final_url, **meta}
 
 
 # Updated to pull __NEXT_DATA__ via BeautifulSoup for better resilience to markup changes.
@@ -509,6 +597,15 @@ def _extract_socials_from_profile(profile: Dict[str, Any]) -> Dict[str, str]:
         elif mapped == "website" and not socials["website"]:
             socials["website"] = normalized
     return socials
+
+
+def _extract_title(html: str) -> str:
+    try:
+        soup = BeautifulSoup(html or "", "html.parser")
+        title = soup.title.string if soup.title else ""
+        return (title or "").strip()
+    except Exception:
+        return ""
 
 
 def _extract_location_from_profile(profile: Dict[str, Any]) -> str:

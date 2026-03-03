@@ -2,7 +2,8 @@
 
 Exposes a single entrypoint:
     fetch_html(url, *, allow_browser_fallback=True, directory=None, job_id=None,
-               required_selectors=None, session=None, timeout_s=20) -> dict
+               required_selectors=None, session=None, timeout_s=20,
+               persistent_profile_dir=None, page_handler=None) -> dict
 
 Return schema:
     {
@@ -31,7 +32,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 import requests
@@ -58,12 +59,12 @@ class PlaywrightUnavailable(RuntimeError):
 @dataclass
 class _JobBrowser:
     playwright: object
-    browser: object
+    browser: object  # None when using launch_persistent_context
     context: object
     pages_used: int = 0
 
 
-_JOB_BROWSERS: Dict[str, _JobBrowser] = {}
+_JOB_BROWSERS: Dict[Tuple[str, str], _JobBrowser] = {}
 
 
 def _log_fetch(
@@ -130,51 +131,79 @@ def _load_playwright():
     return sync_playwright, PlaywrightTimeoutError
 
 
-def _ensure_context(job_id: str) -> _JobBrowser:
+def _ensure_context(job_id: str, persistent_profile_dir: Optional[str] = None) -> _JobBrowser:
     job_key = job_id or "global"
-    cached = _JOB_BROWSERS.get(job_key)
+    cache_key = (job_key, persistent_profile_dir or "volatile")
+    cached = _JOB_BROWSERS.get(cache_key)
     if cached:
         return cached
 
     sync_playwright, _ = _load_playwright()
     pw = sync_playwright().start()
-    browser = pw.chromium.launch(headless=_PW_HEADLESS)
-    context = browser.new_context()
-    jb = _JobBrowser(playwright=pw, browser=browser, context=context, pages_used=0)
-    _JOB_BROWSERS[job_key] = jb
+
+    if persistent_profile_dir:
+        os.makedirs(persistent_profile_dir, exist_ok=True)
+        context = pw.chromium.launch_persistent_context(
+            user_data_dir=persistent_profile_dir,
+            headless=_PW_HEADLESS,
+        )
+        jb = _JobBrowser(playwright=pw, browser=None, context=context, pages_used=0)
+    else:
+        browser = pw.chromium.launch(headless=_PW_HEADLESS)
+        context = browser.new_context()
+        jb = _JobBrowser(playwright=pw, browser=browser, context=context, pages_used=0)
+
+    _JOB_BROWSERS[cache_key] = jb
+    if os.getenv("HTML_FETCHER_DEBUG_PERSIST") == "1" and persistent_profile_dir:
+        try:
+            print(
+                f"[html_fetcher] persistent context initialized dir={persistent_profile_dir} job={job_key}"
+            )
+        except Exception:
+            pass
     return jb
 
 
 def close_job_browser(job_id: Optional[str]) -> None:
     job_key = job_id or "global"
-    jb = _JOB_BROWSERS.pop(job_key, None)
-    if not jb:
-        return
-    try:
-        jb.context.close()
-    except Exception:
-        pass
-    try:
-        jb.browser.close()
-    except Exception:
-        pass
-    try:
-        jb.playwright.stop()
-    except Exception:
-        pass
+    keys = [key for key in list(_JOB_BROWSERS.keys()) if key[0] == job_key]
+    for key in keys:
+        jb = _JOB_BROWSERS.pop(key, None)
+        if not jb:
+            continue
+        try:
+            jb.context.close()
+        except Exception:
+            pass
+        try:
+            if jb.browser:
+                jb.browser.close()
+        except Exception:
+            pass
+        try:
+            jb.playwright.stop()
+        except Exception:
+            pass
 
 
 def close_all_browsers() -> None:
     keys = list(_JOB_BROWSERS.keys())
     for key in keys:
-        close_job_browser(key)
+        close_job_browser(key[0])
 
 
 atexit.register(close_all_browsers)
 
 
-def _playwright_fetch(url: str, job_id: Optional[str], timeout_s: float) -> Dict[str, Optional[str]]:
-    jb = _ensure_context(job_id)
+def _playwright_fetch(
+    url: str,
+    job_id: Optional[str],
+    timeout_s: float,
+    *,
+    persistent_profile_dir: Optional[str] = None,
+    page_handler: Optional[object] = None,
+) -> Dict[str, Optional[str]]:
+    jb = _ensure_context(job_id, persistent_profile_dir)
     if jb.pages_used >= _PW_MAX_PAGES:
         raise PlaywrightUnavailable("page_budget_exhausted")
 
@@ -182,6 +211,12 @@ def _playwright_fetch(url: str, job_id: Optional[str], timeout_s: float) -> Dict
     jb.pages_used += 1
     try:
         page.goto(url, wait_until="domcontentloaded", timeout=timeout_s * 1000)
+        if page_handler:
+            try:
+                page_handler(page)
+            except Exception:
+                # Do not fail fetch on handler issues; proceed with current page state.
+                pass
         html = page.content()
         final_url = page.url
         return {"html": html, "final_url": final_url}
@@ -201,6 +236,8 @@ def fetch_html(
     required_selectors: Optional[List[str]] = None,
     session: Optional[requests.Session] = None,
     timeout_s: float = 20,
+    persistent_profile_dir: Optional[str] = None,
+    page_handler: Optional[object] = None,
 ) -> Dict[str, object]:
     if not url:
         return {
@@ -259,7 +296,13 @@ def fetch_html(
     # Attempt Playwright fallback if enabled.
     if allow_browser_fallback and _PW_ENABLED:
         try:
-            pw_result = _playwright_fetch(url, job_id, timeout_s)
+            pw_result = _playwright_fetch(
+                url,
+                job_id,
+                timeout_s,
+                persistent_profile_dir=persistent_profile_dir,
+                page_handler=page_handler,
+            )
             html = pw_result.get("html", "")
             final_url = pw_result.get("final_url", final_url)
             mode_used = "playwright"
