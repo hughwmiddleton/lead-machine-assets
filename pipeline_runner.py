@@ -39,6 +39,8 @@ _LEGACY_MODULE = None
 _LOGGER = logging.getLogger(__name__)
 EMAIL_PRIORITY_COLS: Sequence[str] = ("Email", "Email_All", "Directory_Email", "Unearthed_Email")
 
+ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
 
 @dataclass
 class AtomicCSVResult:
@@ -990,11 +992,20 @@ _COUNTRY_ALIASES = [
 ]
 
 
+def _safe_parse_date(value):
+    """Parse dates while avoiding pandas ISO+dayfirst warning; keeps AU-style parsing intact."""
+    if isinstance(value, str):
+        text = value.strip()
+        if ISO_DATE_RE.match(text):
+            return pd.to_datetime(text, format="%Y-%m-%d", dayfirst=False, errors="coerce")
+    return pd.to_datetime(value, dayfirst=True, errors="coerce")
+
+
 def _normalize_date_string(value: str) -> str:
     text = str(value or "").strip()
     if not text:
         return ""
-    parsed = pd.to_datetime(text, errors="coerce", dayfirst=True)
+    parsed = _safe_parse_date(text)
     if pd.isna(parsed):
         return ""
     try:
