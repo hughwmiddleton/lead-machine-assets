@@ -141,6 +141,8 @@ def run_seed_phase(config_path: str, run_dir: str, resume: bool = False) -> Dict
                 schema_valid=schema_valid,
             )
 
+        note_msg: Optional[str] = None
+
         if should_skip:
             # Ensure metadata is present even when skipping.
             row_count = job_entry.get("row_count") or _safe_count_rows(raw_csv)
@@ -186,19 +188,25 @@ def run_seed_phase(config_path: str, run_dir: str, resume: bool = False) -> Dict
                     row_count = _safe_count_rows(raw_csv)
                     schema_hash = ""
 
-                status = "completed" if row_count > 0 else "failed"
                 raw_exists = os.path.exists(raw_csv)
                 raw_bytes = os.path.getsize(raw_csv) if raw_exists else 0
-                if status == "failed" and not error_msg:
-                    if not raw_exists:
-                        error_msg = "raw.csv missing"
-                    elif row_count == 0:
-                        error_msg = "zero rows"
 
-        if status == "completed" and (not raw_exists or row_count <= 0):
+                zero_rows = row_count == 0
+                status = "completed" if raw_exists else "failed"
+
+                if not raw_exists:
+                    error_msg = error_msg or "raw.csv missing"
+                elif zero_rows:
+                    # Successful scrape that legitimately returned zero results.
+                    error_msg = None
+                    note_msg = "zero rows"
+                elif not error_msg:
+                    error_msg = ""
+
+        if status == "completed" and not raw_exists:
             status = "failed"
             if not error_msg:
-                error_msg = "raw.csv missing" if not raw_exists else "zero rows"
+                error_msg = "raw.csv missing"
 
         seed_jobs[job_id] = {
             "status": status,
@@ -208,17 +216,18 @@ def run_seed_phase(config_path: str, run_dir: str, resume: bool = False) -> Dict
             "schema_hash": schema_hash or "",
         }
 
-        _write_job_status(
-            job_dir,
-            {
-                "job_id": job_id,
-                "status": status,
-                "row_count": int(row_count),
-                "raw_exists": bool(raw_exists),
-                "raw_bytes": int(raw_bytes),
-                "error": error_msg or "",
-            },
-        )
+        status_payload = {
+            "job_id": job_id,
+            "status": status,
+            "row_count": int(row_count),
+            "raw_exists": bool(raw_exists),
+            "raw_bytes": int(raw_bytes),
+            "error": None if (status == "completed" and raw_exists and row_count == 0) else (error_msg or ""),
+        }
+        if note_msg:
+            status_payload["note"] = note_msg
+
+        _write_job_status(job_dir, status_payload)
 
         if status == "completed":
             completed_jobs += 1
