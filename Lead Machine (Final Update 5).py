@@ -193,10 +193,23 @@ SC_SOCIAL_SELECTORS = [
     'a[href*="x.com"]',
     'a[href*="beacons.ai"]',
     'a[href*="carrd.co"]',
-    'a[href*="flow.page"]'
+    'a[href*="flow.page"]',
+    'a[href*="solo.to"]',
+    'a[href*="hypeddit.com"]',
+    'a[href*="toneden.io"]',
 ]
-SC_AGGREGATOR_HOSTS = ("linktr.ee", "beacons.ai", "bandcamp.com", "carrd.co", "flow.page")
-SC_AGGREGATOR_PREFERENCE = ("linktr.ee", "beacons.ai", "bandcamp.com", "carrd.co", "flow.page")
+SC_AGGREGATOR_ALLOWLIST = ("linktr.ee", "beacons.ai", "solo.to", "hypeddit.com", "toneden.io")
+SC_AGGREGATOR_HOSTS = SC_AGGREGATOR_ALLOWLIST
+SC_AGGREGATOR_PREFERENCE = (
+    "linktr.ee",
+    "beacons.ai",
+    "solo.to",
+    "hypeddit.com",
+    "toneden.io",
+    "bandcamp.com",
+    "carrd.co",
+    "flow.page",
+)
 SC_REQUEST_TIMEOUT = (5, 10)
 SC_SEARCH_USERS_API = "https://api-v2.soundcloud.com/search/users"
 SC_MAX_WORKERS = 8
@@ -297,7 +310,7 @@ SOCIAL_HOSTS = (
     "instagram.com", "facebook.com", "x.com", "twitter.com", "youtube.com", "tiktok.com",
     "soundcloud.com"
 )
-SOCIAL_HOSTS_PATTERN = r"(?:linktr\.ee|beacons\.ai|bandcamp\.com|carrd\.co|flow\.page|instagram\.com|facebook\.com|x\.com|twitter\.com|youtube\.com|tiktok\.com)"
+SOCIAL_HOSTS_PATTERN = r"(?:linktr\.ee|beacons\.ai|solo\.to|hypeddit\.com|toneden\.io|bandcamp\.com|carrd\.co|flow\.page|instagram\.com|facebook\.com|x\.com|twitter\.com|youtube\.com|tiktok\.com)"
 URL_RE = re.compile(rf"https?://{SOCIAL_HOSTS_PATTERN}[^\s\"'<)]+", re.IGNORECASE)
 _SOCIAL_TEXT_RE = re.compile(
     rf"((?:https?://|www\.)?{SOCIAL_HOSTS_PATTERN}[^\s\"'<)]+)",
@@ -5346,7 +5359,8 @@ def extract_sc_links(session: requests.Session, handle: str) -> dict:
             'a[href*="youtube.com"], a[href*="tiktok.com"], '
             'a[href*="twitter.com"], a[href*="x.com"], '
             'a[href*="beacons.ai"], a[href*="carrd.co"], '
-            'a[href*="flow.page"]'
+            'a[href*="flow.page"], a[href*="solo.to"], '
+            'a[href*="hypeddit.com"], a[href*="toneden.io"]'
         ):
             href = (a.get("href") or "").strip()
             if not href:
@@ -5446,14 +5460,17 @@ def extract_sc_links(session: requests.Session, handle: str) -> dict:
         if text_blob:
             _record_contact_text(text_blob[:4000])
 
-    did_expand = False
-    for candidate in list(external_urls):
-        host = (urlparse(candidate).hostname or "").lower()
-        if any(host.endswith(pref) for pref in AGG_PREF):
-            for mail in expand_for_email(session, candidate):
-                emails.add(mail)
-            did_expand = True
+    aggregator_link = None
+    for candidate in sorted(external_urls):
+        if _is_aggregator_link(candidate):
+            aggregator_link = candidate
             break
+
+    aggregator_emails: List[str] = []
+    if aggregator_link:
+        aggregator_emails = _fetch_aggregator_emails(session, aggregator_link, display_name)
+        for mail in aggregator_emails:
+            emails.add(mail)
 
     api_profile = _sc_fetch_api_profile(session, handle)
     if api_profile:
@@ -5549,7 +5566,8 @@ def extract_sc_links(session: requests.Session, handle: str) -> dict:
         "genre": user_genre,
         "user_genre": user_genre,
         "elapsed_ms": elapsed_ms,
-        "aggregator_expanded": int(did_expand),
+        "aggregator_expanded": int(bool(aggregator_link)),
+        "_aggregator_tried": int(bool(aggregator_link)),
         "bio_text": bio_text,
         "sounds_like": _sc_sounds_like_from_bio(bio_text),
         "latest_track_title": latest_title,
@@ -5712,6 +5730,59 @@ def _sc_collect_emails_from_text(bucket: set, text: str):
         cleaned = (address or "").strip()
         if cleaned and not cleaned.lower().endswith("@soundcloud.com"):
             bucket.add(cleaned)
+
+
+def _is_aggregator_link(url: str) -> bool:
+    if not url:
+        return False
+    cleaned = (url or "").strip().strip(" ,.;:)>]\\\"'")
+    if not cleaned or cleaned.lower().startswith("mailto:"):
+        return False
+    if not re.match(r"^[a-z]+://", cleaned, flags=re.IGNORECASE):
+        cleaned = "https://" + cleaned.lstrip("/")
+    try:
+        host = (urlparse(cleaned).hostname or "").lower().rstrip(".")
+    except Exception:
+        return False
+    if not host:
+        return False
+    if host.startswith("www."):
+        host = host[4:]
+    return any(host == allow or host.endswith("." + allow) for allow in SC_AGGREGATOR_ALLOWLIST)
+
+
+def _fetch_aggregator_emails(session: requests.Session, url: str, artist_name: str = "") -> List[str]:
+    target = (url or "").strip()
+    if not target.lower().startswith(("http://", "https://")):
+        target = "https://" + target.lstrip("/")
+    domain = (urlparse(target).hostname or "").lower()
+    if domain.startswith("www."):
+        domain = domain[4:]
+    artist_label = artist_name or ""
+    print(f"[Aggregator] detected {domain or '<unknown>'} for '{artist_label or '<unknown>'}'")
+    emails: List[str] = []
+    try:
+        resp = session.get(target, timeout=SC_REQUEST_TIMEOUT, headers=_rand_headers())
+        status = getattr(resp, "status_code", None)
+        if status and status >= 400:
+            print("[Aggregator] emails_found=0")
+            print("[Aggregator] no emails found")
+            polite_sleep()
+            return []
+        html = getattr(resp, "text", "") or ""
+        for mail in extract_emails(html):
+            normalized = (mail or "").strip().lower()
+            if normalized and normalized not in emails:
+                emails.append(normalized)
+        print(f"[Aggregator] emails_found={len(emails)}")
+        if not emails:
+            print("[Aggregator] no emails found")
+    except Exception:
+        print("[Aggregator] emails_found=0")
+        print("[Aggregator] no emails found")
+    finally:
+        polite_sleep()
+    return emails
 
 
 def _spotify_artist_id_from_url(url: str) -> str:
