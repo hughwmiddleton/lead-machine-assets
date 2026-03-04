@@ -386,7 +386,45 @@ def _spotify_maybe_screenshot(page, artist_id: str) -> None:
 
 
 def _spotify_page_handler(artist_id: str, meta: Dict[str, Any]) -> Callable[[Any], None]:
+    meta.setdefault("network_external_links", [])
+    meta.setdefault("network_payload_found", False)
+
     def _handler(page: Any) -> None:
+        def _network_listener(response: Any) -> None:
+            try:
+                if "pathfinder" not in getattr(response, "url", ""):
+                    return
+                headers = getattr(response, "headers", {}) or {}
+                if callable(headers):
+                    try:
+                        headers = headers() or {}
+                    except Exception:
+                        headers = {}
+                content_type = ""
+                try:
+                    content_type = headers.get("content-type", "") or headers.get("Content-Type", "")
+                except Exception:
+                    content_type = ""
+                if "application/json" not in str(content_type).lower():
+                    return
+                data = response.json()
+                if not data:
+                    return
+                links = _extract_external_links_from_json(data)
+                if not links:
+                    return
+                meta["network_external_links"] = links
+                meta["network_payload_found"] = True
+                _log(meta.get("_logger"), f"[Spotify About] Network externalLinks captured for {artist_id}")
+            except Exception:
+                pass
+
+        try:
+            if hasattr(page, "on"):
+                page.on("response", _network_listener)
+        except Exception:
+            pass
+
         _spotify_consent_handler(page, meta)
         found = _spotify_wait_for_next_data(page, meta, SPOTIFY_NEXTDATA_WAIT_MS)
         if found:
@@ -414,6 +452,46 @@ def _spotify_page_handler(artist_id: str, meta: Dict[str, Any]) -> Callable[[Any
             _spotify_maybe_screenshot(page, artist_id)
 
     return _handler
+
+
+def _extract_external_links_from_json(blob: Any) -> List[Dict[str, str]]:
+    results: List[Dict[str, str]] = []
+    seen = set()
+
+    def _maybe_add(item: Any) -> None:
+        if not isinstance(item, dict):
+            return
+        url = (item.get("url") or item.get("uri") or "").strip()
+        name = (item.get("name") or item.get("title") or item.get("type") or "").strip()
+        if not url:
+            return
+        key = (url, name.lower() if name else "")
+        if key in seen:
+            return
+        seen.add(key)
+        results.append({"name": name, "url": url})
+
+    def _walk(node: Any) -> None:
+        if isinstance(node, dict):
+            if "externalLinks" in node:
+                ext = node.get("externalLinks")
+                candidates: List[Any] = []
+                if isinstance(ext, dict):
+                    items = ext.get("items")
+                    if isinstance(items, list):
+                        candidates.extend(items)
+                if isinstance(ext, list):
+                    candidates.extend(ext)
+                for cand in candidates:
+                    _maybe_add(cand)
+            for value in node.values():
+                _walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                _walk(value)
+
+    _walk(blob)
+    return results
 
 
 def extract_social_links_from_page(page_html: str) -> Dict[str, str]:
@@ -604,6 +682,24 @@ def _fetch_about_payload(
         "primary_genre": "",
     }
 
+    if fetch_info.get("mode") == "playwright" and fetch_info.get("network_external_links"):
+        mapped_socials = _map_links_to_social_fields(fetch_info.get("network_external_links") or [])
+        payload["socials"] = mapped_socials
+        if _is_spotify_generic_socials(payload["socials"]):
+            payload["socials"] = _empty_socials()
+            payload["reason"] = payload.get("reason") or "generic_spotify_socials_filtered"
+            _log(
+                logger,
+                f"[Spotify About] filtered generic Spotify socials for artist {artist_id} "
+                f"mode={fetch_info.get('mode')} title={_extract_title(document_html or html) or ''}",
+            )
+        else:
+            payload["reason"] = None
+            payload["status"] = "ok"
+            _log_social_summary(logger, artist_id, payload.get("socials") or {})
+            _maybe_save_artifact(artist_id, document_html or html, fetch_info)
+            return payload
+
     next_data = _extract_next_data(document_html or "") or _extract_next_data(html or "")
     if not next_data:
         eval_json = fetch_info.get("evaluated_next_data_json")
@@ -685,6 +781,7 @@ def _fetch_artist_html(
         "next_data_found": False,
         "next_data_retry": False,
         "about_path_used": artist_url.endswith("/about"),
+        "_logger": logger,
     }
     try:
         result = fetch_html(
@@ -875,6 +972,12 @@ def _extract_socials_from_profile(profile: Dict[str, Any]) -> Dict[str, str]:
         elif mapped == "website" and not socials["website"]:
             socials["website"] = normalized
     return socials
+
+
+def _map_links_to_social_fields(links: List[Dict[str, str]]) -> Dict[str, str]:
+    profile: Dict[str, Any] = {"externalLinks": {"items": links or []}}
+    socials = _extract_socials_from_profile(profile)
+    return socials if socials else _empty_socials()
 
 
 def _extract_title(html: str) -> str:
