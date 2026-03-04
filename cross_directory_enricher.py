@@ -7430,7 +7430,7 @@ class CrossDirectoryEnricherWorker(QThread):
         primary_status: Optional[int] = None
         if use_track and sanitized_title:
             _lf_sleep(lf_unhealthy)
-            html = self._fetch_url(url, label="Last.fm search", max_attempts=1)
+            html = self._fetch_url(url, label="Last.fm search", max_attempts=1, endpoint="search")
             primary_status = getattr(self, "_last_http_status", None)
 
         best_score = 0.0
@@ -7454,7 +7454,7 @@ class CrossDirectoryEnricherWorker(QThread):
             quoted_no_quotes = urllib.parse.quote_plus(no_quote_query)
             no_quote_url = f"https://www.last.fm/search?q={quoted_no_quotes}&type=artist"
             _lf_sleep(self._lf_endpoint_in_cooldown("search") or self._lf_search_consecutive_406 > 0)
-            no_html = self._fetch_url(no_quote_url, label="Last.fm search (no-quotes)", max_attempts=1)
+            no_html = self._fetch_url(no_quote_url, label="Last.fm search (no-quotes)", max_attempts=1, endpoint="search")
             no_candidate = _parse_first_candidate(no_html, log_no_results=False) if no_html else None
             if no_candidate:
                 n_disp, n_prof, n_conf, n_rank, n_match = no_candidate
@@ -7484,7 +7484,7 @@ class CrossDirectoryEnricherWorker(QThread):
             quoted_fb = urllib.parse.quote_plus(fallback_query)
             fb_url = f"https://www.last.fm/search?q={quoted_fb}&type=artist"
             _lf_sleep(self._lf_endpoint_in_cooldown("search") or self._lf_search_consecutive_406 > 0)
-            fb_html = self._fetch_url(fb_url, label="Last.fm search (fallback)", max_attempts=1)
+            fb_html = self._fetch_url(fb_url, label="Last.fm search (fallback)", max_attempts=1, endpoint="search")
             fb_status = getattr(self, "_last_http_status", None)
             if fb_status == 406 or (not fb_html and fb_status == 406):
                 # Shape fallback failed; mark unhealthy and skip upcoming search requests.
@@ -7535,11 +7535,13 @@ class CrossDirectoryEnricherWorker(QThread):
         label: str,
         max_attempts: int = 2,
         headers: Optional[Dict[str, str]] = None,
+        endpoint: Optional[str] = None,
     ) -> Optional[str]:
         # Track the most recent fetch outcome for instrumentation.
         self._last_fetch_ok: Optional[bool] = None
         self._last_http_status: Optional[int] = None
         is_lastfm = "last.fm" in url.lower()
+        lf_endpoint = endpoint if is_lastfm and endpoint in ("search", "profile") else None
         headers_name = "default"
         if is_lastfm and headers is None:
             headers = LASTFM_HEADERS
@@ -7547,22 +7549,20 @@ class CrossDirectoryEnricherWorker(QThread):
         elif headers is not None:
             headers_name = "custom"
 
-        endpoint_type = "profile" if is_lastfm and "profile" in label.lower() else "search"
-        now = time.time()
-        if is_lastfm:
+        if lf_endpoint:
             now_mono = self._lf_now()
-            if self._lf_endpoint_in_cooldown(endpoint_type, now_mono):
-                remaining = self._lf_endpoint_cooldown_remaining(endpoint_type, now_mono)
-                skip_logged_attr = "_lf_profile_cooldown_skip_logged" if endpoint_type == "profile" else "_lf_search_cooldown_skip_logged"
+            if self._lf_endpoint_in_cooldown(lf_endpoint, now_mono):
+                remaining = self._lf_endpoint_cooldown_remaining(lf_endpoint, now_mono)
+                skip_logged_attr = "_lf_profile_cooldown_skip_logged" if lf_endpoint == "profile" else "_lf_search_cooldown_skip_logged"
                 if not getattr(self, skip_logged_attr, False):
                     try:
                         self.log_message.emit(
-                            f"[Enricher][LF] {endpoint_type} cooldown active; skipping Last.fm fetch. expires_in={remaining}s"
+                            f"[Enricher][LF] {lf_endpoint} cooldown active; skipping Last.fm fetch expires_in={remaining}s"
                         )
                     except Exception:
                         pass
                     setattr(self, skip_logged_attr, True)
-                if endpoint_type == "profile":
+                if lf_endpoint == "profile":
                     self._lf_profile_skipped_cooldown += 1
                 else:
                     self._lf_search_skipped_cooldown += 1
@@ -7583,11 +7583,11 @@ class CrossDirectoryEnricherWorker(QThread):
                 text = getattr(resp, "text", "") or ""
                 self._last_http_status = status
 
-                if is_lastfm and status == 406:
+                if is_lastfm and lf_endpoint and status == 406:
                     pass
-                elif is_lastfm:
+                elif is_lastfm and lf_endpoint:
                     if status and status < 400:
-                        self._lf_mark_success(endpoint_type)
+                        self._lf_mark_success(lf_endpoint)
                 if is_lastfm:
                     try:
                         self.log_message.emit(
@@ -7640,8 +7640,8 @@ class CrossDirectoryEnricherWorker(QThread):
                 self._last_http_status = status
                 html = exc.response.text if exc.response is not None else ""
 
-                if is_lastfm and status == 406:
-                    self._lf_mark_406(endpoint_type)
+                if is_lastfm and lf_endpoint and status == 406:
+                    self._lf_mark_406(lf_endpoint)
                     self._last_fetch_ok = False
                     suffix = _format_outcome_suffix(fetch_ok=False, actionable=None, http_status=status)
                     self.log_message.emit(
@@ -7731,7 +7731,8 @@ class CrossDirectoryEnricherWorker(QThread):
     ) -> Optional[EnrichmentPayload]:
         self.log_message.emit(f"[Enricher] Fetching {source_dir} profile: {profile_url}")
         attempts = LF_SEARCH_RETRY_MAX if source_dir == "lastfm" else 2
-        html = self._fetch_url(profile_url, label=f"{source_dir} profile", max_attempts=attempts)
+        lf_endpoint = "profile" if source_dir == "lastfm" else None
+        html = self._fetch_url(profile_url, label=f"{source_dir} profile", max_attempts=attempts, endpoint=lf_endpoint)
         fetched_ok = bool(html)
         if not fetched_ok:
             return None

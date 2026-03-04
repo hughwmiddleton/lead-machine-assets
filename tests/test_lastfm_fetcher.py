@@ -44,7 +44,9 @@ def test_lastfm_406_no_retry(monkeypatch):
     monkeypatch.setattr(worker.session, "get", fake_get)
     monkeypatch.setattr(time, "sleep", lambda s: sleeps.append(s))
 
-    html = worker._fetch_url("https://www.last.fm/search?q=test&type=artist", "Last.fm search", max_attempts=3)
+    html = worker._fetch_url(
+        "https://www.last.fm/search?q=test&type=artist", "Last.fm search", max_attempts=3, endpoint="search"
+    )
 
     assert html is None  # first 406 should short-circuit
     assert worker._last_http_status == 406
@@ -84,11 +86,21 @@ def test_lastfm_soft_cooldown_after_consecutive_406(monkeypatch):
 
     # First three 406s should not enter search cooldown yet.
     for _ in range(3):
-        assert worker._fetch_url("https://www.last.fm/search?q=test&type=artist", "Last.fm search", max_attempts=1) is None
+        assert (
+            worker._fetch_url(
+                "https://www.last.fm/search?q=test&type=artist", "Last.fm search", max_attempts=1, endpoint="search"
+            )
+            is None
+        )
     assert worker._lf_search_cooldown_until == 0.0
 
     # Fourth 406 crosses the threshold.
-    assert worker._fetch_url("https://www.last.fm/search?q=test&type=artist", "Last.fm search", max_attempts=1) is None
+    assert (
+        worker._fetch_url(
+            "https://www.last.fm/search?q=test&type=artist", "Last.fm search", max_attempts=1, endpoint="search"
+        )
+        is None
+    )
 
     assert worker._lf_search_cooldown_until > fake_mono()
     assert any("Entering soft cooldown (search)" in msg for msg in logs)
@@ -100,7 +112,9 @@ def test_lastfm_soft_cooldown_after_consecutive_406(monkeypatch):
         return _DummyResp(200, "should not be called")
 
     monkeypatch.setattr(worker.session, "get", fail_get)
-    html2 = worker._fetch_url("https://www.last.fm/search?q=test&type=artist", "Last.fm search", max_attempts=1)
+    html2 = worker._fetch_url(
+        "https://www.last.fm/search?q=test&type=artist", "Last.fm search", max_attempts=1, endpoint="search"
+    )
     assert html2 is None
     assert called["count"] == 0
 
@@ -117,7 +131,7 @@ def test_lastfm_sanitized_empty_uses_artist_only(monkeypatch):
     worker._live_context = {"song_title": "...", "artist": "Sample Artist"}
     urls = []
 
-    def fake_fetch(url, label=None, max_attempts=None, headers=None):
+    def fake_fetch(url, label=None, max_attempts=None, headers=None, endpoint=None):
         urls.append((url, label, max_attempts))
         # Return a simple search result for the fallback query.
         worker._last_http_status = 200
@@ -148,7 +162,7 @@ def test_lastfm_primary_406_fast_fallback(monkeypatch):
     worker._live_context = {"song_title": "Good Track", "artist": "Artist X"}
     calls = []
 
-    def fake_fetch(url, label=None, max_attempts=None, headers=None):
+    def fake_fetch(url, label=None, max_attempts=None, headers=None, endpoint=None):
         calls.append((label, max_attempts))
         if label == "Last.fm search":
             worker._last_http_status = 406
@@ -183,7 +197,7 @@ def test_lastfm_fallback_406_does_not_retry(monkeypatch):
     worker._live_context = {"song_title": "Track", "artist": "Artist Y"}
     calls = []
 
-    def fake_fetch(url, label=None, max_attempts=None, headers=None):
+    def fake_fetch(url, label=None, max_attempts=None, headers=None, endpoint=None):
         calls.append((label, max_attempts))
         if label == "Last.fm search":
             worker._last_http_status = 406
@@ -209,7 +223,7 @@ def test_lastfm_sanitizer_numeric_heavy_skips_track(monkeypatch):
     worker._live_context = {"song_title": "2026/01/30", "artist": "Artist Z"}
     calls = []
 
-    def fake_fetch(url, label=None, max_attempts=None, headers=None):
+    def fake_fetch(url, label=None, max_attempts=None, headers=None, endpoint=None):
         calls.append((url, label, max_attempts))
         worker._last_http_status = 200
         worker._last_fetch_ok = True
@@ -240,7 +254,7 @@ def test_lastfm_sanitizer_empty_skips_primary_and_goes_fallback_only(monkeypatch
 
     worker.log_message = SimpleNamespace(emit=lambda msg: logs.append(msg))
 
-    def fake_fetch(url, label=None, max_attempts=None, headers=None):
+    def fake_fetch(url, label=None, max_attempts=None, headers=None, endpoint=None):
         calls.append((label, max_attempts))
         worker._last_http_status = 200
         worker._last_fetch_ok = True
@@ -267,7 +281,7 @@ def test_lastfm_no_quotes_variant_on_low_confidence(monkeypatch):
     worker._live_context = {"song_title": "Good Track", "artist": "Artist Q"}
     calls: List[tuple] = []
 
-    def fake_fetch(url, label=None, max_attempts=None, headers=None):
+    def fake_fetch(url, label=None, max_attempts=None, headers=None, endpoint=None):
         calls.append((label, max_attempts))
         if label == "Last.fm search":
             worker._last_http_status = 200
@@ -306,7 +320,7 @@ def test_lastfm_no_quotes_not_triggered_on_406(monkeypatch):
     worker._live_context = {"song_title": "Good Track", "artist": "Artist Q"}
     calls: List[tuple] = []
 
-    def fake_fetch(url, label=None, max_attempts=None, headers=None):
+    def fake_fetch(url, label=None, max_attempts=None, headers=None, endpoint=None):
         calls.append((label, max_attempts))
         if label == "Last.fm search":
             worker._last_http_status = 406
@@ -368,7 +382,8 @@ def test_lastfm_search_cooldown_does_not_block_profile_fetch(monkeypatch):
     # Search attempt should be skipped and logged.
     payload = worker._live_search_lastfm("Artist With Cooldown")
     assert payload is None
-    assert any("search cooldown active" in msg or "search_skipped" in msg for msg in logs)
+    assert any("search cooldown active" in msg for msg in logs)
+    assert not any("profile cooldown active" in msg for msg in logs)
 
     # Profile fetch should still run (different endpoint).
     monkeypatch.setattr(
@@ -376,10 +391,17 @@ def test_lastfm_search_cooldown_does_not_block_profile_fetch(monkeypatch):
         "_extract_links_from_profile",
         lambda html, source_dir, url: ({"https://twitter.com/demo"}, set(), set(), set()),
     )
-    monkeypatch.setattr(worker.session, "get", lambda url, timeout=None, headers=None: _DummyResp(200, "<html/>"))
+    calls: List[str] = []
+
+    def fake_get(url, timeout=None, headers=None):
+        calls.append(url)
+        return _DummyResp(200, "<html/>")
+
+    monkeypatch.setattr(worker.session, "get", fake_get)
     profile_payload = worker._fetch_profile_and_build("https://www.last.fm/music/demo", "lastfm")
     assert profile_payload is not None
     assert profile_payload.source_url == "https://www.last.fm/music/demo"
+    assert calls  # profile fetch issued despite search cooldown
     # Profile cooldown should not have been set by the skipped search.
     assert not worker._lf_endpoint_in_cooldown("profile")
 
@@ -391,6 +413,7 @@ def test_lastfm_endpoint_cooldowns_are_independent(monkeypatch):
         worker._lf_mark_406("search")
     assert worker._lf_endpoint_in_cooldown("search")
     assert not worker._lf_endpoint_in_cooldown("profile")
+    assert worker._lf_profile_cooldown_until == 0.0
 
     # Trigger profile cooldown separately.
     for _ in range(cde.LF_COOLDOWN_CONSEC_406):
