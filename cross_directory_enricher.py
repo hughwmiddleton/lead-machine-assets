@@ -24,6 +24,7 @@ import soundcloud_engine as sc_engine
 import pandas as pd
 import requests
 from bs4 import BeautifulSoup
+from source_scheduler import SourceDiversityScheduler, SourceResult, SourceSpec
 from html_fetcher import fetch_html, _detect_soft_block
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
@@ -4283,17 +4284,127 @@ class CrossDirectoryEnricherWorker(QThread):
 
     def _run_source_phased(self, seed_df, directory_indexes, priority, fb_driver, total):
         """Run enrichment in source-phased mode: one source across all rows at a time."""
+        use_scheduler = (
+            os.getenv("SOURCE_DIVERSITY_SCHEDULER", "0").strip().lower() in {"1", "true", "yes", "on"}
+        )
+        if use_scheduler:
+            self.log_message.emit("[Enricher] Source diversity scheduler=ON (round-robin)")
         # Phase 0: Directory matching (fast, no network)
         self._phase_directory_matching(seed_df, directory_indexes, priority, total)
-        # Phase 1: Dedicated SoundCloud live check
+        if use_scheduler:
+            self._run_interleaved_sources(seed_df, fb_driver, total)
+        else:
+            # Phase 1: Dedicated SoundCloud live check
+            if self.enable_live_search:
+                self._phase_soundcloud(seed_df, total)
+            # Phase 2: General live lookup (BC + LF; SC mostly skipped since Phase 1 populated it)
+            if self.enable_live_search:
+                self._phase_live_lookup(seed_df, total)
+            # Phase 3: Facebook
+            if ENABLE_FACEBOOK_ENRICHMENT and fb_driver:
+                self._phase_facebook(seed_df, fb_driver, total)
+
+    def _run_interleaved_sources(self, seed_df, fb_driver, total):
+        """Interleave SC, LF (live lookup), and FB across rows to avoid bursts."""
+
+        rows = list(seed_df.index)
+        position_by_row = {row_idx: pos for pos, row_idx in enumerate(seed_df.index, start=1)}
+
+        def _row_label(row_idx: int) -> str:
+            pos = position_by_row.get(row_idx, row_idx)
+            return f"{pos}/{total}"
+
+        sources: List[SourceSpec] = []
+
         if self.enable_live_search:
-            self._phase_soundcloud(seed_df, total)
-        # Phase 2: General live lookup (BC + LF; SC mostly skipped since Phase 1 populated it)
-        if self.enable_live_search:
-            self._phase_live_lookup(seed_df, total)
-        # Phase 3: Facebook
+
+            def sc_available() -> Tuple[bool, Optional[str]]:
+                in_cd = self._sc_in_live_cooldown()
+                return (not in_cd, "cooldown" if in_cd else None)
+
+            def sc_run(row_idx: int) -> SourceResult:
+                ctx = self._build_row_context(seed_df, row_idx, position_by_row[row_idx], total)
+                if not ctx:
+                    return SourceResult()
+                self._init_row_enrichment_state()
+                sc_enriched, _ = self._enrich_row_sc_live(seed_df, row_idx, ctx)
+                return SourceResult(attempted=True, enriched=bool(sc_enriched))
+
+            sources.append(
+                SourceSpec(
+                    name="SC",
+                    rows=rows,
+                    run_row=sc_run,
+                    is_available=sc_available,
+                )
+            )
+
+            def lf_available() -> Tuple[bool, Optional[str]]:
+                in_cd = self._lf_in_cooldown()
+                return (not in_cd, "cooldown" if in_cd else None)
+
+            def lf_run(row_idx: int) -> SourceResult:
+                ctx = self._build_row_context(seed_df, row_idx, position_by_row[row_idx], total)
+                if not ctx:
+                    return SourceResult()
+                self._init_row_enrichment_state()
+                if self.max_live_searches > 0 and self.live_search_attempts >= self.max_live_searches:
+                    if not self._notified_limit:
+                        self.log_message.emit(
+                            "[Scheduler] live search limit reached; skipping remaining live lookups."
+                        )
+                        self._notified_limit = True
+                    return SourceResult()
+                ll_enriched, _ = self._enrich_row_live_lookup(seed_df, row_idx, ctx)
+                return SourceResult(attempted=True, enriched=bool(ll_enriched))
+
+            sources.append(
+                SourceSpec(
+                    name="LF",
+                    rows=rows,
+                    run_row=lf_run,
+                    is_available=lf_available,
+                )
+            )
+
         if ENABLE_FACEBOOK_ENRICHMENT and fb_driver:
-            self._phase_facebook(seed_df, fb_driver, total)
+
+            def fb_available() -> Tuple[bool, Optional[str]]:
+                return (True, None)
+
+            def fb_run(row_idx: int) -> SourceResult:
+                ctx = self._build_row_context(seed_df, row_idx, position_by_row[row_idx], total)
+                if not ctx:
+                    return SourceResult()
+                self._init_row_enrichment_state()
+                fb_enriched = self._enrich_row_facebook(seed_df, row_idx, fb_driver, ctx)
+                return SourceResult(attempted=True, enriched=bool(fb_enriched))
+
+            sources.append(
+                SourceSpec(
+                    name="FB",
+                    rows=rows,
+                    run_row=fb_run,
+                    is_available=fb_available,
+                )
+            )
+
+        if not sources:
+            return
+
+        scheduler = SourceDiversityScheduler(
+            sources,
+            row_label=_row_label,
+            log_fn=self.log_message.emit,
+        )
+        summary = scheduler.run()
+        for source_name in ("SC", "LF", "FB"):
+            if source_name in summary:
+                stats = summary[source_name]
+                self.log_message.emit(
+                    f"[Scheduler][Summary] {source_name} attempted={stats['attempted']} "
+                    f"enriched={stats['enriched']} skipped_cooldown={stats['skipped_cooldown']}"
+                )
 
     def _phase_directory_matching(self, seed_df, directory_indexes, priority, total):
         self.log_message.emit("[Enricher][Directory Phase] Starting...")
