@@ -128,6 +128,58 @@ class SoundCloudEngineSwitchTests(unittest.TestCase):
         self.assertEqual(calls["exec"], 1)
         self.assertIs(helper1, helper2)
 
+    def test_html_challenges_force_rss_only_without_fallback_block(self) -> None:
+        worker = self._make_worker()
+        worker.night_mode = True
+        worker._live_context = {"song_title": "", "location": "", "track": "", "genre": ""}
+
+        logs: list = []
+
+        class Log:
+            @staticmethod
+            def emit(msg, *args, **kwargs):
+                logs.append(str(msg))
+
+        worker.log_message = Log()
+
+        # Simulate prior html challenges triggering rss_only mode.
+        worker._sc_html_challenge_count = 2
+        worker._sc_enter_rss_only_mode(reason="consecutive_challenges")
+
+        # Avoid network: no candidates from search.
+        worker._night_sc_search_candidates = lambda *args, **kwargs: None
+
+        # RSS payload succeeds; no HTML fallback attempted.
+        payload = EnrichmentPayload(
+            socials=set(),
+            websites={"https://soundcloud.com/test-handle"},
+            emails=set(),
+            link_hubs=set(),
+            source_dir="soundcloud",
+            source_url="https://soundcloud.com/test-handle",
+            source_detail=_format_source_display("soundcloud_live"),
+        )
+        worker._sc_build_rss_payload = lambda handle, base_payload, row_idx=None: (payload, True, True, "rss_success")
+        worker._apply_payload_guarded = lambda *args, **kwargs: True
+        worker._finalize_night_sc = lambda *args, **kwargs: None
+
+        original_flags = enricher._SC_SHARED_ENGINE.get_run_flags
+        enricher._SC_SHARED_ENGINE.get_run_flags = lambda: {
+            "root_fetch_disabled": 0,
+            "tracks_api_blocked": 0,
+            "used_rss": 1,
+        }
+
+        df = pd.DataFrame([{"SoundCloud Link": "https://soundcloud.com/test-handle"}])
+        try:
+            result = worker._night_sc_attempt_row(df, 0, "Test Artist")
+        finally:
+            enricher._SC_SHARED_ENGINE.get_run_flags = original_flags
+
+        self.assertTrue(result)
+        self.assertTrue(any("rss_only=1" in msg for msg in logs))
+        self.assertFalse(any("fallback_blocked" in msg for msg in logs))
+
     def test_tracks_api_block_allows_html_fallback_by_default(self) -> None:
         worker = self._make_worker()
         worker.night_mode = True

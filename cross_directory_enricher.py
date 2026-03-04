@@ -4920,6 +4920,13 @@ class CrossDirectoryEnricherWorker(QThread):
             self._sc_html_challenge_count += 1
             self._night_sc_challenge_streak += 1
             if getattr(self, "_night_sc_challenge_streak", 0) >= SC_RSS_ONLY_CONSEC_CHALLENGES:
+                try:
+                    if not getattr(self, "_sc_rss_only_mode", False):
+                        self.log_message.emit(
+                            "[Night SC] forcing rss_only due to html challenges=%d" % int(self._sc_html_challenge_count)
+                        )
+                except Exception:
+                    pass
                 self._sc_enter_rss_only_mode(reason="consecutive_challenges")
         except Exception:
             pass
@@ -6293,11 +6300,7 @@ class CrossDirectoryEnricherWorker(QThread):
             tracks_api_blocked = int(flags.get("tracks_api_blocked", 0) or 0)
             allow_tracks_fallback = _sc_allow_fallback_on_tracks_api_block()
             tracks_blocking = tracks_api_blocked == 1 and not allow_tracks_fallback
-            engine_unstable = (
-                root_fetch_disabled == 1
-                or tracks_blocking
-                or getattr(self, "_sc_html_challenge_count", 0) > 0
-            )
+            engine_unstable = tracks_blocking
             fallback_allowed = (
                 not getattr(self, "_sc_rss_only_mode", False)
                 and not sc_fallback_used
@@ -6523,11 +6526,7 @@ class CrossDirectoryEnricherWorker(QThread):
         tracks_api_blocked = int(flags.get("tracks_api_blocked", 0) or 0)
         allow_tracks_fallback = _sc_allow_fallback_on_tracks_api_block()
         tracks_blocking = tracks_api_blocked == 1 and not allow_tracks_fallback
-        engine_unstable = (
-            root_fetch_disabled == 1
-            or tracks_blocking
-            or getattr(self, "_sc_html_challenge_count", 0) > 0
-        )
+        engine_unstable = tracks_blocking
         fallback_allowed = (
             not getattr(self, "_sc_rss_only_mode", False)
             and not sc_fallback_used
