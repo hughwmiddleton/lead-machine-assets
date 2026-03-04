@@ -56,6 +56,64 @@ def test_cookie_wall_fixture_returns_cookie_reason(monkeypatch):
     assert payload.get("socials") == {"instagram": "", "facebook": "", "twitter": "", "website": ""}
 
 
+def test_cookie_wall_with_spotify_generic_socials_is_filtered(monkeypatch):
+    fixture = Path("tests/fixtures/spotify_about_cookie_wall_socials.html").read_text(encoding="utf-8")
+    session = _DummySession()
+
+    def fake_fetch(url, **kwargs):
+        return {
+            "mode_used": "requests",
+            "status": 200,
+            "html": fixture,
+            "reason": "ok",
+            "final_url": url,
+        }
+
+    monkeypatch.setattr(sas, "fetch_html", fake_fetch)
+    html, meta = sas._fetch_artist_html(session, "https://open.spotify.com/artist/xyz", logger=None)
+    assert html == fixture
+
+    payload = sas._fetch_about_payload(session, "xyz", logger=None)
+    assert payload.get("reason") in {"cookie_wall_or_bot", "next_data_missing"}
+    assert payload.get("socials") == {"instagram": "", "facebook": "", "twitter": "", "website": ""}
+
+
+def test_cookie_wall_with_spotify_substring_handle_does_not_matter(monkeypatch):
+    fixture = Path("tests/fixtures/spotify_about_cookie_wall_spotify_substring.html").read_text(encoding="utf-8")
+    session = _DummySession()
+
+    def fake_fetch(url, **kwargs):
+        return {
+            "mode_used": "requests",
+            "status": 200,
+            "html": fixture,
+            "reason": "ok",
+            "final_url": url,
+        }
+
+    monkeypatch.setattr(sas, "fetch_html", fake_fetch)
+    payload = sas._fetch_about_payload(session, "xyz", logger=None)
+    assert payload.get("reason") in {"cookie_wall_or_bot", "next_data_missing"}
+    assert payload.get("socials") == {"instagram": "", "facebook": "", "twitter": "", "website": ""}
+
+
+def test_nextdata_with_spotify_website_is_filtered(monkeypatch):
+    fixture = Path("tests/fixtures/spotify_about_nextdata_spotify_site.html").read_text(encoding="utf-8")
+    session = _DummySession()
+
+    def fake_fetch(url, **kwargs):
+        return {
+            "mode_used": "requests",
+            "status": 200,
+            "html": fixture,
+            "reason": "ok",
+            "final_url": url,
+        }
+
+    monkeypatch.setattr(sas, "fetch_html", fake_fetch)
+    payload = sas._fetch_about_payload(session, "xyz", logger=None)
+    assert payload.get("socials") == {"instagram": "", "facebook": "", "twitter": "", "website": ""}
+    assert payload.get("reason") == "generic_spotify_socials_filtered"
 def test_consent_handler_marks_flags_once():
     calls = {"wait": 0, "click": 0}
 

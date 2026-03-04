@@ -130,6 +130,44 @@ def _empty_socials() -> Dict[str, str]:
     }
 
 
+def _url_path_endswith_handle(url: str, handle_set: set) -> bool:
+    if not url:
+        return False
+    try:
+        parsed = urlparse(url)
+        parts = [p for p in (parsed.path or "").split("/") if p]
+        if not parts:
+            return False
+        first = parts[0].lower()
+        return first in handle_set
+    except Exception:
+        return False
+
+
+def _is_spotify_generic_socials(socials: Dict[str, str]) -> bool:
+    if not socials:
+        return False
+    generic_domains = ("spotify.com", "open.spotify.com", "spotifyforvendors.com")
+    insta_handles = {"spotify", "spotifyartists", "spotifyaunz"}
+    fb_handles = {"spotify", "spotifyau", "spotifyaunz"}
+    tw_handles = {"spotify", "spotifyau", "spotifyartists"}
+
+    insta = socials.get("instagram") or ""
+    fb = socials.get("facebook") or ""
+    tw = socials.get("twitter") or ""
+    web = (socials.get("website") or "").lower()
+
+    if ("instagram.com" in insta.lower()) and _url_path_endswith_handle(insta, insta_handles):
+        return True
+    if ("facebook.com" in fb.lower()) and _url_path_endswith_handle(fb, fb_handles):
+        return True
+    if ("twitter.com" in tw.lower() or "x.com" in tw.lower()) and _url_path_endswith_handle(tw, tw_handles):
+        return True
+    if any(dom in web for dom in generic_domains):
+        return True
+    return False
+
+
 def _maybe_save_artifact(artist_id: str, html: str, fetch_info: Dict[str, Any]) -> None:
     if not _SPOTIFY_ABOUT_DEBUG_ARTIFACTS or not _SPOTIFY_ABOUT_ARTIFACT_DIR:
         return
@@ -417,13 +455,9 @@ def _fetch_about_payload(
         "primary_genre": "",
     }
 
-    html_socials = _extract_socials_from_soup(soup)
-    payload["socials"] = dict(html_socials)
-
     next_data = _extract_next_data_from_soup(soup)
     if not next_data:
         wall_reason = _detect_cookie_wall(html)
-        payload["socials"] = _fallback_socials_from_html(html, payload["socials"])
         payload["status"] = "non_actionable"
         payload["reason"] = wall_reason or "next_data_missing"
         page_title = _extract_title(html)
@@ -447,6 +481,14 @@ def _fetch_about_payload(
                     payload["socials"][key] = value
             payload["location"] = _extract_location_from_profile(profile)
             payload["primary_genre"] = _extract_primary_genre(profile)
+            if _is_spotify_generic_socials(payload["socials"]):
+                payload["socials"] = _empty_socials()
+                payload["reason"] = payload.get("reason") or "generic_spotify_socials_filtered"
+                _log(
+                    logger,
+                    f"[Spotify About] filtered generic Spotify socials for artist {artist_id} "
+                    f"mode={fetch_info.get('mode')} title={_extract_title(html) or ''}",
+                )
 
     _log_social_summary(logger, artist_id, payload.get("socials") or {})
     _maybe_save_artifact(artist_id, html, fetch_info)
