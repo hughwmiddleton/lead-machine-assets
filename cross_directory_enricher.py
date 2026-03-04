@@ -4455,13 +4455,22 @@ class CrossDirectoryEnricherWorker(QThread):
             if self.max_live_searches > 0 and self.live_search_attempts >= self.max_live_searches:
                 stop_reason = "max_live"
                 break
-            if self._sc_in_live_cooldown():
-                stop_reason = "cooldown"
-                break
             ctx = self._build_row_context(seed_df, row_idx, position, total)
             if not ctx:
                 continue
             processed_rows += 1
+            if self._sc_in_live_cooldown():
+                skipped_cooldown += 1
+                artist = ctx.get("artist") or "<unknown>"
+                expires = int(max(1.0, (self._sc_live_disabled_until - time.time())))
+                try:
+                    self.log_message.emit(
+                        f"[Enricher][SC] cooldown active; skipping row {position}/{total} '{artist}' expires_in={expires}s"
+                    )
+                except Exception:
+                    pass
+                self._set_platform_state("soundcloud", "skipped")
+                continue
             self._init_row_enrichment_state()
             if not _coerce_directory_value(seed_df.at[row_idx, "SoundCloud Link"]):
                 if getattr(self, "_sc_live_enrich_disabled", False):
@@ -4473,14 +4482,13 @@ class CrossDirectoryEnricherWorker(QThread):
         if stop_reason:
             reason_label = "cooldown" if stop_reason == "cooldown" else "max_live"
             self.log_message.emit(f"[Enricher][SC Phase] Stopped early: {reason_label}")
-            if stop_reason == "cooldown":
-                try:
-                    self.log_message.emit(
-                        "[Enricher][SC Phase] cooldown_summary: %s"
-                        % (self._sc_fail_stats_snapshot(),)
-                    )
-                except Exception:
-                    pass
+        if skipped_cooldown:
+            try:
+                self.log_message.emit(
+                    "[Enricher][SC Phase] cooldown_summary: %s" % (self._sc_fail_stats_snapshot(),)
+                )
+            except Exception:
+                pass
         self.log_message.emit(
             f"[Enricher][SC Phase] Completed {processed_rows} rows "
             f"(enriched={enriched_count}, skipped_cooldown={skipped_cooldown}, "

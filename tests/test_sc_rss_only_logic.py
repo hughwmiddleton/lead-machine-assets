@@ -1,4 +1,5 @@
 import time
+import pandas as pd
 
 from cross_directory_enricher import (
     CrossDirectoryEnricherWorker,
@@ -113,6 +114,59 @@ def test_rss_only_skips_live_search_engine_paths(monkeypatch):
     assert result is None
     assert called["people_search"] == 0  # guard prevented call
     assert w._sc_rss_only_engine_fetch_skips >= 1
+
+
+def test_sc_phase_continues_during_cooldown(monkeypatch):
+    w = _mk_worker()
+    w.enable_live_search = True
+    rows = 5
+    seed_df = pd.DataFrame(
+        {
+            "SoundCloud Link": [""] * rows,
+            "Artist Name": [f"Artist {i}" for i in range(rows)],
+        }
+    )
+
+    # Cooldown flags per row: False, True, True, False, False
+    cooldown_flags = [False, True, True, False, False]
+
+    def fake_cooldown(now=None):
+        return cooldown_flags.pop(0) if cooldown_flags else False
+
+    sc_calls = []
+
+    def fake_enrich(df, row_idx, ctx):
+        sc_calls.append(row_idx)
+        return (False, False)
+
+    logs = []
+
+    class Log:
+        @staticmethod
+        def emit(msg, *args, **kwargs):
+            logs.append(str(msg))
+
+    w.log_message = Log()
+    w._sc_in_live_cooldown = fake_cooldown
+    w._build_row_context = lambda df, row_idx, position, total: {
+        "artist": df.at[row_idx, "Artist Name"],
+        "position": position,
+        "total": total,
+        "spotify_id": "",
+    }
+    w._enrich_row_sc_live = fake_enrich
+
+    w._phase_soundcloud(seed_df, rows)
+
+    # Enrichment called only on non-cooldown rows (0,3,4).
+    assert sc_calls == [0, 3, 4]
+    # Summary reflects all rows processed and cooldown skips counted.
+    summary = [l for l in logs if "[Enricher][SC Phase] Completed" in l]
+    assert summary
+    assert "Completed 5 rows" in summary[-1]
+    assert "skipped_cooldown=2" in summary[-1]
+    # No early-stop log on cooldown.
+    assert not any("Stopped early: cooldown" in l for l in logs)
 
 
 def test_breaker_has_grace_period():
