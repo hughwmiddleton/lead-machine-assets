@@ -4293,16 +4293,16 @@ class CrossDirectoryEnricherWorker(QThread):
         self._phase_directory_matching(seed_df, directory_indexes, priority, total)
         if use_scheduler:
             self._run_interleaved_sources(seed_df, fb_driver, total)
-        else:
-            # Phase 1: Dedicated SoundCloud live check
-            if self.enable_live_search:
-                self._phase_soundcloud(seed_df, total)
-            # Phase 2: General live lookup (BC + LF; SC mostly skipped since Phase 1 populated it)
-            if self.enable_live_search:
-                self._phase_live_lookup(seed_df, total)
-            # Phase 3: Facebook
-            if ENABLE_FACEBOOK_ENRICHMENT and fb_driver:
-                self._phase_facebook(seed_df, fb_driver, total)
+            return
+        # Phase 1: Dedicated SoundCloud live check
+        if self.enable_live_search:
+            self._phase_soundcloud(seed_df, total)
+        # Phase 2: General live lookup (BC + LF; SC mostly skipped since Phase 1 populated it)
+        if self.enable_live_search:
+            self._phase_live_lookup(seed_df, total)
+        # Phase 3: Facebook
+        if ENABLE_FACEBOOK_ENRICHMENT and fb_driver:
+            self._phase_facebook(seed_df, fb_driver, total)
 
     def _run_interleaved_sources(self, seed_df, fb_driver, total):
         """Interleave SC, LF (live lookup), and FB across rows to avoid bursts."""

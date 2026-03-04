@@ -73,3 +73,32 @@ def test_scheduler_attempt_counts_match_rows():
     assert summary["LF"]["enriched"] == 2  # rows 6 and 8 (even idx) considered enriched
     assert summary["LF"]["skipped_cooldown"] == 0
 
+
+def test_scheduler_mode_skips_legacy_phases(monkeypatch):
+    # Build a worker instance without running QThread.__init__
+    from cross_directory_enricher import CrossDirectoryEnricherWorker
+    monkeypatch.setattr(CrossDirectoryEnricherWorker, "__init__", lambda self, *a, **k: None)
+    worker = CrossDirectoryEnricherWorker(None, None)
+    worker.enable_live_search = True
+    worker.log_message = type("Logger", (), {"emit": lambda *args, **kwargs: None})()
+
+    calls = {"dir": 0, "sc": 0, "lf": 0, "fb": 0, "sched": 0}
+
+    monkeypatch.setattr(worker, "_phase_directory_matching", lambda *a, **k: calls.__setitem__("dir", calls["dir"] + 1))
+    monkeypatch.setattr(worker, "_phase_soundcloud", lambda *a, **k: calls.__setitem__("sc", calls["sc"] + 1))
+    monkeypatch.setattr(worker, "_phase_live_lookup", lambda *a, **k: calls.__setitem__("lf", calls["lf"] + 1))
+    monkeypatch.setattr(worker, "_phase_facebook", lambda *a, **k: calls.__setitem__("fb", calls["fb"] + 1))
+    monkeypatch.setattr(worker, "_run_interleaved_sources", lambda *a, **k: calls.__setitem__("sched", calls["sched"] + 1))
+
+    monkeypatch.setenv("SOURCE_DIVERSITY_SCHEDULER", "1")
+
+    # Minimal inputs: empty dataframe and stubs for unused params.
+    import pandas as pd
+    seed_df = pd.DataFrame()
+    worker._run_source_phased(seed_df, directory_indexes={}, priority=[], fb_driver=None, total=0)
+
+    assert calls["dir"] == 1
+    assert calls["sched"] == 1
+    assert calls["sc"] == 0
+    assert calls["lf"] == 0
+    assert calls["fb"] == 0
