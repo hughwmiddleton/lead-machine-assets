@@ -358,6 +358,38 @@ def _sc_stat_inc(key: str, n: int = 1):
         _SC_RUN_STATS[key] = int(_SC_RUN_STATS.get(key, 0)) + int(n)
 
 
+def format_run_stats_summary(stats: Dict[str, int]) -> str:
+    """
+    Helper for diagnostics: build a single-line summary of run stats.
+    """
+    stats = stats or {}
+    return (
+        "handles={handles_total} "
+        "actionable={actionable_written} "
+        "about_attempts={about_attempts} "
+        "about_challenges={about_challenges} "
+        "about_disabled={about_disabled} "
+        "root_403={root_403} "
+        "tracks_api_401={tracks_api_401} "
+        "tracks_api_403={tracks_api_403} "
+        "tracks_api_blocked={tracks_api_blocked} "
+        "rss_used={rss_used} "
+        "api_user_fallback_used={api_user_fallback_used}"
+    ).format(
+        handles_total=stats.get("handles_total", 0),
+        actionable_written=stats.get("actionable_written", 0),
+        about_attempts=stats.get("about_attempts", 0),
+        about_challenges=stats.get("about_challenges", 0),
+        about_disabled=stats.get("about_disabled", 0),
+        root_403=stats.get("root_403", 0),
+        tracks_api_401=stats.get("tracks_api_401", 0),
+        tracks_api_403=stats.get("tracks_api_403", 0),
+        tracks_api_blocked=stats.get("tracks_api_blocked", 0),
+        rss_used=stats.get("rss_used", 0),
+        api_user_fallback_used=stats.get("api_user_fallback_used", 0),
+    )
+
+
 class SoundCloudAboutCache:
     def __init__(self, path: str = SC_CACHE_PATH):
         self.path = path
@@ -532,8 +564,12 @@ def _sc_fetch_latest_track_metadata(session, client_id: str, user_id, handle: st
     params = {"client_id": client_id, "limit": 1, "linked_partitioning": 1, "order": "published_at"}
     try:
         resp = session.get(api_url, params=params, timeout=SC_REQUEST_TIMEOUT, headers=_rand_headers())
-        if resp.status_code == 403:
-            _sc_stat_inc("tracks_api_403")
+        if resp.status_code in (401, 403):
+            if resp.status_code == 403:
+                _sc_stat_inc("tracks_api_403")
+            if resp.status_code == 401:
+                _sc_stat_inc("tracks_api_401")
+            _sc_stat_inc("tracks_api_blocked")
             return rss_track or {}
         resp.raise_for_status()
         payload = resp.json() or {}
@@ -1437,7 +1473,13 @@ class SoundCloudEngine:
         return {
             "root_fetch_disabled": int(bool(_SC_ROOT_FORBIDDEN)),
             "about_disabled": int(bool(_SC_ABOUT_DISABLED)),
-            "tracks_api_blocked": int(bool(stats.get("tracks_api_403", 0))),
+            "tracks_api_blocked": int(
+                bool(
+                    stats.get("tracks_api_blocked", 0)
+                    or stats.get("tracks_api_403", 0)
+                    or stats.get("tracks_api_401", 0)
+                )
+            ),
             "used_user_api": int(bool(stats.get("api_user_fallback_used", 0))),
             "used_rss": int(bool(stats.get("rss_used", 0))),
         }
@@ -1451,7 +1493,9 @@ class SoundCloudEngine:
             "about_challenges": 0,
             "about_disabled": 0,
             "root_403": 0,
+            "tracks_api_blocked": 0,
             "tracks_api_403": 0,
+            "tracks_api_401": 0,
             "api_user_fallback_used": 0,
             "rss_used": 0,
         }

@@ -232,9 +232,22 @@ SC_CHALLENGE_ACTIVE_SECONDS = int(os.getenv("SC_CHALLENGE_ACTIVE_SECONDS", "300"
 SC_BREAKER_MIN_ROWS = int(os.getenv("SC_BREAKER_MIN_ROWS", "12"))
 SC_RSS_FAIL_BREAKER_THRESHOLD = int(os.getenv("SC_RSS_FAIL_BREAKER_THRESHOLD", "4"))
 SC_RSS_BREAKER_COOLDOWN_SECONDS = int(os.getenv("SC_RSS_BREAKER_COOLDOWN_SECONDS", "120"))
+SC_ALLOW_FALLBACK_ON_TRACKS_401_403 = int(os.getenv("SC_ALLOW_FALLBACK_ON_TRACKS_401_403", "1") or "1")
 NIGHT_SC_BUDGET_SECONDS_DEFAULT = 6
 NIGHT_SC_MAX_FETCHES_DEFAULT = 3
 _NIGHT_SC_PIPELINE_LOGGED = False
+_SC_TRACKS_API_FALLBACK_LOGGED = False
+
+
+def _sc_allow_fallback_on_tracks_api_block() -> bool:
+    """
+    Runtime check for allowing HTML/about fallback when the tracks API is blocked.
+    Reads the env var each time so operators can toggle without reloads.
+    """
+    try:
+        return int(os.getenv("SC_ALLOW_FALLBACK_ON_TRACKS_401_403", str(SC_ALLOW_FALLBACK_ON_TRACKS_401_403)) or "1") != 0
+    except Exception:
+        return True
 
 
 def _sc_classify_rss_reason(reason: str) -> str:
@@ -6096,6 +6109,7 @@ class CrossDirectoryEnricherWorker(QThread):
         artist_name: str,
         spotify_id: str = "",
     ) -> bool:
+        global _SC_TRACKS_API_FALLBACK_LOGGED
         try:
             self._sc_rows_seen += 1
             if getattr(self, "_sc_rss_only_mode", False):
@@ -6277,9 +6291,11 @@ class CrossDirectoryEnricherWorker(QThread):
                 flags = {}
             root_fetch_disabled = int(flags.get("root_fetch_disabled", 0) or 0)
             tracks_api_blocked = int(flags.get("tracks_api_blocked", 0) or 0)
+            allow_tracks_fallback = _sc_allow_fallback_on_tracks_api_block()
+            tracks_blocking = tracks_api_blocked == 1 and not allow_tracks_fallback
             engine_unstable = (
                 root_fetch_disabled == 1
-                or tracks_api_blocked == 1
+                or tracks_blocking
                 or getattr(self, "_sc_html_challenge_count", 0) > 0
             )
             fallback_allowed = (
@@ -6288,6 +6304,32 @@ class CrossDirectoryEnricherWorker(QThread):
                 and not attempt.challenge
                 and not engine_unstable
             )
+            if os.getenv("SC_DEBUG_FALLBACK_GATE") == "1":
+                try:
+                    self.log_message.emit(
+                        "[SC DEBUG] row=%s flags={ root_fetch_disabled=%d, tracks_api_blocked=%d, allow_tracks_fallback=%d, tracks_blocking=%d, html_challenges=%d, engine_unstable=%d, fallback_allowed=%d, rss_first_attempted=%d }"
+                        % (
+                            row_idx,
+                            root_fetch_disabled,
+                            tracks_api_blocked,
+                            int(bool(allow_tracks_fallback)),
+                            int(bool(tracks_blocking)),
+                            int(getattr(self, "_sc_html_challenge_count", 0)),
+                            int(bool(engine_unstable)),
+                            int(bool(fallback_allowed)),
+                            int(bool(sc_rss_first_attempted)),
+                        )
+                    )
+                except Exception:
+                    pass
+            if tracks_api_blocked and allow_tracks_fallback and fallback_allowed and not _SC_TRACKS_API_FALLBACK_LOGGED:
+                try:
+                    self.log_message.emit(
+                        "[SC] tracks API blocked (401/403); continuing with HTML/about fallback (SC_ALLOW_FALLBACK_ON_TRACKS_401_403=1)"
+                    )
+                except Exception:
+                    pass
+                _SC_TRACKS_API_FALLBACK_LOGGED = True
             if sc_rss_first_attempted and not fallback_allowed and engine_unstable:
                 try:
                     self.log_message.emit(
@@ -6479,9 +6521,11 @@ class CrossDirectoryEnricherWorker(QThread):
             flags = {}
         root_fetch_disabled = int(flags.get("root_fetch_disabled", 0) or 0)
         tracks_api_blocked = int(flags.get("tracks_api_blocked", 0) or 0)
+        allow_tracks_fallback = _sc_allow_fallback_on_tracks_api_block()
+        tracks_blocking = tracks_api_blocked == 1 and not allow_tracks_fallback
         engine_unstable = (
             root_fetch_disabled == 1
-            or tracks_api_blocked == 1
+            or tracks_blocking
             or getattr(self, "_sc_html_challenge_count", 0) > 0
         )
         fallback_allowed = (
@@ -6490,6 +6534,32 @@ class CrossDirectoryEnricherWorker(QThread):
             and not attempt.challenge
             and not engine_unstable
         )
+        if os.getenv("SC_DEBUG_FALLBACK_GATE") == "1":
+            try:
+                self.log_message.emit(
+                    "[SC DEBUG] row=%s flags={ root_fetch_disabled=%d, tracks_api_blocked=%d, allow_tracks_fallback=%d, tracks_blocking=%d, html_challenges=%d, engine_unstable=%d, fallback_allowed=%d, rss_first_attempted=%d }"
+                    % (
+                        row_idx,
+                        root_fetch_disabled,
+                        tracks_api_blocked,
+                        int(bool(allow_tracks_fallback)),
+                        int(bool(tracks_blocking)),
+                        int(getattr(self, "_sc_html_challenge_count", 0)),
+                        int(bool(engine_unstable)),
+                        int(bool(fallback_allowed)),
+                        int(bool(sc_rss_first_attempted)),
+                    )
+                )
+            except Exception:
+                pass
+        if tracks_api_blocked and allow_tracks_fallback and fallback_allowed and not _SC_TRACKS_API_FALLBACK_LOGGED:
+            try:
+                self.log_message.emit(
+                    "[SC] tracks API blocked (401/403); continuing with HTML/about fallback (SC_ALLOW_FALLBACK_ON_TRACKS_401_403=1)"
+                )
+            except Exception:
+                pass
+            _SC_TRACKS_API_FALLBACK_LOGGED = True
         if sc_rss_first_attempted and not fallback_allowed and engine_unstable:
             try:
                 self.log_message.emit(

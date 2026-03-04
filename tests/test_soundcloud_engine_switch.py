@@ -22,6 +22,7 @@ class SoundCloudEngineSwitchTests(unittest.TestCase):
         enricher._SC_HEALTHCHECK_LOGGED = False
         enricher._T007_SC_HELPER = None
         enricher._T007_SC_HELPER_LOADED = False
+        enricher._SC_TRACKS_API_FALLBACK_LOGGED = False
 
     def _make_worker(self) -> CrossDirectoryEnricherWorker:
         worker = CrossDirectoryEnricherWorker("seed.csv", "output.csv")
@@ -126,3 +127,50 @@ class SoundCloudEngineSwitchTests(unittest.TestCase):
         self.assertEqual(calls["spec"], 1)
         self.assertEqual(calls["exec"], 1)
         self.assertIs(helper1, helper2)
+
+    def test_tracks_api_block_allows_html_fallback_by_default(self) -> None:
+        worker = self._make_worker()
+        worker.night_mode = True
+        worker._live_context = {"song_title": "", "location": "", "track": "", "genre": ""}
+        worker._night_sc_cache_lookup = lambda handle, profile_url: None
+
+        # Simulate RSS attempt failing but available.
+        worker._sc_build_rss_payload = lambda handle, base_payload, row_idx=None: (None, False, True, "rss_fail")
+
+        fallback_called = {"count": 0}
+
+        def fake_fallback(url, attempt):
+            fallback_called["count"] += 1
+            return (
+                EnrichmentPayload(
+                    socials=set(),
+                    websites=set(),
+                    emails=set(),
+                    link_hubs=set(),
+                    source_dir="soundcloud",
+                    source_url=url,
+                    source_detail=_format_source_display("soundcloud_live"),
+                ),
+                True,
+            )
+
+        worker._night_sc_fetch_profile_payload = fake_fallback
+        worker._apply_payload_guarded = lambda *args, **kwargs: True
+        worker._finalize_night_sc = lambda *args, **kwargs: None
+
+        original_get_flags = enricher._SC_SHARED_ENGINE.get_run_flags
+        enricher._SC_SHARED_ENGINE.get_run_flags = lambda: {
+            "root_fetch_disabled": 0,
+            "tracks_api_blocked": 1,
+            "used_rss": 0,
+        }
+
+        df = pd.DataFrame([{"SoundCloud Link": "https://soundcloud.com/test-handle"}])
+        try:
+            with mock.patch.dict(os.environ, {"SC_ALLOW_FALLBACK_ON_TRACKS_401_403": "1"}):
+                result = worker._night_sc_attempt_row(df, 0, "Test Artist")
+        finally:
+            enricher._SC_SHARED_ENGINE.get_run_flags = original_get_flags
+
+        self.assertTrue(result)
+        self.assertGreaterEqual(fallback_called["count"], 1)

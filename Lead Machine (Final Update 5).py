@@ -7681,7 +7681,9 @@ def scrape_soundcloud(website_url, seed_tags=None, pages_per_tag=SOUNDCLOUD_PAGE
             f"about_challenges={stats.get('about_challenges', 0)} "
             f"about_disabled={1 if _SC_ABOUT_DISABLED else 0} "
             f"root_403={stats.get('root_403', 0)} "
+            f"tracks_api_401={stats.get('tracks_api_401', 0)} "
             f"tracks_api_403={stats.get('tracks_api_403', 0)} "
+            f"tracks_api_blocked={stats.get('tracks_api_blocked', 0)} "
             f"rss_used={stats.get('rss_used', 0)} "
             f"api_user_fallback_used={stats.get('api_user_fallback_used', 0)}"
         )

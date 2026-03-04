@@ -101,6 +101,8 @@ export NIGHTMODE_SC_ENGINE=1
 
 # Make sure About/links scraping is allowed (do NOT set this to 1)
 export SC_ADAPTIVE_ABOUT_DISABLE=0
+export SC_DEBUG_FALLBACK_GATE=1
+export SC_ALLOW_FALLBACK_ON_TRACKS_401_403=1
 
 # Working client_id from Chrome devtools
 export SC_CLIENT_ID="1lzwHiVxAHeYKAMqN0IIGD3ZARgJy2kl"
