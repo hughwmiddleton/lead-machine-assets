@@ -5,7 +5,9 @@ from cross_directory_enricher import (
     SC_BREAKER_MIN_ROWS,
     SC_RSS_FAIL_BREAKER_THRESHOLD,
     SC_RSS_ONLY_CONSEC_CHALLENGES,
+    SC_RSS_ONLY_CONSEC_403,
     SC_RSS_ONLY_COOLDOWN_SECONDS,
+    _NightSCAttempt,
 )
 
 
@@ -54,6 +56,63 @@ def test_rss_only_cooldown_exits_mode():
     w._sc_rss_only_entered_at = time.time() - (SC_RSS_ONLY_COOLDOWN_SECONDS + 1)
     w._sc_maybe_exit_rss_only(row_idx=6)
     assert w._sc_rss_only_mode is False
+
+
+def test_consecutive_403_triggers_rss_only_mode():
+    w = _mk_worker()
+    for i in range(SC_RSS_ONLY_CONSEC_403):
+        w._sc_record_403(row_idx=i, source="test")
+    assert w._sc_rss_only_mode is True
+    assert w._sc_consecutive_403 >= SC_RSS_ONLY_CONSEC_403
+    assert w._sc_rss_only_entries_consecutive_403 == 1
+
+
+def test_consecutive_403_does_not_overcount_entries():
+    w = _mk_worker()
+    for i in range(SC_RSS_ONLY_CONSEC_403):
+        w._sc_record_403(row_idx=i, source="test")
+    assert w._sc_rss_only_entries_consecutive_403 == 1
+    # Additional 403s while already in rss_only should not increment entries counter.
+    for i in range(2):
+        w._sc_record_403(row_idx=100 + i, source="test")
+    assert w._sc_rss_only_entries_consecutive_403 == 1
+
+
+def test_rss_only_skips_engine_fetch():
+    w = _mk_worker()
+    w._sc_enter_rss_only_mode(reason="test")
+    # Fake session that would raise if called.
+    class FakeSession:
+        def __init__(self):
+            self.calls = 0
+
+        def get(self, *args, **kwargs):
+            self.calls += 1
+            raise AssertionError("engine fetch should be skipped in rss_only")
+
+    w.session = FakeSession()
+    attempt = _NightSCAttempt()
+    status, body = w._night_sc_http_get("https://soundcloud.com", "profile_fetch", attempt)
+    assert status is None
+    assert body == ""
+    assert w.session.calls == 0
+    assert w._sc_rss_only_engine_fetch_skips >= 1
+
+
+def test_rss_only_skips_live_search_engine_paths(monkeypatch):
+    w = _mk_worker()
+    w._sc_enter_rss_only_mode(reason="test")
+    called = {"people_search": 0}
+
+    def fake_people_search(query):
+        called["people_search"] += 1
+        return []
+
+    monkeypatch.setattr(w, "_soundcloud_people_search_candidates", fake_people_search)
+    result = w._live_search_soundcloud("Artist")
+    assert result is None
+    assert called["people_search"] == 0  # guard prevented call
+    assert w._sc_rss_only_engine_fetch_skips >= 1
 
 
 def test_breaker_has_grace_period():

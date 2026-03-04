@@ -226,6 +226,7 @@ _SC_CHALLENGE_TOKENS = (
     "are you a human",
 )
 SC_RSS_ONLY_CONSEC_CHALLENGES = int(os.getenv("SC_RSS_ONLY_CONSEC_CHALLENGES", "2"))
+SC_RSS_ONLY_CONSEC_403 = int(os.getenv("SC_RSS_ONLY_CONSEC_403", "3"))
 SC_RSS_ONLY_COOLDOWN_SECONDS = int(os.getenv("SC_RSS_ONLY_COOLDOWN_SECONDS", "300"))
 SC_RSS_ONLY_COOLDOWN_ROWS = int(os.getenv("SC_RSS_ONLY_COOLDOWN_ROWS", "15"))
 SC_RSS_ONLY_SUCCESS_RESET = int(os.getenv("SC_RSS_ONLY_SUCCESS_RESET", "2"))
@@ -3702,10 +3703,13 @@ class CrossDirectoryEnricherWorker(QThread):
         self._sc_rss_fail_streak_nofeed: int = 0
         self._sc_rss_fail_counts: Counter = Counter()
         self._sc_rss_fail_last_reasons = deque(maxlen=5)
+        self._sc_consecutive_403: int = 0
         self._sc_rss_only_logged: bool = False
         self._sc_rss_only_entered_at: float = 0.0
         self._sc_rss_only_rows: int = 0
         self._sc_rss_successes: int = 0
+        self._sc_rss_only_entries_consecutive_403: int = 0
+        self._sc_rss_only_engine_fetch_skips: int = 0
         self._sc_rows_seen: int = 0
         self._sc_last_challenge_at: float = 0.0
         # Bandcamp run-state
@@ -3961,6 +3965,15 @@ class CrossDirectoryEnricherWorker(QThread):
                 if self._bc_search_breaker_tripped:
                     summary_parts.append(f"breaker=1 reason={self._bc_search_breaker_reason or 'unknown'}")
                 self.log_message.emit(f"[Enricher] Bandcamp summary: " + " ".join(summary_parts))
+            # SoundCloud RSS-only summary (low noise)
+            if getattr(self, "_sc_rss_only_entries_consecutive_403", 0) or getattr(self, "_sc_rss_only_engine_fetch_skips", 0):
+                sc_summary_parts = []
+                if getattr(self, "_sc_rss_only_entries_consecutive_403", 0):
+                    sc_summary_parts.append(f"rss_only_entries_consecutive_403={self._sc_rss_only_entries_consecutive_403}")
+                if getattr(self, "_sc_rss_only_engine_fetch_skips", 0):
+                    sc_summary_parts.append(f"engine_fetch_skips={self._sc_rss_only_engine_fetch_skips}")
+                if sc_summary_parts:
+                    self.log_message.emit("[Enricher] SoundCloud summary: " + " ".join(sc_summary_parts))
             seed_df = self._ensure_bandcamp_output_columns(seed_df)
             _ensure_parent_dir(self.output_csv_path)
             try:
@@ -4966,6 +4979,7 @@ class CrossDirectoryEnricherWorker(QThread):
             self._sc_rss_fail_counts = Counter()
             if hasattr(self, "_sc_rss_fail_last_reasons"):
                 self._sc_rss_fail_last_reasons.clear()
+            self._sc_reset_403_streak()
             return False
         return bool(disabled_until and now < disabled_until)
 
@@ -4986,27 +5000,27 @@ class CrossDirectoryEnricherWorker(QThread):
         except Exception:
             pass
 
-    def _sc_enter_rss_only_mode(self, reason: str = "html_challenges", row_idx: Optional[int] = None) -> None:
+    def _sc_enter_rss_only_mode(self, reason: str = "html_challenges", row_idx: Optional[int] = None) -> bool:
         if getattr(self, "_sc_rss_only_mode", False):
-            return
+            return False
         self._sc_rss_only_mode = True
         self._sc_rss_only_entered_at = time.time()
         self._sc_rss_only_rows = 0
         self._sc_rss_successes = 0
         try:
             if not getattr(self, "_sc_rss_only_logged", False):
+                row_label = row_idx if row_idx is not None else "<unknown>"
                 self.log_message.emit(
-                    "[Night SC] Entering RSS-only mode (reason=%s row=%s challenges=%d streak=%d)"
-                    % (
-                        reason,
-                        row_idx if row_idx is not None else "<unknown>",
-                        int(getattr(self, "_sc_html_challenge_count", 0)),
-                        int(getattr(self, "_night_sc_challenge_streak", 0)),
-                    )
+                    f"[Night SC] Entering RSS-only mode (reason={reason} row={row_label} "
+                    f"challenges={int(getattr(self, '_sc_html_challenge_count', 0))} "
+                    f"html_streak={int(getattr(self, '_night_sc_challenge_streak', 0))} "
+                    f"api_403_streak={int(getattr(self, '_sc_consecutive_403', 0))} "
+                    f"threshold_403={int(SC_RSS_ONLY_CONSEC_403)})"
                 )
                 self._sc_rss_only_logged = True
         except Exception:
             pass
+        return True
 
     def _sc_exit_rss_only_mode(self, reason: str = "cooldown_elapsed", row_idx: Optional[int] = None) -> None:
         if not getattr(self, "_sc_rss_only_mode", False):
@@ -5034,6 +5048,7 @@ class CrossDirectoryEnricherWorker(QThread):
         self._sc_rss_fail_streak_nofeed = 0
         self._sc_rss_fail_counts = Counter()
         self._sc_rss_fail_last_reasons.clear()
+        self._sc_reset_403_streak()
 
     def _sc_maybe_exit_rss_only(self, row_idx: Optional[int] = None) -> None:
         if not getattr(self, "_sc_rss_only_mode", False):
@@ -5060,6 +5075,25 @@ class CrossDirectoryEnricherWorker(QThread):
             f"counts={counts_summary} last={last_reasons}"
         )
 
+    def _sc_reset_403_streak(self) -> None:
+        """Reset consecutive 403 counter after a successful or non-403 outcome."""
+        self._sc_consecutive_403 = 0
+
+    def _sc_record_403(self, row_idx: Optional[int] = None, source: str = "unknown") -> None:
+        """
+        Track consecutive 403/blocked responses from SC engine/profile fetches.
+        Enter RSS-only mode when the streak reaches the configured threshold.
+        """
+        if getattr(self, "_sc_rss_only_mode", False):
+            return
+        self._sc_consecutive_403 += 1
+        if getattr(self, "_sc_consecutive_403", 0) >= SC_RSS_ONLY_CONSEC_403:
+            entered = self._sc_enter_rss_only_mode(
+                reason="consecutive_403",
+                row_idx=row_idx,
+            )
+            if entered:
+                self._sc_rss_only_entries_consecutive_403 += 1
     def _sc_record_html_challenge(self) -> None:
         try:
             now = time.time()
@@ -5843,6 +5877,13 @@ class CrossDirectoryEnricherWorker(QThread):
             return (None, "")
         if getattr(self, "_sc_rss_only_mode", False):
             attempt.reason = attempt.reason or "rss_only_mode"
+            self._sc_rss_only_engine_fetch_skips += 1
+            try:
+                self.log_message.emit(
+                    "[Night SC] rss_only=1 -> skipping engine/profile fetch label=%s" % (label,)
+                )
+            except Exception:
+                pass
             return (None, "")
         if not attempt.note_fetch():
             return (None, "")
@@ -6103,6 +6144,13 @@ class CrossDirectoryEnricherWorker(QThread):
             attempt.profile_source = "rss_only"
             attempt.challenge = False
             attempt.reason = attempt.reason or "rss_only_mode"
+            self._sc_rss_only_engine_fetch_skips += 1
+            try:
+                self.log_message.emit(
+                    "[Night SC] rss_only=1 -> skipping profile fetch url=%s" % (profile_url or "<missing>",)
+                )
+            except Exception:
+                pass
             return (None, False)
         handle = _sc_handle_from_profile_url(profile_url) if profile_url else ""
         engine_enabled = _night_sc_engine_enabled(getattr(self, "night_mode", False)) and handle
@@ -6967,6 +7015,11 @@ class CrossDirectoryEnricherWorker(QThread):
             reason = "no_match"
         attempt.status = status
         attempt.reason = reason
+        # 403 streak tracking for RSS-only guardrail (API/profile failures).
+        if attempt.saw_403:
+            self._sc_record_403(row_idx=row_idx, source=attempt.profile_source or attempt.candidate_source or "unknown")
+        else:
+            self._sc_reset_403_streak()
         self._write_sc_status_columns(df, row_idx, status, reason, attempt.fetches, attempt.elapsed_ms())
         if getattr(self, "night_mode", False):
             try:
@@ -7015,6 +7068,16 @@ class CrossDirectoryEnricherWorker(QThread):
             pass
         self._cache_night_sc_snapshot(attempt, status, reason, effective_payload)
     def _live_search_soundcloud(self, artist_name: str) -> Optional[EnrichmentPayload]:
+        if getattr(self, "_sc_rss_only_mode", False):
+            self._sc_rss_only_engine_fetch_skips += 1
+            try:
+                self.log_message.emit(
+                    "[Enricher][SC] rss_only=1 -> skipping live SoundCloud search for '%s'." % (artist_name,)
+                )
+            except Exception:
+                pass
+            self._set_platform_state("soundcloud", "skipped")
+            return None
         if getattr(self, "_sc_live_enrich_disabled", False):
             reason = self._sc_live_enrich_disabled_reason or "first_challenge_page"
             self.log_message.emit(
