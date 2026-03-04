@@ -10,6 +10,7 @@ Return schema:
         "status": int | None,
         "final_url": str,
         "html": str,
+        "document_html": str | None,
         "mode_used": "requests" | "playwright",
         "reason": "ok" | "status_403" | "status_406" | "status_429" |
                    "status_503" | "soft_block" | "missing_selectors" |
@@ -210,7 +211,19 @@ def _playwright_fetch_impl(
     page = jb.context.new_page()
     jb.pages_used += 1
     try:
-        page.goto(url, wait_until="domcontentloaded", timeout=timeout_s * 1000)
+        response = page.goto(url, wait_until="domcontentloaded", timeout=timeout_s * 1000)
+        document_html = ""
+        try:
+            if response is not None:
+                document_html = response.text() or ""
+        except Exception:
+            try:
+                if response is not None:
+                    body_bytes = response.body()
+                    if body_bytes:
+                        document_html = body_bytes.decode("utf-8", errors="ignore")
+            except Exception:
+                pass
         if page_handler:
             try:
                 page_handler(page)
@@ -219,7 +232,7 @@ def _playwright_fetch_impl(
                 pass
         html = page.content()
         final_url = page.url
-        return {"html": html, "final_url": final_url}
+        return {"html": html, "document_html": document_html, "final_url": final_url}
     finally:
         try:
             page.close()
@@ -276,16 +289,19 @@ def fetch_html(
     reason = "ok"
     mode_used = "requests"
     domain = urlparse(url).netloc.lower()
+    document_html = ""
 
     try:
         resp = sess.get(url, timeout=timeout_s, allow_redirects=True)
         status = getattr(resp, "status_code", None)
         final_url = getattr(resp, "url", url)
         html = resp.text or ""
+        document_html = html
     except Exception:
         reason = "requests_error"
         status = None
         html = ""
+        document_html = ""
 
     trigger_reason = None
     if status in {403, 406, 429, 503}:
@@ -305,6 +321,7 @@ def fetch_html(
             "status": status,
             "final_url": final_url,
             "html": html,
+            "document_html": document_html or html or "",
             "mode_used": mode_used,
             "reason": reason,
             "elapsed_ms": elapsed_ms,
@@ -326,6 +343,7 @@ def fetch_html(
                 # Support legacy monkeypatches without kwarg support.
                 pw_result = _playwright_fetch(url, job_id, timeout_s)
             html = pw_result.get("html", "")
+            document_html = pw_result.get("document_html", document_html)
             final_url = pw_result.get("final_url", final_url)
             mode_used = "playwright"
             reason = trigger_reason
@@ -353,6 +371,7 @@ def fetch_html(
         "status": status,
         "final_url": final_url,
         "html": html or "",
+        "document_html": document_html or html or "",
         "mode_used": mode_used,
         "reason": reason,
         "elapsed_ms": elapsed_ms,

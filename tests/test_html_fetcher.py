@@ -122,3 +122,18 @@ def test_playwright_status_preserved_when_empty(monkeypatch):
     assert result["mode_used"] == "playwright"
     assert result["html"] == ""
     assert result["status"] == 406
+
+
+def test_playwright_returns_document_html(monkeypatch):
+    session = _DummySession(lambda url, *_: _DummyResp(403, "blocked", url))
+
+    def fake_pw(url, job_id, timeout_s, **kwargs):
+        return {
+            "html": "<html>page</html>",
+            "document_html": "<html>document</html>",
+            "final_url": url + "/pw",
+        }
+
+    monkeypatch.setattr(html_fetcher, "_playwright_fetch", fake_pw)
+    result = html_fetcher.fetch_html("https://example.com", session=session, directory="test")
+    assert result["document_html"] == "<html>document</html>"

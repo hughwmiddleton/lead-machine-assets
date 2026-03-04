@@ -90,6 +90,7 @@ def _env_true(name: str, default: bool = False) -> bool:
 
 DEBUG_SPOTIFY_ABOUT = _env_true("SPOTIFY_ABOUT_DEBUG", False)
 _DEBUG_SPOTIFY_ABOUT_ONCE = False
+_SPOTIFY_ABOUT_ALWAYS_ARTIFACTS = _env_true("SPOTIFY_ABOUT_ALWAYS_ARTIFACTS", False)
 
 
 # Spotify-only persistent Playwright profile (opt-in, safe default inside repo)
@@ -101,6 +102,16 @@ _SPOTIFY_PW_PROFILE_DIR = os.environ.get("SPOTIFY_PW_PROFILE_DIR") or os.path.ab
 _SPOTIFY_ABOUT_DEBUG_ARTIFACTS = _env_true("SPOTIFY_ABOUT_DEBUG_ARTIFACTS", False)
 _SPOTIFY_ABOUT_ARTIFACT_DIR = os.environ.get("SPOTIFY_ABOUT_ARTIFACT_DIR")
 CONSENT_TIMEOUT_MS = 1800
+_DEFAULT_NEXTDATA_WAIT_MS = 2500
+try:
+    _parsed_wait = int(os.environ.get("SPOTIFY_NEXTDATA_WAIT_MS", "") or 0)
+    if _parsed_wait > 0:
+        _DEFAULT_NEXTDATA_WAIT_MS = max(500, min(_parsed_wait, 6000))
+except Exception:
+    pass
+
+SPOTIFY_NEXTDATA_WAIT_MS = _DEFAULT_NEXTDATA_WAIT_MS
+SPOTIFY_NEXTDATA_MAX_RETRIES = 1
 
 
 def _log(logger: Optional[LoggerFn], message: str) -> None:
@@ -169,7 +180,9 @@ def _is_spotify_generic_socials(socials: Dict[str, str]) -> bool:
 
 
 def _maybe_save_artifact(artist_id: str, html: str, fetch_info: Dict[str, Any]) -> None:
-    if not _SPOTIFY_ABOUT_DEBUG_ARTIFACTS or not _SPOTIFY_ABOUT_ARTIFACT_DIR:
+    always = _SPOTIFY_ABOUT_ALWAYS_ARTIFACTS
+    debug_flag = _SPOTIFY_ABOUT_DEBUG_ARTIFACTS
+    if not (_SPOTIFY_ABOUT_ARTIFACT_DIR and (debug_flag or always or fetch_info.get("force_artifacts"))):
         return
     try:
         os.makedirs(_SPOTIFY_ABOUT_ARTIFACT_DIR, exist_ok=True)
@@ -177,6 +190,45 @@ def _maybe_save_artifact(artist_id: str, html: str, fetch_info: Dict[str, Any]) 
         with open(snippet_path, "w", encoding="utf-8") as fh:
             fh.write(f"final_url={fetch_info.get('final_url','')}\n")
             fh.write(html[:5000])
+    except Exception:
+        pass
+
+
+def _save_missing_nextdata_artifacts(
+    artist_id: str,
+    page_html: str,
+    document_html: str,
+    fetch_info: Dict[str, Any],
+    *,
+    page_title: str,
+    about_used: bool,
+) -> None:
+    if not _SPOTIFY_ABOUT_ARTIFACT_DIR:
+        return
+    if not (_SPOTIFY_ABOUT_DEBUG_ARTIFACTS or _SPOTIFY_ABOUT_ALWAYS_ARTIFACTS):
+        return
+    try:
+        os.makedirs(_SPOTIFY_ABOUT_ARTIFACT_DIR, exist_ok=True)
+        base = os.path.join(_SPOTIFY_ABOUT_ARTIFACT_DIR, f"about_{artist_id}_missing_nextdata")
+        with open(base + ".txt", "w", encoding="utf-8") as fh:
+            fh.write(f"final_url={fetch_info.get('final_url','')}\n")
+            fh.write(f"mode={fetch_info.get('mode')}\n")
+            fh.write(f"consent_clicked={fetch_info.get('consent_clicked')}\n")
+            fh.write(f"title={page_title or ''}\n")
+            fh.write(f"about_used={about_used}\n")
+            snippet = (document_html or "")[:500]
+            fh.write("document_snippet:\n")
+            fh.write(snippet)
+            fh.write("\n----\n")
+            fh.write("page_content_snippet:\n")
+            fh.write((page_html or "")[:500])
+        # Save full document response separately for forensic parsing.
+        if document_html:
+            with open(base + "_document.html", "w", encoding="utf-8") as fh:
+                fh.write(document_html)
+        if page_html:
+            with open(base + "_pagecontent.html", "w", encoding="utf-8") as fh:
+                fh.write(page_html)
     except Exception:
         pass
 
@@ -224,7 +276,7 @@ def _debug_spotify_about(url: str) -> None:
 
 
 def _spotify_consent_handler(page, meta: Optional[Dict[str, Any]] = None) -> None:
-    """Best-effort click through Spotify's consent wall. Safe no-op on failure."""
+    """Best-effort click through Spotify's consent wall (page + iframes)."""
     meta = meta if isinstance(meta, dict) else {}
     meta.setdefault("consent_found", False)
     meta.setdefault("consent_clicked", False)
@@ -235,35 +287,133 @@ def _spotify_consent_handler(page, meta: Optional[Dict[str, Any]] = None) -> Non
             pass
 
     selectors = [
-        "button:has-text(\"Accept\")",
-        "button:has-text(\"Agree\")",
-        "button:has-text(\"I agree\")",
-        "button:has-text(\"Allow all\")",
-        "button:has-text(\"Accept all\")",
-        "text=Accept",
-        "text=Agree",
+        "button:has-text('Accept Cookies')",
+        "button:has-text('Accept all')",
+        "button:has-text('Allow all')",
+        "button:has-text('I agree')",
+        "button:has-text('Agree')",
+        "button:has-text('Continue')",
+        "button:has-text('OK')",
+        "div[role=button]:has-text('Accept')",
+        "div[role=button]:has-text('Agree')",
+        "div[role=button]:has-text('Allow')",
+        "[aria-label*='accept' i]",
+        "[aria-label*='agree' i]",
+        "[aria-label*='allow' i]",
+        "button[data-testid*='accept' i]",
+        "button[data-testid*='agree' i]",
+        "button[data-testid*='allow' i]",
+        "[data-testid*='consent' i]",
+        "[data-testid*='cookie' i]",
+        "[id*='onetrust' i] button",
+        "[class*='onetrust' i] button",
     ]
-    for sel in selectors:
-        try:
-            locator_obj = page.locator(sel)
-            locator = getattr(locator_obj, "first", locator_obj)
-            locator.wait_for(state="visible", timeout=CONSENT_TIMEOUT_MS)
-            meta["consent_found"] = True
+
+    def _try_frame(frame) -> bool:
+        for sel in selectors:
             try:
-                locator.click(timeout=CONSENT_TIMEOUT_MS)
-                meta["consent_clicked"] = True
+                locator_obj = frame.locator(sel)
+                locator = getattr(locator_obj, "first", locator_obj)
+                locator.wait_for(state="visible", timeout=CONSENT_TIMEOUT_MS)
+                meta["consent_found"] = True
+                try:
+                    locator.click(timeout=CONSENT_TIMEOUT_MS)
+                    meta["consent_clicked"] = True
+                except PlaywrightTimeoutError:
+                    pass
+                return True
             except PlaywrightTimeoutError:
-                pass
+                continue
+            except Exception:
+                continue
+        return False
+
+    frames: List[Any] = []
+    try:
+        frames.append(page)
+    except Exception:
+        pass
+    try:
+        frames.extend(list(getattr(page, "frames", []) or []))
+    except Exception:
+        pass
+
+    for frame in frames:
+        if _try_frame(frame):
             break
-        except PlaywrightTimeoutError:
-            continue
-        except Exception:
-            continue
+
     if meta.get("consent_clicked"):
         try:
             page.wait_for_timeout(500)
         except Exception:
             pass
+
+
+def _spotify_wait_for_next_data(page, meta: Dict[str, Any], timeout_ms: int) -> bool:
+    meta.setdefault("next_data_waited", False)
+    meta.setdefault("next_data_found", False)
+    meta["next_data_waited"] = True
+    try:
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+    except Exception:
+        class PlaywrightTimeoutError(Exception):
+            pass
+
+    try:
+        page.wait_for_selector("script#__NEXT_DATA__", timeout=timeout_ms)
+        meta["next_data_found"] = True
+        return True
+    except PlaywrightTimeoutError:
+        return False
+    except Exception:
+        return False
+
+
+def _spotify_maybe_screenshot(page, artist_id: str) -> None:
+    if not _SPOTIFY_ABOUT_ARTIFACT_DIR:
+        return
+    if not (_SPOTIFY_ABOUT_DEBUG_ARTIFACTS or _SPOTIFY_ABOUT_ALWAYS_ARTIFACTS):
+        return
+    try:
+        os.makedirs(_SPOTIFY_ABOUT_ARTIFACT_DIR, exist_ok=True)
+        screenshot_path = os.path.join(
+            _SPOTIFY_ABOUT_ARTIFACT_DIR, f"about_{artist_id}_screenshot.png"
+        )
+        page.screenshot(path=screenshot_path, full_page=True)
+    except Exception:
+        # Never let screenshot failure break pipeline.
+        pass
+
+
+def _spotify_page_handler(artist_id: str, meta: Dict[str, Any]) -> Callable[[Any], None]:
+    def _handler(page: Any) -> None:
+        _spotify_consent_handler(page, meta)
+        found = _spotify_wait_for_next_data(page, meta, SPOTIFY_NEXTDATA_WAIT_MS)
+        if found:
+            return
+
+        meta["next_data_retry"] = True
+        try:
+            _spotify_consent_handler(page, meta)
+        except Exception:
+            pass
+        try:
+            page.reload(wait_until="domcontentloaded")
+        except Exception:
+            pass
+        found_retry = _spotify_wait_for_next_data(page, meta, SPOTIFY_NEXTDATA_WAIT_MS)
+        if not found_retry:
+            try:
+                meta["evaluate_attempted"] = True
+                eval_result = page.evaluate("() => window.__NEXT_DATA__ || window.__PRELOADED_STATE__ || null")
+                if eval_result:
+                    meta["evaluated_next_data_json"] = json.dumps(eval_result)
+                    meta["next_data_found"] = True
+            except Exception:
+                meta["evaluate_error"] = True
+            _spotify_maybe_screenshot(page, artist_id)
+
+    return _handler
 
 
 def extract_social_links_from_page(page_html: str) -> Dict[str, str]:
@@ -439,15 +589,14 @@ def _fetch_about_payload(
     artist_id: str,
     logger: Optional[LoggerFn],
 ) -> Dict[str, Any]:
-    artist_url = f"https://open.spotify.com/artist/{artist_id}"
+    artist_url = f"https://open.spotify.com/artist/{artist_id}/about"
     html, fetch_info = _fetch_artist_html(session, artist_url, logger)
-    if not html:
+    document_html = fetch_info.get("document_html") or ""
+    if not html and not document_html and not fetch_info.get("evaluated_next_data_json"):
         return {}
 
     if DEBUG_SPOTIFY_ABOUT:
         _debug_spotify_about(artist_url)
-
-    soup = BeautifulSoup(html, "html.parser")
 
     payload: Dict[str, Any] = {
         "socials": _empty_socials(),
@@ -455,20 +604,47 @@ def _fetch_about_payload(
         "primary_genre": "",
     }
 
-    next_data = _extract_next_data_from_soup(soup)
+    next_data = _extract_next_data(document_html or "") or _extract_next_data(html or "")
     if not next_data:
-        wall_reason = _detect_cookie_wall(html)
+        eval_json = fetch_info.get("evaluated_next_data_json")
+        if eval_json:
+            try:
+                next_data = json.loads(eval_json)
+            except Exception:
+                next_data = None
+    if not next_data:
+        wall_reason = _detect_cookie_wall(document_html or html)
         payload["status"] = "non_actionable"
-        payload["reason"] = wall_reason or "next_data_missing"
-        page_title = _extract_title(html)
+        page_title = _extract_title(document_html or html)
+        if wall_reason and fetch_info.get("consent_clicked") and page_title:
+            wall_reason = None
+        if fetch_info.get("consent_clicked") and page_title:
+            payload["reason"] = "next_data_missing_after_consent"
+        elif wall_reason:
+            payload["reason"] = wall_reason
+        elif fetch_info.get("mode") == "playwright":
+            payload["reason"] = "spotify_bot_variant_no_nextdata"
+        else:
+            payload["reason"] = "about_payload_unavailable"
+        fetch_info["force_artifacts"] = True
         _log(
             logger,
             (
                 f"[Spotify About] __NEXT_DATA__ missing for artist {artist_id} "
                 f"reason={payload['reason']} mode={fetch_info.get('mode')} final_url={fetch_info.get('final_url')} "
                 f"consent_found={fetch_info.get('consent_found')} consent_clicked={fetch_info.get('consent_clicked')} "
+                f"next_data_waited={fetch_info.get('next_data_waited')} next_data_found={fetch_info.get('next_data_found')} "
+                f"next_data_retry={fetch_info.get('next_data_retry')} "
                 f"title={page_title or ''}"
             ),
+        )
+        _save_missing_nextdata_artifacts(
+            artist_id,
+            html,
+            document_html,
+            fetch_info,
+            page_title=page_title,
+            about_used=True,
         )
     else:
         profile = _extract_profile_blob(next_data)
@@ -487,11 +663,11 @@ def _fetch_about_payload(
                 _log(
                     logger,
                     f"[Spotify About] filtered generic Spotify socials for artist {artist_id} "
-                    f"mode={fetch_info.get('mode')} title={_extract_title(html) or ''}",
+                    f"mode={fetch_info.get('mode')} title={_extract_title(document_html or html) or ''}",
                 )
 
     _log_social_summary(logger, artist_id, payload.get("socials") or {})
-    _maybe_save_artifact(artist_id, html, fetch_info)
+    _maybe_save_artifact(artist_id, document_html or html, fetch_info)
 
     return payload
 
@@ -502,7 +678,14 @@ def _fetch_artist_html(
     artist_url: str,
     logger: Optional[LoggerFn],
 ) -> Tuple[str, Dict[str, Any]]:
-    meta: Dict[str, Any] = {"consent_found": False, "consent_clicked": False}
+    meta: Dict[str, Any] = {
+        "consent_found": False,
+        "consent_clicked": False,
+        "next_data_waited": False,
+        "next_data_found": False,
+        "next_data_retry": False,
+        "about_path_used": artist_url.endswith("/about"),
+    }
     try:
         result = fetch_html(
             artist_url,
@@ -512,7 +695,7 @@ def _fetch_artist_html(
             allow_browser_fallback=True,
             timeout_s=HTTP_TIMEOUT,
             persistent_profile_dir=_SPOTIFY_PW_PROFILE_DIR,
-            page_handler=lambda page: _spotify_consent_handler(page, meta),
+            page_handler=_spotify_page_handler(artist_url.split("/")[-1], meta),
         )
     except Exception as exc:
         _log(logger, f"[Spotify About] HTTP error for {artist_url}: {exc}")
@@ -521,34 +704,87 @@ def _fetch_artist_html(
     status = result.get("status")
     mode_used = result.get("mode_used")
     html = result.get("html") or ""
+    document_html = result.get("document_html") or ""
     reason = result.get("reason")
     final_url = result.get("final_url") or artist_url
 
     if mode_used == "requests":
         if status and status != 200:
             _log(logger, f"[Spotify About] HTTP {status} for {artist_url}")
-            return "", {"mode": mode_used, "reason": f"http_{status}", "final_url": final_url, **meta}
-        return html, {"mode": mode_used, "reason": reason, "final_url": final_url, **meta}
+            return "", {
+                "mode": mode_used,
+                "reason": f"http_{status}",
+                "final_url": final_url,
+                "document_html": document_html,
+                **meta,
+            }
+        return html, {"mode": mode_used, "reason": reason, "final_url": final_url, "document_html": document_html, **meta}
 
     if mode_used == "playwright":
         _log(logger, f"[Spotify About] Playwright fallback used for {artist_url} reason={reason}")
-        return html if html else "", {"mode": mode_used, "reason": reason, "final_url": final_url, **meta}
+        return html if html else "", {
+            "mode": mode_used,
+            "reason": reason,
+            "final_url": final_url,
+            "document_html": document_html,
+            **meta,
+        }
 
-    return html, {"mode": mode_used or "unknown", "reason": reason, "final_url": final_url, **meta}
+    return html, {"mode": mode_used or "unknown", "reason": reason, "final_url": final_url, "document_html": document_html, **meta}
 
 
-# Updated to pull __NEXT_DATA__ via BeautifulSoup for better resilience to markup changes.
-def _extract_next_data_from_soup(soup: Optional[BeautifulSoup]) -> Optional[Dict[str, Any]]:
-    if soup is None:
+def _safe_parse_json(raw: str) -> Optional[Dict[str, Any]]:
+    if not raw:
         return None
-    script = soup.find("script", id="__NEXT_DATA__")
-    if not script or not script.string:
-        return None
-    raw = script.string.strip()
+    raw = raw.strip()
+    # Trim trailing semicolons or assignment wrappers.
+    raw = raw.rstrip(";")
+    # Some blobs come as \"window.__NEXT_DATA__ = {...}\"; try to strip leading assignment.
+    assign_match = re.search(r"=\s*(\{.*\})", raw, re.DOTALL)
+    if assign_match:
+        raw = assign_match.group(1)
     try:
         return json.loads(raw)
-    except json.JSONDecodeError:
+    except Exception:
         return None
+
+
+def _extract_next_data(html: str) -> Optional[Dict[str, Any]]:
+    if not html:
+        return None
+    soup = BeautifulSoup(html, "html.parser")
+    # 1) canonical id match
+    script = soup.find("script", id="__NEXT_DATA__")
+    if script and script.string:
+        parsed = _safe_parse_json(script.string)
+        if parsed:
+            return parsed
+    # 2) any script that looks like Next.js payload
+    for node in soup.find_all("script"):
+        content = (node.string or node.text or "").strip()
+        if not content:
+            continue
+        if '"props":{"pageProps"' in content or "pageProps" in content:
+            parsed = _safe_parse_json(content)
+            if parsed:
+                return parsed
+        if "Spotify.Entity" in content or "__PRELOADED_STATE__" in content:
+            parsed = _safe_parse_json(content)
+            if parsed:
+                return parsed
+    # 3) regex sweep for inline assignment patterns
+    patterns = [
+        r"__NEXT_DATA__\s*=\s*(\{.*?\})\s*<",
+        r"Spotify\.Entity\s*=\s*(\{.*?\})\s*;",
+        r"__PRELOADED_STATE__\s*=\s*(\{.*?\})\s*;",
+    ]
+    for pat in patterns:
+        match = re.search(pat, html, re.DOTALL)
+        if match:
+            parsed = _safe_parse_json(match.group(1))
+            if parsed:
+                return parsed
+    return None
 
 
 def _extract_profile_blob(next_data: Dict[str, Any]) -> Dict[str, Any]:
