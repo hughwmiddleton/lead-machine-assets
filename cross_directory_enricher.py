@@ -7535,6 +7535,7 @@ class CrossDirectoryEnricherWorker(QThread):
         label: str,
         max_attempts: int = 2,
         headers: Optional[Dict[str, str]] = None,
+        *,
         endpoint: Optional[str] = None,
     ) -> Optional[str]:
         # Track the most recent fetch outcome for instrumentation.
