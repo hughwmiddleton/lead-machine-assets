@@ -91,6 +91,20 @@ class SoundCloudAggregatorTests(unittest.TestCase):
         total_fetches = (session.calls.get(first, 0) + session.calls.get(second, 0))
         self.assertEqual(total_fetches, 1)
 
+    def test_preference_order_beats_lexical(self):
+        handle = "pref"
+        preferred = "https://linktr.ee/pref"
+        secondary = "https://beacons.ai/pref"
+        about_html = f'<a href="{secondary}">b</a><a href="{preferred}">l</a>'
+        mapping = self._build_mapping(handle, about_html, preferred, "contact@preferred.com")
+        session = FakeSession(mapping)
+
+        payload = sc.extract_sc_links(session, handle)
+
+        self.assertIn("contact@preferred.com", payload.get("emails", []))
+        self.assertEqual(session.calls.get(preferred, 0), 1)
+        self.assertIsNone(session.calls.get(secondary))
+
     def test_fetch_failure_is_swallowed(self):
         handle = "fail"
         aggregator_url = "https://linktr.ee/fail"
@@ -118,6 +132,19 @@ class SoundCloudAggregatorTests(unittest.TestCase):
 
         self.assertIn("[Aggregator] skipped: max_live", output)
         self.assertEqual(session.calls.get(aggregator_url, 0), 0)
+
+    def test_allowlisted_aggregator_not_double_fetched(self):
+        handle = "nodouble"
+        aggregator_url = "https://linktr.ee/nodouble"
+        about_html = f'<a href="{aggregator_url}">links</a>'
+        mapping = self._build_mapping(handle, about_html, aggregator_url, "hello@artist.com")
+        session = FakeSession(mapping)
+        with mock.patch.object(sc, "expand_for_email", wraps=sc.expand_for_email) as expand_mock:
+            payload = sc.extract_sc_links(session, handle)
+
+        self.assertIn("hello@artist.com", payload.get("emails", []))
+        self.assertEqual(session.calls.get(aggregator_url, 0), 1)
+        self.assertEqual(expand_mock.call_count, 0)
 
 
 if __name__ == "__main__":

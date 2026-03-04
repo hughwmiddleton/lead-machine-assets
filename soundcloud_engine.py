@@ -832,7 +832,7 @@ def _is_aggregator_link(url: str) -> bool:
     return any(host == allow or host.endswith("." + allow) for allow in SC_AGGREGATOR_ALLOWLIST)
 
 
-def _fetch_aggregator_emails(session: requests.Session, url: str, artist_name: str = "") -> List[str]:
+def _aggregator_budget_ok() -> Tuple[bool, str]:
     allowed = True
     reason = ""
     if _AGGREGATOR_BUDGET_CHECK:
@@ -840,12 +840,23 @@ def _fetch_aggregator_emails(session: requests.Session, url: str, artist_name: s
             result = _AGGREGATOR_BUDGET_CHECK()
             if isinstance(result, tuple):
                 allowed = bool(result[0])
-                reason = str(result[1] or "") if len(result) > 1 else ""
+                if len(result) > 1:
+                    reason = str(result[1] or "")
             else:
                 allowed = bool(result)
         except Exception:
             allowed = True
             reason = ""
+    return allowed, reason
+
+
+def _fetch_aggregator_emails(session: requests.Session, url: str, artist_name: str = "") -> List[str]:
+    target = (url or "").strip()
+    if not _is_aggregator_link(target):
+        print("[Aggregator] skipped: not_allowlisted")
+        return []
+
+    allowed, reason = _aggregator_budget_ok()
     if not allowed:
         print(f"[Aggregator] skipped: {reason or 'budget_exhausted'}")
         return []
@@ -886,6 +897,8 @@ def _fetch_aggregator_emails(session: requests.Session, url: str, artist_name: s
 def expand_for_email(session, url):
     mails = set()
     if not url:
+        return sorted(mails)
+    if _is_aggregator_link(url):
         return sorted(mails)
     try:
         resp = session.get(url, timeout=(6, 12), headers=_rand_headers())
@@ -1215,16 +1228,52 @@ def extract_sc_links(session: requests.Session, handle: str) -> dict:
             _record_contact_text(text_blob[:4000])
 
     aggregator_link = None
-    for candidate in sorted(external_urls):
-        if _is_aggregator_link(candidate):
-            aggregator_link = candidate
-            break
+    aggregators = [u for u in external_urls if _is_aggregator_link(u)]
+
+    def _agg_rank(u: str) -> Tuple[int, str]:
+        host = (urlparse((u or "").strip()).hostname or "").lower()
+        if host.startswith("www."):
+            host = host[4:]
+        pref_idx = len(SC_AGGREGATOR_PREFERENCE)
+        for idx, pref_host in enumerate(SC_AGGREGATOR_PREFERENCE):
+            if host == pref_host or host.endswith("." + pref_host):
+                pref_idx = idx
+                break
+        return (pref_idx, (u or "").lower())
+
+    if aggregators:
+        aggregator_link = sorted(aggregators, key=_agg_rank)[0]
 
     aggregator_emails: List[str] = []
+    aggregator_detected = bool(aggregator_link)
+    aggregator_fetch_attempted = False
+    aggregator_expanded = False  # legacy: expand_for_email executed
     if aggregator_link:
-        aggregator_emails = _fetch_aggregator_emails(session, aggregator_link, display_name)
-        for mail in aggregator_emails:
-            emails.add(mail)
+        allowed, reason = _aggregator_budget_ok()
+        if not allowed:
+            print(f"[Aggregator] skipped: {reason or 'budget_exhausted'}")
+        else:
+            aggregator_fetch_attempted = True
+            aggregator_emails = _fetch_aggregator_emails(session, aggregator_link, display_name)
+            for mail in aggregator_emails:
+                emails.add(mail)
+
+    # Expand a single non-allowlisted hub (bandcamp/carrd/flow.page) for mailto links.
+    EXPANDABLE_DOMAINS = tuple(d for d in SC_AGGREGATOR_PREFERENCE if d not in SC_AGGREGATOR_ALLOWLIST)
+    expandable_candidates = [u for u in sorted(external_urls) if not _is_aggregator_link(u)]
+    for candidate in expandable_candidates:
+        host = (urlparse((candidate or "").strip()).hostname or "").lower()
+        if host.startswith("www."):
+            host = host[4:]
+        if not any(host == d or host.endswith("." + d) for d in EXPANDABLE_DOMAINS):
+            continue
+        mails = expand_for_email(session, candidate)
+        aggregator_expanded = True
+        for mail in mails:
+            cleaned = (mail or "").strip().lower()
+            if cleaned:
+                emails.add(cleaned)
+        break
 
     api_profile = _sc_fetch_api_profile(session, handle)
     if api_profile:
@@ -1333,8 +1382,10 @@ def extract_sc_links(session: requests.Session, handle: str) -> dict:
         "genre": user_genre,
         "user_genre": user_genre,
         "elapsed_ms": elapsed_ms,
-        "aggregator_expanded": int(bool(aggregator_link)),
-        "_aggregator_tried": int(bool(aggregator_link)),
+        "aggregator_detected": int(aggregator_detected),
+        "aggregator_expanded": int(aggregator_expanded),
+        "aggregator_fetch_attempted": int(aggregator_fetch_attempted),
+        "_aggregator_tried": int(aggregator_fetch_attempted),
         "bio_text": bio_text,
         "sounds_like": _sc_sounds_like_from_bio(bio_text),
         "latest_track_title": latest_title,

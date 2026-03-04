@@ -3728,6 +3728,17 @@ class CrossDirectoryEnricherWorker(QThread):
         self._lf_cooldown_logged: bool = False
         self._lf_cooldown_skip_logged: bool = False
         self._directory_indexes: Dict[str, DirectoryIndex] = {}
+        # Share live-search budget with SoundCloud aggregator fetches.
+        try:
+            def _agg_budget_check():
+                if self.max_live_searches is None or self.max_live_searches <= 0:
+                    return (True, "")
+                if self.live_search_attempts < self.max_live_searches:
+                    return (True, "")
+                return (False, "max_live")
+            sc_engine._AGGREGATOR_BUDGET_CHECK = _agg_budget_check
+        except Exception:
+            pass
 
     def run(self) -> None:
         try:
