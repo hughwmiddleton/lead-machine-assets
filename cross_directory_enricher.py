@@ -94,7 +94,7 @@ LF_BACKOFF_MAX = 6.0
 LF_PACING_DELAY_S = 0.25
 LF_UNHEALTHY_PACING_MIN_S = 2.0
 LF_UNHEALTHY_PACING_MAX_S = 4.0
-LF_COOLDOWN_CONSEC_406 = 2
+LF_COOLDOWN_CONSEC_406 = 4
 LF_COOLDOWN_MIN_S = 12.0
 LF_COOLDOWN_STEP_S = 6.0
 LF_COOLDOWN_MAX_S = 60.0
@@ -4356,30 +4356,36 @@ class CrossDirectoryEnricherWorker(QThread):
         self.log_message.emit("[Enricher][LF Phase] Starting...")
         enriched_count = 0
         processed_rows = 0
-        stop_reason = ""
+        skipped_cooldown = 0
+        stopped_max_live = False
         for position, row_idx in enumerate(seed_df.index, start=1):
             if self.max_live_searches > 0 and self.live_search_attempts >= self.max_live_searches:
-                stop_reason = "max_live"
-                break
-            if self._lf_in_cooldown():
-                stop_reason = "cooldown"
+                stopped_max_live = True
                 break
             ctx = self._build_row_context(seed_df, row_idx, position, total)
             if not ctx:
                 continue
             processed_rows += 1
             self._init_row_enrichment_state()
+            artist = ctx.get("artist") or "<unknown>"
+            if self._lf_in_cooldown():
+                expires = int(max(1.0, self._lf_cooldown_until - self._lf_now()))
+                try:
+                    self.log_message.emit(
+                        f"[Enricher][LF] cooldown active; skipping row {position}/{total} '{artist}' expires_in={expires}s"
+                    )
+                except Exception:
+                    pass
+                self._set_platform_state("lastfm", "skipped")
+                skipped_cooldown += 1
+                continue
             ll_enriched, _ = self._enrich_row_live_lookup(seed_df, row_idx, ctx)
             if ll_enriched:
                 enriched_count += 1
-            if not stop_reason and self._lf_in_cooldown():
-                stop_reason = "cooldown"
-                break
-        if stop_reason:
-            reason_label = "cooldown" if stop_reason == "cooldown" else "max_live"
-            self.log_message.emit(f"[Enricher][LF Phase] Stopped early: {reason_label}")
+        if stopped_max_live:
+            self.log_message.emit("[Enricher][LF Phase] Stopped early: max_live")
         self.log_message.emit(
-            f"[Enricher][LF Phase] Completed {processed_rows} rows (enriched={enriched_count})"
+            f"[Enricher][LF Phase] Completed {processed_rows} rows (enriched={enriched_count}, skipped_cooldown={skipped_cooldown})"
         )
 
     def _phase_facebook(self, seed_df, fb_driver, total):
@@ -4701,11 +4707,18 @@ class CrossDirectoryEnricherWorker(QThread):
         Offline-first Bandcamp enrich using the loaded Bandcamp directory index.
         Avoids hitting bandcamp.com when discover/search are blocked.
         """
+        debug_attempts = bool(os.getenv("BC_DEBUG_ATTEMPTS"))
         index = getattr(self, "_directory_indexes", {}).get("bandcamp") if hasattr(self, "_directory_indexes") else None
         if not index:
+            if debug_attempts:
+                self.log_message.emit(
+                    "[BC Debug] directory_fallback: index_missing "
+                    f"bandcamp_csv_path_set={bool(getattr(self, 'bandcamp_csv_path', ''))}"
+                )
             return None
         key = normalise_artist_name(artist_name)
         candidates = _dedupe_rows(index.lookup_artist(key))
+        shortlist_used = False
         if not candidates:
             shortlist: List[Dict[str, Any]] = []
             for idx, (artist_key, rows) in enumerate(index.rows_by_artist.items()):
@@ -4724,6 +4737,20 @@ class CrossDirectoryEnricherWorker(QThread):
                 if len(shortlist) >= 200:
                     break
             candidates = shortlist[:200]
+            shortlist_used = True
+        if debug_attempts:
+            try:
+                self.log_message.emit(
+                    "[BC Debug] directory_fallback: key='%s' candidates=%d shortlist_used=%s index_artists=%d"
+                    % (
+                        key,
+                        len(candidates),
+                        shortlist_used,
+                        index.unique_artist_count() if index else 0,
+                    )
+                )
+            except Exception:
+                pass
         best_payload: Optional[EnrichmentPayload] = None
         best_conf = 0.0
         best_match = 0.0
@@ -5030,7 +5057,7 @@ class CrossDirectoryEnricherWorker(QThread):
             cooldown = int(max(1.0, self._lf_cooldown_until - now))
             try:
                 self.log_message.emit(
-                    f"[Enricher][LF] Entering soft cooldown after consecutive 406s={self._lf_consecutive_406}; cooldown_s={cooldown}"
+                    f"[Enricher][LF] Entering soft cooldown after consecutive 406s={self._lf_consecutive_406}; cooldown_s={cooldown}; until={self._lf_cooldown_until:.2f}"
                 )
             except Exception:
                 pass
@@ -5427,6 +5454,23 @@ class CrossDirectoryEnricherWorker(QThread):
         primary_genre_hint = _clean_cell(getattr(self, "_live_context", {}).get("genre", ""))
 
         search_allowed = BC_ENABLE_SEARCH_ENDPOINT and not self._bc_should_skip_search()
+        debug_attempts = bool(os.getenv("BC_DEBUG_ATTEMPTS"))
+        if debug_attempts:
+            try:
+                bc_index = getattr(self, "_directory_indexes", {}).get("bandcamp") if hasattr(self, "_directory_indexes") else None
+                self.log_message.emit(
+                    "[BC Debug] live_search_bandcamp: bandcamp_csv_path_set=%s index_artists=%s "
+                    "search_allowed=%s breaker_tripped=%s attempts=%d"
+                    % (
+                        bool(getattr(self, "bandcamp_csv_path", "")),
+                        bc_index.unique_artist_count() if bc_index else 0,
+                        search_allowed,
+                        self._bc_search_breaker_tripped,
+                        self._last_bc_row_stats.get("attempts", 0),
+                    )
+                )
+            except Exception:
+                pass
 
         # 1) Directory-based fallback (discover substitute, no network)
         directory_payload = self._bc_directory_fallback(artist_name, song_title)
@@ -7066,7 +7110,7 @@ class CrossDirectoryEnricherWorker(QThread):
     def _live_search_lastfm(self, artist_name: str) -> Optional[EnrichmentPayload]:
         if self._lf_cooldown_until and not self._lf_in_cooldown():
             try:
-                self.log_message.emit("[Enricher][LF] Soft cooldown complete; resuming Last.fm.")
+                self.log_message.emit("[Enricher][LF] cooldown expired; resuming")
             except Exception:
                 pass
             self._lf_clear_cooldown()
@@ -7075,7 +7119,7 @@ class CrossDirectoryEnricherWorker(QThread):
                 cooldown = int(max(1.0, self._lf_cooldown_until - self._lf_now()))
                 try:
                     self.log_message.emit(
-                        f"[Enricher][LF] Soft cooldown active; skipping Last.fm search. cooldown_s={cooldown}"
+                        f"[Enricher][LF] cooldown active; skipping row '{artist_name}' expires_in={cooldown}s"
                     )
                 except Exception:
                     pass
@@ -7200,7 +7244,7 @@ class CrossDirectoryEnricherWorker(QThread):
             fb_status = getattr(self, "_last_http_status", None)
             if fb_status == 406 or (not fb_html and fb_status == 406):
                 # Shape fallback failed; mark unhealthy and skip upcoming rows.
-                self._lf_enter_cooldown()
+                self._lf_mark_406()
             fallback_candidate = _parse_first_candidate(fb_html, log_no_results=False) if fb_html else None
             if fallback_candidate:
                 fb_display, fb_profile, fb_conf, fb_rank, fb_match_score = fallback_candidate
@@ -7267,7 +7311,7 @@ class CrossDirectoryEnricherWorker(QThread):
                     cooldown = int(max(1.0, self._lf_cooldown_until - now_mono))
                     try:
                         self.log_message.emit(
-                            f"[Enricher][LF] Soft cooldown active; skipping Last.fm search. cooldown_s={cooldown}"
+                            f"[Enricher][LF] cooldown active; skipping Last.fm fetch. expires_in={cooldown}s"
                         )
                     except Exception:
                         pass
@@ -7348,20 +7392,15 @@ class CrossDirectoryEnricherWorker(QThread):
 
                 if is_lastfm and status == 406:
                     self._lf_mark_406()
-                    if attempt < max_attempts:
-                        delay = min(
-                            LF_BACKOFF_MAX,
-                            LF_BACKOFF_BASE * (2 ** max(0, attempt - 1)) + random.uniform(0, 0.35),
-                        )
-                        time.sleep(delay)
-                        continue
-                    self._lf_enter_cooldown()
+                    self._last_fetch_ok = False
                     suffix = _format_outcome_suffix(fetch_ok=False, actionable=None, http_status=status)
-                    self.log_message.emit(f"[Enricher][LF] {label} failed with 406 (no HTML){suffix}")
+                    self.log_message.emit(
+                        f"[Enricher][LF] {label} received 406; treating as cooldown (no retry){suffix}"
+                    )
                     return None
 
                 trigger_pw = allow_pw and (not pw_attempted) and (
-                    status in {403, 406, 429, 503} or _detect_soft_block(html)
+                    status in {403, 429, 503} or _detect_soft_block(html)
                 )
                 if trigger_pw:
                     pw_attempted = True

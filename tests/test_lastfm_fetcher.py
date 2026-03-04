@@ -2,6 +2,8 @@ import time
 from types import SimpleNamespace
 from typing import List
 
+import pandas as pd
+
 import requests
 
 import cross_directory_enricher as cde
@@ -29,33 +31,33 @@ def _build_worker():
     return worker
 
 
-def test_lastfm_406_retries_then_succeeds(monkeypatch):
+def test_lastfm_406_no_retry(monkeypatch):
     worker = _build_worker()
-    statuses: List[int] = [406, 406, 200]
+    statuses: List[int] = [406, 200]
 
     def fake_get(url, timeout=None, headers=None):
         status = statuses.pop(0)
         return _DummyResp(status, "html-ok")
 
-    sleeps = []
+    sleeps: List[float] = []
 
     monkeypatch.setattr(worker.session, "get", fake_get)
     monkeypatch.setattr(time, "sleep", lambda s: sleeps.append(s))
 
     html = worker._fetch_url("https://www.last.fm/search?q=test&type=artist", "Last.fm search", max_attempts=3)
 
-    assert html == "html-ok"
-    assert worker._last_http_status == 200
-    # Two 406s should trigger two backoffs.
-    assert len(sleeps) == 2
+    assert html is None  # first 406 should short-circuit
+    assert worker._last_http_status == 406
+    assert len(statuses) == 1  # second status unused (no retry)
+    assert sleeps == []  # no backoff when 406
 
 
 def test_lastfm_soft_cooldown_after_consecutive_406(monkeypatch):
     worker = _build_worker()
-    monkeypatch.setattr(cde, "LF_COOLDOWN_CONSEC_406", 2)
+    monkeypatch.setattr(cde, "LF_COOLDOWN_CONSEC_406", 4)
     monkeypatch.setattr(cde, "LF_COOLDOWN_MIN_S", 10)
     monkeypatch.setattr(cde, "LF_COOLDOWN_MAX_S", 60)
-    statuses: List[int] = [406, 406]
+    statuses: List[int] = [406, 406, 406, 406]
 
     def fake_get(url, timeout=None, headers=None):
         status = statuses.pop(0)
@@ -80,11 +82,16 @@ def test_lastfm_soft_cooldown_after_consecutive_406(monkeypatch):
     monkeypatch.setattr(time, "monotonic", fake_mono)
     monkeypatch.setattr(time, "sleep", fake_sleep)
 
-    html = worker._fetch_url("https://www.last.fm/search?q=test&type=artist", "Last.fm search", max_attempts=2)
-    assert html is None
+    # First three 406s should not enter cooldown yet.
+    for _ in range(3):
+        assert worker._fetch_url("https://www.last.fm/search?q=test&type=artist", "Last.fm search", max_attempts=1) is None
+    assert worker._lf_cooldown_until == 0.0
+
+    # Fourth 406 crosses the threshold.
+    assert worker._fetch_url("https://www.last.fm/search?q=test&type=artist", "Last.fm search", max_attempts=1) is None
+
     assert worker._lf_cooldown_until > fake_mono()
     assert any("Entering soft cooldown" in msg for msg in logs)
-    assert all("cooling down for 600s" not in msg for msg in logs)
 
     called = {"count": 0}
 
@@ -325,3 +332,89 @@ def test_lastfm_no_quotes_not_triggered_on_406(monkeypatch):
     # Should not attempt no-quotes variant when primary was 406.
     assert ("Last.fm search (no-quotes)", 1) not in calls
     assert ("Last.fm search (fallback)", 1) in calls
+
+
+def test_lastfm_phase_skips_rows_without_stopping(monkeypatch):
+    worker = _build_worker()
+    worker._lf_cooldown_until = worker._lf_now() + 30
+    logs: List[str] = []
+    worker.log_message = SimpleNamespace(emit=lambda msg: logs.append(msg))
+
+    df = pd.DataFrame({"Artist Name": [f"Artist {i}" for i in range(10)]})
+
+    worker._phase_live_lookup(df, total=len(df.index))
+
+    assert not any("Stopped early: cooldown" in msg for msg in logs)
+    # Should log skip per row and summary with skipped_cooldown=10
+    skipped_logs = [msg for msg in logs if "cooldown active; skipping row" in msg]
+    assert len(skipped_logs) == 10
+    assert any("skipped_cooldown=10" in msg for msg in logs)
+
+
+def test_lastfm_phase_resumes_after_cooldown_expiry(monkeypatch):
+    worker = _build_worker()
+    worker._lf_cooldown_until = 10.0
+    call_count = {"count": 0}
+    logs: List[str] = []
+    worker.log_message = SimpleNamespace(emit=lambda msg: logs.append(msg))
+
+    def fake_enrich(df, row_idx, ctx):
+        call_count["count"] += 1
+        return (False, False)
+
+    # First two iterations: cooldown active, third iteration: expired.
+    call_checks = {"calls": 0}
+
+    def fake_in_cooldown(now=None):
+        call_checks["calls"] += 1
+        return call_checks["calls"] <= 2
+
+    monkeypatch.setattr(worker, "_lf_in_cooldown", fake_in_cooldown)
+    monkeypatch.setattr(worker, "_enrich_row_live_lookup", fake_enrich)
+    monkeypatch.setattr(worker, "_lf_now", lambda: 0.0)
+
+    df = pd.DataFrame({"Artist Name": [f"Artist {i}" for i in range(3)]})
+
+    worker._phase_live_lookup(df, total=len(df.index))
+
+    # Only the third row should attempt enrichment.
+    assert call_count["count"] == 1
+    assert any("skipped_cooldown=2" in msg for msg in logs)
+
+
+def test_lastfm_phase_does_not_stop_when_cooldown_triggers_mid_phase(monkeypatch):
+    worker = _build_worker()
+    logs: List[str] = []
+    worker.log_message = SimpleNamespace(emit=lambda msg: logs.append(msg))
+
+    now = [0.0]
+
+    def fake_now():
+        return now[0]
+
+    def fake_in_cooldown(now_arg=None):
+        current = now[0] if now_arg is None else now_arg
+        return bool(worker._lf_cooldown_until and current < worker._lf_cooldown_until)
+
+    call_count = {"attempts": 0}
+
+    def fake_enrich(df, row_idx, ctx):
+        call_count["attempts"] += 1
+        if call_count["attempts"] == 3:
+            worker._lf_cooldown_until = fake_now() + 30
+        return (False, False)
+
+    monkeypatch.setattr(worker, "_lf_now", fake_now)
+    monkeypatch.setattr(worker, "_lf_in_cooldown", fake_in_cooldown)
+    monkeypatch.setattr(worker, "_enrich_row_live_lookup", fake_enrich)
+
+    df = pd.DataFrame({"Artist Name": [f"Artist {i}" for i in range(10)]})
+
+    worker._phase_live_lookup(df, total=len(df.index))
+
+    # Cooldown was set mid-phase but rows were not stopped early.
+    assert worker._lf_cooldown_until > 0
+    assert not any("Stopped early" in msg and "cooldown" in msg for msg in logs)
+    skip_logs = [msg for msg in logs if "cooldown active; skipping row" in msg]
+    assert len(skip_logs) == 7  # rows 4-10 skipped
+    assert any("skipped_cooldown=7" in msg for msg in logs)
