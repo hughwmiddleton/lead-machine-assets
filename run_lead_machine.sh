@@ -23,31 +23,36 @@ export SPOTIFY_REDIRECT_URI="http://127.0.0.1:8080/callback"
 export SPOTIFY_REFRESH_TOKEN="AQB1vtP347IrhWrFAScJ_TwBSK0ZTiEdAbhxrmGf82vqmZIANMZdpLqnkpUDsEjGK9HZGGVfkfB9D915m28IK5CCAFFTMBwLd63n0UVmoYSSkjs_F8qXHJeDG-I0UgwrtAU"
 # =====================================================
 #!/bin/bash
+set -euo pipefail
+
+# =====================================================
 # GENERAL
 # =====================================================
 unset SC_DEBUG_LATEST
 export PYTHONFAULTHANDLER=1
 
-# Enrichment execution mode: "row_linear" (default) or "source_phased"
-# source_phased sweeps each source across all rows before the next source,
-# so time-based cooldowns can expire mid-phase instead of blocking all remaining rows.
-export ENRICHMENT_MODE="row_linear"
+# Optional: load secrets/tokens (DO NOT COMMIT .env.local)
+# [ -f ".env.local" ] && source ".env.local"
+
+# Enrichment execution mode:
+# - row_linear: per-row across sources
+# - source_phased: sweep each source across all rows (better when cooldowns happen)
+export ENRICHMENT_MODE="source_phased"
 
 # Qt GUI visible (macOS cocoa)
 unset QT_QPA_PLATFORM
 
 # =====================================================
-# EMAIL_ALL / QUARANTINE DEBUG (new)
+# EMAIL_ALL / QUARANTINE DEBUG
 # =====================================================
 export EMAIL_ALL_LOG=1
 export EMAIL_ALL_GUARD=1
 
-# Anchor wait tuning (new)
+# =====================================================
+# FB TUNING / DEBUG (High Signal, Low Noise)
+# =====================================================
 export FB_ANCHOR_WAIT_S=6
 
-# =====================================================
-# FB DEBUG (High Signal, Low Noise)
-# =====================================================
 export FB_DEBUG_CAND_META=1
 export FB_DEBUG_CAND_META_N=12
 export FB_DEBUG_CANDIDATES=1
@@ -60,8 +65,8 @@ export FB_DEBUG_RANK_SORT=1
 export FB_CANDIDATE_RANKING=1
 export FB_CANDIDATE_RANKING_PREVIEW_N=10
 
-# Refine pass ON (needed for quality gate validation)
-unset FB_REFINE_QUERY=1
+# Refine pass ON (fix: "unset VAR=1" is invalid bash)
+export FB_REFINE_QUERY=1
 
 # Leave deep internals OFF
 unset FB_DEBUG_CAND_GATE
@@ -75,38 +80,33 @@ unset FB_ALLOW_AUTOMATED_LOGIN
 # =====================================================
 # FB FEATURES (CORE TEST)
 # =====================================================
-
-# T016 — DOM Gate V2 (IMPORTANT)
 export FB_SEARCH_HARVEST_V2=1
-
-# Existing DOM fallback (keep ON)
 export NIGHT_FB_DOM_FALLBACK=1
 
-# Minimum quality gate
 export NIGHT_FB_MIN_QUALITY_GATE=1
 export NIGHT_FB_MIN_QUALITY_SCORE=25
 
-# Checkpoint guard
 export NIGHT_FB_CHECKPOINT_GUARD=1
 
-# Stable Night FB profile (prevents profile drift + lock weirdness)
 export NIGHT_FB_PROFILE_DIR="/Users/hughmiddleton/Lead Machine/Lead Machine Code/night_fb_profile"
 
-# Optional verbose driver logs (turn on only when debugging deeply)
-# export NIGHT_FB_CHROMEDRIVER_LOG=/tmp/night_fb_chromedriver.log
-
-# Disable email override (we want real behaviour)
+# Disable email override debug (use real behaviour)
 unset FB_DEBUG_EMAIL_OVERRIDE
 
 # =====================================================
-# SoundCloud (OFF to reduce noise)
+# SOUNDCloud (Yield-critical)
 # =====================================================
 export NIGHT_SC_DEBUG=1
 export NIGHTMODE_SC_ENGINE=1
-export SC_ADAPTIVE_ABOUT_DISABLE=1
+
+# Make sure About/links scraping is allowed (do NOT set this to 1)
+export SC_ADAPTIVE_ABOUT_DISABLE=0
+
+# Working client_id from Chrome devtools
+export SC_CLIENT_ID="1lzwHiVxAHeYKAMqN0IIGD3ZARgJy2kl"
 
 # =====================================================
-# Bandcamp (minimal debug)
+# BANDCAMP (minimal debug)
 # =====================================================
 unset BC_DEBUG_FILTER_SRC
 unset BC_DEBUG_LOCATION
