@@ -82,16 +82,16 @@ def test_lastfm_soft_cooldown_after_consecutive_406(monkeypatch):
     monkeypatch.setattr(time, "monotonic", fake_mono)
     monkeypatch.setattr(time, "sleep", fake_sleep)
 
-    # First three 406s should not enter cooldown yet.
+    # First three 406s should not enter search cooldown yet.
     for _ in range(3):
         assert worker._fetch_url("https://www.last.fm/search?q=test&type=artist", "Last.fm search", max_attempts=1) is None
-    assert worker._lf_cooldown_until == 0.0
+    assert worker._lf_search_cooldown_until == 0.0
 
     # Fourth 406 crosses the threshold.
     assert worker._fetch_url("https://www.last.fm/search?q=test&type=artist", "Last.fm search", max_attempts=1) is None
 
-    assert worker._lf_cooldown_until > fake_mono()
-    assert any("Entering soft cooldown" in msg for msg in logs)
+    assert worker._lf_search_cooldown_until > fake_mono()
+    assert any("Entering soft cooldown (search)" in msg for msg in logs)
 
     called = {"count": 0}
 
@@ -336,85 +336,125 @@ def test_lastfm_no_quotes_not_triggered_on_406(monkeypatch):
 
 def test_lastfm_phase_skips_rows_without_stopping(monkeypatch):
     worker = _build_worker()
-    worker._lf_cooldown_until = worker._lf_now() + 30
+    worker._lf_search_cooldown_until = worker._lf_now() + 30
     logs: List[str] = []
     worker.log_message = SimpleNamespace(emit=lambda msg: logs.append(msg))
 
-    df = pd.DataFrame({"Artist Name": [f"Artist {i}" for i in range(10)]})
+    df = pd.DataFrame(
+        {
+            "Artist Name": [f"Artist {i}" for i in range(10)],
+            "SoundCloud Link": ["" for _ in range(10)],
+            "Bandcamp_URL": ["" for _ in range(10)],
+        }
+    )
 
     worker._phase_live_lookup(df, total=len(df.index))
 
     assert not any("Stopped early: cooldown" in msg for msg in logs)
-    # Should log skip per row and summary with skipped_cooldown=10
-    skipped_logs = [msg for msg in logs if "cooldown active; skipping row" in msg]
-    assert len(skipped_logs) == 10
-    assert any("skipped_cooldown=10" in msg for msg in logs)
+    # Should log search cooldown and summary with search_skipped=10
+    skipped_logs = [msg for msg in logs if "search cooldown active" in msg]
+    assert len(skipped_logs) >= 1
+    assert any("search_skipped=10" in msg for msg in logs)
 
 
-def test_lastfm_phase_resumes_after_cooldown_expiry(monkeypatch):
-    worker = _build_worker()
-    worker._lf_cooldown_until = 10.0
-    call_count = {"count": 0}
-    logs: List[str] = []
-    worker.log_message = SimpleNamespace(emit=lambda msg: logs.append(msg))
-
-    def fake_enrich(df, row_idx, ctx):
-        call_count["count"] += 1
-        return (False, False)
-
-    # First two iterations: cooldown active, third iteration: expired.
-    call_checks = {"calls": 0}
-
-    def fake_in_cooldown(now=None):
-        call_checks["calls"] += 1
-        return call_checks["calls"] <= 2
-
-    monkeypatch.setattr(worker, "_lf_in_cooldown", fake_in_cooldown)
-    monkeypatch.setattr(worker, "_enrich_row_live_lookup", fake_enrich)
-    monkeypatch.setattr(worker, "_lf_now", lambda: 0.0)
-
-    df = pd.DataFrame({"Artist Name": [f"Artist {i}" for i in range(3)]})
-
-    worker._phase_live_lookup(df, total=len(df.index))
-
-    # Only the third row should attempt enrichment.
-    assert call_count["count"] == 1
-    assert any("skipped_cooldown=2" in msg for msg in logs)
-
-
-def test_lastfm_phase_does_not_stop_when_cooldown_triggers_mid_phase(monkeypatch):
+def test_lastfm_search_cooldown_does_not_block_profile_fetch(monkeypatch):
     worker = _build_worker()
     logs: List[str] = []
     worker.log_message = SimpleNamespace(emit=lambda msg: logs.append(msg))
 
-    now = [0.0]
+    # Pretend search cooldown is already active.
+    worker._lf_search_cooldown_until = worker._lf_now() + 30
 
-    def fake_now():
-        return now[0]
+    # Search attempt should be skipped and logged.
+    payload = worker._live_search_lastfm("Artist With Cooldown")
+    assert payload is None
+    assert any("search cooldown active" in msg or "search_skipped" in msg for msg in logs)
 
-    def fake_in_cooldown(now_arg=None):
-        current = now[0] if now_arg is None else now_arg
-        return bool(worker._lf_cooldown_until and current < worker._lf_cooldown_until)
+    # Profile fetch should still run (different endpoint).
+    monkeypatch.setattr(
+        cde,
+        "_extract_links_from_profile",
+        lambda html, source_dir, url: ({"https://twitter.com/demo"}, set(), set(), set()),
+    )
+    monkeypatch.setattr(worker.session, "get", lambda url, timeout=None, headers=None: _DummyResp(200, "<html/>"))
+    profile_payload = worker._fetch_profile_and_build("https://www.last.fm/music/demo", "lastfm")
+    assert profile_payload is not None
+    assert profile_payload.source_url == "https://www.last.fm/music/demo"
+    # Profile cooldown should not have been set by the skipped search.
+    assert not worker._lf_endpoint_in_cooldown("profile")
 
-    call_count = {"attempts": 0}
 
-    def fake_enrich(df, row_idx, ctx):
-        call_count["attempts"] += 1
-        if call_count["attempts"] == 3:
-            worker._lf_cooldown_until = fake_now() + 30
-        return (False, False)
+def test_lastfm_endpoint_cooldowns_are_independent(monkeypatch):
+    worker = _build_worker()
+    # Trigger search cooldown.
+    for _ in range(cde.LF_COOLDOWN_CONSEC_406):
+        worker._lf_mark_406("search")
+    assert worker._lf_endpoint_in_cooldown("search")
+    assert not worker._lf_endpoint_in_cooldown("profile")
 
-    monkeypatch.setattr(worker, "_lf_now", fake_now)
-    monkeypatch.setattr(worker, "_lf_in_cooldown", fake_in_cooldown)
-    monkeypatch.setattr(worker, "_enrich_row_live_lookup", fake_enrich)
+    # Trigger profile cooldown separately.
+    for _ in range(cde.LF_COOLDOWN_CONSEC_406):
+        worker._lf_mark_406("profile")
+    assert worker._lf_endpoint_in_cooldown("profile")
+    # Search cooldown remains set (independent timers).
+    assert worker._lf_endpoint_in_cooldown("search")
 
-    df = pd.DataFrame({"Artist Name": [f"Artist {i}" for i in range(10)]})
+
+def test_lastfm_cooldown_logs_include_endpoint_labels(monkeypatch):
+    worker = _build_worker()
+    logs: List[str] = []
+    worker.log_message = SimpleNamespace(emit=lambda msg: logs.append(msg))
+
+    # Enter search cooldown via helper.
+    worker._lf_set_endpoint_cooldown("search", consec=cde.LF_COOLDOWN_CONSEC_406)
+    worker._lf_set_endpoint_cooldown("profile", consec=cde.LF_COOLDOWN_CONSEC_406)
+
+    assert any("search" in msg.lower() for msg in logs)
+    assert any("profile" in msg.lower() for msg in logs)
+
+
+def test_lastfm_phase_mixed_rows_continues_under_search_cooldown(monkeypatch):
+    worker = _build_worker()
+    logs: List[str] = []
+    worker.log_message = SimpleNamespace(emit=lambda msg: logs.append(msg))
+
+    df = pd.DataFrame(
+        {
+            "Artist Name": ["Artist A", "Artist B"],
+            "SoundCloud Link": ["", ""],
+            "Bandcamp_URL": ["", ""],
+        }
+    )
+
+    # Make profile fetch return actionable payload.
+    monkeypatch.setattr(
+        cde,
+        "_extract_links_from_profile",
+        lambda html, source_dir, url: ({"https://twitter.com/demo"}, set(), set(), set()),
+    )
+    monkeypatch.setattr(worker.session, "get", lambda url, timeout=None, headers=None: _DummyResp(200, "<html/>"))
+
+    profile_called = {"called": False}
+
+    def fake_live_lookup(artist_name, skip_soundcloud=False, skip_bandcamp=False):
+        if artist_name == "Artist A":
+            for _ in range(cde.LF_COOLDOWN_CONSEC_406):
+                worker._lf_mark_406("search")
+            worker._lf_search_skipped_cooldown += 1
+            worker.log_message.emit("[Enricher][LF] search cooldown active; skipping row 'Artist A' expires_in=30s")
+            return None
+        if artist_name == "Artist B":
+            profile_called["called"] = True
+            return worker._fetch_profile_and_build("https://www.last.fm/music/artistb", "lastfm")
+        return None
+
+    monkeypatch.setattr(worker, "_live_lookup", fake_live_lookup)
 
     worker._phase_live_lookup(df, total=len(df.index))
 
-    # Cooldown was set mid-phase but rows were not stopped early.
-    assert worker._lf_cooldown_until > 0
-    assert not any("Stopped early" in msg and "cooldown" in msg for msg in logs)
-    skip_logs = [msg for msg in logs if "cooldown active; skipping row" in msg]
-    assert len(skip_logs) == 7  # rows 4-10 skipped
-    assert any("skipped_cooldown=7" in msg for msg in logs)
+    # Search attempts were skipped for first row; profile still fetched for second row.
+    assert any("search cooldown active" in msg for msg in logs)
+    assert profile_called["called"]
+    # Phase summary should show at least one search skip and no early stop.
+    assert any("search_skipped" in msg for msg in logs)
+    assert not any("Stopped early: cooldown" in msg for msg in logs)

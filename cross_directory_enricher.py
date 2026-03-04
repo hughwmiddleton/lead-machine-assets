@@ -3726,11 +3726,17 @@ class CrossDirectoryEnricherWorker(QThread):
         self._last_bc_row_stats: Dict[str, Any] = {}
         self._bc_discover_cache: Dict[str, List[Tuple[str, str]]] = {}
         self._bc_discover_fetches: int = 0
-        # Last.fm health state
-        self._lf_consecutive_406: int = 0
-        self._lf_cooldown_until: float = 0.0  # monotonic timestamp
-        self._lf_cooldown_logged: bool = False
-        self._lf_cooldown_skip_logged: bool = False
+        # Last.fm health state (endpoint-specific)
+        self._lf_search_consecutive_406: int = 0
+        self._lf_profile_consecutive_406: int = 0
+        self._lf_search_cooldown_until: float = 0.0  # monotonic timestamp
+        self._lf_profile_cooldown_until: float = 0.0  # monotonic timestamp
+        self._lf_search_cooldown_logged: bool = False
+        self._lf_profile_cooldown_logged: bool = False
+        self._lf_search_cooldown_skip_logged: bool = False
+        self._lf_profile_cooldown_skip_logged: bool = False
+        self._lf_search_skipped_cooldown: int = 0
+        self._lf_profile_skipped_cooldown: int = 0
         self._directory_indexes: Dict[str, DirectoryIndex] = {}
         # Share live-search budget with SoundCloud aggregator fetches.
         try:
@@ -4364,7 +4370,7 @@ class CrossDirectoryEnricherWorker(QThread):
             )
 
             def lf_available() -> Tuple[bool, Optional[str]]:
-                in_cd = self._lf_in_cooldown()
+                in_cd = self._lf_endpoint_in_cooldown("search") and self._lf_endpoint_in_cooldown("profile")
                 return (not in_cd, "cooldown" if in_cd else None)
 
             def lf_run(row_idx: int) -> SourceResult:
@@ -4499,7 +4505,8 @@ class CrossDirectoryEnricherWorker(QThread):
         self.log_message.emit("[Enricher][LF Phase] Starting...")
         enriched_count = 0
         processed_rows = 0
-        skipped_cooldown = 0
+        skipped_search_cooldown = 0
+        skipped_profile_cooldown = 0
         stopped_max_live = False
         for position, row_idx in enumerate(seed_df.index, start=1):
             if self.max_live_searches > 0 and self.live_search_attempts >= self.max_live_searches:
@@ -4510,25 +4517,18 @@ class CrossDirectoryEnricherWorker(QThread):
                 continue
             processed_rows += 1
             self._init_row_enrichment_state()
-            artist = ctx.get("artist") or "<unknown>"
-            if self._lf_in_cooldown():
-                expires = int(max(1.0, self._lf_cooldown_until - self._lf_now()))
-                try:
-                    self.log_message.emit(
-                        f"[Enricher][LF] cooldown active; skipping row {position}/{total} '{artist}' expires_in={expires}s"
-                    )
-                except Exception:
-                    pass
-                self._set_platform_state("lastfm", "skipped")
-                skipped_cooldown += 1
-                continue
             ll_enriched, _ = self._enrich_row_live_lookup(seed_df, row_idx, ctx)
             if ll_enriched:
                 enriched_count += 1
+            skipped_search_cooldown += getattr(self, "_lf_search_skipped_cooldown", 0)
+            skipped_profile_cooldown += getattr(self, "_lf_profile_skipped_cooldown", 0)
+            self._lf_search_skipped_cooldown = 0
+            self._lf_profile_skipped_cooldown = 0
         if stopped_max_live:
             self.log_message.emit("[Enricher][LF Phase] Stopped early: max_live")
         self.log_message.emit(
-            f"[Enricher][LF Phase] Completed {processed_rows} rows (enriched={enriched_count}, skipped_cooldown={skipped_cooldown})"
+            f"[Enricher][LF Phase] Completed {processed_rows} rows (enriched={enriched_count}, "
+            f"search_skipped={skipped_search_cooldown}, profile_skipped={skipped_profile_cooldown})"
         )
 
     def _phase_facebook(self, seed_df, fb_driver, total):
@@ -5198,45 +5198,86 @@ class CrossDirectoryEnricherWorker(QThread):
     def _lf_now(self) -> float:
         return time.monotonic()
 
-    def _lf_in_cooldown(self, now: Optional[float] = None) -> bool:
+    # ---------- Last.fm cooldown helpers (endpoint-specific) ----------
+    def _lf_endpoint_in_cooldown(self, endpoint: str, now: Optional[float] = None) -> bool:
         now = self._lf_now() if now is None else now
-        return bool(self._lf_cooldown_until and now < self._lf_cooldown_until)
+        until = self._lf_search_cooldown_until if endpoint == "search" else self._lf_profile_cooldown_until
+        return bool(until and now < until)
 
-    def _lf_clear_cooldown(self) -> None:
-        if self._lf_cooldown_until:
-            self._lf_cooldown_until = 0.0
-        self._lf_cooldown_logged = False
-        self._lf_cooldown_skip_logged = False
+    def _lf_clear_endpoint_cooldown(self, endpoint: str) -> None:
+        if endpoint == "search":
+            if self._lf_search_cooldown_until:
+                self._lf_search_cooldown_until = 0.0
+            self._lf_search_cooldown_logged = False
+            self._lf_search_cooldown_skip_logged = False
+            self._lf_search_consecutive_406 = 0
+        else:
+            if self._lf_profile_cooldown_until:
+                self._lf_profile_cooldown_until = 0.0
+            self._lf_profile_cooldown_logged = False
+            self._lf_profile_cooldown_skip_logged = False
+            self._lf_profile_consecutive_406 = 0
 
-    def _lf_enter_cooldown(self) -> None:
+    def _lf_endpoint_cooldown_remaining(self, endpoint: str, now: Optional[float] = None) -> int:
+        now = self._lf_now() if now is None else now
+        until = self._lf_search_cooldown_until if endpoint == "search" else self._lf_profile_cooldown_until
+        return int(max(0.0, (until or 0.0) - now))
+
+    def _lf_set_endpoint_cooldown(
+        self, endpoint: str, seconds: Optional[int] = None, reason: str = "", consec: Optional[int] = None
+    ) -> None:
         now = self._lf_now()
-        base = LF_COOLDOWN_MIN_S + max(0, self._lf_consecutive_406 - LF_COOLDOWN_CONSEC_406) * LF_COOLDOWN_STEP_S
-        duration = min(LF_COOLDOWN_MAX_S, max(LF_COOLDOWN_MIN_S, base))
+        consec_val = (
+            consec
+            if consec is not None
+            else (self._lf_search_consecutive_406 if endpoint == "search" else self._lf_profile_consecutive_406)
+        )
+        if seconds is not None:
+            duration = float(seconds)
+        else:
+            base = LF_COOLDOWN_MIN_S + max(0, consec_val - LF_COOLDOWN_CONSEC_406) * LF_COOLDOWN_STEP_S
+            duration = min(LF_COOLDOWN_MAX_S, max(LF_COOLDOWN_MIN_S, base))
+        current_until = self._lf_search_cooldown_until if endpoint == "search" else self._lf_profile_cooldown_until
         new_until = now + duration
-        if self._lf_cooldown_until and self._lf_cooldown_until > now:
-            new_until = min(now + LF_COOLDOWN_MAX_S, max(self._lf_cooldown_until, new_until))
-        entering = not self._lf_in_cooldown(now)
-        self._lf_cooldown_until = new_until
-        if entering and not self._lf_cooldown_logged:
-            cooldown = int(max(1.0, self._lf_cooldown_until - now))
+        if current_until and current_until > now:
+            new_until = min(now + LF_COOLDOWN_MAX_S, max(current_until, new_until))
+        entering = not self._lf_endpoint_in_cooldown(endpoint, now)
+        if endpoint == "search":
+            self._lf_search_cooldown_until = new_until
+        else:
+            self._lf_profile_cooldown_until = new_until
+        if entering:
+            cooldown = int(max(1.0, new_until - now))
             try:
-                self.log_message.emit(
-                    f"[Enricher][LF] Entering soft cooldown after consecutive 406s={self._lf_consecutive_406}; cooldown_s={cooldown}; until={self._lf_cooldown_until:.2f}"
-                )
+                if endpoint == "search" and not self._lf_search_cooldown_logged:
+                    self.log_message.emit(
+                        f"[Enricher][LF] Entering soft cooldown (search) after consecutive 406s={consec_val}; cooldown_s={cooldown}; until={new_until:.2f}"
+                    )
+                    self._lf_search_cooldown_logged = True
+                if endpoint == "profile" and not self._lf_profile_cooldown_logged:
+                    self.log_message.emit(
+                        f"[Enricher][LF] Entering soft cooldown (profile) after consecutive 406s={consec_val}; cooldown_s={cooldown}; until={new_until:.2f}"
+                    )
+                    self._lf_profile_cooldown_logged = True
             except Exception:
                 pass
-            self._lf_cooldown_logged = True
-        if entering:
-            self._lf_cooldown_skip_logged = False
+            if endpoint == "search":
+                self._lf_search_cooldown_skip_logged = False
+            else:
+                self._lf_profile_cooldown_skip_logged = False
 
-    def _lf_mark_406(self) -> None:
-        self._lf_consecutive_406 += 1
-        if self._lf_consecutive_406 >= LF_COOLDOWN_CONSEC_406:
-            self._lf_enter_cooldown()
+    def _lf_mark_406(self, endpoint: str) -> None:
+        if endpoint == "search":
+            self._lf_search_consecutive_406 += 1
+            if self._lf_search_consecutive_406 >= LF_COOLDOWN_CONSEC_406:
+                self._lf_set_endpoint_cooldown("search")
+        else:
+            self._lf_profile_consecutive_406 += 1
+            if self._lf_profile_consecutive_406 >= LF_COOLDOWN_CONSEC_406:
+                self._lf_set_endpoint_cooldown("profile")
 
-    def _lf_mark_success(self) -> None:
-        self._lf_consecutive_406 = 0
-        self._lf_clear_cooldown()
+    def _lf_mark_success(self, endpoint: str) -> None:
+        self._lf_clear_endpoint_cooldown(endpoint)
 
     def _compute_match_score_for_candidate(
         self,
@@ -7301,22 +7342,32 @@ class CrossDirectoryEnricherWorker(QThread):
         return None
 
     def _live_search_lastfm(self, artist_name: str) -> Optional[EnrichmentPayload]:
-        if self._lf_cooldown_until and not self._lf_in_cooldown():
-            try:
-                self.log_message.emit("[Enricher][LF] cooldown expired; resuming")
-            except Exception:
-                pass
-            self._lf_clear_cooldown()
-        if self._lf_in_cooldown():
-            if not self._lf_cooldown_skip_logged:
-                cooldown = int(max(1.0, self._lf_cooldown_until - self._lf_now()))
+        # Clear expired cooldowns
+        for endpoint in ("search", "profile"):
+            if endpoint == "search" and self._lf_search_cooldown_until and not self._lf_endpoint_in_cooldown("search"):
+                try:
+                    self.log_message.emit("[Enricher][LF] search cooldown expired; resuming")
+                except Exception:
+                    pass
+                self._lf_clear_endpoint_cooldown("search")
+            if endpoint == "profile" and self._lf_profile_cooldown_until and not self._lf_endpoint_in_cooldown("profile"):
+                try:
+                    self.log_message.emit("[Enricher][LF] profile cooldown expired; resuming")
+                except Exception:
+                    pass
+                self._lf_clear_endpoint_cooldown("profile")
+
+        if self._lf_endpoint_in_cooldown("search"):
+            if not self._lf_search_cooldown_skip_logged:
+                cooldown = self._lf_endpoint_cooldown_remaining("search")
                 try:
                     self.log_message.emit(
-                        f"[Enricher][LF] cooldown active; skipping row '{artist_name}' expires_in={cooldown}s"
+                        f"[Enricher][LF] search cooldown active; skipping row '{artist_name}' expires_in={cooldown}s"
                     )
                 except Exception:
                     pass
-                self._lf_cooldown_skip_logged = True
+                self._lf_search_cooldown_skip_logged = True
+            self._lf_search_skipped_cooldown += 1
             self._set_platform_state("lastfm", "skipped")
             return None
         if not self._platform_attempt_allowed("lastfm", artist_name, "Last.fm Enrich"):
@@ -7350,7 +7401,7 @@ class CrossDirectoryEnricherWorker(QThread):
             self._set_platform_state("lastfm", "skipped")
             return None
         self.log_message.emit(f"[Enricher] Last.fm live search: {url}")
-        lf_unhealthy = self._lf_in_cooldown() or self._lf_consecutive_406 > 0
+        lf_unhealthy = self._lf_endpoint_in_cooldown("search") or self._lf_search_consecutive_406 > 0
 
         def _parse_first_candidate(html_doc: str, log_no_results: bool) -> Optional[Tuple[str, str, float, float, float]]:
             if not html_doc:
@@ -7402,7 +7453,7 @@ class CrossDirectoryEnricherWorker(QThread):
             no_quote_query = f"{artist_name} {sanitized_title}".strip()
             quoted_no_quotes = urllib.parse.quote_plus(no_quote_query)
             no_quote_url = f"https://www.last.fm/search?q={quoted_no_quotes}&type=artist"
-            _lf_sleep(self._lf_in_cooldown() or self._lf_consecutive_406 > 0)
+            _lf_sleep(self._lf_endpoint_in_cooldown("search") or self._lf_search_consecutive_406 > 0)
             no_html = self._fetch_url(no_quote_url, label="Last.fm search (no-quotes)", max_attempts=1)
             no_candidate = _parse_first_candidate(no_html, log_no_results=False) if no_html else None
             if no_candidate:
@@ -7432,12 +7483,12 @@ class CrossDirectoryEnricherWorker(QThread):
             )
             quoted_fb = urllib.parse.quote_plus(fallback_query)
             fb_url = f"https://www.last.fm/search?q={quoted_fb}&type=artist"
-            _lf_sleep(self._lf_in_cooldown() or self._lf_consecutive_406 > 0)
+            _lf_sleep(self._lf_endpoint_in_cooldown("search") or self._lf_search_consecutive_406 > 0)
             fb_html = self._fetch_url(fb_url, label="Last.fm search (fallback)", max_attempts=1)
             fb_status = getattr(self, "_last_http_status", None)
             if fb_status == 406 or (not fb_html and fb_status == 406):
-                # Shape fallback failed; mark unhealthy and skip upcoming rows.
-                self._lf_mark_406()
+                # Shape fallback failed; mark unhealthy and skip upcoming search requests.
+                self._lf_mark_406("search")
             fallback_candidate = _parse_first_candidate(fb_html, log_no_results=False) if fb_html else None
             if fallback_candidate:
                 fb_display, fb_profile, fb_conf, fb_rank, fb_match_score = fallback_candidate
@@ -7496,19 +7547,25 @@ class CrossDirectoryEnricherWorker(QThread):
         elif headers is not None:
             headers_name = "custom"
 
+        endpoint_type = "profile" if is_lastfm and "profile" in label.lower() else "search"
         now = time.time()
         if is_lastfm:
             now_mono = self._lf_now()
-            if self._lf_in_cooldown(now_mono):
-                if not self._lf_cooldown_skip_logged:
-                    cooldown = int(max(1.0, self._lf_cooldown_until - now_mono))
+            if self._lf_endpoint_in_cooldown(endpoint_type, now_mono):
+                remaining = self._lf_endpoint_cooldown_remaining(endpoint_type, now_mono)
+                skip_logged_attr = "_lf_profile_cooldown_skip_logged" if endpoint_type == "profile" else "_lf_search_cooldown_skip_logged"
+                if not getattr(self, skip_logged_attr, False):
                     try:
                         self.log_message.emit(
-                            f"[Enricher][LF] cooldown active; skipping Last.fm fetch. expires_in={cooldown}s"
+                            f"[Enricher][LF] {endpoint_type} cooldown active; skipping Last.fm fetch. expires_in={remaining}s"
                         )
                     except Exception:
                         pass
-                    self._lf_cooldown_skip_logged = True
+                    setattr(self, skip_logged_attr, True)
+                if endpoint_type == "profile":
+                    self._lf_profile_skipped_cooldown += 1
+                else:
+                    self._lf_search_skipped_cooldown += 1
                 self._last_fetch_ok = False
                 self._last_http_status = None
                 return None
@@ -7530,7 +7587,7 @@ class CrossDirectoryEnricherWorker(QThread):
                     pass
                 elif is_lastfm:
                     if status and status < 400:
-                        self._lf_mark_success()
+                        self._lf_mark_success(endpoint_type)
                 if is_lastfm:
                     try:
                         self.log_message.emit(
@@ -7584,7 +7641,7 @@ class CrossDirectoryEnricherWorker(QThread):
                 html = exc.response.text if exc.response is not None else ""
 
                 if is_lastfm and status == 406:
-                    self._lf_mark_406()
+                    self._lf_mark_406(endpoint_type)
                     self._last_fetch_ok = False
                     suffix = _format_outcome_suffix(fetch_ok=False, actionable=None, http_status=status)
                     self.log_message.emit(
