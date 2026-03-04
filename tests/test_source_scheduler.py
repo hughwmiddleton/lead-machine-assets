@@ -102,3 +102,69 @@ def test_scheduler_mode_skips_legacy_phases(monkeypatch):
     assert calls["sc"] == 0
     assert calls["lf"] == 0
     assert calls["fb"] == 0
+
+
+def test_adaptive_priority_prefers_successful_sources(monkeypatch):
+    # Deterministic jitter for reproducibility.
+    monkeypatch.setattr("source_scheduler.random.uniform", lambda a, b: 0)
+
+    calls = []
+    rows = [0, 1, 2, 3]
+
+    def sc_run(idx):
+        calls.append(f"SC{idx}")
+        return SourceResult(attempted=True, enriched=True)
+
+    def lf_run(idx):
+        calls.append(f"LF{idx}")
+        return SourceResult(attempted=True, enriched=False)
+
+    scheduler = SourceDiversityScheduler(
+        [
+            SourceSpec(name="SC", rows=rows, run_row=sc_run, is_available=lambda: (True, None)),
+            SourceSpec(name="LF", rows=rows, run_row=lf_run, is_available=lambda: (True, None)),
+        ],
+        row_label=str,
+    )
+    scheduler.run()
+
+    # SC should be scheduled before LF once success history is available (after first row).
+    assert calls[:2] == ["SC0", "LF0"]
+    assert calls[2:4] == ["SC1", "LF1"]
+    assert calls[4:6] == ["SC2", "LF2"]
+
+
+def test_cooldown_sources_are_deprioritised(monkeypatch):
+    monkeypatch.setattr("source_scheduler.random.uniform", lambda a, b: 0)
+
+    rows = [0, 1, 2, 3]
+    calls = []
+    lf_checks = {"count": 0}
+
+    def sc_run(idx):
+        calls.append(f"SC{idx}")
+        return SourceResult(attempted=True, enriched=True)
+
+    def lf_is_available():
+        lf_checks["count"] += 1
+        # LF in cooldown for first two checks, then becomes available.
+        return (lf_checks["count"] > 2, "cooldown" if lf_checks["count"] <= 2 else None)
+
+    def lf_run(idx):
+        calls.append(f"LF{idx}")
+        return SourceResult(attempted=True, enriched=False)
+
+    scheduler = SourceDiversityScheduler(
+        [
+            SourceSpec(name="SC", rows=rows, run_row=sc_run, is_available=lambda: (True, None)),
+            SourceSpec(name="LF", rows=rows, run_row=lf_run, is_available=lf_is_available),
+        ],
+        row_label=str,
+    )
+    scheduler.run()
+
+    # LF rows 0 and 1 are skipped for cooldown; first LF run should occur after SC has progressed.
+    first_lf_idx = calls.index("LF2")
+    assert first_lf_idx > calls.index("SC2")
+    # Healthy SC keeps leading even after LF becomes available.
+    assert calls.index("SC3") < calls.index("LF3")
