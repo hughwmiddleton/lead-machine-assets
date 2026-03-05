@@ -64,7 +64,26 @@ def _row_source_opportunity(row: Any, source_name: str) -> bool:
 
     if name in {"FB", "FACEBOOK"}:
         fb_url = _get_value(["facebook_url", "Facebook_URL", "Facebook URL", "FB_URL", "facebook"])
-        return _has_text(fb_url)
+        if _has_text(fb_url):
+            return True
+
+        social_text = _get_value([
+            "Social Link",
+            "social_link",
+            "social",
+            "links",
+            "External Links",
+            "external_links",
+        ])
+        if _has_text(social_text):
+            try:
+                text = str(social_text).lower()
+                if any(domain in text for domain in ("facebook.com", "m.facebook.com", "fb.com")):
+                    return True
+            except Exception:
+                pass
+
+        return False
 
     # Unknown sources fall back to existing behaviour.
     return True

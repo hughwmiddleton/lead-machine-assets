@@ -227,6 +227,63 @@ def test_opportunity_skips_facebook_when_url_missing():
     assert summary["FB"]["skipped_opportunity"] == 1
 
 
+def test_fb_opportunity_true_when_social_link_contains_facebook():
+    rows = [0]
+    row_data = {0: {"Artist Name": "Artist X", "Facebook_URL": "", "Social Link": "https://www.facebook.com/dizzydaysband"}}
+    fb_calls = []
+
+    fb_spec = SourceSpec(
+        name="FB",
+        rows=rows,
+        run_row=lambda idx: (fb_calls.append(idx) or SourceResult(attempted=True)),
+        is_available=lambda: (True, None),
+        row_getter=lambda idx: row_data[idx],
+    )
+    summary = SourceDiversityScheduler([fb_spec], row_label=str).run()
+
+    assert fb_calls == [0]
+    assert summary["FB"]["attempted"] == 1
+    assert summary["FB"]["skipped_opportunity"] == 0
+
+
+def test_fb_opportunity_false_when_social_link_non_facebook():
+    rows = [0]
+    row_data = {0: {"Artist Name": "Artist X", "Social Link": "https://www.instagram.com/xxx"}}
+    fb_calls = []
+
+    fb_spec = SourceSpec(
+        name="FB",
+        rows=rows,
+        run_row=lambda idx: (fb_calls.append(idx) or SourceResult(attempted=True)),
+        is_available=lambda: (True, None),
+        row_getter=lambda idx: row_data[idx],
+    )
+    summary = SourceDiversityScheduler([fb_spec], row_label=str).run()
+
+    assert not fb_calls
+    assert summary["FB"]["attempted"] == 0
+    assert summary["FB"]["skipped_opportunity"] == 1
+
+
+def test_fb_opportunity_true_when_external_links_contains_facebook():
+    rows = [0]
+    row_data = {0: {"Artist Name": "Artist X", "External Links": "bandsite; http://m.facebook.com/dizzydays"}}
+    fb_calls = []
+
+    fb_spec = SourceSpec(
+        name="FB",
+        rows=rows,
+        run_row=lambda idx: (fb_calls.append(idx) or SourceResult(attempted=True)),
+        is_available=lambda: (True, None),
+        row_getter=lambda idx: row_data[idx],
+    )
+    summary = SourceDiversityScheduler([fb_spec], row_label=str).run()
+
+    assert fb_calls == [0]
+    assert summary["FB"]["attempted"] == 1
+    assert summary["FB"]["skipped_opportunity"] == 0
+
+
 def test_opportunity_weight_prioritises_sources(monkeypatch):
     monkeypatch.setattr("source_scheduler.random.uniform", lambda a, b: 0)
     rows = [0]
