@@ -161,11 +161,70 @@ def test_sc_phase_continues_during_cooldown(monkeypatch):
     # Enrichment called only on non-cooldown rows (0,3,4).
     assert sc_calls == [0, 3, 4]
     # Summary reflects all rows processed and cooldown skips counted.
-    summary = [l for l in logs if "[Enricher][SC Phase] Completed" in l]
-    assert summary
-    assert "Completed 5 rows" in summary[-1]
-    assert "skipped_cooldown=2" in summary[-1]
+    summary_lines = [l for l in logs if "[Enricher][SC Phase] Completed" in l]
+    assert summary_lines
+    assert "Completed 5 rows" in summary_lines[-1]
+    assert "skipped_cooldown=2" in summary_lines[-1]
+    # Cooldown skip summary is emitted instead of early stop.
+    cooldown_lines = [l for l in logs if "cooldown_skip_summary" in l]
+    assert cooldown_lines
+    assert "cooldown_s_remaining" in cooldown_lines[-1]
     # No early-stop log on cooldown.
+    assert not any("Stopped early: cooldown" in l for l in logs)
+
+
+def test_sc_phase_continues_after_midphase_breaker_trip(monkeypatch):
+    w = _mk_worker()
+    w.enable_live_search = True
+    rows = 4
+    seed_df = pd.DataFrame(
+        {
+            "SoundCloud Link": [""] * rows,
+            "Artist Name": [f"Artist {i}" for i in range(rows)],
+        }
+    )
+
+    logs = []
+
+    class Log:
+        @staticmethod
+        def emit(msg, *args, **kwargs):
+            logs.append(str(msg))
+
+    w.log_message = Log()
+
+    # Real cooldown detector, but we control the timestamp knob.
+    w._sc_live_disabled_until = 0.0
+
+    def build_ctx(df, row_idx, position, total):
+        return {
+            "artist": df.at[row_idx, "Artist Name"],
+            "position": position,
+            "total": total,
+            "spotify_id": "",
+        }
+
+    w._build_row_context = build_ctx
+
+    def fake_sc_enrich(df, row_idx, ctx):
+        # Trip breaker on row 1, leaving subsequent rows to observe cooldown.
+        if row_idx == 1:
+            w._sc_live_disabled_until = time.time() + 999
+        return (False, False)
+
+    w._enrich_row_sc_live = fake_sc_enrich
+
+    w._phase_soundcloud(seed_df, rows)
+
+    # Completed should still show all rows, with cooldown skips for rows 2 and 3.
+    summary_lines = [l for l in logs if "[Enricher][SC Phase] Completed" in l]
+    assert summary_lines
+    assert "Completed 4 rows" in summary_lines[-1]
+    assert "skipped_cooldown=2" in summary_lines[-1]
+    # Cooldown skip summary emitted.
+    cooldown_lines = [l for l in logs if "cooldown_skip_summary" in l]
+    assert cooldown_lines
+    # No early-stop cooldown log.
     assert not any("Stopped early: cooldown" in l for l in logs)
 
 

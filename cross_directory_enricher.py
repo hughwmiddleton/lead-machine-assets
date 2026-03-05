@@ -4474,10 +4474,11 @@ class CrossDirectoryEnricherWorker(QThread):
         skipped_cooldown = 0
         skipped_disabled = 0
         processed_rows = 0
-        stop_reason = ""
+        cooldown_remaining_hint = 0
+        stopped_max_live = False
         for position, row_idx in enumerate(seed_df.index, start=1):
             if self.max_live_searches > 0 and self.live_search_attempts >= self.max_live_searches:
-                stop_reason = "max_live"
+                stopped_max_live = True
                 break
             ctx = self._build_row_context(seed_df, row_idx, position, total)
             if not ctx:
@@ -4486,7 +4487,14 @@ class CrossDirectoryEnricherWorker(QThread):
             if self._sc_in_live_cooldown():
                 skipped_cooldown += 1
                 artist = ctx.get("artist") or "<unknown>"
-                expires = int(max(1.0, (self._sc_live_disabled_until - time.time())))
+                try:
+                    cooldown_remaining_hint = max(
+                        cooldown_remaining_hint,
+                        int(max(0.0, (getattr(self, "_sc_live_disabled_until", 0.0) or 0.0) - time.time())),
+                    )
+                except Exception:
+                    pass
+                expires = int(max(1.0, (getattr(self, "_sc_live_disabled_until", 0.0) or 0.0) - time.time()))
                 try:
                     self.log_message.emit(
                         f"[Enricher][SC] cooldown active; skipping row {position}/{total} '{artist}' expires_in={expires}s"
@@ -4494,6 +4502,17 @@ class CrossDirectoryEnricherWorker(QThread):
                 except Exception:
                     pass
                 self._set_platform_state("soundcloud", "skipped")
+                try:
+                    self._write_sc_status_columns(
+                        seed_df,
+                        row_idx,
+                        "skipped_cooldown",
+                        "cooldown_active",
+                        0,
+                        0,
+                    )
+                except Exception:
+                    pass
                 continue
             self._init_row_enrichment_state()
             if not _coerce_directory_value(seed_df.at[row_idx, "SoundCloud Link"]):
@@ -4503,13 +4522,32 @@ class CrossDirectoryEnricherWorker(QThread):
                     sc_enriched, _ = self._enrich_row_sc_live(seed_df, row_idx, ctx)
                     if sc_enriched:
                         enriched_count += 1
-        if stop_reason:
-            reason_label = "cooldown" if stop_reason == "cooldown" else "max_live"
-            self.log_message.emit(f"[Enricher][SC Phase] Stopped early: {reason_label}")
+        if stopped_max_live:
+            self.log_message.emit("[Enricher][SC Phase] Stopped early: max_live")
         if skipped_cooldown:
             try:
+                cooldown_remaining_hint = max(
+                    cooldown_remaining_hint,
+                    int(max(0.0, (getattr(self, "_sc_live_disabled_until", 0.0) or 0.0) - time.time())),
+                )
+            except Exception:
+                pass
+            try:
+                cooldown_snapshot = self._sc_fail_stats_snapshot()
+            except Exception:
+                cooldown_snapshot = ""
+            try:
                 self.log_message.emit(
-                    "[Enricher][SC Phase] cooldown_summary: %s" % (self._sc_fail_stats_snapshot(),)
+                    "[Enricher][SC Phase] cooldown_skip_summary: "
+                    f"skipped_cooldown={skipped_cooldown} "
+                    f"cooldown_s_remaining={cooldown_remaining_hint} "
+                    f"counts={cooldown_snapshot}"
+                )
+            except Exception:
+                pass
+            try:
+                self.log_message.emit(
+                    "[Enricher][SC Phase] cooldown_summary: %s" % (cooldown_snapshot,)
                 )
             except Exception:
                 pass
@@ -4527,9 +4565,6 @@ class CrossDirectoryEnricherWorker(QThread):
         skipped_profile_cooldown = 0
         stopped_max_live = False
         for position, row_idx in enumerate(seed_df.index, start=1):
-            if self.max_live_searches > 0 and self.live_search_attempts >= self.max_live_searches:
-                stopped_max_live = True
-                break
             ctx = self._build_row_context(seed_df, row_idx, position, total)
             if not ctx:
                 continue
@@ -4562,8 +4597,11 @@ class CrossDirectoryEnricherWorker(QThread):
                         except Exception:
                             pass
                         self._lf_search_cooldown_skip_logged = True
-                    self._lf_search_skipped_cooldown += 1
-                    self._set_platform_state("lastfm", "skipped")
+                self._lf_search_skipped_cooldown += 1
+                self._set_platform_state("lastfm", "skipped")
+            if (not lf_skip_search) and self.max_live_searches > 0 and self.live_search_attempts >= self.max_live_searches:
+                stopped_max_live = True
+                break
             ll_enriched, _ = self._enrich_row_live_lookup(seed_df, row_idx, ctx, skip_lastfm=lf_skip_search)
             if ll_enriched:
                 enriched_count += 1
@@ -4573,6 +4611,12 @@ class CrossDirectoryEnricherWorker(QThread):
             self._lf_profile_skipped_cooldown = 0
         if stopped_max_live:
             self.log_message.emit("[Enricher][LF Phase] Stopped early: max_live")
+        try:
+            self.log_message.emit(
+                f"[Enricher][LF Phase] search_skip_summary: search_skipped={skipped_search_cooldown}"
+            )
+        except Exception:
+            pass
         self.log_message.emit(
             f"[Enricher][LF Phase] Completed {processed_rows} rows (enriched={enriched_count}, "
             f"search_skipped={skipped_search_cooldown}, profile_skipped={skipped_profile_cooldown})"
