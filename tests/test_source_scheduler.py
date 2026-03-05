@@ -225,3 +225,89 @@ def test_opportunity_skips_facebook_when_url_missing():
     assert not fb_calls
     assert summary["FB"]["attempted"] == 0
     assert summary["FB"]["skipped_opportunity"] == 1
+
+
+def test_opportunity_weight_prioritises_sources(monkeypatch):
+    monkeypatch.setattr("source_scheduler.random.uniform", lambda a, b: 0)
+    rows = [0]
+    row_data = {
+        0: {
+            "Artist Name": "Artist A",
+            "soundcloud_url": "https://soundcloud.com/test",  # no SC opportunity
+            "facebook_url": "https://facebook.com/test",  # FB opportunity
+        }
+    }
+    order: list[str] = []
+
+    def sc_run(idx):
+        order.append("SC")
+        return SourceResult(attempted=True, enriched=False)
+
+    def fb_run(idx):
+        order.append("FB")
+        return SourceResult(attempted=True, enriched=False)
+
+    row_getter = lambda idx: row_data[idx]
+    scheduler = SourceDiversityScheduler(
+        [
+            SourceSpec(name="SC", rows=rows, run_row=sc_run, is_available=lambda: (True, None), row_getter=row_getter),
+            SourceSpec(name="FB", rows=rows, run_row=fb_run, is_available=lambda: (True, None), row_getter=row_getter),
+        ],
+        row_label=str,
+    )
+    summary = scheduler.run()
+
+    assert order[0] == "FB"
+    assert summary["SC"]["skipped_opportunity"] == 1
+
+
+def test_short_circuit_stops_remaining_sources(monkeypatch):
+    monkeypatch.setattr("source_scheduler.random.uniform", lambda a, b: 0)
+    rows = [0]
+    row_data = {0: {"Artist Name": "Artist A", "Email": "", "Email_All": ""}}
+    calls = {"SC": 0, "LF": 0}
+
+    def sc_run(idx):
+        calls["SC"] += 1
+        row_data[idx]["Email"] = "artist@example.com"
+        return SourceResult(attempted=True, enriched=True)
+
+    def lf_run(idx):
+        calls["LF"] += 1
+        return SourceResult(attempted=True, enriched=True)
+
+    row_getter = lambda idx: row_data[idx]
+
+    scheduler = SourceDiversityScheduler(
+        [
+            SourceSpec(name="SC", rows=rows, run_row=sc_run, is_available=lambda: (True, None), row_getter=row_getter),
+            SourceSpec(name="LF", rows=rows, run_row=lf_run, is_available=lambda: (True, None), row_getter=row_getter),
+        ],
+        row_label=str,
+        short_circuit_fn=lambda row: __import__("pipeline_runner").has_contact_email_for_short_circuit(row),
+    )
+    scheduler.run()
+
+    assert calls["SC"] == 1
+    assert calls["LF"] == 0
+
+
+def test_scheduler_opportunity_fallback_on_row_error():
+    rows = [0]
+    calls = []
+
+    def row_getter(_):
+        raise RuntimeError("row failure")
+
+    spec = SourceSpec(
+        name="LF",
+        rows=rows,
+        run_row=lambda idx: (calls.append(idx) or SourceResult(attempted=True)),
+        is_available=lambda: (True, None),
+        row_getter=row_getter,
+    )
+
+    summary = SourceDiversityScheduler([spec], row_label=str).run()
+
+    assert calls == [0]
+    assert summary["LF"]["attempted"] == 1

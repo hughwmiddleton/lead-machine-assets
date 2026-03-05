@@ -2743,7 +2743,23 @@ def _extract_emails_from_html_text(html: str) -> Set[str]:
         cleaned = re.sub(r"\\s+dot\\s+", ".", cleaned, flags=re.IGNORECASE)
         return cleaned
 
-    normalised_text = _normalise_obfuscations(text)
+    from email_normalizer import normalize_obfuscated_email_patterns  # local import to avoid heavyweight cycles
+    try:
+        normalised_text, replacements = normalize_obfuscated_email_patterns(text)
+        if replacements:
+            try:
+                from pipeline_runner import increment_pattern_emails
+
+                increment_pattern_emails(replacements)
+            except Exception:
+                pass
+    except Exception:
+        normalised_text = text
+        replacements = 0
+    # Preserve legacy dot normalization to keep backwards-compatible coverage.
+    normalised_text = re.sub(r"\s*\[\s*dot\s*\]\s*", ".", normalised_text, flags=re.IGNORECASE)
+    normalised_text = re.sub(r"\s*\(\s*dot\s*\)\s*", ".", normalised_text, flags=re.IGNORECASE)
+    normalised_text = re.sub(r"\s+dot\s+", ".", normalised_text, flags=re.IGNORECASE)
     for match in _EMAIL_REGEX.findall(normalised_text):
         candidate = match.strip().lower()
         if not candidate or candidate.count("@") != 1:
@@ -2888,16 +2904,25 @@ def _extract_emails_from_html_text(html: str) -> Set[str]:
     if not text:
         return emails
     normalized = text
-    replacements = (
-        (r"\\s*\\[\\s*at\\s*\\]\\s*", "@"),
-        (r"\\s*\\(\\s*at\\s*\\)\\s*", "@"),
-        (r"\\s+at\\s+", "@"),
-        (r"\\s*\\[\\s*dot\\s*\\]\\s*", "."),
-        (r"\\s*\\(\\s*dot\\s*\\)\\s*", "."),
-        (r"\\s+dot\\s+", "."),
-    )
-    for pattern, replacement in replacements:
-        normalized = re.sub(pattern, replacement, normalized, flags=re.IGNORECASE)
+    try:
+        from email_normalizer import normalize_obfuscated_email_patterns
+
+        normalized, replacements = normalize_obfuscated_email_patterns(normalized)
+        if replacements:
+            try:
+                from pipeline_runner import increment_pattern_emails
+
+                increment_pattern_emails(replacements)
+            except Exception:
+                pass
+    except Exception:
+        replacements = 0
+    for pattern in (
+        r"\\s*\\[\\s*dot\\s*\\]\\s*",
+        r"\\s*\\(\\s*dot\\s*\\)\\s*",
+        r"\\s+dot\\s+",
+    ):
+        normalized = re.sub(pattern, ".", normalized, flags=re.IGNORECASE)
     for match in _EMAIL_REGEX.findall(normalized):
         cleaned = match.strip().lower()
         if not cleaned:
@@ -4444,10 +4469,20 @@ class CrossDirectoryEnricherWorker(QThread):
         if not sources:
             return
 
+        try:
+            from pipeline_runner import has_contact_email_for_short_circuit
+        except Exception:
+            has_contact_email_for_short_circuit = None  # type: ignore
+
+        short_circuit_fn = (
+            (lambda row: has_contact_email_for_short_circuit(row)) if has_contact_email_for_short_circuit else None
+        )
+
         scheduler = SourceDiversityScheduler(
             sources,
             row_label=_row_label,
             log_fn=self.log_message.emit,
+            short_circuit_fn=short_circuit_fn,
         )
         summary = scheduler.run()
         for source_name in ("SC", "LF", "FB"):
@@ -4458,6 +4493,16 @@ class CrossDirectoryEnricherWorker(QThread):
                     f"enriched={stats['enriched']} skipped_cooldown={stats['skipped_cooldown']} "
                     f"skipped_opportunity={stats['skipped_opportunity']}"
                 )
+        try:
+            from pipeline_runner import get_email_summary_counts
+
+            email_summary = get_email_summary_counts()
+            self.log_message.emit(
+                f"[Scheduler][Summary] emails_found={email_summary.get('emails_found', 0)} "
+                f"pattern_emails={email_summary.get('pattern_emails', 0)}"
+            )
+        except Exception:
+            pass
 
     def _phase_directory_matching(self, seed_df, directory_indexes, priority, total):
         self.log_message.emit("[Enricher][Directory Phase] Starting...")

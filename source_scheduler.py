@@ -98,11 +98,14 @@ class SourceDiversityScheduler:
         sources: Sequence[SourceSpec],
         row_label: Optional[Callable[[int], str]] = None,
         log_fn: Optional[Callable[[str], None]] = None,
+        short_circuit_fn: Optional[Callable[[Any], bool]] = None,
     ) -> None:
         self.sources: List[SourceSpec] = list(sources)
         self._positions: Dict[str, int] = {spec.name: 0 for spec in self.sources}
         self._row_label = row_label or (lambda idx: str(idx))
         self._log = log_fn
+        self._short_circuit_fn = short_circuit_fn
+        self._completed_rows: set[int] = set()
         self._summary: Dict[str, Dict[str, int]] = {
             spec.name: {"attempted": 0, "enriched": 0, "skipped_cooldown": 0, "skipped_opportunity": 0}
             for spec in self.sources
@@ -127,13 +130,27 @@ class SourceDiversityScheduler:
             except Exception:
                 pass
 
+    def _peek_next_row(self, spec: SourceSpec) -> Optional[int]:
+        pos = self._positions.get(spec.name, 0)
+        rows = spec.rows
+        while pos < len(rows):
+            candidate = rows[pos]
+            if candidate not in self._completed_rows:
+                return candidate
+            pos += 1
+        return None
+
     def _next_row(self, spec: SourceSpec) -> Optional[int]:
         pos = self._positions.get(spec.name, 0)
-        if pos >= len(spec.rows):
-            return None
-        row_idx = spec.rows[pos]
-        self._positions[spec.name] = pos + 1
-        return row_idx
+        rows = spec.rows
+        while pos < len(rows):
+            row_idx = rows[pos]
+            pos += 1
+            self._positions[spec.name] = pos
+            if row_idx in self._completed_rows:
+                continue
+            return row_idx
+        return None
 
     def _record(self, spec_name: str, result: SourceResult) -> None:
         summary = self._summary[spec_name]
@@ -176,7 +193,22 @@ class SourceDiversityScheduler:
         cooldown_rate = cooldown / denom if denom else 0.0
 
         priority = (success_rate * 2.0) - (cooldown_rate * 1.5) + jitter
-        return max(0.2, min(3.0, priority))
+        base_score = max(0.2, min(3.0, priority))
+
+        # Opportunity-weighted multiplier based on the next pending row for this source.
+        opportunity_weight = 1.0
+        next_row = self._peek_next_row(spec)
+        if next_row is not None and spec.row_getter:
+            try:
+                row_data = spec.row_getter(next_row)
+                if row_data is None:
+                    opportunity_weight = 1.0
+                else:
+                    has_opportunity = _row_source_opportunity(row_data, spec.name)
+                    opportunity_weight = 1.5 if has_opportunity else 0.0
+            except Exception:
+                opportunity_weight = 1.0
+        return base_score * opportunity_weight
 
     def _maybe_emit_health(self) -> None:
         self._iteration_counter += 1
@@ -203,7 +235,7 @@ class SourceDiversityScheduler:
             try:
                 sorted_sources = sorted(
                     self.sources,
-                    key=lambda s: self._compute_priority(s),
+                    key=lambda s: (self._compute_priority(s), s.name),
                     reverse=True,
                 )
             except Exception:
@@ -214,7 +246,12 @@ class SourceDiversityScheduler:
                 if row_idx is None:
                     continue
                 progressed = True
-                row_data = spec.row_getter(row_idx) if spec.row_getter else None
+                row_data = None
+                if spec.row_getter:
+                    try:
+                        row_data = spec.row_getter(row_idx)
+                    except Exception:
+                        row_data = None
                 has_opportunity = True
                 if row_data is not None:
                     try:
@@ -236,6 +273,14 @@ class SourceDiversityScheduler:
                 self._emit(f"[Scheduler] running {spec.name} for row {display_row}")
                 result = spec.run_row(row_idx)
                 self._record(spec.name, result)
+                if result.attempted and self._short_circuit_fn:
+                    try:
+                        latest_row = spec.row_getter(row_idx) if spec.row_getter else None
+                        if latest_row is not None and self._short_circuit_fn(latest_row):
+                            self._completed_rows.add(row_idx)
+                            self._emit(f"[Scheduler] row {display_row} email found; short-circuiting remaining sources")
+                    except Exception:
+                        pass
             if not progressed:
                 break
         return self._summary

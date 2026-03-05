@@ -2117,14 +2117,32 @@ def _extract_emails_from_html(html: str) -> Tuple[List[str], bool]:
             mailto_used = True
     text_blob = soup.get_text(" ", strip=True) if soup else ""
     if text_blob:
+        try:
+            from email_normalizer import normalize_obfuscated_email_patterns
+
+            text_blob, replacements = normalize_obfuscated_email_patterns(text_blob)
+            if replacements:
+                try:
+                    from pipeline_runner import increment_pattern_emails
+
+                    increment_pattern_emails(replacements)
+                except Exception:
+                    pass
+        except Exception:
+            replacements = 0
         emails.extend(match.group(0) for match in EMAIL_REGEX.finditer(text_blob))
     seen = set()
     unique: List[str] = []
     for email in emails:
         cleaned = email.strip()
-        if cleaned and cleaned not in seen:
-            seen.add(cleaned)
-            unique.append(cleaned)
+        try:
+            from email_normalizer import normalize_email_value
+        except Exception:
+            normalize_email_value = lambda v: (v or "").strip().lower()
+        normalized = normalize_email_value(cleaned)
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            unique.append(normalized)
     return unique, mailto_used
 
 
@@ -2142,8 +2160,12 @@ def _choose_primary_email(emails: Sequence[str], artist_slug: str) -> Optional[s
 def _merge_email_all(existing: str, new_emails: Sequence[str]) -> str:
     merged: List[str] = []
     seen = set()
+    try:
+        from email_normalizer import normalize_email_value
+    except Exception:
+        normalize_email_value = lambda v: (v or "").strip().lower()
     for value in list(_split_multi(existing)) + list(new_emails):
-        cleaned = (value or "").strip()
+        cleaned = normalize_email_value(value)
         if cleaned and cleaned not in seen:
             seen.add(cleaned)
             merged.append(cleaned)

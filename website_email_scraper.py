@@ -8,6 +8,8 @@ from urllib.parse import urljoin, urlparse
 
 import requests
 from html_fetcher import fetch_html
+from email_normalizer import normalize_obfuscated_email_patterns
+from pipeline_runner import normalize_emails, increment_pattern_emails
 from bs4 import BeautifulSoup
 
 Row = Dict[str, str]
@@ -81,7 +83,7 @@ def enrich_rows_with_website_emails(
                 if logger:
                     logger(f"[WebsiteEmail] Failed to fetch {normalized}: {exc}")
                 continue
-            emails = _extract_emails_from_html(html)
+            emails = _extract_emails_from_html(html, logger=logger)
             if not emails:
                 emails, follow_url = _follow_contact_links_and_extract(session, html, normalized, logger)
                 if emails and follow_url:
@@ -199,18 +201,21 @@ def _fetch_html(session: requests.Session, url: str) -> str:
     return html
 
 
-def _extract_emails_from_html(html: str) -> List[str]:
+def _extract_emails_from_html(html: str, logger: LoggerFn = None) -> List[str]:
     if not html:
         return []
-    emails = EMAIL_RE.findall(html)
+    normalized_html, replacements = normalize_obfuscated_email_patterns(html, logger=logger)
+    if replacements:
+        increment_pattern_emails(replacements)
+    emails = EMAIL_RE.findall(normalized_html)
     deduped: List[str] = []
     seen: Set[str] = set()
     for email in emails:
         normalized = email.strip().lower()
         if normalized not in seen:
             seen.add(normalized)
-            deduped.append(email.strip())
-    return deduped
+            deduped.append(normalized)
+    return normalize_emails(";".join(deduped))
 
 
 def _follow_contact_links_and_extract(
@@ -248,7 +253,7 @@ def _follow_contact_links_and_extract(
             if logger:
                 logger(f"[WebsiteEmail] Contact fetch failed {link}: {exc}")
             continue
-        new_emails = _extract_emails_from_html(follow_html)
+        new_emails = _extract_emails_from_html(follow_html, logger=logger)
         for email in new_emails:
             if email not in emails:
                 emails.append(email)

@@ -39,6 +39,8 @@ _LEGACY_MODULE = None
 _LOGGER = logging.getLogger(__name__)
 EMAIL_PRIORITY_COLS: Sequence[str] = ("Email", "Email_All", "Directory_Email", "Unearthed_Email")
 
+_EMAIL_SUMMARY = {"emails_found": 0, "pattern_emails": 0}
+
 ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
@@ -53,6 +55,21 @@ class AtomicCSVResult:
 def _should_keep_tmp_on_failure() -> bool:
     flag = os.getenv("KEEP_TMP_ON_FAILURE", "")
     return flag in {"1", "true", "TRUE"}
+
+
+def _bump_email_summary(key: str, delta: int = 1) -> None:
+    if delta <= 0:
+        return
+    if key in _EMAIL_SUMMARY:
+        _EMAIL_SUMMARY[key] += delta
+
+
+def increment_pattern_emails(delta: int = 1) -> None:
+    _bump_email_summary("pattern_emails", delta)
+
+
+def get_email_summary_counts() -> Dict[str, int]:
+    return dict(_EMAIL_SUMMARY)
 
 
 def _safe_count_rows(csv_path: Union[str, Path]) -> int:
@@ -104,6 +121,7 @@ def normalize_emails(value) -> List[str]:
     basic email shape, dedupe, and return sorted list for stable output.
     """
     text = "" if value is None else str(value)
+    text = re.sub(r"\s*@\s*", "@", text)
     parts = re.split(r"[\s,;]+", text)
     seen: set[str] = set()
     cleaned: List[str] = []
@@ -188,8 +206,10 @@ def _guard_email_all_sources(row: pd.Series, email_all: str, logger: LoggerFn = 
 def _set_email_all(df: pd.DataFrame, idx: int, new_emails: Union[str, Sequence[str]], source: str, logger: LoggerFn = None) -> str:
     """Centralized Email_All setter with merge + logging + guard."""
     existing_val = _cell_str(df.at[idx, "Email_All"] if "Email_All" in df.columns else "")
+    before_count = len(normalize_emails(existing_val))
     merged_list = _merge_email_lists(existing_val, new_emails)
     merged_str = ";".join(merged_list)
+    _bump_email_summary("emails_found", max(0, len(merged_list) - before_count))
     df.at[idx, "Email_All"] = merged_str
     artist = _cell_str(df.at[idx, "Artist Name"]) if "Artist Name" in df.columns else ""
     log_enabled = os.getenv("EMAIL_ALL_LOG") in {"1", "true", "TRUE"}
@@ -204,6 +224,22 @@ def _row_has_valid_email(row: pd.Series) -> Tuple[bool, List[str]]:
     """Return (has_email, normalized_emails) using the pipeline's permissive parser."""
     emails = _merge_email_lists(row.get("Email", ""), row.get("Email_All", ""))
     return (len(emails) > 0, emails)
+
+
+def has_contact_email_for_short_circuit(row: pd.Series) -> bool:
+    """Return True when row has a contact-worthy email (filters noreply/support/system)."""
+    has_email, emails = _row_has_valid_email(row)
+    if not has_email:
+        return False
+    forbidden = ("noreply", "no-reply", "donotreply", "support", "system")
+    for email in emails:
+        lower = (email or "").lower()
+        if "@" not in lower or "." not in lower:
+            continue
+        if any(token in lower for token in forbidden):
+            continue
+        return True
+    return False
 
 
 def _strong_domain_match_short_name(artist_name: str, emails: List[str]) -> bool:
