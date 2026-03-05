@@ -3737,6 +3737,12 @@ class CrossDirectoryEnricherWorker(QThread):
         self._lf_profile_cooldown_skip_logged: bool = False
         self._lf_search_skipped_cooldown: int = 0
         self._lf_profile_skipped_cooldown: int = 0
+        # Last.fm run-scoped caches (reset every run)
+        self._lf_profile_url_cache: Dict[str, str] = {}
+        self._lf_search_result_cache: Dict[str, Optional[str]] = {}
+        self._lf_canonical_url_cache: Dict[str, str] = {}
+        self._last_final_url: Optional[str] = None
+        self._last_resolved_profile_url: Optional[str] = None
         self._directory_indexes: Dict[str, DirectoryIndex] = {}
         # Share live-search budget with SoundCloud aggregator fetches.
         try:
@@ -3781,6 +3787,16 @@ class CrossDirectoryEnricherWorker(QThread):
         self._sc_rss_successes = 0
         self._sc_rows_seen = 0
         self._sc_last_challenge_at = 0.0
+        # Last.fm run-scoped state reset each run
+        self._lf_search_skipped_cooldown = 0
+        self._lf_profile_skipped_cooldown = 0
+        self._lf_search_cooldown_skip_logged = False
+        self._lf_profile_cooldown_skip_logged = False
+        self._lf_profile_url_cache = {}
+        self._lf_search_result_cache = {}
+        self._lf_canonical_url_cache = {}
+        self._last_final_url = None
+        self._last_resolved_profile_url = None
         # Bandcamp discover per-run state
         self._bc_discover_cache = {}
         self._bc_discover_fetches = 0
@@ -4025,6 +4041,7 @@ class CrossDirectoryEnricherWorker(QThread):
         track_key = _extract_seed_track_key(row)
         seed_song_title = _extract_seed_track_text(row)
         spotify_domain = extract_domain(_clean_cell(row.get("Spotify_Website_URL", "")))
+        seed_links_by_source = _extract_seed_links_by_source(row)
         self._live_context = {
             "artist": artist,
             "location": _clean_cell(row.get("Location")),
@@ -4033,9 +4050,9 @@ class CrossDirectoryEnricherWorker(QThread):
             "song_title": seed_song_title,
             "spotify_domain": spotify_domain,
             "spotify_id": _clean_cell(row.get("Spotify_Artist_ID")),
+            "seed_lastfm_urls": seed_links_by_source.get("lastfm", set()),
         }
         spotify_id = self._live_context.get("spotify_id", "")
-        seed_links_by_source = _extract_seed_links_by_source(row)
         return {
             "artist": artist,
             "key": key,
@@ -4141,7 +4158,7 @@ class CrossDirectoryEnricherWorker(QThread):
                             return (True, False)
         return (False, False)
 
-    def _enrich_row_live_lookup(self, seed_df, row_idx, ctx):
+    def _enrich_row_live_lookup(self, seed_df, row_idx, ctx, *, skip_lastfm: bool = False):
         """General live lookup (BC + SC + LF) for a single row.
 
         Returns (enriched: bool, skip_rest: bool).
@@ -4161,6 +4178,7 @@ class CrossDirectoryEnricherWorker(QThread):
             artist,
             skip_soundcloud=skip_soundcloud,
             skip_bandcamp=bandcamp_url_present,
+            skip_lastfm=skip_lastfm,
         )
         if not getattr(self, "night_mode", False) and self._mark_sc_blocked_row(seed_df, row_idx):
             return (False, True)
@@ -4517,7 +4535,36 @@ class CrossDirectoryEnricherWorker(QThread):
                 continue
             processed_rows += 1
             self._init_row_enrichment_state()
-            ll_enriched, _ = self._enrich_row_live_lookup(seed_df, row_idx, ctx)
+            lf_skip_search = False
+            if self._lf_endpoint_in_cooldown("search"):
+                artist = ctx.get("artist", "")
+                artist_key = normalise_artist_name(artist)
+                seed_urls = set(ctx.get("seed_lastfm_urls") or [])
+                cached_profile = (
+                    artist_key
+                    and (
+                        artist_key in self._lf_profile_url_cache
+                        or (
+                            artist_key in self._lf_search_result_cache
+                            and self._lf_search_result_cache.get(artist_key)
+                        )
+                    )
+                )
+                has_profile_first = bool(seed_urls or cached_profile)
+                if not has_profile_first:
+                    lf_skip_search = True
+                    if not self._lf_search_cooldown_skip_logged:
+                        cooldown = self._lf_endpoint_cooldown_remaining("search")
+                        try:
+                            self.log_message.emit(
+                                f"[Enricher][LF] search cooldown active; skipping row '{artist}' expires_in={cooldown}s"
+                            )
+                        except Exception:
+                            pass
+                        self._lf_search_cooldown_skip_logged = True
+                    self._lf_search_skipped_cooldown += 1
+                    self._set_platform_state("lastfm", "skipped")
+            ll_enriched, _ = self._enrich_row_live_lookup(seed_df, row_idx, ctx, skip_lastfm=lf_skip_search)
             if ll_enriched:
                 enriched_count += 1
             skipped_search_cooldown += getattr(self, "_lf_search_skipped_cooldown", 0)
@@ -5587,6 +5634,7 @@ class CrossDirectoryEnricherWorker(QThread):
         artist_name: str,
         skip_soundcloud: bool = False,
         skip_bandcamp: bool = False,
+        skip_lastfm: bool = False,
     ) -> Optional[EnrichmentPayload]:
         if not artist_name:
             return None
@@ -5623,6 +5671,10 @@ class CrossDirectoryEnricherWorker(QThread):
                     continue
                 payload = self._live_search_soundcloud(artist_name)
             elif source == "lastfm":
+                if skip_lastfm:
+                    if getattr(self, "_row_enrichment_state", {}).get("lastfm") == "pending":
+                        self._set_platform_state("lastfm", "skipped")
+                    continue
                 payload = self._live_search_lastfm(artist_name)
             if payload:
                 current_best = getattr(best_payload, "match_score", 0.0) if best_payload else 0.0
@@ -7342,6 +7394,7 @@ class CrossDirectoryEnricherWorker(QThread):
         return None
 
     def _live_search_lastfm(self, artist_name: str) -> Optional[EnrichmentPayload]:
+        artist_key = normalise_artist_name(artist_name)
         # Clear expired cooldowns
         for endpoint in ("search", "profile"):
             if endpoint == "search" and self._lf_search_cooldown_until and not self._lf_endpoint_in_cooldown("search"):
@@ -7357,6 +7410,57 @@ class CrossDirectoryEnricherWorker(QThread):
                     pass
                 self._lf_clear_endpoint_cooldown("profile")
 
+        if not self._platform_attempt_allowed("lastfm", artist_name, "Last.fm Enrich"):
+            return None
+
+        # Profile-first paths (run-scoped cache, seed URL, search reuse)
+        seed_lastfm_urls: Set[str] = set()
+        try:
+            seed_lastfm_urls = set(getattr(self, "_live_context", {}).get("seed_lastfm_urls") or [])
+        except Exception:
+            seed_lastfm_urls = set()
+
+        cached_profile_url: Optional[str] = None
+        if artist_key and artist_key in self._lf_profile_url_cache:
+            cached_profile_url = self._lf_profile_url_cache[artist_key]
+            try:
+                self.log_message.emit(f"[LF] cache hit -> profile-first for '{artist_name}'")
+            except Exception:
+                pass
+        elif seed_lastfm_urls:
+            cached_profile_url = next(iter(seed_lastfm_urls))
+            try:
+                self.log_message.emit("[LF] profile-first path used")
+            except Exception:
+                pass
+        elif artist_key and artist_key in self._lf_search_result_cache:
+            cached = self._lf_search_result_cache[artist_key]
+            try:
+                self.log_message.emit(f"[LF] search reuse -> skipping new search for '{artist_name}'")
+            except Exception:
+                pass
+            if cached:
+                cached_profile_url = cached
+            else:
+                self._set_platform_state("lastfm", "skipped")
+                return None
+
+        if cached_profile_url:
+            payload, resolved_url = self._lf_fetch_profile_only(cached_profile_url, artist_key, artist_name)
+            fetch_ok_flag = getattr(self, "_last_fetch_ok", None)
+            actionable_flag = _payload_actionable(payload)
+            if fetch_ok_flag is False and actionable_flag is None:
+                actionable_flag = False
+            outcome_suffix = _format_outcome_suffix(
+                fetch_ok=fetch_ok_flag,
+                actionable=actionable_flag,
+                http_status=getattr(self, "_last_http_status", None),
+            )
+            self.log_message.emit(
+                f"[Enricher] Last.fm Enrich: profile-first for '{artist_name}' -> {resolved_url or cached_profile_url}{outcome_suffix}"
+            )
+            return payload
+
         if self._lf_endpoint_in_cooldown("search"):
             if not self._lf_search_cooldown_skip_logged:
                 cooldown = self._lf_endpoint_cooldown_remaining("search")
@@ -7369,8 +7473,6 @@ class CrossDirectoryEnricherWorker(QThread):
                 self._lf_search_cooldown_skip_logged = True
             self._lf_search_skipped_cooldown += 1
             self._set_platform_state("lastfm", "skipped")
-            return None
-        if not self._platform_attempt_allowed("lastfm", artist_name, "Last.fm Enrich"):
             return None
         song_title_raw = _clean_cell(getattr(self, "_live_context", {}).get("song_title", ""))
         sanitized_title = _sanitize_lastfm_track_title(song_title_raw)
@@ -7402,6 +7504,7 @@ class CrossDirectoryEnricherWorker(QThread):
             return None
         self.log_message.emit(f"[Enricher] Last.fm live search: {url}")
         lf_unhealthy = self._lf_endpoint_in_cooldown("search") or self._lf_search_consecutive_406 > 0
+        search_attempted = False
 
         def _parse_first_candidate(html_doc: str, log_no_results: bool) -> Optional[Tuple[str, str, float, float, float]]:
             if not html_doc:
@@ -7427,11 +7530,10 @@ class CrossDirectoryEnricherWorker(QThread):
             return disp, prof, score, rank, match_score
 
         html: Optional[str] = None
-        primary_status: Optional[int] = None
         if use_track and sanitized_title:
+            search_attempted = True
             _lf_sleep(lf_unhealthy)
             html = self._fetch_url(url, label="Last.fm search", max_attempts=1, endpoint="search")
-            primary_status = getattr(self, "_last_http_status", None)
 
         best_score = 0.0
         best_rank_score = 0.0
@@ -7442,73 +7544,36 @@ class CrossDirectoryEnricherWorker(QThread):
         primary_candidate = _parse_first_candidate(html, log_no_results=True) if html else None
         if primary_candidate:
             display_name, profile_url, best_score, best_rank_score, best_match_score = primary_candidate
-        # Optional no-quotes variant when the initial quoted search returned HTML but no safe match.
-        if (
-            use_track
-            and sanitized_title
-            and primary_status == 200
-            and html
-            and (best_score < MIN_LF_CONFIDENCE or not profile_url)
-        ):
-            no_quote_query = f"{artist_name} {sanitized_title}".strip()
-            quoted_no_quotes = urllib.parse.quote_plus(no_quote_query)
-            no_quote_url = f"https://www.last.fm/search?q={quoted_no_quotes}&type=artist"
-            _lf_sleep(self._lf_endpoint_in_cooldown("search") or self._lf_search_consecutive_406 > 0)
-            no_html = self._fetch_url(no_quote_url, label="Last.fm search (no-quotes)", max_attempts=1, endpoint="search")
-            no_candidate = _parse_first_candidate(no_html, log_no_results=False) if no_html else None
-            if no_candidate:
-                n_disp, n_prof, n_conf, n_rank, n_match = no_candidate
-                if (
-                    n_match > best_match_score
-                    or n_conf > best_score
-                    or (abs(n_conf - best_score) <= 0.02 and n_rank > best_rank_score)
-                ):
-                    display_name = n_disp
-                    profile_url = n_prof
-                    best_score = n_conf
-                    best_rank_score = n_rank
-                    best_match_score = n_match
-
-        # Decide if fallback is needed.
-        fallback_needed = (
-            (not use_track)
-            or (not html)
-            or (best_score < MIN_LF_CONFIDENCE and use_track and primary_query != artist_name)
-        )
-
-        if fallback_needed:
+        if not search_attempted:
             fallback_query = artist_name
             self.log_message.emit(
-                f"[Enricher] Last.fm Enrich: no safe match for '{artist_name}', trying artist-only query '{fallback_query}'."
+                f"[Enricher] Last.fm Enrich: artist-only search for '{artist_name}'."
             )
             quoted_fb = urllib.parse.quote_plus(fallback_query)
             fb_url = f"https://www.last.fm/search?q={quoted_fb}&type=artist"
-            _lf_sleep(self._lf_endpoint_in_cooldown("search") or self._lf_search_consecutive_406 > 0)
+            _lf_sleep(lf_unhealthy)
             fb_html = self._fetch_url(fb_url, label="Last.fm search (fallback)", max_attempts=1, endpoint="search")
-            fb_status = getattr(self, "_last_http_status", None)
-            if fb_status == 406 or (not fb_html and fb_status == 406):
-                # Shape fallback failed; mark unhealthy and skip upcoming search requests.
-                self._lf_mark_406("search")
             fallback_candidate = _parse_first_candidate(fb_html, log_no_results=False) if fb_html else None
             if fallback_candidate:
                 fb_display, fb_profile, fb_conf, fb_rank, fb_match_score = fallback_candidate
-                if (
-                    fb_match_score > best_match_score
-                    or fb_conf > best_score
-                    or (abs(fb_conf - best_score) <= 0.02 and fb_rank > best_rank_score)
-                ):
-                    display_name = fb_display
-                    profile_url = fb_profile
-                    best_score = fb_conf
-                    best_rank_score = fb_rank
-                    best_match_score = fb_match_score
+                display_name = fb_display
+                profile_url = fb_profile
+                best_score = fb_conf
+                best_rank_score = fb_rank
+                best_match_score = fb_match_score
         if best_score < MIN_LF_CONFIDENCE or not profile_url:
             self.log_message.emit(
                 f"[Enricher] Last.fm Enrich: no safe match for '{artist_name}' (best_confidence={best_score:.2f}), skipping."
             )
+            if artist_key:
+                self._lf_search_result_cache[artist_key] = None
             self._set_platform_state("lastfm", "skipped")
             return None
-        payload = self._fetch_profile_and_build(profile_url, "lastfm")
+        if artist_key:
+            self._lf_profile_url_cache[artist_key] = profile_url
+            self._lf_search_result_cache[artist_key] = profile_url
+
+        payload, resolved_url = self._lf_fetch_profile_only(profile_url, artist_key, artist_name)
         fetch_ok_flag = getattr(self, "_last_fetch_ok", None)
         actionable_flag = _payload_actionable(payload)
         if fetch_ok_flag is False and actionable_flag is None:
@@ -7519,15 +7584,38 @@ class CrossDirectoryEnricherWorker(QThread):
             http_status=getattr(self, "_last_http_status", None),
         )
         self.log_message.emit(
-            f"[Enricher] Last.fm Enrich: candidate '{display_name or profile_url}' for '{artist_name}' has confidence={best_score:.2f}{outcome_suffix}"
+            f"[Enricher] Last.fm Enrich: candidate '{display_name or resolved_url}' for '{artist_name}' has confidence={best_score:.2f}{outcome_suffix}"
         )
         if payload:
             payload.match_score = best_match_score
             payload.candidate_name = display_name or ""
-            self._set_platform_state("lastfm", "matched")
             return payload
-        self._set_platform_state("lastfm", "skipped")
         return None
+
+    def _lf_fetch_profile_only(
+        self, profile_url: str, artist_key: str, artist_name: str
+    ) -> Tuple[Optional[EnrichmentPayload], str]:
+        """Fetch a Last.fm profile using caches/canonical mapping without issuing search requests."""
+        url_to_fetch = profile_url
+        if profile_url in self._lf_canonical_url_cache:
+            url_to_fetch = self._lf_canonical_url_cache[profile_url]
+            try:
+                self.log_message.emit("[LF] canonical reuse -> using cached canonical URL")
+            except Exception:
+                pass
+        payload = self._fetch_profile_and_build(url_to_fetch, "lastfm")
+        resolved_url = getattr(self, "_last_resolved_profile_url", "") or url_to_fetch
+        if resolved_url and profile_url and resolved_url != profile_url:
+            self._lf_canonical_url_cache[profile_url] = resolved_url
+        if payload and artist_key:
+            self._lf_profile_url_cache[artist_key] = resolved_url
+            self._lf_search_result_cache[artist_key] = resolved_url
+            self._set_platform_state("lastfm", "matched")
+        else:
+            if artist_key and artist_key not in self._lf_search_result_cache:
+                self._lf_search_result_cache[artist_key] = None
+            self._set_platform_state("lastfm", "skipped")
+        return payload, resolved_url
 
     def _fetch_url(
         self,
@@ -7541,6 +7629,7 @@ class CrossDirectoryEnricherWorker(QThread):
         # Track the most recent fetch outcome for instrumentation.
         self._last_fetch_ok: Optional[bool] = None
         self._last_http_status: Optional[int] = None
+        self._last_final_url: Optional[str] = None
         is_lastfm = "last.fm" in url.lower()
         lf_endpoint = endpoint if is_lastfm and endpoint in ("search", "profile") else None
         headers_name = "default"
@@ -7581,6 +7670,7 @@ class CrossDirectoryEnricherWorker(QThread):
             try:
                 resp = self.session.get(url, timeout=HTTP_TIMEOUT, headers=headers)
                 status = getattr(resp, "status_code", None)
+                self._last_final_url = getattr(resp, "url", None) or url
                 text = getattr(resp, "text", "") or ""
                 self._last_http_status = status
 
@@ -7639,6 +7729,10 @@ class CrossDirectoryEnricherWorker(QThread):
             except requests.HTTPError as exc:
                 status = exc.response.status_code if exc.response is not None else None
                 self._last_http_status = status
+                try:
+                    self._last_final_url = exc.response.url  # type: ignore[attr-defined]
+                except Exception:
+                    self._last_final_url = url
                 html = exc.response.text if exc.response is not None else ""
 
                 if is_lastfm and lf_endpoint and status == 406:
@@ -7727,16 +7821,47 @@ class CrossDirectoryEnricherWorker(QThread):
                 return None
         return None
 
+    def _lf_resolve_canonical_profile_url(self, original_url: str, html: str) -> str:
+        canonical = original_url or ""
+        final_url = getattr(self, "_last_final_url", "") or ""
+        final_norm = _normalise_url(final_url) if final_url else None
+        if final_norm:
+            canonical = final_norm
+        try:
+            soup = BeautifulSoup(html, "html.parser")
+            link_tag = soup.find("link", rel=lambda val: val and "canonical" in str(val).lower())
+            og_url = soup.find("meta", attrs={"property": "og:url"})
+            candidates = []
+            if link_tag:
+                candidates.append(link_tag.get("href") or "")
+            if og_url:
+                candidates.append(og_url.get("content") or "")
+            for cand in candidates:
+                normalised = _normalise_url(cand)
+                if normalised:
+                    canonical = normalised
+                    break
+        except Exception:
+            pass
+        if canonical:
+            self._lf_canonical_url_cache[original_url] = canonical
+            self._lf_canonical_url_cache.setdefault(canonical, canonical)
+        return canonical
+
     def _fetch_profile_and_build(
         self, profile_url: str, source_dir: str, confidence: Optional[float] = None
     ) -> Optional[EnrichmentPayload]:
         self.log_message.emit(f"[Enricher] Fetching {source_dir} profile: {profile_url}")
+        self._last_resolved_profile_url = profile_url
         attempts = LF_SEARCH_RETRY_MAX if source_dir == "lastfm" else 2
         lf_endpoint = "profile" if source_dir == "lastfm" else None
         html = self._fetch_url(profile_url, label=f"{source_dir} profile", max_attempts=attempts, endpoint=lf_endpoint)
         fetched_ok = bool(html)
         if not fetched_ok:
             return None
+        if source_dir == "lastfm":
+            profile_url = self._lf_resolve_canonical_profile_url(profile_url, html)
+            self._last_resolved_profile_url = profile_url
         socials, websites, emails, link_hubs = _extract_links_from_profile(
             html, source_dir, profile_url
         )
