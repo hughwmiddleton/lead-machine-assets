@@ -41,3 +41,47 @@ def test_dedupe_prefers_fb_in_night_mode() -> None:
     deduped = dedupe_pre_auto_validate(df, "Source Directory", night_mode=True)
     assert len(deduped.index) == 1
     assert deduped.iloc[0]["Facebook_URL"] == "https://facebook.com/surely-shirley"
+
+
+def test_extract_fb_urls_from_generic_links() -> None:
+    row = {
+        "Social Link": "https://instagram.com/foo | https://www.facebook.com/panicboomband",
+        "External Links": "https://fb.com/panicboom; https://example.com",
+    }
+
+    urls = night_mode_fb._extract_fb_urls_for_night_mode(row)
+
+    assert urls == ["https://www.facebook.com/panicboomband", "https://fb.com/panicboom"]
+
+
+def test_pass_a_uses_fb_url_from_social_link(monkeypatch) -> None:
+    enricher = night_mode_fb.NightModeFacebookEnricher(
+        legacy_module=None,
+        username="",
+        password="",
+        logger=None,
+        use_shared_session=False,
+    )
+    monkeypatch.setattr(enricher, "_ensure_session", lambda: None)
+
+    calls = {"urls": []}
+
+    def _fake_scrape(url, *args, **kwargs):  # noqa: ANN001
+        calls["urls"].append(url)
+        night_result = night_mode_fb.NightModeFacebookResult(
+            email="artist@test.com",
+            email_all="artist@test.com",
+            facebook_url=night_mode_fb._normalise_fb_url(url),
+            email_extract_method="regex",
+        )
+        return night_result, ["artist@test.com"], "session", "found_email"
+
+    monkeypatch.setattr(enricher, "_scrape_single_fb_candidate", _fake_scrape)
+
+    row = {"Artist Name": "Test Artist", "Social Link": "https://www.facebook.com/panicboomband"}
+
+    result = enricher.enrich_row_with_facebook_night(row)
+
+    assert calls["urls"] == ["https://www.facebook.com/panicboomband"]
+    assert result.get("FB_Status") == "pass_a_found_email"
+    assert result.get("FB_Reason") == "explicit_url"

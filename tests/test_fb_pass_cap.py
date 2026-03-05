@@ -58,9 +58,8 @@ def test_nightmode_fb_pass_respects_cap(monkeypatch, tmp_path):
         skip_rows_with_email=False,
     )
 
-    # Only first 2 rows should have been processed
+    # Only first 2 rows should have been processed, but all rows are preserved in output.
     assert dummy_helper.calls == 2
     df_out = pd.read_csv(output_csv)
-    assert len(df_out.index) == 2
+    assert len(df_out.index) == 5
     assert status.processed_rows >= 2
-

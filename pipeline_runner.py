@@ -17,6 +17,7 @@ import shutil
 import tempfile
 import time
 import datetime
+from urllib.parse import urlsplit
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union, MutableMapping
@@ -42,6 +43,209 @@ EMAIL_PRIORITY_COLS: Sequence[str] = ("Email", "Email_All", "Directory_Email", "
 _EMAIL_SUMMARY = {"emails_found": 0, "pattern_emails": 0}
 
 ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_UNEARTHED_TRACK_URL_COLUMNS = (
+    "track url",
+    "track_url",
+    "trackurl",
+    "source url",
+    "source_url",
+    "unearthed url",
+    "unearthed_url",
+    "profile url",
+    "profile_url",
+)
+
+_UNEARTHED_LINK_COLUMNS = (
+    "Social Link",
+    "External Links",
+    "Website",
+    "Facebook_URL",
+    "Facebook URL",
+    "Instagram_URL",
+    "YouTube_URL",
+    "TikTok_URL",
+)
+
+_LINK_TOKEN_SPLIT_RE = re.compile(r"\s*\|\s*|\s*,\s*|\s+")
+
+
+def _normalize_ws_lower(value: str) -> str:
+    """Lowercase, strip, and collapse whitespace for stable comparisons."""
+    text = (value or "").strip()
+    if not text:
+        return ""
+    text = re.sub(r"\s+", " ", text)
+    return text.lower()
+
+
+def _normalize_track_urlish(url: str) -> str:
+    """
+    Normalize a URL-like string for equality:
+    - strip/trim
+    - lower scheme/netloc
+    - drop query/fragment
+    - remove trailing slash
+    """
+    raw = (url or "").strip()
+    if not raw:
+        return ""
+    parts = urlsplit(raw)
+    if parts.scheme or parts.netloc:
+        path = parts.path.rstrip("/")
+        norm = f"{(parts.scheme or 'http').lower()}://{parts.netloc.lower()}{path}"
+    else:
+        norm = raw
+    return norm.lower().split("#", 1)[0].split("?", 1)[0].rstrip("/")
+
+
+def _find_unearthed_track_url_column(df: pd.DataFrame) -> Optional[str]:
+    for col in df.columns:
+        if col and str(col).lower() in _UNEARTHED_TRACK_URL_COLUMNS:
+            return col
+    return None
+
+
+def _linkish_columns(df: pd.DataFrame, track_col: Optional[str]) -> List[str]:
+    """Return list of social/external link columns present in df."""
+    cols: List[str] = []
+    for col in df.columns:
+        if col == track_col:
+            continue
+        if col in _UNEARTHED_LINK_COLUMNS or ("link" in str(col).lower() and str(col).strip()):
+            cols.append(col)
+    return cols
+
+
+def _split_links(cell: Any) -> List[str]:
+    """Tokenize a linkish cell into ordered, de-duped list of strings."""
+    if cell is None:
+        return []
+    text = str(cell).strip()
+    if not text:
+        return []
+    tokens = _LINK_TOKEN_SPLIT_RE.split(text)
+    seen = set()
+    result: List[str] = []
+    for tok in tokens:
+        t = tok.strip()
+        if not t:
+            continue
+        key = t.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(t)
+    return result
+
+
+def _merge_link_columns(target: MutableMapping[str, Any], incoming: MutableMapping[str, Any], cols: Sequence[str]) -> None:
+    """
+    Merge linkish columns from incoming into target in-place:
+    - union tokens, preserve first-seen order
+    - skip empty sources
+    """
+    for col in cols:
+        if col not in incoming:
+            continue
+        incoming_tokens = _split_links(incoming.get(col, ""))
+        if not incoming_tokens:
+            continue
+        existing_tokens = _split_links(target.get(col, ""))
+        ordered: List[str] = []
+        seen = set()
+        for tok in existing_tokens + incoming_tokens:
+            key = tok.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            ordered.append(tok)
+        target[col] = " | ".join(ordered)
+
+
+def _dedupe_unearthed_rows(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Drop duplicate Unearthed rows by stable key while merging link fields:
+      1) Prefer normalized track URL when present.
+      2) Otherwise use (artist_norm, song_norm).
+    Keep first occurrence; preserve order; merge social/external links from
+    duplicates into the kept row.
+    """
+    if df is None or df.empty:
+        return df
+
+    track_col = _find_unearthed_track_url_column(df)
+    track_norm = (
+        df[track_col].fillna("").astype(str).apply(_normalize_track_urlish)
+        if track_col
+        else pd.Series("", index=df.index)
+    )
+    artist_norm = df.get("Artist Name", pd.Series("", index=df.index)).fillna("").astype(str).apply(_normalize_ws_lower)
+    song_norm = df.get("Song Title", pd.Series("", index=df.index)).fillna("").astype(str).apply(_normalize_ws_lower)
+
+    seen_track: set[str] = set()
+    seen_artist_song: set[tuple[str, str]] = set()
+    track_to_row: dict[str, int] = {}
+    artist_song_to_row: dict[tuple[str, str], int] = {}
+    output_rows: list[MutableMapping[str, Any]] = []
+
+    mergeable_cols = _linkish_columns(df, track_col)
+
+    for idx in df.index:
+        key = (artist_norm.at[idx], song_norm.at[idx])
+        tnorm = track_norm.at[idx] if track_col else ""
+        row_dict: MutableMapping[str, Any] = df.loc[idx].to_dict()
+        if tnorm:
+            if tnorm in seen_track:
+                target_idx = track_to_row[tnorm]
+                _merge_link_columns(output_rows[target_idx], row_dict, mergeable_cols)
+                if key not in artist_song_to_row:
+                    artist_song_to_row[key] = target_idx
+                continue
+            seen_track.add(tnorm)
+            # Tie the URL and artist+song namespaces so url-less duplicates are dropped.
+            seen_artist_song.add(key)
+            artist_song_to_row[key] = len(output_rows)
+            track_to_row[tnorm] = len(output_rows)
+            output_rows.append(row_dict)
+            continue
+
+        if key in seen_artist_song:
+            target_idx = artist_song_to_row.get(key)
+            if target_idx is not None:
+                _merge_link_columns(output_rows[target_idx], row_dict, mergeable_cols)
+            continue
+        seen_artist_song.add(key)
+        artist_song_to_row[key] = len(output_rows)
+        output_rows.append(row_dict)
+
+    if not output_rows:
+        return df.iloc[0:0].copy()
+
+    deduped = pd.DataFrame(output_rows)
+    return deduped.reindex(columns=df.columns).reset_index(drop=True)
+
+
+def _dedupe_unearthed_csv(path: str, logger: LoggerFn = None) -> None:
+    """Best-effort dedupe for Unearthed temp CSVs before promotion."""
+    if not path or not os.path.exists(path):
+        return
+    try:
+        df = pd.read_csv(path, dtype=str, keep_default_na=False)
+    except Exception:
+        return
+    before = len(df.index)
+    if before <= 1:
+        return
+    deduped = _dedupe_unearthed_rows(df)
+    after = len(deduped.index)
+    if after == before:
+        return
+    try:
+        deduped.to_csv(path, index=False, encoding="utf-8-sig")
+        _safe_log(logger, f"[Unearthed] Deduped temp CSV: removed {before - after} duplicates (kept {after}).")
+    except Exception:
+        # If writing fails, keep original to avoid data loss.
+        pass
 
 
 @dataclass
@@ -737,6 +941,9 @@ def ensure_final_raw_csv(raw_output_path: Union[str, Path], job_label: str = "",
         return None
 
     try:
+        job_label_lc = (job_label or final_path.parent.name or "").lower()
+        if "unearthed" in job_label_lc:
+            _dedupe_unearthed_csv(tmp_path.as_posix(), logger=logger)
         res = _finalize_tmp_csv(tmp_path, final_path)
         _safe_log(
             logger,
@@ -1700,6 +1907,7 @@ def run_directory_job(job_config: Dict[str, Any], raw_output_path: str, logger: 
             except Exception:
                 full_csv = None
             if full_csv:
+                _dedupe_unearthed_csv(full_csv, logger=logger)
                 finalize_result = _finalize_tmp_csv(tmp_path, final_path)
                 result_path = str(finalize_result.final_path)
                 success = True
@@ -1713,6 +1921,7 @@ def run_directory_job(job_config: Dict[str, Any], raw_output_path: str, logger: 
                     existing_csv=output_path,
                     max_artists=target_count or 200,
                 )
+                _dedupe_unearthed_csv(output_path, logger=logger)
                 finalize_result = _finalize_tmp_csv(tmp_path, final_path)
                 result_path = str(finalize_result.final_path)
                 success = True
@@ -2206,10 +2415,31 @@ def run_facebook_global_pass_nightmode(
     else:
         _safe_log_console(logger, "[Night FB] FB username missing; Night FB will run unauthenticated.")
 
-    # Use existing output if present so resumes keep prior enrichments.
-    base_path = output_csv if output_csv and os.path.exists(output_csv) else input_csv
-    df = pd.read_csv(base_path)
-    df = df.fillna("")
+    # Always start from the full input to avoid losing rows when smoke caps are used.
+    df = pd.read_csv(input_csv, dtype=str, keep_default_na=False).fillna("")
+
+    # If an output already exists, overlay any previously enriched columns onto the
+    # full input frame instead of trusting the prior (possibly truncated) file.
+    if output_csv and os.path.exists(output_csv):
+        try:
+            prev_df = pd.read_csv(output_csv, dtype=str, keep_default_na=False).fillna("")
+            if len(prev_df) != len(df):
+                _safe_log_console(
+                    logger,
+                    f"[Night FB] Existing master_post_fb row count mismatch (input={len(df)} output={len(prev_df)}); rebuilding from input.",
+                )
+            overlap_len = min(len(prev_df), len(df))
+            shared_cols = [col for col in prev_df.columns if col in df.columns]
+            if overlap_len and shared_cols:
+                df.loc[: overlap_len - 1, shared_cols] = prev_df.loc[: overlap_len - 1, shared_cols]
+            extra_cols = [col for col in prev_df.columns if col not in df.columns]
+            for col in extra_cols:
+                df[col] = ""
+                if overlap_len:
+                    df.loc[: overlap_len - 1, col] = prev_df.loc[: overlap_len - 1, col]
+        except Exception:
+            pass
+
     df = _consolidate_email_all(df)
     if "FB_Status" not in df.columns and "fb_status" in df.columns:
         df.rename(columns={"fb_status": "FB_Status"}, inplace=True)
@@ -2238,11 +2468,12 @@ def run_facebook_global_pass_nightmode(
         fb_cap = int(fb_cap_raw or "0")
     except Exception:
         fb_cap = 0
-    if fb_cap > 0:
-        _safe_log_console(logger, f"[FB Smoke Cap] Limiting FB pass to {fb_cap} rows")
-        df = df.head(fb_cap)
 
     total_rows = len(df.index)
+    iter_indices = list(df.index)
+    if fb_cap > 0:
+        _safe_log_console(logger, f"[FB Smoke Cap] Limiting FB attempts to first {fb_cap} rows (output will retain all rows)")
+        iter_indices = iter_indices[:fb_cap]
     state = _load_fb_state(state_path)
     last_index = int(state.get("fb_last_index", -1) or -1)
     attempted_total = int(state.get("fb_attempted_total", 0) or 0)
@@ -2335,7 +2566,8 @@ def run_facebook_global_pass_nightmode(
             return df
 
         failure_logged = False
-        for idx, row in df.iterrows():
+        for idx in iter_indices:
+            row = df.loc[idx]
             failed, fail_reason = (fb_helper.get_session_failure() if hasattr(fb_helper, "get_session_failure") else (False, ""))  # type: ignore[attr-defined]
             if failed:
                 if not failure_logged:

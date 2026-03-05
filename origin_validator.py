@@ -452,14 +452,23 @@ def _first_url_from_cell(value: str) -> str:
     return ""
 
 
-def dedupe_pre_auto_validate(df: pd.DataFrame, source_dir_col: str, night_mode: bool = False) -> pd.DataFrame:
+def dedupe_pre_auto_validate(
+    df: pd.DataFrame,
+    source_dir_col: str,
+    night_mode: bool = False,
+    return_mapping: bool = False,
+) -> pd.DataFrame | tuple[pd.DataFrame, Dict[int, List[int]]]:
     """
     Removes duplicate rows before origin auto-validate using the composite key:
     normalised Artist Name + core Song Title + Source Directory (+ Email/first link if present).
-    Keeps the first occurrence only and logs how many rows were removed.
+
+    When ``return_mapping`` is True, also returns a mapping of deduped row index ->
+    list of original DataFrame indices that shared the same composite key. This is
+    used to re-apply validation results back onto the full (non-deduped) frame so
+    the written CSV retains the original row count.
     """
     if df is None:
-        return df
+        return (df, {}) if return_mapping else df
     total_before = len(df.index)
     if total_before == 0:
         _log(None, "[Deduper] Removed 0 duplicate rows before Auto-Validate (kept 0 unique rows)")
@@ -485,6 +494,7 @@ def dedupe_pre_auto_validate(df: pd.DataFrame, source_dir_col: str, night_mode: 
     seen = set()
     keep_indices: List[int] = []
     best_contact: Dict[Tuple[str, str, str, str], Tuple[int, Tuple[int, int, int]]] = {}
+    composite_members: Dict[Tuple[str, str, str, str], List[int]] = {}
 
     def _night_mode_row_score(row: pd.Series) -> Tuple[int, int, int]:
         def _has_value(val: Any) -> int:
@@ -507,6 +517,8 @@ def dedupe_pre_auto_validate(df: pd.DataFrame, source_dir_col: str, night_mode: 
         contact_norm = _contact_key(row)
         composite = (artist_norm, track_norm, source_norm, contact_norm)
         score = _night_mode_row_score(row)
+        composite_members.setdefault(composite, []).append(idx)
+
         if composite in seen:
             prev_idx, prev_score = best_contact.get(composite, (-1, (0, 0, 0)))
             if score > prev_score:
@@ -525,7 +537,22 @@ def dedupe_pre_auto_validate(df: pd.DataFrame, source_dir_col: str, night_mode: 
     deduped.reset_index(drop=True, inplace=True)
     removed = total_before - len(deduped.index)
     _log(None, f"[Deduper] Removed {removed} duplicate rows before Auto-Validate (kept {len(deduped.index)} unique rows)")
-    return deduped
+
+    if not return_mapping:
+        return deduped
+
+    # Map deduped row index -> original indices that shared the composite key
+    mapping: Dict[int, List[int]] = {}
+    best_idx_to_composite: Dict[int, Tuple[str, str, str, str]] = {}
+    for composite, (best_idx, _) in best_contact.items():
+        best_idx_to_composite[best_idx] = composite
+
+    for dedup_idx, orig_idx in enumerate(keep_indices):
+        composite = best_idx_to_composite.get(orig_idx)
+        members = composite_members.get(composite, [orig_idx]) if composite else [orig_idx]
+        mapping[dedup_idx] = members
+
+    return deduped, mapping
 
 
 def _select_rows_to_validate(df: pd.DataFrame, scope: str, match_col: str, status_col: str) -> Tuple[List[int], Dict[str, int]]:
@@ -613,28 +640,35 @@ def run_auto_validate(
     if not csv_path or not os.path.exists(csv_path):
         raise FileNotFoundError(f"CSV not found: {csv_path}")
 
-    df = pd.read_csv(csv_path)
-    if df.empty:
+    raw_df = pd.read_csv(csv_path)
+    if raw_df.empty:
         _log(logger, "[Auto-Validate] CSV is empty; nothing to validate.")
         return csv_path
 
-    source_dir_col = _ensure_column(df, SOURCE_DIR_COLUMNS)
-    source_url_col = _ensure_column(df, SOURCE_URL_COLUMNS)
-    df = dedupe_pre_auto_validate(df, source_dir_col, night_mode=night_mode)
+    source_dir_col = _ensure_column(raw_df, SOURCE_DIR_COLUMNS)
+    source_url_col = _ensure_column(raw_df, SOURCE_URL_COLUMNS)
+
+    df_deduped, dedupe_map = dedupe_pre_auto_validate(
+        raw_df,
+        source_dir_col,
+        night_mode=night_mode,
+        return_mapping=True,
+    )
+
     for col in ("final_status", "match_score_overall", "origin_match_flag", "origin_match_reason", "origin_artist_score", "origin_title_score"):
-        if col not in df.columns:
-            df[col] = "" if col.endswith("_reason") else 0
+        if col not in df_deduped.columns:
+            df_deduped[col] = "" if col.endswith("_reason") else 0
     for col in ("origin_artist_score", "origin_title_score", "match_score_overall"):
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0).astype(float)
+        if col in df_deduped.columns:
+            df_deduped[col] = pd.to_numeric(df_deduped[col], errors="coerce").fillna(0.0).astype(float)
     for col in ("final_status", "origin_match_reason"):
-        if col in df.columns:
-            df[col] = df[col].fillna("").astype(str)
+        if col in df_deduped.columns:
+            df_deduped[col] = df_deduped[col].fillna("").astype(str)
 
     match_col = "match_score_overall"
     status_col = "final_status"
-    validate_indices, selection_reasons = _select_rows_to_validate(df, validate_scope, match_col, status_col)
-    _log(logger, f"[Auto-Validate] Loaded {len(df)} rows, validating {len(validate_indices)} selected rows...")
+    validate_indices, selection_reasons = _select_rows_to_validate(df_deduped, validate_scope, match_col, status_col)
+    _log(logger, f"[Auto-Validate] Loaded {len(df_deduped)} deduped rows (from {len(raw_df)}), validating {len(validate_indices)} selected rows...")
     if selection_reasons:
         reason_summary = ", ".join(f"{key}={selection_reasons[key]}" for key in sorted(selection_reasons))
     else:
@@ -649,7 +683,7 @@ def run_auto_validate(
     blocked = 0
 
     for idx in validate_indices:
-        row = df.loc[idx]
+        row = df_deduped.loc[idx]
         artist_name = str(row.get("Artist Name", "") or "").strip()
         song_title = str(row.get("Song Title", "") or "").strip()
         raw_source_dir = str(row.get(source_dir_col, "") or "")
@@ -665,13 +699,13 @@ def run_auto_validate(
             inferred_dir = _infer_directory_from_url(source_url)
             if inferred_dir:
                 source_dir = inferred_dir
-                df.at[idx, source_dir_col] = inferred_dir
+                df_deduped.at[idx, source_dir_col] = inferred_dir
         origin_type = _normalise_source_directory(source_dir)
         if not origin_type:
             inferred_dir = _infer_directory_from_url(source_url)
             origin_type = _normalise_source_directory(inferred_dir)
             if origin_type:
-                df.at[idx, source_dir_col] = origin_type
+                df_deduped.at[idx, source_dir_col] = origin_type
         if not origin_type:
             if source_dir or source_url:
                 df.at[idx, "origin_match_flag"] = 0
@@ -691,10 +725,10 @@ def run_auto_validate(
         except Exception as exc:
             _log(logger, f"[Auto-Validate] Error validating {source_url}: {exc}")
             result = OriginMatchResult(False, 0.0, 0.0, None, "parse_error")
-        df.at[idx, "origin_match_flag"] = 1 if result.origin_match_flag else 0
-        df.at[idx, "origin_match_reason"] = result.reason
-        df.at[idx, "origin_artist_score"] = round(result.artist_score, 3)
-        df.at[idx, "origin_title_score"] = round(result.title_score, 3)
+        df_deduped.at[idx, "origin_match_flag"] = 1 if result.origin_match_flag else 0
+        df_deduped.at[idx, "origin_match_reason"] = result.reason
+        df_deduped.at[idx, "origin_artist_score"] = round(result.artist_score, 3)
+        df_deduped.at[idx, "origin_title_score"] = round(result.title_score, 3)
         new_status, new_score = _update_status_with_origin(row, result)
         if not result.origin_match_flag and max(result.artist_score, result.title_score) >= 0.6:
             # debug-level logging if logger supports debug()
@@ -713,18 +747,39 @@ def run_auto_validate(
                 except Exception:
                     pass
         if new_status and new_status != row.get("final_status", ""):
-            df.at[idx, "final_status"] = new_status
+            df_deduped.at[idx, "final_status"] = new_status
             if new_status == "OK":
                 upgraded += 1
             elif new_status == "BLOCKED_BY_ORIGIN":
                 blocked += 1
-        df.at[idx, "match_score_overall"] = new_score
+        df_deduped.at[idx, "match_score_overall"] = new_score
+
+    # Re-apply validation results back onto the original, non-deduped frame to
+    # preserve all rows and their original order.
+    df_out = raw_df.copy()
+    cols_to_copy = [
+        source_dir_col,
+        "origin_match_flag",
+        "origin_match_reason",
+        "origin_artist_score",
+        "origin_title_score",
+        "final_status",
+        "match_score_overall",
+    ]
+    for dedup_idx, orig_indices in dedupe_map.items():
+        for col in cols_to_copy:
+            if col not in df_out.columns:
+                df_out[col] = "" if col.endswith("_reason") else 0
+            value = df_deduped.at[dedup_idx, col] if col in df_deduped.columns else ""
+            # Avoid dtype warnings by casting to objects before assignment
+            df_out[col] = df_out[col].astype(object)
+            df_out.loc[orig_indices, col] = value
 
     if output_path:
         target_path = output_path
     else:
         target_path = _derive_origin_output_path(csv_path)
-    df.to_csv(target_path, index=False)
+    df_out.to_csv(target_path, index=False)
     for dir_name, count in dir_counts.items():
         _log(logger, f"[Auto-Validate] {dir_name}: checked {count} URL(s)")
     _log(logger, f"[Auto-Validate] Completed. Upgraded: {upgraded}, Blocked: {blocked}. Output: {target_path}")

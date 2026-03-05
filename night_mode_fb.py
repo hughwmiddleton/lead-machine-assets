@@ -959,40 +959,70 @@ def _fb_status_is_rejected(status: str) -> bool:
 
 def _extract_fb_urls_for_night_mode(row):
     fields = [
-        "Social Link",
-        "External Links",
         "Facebook_URL",
         "Facebook URL",
+        "Social Link",
+        "External Links",
         "Spotify_Website_URL",
         "Spotify Website URL",
+        "facebook_url",
+        "facebook url",
+        "social link",
+        "external links",
     ]
-    urls = []
-    for f in fields:
-        raw = (row.get(f) or "").strip()
+    allowed_hosts = ("facebook.com", "m.facebook.com", "fb.com", "fb.me")
+
+    def _clean_value(val: Any) -> str:
+        try:
+            import pandas as _pd  # type: ignore
+            if _pd.isna(val):
+                return ""
+        except Exception:
+            pass
+        try:
+            return str(val or "").strip()
+        except Exception:
+            return ""
+
+    urls: List[str] = []
+    seen: Set[str] = set()
+    for field in fields:
+        value = None
+        for key, val in (row or {}).items():
+            try:
+                if str(key).lower() == field.lower():
+                    value = val
+                    break
+            except Exception:
+                continue
+        raw = _clean_value(value)
         if not raw:
             continue
-        parts = re.split(r"[,\s;|]+", raw)
-        for p in parts:
-            if "facebook.com" in p.lower() or "fb.me" in p.lower():
-                urls.append(p)
+        parts = _FB_SPLIT_PATTERN.split(raw)
+        for part in parts:
+            candidate = _clean_value(part)
+            if not candidate:
+                continue
+            lowered = candidate.lower()
+            if not any(host in lowered for host in allowed_hosts):
+                continue
+            if candidate.startswith("//"):
+                candidate = "https:" + candidate
+            elif not candidate.startswith("http"):
+                candidate = "https://" + candidate
+            try:
+                path = urllib.parse.urlparse(candidate).path.lower()
+            except Exception:
+                path = ""
+            bad = ("/r.php", "/login", "/share.php", "/l.php", "/dialog/")
+            if any(path.startswith(b) for b in bad):
+                continue
+            candidate = candidate.strip()
+            if candidate and candidate not in seen:
+                seen.add(candidate)
+                urls.append(candidate)
 
-    clean = []
-    for url in urls:
-        u = url.strip()
-        if not u:
-            continue
-        if u.startswith("//"):
-            u = "https:" + u
-        if not u.startswith("http"):
-            u = "https://" + u
-        # filter login redirects
-        bad = ("/r.php", "/login", "/share.php", "/l.php", "/dialog/")
-        path = urllib.parse.urlparse(u).path.lower()
-        if any(path.startswith(b) for b in bad):
-            continue
-        clean.append(u)
-
-    return list(dict.fromkeys(clean))
+    return urls
 
 
 def _extract_fb_urls_from_row(row: Dict[str, str]) -> List[str]:
@@ -3275,6 +3305,18 @@ class NightModeFacebookEnricher:
         self.checkpoint_events: int = 0
         self.login_wall_events: int = 0
         self.protective_shutdown: bool = False
+        # Debug-only FB URL flow tracing; defaults to off.
+        self._debug_fb_url_flow: bool = _bool_env("DEBUG_FB_URL_FLOW", default=False)
+        self._debug_fb_url_flow_limit: int = int(os.getenv("DEBUG_FB_URL_FLOW_N") or 25)
+        self._debug_fb_url_flow_seen: int = 0
+        self._debug_fb_url_flow_with_urls: int = 0
+        self._debug_fb_url_flow_skipped: int = 0
+        self._debug_fb_url_flow_summary_logged: bool = False
+        if self._debug_fb_url_flow:
+            try:
+                atexit.register(self._emit_fb_url_flow_summary)
+            except Exception:
+                pass
 
         if (not self.headless) and self.require_display and _is_linux() and (not _display_env_present()):
             self._skip_fb_due_to_display = True
@@ -3894,6 +3936,18 @@ class NightModeFacebookEnricher:
         result["FB_Status"] = "skipped_checkpoint"
         result["FB_Reason"] = "checkpoint"
         return result
+
+    def _emit_fb_url_flow_summary(self, prefix: str = "[Night FB][URLFLOW] summary") -> None:
+        if self._debug_fb_url_flow_summary_logged:
+            return
+        self._debug_fb_url_flow_summary_logged = True
+        if not self._debug_fb_url_flow:
+            return
+        _log(
+            self.logger,
+            f"{prefix}: rows_seen={self._debug_fb_url_flow_seen} rows_with_fb_url_extracted={self._debug_fb_url_flow_with_urls} "
+            f"rows_skipped_no_fb_url={self._debug_fb_url_flow_skipped}",
+        )
 
     def _is_unearthed_source(self, row: Dict[str, str]) -> bool:
         source_dir = str(row.get("Source Directory", "") or "").strip().lower()
@@ -4884,6 +4938,24 @@ class NightModeFacebookEnricher:
             fb_urls.insert(0, facebook_url)
         is_unearthed = self._is_unearthed_source(result)
 
+        if self._debug_fb_url_flow and self._debug_fb_url_flow_seen < self._debug_fb_url_flow_limit:
+            self._debug_fb_url_flow_seen += 1
+            if fb_urls:
+                self._debug_fb_url_flow_with_urls += 1
+            raw_social = _clean_val(result.get("Social Link", ""))
+            raw_external = _clean_val(result.get("External Links", ""))
+            raw_fb = _clean_val(result.get("Facebook_URL", ""))
+            _log(
+                self.logger,
+                "[Night FB][URLFLOW] artist="
+                f"\"{artist_name}\" src_dir=\"{_clean_val(result.get('Source Directory', ''))}\""
+                f" src_job=\"{_clean_val(result.get('__source_job', ''))}\""
+                f" fb_url_raw=\"{raw_fb}\" social_raw=\"{raw_social}\" external_raw=\"{raw_external}\""
+                f" extracted={fb_urls}",
+            )
+            if self._debug_fb_url_flow_seen == self._debug_fb_url_flow_limit:
+                self._emit_fb_url_flow_summary(prefix="[Night FB][URLFLOW] limit reached")
+
         try:
             if not self._maybe_recover_or_skip_on_checkpoint():
                 return self._mark_row_checkpoint(result)
@@ -4913,6 +4985,8 @@ class NightModeFacebookEnricher:
                     result["FB_Status"] = "pass_a_skipped_no_fb_url"
                 if not result.get("FB_Reason"):
                     result["FB_Reason"] = "skipped_no_fb_url"
+                if self._debug_fb_url_flow:
+                    self._debug_fb_url_flow_skipped += 1
                 _log(self.logger, "[Night FB][PASS A] skipped (no explicit FB URL); proceeding to v2 search")
             else:
                 _log(self.logger, f"[Night FB] Using explicit FB URLs: {fb_urls}")
