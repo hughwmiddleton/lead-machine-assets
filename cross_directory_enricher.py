@@ -4363,6 +4363,7 @@ class CrossDirectoryEnricherWorker(QThread):
             return f"{pos}/{total}"
 
         sources: List[SourceSpec] = []
+        row_getter = lambda rid: seed_df.loc[rid]
 
         if self.enable_live_search:
 
@@ -4384,6 +4385,7 @@ class CrossDirectoryEnricherWorker(QThread):
                     rows=rows,
                     run_row=sc_run,
                     is_available=sc_available,
+                    row_getter=row_getter,
                 )
             )
 
@@ -4412,6 +4414,7 @@ class CrossDirectoryEnricherWorker(QThread):
                     rows=rows,
                     run_row=lf_run,
                     is_available=lf_available,
+                    row_getter=row_getter,
                 )
             )
 
@@ -4434,6 +4437,7 @@ class CrossDirectoryEnricherWorker(QThread):
                     rows=rows,
                     run_row=fb_run,
                     is_available=fb_available,
+                    row_getter=row_getter,
                 )
             )
 
@@ -4451,7 +4455,8 @@ class CrossDirectoryEnricherWorker(QThread):
                 stats = summary[source_name]
                 self.log_message.emit(
                     f"[Scheduler][Summary] {source_name} attempted={stats['attempted']} "
-                    f"enriched={stats['enriched']} skipped_cooldown={stats['skipped_cooldown']}"
+                    f"enriched={stats['enriched']} skipped_cooldown={stats['skipped_cooldown']} "
+                    f"skipped_opportunity={stats['skipped_opportunity']}"
                 )
 
     def _phase_directory_matching(self, seed_df, directory_indexes, priority, total):

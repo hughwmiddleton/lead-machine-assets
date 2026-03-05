@@ -10,7 +10,64 @@ from __future__ import annotations
 import random
 from collections import deque
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+
+
+def _row_source_opportunity(row: Any, source_name: str) -> bool:
+    """Return True when a source has a realistic opportunity to enrich the row.
+
+    The checks are deliberately defensive: missing keys or unexpected row
+    objects should not raise. When we cannot inspect the row, we allow the
+    attempt so existing behaviour is preserved.
+    """
+
+    def _get_value(keys: Sequence[str]) -> Any:
+        if row is None:
+            return None
+        for key in keys:
+            try:
+                if isinstance(row, dict):
+                    if key in row:
+                        return row.get(key)
+                    continue
+                if hasattr(row, "get"):
+                    # pandas Series provides .get
+                    val = row.get(key, None)  # type: ignore[arg-type]
+                    if val is not None:
+                        return val
+                    continue
+                if hasattr(row, key):
+                    return getattr(row, key)
+            except Exception:
+                continue
+        return None
+
+    def _has_text(value: Any) -> bool:
+        if value is None:
+            return False
+        if isinstance(value, str):
+            return bool(value.strip())
+        return bool(value)
+
+    name = (source_name or "").strip().upper()
+    artist_present = _has_text(_get_value(["artist", "Artist Name", "artist_name"]))
+
+    if name in {"SC", "SOUNDCLOUD"}:
+        sc_url = _get_value(
+            ["soundcloud_url", "SoundCloud Link", "Soundcloud Link", "soundcloud", "SC_URL"]
+        )
+        return artist_present and not _has_text(sc_url)
+
+    if name in {"LF", "LASTFM", "LAST.FM"}:
+        lf_url = _get_value(["lastfm_url", "LastFM URL", "Last FM URL", "LastFM Link", "lastfm"])
+        return artist_present and not _has_text(lf_url)
+
+    if name in {"FB", "FACEBOOK"}:
+        fb_url = _get_value(["facebook_url", "Facebook_URL", "Facebook URL", "FB_URL", "facebook"])
+        return _has_text(fb_url)
+
+    # Unknown sources fall back to existing behaviour.
+    return True
 
 
 @dataclass
@@ -30,6 +87,7 @@ class SourceSpec:
     rows: Sequence[int]
     run_row: Callable[[int], SourceResult]
     is_available: Callable[[], Tuple[bool, Optional[str]]]
+    row_getter: Optional[Callable[[int], Any]] = None
 
 
 class SourceDiversityScheduler:
@@ -46,7 +104,7 @@ class SourceDiversityScheduler:
         self._row_label = row_label or (lambda idx: str(idx))
         self._log = log_fn
         self._summary: Dict[str, Dict[str, int]] = {
-            spec.name: {"attempted": 0, "enriched": 0, "skipped_cooldown": 0}
+            spec.name: {"attempted": 0, "enriched": 0, "skipped_cooldown": 0, "skipped_opportunity": 0}
             for spec in self.sources
         }
         self._metrics: Dict[str, Dict[str, object]] = {
@@ -156,6 +214,18 @@ class SourceDiversityScheduler:
                 if row_idx is None:
                     continue
                 progressed = True
+                row_data = spec.row_getter(row_idx) if spec.row_getter else None
+                has_opportunity = True
+                if row_data is not None:
+                    try:
+                        has_opportunity = _row_source_opportunity(row_data, spec.name)
+                    except Exception:
+                        has_opportunity = True
+                if not has_opportunity:
+                    self._summary[spec.name]["skipped_opportunity"] += 1
+                    display_row = self._row_label(row_idx)
+                    self._emit(f"[Scheduler] skipping {spec.name} row {display_row} (no opportunity)")
+                    continue
                 available, reason = spec.is_available()
                 display_row = self._row_label(row_idx)
                 if not available:

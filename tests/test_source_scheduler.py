@@ -168,3 +168,60 @@ def test_cooldown_sources_are_deprioritised(monkeypatch):
     assert first_lf_idx > calls.index("SC2")
     # Healthy SC keeps leading even after LF becomes available.
     assert calls.index("SC3") < calls.index("LF3")
+
+
+def test_opportunity_skips_soundcloud_when_url_present():
+    rows = [0]
+    row_data = {0: {"Artist Name": "Test Artist", "soundcloud_url": "https://soundcloud.com/test"}}
+    sc_calls = []
+
+    sc_spec = SourceSpec(
+        name="SC",
+        rows=rows,
+        run_row=lambda idx: (sc_calls.append(idx) or SourceResult(attempted=True)),
+        is_available=lambda: (True, None),
+        row_getter=lambda idx: row_data[idx],
+    )
+    summary = SourceDiversityScheduler([sc_spec], row_label=str).run()
+
+    assert not sc_calls
+    assert summary["SC"]["attempted"] == 0
+    assert summary["SC"]["skipped_opportunity"] == 1
+
+
+def test_opportunity_allows_lastfm_when_missing_url():
+    rows = [0]
+    row_data = {0: {"Artist Name": "Artist X", "lastfm_url": ""}}
+    calls = []
+
+    lf_spec = SourceSpec(
+        name="LF",
+        rows=rows,
+        run_row=lambda idx: (calls.append(idx) or SourceResult(attempted=True)),
+        is_available=lambda: (True, None),
+        row_getter=lambda idx: row_data[idx],
+    )
+    summary = SourceDiversityScheduler([lf_spec], row_label=str).run()
+
+    assert calls == [0]
+    assert summary["LF"]["attempted"] == 1
+    assert summary["LF"]["skipped_opportunity"] == 0
+
+
+def test_opportunity_skips_facebook_when_url_missing():
+    rows = [0]
+    row_data = {0: {"Artist Name": "Artist X", "facebook_url": ""}}
+    fb_calls = []
+
+    fb_spec = SourceSpec(
+        name="FB",
+        rows=rows,
+        run_row=lambda idx: (fb_calls.append(idx) or SourceResult(attempted=True)),
+        is_available=lambda: (True, None),
+        row_getter=lambda idx: row_data[idx],
+    )
+    summary = SourceDiversityScheduler([fb_spec], row_label=str).run()
+
+    assert not fb_calls
+    assert summary["FB"]["attempted"] == 0
+    assert summary["FB"]["skipped_opportunity"] == 1
