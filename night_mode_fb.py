@@ -31,7 +31,12 @@ from selenium.webdriver.chrome.service import Service as ChromeService
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
-from selenium.common.exceptions import NoSuchElementException, StaleElementReferenceException, TimeoutException
+from selenium.common.exceptions import (
+    NoSuchElementException,
+    StaleElementReferenceException,
+    TimeoutException,
+    WebDriverException,
+)
 
 try:
     import facebook_enrich  # type: ignore
@@ -253,6 +258,59 @@ def _find_all(driver, css_selector: str) -> List:
         return driver.find_elements(By.CSS_SELECTOR, css_selector)
     except Exception:
         return []
+
+
+def _load_fb_page_with_timeout(
+    driver,
+    url: str,
+    timeout_s: float = 20.0,
+    logger: LoggerFn = None,
+) -> Tuple[str, str, bool]:
+    """Navigate with a hard timeout; recover via window.stop().
+
+    Returns (html, current_url, timed_out flag). Does not raise on
+    TimeoutException; other webdriver errors bubble up.
+    """
+    if not driver or not url:
+        return "", url or "", False
+
+    timed_out = False
+
+    try:
+        driver.set_page_load_timeout(timeout_s)
+    except Exception:
+        pass
+
+    try:
+        driver.get(url)
+    except TimeoutException:
+        timed_out = True
+    except WebDriverException:
+        # Non-timeout driver errors should surface to callers.
+        raise
+    except Exception:
+        # Preserve previous behaviour for non-timeout errors.
+        raise
+
+    if timed_out:
+        _log(logger, f"[FB Enrich] Timeout loading {url} ({int(timeout_s)}s)")
+        try:
+            driver.execute_script("window.stop();")
+            _log(logger, "[FB Enrich] Recovered from timeout using window.stop()")
+        except Exception:
+            pass
+
+    try:
+        current_url = getattr(driver, "current_url", "") or url
+    except Exception:
+        current_url = url
+
+    try:
+        html = getattr(driver, "page_source", "") or ""
+    except Exception:
+        html = ""
+
+    return html, current_url, timed_out
 
 
 def _normalize_fb_href(href: str) -> str:
@@ -1879,6 +1937,10 @@ class NightPersistentFacebookSession:
         # Checkpoint resilience
         self.checkpoint_restart_count: int = 0
         self.checkpoint_cooldown_done: bool = False
+        # Last navigation metadata
+        self.last_nav_timed_out: bool = False
+        self.last_nav_page_source: str = ""
+        self.last_nav_current_url: str = ""
 
     def close(self):
         try:
@@ -1998,14 +2060,20 @@ class NightPersistentFacebookSession:
         log_target = logger if logger is not None else self.logger
         driver = self.ensure_logged_in()
         try:
-            driver.get(url)
+            html, current_url, timed_out = _load_fb_page_with_timeout(driver, url, timeout_s=20.0, logger=log_target)
+            self.last_nav_timed_out = timed_out
+            self.last_nav_page_source = html
+            self.last_nav_current_url = current_url
             return driver
         except Exception as exc:
             if _is_session_death_exc(exc):
                 _log(log_target, f"[Night FB] Driver session died during navigate; refreshing and retrying url={url!r} error={exc}")
                 try:
                     driver = self.refresh_session()
-                    driver.get(url)
+                    html, current_url, timed_out = _load_fb_page_with_timeout(driver, url, timeout_s=20.0, logger=log_target)
+                    self.last_nav_timed_out = timed_out
+                    self.last_nav_page_source = html
+                    self.last_nav_current_url = current_url
                     return driver
                 except Exception as exc2:
                     _log(log_target, f"[Night FB] Driver retry after refresh failed url={url!r}; err={exc2}")
@@ -2795,7 +2863,9 @@ def _try_explicit_fb(driver, url: str, logger: LoggerFn = None) -> Tuple[List[st
         return [], "no_email_found", ""
 
     try:
-        driver.get(url)
+        page_source_raw, current_url, timed_out = _load_fb_page_with_timeout(
+            driver, url, timeout_s=20.0, logger=logger
+        )
     except Exception:
         try:
             _log(logger, f"[Night FB] Explicit FB navigation failed for {url}")
@@ -2804,15 +2874,18 @@ def _try_explicit_fb(driver, url: str, logger: LoggerFn = None) -> Tuple[List[st
         return [], "no_email_found", ""
 
     try:
-        final_url = (getattr(driver, "current_url", "") or "").lower()
+        final_url = (current_url or getattr(driver, "current_url", "") or "").lower()
     except Exception:
         final_url = (url or "").lower()
 
     try:
-        page_source_raw = getattr(driver, "page_source", "") or ""
+        page_source_raw = page_source_raw or getattr(driver, "page_source", "") or ""
     except Exception:
-        page_source_raw = ""
+        page_source_raw = page_source_raw or ""
     page_source = page_source_raw.lower()
+
+    if timed_out and not page_source_raw:
+        return [], "timeout", ""
 
     if ("login" in final_url) or ("/login.php" in final_url) or ("device-based" in page_source) or ("log in" in page_source and "facebook" in page_source):
         return [], "redirect_login", ""
@@ -3343,6 +3416,9 @@ class NightModeFacebookEnricher:
         self.session_unhealthy_count: int = 0
         self.checkpoint_events: int = 0
         self.login_wall_events: int = 0
+        # Navigation timeout tracking
+        self._last_fb_timeout: bool = False
+        self._last_fb_timeout_url: str = ""
         self.protective_shutdown: bool = False
         # Debug-only FB URL flow tracing; defaults to off.
         self._debug_fb_url_flow: bool = _bool_env("DEBUG_FB_URL_FLOW", default=False)
@@ -3920,12 +3996,18 @@ class NightModeFacebookEnricher:
             return None, None
         self._page_budget_remaining = budget - 1
         self.fb_email_pages_visited += 1
+        self._last_fb_timeout = False
+        self._last_fb_timeout_url = ""
         session = self._ensure_session()
         if not session:
             return None, None
         self._ensure_driver_alive(session)
         def _navigate_once() -> Tuple[Optional[str], Optional[str]]:
             driver = session.navigate(url)
+            timed_out = bool(getattr(session, "last_nav_timed_out", False))
+            if timed_out:
+                self._last_fb_timeout = True
+                self._last_fb_timeout_url = url
             if goto_about:
                 goto_about_fn = getattr(self.legacy, "_goto_facebook_about", None)
                 if callable(goto_about_fn):
@@ -3981,13 +4063,18 @@ class NightModeFacebookEnricher:
             return None, None
         self._page_budget_remaining = budget - 1
         self.fb_email_pages_visited += 1
+        self._last_fb_timeout = False
+        self._last_fb_timeout_url = ""
         try:
             driver = self._get_anon_driver()
         except Exception as exc:
             _log(self.logger, f"[Night FB] Anonymous driver unavailable: {exc}")
             return None, None
         try:
-            driver.get(url)
+            html, current_url, timed_out = _load_fb_page_with_timeout(driver, url, timeout_s=20.0, logger=self.logger)
+            if timed_out:
+                self._last_fb_timeout = True
+                self._last_fb_timeout_url = url
             if goto_about:
                 goto_about_fn = getattr(self.legacy, "_goto_facebook_about", None)
                 if callable(goto_about_fn):
@@ -3996,7 +4083,7 @@ class NightModeFacebookEnricher:
                     except Exception:
                         pass
             time.sleep(1.0)
-            current_url = getattr(driver, "current_url", None) or url
+            current_url = getattr(driver, "current_url", None) or current_url or url
             if is_fb_login_redirect(current_url) or _is_fb_login_or_security_url(current_url):
                 return None, current_url
             return driver.page_source, current_url
@@ -4445,8 +4532,10 @@ class NightModeFacebookEnricher:
         used_driver_kind = "session"
         outcome_hint = "fetch_error"
         reject_reason = ""
+        timed_out_flag = False
 
         html, resolved_url = self._fetch_html_with_url(candidate_url, goto_about=False)
+        timed_out_flag = timed_out_flag or bool(getattr(self, "_last_fb_timeout", False))
         if html:
             outcome_hint = "fetched"
         if (not html) and allow_anon:
@@ -4454,6 +4543,9 @@ class NightModeFacebookEnricher:
             used_driver_kind = "anon_fallback"
             if html and outcome_hint != "fetched":
                 outcome_hint = "fetched"
+            timed_out_flag = timed_out_flag or bool(getattr(self, "_last_fb_timeout", False))
+        if (not html) and timed_out_flag:
+            return None, [], used_driver_kind, "timeout"
         if not html:
             return None
         resolved_url = _normalise_fb_url(resolved_url or candidate_url)
@@ -5075,7 +5167,7 @@ class NightModeFacebookEnricher:
 
             allow_anon = self._should_allow_anonymous(result)
             # PASS A: explicit URL attempts (instrumentation only)
-            outcome_rank = {"found_email": 0, "login_wall": 1, "fetch_error": 2, "no_email_on_page": 3}
+            outcome_rank = {"found_email": 0, "login_wall": 1, "timeout": 2, "fetch_error": 3, "no_email_on_page": 4}
             best_outcome = None
             best_reason = ""
             best_driver = ""
@@ -5113,7 +5205,7 @@ class NightModeFacebookEnricher:
                         outcome_for_log = "fetch_error"
                         reason_for_log = f"session_exception:{exc.__class__.__name__}"
                     night_result, emails, driver_kind, candidate_outcome = _unpack_fb_candidate(candidate)
-                    if night_result is not None or candidate_outcome == "login_wall":
+                    if night_result is not None or candidate_outcome in ("login_wall", "content_unavailable", "timeout"):
                         if night_result is None:
                             outcome_for_log = candidate_outcome
                             if candidate_outcome == "login_wall":
@@ -5128,6 +5220,15 @@ class NightModeFacebookEnricher:
                                 reason_for_log = "content_unavailable"
                                 if best_outcome is None:
                                     best_outcome = "content_unavailable"
+                                    best_reason = reason_for_log
+                                    best_driver = driver_kind
+                                    best_page_url = _normalise_fb_url(direct_url)
+                            elif candidate_outcome == "timeout":
+                                reason_for_log = "timeout"
+                                self._pass_a_bump("fetch_error")
+                                current_rank = outcome_rank.get("timeout", 99)
+                                if best_outcome is None or current_rank < outcome_rank.get(best_outcome, 99):
+                                    best_outcome = "timeout"
                                     best_reason = reason_for_log
                                     best_driver = driver_kind
                                     best_page_url = _normalise_fb_url(direct_url)
@@ -5147,6 +5248,8 @@ class NightModeFacebookEnricher:
                                 reason_for_log = "session_fetch_ok_no_email" if not driver_kind.startswith("anon") else "anon_fetch_ok_no_email"
                             elif candidate_outcome == "login_wall":
                                 reason_for_log = "session_login_wall" if not driver_kind.startswith("anon") else "anon_login_wall"
+                            elif candidate_outcome == "timeout":
+                                reason_for_log = "timeout"
                             else:
                                 reason_for_log = f"{driver_kind}_exception:unknown"
                             if emails:
@@ -5189,6 +5292,10 @@ class NightModeFacebookEnricher:
                         result["FB_Reason"] = best_reason or ("anon_login_wall" if best_driver.startswith("anon") else "session_login_wall")
                         self._register_login_wall()
                         self._pass_a_bump("login_wall")
+                    elif best_outcome == "timeout":
+                        result["FB_Status"] = "pass_a_timeout"
+                        result["FB_Reason"] = best_reason or "timeout"
+                        self._pass_a_bump("fetch_error")
                     elif best_outcome == "fetch_error":
                         result["FB_Status"] = "pass_a_fetch_error"
                         result["FB_Reason"] = best_reason or ("anon_exception:unknown" if best_driver.startswith("anon") else "session_exception:unknown")
@@ -5236,10 +5343,16 @@ class NightModeFacebookEnricher:
                             )
                             return result
                     if reason_code:
-                        result["FB_Status"] = "pass_a_login_wall" if reason_code.startswith("redirect") else "pass_a_no_email_on_page"
-                        result["FB_Reason"] = "anon_login_wall" if "login" in reason_code else "anon_fetch_ok_no_email"
-                        self._pass_a_bump("login_wall" if "login" in reason_code else "no_email_on_page")
-                        _log(self.logger, f"[Night FB] Explicit FB URL had no emails (reason={reason_code}); falling back to search.")
+                        if reason_code == "timeout":
+                            result["FB_Status"] = "pass_a_timeout"
+                            result["FB_Reason"] = "timeout"
+                            self._pass_a_bump("fetch_error")
+                            _log(self.logger, f"[Night FB] Explicit FB URL timed out; falling back to search.")
+                        else:
+                            result["FB_Status"] = "pass_a_login_wall" if reason_code.startswith("redirect") else "pass_a_no_email_on_page"
+                            result["FB_Reason"] = "anon_login_wall" if "login" in reason_code else "anon_fetch_ok_no_email"
+                            self._pass_a_bump("login_wall" if "login" in reason_code else "no_email_on_page")
+                            _log(self.logger, f"[Night FB] Explicit FB URL had no emails (reason={reason_code}); falling back to search.")
                     elif not result.get("FB_Status"):
                         _log(self.logger, "[Night FB] Explicit FB URLs produced no results; falling back to search.")
                         if not result.get("FB_Status"):

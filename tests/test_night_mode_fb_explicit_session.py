@@ -1,6 +1,7 @@
 import pytest
 
 import night_mode_fb as nmfb
+from selenium.common.exceptions import TimeoutException
 
 
 class _DummyLegacy:
@@ -113,3 +114,77 @@ def test_rows_without_explicit_fb_urls_unchanged(monkeypatch, enricher):
     result = enricher.enrich_row_with_facebook_night(row)
 
     assert result.get("FB_Status", "").startswith("pass_a_skipped") or result.get("FB_Status", "") == "ok" or not result.get("FB_Status", "")
+
+
+class _TimeoutDriver:
+    def __init__(self, html: str = ""):
+        self._html = html
+        self.set_timeout_called = None
+        self.stop_called = False
+        self.get_calls = 0
+
+    def set_page_load_timeout(self, seconds):
+        self.set_timeout_called = seconds
+
+    def get(self, url):  # noqa: ANN001
+        self.get_calls += 1
+        raise TimeoutException("timed out")
+
+    def execute_script(self, script):
+        if script == "window.stop();":
+            self.stop_called = True
+
+    @property
+    def page_source(self):
+        return self._html
+
+    @property
+    def current_url(self):
+        return "https://www.facebook.com/timeout"
+
+
+def test_explicit_fb_timeout_without_html(monkeypatch, enricher):
+    driver = _TimeoutDriver(html="")
+    monkeypatch.setattr(enricher, "_has_authenticated_session", lambda: False)
+    monkeypatch.setattr(enricher, "_should_allow_anonymous", lambda row: True)
+    monkeypatch.setattr(enricher, "_get_anon_driver", lambda: driver)
+    monkeypatch.setattr(enricher, "_ensure_session", lambda: None)
+
+    row = {
+        "Artist Name": "Timeout Artist",
+        "Email": "",
+        "Email_All": "",
+        "facebook_url": "https://www.facebook.com/timeout.artist",
+    }
+
+    result = enricher.enrich_row_with_facebook_night(row)
+
+    assert result.get("FB_Status") == "pass_a_timeout"
+    assert result.get("FB_Reason") == "timeout"
+    assert driver.set_timeout_called == 20
+    assert driver.stop_called is True
+
+
+def test_explicit_fb_timeout_with_salvage_html(monkeypatch, enricher):
+    html = '<html><body><a href="mailto:artist@test.com">email</a></body></html>'
+    driver = _TimeoutDriver(html=html)
+    monkeypatch.setattr(enricher, "_has_authenticated_session", lambda: False)
+    monkeypatch.setattr(enricher, "_should_allow_anonymous", lambda row: True)
+    monkeypatch.setattr(enricher, "_get_anon_driver", lambda: driver)
+    monkeypatch.setattr(enricher, "_ensure_session", lambda: None)
+    # Ensure email override allows keeping emails even if music signals are weak in this synthetic page.
+    monkeypatch.setattr(nmfb, "should_accept_email_override", lambda *args, **kwargs: (True, "test_override"))
+
+    row = {
+        "Artist Name": "Timeout Artist",
+        "Email": "",
+        "Email_All": "",
+        "facebook_url": "https://www.facebook.com/timeout.artist",
+    }
+
+    result = enricher.enrich_row_with_facebook_night(row)
+
+    assert result.get("FB_Status") != "pass_a_timeout"
+    assert driver.stop_called is True
+    # Salvaged HTML should still be parsed and produce the email.
+    assert "artist@test.com" in (result.get("Email_All") or "") or result.get("Email") == "artist@test.com"
