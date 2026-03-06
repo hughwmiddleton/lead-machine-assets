@@ -1134,7 +1134,7 @@ def _normalise_fb_url(url: str) -> str:
         ids = qs.get("id", [])
         if not ids:
             return ""
-        profile_id = (ids[0] or "").strip()
+        profile_id = (ids[0] or "").strip().rstrip("/")
         if not profile_id.isdigit():
             return ""
         return urllib.parse.urlunparse((scheme, host, "/profile.php", "", f"id={profile_id}", ""))
@@ -1144,6 +1144,54 @@ def _normalise_fb_url(url: str) -> str:
         return ""
 
     return urllib.parse.urlunparse((scheme, host, path, "", "", ""))
+
+
+def _canonicalize_and_dedupe_explicit_fb_urls(
+    urls: Sequence[str], logger: LoggerFn = None, debug: bool = False
+) -> List[str]:
+    """Normalize and dedupe explicit FB URLs while preserving order."""
+
+    before_count = len(urls or [])
+    seen: Set[str] = set()
+    canonical: List[str] = []
+
+    for raw in urls or []:
+        norm = _normalise_fb_url(raw)
+        if not norm:
+            continue
+        try:
+            parsed = urllib.parse.urlsplit(norm)
+            path = parsed.path.rstrip("/") or "/"
+            keep_query = parsed.query if parsed.path.lower() == "/profile.php" else ""
+            parsed = parsed._replace(path=path, query=keep_query, fragment="")
+            norm = urllib.parse.urlunsplit(parsed)
+        except Exception:
+            pass
+
+        try:
+            parsed_for_key = urllib.parse.urlsplit(norm)
+            key = urllib.parse.urlunsplit(
+                (
+                    (parsed_for_key.scheme or "https").lower(),
+                    (parsed_for_key.netloc or "").lower(),
+                    parsed_for_key.path,
+                    parsed_for_key.query,
+                    "",
+                )
+            )
+        except Exception:
+            key = norm
+
+        if key in seen:
+            continue
+        seen.add(key)
+        canonical.append(norm)
+
+    after_count = len(canonical)
+    if debug and logger and before_count and before_count != after_count:
+        _log(logger, f"[Night FB] Deduplicated explicit FB URLs: {before_count} -> {after_count}")
+
+    return canonical
 
 
 def _purge_wdm_cache(driver_path: Optional[str]) -> None:
@@ -5127,6 +5175,9 @@ class NightModeFacebookEnricher:
         fb_urls = _extract_fb_urls_for_night_mode(result)
         if facebook_url and facebook_url not in fb_urls:
             fb_urls.insert(0, facebook_url)
+        fb_urls = _canonicalize_and_dedupe_explicit_fb_urls(
+            fb_urls, logger=self.logger, debug=self._debug_fb_url_flow
+        )
         is_unearthed = self._is_unearthed_source(result)
 
         if self._debug_fb_url_flow and self._debug_fb_url_flow_seen < self._debug_fb_url_flow_limit:

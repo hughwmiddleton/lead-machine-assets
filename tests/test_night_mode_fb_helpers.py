@@ -85,3 +85,75 @@ def test_pass_a_uses_fb_url_from_social_link(monkeypatch) -> None:
     assert calls["urls"] == ["https://www.facebook.com/panicboomband"]
     assert result.get("FB_Status") == "pass_a_found_email"
     assert result.get("FB_Reason") == "explicit_url"
+
+
+def test_explicit_fb_urls_canonicalized_and_deduped(monkeypatch) -> None:
+    enricher = night_mode_fb.NightModeFacebookEnricher(
+        legacy_module=None,
+        username="",
+        password="",
+        logger=None,
+        use_shared_session=False,
+    )
+    monkeypatch.setattr(enricher, "_ensure_session", lambda: None)
+    monkeypatch.setattr(enricher, "_has_authenticated_session", lambda: False)
+    monkeypatch.setattr(enricher, "_should_allow_anonymous", lambda row: True)
+    monkeypatch.setattr(enricher, "_get_anon_driver", lambda: object())
+
+    calls = []
+
+    def _fake_scrape(self, fb_url, *args, **kwargs):  # noqa: ANN001
+        calls.append(fb_url)
+        return None
+
+    monkeypatch.setattr(night_mode_fb.NightModeFacebookEnricher, "_scrape_single_fb_candidate", _fake_scrape)
+
+    row = {
+        "Artist Name": "Dedup Artist",
+        "Email": "",
+        "Email_All": "",
+        "Facebook_URL": "https://facebook.com/artist?ref=share",
+        "Social Link": "https://facebook.com/artist/ | https://facebook.com/artist",
+    }
+
+    result = enricher.enrich_row_with_facebook_night(row)
+
+    assert len(calls) == 1, "Duplicate explicit FB URLs should be visited once"
+    assert night_mode_fb._normalise_fb_url(calls[0]) == "https://www.facebook.com/artist"
+    assert result.get("FB_Status"), "PASS A should still produce a status even without emails"
+
+
+def test_profile_php_explicit_urls_deduped(monkeypatch) -> None:
+    enricher = night_mode_fb.NightModeFacebookEnricher(
+        legacy_module=None,
+        username="",
+        password="",
+        logger=None,
+        use_shared_session=False,
+    )
+    monkeypatch.setattr(enricher, "_ensure_session", lambda: None)
+    monkeypatch.setattr(enricher, "_has_authenticated_session", lambda: False)
+    monkeypatch.setattr(enricher, "_should_allow_anonymous", lambda row: True)
+    monkeypatch.setattr(enricher, "_get_anon_driver", lambda: object())
+
+    calls = []
+
+    def _fake_scrape(self, fb_url, *args, **kwargs):  # noqa: ANN001
+        calls.append(fb_url)
+        return None
+
+    monkeypatch.setattr(night_mode_fb.NightModeFacebookEnricher, "_scrape_single_fb_candidate", _fake_scrape)
+
+    row = {
+        "Artist Name": "Profile Artist",
+        "Email": "",
+        "Email_All": "",
+        "Facebook_URL": "https://facebook.com/profile.php?id=123&ref=share",
+        "Social Link": "https://facebook.com/profile.php?id=123 | https://facebook.com/profile.php?id=123/",
+    }
+
+    result = enricher.enrich_row_with_facebook_night(row)
+
+    assert len(calls) == 1, "Profile profile.php variants should be visited once"
+    assert night_mode_fb._normalise_fb_url(calls[0]) == "https://www.facebook.com/profile.php?id=123"
+    assert result.get("FB_Status"), "PASS A should still produce a status even without emails"
