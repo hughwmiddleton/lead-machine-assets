@@ -29,6 +29,21 @@ def test_promote_ignores_non_facebook_and_share_links():
     assert "facebook_url" not in bad or bad.get("facebook_url", "") == ""
 
 
-def test_extract_rejects_profile_and_groups():
-    assert extract_facebook_url_from_text("https://www.facebook.com/profile.php?id=12345") is None
+def test_extract_accepts_numeric_profile_and_rejects_groups():
+    assert extract_facebook_url_from_text("https://www.facebook.com/profile.php?id=12345") == "https://www.facebook.com/profile.php?id=12345"
+    assert extract_facebook_url_from_text("https://www.facebook.com/profile.php?id=abc") is None
     assert extract_facebook_url_from_text("https://www.facebook.com/groups/mygroup") is None
+
+
+def test_promote_accepts_fb_short_domains_and_profile_ids():
+    row_short = {"Social Link": "https://fb.com/exampleband", "facebook_url": ""}
+    promote_facebook_url(row_short)
+    assert row_short["facebook_url"] == "https://www.facebook.com/exampleband"
+
+    row_short_me = {"External Links": "https://fb.me/exampleband"}
+    promote_facebook_url(row_short_me)
+    assert row_short_me["facebook_url"] == "https://www.facebook.com/exampleband"
+
+    row_profile = {"Website": "https://www.facebook.com/profile.php?id=123456789"}
+    promote_facebook_url(row_profile)
+    assert row_profile["facebook_url"] == "https://www.facebook.com/profile.php?id=123456789"

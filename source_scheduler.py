@@ -18,7 +18,17 @@ import urllib.parse
 # Facebook URL promotion helpers
 # ---------------------------------------------------------------------------
 
-_FB_ALLOWED_HOSTS = {"facebook.com", "www.facebook.com", "m.facebook.com"}
+_FB_ALLOWED_HOSTS = {
+    "facebook.com",
+    "www.facebook.com",
+    "m.facebook.com",
+    "fb.com",
+    "www.fb.com",
+    "m.fb.com",
+    "fb.me",
+    "www.fb.me",
+    "m.fb.me",
+}
 _FB_REJECT_PATH_PREFIXES = (
     "/share",
     "/sharer.php",
@@ -37,10 +47,10 @@ _FB_REJECT_PATH_PREFIXES = (
 def _normalize_fb_url(raw: str) -> str:
     """Normalize a Facebook URL to https://www.facebook.com/<path>.
 
-    - Accept facebook.com, www.facebook.com, m.facebook.com
+    - Accept facebook.com/www/m plus fb.com/fb.me short domains
     - Remove query/fragment noise
     - Reject obvious share/plugin/watch/group/event endpoints
-    - Reject profile.php?id=... to avoid noisy people-profile links by default
+    - Accept profile.php?id=<numeric> only; reject other profile.php uses
     """
     if not raw:
         return ""
@@ -63,13 +73,18 @@ def _normalize_fb_url(raw: str) -> str:
     lowered_path = path.lower()
     if lowered_path.startswith(_FB_REJECT_PATH_PREFIXES):
         return ""
+    clean_query = ""
     if lowered_path == "/profile.php":
-        # Default to reject profile.php?id=... to avoid noisy personal profiles.
-        return ""
+        qs = urllib.parse.parse_qs(parsed.query or "", keep_blank_values=False)
+        ids = qs.get("id", [])
+        profile_id = (ids[0] or "").strip() if ids else ""
+        if not profile_id.isdigit():
+            return ""
+        clean_query = f"id={profile_id}"
 
-    # Strip query/fragment tracking noise.
+    # Strip query/fragment tracking noise (except allowed profile id query).
     clean_path = path.rstrip("/")
-    return urllib.parse.urlunparse(("https", "www.facebook.com", clean_path, "", "", ""))
+    return urllib.parse.urlunparse(("https", "www.facebook.com", clean_path, "", clean_query, ""))
 
 
 def extract_facebook_url_from_text(text: str) -> Optional[str]:
