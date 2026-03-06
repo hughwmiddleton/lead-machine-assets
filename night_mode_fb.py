@@ -37,6 +37,7 @@ from selenium.common.exceptions import (
     TimeoutException,
     WebDriverException,
 )
+from source_scheduler import canonicalize_facebook_url, ensure_canonical_facebook_url
 
 try:
     import facebook_enrich  # type: ignore
@@ -78,6 +79,35 @@ FB_CLUE_FIELDS = [
     "Facebook_URL",
     "Facebook URL",
 ]
+_EXPLICIT_FB_INTAKE_FIELDS = (
+    "Facebook_URL",
+    "Facebook URL",
+    "Social Link",
+    "External Links",
+    "Spotify_Website_URL",
+    "Spotify Website URL",
+    "facebook_url",
+    "facebook url",
+    "social link",
+    "external links",
+)
+_EXPLICIT_FB_ALLOWED_HOSTS = ("facebook.com", "m.facebook.com", "web.facebook.com", "touch.facebook.com", "fb.com", "fb.me")
+_EXPLICIT_FB_PREFILTER_PATHS = ("/r.php", "/login", "/share.php", "/l.php", "/dialog/")
+
+
+@dataclass
+class ExplicitFbIntakeDecision:
+    outcome: str
+    source_fields: List[str]
+    accepted_urls: List[str]
+    rejected_invalid: List[str]
+    rejected_guard: List[str]
+    promotion_expected_missing_canonical: bool
+    canonical_value_present: bool
+    promotion_source: str = ""
+    invalid_reason: str = ""
+    guard_reason: str = ""
+    message: str = ""
 
 _FB_JUNK_HOSTS = (
     "l.facebook.com",
@@ -1092,18 +1122,7 @@ def _is_valid_fb_url_value(value: object) -> bool:
 
 
 def _extract_fb_urls_for_night_mode(row):
-    fields = [
-        "Facebook_URL",
-        "Facebook URL",
-        "Social Link",
-        "External Links",
-        "Spotify_Website_URL",
-        "Spotify Website URL",
-        "facebook_url",
-        "facebook url",
-        "social link",
-        "external links",
-    ]
+    fields = _EXPLICIT_FB_INTAKE_FIELDS
     allowed_hosts = ("facebook.com", "m.facebook.com", "fb.com", "fb.me")
 
     def _clean_value(val: Any) -> str:
@@ -1150,8 +1169,7 @@ def _extract_fb_urls_for_night_mode(row):
                 path = urllib.parse.urlparse(candidate).path.lower()
             except Exception:
                 path = ""
-            bad = ("/r.php", "/login", "/share.php", "/l.php", "/dialog/")
-            if any(path.startswith(b) for b in bad):
+            if any(path.startswith(b) for b in _EXPLICIT_FB_PREFILTER_PATHS):
                 continue
             candidate = candidate.strip()
             if candidate and candidate not in seen:
@@ -1288,6 +1306,278 @@ def _canonicalize_and_dedupe_explicit_fb_urls(
         _log(logger, f"[Night FB] Deduplicated explicit FB URLs: {before_count} -> {after_count}")
 
     return canonical
+
+
+def _explicit_fb_row_value(row: Dict[str, str], field: str) -> str:
+    for key, value in (row or {}).items():
+        try:
+            if str(key).lower() != field.lower():
+                continue
+        except Exception:
+            continue
+        try:
+            import pandas as _pd  # type: ignore
+
+            if _pd.isna(value):
+                return ""
+        except Exception:
+            pass
+        try:
+            return str(value or "").strip()
+        except Exception:
+            return ""
+    return ""
+
+
+def _explicit_fb_row_lookup(row: Dict[str, str], field: str) -> Tuple[str, str]:
+    for key, value in (row or {}).items():
+        try:
+            if str(key).lower() != field.lower():
+                continue
+        except Exception:
+            continue
+        try:
+            import pandas as _pd  # type: ignore
+
+            if _pd.isna(value):
+                return str(key), ""
+        except Exception:
+            pass
+        try:
+            return str(key), str(value or "").strip()
+        except Exception:
+            return str(key), ""
+    return "", ""
+
+
+def _looks_like_explicit_fb_candidate(value: str) -> bool:
+    lowered = (value or "").strip().lower()
+    if not lowered:
+        return False
+    if lowered.startswith("/"):
+        return True
+    if lowered in {"facebook", "facebook.com", "www.facebook.com", "m.facebook.com", "fb.com", "fb.me"}:
+        return True
+    return any(host in lowered for host in _EXPLICIT_FB_ALLOWED_HOSTS)
+
+
+def _explicit_fb_prefilter_reason(candidate: str) -> str:
+    cleaned = (candidate or "").strip()
+    if not cleaned:
+        return ""
+    if cleaned.startswith("//"):
+        cleaned = "https:" + cleaned
+    elif not cleaned.startswith("http"):
+        cleaned = "https://" + cleaned
+    try:
+        path = urllib.parse.urlparse(cleaned).path.lower()
+    except Exception:
+        return ""
+    if not path:
+        return ""
+    if path.startswith("/r.php") or path.startswith("/login"):
+        return "login_redirect_surface"
+    if path.startswith("/share.php") or path.startswith("/dialog/"):
+        return "share_surface"
+    if path.startswith("/l.php"):
+        return "link_shim_surface"
+    return ""
+
+
+def _explicit_fb_pre_scrape_guard_reason(url: str) -> Tuple[str, str]:
+    raw_fb_url = (url or "").strip()
+    if raw_fb_url.startswith("/"):
+        raw_fb_url = "https://www.facebook.com" + raw_fb_url
+    if _is_invalid_fb_value(raw_fb_url):
+        return "invalid_placeholder", raw_fb_url or "<blank>"
+    if not fb_is_allowed_profile_candidate_url(raw_fb_url):
+        return "shape_disallowed", raw_fb_url or "<blank>"
+    candidate_url = _normalise_fb_url(raw_fb_url or "")
+    if not candidate_url:
+        return "normalize_failed", raw_fb_url or "<blank>"
+    if _is_junk_fb_candidate(candidate_url):
+        return "junk_surface", candidate_url
+    url_lower = candidate_url.lower()
+    if "/r.php" in url_lower or "/login" in url_lower or "/register" in url_lower:
+        return "login_redirect", candidate_url
+    return "", candidate_url or raw_fb_url
+
+
+def _compact_explicit_fb_values(values: Sequence[str], limit: int = 2, width: int = 96) -> str:
+    compacted: List[str] = []
+    seen: Set[str] = set()
+    for value in values or []:
+        text = str(value or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        if len(text) > width:
+            text = text[: width - 3] + "..."
+        compacted.append(text)
+    if not compacted:
+        return ""
+    if len(compacted) <= limit:
+        return ",".join(compacted)
+    return f"{','.join(compacted[:limit])},+{len(compacted) - limit}"
+
+
+def classify_explicit_fb_intake(
+    row: Dict[str, str],
+    *,
+    accepted_urls: Optional[Sequence[str]] = None,
+) -> ExplicitFbIntakeDecision:
+    accepted_urls = list(accepted_urls) if accepted_urls is not None else _canonicalize_and_dedupe_explicit_fb_urls(_extract_fb_urls_for_night_mode(row))
+
+    source_fields_seen: List[str] = []
+    source_fields_set: Set[str] = set()
+    scanned_actual_fields: Set[str] = set()
+    rejected_invalid: List[str] = []
+    rejected_invalid_seen: Set[str] = set()
+    rejected_guard: List[str] = []
+    rejected_guard_seen: Set[str] = set()
+    invalid_reason = ""
+    guard_reason = ""
+    accepted_sources_by_url: Dict[str, str] = {}
+
+    for field in _EXPLICIT_FB_INTAKE_FIELDS:
+        actual_field, raw = _explicit_fb_row_lookup(row, field)
+        actual_field_key = (actual_field or field).lower()
+        if actual_field and actual_field_key in scanned_actual_fields:
+            continue
+        if actual_field:
+            scanned_actual_fields.add(actual_field_key)
+        if not raw:
+            continue
+        parts = _FB_SPLIT_PATTERN.split(raw)
+        is_direct_fb_field = actual_field_key in {"facebook_url", "facebook url"}
+        for part in parts:
+            candidate = str(part or "").strip()
+            if not candidate or (not is_direct_fb_field and not _looks_like_explicit_fb_candidate(candidate)):
+                continue
+            source_label = actual_field or field
+            if source_label not in source_fields_set:
+                source_fields_seen.append(source_label)
+                source_fields_set.add(source_label)
+            if not _is_valid_fb_url_value(candidate):
+                if candidate not in rejected_invalid_seen:
+                    rejected_invalid.append(candidate)
+                    rejected_invalid_seen.add(candidate)
+                if not invalid_reason:
+                    invalid_reason = "invalid_placeholder_or_malformed"
+                continue
+            if not any(host in candidate.lower() for host in _EXPLICIT_FB_ALLOWED_HOSTS):
+                if candidate not in rejected_invalid_seen:
+                    rejected_invalid.append(candidate)
+                    rejected_invalid_seen.add(candidate)
+                if not invalid_reason:
+                    invalid_reason = "missing_fb_host"
+                continue
+            prefilter_reason = _explicit_fb_prefilter_reason(candidate)
+            if prefilter_reason:
+                if candidate not in rejected_guard_seen:
+                    rejected_guard.append(candidate)
+                    rejected_guard_seen.add(candidate)
+                if not guard_reason:
+                    guard_reason = prefilter_reason
+                continue
+            canonical = _normalise_fb_url(candidate)
+            if not canonical:
+                if candidate not in rejected_invalid_seen:
+                    rejected_invalid.append(candidate)
+                    rejected_invalid_seen.add(candidate)
+                if not invalid_reason:
+                    invalid_reason = "canonicalization_dropped"
+                continue
+            accepted_sources_by_url.setdefault(canonical, source_label)
+            guard_reject_reason, guard_sample = _explicit_fb_pre_scrape_guard_reason(canonical)
+            if guard_reject_reason:
+                if guard_sample not in rejected_guard_seen:
+                    rejected_guard.append(guard_sample)
+                    rejected_guard_seen.add(guard_sample)
+                if not guard_reason:
+                    guard_reason = guard_reject_reason
+
+    source_fields = []
+    source_seen: Set[str] = set()
+    for url in accepted_urls:
+        source = accepted_sources_by_url.get(url, "")
+        if source and source not in source_seen:
+            source_fields.append(source)
+            source_seen.add(source)
+    for field in source_fields_seen:
+        if field not in source_seen:
+            source_fields.append(field)
+            source_seen.add(field)
+
+    canonical_value_present = bool(canonicalize_facebook_url(_explicit_fb_row_value(row, "Facebook_URL")))
+    promoted_url, promotion_source = ensure_canonical_facebook_url(row, set_row=False)
+    promotion_expected_missing_canonical = bool(promoted_url and not canonical_value_present)
+
+    if accepted_urls:
+        outcome = "attempt"
+    elif rejected_invalid:
+        outcome = "reject_invalid"
+    elif rejected_guard:
+        outcome = "reject_guard"
+    elif promotion_expected_missing_canonical:
+        outcome = "promotion_expected_missing_canonical"
+    else:
+        outcome = "no_explicit_url"
+
+    message = outcome
+    if outcome == "attempt":
+        message = "explicit URL present and queued for PASS A"
+    elif outcome == "reject_invalid":
+        message = "explicit URL present but rejected as invalid"
+    elif outcome == "reject_guard":
+        message = "explicit URL present but filtered by guard"
+    elif outcome == "promotion_expected_missing_canonical":
+        message = "promotion source had FB URL but canonical field was blank at intake"
+    elif outcome == "no_explicit_url":
+        message = "no explicit FB URL detected on row"
+
+    return ExplicitFbIntakeDecision(
+        outcome=outcome,
+        source_fields=source_fields,
+        accepted_urls=list(accepted_urls),
+        rejected_invalid=rejected_invalid,
+        rejected_guard=rejected_guard,
+        promotion_expected_missing_canonical=promotion_expected_missing_canonical,
+        canonical_value_present=canonical_value_present,
+        promotion_source=promotion_source or "",
+        invalid_reason=invalid_reason,
+        guard_reason=guard_reason,
+        message=message,
+    )
+
+
+def _log_explicit_fb_intake(logger: LoggerFn, artist_name: str, decision: ExplicitFbIntakeDecision) -> None:
+    parts = [
+        '[Night FB][Explicit Intake]',
+        f'artist="{artist_name or "<unknown>"}"',
+        f'outcome="{decision.outcome}"',
+    ]
+    if decision.source_fields:
+        parts.append(f'source="{_compact_explicit_fb_values(decision.source_fields, limit=3, width=48)}"')
+    if decision.accepted_urls:
+        parts.append(f'urls="{_compact_explicit_fb_values(decision.accepted_urls)}"')
+    if decision.rejected_invalid:
+        parts.append(f'invalid="{_compact_explicit_fb_values(decision.rejected_invalid, limit=1)}"')
+    if decision.invalid_reason:
+        parts.append(f'invalid_reason="{decision.invalid_reason}"')
+    if decision.rejected_guard:
+        parts.append(f'guard="{_compact_explicit_fb_values(decision.rejected_guard, limit=1)}"')
+    if decision.guard_reason:
+        parts.append(f'guard_reason="{decision.guard_reason}"')
+    if decision.canonical_value_present:
+        parts.append('canonical_field="present"')
+    elif decision.promotion_expected_missing_canonical:
+        parts.append('canonical_field="blank"')
+    if decision.promotion_expected_missing_canonical:
+        parts.append('promotion_expected="1"')
+        if decision.promotion_source:
+            parts.append(f'promotion_source="{decision.promotion_source}"')
+    _log(logger, " ".join(parts))
 
 
 def _purge_wdm_cache(driver_path: Optional[str]) -> None:
@@ -3528,6 +3818,7 @@ class NightModeFacebookEnricher:
         self._last_search_candidates: List[Dict[str, Any]] = []
         self._last_search_reject_reason: str = ""
         self._last_search_reject_score: Optional[int] = None
+        self._last_explicit_guard_reason: str = ""
         self._pass_a_counts = {
             "attempted": 0,
             "found_email": 0,
@@ -4658,23 +4949,18 @@ class NightModeFacebookEnricher:
         if raw_fb_url.startswith("/"):
             raw_fb_url = "https://www.facebook.com" + raw_fb_url
         gate_debug = os.getenv("FB_DEBUG_CAND_GATE") == "1"
-        if _is_invalid_fb_value(raw_fb_url):
+        self._last_explicit_guard_reason = ""
+        guard_reason, guard_url = _explicit_fb_pre_scrape_guard_reason(raw_fb_url)
+        if guard_reason:
+            self._last_explicit_guard_reason = guard_reason
+            _log(
+                self.logger,
+                f'[Night FB][Explicit Guard] artist="{artist_name or "<unknown>"}" url="{guard_url or raw_fb_url or "<blank>"}" reason="{guard_reason}"',
+            )
             if gate_debug:
-                _log(self.logger, f"[Night FB][Gate] skipping invalid url={raw_fb_url!r} before scrape")
-            return None
-        if not fb_is_allowed_profile_candidate_url(raw_fb_url):
-            if gate_debug:
-                _log(self.logger, f"[Night FB][Gate] rejected url={raw_fb_url!r} before scrape")
+                _log(self.logger, f"[Night FB][Gate] rejected url={raw_fb_url!r} before scrape reason={guard_reason}")
             return None
         candidate_url = _normalise_fb_url(raw_fb_url or "")
-        if not candidate_url:
-            return None
-        if _is_junk_fb_candidate(candidate_url):
-            return None
-        url_lower = candidate_url.lower()
-        if "/r.php" in url_lower or "/login" in url_lower or "/register" in url_lower:
-            _log(self.logger, f"[Night FB] Ignoring login/redirect page: {candidate_url}")
-            return None
         _log(self.logger, f"[FB Email] Visiting {candidate_url}")
 
         used_driver_kind = "session"
@@ -5281,6 +5567,8 @@ class NightModeFacebookEnricher:
         fb_urls = _canonicalize_and_dedupe_explicit_fb_urls(
             fb_urls, logger=self.logger, debug=self._debug_fb_url_flow
         )
+        explicit_intake = classify_explicit_fb_intake(result, accepted_urls=fb_urls)
+        _log_explicit_fb_intake(self.logger, artist_name, explicit_intake)
         is_unearthed = self._is_unearthed_source(result)
 
         if self._debug_fb_url_flow and self._debug_fb_url_flow_seen < self._debug_fb_url_flow_limit:
@@ -5349,6 +5637,7 @@ class NightModeFacebookEnricher:
                     outcome_for_log = "fetch_error"
                     reason_for_log = ""
                     self._pass_a_bump("attempted")
+                    self._last_explicit_guard_reason = ""
                     try:
                         candidate = self._scrape_single_fb_candidate(
                             direct_url, result, artist_name, allow_anon=allow_anon_for_explicit
@@ -5430,7 +5719,11 @@ class NightModeFacebookEnricher:
                                     best_driver = driver_kind
                                     best_page_url = page_url
                     else:
-                        if not reason_for_log:
+                        if self._last_explicit_guard_reason:
+                            driver_kind = "pre_scrape_guard"
+                            outcome_for_log = "guard_reject"
+                            reason_for_log = self._last_explicit_guard_reason
+                        elif not reason_for_log:
                             reason_for_log = "session_exception:unknown" if driver_kind == "session" else f"{driver_kind}_exception:unknown"
                         self._pass_a_bump("fetch_error")
                         if best_outcome is None:

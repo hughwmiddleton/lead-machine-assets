@@ -58,6 +58,7 @@ def test_explicit_fb_url_prefers_authenticated_session(monkeypatch, enricher):
     result = enricher.enrich_row_with_facebook_night(row)
 
     assert observed.get("allow_anon") is False, "Should not fall back to anonymous when session is available"
+    assert any('[Night FB][Explicit Intake]' in msg and 'outcome="attempt"' in msg for msg in logs)
     assert "Using explicit FB URLs with authenticated session" in " ".join(logs)
     assert any('mode="session"' in msg for msg in logs), "PASS A log should report session mode"
     assert result.get("FB_Status", "").startswith("pass_a")
@@ -90,6 +91,7 @@ def test_explicit_fb_url_falls_back_to_legacy_anon(monkeypatch, enricher):
     result = enricher.enrich_row_with_facebook_night(row)
 
     assert observed.get("allow_anon") is True, "Legacy anon probe should remain enabled when session missing"
+    assert any('[Night FB][Explicit Intake]' in msg and 'outcome="attempt"' in msg for msg in logs)
     assert "Falling back to legacy anon probe for explicit FB URLs" in " ".join(logs)
     assert any('mode="legacy_anon_probe"' in msg for msg in logs), "PASS A log should report legacy anon mode"
     assert result.get("FB_Status", "")  # status still set/returned without crashing

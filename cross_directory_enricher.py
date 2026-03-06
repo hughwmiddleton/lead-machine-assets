@@ -70,6 +70,7 @@ from facebook_enrich import (
     _fb_extract_candidates_from_search_dom,
 )
 from night_mode_fb import (
+    classify_explicit_fb_intake,
     _extract_emails_from_html,
     _is_fb_login_or_security_url,
     _looks_like_fb_warning_or_block,
@@ -4490,8 +4491,17 @@ class CrossDirectoryEnricherWorker(QThread):
                                 existing_fb_links.append(normalised)
 
                 if not existing_fb_links:
+                    intake = classify_explicit_fb_intake(seed_df.loc[row_idx].to_dict())
+                    source_summary = ",".join(intake.source_fields[:2]) if intake.source_fields else "<none>"
+                    sample = ""
+                    if intake.accepted_urls:
+                        sample = intake.accepted_urls[0]
+                    elif intake.rejected_invalid:
+                        sample = intake.rejected_invalid[0]
+                    elif intake.rejected_guard:
+                        sample = intake.rejected_guard[0]
                     self.log_message.emit(
-                        f"[FB Enrich] Skipping '{artist}' – no explicit Facebook URL present."
+                        f"[FB Enrich] Skipping '{artist}' – explicit FB intake outcome='{intake.outcome}' source='{source_summary}' sample='{sample}'."
                     )
                     if "FB_Status" not in seed_df.columns:
                         seed_df["FB_Status"] = ""

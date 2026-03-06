@@ -54,6 +54,55 @@ def test_extract_fb_urls_from_generic_links() -> None:
     assert urls == ["https://www.facebook.com/panicboomband", "https://fb.com/panicboom"]
 
 
+def test_classify_explicit_fb_intake_attempt_with_promotion_gap() -> None:
+    row = {
+        "Artist Name": "George Riley",
+        "Facebook_URL": "",
+        "Social Link": "https://www.facebook.com/georgerileymusic | https://instagram.com/georgeriley",
+    }
+
+    decision = night_mode_fb.classify_explicit_fb_intake(row)
+
+    assert decision.outcome == "attempt"
+    assert decision.accepted_urls == ["https://www.facebook.com/georgerileymusic"]
+    assert decision.promotion_expected_missing_canonical is True
+    assert decision.promotion_source == "Social Link"
+    assert "Social Link" in decision.source_fields
+
+
+def test_classify_explicit_fb_intake_rejects_invalid_placeholder() -> None:
+    decision = night_mode_fb.classify_explicit_fb_intake(
+        {"Artist Name": "Bad FB", "Facebook_URL": "https://facebook.com/nan/about"}
+    )
+
+    assert decision.outcome == "reject_invalid"
+    assert decision.accepted_urls == []
+    assert decision.rejected_invalid == ["https://facebook.com/nan/about"]
+    assert decision.invalid_reason == "invalid_placeholder_or_malformed"
+
+
+def test_classify_explicit_fb_intake_rejects_guarded_shape() -> None:
+    decision = night_mode_fb.classify_explicit_fb_intake(
+        {"Artist Name": "Guarded FB", "Facebook_URL": "https://www.facebook.com/share.php?u=test"}
+    )
+
+    assert decision.outcome == "reject_guard"
+    assert decision.accepted_urls == []
+    assert decision.rejected_guard == ["https://www.facebook.com/share.php?u=test"]
+    assert decision.guard_reason == "share_surface"
+
+
+def test_classify_explicit_fb_intake_reports_no_explicit_url() -> None:
+    decision = night_mode_fb.classify_explicit_fb_intake(
+        {"Artist Name": "No FB", "Social Link": "https://www.instagram.com/no-fb"}
+    )
+
+    assert decision.outcome == "no_explicit_url"
+    assert decision.accepted_urls == []
+    assert decision.rejected_invalid == []
+    assert decision.rejected_guard == []
+
+
 def test_pass_a_uses_fb_url_from_social_link(monkeypatch) -> None:
     enricher = night_mode_fb.NightModeFacebookEnricher(
         legacy_module=None,
@@ -131,6 +180,8 @@ def test_explicit_fb_url_placeholders_rejected(monkeypatch) -> None:
         logger=None,
         use_shared_session=False,
     )
+    logs = []
+    enricher.logger = lambda msg: logs.append(msg)
     monkeypatch.setattr(enricher, "_ensure_session", lambda: None)
     monkeypatch.setattr(enricher, "_has_authenticated_session", lambda: False)
     monkeypatch.setattr(enricher, "_should_allow_anonymous", lambda row: True)
@@ -151,6 +202,8 @@ def test_explicit_fb_url_placeholders_rejected(monkeypatch) -> None:
     for row in rows:
         result = enricher.enrich_row_with_facebook_night(row)
         assert result.get("FB_Status") == "pass_a_skipped_no_fb_url"
+
+    assert any('[Night FB][Explicit Intake]' in msg and 'outcome="reject_invalid"' in msg for msg in logs)
 
     # Valid URL still passes through.
     row_valid = {
@@ -237,3 +290,32 @@ def test_profile_php_explicit_urls_deduped(monkeypatch) -> None:
     assert len(calls) == 1, "Profile profile.php variants should be visited once"
     assert night_mode_fb._normalise_fb_url(calls[0]) == "https://www.facebook.com/profile.php?id=123"
     assert result.get("FB_Status"), "PASS A should still produce a status even without emails"
+
+
+def test_guard_rejected_explicit_url_logs_reason(monkeypatch) -> None:
+    logs = []
+    enricher = night_mode_fb.NightModeFacebookEnricher(
+        legacy_module=None,
+        username="",
+        password="",
+        logger=lambda msg: logs.append(msg),
+        use_shared_session=False,
+    )
+    monkeypatch.setattr(enricher, "_ensure_session", lambda: None)
+    monkeypatch.setattr(enricher, "_has_authenticated_session", lambda: False)
+    monkeypatch.setattr(enricher, "_should_allow_anonymous", lambda row: True)
+    monkeypatch.setattr(enricher, "_get_anon_driver", lambda: object())
+    monkeypatch.setattr(enricher, "_search_for_page", lambda *args, **kwargs: "")
+
+    row = {
+        "Artist Name": "Guarded",
+        "Email": "",
+        "Email_All": "",
+        "Facebook_URL": "https://www.facebook.com/guarded/about",
+    }
+
+    result = enricher.enrich_row_with_facebook_night(row)
+
+    assert result.get("FB_Status")
+    assert any('[Night FB][Explicit Intake]' in msg and 'outcome="attempt"' in msg and 'guard_reason="shape_disallowed"' in msg for msg in logs)
+    assert any('[Night FB][Explicit Guard]' in msg and 'reason="shape_disallowed"' in msg for msg in logs)
