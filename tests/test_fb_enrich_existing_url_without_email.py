@@ -61,6 +61,10 @@ def test_fb_enrich_runs_when_fb_url_present_or_promotable(monkeypatch, row_overr
         calls.append(url)
         return (["fb@example.com"], "https://www.facebook.com/socialfb/about", "")
 
+    def fail_discover(*args, **kwargs):
+        raise AssertionError("discovery should not run when a canonical/promotable facebook_url already exists")
+
+    monkeypatch.setattr(cde, "_discover_facebook_url_bounded", fail_discover)
     monkeypatch.setattr(cde, "_extract_fb_emails_bounded", fake_extract)
 
     matched = worker._enrich_row_facebook(seed_df, 0, object(), ctx)
@@ -181,25 +185,106 @@ def test_fb_enrich_skips_when_fb_url_missing(monkeypatch):
             "Email_All": "",
             "Social Link": "",
             "External Links": "",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
         }
     )
     ctx = worker._build_row_context(seed_df, 0, 1, 1)
 
-    called = False
+    driver = object()
+    discover_calls = []
+    extract_calls = []
 
-    def fake_extract(*args, **kwargs):
-        nonlocal called
-        called = True
-        return ([], "", "")
+    def fake_discover(fb_driver, artist_name, location, logger):
+        discover_calls.append((fb_driver, artist_name, location))
+        return "https://www.facebook.com/discoveredband"
 
+    def fake_extract(driver_obj, url, log_fn=None):
+        extract_calls.append((driver_obj, url))
+        return (["fb@example.com"], "https://www.facebook.com/discoveredband/about", "")
+
+    monkeypatch.setattr(cde, "_discover_facebook_url_bounded", fake_discover)
     monkeypatch.setattr(cde, "_extract_fb_emails_bounded", fake_extract)
+
+    matched = worker._enrich_row_facebook(seed_df, 0, driver, ctx)
+
+    assert matched is True
+    assert discover_calls == [(driver, "No FB URL", "")]
+    assert extract_calls == [(driver, "https://www.facebook.com/discoveredband")]
+    assert seed_df.at[0, "facebook_url"] == "https://www.facebook.com/discoveredband"
+    assert seed_df.at[0, "Facebook_URL"] == "https://www.facebook.com/discoveredband"
+    assert seed_df.at[0, "Facebook URL"] == "https://www.facebook.com/discoveredband"
+    assert any("attempting bounded discovery" in msg.lower() for msg in logs)
+    assert any("candidate accepted" in msg.lower() for msg in logs)
+    assert any("canonical facebook_url populated via discovery" in msg.lower() for msg in logs)
+
+
+def test_fb_enrich_discovery_miss_preserves_no_fb_url_status(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "No Match",
+            "Email": "",
+            "Email_All": "",
+            "Social Link": "",
+            "External Links": "",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+
+    discover_calls = []
+
+    def fake_discover(fb_driver, artist_name, location, logger):
+        discover_calls.append((artist_name, location))
+        return ""
+
+    def fail_extract(*args, **kwargs):
+        raise AssertionError("_extract_fb_emails_bounded should not run after a discovery miss")
+
+    monkeypatch.setattr(cde, "_discover_facebook_url_bounded", fake_discover)
+    monkeypatch.setattr(cde, "_extract_fb_emails_bounded", fail_extract)
 
     matched = worker._enrich_row_facebook(seed_df, 0, object(), ctx)
 
     assert matched is False
-    assert called is False
+    assert discover_calls == [("No Match", "")]
     assert seed_df.at[0, "FB_Status"] == "no_fb_url"
-    assert any("no explicit facebook url" in msg.lower() for msg in logs)
+    assert any("attempting bounded discovery" in msg.lower() for msg in logs)
+    assert any("no safe candidate found" in msg.lower() for msg in logs)
+
+
+def test_fb_enrich_rejects_invalid_discovered_candidate(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Invalid Candidate",
+            "Email": "",
+            "Email_All": "",
+            "Social Link": "",
+            "External Links": "",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+
+    def fake_find_best_page(artist_name, location, fb_client, logger):
+        return "https://www.facebook.com/share.php?u=bad"
+
+    def fail_extract(*args, **kwargs):
+        raise AssertionError("_extract_fb_emails_bounded should not run for an invalid discovered candidate")
+
+    monkeypatch.setattr(cde, "facebook_find_best_page", fake_find_best_page)
+    monkeypatch.setattr(cde, "_extract_fb_emails_bounded", fail_extract)
+
+    matched = worker._enrich_row_facebook(seed_df, 0, object(), ctx)
+
+    assert matched is False
+    assert seed_df.at[0, "FB_Status"] == "no_fb_url"
+    assert seed_df.at[0, "facebook_url"] == ""
+    assert seed_df.at[0, "Facebook_URL"] == ""
+    assert any("no safe candidate found" in msg.lower() for msg in logs)
 
 
 def test_cross_directory_promotion_backfills_canonical_from_lower_alias():

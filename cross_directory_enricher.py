@@ -2544,6 +2544,30 @@ def facebook_find_best_page(
         return None
 
 
+def _discover_facebook_url_bounded(fb_driver, artist_name: str, location: str, logger) -> str:
+    """Attempt one bounded daytime Facebook discovery using the existing driver."""
+    if not fb_driver:
+        return ""
+    artist_name = cell_to_str(artist_name)
+    location = cell_to_str(location)
+    if not artist_name:
+        return ""
+    try:
+        fb_client = FacebookSearchClient(driver=fb_driver, logger=logger)
+    except Exception:
+        return ""
+    fb_url = facebook_find_best_page(artist_name, location, fb_client, logger)
+    canonical_fb_url = canonicalize_facebook_url(fb_url)
+    if not canonical_fb_url:
+        return ""
+    canonical_fb_url = _canonicalize_fb_url(canonical_fb_url)
+    if not canonical_fb_url:
+        return ""
+    if not fb_is_allowed_profile_candidate_url(canonical_fb_url):
+        return ""
+    return canonical_fb_url
+
+
 def enrich_row_with_facebook(row: dict, logger, fb_client) -> None:
     artist_name = cell_to_str(row.get("Artist Name") or row.get("artist"))
     if not artist_name:
@@ -4638,13 +4662,31 @@ class CrossDirectoryEnricherWorker(QThread):
                         sample = intake.rejected_invalid[0]
                     elif intake.rejected_guard:
                         sample = intake.rejected_guard[0]
+                    location = cell_to_str(seed_df.at[row_idx, "Location"]) if "Location" in seed_df.columns else ""
                     self.log_message.emit(
-                        f"[FB Enrich] Skipping '{artist}' – no explicit facebook url; explicit FB intake outcome='{intake.outcome}' source='{source_summary}' sample='{sample}'."
+                        f"[FB Discover] No explicit facebook url for '{artist}'; attempting bounded discovery "
+                        f"(explicit FB intake outcome='{intake.outcome}' source='{source_summary}' sample='{sample}')."
                     )
-                    if "FB_Status" not in seed_df.columns:
-                        seed_df["FB_Status"] = ""
-                    seed_df.at[row_idx, "FB_Status"] = seed_df.at[row_idx, "FB_Status"] or "no_fb_url"
-                else:
+                    discovered_fb_url = _discover_facebook_url_bounded(
+                        fb_driver, artist, location, self.log_message.emit
+                    )
+                    if discovered_fb_url:
+                        self.log_message.emit(
+                            f"[FB Discover] Candidate accepted for '{artist}': {discovered_fb_url}"
+                        )
+                        for col in ("facebook_url", "Facebook_URL", "Facebook URL"):
+                            if col in seed_df.columns and not cell_to_str(seed_df.at[row_idx, col]):
+                                seed_df.at[row_idx, col] = discovered_fb_url
+                        self.log_message.emit(
+                            f"[FB Discover] Canonical facebook_url populated via discovery for '{artist}'"
+                        )
+                        existing_fb_links = [discovered_fb_url]
+                    else:
+                        self.log_message.emit(f"[FB Discover] No safe candidate found for '{artist}'")
+                        if "FB_Status" not in seed_df.columns:
+                            seed_df["FB_Status"] = ""
+                        seed_df.at[row_idx, "FB_Status"] = seed_df.at[row_idx, "FB_Status"] or "no_fb_url"
+                if existing_fb_links:
                     fb_emails: List[str] = []
                     page_url_used = ""
                     fb_status_reason = ""

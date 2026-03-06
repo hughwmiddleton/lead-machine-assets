@@ -282,7 +282,9 @@ def _row_source_opportunity(row: Any, source_name: str) -> bool:
             except Exception:
                 fb_url = fb_url
         email = _get_value(["Email", "Email_All", "email"])
-        return bool(_has_text(fb_url) and not _has_text(email))
+        if _has_text(email):
+            return False
+        return bool(_has_text(fb_url) or artist_present)
 
     # Unknown sources fall back to existing behaviour.
     return True

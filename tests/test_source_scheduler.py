@@ -243,7 +243,7 @@ def test_opportunity_allows_lastfm_when_missing_url():
     assert summary["LF"]["skipped_opportunity"] == 0
 
 
-def test_opportunity_skips_facebook_when_url_missing():
+def test_opportunity_runs_facebook_when_url_missing_but_artist_present():
     rows = [0]
     row_data = {0: {"Artist Name": "Artist X", "facebook_url": ""}}
     fb_calls = []
@@ -257,9 +257,9 @@ def test_opportunity_skips_facebook_when_url_missing():
     )
     summary = SourceDiversityScheduler([fb_spec], row_label=str).run()
 
-    assert not fb_calls
-    assert summary["FB"]["attempted"] == 0
-    assert summary["FB"]["skipped_opportunity"] == 1
+    assert fb_calls == [0]
+    assert summary["FB"]["attempted"] == 1
+    assert summary["FB"]["skipped_opportunity"] == 0
 
 
 def test_fb_opportunity_true_when_social_link_contains_facebook():
@@ -302,10 +302,29 @@ def test_fb_opportunity_after_promotion_from_social_link():
     assert summary["FB"]["skipped_opportunity"] == 0
 
 
-def test_fb_opportunity_false_when_social_link_non_facebook():
+def test_fb_opportunity_true_with_artist_name_even_without_explicit_facebook_url():
     rows = [0]
     row_data = {0: {"Artist Name": "Artist X", "Social Link": "https://www.instagram.com/xxx"}}
     fb_calls = []
+
+    fb_spec = SourceSpec(
+        name="FB",
+        rows=rows,
+        run_row=lambda idx: (fb_calls.append(idx) or SourceResult(attempted=True)),
+        is_available=lambda: (True, None),
+        row_getter=lambda idx: row_data[idx],
+    )
+    summary = SourceDiversityScheduler([fb_spec], row_label=str).run()
+
+    assert fb_calls == [0]
+    assert summary["FB"]["attempted"] == 1
+    assert summary["FB"]["skipped_opportunity"] == 0
+
+
+def test_fb_opportunity_false_when_email_present():
+    rows = [0]
+    row_data = {0: {"Artist Name": "Artist X", "facebook_url": "https://facebook.com/artist", "Email": "x@test.com"}}
+    fb_calls: list[int] = []
 
     fb_spec = SourceSpec(
         name="FB",
@@ -321,9 +340,9 @@ def test_fb_opportunity_false_when_social_link_non_facebook():
     assert summary["FB"]["skipped_opportunity"] == 1
 
 
-def test_fb_opportunity_false_when_email_present():
+def test_fb_opportunity_false_without_artist_or_explicit_facebook_url():
     rows = [0]
-    row_data = {0: {"Artist Name": "Artist X", "facebook_url": "https://facebook.com/artist", "Email": "x@test.com"}}
+    row_data = {0: {"Artist Name": "", "Social Link": "https://www.instagram.com/xxx", "Email": ""}}
     fb_calls: list[int] = []
 
     fb_spec = SourceSpec(
