@@ -1590,8 +1590,34 @@ def _is_session_death_exc(exc: BaseException) -> bool:
         msg = (str(exc) or "").lower()
     except Exception:
         return False
-    death_tokens = ("no such window", "web view not found", "invalid session id")
+    death_tokens = (
+        "no such window",
+        "web view not found",
+        "invalid session id",
+        "session deleted because of page crash",
+        "chrome not reachable",
+        "target frame detached",
+    )
     return any(tok in msg for tok in death_tokens)
+
+
+def _dead_fb_driver_reason(exc: BaseException) -> str:
+    try:
+        msg = (str(exc) or "").lower()
+    except Exception:
+        return "unknown"
+    token_map = (
+        ("no such window", "no such window"),
+        ("web view not found", "web view not found"),
+        ("invalid session id", "invalid session id"),
+        ("session deleted because of page crash", "page crash"),
+        ("chrome not reachable", "chrome not reachable"),
+        ("target frame detached", "target frame detached"),
+    )
+    for token, label in token_map:
+        if token in msg:
+            return label
+    return "unknown"
 
 
 def _looks_like_fb_warning_or_block(html: Optional[str], url: str = "") -> Optional[str]:
@@ -2186,17 +2212,7 @@ class NightPersistentFacebookSession:
             return driver
         except Exception as exc:
             if _is_session_death_exc(exc):
-                _log(log_target, f"[Night FB] Driver session died during navigate; refreshing and retrying url={url!r} error={exc}")
-                try:
-                    driver = self.refresh_session()
-                    html, current_url, timed_out = _load_fb_page_with_timeout(driver, url, timeout_s=20.0, logger=log_target)
-                    self.last_nav_timed_out = timed_out
-                    self.last_nav_page_source = html
-                    self.last_nav_current_url = current_url
-                    return driver
-                except Exception as exc2:
-                    _log(log_target, f"[Night FB] Driver retry after refresh failed url={url!r}; err={exc2}")
-                    raise FacebookDriverError(f"driver_session_died url={url!r}: {exc2}")
+                _log(log_target, f"[Night FB] Driver session died during navigate url={url!r}; propagating for bounded restart. error={exc}")
             raise
 
     def refresh_session(self):
@@ -3539,6 +3555,9 @@ class NightModeFacebookEnricher:
         self._last_fb_timeout: bool = False
         self._last_fb_timeout_url: str = ""
         self.protective_shutdown: bool = False
+        # Driver restart guard
+        self._driver_restart_limit: int = int(os.getenv("NIGHT_FB_MAX_DRIVER_RESTARTS") or 2)
+        self._driver_restart_count: int = 0
         # Debug-only FB URL flow tracing; defaults to off.
         self._debug_fb_url_flow: bool = _bool_env("DEBUG_FB_URL_FLOW", default=False)
         self._debug_fb_url_flow_limit: int = int(os.getenv("DEBUG_FB_URL_FLOW_N") or 25)
@@ -4084,6 +4103,34 @@ class NightModeFacebookEnricher:
         else:
             raise FacebookDriverError("No refresh_session available to recreate driver.")
 
+    def _restart_dead_driver(self, session, reason: str) -> None:
+        """
+        Bounded restart for dead driver scenarios; marks session failed when limit is exceeded.
+        Always raises FacebookDriverError so the triggering row fails safely.
+        """
+        if self._driver_restart_count >= self._driver_restart_limit:
+            _log(self.logger, "[Night FB] Restart limit reached. Skipping remaining FB rows.")
+            self._session_failed = True
+            self._session_failed_reason = "driver_restart_limit"
+            self._skip_fb_due_to_session_failure = True
+            self._skip_fb_due_to_session_failure_reason = "driver_restart_limit"
+            raise FacebookDriverError("driver_restart_limit")
+
+        self._driver_restart_count += 1
+        _log(self.logger, f"[Night FB] Detected dead FB driver ({reason}). Restarting session.")
+        try:
+            self._refresh_driver(session)
+            _log(self.logger, "[Night FB] Facebook driver restarted successfully.")
+        except Exception as exc:
+            self._session_failed = True
+            self._session_failed_reason = str(exc)
+            self._skip_fb_due_to_session_failure = True
+            self._skip_fb_due_to_session_failure_reason = str(exc)
+            raise FacebookDriverError(f"driver_restart_failed:{exc}") from exc
+
+        # Fail the current row; subsequent rows will use the new driver.
+        raise FacebookDriverError(f"driver_restarted:{reason}")
+
     def _ensure_driver_alive(self, session):
         if session is None:
             raise FacebookDriverError("Facebook session not initialized.")
@@ -4104,6 +4151,10 @@ class NightModeFacebookEnricher:
             _ = driver.current_url
             if not _is_driver_authenticated(driver):
                 raise FacebookDriverError("Facebook session unauthenticated (missing c_user cookie).")
+        except WebDriverException as exc:
+            if _is_session_death_exc(exc):
+                self._restart_dead_driver(session, _dead_fb_driver_reason(exc))
+            self._refresh_driver(session)
         except Exception:
             self._refresh_driver(session)
         return session
@@ -4143,6 +4194,10 @@ class NightModeFacebookEnricher:
 
         try:
             html, current_url = _navigate_once()
+        except WebDriverException as exc:
+            if _is_session_death_exc(exc):
+                self._restart_dead_driver(session, _dead_fb_driver_reason(exc))
+            raise
         except Exception as exc:  # pragma: no cover - defensive
             _log(self.logger, f"[Night FB] Fetch failed (will refresh session) for {url}: {exc}")
             try:
@@ -4407,6 +4462,10 @@ class NightModeFacebookEnricher:
             nav_fn = _nav_with_session if session else _nav_anon
             try:
                 return nav_fn()
+            except WebDriverException as exc:
+                if session and _is_session_death_exc(exc):
+                    self._restart_dead_driver(session, _dead_fb_driver_reason(exc))
+                raise
             except Exception as exc:  # pragma: no cover - defensive
                 _log(self.logger, f"[Night FB] Search navigation failed (will refresh session): {exc}")
                 if session:
@@ -4419,6 +4478,10 @@ class NightModeFacebookEnricher:
                 return nav_fn()
             except FacebookDriverError as exc2:
                 raise exc2
+            except WebDriverException as exc2:
+                if session and _is_session_death_exc(exc2):
+                    self._restart_dead_driver(session, _dead_fb_driver_reason(exc2))
+                raise
             except Exception as exc2:  # pragma: no cover - defensive
                 _log(self.logger, f"[Night FB] Search navigation failed after refresh: {exc2}")
                 raise FacebookDriverError(str(exc2))
@@ -5322,6 +5385,8 @@ class NightModeFacebookEnricher:
                         candidate = self._scrape_single_fb_candidate(
                             direct_url, result, artist_name, allow_anon=allow_anon_for_explicit
                         )
+                    except FacebookDriverError:
+                        raise
                     except Exception as exc:
                         candidate = None
                         driver_kind = "unknown"
