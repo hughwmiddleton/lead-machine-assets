@@ -3819,7 +3819,15 @@ class NightModeFacebookEnricher:
         if key in self._pass_a_counts:
             self._pass_a_counts[key] += 1
 
-    def _pass_a_log_row(self, artist: str, url: str, driver_kind: str, outcome: str, reason: str) -> None:
+    def _pass_a_log_row(
+        self,
+        artist: str,
+        url: str,
+        driver_kind: str,
+        outcome: str,
+        reason: str,
+        mode: str = "legacy_anon_probe",
+    ) -> None:
         safe_artist = artist or "<unknown>"
         safe_url = url or "<none>"
         safe_driver = driver_kind or "unknown"
@@ -3827,7 +3835,7 @@ class NightModeFacebookEnricher:
         safe_reason = reason or ""
         _log(
             self.logger,
-            f'[Night FB][PASS A] artist="{safe_artist}" url="{safe_url}" mode="legacy_anon_probe" driver="{safe_driver}" outcome="{safe_outcome}" reason="{safe_reason}"',
+            f'[Night FB][PASS A] artist="{safe_artist}" url="{safe_url}" mode="{mode}" driver="{safe_driver}" outcome="{safe_outcome}" reason="{safe_reason}"',
         )
 
     def _has_authenticated_session(self) -> bool:
@@ -5083,6 +5091,7 @@ class NightModeFacebookEnricher:
                 _log(self.logger, "[Night FB][PASS A] skipped (no explicit FB URL); proceeding to v2 search")
             else:
                 authed_session_available = self._has_authenticated_session()
+                pass_a_mode = "session" if authed_session_available else "legacy_anon_probe"
                 if authed_session_available:
                     _log(self.logger, f"[Night FB] Using explicit FB URLs with authenticated session: {fb_urls}")
                 else:
@@ -5153,7 +5162,7 @@ class NightModeFacebookEnricher:
                                 result["FB_Status"] = "pass_a_found_email"
                                 result["FB_Reason"] = "explicit_url"
                                 self._pass_a_bump("found_email")
-                                self._pass_a_log_row(artist_name, page_url, driver_kind, "found_email", reason_for_log)
+                                self._pass_a_log_row(artist_name, page_url, driver_kind, "found_email", reason_for_log, mode=pass_a_mode)
                                 return result
                             else:
                                 page_url = night_result.facebook_url or _normalise_fb_url(direct_url)
@@ -5172,7 +5181,7 @@ class NightModeFacebookEnricher:
                             best_reason = reason_for_log
                             best_driver = driver_kind
                             best_page_url = _normalise_fb_url(direct_url)
-                    self._pass_a_log_row(artist_name, direct_url, driver_kind, outcome_for_log, reason_for_log)
+                    self._pass_a_log_row(artist_name, direct_url, driver_kind, outcome_for_log, reason_for_log, mode=pass_a_mode)
 
                 if best_outcome:
                     if best_outcome == "login_wall":
@@ -5217,7 +5226,14 @@ class NightModeFacebookEnricher:
                             result["FB_Status"] = "pass_a_found_email"
                             result["FB_Reason"] = "explicit_url"
                             self._pass_a_bump("found_email")
-                            self._pass_a_log_row(artist_name, page_url, "anon" if allow_anon else "session", "found_email", "explicit_url")
+                            self._pass_a_log_row(
+                                artist_name,
+                                page_url,
+                                "anon" if allow_anon else "session",
+                                "found_email",
+                                "explicit_url",
+                                mode=pass_a_mode,
+                            )
                             return result
                     if reason_code:
                         result["FB_Status"] = "pass_a_login_wall" if reason_code.startswith("redirect") else "pass_a_no_email_on_page"
