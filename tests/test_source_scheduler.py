@@ -104,6 +104,41 @@ def test_scheduler_mode_skips_legacy_phases(monkeypatch):
     assert calls["fb"] == 0
 
 
+def test_email_summary_resets_per_cross_directory_run(tmp_path, monkeypatch):
+    import cross_directory_enricher as cde
+    import pipeline_runner
+
+    seed_csv = tmp_path / "missing.csv"
+    output_one = tmp_path / "out_one.csv"
+    output_two = tmp_path / "out_two.csv"
+
+    def _make_worker(output_path):
+        worker = cde.CrossDirectoryEnricherWorker(seed_csv.as_posix(), output_path.as_posix(), enable_live_search=False)
+        worker.log_message = type("obj", (), {"emit": lambda *args, **kwargs: None})
+        worker.progress = type("obj", (), {"emit": lambda *args, **kwargs: None})
+        worker.finished = type("obj", (), {"emit": lambda *args, **kwargs: None})
+        return worker
+
+    pipeline_runner.increment_pattern_emails(7)
+    pipeline_runner.record_email_summary_row_change(
+        {"Email": "", "Email_All": ""},
+        {"Email": "stale@example.com", "Email_All": "stale@example.com"},
+    )
+
+    worker_one = _make_worker(output_one)
+    worker_one._run_impl()
+    assert pipeline_runner.get_email_summary_counts() == {"emails_found": 0, "pattern_emails": 0}
+
+    pipeline_runner.increment_pattern_emails(4)
+    pipeline_runner.record_email_summary_row_change(
+        {"Email": "", "Email_All": ""},
+        {"Email": "carry@example.com", "Email_All": "carry@example.com"},
+    )
+    worker_two = _make_worker(output_two)
+    worker_two._run_impl()
+    assert pipeline_runner.get_email_summary_counts() == {"emails_found": 0, "pattern_emails": 0}
+
+
 def test_adaptive_priority_prefers_successful_sources(monkeypatch):
     # Deterministic jitter for reproducibility.
     monkeypatch.setattr("source_scheduler.random.uniform", lambda a, b: 0)

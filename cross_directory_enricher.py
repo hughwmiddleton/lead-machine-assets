@@ -4005,6 +4005,12 @@ class CrossDirectoryEnricherWorker(QThread):
 
     def _run_impl(self) -> None:
         fb_driver = None
+        try:
+            from pipeline_runner import reset_email_summary_counts
+
+            reset_email_summary_counts()
+        except Exception:
+            pass
         # Reset SoundCloud live-enrich fail-fast flag for each run.
         self._sc_live_enrich_disabled = False
         self._sc_live_enrich_disabled_reason = ""
