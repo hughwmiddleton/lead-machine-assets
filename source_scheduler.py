@@ -44,6 +44,17 @@ _FB_REJECT_PATH_PREFIXES = (
 )
 
 
+def canonicalize_facebook_url(raw: Any) -> str:
+    """Return a canonical Facebook page/profile URL or an empty string."""
+    if raw is None:
+        return ""
+    try:
+        text = str(raw or "").strip()
+    except Exception:
+        return ""
+    return _normalize_fb_url(text)
+
+
 def _normalize_fb_url(raw: str) -> str:
     """Normalize a Facebook URL to https://www.facebook.com/<path>.
 
@@ -84,6 +95,11 @@ def _normalize_fb_url(raw: str) -> str:
 
     # Strip query/fragment tracking noise (except allowed profile id query).
     clean_path = path.rstrip("/")
+    path_stripped = clean_path.strip("/")
+    if path_stripped:
+        first_segment = path_stripped.split("/", 1)[0].lower()
+        if first_segment in {"nan", "none", "null"}:
+            return ""
     return urllib.parse.urlunparse(("https", "www.facebook.com", clean_path, "", clean_query, ""))
 
 
@@ -101,18 +117,10 @@ def extract_facebook_url_from_text(text: str) -> Optional[str]:
     return None
 
 
-def promote_facebook_url(row: MutableMapping[str, Any], *, set_row: bool = True) -> Optional[str]:
-    """
-    Promote any Facebook link found in generic link fields into canonical facebook_url.
-
-    - Only sets facebook_url/Facebook_URL when currently missing/empty.
-    - Does not overwrite an existing value.
-    - Searches Social Link, External Links, Website/Websites fields.
-    - set_row=False avoids mutating pandas Series slices (prevents SettingWithCopyWarning);
-      callers can write via df.loc instead.
-    """
+def _canonical_fb_candidate_from_row(row: MutableMapping[str, Any]) -> Tuple[str, str]:
+    """Return the best canonical Facebook URL candidate plus its source field."""
     if row is None:
-        return None
+        return ("", "")
 
     def _get(keys: Sequence[str]) -> str:
         for key in keys:
@@ -133,38 +141,88 @@ def promote_facebook_url(row: MutableMapping[str, Any], *, set_row: bool = True)
                     return text_val
         return ""
 
-    existing = _get(["facebook_url", "Facebook_URL", "Facebook URL"])
-    if existing:
-        return None
+    direct_fields = ("Facebook_URL", "facebook_url", "Facebook URL", "FB_URL", "facebook", "Facebook")
+    for field in direct_fields:
+        normalised = canonicalize_facebook_url(_get((field,)))
+        if normalised:
+            return (normalised, field)
 
     candidate_fields = ("Social Link", "External Links", "Website", "Websites", "Website URL")
     for field in candidate_fields:
-        raw = _get((field,))
-        url = extract_facebook_url_from_text(raw)
+        url = extract_facebook_url_from_text(_get((field,)))
         if url:
-            if not set_row:
-                return url
-            try:
-                import pandas as _pd  # type: ignore
+            return (url, field)
 
-                if isinstance(row, _pd.Series):
-                    # Avoid SettingWithCopy; caller should assign via df.loc/df.at.
-                    return url
-            except Exception:
-                pass
-            try:
-                if hasattr(row, "__setitem__"):
-                    if not _get(["facebook_url"]):
-                        row["facebook_url"] = url  # type: ignore[index]
-                    if "Facebook_URL" in row and not _get(["Facebook_URL"]):  # type: ignore[operator]
-                        row["Facebook_URL"] = url  # type: ignore[index]
-                    elif "Facebook URL" in row and not _get(["Facebook URL"]):  # type: ignore[operator]
-                        row["Facebook URL"] = url  # type: ignore[index]
-            except Exception:
-                # Silent failure — return the url so callers can set it.
-                pass
-            return url
-    return None
+    return ("", "")
+
+
+def ensure_canonical_facebook_url(
+    row: MutableMapping[str, Any], *, set_row: bool = True
+) -> Tuple[str, str]:
+    """
+    Resolve the best Facebook URL candidate from supported aliases and optionally
+    mirror it into the canonical persisted sink ``Facebook_URL``.
+    """
+    if row is None:
+        return ("", "")
+
+    url, source = _canonical_fb_candidate_from_row(row)
+    if not url:
+        return ("", "")
+    if not set_row:
+        return (url, source)
+
+    try:
+        import pandas as _pd  # type: ignore
+
+        if isinstance(row, _pd.Series):
+            # Avoid SettingWithCopy; caller should assign via df.loc/df.at.
+            return (url, source)
+    except Exception:
+        pass
+
+    def _get_one(key: str) -> str:
+        try:
+            val = row.get(key) if isinstance(row, dict) or hasattr(row, "get") else getattr(row, key, None)  # type: ignore[attr-defined]
+        except Exception:
+            val = None
+        try:
+            import pandas as _pd  # type: ignore
+
+            if _pd.isna(val):
+                return ""
+        except Exception:
+            pass
+        return str(val or "").strip() if val is not None else ""
+
+    try:
+        if hasattr(row, "__setitem__"):
+            current_canonical = canonicalize_facebook_url(_get_one("Facebook_URL"))
+            if current_canonical:
+                url = current_canonical
+            if _get_one("Facebook_URL") != url:
+                row["Facebook_URL"] = url  # type: ignore[index]
+            if not canonicalize_facebook_url(_get_one("facebook_url")):
+                row["facebook_url"] = url  # type: ignore[index]
+            if "Facebook URL" in row and not canonicalize_facebook_url(_get_one("Facebook URL")):  # type: ignore[operator]
+                row["Facebook URL"] = url  # type: ignore[index]
+    except Exception:
+        pass
+    return (url, source)
+
+
+def promote_facebook_url(row: MutableMapping[str, Any], *, set_row: bool = True) -> Optional[str]:
+    """
+    Promote any Facebook link found in accepted aliases into canonical Facebook fields.
+
+    - Reads canonical and legacy aliases first, then generic link fields.
+    - Mirrors a valid value into ``Facebook_URL`` when recoverable.
+    - Does not replace an existing canonical value with a different alias value.
+    - set_row=False avoids mutating pandas Series slices (prevents SettingWithCopyWarning);
+      callers can write via df.loc instead.
+    """
+    url, _ = ensure_canonical_facebook_url(row, set_row=set_row)
+    return url or None
 
 
 def _row_source_opportunity(row: Any, source_name: str) -> bool:

@@ -28,6 +28,8 @@ from source_scheduler import (
     SourceDiversityScheduler,
     SourceResult,
     SourceSpec,
+    canonicalize_facebook_url,
+    ensure_canonical_facebook_url,
     promote_facebook_url,
 )
 from html_fetcher import fetch_html, _detect_soft_block
@@ -3799,24 +3801,38 @@ def _apply_fb_promotion_df(df: pd.DataFrame, log_fn: Optional[Callable[[str], No
     if "Facebook URL" not in df.columns:
         df["Facebook URL"] = ""
     populated = 0
+    canonical_from_alias = 0
+    canonical_from_links = 0
     for idx in df.index:
-        new_url = promote_facebook_url(df.loc[idx], set_row=False)
+        new_url, source = ensure_canonical_facebook_url(df.loc[idx], set_row=False)
         if not new_url:
             continue
         wrote = False
-        if not _coerce_directory_value(df.loc[idx, "facebook_url"]):
-            df.loc[idx, "facebook_url"] = new_url
-            wrote = True
-        if "Facebook_URL" in df.columns and not _coerce_directory_value(df.loc[idx, "Facebook_URL"]):
+        current_canonical_raw = _coerce_directory_value(df.loc[idx, "Facebook_URL"])
+        current_canonical = canonicalize_facebook_url(current_canonical_raw)
+        if current_canonical and current_canonical_raw != current_canonical:
+            df.loc[idx, "Facebook_URL"] = current_canonical
+        elif not current_canonical:
             df.loc[idx, "Facebook_URL"] = new_url
             wrote = True
-        elif "Facebook URL" in df.columns and not _coerce_directory_value(df.loc[idx, "Facebook URL"]):
+            if source in {"Social Link", "External Links", "Website", "Websites", "Website URL"}:
+                canonical_from_links += 1
+            elif source and source != "Facebook_URL":
+                canonical_from_alias += 1
+        if not canonicalize_facebook_url(df.loc[idx, "facebook_url"]):
+            df.loc[idx, "facebook_url"] = new_url
+            wrote = True
+        if "Facebook URL" in df.columns and not canonicalize_facebook_url(df.loc[idx, "Facebook URL"]):
             df.loc[idx, "Facebook URL"] = new_url
             wrote = True
         if wrote:
             populated += 1
     if log_fn and populated:
         _safe_log(log_fn, "[FB Promotion] facebook_url populated for %s rows", populated)
+    if log_fn and canonical_from_alias:
+        _safe_log(log_fn, "[FB Promotion] canonical Facebook_URL backfilled from alias fields for %s rows", canonical_from_alias)
+    if log_fn and canonical_from_links:
+        _safe_log(log_fn, "[FB Promotion] canonical Facebook_URL backfilled from Social Link / External Links for %s rows", canonical_from_links)
     return df
 
 

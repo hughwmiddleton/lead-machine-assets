@@ -167,3 +167,22 @@ def test_fb_enrich_skips_when_fb_url_missing(monkeypatch):
     assert called is False
     assert seed_df.at[0, "FB_Status"] == "no_fb_url"
     assert any("no explicit facebook url" in msg.lower() for msg in logs)
+
+
+def test_cross_directory_promotion_backfills_canonical_from_lower_alias():
+    df = pd.DataFrame(
+        [
+            {
+                "Artist Name": "Lower Alias",
+                "facebook_url": "https://www.facebook.com/existinglower",
+                "Facebook_URL": "",
+                "Social Link": "",
+                "External Links": "",
+            }
+        ],
+        dtype=str,
+    ).fillna("")
+
+    promoted = cde._apply_fb_promotion_df(df.copy())
+
+    assert promoted.at[0, "Facebook_URL"] == "https://www.facebook.com/existinglower"

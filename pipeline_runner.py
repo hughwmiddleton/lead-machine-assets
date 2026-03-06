@@ -25,7 +25,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tupl
 import pandas as pd
 from email_provenance import _set_email_with_provenance
 from html_fetcher import close_job_browser
-from source_scheduler import promote_facebook_url
+from source_scheduler import canonicalize_facebook_url, ensure_canonical_facebook_url, promote_facebook_url
 
 try:  # Shared FB helper; safe fallback if unavailable.
     from facebook_enrich import is_fb_login_redirect  # type: ignore
@@ -1110,24 +1110,38 @@ def _promote_fb_urls_df(df: pd.DataFrame, logger: LoggerFn = None) -> pd.DataFra
     if "Facebook URL" not in df.columns:
         df["Facebook URL"] = ""
     populated = 0
+    canonical_from_alias = 0
+    canonical_from_links = 0
     for idx in df.index:
-        new_url = promote_facebook_url(df.loc[idx], set_row=False)
+        new_url, source = ensure_canonical_facebook_url(df.loc[idx], set_row=False)
         if not new_url:
             continue
         wrote = False
-        if not str(df.loc[idx, "facebook_url"] or "").strip():
-            df.loc[idx, "facebook_url"] = new_url
-            wrote = True
-        if "Facebook_URL" in df.columns and not str(df.loc[idx, "Facebook_URL"] or "").strip():
+        current_canonical_raw = str(df.loc[idx, "Facebook_URL"] or "").strip()
+        current_canonical = canonicalize_facebook_url(current_canonical_raw)
+        if current_canonical and current_canonical_raw != current_canonical:
+            df.loc[idx, "Facebook_URL"] = current_canonical
+        elif not current_canonical:
             df.loc[idx, "Facebook_URL"] = new_url
             wrote = True
-        elif "Facebook URL" in df.columns and not str(df.loc[idx, "Facebook URL"] or "").strip():
+            if source in {"Social Link", "External Links", "Website", "Websites", "Website URL"}:
+                canonical_from_links += 1
+            elif source and source != "Facebook_URL":
+                canonical_from_alias += 1
+        if not canonicalize_facebook_url(df.loc[idx, "facebook_url"]):
+            df.loc[idx, "facebook_url"] = new_url
+            wrote = True
+        if "Facebook URL" in df.columns and not canonicalize_facebook_url(df.loc[idx, "Facebook URL"]):
             df.loc[idx, "Facebook URL"] = new_url
             wrote = True
         if wrote:
             populated += 1
     if logger and populated:
         _safe_log(logger, f"[FB Promotion] facebook_url populated for {populated} rows")
+    if logger and canonical_from_alias:
+        _safe_log(logger, f"[FB Promotion] canonical Facebook_URL backfilled from alias fields for {canonical_from_alias} rows")
+    if logger and canonical_from_links:
+        _safe_log(logger, f"[FB Promotion] canonical Facebook_URL backfilled from Social Link / External Links for {canonical_from_links} rows")
     return df
 
 
@@ -2119,6 +2133,7 @@ def run_enrichment(raw_csv_path: str, enriched_output_path: str, logger: LoggerF
         df_final = pd.read_csv(final_path, dtype=str, keep_default_na=False)
         df_final = df_final.fillna("")
         df_final = _consolidate_email_all(df_final)
+        df_final = _promote_fb_urls_df(df_final, logger=logger)
         df_final = recompute_final_status_post_enrichment(df_final, logger)
         df_final.to_csv(final_path, index=False)
     except Exception as exc:  # pragma: no cover - defensive
