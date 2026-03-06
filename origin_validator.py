@@ -691,7 +691,7 @@ def run_auto_validate(
         source_url = str(row.get(source_url_col, "") or "").strip()
         if not source_url:
             for alt_col in ("SoundCloud Link", "Social Link", "Spotify_URL", "External Links"):
-                if alt_col in df.columns:
+                if alt_col in df_deduped.columns:
                     source_url = _first_url_from_cell(row.get(alt_col, ""))
                 if source_url:
                     break
@@ -708,10 +708,10 @@ def run_auto_validate(
                 df_deduped.at[idx, source_dir_col] = origin_type
         if not origin_type:
             if source_dir or source_url:
-                df.at[idx, "origin_match_flag"] = 0
-                df.at[idx, "origin_match_reason"] = "unsupported_directory"
-                df.at[idx, "origin_artist_score"] = 0.0
-                df.at[idx, "origin_title_score"] = 0.0
+                df_deduped.at[idx, "origin_match_flag"] = 0
+                df_deduped.at[idx, "origin_match_reason"] = "unsupported_directory"
+                df_deduped.at[idx, "origin_artist_score"] = 0.0
+                df_deduped.at[idx, "origin_title_score"] = 0.0
             continue
         if not source_url:
             continue
