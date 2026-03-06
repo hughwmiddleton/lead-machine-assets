@@ -1806,7 +1806,13 @@ class FacebookSearchClient:
                 return False
         return False
 
-    def find_best_page_url(self, artist_name: str, location: Optional[str] = None) -> Optional[str]:
+    def find_best_page_url(
+        self,
+        artist_name: str,
+        location: Optional[str] = None,
+        *,
+        require_strong_candidate: bool = False,
+    ) -> Optional[str]:
         try:
             from selenium.webdriver.common.by import By
             from selenium.webdriver.support.ui import WebDriverWait
@@ -2456,6 +2462,25 @@ class FacebookSearchClient:
             )
             return None
 
+        if require_strong_candidate:
+            is_strong, strong_reason = _facebook_candidate_is_strong(
+                artist_name,
+                best_candidate,
+                page_html,
+                page_category_text,
+                page_text_blocks,
+                outbound_links,
+                logger=self.logger,
+            )
+            if not is_strong:
+                _safe_log(
+                    self.logger,
+                    "[FB Discover] Rejected candidate for '%s' - weak candidate: %s",
+                    artist_name,
+                    strong_reason,
+                )
+                return None
+
         _safe_log(
             self.logger,
             "[FB Enrich] Best FB candidate for '%s' -> '%s' (final_score=%.2f, name_score=%.2f, cat_boost=%.2f, music=%s, corporate=%s, category='%s')",
@@ -2529,8 +2554,108 @@ def _build_facebook_search_client(logger) -> Tuple[Optional["FacebookSearchClien
         return None, None
 
 
+def _facebook_candidate_has_personal_profile_phrase(
+    artist_name: str,
+    candidate_name: str,
+    page_html: str,
+    page_text_blocks: List[str],
+) -> bool:
+    raw_blob = " ".join(part for part in [page_html, " ".join(page_text_blocks or [])] if part)
+    raw_blob = " ".join(raw_blob.split()).lower()
+    normalized_blob = normalize_fb_name(raw_blob)
+    names_to_check = []
+    for raw_name in (artist_name, candidate_name):
+        name = cell_to_str(raw_name)
+        if not name:
+            continue
+        names_to_check.append(name)
+    for name in names_to_check:
+        name_phrase = " ".join(name.split()).lower()
+        if name_phrase and f"{name_phrase} is on facebook" in raw_blob:
+            return True
+        name_norm = normalize_fb_name(name)
+        if name_norm and f"{name_norm} is on facebook" in normalized_blob:
+            return True
+    return False
+
+
+def _facebook_candidate_is_strong(
+    artist_name: str,
+    candidate: FbCandidate,
+    page_html: str,
+    page_category_text,
+    page_text_blocks,
+    outbound_links,
+    logger=None,
+) -> Tuple[bool, str]:
+    candidate_name = cell_to_str(getattr(candidate, "name", ""))
+    candidate_url = cell_to_str(getattr(candidate, "url", ""))
+    page_html = page_html or ""
+    page_text_blocks = list(page_text_blocks or [])
+    outbound_links = list(outbound_links or [])
+
+    if _facebook_candidate_has_personal_profile_phrase(
+        artist_name,
+        candidate_name,
+        page_html,
+        page_text_blocks,
+    ):
+        return False, "personal_profile_phrase"
+
+    category_values: List[str] = []
+    for raw_value in (
+        page_category_text,
+        getattr(candidate, "category", ""),
+        getattr(candidate, "descriptor", ""),
+        getattr(candidate, "secondary_text", ""),
+    ):
+        value = clean_fb_category_text(cell_to_str(raw_value))
+        if value:
+            category_values.append(value)
+    for token in getattr(candidate, "category_tokens", []) or []:
+        value = clean_fb_category_text(cell_to_str(token))
+        if value:
+            category_values.append(value)
+
+    for category_value in category_values:
+        if is_music_like_category(category_value, logger=logger, debug_logging_enabled=True):
+            return True, "music_category"
+
+    strong_music_link_tokens = (
+        "spotify.com",
+        "open.spotify.com",
+        "bandcamp.com",
+        "soundcloud.com",
+        "music.apple.com",
+    )
+    for link in outbound_links:
+        link_l = cell_to_str(link).lower()
+        if any(token in link_l for token in strong_music_link_tokens):
+            return True, "music_platform_link"
+
+    if candidate_url and page_html:
+        contact_surface = _select_fb_contact_surface_url(candidate_url, page_html)
+        if contact_surface:
+            return True, "page_structure_surface"
+
+    structure_blob = " ".join(page_text_blocks).lower()
+    if any(token in structure_blob for token in ("official page", "contact info", "contact us", "email us")):
+        return True, "page_structure_text"
+
+    artist_norm = normalize_fb_name(artist_name).replace(" ", "")
+    if artist_norm and len(artist_norm) < 4:
+        return False, "short_name_without_strong_signal"
+
+    return False, "slug_or_name_only_match"
+
+
 def facebook_find_best_page(
-    artist_name: str, location: str, fb_client, logger
+    artist_name: str,
+    location: str,
+    fb_client,
+    logger,
+    *,
+    require_strong_candidate: bool = False,
 ) -> Optional[str]:
     artist_name = cell_to_str(artist_name)
     location = cell_to_str(location)
@@ -2538,7 +2663,11 @@ def facebook_find_best_page(
         _safe_log(logger, "[FB Enrich] No Facebook search client available; skipping '%s'.", artist_name)
         return None
     try:
-        return fb_client.find_best_page_url(artist_name, location)
+        return fb_client.find_best_page_url(
+            artist_name,
+            location,
+            require_strong_candidate=require_strong_candidate,
+        )
     except Exception as exc:
         _safe_log(logger, "[FB Enrich] Facebook search client error for '%s': %s", artist_name, exc)
         return None
@@ -2556,7 +2685,13 @@ def _discover_facebook_url_bounded(fb_driver, artist_name: str, location: str, l
         fb_client = FacebookSearchClient(driver=fb_driver, logger=logger)
     except Exception:
         return ""
-    fb_url = facebook_find_best_page(artist_name, location, fb_client, logger)
+    fb_url = facebook_find_best_page(
+        artist_name,
+        location,
+        fb_client,
+        logger,
+        require_strong_candidate=True,
+    )
     canonical_fb_url = canonicalize_facebook_url(fb_url)
     if not canonical_fb_url:
         return ""

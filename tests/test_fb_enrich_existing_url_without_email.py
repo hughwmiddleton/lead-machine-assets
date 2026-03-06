@@ -21,6 +21,138 @@ def _seed_df(row):
     return df
 
 
+def test_discover_facebook_url_bounded_requires_strong_candidate(monkeypatch):
+    calls = []
+
+    class _DummyClient:
+        pass
+
+    monkeypatch.setattr(cde, "FacebookSearchClient", lambda driver, logger: _DummyClient())
+
+    def fake_find_best_page(artist_name, location, fb_client, logger, require_strong_candidate=False):
+        calls.append(
+            {
+                "artist_name": artist_name,
+                "location": location,
+                "require_strong_candidate": require_strong_candidate,
+            }
+        )
+        return "https://www.facebook.com/strongband"
+
+    monkeypatch.setattr(cde, "facebook_find_best_page", fake_find_best_page)
+
+    result = cde._discover_facebook_url_bounded(object(), "The Midnight Echo", "", logger=None)
+
+    assert result == "https://www.facebook.com/strongband"
+    assert calls == [
+        {
+            "artist_name": "The Midnight Echo",
+            "location": "",
+            "require_strong_candidate": True,
+        }
+    ]
+
+
+def test_facebook_candidate_is_strong_accepts_music_category():
+    candidate = cde.FbCandidate(
+        name="The Midnight Echo",
+        url="https://www.facebook.com/themidnightecho",
+        category="Musician/Band",
+    )
+
+    accepted, reason = cde._facebook_candidate_is_strong(
+        "The Midnight Echo",
+        candidate,
+        "<html><body><div>Musician/Band</div></body></html>",
+        "Musician/Band",
+        ["Musician/Band"],
+        [],
+    )
+
+    assert accepted is True
+    assert reason == "music_category"
+
+
+def test_facebook_candidate_is_strong_rejects_personal_profile_phrase():
+    candidate = cde.FbCandidate(
+        name="John Smith",
+        url="https://www.facebook.com/johnsmith",
+        category="",
+    )
+
+    accepted, reason = cde._facebook_candidate_is_strong(
+        "John Smith",
+        candidate,
+        "<html><body><div>John Smith is on Facebook</div></body></html>",
+        "",
+        ["John Smith is on Facebook"],
+        [],
+    )
+
+    assert accepted is False
+    assert reason == "personal_profile_phrase"
+
+
+def test_facebook_candidate_is_strong_rejects_slug_only_weak_match():
+    candidate = cde.FbCandidate(
+        name="Skyline",
+        url="https://www.facebook.com/skyline",
+        category="",
+    )
+
+    accepted, reason = cde._facebook_candidate_is_strong(
+        "Skyline",
+        candidate,
+        "<html><body><div>Welcome to Skyline</div></body></html>",
+        "",
+        ["Welcome to Skyline"],
+        [],
+    )
+
+    assert accepted is False
+    assert reason == "slug_or_name_only_match"
+
+
+def test_facebook_candidate_is_strong_rejects_short_name_without_positive_signals():
+    candidate = cde.FbCandidate(
+        name="Sun",
+        url="https://www.facebook.com/sun",
+        category="",
+    )
+
+    accepted, reason = cde._facebook_candidate_is_strong(
+        "Sun",
+        candidate,
+        "<html><body><div>Sun</div></body></html>",
+        "",
+        ["Sun"],
+        [],
+    )
+
+    assert accepted is False
+    assert reason == "short_name_without_strong_signal"
+
+
+def test_facebook_candidate_is_strong_accepts_short_name_with_music_platform_link():
+    candidate = cde.FbCandidate(
+        name="Sun",
+        url="https://www.facebook.com/sun",
+        category="",
+    )
+
+    accepted, reason = cde._facebook_candidate_is_strong(
+        "Sun",
+        candidate,
+        '<html><body><a href="https://soundcloud.com/sun">SoundCloud</a></body></html>',
+        "",
+        ["Listen now"],
+        ["https://soundcloud.com/sun"],
+    )
+
+    assert accepted is True
+    assert reason == "music_platform_link"
+
+
 @pytest.mark.parametrize(
     "row_overrides,expected_call",
     [
@@ -456,7 +588,7 @@ def test_fb_enrich_rejects_invalid_discovered_candidate(monkeypatch):
     )
     ctx = worker._build_row_context(seed_df, 0, 1, 1)
 
-    def fake_find_best_page(artist_name, location, fb_client, logger):
+    def fake_find_best_page(artist_name, location, fb_client, logger, require_strong_candidate=False):
         return "https://www.facebook.com/share.php?u=bad"
 
     def fail_extract(*args, **kwargs):
