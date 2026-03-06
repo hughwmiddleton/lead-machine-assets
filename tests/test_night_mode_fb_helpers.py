@@ -1,4 +1,5 @@
 import pandas as pd
+import pytest
 
 import night_mode_fb
 from origin_validator import dedupe_pre_auto_validate
@@ -224,6 +225,90 @@ def test_explicit_fb_url_placeholders_rejected(monkeypatch) -> None:
     enricher.enrich_row_with_facebook_night(row_valid)
 
     assert [night_mode_fb._normalise_fb_url(calls[0])] == ["https://www.facebook.com/artistpage"]
+
+
+def test_valid_facebook_url_starts_scrape_even_when_email_column_is_stale(monkeypatch) -> None:
+    logs = []
+    enricher = night_mode_fb.NightModeFacebookEnricher(
+        legacy_module=None,
+        username="",
+        password="",
+        logger=lambda msg: logs.append(msg),
+        use_shared_session=False,
+    )
+    monkeypatch.setattr(enricher, "_ensure_session", lambda: None)
+    monkeypatch.setattr(enricher, "_has_authenticated_session", lambda: False)
+    monkeypatch.setattr(enricher, "_search_for_page", lambda *args, **kwargs: "")
+    monkeypatch.setattr(
+        enricher,
+        "_fetch_html_with_url",
+        lambda url, goto_about=False: ('<html><body><a href="mailto:artist@test.com">Email</a></body></html>', url),
+    )
+    monkeypatch.setattr(night_mode_fb, "_night_fb_has_music_signals", lambda *args, **kwargs: True)
+
+    row = {
+        "Artist Name": "Example Band",
+        "Email": "stale@example.com",
+        "Email_All": "",
+        "facebook_url": "https://facebook.com/exampleband",
+    }
+
+    result = enricher.enrich_row_with_facebook_night(row)
+
+    assert result.get("FB_Status") == "pass_a_found_email"
+    assert result.get("Email") == "artist@test.com"
+    assert "artist@test.com" in (result.get("Email_All") or "")
+    assert any('[Night FB] Starting FB scrape for artist="Example Band"' in msg for msg in logs)
+    assert any('[Night FB][PASS A]' in msg and 'outcome="found_email"' in msg for msg in logs)
+
+
+@pytest.mark.parametrize(
+    ("value", "expect_skip_log"),
+    [
+        (None, True),
+        (float("nan"), True),
+        ("", False),
+        ("   ", True),
+        ("nan", True),
+    ],
+)
+def test_invalid_direct_facebook_url_values_skip_without_scraping(monkeypatch, value, expect_skip_log) -> None:
+    logs = []
+    enricher = night_mode_fb.NightModeFacebookEnricher(
+        legacy_module=None,
+        username="",
+        password="",
+        logger=lambda msg: logs.append(msg),
+        use_shared_session=False,
+    )
+    monkeypatch.setattr(enricher, "_ensure_session", lambda: None)
+    monkeypatch.setattr(enricher, "_has_authenticated_session", lambda: False)
+    monkeypatch.setattr(enricher, "_should_allow_anonymous", lambda row: True)
+    monkeypatch.setattr(enricher, "_get_anon_driver", lambda: object())
+    monkeypatch.setattr(enricher, "_search_for_page", lambda *args, **kwargs: "")
+
+    called = False
+
+    def _fail_scrape(self, *args, **kwargs):  # noqa: ANN001
+        nonlocal called
+        called = True
+        raise AssertionError("invalid direct facebook_url should not reach scraper")
+
+    monkeypatch.setattr(night_mode_fb.NightModeFacebookEnricher, "_scrape_single_fb_candidate", _fail_scrape)
+
+    row = {
+        "Artist Name": "Bad FB",
+        "Email": "",
+        "Email_All": "",
+        "facebook_url": value,
+    }
+
+    result = enricher.enrich_row_with_facebook_night(row)
+
+    assert called is False
+    assert result.get("FB_Status") == "pass_a_skipped_no_fb_url"
+    if expect_skip_log:
+        assert any("invalid facebook_url value" in msg for msg in logs)
 
 
 def test_is_valid_fb_url_value_rejects_placeholder_paths() -> None:

@@ -93,6 +93,7 @@ _EXPLICIT_FB_INTAKE_FIELDS = (
 )
 _EXPLICIT_FB_ALLOWED_HOSTS = ("facebook.com", "m.facebook.com", "web.facebook.com", "touch.facebook.com", "fb.com", "fb.me")
 _EXPLICIT_FB_PREFILTER_PATHS = ("/r.php", "/login", "/share.php", "/l.php", "/dialog/")
+_DIRECT_FB_ROW_FIELDS = ("Facebook_URL", "Facebook URL", "facebook_url", "facebook url")
 
 
 @dataclass
@@ -1119,6 +1120,80 @@ def _is_valid_fb_url_value(value: object) -> bool:
         return True
 
     return False
+
+
+def _clean_row_string(value: Any) -> str:
+    try:
+        import pandas as _pd  # type: ignore
+
+        if _pd.isna(value):
+            return ""
+    except Exception:
+        pass
+    try:
+        return str(value or "").strip()
+    except Exception:
+        return ""
+
+
+def _row_has_usable_email_for_fb_skip(row: Dict[str, Any]) -> Tuple[bool, str]:
+    email_all = _clean_row_string((row or {}).get("Email_All", ""))
+    email_source = _clean_row_string((row or {}).get("Email Source", "")).lower()
+    suspect_email = _clean_row_string((row or {}).get("Suspect_Email", ""))
+    suspect_email_all = _clean_row_string((row or {}).get("Suspect_Email_All", ""))
+
+    quarantined_repeat = email_source == "quarantined (repeat email)"
+    suspect_present = bool(suspect_email or suspect_email_all)
+    has_email_effective = bool(email_all) and not quarantined_repeat and not suspect_present
+    return has_email_effective, email_all
+
+
+def _raw_fb_value_for_log(value: Any) -> str:
+    if value is None:
+        return "None"
+    try:
+        import pandas as _pd  # type: ignore
+
+        if _pd.isna(value):
+            return "nan"
+    except Exception:
+        pass
+    try:
+        text = str(value)
+    except Exception:
+        return "<unprintable>"
+    return text if text.strip() else "<blank>"
+
+
+def _find_invalid_direct_fb_row_value(row: Dict[str, Any]) -> Tuple[str, str]:
+    direct_fields = {field.lower() for field in _DIRECT_FB_ROW_FIELDS}
+    seen: Set[str] = set()
+
+    for key, value in (row or {}).items():
+        try:
+            key_text = str(key)
+        except Exception:
+            continue
+        key_norm = key_text.lower()
+        if key_norm not in direct_fields or key_norm in seen:
+            continue
+        seen.add(key_norm)
+
+        if value is None:
+            return key_text, _raw_fb_value_for_log(value)
+        try:
+            import pandas as _pd  # type: ignore
+
+            if _pd.isna(value):
+                return key_text, _raw_fb_value_for_log(value)
+        except Exception:
+            pass
+
+        if isinstance(value, str):
+            if value != "" and (not value.strip() or value.strip().lower() in {"nan", "none", "null"}):
+                return key_text, _raw_fb_value_for_log(value)
+
+    return "", ""
 
 
 def _extract_fb_urls_for_night_mode(row):
@@ -4961,6 +5036,10 @@ class NightModeFacebookEnricher:
                 _log(self.logger, f"[Night FB][Gate] rejected url={raw_fb_url!r} before scrape reason={guard_reason}")
             return None
         candidate_url = _normalise_fb_url(raw_fb_url or "")
+        _log(
+            self.logger,
+            f'[Night FB] Starting FB scrape for artist="{artist_name or "<unknown>"}" url="{candidate_url or raw_fb_url or "<blank>"}"',
+        )
         _log(self.logger, f"[FB Email] Visiting {candidate_url}")
 
         used_driver_kind = "session"
@@ -5549,13 +5628,17 @@ class NightModeFacebookEnricher:
             self.fb_rows_skipped["checkpoint"] += 1
             return self._mark_row_checkpoint(result)
 
-        existing_email = _clean_val(result.get("Email", ""))
-        if existing_email:
+        artist_name = _clean_val(result.get("Artist Name", ""))
+        skip_due_to_email, email_all_clean = _row_has_usable_email_for_fb_skip(result)
+        if skip_due_to_email:
             self.fb_rows_skipped["no_opportunity"] += 1
+            _log(
+                self.logger,
+                f"[Night FB] Skipping row before FB scrape for artist='{artist_name or '<unknown>'}' because Email_All is already populated ({email_all_clean!r}).",
+            )
             if not result.get("FB_Status"):
                 result["FB_Status"] = "ok"
             return result
-        artist_name = _clean_val(result.get("Artist Name", ""))
         location = _clean_val(result.get("Location", ""))
         raw_fb_url = _clean_val(result.get("Facebook_URL", ""))
         if raw_fb_url and _is_invalid_fb_value(raw_fb_url) and self._debug_fb_url_flow:
@@ -5569,6 +5652,18 @@ class NightModeFacebookEnricher:
         )
         explicit_intake = classify_explicit_fb_intake(result, accepted_urls=fb_urls)
         _log_explicit_fb_intake(self.logger, artist_name, explicit_intake)
+        if not fb_urls:
+            invalid_field, invalid_value = _find_invalid_direct_fb_row_value(result)
+            if invalid_field and invalid_value:
+                _log(
+                    self.logger,
+                    f"[Night FB] Skipping row - invalid facebook_url value: {invalid_value} artist='{artist_name or '<unknown>'}' field='{invalid_field}'",
+                )
+            elif explicit_intake.rejected_invalid:
+                _log(
+                    self.logger,
+                    f"[Night FB] Skipping row - invalid facebook_url value: {explicit_intake.rejected_invalid[0]} artist='{artist_name or '<unknown>'}'",
+                )
         is_unearthed = self._is_unearthed_source(result)
 
         if self._debug_fb_url_flow and self._debug_fb_url_flow_seen < self._debug_fb_url_flow_limit:
