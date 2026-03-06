@@ -1308,6 +1308,17 @@ def _row_has_email(row) -> bool:
     return bool(email_primary or email_all)
 
 
+def _row_email_summary_snapshot(df: pd.DataFrame, row_idx) -> Dict[str, str]:
+    """Capture the row email fields used by scheduler email accounting."""
+    snapshot: Dict[str, str] = {}
+    for col in ("Email", "Email_All"):
+        if col in df.columns:
+            snapshot[col] = cell_to_str(df.at[row_idx, col])
+        else:
+            snapshot[col] = ""
+    return snapshot
+
+
 def _canonicalize_fb_url(raw: str) -> str:
     """Normalize and validate a Facebook URL candidate."""
     if not raw:
@@ -4436,6 +4447,7 @@ class CrossDirectoryEnricherWorker(QThread):
         position = ctx["position"]
         total = ctx["total"]
         had_email_from_seed = ctx.get("had_email_from_seed") or ctx.get("had_fb_or_email_from_seed")
+        email_before = _row_email_summary_snapshot(seed_df, row_idx)
         fb_attempted = False
         fb_matched = False
         if not self._platform_attempt_allowed("facebook", artist, "Facebook Enrich"):
@@ -4531,6 +4543,15 @@ class CrossDirectoryEnricherWorker(QThread):
                                 sorted({e.strip().lower() for e in fb_emails if e})
                             )
                             seed_df.at[row_idx, "FB_Status"] = seed_df.at[row_idx, "FB_Status"] or "found_email"
+                            try:
+                                from pipeline_runner import record_email_summary_row_change
+
+                                record_email_summary_row_change(
+                                    email_before,
+                                    _row_email_summary_snapshot(seed_df, row_idx),
+                                )
+                            except Exception:
+                                pass
                             fb_matched = True
                     else:
                         fallback_status = fb_status_reason or "no_email_on_page"
@@ -5754,6 +5775,7 @@ class CrossDirectoryEnricherWorker(QThread):
         return payload
 
     def _apply_payload(self, df: pd.DataFrame, row_idx, payload: EnrichmentPayload) -> None:
+        email_before = _row_email_summary_snapshot(df, row_idx)
         original_social_raw = df.at[row_idx, "Social Link"]
         original_sites_raw = df.at[row_idx, "External Links"]
         existing_socials = _split_pipe_cell(original_social_raw)
@@ -5844,6 +5866,15 @@ class CrossDirectoryEnricherWorker(QThread):
                         source_url = canonical
                 df.at[row_idx, "Source Directory"] = display_value
                 df.at[row_idx, "Source URL"] = source_url
+        try:
+            from pipeline_runner import record_email_summary_row_change
+
+            record_email_summary_row_change(
+                email_before,
+                _row_email_summary_snapshot(df, row_idx),
+            )
+        except Exception:
+            pass
 
     def _apply_structured_fields(
         self,

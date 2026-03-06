@@ -107,6 +107,101 @@ def test_soundcloud_apply_sets_provenance() -> None:
     assert row["Email_Extract_Method"] == "regex"
 
 
+def test_apply_payload_email_mutation_increments_summary() -> None:
+    pipeline_runner.reset_email_summary_counts()
+    df = pd.DataFrame(
+        [
+            {
+                "Social Link": "",
+                "External Links": "",
+                "Email": "",
+                "Email_All": "",
+                "Email_Source_URL": "",
+                "Email_Source_Type": "",
+                "Email_Extract_Method": "",
+                "SoundCloud Link": "",
+                "Source Directory": "",
+                "Source URL": "",
+            }
+        ]
+    )
+    payload = EnrichmentPayload(
+        socials=set(),
+        websites=set(),
+        emails={"sc@example.com"},
+        link_hubs=set(),
+        source_dir="soundcloud",
+        source_url="https://soundcloud.com/testartist",
+        source_detail="soundcloud_live",
+    )
+
+    CrossDirectoryEnricherWorker._apply_payload(None, df, 0, payload)
+
+    assert df.at[0, "Email"] == "sc@example.com"
+    assert pipeline_runner.get_email_summary_counts()["emails_found"] == 1
+
+
+def test_apply_payload_metadata_only_does_not_increment_summary() -> None:
+    pipeline_runner.reset_email_summary_counts()
+    df = pd.DataFrame(
+        [
+            {
+                "Social Link": "",
+                "External Links": "",
+                "Email": "",
+                "Email_All": "",
+                "Source Directory": "",
+                "Source URL": "",
+            }
+        ]
+    )
+    payload = EnrichmentPayload(
+        socials={"https://instagram.com/testartist"},
+        websites={"https://testartist.example.com"},
+        emails=set(),
+        link_hubs=set(),
+        source_dir="soundcloud",
+        source_url="https://soundcloud.com/testartist",
+        source_detail="soundcloud_live",
+    )
+
+    CrossDirectoryEnricherWorker._apply_payload(None, df, 0, payload)
+
+    assert df.at[0, "Email"] == ""
+    assert pipeline_runner.get_email_summary_counts()["emails_found"] == 0
+
+
+def test_apply_payload_same_row_same_email_does_not_double_count() -> None:
+    pipeline_runner.reset_email_summary_counts()
+    df = pd.DataFrame(
+        [
+            {
+                "Social Link": "",
+                "External Links": "",
+                "Email": "",
+                "Email_All": "",
+                "Source Directory": "",
+                "Source URL": "",
+            }
+        ]
+    )
+    payload = EnrichmentPayload(
+        socials=set(),
+        websites=set(),
+        emails={"repeat@example.com"},
+        link_hubs=set(),
+        source_dir="soundcloud",
+        source_url="https://soundcloud.com/testartist",
+        source_detail="soundcloud_live",
+    )
+
+    CrossDirectoryEnricherWorker._apply_payload(None, df, 0, payload)
+    CrossDirectoryEnricherWorker._apply_payload(None, df, 0, payload)
+
+    assert df.at[0, "Email"] == "repeat@example.com"
+    assert pipeline_runner.get_email_summary_counts()["emails_found"] == 1
+
+
 def test_fill_email_provenance_fallback_about_url() -> None:
     df = pd.DataFrame(
         [

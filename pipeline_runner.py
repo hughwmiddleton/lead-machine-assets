@@ -273,8 +273,33 @@ def increment_pattern_emails(delta: int = 1) -> None:
     _bump_email_summary("pattern_emails", delta)
 
 
+def reset_email_summary_counts() -> None:
+    for key in _EMAIL_SUMMARY:
+        _EMAIL_SUMMARY[key] = 0
+
+
 def get_email_summary_counts() -> Dict[str, int]:
     return dict(_EMAIL_SUMMARY)
+
+
+def record_email_summary_row_change(before_row: Any, after_row: Any) -> int:
+    """Count newly landed row emails from an actual before/after transition."""
+
+    def _emails(row_like: Any) -> set[str]:
+        if row_like is None or not hasattr(row_like, "get"):
+            return set()
+        return set(
+            _merge_email_lists(
+                row_like.get("Email", ""),
+                row_like.get("Email_All", ""),
+            )
+        )
+
+    before_emails = _emails(before_row)
+    after_emails = _emails(after_row)
+    delta = len(after_emails - before_emails)
+    _bump_email_summary("emails_found", delta)
+    return delta
 
 
 def _safe_count_rows(csv_path: Union[str, Path]) -> int:

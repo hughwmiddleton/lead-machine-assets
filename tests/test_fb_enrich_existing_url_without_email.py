@@ -5,6 +5,7 @@ from types import SimpleNamespace
 pytest.importorskip("PyQt5")
 
 import cross_directory_enricher as cde
+import pipeline_runner
 
 
 def _make_worker(logs):
@@ -103,6 +104,38 @@ def test_fb_enrich_handles_missing_email_columns(monkeypatch):
     assert calls, "FB extraction should be attempted when a promotable link exists"
     assert "Email_All" in seed_df.columns
     assert seed_df.at[0, "Email_All"] == ""
+
+
+def test_fb_explicit_email_discovery_increments_summary(monkeypatch):
+    pipeline_runner.reset_email_summary_counts()
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Has FB URL",
+            "Email": "",
+            "Email_All": "",
+            "facebook_url": "https://www.facebook.com/socialfb",
+            "Facebook_URL": "https://www.facebook.com/socialfb",
+            "Social Link": "",
+            "External Links": "",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+
+    def fake_extract(driver, url, log_fn=None):
+        return (["fb@example.com"], "https://www.facebook.com/socialfb/about", "")
+
+    monkeypatch.setattr(cde, "_extract_fb_emails_bounded", fake_extract)
+
+    matched = worker._enrich_row_facebook(seed_df, 0, object(), ctx)
+
+    assert matched is True
+    assert seed_df.at[0, "Email"] == "fb@example.com"
+    assert pipeline_runner.get_email_summary_counts()["emails_found"] == 1
 
 
 def test_fb_enrich_skips_when_email_present(monkeypatch):
