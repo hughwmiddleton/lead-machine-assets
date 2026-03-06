@@ -2738,6 +2738,22 @@ def _extract_emails_from_html(html: str) -> Tuple[List[str], bool]:
         except Exception:
             replacements = 0
         emails.extend(match.group(0) for match in EMAIL_REGEX.finditer(text_blob))
+    raw_html = html if isinstance(html, str) else str(html)
+    if raw_html:
+        try:
+            from email_normalizer import normalize_obfuscated_email_patterns
+
+            raw_html, replacements = normalize_obfuscated_email_patterns(raw_html)
+            if replacements:
+                try:
+                    from pipeline_runner import increment_pattern_emails
+
+                    increment_pattern_emails(replacements)
+                except Exception:
+                    pass
+        except Exception:
+            replacements = 0
+        emails.extend(match.group(0) for match in EMAIL_REGEX.finditer(raw_html))
     seen = set()
     unique: List[str] = []
     for email in emails:
@@ -5087,9 +5103,13 @@ class NightModeFacebookEnricher:
         except Exception:
             page_title = ""
 
+        _log(self.logger, f"[FB Email] Scanning main page HTML for emails: {resolved_url}")
         has_music_signals_main = _night_fb_has_music_signals(soup, {"url": resolved_url})
         emails, main_mailto = _extract_emails_from_html(html or "")
         email_method = "mailto" if emails and main_mailto else ("regex" if emails else "")
+        if emails:
+            for email in emails:
+                _log(self.logger, f"[FB Email] Found email on main page: {email}")
 
         about_attempted = "no"
         about_result = ""
@@ -5107,7 +5127,7 @@ class NightModeFacebookEnricher:
         seed_url_match = bool(seed_fb_norm and resolved_url and _normalise_fb_url(resolved_url) == seed_fb_norm)
         artist_location = _coerce_str(row.get("Country_Derived") or row.get("Country") or row.get("Location"))
 
-        need_about_fetch = (not has_music_signals) or (not emails)
+        need_about_fetch = not emails
         contact_url: Optional[str] = None
         if need_about_fetch and self._page_budget_remaining > 0:
             if not has_music_signals:
