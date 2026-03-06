@@ -1367,6 +1367,133 @@ def _row_has_facebook_or_email(row) -> bool:
     return _row_has_email(row)
 
 
+_FB_CONTACT_SURFACE_HOSTS = {
+    "facebook.com",
+    "www.facebook.com",
+    "m.facebook.com",
+    "web.facebook.com",
+    "touch.facebook.com",
+}
+
+_FB_CONTACT_SURFACE_PRIORITIES = (
+    ("about", ("sk=about", "about_profile_transparency", "/about", "about")),
+    ("contact", ("contact_and_basic_info", "/contact", "contact")),
+    ("info", ("/info", "info")),
+)
+
+
+def _normalise_fb_surface_url(url: str, base_url: str = "") -> str:
+    """Normalize a Facebook profile/contact surface URL while preserving query strings."""
+    raw = cell_to_str(url)
+    if not raw:
+        return ""
+
+    lowered = raw.lower()
+    if lowered.startswith("#") or lowered.startswith("javascript:") or lowered.startswith("mailto:") or lowered.startswith("tel:"):
+        return ""
+
+    resolved = normalize_external_url(raw) or raw
+    try:
+        if base_url:
+            resolved = urllib.parse.urljoin(base_url, resolved)
+        elif resolved.startswith("//"):
+            resolved = "https:" + resolved
+        elif resolved.startswith("/"):
+            resolved = "https://www.facebook.com" + resolved
+    except Exception:
+        return ""
+
+    try:
+        parsed = urllib.parse.urlparse(resolved)
+    except Exception:
+        return ""
+
+    scheme = (parsed.scheme or "https").lower()
+    if scheme not in {"http", "https"}:
+        return ""
+
+    host = (parsed.netloc or "").lower()
+    if host not in _FB_CONTACT_SURFACE_HOSTS:
+        return ""
+    if host in {"facebook.com", "web.facebook.com", "m.facebook.com", "touch.facebook.com"}:
+        host = "www.facebook.com"
+
+    candidate = urllib.parse.urlunparse((scheme, host, parsed.path or "", "", parsed.query or "", ""))
+    canonical = _normalise_fb_url(candidate)
+    if not canonical:
+        return ""
+
+    if urllib.parse.urlparse(canonical).path.lower() == "/profile.php":
+        return canonical
+
+    canonical_parsed = urllib.parse.urlparse(canonical)
+    return urllib.parse.urlunparse(
+        (
+            canonical_parsed.scheme or scheme,
+            canonical_parsed.netloc or host,
+            canonical_parsed.path,
+            "",
+            parsed.query or "",
+            "",
+        )
+    )
+
+
+def _select_fb_contact_surface_url(base_url: str, html: str) -> Optional[str]:
+    """Return the best on-domain Facebook contact/about/info surface from page HTML."""
+    if not base_url or not html:
+        return None
+
+    base_norm = _normalise_fb_surface_url(base_url)
+    if not base_norm:
+        return None
+
+    try:
+        soup = BeautifulSoup(html, "html.parser")
+    except Exception:
+        return None
+
+    candidates: list[tuple[int, int, int, str]] = []
+    seen: set[str] = set()
+
+    for index, anchor in enumerate(soup.find_all("a", href=True)):
+        href = cell_to_str(anchor.get("href"))
+        if not href:
+            continue
+        absolute = _normalise_fb_surface_url(href, base_url=base_norm)
+        if not absolute or absolute == base_norm or absolute in seen:
+            continue
+
+        text = " ".join(anchor.get_text(" ", strip=True).lower().split())
+        href_lower = href.lower()
+        absolute_lower = absolute.lower()
+
+        matched_rank = None
+        matched_token_rank = None
+        for priority_rank, (bucket, tokens) in enumerate(_FB_CONTACT_SURFACE_PRIORITIES):
+            text_matches = bucket in text
+            token_rank = next(
+                (token_rank for token_rank, token in enumerate(tokens) if token in href_lower or token in absolute_lower),
+                None,
+            )
+            if text_matches or token_rank is not None:
+                matched_rank = priority_rank
+                matched_token_rank = token_rank if token_rank is not None else len(tokens)
+                break
+
+        if matched_rank is None:
+            continue
+
+        seen.add(absolute)
+        candidates.append((matched_rank, matched_token_rank or 0, index, absolute))
+
+    if not candidates:
+        return None
+
+    candidates.sort()
+    return candidates[0][3]
+
+
 def _extract_fb_emails_bounded(fb_driver, fb_url: str, log_fn=None) -> tuple[list[str], str, str]:
     """
     Visit at most two Facebook pages (main + about/info/contact) to extract emails.
@@ -1388,50 +1515,61 @@ def _extract_fb_emails_bounded(fb_driver, fb_url: str, log_fn=None) -> tuple[lis
             except Exception:
                 pass
 
-    def _fetch(target: str) -> tuple[list[str], str]:
+    def _fetch(target: str) -> tuple[list[str], str, str]:
         nonlocal budget, last_reason, resolved_url
         if budget <= 0 or not target:
-            return ([], resolved_url)
-        target_norm = _normalise_fb_url(normalize_external_url(target))
-        if not target_norm or target_norm in visited:
-            return ([], resolved_url)
-        visited.add(target_norm)
+            return ([], resolved_url, "")
+        target_fetch = _normalise_fb_surface_url(target) or _normalise_fb_url(normalize_external_url(target))
+        if not target_fetch or target_fetch in visited:
+            return ([], resolved_url, "")
+        visited.add(target_fetch)
         budget -= 1
         try:
-            fb_driver.get(target_norm)
-            current_url = getattr(fb_driver, "current_url", "") or target_norm
-            resolved_url = _normalise_fb_url(normalize_external_url(current_url) or current_url) or current_url
+            fb_driver.get(target_fetch)
+            current_url = getattr(fb_driver, "current_url", "") or target_fetch
+            resolved_url = _normalise_fb_surface_url(current_url) or _normalise_fb_url(normalize_external_url(current_url) or current_url) or current_url
             if _is_fb_login_or_security_url(current_url):
                 last_reason = "login_wall"
                 _log("[FB Enrich] Facebook login/checkpoint detected; skipping.")
-                return ([], resolved_url)
+                return ([], resolved_url, "")
             html = getattr(fb_driver, "page_source", "") or ""
             warning = _looks_like_fb_warning_or_block(html, current_url)
             if warning:
                 last_reason = warning
                 _log(f"[FB Enrich] Warning/block page detected ({warning}); skipping row.")
-                return ([], resolved_url)
+                return ([], resolved_url, html)
             found, _ = _extract_emails_from_html(html)
-            return (found, resolved_url)
+            return (found, resolved_url, html)
         except Exception as exc:  # pragma: no cover - defensive
             last_reason = "fetch_error"
-            _log(f"[FB Enrich] Error fetching FB page '{target_norm}': {exc}")
-            return ([], target_norm)
+            _log(f"[FB Enrich] Error fetching FB page '{target_fetch}': {exc}")
+            return ([], target_fetch, "")
 
-    main_emails, resolved = _fetch(fb_url)
+    main_target = _normalise_fb_surface_url(fb_url) or _normalise_fb_url(normalize_external_url(fb_url))
+    if main_target:
+        _log(f"[FB Enrich] Visiting {main_target}")
+    main_emails, resolved, main_html = _fetch(fb_url)
     if main_emails:
         return (main_emails, resolved, last_reason)
 
-    parsed = urllib.parse.urlparse(fb_url)
-    base_path = (parsed.path or "").rstrip("/") or "/"
-    about_candidates = [
-        urllib.parse.urlunparse(parsed._replace(path=base_path + suffix, query="", fragment=""))
-        for suffix in ("/about", "/info", "/contact")
-    ]
-    for about_url in about_candidates:
-        more_emails, resolved = _fetch(about_url)
+    selected_url = _select_fb_contact_surface_url(resolved or fb_url, main_html)
+    if selected_url:
+        _log(f"[FB Enrich] Visiting contact/about page: {selected_url}")
+        more_emails, resolved, _ = _fetch(selected_url)
         if more_emails:
             return (more_emails, resolved, last_reason)
+    else:
+        _log("[FB Enrich] No contact/about link found")
+        if budget > 0:
+            parsed = urllib.parse.urlparse(resolved or fb_url)
+            base_path = (parsed.path or "").rstrip("/") or "/"
+            fallback_url = urllib.parse.urlunparse(
+                parsed._replace(path=base_path + "/about", query="", fragment="")
+            )
+            _log(f"[FB Enrich] Visiting contact/about page: {fallback_url}")
+            more_emails, resolved, _ = _fetch(fallback_url)
+            if more_emails:
+                return (more_emails, resolved, last_reason)
 
     return ([], resolved or fb_url, last_reason)
 
@@ -4501,7 +4639,7 @@ class CrossDirectoryEnricherWorker(QThread):
                     elif intake.rejected_guard:
                         sample = intake.rejected_guard[0]
                     self.log_message.emit(
-                        f"[FB Enrich] Skipping '{artist}' – explicit FB intake outcome='{intake.outcome}' source='{source_summary}' sample='{sample}'."
+                        f"[FB Enrich] Skipping '{artist}' – no explicit facebook url; explicit FB intake outcome='{intake.outcome}' source='{source_summary}' sample='{sample}'."
                     )
                     if "FB_Status" not in seed_df.columns:
                         seed_df["FB_Status"] = ""
