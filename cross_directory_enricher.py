@@ -4089,6 +4089,7 @@ class CrossDirectoryEnricherWorker(QThread):
         self.total_rows = 0
         self._live_context: Dict[str, Any] = {}
         self._row_enrichment_state: Dict[str, str] = {}
+        self._fb_discovery_attempted_rows: Set[Any] = set()
         self._night_sc_cache: Dict[str, Dict[str, Any]] = {}
         self._active_night_sc_attempt: Optional[_NightSCAttempt] = None
         self._night_sc_challenge_streak: int = 0  # consecutive challenge detections
@@ -4201,6 +4202,7 @@ class CrossDirectoryEnricherWorker(QThread):
         self._lf_canonical_url_cache = {}
         self._last_final_url = None
         self._last_resolved_profile_url = None
+        self._fb_discovery_attempted_rows = set()
         # Bandcamp discover per-run state
         self._bc_discover_cache = {}
         self._bc_discover_fetches = 0
@@ -4653,39 +4655,51 @@ class CrossDirectoryEnricherWorker(QThread):
                                 existing_fb_links.append(normalised)
 
                 if not existing_fb_links:
-                    intake = classify_explicit_fb_intake(seed_df.loc[row_idx].to_dict())
-                    source_summary = ",".join(intake.source_fields[:2]) if intake.source_fields else "<none>"
-                    sample = ""
-                    if intake.accepted_urls:
-                        sample = intake.accepted_urls[0]
-                    elif intake.rejected_invalid:
-                        sample = intake.rejected_invalid[0]
-                    elif intake.rejected_guard:
-                        sample = intake.rejected_guard[0]
-                    location = cell_to_str(seed_df.at[row_idx, "Location"]) if "Location" in seed_df.columns else ""
-                    self.log_message.emit(
-                        f"[FB Discover] No explicit facebook url for '{artist}'; attempting bounded discovery "
-                        f"(explicit FB intake outcome='{intake.outcome}' source='{source_summary}' sample='{sample}')."
-                    )
-                    discovered_fb_url = _discover_facebook_url_bounded(
-                        fb_driver, artist, location, self.log_message.emit
-                    )
-                    if discovered_fb_url:
+                    if row_idx in getattr(self, "_fb_discovery_attempted_rows", set()):
                         self.log_message.emit(
-                            f"[FB Discover] Candidate accepted for '{artist}': {discovered_fb_url}"
+                            f"[FB Discover] Skipping discovery for '{artist}' (already attempted this run)"
                         )
-                        for col in ("facebook_url", "Facebook_URL", "Facebook URL"):
-                            if col in seed_df.columns and not cell_to_str(seed_df.at[row_idx, col]):
-                                seed_df.at[row_idx, col] = discovered_fb_url
-                        self.log_message.emit(
-                            f"[FB Discover] Canonical facebook_url populated via discovery for '{artist}'"
-                        )
-                        existing_fb_links = [discovered_fb_url]
-                    else:
-                        self.log_message.emit(f"[FB Discover] No safe candidate found for '{artist}'")
                         if "FB_Status" not in seed_df.columns:
                             seed_df["FB_Status"] = ""
                         seed_df.at[row_idx, "FB_Status"] = seed_df.at[row_idx, "FB_Status"] or "no_fb_url"
+                    else:
+                        intake = classify_explicit_fb_intake(seed_df.loc[row_idx].to_dict())
+                        source_summary = ",".join(intake.source_fields[:2]) if intake.source_fields else "<none>"
+                        sample = ""
+                        if intake.accepted_urls:
+                            sample = intake.accepted_urls[0]
+                        elif intake.rejected_invalid:
+                            sample = intake.rejected_invalid[0]
+                        elif intake.rejected_guard:
+                            sample = intake.rejected_guard[0]
+                        location = cell_to_str(seed_df.at[row_idx, "Location"]) if "Location" in seed_df.columns else ""
+                        self.log_message.emit(
+                            f"[FB Discover] No explicit facebook url for '{artist}'; attempting bounded discovery "
+                            f"(explicit FB intake outcome='{intake.outcome}' source='{source_summary}' sample='{sample}')."
+                        )
+                        self._fb_discovery_attempted_rows.add(row_idx)
+                        discovered_fb_url = _discover_facebook_url_bounded(
+                            fb_driver, artist, location, self.log_message.emit
+                        )
+                        if discovered_fb_url:
+                            self.log_message.emit(
+                                f"[FB Discover] Candidate accepted for '{artist}': {discovered_fb_url}"
+                            )
+                            for col in ("facebook_url", "Facebook_URL", "Facebook URL"):
+                                if col in seed_df.columns and not cell_to_str(seed_df.at[row_idx, col]):
+                                    seed_df.at[row_idx, col] = discovered_fb_url
+                            self.log_message.emit(
+                                f"[FB Discover] Canonical facebook_url populated via discovery for '{artist}'"
+                            )
+                            existing_fb_links = [discovered_fb_url]
+                        else:
+                            self.log_message.emit(f"[FB Discover] No safe candidate found for '{artist}'")
+                            self.log_message.emit(
+                                f"[FB Discover] Discovery failed for '{artist}'; locking FB discovery for this run"
+                            )
+                            if "FB_Status" not in seed_df.columns:
+                                seed_df["FB_Status"] = ""
+                            seed_df.at[row_idx, "FB_Status"] = seed_df.at[row_idx, "FB_Status"] or "no_fb_url"
                 if existing_fb_links:
                     fb_emails: List[str] = []
                     page_url_used = ""
@@ -4799,7 +4813,19 @@ class CrossDirectoryEnricherWorker(QThread):
             return f"{pos}/{total}"
 
         sources: List[SourceSpec] = []
-        row_getter = lambda rid: seed_df.loc[rid]
+        def row_getter(rid):
+            row_data = seed_df.loc[rid]
+            if rid not in getattr(self, "_fb_discovery_attempted_rows", set()):
+                return row_data
+            try:
+                row_copy = row_data.copy()
+            except Exception:
+                row_copy = dict(row_data) if hasattr(row_data, "items") else row_data
+            try:
+                row_copy["__fb_discovery_attempted_this_run"] = "1"
+            except Exception:
+                pass
+            return row_copy
 
         if self.enable_live_search:
 

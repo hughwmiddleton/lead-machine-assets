@@ -378,6 +378,102 @@ def test_fb_opportunity_true_when_external_links_contains_facebook():
     assert summary["FB"]["skipped_opportunity"] == 0
 
 
+def test_fb_opportunity_false_when_discovery_already_attempted_and_no_url():
+    rows = [0]
+    row_data = {0: {"Artist Name": "Artist X", "facebook_url": "", "__fb_discovery_attempted_this_run": "1"}}
+    fb_calls: list[int] = []
+
+    fb_spec = SourceSpec(
+        name="FB",
+        rows=rows,
+        run_row=lambda idx: (fb_calls.append(idx) or SourceResult(attempted=True)),
+        is_available=lambda: (True, None),
+        row_getter=lambda idx: row_data[idx],
+    )
+    summary = SourceDiversityScheduler([fb_spec], row_label=str).run()
+
+    assert not fb_calls
+    assert summary["FB"]["attempted"] == 0
+    assert summary["FB"]["skipped_opportunity"] == 1
+
+
+def test_fb_opportunity_true_with_explicit_url_even_if_discovery_attempted():
+    rows = [0]
+    row_data = {
+        0: {
+            "Artist Name": "Artist X",
+            "facebook_url": "https://www.facebook.com/artistx",
+            "__fb_discovery_attempted_this_run": "1",
+        }
+    }
+    fb_calls: list[int] = []
+
+    fb_spec = SourceSpec(
+        name="FB",
+        rows=rows,
+        run_row=lambda idx: (fb_calls.append(idx) or SourceResult(attempted=True)),
+        is_available=lambda: (True, None),
+        row_getter=lambda idx: row_data[idx],
+    )
+    summary = SourceDiversityScheduler([fb_spec], row_label=str).run()
+
+    assert fb_calls == [0]
+    assert summary["FB"]["attempted"] == 1
+    assert summary["FB"]["skipped_opportunity"] == 0
+
+
+def test_failed_fb_discovery_does_not_starve_other_sources_or_change_interleaving(monkeypatch):
+    monkeypatch.setattr("source_scheduler.random.uniform", lambda a, b: 0)
+    rows = [0]
+    row_data = {
+        0: {
+            "Artist Name": "Artist A",
+            "facebook_url": "",
+            "__fb_discovery_attempted_this_run": "1",
+            "soundcloud_url": "",
+            "lastfm_url": "",
+            "Email": "",
+            "Email_All": "",
+        }
+    }
+    calls: list[str] = []
+
+    scheduler = SourceDiversityScheduler(
+        [
+            SourceSpec(
+                name="SC",
+                rows=rows,
+                run_row=lambda idx: (calls.append(f"SC{idx}") or SourceResult(attempted=True)),
+                is_available=lambda: (True, None),
+                row_getter=lambda idx: row_data[idx],
+            ),
+            SourceSpec(
+                name="LF",
+                rows=rows,
+                run_row=lambda idx: (calls.append(f"LF{idx}") or SourceResult(attempted=True)),
+                is_available=lambda: (True, None),
+                row_getter=lambda idx: row_data[idx],
+            ),
+            SourceSpec(
+                name="FB",
+                rows=rows,
+                run_row=lambda idx: (calls.append(f"FB{idx}") or SourceResult(attempted=True)),
+                is_available=lambda: (True, None),
+                row_getter=lambda idx: row_data[idx],
+            ),
+        ],
+        row_label=str,
+    )
+    summary = scheduler.run()
+
+    assert "FB0" not in calls
+    assert set(calls) == {"SC0", "LF0"}
+    assert summary["FB"]["attempted"] == 0
+    assert summary["FB"]["skipped_opportunity"] == 1
+    assert summary["SC"]["attempted"] == 1
+    assert summary["LF"]["attempted"] == 1
+
+
 def test_opportunity_weight_prioritises_sources(monkeypatch):
     monkeypatch.setattr("source_scheduler.random.uniform", lambda a, b: 0)
     rows = [0]

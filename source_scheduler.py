@@ -281,8 +281,20 @@ def _row_source_opportunity(row: Any, source_name: str) -> bool:
                 fb_url = promote_facebook_url(row, set_row=False)
             except Exception:
                 fb_url = fb_url
+        usable_fb_url = canonicalize_facebook_url(fb_url)
+        fb_discovery_attempted = _has_text(
+            _get_value(
+                [
+                    "__fb_discovery_attempted_this_run",
+                    "__fb_discovery_attempted",
+                    "fb_discovery_attempted",
+                ]
+            )
+        )
         email = _get_value(["Email", "Email_All", "email"])
         if _has_text(email):
+            return False
+        if not usable_fb_url and fb_discovery_attempted:
             return False
         return bool(_has_text(fb_url) or artist_present)
 
