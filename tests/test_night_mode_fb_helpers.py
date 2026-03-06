@@ -183,6 +183,26 @@ def test_is_valid_fb_url_value_rejects_root_only_fb_urls() -> None:
     assert night_mode_fb._is_valid_fb_url_value("facebook.com") is False
 
 
+def test_is_invalid_fb_value_rejects_missing_placeholders() -> None:
+    assert night_mode_fb._is_invalid_fb_value(float("nan")) is True
+    assert night_mode_fb._is_invalid_fb_value("nan") is True
+    assert night_mode_fb._is_invalid_fb_value("") is True
+    assert night_mode_fb._is_invalid_fb_value("https://facebook.com/artist") is False
+
+
+def test_normalise_fb_url_rejects_nan_paths() -> None:
+    assert night_mode_fb._normalise_fb_url("facebook.com/nan") == ""
+    assert night_mode_fb._normalise_fb_url("https://facebook.com/nan/about") == ""
+    assert night_mode_fb._normalise_fb_url("/nan") == ""
+    assert night_mode_fb._normalise_fb_url("https://facebook.com/realartist") == "https://www.facebook.com/realartist"
+
+
+def test_canonicalize_explicit_urls_drop_invalid_nan_entries() -> None:
+    urls = ["facebook.com/nan", "https://facebook.com/artist"]
+    result = night_mode_fb._canonicalize_and_dedupe_explicit_fb_urls(urls)
+    assert result == ["https://www.facebook.com/artist"]
+
+
 def test_profile_php_explicit_urls_deduped(monkeypatch) -> None:
     enricher = night_mode_fb.NightModeFacebookEnricher(
         legacy_module=None,

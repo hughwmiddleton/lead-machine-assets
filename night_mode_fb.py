@@ -1015,24 +1015,31 @@ def _fb_status_is_rejected(status: str) -> bool:
     return any(tok in status_norm for tok in tokens)
 
 
+def _is_invalid_fb_value(value: object) -> bool:
+    """Detect placeholder / missing FB values before any canonicalisation."""
+    if value is None:
+        return True
+    try:
+        v = str(value).strip().lower()
+    except Exception:
+        return True
+    return v in {"", "nan", "none", "null"}
+
+
 def _is_valid_fb_url_value(value: object) -> bool:
     """
     Reject obvious placeholder / missing values before normalisation.
     Keeps scope narrow to explicit FB URLs feeding PASS A.
     """
-    if value is None:
+    if _is_invalid_fb_value(value):
         return False
     try:
         text = str(value)
     except Exception:
         return False
     cleaned = text.strip()
-    if not cleaned:
-        return False
 
     lowered = cleaned.lower()
-    if lowered in {"nan", "none", "null", ""}:
-        return False
 
     # Strip scheme and leading slashes for placeholder detection.
     stripped = lowered
@@ -1177,11 +1184,19 @@ def _parse_existing_fb_url(row: Dict[str, str]) -> str:
 
 
 def _normalise_fb_url(url: str) -> str:
+    if _is_invalid_fb_value(url):
+        return ""
     if not url:
         return ""
     cleaned = url.strip()
     if cleaned.startswith("/"):
         cleaned = "https://www.facebook.com" + cleaned
+    elif "://" not in cleaned:
+        lowered_cleaned = cleaned.lower()
+        for host_prefix in ("facebook.com", "www.facebook.com", "m.facebook.com", "web.facebook.com", "fb.com", "fb.me"):
+            if lowered_cleaned.startswith(host_prefix):
+                cleaned = "https://" + cleaned
+                break
     try:
         parsed = urllib.parse.urlparse(cleaned)
     except Exception:
@@ -1211,6 +1226,12 @@ def _normalise_fb_url(url: str) -> str:
         return urllib.parse.urlunparse((scheme, host, "/profile.php", "", f"id={profile_id}", ""))
 
     path = path.rstrip("/").lower()
+    path_stripped = path.strip("/")
+    if path_stripped in {"", "nan", "none", "null"}:
+        return ""
+    first_segment = path_stripped.split("/", 1)[0]
+    if first_segment in {"nan", "none", "null"}:
+        return ""
     if not path:
         return ""
 
@@ -1227,6 +1248,10 @@ def _canonicalize_and_dedupe_explicit_fb_urls(
     canonical: List[str] = []
 
     for raw in urls or []:
+        if _is_invalid_fb_value(raw):
+            if debug and logger:
+                _log(logger, f"[Night FB] Skipping invalid facebook_url value: {raw}")
+            continue
         norm = _normalise_fb_url(raw)
         if not norm:
             continue
@@ -4633,6 +4658,10 @@ class NightModeFacebookEnricher:
         if raw_fb_url.startswith("/"):
             raw_fb_url = "https://www.facebook.com" + raw_fb_url
         gate_debug = os.getenv("FB_DEBUG_CAND_GATE") == "1"
+        if _is_invalid_fb_value(raw_fb_url):
+            if gate_debug:
+                _log(self.logger, f"[Night FB][Gate] skipping invalid url={raw_fb_url!r} before scrape")
+            return None
         if not fb_is_allowed_profile_candidate_url(raw_fb_url):
             if gate_debug:
                 _log(self.logger, f"[Night FB][Gate] rejected url={raw_fb_url!r} before scrape")
@@ -5243,6 +5272,8 @@ class NightModeFacebookEnricher:
         artist_name = _clean_val(result.get("Artist Name", ""))
         location = _clean_val(result.get("Location", ""))
         raw_fb_url = _clean_val(result.get("Facebook_URL", ""))
+        if raw_fb_url and _is_invalid_fb_value(raw_fb_url) and self._debug_fb_url_flow:
+            _log(self.logger, f"[Night FB] Skipping invalid facebook_url value: {raw_fb_url}")
         facebook_url = _normalise_fb_url(raw_fb_url) if _is_valid_fb_url_value(raw_fb_url) else ""
         fb_urls = _extract_fb_urls_for_night_mode(result)
         if facebook_url and facebook_url not in fb_urls:
