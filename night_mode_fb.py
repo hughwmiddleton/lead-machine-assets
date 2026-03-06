@@ -5110,6 +5110,9 @@ class NightModeFacebookEnricher:
         if emails:
             for email in emails:
                 _log(self.logger, f"[FB Email] Found email on main page: {email}")
+            _log(self.logger, "[FB Email] Skipping contact/about fetch because main page email already found")
+        else:
+            _log(self.logger, "[FB Email] No email found on main page; evaluating contact/about fetch")
 
         about_attempted = "no"
         about_result = ""
