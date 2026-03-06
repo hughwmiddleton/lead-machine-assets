@@ -123,6 +123,66 @@ def test_explicit_fb_urls_canonicalized_and_deduped(monkeypatch) -> None:
     assert result.get("FB_Status"), "PASS A should still produce a status even without emails"
 
 
+def test_explicit_fb_url_placeholders_rejected(monkeypatch) -> None:
+    enricher = night_mode_fb.NightModeFacebookEnricher(
+        legacy_module=None,
+        username="",
+        password="",
+        logger=None,
+        use_shared_session=False,
+    )
+    monkeypatch.setattr(enricher, "_ensure_session", lambda: None)
+    monkeypatch.setattr(enricher, "_has_authenticated_session", lambda: False)
+    monkeypatch.setattr(enricher, "_should_allow_anonymous", lambda row: True)
+    monkeypatch.setattr(enricher, "_get_anon_driver", lambda: object())
+    monkeypatch.setattr(enricher, "_search_for_page", lambda *args, **kwargs: "")
+
+    def _fail_scrape(self, *args, **kwargs):  # noqa: ANN001
+        raise AssertionError("should not scrape invalid explicit URLs")
+
+    monkeypatch.setattr(night_mode_fb.NightModeFacebookEnricher, "_scrape_single_fb_candidate", _fail_scrape)
+
+    rows = [
+        {"Artist Name": "Bad NaN", "Email": "", "Email_All": "", "Facebook_URL": "nan"},
+        {"Artist Name": "Bad None", "Email": "", "Email_All": "", "Facebook_URL": None},
+        {"Artist Name": "Bad Empty", "Email": "", "Email_All": "", "Facebook_URL": "   "},
+    ]
+
+    for row in rows:
+        result = enricher.enrich_row_with_facebook_night(row)
+        assert result.get("FB_Status") == "pass_a_skipped_no_fb_url"
+
+    # Valid URL still passes through.
+    row_valid = {
+        "Artist Name": "Good",
+        "Email": "",
+        "Email_All": "",
+        "Facebook_URL": "https://facebook.com/artistpage",
+    }
+
+    calls = []
+
+    def _capture_scrape(self, fb_url, *args, **kwargs):  # noqa: ANN001
+        calls.append(fb_url)
+        return None
+
+    monkeypatch.setattr(night_mode_fb.NightModeFacebookEnricher, "_scrape_single_fb_candidate", _capture_scrape)
+
+    enricher.enrich_row_with_facebook_night(row_valid)
+
+    assert [night_mode_fb._normalise_fb_url(calls[0])] == ["https://www.facebook.com/artistpage"]
+
+
+def test_is_valid_fb_url_value_rejects_placeholder_paths() -> None:
+    assert night_mode_fb._is_valid_fb_url_value("https://facebook.com/nan/about") is False
+    assert night_mode_fb._is_valid_fb_url_value("/nan") is False
+
+
+def test_is_valid_fb_url_value_rejects_root_only_fb_urls() -> None:
+    assert night_mode_fb._is_valid_fb_url_value("https://facebook.com") is False
+    assert night_mode_fb._is_valid_fb_url_value("facebook.com") is False
+
+
 def test_profile_php_explicit_urls_deduped(monkeypatch) -> None:
     enricher = night_mode_fb.NightModeFacebookEnricher(
         legacy_module=None,

@@ -1015,6 +1015,75 @@ def _fb_status_is_rejected(status: str) -> bool:
     return any(tok in status_norm for tok in tokens)
 
 
+def _is_valid_fb_url_value(value: object) -> bool:
+    """
+    Reject obvious placeholder / missing values before normalisation.
+    Keeps scope narrow to explicit FB URLs feeding PASS A.
+    """
+    if value is None:
+        return False
+    try:
+        text = str(value)
+    except Exception:
+        return False
+    cleaned = text.strip()
+    if not cleaned:
+        return False
+
+    lowered = cleaned.lower()
+    if lowered in {"nan", "none", "null", ""}:
+        return False
+
+    # Strip scheme and leading slashes for placeholder detection.
+    stripped = lowered
+    if stripped.startswith("http://"):
+        stripped = stripped[7:]
+    elif stripped.startswith("https://"):
+        stripped = stripped[8:]
+    stripped = stripped.lstrip("/")
+    if stripped.startswith("www."):
+        stripped = stripped[4:]
+
+    # Placeholder host/path combinations.
+    placeholder_hosts = ("facebook.com", "m.facebook.com", "web.facebook.com", "touch.facebook.com", "fb.com", "fb.me")
+    for host in placeholder_hosts:
+        prefix = f"{host}/"
+        if stripped == host or (
+            stripped.startswith(prefix)
+            and stripped[len(prefix):] in ("nan", "null", "none", "")
+        ):
+            return False
+
+    # Placeholder path-only after stripping.
+    if stripped in {"nan", "null", "none"}:
+        return False
+
+    has_allowed_host = any(h in stripped for h in ("facebook.com", "fb.com", "fb.me"))
+    starts_with_slash = isinstance(value, str) and value.strip().startswith("/")
+
+    # Require either an allowed host with a path, or a path-only value.
+    if has_allowed_host:
+        try:
+            parsed = urllib.parse.urlparse(cleaned if lowered.startswith("http") else f"https://{stripped}")
+            path = parsed.path or ""
+        except Exception:
+            return False
+        if not path or path == "/":
+            return False
+        first_segment = path.lstrip("/").split("/", 1)[0]
+        if first_segment in {"nan", "null", "none", ""}:
+            return False
+        return True
+
+    if starts_with_slash:
+        first_segment = stripped.split("/", 1)[0]
+        if first_segment in {"nan", "null", "none", ""}:
+            return False
+        return True
+
+    return False
+
+
 def _extract_fb_urls_for_night_mode(row):
     fields = [
         "Facebook_URL",
@@ -1060,6 +1129,8 @@ def _extract_fb_urls_for_night_mode(row):
         for part in parts:
             candidate = _clean_value(part)
             if not candidate:
+                continue
+            if not _is_valid_fb_url_value(candidate):
                 continue
             lowered = candidate.lower()
             if not any(host in lowered for host in allowed_hosts):
@@ -5171,7 +5242,8 @@ class NightModeFacebookEnricher:
             return result
         artist_name = _clean_val(result.get("Artist Name", ""))
         location = _clean_val(result.get("Location", ""))
-        facebook_url = _normalise_fb_url(_clean_val(result.get("Facebook_URL", "")))
+        raw_fb_url = _clean_val(result.get("Facebook_URL", ""))
+        facebook_url = _normalise_fb_url(raw_fb_url) if _is_valid_fb_url_value(raw_fb_url) else ""
         fb_urls = _extract_fb_urls_for_night_mode(result)
         if facebook_url and facebook_url not in fb_urls:
             fb_urls.insert(0, facebook_url)
