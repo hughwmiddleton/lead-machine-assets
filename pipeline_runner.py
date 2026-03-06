@@ -25,6 +25,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tupl
 import pandas as pd
 from email_provenance import _set_email_with_provenance
 from html_fetcher import close_job_browser
+from source_scheduler import promote_facebook_url
 
 try:  # Shared FB helper; safe fallback if unavailable.
     from facebook_enrich import is_fb_login_redirect  # type: ignore
@@ -1095,6 +1096,38 @@ def _coalesce_emails(df: pd.DataFrame) -> pd.DataFrame:
         .astype(str)
     )
     df["Email"] = email_series.str.strip()
+    return df
+
+
+def _promote_fb_urls_df(df: pd.DataFrame, logger: LoggerFn = None) -> pd.DataFrame:
+    """Promote Facebook links from generic link fields into facebook_url/Facebook_URL."""
+    if df is None or df.empty:
+        return df
+    if "facebook_url" not in df.columns:
+        df["facebook_url"] = ""
+    if "Facebook_URL" not in df.columns:
+        df["Facebook_URL"] = ""
+    if "Facebook URL" not in df.columns:
+        df["Facebook URL"] = ""
+    populated = 0
+    for idx in df.index:
+        new_url = promote_facebook_url(df.loc[idx], set_row=False)
+        if not new_url:
+            continue
+        wrote = False
+        if not str(df.loc[idx, "facebook_url"] or "").strip():
+            df.loc[idx, "facebook_url"] = new_url
+            wrote = True
+        if "Facebook_URL" in df.columns and not str(df.loc[idx, "Facebook_URL"] or "").strip():
+            df.loc[idx, "Facebook_URL"] = new_url
+            wrote = True
+        elif "Facebook URL" in df.columns and not str(df.loc[idx, "Facebook URL"] or "").strip():
+            df.loc[idx, "Facebook URL"] = new_url
+            wrote = True
+        if wrote:
+            populated += 1
+    if logger and populated:
+        _safe_log(logger, f"[FB Promotion] facebook_url populated for {populated} rows")
     return df
 
 
@@ -2173,6 +2206,7 @@ def run_facebook_global_pass(
     df = pd.read_csv(input_csv)
     df = df.fillna("")
     df = _consolidate_email_all(df)
+    df = _promote_fb_urls_df(df, logger=_LOGGER)
     # Normalize FB_Status column (empty string default). Preserve legacy lowercase if present.
     if "FB_Status" not in df.columns and "fb_status" in df.columns:
         df.rename(columns={"fb_status": "FB_Status"}, inplace=True)
@@ -2441,6 +2475,7 @@ def run_facebook_global_pass_nightmode(
             pass
 
     df = _consolidate_email_all(df)
+    df = _promote_fb_urls_df(df, logger=logger or _LOGGER)
     if "FB_Status" not in df.columns and "fb_status" in df.columns:
         df.rename(columns={"fb_status": "FB_Status"}, inplace=True)
     if "FB_Status" not in df.columns:
@@ -2803,6 +2838,21 @@ def run_facebook_global_pass_nightmode(
         f"fetch_error={counts.get('fetch_error',0)} "
         f"skipped_no_fb_url={counts.get('skipped_no_fb_url',0)}",
     )
+    try:
+        email_stats = fb_helper.get_email_stats()
+    except Exception:
+        email_stats = {}
+    if email_stats:
+        _safe_log_console(
+            logger,
+            "[FB Email][Summary] "
+            f"pages_visited={email_stats.get('fb_email_pages_visited',0)} "
+            f"emails_found={email_stats.get('fb_emails_found',0)} "
+            f"skipped_checkpoint={email_stats.get('fb_rows_skipped_reason_checkpoint',0)} "
+            f"skipped_challenge={email_stats.get('fb_rows_skipped_reason_challenge',0)} "
+            f"skipped_cooldown={email_stats.get('fb_rows_skipped_reason_cooldown',0)} "
+            f"skipped_no_opportunity={email_stats.get('fb_rows_skipped_reason_no_opportunity',0)}",
+        )
 
     df.drop(columns=["__row_id"], inplace=True, errors="ignore")
     df.to_csv(output_csv, index=False)

@@ -2859,6 +2859,35 @@ def _fetch_fb_about_variants(base_url: str) -> List[str]:
     return variants
 
 
+def _pick_fb_contact_link(soup: BeautifulSoup, base_url: str) -> Optional[str]:
+    """
+    Choose a single same-domain contact/about/info link from the main page.
+    Prioritises about > contact > info.
+    """
+    if not soup:
+        return None
+    base = base_url or "https://www.facebook.com/"
+    priorities = {"about": 1, "contact": 2, "info": 3}
+    candidates: List[Tuple[int, str]] = []
+    for anchor in soup.find_all("a"):
+        href = anchor.get("href") or ""
+        text = (anchor.get_text() or "").strip().lower()
+        href_lc = href.lower()
+        for token, rank in priorities.items():
+            if token in href_lc or token in text:
+                resolved = urllib.parse.urljoin(base, href)
+                if "facebook.com" not in resolved:
+                    continue
+                resolved = resolved.split("#", 1)[0]
+                candidates.append((rank, resolved))
+                break
+    if candidates:
+        candidates.sort(key=lambda item: item[0])
+        return candidates[0][1]
+    fallback = _fetch_fb_about_variants(base_url)
+    return fallback[0] if fallback else None
+
+
 def _night_fb_has_music_signals(soup: BeautifulSoup, meta: Optional[Dict[str, str]] = None) -> bool:
     if soup is None:
         return False
@@ -3290,6 +3319,16 @@ class NightModeFacebookEnricher:
             "fetch_error": 0,
             "skipped_no_fb_url": 0,
         }
+        self.fb_email_pages_visited: int = 0
+        self.fb_emails_found: int = 0
+        self.fb_rows_skipped: Dict[str, int] = {
+            "challenge": 0,
+            "checkpoint": 0,
+            "cooldown": 0,
+            "no_opportunity": 0,
+        }
+        # Per-row budget: main page + at most one contact/about page.
+        self._page_budget_remaining: int = 2
         # Per-run reject cache to avoid re-selecting clearly bad pages (name mismatch, non-music, etc.).
         self._fb_reject_cache: Dict[str, Set[str]] = {}
         self._fb_reject_cache_global: Set[str] = set()
@@ -3791,8 +3830,32 @@ class NightModeFacebookEnricher:
             f'[Night FB][PASS A] artist="{safe_artist}" url="{safe_url}" mode="legacy_anon_probe" driver="{safe_driver}" outcome="{safe_outcome}" reason="{safe_reason}"',
         )
 
+    def _has_authenticated_session(self) -> bool:
+        """
+        Lightweight check to see if an authenticated Night FB session is available.
+        Returns False on any error to keep legacy fallbacks intact.
+        """
+        try:
+            session = self._ensure_session()
+            if not session:
+                return False
+            self._ensure_driver_alive(session)
+            return True
+        except Exception:
+            return False
+
     def get_pass_a_counts(self) -> Dict[str, int]:
         return dict(self._pass_a_counts)
+
+    def get_email_stats(self) -> Dict[str, int]:
+        return {
+            "fb_email_pages_visited": int(self.fb_email_pages_visited),
+            "fb_emails_found": int(self.fb_emails_found),
+            "fb_rows_skipped_reason_challenge": int(self.fb_rows_skipped.get("challenge", 0)),
+            "fb_rows_skipped_reason_checkpoint": int(self.fb_rows_skipped.get("checkpoint", 0)),
+            "fb_rows_skipped_reason_cooldown": int(self.fb_rows_skipped.get("cooldown", 0)),
+            "fb_rows_skipped_reason_no_opportunity": int(self.fb_rows_skipped.get("no_opportunity", 0)),
+        }
 
     def get_slow_mode_multiplier(self) -> float:
         try:
@@ -3843,6 +3906,12 @@ class NightModeFacebookEnricher:
         return session
 
     def _fetch_html_with_url(self, url: str, goto_about: bool = True) -> Tuple[Optional[str], Optional[str]]:
+        budget = getattr(self, "_page_budget_remaining", 2)
+        if budget <= 0:
+            _log(self.logger, "[FB Email] Skipped: page budget exhausted")
+            return None, None
+        self._page_budget_remaining = budget - 1
+        self.fb_email_pages_visited += 1
         session = self._ensure_session()
         if not session:
             return None, None
@@ -3898,6 +3967,12 @@ class NightModeFacebookEnricher:
         return html, current_url
 
     def _fetch_html_with_url_anon(self, url: str, goto_about: bool = True) -> Tuple[Optional[str], Optional[str]]:
+        budget = getattr(self, "_page_budget_remaining", 2)
+        if budget <= 0:
+            _log(self.logger, "[FB Email] Skipped: page budget exhausted")
+            return None, None
+        self._page_budget_remaining = budget - 1
+        self.fb_email_pages_visited += 1
         try:
             driver = self._get_anon_driver()
         except Exception as exc:
@@ -4357,6 +4432,7 @@ class NightModeFacebookEnricher:
         if "/r.php" in url_lower or "/login" in url_lower or "/register" in url_lower:
             _log(self.logger, f"[Night FB] Ignoring login/redirect page: {candidate_url}")
             return None
+        _log(self.logger, f"[FB Email] Visiting {candidate_url}")
 
         used_driver_kind = "session"
         outcome_hint = "fetch_error"
@@ -4375,6 +4451,7 @@ class NightModeFacebookEnricher:
         resolved_url = _normalise_fb_url(resolved_url or candidate_url)
         if _is_fb_login_or_security_url(resolved_url):
             _log(self.logger, f"[Night FB] Ignoring login/redirect page: {resolved_url}")
+            self.fb_rows_skipped["challenge"] += 1
             return None, [], used_driver_kind, "login_wall"
 
         lower_html = (html or "").lower()
@@ -4418,49 +4495,51 @@ class NightModeFacebookEnricher:
         artist_location = _coerce_str(row.get("Country_Derived") or row.get("Country") or row.get("Location"))
 
         need_about_fetch = (not has_music_signals) or (not emails)
-        if need_about_fetch:
+        contact_url: Optional[str] = None
+        if need_about_fetch and self._page_budget_remaining > 0:
             if not has_music_signals:
-                _log(self.logger, f"[Night FB] No music signals on main page {resolved_url}, checking About tab...")
-            about_attempted = "yes"
-            for about_url in _fetch_fb_about_variants(resolved_url):
+                _log(self.logger, f"[Night FB] No music signals on main page {resolved_url}, checking About/Contact...")
+            contact_url = _pick_fb_contact_link(soup, resolved_url)
+            if contact_url:
+                about_attempted = "yes"
+                _log(self.logger, f"[FB Email] Visiting {contact_url}")
                 try:
-                    about_html, about_resolved = self._fetch_html_with_url(about_url, goto_about=False)
+                    about_html, about_resolved = self._fetch_html_with_url(contact_url, goto_about=False)
                     if (not about_html) and allow_anon:
-                        about_html, about_resolved = self._fetch_html_with_url_anon(about_url, goto_about=False)
+                        about_html, about_resolved = self._fetch_html_with_url_anon(contact_url, goto_about=False)
                 except Exception:
-                    about_html, about_resolved = "", about_url
-                final_about = _normalise_fb_url(about_resolved or about_url)
+                    about_html, about_resolved = "", contact_url
+                final_about = _normalise_fb_url(about_resolved or contact_url)
                 if _is_fb_login_or_security_url(final_about):
                     about_result = "blocked_login"
-                    break
-                lower_html = (about_html or "").lower()
-                if any(tok in lower_html for tok in ("checkpoint", "consent", "cookie", "privacy")):
-                    about_result = "checkpoint"
-                    break
-                not_found_phrases = ("page isn’t available", "page isn't available", "content isn't available", "not available right now")
-                if any(p in lower_html for p in not_found_phrases):
-                    about_result = "not_found"
-                    continue
-
-                about_soup = BeautifulSoup(about_html or "", "html.parser") if about_html else None
-                if (not has_music_signals) and about_soup:
-                    if _night_fb_has_music_signals(about_soup, {"url": final_about}):
-                        has_music_signals = True
-                        about_result = "music_signals"
-                        _log(self.logger, f"[Night FB] Music signals found on About tab {final_about}.")
-                if not emails:
-                    about_emails, about_mailto = _extract_emails_from_html(about_html or "")
-                    if about_emails:
-                        emails = about_emails
-                        email_method = "mailto" if about_mailto else "regex"
-                        email_source = about_url.rsplit("/", 1)[-1] or "about"
-                        about_result = "emails_found"
-                if has_music_signals and emails:
-                    break
-                if not about_result:
-                    about_result = "no_email"
-            if not about_result:
-                about_result = "fetch_error" if not emails else "emails_found"
+                    self.fb_rows_skipped["challenge"] += 1
+                else:
+                    lower_html = (about_html or "").lower()
+                    if any(tok in lower_html for tok in ("checkpoint", "consent", "cookie", "privacy")):
+                        about_result = "checkpoint"
+                        self.fb_rows_skipped["checkpoint"] += 1
+                    else:
+                        not_found_phrases = ("page isn’t available", "page isn't available", "content isn't available", "not available right now")
+                        if any(p in lower_html for p in not_found_phrases):
+                            about_result = "not_found"
+                        else:
+                            about_soup = BeautifulSoup(about_html or "", "html.parser") if about_html else None
+                            if (not has_music_signals) and about_soup:
+                                if _night_fb_has_music_signals(about_soup, {"url": final_about}):
+                                    has_music_signals = True
+                                    about_result = "music_signals"
+                                    _log(self.logger, f"[Night FB] Music signals found on About tab {final_about}.")
+                            if not emails:
+                                about_emails, about_mailto = _extract_emails_from_html(about_html or "")
+                                if about_emails:
+                                    emails = about_emails
+                                    email_method = "mailto" if about_mailto else "regex"
+                                    email_source = contact_url.rsplit("/", 1)[-1] or "about"
+                                    about_result = "emails_found"
+                            if not about_result:
+                                about_result = "no_email"
+            elif need_about_fetch and not contact_url:
+                about_result = "no_contact_link"
 
         if about_result == "not_found" and not emails and not has_music_signals:
             _log(self.logger, f"[Night FB][PageUnavailable] {resolved_url} (about tab)")
@@ -4520,6 +4599,14 @@ class NightModeFacebookEnricher:
             # On rejection, strip any collected emails and cache the reject for this run.
             emails = []
             self._fb_mark_rejected(artist_name, resolved_url or candidate_url, reject_reason or outcome_hint)
+
+        if emails:
+            unique_emails = sorted(set(emails))
+            for email in unique_emails:
+                _log(self.logger, f"[FB Email] Found email: {email}")
+            self.fb_emails_found += len(unique_emails)
+        else:
+            _log(self.logger, "[FB Email] No email found")
 
         night_result = self._build_result(
             emails,
@@ -4892,6 +4979,7 @@ class NightModeFacebookEnricher:
         result = dict(original_row)
         result["FB_Status"] = result.get("FB_Status", "") or ""
         self._checkpoint_warned_this_row = False
+        self._page_budget_remaining = 2
 
         def _clean_val(value: str) -> str:
             try:
@@ -4920,13 +5008,16 @@ class NightModeFacebookEnricher:
         if self.protective_shutdown:
             result["FB_Status"] = result.get("FB_Status", "") or "skipped_checkpoint"
             result["FB_Reason"] = result.get("FB_Reason", "") or "checkpoint"
+            self.fb_rows_skipped["checkpoint"] += 1
             return result
 
         if self._skip_fb_due_to_checkpoint:
+            self.fb_rows_skipped["checkpoint"] += 1
             return self._mark_row_checkpoint(result)
 
         existing_email = _clean_val(result.get("Email", ""))
         if existing_email:
+            self.fb_rows_skipped["no_opportunity"] += 1
             if not result.get("FB_Status"):
                 result["FB_Status"] = "ok"
             return result
@@ -4958,6 +5049,7 @@ class NightModeFacebookEnricher:
 
         try:
             if not self._maybe_recover_or_skip_on_checkpoint():
+                self.fb_rows_skipped["checkpoint"] += 1
                 return self._mark_row_checkpoint(result)
             page_url = ""
             emails: List[str] = []
@@ -4967,6 +5059,7 @@ class NightModeFacebookEnricher:
                 result["FB_Status"] = "checkpoint_search_disabled"
                 result["FB_Reason"] = "checkpoint"
                 _log(self.logger, "[Night FB] search disabled due to checkpoint; skipping FB search.")
+                self.fb_rows_skipped["checkpoint"] += 1
                 return result
             if is_unearthed:
                 _log(self.logger, "[Night FB] Detected Unearthed row -> using legacy no-login FB scrape.")
@@ -4989,14 +5082,22 @@ class NightModeFacebookEnricher:
                     self._debug_fb_url_flow_skipped += 1
                 _log(self.logger, "[Night FB][PASS A] skipped (no explicit FB URL); proceeding to v2 search")
             else:
+                authed_session_available = self._has_authenticated_session()
+                if authed_session_available:
+                    _log(self.logger, f"[Night FB] Using explicit FB URLs with authenticated session: {fb_urls}")
+                else:
+                    _log(self.logger, f"[Night FB] Falling back to legacy anon probe for explicit FB URLs: {fb_urls}")
                 _log(self.logger, f"[Night FB] Using explicit FB URLs: {fb_urls}")
+                allow_anon_for_explicit = False if authed_session_available else allow_anon
                 for direct_url in fb_urls:
                     driver_kind = "session"
                     outcome_for_log = "fetch_error"
                     reason_for_log = ""
                     self._pass_a_bump("attempted")
                     try:
-                        candidate = self._scrape_single_fb_candidate(direct_url, result, artist_name, allow_anon=allow_anon)
+                        candidate = self._scrape_single_fb_candidate(
+                            direct_url, result, artist_name, allow_anon=allow_anon_for_explicit
+                        )
                     except Exception as exc:
                         candidate = None
                         driver_kind = "unknown"

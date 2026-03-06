@@ -1,6 +1,6 @@
 import pytest
 
-from source_scheduler import SourceDiversityScheduler, SourceResult, SourceSpec
+from source_scheduler import SourceDiversityScheduler, SourceResult, SourceSpec, promote_facebook_url
 
 
 def test_scheduler_interleaves_sources():
@@ -229,7 +229,7 @@ def test_opportunity_skips_facebook_when_url_missing():
 
 def test_fb_opportunity_true_when_social_link_contains_facebook():
     rows = [0]
-    row_data = {0: {"Artist Name": "Artist X", "Facebook_URL": "", "Social Link": "https://www.facebook.com/dizzydaysband"}}
+    row_data = {0: {"Artist Name": "Artist X", "facebook_url": "https://www.facebook.com/dizzydaysband", "Email": ""}}
     fb_calls = []
 
     fb_spec = SourceSpec(
@@ -241,6 +241,27 @@ def test_fb_opportunity_true_when_social_link_contains_facebook():
     )
     summary = SourceDiversityScheduler([fb_spec], row_label=str).run()
 
+    assert fb_calls == [0]
+    assert summary["FB"]["attempted"] == 1
+    assert summary["FB"]["skipped_opportunity"] == 0
+
+
+def test_fb_opportunity_after_promotion_from_social_link():
+    rows = [0]
+    row = {"Artist Name": "Artist X", "facebook_url": "", "Social Link": "https://www.facebook.com/dizzydaysband"}
+    promote_facebook_url(row)
+    fb_calls = []
+
+    fb_spec = SourceSpec(
+        name="FB",
+        rows=rows,
+        run_row=lambda idx: (fb_calls.append(idx) or SourceResult(attempted=True)),
+        is_available=lambda: (True, None),
+        row_getter=lambda idx: row,
+    )
+    summary = SourceDiversityScheduler([fb_spec], row_label=str).run()
+
+    assert row.get("facebook_url") == "https://www.facebook.com/dizzydaysband"
     assert fb_calls == [0]
     assert summary["FB"]["attempted"] == 1
     assert summary["FB"]["skipped_opportunity"] == 0
@@ -265,9 +286,28 @@ def test_fb_opportunity_false_when_social_link_non_facebook():
     assert summary["FB"]["skipped_opportunity"] == 1
 
 
+def test_fb_opportunity_false_when_email_present():
+    rows = [0]
+    row_data = {0: {"Artist Name": "Artist X", "facebook_url": "https://facebook.com/artist", "Email": "x@test.com"}}
+    fb_calls: list[int] = []
+
+    fb_spec = SourceSpec(
+        name="FB",
+        rows=rows,
+        run_row=lambda idx: (fb_calls.append(idx) or SourceResult(attempted=True)),
+        is_available=lambda: (True, None),
+        row_getter=lambda idx: row_data[idx],
+    )
+    summary = SourceDiversityScheduler([fb_spec], row_label=str).run()
+
+    assert not fb_calls
+    assert summary["FB"]["attempted"] == 0
+    assert summary["FB"]["skipped_opportunity"] == 1
+
+
 def test_fb_opportunity_true_when_external_links_contains_facebook():
     rows = [0]
-    row_data = {0: {"Artist Name": "Artist X", "External Links": "bandsite; http://m.facebook.com/dizzydays"}}
+    row_data = {0: {"Artist Name": "Artist X", "facebook_url": "http://m.facebook.com/dizzydays", "Email_All": ""}}
     fb_calls = []
 
     fb_spec = SourceSpec(

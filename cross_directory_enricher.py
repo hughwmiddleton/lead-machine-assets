@@ -24,7 +24,12 @@ import soundcloud_engine as sc_engine
 import pandas as pd
 import requests
 from bs4 import BeautifulSoup
-from source_scheduler import SourceDiversityScheduler, SourceResult, SourceSpec
+from source_scheduler import (
+    SourceDiversityScheduler,
+    SourceResult,
+    SourceSpec,
+    promote_facebook_url,
+)
 from html_fetcher import fetch_html, _detect_soft_block
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
@@ -61,6 +66,13 @@ from facebook_enrich import (
     fb_reason_code_split,
     fb_is_allowed_profile_candidate_url,
     _fb_extract_candidates_from_search_dom,
+)
+from night_mode_fb import (
+    _extract_emails_from_html,
+    _is_fb_login_or_security_url,
+    _looks_like_fb_warning_or_block,
+    _merge_email_all,
+    _normalise_fb_url,
 )
 
 # ---------------------------------------------------------------------------
@@ -1271,10 +1283,10 @@ def cell_to_str(value) -> str:
             return ""
 
 
-def _row_has_facebook_or_email(row) -> bool:
+def _row_has_email(row) -> bool:
     """
-    Return True if the row already has any Facebook URL or any email address.
-    Considers both seed CSV contents and any enrichment already applied.
+    Return True when the row already has any email populated.
+    Looks at Email and Email_All style fields and ignores Facebook URLs.
     """
     if row is None:
         return False
@@ -1289,14 +1301,125 @@ def _row_has_facebook_or_email(row) -> bool:
                 value = ""
         return (str(value) or "").strip()
 
-    social = _get("Social Link")
-    email = _get("Email")
-    candidates = []
-    if social:
-        candidates.extend([p.strip() for p in re.split(r"[,\s]+", social) if p.strip()])
-    has_fb = any("facebook.com" in url.lower() or "fb.me" in url.lower() for url in candidates)
-    has_email = bool(email)
-    return has_fb or has_email
+    email_primary = _get("Email")
+    email_all = _get("Email_All") or _get("Email All")
+    return bool(email_primary or email_all)
+
+
+def _canonicalize_fb_url(raw: str) -> str:
+    """Normalize and validate a Facebook URL candidate."""
+    if not raw:
+        return ""
+    cleaned = normalize_external_url(cell_to_str(raw))
+    normalised = _normalise_fb_url(cleaned or raw)
+    if normalised and "facebook.com" in normalised.lower():
+        return normalised
+    return ""
+
+
+def _get_canonical_fb_url(row) -> str:
+    """
+    Return the preferred Facebook URL for a row.
+    Preference order: facebook_url -> Facebook_URL -> Facebook URL.
+    """
+    if row is None:
+        return ""
+
+    def _get(key: str) -> str:
+        try:
+            value = row.get(key, "")
+        except AttributeError:
+            try:
+                value = row[key]
+            except Exception:
+                value = ""
+        return (str(value) or "").strip()
+
+    for key in ("facebook_url", "Facebook_URL", "Facebook URL"):
+        raw = _get(key)
+        normalised = _canonicalize_fb_url(raw)
+        if normalised:
+            return normalised
+    promoted = promote_facebook_url(row, set_row=False)
+    return _canonicalize_fb_url(promoted)
+
+
+def _row_has_facebook_or_email(row) -> bool:
+    """
+    Legacy helper retained for compatibility.
+    Now only considers existing emails so rows with prefilled Facebook URLs
+    are still eligible for FB email extraction.
+    """
+    return _row_has_email(row)
+
+
+def _extract_fb_emails_bounded(fb_driver, fb_url: str, log_fn=None) -> tuple[list[str], str, str]:
+    """
+    Visit at most two Facebook pages (main + about/info/contact) to extract emails.
+    Returns (emails, resolved_url, status_reason).
+    """
+    emails: list[str] = []
+    resolved_url = fb_url or ""
+    last_reason = ""
+    if not fb_driver or not fb_url:
+        return (emails, resolved_url, "no_fb_url")
+
+    budget = 2
+    visited: set[str] = set()
+
+    def _log(msg: str) -> None:
+        if log_fn:
+            try:
+                log_fn(msg)
+            except Exception:
+                pass
+
+    def _fetch(target: str) -> tuple[list[str], str]:
+        nonlocal budget, last_reason, resolved_url
+        if budget <= 0 or not target:
+            return ([], resolved_url)
+        target_norm = _normalise_fb_url(normalize_external_url(target))
+        if not target_norm or target_norm in visited:
+            return ([], resolved_url)
+        visited.add(target_norm)
+        budget -= 1
+        try:
+            fb_driver.get(target_norm)
+            current_url = getattr(fb_driver, "current_url", "") or target_norm
+            resolved_url = _normalise_fb_url(normalize_external_url(current_url) or current_url) or current_url
+            if _is_fb_login_or_security_url(current_url):
+                last_reason = "login_wall"
+                _log("[FB Enrich] Facebook login/checkpoint detected; skipping.")
+                return ([], resolved_url)
+            html = getattr(fb_driver, "page_source", "") or ""
+            warning = _looks_like_fb_warning_or_block(html, current_url)
+            if warning:
+                last_reason = warning
+                _log(f"[FB Enrich] Warning/block page detected ({warning}); skipping row.")
+                return ([], resolved_url)
+            found, _ = _extract_emails_from_html(html)
+            return (found, resolved_url)
+        except Exception as exc:  # pragma: no cover - defensive
+            last_reason = "fetch_error"
+            _log(f"[FB Enrich] Error fetching FB page '{target_norm}': {exc}")
+            return ([], target_norm)
+
+    main_emails, resolved = _fetch(fb_url)
+    if main_emails:
+        return (main_emails, resolved, last_reason)
+
+    parsed = urllib.parse.urlparse(fb_url)
+    base_path = (parsed.path or "").rstrip("/") or "/"
+    about_candidates = [
+        urllib.parse.urlunparse(parsed._replace(path=base_path + suffix, query="", fragment=""))
+        for suffix in ("/about", "/info", "/contact")
+    ]
+    for about_url in about_candidates:
+        more_emails, resolved = _fetch(about_url)
+        if more_emails:
+            return (more_emails, resolved, last_reason)
+
+    return ([], resolved or fb_url, last_reason)
 
 
 def _safe_log(logger, message: str, *args) -> None:
@@ -2274,26 +2397,30 @@ def enrich_row_with_facebook(row: dict, logger, fb_client) -> None:
     if not artist_name:
         _safe_log(logger, "[FB Enrich] Skipping row with empty artist name: %r", row)
         return
-    existing_links_raw = [
-        cell_to_str(row.get("Social Link")),
-        cell_to_str(row.get("External Links")),
-        cell_to_str(row.get("Facebook_URL")),
-    ]
-    if any("facebook.com" in value.lower() for value in existing_links_raw if value):
-        _safe_log(logger, "[FB Enrich] Row already has Facebook link, skipping: %s", artist_name)
+    has_email = _row_has_email(row)
+    existing_fb_url = _get_canonical_fb_url(row)
+    if has_email:
+        _safe_log(logger, "[FB Enrich] Row already has email, skipping Facebook discovery: %s", artist_name)
+        return
+    if existing_fb_url:
+        # Already have a FB URL; normalise + promote but do not skip downstream email extraction.
+        if "facebook_url" in row:
+            row["facebook_url"] = existing_fb_url
+        if "Facebook_URL" in row:
+            row["Facebook_URL"] = existing_fb_url
+        if "Facebook URL" in row:
+            row["Facebook URL"] = existing_fb_url
+        if not cell_to_str(row.get("Social Link")):
+            row["Social Link"] = _append_link(row.get("Social Link", ""), existing_fb_url)
+        if "External Links" in row and not cell_to_str(row.get("External Links")):
+            row["External Links"] = _append_link(row.get("External Links", ""), existing_fb_url)
         return
     location = cell_to_str(row.get("Location") or row.get("location"))
     fb_url = facebook_find_best_page(artist_name, location, fb_client, logger)
     if not fb_url:
         return
-    fb_url = cell_to_str(fb_url)
-    if not fb_url:
-        return
-    fb_url = fb_url.split("?", 1)[0].rstrip("/")
-    normalised = _normalise_url(fb_url)
-    if normalised and "facebook.com" in normalised.lower():
-        fb_url = normalised
-    if "facebook.com" not in fb_url.lower():
+    fb_url = _normalise_fb_url(normalize_external_url(cell_to_str(fb_url)))
+    if not fb_url or "facebook.com" not in fb_url.lower():
         return
     # Only back-fill Social Link if empty; never overwrite existing seed value.
     if not cell_to_str(row.get("Social Link")):
@@ -3637,6 +3764,62 @@ def dedupe_pre_enrich(df: pd.DataFrame) -> pd.DataFrame:
     return deduped_df
 
 
+EMAIL_COLUMNS_REQUIRED: Tuple[str, ...] = ("Email", "Email_All")
+EMAIL_COLUMNS_PROVENANCE: Tuple[str, ...] = (
+    "Email_Type",
+    "Email_Source_URL",
+    "Email_Source_Type",
+    "Email_Extract_Method",
+)
+
+
+def _ensure_email_columns(df: Optional[pd.DataFrame]) -> Optional[pd.DataFrame]:
+    """
+    Guarantee email columns exist with string dtype to prevent KeyError during enrichment.
+    Operates in-place and returns the same dataframe for convenience.
+    """
+    if df is None:
+        return df
+    for column in EMAIL_COLUMNS_REQUIRED + EMAIL_COLUMNS_PROVENANCE:
+        if column not in df.columns:
+            df[column] = ""
+        else:
+            df[column] = df[column].fillna("").astype(str)
+    return df
+
+
+def _apply_fb_promotion_df(df: pd.DataFrame, log_fn: Optional[Callable[[str], None]] = None) -> pd.DataFrame:
+    """Promote Facebook URLs from generic link fields into facebook_url/Facebook_URL."""
+    if df is None or df.empty:
+        return df
+    if "facebook_url" not in df.columns:
+        df["facebook_url"] = ""
+    if "Facebook_URL" not in df.columns:
+        df["Facebook_URL"] = ""
+    if "Facebook URL" not in df.columns:
+        df["Facebook URL"] = ""
+    populated = 0
+    for idx in df.index:
+        new_url = promote_facebook_url(df.loc[idx], set_row=False)
+        if not new_url:
+            continue
+        wrote = False
+        if not _coerce_directory_value(df.loc[idx, "facebook_url"]):
+            df.loc[idx, "facebook_url"] = new_url
+            wrote = True
+        if "Facebook_URL" in df.columns and not _coerce_directory_value(df.loc[idx, "Facebook_URL"]):
+            df.loc[idx, "Facebook_URL"] = new_url
+            wrote = True
+        elif "Facebook URL" in df.columns and not _coerce_directory_value(df.loc[idx, "Facebook URL"]):
+            df.loc[idx, "Facebook URL"] = new_url
+            wrote = True
+        if wrote:
+            populated += 1
+    if log_fn and populated:
+        _safe_log(log_fn, "[FB Promotion] facebook_url populated for %s rows", populated)
+    return df
+
+
 def _dedupe_rows(rows: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
     deduped: List[Dict[str, Any]] = []
     seen_ids: Set[int] = set()
@@ -3876,6 +4059,11 @@ class CrossDirectoryEnricherWorker(QThread):
             dedupe_message = getattr(dedupe_pre_enrich, "_last_log_message", "")
             if dedupe_message:
                 self.log_message.emit(dedupe_message)
+            seed_df = _ensure_email_columns(seed_df)
+            self.log_message.emit(
+                "[Schema] ensured email columns: Email, Email_All, Email_Type, Email_Source_URL, Email_Source_Type, Email_Extract_Method"
+            )
+            seed_df = _apply_fb_promotion_df(seed_df, log_fn=self.log_message.emit)
             total = len(seed_df.index)
             self.total_rows = total
             if getattr(self, "night_mode", False):
@@ -4055,7 +4243,7 @@ class CrossDirectoryEnricherWorker(QThread):
         Does NOT call _init_row_enrichment_state — callers must do that.
         """
         row = seed_df.loc[row_idx]
-        had_fb_or_email_from_seed = _row_has_facebook_or_email(row)
+        had_email_from_seed = _row_has_email(row)
         artist = _clean_cell(row.get("Artist Name"))
         key = normalise_artist_name(artist)
         if not key:
@@ -4084,7 +4272,7 @@ class CrossDirectoryEnricherWorker(QThread):
             "track_key": track_key,
             "spotify_id": spotify_id,
             "seed_links_by_source": seed_links_by_source,
-            "had_fb_or_email_from_seed": had_fb_or_email_from_seed,
+            "had_email_from_seed": had_email_from_seed,
             "position": position,
             "total": total,
         }
@@ -4231,81 +4419,65 @@ class CrossDirectoryEnricherWorker(QThread):
         artist = ctx["artist"]
         position = ctx["position"]
         total = ctx["total"]
-        had_fb_or_email_from_seed = ctx["had_fb_or_email_from_seed"]
+        had_email_from_seed = ctx.get("had_email_from_seed") or ctx.get("had_fb_or_email_from_seed")
         fb_attempted = False
         fb_matched = False
         if not self._platform_attempt_allowed("facebook", artist, "Facebook Enrich"):
             fb_attempted = False
         else:
             fb_attempted = True
-            has_fb_or_email_after_directories = _row_has_facebook_or_email(seed_df.loc[row_idx])
-            if had_fb_or_email_from_seed or has_fb_or_email_after_directories:
+            has_email_after_directories = _row_has_email(seed_df.loc[row_idx])
+            if had_email_from_seed or has_email_after_directories:
                 self.log_message.emit(
-                    f"[FB Enrich] Skipping Facebook enrichment for '{artist}' (already has Facebook/email from seed or directory enrichment)."
+                    f"[FB Enrich] Skipping Facebook enrichment for '{artist}' (already has email from seed or directory enrichment)."
                 )
             else:
-                current_social_links = [
-                    cell_to_str(seed_df.at[row_idx, "Social Link"]),
-                    cell_to_str(seed_df.at[row_idx, "External Links"]),
-                    cell_to_str(seed_df.at[row_idx, "Facebook_URL"]),
-                ]
-                current_email = cell_to_str(seed_df.at[row_idx, "Email"])
-                has_fb_link = any(
-                    isinstance(link, str) and "facebook.com" in link.lower()
-                    for link in current_social_links
-                    if link
-                )
-                has_email = bool((current_email or "").strip())
-                if has_fb_link or has_email:
+                for col in ("facebook_url", "Facebook_URL", "Facebook URL"):
+                    if col not in seed_df.columns:
+                        seed_df[col] = ""
+                row = seed_df.loc[row_idx]
+                promoted_fb = promote_facebook_url(row, set_row=False)
+                promoted_norm = _canonicalize_fb_url(promoted_fb)
+                if promoted_norm:
+                    if not cell_to_str(seed_df.at[row_idx, "facebook_url"]):
+                        seed_df.at[row_idx, "facebook_url"] = promoted_norm
+                    if "Facebook_URL" in seed_df.columns and not cell_to_str(seed_df.at[row_idx, "Facebook_URL"]):
+                        seed_df.at[row_idx, "Facebook_URL"] = promoted_norm
+                    elif "Facebook URL" in seed_df.columns and not cell_to_str(seed_df.at[row_idx, "Facebook URL"]):
+                        seed_df.at[row_idx, "Facebook URL"] = promoted_norm
+                fb_url_val = _get_canonical_fb_url(seed_df.loc[row_idx])
+                existing_fb_links: List[str] = []
+                if fb_url_val:
+                    parts = [part.strip() for part in str(fb_url_val).split(",") if part.strip()]
+                    for part in parts:
+                        if "facebook.com" in part.lower():
+                            normalised = _normalise_fb_url(normalize_external_url(part))
+                            if normalised:
+                                existing_fb_links.append(normalised)
+
+                if not existing_fb_links:
                     self.log_message.emit(
-                        f"[FB Enrich] Skipping Facebook enrichment for '{artist}' (already has Facebook/email from directory enrichment)."
+                        f"[FB Enrich] Skipping '{artist}' – no explicit Facebook URL present."
                     )
+                    if "FB_Status" not in seed_df.columns:
+                        seed_df["FB_Status"] = ""
+                    seed_df.at[row_idx, "FB_Status"] = seed_df.at[row_idx, "FB_Status"] or "no_fb_url"
                 else:
-                    row = seed_df.loc[row_idx]
-                    social_link_val = cell_to_str(row.get("Social Link", ""))
-                    external_link_val = cell_to_str(row.get("External Links", ""))
-                    fb_url_val = cell_to_str(row.get("Facebook_URL", ""))
-                    existing_fb_links: List[str] = []
-                    for blob in (social_link_val, external_link_val, fb_url_val):
-                        if not blob:
-                            continue
-                        parts = [part.strip() for part in blob.split(",") if part.strip()]
-                        for part in parts:
-                            if "facebook.com" in part.lower():
-                                existing_fb_links.append(part)
                     fb_emails: List[str] = []
                     page_url_used = ""
+                    fb_status_reason = ""
+
                     try:
-                        if existing_fb_links:
-                            fb_candidates = (
-                                [existing_fb_links]
-                                if isinstance(existing_fb_links, str)
-                                else list(existing_fb_links)
+                        for candidate in existing_fb_links:
+                            fb_emails, resolved_url, fb_status_reason = _extract_fb_emails_bounded(
+                                fb_driver, candidate, log_fn=self.log_message.emit
                             )
-                            for candidate in fb_candidates:
-                                candidate_norm = normalize_external_url(candidate)
-                                found = fb_scrape_emails_from_page(
-                                    fb_driver, candidate_norm, log_fn=self.log_message.emit
-                                )
-                                try:
-                                    current_url = (fb_driver.current_url or "").lower()
-                                    if "facebook.com/login" in current_url:
-                                        self.log_message.emit(
-                                            "[FB Enrich] Facebook login wall detected for this page; enrichment skipped (not logged in)."
-                                        )
-                                        found = []
-                                except Exception:
-                                    pass
-                                if found:
-                                    fb_emails = found
-                                    page_url_used = candidate_norm
-                                    break
-                        else:
-                            # No explicit FB URL; legacy FB Enrich pass does nothing.
-                            self.log_message.emit(
-                                f"[FB Enrich] Skipping '{artist}' – no explicit Facebook URL present."
-                            )
-                    except Exception as exc:
+                            page_url_used = resolved_url or candidate
+                            if fb_emails:
+                                break
+                            if fb_status_reason in {"login_wall", "warning_interstitial", "checkpoint"}:
+                                break
+                    except Exception as exc:  # pragma: no cover - defensive
                         self.log_message.emit(
                             f"[FB Enrich] Error enriching row {position}/{total} ({artist}): {exc}"
                         )
@@ -4323,10 +4495,11 @@ class CrossDirectoryEnricherWorker(QThread):
                             current_email = cell_to_str(seed_df.at[row_idx, "Email"])
                             if not current_email:
                                 seed_df.at[row_idx, "Email"] = fb_emails[0]
-                            if not existing_fb_links and page_url_used:
-                                if not seed_df.at[row_idx, "Social Link"]:
-                                    seed_df.at[row_idx, "Social Link"] = page_url_used
-                            if page_url_used and not seed_df.at[row_idx, "Facebook_URL"]:
+                            if page_url_used and not cell_to_str(seed_df.at[row_idx, "Social Link"]):
+                                seed_df.at[row_idx, "Social Link"] = page_url_used
+                            if page_url_used and "facebook_url" in seed_df.columns and not cell_to_str(seed_df.at[row_idx, "facebook_url"]):
+                                seed_df.at[row_idx, "facebook_url"] = page_url_used
+                            if page_url_used and not cell_to_str(seed_df.at[row_idx, "Facebook_URL"]):
                                 seed_df.at[row_idx, "Facebook_URL"] = page_url_used
                             seed_df.at[row_idx, "Email_All"] = _merge_email_all(
                                 seed_df.at[row_idx, "Email_All"], fb_emails
@@ -4338,18 +4511,20 @@ class CrossDirectoryEnricherWorker(QThread):
                                 seed_df.at[row_idx, "Email_Source_Type"] = "facebook_enrich"
                             if not cell_to_str(seed_df.at[row_idx, "Email_Extract_Method"]):
                                 seed_df.at[row_idx, "Email_Extract_Method"] = "regex"
-                            seed_df.at[row_idx, "__fb_emails_applied"] = ";".join(sorted({e.strip().lower() for e in fb_emails if e}))
+                            seed_df.at[row_idx, "__fb_emails_applied"] = ";".join(
+                                sorted({e.strip().lower() for e in fb_emails if e})
+                            )
                             seed_df.at[row_idx, "FB_Status"] = seed_df.at[row_idx, "FB_Status"] or "found_email"
                             fb_matched = True
-                    elif existing_fb_links:
-                        seed_df.at[row_idx, "FB_Status"] = seed_df.at[row_idx, "FB_Status"] or "no_email_on_page"
                     else:
-                        seed_df.at[row_idx, "FB_Status"] = seed_df.at[row_idx, "FB_Status"] or "no_fb_url"
+                        fallback_status = fb_status_reason or "no_email_on_page"
+                        seed_df.at[row_idx, "FB_Status"] = seed_df.at[row_idx, "FB_Status"] or fallback_status
         if fb_attempted and not fb_matched:
             self._set_platform_state("facebook", "skipped")
         elif fb_matched:
             self._set_platform_state("facebook", "matched")
         return fb_matched
+
 
     # ------------------------------------------------------------------
     # Source-phased orchestration (ENRICHMENT_MODE=source_phased)
@@ -4373,6 +4548,8 @@ class CrossDirectoryEnricherWorker(QThread):
         # Phase 2: General live lookup (BC + LF; SC mostly skipped since Phase 1 populated it)
         if self.enable_live_search:
             self._phase_live_lookup(seed_df, total)
+        # Refresh Facebook promotion after live/directory phases so newly discovered FB links are usable.
+        seed_df = _apply_fb_promotion_df(seed_df, log_fn=self.log_message.emit)
         # Phase 3: Facebook
         if ENABLE_FACEBOOK_ENRICHMENT and fb_driver:
             self._phase_facebook(seed_df, fb_driver, total)
@@ -4380,6 +4557,7 @@ class CrossDirectoryEnricherWorker(QThread):
     def _run_interleaved_sources(self, seed_df, fb_driver, total):
         """Interleave SC, LF (live lookup), and FB across rows to avoid bursts."""
 
+        seed_df = _apply_fb_promotion_df(seed_df, log_fn=self.log_message.emit)
         rows = list(seed_df.index)
         position_by_row = {row_idx: pos for pos, row_idx in enumerate(seed_df.index, start=1)}
 

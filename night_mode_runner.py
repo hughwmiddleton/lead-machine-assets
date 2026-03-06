@@ -34,6 +34,7 @@ from pipeline_runner import (
     run_facebook_global_pass_nightmode,
     run_master_enrichment,
 )
+from source_scheduler import promote_facebook_url
 from soundcloud_metadata_enricher import enrich_soundcloud_metadata
 
 def _ensure_string_columns(df: pd.DataFrame, cols: List[str]) -> None:
@@ -43,6 +44,38 @@ def _ensure_string_columns(df: pd.DataFrame, cols: List[str]) -> None:
                 df[col] = df[col].astype("string")
             except Exception:
                 df[col] = df[col].astype(object)
+
+
+def _promote_fb_urls_df(df: pd.DataFrame, logger: Optional[Callable[[str], None]] = None) -> pd.DataFrame:
+    """Promote Facebook links from generic fields into facebook_url/Facebook_URL."""
+    if df is None or df.empty:
+        return df
+    if "facebook_url" not in df.columns:
+        df["facebook_url"] = ""
+    if "Facebook_URL" not in df.columns:
+        df["Facebook_URL"] = ""
+    if "Facebook URL" not in df.columns:
+        df["Facebook URL"] = ""
+    populated = 0
+    for idx in df.index:
+        new_url = promote_facebook_url(df.loc[idx], set_row=False)
+        if not new_url:
+            continue
+        wrote = False
+        if not str(df.loc[idx, "facebook_url"] or "").strip():
+            df.loc[idx, "facebook_url"] = new_url
+            wrote = True
+        if "Facebook_URL" in df.columns and not str(df.loc[idx, "Facebook_URL"] or "").strip():
+            df.loc[idx, "Facebook_URL"] = new_url
+            wrote = True
+        elif "Facebook URL" in df.columns and not str(df.loc[idx, "Facebook URL"] or "").strip():
+            df.loc[idx, "Facebook URL"] = new_url
+            wrote = True
+        if wrote:
+            populated += 1
+    if logger and populated:
+        logger(f"[FB Promotion] facebook_url populated for {populated} rows")
+    return df
 
 DEFAULT_EXPORT_MODE = "both"
 MAX_CONSECUTIVE_ERRORS = 10
@@ -720,6 +753,7 @@ def _merge_master(run_dir: str, job_states: List[Dict[str, Any]], logger: loggin
             combined[col] = combined[col].fillna("").astype(str).apply(_strip_excluded_urls)
 
     combined = _coalesce_emails(combined)
+    combined = _promote_fb_urls_df(combined, logger=logger.info if logger else None)
     # Integrity guard: Email must have provenance
     if "Needs_Review" not in combined.columns:
         combined["Needs_Review"] = ""
@@ -806,6 +840,7 @@ def _merge_raw_master(
         if col in combined.columns:
             combined[col] = combined[col].fillna("").astype(str).apply(_strip_excluded_urls)
     combined = _coalesce_emails(combined)
+    combined = _promote_fb_urls_df(combined, logger=logger.info if logger else None)
     # Integrity guard: Email must have provenance
     if "Needs_Review" not in combined.columns:
         combined["Needs_Review"] = ""

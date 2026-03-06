@@ -10,7 +10,146 @@ from __future__ import annotations
 import random
 from collections import deque
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, MutableMapping, Optional, Sequence, Tuple
+import re
+import urllib.parse
+
+# ---------------------------------------------------------------------------
+# Facebook URL promotion helpers
+# ---------------------------------------------------------------------------
+
+_FB_ALLOWED_HOSTS = {"facebook.com", "www.facebook.com", "m.facebook.com"}
+_FB_REJECT_PATH_PREFIXES = (
+    "/share",
+    "/sharer.php",
+    "/dialog/share",
+    "/plugins/",
+    "/story.php",
+    "/photo.php",
+    "/permalink.php",
+    "/events",
+    "/groups",
+    "/watch",
+    "/reel",
+)
+
+
+def _normalize_fb_url(raw: str) -> str:
+    """Normalize a Facebook URL to https://www.facebook.com/<path>.
+
+    - Accept facebook.com, www.facebook.com, m.facebook.com
+    - Remove query/fragment noise
+    - Reject obvious share/plugin/watch/group/event endpoints
+    - Reject profile.php?id=... to avoid noisy people-profile links by default
+    """
+    if not raw:
+        return ""
+    candidate = raw.strip()
+    if candidate.startswith("//"):
+        candidate = "https:" + candidate
+    if not candidate.startswith("http"):
+        candidate = "https://" + candidate
+    try:
+        parsed = urllib.parse.urlparse(candidate)
+    except Exception:
+        return ""
+
+    host = parsed.netloc.lower()
+    if host not in _FB_ALLOWED_HOSTS:
+        return ""
+    path = parsed.path or ""
+    if not path or path == "/":
+        return ""
+    lowered_path = path.lower()
+    if lowered_path.startswith(_FB_REJECT_PATH_PREFIXES):
+        return ""
+    if lowered_path == "/profile.php":
+        # Default to reject profile.php?id=... to avoid noisy personal profiles.
+        return ""
+
+    # Strip query/fragment tracking noise.
+    clean_path = path.rstrip("/")
+    return urllib.parse.urlunparse(("https", "www.facebook.com", clean_path, "", "", ""))
+
+
+def extract_facebook_url_from_text(text: str) -> Optional[str]:
+    """Return the first canonical Facebook page/profile URL found in free text."""
+    if not text:
+        return None
+    parts = re.split(r"[|,\s]+", str(text))
+    for part in parts:
+        if not part:
+            continue
+        url = _normalize_fb_url(part)
+        if url:
+            return url
+    return None
+
+
+def promote_facebook_url(row: MutableMapping[str, Any], *, set_row: bool = True) -> Optional[str]:
+    """
+    Promote any Facebook link found in generic link fields into canonical facebook_url.
+
+    - Only sets facebook_url/Facebook_URL when currently missing/empty.
+    - Does not overwrite an existing value.
+    - Searches Social Link, External Links, Website/Websites fields.
+    - set_row=False avoids mutating pandas Series slices (prevents SettingWithCopyWarning);
+      callers can write via df.loc instead.
+    """
+    if row is None:
+        return None
+
+    def _get(keys: Sequence[str]) -> str:
+        for key in keys:
+            try:
+                val = row.get(key) if isinstance(row, dict) or hasattr(row, "get") else getattr(row, key, None)  # type: ignore[attr-defined]
+            except Exception:
+                val = None
+            if val:
+                try:
+                    import pandas as _pd  # type: ignore
+
+                    if _pd.isna(val):
+                        continue
+                except Exception:
+                    pass
+                text_val = str(val).strip()
+                if text_val:
+                    return text_val
+        return ""
+
+    existing = _get(["facebook_url", "Facebook_URL", "Facebook URL"])
+    if existing:
+        return None
+
+    candidate_fields = ("Social Link", "External Links", "Website", "Websites", "Website URL")
+    for field in candidate_fields:
+        raw = _get((field,))
+        url = extract_facebook_url_from_text(raw)
+        if url:
+            if not set_row:
+                return url
+            try:
+                import pandas as _pd  # type: ignore
+
+                if isinstance(row, _pd.Series):
+                    # Avoid SettingWithCopy; caller should assign via df.loc/df.at.
+                    return url
+            except Exception:
+                pass
+            try:
+                if hasattr(row, "__setitem__"):
+                    if not _get(["facebook_url"]):
+                        row["facebook_url"] = url  # type: ignore[index]
+                    if "Facebook_URL" in row and not _get(["Facebook_URL"]):  # type: ignore[operator]
+                        row["Facebook_URL"] = url  # type: ignore[index]
+                    elif "Facebook URL" in row and not _get(["Facebook URL"]):  # type: ignore[operator]
+                        row["Facebook URL"] = url  # type: ignore[index]
+            except Exception:
+                # Silent failure — return the url so callers can set it.
+                pass
+            return url
+    return None
 
 
 def _row_source_opportunity(row: Any, source_name: str) -> bool:
@@ -64,26 +203,13 @@ def _row_source_opportunity(row: Any, source_name: str) -> bool:
 
     if name in {"FB", "FACEBOOK"}:
         fb_url = _get_value(["facebook_url", "Facebook_URL", "Facebook URL", "FB_URL", "facebook"])
-        if _has_text(fb_url):
-            return True
-
-        social_text = _get_value([
-            "Social Link",
-            "social_link",
-            "social",
-            "links",
-            "External Links",
-            "external_links",
-        ])
-        if _has_text(social_text):
+        if not _has_text(fb_url):
             try:
-                text = str(social_text).lower()
-                if any(domain in text for domain in ("facebook.com", "m.facebook.com", "fb.com")):
-                    return True
+                fb_url = promote_facebook_url(row, set_row=False)
             except Exception:
-                pass
-
-        return False
+                fb_url = fb_url
+        email = _get_value(["Email", "Email_All", "email"])
+        return bool(_has_text(fb_url) and not _has_text(email))
 
     # Unknown sources fall back to existing behaviour.
     return True
