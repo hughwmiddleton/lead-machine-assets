@@ -42,6 +42,7 @@ from PyQt5.QtCore import QThread, pyqtSignal
 from webdriver_manager.chrome import ChromeDriverManager
 from urllib.parse import urlparse, parse_qs, unquote
 from unidecode import unidecode
+from email_normalizer import normalize_email_value, normalize_obfuscated_email_patterns
 from email_provenance import _set_email_with_provenance
 
 from facebook_enrich import (
@@ -758,6 +759,29 @@ SOURCE_BASE_NAMES = {
 }
 
 MAX_WEBSITES = 2
+WEBSITE_EMAIL_MAX_PAGES = max(1, int(os.getenv("WEBSITE_EMAIL_MAX_PAGES", "3") or 3))
+WEBSITE_EMAIL_TIMEOUT = float(os.getenv("WEBSITE_EMAIL_TIMEOUT", "8") or 8)
+WEBSITE_EMAIL_MAX_BYTES = max(1024, int(os.getenv("WEBSITE_EMAIL_MAX_BYTES", str(1_500_000)) or 1_500_000))
+WEBSITE_EMAIL_KEYWORDS = (
+    "contact",
+    "about",
+    "booking",
+    "bookings",
+    "press",
+    "management",
+    "manager",
+    "mgmt",
+)
+WEBSITE_EMAIL_PATH_KEYWORDS = (
+    "/contact",
+    "/about",
+    "/book",
+    "/booking",
+    "/press",
+    "/management",
+    "/team",
+)
+WEBSITE_EMAIL_JUNK_KEYWORDS = ("login", "logout", "cart", "privacy", "terms")
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MULTI_VALUE_SEPARATOR = ", "
 FACEBOOK_HELPERS_PATH = os.path.join(BASE_DIR, "Lead Machine (Final Update 5).py")
@@ -1069,6 +1093,16 @@ class DirectoryIndex:
 
     def unique_artist_count(self) -> int:
         return len(self.rows_by_artist)
+
+
+@dataclass
+class WebsiteFetchResult:
+    url: str
+    final_url: str
+    status: Optional[int]
+    content_type: str
+    html: str
+    is_html: bool
 
 
 # ---------------------------------------------------------------------------
@@ -3123,6 +3157,172 @@ def _extract_directory_fields(
     return socials, websites, emails, link_hubs
 
 
+def _website_domains_match(left_url: str, right_url: str) -> bool:
+    left_domain = extract_domain(left_url)
+    right_domain = extract_domain(right_url)
+    return bool(left_domain and right_domain and left_domain == right_domain)
+
+
+def _mailto_emails_from_soup(soup: Optional[BeautifulSoup]) -> Tuple[List[str], bool]:
+    if soup is None:
+        return ([], False)
+    emails: List[str] = []
+    used_mailto = False
+    for anchor in soup.select('a[href^="mailto:"]'):
+        href = cell_to_str(anchor.get("href"))
+        if not href:
+            continue
+        addr = href.split("mailto:", 1)[-1].split("?", 1)[0].strip()
+        cleaned = normalize_email_value(addr)
+        if cleaned and cleaned not in emails:
+            emails.append(cleaned)
+            used_mailto = True
+    return (emails, used_mailto)
+
+
+def _extract_website_emails_from_html(html: str) -> Tuple[List[str], bool]:
+    if not html:
+        return ([], False)
+    try:
+        emails, used_mailto = _extract_emails_from_html(html)
+    except Exception:
+        try:
+            soup = BeautifulSoup(html, "html.parser")
+        except Exception:
+            soup = None
+        emails, used_mailto = _mailto_emails_from_soup(soup)
+    return (emails, used_mailto)
+
+
+def _discover_website_contact_candidates(base_url: str, html: str) -> List[str]:
+    if not base_url or not html:
+        return []
+    try:
+        soup = BeautifulSoup(html, "html.parser")
+    except Exception:
+        return []
+
+    candidates: List[Tuple[int, int, str]] = []
+    seen: Set[str] = set()
+    base_norm = _normalise_url(base_url) or base_url
+
+    for anchor in soup.find_all("a", href=True):
+        href_raw = cell_to_str(anchor.get("href"))
+        if not href_raw:
+            continue
+        href_lower = href_raw.lower()
+        if href_lower.startswith(("mailto:", "tel:", "javascript:", "#")):
+            continue
+        absolute = _normalise_url(urllib.parse.urljoin(base_norm, href_raw))
+        if not absolute or absolute == base_norm:
+            continue
+        if not _website_domains_match(base_norm, absolute):
+            continue
+        parsed = urllib.parse.urlparse(absolute)
+        query_lower = (parsed.query or "").lower()
+        if len(query_lower) > 80 or "utm_" in query_lower or "fbclid=" in query_lower or "gclid=" in query_lower:
+            continue
+
+        text_lower = " ".join(anchor.get_text(" ", strip=True).lower().split())
+        path_lower = parsed.path.lower()
+        score = 0
+        strong_match = False
+        for keyword in WEBSITE_EMAIL_KEYWORDS:
+            if keyword in text_lower:
+                score += 6
+                strong_match = True
+            if keyword in href_lower:
+                score += 5
+                strong_match = True
+        for keyword in WEBSITE_EMAIL_PATH_KEYWORDS:
+            if keyword in path_lower or keyword in href_lower:
+                score += 7
+                strong_match = True
+        if not strong_match:
+            continue
+        junk_hit = any(keyword in text_lower or keyword in path_lower for keyword in WEBSITE_EMAIL_JUNK_KEYWORDS)
+        if junk_hit and score < 10:
+            continue
+        if absolute in seen:
+            continue
+        seen.add(absolute)
+        path_length = len(parsed.path or "/")
+        candidates.append((-score, path_length, absolute))
+
+    candidates.sort()
+    return [url for _, _, url in candidates]
+
+
+def _fetch_website_html_bounded(
+    session: requests.Session,
+    url: str,
+    *,
+    timeout_s: float = WEBSITE_EMAIL_TIMEOUT,
+    max_bytes: int = WEBSITE_EMAIL_MAX_BYTES,
+) -> WebsiteFetchResult:
+    final_url = url
+    status = None
+    content_type = ""
+    try:
+        response = session.get(url, timeout=timeout_s, allow_redirects=True, stream=True)
+        status = getattr(response, "status_code", None)
+        final_url = getattr(response, "url", url) or url
+        content_type = cell_to_str(response.headers.get("Content-Type", "")).lower()
+        is_html = "html" in content_type or "xhtml" in content_type
+        if not is_html:
+            try:
+                response.close()
+            except Exception:
+                pass
+            return WebsiteFetchResult(
+                url=url,
+                final_url=final_url,
+                status=status,
+                content_type=content_type,
+                html="",
+                is_html=False,
+            )
+        chunks: List[bytes] = []
+        bytes_read = 0
+        for chunk in response.iter_content(chunk_size=16_384, decode_unicode=False):
+            if not chunk:
+                continue
+            bytes_read += len(chunk)
+            if bytes_read > max_bytes:
+                try:
+                    response.close()
+                except Exception:
+                    pass
+                return WebsiteFetchResult(
+                    url=url,
+                    final_url=final_url,
+                    status=status,
+                    content_type=content_type,
+                    html="",
+                    is_html=False,
+                )
+            chunks.append(chunk)
+        encoding = getattr(response, "encoding", None) or "utf-8"
+        html = b"".join(chunks).decode(encoding, errors="replace")
+        return WebsiteFetchResult(
+            url=url,
+            final_url=final_url,
+            status=status,
+            content_type=content_type,
+            html=html,
+            is_html=True,
+        )
+    except Exception:
+        return WebsiteFetchResult(
+            url=url,
+            final_url=final_url,
+            status=status,
+            content_type=content_type,
+            html="",
+            is_html=False,
+        )
+
+
 def _coerce_directory_value(value: Any) -> str:
     if isinstance(value, (list, tuple, set)):
         parts = [_clean_cell(part) for part in value]
@@ -4579,6 +4779,7 @@ class CrossDirectoryEnricherWorker(QThread):
                             self._update_progress(position, total)
                             continue
                     enriched |= self._enrich_row_instagram_email(seed_df, row_idx, ctx)
+                    enriched |= self._enrich_row_website_email(seed_df, row_idx, ctx)
                     if ENABLE_FACEBOOK_ENRICHMENT and fb_driver:
                         enriched |= self._enrich_row_facebook(seed_df, row_idx, fb_driver, ctx)
                     if not enriched:
@@ -4632,6 +4833,7 @@ class CrossDirectoryEnricherWorker(QThread):
             "bandcamp": "pending",
             "lastfm": "pending",
             "instagram": "pending",
+            "website": "pending",
             "facebook": "pending",
         }
         self._sc_blocked_for_row = False
@@ -4998,6 +5200,122 @@ class CrossDirectoryEnricherWorker(QThread):
         self._set_platform_state("instagram", "matched")
         return True
 
+    def _enrich_row_website_email(self, seed_df, row_idx, ctx):
+        """Fetch a bounded set of same-domain contact pages from Spotify_Website_URL."""
+        try:
+            from pipeline_runner import normalize_emails as _normalize_emails
+        except Exception:
+            _normalize_emails = lambda value: [normalize_email_value(value)] if normalize_email_value(value) else []
+        row = seed_df.loc[row_idx]
+        if _row_has_email(row):
+            self._set_platform_state("website", "skipped")
+            return False
+
+        website_url = _normalise_url(_coerce_directory_value(row.get("Spotify_Website_URL", "")))
+        if not website_url:
+            self._set_platform_state("website", "skipped")
+            return False
+
+        max_fetches = max(1, WEBSITE_EMAIL_MAX_PAGES)
+        fetches_used = 0
+        emails_found: List[str] = []
+        source_url = ""
+        extract_method = "regex"
+        artist = ctx.get("artist") or _clean_cell(row.get("Artist Name")) or "<unknown>"
+        email_before = _row_email_summary_snapshot(seed_df, row_idx)
+
+        def _fetch(target_url: str) -> WebsiteFetchResult:
+            nonlocal fetches_used
+            fetches_used += 1
+            return _fetch_website_html_bounded(
+                self.session,
+                target_url,
+                timeout_s=WEBSITE_EMAIL_TIMEOUT,
+                max_bytes=WEBSITE_EMAIL_MAX_BYTES,
+            )
+
+        homepage = _fetch(website_url)
+        homepage_url = homepage.final_url or website_url
+        homepage_ok = bool(homepage.is_html and homepage.html)
+        self.log_message.emit(
+            f"[Web] homepage fetched ok={homepage_ok} artist='{artist}' url={homepage_url}"
+        )
+
+        if homepage.is_html and homepage.html:
+            page_emails, used_mailto = _extract_website_emails_from_html(homepage.html)
+            if page_emails:
+                emails_found = page_emails
+                source_url = homepage_url
+                extract_method = "mailto" if used_mailto else "regex"
+
+        remaining_budget = max(0, max_fetches - fetches_used)
+        candidates: List[str] = []
+        if not emails_found and remaining_budget > 0 and homepage.is_html and homepage.html:
+            candidates = _discover_website_contact_candidates(homepage_url, homepage.html)
+            self.log_message.emit(
+                f"[Web] found contact candidates={len(candidates)} using top={min(len(candidates), remaining_budget)} artist='{artist}'"
+            )
+            for candidate_url in candidates[:remaining_budget]:
+                result = _fetch(candidate_url)
+                if not result.is_html or not result.html:
+                    continue
+                page_emails, used_mailto = _extract_website_emails_from_html(result.html)
+                if not page_emails:
+                    continue
+                if not source_url:
+                    source_url = result.final_url or candidate_url
+                    extract_method = "mailto" if used_mailto else "regex"
+                emails_found = list(dict.fromkeys([*emails_found, *page_emails]))
+
+        normalized_emails = _normalize_emails(";".join(emails_found))
+        self.log_message.emit(
+            f"[Web] emails_found={len(normalized_emails)} pages_fetched={fetches_used} artist='{artist}'"
+        )
+        if not normalized_emails:
+            self._set_platform_state("website", "skipped")
+            return False
+
+        primary_email = normalized_emails[0]
+        if not cell_to_str(seed_df.at[row_idx, "Email"]):
+            _set_email_with_provenance(
+                (seed_df, row_idx),
+                primary_email,
+                source_url=source_url,
+                source_type="website_enrich",
+                method=extract_method,
+            )
+        try:
+            from pipeline_runner import _set_email_all, record_email_summary_row_change
+
+            _set_email_all(
+                seed_df,
+                row_idx,
+                normalized_emails,
+                source="website_enrich",
+                logger=self.log_message.emit,
+            )
+            record_email_summary_row_change(
+                email_before,
+                _row_email_summary_snapshot(seed_df, row_idx),
+            )
+        except Exception:
+            seed_df.at[row_idx, "Email_All"] = ";".join(normalized_emails)
+        if "Email_Type" in seed_df.columns and not cell_to_str(seed_df.at[row_idx, "Email_Type"]):
+            seed_df.at[row_idx, "Email_Type"] = "website_enrich"
+        if "Email_Source_URL" in seed_df.columns and source_url and not cell_to_str(seed_df.at[row_idx, "Email_Source_URL"]):
+            seed_df.at[row_idx, "Email_Source_URL"] = source_url
+        if "Email_Source_Type" in seed_df.columns and not cell_to_str(seed_df.at[row_idx, "Email_Source_Type"]):
+            seed_df.at[row_idx, "Email_Source_Type"] = "website_enrich"
+        if "Email_Extract_Method" in seed_df.columns and not cell_to_str(seed_df.at[row_idx, "Email_Extract_Method"]):
+            seed_df.at[row_idx, "Email_Extract_Method"] = extract_method
+        self._index_domain_email_reuse_from_row(
+            seed_df,
+            row_idx,
+            _clean_cell(ctx.get("spotify_domain", "")),
+        )
+        self._set_platform_state("website", "matched")
+        return True
+
     def _enrich_row_facebook(self, seed_df, row_idx, fb_driver, ctx):
         """Facebook enrichment for a single row. Returns True if enrichment applied."""
         artist = ctx["artist"]
@@ -5180,6 +5498,7 @@ class CrossDirectoryEnricherWorker(QThread):
         if use_scheduler:
             # Keep IG extraction outside the scheduler as a bounded single-page pass.
             self._phase_instagram_email(seed_df, total)
+            self._phase_website_email(seed_df, total)
             self._run_interleaved_sources(seed_df, fb_driver, total)
             return
         # Phase 1: Dedicated SoundCloud live check
@@ -5190,9 +5509,11 @@ class CrossDirectoryEnricherWorker(QThread):
             self._phase_live_lookup(seed_df, total)
         # Phase 3: Instagram profile HTML email extraction (single fetch only)
         self._phase_instagram_email(seed_df, total)
+        # Phase 4: bounded website contact crawl from canonical website field.
+        self._phase_website_email(seed_df, total)
         # Refresh Facebook promotion after live/directory phases so newly discovered FB links are usable.
         seed_df = _apply_fb_promotion_df(seed_df, log_fn=self.log_message.emit)
-        # Phase 4: Facebook
+        # Phase 5: Facebook
         if ENABLE_FACEBOOK_ENRICHMENT and fb_driver:
             self._phase_facebook(seed_df, fb_driver, total)
 
@@ -5461,6 +5782,17 @@ class CrossDirectoryEnricherWorker(QThread):
                 continue
             self._init_row_enrichment_state()
             self._enrich_row_instagram_email(seed_df, row_idx, ctx)
+
+    def _phase_website_email(self, seed_df, total):
+        for position, row_idx in enumerate(seed_df.index, start=1):
+            ctx = self._build_row_context(seed_df, row_idx, position, total)
+            if not ctx:
+                continue
+            if row_idx in self._domain_email_reuse_rows or self._maybe_apply_domain_email_reuse(seed_df, row_idx, ctx):
+                self._set_platform_state("website", "skipped")
+                continue
+            self._init_row_enrichment_state()
+            self._enrich_row_website_email(seed_df, row_idx, ctx)
 
     def _phase_live_lookup(self, seed_df, total):
         self.log_message.emit("[Enricher][LF Phase] Starting...")
