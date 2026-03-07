@@ -251,6 +251,8 @@ SC_CHALLENGE_ACTIVE_SECONDS = int(os.getenv("SC_CHALLENGE_ACTIVE_SECONDS", "300"
 SC_BREAKER_MIN_ROWS = int(os.getenv("SC_BREAKER_MIN_ROWS", "12"))
 SC_RSS_FAIL_BREAKER_THRESHOLD = int(os.getenv("SC_RSS_FAIL_BREAKER_THRESHOLD", "4"))
 SC_RSS_BREAKER_COOLDOWN_SECONDS = int(os.getenv("SC_RSS_BREAKER_COOLDOWN_SECONDS", "120"))
+SC_COOLDOWN_ROW_RETRY_MAX = int(os.getenv("SC_COOLDOWN_ROW_RETRY_MAX", "2"))
+SC_COOLDOWN_ROW_RETRY_JITTER_S = float(os.getenv("SC_COOLDOWN_ROW_RETRY_JITTER_S", "0.15"))
 SC_ALLOW_FALLBACK_ON_TRACKS_401_403 = int(os.getenv("SC_ALLOW_FALLBACK_ON_TRACKS_401_403", "1") or "1")
 NIGHT_SC_BUDGET_SECONDS_DEFAULT = 6
 NIGHT_SC_MAX_FETCHES_DEFAULT = 3
@@ -5700,6 +5702,168 @@ class CrossDirectoryEnricherWorker(QThread):
     # Source-phased orchestration (ENRICHMENT_MODE=source_phased)
     # ------------------------------------------------------------------
 
+    def _sc_row_retry_after(self, base_until: Optional[float], *, retry_count: int, ordinal: int) -> float:
+        """
+        Return a small staggered retry timestamp so deferred rows do not all
+        re-enter immediately when the breaker window lifts.
+        """
+        base = float(base_until or time.time())
+        retry_idx = max(0, int(retry_count))
+        slot = max(0, int(ordinal)) % 5
+        stagger = SC_COOLDOWN_ROW_RETRY_JITTER_S * float(slot + retry_idx + 1)
+        return base + stagger
+
+    def _sc_defer_row_for_cooldown(
+        self,
+        seed_df,
+        row_idx,
+        *,
+        position: int,
+        total: int,
+        deferred_rows: Dict[Any, Dict[str, Any]],
+        retry_count: int = 0,
+    ) -> None:
+        cooldown_end = float(getattr(self, "_sc_live_disabled_until", 0.0) or time.time())
+        retry_after = self._sc_row_retry_after(
+            cooldown_end,
+            retry_count=retry_count,
+            ordinal=len(deferred_rows),
+        )
+        state = deferred_rows.get(row_idx)
+        if state:
+            state["retry_after"] = max(float(state.get("retry_after", 0.0) or 0.0), retry_after)
+            state["cooldown_end"] = max(float(state.get("cooldown_end", 0.0) or 0.0), cooldown_end)
+            state["position"] = position
+            state["total"] = total
+            state["retry_later"] = True
+            state["row_attempted"] = False
+        else:
+            deferred_rows[row_idx] = {
+                "row_idx": row_idx,
+                "position": position,
+                "total": total,
+                "retry_count": max(0, int(retry_count)),
+                "retry_after": retry_after,
+                "cooldown_end": cooldown_end,
+                "retry_later": True,
+                "row_attempted": False,
+            }
+        artist = ""
+        try:
+            artist = _clean_cell(seed_df.at[row_idx, "Artist Name"])
+        except Exception:
+            artist = ""
+        expires = int(max(1.0, cooldown_end - time.time()))
+        retry_after_s = int(max(1.0, retry_after - time.time()))
+        try:
+            self.log_message.emit(
+                f"[Enricher][SC] cooldown active; deferring row {position}/{total} "
+                f"'{artist or '<unknown>'}' expires_in={expires}s retry_after={retry_after_s}s "
+                f"retry_count={max(0, int(retry_count))}"
+            )
+        except Exception:
+            pass
+        self._set_platform_state("soundcloud", "skipped")
+        try:
+            self._write_sc_status_columns(
+                seed_df,
+                row_idx,
+                "retry_later",
+                "cooldown_active",
+                0,
+                0,
+            )
+        except Exception:
+            pass
+
+    def _retry_deferred_soundcloud_rows(
+        self,
+        seed_df,
+        total: int,
+        deferred_rows: Dict[Any, Dict[str, Any]],
+        *,
+        phase_label: str,
+    ) -> Dict[Any, Dict[str, Any]]:
+        if not deferred_rows:
+            return {}
+        retried = 0
+        enriched = 0
+        carried = 0
+        exhausted = 0
+        remaining: Dict[Any, Dict[str, Any]] = {}
+        try:
+            self.log_message.emit(
+                f"[Enricher][SC Retry] Starting {phase_label} (queued={len(deferred_rows)})"
+            )
+        except Exception:
+            pass
+        for row_idx, state in sorted(
+            deferred_rows.items(),
+            key=lambda item: (
+                float(item[1].get("retry_after", 0.0) or 0.0),
+                int(item[1].get("position", 0) or 0),
+            ),
+        ):
+            retry_count = max(0, int(state.get("retry_count", 0) or 0))
+            position = int(state.get("position", 0) or 0)
+            now = time.time()
+            retry_after = float(state.get("retry_after", 0.0) or 0.0)
+            if retry_after and now < retry_after:
+                carried += 1
+                remaining[row_idx] = state
+                continue
+            try:
+                if _coerce_directory_value(seed_df.at[row_idx, "SoundCloud Link"]):
+                    continue
+            except Exception:
+                pass
+            ctx = self._build_row_context(seed_df, row_idx, position, total)
+            if not ctx:
+                continue
+            if row_idx in self._domain_email_reuse_rows or self._maybe_apply_domain_email_reuse(seed_df, row_idx, ctx):
+                self._set_platform_state("soundcloud", "skipped")
+                continue
+            if self._sc_in_live_cooldown():
+                self._sc_defer_row_for_cooldown(
+                    seed_df,
+                    row_idx,
+                    position=position,
+                    total=total,
+                    deferred_rows=remaining,
+                    retry_count=retry_count,
+                )
+                carried += 1
+                continue
+            if retry_count >= SC_COOLDOWN_ROW_RETRY_MAX:
+                exhausted += 1
+                continue
+            self._init_row_enrichment_state()
+            retried += 1
+            sc_enriched, _ = self._enrich_row_sc_live(seed_df, row_idx, ctx)
+            if sc_enriched:
+                enriched += 1
+                continue
+            if self._sc_in_live_cooldown() and (retry_count + 1) < SC_COOLDOWN_ROW_RETRY_MAX:
+                self._sc_defer_row_for_cooldown(
+                    seed_df,
+                    row_idx,
+                    position=position,
+                    total=total,
+                    deferred_rows=remaining,
+                    retry_count=retry_count + 1,
+                )
+                carried += 1
+            elif self._sc_in_live_cooldown():
+                exhausted += 1
+        try:
+            self.log_message.emit(
+                f"[Enricher][SC Retry] Completed {phase_label} "
+                f"(retried={retried}, enriched={enriched}, deferred={carried}, exhausted={exhausted})"
+            )
+        except Exception:
+            pass
+        return remaining
+
     def _run_source_phased(self, seed_df, directory_indexes, priority, fb_driver, total):
         """Run enrichment in source-phased mode: one source across all rows at a time."""
         use_scheduler = (
@@ -5715,9 +5879,10 @@ class CrossDirectoryEnricherWorker(QThread):
             self._phase_website_email(seed_df, total)
             self._run_interleaved_sources(seed_df, fb_driver, total)
             return
+        sc_deferred_rows: Dict[Any, Dict[str, Any]] = {}
         # Phase 1: Dedicated SoundCloud live check
         if self.enable_live_search:
-            self._phase_soundcloud(seed_df, total)
+            sc_deferred_rows = self._phase_soundcloud(seed_df, total)
         # Phase 2: General live lookup (BC + LF; SC mostly skipped since Phase 1 populated it)
         if self.enable_live_search:
             self._phase_live_lookup(seed_df, total)
@@ -5725,11 +5890,25 @@ class CrossDirectoryEnricherWorker(QThread):
         self._phase_instagram_email(seed_df, total)
         # Phase 4: bounded website contact crawl from canonical website field.
         self._phase_website_email(seed_df, total)
+        if self.enable_live_search and sc_deferred_rows:
+            sc_deferred_rows = self._retry_deferred_soundcloud_rows(
+                seed_df,
+                total,
+                sc_deferred_rows,
+                phase_label="post_website",
+            )
         # Refresh Facebook promotion after live/directory phases so newly discovered FB links are usable.
         seed_df = _apply_fb_promotion_df(seed_df, log_fn=self.log_message.emit)
         # Phase 5: Facebook
         if ENABLE_FACEBOOK_ENRICHMENT and fb_driver:
             self._phase_facebook(seed_df, fb_driver, total)
+            if self.enable_live_search and sc_deferred_rows:
+                self._retry_deferred_soundcloud_rows(
+                    seed_df,
+                    total,
+                    sc_deferred_rows,
+                    phase_label="final_window",
+                )
 
     def _run_interleaved_sources(self, seed_df, fb_driver, total):
         """Interleave SC, LF (live lookup), and FB across rows to avoid bursts."""
@@ -5917,6 +6096,7 @@ class CrossDirectoryEnricherWorker(QThread):
         skipped_disabled = 0
         processed_rows = 0
         cooldown_remaining_hint = 0
+        deferred_rows: Dict[Any, Dict[str, Any]] = {}
         stopped_max_live = False
         for position, row_idx in enumerate(seed_df.index, start=1):
             if self.max_live_searches > 0 and self.live_search_attempts >= self.max_live_searches:
@@ -5931,7 +6111,6 @@ class CrossDirectoryEnricherWorker(QThread):
                 continue
             if self._sc_in_live_cooldown():
                 skipped_cooldown += 1
-                artist = ctx.get("artist") or "<unknown>"
                 try:
                     cooldown_remaining_hint = max(
                         cooldown_remaining_hint,
@@ -5939,25 +6118,14 @@ class CrossDirectoryEnricherWorker(QThread):
                     )
                 except Exception:
                     pass
-                expires = int(max(1.0, (getattr(self, "_sc_live_disabled_until", 0.0) or 0.0) - time.time()))
-                try:
-                    self.log_message.emit(
-                        f"[Enricher][SC] cooldown active; skipping row {position}/{total} '{artist}' expires_in={expires}s"
-                    )
-                except Exception:
-                    pass
-                self._set_platform_state("soundcloud", "skipped")
-                try:
-                    self._write_sc_status_columns(
-                        seed_df,
-                        row_idx,
-                        "skipped_cooldown",
-                        "cooldown_active",
-                        0,
-                        0,
-                    )
-                except Exception:
-                    pass
+                self._sc_defer_row_for_cooldown(
+                    seed_df,
+                    row_idx,
+                    position=position,
+                    total=total,
+                    deferred_rows=deferred_rows,
+                    retry_count=0,
+                )
                 continue
             self._init_row_enrichment_state()
             if not _coerce_directory_value(seed_df.at[row_idx, "SoundCloud Link"]):
@@ -5999,8 +6167,9 @@ class CrossDirectoryEnricherWorker(QThread):
         self.log_message.emit(
             f"[Enricher][SC Phase] Completed {processed_rows} rows "
             f"(enriched={enriched_count}, skipped_cooldown={skipped_cooldown}, "
-            f"skipped_disabled={skipped_disabled})"
+            f"skipped_disabled={skipped_disabled}, deferred={len(deferred_rows)})"
         )
+        return deferred_rows
 
     def _phase_instagram_email(self, seed_df, total):
         for position, row_idx in enumerate(seed_df.index, start=1):

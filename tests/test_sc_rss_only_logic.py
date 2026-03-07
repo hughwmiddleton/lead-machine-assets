@@ -228,6 +228,182 @@ def test_sc_phase_continues_after_midphase_breaker_trip(monkeypatch):
     assert not any("Stopped early: cooldown" in l for l in logs)
 
 
+def test_sc_retry_after_cooldown(monkeypatch):
+    w = _mk_worker()
+    w.enable_live_search = True
+    rows = 4
+    seed_df = pd.DataFrame(
+        {
+            "SoundCloud Link": [""] * rows,
+            "Artist Name": [f"Artist {i}" for i in range(rows)],
+            "SC_Status": [""] * rows,
+            "SC_Reason": [""] * rows,
+        }
+    )
+
+    now = [1000.0]
+    monkeypatch.setattr(time, "time", lambda: now[0])
+
+    logs = []
+
+    class Log:
+        @staticmethod
+        def emit(msg, *args, **kwargs):
+            logs.append(str(msg))
+
+    w.log_message = Log()
+    w._phase_directory_matching = lambda *args, **kwargs: None
+    w._phase_live_lookup = lambda *args, **kwargs: now.__setitem__(0, now[0] + 20.0)
+    w._phase_instagram_email = lambda *args, **kwargs: None
+    w._phase_website_email = lambda *args, **kwargs: None
+    w._build_row_context = lambda df, row_idx, position, total: {
+        "artist": df.at[row_idx, "Artist Name"],
+        "position": position,
+        "total": total,
+        "spotify_id": "",
+    }
+
+    calls = []
+    attempts = {}
+
+    def fake_sc_enrich(df, row_idx, ctx):
+        attempts[row_idx] = attempts.get(row_idx, 0) + 1
+        calls.append(row_idx)
+        if row_idx == 1 and attempts[row_idx] == 1:
+            w._sc_live_disabled_until = now[0] + 10.0
+        if row_idx in {2, 3} and now[0] >= 1010.0:
+            df.at[row_idx, "SC_Status"] = "retried"
+        return (False, False)
+
+    w._enrich_row_sc_live = fake_sc_enrich
+
+    w._run_source_phased(seed_df, directory_indexes={}, priority=[], fb_driver=None, total=rows)
+
+    assert calls == [0, 1, 2, 3]
+    assert seed_df.at[2, "SC_Status"] == "retried"
+    assert seed_df.at[3, "SC_Status"] == "retried"
+    assert any("Starting post_website" in line for line in logs)
+    assert any("Completed post_website (retried=2" in line for line in logs)
+
+
+def test_sc_retry_capped_at_two(monkeypatch):
+    import cross_directory_enricher as cde
+
+    w = _mk_worker()
+    w.enable_live_search = True
+    rows = 2
+    seed_df = pd.DataFrame(
+        {
+            "SoundCloud Link": [""] * rows,
+            "Artist Name": [f"Artist {i}" for i in range(rows)],
+            "SC_Status": [""] * rows,
+            "SC_Reason": [""] * rows,
+        }
+    )
+
+    now = [1000.0]
+    monkeypatch.setattr(time, "time", lambda: now[0])
+    monkeypatch.setattr(cde, "ENABLE_FACEBOOK_ENRICHMENT", True)
+
+    logs = []
+
+    class Log:
+        @staticmethod
+        def emit(msg, *args, **kwargs):
+            logs.append(str(msg))
+
+    w.log_message = Log()
+    w._phase_directory_matching = lambda *args, **kwargs: None
+    w._phase_live_lookup = lambda *args, **kwargs: now.__setitem__(0, now[0] + 20.0)
+    w._phase_instagram_email = lambda *args, **kwargs: None
+    w._phase_website_email = lambda *args, **kwargs: None
+    w._phase_facebook = lambda *args, **kwargs: now.__setitem__(0, now[0] + 20.0)
+    w._build_row_context = lambda df, row_idx, position, total: {
+        "artist": df.at[row_idx, "Artist Name"],
+        "position": position,
+        "total": total,
+        "spotify_id": "",
+    }
+
+    attempts = {}
+
+    def fake_sc_enrich(df, row_idx, ctx):
+        attempts[row_idx] = attempts.get(row_idx, 0) + 1
+        if row_idx == 0 and attempts[row_idx] == 1:
+            w._sc_live_disabled_until = now[0] + 10.0
+        elif row_idx == 1:
+            w._sc_live_disabled_until = now[0] + 10.0
+        return (False, False)
+
+    w._enrich_row_sc_live = fake_sc_enrich
+
+    w._run_source_phased(seed_df, directory_indexes={}, priority=[], fb_driver=object(), total=rows)
+
+    assert attempts[0] == 1
+    assert attempts[1] == 2
+    assert any("Completed final_window" in line and "exhausted=1" in line for line in logs)
+
+
+def test_sc_retry_skipped_if_row_enriched_elsewhere(monkeypatch):
+    w = _mk_worker()
+    w.enable_live_search = True
+    rows = 4
+    seed_df = pd.DataFrame(
+        {
+            "SoundCloud Link": [""] * rows,
+            "Artist Name": [f"Artist {i}" for i in range(rows)],
+            "SC_Status": [""] * rows,
+            "SC_Reason": [""] * rows,
+        }
+    )
+
+    now = [1000.0]
+    monkeypatch.setattr(time, "time", lambda: now[0])
+
+    logs = []
+
+    class Log:
+        @staticmethod
+        def emit(msg, *args, **kwargs):
+            logs.append(str(msg))
+
+    w.log_message = Log()
+    w._phase_directory_matching = lambda *args, **kwargs: None
+    w._phase_instagram_email = lambda *args, **kwargs: None
+    w._phase_website_email = lambda *args, **kwargs: None
+    w._build_row_context = lambda df, row_idx, position, total: {
+        "artist": df.at[row_idx, "Artist Name"],
+        "position": position,
+        "total": total,
+        "spotify_id": "",
+    }
+
+    def fake_phase_live_lookup(df, total):
+        now[0] += 20.0
+        df.at[2, "SoundCloud Link"] = "https://soundcloud.com/already-filled"
+
+    w._phase_live_lookup = fake_phase_live_lookup
+
+    calls = []
+    attempts = {}
+
+    def fake_sc_enrich(df, row_idx, ctx):
+        attempts[row_idx] = attempts.get(row_idx, 0) + 1
+        calls.append(row_idx)
+        if row_idx == 1 and attempts[row_idx] == 1:
+            w._sc_live_disabled_until = now[0] + 10.0
+        return (False, False)
+
+    w._enrich_row_sc_live = fake_sc_enrich
+
+    w._run_source_phased(seed_df, directory_indexes={}, priority=[], fb_driver=None, total=rows)
+
+    assert calls == [0, 1, 3]
+    assert attempts.get(2, 0) == 0
+    assert seed_df.at[2, "SoundCloud Link"] == "https://soundcloud.com/already-filled"
+    assert any("Completed post_website (retried=1" in line for line in logs)
+
+
 def test_breaker_has_grace_period():
     w = _mk_worker()
     # Failures before grace rows should not trip breaker.
