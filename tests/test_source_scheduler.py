@@ -1,6 +1,6 @@
 import pytest
 
-from source_scheduler import SourceDiversityScheduler, SourceResult, SourceSpec, promote_facebook_url
+from source_scheduler import SourceDiversityScheduler, SourceResult, SourceSpec, TimedRetry, promote_facebook_url
 
 
 def test_scheduler_interleaves_sources():
@@ -637,6 +637,236 @@ def test_short_circuit_stops_remaining_sources(monkeypatch):
 
     assert calls["SC"] == 1
     assert calls["LF"] == 0
+
+
+def test_scheduler_defers_availability_cooldown_and_retries_when_ready():
+    now = {"value": 0}
+    sc_calls = []
+
+    def sc_is_available():
+        return (now["value"] >= 5, "cooldown" if now["value"] < 5 else None)
+
+    def sc_run(idx):
+        sc_calls.append(idx)
+        return SourceResult(attempted=True, enriched=True)
+
+    tick_calls = []
+
+    def tick_run(idx):
+        tick_calls.append(idx)
+        now["value"] = 10
+        return SourceResult(attempted=True, enriched=False)
+
+    summary = SourceDiversityScheduler(
+        [
+            SourceSpec(
+                name="SC",
+                rows=[0],
+                run_row=sc_run,
+                is_available=sc_is_available,
+                retry_now=lambda: now["value"],
+                unavailable_retry=lambda row_idx, reason, retry_count: TimedRetry(ready_at=5, max_attempts=2),
+            ),
+            SourceSpec(
+                name="AUX",
+                rows=[99],
+                run_row=tick_run,
+                is_available=lambda: (True, None),
+            ),
+        ],
+        row_label=str,
+    ).run()
+
+    assert tick_calls == [99]
+    assert sc_calls == [0]
+    assert summary["SC"]["skipped_cooldown"] == 1
+    assert summary["SC"]["attempted"] == 1
+
+
+def test_scheduler_exits_cleanly_when_deferred_work_is_not_ready():
+    checks = {"available": 0}
+
+    def sc_is_available():
+        checks["available"] += 1
+        return (False, "cooldown")
+
+    summary = SourceDiversityScheduler(
+        [
+            SourceSpec(
+                name="SC",
+                rows=[0],
+                run_row=lambda idx: pytest.fail("deferred row should not run before ready"),
+                is_available=sc_is_available,
+                retry_now=lambda: 0,
+                unavailable_retry=lambda row_idx, reason, retry_count: TimedRetry(ready_at=10, max_attempts=2),
+            )
+        ],
+        row_label=str,
+    ).run()
+
+    assert checks["available"] == 1
+    assert summary["SC"]["attempted"] == 0
+    assert summary["SC"]["skipped_cooldown"] == 1
+
+
+def test_scheduler_bounds_timed_retries():
+    now = {"value": 0}
+    sc_retry_counts = []
+
+    def sc_run(row_idx, retry_count):
+        sc_retry_counts.append(retry_count)
+        return SourceResult(
+            attempted=True,
+            enriched=False,
+            retry_later=True,
+            timed_retry=TimedRetry(ready_at=now["value"] + 1, max_attempts=2),
+        )
+
+    def tick_run(idx):
+        now["value"] += 1
+        return SourceResult(attempted=True, enriched=False)
+
+    summary = SourceDiversityScheduler(
+        [
+            SourceSpec(
+                name="SC",
+                rows=[0],
+                run_row=lambda idx: sc_run(idx, 0),
+                run_row_retry=sc_run,
+                is_available=lambda: (True, None),
+                retry_now=lambda: now["value"],
+            ),
+            SourceSpec(
+                name="AUX",
+                rows=[10, 11, 12],
+                run_row=tick_run,
+                is_available=lambda: (True, None),
+            ),
+        ],
+        row_label=str,
+    ).run()
+
+    assert sc_retry_counts == [0, 1]
+    assert summary["SC"]["attempted"] == 2
+
+
+def test_scheduler_skips_deferred_retry_when_row_completed_elsewhere():
+    now = {"value": 0}
+    row_data = {0: {"Artist Name": "Artist A", "Email": "", "Email_All": ""}}
+    sc_calls = []
+    lf_calls = []
+
+    def sc_run(row_idx, retry_count):
+        sc_calls.append((row_idx, retry_count))
+        return SourceResult(
+            attempted=True,
+            enriched=False,
+            retry_later=True,
+            timed_retry=TimedRetry(ready_at=5, max_attempts=2),
+        )
+
+    def lf_run(row_idx):
+        lf_calls.append(row_idx)
+        now["value"] = 10
+        row_data[row_idx]["Email"] = "artist@example.com"
+        return SourceResult(attempted=True, enriched=True)
+
+    scheduler = SourceDiversityScheduler(
+        [
+            SourceSpec(
+                name="SC",
+                rows=[0],
+                run_row=lambda idx: sc_run(idx, 0),
+                run_row_retry=sc_run,
+                is_available=lambda: (True, None),
+                row_getter=lambda idx: row_data[idx],
+                retry_now=lambda: now["value"],
+            ),
+            SourceSpec(
+                name="LF",
+                rows=[0],
+                run_row=lf_run,
+                is_available=lambda: (True, None),
+                row_getter=lambda idx: row_data[idx],
+            ),
+        ],
+        row_label=str,
+        short_circuit_fn=lambda row: bool(row.get("Email") or row.get("Email_All")),
+    )
+    scheduler.run()
+
+    assert sc_calls == [(0, 0)]
+    assert lf_calls == [0]
+
+
+def test_interleaved_sc_cooldown_rows_are_deferred_and_retried(monkeypatch):
+    import pandas as pd
+    import cross_directory_enricher as cde
+
+    monkeypatch.setattr("source_scheduler.random.uniform", lambda a, b: 0)
+    monkeypatch.setattr(cde.CrossDirectoryEnricherWorker, "__init__", lambda self, *a, **k: None)
+
+    worker = cde.CrossDirectoryEnricherWorker(None, None)
+    worker.enable_live_search = True
+    worker.max_live_searches = 0
+    worker.live_search_attempts = 0
+    worker._notified_limit = False
+    worker._sc_live_disabled_until = 0.0
+    worker._sc_in_live_cooldown = lambda now=None: bool(worker._sc_live_disabled_until and worker._sc_live_disabled_until > cde.time.time())
+    worker._fb_discovery_attempted_rows = set()
+    worker._domain_email_reuse_rows = set()
+    worker._lf_endpoint_in_cooldown = lambda endpoint: False
+    worker.log_message = type("Logger", (), {"emit": lambda *args, **kwargs: None})()
+    worker._init_row_enrichment_state = lambda: None
+    worker._maybe_apply_domain_email_reuse = lambda *args, **kwargs: False
+    worker._build_row_context = lambda df, row_idx, position, total: {
+        "artist": df.at[row_idx, "Artist Name"],
+        "position": position,
+        "total": total,
+        "spotify_id": "",
+    }
+
+    seed_df = pd.DataFrame(
+        {
+            "Artist Name": ["Artist 0", "Artist 1"],
+            "SoundCloud Link": ["", ""],
+            "Email": ["", ""],
+            "Email_All": ["", ""],
+            "SC_Status": ["", ""],
+            "SC_Reason": ["", ""],
+        },
+        index=[0, 1],
+    )
+
+    now = {"value": 1000.0}
+    monkeypatch.setattr(cde.time, "time", lambda: now["value"])
+
+    sc_attempts = {}
+    lf_attempts = []
+
+    def fake_sc_enrich(df, row_idx, ctx):
+        sc_attempts[row_idx] = sc_attempts.get(row_idx, 0) + 1
+        if row_idx == 0 and sc_attempts[row_idx] == 1:
+            worker._sc_live_disabled_until = now["value"] + 5.0
+            return (False, False)
+        df.at[row_idx, "SC_Status"] = f"retried_{sc_attempts[row_idx]}"
+        return (False, False)
+
+    def fake_lf_enrich(df, row_idx, ctx):
+        lf_attempts.append(row_idx)
+        if len(lf_attempts) >= 2:
+            now["value"] = 1010.0
+        return (False, False)
+
+    worker._enrich_row_sc_live = fake_sc_enrich
+    worker._enrich_row_live_lookup = fake_lf_enrich
+
+    worker._run_interleaved_sources(seed_df, fb_driver=None, total=len(seed_df))
+
+    assert sc_attempts == {0: 2, 1: 1}
+    assert lf_attempts == [0, 1]
+    assert seed_df.at[0, "SC_Status"] == "retried_2"
+    assert seed_df.at[1, "SC_Status"] == "retried_1"
 
 
 def test_scheduler_opportunity_fallback_on_row_error():

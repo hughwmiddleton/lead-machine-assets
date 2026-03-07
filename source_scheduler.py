@@ -310,6 +310,15 @@ class SourceResult:
     enriched: bool = False
     skipped_cooldown: bool = False
     retry_later: bool = False
+    timed_retry: Optional["TimedRetry"] = None
+
+
+@dataclass
+class TimedRetry:
+    """Explicit timed retry metadata in the source's own clock domain."""
+
+    ready_at: Any
+    max_attempts: int
 
 
 @dataclass
@@ -321,6 +330,19 @@ class SourceSpec:
     run_row: Callable[[int], SourceResult]
     is_available: Callable[[], Tuple[bool, Optional[str]]]
     row_getter: Optional[Callable[[int], Any]] = None
+    retry_now: Optional[Callable[[], Any]] = None
+    unavailable_retry: Optional[Callable[[int, Optional[str], int], Optional[TimedRetry]]] = None
+    run_row_retry: Optional[Callable[[int, int], SourceResult]] = None
+
+
+@dataclass
+class _DeferredEntry:
+    source_name: str
+    row_idx: int
+    retry_count: int
+    ready_at: Any
+    max_attempts: int
+    ordinal: int
 
 
 class SourceDiversityScheduler:
@@ -340,6 +362,8 @@ class SourceDiversityScheduler:
         self._short_circuit_fn = short_circuit_fn
         self._completed_rows: set[int] = set()
         self._row_source_failures: Dict[int, set[str]] = defaultdict(set)
+        self._deferred: Dict[Tuple[str, int], _DeferredEntry] = {}
+        self._deferred_ordinal: int = 0
         self._summary: Dict[str, Dict[str, int]] = {
             spec.name: {"attempted": 0, "enriched": 0, "skipped_cooldown": 0, "skipped_opportunity": 0}
             for spec in self.sources
@@ -390,6 +414,110 @@ class SourceDiversityScheduler:
                 continue
             return row_idx
         return None
+
+    def _later_ready_at(self, current: Any, new: Any) -> Any:
+        try:
+            return current if current >= new else new
+        except Exception:
+            return new
+
+    def _defer_row(
+        self,
+        spec: SourceSpec,
+        row_idx: int,
+        timed_retry: Optional[TimedRetry],
+        *,
+        retry_count: int,
+    ) -> bool:
+        if timed_retry is None:
+            return False
+        try:
+            max_attempts = max(0, int(timed_retry.max_attempts))
+        except Exception:
+            return False
+        if max_attempts <= 0 or retry_count >= max_attempts:
+            return False
+
+        key = (spec.name, row_idx)
+        existing = self._deferred.get(key)
+        ordinal = existing.ordinal if existing else self._deferred_ordinal
+        if existing is None:
+            self._deferred_ordinal += 1
+            ready_at = timed_retry.ready_at
+        else:
+            ready_at = self._later_ready_at(existing.ready_at, timed_retry.ready_at)
+
+        self._deferred[key] = _DeferredEntry(
+            source_name=spec.name,
+            row_idx=row_idx,
+            retry_count=max(int(existing.retry_count), retry_count) if existing else retry_count,
+            ready_at=ready_at,
+            max_attempts=max(int(existing.max_attempts), max_attempts) if existing else max_attempts,
+            ordinal=ordinal,
+        )
+        return True
+
+    def _pop_ready_deferred(self, spec: SourceSpec) -> Optional[_DeferredEntry]:
+        if not self._deferred or not spec.retry_now:
+            return None
+
+        try:
+            now = spec.retry_now()
+        except Exception:
+            return None
+
+        best_key: Optional[Tuple[str, int]] = None
+        best_entry: Optional[_DeferredEntry] = None
+        stale_keys: List[Tuple[str, int]] = []
+
+        for key, entry in self._deferred.items():
+            if entry.source_name != spec.name:
+                continue
+            if entry.row_idx in self._completed_rows:
+                stale_keys.append(key)
+                continue
+            failed_sources = self._row_source_failures.get(entry.row_idx)
+            if failed_sources and spec.name in failed_sources:
+                stale_keys.append(key)
+                continue
+            if entry.retry_count >= entry.max_attempts:
+                stale_keys.append(key)
+                continue
+            try:
+                ready = entry.ready_at <= now
+            except Exception:
+                ready = False
+            if not ready:
+                continue
+            if best_entry is None:
+                best_key = key
+                best_entry = entry
+                continue
+            try:
+                current_is_earlier = entry.ready_at < best_entry.ready_at
+            except Exception:
+                current_is_earlier = False
+            if current_is_earlier or (
+                entry.ready_at == best_entry.ready_at and entry.ordinal < best_entry.ordinal
+            ):
+                best_key = key
+                best_entry = entry
+
+        for key in stale_keys:
+            self._deferred.pop(key, None)
+
+        if best_key is None:
+            return None
+        return self._deferred.pop(best_key, None)
+
+    def _next_work(self, spec: SourceSpec) -> Optional[Tuple[int, int]]:
+        deferred = self._pop_ready_deferred(spec)
+        if deferred is not None:
+            return (deferred.row_idx, deferred.retry_count)
+        row_idx = self._next_row(spec)
+        if row_idx is None:
+            return None
+        return (row_idx, 0)
 
     def _record(self, spec_name: str, result: SourceResult) -> None:
         summary = self._summary[spec_name]
@@ -481,9 +609,10 @@ class SourceDiversityScheduler:
                 sorted_sources = self.sources
 
             for spec in sorted_sources:
-                row_idx = self._next_row(spec)
-                if row_idx is None:
+                work_item = self._next_work(spec)
+                if work_item is None:
                     continue
+                row_idx, retry_count = work_item
                 progressed = True
                 row_data = None
                 if spec.row_getter:
@@ -507,11 +636,21 @@ class SourceDiversityScheduler:
                 if not available:
                     if reason == "cooldown":
                         self._record_cooldown(spec.name)
+                        timed_retry = None
+                        if spec.unavailable_retry:
+                            try:
+                                timed_retry = spec.unavailable_retry(row_idx, reason, retry_count)
+                            except Exception:
+                                timed_retry = None
+                        self._defer_row(spec, row_idx, timed_retry, retry_count=retry_count)
                         self._emit(f"[Scheduler] skipping {spec.name} (cooldown) row {display_row}")
                     continue
                 self._emit(f"[Scheduler] running {spec.name} for row {display_row}")
-                result = spec.run_row(row_idx)
+                run_row = spec.run_row_retry or (lambda idx, _retry_count: spec.run_row(idx))
+                result = run_row(row_idx, retry_count)
                 self._record(spec.name, result)
+                if result.timed_retry and not result.enriched:
+                    self._defer_row(spec, row_idx, result.timed_retry, retry_count=retry_count + 1)
                 if result.attempted and not result.enriched and not result.retry_later:
                     self._row_source_failures[row_idx].add(spec.name)
                 if result.attempted and self._short_circuit_fn:

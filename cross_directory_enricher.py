@@ -28,6 +28,7 @@ from source_scheduler import (
     SourceDiversityScheduler,
     SourceResult,
     SourceSpec,
+    TimedRetry,
     canonicalize_facebook_url,
     ensure_canonical_facebook_url,
     promote_facebook_url,
@@ -5922,6 +5923,20 @@ class CrossDirectoryEnricherWorker(QThread):
             return f"{pos}/{total}"
 
         sources: List[SourceSpec] = []
+
+        def _sc_timed_retry(row_idx: int, retry_count: int) -> Optional[TimedRetry]:
+            retry_idx = max(0, int(retry_count))
+            if retry_idx >= SC_COOLDOWN_ROW_RETRY_MAX:
+                return None
+            return TimedRetry(
+                ready_at=self._sc_row_retry_after(
+                    getattr(self, "_sc_live_disabled_until", 0.0),
+                    retry_count=retry_idx,
+                    ordinal=position_by_row.get(row_idx, 0),
+                ),
+                max_attempts=SC_COOLDOWN_ROW_RETRY_MAX,
+            )
+
         def row_getter(rid):
             row_data = seed_df.loc[rid]
             if rid not in getattr(self, "_fb_discovery_attempted_rows", set()):
@@ -5942,7 +5957,7 @@ class CrossDirectoryEnricherWorker(QThread):
                 in_cd = self._sc_in_live_cooldown()
                 return (not in_cd, "cooldown" if in_cd else None)
 
-            def sc_run(row_idx: int) -> SourceResult:
+            def sc_run(row_idx: int, retry_count: int = 0) -> SourceResult:
                 ctx = self._build_row_context(seed_df, row_idx, position_by_row[row_idx], total)
                 if not ctx:
                     return SourceResult()
@@ -5950,19 +5965,29 @@ class CrossDirectoryEnricherWorker(QThread):
                     return SourceResult()
                 self._init_row_enrichment_state()
                 sc_enriched, sc_retry_later = self._enrich_row_sc_live(seed_df, row_idx, ctx)
+                timed_retry = None
+                if not sc_enriched and self._sc_in_live_cooldown():
+                    timed_retry = _sc_timed_retry(row_idx, max(0, int(retry_count)) + 1)
+                    sc_retry_later = True
                 return SourceResult(
                     attempted=True,
                     enriched=bool(sc_enriched),
                     retry_later=bool(sc_retry_later),
+                    timed_retry=timed_retry,
                 )
 
             sources.append(
                 SourceSpec(
                     name="SC",
                     rows=rows,
-                    run_row=sc_run,
+                    run_row=lambda row_idx: sc_run(row_idx, 0),
                     is_available=sc_available,
                     row_getter=row_getter,
+                    retry_now=time.time,
+                    unavailable_retry=lambda row_idx, reason, retry_count: (
+                        _sc_timed_retry(row_idx, retry_count) if reason == "cooldown" else None
+                    ),
+                    run_row_retry=sc_run,
                 )
             )
 
