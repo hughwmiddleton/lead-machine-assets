@@ -42,6 +42,7 @@ from PyQt5.QtCore import QThread, pyqtSignal
 from webdriver_manager.chrome import ChromeDriverManager
 from urllib.parse import urlparse, parse_qs, unquote
 from unidecode import unidecode
+from email_provenance import _set_email_with_provenance
 
 from facebook_enrich import (
     FbCandidate,
@@ -4334,6 +4335,9 @@ class CrossDirectoryEnricherWorker(QThread):
         self._last_final_url: Optional[str] = None
         self._last_resolved_profile_url: Optional[str] = None
         self._directory_indexes: Dict[str, DirectoryIndex] = {}
+        self._domain_email_reuse_index: Dict[str, Dict[str, str]] = {}
+        self._domain_email_reuse_rows: Set[Any] = set()
+        self._domain_email_reuse_count: int = 0
         # Share live-search budget with SoundCloud aggregator fetches.
         try:
             def _agg_budget_check():
@@ -4394,6 +4398,9 @@ class CrossDirectoryEnricherWorker(QThread):
         self._last_final_url = None
         self._last_resolved_profile_url = None
         self._fb_discovery_attempted_rows = set()
+        self._domain_email_reuse_index = {}
+        self._domain_email_reuse_rows = set()
+        self._domain_email_reuse_count = 0
         # Bandcamp discover per-run state
         self._bc_discover_cache = {}
         self._bc_discover_fetches = 0
@@ -4555,6 +4562,9 @@ class CrossDirectoryEnricherWorker(QThread):
                     if not ctx:
                         self._update_progress(position, total)
                         continue
+                    if self._maybe_apply_domain_email_reuse(seed_df, row_idx, ctx):
+                        self._update_progress(position, total)
+                        continue
                     self._init_row_enrichment_state()
                     enriched = self._enrich_row_directories(seed_df, row_idx, directory_indexes, priority, ctx)
                     if self.enable_live_search:
@@ -4599,6 +4609,10 @@ class CrossDirectoryEnricherWorker(QThread):
                     sc_summary_parts.append(f"engine_fetch_skips={self._sc_rss_only_engine_fetch_skips}")
                 if sc_summary_parts:
                     self.log_message.emit("[Enricher] SoundCloud summary: " + " ".join(sc_summary_parts))
+            self.log_message.emit(
+                f"[Enricher] Domain email reuse summary: indexed_domains={len(self._domain_email_reuse_index)} "
+                f"rows_reused={self._domain_email_reuse_count}"
+            )
             seed_df = self._ensure_bandcamp_output_columns(seed_df)
             _ensure_parent_dir(self.output_csv_path)
             try:
@@ -4622,6 +4636,119 @@ class CrossDirectoryEnricherWorker(QThread):
         }
         self._sc_blocked_for_row = False
         self._last_bc_row_stats = {}
+
+    def _index_domain_email_reuse(
+        self,
+        spotify_domain: str,
+        *,
+        email: str,
+        email_all: str = "",
+        source_url: str = "",
+        source_type: str = "",
+        extract_method: str = "",
+        email_type: str = "",
+        source_label: str = "",
+    ) -> bool:
+        domain_norm = _clean_cell(spotify_domain).lower()
+        if not domain_norm or domain_norm in self._domain_email_reuse_index:
+            return False
+
+        source_label_norm = _clean_cell(source_label).lower()
+        if source_label_norm.startswith("seed directory"):
+            return False
+
+        try:
+            from email_normalizer import normalize_email_value
+        except Exception:
+            normalize_email_value = lambda value: _clean_cell(value).lower()
+        try:
+            from pipeline_runner import normalize_emails
+        except Exception:
+            normalize_emails = lambda value: [normalize_email_value(value)] if normalize_email_value(value) else []
+
+        email_norm = normalize_email_value(email)
+        if not email_norm or email_norm.split("@", 1)[1] != domain_norm:
+            return False
+
+        email_all_norm = ";".join(normalize_emails(email_all)) if email_all else ""
+        if not email_all_norm:
+            email_all_norm = email_norm
+
+        self._domain_email_reuse_index[domain_norm] = {
+            "email": email_norm,
+            "email_all": email_all_norm,
+            "source_url": _clean_cell(source_url),
+            "source_type": _clean_cell(source_type),
+            "extract_method": _clean_cell(extract_method) or "regex",
+            "email_type": _clean_cell(email_type),
+        }
+        return True
+
+    def _index_domain_email_reuse_from_row(self, df: pd.DataFrame, row_idx, spotify_domain: str, source_label: str = "") -> bool:
+        if df is None or row_idx not in df.index:
+            return False
+        email_value = _coerce_directory_value(df.at[row_idx, "Email"]) if "Email" in df.columns else ""
+        if not email_value:
+            return False
+        email_all_value = _coerce_directory_value(df.at[row_idx, "Email_All"]) if "Email_All" in df.columns else ""
+        source_url = _coerce_directory_value(df.at[row_idx, "Email_Source_URL"]) if "Email_Source_URL" in df.columns else ""
+        source_type = _coerce_directory_value(df.at[row_idx, "Email_Source_Type"]) if "Email_Source_Type" in df.columns else ""
+        extract_method = _coerce_directory_value(df.at[row_idx, "Email_Extract_Method"]) if "Email_Extract_Method" in df.columns else ""
+        email_type = _coerce_directory_value(df.at[row_idx, "Email_Type"]) if "Email_Type" in df.columns else ""
+        row_source_label = _coerce_directory_value(df.at[row_idx, "Email Source"]) if "Email Source" in df.columns else ""
+        return self._index_domain_email_reuse(
+            spotify_domain,
+            email=email_value,
+            email_all=email_all_value,
+            source_url=source_url,
+            source_type=source_type,
+            extract_method=extract_method,
+            email_type=email_type,
+            source_label=source_label or row_source_label,
+        )
+
+    def _maybe_apply_domain_email_reuse(self, df: pd.DataFrame, row_idx, ctx: Optional[Dict[str, Any]]) -> bool:
+        if df is None or row_idx not in df.index or row_idx in self._domain_email_reuse_rows:
+            return False
+        row = df.loc[row_idx]
+        if _row_has_email(row):
+            return False
+        domain_norm = _clean_cell((ctx or {}).get("spotify_domain", "")).lower()
+        if not domain_norm:
+            return False
+        entry = self._domain_email_reuse_index.get(domain_norm)
+        if not entry:
+            return False
+
+        email_before = _row_email_summary_snapshot(df, row_idx)
+        _set_email_with_provenance(
+            (df, row_idx),
+            entry.get("email", ""),
+            entry.get("source_url", ""),
+            entry.get("source_type", ""),
+            entry.get("extract_method", "regex") or "regex",
+        )
+        try:
+            from pipeline_runner import _set_email_all, record_email_summary_row_change
+        except Exception:
+            _set_email_all = None  # type: ignore[assignment]
+            record_email_summary_row_change = None  # type: ignore[assignment]
+
+        if callable(_set_email_all):
+            _set_email_all(
+                df,
+                row_idx,
+                entry.get("email_all") or entry.get("email", ""),
+                source="domain_reuse",
+                logger=self.log_message.emit,
+            )
+        if entry.get("email_type") and not _coerce_directory_value(df.at[row_idx, "Email_Type"]):
+            df.at[row_idx, "Email_Type"] = entry.get("email_type", "")
+        if callable(record_email_summary_row_change):
+            record_email_summary_row_change(email_before, _row_email_summary_snapshot(df, row_idx))
+        self._domain_email_reuse_rows.add(row_idx)
+        self._domain_email_reuse_count += 1
+        return True
 
     # ------------------------------------------------------------------
     # Extracted per-row helpers (used by both row-linear and source-phased)
@@ -4661,6 +4788,7 @@ class CrossDirectoryEnricherWorker(QThread):
             "artist": artist,
             "key": key,
             "track_key": track_key,
+            "spotify_domain": spotify_domain,
             "spotify_id": spotify_id,
             "seed_links_by_source": seed_links_by_source,
             "had_email_from_seed": had_email_from_seed,
@@ -4862,6 +4990,11 @@ class CrossDirectoryEnricherWorker(QThread):
             )
         except Exception:
             pass
+        self._index_domain_email_reuse_from_row(
+            seed_df,
+            row_idx,
+            _clean_cell(ctx.get("spotify_domain", "")),
+        )
         self._set_platform_state("instagram", "matched")
         return True
 
@@ -5015,6 +5148,11 @@ class CrossDirectoryEnricherWorker(QThread):
                                 )
                             except Exception:
                                 pass
+                            self._index_domain_email_reuse_from_row(
+                                seed_df,
+                                row_idx,
+                                _clean_cell(ctx.get("spotify_domain", "")),
+                            )
                             fb_matched = True
                     else:
                         fallback_status = fb_status_reason or "no_email_on_page"
@@ -5094,6 +5232,8 @@ class CrossDirectoryEnricherWorker(QThread):
                 ctx = self._build_row_context(seed_df, row_idx, position_by_row[row_idx], total)
                 if not ctx:
                     return SourceResult()
+                if row_idx in self._domain_email_reuse_rows or self._maybe_apply_domain_email_reuse(seed_df, row_idx, ctx):
+                    return SourceResult()
                 self._init_row_enrichment_state()
                 sc_enriched, _ = self._enrich_row_sc_live(seed_df, row_idx, ctx)
                 return SourceResult(attempted=True, enriched=bool(sc_enriched))
@@ -5115,6 +5255,8 @@ class CrossDirectoryEnricherWorker(QThread):
             def lf_run(row_idx: int) -> SourceResult:
                 ctx = self._build_row_context(seed_df, row_idx, position_by_row[row_idx], total)
                 if not ctx:
+                    return SourceResult()
+                if row_idx in self._domain_email_reuse_rows or self._maybe_apply_domain_email_reuse(seed_df, row_idx, ctx):
                     return SourceResult()
                 self._init_row_enrichment_state()
                 if self.max_live_searches > 0 and self.live_search_attempts >= self.max_live_searches:
@@ -5145,6 +5287,8 @@ class CrossDirectoryEnricherWorker(QThread):
             def fb_run(row_idx: int) -> SourceResult:
                 ctx = self._build_row_context(seed_df, row_idx, position_by_row[row_idx], total)
                 if not ctx:
+                    return SourceResult()
+                if row_idx in self._domain_email_reuse_rows or self._maybe_apply_domain_email_reuse(seed_df, row_idx, ctx):
                     return SourceResult()
                 self._init_row_enrichment_state()
                 fb_enriched = self._enrich_row_facebook(seed_df, row_idx, fb_driver, ctx)
@@ -5206,6 +5350,9 @@ class CrossDirectoryEnricherWorker(QThread):
             if not ctx:
                 self._update_progress(position, total)
                 continue
+            if self._maybe_apply_domain_email_reuse(seed_df, row_idx, ctx):
+                self._update_progress(position, total)
+                continue
             self._init_row_enrichment_state()
             if self._enrich_row_directories(seed_df, row_idx, directory_indexes, priority, ctx):
                 enriched_count += 1
@@ -5228,6 +5375,9 @@ class CrossDirectoryEnricherWorker(QThread):
             if not ctx:
                 continue
             processed_rows += 1
+            if row_idx in self._domain_email_reuse_rows or self._maybe_apply_domain_email_reuse(seed_df, row_idx, ctx):
+                self._set_platform_state("soundcloud", "skipped")
+                continue
             if self._sc_in_live_cooldown():
                 skipped_cooldown += 1
                 artist = ctx.get("artist") or "<unknown>"
@@ -5306,6 +5456,9 @@ class CrossDirectoryEnricherWorker(QThread):
             ctx = self._build_row_context(seed_df, row_idx, position, total)
             if not ctx:
                 continue
+            if row_idx in self._domain_email_reuse_rows or self._maybe_apply_domain_email_reuse(seed_df, row_idx, ctx):
+                self._set_platform_state("instagram", "skipped")
+                continue
             self._init_row_enrichment_state()
             self._enrich_row_instagram_email(seed_df, row_idx, ctx)
 
@@ -5321,6 +5474,9 @@ class CrossDirectoryEnricherWorker(QThread):
             if not ctx:
                 continue
             processed_rows += 1
+            if row_idx in self._domain_email_reuse_rows or self._maybe_apply_domain_email_reuse(seed_df, row_idx, ctx):
+                self._set_platform_state("lastfm", "skipped")
+                continue
             self._init_row_enrichment_state()
             lf_skip_search = False
             if self._lf_endpoint_in_cooldown("search"):
@@ -5385,6 +5541,11 @@ class CrossDirectoryEnricherWorker(QThread):
             if not ctx:
                 continue
             processed_rows += 1
+            if row_idx in self._domain_email_reuse_rows or self._maybe_apply_domain_email_reuse(seed_df, row_idx, ctx):
+                self._set_platform_state("facebook", "skipped")
+                skipped_count += 1
+                self._update_progress(position, total)
+                continue
             self._init_row_enrichment_state()
             if self._enrich_row_facebook(seed_df, row_idx, fb_driver, ctx):
                 enriched_count += 1
@@ -6362,6 +6523,13 @@ class CrossDirectoryEnricherWorker(QThread):
             )
         except Exception:
             pass
+        if new_emails and self is not None and hasattr(self, "_index_domain_email_reuse_from_row"):
+            self._index_domain_email_reuse_from_row(
+                df,
+                row_idx,
+                _clean_cell(getattr(self, "_live_context", {}).get("spotify_domain", "")),
+                source_label=payload.source_detail or payload.source_dir or "",
+            )
 
     def _apply_structured_fields(
         self,

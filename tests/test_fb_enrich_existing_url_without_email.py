@@ -11,6 +11,7 @@ import pipeline_runner
 def _make_worker(logs):
     worker = cde.CrossDirectoryEnricherWorker("seed.csv", "output.csv", enable_live_search=False)
     worker.log_message = SimpleNamespace(emit=lambda msg: logs.append(msg))
+    worker.progress = SimpleNamespace(emit=lambda *args, **kwargs: None)
     worker._set_platform_state = lambda *args, **kwargs: None
     worker._platform_attempt_allowed = lambda *args, **kwargs: True
     return worker
@@ -572,6 +573,205 @@ def test_fb_discovery_lock_does_not_leak_across_worker_runs(monkeypatch):
     assert len(discover_calls) == 2
     assert worker_one._fb_discovery_attempted_rows == {0}
     assert worker_two._fb_discovery_attempted_rows == {0}
+
+
+def test_phase_facebook_reuses_indexed_domain_email_without_second_scrape(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = pd.DataFrame(
+        [
+            {
+                "Artist Name": "Bright One",
+                "Email": "",
+                "Email_All": "",
+                "Email_Type": "",
+                "Email_Source_URL": "",
+                "Email_Source_Type": "",
+                "Email_Extract_Method": "",
+                "Spotify_Website_URL": "https://brightmusic.com/about",
+                "facebook_url": "https://www.facebook.com/brightone",
+                "Facebook_URL": "https://www.facebook.com/brightone",
+                "Facebook URL": "https://www.facebook.com/brightone",
+                "Social Link": "",
+                "External Links": "",
+            },
+            {
+                "Artist Name": "Bright Two",
+                "Email": "",
+                "Email_All": "",
+                "Email_Type": "",
+                "Email_Source_URL": "",
+                "Email_Source_Type": "",
+                "Email_Extract_Method": "",
+                "Spotify_Website_URL": "https://brightmusic.com/contact",
+                "facebook_url": "https://www.facebook.com/brighttwo",
+                "Facebook_URL": "https://www.facebook.com/brighttwo",
+                "Facebook URL": "https://www.facebook.com/brighttwo",
+                "Social Link": "",
+                "External Links": "",
+            },
+        ],
+        dtype=str,
+    ).fillna("")
+
+    extract_calls = []
+
+    def fake_extract(driver_obj, url, log_fn=None):
+        extract_calls.append(url)
+        if url == "https://www.facebook.com/brightone":
+            return (["mgmt@brightmusic.com"], url, "")
+        raise AssertionError("second row should reuse indexed domain email before FB scrape")
+
+    monkeypatch.setattr(cde, "_extract_fb_emails_bounded", fake_extract)
+
+    worker._phase_facebook(seed_df, object(), total=2)
+
+    assert extract_calls == ["https://www.facebook.com/brightone"]
+    assert seed_df.at[1, "Email"] == "mgmt@brightmusic.com"
+    assert seed_df.at[1, "Email_All"] == "mgmt@brightmusic.com"
+    assert seed_df.at[1, "Email_Type"] == "fb_enrich"
+    assert seed_df.at[1, "Email_Source_URL"] == "https://www.facebook.com/brightone"
+    assert seed_df.at[1, "Email_Source_Type"] == "facebook_enrich"
+    assert seed_df.at[1, "Email_Extract_Method"] == "regex"
+    assert len(worker._domain_email_reuse_index) == 1
+    assert worker._domain_email_reuse_count == 1
+
+
+def test_domain_email_reuse_only_fills_rows_without_email():
+    logs = []
+    worker = _make_worker(logs)
+    worker._index_domain_email_reuse(
+        "brightmusic.com",
+        email="mgmt@brightmusic.com",
+        email_all="mgmt@brightmusic.com",
+        source_url="https://www.facebook.com/brightone",
+        source_type="facebook_enrich",
+        extract_method="regex",
+        email_type="fb_enrich",
+    )
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Already Filled",
+            "Email": "existing@brightmusic.com",
+            "Email_All": "existing@brightmusic.com",
+            "Email_Type": "",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+            "Spotify_Website_URL": "https://brightmusic.com",
+        }
+    )
+
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    reused = worker._maybe_apply_domain_email_reuse(seed_df, 0, ctx)
+
+    assert reused is False
+    assert seed_df.at[0, "Email"] == "existing@brightmusic.com"
+    assert seed_df.at[0, "Email_All"] == "existing@brightmusic.com"
+    assert worker._domain_email_reuse_count == 0
+
+
+def test_domain_email_reuse_skips_when_only_email_all_is_populated():
+    logs = []
+    worker = _make_worker(logs)
+    worker._index_domain_email_reuse(
+        "brightmusic.com",
+        email="mgmt@brightmusic.com",
+        email_all="mgmt@brightmusic.com",
+        source_url="https://www.facebook.com/brightone",
+        source_type="facebook_enrich",
+        extract_method="regex",
+        email_type="fb_enrich",
+    )
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Email All Only",
+            "Email": "",
+            "Email_All": "existing@brightmusic.com",
+            "Email_Type": "",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+            "Spotify_Website_URL": "https://brightmusic.com",
+        }
+    )
+
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    reused = worker._maybe_apply_domain_email_reuse(seed_df, 0, ctx)
+
+    assert reused is False
+    assert seed_df.at[0, "Email"] == ""
+    assert seed_df.at[0, "Email_All"] == "existing@brightmusic.com"
+    assert worker._domain_email_reuse_count == 0
+
+
+def test_domain_email_reuse_index_is_worker_local():
+    logs_one = []
+    logs_two = []
+    worker_one = _make_worker(logs_one)
+    worker_two = _make_worker(logs_two)
+
+    assert worker_one._index_domain_email_reuse(
+        "brightmusic.com",
+        email="mgmt@brightmusic.com",
+        email_all="mgmt@brightmusic.com;mgmt@brightmusic.com",
+        source_url="https://www.facebook.com/brightone",
+        source_type="facebook_enrich",
+        extract_method="regex",
+        email_type="fb_enrich",
+    )
+
+    seed_one = _seed_df(
+        {
+            "Artist Name": "Worker One",
+            "Email": "",
+            "Email_All": "",
+            "Email_Type": "",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+            "Spotify_Website_URL": "https://brightmusic.com",
+        }
+    )
+    seed_two = seed_one.copy()
+
+    ctx_one = worker_one._build_row_context(seed_one, 0, 1, 1)
+    ctx_two = worker_two._build_row_context(seed_two, 0, 1, 1)
+
+    assert worker_one._maybe_apply_domain_email_reuse(seed_one, 0, ctx_one) is True
+    assert worker_two._maybe_apply_domain_email_reuse(seed_two, 0, ctx_two) is False
+    assert seed_one.at[0, "Email"] == "mgmt@brightmusic.com"
+    assert seed_one.at[0, "Email_All"] == "mgmt@brightmusic.com"
+    assert seed_two.at[0, "Email"] == ""
+    assert seed_two.at[0, "Email_All"] == ""
+
+
+def test_seed_directory_email_rows_are_not_indexed_for_domain_reuse():
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Seed Directory Artist",
+            "Email": "seed@brightmusic.com",
+            "Email_All": "seed@brightmusic.com",
+            "Email_Type": "",
+            "Email_Source_URL": "https://brightmusic.com/contact",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "regex",
+            "Email Source": "Seed directory (site/email scrape)",
+            "Spotify_Website_URL": "https://brightmusic.com",
+        }
+    )
+
+    indexed = worker._index_domain_email_reuse_from_row(
+        seed_df,
+        0,
+        "brightmusic.com",
+        source_label="Seed directory (site/email scrape)",
+    )
+
+    assert indexed is False
+    assert worker._domain_email_reuse_index == {}
 
 
 def test_fb_enrich_rejects_invalid_discovered_candidate(monkeypatch):
