@@ -74,6 +74,60 @@ def test_scheduler_attempt_counts_match_rows():
     assert summary["LF"]["skipped_cooldown"] == 0
 
 
+def test_row_source_lock_prevents_repeat_attempts():
+    rows = [0, 0, 1]
+    calls = []
+
+    def run_row(idx):
+        calls.append(idx)
+        if idx == 0:
+            return SourceResult(attempted=True, enriched=False, retry_later=False)
+        return SourceResult(attempted=True, enriched=True)
+
+    spec = SourceSpec(
+        name="LF",
+        rows=rows,
+        run_row=run_row,
+        is_available=lambda: (True, None),
+    )
+
+    summary = SourceDiversityScheduler([spec], row_label=str).run()
+
+    assert calls == [0, 1]
+    assert summary["LF"]["attempted"] == 2
+    assert summary["LF"]["enriched"] == 1
+
+
+def test_row_source_lock_does_not_apply_to_retry_later():
+    rows = [0, 0, 1]
+    calls = []
+    row_zero_attempts = {"count": 0}
+
+    def run_row(idx):
+        calls.append(idx)
+        if idx == 0:
+            row_zero_attempts["count"] += 1
+            return SourceResult(
+                attempted=True,
+                enriched=(row_zero_attempts["count"] > 1),
+                retry_later=(row_zero_attempts["count"] == 1),
+            )
+        return SourceResult(attempted=True, enriched=True)
+
+    spec = SourceSpec(
+        name="LF",
+        rows=rows,
+        run_row=run_row,
+        is_available=lambda: (True, None),
+    )
+
+    summary = SourceDiversityScheduler([spec], row_label=str).run()
+
+    assert calls == [0, 0, 1]
+    assert summary["LF"]["attempted"] == 3
+    assert summary["LF"]["enriched"] == 2
+
+
 def test_scheduler_mode_skips_legacy_phases(monkeypatch):
     # Build a worker instance without running QThread.__init__
     from cross_directory_enricher import CrossDirectoryEnricherWorker
@@ -104,6 +158,50 @@ def test_scheduler_mode_skips_legacy_phases(monkeypatch):
     assert calls["sc"] == 0
     assert calls["lf"] == 0
     assert calls["fb"] == 0
+
+
+def test_interleaved_fb_run_maps_login_wall_to_retry_later(monkeypatch):
+    import pandas as pd
+    import cross_directory_enricher as cde
+
+    monkeypatch.setattr(cde.CrossDirectoryEnricherWorker, "__init__", lambda self, *a, **k: None)
+    monkeypatch.setattr(cde, "ENABLE_FACEBOOK_ENRICHMENT", True)
+
+    captured = {}
+
+    class FakeScheduler:
+        def __init__(self, sources, row_label=None, log_fn=None, short_circuit_fn=None):
+            captured["sources"] = list(sources)
+
+        def run(self):
+            return {}
+
+    monkeypatch.setattr(cde, "SourceDiversityScheduler", FakeScheduler)
+
+    worker = cde.CrossDirectoryEnricherWorker(None, None)
+    worker.enable_live_search = False
+    worker.log_message = type("Logger", (), {"emit": lambda *args, **kwargs: None})()
+    worker._fb_discovery_attempted_rows = set()
+    worker._domain_email_reuse_rows = set()
+    worker._build_row_context = lambda *args, **kwargs: {"artist": "Artist X", "position": 1, "total": 1}
+    worker._maybe_apply_domain_email_reuse = lambda *args, **kwargs: False
+    worker._init_row_enrichment_state = lambda: None
+
+    def fake_enrich_row_facebook(seed_df, row_idx, fb_driver, ctx):
+        seed_df.at[row_idx, "FB_Status"] = "login_wall"
+        return False
+
+    worker._enrich_row_facebook = fake_enrich_row_facebook
+
+    seed_df = pd.DataFrame([{"Artist Name": "Artist X", "FB_Status": ""}], index=[0])
+    worker._run_interleaved_sources(seed_df, fb_driver=object(), total=1)
+
+    fb_source = next(spec for spec in captured["sources"] if spec.name == "FB")
+    result = fb_source.run_row(0)
+
+    assert result.attempted is True
+    assert result.enriched is False
+    assert result.retry_later is True
 
 
 def test_email_summary_resets_per_cross_directory_run(tmp_path, monkeypatch):

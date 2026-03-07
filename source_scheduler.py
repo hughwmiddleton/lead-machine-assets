@@ -8,7 +8,7 @@ cursor one step per round to avoid long single-source bursts.
 from __future__ import annotations
 
 import random
-from collections import deque
+from collections import defaultdict, deque
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, MutableMapping, Optional, Sequence, Tuple
 import re
@@ -309,6 +309,7 @@ class SourceResult:
     attempted: bool = False
     enriched: bool = False
     skipped_cooldown: bool = False
+    retry_later: bool = False
 
 
 @dataclass
@@ -338,6 +339,7 @@ class SourceDiversityScheduler:
         self._log = log_fn
         self._short_circuit_fn = short_circuit_fn
         self._completed_rows: set[int] = set()
+        self._row_source_failures: Dict[int, set[str]] = defaultdict(set)
         self._summary: Dict[str, Dict[str, int]] = {
             spec.name: {"attempted": 0, "enriched": 0, "skipped_cooldown": 0, "skipped_opportunity": 0}
             for spec in self.sources
@@ -368,7 +370,9 @@ class SourceDiversityScheduler:
         while pos < len(rows):
             candidate = rows[pos]
             if candidate not in self._completed_rows:
-                return candidate
+                failed_sources = self._row_source_failures.get(candidate)
+                if not failed_sources or spec.name not in failed_sources:
+                    return candidate
             pos += 1
         return None
 
@@ -380,6 +384,9 @@ class SourceDiversityScheduler:
             pos += 1
             self._positions[spec.name] = pos
             if row_idx in self._completed_rows:
+                continue
+            failed_sources = self._row_source_failures.get(row_idx)
+            if failed_sources and spec.name in failed_sources:
                 continue
             return row_idx
         return None
@@ -505,6 +512,8 @@ class SourceDiversityScheduler:
                 self._emit(f"[Scheduler] running {spec.name} for row {display_row}")
                 result = spec.run_row(row_idx)
                 self._record(spec.name, result)
+                if result.attempted and not result.enriched and not result.retry_later:
+                    self._row_source_failures[row_idx].add(spec.name)
                 if result.attempted and self._short_circuit_fn:
                     try:
                         latest_row = spec.row_getter(row_idx) if spec.row_getter else None

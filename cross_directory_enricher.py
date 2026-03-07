@@ -5643,8 +5643,12 @@ class CrossDirectoryEnricherWorker(QThread):
                 if row_idx in self._domain_email_reuse_rows or self._maybe_apply_domain_email_reuse(seed_df, row_idx, ctx):
                     return SourceResult()
                 self._init_row_enrichment_state()
-                sc_enriched, _ = self._enrich_row_sc_live(seed_df, row_idx, ctx)
-                return SourceResult(attempted=True, enriched=bool(sc_enriched))
+                sc_enriched, sc_retry_later = self._enrich_row_sc_live(seed_df, row_idx, ctx)
+                return SourceResult(
+                    attempted=True,
+                    enriched=bool(sc_enriched),
+                    retry_later=bool(sc_retry_later),
+                )
 
             sources.append(
                 SourceSpec(
@@ -5674,8 +5678,12 @@ class CrossDirectoryEnricherWorker(QThread):
                         )
                         self._notified_limit = True
                     return SourceResult()
-                ll_enriched, _ = self._enrich_row_live_lookup(seed_df, row_idx, ctx)
-                return SourceResult(attempted=True, enriched=bool(ll_enriched))
+                ll_enriched, ll_retry_later = self._enrich_row_live_lookup(seed_df, row_idx, ctx)
+                return SourceResult(
+                    attempted=True,
+                    enriched=bool(ll_enriched),
+                    retry_later=bool(ll_retry_later),
+                )
 
             sources.append(
                 SourceSpec(
@@ -5700,7 +5708,15 @@ class CrossDirectoryEnricherWorker(QThread):
                     return SourceResult()
                 self._init_row_enrichment_state()
                 fb_enriched = self._enrich_row_facebook(seed_df, row_idx, fb_driver, ctx)
-                return SourceResult(attempted=True, enriched=bool(fb_enriched))
+                fb_status = ""
+                if "FB_Status" in seed_df.columns:
+                    fb_status = cell_to_str(seed_df.at[row_idx, "FB_Status"]).strip().lower()
+                fb_retry_later = fb_status in {"login_wall", "warning_interstitial", "checkpoint", "fetch_error"}
+                return SourceResult(
+                    attempted=True,
+                    enriched=bool(fb_enriched),
+                    retry_later=fb_retry_later,
+                )
 
             sources.append(
                 SourceSpec(
