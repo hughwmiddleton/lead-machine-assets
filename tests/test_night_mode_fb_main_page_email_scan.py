@@ -185,3 +185,54 @@ def test_candidate_fetch_budget_remains_capped_at_two_pages(monkeypatch) -> None
     assert driver_kind == "session"
     assert outcome == "no_email_on_page"
     assert any("[FB Email] No email found on main page; evaluating contact/about fetch" in msg for msg in logs)
+
+
+def test_secondary_fetch_is_skipped_when_only_invalid_internal_surfaces_exist(monkeypatch) -> None:
+    logs = []
+    enricher = _build_enricher(logs)
+    calls = []
+    main_url = "https://www.facebook.com/artist"
+
+    pages = {
+        main_url: (
+            """
+            <html>
+              <body>
+                <div>No email on the main page.</div>
+                <a href="/events/birthdays/?foo=1">About</a>
+                <a href="/artist/videos">Contact</a>
+              </body>
+            </html>
+            """,
+            main_url,
+        ),
+    }
+
+    def fake_fetch(url, goto_about=False):  # noqa: ANN001
+        calls.append(url)
+        return pages[url]
+
+    monkeypatch.setattr(enricher, "_fetch_html_with_url", fake_fetch)
+    monkeypatch.setattr(nmfb, "_night_fb_has_music_signals", lambda soup, context: False)
+    monkeypatch.setattr(nmfb, "should_accept_email_override", lambda *args, **kwargs: (True, "test_override"))
+
+    result = enricher._scrape_single_fb_candidate(
+        main_url,
+        {"Artist Name": "Artist", "Email_All": ""},
+        "Artist",
+        allow_anon=False,
+        candidate_context={},
+    )
+
+    assert result is not None
+    night_result, emails, driver_kind, outcome = result
+    assert emails == []
+    assert night_result is not None
+    assert night_result.about_attempted == "no"
+    assert night_result.about_result == "no_contact_link"
+    assert calls == [main_url]
+    assert len(calls) == 1
+    assert driver_kind == "session"
+    assert outcome == "no_email_on_page"
+    assert any("[FB Email] No email found on main page; evaluating contact/about fetch" in msg for msg in logs)
+    assert any("[FB Email] No valid contact surface found" in msg for msg in logs)

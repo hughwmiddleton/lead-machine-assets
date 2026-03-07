@@ -3459,31 +3459,107 @@ def _fetch_fb_about_variants(base_url: str) -> List[str]:
 
 def _pick_fb_contact_link(soup: BeautifulSoup, base_url: str) -> Optional[str]:
     """
-    Choose a single same-domain contact/about/info link from the main page.
-    Prioritises about > contact > info.
+    Choose a single valid Facebook contact/about surface from the main page.
+    Prioritises about > about_contact_and_basic_info > contact.
     """
     if not soup:
         return None
+
     base = base_url or "https://www.facebook.com/"
-    priorities = {"about": 1, "contact": 2, "info": 3}
-    candidates: List[Tuple[int, str]] = []
-    for anchor in soup.find_all("a"):
-        href = anchor.get("href") or ""
-        text = (anchor.get_text() or "").strip().lower()
-        href_lc = href.lower()
-        for token, rank in priorities.items():
-            if token in href_lc or token in text:
-                resolved = urllib.parse.urljoin(base, href)
-                if "facebook.com" not in resolved:
-                    continue
-                resolved = resolved.split("#", 1)[0]
-                candidates.append((rank, resolved))
-                break
-    if candidates:
-        candidates.sort(key=lambda item: item[0])
-        return candidates[0][1]
-    fallback = _fetch_fb_about_variants(base_url)
-    return fallback[0] if fallback else None
+    allowed_hosts = {
+        "facebook.com",
+        "www.facebook.com",
+        "m.facebook.com",
+        "web.facebook.com",
+        "touch.facebook.com",
+    }
+    alias_hosts = {"facebook.com", "m.facebook.com", "web.facebook.com", "touch.facebook.com"}
+    rejected_surface_tokens = {
+        "events",
+        "birthdays",
+        "groups",
+        "posts",
+        "permalink",
+        "photos",
+        "watch",
+        "videos",
+    }
+    allowed_sk = {"about", "about_contact_and_basic_info"}
+
+    def _canonicalize_resolved(candidate_url: str) -> Optional[Tuple[str, urllib.parse.ParseResult]]:
+        resolved = urllib.parse.urljoin(base, candidate_url or "").split("#", 1)[0]
+        try:
+            parsed = urllib.parse.urlparse(resolved)
+        except Exception:
+            return None
+        scheme = (parsed.scheme or "https").lower()
+        if scheme not in {"http", "https"}:
+            return None
+        host = (parsed.netloc or "").lower()
+        if host not in allowed_hosts:
+            return None
+        if host in alias_hosts:
+            host = "www.facebook.com"
+        normalized = urllib.parse.urlunparse(
+            (scheme, host, parsed.path or "", "", parsed.query or "", "")
+        )
+        return normalized, urllib.parse.urlparse(normalized)
+
+    try:
+        base_parsed = urllib.parse.urlparse(base)
+    except Exception:
+        return None
+    base_path = (base_parsed.path or "").rstrip("/").lower() or "/"
+
+    candidates: List[Tuple[int, int, int, str]] = []
+    seen: Set[str] = set()
+    for index, anchor in enumerate(soup.find_all("a", href=True)):
+        href = (anchor.get("href") or "").strip()
+        if not href:
+            continue
+
+        canonical = _canonicalize_resolved(href)
+        if not canonical:
+            continue
+        resolved, parsed = canonical
+        path = (parsed.path or "").rstrip("/").lower() or "/"
+        path_segments = [segment for segment in path.split("/") if segment]
+        if any(segment in rejected_surface_tokens for segment in path_segments):
+            continue
+        if resolved in seen:
+            continue
+
+        priority: Optional[int] = None
+        if path.endswith("/about"):
+            priority = 0
+        elif path.endswith("/about_contact_and_basic_info"):
+            priority = 1
+        elif path.endswith("/contact"):
+            priority = 2
+        else:
+            qs = urllib.parse.parse_qs(parsed.query or "", keep_blank_values=False)
+            sk_value = ((qs.get("sk") or [""])[0] or "").strip().lower()
+            if sk_value in allowed_sk and (path == base_path or path == "/profile.php"):
+                priority = 0 if sk_value == "about" else 1
+
+        if priority is None:
+            continue
+
+        text = " ".join(anchor.get_text(" ", strip=True).lower().split())
+        text_rank = 1
+        if priority == 0 and "about" in text:
+            text_rank = 0
+        elif priority in {1, 2} and ("contact" in text or "about" in text):
+            text_rank = 0
+
+        seen.add(resolved)
+        candidates.append((priority, text_rank, index, resolved))
+
+    if not candidates:
+        return None
+
+    candidates.sort()
+    return candidates[0][3]
 
 
 def _night_fb_has_music_signals(soup: BeautifulSoup, meta: Optional[Dict[str, str]] = None) -> bool:
@@ -5175,6 +5251,7 @@ class NightModeFacebookEnricher:
                             if not about_result:
                                 about_result = "no_email"
             elif need_about_fetch and not contact_url:
+                _log(self.logger, "[FB Email] No valid contact surface found")
                 about_result = "no_contact_link"
 
         if about_result == "not_found" and not emails and not has_music_signals:
