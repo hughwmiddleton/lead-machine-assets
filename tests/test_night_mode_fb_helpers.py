@@ -26,6 +26,27 @@ def test_extract_emails_and_primary_selection() -> None:
     assert len(set(merged.split(";"))) == len(merged.split(";"))
 
 
+def test_extract_emails_from_script_json_and_escaped_variants() -> None:
+    html = r"""
+    <html>
+      <body>
+        <div>Visible: info@label.com</div>
+        <script type="application/json">
+          {"email":"mgmt@label.com","business_email":"info@label.com"}
+        </script>
+        <script>
+          window.__data = {\"email\":\"mgmt@label.com\"};
+        </script>
+      </body>
+    </html>
+    """
+
+    emails, used_mailto = night_mode_fb._extract_emails_from_html(html)
+
+    assert emails == ["info@label.com", "mgmt@label.com"]
+    assert used_mailto is False
+
+
 def test_dedupe_prefers_fb_in_night_mode() -> None:
     df = pd.DataFrame(
         [
