@@ -4856,17 +4856,28 @@ class CrossDirectoryEnricherWorker(QThread):
             self._set_platform_state("instagram", "skipped")
             return False
 
-        ig_emails, _ = _extract_emails_from_html(html)
-        if not ig_emails:
+        soup = BeautifulSoup(html, "html.parser")
+        ig_emails, _ = _extract_emails_from_html(html, soup=soup)
+
+        meta_emails: List[str] = []
+        for meta_tag in soup.select('meta[property="og:description"], meta[name="description"]'):
+            meta_content = cell_to_str(meta_tag.get("content"))
+            if not meta_content:
+                continue
+            extracted_meta_emails, _ = _extract_emails_from_html(meta_content)
+            meta_emails.extend(extracted_meta_emails)
+
+        all_ig_emails = list(dict.fromkeys([*ig_emails, *meta_emails]))
+        if not all_ig_emails:
             self.log_message.emit("[IG Email] No email found")
             self._set_platform_state("instagram", "skipped")
             return False
 
-        found_email = ig_emails[0]
+        found_email = all_ig_emails[0]
         self.log_message.emit(f"[IG Email] Found email: {found_email}")
         if not cell_to_str(seed_df.at[row_idx, "Email"]):
             seed_df.at[row_idx, "Email"] = found_email
-        seed_df.at[row_idx, "Email_All"] = _merge_email_all(seed_df.at[row_idx, "Email_All"], ig_emails)
+        seed_df.at[row_idx, "Email_All"] = _merge_email_all(seed_df.at[row_idx, "Email_All"], all_ig_emails)
         seed_df.at[row_idx, "Email_Type"] = "ig_enrich"
         if not cell_to_str(seed_df.at[row_idx, "Email_Source_URL"]):
             seed_df.at[row_idx, "Email_Source_URL"] = ig_url

@@ -2710,12 +2710,12 @@ def _create_fb_driver_public(headless: bool = True):
     return _start_chromedriver_with_retry(chrome_options, logger=None, profile_dir=None, enable_temp_profile_fallback=False)
 
 
-def _extract_emails_from_html(html: str) -> Tuple[List[str], bool]:
+def _extract_emails_from_html(html: str, soup: Optional[BeautifulSoup] = None) -> Tuple[List[str], bool]:
     emails: List[str] = []
     mailto_used = False
     if not html:
         return emails, mailto_used
-    soup = BeautifulSoup(html, "html.parser")
+    soup = soup or BeautifulSoup(html, "html.parser")
     for anchor in soup.select('a[href^="mailto:"]'):
         href = anchor.get("href") or ""
         addr = href.split("mailto:", 1)[-1].split("?", 1)[0]
