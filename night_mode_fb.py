@@ -3460,7 +3460,7 @@ def _fetch_fb_about_variants(base_url: str) -> List[str]:
 def _pick_fb_contact_link(soup: BeautifulSoup, base_url: str) -> Optional[str]:
     """
     Choose a single valid Facebook contact/about surface from the main page.
-    Prioritises about > about_contact_and_basic_info > contact.
+    Prioritises about_contact_and_basic_info > about > contact.
     """
     if not soup:
         return None
@@ -3530,9 +3530,9 @@ def _pick_fb_contact_link(soup: BeautifulSoup, base_url: str) -> Optional[str]:
             continue
 
         priority: Optional[int] = None
-        if path.endswith("/about"):
+        if path.endswith("/about_contact_and_basic_info"):
             priority = 0
-        elif path.endswith("/about_contact_and_basic_info"):
+        elif path.endswith("/about"):
             priority = 1
         elif path.endswith("/contact"):
             priority = 2
@@ -3540,14 +3540,14 @@ def _pick_fb_contact_link(soup: BeautifulSoup, base_url: str) -> Optional[str]:
             qs = urllib.parse.parse_qs(parsed.query or "", keep_blank_values=False)
             sk_value = ((qs.get("sk") or [""])[0] or "").strip().lower()
             if sk_value in allowed_sk and (path == base_path or path == "/profile.php"):
-                priority = 0 if sk_value == "about" else 1
+                priority = 0 if sk_value == "about_contact_and_basic_info" else 1
 
         if priority is None:
             continue
 
         text = " ".join(anchor.get_text(" ", strip=True).lower().split())
         text_rank = 1
-        if priority == 0 and "about" in text:
+        if priority == 0 and ("contact" in text or "about" in text):
             text_rank = 0
         elif priority in {1, 2} and ("contact" in text or "about" in text):
             text_rank = 0

@@ -127,6 +127,79 @@ def test_secondary_fetch_still_runs_when_main_page_has_no_email(monkeypatch) -> 
     assert any(f"[FB Email] Visiting {about_url}" in msg for msg in logs)
 
 
+def test_secondary_fetch_prefers_about_contact_and_basic_info_and_stays_within_cap(monkeypatch) -> None:
+    logs = []
+    enricher = _build_enricher(logs)
+    calls = []
+    main_url = "https://www.facebook.com/artist"
+    about_url = "https://www.facebook.com/artist/about"
+    contact_info_url = "https://www.facebook.com/artist/about_contact_and_basic_info"
+
+    pages = {
+        main_url: (
+            """
+            <html>
+              <body>
+                <div>No email on the main page.</div>
+                <a href="/artist/about">About</a>
+                <a href="/artist/about_contact_and_basic_info">Contact info</a>
+              </body>
+            </html>
+            """,
+            main_url,
+        ),
+        about_url: (
+            """
+            <html>
+              <body>
+                <div>No email here.</div>
+              </body>
+            </html>
+            """,
+            about_url,
+        ),
+        contact_info_url: (
+            """
+            <html>
+              <body>
+                <div>Bookings: bookings@artist.com</div>
+              </body>
+            </html>
+            """,
+            contact_info_url,
+        ),
+    }
+
+    def fake_fetch(url, goto_about=False):  # noqa: ANN001
+        calls.append(url)
+        return pages[url]
+
+    monkeypatch.setattr(enricher, "_fetch_html_with_url", fake_fetch)
+    monkeypatch.setattr(nmfb, "_night_fb_has_music_signals", lambda soup, context: False)
+    monkeypatch.setattr(nmfb, "should_accept_email_override", lambda *args, **kwargs: (True, "test_override"))
+
+    result = enricher._scrape_single_fb_candidate(
+        main_url,
+        {"Artist Name": "Artist", "Email_All": ""},
+        "Artist",
+        allow_anon=False,
+        candidate_context={},
+    )
+
+    assert result is not None
+    night_result, emails, driver_kind, outcome = result
+    assert emails == ["bookings@artist.com"]
+    assert night_result is not None
+    assert night_result.about_attempted == "yes"
+    assert night_result.about_result == "emails_found"
+    assert calls == [main_url, contact_info_url]
+    assert len(calls) == 2
+    assert driver_kind == "session"
+    assert outcome == "found_email"
+    assert any("[FB Email] No email found on main page; evaluating contact/about fetch" in msg for msg in logs)
+    assert any(f"[FB Email] Visiting {contact_info_url}" in msg for msg in logs)
+
+
 def test_candidate_fetch_budget_remains_capped_at_two_pages(monkeypatch) -> None:
     logs = []
     enricher = _build_enricher(logs)

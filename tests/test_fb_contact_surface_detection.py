@@ -81,12 +81,38 @@ def test_night_mode_pick_fb_contact_link_accepts_about_contact_and_basic_info() 
     assert selected == "https://www.facebook.com/artist/about_contact_and_basic_info"
 
 
+def test_night_mode_pick_fb_contact_link_prefers_about_contact_and_basic_info_over_about() -> None:
+    html = """
+    <html><body>
+      <a href="/artist/about">About</a>
+      <a href="/artist/about_contact_and_basic_info">Contact info</a>
+    </body></html>
+    """
+
+    selected = _pick_from_html("https://www.facebook.com/artist", html)
+
+    assert selected == "https://www.facebook.com/artist/about_contact_and_basic_info"
+
+
 def test_night_mode_pick_fb_contact_link_accepts_contact_path() -> None:
     html = '<html><body><a href="/artist/contact">Contact</a></body></html>'
 
     selected = _pick_from_html("https://www.facebook.com/artist", html)
 
     assert selected == "https://www.facebook.com/artist/contact"
+
+
+def test_night_mode_pick_fb_contact_link_falls_back_to_about_over_contact() -> None:
+    html = """
+    <html><body>
+      <a href="/artist/contact">Contact</a>
+      <a href="/artist/about">About</a>
+    </body></html>
+    """
+
+    selected = _pick_from_html("https://www.facebook.com/artist", html)
+
+    assert selected == "https://www.facebook.com/artist/about"
 
 
 def test_night_mode_pick_fb_contact_link_rejects_events_surface() -> None:
@@ -140,6 +166,19 @@ def test_night_mode_pick_fb_contact_link_accepts_valid_sk_about_surface() -> Non
     selected = _pick_from_html("https://www.facebook.com/artist", html)
 
     assert selected == "https://www.facebook.com/artist?sk=about"
+
+
+def test_night_mode_pick_fb_contact_link_prefers_sk_about_contact_and_basic_info_over_sk_about() -> None:
+    html = """
+    <html><body>
+      <a href="/artist?sk=about">About</a>
+      <a href="/artist?sk=about_contact_and_basic_info">Contact info</a>
+    </body></html>
+    """
+
+    selected = _pick_from_html("https://www.facebook.com/artist", html)
+
+    assert selected == "https://www.facebook.com/artist?sk=about_contact_and_basic_info"
 
 
 class _FakeFacebookDriver:
