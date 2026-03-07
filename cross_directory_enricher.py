@@ -781,6 +781,18 @@ WEBSITE_EMAIL_PATH_KEYWORDS = (
     "/management",
     "/team",
 )
+WEBSITE_EMAIL_SHALLOW_PATHS = (
+    "/contact",
+    "/press",
+    "/media",
+    "/epk",
+    "/management",
+    "/manager",
+    "/booking",
+    "/bookings",
+    "/team",
+    "/about",
+)
 WEBSITE_EMAIL_JUNK_KEYWORDS = ("login", "logout", "cart", "privacy", "terms")
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MULTI_VALUE_SEPARATOR = ", "
@@ -3253,6 +3265,41 @@ def _discover_website_contact_candidates(base_url: str, html: str) -> List[str]:
     return [url for _, _, url in candidates]
 
 
+def _build_website_shallow_candidates(base_url: str, current_url: str = "") -> List[str]:
+    base_norm = _normalise_url(base_url)
+    current_norm = _normalise_url(current_url)
+    if current_norm and (not base_norm or not _website_domains_match(base_norm, current_norm)):
+        current_norm = None
+    root_source = current_norm or base_norm
+    if not root_source:
+        return []
+    parsed = urllib.parse.urlparse(root_source)
+    if not parsed.scheme or not parsed.netloc:
+        return []
+
+    root_url = urllib.parse.urlunparse((parsed.scheme, parsed.netloc, "/", "", "", ""))
+    seen: Set[str] = set()
+    skip = {url for url in (base_norm, current_norm) if url}
+    candidates: List[str] = []
+    for path in WEBSITE_EMAIL_SHALLOW_PATHS:
+        candidate = _normalise_url(urllib.parse.urljoin(root_url, path))
+        if not candidate or candidate in seen or candidate in skip:
+            continue
+        if not _website_domains_match(root_url, candidate):
+            continue
+        seen.add(candidate)
+        candidates.append(candidate)
+    return candidates
+
+
+def _website_fetch_result_is_same_domain(result: WebsiteFetchResult, base_url: str) -> bool:
+    final_url = _normalise_url(result.final_url or result.url or "")
+    base_norm = _normalise_url(base_url or "")
+    if not final_url or not base_norm:
+        return False
+    return _website_domains_match(base_norm, final_url)
+
+
 def _fetch_website_html_bounded(
     session: requests.Session,
     url: str,
@@ -5236,12 +5283,16 @@ class CrossDirectoryEnricherWorker(QThread):
 
         homepage = _fetch(website_url)
         homepage_url = homepage.final_url or website_url
-        homepage_ok = bool(homepage.is_html and homepage.html)
+        homepage_ok = bool(
+            homepage.is_html
+            and homepage.html
+            and _website_fetch_result_is_same_domain(homepage, website_url)
+        )
         self.log_message.emit(
             f"[Web] homepage fetched ok={homepage_ok} artist='{artist}' url={homepage_url}"
         )
 
-        if homepage.is_html and homepage.html:
+        if homepage_ok:
             page_emails, used_mailto = _extract_website_emails_from_html(homepage.html)
             if page_emails:
                 emails_found = page_emails
@@ -5250,7 +5301,7 @@ class CrossDirectoryEnricherWorker(QThread):
 
         remaining_budget = max(0, max_fetches - fetches_used)
         candidates: List[str] = []
-        if not emails_found and remaining_budget > 0 and homepage.is_html and homepage.html:
+        if not emails_found and remaining_budget > 0 and homepage_ok:
             candidates = _discover_website_contact_candidates(homepage_url, homepage.html)
             self.log_message.emit(
                 f"[Web] found contact candidates={len(candidates)} using top={min(len(candidates), remaining_budget)} artist='{artist}'"
@@ -5259,6 +5310,8 @@ class CrossDirectoryEnricherWorker(QThread):
                 result = _fetch(candidate_url)
                 if not result.is_html or not result.html:
                     continue
+                if not _website_fetch_result_is_same_domain(result, website_url):
+                    continue
                 page_emails, used_mailto = _extract_website_emails_from_html(result.html)
                 if not page_emails:
                     continue
@@ -5266,6 +5319,40 @@ class CrossDirectoryEnricherWorker(QThread):
                     source_url = result.final_url or candidate_url
                     extract_method = "mailto" if used_mailto else "regex"
                 emails_found = list(dict.fromkeys([*emails_found, *page_emails]))
+
+        remaining_budget = max(0, max_fetches - fetches_used)
+        if not emails_found and remaining_budget > 0:
+            shallow_candidates = _build_website_shallow_candidates(website_url, homepage_url)
+            if candidates:
+                seen_candidates = set(candidates)
+                shallow_candidates = [url for url in shallow_candidates if url not in seen_candidates]
+            shallow_to_try = shallow_candidates[:remaining_budget]
+            self.log_message.emit(
+                f"[Web] shallow sweep paths_considered={len(shallow_candidates)} using_top={len(shallow_to_try)}"
+            )
+            shallow_fetches = 0
+            shallow_emails_found = 0
+            for candidate_url in shallow_to_try:
+                result = _fetch(candidate_url)
+                shallow_fetches += 1
+                if not result.is_html or not result.html:
+                    continue
+                if not _website_fetch_result_is_same_domain(result, website_url):
+                    continue
+                page_emails, used_mailto = _extract_website_emails_from_html(result.html)
+                if not page_emails:
+                    continue
+                if not source_url:
+                    source_url = result.final_url or candidate_url
+                    extract_method = "mailto" if used_mailto else "regex"
+                emails_found = list(dict.fromkeys([*emails_found, *page_emails]))
+                shallow_emails_found = len(page_emails)
+                matched_path = urllib.parse.urlparse(result.final_url or candidate_url).path or "/"
+                self.log_message.emit(f"[Web] shallow sweep matched path={matched_path}")
+                break
+            self.log_message.emit(
+                f"[Web] shallow sweep fetched={shallow_fetches} emails_found={shallow_emails_found}"
+            )
 
         normalized_emails = _normalize_emails(";".join(emails_found))
         self.log_message.emit(

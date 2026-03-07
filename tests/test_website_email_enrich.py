@@ -243,3 +243,156 @@ def test_website_email_skips_when_canonical_email_exists(monkeypatch):
 
     assert matched is False
     assert seed_df.at[0, "Email_All"] == "existing@artist.test"
+
+
+def test_website_email_shallow_sweep_finds_press_email(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Press Artist",
+            "Email": "",
+            "Email_All": "",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+            "Email_Type": "",
+            "Spotify_Website_URL": "https://artist.test",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    calls = []
+
+    pages = {
+        "https://artist.test": _result(
+            "https://artist.test",
+            html="<html><body><a href='/contact'>Contact</a></body></html>",
+        ),
+        "https://artist.test/contact": _result(
+            "https://artist.test/contact",
+            html="<html><body>No email here</body></html>",
+        ),
+        "https://artist.test/press": _result(
+            "https://artist.test/press",
+            html="<html><body>Press: press@artist.test</body></html>",
+        ),
+    }
+
+    def fake_fetch(session, url, *, timeout_s, max_bytes):
+        calls.append(url)
+        return pages[url]
+
+    monkeypatch.setattr(cde, "_fetch_website_html_bounded", fake_fetch)
+    monkeypatch.setattr(cde, "WEBSITE_EMAIL_MAX_PAGES", 3)
+
+    matched = worker._enrich_row_website_email(seed_df, 0, ctx)
+
+    assert matched is True
+    assert calls == [
+        "https://artist.test",
+        "https://artist.test/contact",
+        "https://artist.test/press",
+    ]
+    assert seed_df.at[0, "Email"] == "press@artist.test"
+    assert seed_df.at[0, "Email_All"] == "press@artist.test"
+    assert seed_df.at[0, "Email_Source_URL"] == "https://artist.test/press"
+    assert seed_df.at[0, "Email_Source_Type"] == "website_enrich"
+    assert seed_df.at[0, "Email_Extract_Method"] == "regex"
+    assert seed_df.at[0, "Email_Type"] == "website_enrich"
+    assert worker._domain_email_reuse_index["artist.test"]["email"] == "press@artist.test"
+    assert any("[Web] shallow sweep paths_considered=" in msg for msg in logs)
+    assert any("[Web] shallow sweep matched path=/press" in msg for msg in logs)
+
+
+def test_website_email_shallow_sweep_respects_max_page_cap(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Shallow Cap Artist",
+            "Email": "",
+            "Email_All": "",
+            "Spotify_Website_URL": "https://artist.test",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    calls = []
+
+    pages = {
+        "https://artist.test": _result(
+            "https://artist.test",
+            html="<html><body>No email here</body></html>",
+        ),
+        "https://artist.test/contact": _result(
+            "https://artist.test/contact",
+            html="<html><body>No email</body></html>",
+        ),
+        "https://artist.test/press": _result(
+            "https://artist.test/press",
+            html="<html><body>No email</body></html>",
+        ),
+    }
+
+    def fake_fetch(session, url, *, timeout_s, max_bytes):
+        calls.append(url)
+        return pages[url]
+
+    monkeypatch.setattr(cde, "_fetch_website_html_bounded", fake_fetch)
+    monkeypatch.setattr(cde, "WEBSITE_EMAIL_MAX_PAGES", 3)
+
+    matched = worker._enrich_row_website_email(seed_df, 0, ctx)
+
+    assert matched is False
+    assert calls == [
+        "https://artist.test",
+        "https://artist.test/contact",
+        "https://artist.test/press",
+    ]
+    assert len(calls) <= 3
+    assert seed_df.at[0, "Email"] == ""
+    assert seed_df.at[0, "Email_All"] == ""
+
+
+def test_website_email_shallow_non_html_counts_toward_cap(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Shallow PDF Artist",
+            "Email": "",
+            "Email_All": "",
+            "Spotify_Website_URL": "https://artist.test",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    calls = []
+
+    pages = {
+        "https://artist.test": _result(
+            "https://artist.test",
+            html="<html><body>No email here</body></html>",
+        ),
+        "https://artist.test/epk": _result(
+            "https://artist.test/epk",
+            html="",
+            content_type="application/pdf",
+            is_html=False,
+        ),
+    }
+
+    def fake_fetch(session, url, *, timeout_s, max_bytes):
+        calls.append(url)
+        return pages[url]
+
+    monkeypatch.setattr(cde, "_fetch_website_html_bounded", fake_fetch)
+    monkeypatch.setattr(cde, "WEBSITE_EMAIL_MAX_PAGES", 2)
+    monkeypatch.setattr(cde, "WEBSITE_EMAIL_SHALLOW_PATHS", ("/epk",))
+
+    matched = worker._enrich_row_website_email(seed_df, 0, ctx)
+
+    assert matched is False
+    assert calls == ["https://artist.test", "https://artist.test/epk"]
+    assert len(calls) == 2
+    assert seed_df.at[0, "Email"] == ""
+    assert seed_df.at[0, "Email_All"] == ""
+    assert any("[Web] shallow sweep fetched=1 emails_found=0" in msg for msg in logs)
