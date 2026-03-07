@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import sys
 import time
 import traceback
@@ -103,6 +104,7 @@ EXCLUDED_URL_SUBSTRINGS = (
     "tiktok.com/@triplejradio",
     "youtube.com/abcaustralia",
 )
+SPOTIFY_FALLBACK_ALLOWED_SOURCES = ("unearthed", "bandcamp", "soundcloud")
 
 
 @dataclass
@@ -137,6 +139,44 @@ class SmokeStats:
             "emails_missing_source_url": self.emails_missing_source_url,
             "emails_total": self.emails_total,
         }
+
+
+@dataclass(frozen=True)
+class SpotifyZeroRowFallbackConfig:
+    enabled: bool
+    order: Tuple[str, ...]
+    invalid_tokens: Tuple[str, ...] = ()
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = str(os.getenv(name, "") or "").strip().lower()
+    if not raw:
+        return default
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _parse_spotify_seed_fallback_order(raw_value: str) -> Tuple[Tuple[str, ...], Tuple[str, ...]]:
+    valid: List[str] = []
+    invalid: List[str] = []
+    seen = set()
+    for token in str(raw_value or "").split(","):
+        normalized = token.strip().lower()
+        if not normalized:
+            continue
+        if normalized not in SPOTIFY_FALLBACK_ALLOWED_SOURCES:
+            invalid.append(normalized)
+            continue
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        valid.append(normalized)
+    return tuple(valid), tuple(invalid)
+
+
+def _load_spotify_zero_row_fallback_config() -> SpotifyZeroRowFallbackConfig:
+    enabled = _env_flag("SPOTIFY_ZERO_ROW_FALLBACK")
+    order, invalid = _parse_spotify_seed_fallback_order(os.getenv("SPOTIFY_SEED_FALLBACK_ORDER", ""))
+    return SpotifyZeroRowFallbackConfig(enabled=enabled, order=order, invalid_tokens=invalid)
 
 
 def _strip_excluded_urls(url_val: str) -> str:
@@ -274,6 +314,42 @@ def _count_rows(csv_path: str) -> int:
             return len(df.index)
         except Exception:
             return 0
+
+
+def _count_data_rows(csv_path: str) -> int:
+    if not csv_path or not os.path.exists(csv_path):
+        return 0
+    try:
+        df = pd.read_csv(csv_path, dtype=str, keep_default_na=False)
+        return len(df.index)
+    except Exception:
+        return 0
+
+
+def _job_row_count(state: Dict[str, Any]) -> int:
+    raw_count = state.get("row_count")
+    if raw_count is not None:
+        try:
+            return max(int(raw_count), 0)
+        except Exception:
+            pass
+    return _count_data_rows(str(state.get("raw_csv") or ""))
+
+
+def _spotify_zero_row_reason(state: Dict[str, Any]) -> str:
+    for key in ("error", "last_error", "reason"):
+        value = str(state.get(key) or "").strip()
+        if value:
+            return f"Reason: {value}"
+    status_value = str(state.get("status") or "").strip()
+    error_count = state.get("error_count")
+    if status_value and error_count not in (None, "", 0, "0"):
+        return f"Reason: status={status_value} error_count={error_count}"
+    return "Reason: playlist empty / inaccessible / extraction returned no artists."
+
+
+def _job_id_for_index(job: Dict[str, Any], idx: int) -> str:
+    return str(job.get("job_id") or job.get("id") or f"job_{idx + 1}")
 
 
 def _primary_url_from_row(row: pd.Series) -> str:
@@ -830,12 +906,15 @@ def _merge_raw_master(
             return None
 
     frames = []
+    non_empty_jobs_merged = 0
     for state in job_states:
         job_id = state.get("job_id", "")
         path = state.get("raw_csv") or ""
         df = _load_job_csv(job_id, path)
         if df is None:
             continue
+        if not df.empty:
+            non_empty_jobs_merged += 1
         df["__source_job"] = job_id
         # Keep a copy of the per-job email fields before any merge/consolidation
         # so SmearGuard can rely on the originals if a later step smears values.
@@ -848,7 +927,7 @@ def _merge_raw_master(
         logger.warning("[Master] No data available after reading raw files.")
         return None
     if stats is not None:
-        stats.jobs_merged = len(frames)
+        stats.jobs_merged = non_empty_jobs_merged
     combined = pd.concat(frames, ignore_index=True, sort=False)
     for col in ("Source URL", "SoundCloud Link", "Social Link", "External Links", "Facebook_URL"):
         if col in combined.columns:
@@ -902,6 +981,49 @@ def _load_state(state_path: str) -> Dict[str, Any]:
         return {}
 
 
+def _mark_job_skipped_for_spotify_fallback(
+    job: Dict[str, Any],
+    run_dir: str,
+    per_job_validate: bool,
+) -> Dict[str, Any]:
+    job_id = job.get("job_id") or job.get("id") or "job_unknown"
+    directory = (job.get("directory") or "").strip().lower()
+    job_dir = os.path.join(run_dir, job_id)
+    os.makedirs(job_dir, exist_ok=True)
+    log_path = os.path.join(job_dir, LOG_FILENAME)
+    state_path = os.path.join(job_dir, STATE_FILENAME)
+    logger = _setup_logger(log_path, job_id)
+    raw_csv = os.path.join(job_dir, "raw.csv")
+    enriched_csv = os.path.join(job_dir, "enriched.csv")
+    # Keep the normal per-job artifact contract intact for resume/merge stages.
+    # This is a completed zero-row placeholder only; downstream summaries should
+    # treat it as row_count=0 rather than as a data-contributing merged job.
+    pipeline_runner._write_rows_to_csv([], raw_csv, source_directory=directory)
+    if per_job_validate:
+        shutil.copyfile(raw_csv, enriched_csv)
+    else:
+        enriched_csv = raw_csv
+
+    state = _load_state(state_path)
+    state.update(
+        {
+            "job_id": job_id,
+            "raw_csv": raw_csv,
+            "enriched_csv": enriched_csv,
+            "input_seed_csv": job.get("input_seed_csv", ""),
+            "status": "completed",
+            "error_count": state.get("error_count", 0),
+            "current_row_index": 0,
+            "valid_leads_so_far": 0,
+            "row_count": 0,
+            "skipped_reason": "spotify_zero_row_fallback_short_circuit",
+        }
+    )
+    _write_json(state_path, state)
+    logger.info("[Seed Fallback] Skipping job %s after earlier fallback success.", job_id)
+    return state
+
+
 def _process_job(
     job: Dict[str, Any],
     run_dir: str,
@@ -945,6 +1067,8 @@ def _process_job(
             logger.info("Starting scrape for job %s", job_id)
             run_directory_job(job, state["raw_csv"], logger=logger.info)
             pipeline_runner.ensure_final_raw_csv(state["raw_csv"], job_id, logger=logger.info)
+        raw_row_count = _count_data_rows(state["raw_csv"])
+        state["row_count"] = raw_row_count
         state["current_row_index"] = max(_count_rows(state["raw_csv"]) - 1, 0)
         state["valid_leads_so_far"] = state.get("valid_leads_so_far", 0) + state["current_row_index"]
         _write_json(state_path, state)
@@ -962,6 +1086,7 @@ def _process_job(
                         sleep_seconds=1.5,
                     )
                     state["raw_csv"] = enriched_path
+                    state["row_count"] = _count_data_rows(enriched_path)
                     state["current_row_index"] = max(_count_rows(enriched_path) - 1, 0)
                     state["valid_leads_so_far"] = state["current_row_index"]
                     _write_json(state_path, state)
@@ -982,6 +1107,7 @@ def _process_job(
             logger.info("Starting enrichment for job %s", job_id)
             final_enriched = run_enrichment(state["raw_csv"], state["enriched_csv"], logger=logger.info, night_mode=True)
             state["enriched_csv"] = final_enriched
+            state["row_count"] = _count_data_rows(state["raw_csv"])
             state["valid_leads_so_far"] = _count_rows(final_enriched)
             state["status"] = "completed"
             _write_json(state_path, state)
@@ -989,6 +1115,7 @@ def _process_job(
         else:
             # Skip per-job validation; leave enrichment for master stage.
             state["enriched_csv"] = state["raw_csv"]
+            state["row_count"] = _count_data_rows(state["raw_csv"])
             state["status"] = "completed"
             _write_json(state_path, state)
             logger.info("Completed job %s (raw only; master enrichment pending)", job_id)
@@ -996,6 +1123,7 @@ def _process_job(
     except Exception as exc:
         state["error_count"] = state.get("error_count", 0) + 1
         state["status"] = "failed" if state["error_count"] >= MAX_CONSECUTIVE_ERRORS else "partial_error"
+        state["last_error"] = f"{exc.__class__.__name__}: {exc}"
         _write_json(state_path, state)
         logger.error("Job %s failed: %s", job_id, exc)
         logger.error(traceback.format_exc())
@@ -1073,18 +1201,106 @@ def run_night_mode(
     if created_new:
         snapshot_path = os.path.join(run_dir, "config_snapshot.json")
         _write_json(snapshot_path, config)
+    master_logger = _setup_logger(os.path.join(run_dir, "master_log.txt"), "master")
+    spotify_fallback_cfg = _load_spotify_zero_row_fallback_config()
+    if spotify_fallback_cfg.enabled and spotify_fallback_cfg.invalid_tokens:
+        master_logger.warning(
+            "[Seed Fallback] ignoring invalid fallback sources: %s",
+            ", ".join(spotify_fallback_cfg.invalid_tokens),
+        )
 
+    jobs = config.get("jobs", []) or []
+    processed_states: Dict[str, Dict[str, Any]] = {}
+    pending_skip_job_ids: Dict[str, str] = {}
     job_states: List[Dict[str, Any]] = []
-    for job in config.get("jobs", []):
-        result_state = _process_job(
+
+    def _process_job_now(job: Dict[str, Any], *, allow_stop_on_failure: bool) -> Dict[str, Any]:
+        return _process_job(
             job,
             run_dir,
             resume=resume,
-            stop_on_failure=stop_on_failure,
+            stop_on_failure=allow_stop_on_failure,
             per_job_validate=not master_enrichment_enabled,
             with_sc_meta=with_sc_meta,
         )
+
+    def _find_pending_job_for_source(source: str, start_index: int) -> Optional[Tuple[int, Dict[str, Any]]]:
+        for candidate_idx in range(start_index, len(jobs)):
+            candidate_job = jobs[candidate_idx]
+            candidate_job_id = _job_id_for_index(candidate_job, candidate_idx)
+            if candidate_job_id in processed_states or candidate_job_id in pending_skip_job_ids:
+                continue
+            candidate_directory = str(candidate_job.get("directory") or "").strip().lower()
+            if source == "unearthed":
+                if "unearthed" in candidate_directory:
+                    return candidate_idx, candidate_job
+            elif candidate_directory == source:
+                return candidate_idx, candidate_job
+        return None
+
+    for idx, job in enumerate(jobs):
+        job_id = _job_id_for_index(job, idx)
+        if job_id in processed_states:
+            job_states.append(processed_states[job_id])
+            continue
+        if job_id in pending_skip_job_ids:
+            skipped_state = _mark_job_skipped_for_spotify_fallback(
+                job,
+                run_dir,
+                per_job_validate=not master_enrichment_enabled,
+            )
+            processed_states[job_id] = skipped_state
+            job_states.append(skipped_state)
+            continue
+
+        result_state = _process_job_now(job, allow_stop_on_failure=stop_on_failure)
+        processed_states[job_id] = result_state
         job_states.append(result_state)
+
+        directory = str(job.get("directory") or "").strip().lower()
+        spotify_zero_rows = directory == "spotify" and _job_row_count(result_state) == 0
+        if spotify_zero_rows:
+            master_logger.info("[Spotify][Seed] 0 artists discovered from playlist.")
+            master_logger.info(_spotify_zero_row_reason(result_state))
+            master_logger.info("Continuing pipeline.")
+
+            if spotify_fallback_cfg.enabled:
+                if spotify_fallback_cfg.order:
+                    master_logger.info(
+                        "[Spotify][Seed] 0 rows detected; triggering fallback chain: %s",
+                        ",".join(spotify_fallback_cfg.order),
+                    )
+                    successful_source = ""
+                    for source_pos, source in enumerate(spotify_fallback_cfg.order):
+                        # Fallback only reuses pending configured jobs already present
+                        # later in the current run config; env vars do not inject jobs.
+                        master_logger.info("[Seed Fallback] attempting configured fallback source: %s", source)
+                        pending = _find_pending_job_for_source(source, idx + 1)
+                        if pending is None:
+                            master_logger.info("[Seed Fallback] no configured pending job found for source: %s", source)
+                            continue
+                        fallback_idx, fallback_job = pending
+                        fallback_job_id = _job_id_for_index(fallback_job, fallback_idx)
+                        fallback_state = _process_job_now(fallback_job, allow_stop_on_failure=False)
+                        processed_states[fallback_job_id] = fallback_state
+                        fallback_rows = _job_row_count(fallback_state)
+                        if fallback_rows > 0:
+                            master_logger.info("[Seed Fallback] %s produced %s artists", source, fallback_rows)
+                            successful_source = source
+                            for remaining_source in spotify_fallback_cfg.order[source_pos + 1 :]:
+                                remaining_pending = _find_pending_job_for_source(remaining_source, idx + 1)
+                                if remaining_pending is None:
+                                    continue
+                                remaining_idx, remaining_job = remaining_pending
+                                remaining_job_id = _job_id_for_index(remaining_job, remaining_idx)
+                                pending_skip_job_ids[remaining_job_id] = remaining_source
+                            break
+                        master_logger.info("[Seed Fallback] %s produced 0 artists", source)
+                    if not successful_source:
+                        master_logger.info("[Seed Fallback] no fallback source produced artists")
+                else:
+                    master_logger.info("[Seed Fallback] fallback enabled but no valid order remains after validation; doing nothing")
+
         if stop_on_failure and result_state.get("status") in {"failed"}:
             break
 
@@ -1093,10 +1309,8 @@ def run_night_mode(
     master_pre_fb = None
     master_post_fb = None
     master_final = None
-    master_logger: Optional[logging.Logger] = None
     if export_mode in {"combined", "both"}:
-        logger = _setup_logger(os.path.join(run_dir, "master_log.txt"), "master")
-        master_logger = logger
+        logger = master_logger
         stats_logger = _wrap_logger_for_stats(logger.info, stats)
         if master_enrichment_enabled:
             master_raw = _merge_raw_master(run_dir, job_states, logger, stats=stats)
