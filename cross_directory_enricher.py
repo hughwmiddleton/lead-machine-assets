@@ -2791,43 +2791,11 @@ def _discover_facebook_url_bounded(fb_driver, artist_name: str, location: str, l
     return canonical_fb_url
 
 
-def enrich_row_with_facebook(row: dict, logger, fb_client) -> None:
-    artist_name = cell_to_str(row.get("Artist Name") or row.get("artist"))
-    if not artist_name:
-        _safe_log(logger, "[FB Enrich] Skipping row with empty artist name: %r", row)
-        return
-    has_email = _row_has_email(row)
-    existing_fb_url = _get_canonical_fb_url(row)
-    if has_email:
-        _safe_log(logger, "[FB Enrich] Row already has email, skipping Facebook discovery: %s", artist_name)
-        return
-    if existing_fb_url:
-        # Already have a FB URL; normalise + promote but do not skip downstream email extraction.
-        if "facebook_url" in row:
-            row["facebook_url"] = existing_fb_url
-        if "Facebook_URL" in row:
-            row["Facebook_URL"] = existing_fb_url
-        if "Facebook URL" in row:
-            row["Facebook URL"] = existing_fb_url
-        if not cell_to_str(row.get("Social Link")):
-            row["Social Link"] = _append_link(row.get("Social Link", ""), existing_fb_url)
-        if "External Links" in row and not cell_to_str(row.get("External Links")):
-            row["External Links"] = _append_link(row.get("External Links", ""), existing_fb_url)
-        return
-    location = cell_to_str(row.get("Location") or row.get("location"))
-    fb_url = facebook_find_best_page(artist_name, location, fb_client, logger)
-    if not fb_url:
-        return
-    fb_url = _normalise_fb_url(normalize_external_url(cell_to_str(fb_url)))
-    if not fb_url or "facebook.com" not in fb_url.lower():
-        return
-    # Only back-fill Social Link if empty; never overwrite existing seed value.
-    if not cell_to_str(row.get("Social Link")):
-        row["Social Link"] = _append_link(row.get("Social Link", ""), fb_url)
-    if "External Links" in row and not cell_to_str(row.get("External Links")):
-        row["External Links"] = _append_link(row.get("External Links", ""), fb_url)
-    if "Facebook_URL" in row:
-        row["Facebook_URL"] = cell_to_str(fb_url)
+def enrich_row_with_facebook(*args, **kwargs) -> None:
+    raise RuntimeError(
+        "enrich_row_with_facebook() is deprecated. "
+        "Use _enrich_row_facebook instead."
+    )
 
 
 def _format_source_display(source_key: Optional[str]) -> str:
