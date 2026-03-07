@@ -711,6 +711,15 @@ DIRECTORY_SOCIAL_COLUMNS = (
     "LinkedIn",
 )
 
+INSTAGRAM_URL_CANDIDATES = (
+    "Instagram",
+    "Instagram URL",
+    "Instagram_URL",
+    "instagram_url",
+    "Social Link",
+    "External Links",
+)
+
 DIRECTORY_WEBSITE_COLUMNS = (
     "External Links",
     "Website",
@@ -1356,6 +1365,85 @@ def _get_canonical_fb_url(row) -> str:
             return normalised
     promoted = promote_facebook_url(row, set_row=False)
     return _canonicalize_fb_url(promoted)
+
+
+_INSTAGRAM_ALLOWED_HOSTS = {
+    "instagram.com",
+    "www.instagram.com",
+    "instagr.am",
+    "www.instagr.am",
+}
+_INSTAGRAM_REJECT_SEGMENTS = {
+    "accounts",
+    "explore",
+    "p",
+    "reel",
+    "reels",
+    "stories",
+}
+_INSTAGRAM_HANDLE_RE = re.compile(r"^[A-Za-z0-9._]{1,30}$")
+
+
+def _canonicalize_instagram_profile_url(raw: str) -> str:
+    """Normalize an Instagram profile URL to the canonical profile root."""
+    if not raw:
+        return ""
+    candidate = cell_to_str(raw)
+    if not candidate:
+        return ""
+    if candidate.startswith("//"):
+        candidate = "https:" + candidate
+    elif "://" not in candidate:
+        candidate = "https://" + candidate.lstrip("/")
+    try:
+        parsed = urllib.parse.urlparse(candidate)
+    except Exception:
+        return ""
+    host = (parsed.netloc or "").lower()
+    if host not in _INSTAGRAM_ALLOWED_HOSTS:
+        return ""
+    segments = [segment for segment in (parsed.path or "").split("/") if segment]
+    if len(segments) != 1:
+        return ""
+    handle = segments[0].strip()
+    if not handle or handle.lower() in _INSTAGRAM_REJECT_SEGMENTS:
+        return ""
+    if not _INSTAGRAM_HANDLE_RE.fullmatch(handle):
+        return ""
+    return f"https://www.instagram.com/{handle}/"
+
+
+def _get_canonical_instagram_url(row) -> str:
+    """Return the first canonical Instagram profile URL found on the row."""
+    if row is None:
+        return ""
+    for key in INSTAGRAM_URL_CANDIDATES:
+        try:
+            value = row.get(key, "")
+        except AttributeError:
+            try:
+                value = row[key]
+            except Exception:
+                value = ""
+        for token in _split_multi_value(value):
+            normalised = _canonicalize_instagram_profile_url(token)
+            if normalised:
+                return normalised
+    return ""
+
+
+def _fetch_instagram_profile_html(session: requests.Session, url: str) -> Tuple[str, Optional[int]]:
+    """Fetch a single Instagram profile page with the worker session and no retries."""
+    if not session or not url:
+        return ("", None)
+    try:
+        resp = session.get(url, timeout=HTTP_TIMEOUT, allow_redirects=False)
+    except Exception:
+        return ("", None)
+    status = getattr(resp, "status_code", None)
+    if status != 200:
+        return ("", status)
+    return (getattr(resp, "text", "") or "", status)
 
 
 def _row_has_facebook_or_email(row) -> bool:
@@ -4512,6 +4600,7 @@ class CrossDirectoryEnricherWorker(QThread):
                         if skip_rest:
                             self._update_progress(position, total)
                             continue
+                    enriched |= self._enrich_row_instagram_email(seed_df, row_idx, ctx)
                     if ENABLE_FACEBOOK_ENRICHMENT and fb_driver:
                         enriched |= self._enrich_row_facebook(seed_df, row_idx, fb_driver, ctx)
                     if not enriched:
@@ -4560,6 +4649,7 @@ class CrossDirectoryEnricherWorker(QThread):
             "soundcloud": "pending",
             "bandcamp": "pending",
             "lastfm": "pending",
+            "instagram": "pending",
             "facebook": "pending",
         }
         self._sc_blocked_for_row = False
@@ -4747,6 +4837,55 @@ class CrossDirectoryEnricherWorker(QThread):
                 seed_df.at[row_idx, "BC_403_Count"] = bc_stats.get("http_403", "")
         return (enriched, False)
 
+    def _enrich_row_instagram_email(self, seed_df, row_idx, ctx):
+        """Extract email from the canonical Instagram profile HTML in a single fetch."""
+        row = seed_df.loc[row_idx]
+        if _row_has_email(row):
+            self._set_platform_state("instagram", "skipped")
+            return False
+        ig_url = _get_canonical_instagram_url(row)
+        if not ig_url:
+            self._set_platform_state("instagram", "skipped")
+            return False
+
+        email_before = _row_email_summary_snapshot(seed_df, row_idx)
+        self.log_message.emit(f"[IG Email] Visiting {ig_url}")
+        html, status = _fetch_instagram_profile_html(self.session, ig_url)
+        if status != 200 or not html:
+            self.log_message.emit("[IG Email] No email found")
+            self._set_platform_state("instagram", "skipped")
+            return False
+
+        ig_emails, _ = _extract_emails_from_html(html)
+        if not ig_emails:
+            self.log_message.emit("[IG Email] No email found")
+            self._set_platform_state("instagram", "skipped")
+            return False
+
+        found_email = ig_emails[0]
+        self.log_message.emit(f"[IG Email] Found email: {found_email}")
+        if not cell_to_str(seed_df.at[row_idx, "Email"]):
+            seed_df.at[row_idx, "Email"] = found_email
+        seed_df.at[row_idx, "Email_All"] = _merge_email_all(seed_df.at[row_idx, "Email_All"], ig_emails)
+        seed_df.at[row_idx, "Email_Type"] = "ig_enrich"
+        if not cell_to_str(seed_df.at[row_idx, "Email_Source_URL"]):
+            seed_df.at[row_idx, "Email_Source_URL"] = ig_url
+        if not cell_to_str(seed_df.at[row_idx, "Email_Source_Type"]):
+            seed_df.at[row_idx, "Email_Source_Type"] = "instagram_enrich"
+        if not cell_to_str(seed_df.at[row_idx, "Email_Extract_Method"]):
+            seed_df.at[row_idx, "Email_Extract_Method"] = "regex"
+        try:
+            from pipeline_runner import record_email_summary_row_change
+
+            record_email_summary_row_change(
+                email_before,
+                _row_email_summary_snapshot(seed_df, row_idx),
+            )
+        except Exception:
+            pass
+        self._set_platform_state("instagram", "matched")
+        return True
+
     def _enrich_row_facebook(self, seed_df, row_idx, fb_driver, ctx):
         """Facebook enrichment for a single row. Returns True if enrichment applied."""
         artist = ctx["artist"]
@@ -4922,6 +5061,8 @@ class CrossDirectoryEnricherWorker(QThread):
         # Phase 0: Directory matching (fast, no network)
         self._phase_directory_matching(seed_df, directory_indexes, priority, total)
         if use_scheduler:
+            # Keep IG extraction outside the scheduler as a bounded single-page pass.
+            self._phase_instagram_email(seed_df, total)
             self._run_interleaved_sources(seed_df, fb_driver, total)
             return
         # Phase 1: Dedicated SoundCloud live check
@@ -4930,9 +5071,11 @@ class CrossDirectoryEnricherWorker(QThread):
         # Phase 2: General live lookup (BC + LF; SC mostly skipped since Phase 1 populated it)
         if self.enable_live_search:
             self._phase_live_lookup(seed_df, total)
+        # Phase 3: Instagram profile HTML email extraction (single fetch only)
+        self._phase_instagram_email(seed_df, total)
         # Refresh Facebook promotion after live/directory phases so newly discovered FB links are usable.
         seed_df = _apply_fb_promotion_df(seed_df, log_fn=self.log_message.emit)
-        # Phase 3: Facebook
+        # Phase 4: Facebook
         if ENABLE_FACEBOOK_ENRICHMENT and fb_driver:
             self._phase_facebook(seed_df, fb_driver, total)
 
@@ -5178,6 +5321,14 @@ class CrossDirectoryEnricherWorker(QThread):
             f"(enriched={enriched_count}, skipped_cooldown={skipped_cooldown}, "
             f"skipped_disabled={skipped_disabled})"
         )
+
+    def _phase_instagram_email(self, seed_df, total):
+        for position, row_idx in enumerate(seed_df.index, start=1):
+            ctx = self._build_row_context(seed_df, row_idx, position, total)
+            if not ctx:
+                continue
+            self._init_row_enrichment_state()
+            self._enrich_row_instagram_email(seed_df, row_idx, ctx)
 
     def _phase_live_lookup(self, seed_df, total):
         self.log_message.emit("[Enricher][LF Phase] Starting...")

@@ -82,9 +82,10 @@ def test_scheduler_mode_skips_legacy_phases(monkeypatch):
     worker.enable_live_search = True
     worker.log_message = type("Logger", (), {"emit": lambda *args, **kwargs: None})()
 
-    calls = {"dir": 0, "sc": 0, "lf": 0, "fb": 0, "sched": 0}
+    calls = {"dir": 0, "ig": 0, "sc": 0, "lf": 0, "fb": 0, "sched": 0}
 
     monkeypatch.setattr(worker, "_phase_directory_matching", lambda *a, **k: calls.__setitem__("dir", calls["dir"] + 1))
+    monkeypatch.setattr(worker, "_phase_instagram_email", lambda *a, **k: calls.__setitem__("ig", calls["ig"] + 1))
     monkeypatch.setattr(worker, "_phase_soundcloud", lambda *a, **k: calls.__setitem__("sc", calls["sc"] + 1))
     monkeypatch.setattr(worker, "_phase_live_lookup", lambda *a, **k: calls.__setitem__("lf", calls["lf"] + 1))
     monkeypatch.setattr(worker, "_phase_facebook", lambda *a, **k: calls.__setitem__("fb", calls["fb"] + 1))
@@ -98,6 +99,7 @@ def test_scheduler_mode_skips_legacy_phases(monkeypatch):
     worker._run_source_phased(seed_df, directory_indexes={}, priority=[], fb_driver=None, total=0)
 
     assert calls["dir"] == 1
+    assert calls["ig"] == 1
     assert calls["sched"] == 1
     assert calls["sc"] == 0
     assert calls["lf"] == 0
