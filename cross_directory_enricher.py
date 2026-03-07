@@ -759,7 +759,7 @@ SOURCE_BASE_NAMES = {
 }
 
 MAX_WEBSITES = 2
-WEBSITE_EMAIL_MAX_PAGES = max(1, int(os.getenv("WEBSITE_EMAIL_MAX_PAGES", "3") or 3))
+WEBSITE_EMAIL_MAX_PAGES = max(1, int(os.getenv("WEBSITE_EMAIL_MAX_PAGES", "2") or 2))
 WEBSITE_EMAIL_TIMEOUT = float(os.getenv("WEBSITE_EMAIL_TIMEOUT", "8") or 8)
 WEBSITE_EMAIL_MAX_BYTES = max(1024, int(os.getenv("WEBSITE_EMAIL_MAX_BYTES", str(1_500_000)) or 1_500_000))
 WEBSITE_EMAIL_KEYWORDS = (
@@ -794,6 +794,11 @@ WEBSITE_EMAIL_SHALLOW_PATHS = (
     "/about",
 )
 WEBSITE_EMAIL_JUNK_KEYWORDS = ("login", "logout", "cart", "privacy", "terms")
+WEBSITE_EMAIL_OPTIONAL_FIELDS = (
+    "Website",
+    "Websites",
+    "Website URL",
+)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MULTI_VALUE_SEPARATOR = ", "
 FACEBOOK_HELPERS_PATH = os.path.join(BASE_DIR, "Lead Machine (Final Update 5).py")
@@ -3300,6 +3305,77 @@ def _website_fetch_result_is_same_domain(result: WebsiteFetchResult, base_url: s
     return _website_domains_match(base_norm, final_url)
 
 
+def _website_cache_key(url: str) -> str:
+    return extract_domain(_normalise_url(url) or url)
+
+
+def _is_platform_host(host: str) -> bool:
+    if not host:
+        return False
+    return any(host.endswith(domain) for domains in PLATFORM_HOSTS.values() for domain in domains)
+
+
+def _is_website_enrich_candidate_url(url: str, *, allow_platform: bool = False) -> bool:
+    normalised = _normalise_url(url)
+    if not normalised or _is_noise_url(normalised):
+        return False
+    host = _host(normalised)
+    if not host:
+        return False
+    path_lower = urllib.parse.urlparse(normalised).path.lower()
+    if host in LINK_HUB_HOSTS:
+        return False
+    if any(host.endswith(domain) for domain in SOCIAL_HOST_WHITELIST):
+        return False
+    if not allow_platform and _is_platform_host(host):
+        return False
+    if host in JUNK_WEBSITE_HOSTS:
+        return False
+    if any(keyword in path_lower for keyword in JUNK_WEBSITE_PATH_KEYWORDS):
+        return False
+    return True
+
+
+def _collect_website_enrich_candidate_urls(row: Any) -> List[str]:
+    if row is None:
+        return []
+
+    candidates: List[str] = []
+    seen_urls: Set[str] = set()
+    seen_domains: Set[str] = set()
+
+    def _add_value(value: Any, *, allow_platform: bool = False) -> None:
+        for token in _split_multi_value(value):
+            normalised = _normalise_url(token)
+            if not normalised:
+                continue
+            domain = _website_cache_key(normalised)
+            if not domain or normalised in seen_urls or domain in seen_domains:
+                continue
+            if not _is_website_enrich_candidate_url(normalised, allow_platform=allow_platform):
+                continue
+            seen_urls.add(normalised)
+            seen_domains.add(domain)
+            candidates.append(normalised)
+
+    _add_value(row.get("Spotify_Website_URL", ""))
+
+    bandcamp_raw = _coerce_directory_value(row.get("Bandcamp_URL", "")) if hasattr(row, "get") else ""
+    bandcamp_norm = _canonicalise_bandcamp_url(bandcamp_raw) if bandcamp_raw else ""
+    if bandcamp_norm:
+        bandcamp_host = _host(bandcamp_norm)
+        _add_value(bandcamp_norm, allow_platform=bool(bandcamp_host.endswith("bandcamp.com")))
+
+    _add_value(row.get("External Links", ""))
+
+    for field in WEBSITE_EMAIL_OPTIONAL_FIELDS:
+        if hasattr(row, "__contains__") and field not in row:
+            continue
+        _add_value(row.get(field, ""))
+
+    return candidates
+
+
 def _fetch_website_html_bounded(
     session: requests.Session,
     url: str,
@@ -4585,6 +4661,7 @@ class CrossDirectoryEnricherWorker(QThread):
         self._domain_email_reuse_index: Dict[str, Dict[str, str]] = {}
         self._domain_email_reuse_rows: Set[Any] = set()
         self._domain_email_reuse_count: int = 0
+        self._website_email_cache: Dict[str, Dict[str, Any]] = {}
         # Share live-search budget with SoundCloud aggregator fetches.
         try:
             def _agg_budget_check():
@@ -4648,6 +4725,7 @@ class CrossDirectoryEnricherWorker(QThread):
         self._domain_email_reuse_index = {}
         self._domain_email_reuse_rows = set()
         self._domain_email_reuse_count = 0
+        self._website_email_cache = {}
         # Bandcamp discover per-run state
         self._bc_discover_cache = {}
         self._bc_discover_fetches = 0
@@ -5248,7 +5326,7 @@ class CrossDirectoryEnricherWorker(QThread):
         return True
 
     def _enrich_row_website_email(self, seed_df, row_idx, ctx):
-        """Fetch a bounded set of same-domain contact pages from Spotify_Website_URL."""
+        """Fetch a bounded set of same-domain contact pages from canonical row website fields."""
         try:
             from pipeline_runner import normalize_emails as _normalize_emails
         except Exception:
@@ -5258,105 +5336,154 @@ class CrossDirectoryEnricherWorker(QThread):
             self._set_platform_state("website", "skipped")
             return False
 
-        website_url = _normalise_url(_coerce_directory_value(row.get("Spotify_Website_URL", "")))
-        if not website_url:
+        website_candidates = _collect_website_enrich_candidate_urls(row)
+        if not website_candidates:
             self._set_platform_state("website", "skipped")
             return False
 
-        max_fetches = max(1, WEBSITE_EMAIL_MAX_PAGES)
-        fetches_used = 0
-        emails_found: List[str] = []
-        source_url = ""
-        extract_method = "regex"
         artist = ctx.get("artist") or _clean_cell(row.get("Artist Name")) or "<unknown>"
         email_before = _row_email_summary_snapshot(seed_df, row_idx)
+        pages_fetched = 0
+        selected_emails: List[str] = []
+        selected_source_url = ""
+        selected_extract_method = "regex"
+        selected_domain = ""
+        fetched_uncached_domain = False
 
-        def _fetch(target_url: str) -> WebsiteFetchResult:
-            nonlocal fetches_used
-            fetches_used += 1
-            return _fetch_website_html_bounded(
-                self.session,
-                target_url,
-                timeout_s=WEBSITE_EMAIL_TIMEOUT,
-                max_bytes=WEBSITE_EMAIL_MAX_BYTES,
+        for website_url in website_candidates:
+            website_domain = _website_cache_key(website_url)
+            if not website_domain:
+                continue
+
+            cached_result = self._website_email_cache.get(website_domain)
+            if cached_result is not None:
+                cached_emails = list(cached_result.get("emails") or [])
+                self.log_message.emit(
+                    f"[Web] cache hit domain={website_domain} status={cached_result.get('status', 'miss')} artist='{artist}'"
+                )
+                if cached_emails:
+                    selected_emails = _normalize_emails(";".join(cached_emails))
+                    selected_source_url = cell_to_str(cached_result.get("source_url"))
+                    selected_extract_method = cell_to_str(cached_result.get("extract_method")) or "regex"
+                    selected_domain = website_domain
+                    break
+                continue
+
+            if fetched_uncached_domain:
+                self.log_message.emit(
+                    f"[Web] skipping uncached candidate domain={website_domain} artist='{artist}' after prior website fetch"
+                )
+                continue
+
+            fetched_uncached_domain = True
+            max_fetches = max(1, WEBSITE_EMAIL_MAX_PAGES)
+            domain_fetches_used = 0
+            emails_found: List[str] = []
+            source_url = ""
+            extract_method = "regex"
+
+            def _fetch(target_url: str) -> WebsiteFetchResult:
+                nonlocal domain_fetches_used, pages_fetched
+                domain_fetches_used += 1
+                pages_fetched += 1
+                return _fetch_website_html_bounded(
+                    self.session,
+                    target_url,
+                    timeout_s=WEBSITE_EMAIL_TIMEOUT,
+                    max_bytes=WEBSITE_EMAIL_MAX_BYTES,
+                )
+
+            homepage = _fetch(website_url)
+            homepage_url = homepage.final_url or website_url
+            homepage_ok = bool(
+                homepage.is_html
+                and homepage.html
+                and _website_fetch_result_is_same_domain(homepage, website_url)
             )
-
-        homepage = _fetch(website_url)
-        homepage_url = homepage.final_url or website_url
-        homepage_ok = bool(
-            homepage.is_html
-            and homepage.html
-            and _website_fetch_result_is_same_domain(homepage, website_url)
-        )
-        self.log_message.emit(
-            f"[Web] homepage fetched ok={homepage_ok} artist='{artist}' url={homepage_url}"
-        )
-
-        if homepage_ok:
-            page_emails, used_mailto = _extract_website_emails_from_html(homepage.html)
-            if page_emails:
-                emails_found = page_emails
-                source_url = homepage_url
-                extract_method = "mailto" if used_mailto else "regex"
-
-        remaining_budget = max(0, max_fetches - fetches_used)
-        candidates: List[str] = []
-        if not emails_found and remaining_budget > 0 and homepage_ok:
-            candidates = _discover_website_contact_candidates(homepage_url, homepage.html)
             self.log_message.emit(
-                f"[Web] found contact candidates={len(candidates)} using top={min(len(candidates), remaining_budget)} artist='{artist}'"
+                f"[Web] homepage fetched ok={homepage_ok} artist='{artist}' url={homepage_url}"
             )
-            for candidate_url in candidates[:remaining_budget]:
-                result = _fetch(candidate_url)
-                if not result.is_html or not result.html:
-                    continue
-                if not _website_fetch_result_is_same_domain(result, website_url):
-                    continue
-                page_emails, used_mailto = _extract_website_emails_from_html(result.html)
-                if not page_emails:
-                    continue
-                if not source_url:
-                    source_url = result.final_url or candidate_url
-                    extract_method = "mailto" if used_mailto else "regex"
-                emails_found = list(dict.fromkeys([*emails_found, *page_emails]))
 
-        remaining_budget = max(0, max_fetches - fetches_used)
-        if not emails_found and remaining_budget > 0:
-            shallow_candidates = _build_website_shallow_candidates(website_url, homepage_url)
-            if candidates:
-                seen_candidates = set(candidates)
-                shallow_candidates = [url for url in shallow_candidates if url not in seen_candidates]
-            shallow_to_try = shallow_candidates[:remaining_budget]
-            self.log_message.emit(
-                f"[Web] shallow sweep paths_considered={len(shallow_candidates)} using_top={len(shallow_to_try)}"
-            )
-            shallow_fetches = 0
-            shallow_emails_found = 0
-            for candidate_url in shallow_to_try:
-                result = _fetch(candidate_url)
-                shallow_fetches += 1
-                if not result.is_html or not result.html:
-                    continue
-                if not _website_fetch_result_is_same_domain(result, website_url):
-                    continue
-                page_emails, used_mailto = _extract_website_emails_from_html(result.html)
-                if not page_emails:
-                    continue
-                if not source_url:
-                    source_url = result.final_url or candidate_url
+            if homepage_ok:
+                page_emails, used_mailto = _extract_website_emails_from_html(homepage.html)
+                if page_emails:
+                    emails_found = page_emails
+                    source_url = homepage_url
                     extract_method = "mailto" if used_mailto else "regex"
-                emails_found = list(dict.fromkeys([*emails_found, *page_emails]))
-                shallow_emails_found = len(page_emails)
-                matched_path = urllib.parse.urlparse(result.final_url or candidate_url).path or "/"
-                self.log_message.emit(f"[Web] shallow sweep matched path={matched_path}")
+
+            remaining_budget = max(0, max_fetches - domain_fetches_used)
+            candidates: List[str] = []
+            if not emails_found and remaining_budget > 0 and homepage_ok:
+                candidates = _discover_website_contact_candidates(homepage_url, homepage.html)
+                self.log_message.emit(
+                    f"[Web] found contact candidates={len(candidates)} using top={min(len(candidates), remaining_budget)} artist='{artist}'"
+                )
+                for candidate_url in candidates[:remaining_budget]:
+                    result = _fetch(candidate_url)
+                    if not result.is_html or not result.html:
+                        continue
+                    if not _website_fetch_result_is_same_domain(result, website_url):
+                        continue
+                    page_emails, used_mailto = _extract_website_emails_from_html(result.html)
+                    if not page_emails:
+                        continue
+                    if not source_url:
+                        source_url = result.final_url or candidate_url
+                        extract_method = "mailto" if used_mailto else "regex"
+                    emails_found = list(dict.fromkeys([*emails_found, *page_emails]))
+
+            remaining_budget = max(0, max_fetches - domain_fetches_used)
+            if not emails_found and remaining_budget > 0:
+                shallow_candidates = _build_website_shallow_candidates(website_url, homepage_url)
+                if candidates:
+                    seen_candidates = set(candidates)
+                    shallow_candidates = [url for url in shallow_candidates if url not in seen_candidates]
+                shallow_to_try = shallow_candidates[:remaining_budget]
+                self.log_message.emit(
+                    f"[Web] shallow sweep paths_considered={len(shallow_candidates)} using_top={len(shallow_to_try)}"
+                )
+                shallow_fetches = 0
+                shallow_emails_found = 0
+                for candidate_url in shallow_to_try:
+                    result = _fetch(candidate_url)
+                    shallow_fetches += 1
+                    if not result.is_html or not result.html:
+                        continue
+                    if not _website_fetch_result_is_same_domain(result, website_url):
+                        continue
+                    page_emails, used_mailto = _extract_website_emails_from_html(result.html)
+                    if not page_emails:
+                        continue
+                    if not source_url:
+                        source_url = result.final_url or candidate_url
+                        extract_method = "mailto" if used_mailto else "regex"
+                    emails_found = list(dict.fromkeys([*emails_found, *page_emails]))
+                    shallow_emails_found = len(page_emails)
+                    matched_path = urllib.parse.urlparse(result.final_url or candidate_url).path or "/"
+                    self.log_message.emit(f"[Web] shallow sweep matched path={matched_path}")
+                    break
+                self.log_message.emit(
+                    f"[Web] shallow sweep fetched={shallow_fetches} emails_found={shallow_emails_found}"
+                )
+
+            normalized_emails = _normalize_emails(";".join(emails_found))
+            cache_entry = {
+                "status": "hit" if normalized_emails else "miss",
+                "emails": list(normalized_emails),
+                "source_url": source_url,
+                "extract_method": extract_method if normalized_emails else "",
+            }
+            self._website_email_cache[website_domain] = cache_entry
+            if normalized_emails:
+                selected_emails = normalized_emails
+                selected_source_url = source_url
+                selected_extract_method = extract_method
+                selected_domain = website_domain
                 break
-            self.log_message.emit(
-                f"[Web] shallow sweep fetched={shallow_fetches} emails_found={shallow_emails_found}"
-            )
 
-        normalized_emails = _normalize_emails(";".join(emails_found))
+        normalized_emails = list(selected_emails)
         self.log_message.emit(
-            f"[Web] emails_found={len(normalized_emails)} pages_fetched={fetches_used} artist='{artist}'"
+            f"[Web] emails_found={len(normalized_emails)} pages_fetched={pages_fetched} artist='{artist}'"
         )
         if not normalized_emails:
             self._set_platform_state("website", "skipped")
@@ -5367,9 +5494,9 @@ class CrossDirectoryEnricherWorker(QThread):
             _set_email_with_provenance(
                 (seed_df, row_idx),
                 primary_email,
-                source_url=source_url,
+                source_url=selected_source_url,
                 source_type="website_enrich",
-                method=extract_method,
+                method=selected_extract_method,
             )
         try:
             from pipeline_runner import _set_email_all, record_email_summary_row_change
@@ -5389,16 +5516,16 @@ class CrossDirectoryEnricherWorker(QThread):
             seed_df.at[row_idx, "Email_All"] = ";".join(normalized_emails)
         if "Email_Type" in seed_df.columns and not cell_to_str(seed_df.at[row_idx, "Email_Type"]):
             seed_df.at[row_idx, "Email_Type"] = "website_enrich"
-        if "Email_Source_URL" in seed_df.columns and source_url and not cell_to_str(seed_df.at[row_idx, "Email_Source_URL"]):
-            seed_df.at[row_idx, "Email_Source_URL"] = source_url
+        if "Email_Source_URL" in seed_df.columns and selected_source_url and not cell_to_str(seed_df.at[row_idx, "Email_Source_URL"]):
+            seed_df.at[row_idx, "Email_Source_URL"] = selected_source_url
         if "Email_Source_Type" in seed_df.columns and not cell_to_str(seed_df.at[row_idx, "Email_Source_Type"]):
             seed_df.at[row_idx, "Email_Source_Type"] = "website_enrich"
         if "Email_Extract_Method" in seed_df.columns and not cell_to_str(seed_df.at[row_idx, "Email_Extract_Method"]):
-            seed_df.at[row_idx, "Email_Extract_Method"] = extract_method
+            seed_df.at[row_idx, "Email_Extract_Method"] = selected_extract_method
         self._index_domain_email_reuse_from_row(
             seed_df,
             row_idx,
-            _clean_cell(ctx.get("spotify_domain", "")),
+            selected_domain or _clean_cell(ctx.get("spotify_domain", "")),
         )
         self._set_platform_state("website", "matched")
         return True

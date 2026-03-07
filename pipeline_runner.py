@@ -1436,12 +1436,16 @@ def infer_email_source(row: pd.Series) -> str:
         return ""
 
     email_type = str(row.get("Email_Type") or "").lower()
+    email_source_type = str(row.get("Email_Source_Type") or "").lower()
     fb_status = str(row.get("FB_Status") or "").lower()
     src_dir = str(row.get("Source Directory") or "").lower()
     src_url = str(row.get("Source URL") or "").lower()
 
     if email_type == "fb_night" or fb_status.startswith("ok"):
         return "Facebook About"
+
+    if email_type == "website_enrich" or email_source_type == "website_enrich":
+        return "Website"
 
     if "unearthed" in src_dir or "unearthed" in src_url:
         return "Triple J Unearthed profile"

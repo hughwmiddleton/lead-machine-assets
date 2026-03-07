@@ -218,3 +218,17 @@ def test_fill_email_provenance_fallback_about_url() -> None:
     assert df.at[0, "Email_Source_URL"] == "https://www.facebook.com/testartist/about"
     assert df.at[0, "Email_Source_Type"] == "facebook_enrich"
     assert df.at[0, "Email_Extract_Method"] == "regex"
+
+
+def test_infer_email_source_uses_website_provenance() -> None:
+    row = pd.Series(
+        {
+            "Email": "bookings@example.com",
+            "Email_Type": "website_enrich",
+            "Email_Source_Type": "website_enrich",
+            "Source Directory": "spotify",
+            "Source URL": "https://open.spotify.com/artist/abc",
+        }
+    )
+
+    assert pipeline_runner.infer_email_source(row) == "Website"

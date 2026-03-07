@@ -245,6 +245,263 @@ def test_website_email_skips_when_canonical_email_exists(monkeypatch):
     assert seed_df.at[0, "Email_All"] == "existing@artist.test"
 
 
+def test_website_email_bandcamp_url_only_extracts_visible_email(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Bandcamp Website Artist",
+            "Email": "",
+            "Email_All": "",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+            "Email_Type": "",
+            "Spotify_Website_URL": "",
+            "Bandcamp_URL": "https://artist.bandcamp.com",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    calls = []
+
+    pages = {
+        "https://artist.bandcamp.com": _result(
+            "https://artist.bandcamp.com",
+            html="<html><body>Bookings: bookings@label.test</body></html>",
+        ),
+    }
+
+    def fake_fetch(session, url, *, timeout_s, max_bytes):
+        calls.append(url)
+        return pages[url]
+
+    monkeypatch.setattr(cde, "_fetch_website_html_bounded", fake_fetch)
+
+    matched = worker._enrich_row_website_email(seed_df, 0, ctx)
+
+    assert matched is True
+    assert calls == ["https://artist.bandcamp.com"]
+    assert seed_df.at[0, "Email"] == "bookings@label.test"
+    assert seed_df.at[0, "Email_All"] == "bookings@label.test"
+    assert seed_df.at[0, "Email_Source_URL"] == "https://artist.bandcamp.com"
+    assert seed_df.at[0, "Email_Source_Type"] == "website_enrich"
+    assert seed_df.at[0, "Email_Extract_Method"] == "regex"
+    assert worker._website_email_cache["artist.bandcamp.com"]["emails"] == ["bookings@label.test"]
+
+
+def test_website_email_external_links_only_extracts_mailto(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "External Website Artist",
+            "Email": "",
+            "Email_All": "",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+            "Email_Type": "",
+            "Spotify_Website_URL": "",
+            "External Links": "https://instagram.com/extartist | https://artist.test",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    calls = []
+
+    pages = {
+        "https://artist.test": _result(
+            "https://artist.test",
+            html="<html><body><a href='mailto:hello@artist.test?subject=hi'>Email</a></body></html>",
+        ),
+    }
+
+    def fake_fetch(session, url, *, timeout_s, max_bytes):
+        calls.append(url)
+        return pages[url]
+
+    monkeypatch.setattr(cde, "_fetch_website_html_bounded", fake_fetch)
+
+    matched = worker._enrich_row_website_email(seed_df, 0, ctx)
+
+    assert matched is True
+    assert calls == ["https://artist.test"]
+    assert seed_df.at[0, "Email"] == "hello@artist.test"
+    assert seed_df.at[0, "Email_All"] == "hello@artist.test"
+    assert seed_df.at[0, "Email_Source_URL"] == "https://artist.test"
+    assert seed_df.at[0, "Email_Source_Type"] == "website_enrich"
+    assert seed_df.at[0, "Email_Extract_Method"] == "mailto"
+
+
+def test_website_email_contact_follow_up_caps_requests_at_two(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Capped Contact Artist",
+            "Email": "",
+            "Email_All": "",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+            "Email_Type": "",
+            "Spotify_Website_URL": "",
+            "External Links": "https://artist.test",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    calls = []
+
+    pages = {
+        "https://artist.test": _result(
+            "https://artist.test",
+            html="<html><body><a href='/contact'>Contact</a></body></html>",
+        ),
+        "https://artist.test/contact": _result(
+            "https://artist.test/contact",
+            html="<html><body>Bookings: bookings@artist.test</body></html>",
+        ),
+        "https://artist.test/about": _result(
+            "https://artist.test/about",
+            html="<html><body>No email</body></html>",
+        ),
+    }
+
+    def fake_fetch(session, url, *, timeout_s, max_bytes):
+        calls.append(url)
+        return pages[url]
+
+    monkeypatch.setattr(cde, "_fetch_website_html_bounded", fake_fetch)
+    monkeypatch.setattr(cde, "WEBSITE_EMAIL_MAX_PAGES", 2)
+
+    matched = worker._enrich_row_website_email(seed_df, 0, ctx)
+
+    assert matched is True
+    assert calls == ["https://artist.test", "https://artist.test/contact"]
+    assert len(calls) == 2
+    assert seed_df.at[0, "Email"] == "bookings@artist.test"
+    assert any("[Web] emails_found=1 pages_fetched=2" in msg for msg in logs)
+
+
+def test_website_email_cached_positive_reuses_without_refetch(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Cache Source Artist",
+            "Email": "",
+            "Email_All": "",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+            "Email_Type": "",
+            "Bandcamp_URL": "https://artist.test",
+        }
+    )
+    seed_df = pd.concat(
+        [
+            seed_df,
+            _seed_df(
+                {
+                    "Artist Name": "Cache Target Artist",
+                    "Email": "",
+                    "Email_All": "",
+                    "Email_Source_URL": "",
+                    "Email_Source_Type": "",
+                    "Email_Extract_Method": "",
+                    "Email_Type": "",
+                    "External Links": "https://artist.test",
+                }
+            ),
+        ],
+        ignore_index=True,
+    ).fillna("")
+    calls = []
+
+    pages = {
+        "https://artist.test": _result(
+            "https://artist.test",
+            html="<html><body>Bookings: bookings@label.test</body></html>",
+        ),
+    }
+
+    def fake_fetch(session, url, *, timeout_s, max_bytes):
+        calls.append(url)
+        return pages[url]
+
+    monkeypatch.setattr(cde, "_fetch_website_html_bounded", fake_fetch)
+
+    ctx_one = worker._build_row_context(seed_df, 0, 1, 2)
+    ctx_two = worker._build_row_context(seed_df, 1, 2, 2)
+
+    matched_one = worker._enrich_row_website_email(seed_df, 0, ctx_one)
+    matched_two = worker._enrich_row_website_email(seed_df, 1, ctx_two)
+
+    assert matched_one is True
+    assert matched_two is True
+    assert calls == ["https://artist.test"]
+    assert seed_df.at[1, "Email"] == "bookings@label.test"
+    assert seed_df.at[1, "Email_Source_Type"] == "website_enrich"
+    assert seed_df.at[1, "Email_Extract_Method"] == "regex"
+
+
+def test_website_email_cached_miss_skips_refetch(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = pd.concat(
+        [
+            _seed_df(
+                {
+                    "Artist Name": "Cache Miss One",
+                    "Email": "",
+                    "Email_All": "",
+                    "Spotify_Website_URL": "https://artist.test",
+                }
+            ),
+            _seed_df(
+                {
+                    "Artist Name": "Cache Miss Two",
+                    "Email": "",
+                    "Email_All": "",
+                    "External Links": "https://artist.test",
+                }
+            ),
+        ],
+        ignore_index=True,
+    ).fillna("")
+    calls = []
+
+    pages = {
+        "https://artist.test": _result(
+            "https://artist.test",
+            html="<html><body><a href='/contact'>Contact</a></body></html>",
+        ),
+        "https://artist.test/contact": _result(
+            "https://artist.test/contact",
+            html="<html><body>No email here</body></html>",
+        ),
+    }
+
+    def fake_fetch(session, url, *, timeout_s, max_bytes):
+        calls.append(url)
+        return pages[url]
+
+    monkeypatch.setattr(cde, "_fetch_website_html_bounded", fake_fetch)
+    monkeypatch.setattr(cde, "WEBSITE_EMAIL_MAX_PAGES", 2)
+
+    ctx_one = worker._build_row_context(seed_df, 0, 1, 2)
+    ctx_two = worker._build_row_context(seed_df, 1, 2, 2)
+
+    matched_one = worker._enrich_row_website_email(seed_df, 0, ctx_one)
+    matched_two = worker._enrich_row_website_email(seed_df, 1, ctx_two)
+
+    assert matched_one is False
+    assert matched_two is False
+    assert calls == ["https://artist.test", "https://artist.test/contact"]
+    assert worker._website_email_cache["artist.test"]["status"] == "miss"
+    assert seed_df.at[1, "Email"] == ""
+    assert any("cache hit domain=artist.test status=miss" in msg for msg in logs)
+
+
 def test_website_email_shallow_sweep_finds_press_email(monkeypatch):
     logs = []
     worker = _make_worker(logs)
