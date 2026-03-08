@@ -20,7 +20,7 @@ import datetime
 from urllib.parse import urlsplit
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union, MutableMapping
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple, Union, MutableMapping
 
 import pandas as pd
 from email_provenance import _set_email_with_provenance
@@ -1797,6 +1797,44 @@ def write_final_and_woodpecker_exports(
     )
 
 
+def _merge_festival_expansion_output(
+    main_output_csv_path: str,
+    expansion_output_csv_path: str,
+    normalise_artist_name_fn: Callable[[str], str],
+    logger: LoggerFn = None,
+) -> int:
+    if not os.path.exists(main_output_csv_path) or not os.path.exists(expansion_output_csv_path):
+        return 0
+    main_df = pd.read_csv(main_output_csv_path, dtype=str, keep_default_na=False).fillna("")
+    expansion_df = pd.read_csv(expansion_output_csv_path, dtype=str, keep_default_na=False).fillna("")
+    if expansion_df.empty or "Artist Name" not in expansion_df.columns:
+        return 0
+
+    existing_keys = {
+        normalise_artist_name_fn(str(name or ""))
+        for name in main_df.get("Artist Name", pd.Series(dtype=str)).tolist()
+        if normalise_artist_name_fn(str(name or ""))
+    }
+    staged_keys: Set[str] = set()
+    kept_rows: List[Dict[str, Any]] = []
+    for _, row in expansion_df.iterrows():
+        artist_name = str(row.get("Artist Name", "") or "").strip()
+        artist_key = normalise_artist_name_fn(artist_name)
+        if not artist_key or artist_key in existing_keys or artist_key in staged_keys:
+            continue
+        kept_rows.append(row.to_dict())
+        staged_keys.add(artist_key)
+
+    if not kept_rows:
+        return 0
+
+    kept_df = pd.DataFrame(kept_rows)
+    merged_df = pd.concat([main_df, kept_df], ignore_index=True, sort=False)
+    merged_df.to_csv(main_output_csv_path, index=False, encoding="utf-8")
+    _safe_log(logger, f"[FestivalExpansion] merged enriched expansion rows={len(kept_rows)}")
+    return len(kept_rows)
+
+
 def run_master_enrichment(
     seed_csv_path: str,
     output_csv_path: str,
@@ -1906,6 +1944,45 @@ def run_master_enrichment(
             logger=logger,
             night_mode=night_mode,
         )
+        try:
+            expansion_raw_csv_path = cross_directory_enricher._festival_expansion_raw_path(output_csv_path)
+        except Exception:
+            expansion_raw_csv_path = ""
+        if expansion_raw_csv_path and os.path.exists(expansion_raw_csv_path):
+            try:
+                expansion_raw_df = pd.read_csv(
+                    expansion_raw_csv_path,
+                    dtype=str,
+                    keep_default_na=False,
+                ).fillna("")
+                expansion_rows = len(expansion_raw_df.index)
+                if expansion_rows > 0:
+                    base, ext = os.path.splitext(output_csv_path)
+                    expansion_output_csv_path = f"{base}_festival_expansion_enriched{ext or '.csv'}"
+                    _safe_log(
+                        logger,
+                        f"[FestivalExpansion] running bounded second enrichment pass rows={expansion_rows}",
+                    )
+                    cross_directory_enricher.run_cross_directory_enrichment(
+                        expansion_raw_csv_path,
+                        expansion_output_csv_path,
+                        bandcamp_csv_path=bandcamp_path_final or "",
+                        soundcloud_csv_path="",
+                        unearthed_csv_path="",
+                        lastfm_csv_path="",
+                        enable_live_search=enable_live_search,
+                        max_live_searches=max_live,
+                        logger=logger,
+                        night_mode=night_mode,
+                    )
+                    _merge_festival_expansion_output(
+                        output_csv_path,
+                        expansion_output_csv_path,
+                        cross_directory_enricher.normalise_artist_name,
+                        logger=logger,
+                    )
+            except Exception as exc:
+                _safe_log(logger, f"[FestivalExpansion] second pass skipped after error: {exc}")
     except Exception as exc:
         _safe_log(logger, f"[Master Enrich] Enricher failed safely: {exc}")
         shutil.copyfile(seed_csv_path, output_csv_path)

@@ -96,6 +96,9 @@ MIN_BC_CONFIDENCE = 0.92
 MIN_LF_CONFIDENCE = 0.9
 STRICT_MATCHING = True
 MATCH_THRESHOLD = 0.7
+FESTIVAL_EXPANSION_DISCOVERY_TIER = "festival_expansion"
+FESTIVAL_EXPANSION_ORIGIN_BANDCAMP = "bandcamp"
+FESTIVAL_EXPANSION_MAX_RELATED_ARTISTS = 3
 
 # Last.fm live search resilience (T0X2)
 LASTFM_HEADERS = {
@@ -1036,6 +1039,7 @@ class EnrichmentPayload:
     source_detail: Optional[str] = None
     match_score: float = 0.0
     candidate_name: str = ""
+    related_artists: List[str] = field(default_factory=list)
 
     def summary(self) -> str:
         parts = []
@@ -1068,6 +1072,98 @@ def _payload_actionable(payload: Optional[EnrichmentPayload]) -> Optional[bool]:
         return None
     has_fields = bool(payload.socials or payload.websites or payload.emails or payload.link_hubs)
     return has_fields
+
+
+def _festival_expansion_raw_path(output_csv_path: str) -> str:
+    base, ext = os.path.splitext(output_csv_path)
+    return f"{base}_festival_expansion_raw{ext or '.csv'}"
+
+
+def _clean_bandcamp_related_artist_name(value: str) -> str:
+    text = " ".join((value or "").replace("\xa0", " ").split()).strip()
+    if not text:
+        return ""
+    text = re.sub(r"^(?:by|from)\s+", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"^[\"'“”‘’]+|[\"'“”‘’]+$", "", text)
+    if len(text) > 80:
+        return ""
+    if text.lower() in {"view all", "more", "recommended by", "fans also like"}:
+        return ""
+    if re.search(r"https?://|bandcamp\.com", text, flags=re.IGNORECASE):
+        return ""
+    if not re.search(r"[A-Za-z]", text):
+        return ""
+    return text.strip(" -|,.;:")
+
+
+def _add_bandcamp_related_name(
+    results: List[str],
+    seen: Set[str],
+    candidate_text: str,
+) -> None:
+    cleaned = _clean_bandcamp_related_artist_name(candidate_text)
+    if not cleaned:
+        return
+    key = normalise_artist_name(cleaned)
+    if not key or key in seen:
+        return
+    seen.add(key)
+    results.append(cleaned)
+
+
+def _extract_bandcamp_related_artist_names(
+    soup: Optional[BeautifulSoup],
+    profile_url: str,
+    limit: int = FESTIVAL_EXPANSION_MAX_RELATED_ARTISTS,
+) -> List[str]:
+    if soup is None or limit <= 0:
+        return []
+
+    results: List[str] = []
+    seen: Set[str] = set()
+    profile_host = urlparse(profile_url or "").netloc.lower().lstrip("www.")
+    selector_candidates = (
+        ".recommended-album .item-artist",
+        ".recommended-grid-container .item-artist",
+        ".recommended-grid-container .itemsubtext",
+        ".related-artists .item-artist",
+        ".fans-also-like .item-artist",
+        ".recommended-by .item-artist",
+    )
+
+    for selector in selector_candidates:
+        for node in soup.select(selector):
+            text = node.get_text(" ", strip=True)
+            _add_bandcamp_related_name(results, seen, text)
+            if len(results) >= limit:
+                return results[:limit]
+
+    hint_tokens = ("recommended", "fans also like", "also like", "related artists")
+    for container in soup.select("[class],[id]"):
+        attrs = " ".join(
+            [
+                " ".join(container.get("class", [])),
+                str(container.get("id") or ""),
+            ]
+        ).lower()
+        if not any(token in attrs for token in ("recommended", "related", "also-like", "also_like", "fans")):
+            continue
+        text_preview = " ".join(container.stripped_strings).lower()
+        if not any(token in text_preview for token in hint_tokens):
+            continue
+        for anchor in container.select("a[href]"):
+            href = urljoin(profile_url, anchor.get("href") or "")
+            host = urlparse(href).netloc.lower().lstrip("www.")
+            if not host or not host.endswith("bandcamp.com"):
+                continue
+            if profile_host and host == profile_host:
+                continue
+            text = anchor.get_text(" ", strip=True) or anchor.get("title") or ""
+            _add_bandcamp_related_name(results, seen, text)
+            if len(results) >= limit:
+                return results[:limit]
+
+    return results[:limit]
 
 
 @dataclass
@@ -4665,6 +4761,10 @@ class CrossDirectoryEnricherWorker(QThread):
         self._domain_email_reuse_rows: Set[Any] = set()
         self._domain_email_reuse_count: int = 0
         self._website_email_cache: Dict[str, Dict[str, Any]] = {}
+        self._festival_expansion_rows: List[Dict[str, Any]] = []
+        self._festival_expansion_existing_keys: Set[str] = set()
+        self._festival_expansion_staged_keys: Set[str] = set()
+        self._festival_expansion_raw_csv_path: str = _festival_expansion_raw_path(output_csv_path)
         # Share live-search budget with SoundCloud aggregator fetches.
         try:
             def _agg_budget_check():
@@ -4695,6 +4795,15 @@ class CrossDirectoryEnricherWorker(QThread):
             from pipeline_runner import reset_email_summary_counts
 
             reset_email_summary_counts()
+        except Exception:
+            pass
+        self._festival_expansion_rows = []
+        self._festival_expansion_existing_keys = set()
+        self._festival_expansion_staged_keys = set()
+        self._festival_expansion_raw_csv_path = _festival_expansion_raw_path(self.output_csv_path)
+        try:
+            if self._festival_expansion_raw_csv_path and os.path.exists(self._festival_expansion_raw_csv_path):
+                os.remove(self._festival_expansion_raw_csv_path)
         except Exception:
             pass
         # Reset SoundCloud live-enrich fail-fast flag for each run.
@@ -4783,6 +4892,11 @@ class CrossDirectoryEnricherWorker(QThread):
             dedupe_message = getattr(dedupe_pre_enrich, "_last_log_message", "")
             if dedupe_message:
                 self.log_message.emit(dedupe_message)
+            self._festival_expansion_existing_keys = {
+                normalise_artist_name(_clean_cell(name))
+                for name in seed_df.get("Artist Name", pd.Series(dtype=str)).tolist()
+                if normalise_artist_name(_clean_cell(name))
+            }
             seed_df = _ensure_email_columns(seed_df)
             self.log_message.emit(
                 "[Schema] ensured email columns: Email, Email_All, Email_Type, Email_Source_URL, Email_Source_Type, Email_Extract_Method"
@@ -4942,6 +5056,7 @@ class CrossDirectoryEnricherWorker(QThread):
                 f"[Enricher] Domain email reuse summary: indexed_domains={len(self._domain_email_reuse_index)} "
                 f"rows_reused={self._domain_email_reuse_count}"
             )
+            self._write_festival_expansion_sidecar()
             seed_df = self._ensure_bandcamp_output_columns(seed_df)
             _ensure_parent_dir(self.output_csv_path)
             try:
@@ -7103,6 +7218,121 @@ class CrossDirectoryEnricherWorker(QThread):
         if cleaned > current:
             df.at[row_idx, "Match_Score"] = cleaned
 
+    def _row_is_festival_expansion(self, row: pd.Series) -> bool:
+        discovery_tier = _clean_cell(row.get("Discovery Tier", "")).strip().lower()
+        expansion_parent = _clean_cell(row.get("Expansion Parent", ""))
+        return discovery_tier == FESTIVAL_EXPANSION_DISCOVERY_TIER or bool(expansion_parent)
+
+    def _row_is_festival_origin(self, row: pd.Series) -> bool:
+        if self._row_is_festival_expansion(row):
+            return False
+        priority = _clean_cell(row.get("Seed Priority", "")).strip().lower()
+        festival_sources = _clean_cell(row.get("Festival Sources", ""))
+        festival_count = _clean_cell(row.get("Festival Count", ""))
+        source_dir = _clean_cell(row.get("Source Directory", "")).strip().lower()
+        if priority in {"festival", "festival_high"}:
+            return True
+        if festival_sources:
+            return True
+        try:
+            if int(float(festival_count or "0")) > 0:
+                return True
+        except Exception:
+            pass
+        return source_dir.startswith("festival_")
+
+    def _build_festival_expansion_row(
+        self,
+        parent_row: pd.Series,
+        candidate_artist: str,
+        origin: str,
+    ) -> Dict[str, Any]:
+        row = {
+            "Artist Name": candidate_artist,
+            "Location": "",
+            "Song Title": "",
+            "Sounds Like": "",
+            "Social Link": "",
+            "SoundCloud Link": "",
+            "Played on triple J": "",
+            "Played on Unearthed": "",
+            "Release Date": "",
+            "Primary Genre": "",
+            "Date Added": datetime.date.today().isoformat(),
+            "External Links": "",
+            "Email": "",
+            "Source Directory": "",
+            "Source URL": "",
+            "Seed Priority": "",
+            "Expansion Parent": _clean_cell(parent_row.get("Artist Name", "")),
+            "Expansion Origin": origin,
+            "Discovery Tier": FESTIVAL_EXPANSION_DISCOVERY_TIER,
+        }
+        festival_sources = _clean_cell(parent_row.get("Festival Sources", ""))
+        festival_count = _clean_cell(parent_row.get("Festival Count", ""))
+        if festival_sources:
+            row["Festival Sources"] = festival_sources
+        if festival_count:
+            row["Festival Count"] = festival_count
+        return row
+
+    def _stage_festival_expansion_candidates(
+        self,
+        df: pd.DataFrame,
+        row_idx,
+        related_artists: Iterable[str],
+        origin: str,
+    ) -> int:
+        if not related_artists:
+            return 0
+        row = df.loc[row_idx]
+        if not self._row_is_festival_origin(row):
+            return 0
+        parent_artist = _clean_cell(row.get("Artist Name", ""))
+        parent_key = normalise_artist_name(parent_artist)
+        if not parent_key:
+            return 0
+        staged = 0
+        skipped_existing = 0
+        extracted = 0
+        for candidate in related_artists:
+            if staged >= FESTIVAL_EXPANSION_MAX_RELATED_ARTISTS:
+                break
+            cleaned = _clean_bandcamp_related_artist_name(candidate)
+            candidate_key = normalise_artist_name(cleaned)
+            if not candidate_key or candidate_key == parent_key:
+                continue
+            extracted += 1
+            if candidate_key in self._festival_expansion_existing_keys or candidate_key in self._festival_expansion_staged_keys:
+                skipped_existing += 1
+                continue
+            self._festival_expansion_rows.append(
+                self._build_festival_expansion_row(row, cleaned, origin)
+            )
+            self._festival_expansion_staged_keys.add(candidate_key)
+            staged += 1
+        self.log_message.emit(
+            f"[FestivalExpansion] parent={parent_artist!r} origin={origin} "
+            f"extracted={extracted} staged={staged} skipped_existing={skipped_existing}"
+        )
+        return staged
+
+    def _write_festival_expansion_sidecar(self) -> None:
+        if not self._festival_expansion_rows:
+            return
+        path = self._festival_expansion_raw_csv_path
+        if not path:
+            return
+        try:
+            expansion_df = pd.DataFrame(self._festival_expansion_rows)
+            _ensure_parent_dir(path)
+            expansion_df.to_csv(path, index=False, encoding="utf-8-sig")
+            self.log_message.emit(
+                f"[FestivalExpansion] staged rows total={len(expansion_df.index)} -> {path}"
+            )
+        except Exception as exc:
+            self.log_message.emit(f"[FestivalExpansion] failed to write staged rows: {exc}")
+
     def _apply_payload_guarded(
         self,
         df: pd.DataFrame,
@@ -7122,6 +7352,14 @@ class CrossDirectoryEnricherWorker(QThread):
             return False
         self._update_row_match_score(df, row_idx, score)
         self._apply_payload(df, row_idx, payload)
+        related_artists = getattr(payload, "related_artists", None) or []
+        if related_artists and (payload.source_dir or "").startswith(FESTIVAL_EXPANSION_ORIGIN_BANDCAMP):
+            self._stage_festival_expansion_candidates(
+                df,
+                row_idx,
+                related_artists,
+                origin=FESTIVAL_EXPANSION_ORIGIN_BANDCAMP,
+            )
         return True
 
     def _payload_from_directory_matches(
@@ -9656,11 +9894,17 @@ class CrossDirectoryEnricherWorker(QThread):
         profile_fetch_ok = getattr(self, "_last_fetch_ok", fetched_ok)
         profile_http_status = getattr(self, "_last_http_status", None)
         profile_soup: Optional[BeautifulSoup] = None
+        related_artists: List[str] = []
         if source_dir == "bandcamp":
             try:
                 profile_soup = BeautifulSoup(html, "html.parser")
             except Exception:
                 profile_soup = None
+            related_artists = _extract_bandcamp_related_artist_names(
+                profile_soup,
+                profile_url,
+                limit=FESTIVAL_EXPANSION_MAX_RELATED_ARTISTS,
+            )
             contact_follow_done = False
             track_follow_done = False
             if not (socials or websites or emails or link_hubs):
@@ -9775,6 +10019,7 @@ class CrossDirectoryEnricherWorker(QThread):
                         source_dir=source_dir,
                         source_url=canonical_url,
                         source_detail=_format_source_display(source_dir),
+                        related_artists=related_artists,
                     )
                     self.log_message.emit(
                         f"[Enricher] Bandcamp: safe match but no actionable fields; returning url-only payload url={canonical_url}"
@@ -9790,6 +10035,7 @@ class CrossDirectoryEnricherWorker(QThread):
             source_dir=source_dir,
             source_url=profile_url,
             source_detail=_format_source_display(live_key),
+            related_artists=related_artists,
         )
         return payload
 
