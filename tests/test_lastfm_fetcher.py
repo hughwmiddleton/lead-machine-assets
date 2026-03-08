@@ -31,6 +31,89 @@ def _build_worker():
     return worker
 
 
+def _live_lookup_call_order(worker, monkeypatch):
+    calls = []
+
+    monkeypatch.setattr(worker, "_live_search_bandcamp", lambda artist: calls.append("bandcamp") or None)
+    monkeypatch.setattr(worker, "_live_search_soundcloud", lambda artist: calls.append("soundcloud") or None)
+    monkeypatch.setattr(worker, "_live_search_lastfm", lambda artist: calls.append("lastfm") or None)
+
+    worker._live_lookup("Test Artist")
+    return calls
+
+
+def test_live_lookup_bc_lf_warmup_keeps_default_order(monkeypatch):
+    worker = _build_worker()
+    worker._live_lookup_bclf_adaptive_enabled = True
+    worker._reset_live_lookup_bclf_stats()
+    worker._live_lookup_bclf_stats["bandcamp"]["attempts"] = cde.LIVE_LOOKUP_BCLF_MIN_ATTEMPTS - 1
+    worker._live_lookup_bclf_stats["bandcamp"]["enriched"] = 1
+    worker._live_lookup_bclf_stats["lastfm"]["attempts"] = cde.LIVE_LOOKUP_BCLF_MIN_ATTEMPTS + 2
+    worker._live_lookup_bclf_stats["lastfm"]["enriched"] = cde.LIVE_LOOKUP_BCLF_MIN_ATTEMPTS + 2
+
+    assert _live_lookup_call_order(worker, monkeypatch) == ["bandcamp", "soundcloud", "lastfm"]
+
+
+def test_live_lookup_bc_lf_adaptive_order_tracks_stats(monkeypatch):
+    worker = _build_worker()
+    worker._live_lookup_bclf_adaptive_enabled = True
+
+    worker._reset_live_lookup_bclf_stats()
+    worker._live_lookup_bclf_stats["bandcamp"].update({"attempts": 4, "enriched": 1, "cooldown": 0})
+    worker._live_lookup_bclf_stats["lastfm"].update({"attempts": 4, "enriched": 4, "cooldown": 0})
+    assert _live_lookup_call_order(worker, monkeypatch) == ["lastfm", "soundcloud", "bandcamp"]
+
+    worker._reset_live_lookup_bclf_stats()
+    worker._live_lookup_bclf_stats["bandcamp"].update({"attempts": 4, "enriched": 4, "cooldown": 0})
+    worker._live_lookup_bclf_stats["lastfm"].update({"attempts": 4, "enriched": 1, "cooldown": 0})
+    assert _live_lookup_call_order(worker, monkeypatch) == ["bandcamp", "soundcloud", "lastfm"]
+
+
+def test_live_lookup_bc_lf_cooldown_penalty_biases_order(monkeypatch):
+    worker = _build_worker()
+    worker._live_lookup_bclf_adaptive_enabled = True
+    worker._reset_live_lookup_bclf_stats()
+    worker._live_lookup_bclf_stats["bandcamp"].update({"attempts": 4, "enriched": 2, "cooldown": 0})
+    worker._live_lookup_bclf_stats["lastfm"].update({"attempts": 4, "enriched": 4, "cooldown": 4})
+
+    assert _live_lookup_call_order(worker, monkeypatch) == ["bandcamp", "soundcloud", "lastfm"]
+
+
+def test_live_lookup_success_credit_requires_applied_winner(monkeypatch):
+    worker = _build_worker()
+    worker._live_lookup_bclf_adaptive_enabled = True
+    worker._reset_live_lookup_bclf_stats()
+    seed_df = pd.DataFrame(
+        [{"Artist Name": "Artist", "Bandcamp_URL": "", "SoundCloud Link": ""}],
+        dtype=str,
+    ).fillna("")
+    ctx = {"artist": "Artist", "spotify_id": ""}
+    payload = cde.EnrichmentPayload(
+        socials=set(),
+        websites={"https://example.com"},
+        emails=set(),
+        link_hubs=set(),
+        source_dir="lastfm",
+        source_url="https://www.last.fm/music/artist",
+        match_score=0.9,
+    )
+    applied_results = iter([False, True])
+
+    monkeypatch.setattr(worker, "_live_lookup", lambda *args, **kwargs: payload)
+    monkeypatch.setattr(worker, "_mark_sc_blocked_row", lambda *args, **kwargs: False)
+    monkeypatch.setattr(worker, "_apply_payload_guarded", lambda *args, **kwargs: next(applied_results))
+
+    enriched, skip_rest = worker._enrich_row_live_lookup(seed_df, 0, ctx)
+    assert enriched is False
+    assert skip_rest is False
+    assert worker._live_lookup_bclf_stats["lastfm"]["enriched"] == 0
+
+    enriched, skip_rest = worker._enrich_row_live_lookup(seed_df, 0, ctx)
+    assert enriched is True
+    assert skip_rest is False
+    assert worker._live_lookup_bclf_stats["lastfm"]["enriched"] == 1
+
+
 def test_lastfm_406_no_retry(monkeypatch):
     worker = _build_worker()
     statuses: List[int] = [406, 200]

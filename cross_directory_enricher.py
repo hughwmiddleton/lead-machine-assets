@@ -96,6 +96,10 @@ MIN_BC_CONFIDENCE = 0.92
 MIN_LF_CONFIDENCE = 0.9
 STRICT_MATCHING = True
 MATCH_THRESHOLD = 0.7
+LIVE_LOOKUP_BCLF_BASE_SCORE = 1.0
+LIVE_LOOKUP_BCLF_MIN_ATTEMPTS = 2
+LIVE_LOOKUP_BCLF_MAX_BONUS = 0.35
+LIVE_LOOKUP_BCLF_MAX_COOLDOWN_PENALTY = 0.45
 FESTIVAL_EXPANSION_DISCOVERY_TIER = "festival_expansion"
 FESTIVAL_EXPANSION_ORIGIN_BANDCAMP = "bandcamp"
 FESTIVAL_EXPANSION_MAX_RELATED_ARTISTS = 3
@@ -4765,6 +4769,9 @@ class CrossDirectoryEnricherWorker(QThread):
         self._lf_canonical_url_cache: Dict[str, str] = {}
         self._last_final_url: Optional[str] = None
         self._last_resolved_profile_url: Optional[str] = None
+        self._live_lookup_bclf_stats: Dict[str, Dict[str, int]] = {}
+        self._live_lookup_bclf_adaptive_enabled: bool = False
+        self._reset_live_lookup_bclf_stats()
         self._directory_indexes: Dict[str, DirectoryIndex] = {}
         self._domain_email_reuse_index: Dict[str, Dict[str, str]] = {}
         self._domain_email_reuse_rows: Set[Any] = set()
@@ -5617,6 +5624,8 @@ class CrossDirectoryEnricherWorker(QThread):
         skip_soundcloud = bool(_coerce_directory_value(seed_df.at[row_idx, "SoundCloud Link"]))
         if getattr(self, "_sc_live_enrich_disabled", False):
             skip_soundcloud = True
+        if skip_lastfm and getattr(self, "_live_lookup_bclf_adaptive_enabled", False):
+            self._record_live_lookup_bclf_cooldown("lastfm")
         payload = self._live_lookup(
             artist,
             skip_soundcloud=skip_soundcloud,
@@ -5631,6 +5640,8 @@ class CrossDirectoryEnricherWorker(QThread):
             )
             if applied:
                 enriched = True
+            if getattr(self, "_live_lookup_bclf_adaptive_enabled", False):
+                self._record_live_lookup_bclf_applied_winner(payload, applied=applied)
         # Persist Bandcamp diagnostics (per-row)
         bc_stats = getattr(self, "_last_bc_row_stats", {}) or {}
         if bc_stats:
@@ -6642,71 +6653,76 @@ class CrossDirectoryEnricherWorker(QThread):
 
     def _phase_live_lookup(self, seed_df, total):
         self.log_message.emit("[Enricher][LF Phase] Starting...")
-        enriched_count = 0
-        processed_rows = 0
-        skipped_search_cooldown = 0
-        skipped_profile_cooldown = 0
-        stopped_max_live = False
-        for position, row_idx in enumerate(seed_df.index, start=1):
-            ctx = self._build_row_context(seed_df, row_idx, position, total)
-            if not ctx:
-                continue
-            processed_rows += 1
-            if row_idx in self._domain_email_reuse_rows or self._maybe_apply_domain_email_reuse(seed_df, row_idx, ctx):
-                self._set_platform_state("lastfm", "skipped")
-                continue
-            self._init_row_enrichment_state()
-            lf_skip_search = False
-            if self._lf_endpoint_in_cooldown("search"):
-                artist = ctx.get("artist", "")
-                artist_key = normalise_artist_name(artist)
-                seed_urls = set(ctx.get("seed_lastfm_urls") or [])
-                cached_profile = (
-                    artist_key
-                    and (
-                        artist_key in self._lf_profile_url_cache
-                        or (
-                            artist_key in self._lf_search_result_cache
-                            and self._lf_search_result_cache.get(artist_key)
+        self._reset_live_lookup_bclf_stats()
+        self._live_lookup_bclf_adaptive_enabled = True
+        try:
+            enriched_count = 0
+            processed_rows = 0
+            skipped_search_cooldown = 0
+            skipped_profile_cooldown = 0
+            stopped_max_live = False
+            for position, row_idx in enumerate(seed_df.index, start=1):
+                ctx = self._build_row_context(seed_df, row_idx, position, total)
+                if not ctx:
+                    continue
+                processed_rows += 1
+                if row_idx in self._domain_email_reuse_rows or self._maybe_apply_domain_email_reuse(seed_df, row_idx, ctx):
+                    self._set_platform_state("lastfm", "skipped")
+                    continue
+                self._init_row_enrichment_state()
+                lf_skip_search = False
+                if self._lf_endpoint_in_cooldown("search"):
+                    artist = ctx.get("artist", "")
+                    artist_key = normalise_artist_name(artist)
+                    seed_urls = set(ctx.get("seed_lastfm_urls") or [])
+                    cached_profile = (
+                        artist_key
+                        and (
+                            artist_key in self._lf_profile_url_cache
+                            or (
+                                artist_key in self._lf_search_result_cache
+                                and self._lf_search_result_cache.get(artist_key)
+                            )
                         )
                     )
+                    has_profile_first = bool(seed_urls or cached_profile)
+                    if not has_profile_first:
+                        lf_skip_search = True
+                        if not self._lf_search_cooldown_skip_logged:
+                            cooldown = self._lf_endpoint_cooldown_remaining("search")
+                            try:
+                                self.log_message.emit(
+                                    f"[Enricher][LF] search cooldown active; skipping row '{artist}' expires_in={cooldown}s"
+                                )
+                            except Exception:
+                                pass
+                            self._lf_search_cooldown_skip_logged = True
+                    self._lf_search_skipped_cooldown += 1
+                    self._set_platform_state("lastfm", "skipped")
+                if (not lf_skip_search) and self.max_live_searches > 0 and self.live_search_attempts >= self.max_live_searches:
+                    stopped_max_live = True
+                    break
+                ll_enriched, _ = self._enrich_row_live_lookup(seed_df, row_idx, ctx, skip_lastfm=lf_skip_search)
+                if ll_enriched:
+                    enriched_count += 1
+                skipped_search_cooldown += getattr(self, "_lf_search_skipped_cooldown", 0)
+                skipped_profile_cooldown += getattr(self, "_lf_profile_skipped_cooldown", 0)
+                self._lf_search_skipped_cooldown = 0
+                self._lf_profile_skipped_cooldown = 0
+            if stopped_max_live:
+                self.log_message.emit("[Enricher][LF Phase] Stopped early: max_live")
+            try:
+                self.log_message.emit(
+                    f"[Enricher][LF Phase] search_skip_summary: search_skipped={skipped_search_cooldown}"
                 )
-                has_profile_first = bool(seed_urls or cached_profile)
-                if not has_profile_first:
-                    lf_skip_search = True
-                    if not self._lf_search_cooldown_skip_logged:
-                        cooldown = self._lf_endpoint_cooldown_remaining("search")
-                        try:
-                            self.log_message.emit(
-                                f"[Enricher][LF] search cooldown active; skipping row '{artist}' expires_in={cooldown}s"
-                            )
-                        except Exception:
-                            pass
-                        self._lf_search_cooldown_skip_logged = True
-                self._lf_search_skipped_cooldown += 1
-                self._set_platform_state("lastfm", "skipped")
-            if (not lf_skip_search) and self.max_live_searches > 0 and self.live_search_attempts >= self.max_live_searches:
-                stopped_max_live = True
-                break
-            ll_enriched, _ = self._enrich_row_live_lookup(seed_df, row_idx, ctx, skip_lastfm=lf_skip_search)
-            if ll_enriched:
-                enriched_count += 1
-            skipped_search_cooldown += getattr(self, "_lf_search_skipped_cooldown", 0)
-            skipped_profile_cooldown += getattr(self, "_lf_profile_skipped_cooldown", 0)
-            self._lf_search_skipped_cooldown = 0
-            self._lf_profile_skipped_cooldown = 0
-        if stopped_max_live:
-            self.log_message.emit("[Enricher][LF Phase] Stopped early: max_live")
-        try:
+            except Exception:
+                pass
             self.log_message.emit(
-                f"[Enricher][LF Phase] search_skip_summary: search_skipped={skipped_search_cooldown}"
+                f"[Enricher][LF Phase] Completed {processed_rows} rows (enriched={enriched_count}, "
+                f"search_skipped={skipped_search_cooldown}, profile_skipped={skipped_profile_cooldown})"
             )
-        except Exception:
-            pass
-        self.log_message.emit(
-            f"[Enricher][LF Phase] Completed {processed_rows} rows (enriched={enriched_count}, "
-            f"search_skipped={skipped_search_cooldown}, profile_skipped={skipped_profile_cooldown})"
-        )
+        finally:
+            self._live_lookup_bclf_adaptive_enabled = False
 
     def _phase_facebook(self, seed_df, fb_driver, total):
         self.log_message.emit("[Enricher][FB Phase] Starting...")
@@ -6764,6 +6780,82 @@ class CrossDirectoryEnricherWorker(QThread):
             "attempts": 0,
             "http_403": 0,
         }
+
+    def _reset_live_lookup_bclf_stats(self) -> None:
+        self._live_lookup_bclf_stats = {
+            "bandcamp": {"attempts": 0, "enriched": 0, "cooldown": 0},
+            "lastfm": {"attempts": 0, "enriched": 0, "cooldown": 0},
+        }
+
+    def _record_live_lookup_bclf_attempt(self, source: str) -> None:
+        if source not in {"bandcamp", "lastfm"}:
+            return
+        stats = getattr(self, "_live_lookup_bclf_stats", None)
+        if not isinstance(stats, dict) or source not in stats:
+            self._reset_live_lookup_bclf_stats()
+            stats = self._live_lookup_bclf_stats
+        stats[source]["attempts"] += 1
+
+    def _record_live_lookup_bclf_cooldown(self, source: str) -> None:
+        if source not in {"bandcamp", "lastfm"}:
+            return
+        stats = getattr(self, "_live_lookup_bclf_stats", None)
+        if not isinstance(stats, dict) or source not in stats:
+            self._reset_live_lookup_bclf_stats()
+            stats = self._live_lookup_bclf_stats
+        stats[source]["cooldown"] += 1
+
+    def _record_live_lookup_bclf_applied_winner(
+        self,
+        payload: Optional[EnrichmentPayload],
+        *,
+        applied: bool,
+    ) -> None:
+        if not applied or not payload:
+            return
+        source = (getattr(payload, "source_dir", "") or "").strip().lower()
+        if source not in {"bandcamp", "lastfm"}:
+            return
+        stats = getattr(self, "_live_lookup_bclf_stats", None)
+        if not isinstance(stats, dict) or source not in stats:
+            self._reset_live_lookup_bclf_stats()
+            stats = self._live_lookup_bclf_stats
+        stats[source]["enriched"] += 1
+
+    def _live_lookup_bclf_priority_score(self, source: str) -> float:
+        stats = (getattr(self, "_live_lookup_bclf_stats", {}) or {}).get(source, {})
+        attempts = int(stats.get("attempts", 0) or 0)
+        enriched = int(stats.get("enriched", 0) or 0)
+        cooldown = int(stats.get("cooldown", 0) or 0)
+        success_bonus = 0.0
+        if attempts >= LIVE_LOOKUP_BCLF_MIN_ATTEMPTS:
+            success_rate = enriched / attempts if attempts else 0.0
+            success_bonus = min(
+                LIVE_LOOKUP_BCLF_MAX_BONUS,
+                max(0.0, success_rate * LIVE_LOOKUP_BCLF_MAX_BONUS),
+            )
+        cooldown_penalty = 0.0
+        if cooldown > 0:
+            denom = attempts or cooldown or 1
+            cooldown_rate = cooldown / denom if denom else 0.0
+            cooldown_penalty = min(
+                LIVE_LOOKUP_BCLF_MAX_COOLDOWN_PENALTY,
+                max(0.0, cooldown_rate * LIVE_LOOKUP_BCLF_MAX_COOLDOWN_PENALTY),
+            )
+        return LIVE_LOOKUP_BCLF_BASE_SCORE + success_bonus - cooldown_penalty
+
+    def _live_lookup_bclf_order(self) -> Tuple[str, str]:
+        default_order = ("bandcamp", "lastfm")
+        stats = getattr(self, "_live_lookup_bclf_stats", {}) or {}
+        bandcamp_attempts = int((stats.get("bandcamp") or {}).get("attempts", 0) or 0)
+        lastfm_attempts = int((stats.get("lastfm") or {}).get("attempts", 0) or 0)
+        if min(bandcamp_attempts, lastfm_attempts) < LIVE_LOOKUP_BCLF_MIN_ATTEMPTS:
+            return default_order
+        bandcamp_score = self._live_lookup_bclf_priority_score("bandcamp")
+        lastfm_score = self._live_lookup_bclf_priority_score("lastfm")
+        if lastfm_score > bandcamp_score:
+            return ("lastfm", "bandcamp")
+        return default_order
 
     def _bc_record_attempt(self, status_code: Optional[int]) -> None:
         self._bc_search_attempts += 1
@@ -7935,11 +8027,17 @@ class CrossDirectoryEnricherWorker(QThread):
             return None
         best_payload: Optional[EnrichmentPayload] = None
         sources: Tuple[str, ...] = ("bandcamp", "soundcloud", "lastfm")
-        if skip_bandcamp:
+        adaptive_enabled = bool(getattr(self, "_live_lookup_bclf_adaptive_enabled", False))
+        if adaptive_enabled and not skip_bandcamp and not skip_lastfm:
+            ordered_bc_lf = self._live_lookup_bclf_order()
+            sources = (ordered_bc_lf[0], "soundcloud", ordered_bc_lf[1])
+        elif skip_bandcamp:
             sources = ("soundcloud", "lastfm")
         for source in sources:
             payload = None
             if source == "bandcamp":
+                if adaptive_enabled:
+                    self._record_live_lookup_bclf_attempt("bandcamp")
                 payload = self._live_search_bandcamp(artist_name)
             elif source == "soundcloud":
                 if skip_soundcloud or getattr(self, "night_mode", False):
@@ -7950,7 +8048,16 @@ class CrossDirectoryEnricherWorker(QThread):
                     if getattr(self, "_row_enrichment_state", {}).get("lastfm") == "pending":
                         self._set_platform_state("lastfm", "skipped")
                     continue
+                lf_search_skipped_before = int(getattr(self, "_lf_search_skipped_cooldown", 0) or 0)
+                lf_profile_skipped_before = int(getattr(self, "_lf_profile_skipped_cooldown", 0) or 0)
+                if adaptive_enabled:
+                    self._record_live_lookup_bclf_attempt("lastfm")
                 payload = self._live_search_lastfm(artist_name)
+                if adaptive_enabled and (
+                    int(getattr(self, "_lf_search_skipped_cooldown", 0) or 0) > lf_search_skipped_before
+                    or int(getattr(self, "_lf_profile_skipped_cooldown", 0) or 0) > lf_profile_skipped_before
+                ):
+                    self._record_live_lookup_bclf_cooldown("lastfm")
             if payload:
                 current_best = getattr(best_payload, "match_score", 0.0) if best_payload else 0.0
                 candidate_score = getattr(payload, "match_score", 0.0) or 0.0

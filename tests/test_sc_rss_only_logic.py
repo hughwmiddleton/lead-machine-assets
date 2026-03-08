@@ -425,6 +425,40 @@ def test_sc_retry_skipped_if_row_enriched_elsewhere(monkeypatch):
     assert any("Completed post_website (retried=1" in line for line in logs)
 
 
+def test_source_phased_top_level_order_unchanged(monkeypatch):
+    import cross_directory_enricher as cde
+
+    w = _mk_worker()
+    w.enable_live_search = True
+    seed_df = pd.DataFrame({"Artist Name": [], "SoundCloud Link": []})
+    calls = []
+
+    monkeypatch.setattr(cde, "ENABLE_FACEBOOK_ENRICHMENT", True)
+    monkeypatch.setattr(
+        cde,
+        "_apply_fb_promotion_df",
+        lambda df, log_fn=None: calls.append("fb_promote") or df,
+    )
+    w._phase_directory_matching = lambda *args, **kwargs: calls.append("directory")
+    w._phase_soundcloud = lambda *args, **kwargs: calls.append("soundcloud") or {}
+    w._phase_live_lookup = lambda *args, **kwargs: calls.append("live_lookup")
+    w._phase_instagram_email = lambda *args, **kwargs: calls.append("instagram")
+    w._phase_website_email = lambda *args, **kwargs: calls.append("website")
+    w._phase_facebook = lambda *args, **kwargs: calls.append("facebook")
+
+    w._run_source_phased(seed_df, directory_indexes={}, priority=[], fb_driver=object(), total=0)
+
+    assert calls == [
+        "directory",
+        "soundcloud",
+        "live_lookup",
+        "instagram",
+        "website",
+        "fb_promote",
+        "facebook",
+    ]
+
+
 def test_breaker_has_grace_period():
     w = _mk_worker()
     # Failures before grace rows should not trip breaker.
