@@ -805,7 +805,7 @@ WEBSITE_EMAIL_OPTIONAL_FIELDS = (
     "Websites",
     "Website URL",
 )
-HEAVY_ENRICHER_CONFIDENCE_THRESHOLD = 0.55
+HEAVY_ENRICHER_CONFIDENCE_THRESHOLD = 0.30
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MULTI_VALUE_SEPARATOR = ", "
 FACEBOOK_HELPERS_PATH = os.path.join(BASE_DIR, "Lead Machine (Final Update 5).py")

@@ -79,3 +79,29 @@ def test_row_confidence_allows_match_score_with_multiple_links():
     assert decision.allowed is True
     assert "strong_match_score" in decision.reasons
     assert "multiple_link_clues" in decision.reasons
+
+
+def test_row_confidence_allows_borderline_some_link_clues_at_threshold():
+    worker = _make_worker()
+    ctx = {
+        "artist": "Conan Gray",
+        "signal_snapshot": {
+            "spotify_domain": "",
+            "seed_links_by_source": {},
+            "website_candidates": (),
+            "soundcloud_link": "",
+            "canonical_fb_url": "",
+            "source_url": "",
+            "source_url_source": "",
+            "match_score": 0.0,
+            "signal_sources": ("external_field", "social_field"),
+        },
+    }
+    df = pd.DataFrame([{"Artist Name": "Conan Gray"}], dtype=str).fillna("")
+
+    decision = worker._row_allows_heavy_enricher(df.loc[0], ctx, "facebook")
+
+    assert decision.allowed is True
+    assert decision.score == 0.30
+    assert decision.threshold == 0.30
+    assert "some_link_clues" in decision.reasons
