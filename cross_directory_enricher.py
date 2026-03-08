@@ -5386,12 +5386,57 @@ class CrossDirectoryEnricherWorker(QThread):
             reasons=tuple(reasons),
         )
 
+    def _row_has_website_domain_hard_allow(
+        self,
+        row: Optional[Any],
+        ctx: Optional[Dict[str, Any]],
+    ) -> bool:
+        def _valid_website_candidates(values: Iterable[Any]) -> bool:
+            for value in values or ():
+                normalised = _normalise_url(_clean_cell(value))
+                if not normalised:
+                    continue
+                domain = _website_cache_key(normalised)
+                host = _host(normalised)
+                if not domain or not host:
+                    continue
+                allow_platform = bool(host.endswith("bandcamp.com"))
+                if _is_website_enrich_candidate_url(normalised, allow_platform=allow_platform):
+                    return True
+            return False
+
+        live_row = row
+        if live_row is None:
+            live_df = getattr(self, "_live_seed_df", None)
+            live_row_idx = getattr(self, "_live_row_idx", None)
+            if live_df is not None and live_row_idx in getattr(live_df, "index", ()):
+                try:
+                    live_row = live_df.loc[live_row_idx]
+                except Exception:
+                    live_row = None
+        if live_row is not None and _valid_website_candidates(_collect_website_enrich_candidate_urls(live_row)):
+            return True
+
+        working_ctx = ctx or getattr(self, "_live_context", {}) or {}
+        signal_snapshot = dict(working_ctx.get("signal_snapshot") or {})
+        if _valid_website_candidates(signal_snapshot.get("website_candidates") or ()):
+            return True
+        return False
+
     def _row_allows_heavy_enricher(
         self,
         row: Optional[Any],
         ctx: Optional[Dict[str, Any]],
         target: str,
     ) -> HeavyEnricherGateDecision:
+        threshold = HEAVY_ENRICHER_CONFIDENCE_THRESHOLD
+        if self._row_has_website_domain_hard_allow(row, ctx):
+            return HeavyEnricherGateDecision(
+                allowed=True,
+                score=1.0,
+                threshold=threshold,
+                reasons=("website_domain",),
+            )
         return self._compute_row_confidence(row, ctx, target)
 
     def _log_low_confidence_skip(
@@ -5413,6 +5458,8 @@ class CrossDirectoryEnricherWorker(QThread):
         Does NOT call _init_row_enrichment_state — callers must do that.
         """
         row = seed_df.loc[row_idx]
+        self._live_seed_df = seed_df
+        self._live_row_idx = row_idx
         had_email_from_seed = _row_has_email(row)
         artist = _clean_cell(row.get("Artist Name"))
         key = normalise_artist_name(artist)

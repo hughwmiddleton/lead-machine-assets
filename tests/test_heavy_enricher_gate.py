@@ -41,7 +41,38 @@ def test_row_confidence_allows_explicit_website_clue():
     decision = worker._row_allows_heavy_enricher(df.loc[0], ctx, "website")
 
     assert decision.allowed is True
-    assert "website_url" in decision.reasons
+    assert decision.score == 1.0
+    assert decision.reasons == ("website_domain",)
+
+
+def test_row_confidence_hard_allows_non_website_target_with_website_domain_clue():
+    worker = _make_worker()
+    ctx, df = _ctx_for(
+        worker,
+        {
+            "Artist Name": "XY",
+            "External Links": "https://artist.test",
+        },
+    )
+
+    decision = worker._row_allows_heavy_enricher(df.loc[0], ctx, "facebook")
+
+    assert decision.allowed is True
+    assert decision.score == 1.0
+    assert decision.threshold == 0.30
+    assert decision.reasons == ("website_domain",)
+
+
+def test_row_confidence_hard_allow_uses_live_row_when_ctx_signal_snapshot_is_stale():
+    worker = _make_worker()
+    ctx, df = _ctx_for(worker, {"Artist Name": "Late Website"})
+    df.at[0, "External Links"] = "https://artist.test"
+
+    decision = worker._row_allows_heavy_enricher(None, worker._live_context, "lastfm")
+
+    assert decision.allowed is True
+    assert decision.score == 1.0
+    assert decision.reasons == ("website_domain",)
 
 
 def test_row_confidence_allows_explicit_facebook_url():
@@ -69,7 +100,8 @@ def test_row_confidence_allows_match_score_with_multiple_links():
             "Artist Name": "Match Artist",
             "Match_Score": "0.72",
             "Social Link": "https://instagram.com/matchartist",
-            "External Links": "https://artist.test",
+            "External Links": "",
+            "SoundCloud Link": "https://soundcloud.com/matchartist",
             "Source URL": "https://soundcloud.com/matchartist",
         },
     )
