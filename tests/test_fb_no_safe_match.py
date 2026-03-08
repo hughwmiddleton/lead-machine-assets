@@ -3,8 +3,24 @@ from types import SimpleNamespace
 import night_mode_fb
 
 
-def _cand(name: str, url: str, category: str = "", aria: str = "", secondary: str = ""):
-    return SimpleNamespace(name=name, url=url, category=category, aria_label=aria, secondary_text=secondary)
+def _cand(
+    name: str,
+    url: str,
+    category: str = "",
+    aria: str = "",
+    secondary: str = "",
+    descriptor: str = "",
+    category_tokens=None,
+):
+    return SimpleNamespace(
+        name=name,
+        url=url,
+        category=category,
+        aria_label=aria,
+        secondary_text=secondary,
+        descriptor=descriptor,
+        category_tokens=list(category_tokens or []),
+    )
 
 
 def _make_enricher():
@@ -57,3 +73,65 @@ def test_mismatch_with_music_signal_can_pass():
     assert chosen is music_mismatch
     assert selected_by in {"ranked_sort", "mismatch_fallback"}
 
+
+def test_low_similarity_corporate_candidate_is_rejected():
+    enricher = _make_enricher()
+    artist = "Midnight Birds"
+    bad = _cand(
+        "Midtown Construction Company",
+        "https://www.facebook.com/midtownconstructioncompany",
+        "Construction company",
+    )
+    ranked = [_rank_item(artist, bad)]
+
+    chosen, selected_by = enricher._choose_ranked_candidate(artist, ranked, min_accept_score=-50)
+
+    assert chosen is None
+    assert selected_by == "no_safe_match"
+    assert enricher._last_search_reject_reason == "corporate_no_music_signal"
+
+
+def test_profile_like_candidate_without_music_metadata_is_rejected():
+    enricher = _make_enricher()
+    artist = "Aurora Beam"
+    bad = _cand(
+        "Aurora Personal Updates",
+        "https://www.facebook.com/profile.php?id=123456789",
+        "",
+    )
+    ranked = [_rank_item(artist, bad)]
+
+    chosen, selected_by = enricher._choose_ranked_candidate(artist, ranked, min_accept_score=-50)
+
+    assert chosen is None
+    assert selected_by == "no_safe_match"
+    assert enricher._last_search_reject_reason == "profile_no_music_signal"
+
+
+def test_profile_like_candidate_with_music_metadata_can_pass():
+    enricher = _make_enricher()
+    artist = "Aurora Beam"
+    good = _cand(
+        "Aurora Beam",
+        "https://www.facebook.com/profile.php?id=123456789",
+        "Public figure",
+        secondary="DJ / Producer",
+    )
+    ranked = [_rank_item(artist, good)]
+
+    chosen, selected_by = enricher._choose_ranked_candidate(artist, ranked, min_accept_score=-50)
+
+    assert chosen is good
+    assert selected_by in {"ranked_sort", "mismatch_fallback"}
+
+
+def test_exact_name_with_weak_metadata_still_allowed():
+    enricher = _make_enricher()
+    artist = "Exact Artist"
+    good = _cand("Exact Artist", "https://www.facebook.com/exactartist", "Public figure")
+    ranked = [_rank_item(artist, good)]
+
+    chosen, selected_by = enricher._choose_ranked_candidate(artist, ranked, min_accept_score=-50)
+
+    assert chosen is good
+    assert selected_by in {"ranked_sort", "mismatch_fallback"}

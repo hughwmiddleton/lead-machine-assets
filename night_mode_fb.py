@@ -984,6 +984,53 @@ def _candidate_has_non_music_deny(features: Dict[str, Any]) -> bool:
     return bool(has_deny and (not has_music) and service_only)
 
 
+def _candidate_corporate_risk(features: Dict[str, Any]) -> Tuple[bool, str, bool]:
+    """
+    Reuse shared FB business/corporate detection across pre-fetch candidate fields.
+    Returns (has_corporate_risk, token, has_artist_like_signal).
+    """
+    name = str(features.get("name") or "")
+    url = str(features.get("url") or "")
+    meta_parts = [
+        str(features.get("category") or ""),
+        str(features.get("descriptor") or ""),
+        str(features.get("aria_label") or ""),
+        str(features.get("secondary_text") or ""),
+    ]
+    category_tokens = features.get("category_tokens") or []
+    if isinstance(category_tokens, (list, tuple, set)):
+        meta_parts.extend(str(token or "") for token in category_tokens)
+    meta_blob = " ".join(part for part in meta_parts if part)
+
+    has_corporate_risk = False
+    corporate_token = ""
+    has_artist_like_signal = False
+
+    if facebook_enrich is not None:
+        detect_token = getattr(facebook_enrich, "detect_corporate_token", None)
+        if callable(detect_token):
+            try:
+                has_corporate_risk, detected_token = detect_token(url, name, meta_blob)
+                corporate_token = str(detected_token or "")
+            except Exception:
+                has_corporate_risk = False
+                corporate_token = ""
+
+        classify_signals = getattr(facebook_enrich, "classify_corporate_signals", None)
+        if callable(classify_signals):
+            try:
+                signals = classify_signals(name, url, meta_blob)
+                has_artist_like_signal = bool(getattr(signals, "has_artist", False))
+                if bool(getattr(signals, "has_hard", False)):
+                    has_corporate_risk = True
+                if (not corporate_token) and has_corporate_risk:
+                    corporate_token = "corporate"
+            except Exception:
+                pass
+
+    return has_corporate_risk, corporate_token, has_artist_like_signal
+
+
 def _candidate_is_safe_enough(item: Dict[str, Any], min_accept_score: int) -> Tuple[bool, str]:
     """
     Apply pre-selection guards to avoid scraping mismatches/non-music pages.
@@ -993,9 +1040,17 @@ def _candidate_is_safe_enough(item: Dict[str, Any], min_accept_score: int) -> Tu
     features = item.get("features") or {}
     match_level = features.get("match_level") or "none"
     music_any = bool(features.get("music_any"))
+    music_positive = bool(features.get("music_any") or features.get("music_primary") or features.get("music_descriptor"))
+    strong_identity = match_level in {"exact", "near"}
+    is_profile = bool(features.get("is_profile"))
 
     if _candidate_has_non_music_deny(features):
         return False, "non_music_category"
+    if is_profile and match_level in {"weak", "mismatch", "none"} and (not music_positive):
+        return False, "profile_no_music_signal"
+    corporate_risk, _corporate_token, artist_like_signal = _candidate_corporate_risk(features)
+    if corporate_risk and (not strong_identity) and (not music_positive) and (not artist_like_signal):
+        return False, "corporate_no_music_signal"
     if score < min_accept_score:
         return False, "rank_below_threshold"
     if match_level == "mismatch" and not music_any:
