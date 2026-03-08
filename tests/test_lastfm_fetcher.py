@@ -157,26 +157,40 @@ def test_lastfm_sanitized_empty_uses_artist_only(monkeypatch):
     assert urls[0][2] == 1
 
 
-def test_lastfm_primary_406_does_not_retry(monkeypatch):
+def test_lastfm_primary_406_uses_artist_only_fallback_and_continues(monkeypatch):
     worker = _build_worker()
     worker._live_context = {"song_title": "Good Track", "artist": "Artist X"}
     calls = []
 
     def fake_fetch(url, label=None, max_attempts=None, headers=None, endpoint=None):
-        calls.append((label, max_attempts))
-        worker._last_http_status = 406
-        worker._last_fetch_ok = False
-        worker._lf_mark_406("search")
-        return None
+        calls.append((url, label, max_attempts))
+        if label == "Last.fm search":
+            worker._last_http_status = 406
+            worker._last_fetch_ok = False
+            worker._lf_mark_406("search")
+            return None
+        worker._last_http_status = 200
+        worker._last_fetch_ok = True
+        worker._lf_mark_success("search")
+        return "<a href='/music/artist-x'>Artist X</a>"
+
+    def fake_profile(profile_url, source_dir, confidence=None):
+        return cde.EnrichmentPayload(
+            socials=set(), websites=set(), emails=set(), link_hubs=set(), source_dir=source_dir, source_url=profile_url
+        )
 
     monkeypatch.setattr(worker, "_fetch_url", fake_fetch)
+    monkeypatch.setattr(worker, "_fetch_profile_and_build", fake_profile)
     monkeypatch.setattr(time, "sleep", lambda s: None)
 
     payload = worker._live_search_lastfm("Artist X")
 
-    assert payload is None
-    assert calls == [("Last.fm search", 1)]
-    assert worker._lf_search_consecutive_406 == 1
+    assert payload is not None
+    assert calls == [
+        ('https://www.last.fm/search?q=%22Artist+X%22+%22Good+Track%22&type=artist', "Last.fm search", 1),
+        ("https://www.last.fm/search?q=Artist+X&type=artist", "Last.fm search (fallback)", 1),
+    ]
+    assert worker._lf_search_consecutive_406 == 0
 
 
 def test_lastfm_artist_only_406_single_attempt(monkeypatch):
@@ -199,6 +213,53 @@ def test_lastfm_artist_only_406_single_attempt(monkeypatch):
     assert payload is None
     assert calls == [("Last.fm search (fallback)", 1)]
     assert worker._lf_search_consecutive_406 == 1
+
+
+def test_lastfm_primary_406_fallback_is_bounded_to_two_attempts(monkeypatch):
+    worker = _build_worker()
+    worker._live_context = {"song_title": "Good Track", "artist": "Artist X"}
+    calls = []
+
+    def fake_fetch(url, label=None, max_attempts=None, headers=None, endpoint=None):
+        calls.append((url, label, max_attempts))
+        worker._last_http_status = 406
+        worker._last_fetch_ok = False
+        worker._lf_mark_406("search")
+        return None
+
+    monkeypatch.setattr(worker, "_fetch_url", fake_fetch)
+    monkeypatch.setattr(time, "sleep", lambda s: None)
+
+    payload = worker._live_search_lastfm("Artist X")
+
+    assert payload is None
+    assert calls == [
+        ('https://www.last.fm/search?q=%22Artist+X%22+%22Good+Track%22&type=artist', "Last.fm search", 1),
+        ("https://www.last.fm/search?q=Artist+X&type=artist", "Last.fm search (fallback)", 1),
+    ]
+
+
+def test_lastfm_primary_406_fallback_can_trigger_cooldown_after_bounded_attempts(monkeypatch):
+    worker = _build_worker()
+    worker._live_context = {"song_title": "Good Track", "artist": "Artist X"}
+    calls = []
+    monkeypatch.setattr(cde, "LF_COOLDOWN_CONSEC_406", 2)
+
+    def fake_fetch(url, label=None, max_attempts=None, headers=None, endpoint=None):
+        calls.append((label, max_attempts))
+        worker._last_http_status = 406
+        worker._last_fetch_ok = False
+        worker._lf_mark_406("search")
+        return None
+
+    monkeypatch.setattr(worker, "_fetch_url", fake_fetch)
+    monkeypatch.setattr(time, "sleep", lambda s: None)
+
+    payload = worker._live_search_lastfm("Artist X")
+
+    assert payload is None
+    assert calls == [("Last.fm search", 1), ("Last.fm search (fallback)", 1)]
+    assert worker._lf_endpoint_in_cooldown("search")
 
 
 def test_lastfm_sanitizer_numeric_heavy_skips_track(monkeypatch):

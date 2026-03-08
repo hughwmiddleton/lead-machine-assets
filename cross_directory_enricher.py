@@ -9227,14 +9227,10 @@ class CrossDirectoryEnricherWorker(QThread):
 
         use_track = bool(sanitized_title)
         primary_query = build_search_query(artist_name, sanitized_title) if use_track else artist_name
-        quoted = urllib.parse.quote_plus(primary_query)
-        url = f"https://www.last.fm/search?q={quoted}&type=artist"
         if not self._increment_live_counter():
             self._set_platform_state("lastfm", "skipped")
             return None
-        self.log_message.emit(f"[Enricher] Last.fm live search: {url}")
         lf_unhealthy = self._lf_endpoint_in_cooldown("search") or self._lf_search_consecutive_406 > 0
-        search_attempted = False
 
         def _parse_first_candidate(html_doc: str, log_no_results: bool) -> Optional[Tuple[str, str, float, float, float]]:
             if not html_doc:
@@ -9259,31 +9255,62 @@ class CrossDirectoryEnricherWorker(QThread):
             )
             return disp, prof, score, rank, match_score
 
-        html: Optional[str] = None
-        if use_track and sanitized_title:
-            search_attempted = True
-            _lf_sleep(lf_unhealthy)
-            html = self._fetch_url(url, label="Last.fm search", max_attempts=1, endpoint="search")
-
         best_score = 0.0
         best_rank_score = 0.0
         best_match_score = 0.0
         display_name = ""
         profile_url = ""
 
-        primary_candidate = _parse_first_candidate(html, log_no_results=True) if html else None
+        def _run_search_attempt(
+            query: str,
+            *,
+            label: str,
+            announce_url: bool = False,
+            artist_only_log: bool = False,
+            log_no_results: bool,
+        ) -> Optional[Tuple[str, str, float, float, float]]:
+            quoted_query = urllib.parse.quote_plus(query)
+            search_url = f"https://www.last.fm/search?q={quoted_query}&type=artist"
+            if announce_url:
+                self.log_message.emit(f"[Enricher] Last.fm live search: {search_url}")
+            if artist_only_log:
+                self.log_message.emit(
+                    f"[Enricher] Last.fm Enrich: artist-only search for '{artist_name}'."
+                )
+            current_unhealthy = self._lf_endpoint_in_cooldown("search") or self._lf_search_consecutive_406 > 0
+            _lf_sleep(current_unhealthy)
+            html_doc = self._fetch_url(search_url, label=label, max_attempts=1, endpoint="search")
+            return _parse_first_candidate(html_doc, log_no_results=log_no_results) if html_doc else None
+
+        primary_candidate: Optional[Tuple[str, str, float, float, float]] = None
+        first_search_406 = False
+        if use_track and sanitized_title:
+            primary_candidate = _run_search_attempt(
+                primary_query,
+                label="Last.fm search",
+                announce_url=True,
+                log_no_results=True,
+            )
+            first_search_406 = getattr(self, "_last_http_status", None) == 406 and getattr(self, "_last_fetch_ok", None) is False
+
         if primary_candidate:
             display_name, profile_url, best_score, best_rank_score, best_match_score = primary_candidate
-        if not search_attempted:
-            fallback_query = artist_name
-            self.log_message.emit(
-                f"[Enricher] Last.fm Enrich: artist-only search for '{artist_name}'."
+
+        fallback_needed = (not use_track) or first_search_406
+        if fallback_needed:
+            if first_search_406:
+                try:
+                    self.log_message.emit(
+                        f"[Enricher][LF] primary search for '{artist_name}' returned 406; trying artist-only fallback."
+                    )
+                except Exception:
+                    pass
+            fallback_candidate = _run_search_attempt(
+                artist_name,
+                label="Last.fm search (fallback)",
+                artist_only_log=True,
+                log_no_results=False,
             )
-            quoted_fb = urllib.parse.quote_plus(fallback_query)
-            fb_url = f"https://www.last.fm/search?q={quoted_fb}&type=artist"
-            _lf_sleep(lf_unhealthy)
-            fb_html = self._fetch_url(fb_url, label="Last.fm search (fallback)", max_attempts=1, endpoint="search")
-            fallback_candidate = _parse_first_candidate(fb_html, log_no_results=False) if fb_html else None
             if fallback_candidate:
                 fb_display, fb_profile, fb_conf, fb_rank, fb_match_score = fallback_candidate
                 display_name = fb_display
