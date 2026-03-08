@@ -2066,6 +2066,21 @@ def run_directory_job(job_config: Dict[str, Any], raw_output_path: str, logger: 
             result_path = str(write_result.final_path)
             success = True
 
+        elif directory == "festival":
+            from festival_scraper import scrape_festivals
+
+            params = {
+                "festival_keys": job_config.get("festival_keys"),
+                "festival_sources": job_config.get("festival_sources"),
+                "festival_source": job_config.get("festival_source"),
+                "festival": job_config.get("festival"),
+                "input_seed_csv": job_config.get("input_seed_csv") or "",
+            }
+            rows = scrape_festivals(target_count or None, params, logger=logger)
+            write_result = _write_rows_to_csv(rows, final_path.as_posix(), source_directory="festival")
+            result_path = str(write_result.final_path)
+            success = True
+
         elif directory == "bandcamp":
             seed = (
                 job_config.get("bandcamp_seed")
