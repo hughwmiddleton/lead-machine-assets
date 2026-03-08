@@ -1511,6 +1511,61 @@ def infer_location_for_export(row: pd.Series) -> str:
     return country
 
 
+def _export_email_looks_suspicious(email: str) -> bool:
+    """Conservative export-time guard for obvious system/ingestion destinations."""
+    email_norm = str(email or "").strip().lower()
+    if not _is_valid_email_shape(email_norm):
+        return True
+
+    local, domain = email_norm.split("@", 1)
+    compact_local = re.sub(r"[^a-z0-9]+", "", local)
+    local_tokens = {token for token in re.split(r"[^a-z0-9]+", local) if token}
+    domain_tokens = {token for token in re.split(r"[^a-z0-9]+", domain) if token}
+
+    if "noreply" in compact_local or "donotreply" in compact_local:
+        return True
+    if {"ingest", "sentry", "system"} & local_tokens:
+        return True
+    if {"sentry", "ingest", "mailgun", "sendgrid", "postmark", "amazonses"} & domain_tokens:
+        return True
+    return False
+
+
+def _compute_export_needs_review(row: pd.Series, primary_email: str, email_source: str) -> bool:
+    """Apply conservative review policy at final export time only."""
+    status_normalized = str(row.get("_status_normalized", "") or "").strip().upper()
+    existing_needs_review = str(row.get("Needs_Review", "") or "").strip().upper() == "TRUE"
+    email_source_url = str(row.get("Email_Source_URL", "") or "").strip()
+    email_source_type = str(row.get("Email_Source_Type", "") or "").strip().lower()
+    review_urls = str(row.get("Review_Urls", "") or row.get("Review Urls", "") or "").strip()
+    fb_review_reason = str(row.get("FB_Review_Reason", "") or "").strip()
+    safe_explicit_source = email_source_type in {"facebook_enrich", "website_enrich"} or email_source in {
+        "Facebook About",
+        "Website",
+    }
+
+    if existing_needs_review:
+        return True
+    if status_normalized == "BLOCK":
+        return True
+    if status_normalized == "WARN":
+        return not safe_explicit_source
+    if not _is_valid_email_shape(primary_email):
+        return True
+    if not email_source_url:
+        return True
+    if review_urls or fb_review_reason:
+        return True
+    if _export_email_looks_suspicious(primary_email):
+        return True
+
+    # Domain-reuse rows are not exposed with a stable export-time label yet, so only
+    # auto-approve explicit FB/website provenance and keep ambiguous sources under review.
+    if status_normalized == "OK" and safe_explicit_source:
+        return False
+    return True
+
+
 def _build_final_export_frame(df: pd.DataFrame) -> pd.DataFrame:
     """
     Build the client-facing final export view without mutating the input frame.
@@ -1536,11 +1591,7 @@ def _build_final_export_frame(df: pd.DataFrame) -> pd.DataFrame:
         email_all = str(row.get("Email_All", "") or "")
 
         final_status = str(row.get("final_status", "") or "").strip()
-        status_normalized = str(row.get("_status_normalized", "") or "").strip()
-        existing_needs_review = str(row.get("Needs_Review", "") or "").strip().upper() == "TRUE"
         email_source_url_val = str(row.get("Email_Source_URL", "") or "").strip()
-        needs_review_missing_prov = bool(email.strip()) and not email_source_url_val
-        needs_review = status_normalized in {"BLOCK", "WARN"} or existing_needs_review or needs_review_missing_prov
 
         # Defensive guard: strip FB-applied emails when FB_Status signals rejection.
         fb_status_val = str(row.get("FB_Status", "") or "")
@@ -1568,6 +1619,7 @@ def _build_final_export_frame(df: pd.DataFrame) -> pd.DataFrame:
         row_for_email_source = row.copy()
         row_for_email_source["Primary Email"] = primary_email
         email_source = infer_email_source(row_for_email_source)
+        needs_review = _compute_export_needs_review(row, primary_email, email_source)
 
         external_links = str(row.get("External Links", "") or "").strip()
         review_urls = str(row.get("Review_Urls", "") or row.get("Review Urls", "") or "").strip()
