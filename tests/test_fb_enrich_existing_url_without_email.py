@@ -243,6 +243,40 @@ def test_fb_enrich_handles_missing_email_columns(monkeypatch):
     assert seed_df.at[0, "Email_All"] == ""
 
 
+def test_fb_gate_skips_weak_row_without_terminal_status(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "DJ",
+            "Email": "",
+            "Email_All": "",
+            "facebook_url": "",
+            "Facebook_URL": "",
+            "Social Link": "",
+            "External Links": "",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+
+    monkeypatch.setattr(
+        cde,
+        "_discover_facebook_url_bounded",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("facebook discovery should be gated")),
+    )
+    monkeypatch.setattr(
+        cde,
+        "_extract_fb_emails_bounded",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("facebook extraction should be gated")),
+    )
+
+    matched = worker._enrich_row_facebook(seed_df, 0, object(), ctx)
+
+    assert matched is False
+    assert "FB_Status" not in seed_df.columns
+    assert any("skipping fb heavy enrichment" in msg.lower() for msg in logs)
+
+
 def test_fb_explicit_email_discovery_increments_summary(monkeypatch):
     pipeline_runner.reset_email_summary_counts()
     logs = []

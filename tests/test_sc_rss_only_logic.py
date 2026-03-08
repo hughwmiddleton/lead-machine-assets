@@ -116,6 +116,27 @@ def test_rss_only_skips_live_search_engine_paths(monkeypatch):
     assert w._sc_rss_only_engine_fetch_skips >= 1
 
 
+def test_sc_gate_skips_weak_row_without_live_lookup(monkeypatch):
+    logs = []
+    w = _mk_worker()
+    w.night_mode = False
+    w.log_message = type("obj", (), {"emit": lambda *args: logs.append(str(args[1] if len(args) > 1 else args[0]))})
+    seed_df = pd.DataFrame([{"Artist Name": "DJ", "SoundCloud Link": ""}], dtype=str).fillna("")
+    ctx = w._build_row_context(seed_df, 0, 1, 1)
+
+    monkeypatch.setattr(
+        w,
+        "_live_search_soundcloud",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("soundcloud live lookup should be gated")),
+    )
+
+    matched, skip_rest = w._enrich_row_sc_live(seed_df, 0, ctx)
+
+    assert matched is False
+    assert skip_rest is False
+    assert any("skipping soundcloud heavy enrichment" in msg.lower() for msg in logs)
+
+
 def test_sc_phase_continues_during_cooldown(monkeypatch):
     w = _mk_worker()
     w.enable_live_search = True

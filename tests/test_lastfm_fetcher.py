@@ -126,6 +126,23 @@ def test_lastfm_track_title_sanitization():
     assert len(cleaned) <= 60
 
 
+def test_lastfm_gate_skips_weak_row_before_fetch(monkeypatch):
+    worker = _build_worker()
+    seed_df = pd.DataFrame([{"Artist Name": "DJ"}], dtype=str).fillna("")
+    worker._build_row_context(seed_df, 0, 1, 1)
+
+    monkeypatch.setattr(
+        worker,
+        "_fetch_url",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("lastfm fetch should be gated")),
+    )
+
+    payload = worker._live_search_lastfm("DJ")
+
+    assert payload is None
+    assert worker._row_enrichment_state.get("lastfm") == "skipped"
+
+
 def test_lastfm_sanitized_empty_uses_artist_only(monkeypatch):
     worker = _build_worker()
     worker._live_context = {"song_title": "...", "artist": "Sample Artist"}

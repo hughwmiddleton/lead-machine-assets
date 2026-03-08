@@ -805,6 +805,7 @@ WEBSITE_EMAIL_OPTIONAL_FIELDS = (
     "Websites",
     "Website URL",
 )
+HEAVY_ENRICHER_CONFIDENCE_THRESHOLD = 0.55
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MULTI_VALUE_SEPARATOR = ", "
 FACEBOOK_HELPERS_PATH = os.path.join(BASE_DIR, "Lead Machine (Final Update 5).py")
@@ -1219,6 +1220,14 @@ class WebsiteFetchResult:
     content_type: str
     html: str
     is_html: bool
+
+
+@dataclass(frozen=True)
+class HeavyEnricherGateDecision:
+    allowed: bool
+    score: float
+    threshold: float
+    reasons: Tuple[str, ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -5199,6 +5208,204 @@ class CrossDirectoryEnricherWorker(QThread):
     # Extracted per-row helpers (used by both row-linear and source-phased)
     # ------------------------------------------------------------------
 
+    def _build_row_signal_snapshot(
+        self,
+        row: Any,
+        *,
+        spotify_domain: str = "",
+        seed_links_by_source: Optional[Dict[str, Set[str]]] = None,
+    ) -> Dict[str, Any]:
+        if row is None:
+            return {
+                "spotify_domain": _clean_cell(spotify_domain),
+                "seed_links_by_source": {},
+                "website_candidates": (),
+                "soundcloud_link": "",
+                "canonical_fb_url": "",
+                "source_url": "",
+                "source_url_source": "",
+                "match_score": 0.0,
+                "signal_sources": (),
+            }
+
+        source_url_raw = _clean_cell(row.get("Source URL")) if hasattr(row, "get") else ""
+        source_url = _normalise_url(source_url_raw) or source_url_raw
+        source_url_source = _source_for_url(source_url) or ""
+        source_host = _host(source_url)
+        if (
+            not source_url_source
+            and source_host
+            and any(source_host.endswith(domain) for domain in SOCIAL_DOMAINS.get("facebook", ()))
+        ):
+            source_url_source = "facebook"
+        website_candidates = tuple(_collect_website_enrich_candidate_urls(row))
+        soundcloud_raw = _clean_cell(row.get("SoundCloud Link")) if hasattr(row, "get") else ""
+        if not soundcloud_raw and hasattr(row, "get"):
+            soundcloud_raw = _clean_cell(row.get("SoundCloud URL"))
+        soundcloud_link = _normalise_url(soundcloud_raw) or soundcloud_raw
+        canonical_fb_url = _get_canonical_fb_url(row)
+        links_by_source = seed_links_by_source or _extract_seed_links_by_source(row)
+        signal_sources: Set[str] = {source for source, urls in links_by_source.items() if urls}
+        if canonical_fb_url:
+            signal_sources.add("facebook")
+        if website_candidates:
+            signal_sources.add("website")
+        if soundcloud_link:
+            signal_sources.add("soundcloud")
+        if source_url_source:
+            signal_sources.add(f"source:{source_url_source}")
+        elif source_url:
+            signal_sources.add("source_url")
+        if spotify_domain:
+            signal_sources.add("spotify_domain")
+        social_raw = _clean_cell(row.get("Social Link")) if hasattr(row, "get") else ""
+        external_raw = _clean_cell(row.get("External Links")) if hasattr(row, "get") else ""
+        if social_raw:
+            signal_sources.add("social_field")
+        if external_raw:
+            signal_sources.add("external_field")
+        try:
+            match_score = float(_clean_cell(row.get("Match_Score"))) if hasattr(row, "get") else 0.0
+            if math.isnan(match_score):
+                match_score = 0.0
+        except Exception:
+            match_score = 0.0
+        return {
+            "spotify_domain": _clean_cell(spotify_domain),
+            "seed_links_by_source": links_by_source,
+            "website_candidates": website_candidates,
+            "soundcloud_link": soundcloud_link,
+            "canonical_fb_url": canonical_fb_url,
+            "source_url": source_url,
+            "source_url_source": source_url_source,
+            "match_score": max(0.0, min(match_score, 1.0)),
+            "signal_sources": tuple(sorted(signal_sources)),
+        }
+
+    def _compute_row_confidence(
+        self,
+        row: Optional[Any],
+        ctx: Optional[Dict[str, Any]],
+        target: str,
+    ) -> HeavyEnricherGateDecision:
+        target_key = _clean_cell(target).strip().lower()
+        live_ctx = getattr(self, "_live_context", {}) or {}
+        working_ctx = ctx or live_ctx
+        signal_snapshot = dict(working_ctx.get("signal_snapshot") or {})
+        if not signal_snapshot and row is not None:
+            signal_snapshot = self._build_row_signal_snapshot(
+                row,
+                spotify_domain=_clean_cell(working_ctx.get("spotify_domain", "")),
+                seed_links_by_source=working_ctx.get("seed_links_by_source"),
+            )
+        if not signal_snapshot:
+            return HeavyEnricherGateDecision(
+                allowed=True,
+                score=HEAVY_ENRICHER_CONFIDENCE_THRESHOLD,
+                threshold=HEAVY_ENRICHER_CONFIDENCE_THRESHOLD,
+                reasons=("missing_signal_snapshot",),
+            )
+
+        score = 0.0
+        reasons: List[str] = []
+
+        def _add(points: float, reason: str) -> None:
+            nonlocal score
+            if not reason or reason in reasons:
+                return
+            score += float(points)
+            reasons.append(reason)
+
+        website_candidates = tuple(signal_snapshot.get("website_candidates") or ())
+        seed_links_by_source = signal_snapshot.get("seed_links_by_source") or {}
+        spotify_domain = _clean_cell(signal_snapshot.get("spotify_domain", ""))
+        source_url = _clean_cell(signal_snapshot.get("source_url", ""))
+        source_url_source = _clean_cell(signal_snapshot.get("source_url_source", "")).lower()
+        canonical_fb_url = _clean_cell(signal_snapshot.get("canonical_fb_url", ""))
+        soundcloud_link = _clean_cell(signal_snapshot.get("soundcloud_link", ""))
+        match_score = float(signal_snapshot.get("match_score") or 0.0)
+        signal_sources = tuple(signal_snapshot.get("signal_sources") or ())
+        signal_count = len(set(signal_sources))
+        artist_name = _clean_cell(working_ctx.get("artist", ""))
+        if not artist_name and row is not None and hasattr(row, "get"):
+            artist_name = _clean_cell(row.get("Artist Name"))
+        artist_tokens = [token for token in re.split(r"\s+", artist_name) if token]
+        artist_alnum_len = sum(1 for ch in artist_name if ch.isalnum())
+
+        if target_key == "website":
+            if website_candidates:
+                _add(0.8, "website_url")
+            if source_url and any(_website_domains_match(source_url, candidate) for candidate in website_candidates):
+                _add(0.45, "source_url_domain_match")
+            spotify_match_url = f"https://{spotify_domain}" if spotify_domain else ""
+            if spotify_match_url and (
+                any(_website_domains_match(candidate, spotify_match_url) for candidate in website_candidates)
+                or (source_url and _website_domains_match(source_url, spotify_match_url))
+            ):
+                _add(0.45, "spotify_domain_match")
+        elif target_key == "facebook":
+            if canonical_fb_url:
+                _add(0.8, "explicit_facebook_url")
+            elif source_url_source == "facebook":
+                _add(0.55, "facebook_source_url")
+        elif target_key == "soundcloud":
+            if soundcloud_link or seed_links_by_source.get("soundcloud"):
+                _add(0.8, "explicit_soundcloud_link")
+            elif source_url_source == "soundcloud":
+                _add(0.55, "soundcloud_source_url")
+        elif target_key == "lastfm":
+            if seed_links_by_source.get("lastfm"):
+                _add(0.8, "explicit_lastfm_url")
+            elif source_url_source == "lastfm":
+                _add(0.55, "lastfm_source_url")
+
+        if match_score >= 0.7:
+            _add(0.6, "strong_match_score")
+        elif match_score >= 0.45:
+            _add(0.35, "match_score")
+
+        if signal_count == 0 and len(artist_tokens) >= 2 and artist_alnum_len >= 6:
+            _add(0.6, "descriptive_artist_name")
+
+        if signal_count >= 3:
+            _add(0.55, "multiple_link_clues")
+        elif signal_count >= 2:
+            _add(0.3, "some_link_clues")
+
+        if spotify_domain:
+            _add(0.15, "spotify_domain")
+        if target_key != "website" and website_candidates:
+            _add(0.2, "website_clue")
+
+        threshold = HEAVY_ENRICHER_CONFIDENCE_THRESHOLD
+        final_score = round(max(0.0, min(score, 1.0)), 2)
+        return HeavyEnricherGateDecision(
+            allowed=final_score >= threshold,
+            score=final_score,
+            threshold=threshold,
+            reasons=tuple(reasons),
+        )
+
+    def _row_allows_heavy_enricher(
+        self,
+        row: Optional[Any],
+        ctx: Optional[Dict[str, Any]],
+        target: str,
+    ) -> HeavyEnricherGateDecision:
+        return self._compute_row_confidence(row, ctx, target)
+
+    def _log_low_confidence_skip(
+        self,
+        target_label: str,
+        artist: str,
+        decision: HeavyEnricherGateDecision,
+    ) -> None:
+        reasons = ",".join(decision.reasons) if decision.reasons else "none"
+        self.log_message.emit(
+            f"[Enricher] skipping {target_label} heavy enrichment for '{artist}' due to low row confidence "
+            f"(score={decision.score:.2f} threshold={decision.threshold:.2f} reasons={reasons})"
+        )
+
     def _build_row_context(self, seed_df, row_idx, position, total):
         """Build per-row context dict and set self._live_context.
 
@@ -5218,6 +5425,11 @@ class CrossDirectoryEnricherWorker(QThread):
         seed_song_title = _extract_seed_track_text(row)
         spotify_domain = extract_domain(_clean_cell(row.get("Spotify_Website_URL", "")))
         seed_links_by_source = _extract_seed_links_by_source(row)
+        signal_snapshot = self._build_row_signal_snapshot(
+            row,
+            spotify_domain=spotify_domain,
+            seed_links_by_source=seed_links_by_source,
+        )
         self._live_context = {
             "artist": artist,
             "location": _clean_cell(row.get("Location")),
@@ -5227,6 +5439,7 @@ class CrossDirectoryEnricherWorker(QThread):
             "spotify_domain": spotify_domain,
             "spotify_id": _clean_cell(row.get("Spotify_Artist_ID")),
             "seed_lastfm_urls": seed_links_by_source.get("lastfm", set()),
+            "signal_snapshot": signal_snapshot,
         }
         spotify_id = self._live_context.get("spotify_id", "")
         return {
@@ -5239,6 +5452,7 @@ class CrossDirectoryEnricherWorker(QThread):
             "had_email_from_seed": had_email_from_seed,
             "position": position,
             "total": total,
+            "signal_snapshot": signal_snapshot,
         }
 
     def _enrich_row_directories(self, seed_df, row_idx, directory_indexes, priority, ctx):
@@ -5305,6 +5519,11 @@ class CrossDirectoryEnricherWorker(QThread):
         """
         artist = ctx["artist"]
         spotify_id = ctx["spotify_id"]
+        decision = self._row_allows_heavy_enricher(seed_df.loc[row_idx], ctx, "soundcloud")
+        if not decision.allowed:
+            self._log_low_confidence_skip("soundcloud", artist, decision)
+            self._set_platform_state("soundcloud", "skipped")
+            return (False, False)
         if not _coerce_directory_value(seed_df.at[row_idx, "SoundCloud Link"]):
             if getattr(self, "_sc_live_enrich_disabled", False):
                 reason = self._sc_live_enrich_disabled_reason or "first_challenge_page"
@@ -5460,6 +5679,11 @@ class CrossDirectoryEnricherWorker(QThread):
             return False
 
         artist = ctx.get("artist") or _clean_cell(row.get("Artist Name")) or "<unknown>"
+        decision = self._row_allows_heavy_enricher(row, ctx, "website")
+        if not decision.allowed:
+            self._log_low_confidence_skip("website", artist, decision)
+            self._set_platform_state("website", "skipped")
+            return False
         email_before = _row_email_summary_snapshot(seed_df, row_idx)
         pages_fetched = 0
         selected_emails: List[str] = []
@@ -5689,6 +5913,11 @@ class CrossDirectoryEnricherWorker(QThread):
                             normalised = _normalise_fb_url(normalize_external_url(part))
                             if normalised:
                                 existing_fb_links.append(normalised)
+                decision = self._row_allows_heavy_enricher(seed_df.loc[row_idx], ctx, "facebook")
+                if not decision.allowed:
+                    self._log_low_confidence_skip("fb", artist, decision)
+                    self._set_platform_state("facebook", "skipped")
+                    return False
 
                 if not existing_fb_links:
                     if row_idx in getattr(self, "_fb_discovery_attempted_rows", set()):
@@ -9410,6 +9639,11 @@ class CrossDirectoryEnricherWorker(QThread):
                 self._lf_clear_endpoint_cooldown("profile")
 
         if not self._platform_attempt_allowed("lastfm", artist_name, "Last.fm Enrich"):
+            return None
+        decision = self._row_allows_heavy_enricher(None, getattr(self, "_live_context", {}) or {}, "lastfm")
+        if not decision.allowed:
+            self._log_low_confidence_skip("lastfm", artist_name, decision)
+            self._set_platform_state("lastfm", "skipped")
             return None
 
         # Profile-first paths (run-scoped cache, seed URL, search reuse)

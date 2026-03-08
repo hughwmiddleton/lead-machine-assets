@@ -79,6 +79,39 @@ def test_website_email_homepage_contact_mailto(monkeypatch):
     assert any("[Web] emails_found=1 pages_fetched=2" in msg for msg in logs)
 
 
+def test_website_email_gate_allows_explicit_website_clue(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "XY",
+            "Email": "",
+            "Email_All": "",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+            "Email_Type": "",
+            "Spotify_Website_URL": "https://artist.test",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    decision = worker._row_allows_heavy_enricher(seed_df.loc[0], ctx, "website")
+    calls = []
+
+    def fake_fetch(session, url, *, timeout_s, max_bytes):
+        calls.append(url)
+        return _result(url, html="<html><body>hello@artist.test</body></html>")
+
+    monkeypatch.setattr(cde, "_fetch_website_html_bounded", fake_fetch)
+
+    matched = worker._enrich_row_website_email(seed_df, 0, ctx)
+
+    assert decision.allowed is True
+    assert calls == ["https://artist.test"]
+    assert matched is True
+    assert seed_df.at[0, "Email"] == "hello@artist.test"
+
+
 def test_website_email_same_domain_only(monkeypatch):
     logs = []
     worker = _make_worker(logs)
