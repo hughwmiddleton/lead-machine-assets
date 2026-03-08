@@ -1,6 +1,13 @@
 import pytest
 
-from source_scheduler import SourceDiversityScheduler, SourceResult, SourceSpec, TimedRetry, promote_facebook_url
+from source_scheduler import (
+    ADAPTIVE_PRIORITY_MAX_BONUS,
+    SourceDiversityScheduler,
+    SourceResult,
+    SourceSpec,
+    TimedRetry,
+    promote_facebook_url,
+)
 
 
 def test_scheduler_interleaves_sources():
@@ -284,27 +291,76 @@ def test_adaptive_priority_prefers_successful_sources(monkeypatch):
     calls = []
     rows = [0, 1, 2, 3]
 
-    def sc_run(idx):
-        calls.append(f"SC{idx}")
+    def aa_run(idx):
+        calls.append(f"AA{idx}")
         return SourceResult(attempted=True, enriched=True)
 
-    def lf_run(idx):
-        calls.append(f"LF{idx}")
+    def zz_run(idx):
+        calls.append(f"ZZ{idx}")
         return SourceResult(attempted=True, enriched=False)
 
     scheduler = SourceDiversityScheduler(
         [
-            SourceSpec(name="SC", rows=rows, run_row=sc_run, is_available=lambda: (True, None)),
-            SourceSpec(name="LF", rows=rows, run_row=lf_run, is_available=lambda: (True, None)),
+            SourceSpec(name="ZZ", rows=rows, run_row=zz_run, is_available=lambda: (True, None)),
+            SourceSpec(name="AA", rows=rows, run_row=aa_run, is_available=lambda: (True, None)),
         ],
         row_label=str,
     )
     scheduler.run()
 
-    # SC should be scheduled before LF once success history is available (after first row).
-    assert calls[:2] == ["SC0", "LF0"]
-    assert calls[2:4] == ["SC1", "LF1"]
-    assert calls[4:6] == ["SC2", "LF2"]
+    # Before the warm-up threshold, tie-break order remains unchanged.
+    assert calls[:4] == ["ZZ0", "AA0", "ZZ1", "AA1"]
+    # Once enough observations exist, the successful source gets a modest preference.
+    assert calls[4:8] == ["AA2", "ZZ2", "AA3", "ZZ3"]
+
+
+def test_adaptive_bias_does_not_apply_before_warmup_threshold(monkeypatch):
+    monkeypatch.setattr("source_scheduler.random.uniform", lambda a, b: 0)
+
+    calls = []
+    rows = [0, 1]
+
+    scheduler = SourceDiversityScheduler(
+        [
+            SourceSpec(
+                name="ZZ",
+                rows=rows,
+                run_row=lambda idx: (calls.append(f"ZZ{idx}") or SourceResult(attempted=True, enriched=False)),
+                is_available=lambda: (True, None),
+            ),
+            SourceSpec(
+                name="AA",
+                rows=rows,
+                run_row=lambda idx: (calls.append(f"AA{idx}") or SourceResult(attempted=True, enriched=True)),
+                is_available=lambda: (True, None),
+            ),
+        ],
+        row_label=str,
+    )
+
+    scheduler.run()
+
+    assert calls == ["ZZ0", "AA0", "ZZ1", "AA1"]
+
+
+def test_adaptive_bias_is_bounded():
+    scheduler = SourceDiversityScheduler(
+        [
+            SourceSpec(
+                name="AA",
+                rows=[],
+                run_row=lambda idx: SourceResult(attempted=True),
+                is_available=lambda: (True, None),
+            )
+        ],
+        row_label=str,
+    )
+
+    metrics = scheduler._metrics["AA"]
+    metrics["attempts"] = 10
+    metrics["enriched"] = 10
+
+    assert scheduler._adaptive_priority_bonus(metrics) == pytest.approx(ADAPTIVE_PRIORITY_MAX_BONUS)
 
 
 def test_cooldown_sources_are_deprioritised(monkeypatch):

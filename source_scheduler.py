@@ -14,6 +14,11 @@ from typing import Any, Callable, Dict, List, MutableMapping, Optional, Sequence
 import re
 import urllib.parse
 
+ADAPTIVE_PRIORITY_MIN_ATTEMPTS = 2
+ADAPTIVE_PRIORITY_MAX_BONUS = 0.35
+COOLDOWN_PRIORITY_MAX_PENALTY = 0.45
+BASE_PRIORITY_SCORE = 1.0
+
 # ---------------------------------------------------------------------------
 # Facebook URL promotion helpers
 # ---------------------------------------------------------------------------
@@ -546,21 +551,39 @@ class SourceDiversityScheduler:
         metrics["recent_enrichments"].append(False)
         self._maybe_emit_health()
 
+    def _adaptive_priority_bonus(self, metrics: MutableMapping[str, object]) -> float:
+        attempts = int(metrics.get("attempts", 0))
+        enriched = int(metrics.get("enriched", 0))
+        if attempts < ADAPTIVE_PRIORITY_MIN_ATTEMPTS:
+            return 0.0
+        success_rate = enriched / attempts if attempts else 0.0
+        return min(ADAPTIVE_PRIORITY_MAX_BONUS, max(0.0, success_rate * ADAPTIVE_PRIORITY_MAX_BONUS))
+
+    def _cooldown_priority_penalty(self, metrics: MutableMapping[str, object]) -> float:
+        attempts = int(metrics.get("attempts", 0))
+        cooldown = int(metrics.get("cooldown", 0))
+        if cooldown <= 0:
+            return 0.0
+        denom = attempts or cooldown or 1
+        cooldown_rate = cooldown / denom if denom else 0.0
+        return min(COOLDOWN_PRIORITY_MAX_PENALTY, max(0.0, cooldown_rate * COOLDOWN_PRIORITY_MAX_PENALTY))
+
     def _compute_priority(self, spec: SourceSpec) -> float:
         metrics = self._metrics.get(spec.name, {})
         attempts = int(metrics.get("attempts", 0))
         cooldown = int(metrics.get("cooldown", 0))
-        enriched = int(metrics.get("enriched", 0))
 
-        # Keep first round deterministic; add jitter once we have activity.
-        jitter = random.uniform(-0.1, 0.1) if (attempts or cooldown) else 0.0
-
-        denom = attempts or 1
-        success_rate = enriched / denom if denom else 0.0
-        cooldown_rate = cooldown / denom if denom else 0.0
-
-        priority = (success_rate * 2.0) - (cooldown_rate * 1.5) + jitter
-        base_score = max(0.2, min(3.0, priority))
+        # Keep early rounds deterministic; only add light jitter once meaningful
+        # history exists or cooldown pressure is present.
+        jitter = (
+            random.uniform(-0.1, 0.1)
+            if (attempts >= ADAPTIVE_PRIORITY_MIN_ATTEMPTS or cooldown)
+            else 0.0
+        )
+        adaptive_bonus = self._adaptive_priority_bonus(metrics)
+        cooldown_penalty = self._cooldown_priority_penalty(metrics)
+        priority = BASE_PRIORITY_SCORE + adaptive_bonus - cooldown_penalty + jitter
+        base_score = max(0.2, min(1.5, priority))
 
         # Opportunity-weighted multiplier based on the next pending row for this source.
         opportunity_weight = 1.0
@@ -588,8 +611,10 @@ class SourceDiversityScheduler:
             enriched = int(metrics["enriched"])
             success_rate = enriched / attempts if attempts else 0.0
             cooldown_rate = cooldown / attempts if attempts else 0.0
+            adaptive_bonus = self._adaptive_priority_bonus(metrics)
             self._emit(
-                f"[Scheduler][Health] {name} success={success_rate:.2f} cooldown={cooldown_rate:.2f} attempts={attempts}"
+                f"[Scheduler][Health] {name} success={success_rate:.2f} cooldown={cooldown_rate:.2f} "
+                f"attempts={attempts} adaptive_bonus={adaptive_bonus:.2f}"
             )
 
     def run(self) -> Dict[str, Dict[str, int]]:
