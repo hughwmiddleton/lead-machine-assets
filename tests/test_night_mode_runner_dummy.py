@@ -190,6 +190,7 @@ class FacebookNightModeWrapperTest(unittest.TestCase):
             [
                 {"Artist Name": "HasEmail", "Email": "a@example.com", "Social Link": "https://facebook.com/hasemail"},
                 {"Artist Name": "NeedsFb1", "Email": "", "Social Link": "https://facebook.com/page1"},
+                {"Artist Name": "NameOnly", "Email": "", "Social Link": ""},
                 {"Artist Name": "", "Email": "", "Social Link": ""},
                 {"Artist Name": "NeedsFb2", "Email": "", "Social Link": "https://facebook.com/page2"},
             ]
@@ -280,6 +281,8 @@ class FacebookNightModeWrapperTest(unittest.TestCase):
         self.assertFalse(final_state.get("fb_captcha_flag"))
         self.assertEqual(final_state.get("fb_attempted_total"), 2)
         df_final = pd.read_csv(self.output_csv)
+        name_only_email = df_final.loc[df_final["Artist Name"] == "NameOnly", "Email"].iloc[0]
+        self.assertTrue(pd.isna(name_only_email) or name_only_email == "")
         self.assertEqual(df_final.loc[df_final["Artist Name"] == "NeedsFb2", "Email"].iloc[0], "fb_NeedsFb2")
 
     def test_nightmode_wrapper_handles_captcha_signal(self) -> None:

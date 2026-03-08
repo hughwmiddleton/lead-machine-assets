@@ -2855,11 +2855,15 @@ def run_facebook_global_pass_nightmode(
                 continue
 
             facebook_url_hint = str(row.get("Facebook_URL", "") or "").strip()
-            has_clue = _has_facebook_clue(row)
+            has_canonical_facebook_url = bool(canonicalize_facebook_url(facebook_url_hint))
             final_fb_statuses = {"login_redirect", "no_candidates", "ok", "found"} | terminal_statuses
             should_run_night_fb = (not has_email_effective) and (fb_status_val not in final_fb_statuses)
-            if should_skip_due_to_email or fb_status_val in final_fb_statuses or not has_clue or not should_run_night_fb:
-                if should_skip_due_to_email or fb_status_val in final_fb_statuses:
+            if (
+                fb_status_val in final_fb_statuses
+                or not has_canonical_facebook_url
+                or not should_run_night_fb
+            ):
+                if fb_status_val in final_fb_statuses:
                     email_state = "present" if has_email_effective else "missing"
                     _safe_log_console(
                         logger,
