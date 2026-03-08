@@ -9,13 +9,13 @@ from __future__ import annotations
 
 import re
 import time
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from bs4 import BeautifulSoup
 
 from html_fetcher import fetch_html
 
-Row = Dict[str, str]
+Row = Dict[str, Any]
 LoggerFn = Optional[Callable[[str], None]]
 
 DATE_FORMAT = "%Y-%m-%d"
@@ -114,7 +114,19 @@ def _parse_artist_names(html: str, selector: str) -> List[str]:
     return names
 
 
-def _build_row(artist_name: str, source_key: str, source_url: str, timestamp: str) -> Row:
+def _seed_priority(festival_count: int) -> str:
+    return "festival_high" if int(festival_count or 0) >= 2 else "festival"
+
+
+def _build_row(
+    artist_name: str,
+    source_key: str,
+    source_url: str,
+    timestamp: str,
+    festival_sources: Sequence[str],
+) -> Row:
+    sources = [str(source).strip() for source in festival_sources if str(source).strip()]
+    festival_count = len(sources)
     return {
         "Artist Name": artist_name,
         "Location": "",
@@ -129,6 +141,9 @@ def _build_row(artist_name: str, source_key: str, source_url: str, timestamp: st
         "Date Added": timestamp,
         "External Links": "",
         "Email": "",
+        "Festival Sources": ";".join(sources),
+        "Festival Count": str(festival_count),
+        "Seed Priority": _seed_priority(festival_count),
         "Source Directory": f"festival_{source_key}",
         "Source URL": source_url,
     }
@@ -151,7 +166,8 @@ def scrape_festivals(
         cap = 0
     cap = max(cap, 0)
 
-    rows: List[Row] = []
+    aggregated_rows: Dict[str, Dict[str, Any]] = {}
+    ordered_keys: List[str] = []
     timestamp = time.strftime(DATE_FORMAT)
 
     for source_key in source_keys:
@@ -187,10 +203,51 @@ def scrape_festivals(
         artist_names = _parse_artist_names(html, selector)
         _log(logger, f"[FestivalSeed] {source_key} -> {len(artist_names)} artists")
         for artist_name in artist_names:
-            rows.append(_build_row(artist_name, source_key, source_url, timestamp))
-            if cap and len(rows) >= cap:
-                _log(logger, f"[FestivalSeed] total -> {len(rows)} rows")
-                return rows
+            artist_key = _normalize_artist_name(artist_name).lower()
+            if not artist_key:
+                continue
+            entry = aggregated_rows.get(artist_key)
+            if entry is None:
+                aggregated_rows[artist_key] = {
+                    "artist_name": artist_name,
+                    "source_key": source_key,
+                    "source_url": source_url,
+                    "festival_sources": [source_key],
+                }
+                ordered_keys.append(artist_key)
+                continue
+            sources = entry.setdefault("festival_sources", [])
+            if source_key not in sources:
+                sources.append(source_key)
+
+    rows: List[Row] = []
+    for artist_key in ordered_keys:
+        entry = aggregated_rows.get(artist_key) or {}
+        rows.append(
+            _build_row(
+                str(entry.get("artist_name") or ""),
+                str(entry.get("source_key") or ""),
+                str(entry.get("source_url") or ""),
+                timestamp,
+                entry.get("festival_sources") or [],
+            )
+        )
+
+    if cap:
+        rows = rows[:cap]
+
+    priority_counts = {"festival_high": 0, "festival": 0}
+    for row in rows:
+        priority = str(row.get("Seed Priority") or "").strip().lower()
+        if priority in priority_counts:
+            priority_counts[priority] += 1
+
+    if rows:
+        _log(
+            logger,
+            f"[FestivalSeed] priority summary: festival_high={priority_counts['festival_high']} "
+            f"festival={priority_counts['festival']}",
+        )
 
     _log(logger, f"[FestivalSeed] total -> {len(rows)} rows")
     return rows

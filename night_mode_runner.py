@@ -946,7 +946,7 @@ def _merge_raw_master(
             _log_skip(job_id, path, raw_bytes, "empty/too small")
             return None
         try:
-            df_local = pd.read_csv(path)
+            df_local = pd.read_csv(path, dtype=str, keep_default_na=False)
             return df_local
         except pd.errors.EmptyDataError as exc:
             _log_skip(job_id, path, raw_bytes, "pandas EmptyDataError", exc)

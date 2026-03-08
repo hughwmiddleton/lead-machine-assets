@@ -204,6 +204,44 @@ def test_interleaved_fb_run_maps_login_wall_to_retry_later(monkeypatch):
     assert result.retry_later is True
 
 
+def test_interleaved_scheduler_orders_festival_rows_first(monkeypatch):
+    import pandas as pd
+    import cross_directory_enricher as cde
+
+    monkeypatch.setattr(cde.CrossDirectoryEnricherWorker, "__init__", lambda self, *a, **k: None)
+    monkeypatch.setattr(cde, "ENABLE_FACEBOOK_ENRICHMENT", True)
+
+    captured = {}
+
+    class FakeScheduler:
+        def __init__(self, sources, row_label=None, log_fn=None, short_circuit_fn=None):
+            captured["sources"] = list(sources)
+
+        def run(self):
+            return {}
+
+    monkeypatch.setattr(cde, "SourceDiversityScheduler", FakeScheduler)
+
+    worker = cde.CrossDirectoryEnricherWorker(None, None)
+    worker.enable_live_search = False
+    worker.log_message = type("Logger", (), {"emit": lambda *args, **kwargs: None})()
+
+    seed_df = pd.DataFrame(
+        [
+            {"Artist Name": "Normal Artist", "Seed Priority": ""},
+            {"Artist Name": "Festival Artist", "Seed Priority": "festival"},
+            {"Artist Name": "Festival Headliner", "Seed Priority": "festival_high"},
+            {"Artist Name": "Festival Support", "Seed Priority": "festival"},
+        ],
+        index=[10, 20, 30, 40],
+    )
+
+    worker._run_interleaved_sources(seed_df, fb_driver=object(), total=4)
+
+    fb_source = next(spec for spec in captured["sources"] if spec.name == "FB")
+    assert list(fb_source.rows) == [30, 20, 40, 10]
+
+
 def test_email_summary_resets_per_cross_directory_run(tmp_path, monkeypatch):
     import cross_directory_enricher as cde
     import pipeline_runner

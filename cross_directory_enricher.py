@@ -5911,12 +5911,43 @@ class CrossDirectoryEnricherWorker(QThread):
                     phase_label="final_window",
                 )
 
+    def _festival_seed_priority_tier(self, row: Any) -> int:
+        if row is None:
+            return 2
+        try:
+            priority = cell_to_str(row.get("Seed Priority", "")).strip().lower()
+        except Exception:
+            priority = ""
+        if priority == "festival_high":
+            return 0
+        if priority == "festival":
+            return 1
+        return 2
+
+    def _ordered_interleaved_row_ids(self, seed_df: pd.DataFrame) -> List[Any]:
+        rows = list(seed_df.index)
+        return sorted(rows, key=lambda row_idx: self._festival_seed_priority_tier(seed_df.loc[row_idx]))
+
     def _run_interleaved_sources(self, seed_df, fb_driver, total):
         """Interleave SC, LF (live lookup), and FB across rows to avoid bursts."""
 
         seed_df = _apply_fb_promotion_df(seed_df, log_fn=self.log_message.emit)
-        rows = list(seed_df.index)
+        rows = self._ordered_interleaved_row_ids(seed_df)
         position_by_row = {row_idx: pos for pos, row_idx in enumerate(seed_df.index, start=1)}
+        priority_summary = {"festival_high": 0, "festival": 0, "normal": 0}
+        for row_idx in rows:
+            tier = self._festival_seed_priority_tier(seed_df.loc[row_idx])
+            if tier == 0:
+                priority_summary["festival_high"] += 1
+            elif tier == 1:
+                priority_summary["festival"] += 1
+            else:
+                priority_summary["normal"] += 1
+        if priority_summary["festival_high"] or priority_summary["festival"]:
+            self.log_message.emit(
+                f"[FestivalPriority] scheduler rows: festival_high={priority_summary['festival_high']} "
+                f"festival={priority_summary['festival']} normal={priority_summary['normal']}"
+            )
 
         def _row_label(row_idx: int) -> str:
             pos = position_by_row.get(row_idx, row_idx)
