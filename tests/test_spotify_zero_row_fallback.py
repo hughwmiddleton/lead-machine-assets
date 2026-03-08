@@ -230,3 +230,46 @@ def test_spotify_zero_row_fallback_rows_still_dedupe_in_master_merge(monkeypatch
     master_csv = pd.read_csv(result["master_csv"], dtype=str, keep_default_na=False)
     dup_rows = master_csv[master_csv["Email"] == "dup@example.com"]
     assert len(dup_rows.index) == 1
+
+
+def test_seed_source_summary_logs_exact_counts_and_zero_sources(monkeypatch, tmp_path: Path) -> None:
+    config_path = tmp_path / "config.json"
+    _write_config(
+        config_path,
+        jobs=[
+            {"job_id": "job_bandcamp_a", "directory": "bandcamp", "target_valid_leads": 3},
+            {"job_id": "job_unearthed", "directory": "unearthed", "target_valid_leads": 3},
+            {"job_id": "job_soundcloud", "directory": "soundcloud", "target_valid_leads": 3},
+            {"job_id": "job_bandcamp_b", "directory": "bandcamp", "target_valid_leads": 3},
+            {"job_id": "job_spotify", "directory": "spotify", "target_valid_leads": 3},
+        ],
+    )
+
+    calls: list[str] = []
+    _install_common_stubs(
+        monkeypatch,
+        {
+            "bandcamp": [
+                {"Artist Name": "Bandcamp Artist 1", "Email": "", "Source Directory": "bandcamp"},
+                {"Artist Name": "Bandcamp Artist 2", "Email": "", "Source Directory": "bandcamp"},
+            ],
+            "unearthed": [{"Artist Name": "Unearthed Artist", "Email": "", "Source Directory": "unearthed"}],
+            "soundcloud": [],
+            "spotify": [],
+        },
+        calls,
+    )
+    monkeypatch.setenv("SPOTIFY_ZERO_ROW_FALLBACK", "0")
+    monkeypatch.delenv("SPOTIFY_SEED_FALLBACK_ORDER", raising=False)
+
+    result = night_mode_runner.run_night_mode(config_path.as_posix(), run_root=(tmp_path / "runs").as_posix())
+
+    assert calls == ["bandcamp", "unearthed", "soundcloud", "bandcamp", "spotify"]
+
+    master_log = (Path(result["run_dir"]) / "master_log.txt").read_text(encoding="utf-8")
+    assert master_log.count("[Seed Summary]") == 1
+    assert "[Seed Summary]" in master_log
+    assert "bandcamp=4" in master_log
+    assert "unearthed=1" in master_log
+    assert "soundcloud=0" in master_log
+    assert "spotify=0" in master_log

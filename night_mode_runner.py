@@ -290,6 +290,59 @@ def _emit_smoke_summary(stats: SmokeStats, logger: logging.Logger) -> None:
         logger.info(line)
 
 
+def _normalise_seed_source_name(raw_directory: str) -> str:
+    text = str(raw_directory or "").strip().lower()
+    if not text:
+        return ""
+    if "unearthed" in text or "triple j" in text:
+        return "unearthed"
+    if "bandcamp" in text:
+        return "bandcamp"
+    if "soundcloud" in text:
+        return "soundcloud"
+    if "spotify" in text:
+        return "spotify"
+    if "lastfm" in text or "last.fm" in text:
+        return "lastfm"
+    return text
+
+
+def _emit_seed_source_summary(
+    jobs: List[Dict[str, Any]],
+    processed_states: Dict[str, Dict[str, Any]],
+    logger: logging.Logger,
+) -> None:
+    ordered_sources: List[str] = []
+    counts: Dict[str, int] = {}
+
+    for idx, job in enumerate(jobs):
+        job_id = _job_id_for_index(job, idx)
+        state = processed_states.get(job_id) or {}
+        if str(state.get("status") or "").strip().lower() != "completed":
+            continue
+
+        source = _normalise_seed_source_name(job.get("directory") or "")
+        if not source:
+            continue
+
+        if source not in counts:
+            counts[source] = 0
+            ordered_sources.append(source)
+
+        try:
+            row_count = int(state.get("row_count") or 0)
+        except Exception:
+            row_count = 0
+        counts[source] += max(row_count, 0)
+
+    if not ordered_sources:
+        return
+
+    logger.info("[Seed Summary]")
+    for source in ordered_sources:
+        logger.info("%s=%s", source, counts.get(source, 0))
+
+
 def _load_json(path: str) -> Dict[str, Any]:
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
@@ -1303,6 +1356,8 @@ def run_night_mode(
 
         if stop_on_failure and result_state.get("status") in {"failed"}:
             break
+
+    _emit_seed_source_summary(jobs, processed_states, master_logger)
 
     master_raw = None
     master_enriched = None
