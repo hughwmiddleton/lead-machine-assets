@@ -32,6 +32,12 @@
       "target_valid_leads": 10,
       "max_hours": 0,
       "job_id": "job_unearthed_4"
+    },
+    {
+      "directory": "festival",
+      "festival_keys": ["bigsound"],
+      "target_valid_leads": 50,
+      "job_id": "festival_smoke"
     }
   ],
   "facebook": {
