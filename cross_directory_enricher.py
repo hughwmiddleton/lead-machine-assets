@@ -5220,6 +5220,7 @@ class CrossDirectoryEnricherWorker(QThread):
                             f"[Enricher] Row {position}/{total}: no enrichment for {ctx['artist']!r}."
                         )
                     self._update_progress(position, total)
+            self._run_late_domain_email_backfill(seed_df, total)
             # Bandcamp per-run summary (low noise)
             if self._bc_search_attempts:
                 summary_parts = [
@@ -5287,6 +5288,52 @@ class CrossDirectoryEnricherWorker(QThread):
         }
         self._sc_blocked_for_row = False
         self._last_bc_row_stats = {}
+
+    def _run_late_domain_email_backfill(self, seed_df: pd.DataFrame, total: int) -> Dict[str, int]:
+        stats = {
+            "rows_scanned": 0,
+            "rows_eligible": 0,
+            "rows_backfilled": 0,
+            "rows_skipped": 0,
+        }
+        if seed_df is None or seed_df.empty or not self._domain_email_reuse_index:
+            self.log_message.emit(
+                "[Enricher] Late domain reuse backfill: "
+                f"rows_scanned={stats['rows_scanned']} "
+                f"rows_eligible={stats['rows_eligible']} "
+                f"rows_backfilled={stats['rows_backfilled']} "
+                f"rows_skipped={stats['rows_skipped']}"
+            )
+            return stats
+
+        for position, row_idx in enumerate(seed_df.index, start=1):
+            stats["rows_scanned"] += 1
+            row = seed_df.loc[row_idx]
+            if _row_has_email(row):
+                stats["rows_skipped"] += 1
+                continue
+            ctx = self._build_row_context(seed_df, row_idx, position, total)
+            if not ctx:
+                stats["rows_skipped"] += 1
+                continue
+            domain_norm = _clean_cell(ctx.get("spotify_domain", "")).lower()
+            if not domain_norm or domain_norm not in self._domain_email_reuse_index:
+                stats["rows_skipped"] += 1
+                continue
+            stats["rows_eligible"] += 1
+            if self._maybe_apply_domain_email_reuse(seed_df, row_idx, ctx):
+                stats["rows_backfilled"] += 1
+            else:
+                stats["rows_skipped"] += 1
+
+        self.log_message.emit(
+            "[Enricher] Late domain reuse backfill: "
+            f"rows_scanned={stats['rows_scanned']} "
+            f"rows_eligible={stats['rows_eligible']} "
+            f"rows_backfilled={stats['rows_backfilled']} "
+            f"rows_skipped={stats['rows_skipped']}"
+        )
+        return stats
 
     def _index_domain_email_reuse(
         self,

@@ -811,6 +811,89 @@ def test_seed_directory_email_rows_are_not_indexed_for_domain_reuse():
     assert worker._domain_profile_index == {}
 
 
+def test_late_domain_backfill_fills_earlier_empty_rows_without_fetches(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = pd.DataFrame(
+        [
+            {
+                "Artist Name": "Earlier Empty",
+                "Email": "",
+                "Email_All": "",
+                "Email_Type": "",
+                "Email_Source_URL": "",
+                "Email_Source_Type": "",
+                "Email_Extract_Method": "",
+                "Spotify_Website_URL": "https://brightmusic.com/about",
+            },
+            {
+                "Artist Name": "Keep Existing Email",
+                "Email": "existing@brightmusic.com",
+                "Email_All": "existing@brightmusic.com",
+                "Email_Type": "",
+                "Email_Source_URL": "",
+                "Email_Source_Type": "",
+                "Email_Extract_Method": "",
+                "Spotify_Website_URL": "https://brightmusic.com/contact",
+            },
+            {
+                "Artist Name": "Keep Existing Email All",
+                "Email": "",
+                "Email_All": "keep@brightmusic.com",
+                "Email_Type": "",
+                "Email_Source_URL": "",
+                "Email_Source_Type": "",
+                "Email_Extract_Method": "",
+                "Spotify_Website_URL": "https://brightmusic.com/press",
+            },
+            {
+                "Artist Name": "Later Discovery",
+                "Email": "mgmt@brightmusic.com",
+                "Email_All": "mgmt@brightmusic.com",
+                "Email_Type": "fb_enrich",
+                "Email_Source_URL": "https://www.facebook.com/brightone",
+                "Email_Source_Type": "facebook_enrich",
+                "Email_Extract_Method": "regex",
+                "Spotify_Website_URL": "https://brightmusic.com/home",
+            },
+        ],
+        dtype=str,
+    ).fillna("")
+
+    assert worker._index_domain_email_reuse_from_row(seed_df, 3, "brightmusic.com") is True
+
+    def fail(*args, **kwargs):
+        raise AssertionError("late-run backfill should not touch enrichment/fetch paths")
+
+    monkeypatch.setattr(worker, "_enrich_row_sc_live", fail)
+    monkeypatch.setattr(worker, "_enrich_row_live_lookup", fail)
+    monkeypatch.setattr(worker, "_enrich_row_instagram_email", fail)
+    monkeypatch.setattr(worker, "_enrich_row_website_email", fail)
+    monkeypatch.setattr(worker, "_enrich_row_facebook", fail)
+
+    stats = worker._run_late_domain_email_backfill(seed_df, total=4)
+
+    assert stats == {
+        "rows_scanned": 4,
+        "rows_eligible": 1,
+        "rows_backfilled": 1,
+        "rows_skipped": 3,
+    }
+    assert seed_df.at[0, "Email"] == "mgmt@brightmusic.com"
+    assert seed_df.at[0, "Email_All"] == "mgmt@brightmusic.com"
+    assert seed_df.at[0, "Email_Type"] == "fb_enrich"
+    assert seed_df.at[0, "Email_Source_URL"] == "https://www.facebook.com/brightone"
+    assert seed_df.at[0, "Email_Source_Type"] == "facebook_enrich"
+    assert seed_df.at[0, "Email_Extract_Method"] == "regex"
+    assert seed_df.at[1, "Email"] == "existing@brightmusic.com"
+    assert seed_df.at[1, "Email_All"] == "existing@brightmusic.com"
+    assert seed_df.at[2, "Email"] == ""
+    assert seed_df.at[2, "Email_All"] == "keep@brightmusic.com"
+    assert worker._domain_email_reuse_count == 1
+    assert worker._yield_tracker.counts["domain_reuse"] == 1
+    assert any("Late domain reuse backfill" in msg for msg in logs)
+
+
 def test_fb_enrich_rejects_invalid_discovered_candidate(monkeypatch):
     logs = []
     worker = _make_worker(logs)
