@@ -6370,6 +6370,26 @@ class CrossDirectoryEnricherWorker(QThread):
                 max_attempts=SC_COOLDOWN_ROW_RETRY_MAX,
             )
 
+        def _lf_cooldown_ready_at(*, include_search: bool, include_profile: bool) -> Optional[float]:
+            now_mono = self._lf_now()
+            ready_candidates: List[float] = []
+            if include_search and self._lf_endpoint_in_cooldown("search", now_mono):
+                ready_candidates.append(float(self.__dict__.get("_lf_search_cooldown_until", 0.0) or 0.0))
+            if include_profile and self._lf_endpoint_in_cooldown("profile", now_mono):
+                ready_candidates.append(float(self.__dict__.get("_lf_profile_cooldown_until", 0.0) or 0.0))
+            if not ready_candidates:
+                return None
+            return min(ready_candidates)
+
+        def _lf_timed_retry(*, include_search: bool, include_profile: bool) -> Optional[TimedRetry]:
+            ready_at = _lf_cooldown_ready_at(
+                include_search=include_search,
+                include_profile=include_profile,
+            )
+            if ready_at is None:
+                return None
+            return TimedRetry(ready_at=ready_at, max_attempts=2)
+
         def row_getter(rid):
             row_data = seed_df.loc[rid]
             if rid not in getattr(self, "_fb_discovery_attempted_rows", set()):
@@ -6442,11 +6462,22 @@ class CrossDirectoryEnricherWorker(QThread):
                         )
                         self._notified_limit = True
                     return SourceResult()
+                search_skipped_before = int(self.__dict__.get("_lf_search_skipped_cooldown", 0) or 0)
+                profile_skipped_before = int(self.__dict__.get("_lf_profile_skipped_cooldown", 0) or 0)
                 ll_enriched, ll_retry_later = self._enrich_row_live_lookup(seed_df, row_idx, ctx)
+                search_skipped = int(self.__dict__.get("_lf_search_skipped_cooldown", 0) or 0) > search_skipped_before
+                profile_skipped = int(self.__dict__.get("_lf_profile_skipped_cooldown", 0) or 0) > profile_skipped_before
+                timed_retry = None
+                if not ll_enriched and (search_skipped or profile_skipped):
+                    timed_retry = _lf_timed_retry(
+                        include_search=search_skipped,
+                        include_profile=profile_skipped,
+                    )
                 return SourceResult(
                     attempted=True,
                     enriched=bool(ll_enriched),
-                    retry_later=bool(ll_retry_later),
+                    retry_later=bool(ll_retry_later or timed_retry is not None),
+                    timed_retry=timed_retry,
                 )
 
             sources.append(
@@ -6456,6 +6487,12 @@ class CrossDirectoryEnricherWorker(QThread):
                     run_row=lf_run,
                     is_available=lf_available,
                     row_getter=row_getter,
+                    retry_now=self._lf_now,
+                    unavailable_retry=lambda row_idx, reason, retry_count: (
+                        _lf_timed_retry(include_search=True, include_profile=True)
+                        if reason == "cooldown"
+                        else None
+                    ),
                 )
             )
 

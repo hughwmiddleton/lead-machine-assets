@@ -211,6 +211,61 @@ def test_interleaved_fb_run_maps_login_wall_to_retry_later(monkeypatch):
     assert result.retry_later is True
 
 
+def test_interleaved_lf_run_maps_search_cooldown_to_timed_retry(monkeypatch):
+    import pandas as pd
+    import cross_directory_enricher as cde
+
+    monkeypatch.setattr(cde.CrossDirectoryEnricherWorker, "__init__", lambda self, *a, **k: None)
+
+    captured = {}
+
+    class FakeScheduler:
+        def __init__(self, sources, row_label=None, log_fn=None, short_circuit_fn=None):
+            captured["sources"] = list(sources)
+
+        def run(self):
+            return {}
+
+    monkeypatch.setattr(cde, "SourceDiversityScheduler", FakeScheduler)
+
+    worker = cde.CrossDirectoryEnricherWorker(None, None)
+    worker.enable_live_search = True
+    worker.max_live_searches = 0
+    worker.live_search_attempts = 0
+    worker._notified_limit = False
+    worker._lf_search_cooldown_until = 105.0
+    worker._lf_profile_cooldown_until = 0.0
+    worker.__dict__["_lf_search_skipped_cooldown"] = 0
+    worker.__dict__["_lf_profile_skipped_cooldown"] = 0
+    worker._lf_now = lambda: 100.0
+    worker.log_message = type("Logger", (), {"emit": lambda *args, **kwargs: None})()
+    worker._fb_discovery_attempted_rows = set()
+    worker._domain_email_reuse_rows = set()
+    worker._build_row_context = lambda *args, **kwargs: {"artist": "Artist X", "position": 1, "total": 1, "spotify_id": ""}
+    worker._maybe_apply_domain_email_reuse = lambda *args, **kwargs: False
+    worker._init_row_enrichment_state = lambda: None
+    worker._enrich_row_sc_live = lambda *args, **kwargs: (False, False)
+
+    def fake_enrich_row_live_lookup(seed_df, row_idx, ctx):
+        worker.__dict__["_lf_search_skipped_cooldown"] += 1
+        return (False, False)
+
+    worker._enrich_row_live_lookup = fake_enrich_row_live_lookup
+
+    seed_df = pd.DataFrame([{"Artist Name": "Artist X", "SoundCloud Link": "", "lastfm_url": ""}], index=[0])
+    worker._run_interleaved_sources(seed_df, fb_driver=None, total=1)
+
+    lf_source = next(spec for spec in captured["sources"] if spec.name == "LF")
+    result = lf_source.run_row(0)
+
+    assert result.attempted is True
+    assert result.enriched is False
+    assert result.retry_later is True
+    assert result.timed_retry is not None
+    assert result.timed_retry.ready_at == 105.0
+    assert result.timed_retry.max_attempts == 2
+
+
 def test_interleaved_scheduler_orders_festival_rows_first(monkeypatch):
     import pandas as pd
     import cross_directory_enricher as cde
@@ -777,6 +832,72 @@ def test_scheduler_defers_availability_cooldown_and_retries_when_ready():
     assert summary["SC"]["attempted"] == 1
 
 
+def test_interleaved_lf_cooldown_rows_are_deferred_and_retried(monkeypatch):
+    import pandas as pd
+    import cross_directory_enricher as cde
+
+    monkeypatch.setattr("source_scheduler.random.uniform", lambda a, b: 0)
+    monkeypatch.setattr(cde.CrossDirectoryEnricherWorker, "__init__", lambda self, *a, **k: None)
+
+    worker = cde.CrossDirectoryEnricherWorker(None, None)
+    worker.enable_live_search = True
+    worker.max_live_searches = 0
+    worker.live_search_attempts = 0
+    worker._notified_limit = False
+    worker._fb_discovery_attempted_rows = set()
+    worker._domain_email_reuse_rows = set()
+    worker.log_message = type("Logger", (), {"emit": lambda *args, **kwargs: None})()
+    worker._init_row_enrichment_state = lambda: None
+    worker._maybe_apply_domain_email_reuse = lambda *args, **kwargs: False
+    worker._build_row_context = lambda df, row_idx, position, total: {
+        "artist": df.at[row_idx, "Artist Name"],
+        "position": position,
+        "total": total,
+        "spotify_id": "",
+    }
+    worker._sc_in_live_cooldown = lambda now=None: False
+    worker._enrich_row_sc_live = lambda *args, **kwargs: (False, False)
+
+    now = {"value": 100.0}
+    worker._lf_now = lambda: now["value"]
+    worker._lf_search_cooldown_until = 105.0
+    worker._lf_profile_cooldown_until = 105.0
+
+    lf_attempts = []
+
+    def fake_lf_enrich(df, row_idx, ctx):
+        lf_attempts.append((row_idx, now["value"]))
+        df.at[row_idx, "lastfm_url"] = "https://www.last.fm/music/retried"
+        return (True, False)
+
+    def fake_fb_enrich(seed_df, row_idx, fb_driver, ctx):
+        now["value"] = 110.0
+        return False
+
+    worker._enrich_row_live_lookup = fake_lf_enrich
+    worker._enrich_row_facebook = fake_fb_enrich
+
+    seed_df = pd.DataFrame(
+        [
+            {
+                "Artist Name": "Artist X",
+                "SoundCloud Link": "",
+                "lastfm_url": "",
+                "facebook_url": "https://www.facebook.com/artistx",
+                "Email": "",
+                "Email_All": "",
+                "FB_Status": "",
+            }
+        ],
+        index=[0],
+    )
+
+    worker._run_interleaved_sources(seed_df, fb_driver=object(), total=1)
+
+    assert lf_attempts == [(0, 110.0)]
+    assert seed_df.at[0, "lastfm_url"] == "https://www.last.fm/music/retried"
+
+
 def test_scheduler_exits_cleanly_when_deferred_work_is_not_ready():
     checks = {"available": 0}
 
@@ -801,6 +922,32 @@ def test_scheduler_exits_cleanly_when_deferred_work_is_not_ready():
     assert checks["available"] == 1
     assert summary["SC"]["attempted"] == 0
     assert summary["SC"]["skipped_cooldown"] == 1
+
+
+def test_attempted_false_result_is_not_queued_for_retry():
+    calls = []
+    now = {"value": 0}
+
+    def run_row(idx):
+        calls.append((idx, now["value"]))
+        now["value"] += 1
+        return SourceResult()
+
+    summary = SourceDiversityScheduler(
+        [
+            SourceSpec(
+                name="LF",
+                rows=[0],
+                run_row=run_row,
+                is_available=lambda: (True, None),
+                retry_now=lambda: now["value"],
+            )
+        ],
+        row_label=str,
+    ).run()
+
+    assert calls == [(0, 0)]
+    assert summary["LF"]["attempted"] == 0
 
 
 def test_scheduler_bounds_timed_retries():
