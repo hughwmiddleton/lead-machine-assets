@@ -668,6 +668,7 @@ def test_phase_facebook_reuses_indexed_domain_email_without_second_scrape(monkey
     assert seed_df.at[1, "Email_Source_Type"] == "facebook_enrich"
     assert seed_df.at[1, "Email_Extract_Method"] == "regex"
     assert len(worker._domain_email_reuse_index) == 1
+    assert worker._domain_email_reuse_index["brightmusic.com"]["role"] == "management"
     assert worker._domain_email_reuse_count == 1
 
 
@@ -778,6 +779,7 @@ def test_domain_email_reuse_index_is_worker_local():
     assert seed_one.at[0, "Email_All"] == "mgmt@brightmusic.com"
     assert seed_two.at[0, "Email"] == ""
     assert seed_two.at[0, "Email_All"] == ""
+    assert worker_one._domain_email_reuse_index["brightmusic.com"]["role"] == "management"
 
 
 def test_seed_directory_email_rows_are_not_indexed_for_domain_reuse():

@@ -590,6 +590,7 @@ def test_website_email_shallow_sweep_finds_press_email(monkeypatch):
     assert seed_df.at[0, "Email_Extract_Method"] == "regex"
     assert seed_df.at[0, "Email_Type"] == "website_enrich"
     assert worker._domain_email_reuse_index["artist.test"]["email"] == "press@artist.test"
+    assert worker._domain_email_reuse_index["artist.test"]["role"] == "press"
     assert any("[Web] shallow sweep paths_considered=" in msg for msg in logs)
     assert any("[Web] shallow sweep matched path=/press" in msg for msg in logs)
 

@@ -1556,6 +1556,25 @@ def _row_has_email(row) -> bool:
     return bool(email_primary or email_all)
 
 
+def _classify_contact_role_from_email(email: str) -> Optional[str]:
+    """Classify a reusable org email from its normalized local-part only."""
+    normalized = normalize_email_value(email)
+    if not normalized or "@" not in normalized:
+        return None
+    local_part = normalized.split("@", 1)[0]
+    if local_part in {"mgmt", "management", "manager"}:
+        return "management"
+    if local_part in {"booking", "bookings", "agent", "agents"}:
+        return "booking"
+    if local_part in {"press", "media", "pr"}:
+        return "press"
+    if local_part in {"info", "hello", "contact"}:
+        return "general"
+    if local_part in {"demo", "releases", "label"}:
+        return "label_related"
+    return None
+
+
 def _row_email_summary_snapshot(df: pd.DataFrame, row_idx) -> Dict[str, str]:
     """Capture the row email fields used by scheduler email accounting."""
     snapshot: Dict[str, str] = {}
@@ -5226,7 +5245,7 @@ class CrossDirectoryEnricherWorker(QThread):
         if not email_all_norm:
             email_all_norm = email_norm
 
-        self._domain_email_reuse_index[domain_norm] = {
+        entry = {
             "email": email_norm,
             "email_all": email_all_norm,
             "source_url": _clean_cell(source_url),
@@ -5234,6 +5253,10 @@ class CrossDirectoryEnricherWorker(QThread):
             "extract_method": _clean_cell(extract_method) or "regex",
             "email_type": _clean_cell(email_type),
         }
+        role = _classify_contact_role_from_email(email_norm)
+        if role:
+            entry["role"] = role
+        self._domain_email_reuse_index[domain_norm] = entry
         return True
 
     def _index_domain_email_reuse_from_row(self, df: pd.DataFrame, row_idx, spotify_domain: str, source_label: str = "") -> bool:
