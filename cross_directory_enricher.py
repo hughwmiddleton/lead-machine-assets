@@ -90,6 +90,8 @@ ENRICHMENT_YIELD_SOURCE_ALIASES = {
     "domain_reuse": "domain_reuse",
 }
 
+DOMAIN_PROFILE_ARTISTS_SAMPLE_MAX = 5
+
 
 @dataclass
 class EnrichmentYieldTracker:
@@ -4868,6 +4870,7 @@ class CrossDirectoryEnricherWorker(QThread):
         self._reset_live_lookup_bclf_stats()
         self._directory_indexes: Dict[str, DirectoryIndex] = {}
         self._domain_email_reuse_index: Dict[str, Dict[str, str]] = {}
+        self._domain_profile_index: Dict[str, Dict[str, Any]] = {}
         self._domain_email_reuse_rows: Set[Any] = set()
         self._domain_email_reuse_count: int = 0
         self._website_email_cache: Dict[str, Dict[str, Any]] = {}
@@ -4946,6 +4949,7 @@ class CrossDirectoryEnricherWorker(QThread):
         self._last_resolved_profile_url = None
         self._fb_discovery_attempted_rows = set()
         self._domain_email_reuse_index = {}
+        self._domain_profile_index = {}
         self._domain_email_reuse_rows = set()
         self._domain_email_reuse_count = 0
         self._website_email_cache = {}
@@ -5271,6 +5275,17 @@ class CrossDirectoryEnricherWorker(QThread):
         extract_method = _coerce_directory_value(df.at[row_idx, "Email_Extract_Method"]) if "Email_Extract_Method" in df.columns else ""
         email_type = _coerce_directory_value(df.at[row_idx, "Email_Type"]) if "Email_Type" in df.columns else ""
         row_source_label = _coerce_directory_value(df.at[row_idx, "Email Source"]) if "Email Source" in df.columns else ""
+        artist_name = _coerce_directory_value(df.at[row_idx, "Artist Name"]) if "Artist Name" in df.columns else ""
+        effective_source_label = source_label or row_source_label
+        self._record_domain_profile_from_row(
+            spotify_domain,
+            artist=artist_name,
+            email=email_value,
+            email_all=email_all_value,
+            source_url=source_url,
+            source_type=source_type,
+            source_label=effective_source_label,
+        )
         return self._index_domain_email_reuse(
             spotify_domain,
             email=email_value,
@@ -5279,7 +5294,7 @@ class CrossDirectoryEnricherWorker(QThread):
             source_type=source_type,
             extract_method=extract_method,
             email_type=email_type,
-            source_label=source_label or row_source_label,
+            source_label=effective_source_label,
         )
 
     def _maybe_apply_domain_email_reuse(self, df: pd.DataFrame, row_idx, ctx: Optional[Dict[str, Any]]) -> bool:
@@ -5327,9 +5342,146 @@ class CrossDirectoryEnricherWorker(QThread):
             _row_email_summary_snapshot(df, row_idx),
             "domain_reuse",
         )
+        self._record_domain_profile_reuse(df, row_idx, domain_norm)
         self._domain_email_reuse_rows.add(row_idx)
         self._domain_email_reuse_count += 1
         return True
+
+    def _upsert_domain_profile(self, domain_norm: str) -> Dict[str, Any]:
+        profile = self._domain_profile_index.get(domain_norm)
+        if profile is not None:
+            return profile
+        profile = {
+            "contacts": [],
+            "artist_count": 0,
+            "artists_sample": [],
+            "source_types": [],
+            "first_source_url": "",
+            "seen_count": 0,
+            "contact_counts": {},
+            "_artist_keys": set(),
+        }
+        self._domain_profile_index[domain_norm] = profile
+        return profile
+
+    def _collect_same_domain_profile_contacts(
+        self,
+        domain_norm: str,
+        *,
+        email: str = "",
+        email_all: str = "",
+    ) -> List[str]:
+        if not domain_norm:
+            return []
+        try:
+            from pipeline_runner import normalize_emails
+        except Exception:
+            normalize_emails = lambda value: [normalize_email_value(value)] if normalize_email_value(value) else []
+
+        ordered_contacts: List[str] = []
+        seen_contacts: Set[str] = set()
+        for raw_value in (email, email_all):
+            for contact in normalize_emails(raw_value):
+                if not contact or "@" not in contact:
+                    continue
+                if contact.split("@", 1)[1] != domain_norm or contact in seen_contacts:
+                    continue
+                seen_contacts.add(contact)
+                ordered_contacts.append(contact)
+        return ordered_contacts
+
+    def _record_domain_profile_observation(
+        self,
+        domain_norm: str,
+        *,
+        artist: str = "",
+        contacts: Optional[List[str]] = None,
+        source_type: str = "",
+        source_url: str = "",
+    ) -> bool:
+        domain_norm = _clean_cell(domain_norm).lower()
+        contact_list = list(contacts or [])
+        if not domain_norm or not contact_list:
+            return False
+
+        profile = self._upsert_domain_profile(domain_norm)
+        profile["seen_count"] = int(profile.get("seen_count", 0) or 0) + 1
+
+        stored_contacts = profile.setdefault("contacts", [])
+        contact_counts = profile.setdefault("contact_counts", {})
+        for contact in contact_list:
+            if contact not in stored_contacts:
+                stored_contacts.append(contact)
+            contact_counts[contact] = int(contact_counts.get(contact, 0) or 0) + 1
+
+        artist_name = _clean_cell(artist)
+        artist_key = normalise_artist_name(artist_name)
+        if artist_key:
+            artist_keys = profile.setdefault("_artist_keys", set())
+            if artist_key not in artist_keys:
+                artist_keys.add(artist_key)
+                if len(profile["artists_sample"]) < DOMAIN_PROFILE_ARTISTS_SAMPLE_MAX:
+                    profile["artists_sample"].append(artist_name)
+            profile["artist_count"] = len(artist_keys)
+
+        source_type_clean = _clean_cell(source_type)
+        if source_type_clean and source_type_clean not in profile["source_types"]:
+            profile["source_types"].append(source_type_clean)
+
+        source_url_clean = _clean_cell(source_url)
+        if source_url_clean and not _clean_cell(profile.get("first_source_url", "")):
+            profile["first_source_url"] = source_url_clean
+        return True
+
+    def _record_domain_profile_from_row(
+        self,
+        spotify_domain: str,
+        *,
+        artist: str = "",
+        email: str = "",
+        email_all: str = "",
+        source_url: str = "",
+        source_type: str = "",
+        source_label: str = "",
+    ) -> bool:
+        domain_norm = _clean_cell(spotify_domain).lower()
+        if not domain_norm:
+            return False
+        if _clean_cell(source_label).lower().startswith("seed directory"):
+            return False
+        contacts = self._collect_same_domain_profile_contacts(
+            domain_norm,
+            email=email,
+            email_all=email_all,
+        )
+        return self._record_domain_profile_observation(
+            domain_norm,
+            artist=artist,
+            contacts=contacts,
+            source_type=source_type,
+            source_url=source_url,
+        )
+
+    def _record_domain_profile_reuse(self, df: pd.DataFrame, row_idx, domain_norm: str) -> bool:
+        if df is None or row_idx not in df.index:
+            return False
+        email_value = _coerce_directory_value(df.at[row_idx, "Email"]) if "Email" in df.columns else ""
+        email_all_value = _coerce_directory_value(df.at[row_idx, "Email_All"]) if "Email_All" in df.columns else ""
+        source_url = _coerce_directory_value(df.at[row_idx, "Email_Source_URL"]) if "Email_Source_URL" in df.columns else ""
+        source_type = _coerce_directory_value(df.at[row_idx, "Email_Source_Type"]) if "Email_Source_Type" in df.columns else ""
+        artist_name = _coerce_directory_value(df.at[row_idx, "Artist Name"]) if "Artist Name" in df.columns else ""
+        contacts = self._collect_same_domain_profile_contacts(
+            _clean_cell(domain_norm).lower(),
+            email=email_value,
+            email_all=email_all_value,
+        )
+        return self._record_domain_profile_observation(
+            domain_norm,
+            artist=artist_name,
+            contacts=contacts,
+            source_type=source_type,
+            source_url=source_url,
+        )
 
     # ------------------------------------------------------------------
     # Extracted per-row helpers (used by both row-linear and source-phased)

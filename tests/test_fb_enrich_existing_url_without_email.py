@@ -808,6 +808,7 @@ def test_seed_directory_email_rows_are_not_indexed_for_domain_reuse():
 
     assert indexed is False
     assert worker._domain_email_reuse_index == {}
+    assert worker._domain_profile_index == {}
 
 
 def test_fb_enrich_rejects_invalid_discovered_candidate(monkeypatch):
