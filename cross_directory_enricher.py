@@ -91,6 +91,16 @@ ENRICHMENT_YIELD_SOURCE_ALIASES = {
 }
 
 DOMAIN_PROFILE_ARTISTS_SAMPLE_MAX = 5
+DOMAIN_PROFILE_MANAGEMENT_LOCAL_PARTS = frozenset({"mgmt", "management", "manager"})
+DOMAIN_PROFILE_BOOKING_LOCAL_PARTS = frozenset({"booking", "bookings", "agent", "agents"})
+DOMAIN_PROFILE_LABEL_LOCAL_PARTS = frozenset({"demo", "demos", "releases", "label"})
+DOMAIN_PROFILE_STRONG_LABEL_PATTERNS = (
+    r"\blabel\b",
+    r"\bdemos?\b",
+    r"\breleases?\b",
+    r"\brecords?\b",
+    r"\brecordings\b",
+)
 
 
 @dataclass
@@ -1575,6 +1585,72 @@ def _classify_contact_role_from_email(email: str) -> Optional[str]:
     if local_part in {"demo", "releases", "label"}:
         return "label_related"
     return None
+
+
+def _domain_profile_contact_local_parts(profile: Optional[Dict[str, Any]]) -> Set[str]:
+    local_parts: Set[str] = set()
+    if not isinstance(profile, dict):
+        return local_parts
+    raw_contacts = list(profile.get("contacts") or [])
+    raw_contacts.extend((profile.get("contact_counts") or {}).keys())
+    for contact in raw_contacts:
+        normalized = normalize_email_value(contact)
+        if not normalized or "@" not in normalized:
+            continue
+        local_parts.add(normalized.split("@", 1)[0])
+    return local_parts
+
+
+def _profile_has_strong_label_string_signal(domain_norm: str, profile: Optional[Dict[str, Any]]) -> bool:
+    if not isinstance(profile, dict):
+        return False
+    text_parts: List[str] = []
+    if domain_norm:
+        text_parts.append(domain_norm)
+    first_source_url = _clean_cell(profile.get("first_source_url", ""))
+    if first_source_url:
+        text_parts.append(first_source_url)
+    for source_type in profile.get("source_types") or []:
+        source_type_clean = _clean_cell(source_type)
+        if source_type_clean:
+            text_parts.append(source_type_clean)
+    if not text_parts:
+        return False
+    normalized_text = " ".join(normalize_role_text(part) for part in text_parts if part)
+    strong_hits = 0
+    for pattern in DOMAIN_PROFILE_STRONG_LABEL_PATTERNS:
+        if re.search(pattern, normalized_text):
+            strong_hits += 1
+    return strong_hits >= 2
+
+
+def _infer_domain_org_type(domain_norm: str, profile: Optional[Dict[str, Any]]) -> str:
+    if not isinstance(profile, dict):
+        return "unknown"
+    try:
+        artist_count = int(profile.get("artist_count", 0) or 0)
+    except Exception:
+        artist_count = 0
+    if artist_count < 2:
+        return "unknown"
+
+    local_parts = _domain_profile_contact_local_parts(profile)
+    has_management = bool(local_parts & DOMAIN_PROFILE_MANAGEMENT_LOCAL_PARTS)
+    has_booking = bool(local_parts & DOMAIN_PROFILE_BOOKING_LOCAL_PARTS)
+    has_label = bool(local_parts & DOMAIN_PROFILE_LABEL_LOCAL_PARTS)
+    if not has_label:
+        has_label = _profile_has_strong_label_string_signal(_clean_cell(domain_norm).lower(), profile)
+
+    matched_type_count = int(has_management) + int(has_booking) + int(has_label)
+    if matched_type_count != 1:
+        return "unknown"
+    if has_management:
+        return "management"
+    if has_booking:
+        return "booking_agency"
+    if has_label:
+        return "label"
+    return "unknown"
 
 
 def _row_email_summary_snapshot(df: pd.DataFrame, row_idx) -> Dict[str, str]:
@@ -5350,6 +5426,7 @@ class CrossDirectoryEnricherWorker(QThread):
     def _upsert_domain_profile(self, domain_norm: str) -> Dict[str, Any]:
         profile = self._domain_profile_index.get(domain_norm)
         if profile is not None:
+            profile.setdefault("org_type", "unknown")
             return profile
         profile = {
             "contacts": [],
@@ -5359,10 +5436,22 @@ class CrossDirectoryEnricherWorker(QThread):
             "first_source_url": "",
             "seen_count": 0,
             "contact_counts": {},
+            "org_type": "unknown",
             "_artist_keys": set(),
         }
         self._domain_profile_index[domain_norm] = profile
         return profile
+
+    def _recompute_domain_org_type(self, domain_norm: str) -> str:
+        domain_key = _clean_cell(domain_norm).lower()
+        if not domain_key:
+            return "unknown"
+        profile = self._domain_profile_index.get(domain_key)
+        if profile is None:
+            return "unknown"
+        org_type = _infer_domain_org_type(domain_key, profile)
+        profile["org_type"] = org_type
+        return org_type
 
     def _collect_same_domain_profile_contacts(
         self,
@@ -5431,6 +5520,7 @@ class CrossDirectoryEnricherWorker(QThread):
         source_url_clean = _clean_cell(source_url)
         if source_url_clean and not _clean_cell(profile.get("first_source_url", "")):
             profile["first_source_url"] = source_url_clean
+        self._recompute_domain_org_type(domain_norm)
         return True
 
     def _record_domain_profile_from_row(

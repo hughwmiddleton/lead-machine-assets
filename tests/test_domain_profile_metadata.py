@@ -15,6 +15,16 @@ def _make_worker(logs):
     return worker
 
 
+def _record_profile(worker, domain_norm, artist, contacts, source_url="https://example.test/contact", source_type="website_enrich"):
+    return worker._record_domain_profile_observation(
+        domain_norm,
+        artist=artist,
+        contacts=list(contacts),
+        source_type=source_type,
+        source_url=source_url,
+    )
+
+
 def test_domain_profile_accumulates_repeated_same_domain_observations():
     logs = []
     worker = _make_worker(logs)
@@ -59,6 +69,7 @@ def test_domain_profile_accumulates_repeated_same_domain_observations():
     assert profile["artists_sample"] == ["Bright One", "Bright Two"]
     assert profile["source_types"] == ["website_enrich", "facebook_enrich"]
     assert profile["first_source_url"] == "https://brightmusic.com/contact"
+    assert profile["org_type"] == "unknown"
 
 
 def test_domain_profile_records_successful_reuse_without_changing_reuse_semantics():
@@ -110,3 +121,49 @@ def test_domain_profile_records_successful_reuse_without_changing_reuse_semantic
     assert profile["artists_sample"] == ["Bright Two"]
     assert profile["source_types"] == ["facebook_enrich"]
     assert profile["first_source_url"] == "https://www.facebook.com/brightone"
+    assert profile["org_type"] == "unknown"
+    assert "org_type" not in worker._domain_email_reuse_index["brightmusic.com"]
+
+
+def test_domain_profile_org_type_management_requires_repeated_artists():
+    worker = _make_worker([])
+
+    assert _record_profile(worker, "brightmusic.com", "Bright One", ["mgmt@brightmusic.com"])
+    assert _record_profile(worker, "brightmusic.com", "Bright Two", ["management@brightmusic.com"])
+
+    assert worker._domain_profile_index["brightmusic.com"]["org_type"] == "management"
+
+
+def test_domain_profile_org_type_booking_agency_requires_repeated_artists():
+    worker = _make_worker([])
+
+    assert _record_profile(worker, "brightshows.com", "Bright One", ["bookings@brightshows.com"])
+    assert _record_profile(worker, "brightshows.com", "Bright Two", ["agent@brightshows.com"])
+
+    assert worker._domain_profile_index["brightshows.com"]["org_type"] == "booking_agency"
+
+
+def test_domain_profile_org_type_label_from_strong_local_part_clues():
+    worker = _make_worker([])
+
+    assert _record_profile(worker, "northrecords.com", "North One", ["releases@northrecords.com"])
+    assert _record_profile(worker, "northrecords.com", "North Two", ["info@northrecords.com"])
+
+    assert worker._domain_profile_index["northrecords.com"]["org_type"] == "label"
+
+
+def test_domain_profile_org_type_mixed_management_and_booking_stays_unknown():
+    worker = _make_worker([])
+
+    assert _record_profile(worker, "brightmusic.com", "Bright One", ["mgmt@brightmusic.com"])
+    assert _record_profile(worker, "brightmusic.com", "Bright Two", ["bookings@brightmusic.com"])
+
+    assert worker._domain_profile_index["brightmusic.com"]["org_type"] == "unknown"
+
+
+def test_domain_profile_org_type_single_artist_stays_unknown():
+    worker = _make_worker([])
+
+    assert _record_profile(worker, "brightmusic.com", "Bright One", ["mgmt@brightmusic.com"])
+
+    assert worker._domain_profile_index["brightmusic.com"]["org_type"] == "unknown"
