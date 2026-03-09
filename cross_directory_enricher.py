@@ -101,6 +101,26 @@ DOMAIN_PROFILE_STRONG_LABEL_PATTERNS = (
     r"\brecords?\b",
     r"\brecordings\b",
 )
+DOMAIN_REUSE_ROLE_PRIORITY = {
+    "management": 0,
+    "booking": 1,
+    "press": 2,
+    "label_related": 3,
+    "general": 4,
+}
+DOMAIN_REUSE_SOURCE_PRIORITY = {
+    "website_enrich": 0,
+    "facebook_enrich": 1,
+    "instagram_enrich": 2,
+    "soundcloud": 3,
+    "soundcloud_live": 3,
+    "bandcamp": 4,
+    "bandcamp_live": 4,
+    "lastfm": 5,
+    "lastfm_live": 5,
+    "live_search": 6,
+}
+DOMAIN_PROFILE_CONTACT_META_KEY = "_contact_meta"
 
 
 @dataclass
@@ -1585,6 +1605,129 @@ def _classify_contact_role_from_email(email: str) -> Optional[str]:
     if local_part in {"demo", "releases", "label"}:
         return "label_related"
     return None
+
+
+def _collect_same_domain_contacts(domain_norm: str, *values: Any) -> List[str]:
+    domain_key = _clean_cell(domain_norm).lower()
+    if not domain_key:
+        return []
+
+    contacts: List[str] = []
+    seen: Set[str] = set()
+    for raw_value in values:
+        if raw_value is None:
+            continue
+        items = raw_value if isinstance(raw_value, (list, tuple, set)) else [raw_value]
+        for item in items:
+            for token in re.split(r"[\s,;]+", "" if item is None else str(item)):
+                normalized = normalize_email_value(token)
+                if not normalized or "@" not in normalized:
+                    continue
+                if normalized.split("@", 1)[1] != domain_key or normalized in seen:
+                    continue
+                seen.add(normalized)
+                contacts.append(normalized)
+    return contacts
+
+
+def _domain_reuse_source_rank(source_type: str) -> int:
+    source_key = _clean_cell(source_type).lower()
+    if not source_key:
+        return 999
+    return DOMAIN_REUSE_SOURCE_PRIORITY.get(source_key, 100)
+
+
+def _merge_domain_reuse_contact_meta(
+    existing_meta: Optional[Dict[str, Any]],
+    candidate_meta: Optional[Dict[str, Any]],
+) -> Dict[str, str]:
+    merged = {
+        key: _clean_cell(value)
+        for key, value in dict(existing_meta or {}).items()
+        if _clean_cell(value)
+    }
+    candidate = {
+        key: _clean_cell(value)
+        for key, value in dict(candidate_meta or {}).items()
+        if _clean_cell(value)
+    }
+    if not candidate:
+        return merged
+
+    meta_fields = ("source_url", "source_type", "extract_method", "email_type")
+    existing_source = merged.get("source_type", "")
+    candidate_source = candidate.get("source_type", "")
+    replace_meta_fields = False
+    if candidate_source:
+        existing_rank = _domain_reuse_source_rank(existing_source)
+        candidate_rank = _domain_reuse_source_rank(candidate_source)
+        if not existing_source or candidate_rank < existing_rank:
+            replace_meta_fields = True
+        elif candidate_rank == existing_rank:
+            existing_completeness = sum(bool(merged.get(field, "")) for field in meta_fields)
+            candidate_completeness = sum(bool(candidate.get(field, "")) for field in meta_fields)
+            if candidate_completeness > existing_completeness:
+                replace_meta_fields = True
+
+    if replace_meta_fields:
+        for field in meta_fields:
+            value = candidate.get(field, "")
+            if value:
+                merged[field] = value
+    else:
+        for field in meta_fields:
+            value = candidate.get(field, "")
+            if value and not merged.get(field, ""):
+                merged[field] = value
+
+    role = candidate.get("role", "")
+    if role:
+        merged["role"] = role
+    return merged
+
+
+def _domain_profile_contact_meta(profile: Optional[Dict[str, Any]], contact: str) -> Dict[str, str]:
+    if not isinstance(profile, dict):
+        return {}
+    contact_meta = profile.get(DOMAIN_PROFILE_CONTACT_META_KEY) or {}
+    return {
+        key: _clean_cell(value)
+        for key, value in dict(contact_meta.get(contact) or {}).items()
+        if _clean_cell(value)
+    }
+
+
+def _select_best_reusable_domain_contact(
+    domain_norm: str,
+    candidate_contacts: Optional[Iterable[str]],
+    *,
+    profile: Optional[Dict[str, Any]] = None,
+    existing_entry: Optional[Dict[str, Any]] = None,
+) -> Tuple[str, List[str]]:
+    contact_counts = (profile or {}).get("contact_counts") or {}
+    contact_meta = (profile or {}).get(DOMAIN_PROFILE_CONTACT_META_KEY) or {}
+    aggregate_contacts = _collect_same_domain_contacts(
+        domain_norm,
+        list(candidate_contacts or []),
+        (profile or {}).get("contacts") or [],
+        list(contact_counts.keys()),
+        (existing_entry or {}).get("email", ""),
+        (existing_entry or {}).get("email_all", ""),
+    )
+    if not aggregate_contacts:
+        return ("", [])
+
+    def _rank(contact: str) -> Tuple[int, int, int, str]:
+        role_rank = DOMAIN_REUSE_ROLE_PRIORITY.get(
+            _classify_contact_role_from_email(contact),
+            len(DOMAIN_REUSE_ROLE_PRIORITY),
+        )
+        seen_count = int(contact_counts.get(contact, 0) or 0)
+        source_rank = _domain_reuse_source_rank((contact_meta.get(contact) or {}).get("source_type", ""))
+        return (role_rank, -seen_count, source_rank, contact)
+
+    best_contact = min(aggregate_contacts, key=_rank)
+    return (best_contact, aggregate_contacts)
 
 
 def _domain_profile_contact_local_parts(profile: Optional[Dict[str, Any]]) -> Set[str]:
@@ -5348,50 +5491,75 @@ class CrossDirectoryEnricherWorker(QThread):
         source_label: str = "",
     ) -> bool:
         domain_norm = _clean_cell(spotify_domain).lower()
-        if not domain_norm or domain_norm in self._domain_email_reuse_index:
+        if not domain_norm:
             return False
 
         source_label_norm = _clean_cell(source_label).lower()
         if source_label_norm.startswith("seed directory"):
             return False
 
-        try:
-            from email_normalizer import normalize_email_value
-        except Exception:
-            normalize_email_value = lambda value: _clean_cell(value).lower()
-        try:
-            from pipeline_runner import normalize_emails
-        except Exception:
-            normalize_emails = lambda value: [normalize_email_value(value)] if normalize_email_value(value) else []
-
-        email_norm = normalize_email_value(email)
-        if not email_norm or email_norm.split("@", 1)[1] != domain_norm:
+        direct_contact = normalize_email_value(email)
+        current_contacts = self._collect_same_domain_profile_contacts(
+            domain_norm,
+            email=email,
+            email_all=email_all,
+        )
+        existing_entry = self._domain_email_reuse_index.get(domain_norm)
+        profile = self._domain_profile_index.get(domain_norm)
+        best_contact, aggregate_contacts = _select_best_reusable_domain_contact(
+            domain_norm,
+            current_contacts,
+            profile=profile,
+            existing_entry=existing_entry,
+        )
+        if not best_contact or not aggregate_contacts:
             return False
 
-        email_all_norm = ";".join(normalize_emails(email_all)) if email_all else ""
-        if not email_all_norm:
-            email_all_norm = email_norm
+        existing_meta = {}
+        if isinstance(existing_entry, dict) and _clean_cell(existing_entry.get("email", "")) == best_contact:
+            existing_meta = {
+                "source_url": existing_entry.get("source_url", ""),
+                "source_type": existing_entry.get("source_type", ""),
+                "extract_method": existing_entry.get("extract_method", ""),
+                "email_type": existing_entry.get("email_type", ""),
+                "role": existing_entry.get("role", ""),
+            }
+        selected_meta = _merge_domain_reuse_contact_meta(
+            existing_meta,
+            _domain_profile_contact_meta(profile, best_contact),
+        )
+        if best_contact and best_contact == direct_contact:
+            selected_meta = _merge_domain_reuse_contact_meta(
+                selected_meta,
+                {
+                    "source_url": _clean_cell(source_url),
+                    "source_type": _clean_cell(source_type),
+                    "extract_method": _clean_cell(extract_method) or "regex",
+                    "email_type": _clean_cell(email_type),
+                    "role": _classify_contact_role_from_email(best_contact) or "",
+                },
+            )
 
+        role = _classify_contact_role_from_email(best_contact)
         entry = {
-            "email": email_norm,
-            "email_all": email_all_norm,
-            "source_url": _clean_cell(source_url),
-            "source_type": _clean_cell(source_type),
-            "extract_method": _clean_cell(extract_method) or "regex",
-            "email_type": _clean_cell(email_type),
+            "email": best_contact,
+            "email_all": ";".join(aggregate_contacts),
+            "source_url": _clean_cell(selected_meta.get("source_url", "")),
+            "source_type": _clean_cell(selected_meta.get("source_type", "")),
+            "extract_method": _clean_cell(selected_meta.get("extract_method", "")) or "regex",
+            "email_type": _clean_cell(selected_meta.get("email_type", "")),
         }
-        role = _classify_contact_role_from_email(email_norm)
         if role:
             entry["role"] = role
+
+        changed = entry != (existing_entry or {})
         self._domain_email_reuse_index[domain_norm] = entry
-        return True
+        return changed
 
     def _index_domain_email_reuse_from_row(self, df: pd.DataFrame, row_idx, spotify_domain: str, source_label: str = "") -> bool:
         if df is None or row_idx not in df.index:
             return False
         email_value = _coerce_directory_value(df.at[row_idx, "Email"]) if "Email" in df.columns else ""
-        if not email_value:
-            return False
         email_all_value = _coerce_directory_value(df.at[row_idx, "Email_All"]) if "Email_All" in df.columns else ""
         source_url = _coerce_directory_value(df.at[row_idx, "Email_Source_URL"]) if "Email_Source_URL" in df.columns else ""
         source_type = _coerce_directory_value(df.at[row_idx, "Email_Source_Type"]) if "Email_Source_Type" in df.columns else ""
@@ -5400,6 +5568,13 @@ class CrossDirectoryEnricherWorker(QThread):
         row_source_label = _coerce_directory_value(df.at[row_idx, "Email Source"]) if "Email Source" in df.columns else ""
         artist_name = _coerce_directory_value(df.at[row_idx, "Artist Name"]) if "Artist Name" in df.columns else ""
         effective_source_label = source_label or row_source_label
+        row_contacts = self._collect_same_domain_profile_contacts(
+            _clean_cell(spotify_domain).lower(),
+            email=email_value,
+            email_all=email_all_value,
+        )
+        if not row_contacts and not self._domain_profile_index.get(_clean_cell(spotify_domain).lower()):
+            return False
         self._record_domain_profile_from_row(
             spotify_domain,
             artist=artist_name,
@@ -5407,6 +5582,8 @@ class CrossDirectoryEnricherWorker(QThread):
             email_all=email_all_value,
             source_url=source_url,
             source_type=source_type,
+            extract_method=extract_method,
+            email_type=email_type,
             source_label=effective_source_label,
         )
         return self._index_domain_email_reuse(
@@ -5465,7 +5642,6 @@ class CrossDirectoryEnricherWorker(QThread):
             _row_email_summary_snapshot(df, row_idx),
             "domain_reuse",
         )
-        self._record_domain_profile_reuse(df, row_idx, domain_norm)
         self._domain_email_reuse_rows.add(row_idx)
         self._domain_email_reuse_count += 1
         return True
@@ -5507,24 +5683,7 @@ class CrossDirectoryEnricherWorker(QThread):
         email: str = "",
         email_all: str = "",
     ) -> List[str]:
-        if not domain_norm:
-            return []
-        try:
-            from pipeline_runner import normalize_emails
-        except Exception:
-            normalize_emails = lambda value: [normalize_email_value(value)] if normalize_email_value(value) else []
-
-        ordered_contacts: List[str] = []
-        seen_contacts: Set[str] = set()
-        for raw_value in (email, email_all):
-            for contact in normalize_emails(raw_value):
-                if not contact or "@" not in contact:
-                    continue
-                if contact.split("@", 1)[1] != domain_norm or contact in seen_contacts:
-                    continue
-                seen_contacts.add(contact)
-                ordered_contacts.append(contact)
-        return ordered_contacts
+        return _collect_same_domain_contacts(domain_norm, email, email_all)
 
     def _record_domain_profile_observation(
         self,
@@ -5532,23 +5691,39 @@ class CrossDirectoryEnricherWorker(QThread):
         *,
         artist: str = "",
         contacts: Optional[List[str]] = None,
+        observed_contact: str = "",
         source_type: str = "",
         source_url: str = "",
+        extract_method: str = "",
+        email_type: str = "",
     ) -> bool:
         domain_norm = _clean_cell(domain_norm).lower()
         contact_list = list(contacts or [])
         if not domain_norm or not contact_list:
             return False
 
+        observed_contact_norm = normalize_email_value(observed_contact)
         profile = self._upsert_domain_profile(domain_norm)
         profile["seen_count"] = int(profile.get("seen_count", 0) or 0) + 1
 
         stored_contacts = profile.setdefault("contacts", [])
         contact_counts = profile.setdefault("contact_counts", {})
+        contact_meta = profile.setdefault(DOMAIN_PROFILE_CONTACT_META_KEY, {})
         for contact in contact_list:
             if contact not in stored_contacts:
                 stored_contacts.append(contact)
             contact_counts[contact] = int(contact_counts.get(contact, 0) or 0) + 1
+            if contact == observed_contact_norm:
+                contact_meta[contact] = _merge_domain_reuse_contact_meta(
+                    contact_meta.get(contact),
+                    {
+                        "source_url": _clean_cell(source_url),
+                        "source_type": _clean_cell(source_type),
+                        "extract_method": _clean_cell(extract_method) or "regex",
+                        "email_type": _clean_cell(email_type),
+                        "role": _classify_contact_role_from_email(contact) or "",
+                    },
+                )
 
         artist_name = _clean_cell(artist)
         artist_key = normalise_artist_name(artist_name)
@@ -5579,6 +5754,8 @@ class CrossDirectoryEnricherWorker(QThread):
         email_all: str = "",
         source_url: str = "",
         source_type: str = "",
+        extract_method: str = "",
+        email_type: str = "",
         source_label: str = "",
     ) -> bool:
         domain_norm = _clean_cell(spotify_domain).lower()
@@ -5595,29 +5772,11 @@ class CrossDirectoryEnricherWorker(QThread):
             domain_norm,
             artist=artist,
             contacts=contacts,
+            observed_contact=email,
             source_type=source_type,
             source_url=source_url,
-        )
-
-    def _record_domain_profile_reuse(self, df: pd.DataFrame, row_idx, domain_norm: str) -> bool:
-        if df is None or row_idx not in df.index:
-            return False
-        email_value = _coerce_directory_value(df.at[row_idx, "Email"]) if "Email" in df.columns else ""
-        email_all_value = _coerce_directory_value(df.at[row_idx, "Email_All"]) if "Email_All" in df.columns else ""
-        source_url = _coerce_directory_value(df.at[row_idx, "Email_Source_URL"]) if "Email_Source_URL" in df.columns else ""
-        source_type = _coerce_directory_value(df.at[row_idx, "Email_Source_Type"]) if "Email_Source_Type" in df.columns else ""
-        artist_name = _coerce_directory_value(df.at[row_idx, "Artist Name"]) if "Artist Name" in df.columns else ""
-        contacts = self._collect_same_domain_profile_contacts(
-            _clean_cell(domain_norm).lower(),
-            email=email_value,
-            email_all=email_all_value,
-        )
-        return self._record_domain_profile_observation(
-            domain_norm,
-            artist=artist_name,
-            contacts=contacts,
-            source_type=source_type,
-            source_url=source_url,
+            extract_method=extract_method,
+            email_type=email_type,
         )
 
     # ------------------------------------------------------------------
@@ -8380,12 +8539,13 @@ class CrossDirectoryEnricherWorker(QThread):
             )
         except Exception:
             pass
-        self._record_enrichment_yield(
-            row_idx,
-            email_before,
-            _row_email_summary_snapshot(df, row_idx),
-            payload.source_dir,
-        )
+        if self is not None and hasattr(self, "_record_enrichment_yield"):
+            self._record_enrichment_yield(
+                row_idx,
+                email_before,
+                _row_email_summary_snapshot(df, row_idx),
+                payload.source_dir,
+            )
         if new_emails and self is not None and hasattr(self, "_index_domain_email_reuse_from_row"):
             self._index_domain_email_reuse_from_row(
                 df,

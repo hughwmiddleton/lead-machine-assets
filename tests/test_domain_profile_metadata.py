@@ -5,6 +5,7 @@ from types import SimpleNamespace
 pytest.importorskip("PyQt5")
 
 import cross_directory_enricher as cde
+import pipeline_runner
 
 
 def _make_worker(logs):
@@ -55,9 +56,13 @@ def test_domain_profile_accumulates_repeated_same_domain_observations():
     ).fillna("")
 
     assert worker._index_domain_email_reuse_from_row(seed_df, 0, "brightmusic.com") is True
-    assert worker._index_domain_email_reuse_from_row(seed_df, 1, "brightmusic.com") is False
+    assert worker._index_domain_email_reuse_from_row(seed_df, 1, "brightmusic.com") is True
 
     assert worker._domain_email_reuse_index["brightmusic.com"]["email"] == "mgmt@brightmusic.com"
+    assert pipeline_runner.normalize_emails(worker._domain_email_reuse_index["brightmusic.com"]["email_all"]) == [
+        "bookings@brightmusic.com",
+        "mgmt@brightmusic.com",
+    ]
     profile = worker._domain_profile_index["brightmusic.com"]
     assert profile["seen_count"] == 2
     assert profile["contacts"] == ["mgmt@brightmusic.com", "bookings@brightmusic.com"]
@@ -112,17 +117,192 @@ def test_domain_profile_records_successful_reuse_without_changing_reuse_semantic
     assert seed_df.at[0, "Email_Extract_Method"] == "regex"
     assert worker._domain_email_reuse_index["brightmusic.com"]["email"] == "mgmt@brightmusic.com"
     assert worker._domain_email_reuse_count == 1
+    assert "brightmusic.com" not in worker._domain_profile_index
+    assert "org_type" not in worker._domain_email_reuse_index["brightmusic.com"]
+
+
+def test_domain_reuse_prefers_management_over_general_same_row_contact_set():
+    worker = _make_worker([])
+    seed_df = pd.DataFrame(
+        [
+            {
+                "Artist Name": "Bright One",
+                "Email": "info@brightmusic.com",
+                "Email_All": "info@brightmusic.com;mgmt@brightmusic.com",
+                "Email_Source_URL": "https://brightmusic.com/contact",
+                "Email_Source_Type": "website_enrich",
+                "Email_Extract_Method": "regex",
+                "Email_Type": "website_enrich",
+            }
+        ],
+        dtype=str,
+    ).fillna("")
+
+    assert worker._index_domain_email_reuse_from_row(seed_df, 0, "brightmusic.com") is True
+    assert worker._domain_email_reuse_index["brightmusic.com"]["email"] == "mgmt@brightmusic.com"
+    assert pipeline_runner.normalize_emails(worker._domain_email_reuse_index["brightmusic.com"]["email_all"]) == [
+        "info@brightmusic.com",
+        "mgmt@brightmusic.com",
+    ]
+
+
+def test_domain_reuse_prefers_booking_over_generic_contact():
+    worker = _make_worker([])
+    seed_df = pd.DataFrame(
+        [
+            {
+                "Artist Name": "Bright One",
+                "Email": "contact@brightmusic.com",
+                "Email_All": "contact@brightmusic.com;bookings@brightmusic.com",
+                "Email_Source_URL": "https://brightmusic.com/contact",
+                "Email_Source_Type": "website_enrich",
+                "Email_Extract_Method": "regex",
+                "Email_Type": "website_enrich",
+            }
+        ],
+        dtype=str,
+    ).fillna("")
+
+    assert worker._index_domain_email_reuse_from_row(seed_df, 0, "brightmusic.com") is True
+    assert worker._domain_email_reuse_index["brightmusic.com"]["email"] == "bookings@brightmusic.com"
+
+
+def test_domain_reuse_prefers_repeated_contact_when_roles_tie():
+    worker = _make_worker([])
+    seed_df = pd.DataFrame(
+        [
+            {
+                "Artist Name": "Bright One",
+                "Email": "hello@brightmusic.com",
+                "Email_All": "hello@brightmusic.com",
+                "Email_Source_URL": "https://brightmusic.com/contact",
+                "Email_Source_Type": "website_enrich",
+                "Email_Extract_Method": "regex",
+                "Email_Type": "website_enrich",
+            },
+            {
+                "Artist Name": "Bright Two",
+                "Email": "contact@brightmusic.com",
+                "Email_All": "contact@brightmusic.com",
+                "Email_Source_URL": "https://brightmusic.com/about",
+                "Email_Source_Type": "website_enrich",
+                "Email_Extract_Method": "regex",
+                "Email_Type": "website_enrich",
+            },
+            {
+                "Artist Name": "Bright Three",
+                "Email": "contact@brightmusic.com",
+                "Email_All": "contact@brightmusic.com",
+                "Email_Source_URL": "https://brightmusic.com/team",
+                "Email_Source_Type": "website_enrich",
+                "Email_Extract_Method": "regex",
+                "Email_Type": "website_enrich",
+            },
+        ],
+        dtype=str,
+    ).fillna("")
+
+    assert worker._index_domain_email_reuse_from_row(seed_df, 0, "brightmusic.com") is True
+    assert worker._index_domain_email_reuse_from_row(seed_df, 1, "brightmusic.com") is True
+    assert worker._index_domain_email_reuse_from_row(seed_df, 2, "brightmusic.com") is False
+
+    assert worker._domain_email_reuse_index["brightmusic.com"]["email"] == "contact@brightmusic.com"
+    assert worker._domain_profile_index["brightmusic.com"]["contact_counts"] == {
+        "hello@brightmusic.com": 1,
+        "contact@brightmusic.com": 2,
+    }
+
+
+def test_domain_reuse_ranking_ignores_reuse_propagation_counts():
+    worker = _make_worker([])
+    seed_df = pd.DataFrame(
+        [
+            {
+                "Artist Name": "Bright One",
+                "Email": "hello@brightmusic.com",
+                "Email_All": "hello@brightmusic.com",
+                "Email_Source_URL": "https://brightmusic.com/contact",
+                "Email_Source_Type": "website_enrich",
+                "Email_Extract_Method": "regex",
+                "Email_Type": "website_enrich",
+                "Spotify_Website_URL": "https://brightmusic.com/contact",
+            },
+            {
+                "Artist Name": "Bright Blank",
+                "Email": "",
+                "Email_All": "",
+                "Email_Source_URL": "",
+                "Email_Source_Type": "",
+                "Email_Extract_Method": "",
+                "Email_Type": "",
+                "Spotify_Website_URL": "https://brightmusic.com/about",
+            },
+            {
+                "Artist Name": "Bright Two",
+                "Email": "contact@brightmusic.com",
+                "Email_All": "contact@brightmusic.com",
+                "Email_Source_URL": "https://brightmusic.com/about",
+                "Email_Source_Type": "website_enrich",
+                "Email_Extract_Method": "regex",
+                "Email_Type": "website_enrich",
+                "Spotify_Website_URL": "https://brightmusic.com/team",
+            },
+        ],
+        dtype=str,
+    ).fillna("")
+
+    assert worker._index_domain_email_reuse_from_row(seed_df, 0, "brightmusic.com") is True
+
+    ctx = worker._build_row_context(seed_df, 1, 3, 3)
+    assert worker._maybe_apply_domain_email_reuse(seed_df, 1, ctx) is True
+    assert worker._domain_profile_index["brightmusic.com"]["contact_counts"] == {
+        "hello@brightmusic.com": 1,
+    }
+
+    assert worker._index_domain_email_reuse_from_row(seed_df, 2, "brightmusic.com") is True
+    assert worker._domain_profile_index["brightmusic.com"]["contact_counts"] == {
+        "hello@brightmusic.com": 1,
+        "contact@brightmusic.com": 1,
+    }
+    assert worker._domain_email_reuse_index["brightmusic.com"]["email"] == "contact@brightmusic.com"
+
+
+def test_domain_profile_preserves_aggregate_contacts_without_mixing_provenance():
+    worker = _make_worker([])
+    seed_df = pd.DataFrame(
+        [
+            {
+                "Artist Name": "Bright One",
+                "Email": "info@brightmusic.com",
+                "Email_All": "info@brightmusic.com;mgmt@brightmusic.com",
+                "Email_Source_URL": "https://brightmusic.com/contact",
+                "Email_Source_Type": "website_enrich",
+                "Email_Extract_Method": "regex",
+                "Email_Type": "website_enrich",
+            }
+        ],
+        dtype=str,
+    ).fillna("")
+
+    assert worker._index_domain_email_reuse_from_row(seed_df, 0, "brightmusic.com") is True
 
     profile = worker._domain_profile_index["brightmusic.com"]
-    assert profile["seen_count"] == 1
-    assert profile["contacts"] == ["mgmt@brightmusic.com"]
-    assert profile["contact_counts"] == {"mgmt@brightmusic.com": 1}
-    assert profile["artist_count"] == 1
-    assert profile["artists_sample"] == ["Bright Two"]
-    assert profile["source_types"] == ["facebook_enrich"]
-    assert profile["first_source_url"] == "https://www.facebook.com/brightone"
-    assert profile["org_type"] == "unknown"
-    assert "org_type" not in worker._domain_email_reuse_index["brightmusic.com"]
+    assert profile["contacts"] == ["info@brightmusic.com", "mgmt@brightmusic.com"]
+    assert profile["contact_counts"] == {
+        "info@brightmusic.com": 1,
+        "mgmt@brightmusic.com": 1,
+    }
+    assert profile[cde.DOMAIN_PROFILE_CONTACT_META_KEY]["info@brightmusic.com"] == {
+        "source_url": "https://brightmusic.com/contact",
+        "source_type": "website_enrich",
+        "extract_method": "regex",
+        "email_type": "website_enrich",
+        "role": "general",
+    }
+    assert profile[cde.DOMAIN_PROFILE_CONTACT_META_KEY].get("mgmt@brightmusic.com", {}) == {}
+    assert worker._domain_email_reuse_index["brightmusic.com"]["email"] == "mgmt@brightmusic.com"
+    assert worker._domain_email_reuse_index["brightmusic.com"]["source_url"] == ""
+    assert worker._domain_email_reuse_index["brightmusic.com"]["source_type"] == ""
 
 
 def test_domain_profile_org_type_management_requires_repeated_artists():
