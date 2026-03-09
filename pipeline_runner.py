@@ -1969,6 +1969,7 @@ def run_master_enrichment(
             if max_live < 0:
                 max_live = 0
 
+        first_pass_state: Dict[str, Any] = {}
         cross_directory_enricher.run_cross_directory_enrichment(
             seed_csv_path,
             output_csv_path,
@@ -1981,6 +1982,7 @@ def run_master_enrichment(
             logger=logger,
             night_mode=night_mode,
             yield_tracker=yield_tracker,
+            state_sink=first_pass_state,
         )
         try:
             expansion_raw_csv_path = cross_directory_enricher._festival_expansion_raw_path(output_csv_path)
@@ -1997,6 +1999,7 @@ def run_master_enrichment(
                 if expansion_rows > 0:
                     base, ext = os.path.splitext(output_csv_path)
                     expansion_output_csv_path = f"{base}_festival_expansion_enriched{ext or '.csv'}"
+                    second_pass_state: Dict[str, Any] = {}
                     _safe_log(
                         logger,
                         f"[FestivalExpansion] running bounded second enrichment pass rows={expansion_rows}",
@@ -2013,6 +2016,7 @@ def run_master_enrichment(
                         logger=logger,
                         night_mode=night_mode,
                         yield_tracker=yield_tracker,
+                        state_sink=second_pass_state,
                     )
                     _merge_festival_expansion_output(
                         output_csv_path,
@@ -2020,6 +2024,24 @@ def run_master_enrichment(
                         cross_directory_enricher.normalise_artist_name,
                         logger=logger,
                     )
+                    try:
+                        merged_profile_index = cross_directory_enricher._merge_domain_profile_indexes(
+                            first_pass_state.get("domain_profile_index"),
+                            second_pass_state.get("domain_profile_index"),
+                        )
+                        merged_reuse_index = cross_directory_enricher._merge_domain_email_reuse_indexes(
+                            merged_profile_index,
+                            first_pass_state.get("domain_email_reuse_index"),
+                            second_pass_state.get("domain_email_reuse_index"),
+                        )
+                        cross_directory_enricher._write_domain_org_sidecar(
+                            output_csv_path,
+                            merged_profile_index,
+                            merged_reuse_index,
+                            log_fn=logger,
+                        )
+                    except Exception as exc:
+                        _safe_log(logger, f"[DomainOrg] failed to write merged sidecar safely: {exc}")
             except Exception as exc:
                 _safe_log(logger, f"[FestivalExpansion] second pass skipped after error: {exc}")
         emit_enrichment_yield_summary(logger, dict(getattr(yield_tracker, "counts", {}) or {}))

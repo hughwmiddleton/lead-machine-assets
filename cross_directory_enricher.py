@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import copy
 import datetime
 import difflib
 import importlib.util
@@ -121,6 +122,15 @@ DOMAIN_REUSE_SOURCE_PRIORITY = {
     "live_search": 6,
 }
 DOMAIN_PROFILE_CONTACT_META_KEY = "_contact_meta"
+DOMAIN_ORG_SIDECAR_COLUMNS: Tuple[str, ...] = (
+    "domain",
+    "org_type",
+    "artist_count",
+    "primary_email",
+    "emails",
+    "roles_seen",
+    "sources_seen",
+)
 
 
 @dataclass
@@ -1190,6 +1200,21 @@ def _festival_expansion_raw_path(output_csv_path: str) -> str:
     return f"{base}_festival_expansion_raw{ext or '.csv'}"
 
 
+def _domain_org_index_path(output_csv_path: str) -> str:
+    base, ext = os.path.splitext(output_csv_path)
+    return f"{base}_domain_org_index{ext or '.csv'}"
+
+
+def _domain_reuse_role_sort_key(role: str) -> Tuple[int, str]:
+    role_key = _clean_cell(role)
+    return (DOMAIN_REUSE_ROLE_PRIORITY.get(role_key, len(DOMAIN_REUSE_ROLE_PRIORITY)), role_key)
+
+
+def _domain_reuse_source_sort_key(source_type: str) -> Tuple[int, str]:
+    source_key = _clean_cell(source_type)
+    return (_domain_reuse_source_rank(source_key), source_key)
+
+
 def _clean_bandcamp_related_artist_name(value: str) -> str:
     text = " ".join((value or "").replace("\xa0", " ").split()).strip()
     if not text:
@@ -1794,6 +1819,257 @@ def _infer_domain_org_type(domain_norm: str, profile: Optional[Dict[str, Any]]) 
     if has_label:
         return "label"
     return "unknown"
+
+
+def _domain_artist_keys_from_profile(profile: Optional[Dict[str, Any]]) -> Set[str]:
+    artist_keys: Set[str] = set()
+    if not isinstance(profile, dict):
+        return artist_keys
+    raw_keys = profile.get("_artist_keys")
+    if isinstance(raw_keys, set):
+        artist_keys.update(_clean_cell(key) for key in raw_keys if _clean_cell(key))
+    elif isinstance(raw_keys, (list, tuple)):
+        artist_keys.update(_clean_cell(key) for key in raw_keys if _clean_cell(key))
+    for artist_name in profile.get("artists_sample") or []:
+        artist_key = normalise_artist_name(_clean_cell(artist_name))
+        if artist_key:
+            artist_keys.add(artist_key)
+    return artist_keys
+
+
+def _domain_profile_artist_samples(profile: Optional[Dict[str, Any]]) -> List[str]:
+    samples: List[str] = []
+    if not isinstance(profile, dict):
+        return samples
+    seen: Set[str] = set()
+    for artist_name in profile.get("artists_sample") or []:
+        cleaned = _clean_cell(artist_name)
+        if not cleaned:
+            continue
+        artist_key = normalise_artist_name(cleaned)
+        if not artist_key or artist_key in seen:
+            continue
+        seen.add(artist_key)
+        samples.append(cleaned)
+    return samples
+
+
+def _merge_domain_profile_indexes(
+    left_index: Optional[Dict[str, Dict[str, Any]]],
+    right_index: Optional[Dict[str, Dict[str, Any]]],
+) -> Dict[str, Dict[str, Any]]:
+    merged: Dict[str, Dict[str, Any]] = {}
+    left_index = left_index or {}
+    right_index = right_index or {}
+    for domain in sorted(set(left_index) | set(right_index)):
+        domain_key = _clean_cell(domain).lower()
+        if not domain_key:
+            continue
+        combined = {
+            "contacts": [],
+            "artist_count": 0,
+            "artists_sample": [],
+            "source_types": [],
+            "first_source_url": "",
+            "seen_count": 0,
+            "contact_counts": {},
+            "org_type": "unknown",
+            DOMAIN_PROFILE_CONTACT_META_KEY: {},
+            "_artist_keys": set(),
+        }
+        contact_seen: Set[str] = set()
+        source_seen: Set[str] = set()
+        artist_sample_seen: Set[str] = set()
+        for profile in (left_index.get(domain_key), right_index.get(domain_key)):
+            if not isinstance(profile, dict):
+                continue
+            combined["seen_count"] += int(profile.get("seen_count", 0) or 0)
+            first_source_url = _clean_cell(profile.get("first_source_url", ""))
+            if first_source_url and not combined["first_source_url"]:
+                combined["first_source_url"] = first_source_url
+            for contact in _collect_same_domain_contacts(
+                domain_key,
+                profile.get("contacts") or [],
+                list((profile.get("contact_counts") or {}).keys()),
+                list(((profile.get(DOMAIN_PROFILE_CONTACT_META_KEY) or {}).keys())),
+            ):
+                if contact in contact_seen:
+                    continue
+                contact_seen.add(contact)
+                combined["contacts"].append(contact)
+            for contact, count in dict(profile.get("contact_counts") or {}).items():
+                normalized = normalize_email_value(contact)
+                if not normalized or "@" not in normalized or normalized.split("@", 1)[1] != domain_key:
+                    continue
+                combined["contact_counts"][normalized] = combined["contact_counts"].get(normalized, 0) + int(count or 0)
+            for contact, meta in dict(profile.get(DOMAIN_PROFILE_CONTACT_META_KEY) or {}).items():
+                normalized = normalize_email_value(contact)
+                if not normalized or "@" not in normalized or normalized.split("@", 1)[1] != domain_key:
+                    continue
+                current_meta = combined[DOMAIN_PROFILE_CONTACT_META_KEY].get(normalized)
+                combined[DOMAIN_PROFILE_CONTACT_META_KEY][normalized] = _merge_domain_reuse_contact_meta(current_meta, meta)
+            for source_type in profile.get("source_types") or []:
+                source_clean = _clean_cell(source_type)
+                if not source_clean or source_clean in source_seen:
+                    continue
+                source_seen.add(source_clean)
+                combined["source_types"].append(source_clean)
+            combined["_artist_keys"].update(_domain_artist_keys_from_profile(profile))
+            for artist_name in _domain_profile_artist_samples(profile):
+                artist_key = normalise_artist_name(artist_name)
+                if not artist_key or artist_key in artist_sample_seen:
+                    continue
+                artist_sample_seen.add(artist_key)
+                if len(combined["artists_sample"]) < DOMAIN_PROFILE_ARTISTS_SAMPLE_MAX:
+                    combined["artists_sample"].append(artist_name)
+        combined["artist_count"] = len(combined["_artist_keys"])
+        combined["org_type"] = _infer_domain_org_type(domain_key, combined)
+        merged[domain_key] = combined
+    return merged
+
+
+def _merge_domain_email_reuse_indexes(
+    profile_index: Optional[Dict[str, Dict[str, Any]]],
+    left_index: Optional[Dict[str, Dict[str, Any]]],
+    right_index: Optional[Dict[str, Dict[str, Any]]],
+) -> Dict[str, Dict[str, str]]:
+    merged: Dict[str, Dict[str, str]] = {}
+    profile_index = profile_index or {}
+    left_index = left_index or {}
+    right_index = right_index or {}
+    for domain in sorted(set(profile_index) | set(left_index) | set(right_index)):
+        domain_key = _clean_cell(domain).lower()
+        if not domain_key:
+            continue
+        profile = profile_index.get(domain_key)
+        left_entry = left_index.get(domain_key) or {}
+        right_entry = right_index.get(domain_key) or {}
+        best_contact, aggregate_contacts = _select_best_reusable_domain_contact(
+            domain_key,
+            _collect_same_domain_contacts(
+                domain_key,
+                left_entry.get("email", ""),
+                left_entry.get("email_all", ""),
+                right_entry.get("email", ""),
+                right_entry.get("email_all", ""),
+            ),
+            profile=profile,
+        )
+        if not best_contact:
+            continue
+        selected_meta = _merge_domain_reuse_contact_meta(
+            _domain_profile_contact_meta(profile, best_contact),
+            {},
+        )
+        for entry in (left_entry, right_entry):
+            if _clean_cell(entry.get("email", "")) == best_contact:
+                selected_meta = _merge_domain_reuse_contact_meta(selected_meta, entry)
+        entry = {
+            "email": best_contact,
+            "email_all": ";".join(aggregate_contacts),
+            "source_url": _clean_cell(selected_meta.get("source_url", "")),
+            "source_type": _clean_cell(selected_meta.get("source_type", "")),
+            "extract_method": _clean_cell(selected_meta.get("extract_method", "")) or "regex",
+            "email_type": _clean_cell(selected_meta.get("email_type", "")),
+        }
+        role = _classify_contact_role_from_email(best_contact) or _clean_cell(selected_meta.get("role", ""))
+        if role:
+            entry["role"] = role
+        merged[domain_key] = entry
+    return merged
+
+
+def _build_domain_org_export_rows(
+    domain_profile_index: Optional[Dict[str, Dict[str, Any]]],
+    domain_email_reuse_index: Optional[Dict[str, Dict[str, Any]]],
+) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    domain_profile_index = domain_profile_index or {}
+    domain_email_reuse_index = domain_email_reuse_index or {}
+    for domain in sorted(set(domain_profile_index) | set(domain_email_reuse_index)):
+        domain_key = _clean_cell(domain).lower()
+        if not domain_key:
+            continue
+        profile = domain_profile_index.get(domain_key) or {}
+        reuse_entry = domain_email_reuse_index.get(domain_key) or {}
+        contacts = _collect_same_domain_contacts(
+            domain_key,
+            profile.get("contacts") or [],
+            list((profile.get("contact_counts") or {}).keys()),
+            reuse_entry.get("email", ""),
+            reuse_entry.get("email_all", ""),
+        )
+        roles_seen: Set[str] = set()
+        for contact in contacts:
+            role = _classify_contact_role_from_email(contact)
+            if role:
+                roles_seen.add(role)
+        for meta in dict(profile.get(DOMAIN_PROFILE_CONTACT_META_KEY) or {}).values():
+            role = _clean_cell((meta or {}).get("role", ""))
+            if role:
+                roles_seen.add(role)
+        reuse_role = _clean_cell(reuse_entry.get("role", ""))
+        if reuse_role:
+            roles_seen.add(reuse_role)
+        sources_seen: Set[str] = set()
+        for source_type in profile.get("source_types") or []:
+            source_clean = _clean_cell(source_type)
+            if source_clean:
+                sources_seen.add(source_clean)
+        for meta in dict(profile.get(DOMAIN_PROFILE_CONTACT_META_KEY) or {}).values():
+            source_clean = _clean_cell((meta or {}).get("source_type", ""))
+            if source_clean:
+                sources_seen.add(source_clean)
+        reuse_source = _clean_cell(reuse_entry.get("source_type", ""))
+        if reuse_source:
+            sources_seen.add(reuse_source)
+        try:
+            artist_count = int(profile.get("artist_count", 0) or 0)
+        except Exception:
+            artist_count = 0
+        row = {
+            "domain": domain_key,
+            "org_type": _clean_cell(profile.get("org_type", "")) or "unknown",
+            "artist_count": artist_count,
+            "primary_email": normalize_email_value(reuse_entry.get("email", "")),
+            "emails": ";".join(sorted(contacts)),
+            "roles_seen": "|".join(sorted(roles_seen, key=_domain_reuse_role_sort_key)),
+            "sources_seen": "|".join(sorted(sources_seen, key=_domain_reuse_source_sort_key)),
+        }
+        if row["primary_email"] or row["emails"] or row["artist_count"] > 0 or row["sources_seen"] or row["roles_seen"]:
+            rows.append(row)
+    return rows
+
+
+def _write_domain_org_sidecar(
+    output_csv_path: str,
+    domain_profile_index: Optional[Dict[str, Dict[str, Any]]],
+    domain_email_reuse_index: Optional[Dict[str, Dict[str, Any]]],
+    *,
+    log_fn=None,
+) -> str:
+    path = _domain_org_index_path(output_csv_path)
+    rows = _build_domain_org_export_rows(domain_profile_index, domain_email_reuse_index)
+    if not rows:
+        if callable(log_fn):
+            log_fn("[DomainOrg] No exportable domain/org data; sidecar skipped.")
+        return ""
+    df = pd.DataFrame(rows, columns=list(DOMAIN_ORG_SIDECAR_COLUMNS))
+    try:
+        from pipeline_runner import _safe_atomic_write_csv
+
+        _safe_atomic_write_csv(
+            df,
+            path,
+            list(DOMAIN_ORG_SIDECAR_COLUMNS),
+            reason="domain_org_index",
+        )
+    except Exception:
+        _ensure_parent_dir(path)
+        df.to_csv(path, index=False, encoding="utf-8-sig")
+    if callable(log_fn):
+        log_fn(f"[DomainOrg] Wrote domain/org index sidecar: {path}")
+    return path
 
 
 def _row_email_summary_snapshot(df: pd.DataFrame, row_idx) -> Dict[str, str]:
@@ -5097,6 +5373,7 @@ class CrossDirectoryEnricherWorker(QThread):
         self._festival_expansion_existing_keys: Set[str] = set()
         self._festival_expansion_staged_keys: Set[str] = set()
         self._festival_expansion_raw_csv_path: str = _festival_expansion_raw_path(output_csv_path)
+        self._domain_org_sidecar_path: str = _domain_org_index_path(output_csv_path)
         self._yield_tracker = yield_tracker or EnrichmentYieldTracker()
         # Share live-search budget with SoundCloud aggregator fetches.
         try:
@@ -5134,9 +5411,18 @@ class CrossDirectoryEnricherWorker(QThread):
         self._festival_expansion_existing_keys = set()
         self._festival_expansion_staged_keys = set()
         self._festival_expansion_raw_csv_path = _festival_expansion_raw_path(self.output_csv_path)
+        output_csv_path = self.output_csv_path.strip() if isinstance(self.output_csv_path, str) else ""
+        self._domain_org_sidecar_path = ""
+        if output_csv_path and os.path.dirname(output_csv_path):
+            self._domain_org_sidecar_path = _domain_org_index_path(output_csv_path)
         try:
             if self._festival_expansion_raw_csv_path and os.path.exists(self._festival_expansion_raw_csv_path):
                 os.remove(self._festival_expansion_raw_csv_path)
+        except Exception:
+            pass
+        try:
+            if self._domain_org_sidecar_path and os.path.exists(self._domain_org_sidecar_path):
+                os.remove(self._domain_org_sidecar_path)
         except Exception:
             pass
         # Reset SoundCloud live-enrich fail-fast flag for each run.
@@ -5401,6 +5687,15 @@ class CrossDirectoryEnricherWorker(QThread):
                 self.finished.emit("")
                 return
             self.log_message.emit(f"[Enricher] Enriched CSV written to {self.output_csv_path}")
+            try:
+                _write_domain_org_sidecar(
+                    self.output_csv_path,
+                    self._domain_profile_index,
+                    self._domain_email_reuse_index,
+                    log_fn=self.log_message.emit,
+                )
+            except Exception as exc:
+                self.log_message.emit(f"[DomainOrg] failed to write sidecar safely: {exc}")
             self.finished.emit(self.output_csv_path)
         finally:
             _cleanup_enricher_facebook_driver()
@@ -11418,6 +11713,7 @@ def run_cross_directory_enrichment(
     logger=None,
     night_mode: bool = False,
     yield_tracker: Optional[EnrichmentYieldTracker] = None,
+    state_sink: Optional[Dict[str, Any]] = None,
 ) -> str:
     """
     Headless wrapper around the existing CrossDirectoryEnricherWorker for programmatic use.
@@ -11457,6 +11753,9 @@ def run_cross_directory_enrichment(
     worker.finished = type("obj", (), {"emit": lambda *args, **kwargs: None})
 
     worker._run_impl()
+    if isinstance(state_sink, dict):
+        state_sink["domain_profile_index"] = copy.deepcopy(getattr(worker, "_domain_profile_index", {}) or {})
+        state_sink["domain_email_reuse_index"] = copy.deepcopy(getattr(worker, "_domain_email_reuse_index", {}) or {})
     return output_csv_path
 
 
