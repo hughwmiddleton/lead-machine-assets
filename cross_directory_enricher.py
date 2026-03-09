@@ -81,6 +81,80 @@ from night_mode_fb import (
     _normalise_fb_url,
 )
 
+
+ENRICHMENT_YIELD_SOURCE_ALIASES = {
+    "website_enrich": "website",
+    "website": "website",
+    "facebook_enrich": "facebook",
+    "facebook": "facebook",
+    "domain_reuse": "domain_reuse",
+}
+
+
+@dataclass
+class EnrichmentYieldTracker:
+    counts: Dict[str, int] = field(default_factory=dict)
+    _seen_events: Set[Tuple[str, str]] = field(default_factory=set)
+
+    @staticmethod
+    def _emails(row_like: Any) -> Set[str]:
+        if row_like is None or not hasattr(row_like, "get"):
+            return set()
+        try:
+            from pipeline_runner import normalize_emails as _normalize_emails
+        except Exception:
+            _normalize_emails = None
+
+        def _fallback_normalize(value: Any) -> List[str]:
+            text = "" if value is None else str(value)
+            parts = re.split(r"[\s,;]+", text)
+            normalized: List[str] = []
+            seen: Set[str] = set()
+            for part in parts:
+                email = part.strip().lower()
+                if not email or "@" not in email or "." not in email.split("@", 1)[-1]:
+                    continue
+                if email in seen:
+                    continue
+                seen.add(email)
+                normalized.append(email)
+            return normalized
+
+        normalize_fn = _normalize_emails or _fallback_normalize
+        emails: Set[str] = set()
+        for column in ("Email", "Email_All"):
+            try:
+                raw_value = row_like.get(column, "")
+            except Exception:
+                raw_value = ""
+            for email in normalize_fn(raw_value):
+                emails.add(email)
+        return emails
+
+    @staticmethod
+    def _canonical_source(source_name: Any) -> str:
+        source = _clean_cell(source_name).lower()
+        if not source:
+            return ""
+        return ENRICHMENT_YIELD_SOURCE_ALIASES.get(source, source)
+
+    def record_transition(self, row_idx: Any, before_row: Any, after_row: Any, source_name: Any) -> bool:
+        source = self._canonical_source(source_name)
+        if not source:
+            return False
+        if self._emails(before_row):
+            return False
+        if not self._emails(after_row):
+            return False
+
+        event_key = (source, str(row_idx))
+        if event_key in self._seen_events:
+            return False
+
+        self._seen_events.add(event_key)
+        self.counts[source] = self.counts.get(source, 0) + 1
+        return True
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -4694,6 +4768,7 @@ class CrossDirectoryEnricherWorker(QThread):
         lastfm_csv_path: str = "",
         enable_live_search: bool = True,
         max_live_searches: int = LIVE_SEARCH_MAX_ATTEMPTS,
+        yield_tracker: Optional[EnrichmentYieldTracker] = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -4781,6 +4856,7 @@ class CrossDirectoryEnricherWorker(QThread):
         self._festival_expansion_existing_keys: Set[str] = set()
         self._festival_expansion_staged_keys: Set[str] = set()
         self._festival_expansion_raw_csv_path: str = _festival_expansion_raw_path(output_csv_path)
+        self._yield_tracker = yield_tracker or EnrichmentYieldTracker()
         # Share live-search budget with SoundCloud aggregator fetches.
         try:
             def _agg_budget_check():
@@ -5086,6 +5162,21 @@ class CrossDirectoryEnricherWorker(QThread):
         finally:
             _cleanup_enricher_facebook_driver()
 
+    def _record_enrichment_yield(
+        self,
+        row_idx: Any,
+        before_row: Any,
+        after_row: Any,
+        source_name: Any,
+    ) -> None:
+        tracker = getattr(self, "_yield_tracker", None)
+        if tracker is None:
+            return
+        try:
+            tracker.record_transition(row_idx, before_row, after_row, source_name)
+        except Exception:
+            pass
+
     def _init_row_enrichment_state(self) -> None:
         self._row_enrichment_state = {
             "soundcloud": "pending",
@@ -5207,6 +5298,12 @@ class CrossDirectoryEnricherWorker(QThread):
             df.at[row_idx, "Email_Type"] = entry.get("email_type", "")
         if callable(record_email_summary_row_change):
             record_email_summary_row_change(email_before, _row_email_summary_snapshot(df, row_idx))
+        self._record_enrichment_yield(
+            row_idx,
+            email_before,
+            _row_email_summary_snapshot(df, row_idx),
+            "domain_reuse",
+        )
         self._domain_email_reuse_rows.add(row_idx)
         self._domain_email_reuse_count += 1
         return True
@@ -5712,6 +5809,12 @@ class CrossDirectoryEnricherWorker(QThread):
             )
         except Exception:
             pass
+        self._record_enrichment_yield(
+            row_idx,
+            email_before,
+            _row_email_summary_snapshot(seed_df, row_idx),
+            "instagram",
+        )
         self._index_domain_email_reuse_from_row(
             seed_df,
             row_idx,
@@ -5914,6 +6017,12 @@ class CrossDirectoryEnricherWorker(QThread):
             )
         except Exception:
             seed_df.at[row_idx, "Email_All"] = ";".join(normalized_emails)
+        self._record_enrichment_yield(
+            row_idx,
+            email_before,
+            _row_email_summary_snapshot(seed_df, row_idx),
+            "website_enrich",
+        )
         if "Email_Type" in seed_df.columns and not cell_to_str(seed_df.at[row_idx, "Email_Type"]):
             seed_df.at[row_idx, "Email_Type"] = "website_enrich"
         if "Email_Source_URL" in seed_df.columns and selected_source_url and not cell_to_str(seed_df.at[row_idx, "Email_Source_URL"]):
@@ -6085,6 +6194,12 @@ class CrossDirectoryEnricherWorker(QThread):
                                 )
                             except Exception:
                                 pass
+                            self._record_enrichment_yield(
+                                row_idx,
+                                email_before,
+                                _row_email_summary_snapshot(seed_df, row_idx),
+                                "facebook_enrich",
+                            )
                             self._index_domain_email_reuse_from_row(
                                 seed_df,
                                 row_idx,
@@ -7953,6 +8068,12 @@ class CrossDirectoryEnricherWorker(QThread):
             )
         except Exception:
             pass
+        self._record_enrichment_yield(
+            row_idx,
+            email_before,
+            _row_email_summary_snapshot(df, row_idx),
+            payload.source_dir,
+        )
         if new_emails and self is not None and hasattr(self, "_index_domain_email_reuse_from_row"):
             self._index_domain_email_reuse_from_row(
                 df,
@@ -10824,6 +10945,7 @@ def run_cross_directory_enrichment(
     max_live_searches: int = LIVE_SEARCH_MAX_ATTEMPTS,
     logger=None,
     night_mode: bool = False,
+    yield_tracker: Optional[EnrichmentYieldTracker] = None,
 ) -> str:
     """
     Headless wrapper around the existing CrossDirectoryEnricherWorker for programmatic use.
@@ -10853,6 +10975,7 @@ def run_cross_directory_enrichment(
         lastfm_csv_path=lastfm_csv_path,
         enable_live_search=enable_live_search,
         max_live_searches=max_live_searches,
+        yield_tracker=yield_tracker,
     )
     worker.night_mode = bool(night_mode)
 

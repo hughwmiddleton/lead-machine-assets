@@ -42,6 +42,17 @@ _LOGGER = logging.getLogger(__name__)
 EMAIL_PRIORITY_COLS: Sequence[str] = ("Email", "Email_All", "Directory_Email", "Unearthed_Email")
 
 _EMAIL_SUMMARY = {"emails_found": 0, "pattern_emails": 0}
+ENRICHMENT_YIELD_SOURCE_ORDER: Sequence[str] = (
+    "website",
+    "facebook",
+    "soundcloud",
+    "lastfm",
+    "domain_reuse",
+    "bandcamp",
+    "bandcamp_directory",
+    "unearthed",
+    "instagram",
+)
 
 ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _UNEARTHED_TRACK_URL_COLUMNS = (
@@ -300,6 +311,31 @@ def record_email_summary_row_change(before_row: Any, after_row: Any) -> int:
     delta = len(after_emails - before_emails)
     _bump_email_summary("emails_found", delta)
     return delta
+
+
+def _ordered_enrichment_yield_items(counts: Dict[str, int]) -> List[Tuple[str, int]]:
+    ordered: List[Tuple[str, int]] = []
+    seen: Set[str] = set()
+    for source in ENRICHMENT_YIELD_SOURCE_ORDER:
+        count = int(counts.get(source, 0) or 0)
+        if count <= 0:
+            continue
+        ordered.append((source, count))
+        seen.add(source)
+    for source in sorted(counts):
+        if source in seen:
+            continue
+        count = int(counts.get(source, 0) or 0)
+        if count <= 0:
+            continue
+        ordered.append((source, count))
+    return ordered
+
+
+def emit_enrichment_yield_summary(logger: LoggerFn, counts: Dict[str, int]) -> None:
+    _safe_log(logger, "[Enrichment Yield]")
+    for source, count in _ordered_enrichment_yield_items(counts):
+        _safe_log(logger, f"{source}={count}")
 
 
 def _safe_count_rows(csv_path: Union[str, Path]) -> int:
@@ -1860,6 +1896,7 @@ def run_master_enrichment(
     try:
         bandcamp_path_final = bandcamp_csv_path or ""
         run_dir = Path(output_csv_path).resolve().parent
+        yield_tracker = cross_directory_enricher.EnrichmentYieldTracker()
         if bandcamp_path_final:
             _safe_log(logger, f"[Master] Bandcamp directory CSV -> {bandcamp_path_final} (explicit)")
         else:
@@ -1943,6 +1980,7 @@ def run_master_enrichment(
             max_live_searches=max_live,
             logger=logger,
             night_mode=night_mode,
+            yield_tracker=yield_tracker,
         )
         try:
             expansion_raw_csv_path = cross_directory_enricher._festival_expansion_raw_path(output_csv_path)
@@ -1974,6 +2012,7 @@ def run_master_enrichment(
                         max_live_searches=max_live,
                         logger=logger,
                         night_mode=night_mode,
+                        yield_tracker=yield_tracker,
                     )
                     _merge_festival_expansion_output(
                         output_csv_path,
@@ -1983,6 +2022,7 @@ def run_master_enrichment(
                     )
             except Exception as exc:
                 _safe_log(logger, f"[FestivalExpansion] second pass skipped after error: {exc}")
+        emit_enrichment_yield_summary(logger, dict(getattr(yield_tracker, "counts", {}) or {}))
     except Exception as exc:
         _safe_log(logger, f"[Master Enrich] Enricher failed safely: {exc}")
         shutil.copyfile(seed_csv_path, output_csv_path)
