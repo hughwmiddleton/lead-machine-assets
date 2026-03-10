@@ -1780,40 +1780,55 @@ def run_master_enrichment(
 
     try:
         bandcamp_path_final = bandcamp_csv_path or ""
+        soundcloud_path_final = ""
+        lastfm_path_final = ""
+        unearthed_path_final = ""
         run_dir = Path(output_csv_path).resolve().parent
         yield_tracker = cross_directory_enricher.EnrichmentYieldTracker()
-        if bandcamp_path_final:
-            _safe_log(logger, f"[Master] Bandcamp directory CSV -> {bandcamp_path_final} (explicit)")
-        else:
-            try:
-                BC_DETECT_RETRIES = 6
-                BC_DETECT_SLEEP_S = 1.0
+        try:
+            DETECT_RETRIES = 6
+            DETECT_SLEEP_S = 1.0
 
-                def _select_best(paths: List[Path]) -> Tuple[Optional[Path], int]:
-                    best = None
-                    best_rows_local = -1
-                    for candidate in sorted(paths):
+            def _select_best(paths: List[Path]) -> Tuple[Optional[Path], int]:
+                best = None
+                best_rows_local = -1
+                for candidate in sorted(paths):
+                    rows_local = -1
+                    try:
+                        with candidate.open("r", encoding="utf-8", errors="ignore") as handle:
+                            line_count = sum(1 for _ in handle)
+                        rows_local = max(0, line_count - 1)
+                    except Exception:
                         rows_local = -1
-                        try:
-                            with candidate.open("r", encoding="utf-8", errors="ignore") as handle:
-                                line_count = sum(1 for _ in handle)
-                            rows_local = max(0, line_count - 1)
-                        except Exception:
-                            rows_local = -1
-                        if best is None or rows_local > best_rows_local:
-                            best_rows_local = rows_local
-                            best = candidate
-                    return best, best_rows_local
+                    if best is None or rows_local > best_rows_local:
+                        best_rows_local = rows_local
+                        best = candidate
+                return best, best_rows_local
+
+            def _detect_directory_csv(
+                directory_name: str,
+                *,
+                label: str,
+                explicit_path: str = "",
+                enriched_filenames: Optional[Tuple[str, ...]] = None,
+            ) -> str:
+                if explicit_path:
+                    _safe_log(logger, f"[Master] {label} directory CSV -> {explicit_path} (explicit)")
+                    return explicit_path
 
                 chosen_path: Optional[Path] = None
                 selected_kind: Optional[str] = None
                 best_rows: int = -1
                 attempts_used: int = 0
+                enriched_names = enriched_filenames or ()
+                job_glob = f"job_{directory_name}_*"
 
-                for attempt in range(BC_DETECT_RETRIES):
+                for attempt in range(DETECT_RETRIES):
                     attempts_used = attempt + 1
-                    enriched = list(run_dir.glob("job_bandcamp_*/bandcamp_enriched.csv"))
-                    raw = list(run_dir.glob("job_bandcamp_*/raw.csv"))
+                    enriched: List[Path] = []
+                    for filename in enriched_names:
+                        enriched.extend(run_dir.glob(f"{job_glob}/{filename}"))
+                    raw = list(run_dir.glob(f"{job_glob}/raw.csv"))
 
                     if enriched:
                         chosen_path, best_rows = _select_best(enriched)
@@ -1828,22 +1843,49 @@ def run_master_enrichment(
 
                     if chosen_path is not None:
                         break
-                    if attempt < BC_DETECT_RETRIES - 1:
-                        time.sleep(BC_DETECT_SLEEP_S)
+                    if attempt < DETECT_RETRIES - 1:
+                        time.sleep(DETECT_SLEEP_S)
 
                 if chosen_path is not None:
-                    bandcamp_path_final = chosen_path.as_posix()
+                    detected_path = chosen_path.as_posix()
                     rows_text = best_rows if best_rows >= 0 else "?"
                     attempts_text = f", attempts={attempts_used}" if attempts_used > 1 else ""
                     _safe_log(
                         logger,
-                        f"[Master] Bandcamp directory CSV -> {bandcamp_path_final} (rows={rows_text}, kind={selected_kind}{attempts_text})",
+                        f"[Master] {label} directory CSV -> {detected_path} (rows={rows_text}, kind={selected_kind}{attempts_text})",
                     )
-                else:
-                    _safe_log(logger, f"[Master] Bandcamp directory CSV -> (none) in {run_dir} (attempts={BC_DETECT_RETRIES})")
-            except Exception as exc:
-                _safe_log(logger, f"[Master] Bandcamp directory CSV detection failed: {type(exc).__name__}: {exc}")
+                    return detected_path
+
+                _safe_log(logger, f"[Master] {label} directory CSV -> (none) in {run_dir} (attempts={DETECT_RETRIES})")
+                return ""
+
+            bandcamp_path_final = _detect_directory_csv(
+                "bandcamp",
+                label="Bandcamp",
+                explicit_path=bandcamp_path_final,
+                enriched_filenames=("bandcamp_enriched.csv",),
+            )
+            soundcloud_path_final = _detect_directory_csv(
+                "soundcloud",
+                label="SoundCloud",
+                enriched_filenames=("soundcloud_enriched.csv",),
+            )
+            lastfm_path_final = _detect_directory_csv(
+                "lastfm",
+                label="Last.fm",
+                enriched_filenames=("lastfm_enriched.csv",),
+            )
+            unearthed_path_final = _detect_directory_csv(
+                "unearthed",
+                label="Unearthed",
+                enriched_filenames=("unearthed_enriched.csv",),
+            )
+        except Exception as exc:
+            _safe_log(logger, f"[Master] directory CSV detection failed: {type(exc).__name__}: {exc}")
         _safe_log(logger, f"[Master] Passing bandcamp_csv_path={bandcamp_path_final or ''}")
+        _safe_log(logger, f"[Master] Passing soundcloud_csv_path={soundcloud_path_final or ''}")
+        _safe_log(logger, f"[Master] Passing lastfm_csv_path={lastfm_path_final or ''}")
+        _safe_log(logger, f"[Master] Passing unearthed_csv_path={unearthed_path_final or ''}")
 
         max_live = getattr(cross_directory_enricher, "LIVE_SEARCH_MAX_ATTEMPTS", 50)
         if max_live_searches is not None:
@@ -1859,9 +1901,9 @@ def run_master_enrichment(
             seed_csv_path,
             output_csv_path,
             bandcamp_csv_path=bandcamp_path_final or "",
-            soundcloud_csv_path="",
-            unearthed_csv_path="",
-            lastfm_csv_path="",
+            soundcloud_csv_path=soundcloud_path_final or "",
+            unearthed_csv_path=unearthed_path_final or "",
+            lastfm_csv_path=lastfm_path_final or "",
             enable_live_search=enable_live_search,
             max_live_searches=max_live,
             logger=logger,
@@ -1893,9 +1935,9 @@ def run_master_enrichment(
                         expansion_raw_csv_path,
                         expansion_output_csv_path,
                         bandcamp_csv_path=bandcamp_path_final or "",
-                        soundcloud_csv_path="",
-                        unearthed_csv_path="",
-                        lastfm_csv_path="",
+                        soundcloud_csv_path=soundcloud_path_final or "",
+                        unearthed_csv_path=unearthed_path_final or "",
+                        lastfm_csv_path=lastfm_path_final or "",
                         enable_live_search=enable_live_search,
                         max_live_searches=max_live,
                         logger=logger,

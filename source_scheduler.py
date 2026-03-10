@@ -230,6 +230,42 @@ def promote_facebook_url(row: MutableMapping[str, Any], *, set_row: bool = True)
     return url or None
 
 
+def _row_get_value(row: Any, keys: Sequence[str]) -> Any:
+    if row is None:
+        return None
+    for key in keys:
+        try:
+            if isinstance(row, dict):
+                if key in row:
+                    return row.get(key)
+                continue
+            if hasattr(row, "get"):
+                val = row.get(key, None)  # type: ignore[arg-type]
+                if val is not None:
+                    return val
+                continue
+            if hasattr(row, key):
+                return getattr(row, key)
+        except Exception:
+            continue
+    return None
+
+
+def _row_has_text(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    return bool(value)
+
+
+def is_spotify_origin_row(row: Any) -> bool:
+    return bool(
+        _row_has_text(_row_get_value(row, ("Spotify_URL", "Spotify URL")))
+        or _row_has_text(_row_get_value(row, ("Spotify_Artist_ID", "Spotify Artist ID")))
+    )
+
+
 def _row_source_opportunity(row: Any, source_name: str) -> bool:
     """Return True when a source has a realistic opportunity to enrich the row.
 
@@ -237,58 +273,27 @@ def _row_source_opportunity(row: Any, source_name: str) -> bool:
     objects should not raise. When we cannot inspect the row, we allow the
     attempt so existing behaviour is preserved.
     """
-
-    def _get_value(keys: Sequence[str]) -> Any:
-        if row is None:
-            return None
-        for key in keys:
-            try:
-                if isinstance(row, dict):
-                    if key in row:
-                        return row.get(key)
-                    continue
-                if hasattr(row, "get"):
-                    # pandas Series provides .get
-                    val = row.get(key, None)  # type: ignore[arg-type]
-                    if val is not None:
-                        return val
-                    continue
-                if hasattr(row, key):
-                    return getattr(row, key)
-            except Exception:
-                continue
-        return None
-
-    def _has_text(value: Any) -> bool:
-        if value is None:
-            return False
-        if isinstance(value, str):
-            return bool(value.strip())
-        return bool(value)
-
     name = (source_name or "").strip().upper()
-    artist_present = _has_text(_get_value(["artist", "Artist Name", "artist_name"]))
+    artist_present = _row_has_text(_row_get_value(row, ["artist", "Artist Name", "artist_name"]))
 
     if name in {"SC", "SOUNDCLOUD"}:
-        sc_url = _get_value(
-            ["soundcloud_url", "SoundCloud Link", "Soundcloud Link", "soundcloud", "SC_URL"]
-        )
-        return artist_present and not _has_text(sc_url)
+        sc_url = _row_get_value(row, ["soundcloud_url", "SoundCloud Link", "Soundcloud Link", "soundcloud", "SC_URL"])
+        return artist_present and not _row_has_text(sc_url)
 
     if name in {"LF", "LASTFM", "LAST.FM"}:
-        lf_url = _get_value(["lastfm_url", "LastFM URL", "Last FM URL", "LastFM Link", "lastfm"])
-        return artist_present and not _has_text(lf_url)
+        lf_url = _row_get_value(row, ["lastfm_url", "LastFM URL", "Last FM URL", "LastFM Link", "lastfm"])
+        return artist_present and not _row_has_text(lf_url)
 
     if name in {"FB", "FACEBOOK"}:
-        fb_url = _get_value(["facebook_url", "Facebook_URL", "Facebook URL", "FB_URL", "facebook"])
-        if not _has_text(fb_url):
+        fb_url = _row_get_value(row, ["facebook_url", "Facebook_URL", "Facebook URL", "FB_URL", "facebook"])
+        if not _row_has_text(fb_url):
             try:
                 fb_url = promote_facebook_url(row, set_row=False)
             except Exception:
                 fb_url = fb_url
         usable_fb_url = canonicalize_facebook_url(fb_url)
-        fb_discovery_attempted = _has_text(
-            _get_value(
+        fb_discovery_attempted = _row_has_text(
+            _row_get_value(row, 
                 [
                     "__fb_discovery_attempted_this_run",
                     "__fb_discovery_attempted",
@@ -296,12 +301,12 @@ def _row_source_opportunity(row: Any, source_name: str) -> bool:
                 ]
             )
         )
-        email = _get_value(["Email", "Email_All", "email"])
-        if _has_text(email):
+        email = _row_get_value(row, ["Email", "Email_All", "email"])
+        if _row_has_text(email) and not is_spotify_origin_row(row):
             return False
         if not usable_fb_url and fb_discovery_attempted:
             return False
-        return bool(_has_text(fb_url) or artist_present)
+        return bool(_row_has_text(fb_url) or artist_present)
 
     # Unknown sources fall back to existing behaviour.
     return True
@@ -681,7 +686,11 @@ class SourceDiversityScheduler:
                 if result.attempted and self._short_circuit_fn:
                     try:
                         latest_row = spec.row_getter(row_idx) if spec.row_getter else None
-                        if latest_row is not None and self._short_circuit_fn(latest_row):
+                        if (
+                            latest_row is not None
+                            and not is_spotify_origin_row(latest_row)
+                            and self._short_circuit_fn(latest_row)
+                        ):
                             self._completed_rows.add(row_idx)
                             self._emit(f"[Scheduler] row {display_row} email found; short-circuiting remaining sources")
                     except Exception:

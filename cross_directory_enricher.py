@@ -32,6 +32,7 @@ from source_scheduler import (
     TimedRetry,
     canonicalize_facebook_url,
     ensure_canonical_facebook_url,
+    is_spotify_origin_row,
     promote_facebook_url,
 )
 from html_fetcher import fetch_html, _detect_soft_block
@@ -5624,7 +5625,7 @@ class CrossDirectoryEnricherWorker(QThread):
                     if not ctx:
                         self._update_progress(position, total)
                         continue
-                    if self._maybe_apply_domain_email_reuse(seed_df, row_idx, ctx):
+                    if self._should_short_circuit_after_domain_reuse(seed_df, row_idx, ctx):
                         self._update_progress(position, total)
                         continue
                     self._init_row_enrichment_state()
@@ -6340,6 +6341,8 @@ class CrossDirectoryEnricherWorker(QThread):
             return None
         track_key = _extract_seed_track_key(row)
         seed_song_title = _extract_seed_track_text(row)
+        spotify_url = _clean_cell(row.get("Spotify_URL"))
+        spotify_origin = bool(is_spotify_origin_row(row))
         spotify_domain = extract_domain(_clean_cell(row.get("Spotify_Website_URL", "")))
         seed_links_by_source = _extract_seed_links_by_source(row)
         signal_snapshot = self._build_row_signal_snapshot(
@@ -6353,8 +6356,10 @@ class CrossDirectoryEnricherWorker(QThread):
             "track": track_key,
             "genre": _coerce_directory_value(row.get("Primary Genre")) if "Primary Genre" in row else "",
             "song_title": seed_song_title,
+            "spotify_url": spotify_url,
             "spotify_domain": spotify_domain,
             "spotify_id": _clean_cell(row.get("Spotify_Artist_ID")),
+            "spotify_origin": spotify_origin,
             "seed_lastfm_urls": seed_links_by_source.get("lastfm", set()),
             "signal_snapshot": signal_snapshot,
         }
@@ -6363,14 +6368,46 @@ class CrossDirectoryEnricherWorker(QThread):
             "artist": artist,
             "key": key,
             "track_key": track_key,
+            "spotify_url": spotify_url,
             "spotify_domain": spotify_domain,
             "spotify_id": spotify_id,
+            "spotify_origin": spotify_origin,
             "seed_links_by_source": seed_links_by_source,
             "had_email_from_seed": had_email_from_seed,
             "position": position,
             "total": total,
             "signal_snapshot": signal_snapshot,
         }
+
+    def _row_is_spotify_origin(self, row: Optional[Any] = None, ctx: Optional[Dict[str, Any]] = None) -> bool:
+        if ctx is not None and "spotify_origin" in ctx:
+            return bool(ctx.get("spotify_origin"))
+        if row is not None:
+            try:
+                return bool(is_spotify_origin_row(row))
+            except Exception:
+                return False
+        return False
+
+    def _should_short_circuit_after_domain_reuse(
+        self,
+        df: pd.DataFrame,
+        row_idx,
+        ctx: Optional[Dict[str, Any]],
+    ) -> bool:
+        spotify_origin = False
+        try:
+            if df is not None and row_idx in df.index:
+                spotify_origin = self._row_is_spotify_origin(df.loc[row_idx], ctx)
+            else:
+                spotify_origin = self._row_is_spotify_origin(None, ctx)
+        except Exception:
+            spotify_origin = self._row_is_spotify_origin(None, ctx)
+        if row_idx in self._domain_email_reuse_rows:
+            return not spotify_origin
+        if self._maybe_apply_domain_email_reuse(df, row_idx, ctx):
+            return not spotify_origin
+        return False
 
     def _enrich_row_directories(self, seed_df, row_idx, directory_indexes, priority, ctx):
         """Directory matching for a single row. Returns True if any enrichment applied."""
@@ -6596,7 +6633,8 @@ class CrossDirectoryEnricherWorker(QThread):
         except Exception:
             _normalize_emails = lambda value: [normalize_email_value(value)] if normalize_email_value(value) else []
         row = seed_df.loc[row_idx]
-        if _row_has_email(row):
+        spotify_origin = self._row_is_spotify_origin(row, ctx)
+        if _row_has_email(row) and not spotify_origin:
             self._set_platform_state("website", "skipped")
             return False
 
@@ -6811,6 +6849,7 @@ class CrossDirectoryEnricherWorker(QThread):
         position = ctx["position"]
         total = ctx["total"]
         had_email_from_seed = ctx.get("had_email_from_seed") or ctx.get("had_fb_or_email_from_seed")
+        spotify_origin = self._row_is_spotify_origin(seed_df.loc[row_idx], ctx)
         email_before = _row_email_summary_snapshot(seed_df, row_idx)
         fb_attempted = False
         fb_matched = False
@@ -6819,7 +6858,7 @@ class CrossDirectoryEnricherWorker(QThread):
         else:
             fb_attempted = True
             has_email_after_directories = _row_has_email(seed_df.loc[row_idx])
-            if had_email_from_seed or has_email_after_directories:
+            if (had_email_from_seed or has_email_after_directories) and not spotify_origin:
                 self.log_message.emit(
                     f"[FB Enrich] Skipping Facebook enrichment for '{artist}' (already has email from seed or directory enrichment)."
                 )
@@ -7104,7 +7143,7 @@ class CrossDirectoryEnricherWorker(QThread):
             ctx = self._build_row_context(seed_df, row_idx, position, total)
             if not ctx:
                 continue
-            if row_idx in self._domain_email_reuse_rows or self._maybe_apply_domain_email_reuse(seed_df, row_idx, ctx):
+            if self._should_short_circuit_after_domain_reuse(seed_df, row_idx, ctx):
                 self._set_platform_state("soundcloud", "skipped")
                 continue
             if self._sc_in_live_cooldown():
@@ -7295,7 +7334,7 @@ class CrossDirectoryEnricherWorker(QThread):
                 ctx = self._build_row_context(seed_df, row_idx, position_by_row[row_idx], total)
                 if not ctx:
                     return SourceResult()
-                if row_idx in self._domain_email_reuse_rows or self._maybe_apply_domain_email_reuse(seed_df, row_idx, ctx):
+                if self._should_short_circuit_after_domain_reuse(seed_df, row_idx, ctx):
                     return SourceResult()
                 self._init_row_enrichment_state()
                 sc_enriched, sc_retry_later = self._enrich_row_sc_live(seed_df, row_idx, ctx)
@@ -7333,7 +7372,7 @@ class CrossDirectoryEnricherWorker(QThread):
                 ctx = self._build_row_context(seed_df, row_idx, position_by_row[row_idx], total)
                 if not ctx:
                     return SourceResult()
-                if row_idx in self._domain_email_reuse_rows or self._maybe_apply_domain_email_reuse(seed_df, row_idx, ctx):
+                if self._should_short_circuit_after_domain_reuse(seed_df, row_idx, ctx):
                     return SourceResult()
                 self._init_row_enrichment_state()
                 if self.max_live_searches > 0 and self.live_search_attempts >= self.max_live_searches:
@@ -7386,7 +7425,7 @@ class CrossDirectoryEnricherWorker(QThread):
                 ctx = self._build_row_context(seed_df, row_idx, position_by_row[row_idx], total)
                 if not ctx:
                     return SourceResult()
-                if row_idx in self._domain_email_reuse_rows or self._maybe_apply_domain_email_reuse(seed_df, row_idx, ctx):
+                if self._should_short_circuit_after_domain_reuse(seed_df, row_idx, ctx):
                     return SourceResult()
                 self._init_row_enrichment_state()
                 fb_enriched = self._enrich_row_facebook(seed_df, row_idx, fb_driver, ctx)
@@ -7456,7 +7495,7 @@ class CrossDirectoryEnricherWorker(QThread):
             if not ctx:
                 self._update_progress(position, total)
                 continue
-            if self._maybe_apply_domain_email_reuse(seed_df, row_idx, ctx):
+            if self._should_short_circuit_after_domain_reuse(seed_df, row_idx, ctx):
                 self._update_progress(position, total)
                 continue
             self._init_row_enrichment_state()
@@ -7482,7 +7521,7 @@ class CrossDirectoryEnricherWorker(QThread):
             if not ctx:
                 continue
             processed_rows += 1
-            if row_idx in self._domain_email_reuse_rows or self._maybe_apply_domain_email_reuse(seed_df, row_idx, ctx):
+            if self._should_short_circuit_after_domain_reuse(seed_df, row_idx, ctx):
                 self._set_platform_state("soundcloud", "skipped")
                 continue
             if self._sc_in_live_cooldown():
@@ -7552,7 +7591,7 @@ class CrossDirectoryEnricherWorker(QThread):
             ctx = self._build_row_context(seed_df, row_idx, position, total)
             if not ctx:
                 continue
-            if row_idx in self._domain_email_reuse_rows or self._maybe_apply_domain_email_reuse(seed_df, row_idx, ctx):
+            if self._should_short_circuit_after_domain_reuse(seed_df, row_idx, ctx):
                 self._set_platform_state("instagram", "skipped")
                 continue
             self._init_row_enrichment_state()
@@ -7563,7 +7602,7 @@ class CrossDirectoryEnricherWorker(QThread):
             ctx = self._build_row_context(seed_df, row_idx, position, total)
             if not ctx:
                 continue
-            if row_idx in self._domain_email_reuse_rows or self._maybe_apply_domain_email_reuse(seed_df, row_idx, ctx):
+            if self._should_short_circuit_after_domain_reuse(seed_df, row_idx, ctx):
                 self._set_platform_state("website", "skipped")
                 continue
             self._init_row_enrichment_state()
@@ -7584,7 +7623,7 @@ class CrossDirectoryEnricherWorker(QThread):
                 if not ctx:
                     continue
                 processed_rows += 1
-                if row_idx in self._domain_email_reuse_rows or self._maybe_apply_domain_email_reuse(seed_df, row_idx, ctx):
+                if self._should_short_circuit_after_domain_reuse(seed_df, row_idx, ctx):
                     self._set_platform_state("lastfm", "skipped")
                     continue
                 self._init_row_enrichment_state()
@@ -7653,7 +7692,7 @@ class CrossDirectoryEnricherWorker(QThread):
             if not ctx:
                 continue
             processed_rows += 1
-            if row_idx in self._domain_email_reuse_rows or self._maybe_apply_domain_email_reuse(seed_df, row_idx, ctx):
+            if self._should_short_circuit_after_domain_reuse(seed_df, row_idx, ctx):
                 self._set_platform_state("facebook", "skipped")
                 skipped_count += 1
                 self._update_progress(position, total)
