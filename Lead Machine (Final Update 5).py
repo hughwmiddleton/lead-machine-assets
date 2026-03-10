@@ -145,6 +145,7 @@ import pipeline_runner
 from lead_vault import EXPORT_PRESETS, WOODPECKER_EXPORT_PRESET, export_with_preset
 from lead_vault.merge import merge_csv_into_master, preview_csv_import
 from lead_vault.schema import get_canonical_master_schema, get_default_master_csv_path
+from lead_vault.stats import summarize_master_dataset
 
 cross_directory_enricher = None
 try:
@@ -9667,6 +9668,21 @@ class LeadVaultTab(QtWidgets.QWidget):
         master_row.addWidget(self.master_path_label)
         layout.addLayout(master_row)
 
+        lead_vault_summary_label = QtWidgets.QLabel("Lead Vault Summary")
+        layout.addWidget(lead_vault_summary_label)
+
+        lead_vault_summary_controls = QtWidgets.QHBoxLayout()
+        self.refresh_summary_button = QtWidgets.QPushButton("Refresh Summary")
+        self.refresh_summary_button.clicked.connect(self._refresh_master_summary)
+        lead_vault_summary_controls.addWidget(self.refresh_summary_button)
+        lead_vault_summary_controls.addStretch()
+        layout.addLayout(lead_vault_summary_controls)
+
+        self.master_summary_view = QtWidgets.QPlainTextEdit()
+        self.master_summary_view.setReadOnly(True)
+        self.master_summary_view.setPlaceholderText("Press Refresh Summary to inspect the current master dataset.")
+        layout.addWidget(self.master_summary_view)
+
         detected_label = QtWidgets.QLabel("Detected Headers")
         layout.addWidget(detected_label)
         self.detected_headers_view = QtWidgets.QPlainTextEdit()
@@ -9788,6 +9804,15 @@ class LeadVaultTab(QtWidgets.QWidget):
 
     def _selected_export_preset(self) -> dict:
         return self.preset_selector.currentData() or WOODPECKER_EXPORT_PRESET
+
+    def _refresh_master_summary(self):
+        master_csv_path = self.master_path_label.text().strip()
+        try:
+            result = summarize_master_dataset(master_csv_path)
+        except Exception as exc:
+            self.master_summary_view.setPlainText(f"Lead Vault summary unavailable:\n{exc}")
+            return
+        self.master_summary_view.setPlainText(self._format_master_summary(result))
 
     def _start_preview(self):
         if self.worker and self.worker.isRunning():
@@ -9942,6 +9967,21 @@ class LeadVaultTab(QtWidgets.QWidget):
             lines.append("")
             lines.append("Warnings:")
             lines.extend(str(item) for item in warnings)
+        return "\n".join(lines)
+
+    def _format_master_summary(self, result: dict) -> str:
+        lines = [
+            f"Total leads: {result.get('total_rows', 0)}",
+            f"Leads with email: {result.get('rows_with_email', 0)}",
+            f"Needs review: {result.get('needs_review', 0)}",
+            "",
+            "Sources",
+        ]
+        sources = result.get("sources", {}) or {}
+        if sources:
+            lines.extend(f"{source_name}: {count}" for source_name, count in sources.items())
+        else:
+            lines.append("No sources found.")
         return "\n".join(lines)
 
     def _generate_export(self):

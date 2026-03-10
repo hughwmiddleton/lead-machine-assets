@@ -199,6 +199,59 @@ def test_generate_export_uses_master_csv_and_shows_summary(qapp, monkeypatch, tm
     assert "Rows exported: 1" in info_calls[0]
 
 
+def test_refresh_summary_updates_read_only_panel(qapp, monkeypatch, tmp_path):
+    module = _load_legacy_module()
+    master_path = tmp_path / "master.csv"
+
+    monkeypatch.setattr(module, "get_default_master_csv_path", lambda: master_path)
+    monkeypatch.setattr(
+        module,
+        "summarize_master_dataset",
+        lambda path: {
+            "total_rows": 4,
+            "rows_with_email": 2,
+            "needs_review": 1,
+            "sources": {
+                "bandcamp": 1,
+                "spotify": 3,
+            },
+        },
+    )
+
+    tab = module.LeadVaultTab()
+    assert tab.master_summary_view.isReadOnly()
+
+    tab.refresh_summary_button.click()
+
+    assert tab.master_summary_view.toPlainText() == (
+        "Total leads: 4\n"
+        "Leads with email: 2\n"
+        "Needs review: 1\n"
+        "\n"
+        "Sources\n"
+        "bandcamp: 1\n"
+        "spotify: 3"
+    )
+
+
+def test_refresh_summary_failure_updates_panel_text(qapp, monkeypatch, tmp_path):
+    module = _load_legacy_module()
+    master_path = tmp_path / "missing.csv"
+
+    monkeypatch.setattr(module, "get_default_master_csv_path", lambda: master_path)
+
+    def _raise_missing(_path):
+        raise FileNotFoundError(f"No such file: {master_path}")
+
+    monkeypatch.setattr(module, "summarize_master_dataset", _raise_missing)
+
+    tab = module.LeadVaultTab()
+    tab.refresh_summary_button.click()
+
+    assert "Lead Vault summary unavailable:" in tab.master_summary_view.toPlainText()
+    assert str(master_path) in tab.master_summary_view.toPlainText()
+
+
 def test_export_preset_selector_exposes_both_presets_and_updates_default_path(qapp, monkeypatch, tmp_path):
     module = _load_legacy_module()
     master_path = tmp_path / "master.csv"
