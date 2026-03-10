@@ -2,7 +2,7 @@ import csv
 import datetime as dt
 
 from lead_vault.alias_map import HEADER_ALIASES
-from lead_vault.merge import merge_csv_into_master, preview_csv_import
+from lead_vault.merge import merge_csv_into_master, preview_csv_import, preview_csv_merge_counts
 from lead_vault.schema import get_canonical_master_schema
 
 
@@ -326,3 +326,69 @@ def test_runtime_manual_mapping_and_ignore_do_not_mutate_alias_table(tmp_path):
     assert result["rows_added"] == 1
     assert rows[0]["Primary_Email"] == "book@example.com"
     assert dict(HEADER_ALIASES) == alias_snapshot
+
+
+def test_preview_csv_merge_counts_returns_expected_added_and_updated_rows(tmp_path):
+    master_path = tmp_path / "master.csv"
+    source_path = tmp_path / "import.csv"
+    _write_csv(
+        master_path,
+        get_canonical_master_schema(),
+        [
+            _master_row(
+                Artist="Existing Act",
+                Primary_Email="existing@example.com",
+                Website="https://existing.example.com",
+            )
+        ],
+    )
+    _write_csv(
+        source_path,
+        ["Artist Name", "Email", "Bandcamp URL"],
+        [
+            {
+                "Artist Name": "Existing Act",
+                "Email": "existing@example.com",
+                "Bandcamp URL": "https://existingact.bandcamp.com",
+            },
+            {
+                "Artist Name": "New Act",
+                "Email": "new@example.com",
+                "Bandcamp URL": "https://newact.bandcamp.com",
+            },
+        ],
+    )
+
+    result = preview_csv_merge_counts(source_path, master_path=master_path, now=RUN_AT)
+
+    assert result["rows_updated"] == 1
+    assert result["rows_added"] == 1
+    assert result["rows_skipped_duplicates"] == 0
+
+
+def test_preview_csv_merge_counts_does_not_modify_master_csv(tmp_path):
+    master_path = tmp_path / "master.csv"
+    source_path = tmp_path / "import.csv"
+    _write_csv(
+        master_path,
+        get_canonical_master_schema(),
+        [_master_row(Artist="Static Bloom", Primary_Email="hello@staticbloom.com")],
+    )
+    _write_csv(
+        source_path,
+        ["Artist Name", "Email", "Bandcamp URL"],
+        [
+            {
+                "Artist Name": "Static Bloom",
+                "Email": "hello@staticbloom.com",
+                "Bandcamp URL": "https://staticbloom.bandcamp.com",
+            }
+        ],
+    )
+    before = master_path.read_text(encoding="utf-8-sig")
+
+    result = preview_csv_merge_counts(source_path, master_path=master_path, now=RUN_AT)
+    after = master_path.read_text(encoding="utf-8-sig")
+
+    assert result["rows_updated"] == 1
+    assert before == after

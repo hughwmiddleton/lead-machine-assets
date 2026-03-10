@@ -27,6 +27,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 
+from lead_vault.merge import preview_csv_merge_counts
 import pipeline_runner
 from pipeline_runner import (
     FacebookGlobalPassStatus,
@@ -98,6 +99,7 @@ CHECKPOINT_INTERVAL_ROWS = 5
 STATE_FILENAME = "state.json"
 LOG_FILENAME = "log.txt"
 FACEBOOK_STATE_FILENAME = "facebook_state.json"
+RUN_SUMMARY_FILENAME = "run_summary.json"
 EMAIL_PRIORITY_COLS = getattr(pipeline_runner, "EMAIL_PRIORITY_COLS", ("Email", "Email_All", "Directory_Email", "Unearthed_Email"))
 EXCLUDED_URL_SUBSTRINGS = (
     "soundcloud.com/triplejunearthed",
@@ -856,6 +858,167 @@ def _discover_latest_run_dir(root: str) -> Optional[str]:
     return candidates[0][1]
 
 
+def _domain_org_sidecar_path(csv_path: str) -> str:
+    base, ext = os.path.splitext(csv_path)
+    return f"{base}_domain_org_index{ext or '.csv'}"
+
+
+def _final_master_candidates(
+    run_dir: str,
+    master_final: Optional[str] = None,
+    master_post_fb: Optional[str] = None,
+    master_pre_fb: Optional[str] = None,
+    master_enriched: Optional[str] = None,
+) -> List[str]:
+    candidates: List[str] = []
+    seen = set()
+    for path in (
+        master_final,
+        master_post_fb,
+        master_pre_fb,
+        master_enriched,
+        os.path.join(run_dir, "master_enriched_deduped.csv"),
+        os.path.join(run_dir, "master_post_fb.csv"),
+        os.path.join(run_dir, "master_pre_fb.csv"),
+        os.path.join(run_dir, "master_enriched.csv"),
+    ):
+        normalized = str(path or "").strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        candidates.append(normalized)
+    return candidates
+
+
+def _select_existing_artifact(paths: List[str]) -> str:
+    for path in paths:
+        if path and os.path.exists(path):
+            return path
+    return ""
+
+
+def _discover_domain_org_sidecar(
+    run_dir: str,
+    artifact_candidates: List[str],
+) -> str:
+    for artifact_path in artifact_candidates:
+        sidecar_path = _domain_org_sidecar_path(artifact_path)
+        if os.path.exists(sidecar_path):
+            return sidecar_path
+    try:
+        sidecar_names = sorted(
+            name for name in os.listdir(run_dir) if name.endswith("_domain_org_index.csv")
+        )
+    except Exception:
+        sidecar_names = []
+    if not sidecar_names:
+        return ""
+    return os.path.join(run_dir, sidecar_names[-1])
+
+
+def _count_nonempty_email_rows(csv_path: str) -> int:
+    if not csv_path or not os.path.exists(csv_path):
+        return 0
+    try:
+        df = pd.read_csv(csv_path, dtype=str, keep_default_na=False).fillna("")
+    except Exception:
+        return 0
+    if df.empty:
+        return 0
+    email_col = df["Email"] if "Email" in df.columns else ""
+    email_all_col = df["Email_All"] if "Email_All" in df.columns else ""
+    if isinstance(email_col, str):
+        email_col = pd.Series([""] * len(df.index))
+    if isinstance(email_all_col, str):
+        email_all_col = pd.Series([""] * len(df.index))
+    has_email = email_col.astype(str).str.strip().ne("") | email_all_col.astype(str).str.strip().ne("")
+    return int(has_email.sum())
+
+
+def _preview_lead_vault_counts(csv_path: str) -> Tuple[int, int]:
+    if not csv_path or not os.path.exists(csv_path):
+        return 0, 0
+    try:
+        preview = preview_csv_merge_counts(csv_path)
+    except Exception:
+        return 0, 0
+    try:
+        rows_added = max(int(preview.get("rows_added") or 0), 0)
+    except Exception:
+        rows_added = 0
+    try:
+        rows_updated = max(int(preview.get("rows_updated") or 0), 0)
+    except Exception:
+        rows_updated = 0
+    return rows_added, rows_updated
+
+
+def _default_run_summary(run_dir: str) -> Dict[str, Any]:
+    return {
+        "run_timestamp": os.path.basename(os.path.abspath(run_dir)),
+        "seeds_processed": 0,
+        "artists_processed": 0,
+        "domains_discovered": 0,
+        "emails_discovered": 0,
+        "orgs_created": 0,
+        "vault_rows_added": 0,
+        "vault_rows_updated": 0,
+    }
+
+
+def _build_run_summary(
+    run_dir: str,
+    master_raw: Optional[str] = None,
+    master_enriched: Optional[str] = None,
+    master_pre_fb: Optional[str] = None,
+    master_post_fb: Optional[str] = None,
+    master_final: Optional[str] = None,
+) -> Dict[str, Any]:
+    summary = _default_run_summary(run_dir)
+    artifact_candidates = _final_master_candidates(
+        run_dir,
+        master_final=master_final,
+        master_post_fb=master_post_fb,
+        master_pre_fb=master_pre_fb,
+        master_enriched=master_enriched,
+    )
+    final_artifact = _select_existing_artifact(artifact_candidates)
+    domain_sidecar = _discover_domain_org_sidecar(run_dir, artifact_candidates)
+
+    try:
+        summary["seeds_processed"] = _count_data_rows(str(master_raw or os.path.join(run_dir, "master_raw.csv")))
+    except Exception:
+        pass
+    try:
+        summary["artists_processed"] = _count_data_rows(final_artifact)
+    except Exception:
+        pass
+    try:
+        summary["domains_discovered"] = _count_data_rows(domain_sidecar)
+    except Exception:
+        pass
+    try:
+        summary["emails_discovered"] = _count_nonempty_email_rows(final_artifact)
+    except Exception:
+        pass
+    try:
+        summary["orgs_created"] = _count_data_rows(domain_sidecar)
+    except Exception:
+        pass
+    rows_added, rows_updated = _preview_lead_vault_counts(final_artifact)
+    summary["vault_rows_added"] = rows_added
+    summary["vault_rows_updated"] = rows_updated
+    return summary
+
+
+def _write_run_summary(run_dir: str, summary: Dict[str, Any]) -> str:
+    path = os.path.join(run_dir, RUN_SUMMARY_FILENAME)
+    os.makedirs(run_dir, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(summary, handle, indent=2)
+    return path
+
+
 def _ensure_run_dir(resume: bool, run_root: str) -> Tuple[str, bool]:
     os.makedirs(run_root, exist_ok=True)
     if resume:
@@ -1473,6 +1636,19 @@ def run_night_mode(
 
     summary_logger = master_logger or _setup_logger(os.path.join(run_dir, "master_log.txt"), "master")
     _emit_smoke_summary(stats, summary_logger)
+    try:
+        run_summary = _build_run_summary(
+            run_dir,
+            master_raw=master_raw,
+            master_enriched=master_enriched,
+            master_pre_fb=master_pre_fb,
+            master_post_fb=master_post_fb,
+            master_final=master_final,
+        )
+        run_summary_path = _write_run_summary(run_dir, run_summary)
+        summary_logger.info("[Run Summary] Wrote run summary: %s", run_summary_path)
+    except Exception as exc:
+        summary_logger.warning("[Run Summary] Failed safely: %s", exc)
 
     return {
         "run_dir": run_dir,

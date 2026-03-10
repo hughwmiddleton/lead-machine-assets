@@ -1,0 +1,50 @@
+{
+  "export_mode": "both",
+  "jobs": [
+    {
+      "directory": "spotify",
+      "mode": "playlist",
+      "input_seed_csv": "https://open.spotify.com/playlist/37i9dQZF1DX7AqyNZFu97s?si=da23b06f79e34bf9",
+      "target_valid_leads": 15,
+      "max_hours": 0,
+      "job_id": "job_spotify_1"
+    },
+    {
+      "directory": "bandcamp",
+      "mode": "discover",
+      "input_seed_csv": "https://bandcamp.com/discover/london+ambient?s=new",
+      "target_valid_leads": 20,
+      "max_hours": 0,
+      "job_id": "job_bandcamp_2"
+    },
+    {
+      "directory": "soundcloud",
+      "mode": "people",
+      "input_seed_csv": "https://soundcloud.com/search/people?q=london&filter.place=london",
+      "target_valid_leads": 20,
+      "max_hours": 0,
+      "job_id": "job_soundcloud_3"
+    },
+    {
+      "directory": "unearthed",
+      "mode": "",
+      "input_seed_csv": "",
+      "target_valid_leads": 10,
+      "max_hours": 0,
+      "job_id": "job_unearthed_4"
+    }
+  ],
+  "phased": true,
+  "facebook": {
+    "auto_resume_after_captcha": true,
+    "cooldown_seconds": 600,
+    "max_auto_resume_attempts": 1,
+    "max_rows_per_run": 80
+  },
+  "master_enrichment": {
+    "enabled": true
+  },
+  "soundcloud_meta_enricher": {
+    "enabled": false
+  }
+}

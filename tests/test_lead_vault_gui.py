@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import os
 from pathlib import Path
 
@@ -348,3 +349,53 @@ def test_generate_export_uses_selected_preset(qapp, monkeypatch, tmp_path):
     assert calls[0][0]["name"] == "final_export"
     assert calls[0][1] == master_path
     assert calls[0][2].name == "final_export.csv"
+
+
+def test_night_mode_run_summary_panel_shows_placeholder_when_summary_is_missing(qapp, tmp_path):
+    module = _load_legacy_module()
+    run_root = tmp_path / "overnight_runs"
+    (run_root / "2026-03-10_115959").mkdir(parents=True)
+    tab = module.NightModeTab()
+    tab.run_root_edit.setText(str(run_root))
+    tab._refresh_run_summary()
+
+    assert tab.run_summary_view.isReadOnly()
+    assert tab.run_summary_view.toPlainText() == module.NIGHT_MODE_RUN_SUMMARY_PLACEHOLDER
+
+
+def test_night_mode_run_summary_panel_renders_latest_summary(qapp, tmp_path):
+    module = _load_legacy_module()
+    run_root = tmp_path / "overnight_runs"
+    latest_run = run_root / "2026-03-10_120000"
+    latest_run.mkdir(parents=True)
+    (latest_run / module.NIGHT_MODE_RUN_SUMMARY_FILENAME).write_text(
+        json.dumps(
+            {
+                "run_timestamp": "2026-03-10_120000",
+                "seeds_processed": 200,
+                "artists_processed": 180,
+                "domains_discovered": 86,
+                "emails_discovered": 52,
+                "orgs_created": 18,
+                "vault_rows_added": 47,
+                "vault_rows_updated": 11,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    tab = module.NightModeTab()
+    tab.run_root_edit.setText(str(run_root))
+    tab._refresh_run_summary()
+
+    assert tab.run_summary_view.toPlainText() == (
+        "Seeds processed: 200\n"
+        "Artists processed: 180\n"
+        "Domains discovered: 86\n"
+        "Emails discovered: 52\n"
+        "Reusable orgs created: 18\n"
+        "\n"
+        "Lead Vault\n"
+        "Rows added: 47\n"
+        "Rows updated: 11"
+    )

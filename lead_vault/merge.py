@@ -59,6 +59,41 @@ def merge_csv_into_master(
     master_path: Optional[PathLike] = None,
     now: Optional[dt.datetime] = None,
 ) -> Dict[str, object]:
+    return _run_csv_merge(
+        source_path,
+        header_overrides=header_overrides,
+        ignored_headers=ignored_headers,
+        master_path=master_path,
+        now=now,
+        write_changes=True,
+    )
+
+
+def preview_csv_merge_counts(
+    source_path: PathLike,
+    header_overrides: Optional[Dict[str, str]] = None,
+    ignored_headers: Optional[Iterable[str]] = None,
+    master_path: Optional[PathLike] = None,
+    now: Optional[dt.datetime] = None,
+) -> Dict[str, object]:
+    return _run_csv_merge(
+        source_path,
+        header_overrides=header_overrides,
+        ignored_headers=ignored_headers,
+        master_path=master_path,
+        now=now,
+        write_changes=False,
+    )
+
+
+def _run_csv_merge(
+    source_path: PathLike,
+    header_overrides: Optional[Dict[str, str]] = None,
+    ignored_headers: Optional[Iterable[str]] = None,
+    master_path: Optional[PathLike] = None,
+    now: Optional[dt.datetime] = None,
+    write_changes: bool = True,
+) -> Dict[str, object]:
     preview = preview_csv_import(
         source_path,
         header_overrides=header_overrides,
@@ -71,8 +106,10 @@ def merge_csv_into_master(
         preview["rows_unresolved_mapping"] = len(rows)
         return preview
 
-    master_csv_path = ensure_master_csv_exists(master_path or get_default_master_csv_path())
-    master_rows = _load_master_rows(master_csv_path)
+    resolved_master_path = Path(master_path) if master_path is not None else get_default_master_csv_path()
+    if write_changes:
+        resolved_master_path = ensure_master_csv_exists(resolved_master_path)
+    master_rows = _load_master_rows(resolved_master_path) if resolved_master_path.exists() else []
     indexes, row_key_cache = _build_indexes(master_rows)
 
     run_dt = _coerce_run_datetime(now)
@@ -138,8 +175,8 @@ def merge_csv_into_master(
                 }
             )
 
-    if changed:
-        _write_master_rows(master_rows, master_csv_path)
+    if changed and write_changes:
+        _write_master_rows(master_rows, resolved_master_path)
 
     return preview
 
@@ -657,4 +694,3 @@ def _make_import_batch(value: dt.datetime) -> str:
 
 def _clean_cell(value: object) -> str:
     return "" if value is None else str(value).strip()
-

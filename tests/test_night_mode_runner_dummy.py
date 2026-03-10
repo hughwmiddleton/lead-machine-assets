@@ -8,6 +8,7 @@ from typing import List
 
 import pandas as pd
 
+import cross_directory_enricher as cde
 import night_mode_runner
 import pipeline_runner
 
@@ -132,6 +133,130 @@ class NightModeRunnerDummyTest(unittest.TestCase):
             resumed_state = json.load(f)
             self.assertEqual(resumed_state.get("status"), "completed")
         self.assertTrue(os.path.exists(os.path.join(job_two_dir, "raw.csv")))
+
+    def test_run_writes_run_summary_json(self) -> None:
+        config_path = os.path.join(self.tmpdir.name, "config.json")
+        self._write_config(config_path)
+
+        def fake_run_directory_job(job_config, raw_output_path, logger=None):
+            rows = [
+                {"Artist Name": f"{job_config['job_id']}_artist_a", "Email": f"{job_config['job_id']}@example.com", "Email_All": ""},
+                {"Artist Name": f"{job_config['job_id']}_artist_b", "Email": "", "Email_All": f"team_{job_config['job_id']}@example.com"},
+            ]
+            pd.DataFrame(rows).to_csv(raw_output_path, index=False)
+            return raw_output_path
+
+        def fake_run_enrichment(raw_csv_path, enriched_output_path, logger=None, night_mode=False):
+            shutil.copyfile(raw_csv_path, enriched_output_path)
+            return enriched_output_path
+
+        def fake_run_master_enrichment(
+            input_csv, output_csv, logger=None, enable_live_search=True, max_live_searches=None, night_mode=False
+        ):
+            shutil.copyfile(input_csv, output_csv)
+            sidecar_path = cde._domain_org_index_path(output_csv)
+            pd.DataFrame(
+                [
+                    {"domain": "alpha.example", "org_type": "management", "artist_count": 2, "primary_email": "alpha@example.com", "emails": "alpha@example.com", "roles_seen": "management", "sources_seen": "website_enrich"},
+                    {"domain": "beta.example", "org_type": "label", "artist_count": 1, "primary_email": "beta@example.com", "emails": "beta@example.com", "roles_seen": "label", "sources_seen": "facebook_enrich"},
+                ]
+            ).to_csv(sidecar_path, index=False)
+            return output_csv
+
+        def fake_fb_pass(input_csv, output_csv, state_path, max_rows_per_run=100, **kwargs):
+            shutil.copyfile(input_csv, output_csv)
+            return pipeline_runner.FacebookGlobalPassStatus(
+                processed_rows=4,
+                total_rows=4,
+                completed=True,
+                hit_captcha=False,
+                limit_reached=False,
+                attempted_total=4,
+            )
+
+        with mock.patch.object(night_mode_runner, "run_directory_job", side_effect=fake_run_directory_job), mock.patch.object(
+            night_mode_runner, "run_enrichment", side_effect=fake_run_enrichment
+        ), mock.patch.object(night_mode_runner, "run_master_enrichment", side_effect=fake_run_master_enrichment), mock.patch.object(
+            night_mode_runner, "run_facebook_global_pass_nightmode", side_effect=fake_fb_pass
+        ), mock.patch.object(
+            night_mode_runner,
+            "preview_csv_merge_counts",
+            return_value={"rows_added": 47, "rows_updated": 11},
+        ):
+            result = night_mode_runner.run_night_mode(config_path, run_root=self.run_root)
+
+        summary_path = os.path.join(result["run_dir"], night_mode_runner.RUN_SUMMARY_FILENAME)
+        self.assertTrue(os.path.exists(summary_path))
+        with open(summary_path, "r", encoding="utf-8") as f:
+            summary = json.load(f)
+
+        self.assertEqual(summary, {
+            "run_timestamp": os.path.basename(result["run_dir"]),
+            "seeds_processed": 4,
+            "artists_processed": 4,
+            "domains_discovered": 2,
+            "emails_discovered": 4,
+            "orgs_created": 2,
+            "vault_rows_added": 47,
+            "vault_rows_updated": 11,
+        })
+
+    def test_run_summary_degrades_cleanly_when_optional_artifacts_are_missing(self) -> None:
+        config_path = os.path.join(self.tmpdir.name, "config.json")
+        self._write_config(config_path)
+
+        def fake_run_directory_job(job_config, raw_output_path, logger=None):
+            rows = [
+                {"Artist Name": f"{job_config['job_id']}_artist_a", "Email": "", "Email_All": f"{job_config['job_id']}@example.com"},
+                {"Artist Name": f"{job_config['job_id']}_artist_b", "Email": "", "Email_All": ""},
+            ]
+            pd.DataFrame(rows).to_csv(raw_output_path, index=False)
+            return raw_output_path
+
+        def fake_run_enrichment(raw_csv_path, enriched_output_path, logger=None, night_mode=False):
+            shutil.copyfile(raw_csv_path, enriched_output_path)
+            return enriched_output_path
+
+        def fake_run_master_enrichment(
+            input_csv, output_csv, logger=None, enable_live_search=True, max_live_searches=None, night_mode=False
+        ):
+            shutil.copyfile(input_csv, output_csv)
+            return output_csv
+
+        def fake_fb_pass(input_csv, output_csv, state_path, max_rows_per_run=100, **kwargs):
+            shutil.copyfile(input_csv, output_csv)
+            return pipeline_runner.FacebookGlobalPassStatus(
+                processed_rows=1,
+                total_rows=2,
+                completed=False,
+                hit_captcha=False,
+                limit_reached=True,
+                attempted_total=1,
+            )
+
+        with mock.patch.object(night_mode_runner, "run_directory_job", side_effect=fake_run_directory_job), mock.patch.object(
+            night_mode_runner, "run_enrichment", side_effect=fake_run_enrichment
+        ), mock.patch.object(night_mode_runner, "run_master_enrichment", side_effect=fake_run_master_enrichment), mock.patch.object(
+            night_mode_runner, "run_facebook_global_pass_nightmode", side_effect=fake_fb_pass
+        ), mock.patch.object(
+            night_mode_runner,
+            "preview_csv_merge_counts",
+            side_effect=RuntimeError("preview unavailable"),
+        ):
+            result = night_mode_runner.run_night_mode(config_path, run_root=self.run_root)
+
+        summary_path = os.path.join(result["run_dir"], night_mode_runner.RUN_SUMMARY_FILENAME)
+        with open(summary_path, "r", encoding="utf-8") as f:
+            summary = json.load(f)
+
+        self.assertEqual(summary["run_timestamp"], os.path.basename(result["run_dir"]))
+        self.assertEqual(summary["seeds_processed"], 4)
+        self.assertEqual(summary["artists_processed"], 4)
+        self.assertEqual(summary["domains_discovered"], 0)
+        self.assertEqual(summary["emails_discovered"], 2)
+        self.assertEqual(summary["orgs_created"], 0)
+        self.assertEqual(summary["vault_rows_added"], 0)
+        self.assertEqual(summary["vault_rows_updated"], 0)
 
     def test_facebook_global_pass_skip_rules(self) -> None:
         # Build a small CSV with various rows.

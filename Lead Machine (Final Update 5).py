@@ -147,6 +147,35 @@ from lead_vault.merge import merge_csv_into_master, preview_csv_import
 from lead_vault.schema import get_canonical_master_schema, get_default_master_csv_path
 from lead_vault.stats import summarize_master_dataset
 
+NIGHT_MODE_RUN_SUMMARY_FILENAME = "run_summary.json"
+NIGHT_MODE_RUN_SUMMARY_PLACEHOLDER = "No runs detected yet.\nRun Lead Machine to generate results."
+
+
+def _discover_latest_night_mode_run_dir(root: str) -> Optional[Path]:
+    root_path = Path(root).expanduser()
+    if not root_path.exists():
+        return None
+    candidates = [path for path in root_path.iterdir() if path.is_dir()]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda path: path.stat().st_mtime)
+
+
+def _load_latest_night_mode_run_summary(run_root: str) -> Optional[dict]:
+    latest_run_dir = _discover_latest_night_mode_run_dir(run_root)
+    if latest_run_dir is None:
+        return None
+    summary_path = latest_run_dir / NIGHT_MODE_RUN_SUMMARY_FILENAME
+    if not summary_path.exists():
+        return None
+    try:
+        with open(summary_path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except Exception:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
 cross_directory_enricher = None
 try:
     import cross_directory_enricher
@@ -10724,6 +10753,23 @@ class NightModeTab(QtWidgets.QWidget):
         run_root_layout.addWidget(run_root_browse)
         layout.addLayout(run_root_layout)
 
+        run_summary_group = QtWidgets.QGroupBox("Run Summary")
+        run_summary_layout = QtWidgets.QVBoxLayout()
+        run_summary_controls = QtWidgets.QHBoxLayout()
+        self.refresh_run_summary_button = QtWidgets.QPushButton("Refresh Summary")
+        self.refresh_run_summary_button.clicked.connect(self._refresh_run_summary)
+        run_summary_controls.addWidget(self.refresh_run_summary_button)
+        run_summary_controls.addStretch()
+        run_summary_layout.addLayout(run_summary_controls)
+        self.run_summary_view = QtWidgets.QPlainTextEdit()
+        self.run_summary_view.setReadOnly(True)
+        self.run_summary_view.setMinimumHeight(120)
+        self.run_summary_view.setMaximumHeight(180)
+        self.run_summary_view.setPlaceholderText(NIGHT_MODE_RUN_SUMMARY_PLACEHOLDER)
+        run_summary_layout.addWidget(self.run_summary_view)
+        run_summary_group.setLayout(run_summary_layout)
+        layout.addWidget(run_summary_group)
+
         # Controls
         controls_layout = QtWidgets.QHBoxLayout()
         self.start_button = QtWidgets.QPushButton("Start Night Mode")
@@ -10749,6 +10795,34 @@ class NightModeTab(QtWidgets.QWidget):
         self.setLayout(layout)
         self._toggle_master_live_controls()
         self._load_config_summary()
+        self._refresh_run_summary()
+
+    def _night_mode_run_root(self) -> str:
+        configured = self.run_root_edit.text().strip()
+        if configured:
+            return configured
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), "overnight_runs")
+
+    def _refresh_run_summary(self):
+        summary = _load_latest_night_mode_run_summary(self._night_mode_run_root())
+        if not summary:
+            self.run_summary_view.setPlainText(NIGHT_MODE_RUN_SUMMARY_PLACEHOLDER)
+            return
+        self.run_summary_view.setPlainText(self._format_run_summary(summary))
+
+    def _format_run_summary(self, summary: dict) -> str:
+        lines = [
+            f"Seeds processed: {int(summary.get('seeds_processed', 0) or 0)}",
+            f"Artists processed: {int(summary.get('artists_processed', 0) or 0)}",
+            f"Domains discovered: {int(summary.get('domains_discovered', 0) or 0)}",
+            f"Emails discovered: {int(summary.get('emails_discovered', 0) or 0)}",
+            f"Reusable orgs created: {int(summary.get('orgs_created', 0) or 0)}",
+            "",
+            "Lead Vault",
+            f"Rows added: {int(summary.get('vault_rows_added', 0) or 0)}",
+            f"Rows updated: {int(summary.get('vault_rows_updated', 0) or 0)}",
+        ]
+        return "\n".join(lines)
 
     def _update_jobs_summary_from_jobs(self):
         lines = []
@@ -11042,6 +11116,7 @@ class NightModeTab(QtWidgets.QWidget):
         self.stop_button.setEnabled(False)
         self.worker = None
         self._bootstrap_stage = None
+        self._refresh_run_summary()
 
     def _toggle_master_live_controls(self):
         enabled = self.master_enrich_checkbox.isChecked()
