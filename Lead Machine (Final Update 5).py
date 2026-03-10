@@ -142,6 +142,7 @@ from spotify_scraper import scrape_spotify
 from origin_validator import _derive_origin_output_path, run_auto_validate
 from soundcloud_metadata_enricher import enrich_soundcloud_metadata
 import pipeline_runner
+from lead_vault import WOODPECKER_EXPORT_PRESET, export_with_preset
 from lead_vault.merge import merge_csv_into_master, preview_csv_import
 from lead_vault.schema import get_canonical_master_schema, get_default_master_csv_path
 
@@ -9703,6 +9704,37 @@ class LeadVaultTab(QtWidgets.QWidget):
         self.summary_view.setPlaceholderText("Preview and import results will appear here.")
         layout.addWidget(self.summary_view)
 
+        export_label = QtWidgets.QLabel("Lead Vault Export")
+        layout.addWidget(export_label)
+
+        preset_row = QtWidgets.QHBoxLayout()
+        preset_label = QtWidgets.QLabel("Preset:")
+        self.preset_selector = QtWidgets.QComboBox()
+        self.preset_selector.addItem("woodpecker", WOODPECKER_EXPORT_PRESET)
+        preset_row.addWidget(preset_label)
+        preset_row.addWidget(self.preset_selector)
+        preset_row.addStretch()
+        layout.addLayout(preset_row)
+
+        export_row = QtWidgets.QHBoxLayout()
+        export_output_label = QtWidgets.QLabel("Output file:")
+        self.export_output_path = QtWidgets.QLineEdit()
+        self.export_output_path.setText(self._default_export_output_path())
+        self.export_output_path.setPlaceholderText("Select where to write the export CSV.")
+        self.browse_export_button = QtWidgets.QPushButton("Browse...")
+        self.browse_export_button.clicked.connect(self._browse_export_output)
+        export_row.addWidget(export_output_label)
+        export_row.addWidget(self.export_output_path)
+        export_row.addWidget(self.browse_export_button)
+        layout.addLayout(export_row)
+
+        export_controls = QtWidgets.QHBoxLayout()
+        self.generate_export_button = QtWidgets.QPushButton("Generate Export")
+        self.generate_export_button.clicked.connect(self._generate_export)
+        export_controls.addWidget(self.generate_export_button)
+        export_controls.addStretch()
+        layout.addLayout(export_controls)
+
         self.setLayout(layout)
 
     def _browse_csv(self):
@@ -9715,6 +9747,20 @@ class LeadVaultTab(QtWidgets.QWidget):
         if file_path:
             self.source_edit.setText(file_path)
 
+    def _default_export_output_path(self) -> str:
+        return str(get_default_master_csv_path().parent / WOODPECKER_EXPORT_PRESET["filename_pattern"])
+
+    def _browse_export_output(self):
+        current_path = self.export_output_path.text().strip() or self._default_export_output_path()
+        file_path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Select Lead Vault export output CSV",
+            current_path,
+            "CSV Files (*.csv);;All Files (*)",
+        )
+        if file_path:
+            self.export_output_path.setText(file_path)
+
     def _reset_preview_state(self):
         self.preview_result = None
         self.detected_headers_view.clear()
@@ -9722,6 +9768,9 @@ class LeadVaultTab(QtWidgets.QWidget):
         self.summary_view.clear()
         self.unmapped_table.setRowCount(0)
         self.import_button.setEnabled(False)
+
+    def _selected_export_preset(self) -> dict:
+        return self.preset_selector.currentData() or WOODPECKER_EXPORT_PRESET
 
     def _start_preview(self):
         if self.worker and self.worker.isRunning():
@@ -9877,6 +9926,54 @@ class LeadVaultTab(QtWidgets.QWidget):
             lines.append("Warnings:")
             lines.extend(str(item) for item in warnings)
         return "\n".join(lines)
+
+    def _generate_export(self):
+        master_csv_path = get_default_master_csv_path()
+        if not master_csv_path.exists():
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Lead Vault Export",
+                f"Master CSV not found:\n{master_csv_path}",
+            )
+            return
+
+        output_path = self.export_output_path.text().strip()
+        if not output_path:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Lead Vault Export",
+                "Select an output CSV path before generating an export.",
+            )
+            return
+
+        preset = self._selected_export_preset()
+        try:
+            result = export_with_preset(preset, master_csv_path, Path(output_path))
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Lead Vault Export",
+                f"Export failed:\n{exc}",
+            )
+            return
+
+        QtWidgets.QMessageBox.information(
+            self,
+            "Lead Vault Export",
+            "\n".join(
+                [
+                    "Export complete",
+                    "",
+                    f"Preset: {result.get('preset', '')}",
+                    f"Rows read: {result.get('rows_read', 0)}",
+                    f"Rows exported: {result.get('rows_exported', 0)}",
+                    f"Rows skipped: {result.get('rows_skipped', 0)}",
+                    "",
+                    "Output file:",
+                    str(result.get("output_file", "")),
+                ]
+            ),
+        )
 
     def _stop_worker(self):
         worker = self.worker

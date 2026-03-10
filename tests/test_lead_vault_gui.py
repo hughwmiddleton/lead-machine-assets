@@ -155,3 +155,44 @@ def test_manual_mapping_is_passed_to_backend_worker_and_summary_updates(qapp, mo
     assert calls[-1].header_overrides == {"Booking Email": "Primary_Email"}
     assert calls[-1].ignored_headers == ["Throwaway"]
     assert "Rows added: 1" in tab.summary_view.toPlainText()
+
+
+def test_generate_export_uses_master_csv_and_shows_summary(qapp, monkeypatch, tmp_path):
+    module = _load_legacy_module()
+    master_path = tmp_path / "master.csv"
+    master_path.write_text("Artist,Primary_Email\nAct,act@example.com\n", encoding="utf-8-sig")
+    output_path = tmp_path / "woodpecker_export.csv"
+    calls = []
+    info_calls = []
+
+    monkeypatch.setattr(module, "get_default_master_csv_path", lambda: master_path)
+
+    def fake_export_with_preset(preset, master_csv_path, target_output_path):
+        calls.append((preset, master_csv_path, target_output_path))
+        return {
+            "preset": "woodpecker",
+            "rows_read": 1,
+            "rows_exported": 1,
+            "rows_skipped": 0,
+            "output_file": str(target_output_path),
+        }
+
+    monkeypatch.setattr(module, "export_with_preset", fake_export_with_preset)
+    monkeypatch.setattr(module.QtWidgets.QMessageBox, "warning", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        module.QtWidgets.QMessageBox,
+        "information",
+        lambda *args, **kwargs: info_calls.append(args[2] if len(args) > 2 else ""),
+    )
+
+    tab = module.LeadVaultTab()
+    tab.export_output_path.setText(str(output_path))
+    tab.generate_export_button.click()
+
+    assert calls
+    assert calls[0][0]["name"] == "woodpecker"
+    assert calls[0][1] == master_path
+    assert calls[0][2] == output_path
+    assert info_calls
+    assert "Export complete" in info_calls[0]
+    assert "Rows exported: 1" in info_calls[0]
