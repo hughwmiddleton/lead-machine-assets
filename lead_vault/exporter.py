@@ -57,6 +57,78 @@ WOODPECKER_EXPORT_PRESET = {
     "filename_pattern": "woodpecker_export.csv",
 }
 
+FINAL_EXPORT_PRESET = {
+    "name": "final_export",
+    "headers": [
+        "Artist",
+        "Primary_Email",
+        "All_Emails",
+        "Location",
+        "Country",
+        "Primary_Genre",
+        "Secondary_Genre",
+        "Website",
+        "Domain",
+        "Spotify_URL",
+        "SoundCloud_URL",
+        "Instagram_URL",
+        "Bandcamp_URL",
+        "External_Links",
+        "Played_On_Triple_J",
+        "Played_On_Unearthed",
+        "Industry_Signals",
+        "Discovery_Source",
+        "Source_Directory",
+        "Source_URL",
+        "Import_Batch",
+        "Date_Added",
+        "First_Discovered_Date",
+        "Last_Updated",
+        "Lead_Status",
+        "Outreach_Status",
+        "Final_Status",
+        "Needs_Review",
+        "Review_Reason",
+        "Review_Urls",
+        "Notes",
+    ],
+    "field_map": {
+        "Artist": "Artist",
+        "Primary_Email": "Primary_Email",
+        "All_Emails": "All_Emails",
+        "Location": "Location",
+        "Country": "Country",
+        "Primary_Genre": "Primary_Genre",
+        "Secondary_Genre": "Secondary_Genre",
+        "Website": "Website",
+        "Domain": "Domain",
+        "Spotify_URL": "Spotify_URL",
+        "SoundCloud_URL": "SoundCloud_URL",
+        "Instagram_URL": "Instagram_URL",
+        "Bandcamp_URL": "Bandcamp_URL",
+        "External_Links": "External_Links",
+        "Played_On_Triple_J": "Played_On_Triple_J",
+        "Played_On_Unearthed": "Played_On_Unearthed",
+        "Industry_Signals": "Industry_Signals",
+        "Discovery_Source": "Discovery_Source",
+        "Source_Directory": "Source_Directory",
+        "Source_URL": "Source_URL",
+        "Import_Batch": "Import_Batch",
+        "Date_Added": "Date_Added",
+        "First_Discovered_Date": "First_Discovered_Date",
+        "Last_Updated": "Last_Updated",
+        "Lead_Status": "Lead_Status",
+        "Outreach_Status": "Outreach_Status",
+        "Final_Status": "Final_Status",
+        "Needs_Review": "Needs_Review",
+        "Review_Reason": "Review_Reason",
+        "Review_Urls": "Review_Urls",
+        "Notes": "Notes",
+    },
+    "row_filter": None,
+    "filename_pattern": "final_export.csv",
+}
+
 _ROW_FILTERS: Dict[str, Callable[[Dict[str, str]], bool]] = {
     "has_primary_email": has_primary_email,
 }
@@ -87,7 +159,11 @@ def export_with_preset(
                 rows_read += 1
                 if row_filter is not None and not row_filter(row):
                     continue
-                writer.writerow({header: row.get(field_map[header], "") for header in headers})
+                export_row = {}
+                for header in headers:
+                    source_field = field_map.get(header)
+                    export_row[header] = row.get(source_field, "") if source_field else ""
+                writer.writerow(export_row)
                 rows_exported += 1
 
     return {
@@ -106,4 +182,14 @@ def _resolve_row_filter(
         return None
     if callable(row_filter):
         return row_filter
+    if isinstance(row_filter, str):
+        if row_filter not in _ROW_FILTERS:
+            raise ValueError(f"Unknown row filter: {row_filter}")
+        return _ROW_FILTERS[row_filter]
     return _ROW_FILTERS[str(row_filter)]
+
+
+EXPORT_PRESETS = {
+    "woodpecker": WOODPECKER_EXPORT_PRESET,
+    "final_export": FINAL_EXPORT_PRESET,
+}
