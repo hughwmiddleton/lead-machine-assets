@@ -9643,85 +9643,145 @@ class LeadVaultTab(QtWidgets.QWidget):
         self._build_ui()
 
     def _build_ui(self):
-        layout = QtWidgets.QVBoxLayout()
+        outer_layout = QtWidgets.QVBoxLayout()
+        outer_layout.setContentsMargins(0, 0, 0, 0)
 
-        source_row = QtWidgets.QHBoxLayout()
+        scroll_area = QtWidgets.QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QtWidgets.QFrame.NoFrame)
+
+        content = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout()
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(12)
+
+        files_group = QtWidgets.QGroupBox("Import Files")
+        files_layout = QtWidgets.QGridLayout()
+        files_layout.setHorizontalSpacing(10)
+        files_layout.setVerticalSpacing(8)
+
         source_label = QtWidgets.QLabel("Import CSV:")
         self.source_edit = QtWidgets.QLineEdit()
         self.source_edit.setPlaceholderText("Select a CSV to preview and merge into the Lead Vault.")
         self.source_edit.textChanged.connect(self._reset_preview_state)
+        self.source_edit.textChanged.connect(lambda text: self._update_path_tooltip(self.source_edit, text))
+        self._update_path_tooltip(self.source_edit)
         source_browse = QtWidgets.QPushButton("Browse...")
         source_browse.clicked.connect(self._browse_csv)
         self.preview_button = QtWidgets.QPushButton("Preview Import")
         self.preview_button.clicked.connect(self._start_preview)
-        source_row.addWidget(source_label)
-        source_row.addWidget(self.source_edit)
-        source_row.addWidget(source_browse)
-        source_row.addWidget(self.preview_button)
-        layout.addLayout(source_row)
+        files_layout.addWidget(source_label, 0, 0)
+        files_layout.addWidget(self.source_edit, 0, 1)
+        files_layout.addWidget(source_browse, 0, 2)
+        files_layout.addWidget(self.preview_button, 0, 3)
 
-        master_row = QtWidgets.QHBoxLayout()
         master_label = QtWidgets.QLabel("Master CSV:")
-        self.master_path_label = QtWidgets.QLineEdit(str(get_default_master_csv_path()))
+        self.master_path_label = QtWidgets.QLineEdit()
         self.master_path_label.setReadOnly(True)
-        master_row.addWidget(master_label)
-        master_row.addWidget(self.master_path_label)
-        layout.addLayout(master_row)
+        self._set_line_edit_path(self.master_path_label, str(get_default_master_csv_path()))
+        files_layout.addWidget(master_label, 1, 0)
+        files_layout.addWidget(self.master_path_label, 1, 1, 1, 3)
+        files_group.setLayout(files_layout)
+        layout.addWidget(files_group)
 
-        lead_vault_summary_label = QtWidgets.QLabel("Lead Vault Summary")
-        layout.addWidget(lead_vault_summary_label)
+        overview_row = QtWidgets.QHBoxLayout()
+        overview_row.setSpacing(12)
 
+        summary_group = QtWidgets.QGroupBox("Lead Vault Summary")
+        summary_layout = QtWidgets.QVBoxLayout()
+        summary_layout.setSpacing(8)
         lead_vault_summary_controls = QtWidgets.QHBoxLayout()
         self.refresh_summary_button = QtWidgets.QPushButton("Refresh Summary")
         self.refresh_summary_button.clicked.connect(self._refresh_master_summary)
         lead_vault_summary_controls.addWidget(self.refresh_summary_button)
         lead_vault_summary_controls.addStretch()
-        layout.addLayout(lead_vault_summary_controls)
+        summary_layout.addLayout(lead_vault_summary_controls)
 
         self.master_summary_view = QtWidgets.QPlainTextEdit()
         self.master_summary_view.setReadOnly(True)
+        self.master_summary_view.setMinimumHeight(110)
+        self.master_summary_view.setMaximumHeight(180)
         self.master_summary_view.setPlaceholderText("Press Refresh Summary to inspect the current master dataset.")
-        layout.addWidget(self.master_summary_view)
+        summary_layout.addWidget(self.master_summary_view)
+        summary_group.setLayout(summary_layout)
+        overview_row.addWidget(summary_group, 2)
 
+        preview_group = QtWidgets.QGroupBox("Preview Mapping")
+        preview_layout = QtWidgets.QGridLayout()
+        preview_layout.setHorizontalSpacing(12)
+        preview_layout.setVerticalSpacing(6)
         detected_label = QtWidgets.QLabel("Detected Headers")
-        layout.addWidget(detected_label)
-        self.detected_headers_view = QtWidgets.QPlainTextEdit()
-        self.detected_headers_view.setReadOnly(True)
-        self.detected_headers_view.setPlaceholderText("Preview a CSV to inspect incoming headers.")
-        layout.addWidget(self.detected_headers_view)
+        preview_layout.addWidget(detected_label, 0, 0)
+        self.detected_headers_view = QtWidgets.QListWidget()
+        self.detected_headers_view.setMinimumHeight(90)
+        self.detected_headers_view.setMaximumHeight(120)
+        self.detected_headers_view.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
+        self.detected_headers_view.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.detected_headers_view.setVerticalScrollMode(QtWidgets.QAbstractItemView.ScrollPerPixel)
+        self.detected_headers_view.setSizePolicy(
+            QtWidgets.QSizePolicy.Expanding,
+            QtWidgets.QSizePolicy.Maximum,
+        )
+        preview_layout.addWidget(self.detected_headers_view, 1, 0)
 
         mapped_label = QtWidgets.QLabel("Auto-Mapped Columns")
-        layout.addWidget(mapped_label)
-        self.mapped_headers_view = QtWidgets.QPlainTextEdit()
-        self.mapped_headers_view.setReadOnly(True)
-        self.mapped_headers_view.setPlaceholderText("Auto-mapped columns will appear here.")
-        layout.addWidget(self.mapped_headers_view)
+        preview_layout.addWidget(mapped_label, 0, 1)
+        self.mapped_headers_view = QtWidgets.QListWidget()
+        self.mapped_headers_view.setMinimumHeight(90)
+        self.mapped_headers_view.setMaximumHeight(120)
+        self.mapped_headers_view.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
+        self.mapped_headers_view.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.mapped_headers_view.setVerticalScrollMode(QtWidgets.QAbstractItemView.ScrollPerPixel)
+        self.mapped_headers_view.setSizePolicy(
+            QtWidgets.QSizePolicy.Expanding,
+            QtWidgets.QSizePolicy.Maximum,
+        )
+        preview_layout.addWidget(self.mapped_headers_view, 1, 1)
 
-        unmapped_label = QtWidgets.QLabel("Manual Mapping For Unmapped Columns")
-        layout.addWidget(unmapped_label)
-        self.unmapped_table = QtWidgets.QTableWidget(0, 2)
-        self.unmapped_table.setHorizontalHeaderLabels(["Incoming Header", "Map To"])
-        self.unmapped_table.horizontalHeader().setStretchLastSection(True)
-        self.unmapped_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
-        layout.addWidget(self.unmapped_table)
+        preview_group.setLayout(preview_layout)
+        overview_row.addWidget(preview_group, 3)
+        layout.addLayout(overview_row)
 
+        mapping_group = QtWidgets.QGroupBox("Manual Mapping For Unmapped Columns")
+        mapping_layout = QtWidgets.QVBoxLayout()
+        mapping_layout.setSpacing(8)
         controls = QtWidgets.QHBoxLayout()
+        controls.addStretch()
         self.import_button = QtWidgets.QPushButton("Run Lead Vault Import")
         self.import_button.setEnabled(False)
         self.import_button.clicked.connect(self._start_import)
         controls.addWidget(self.import_button)
-        controls.addStretch()
-        layout.addLayout(controls)
+        mapping_layout.addLayout(controls)
+        self.unmapped_table = QtWidgets.QTableWidget(0, 2)
+        self.unmapped_table.setHorizontalHeaderLabels(["Incoming Header", "Map To"])
+        self.unmapped_table.setMinimumHeight(200)
+        unmapped_header = self.unmapped_table.horizontalHeader()
+        unmapped_header.setSectionResizeMode(0, QtWidgets.QHeaderView.Interactive)
+        unmapped_header.setSectionResizeMode(1, QtWidgets.QHeaderView.Stretch)
+        self.unmapped_table.setColumnWidth(0, 280)
+        self.unmapped_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        mapping_layout.addWidget(self.unmapped_table)
+        mapping_group.setLayout(mapping_layout)
+        layout.addWidget(mapping_group, 5)
 
-        summary_label = QtWidgets.QLabel("Import Summary")
-        layout.addWidget(summary_label)
+        lower_row = QtWidgets.QHBoxLayout()
+        lower_row.setSpacing(12)
+
+        import_summary_group = QtWidgets.QGroupBox("Import Summary")
+        import_summary_layout = QtWidgets.QVBoxLayout()
+        import_summary_layout.setSpacing(8)
         self.summary_view = QtWidgets.QPlainTextEdit()
         self.summary_view.setReadOnly(True)
+        self.summary_view.setMinimumHeight(120)
         self.summary_view.setPlaceholderText("Preview and import results will appear here.")
-        layout.addWidget(self.summary_view)
+        import_summary_layout.addWidget(self.summary_view)
+        import_summary_group.setLayout(import_summary_layout)
+        lower_row.addWidget(import_summary_group, 3)
 
-        export_label = QtWidgets.QLabel("Lead Vault Export")
-        layout.addWidget(export_label)
+        export_group = QtWidgets.QGroupBox("Lead Vault Export")
+        export_group.setMinimumHeight(220)
+        export_layout = QtWidgets.QVBoxLayout()
+        export_layout.setSpacing(8)
 
         preset_row = QtWidgets.QHBoxLayout()
         preset_label = QtWidgets.QLabel("Preset:")
@@ -9731,20 +9791,23 @@ class LeadVaultTab(QtWidgets.QWidget):
         preset_row.addWidget(preset_label)
         preset_row.addWidget(self.preset_selector)
         preset_row.addStretch()
-        layout.addLayout(preset_row)
+        export_layout.addLayout(preset_row)
+
+        output_file_label = QtWidgets.QLabel("Output file:")
+        export_layout.addWidget(output_file_label)
 
         export_row = QtWidgets.QHBoxLayout()
-        export_output_label = QtWidgets.QLabel("Output file:")
         self.export_output_path = QtWidgets.QLineEdit()
         self._last_suggested_export_path = self._default_export_output_path(self._selected_export_preset())
-        self.export_output_path.setText(self._last_suggested_export_path)
+        self._set_line_edit_path(self.export_output_path, self._last_suggested_export_path)
         self.export_output_path.setPlaceholderText("Select where to write the export CSV.")
+        self.export_output_path.textChanged.connect(lambda text: self._update_path_tooltip(self.export_output_path, text))
+        self._update_path_tooltip(self.export_output_path)
         self.browse_export_button = QtWidgets.QPushButton("Browse...")
         self.browse_export_button.clicked.connect(self._browse_export_output)
-        export_row.addWidget(export_output_label)
         export_row.addWidget(self.export_output_path)
         export_row.addWidget(self.browse_export_button)
-        layout.addLayout(export_row)
+        export_layout.addLayout(export_row)
         self.preset_selector.currentIndexChanged.connect(self._handle_export_preset_changed)
 
         export_controls = QtWidgets.QHBoxLayout()
@@ -9752,9 +9815,25 @@ class LeadVaultTab(QtWidgets.QWidget):
         self.generate_export_button.clicked.connect(self._generate_export)
         export_controls.addWidget(self.generate_export_button)
         export_controls.addStretch()
-        layout.addLayout(export_controls)
+        export_layout.addLayout(export_controls)
 
-        self.setLayout(layout)
+        export_group.setLayout(export_layout)
+        lower_row.addWidget(export_group, 4)
+        layout.addLayout(lower_row, 3)
+
+        content.setLayout(layout)
+        scroll_area.setWidget(content)
+        outer_layout.addWidget(scroll_area)
+        self.setLayout(outer_layout)
+
+    def _update_path_tooltip(self, widget: QtWidgets.QLineEdit, text: Optional[str] = None):
+        tooltip_text = (text if text is not None else widget.text()).strip()
+        widget.setToolTip(tooltip_text)
+
+    def _set_line_edit_path(self, widget: QtWidgets.QLineEdit, text: str):
+        widget.setText(text)
+        self._update_path_tooltip(widget, text)
+        widget.setCursorPosition(0)
 
     def _browse_csv(self):
         file_path, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -9764,7 +9843,7 @@ class LeadVaultTab(QtWidgets.QWidget):
             "CSV Files (*.csv);;All Files (*)",
         )
         if file_path:
-            self.source_edit.setText(file_path)
+            self._set_line_edit_path(self.source_edit, file_path)
 
     def _available_export_presets(self) -> List[dict]:
         presets = list(EXPORT_PRESETS.values())
@@ -9780,7 +9859,7 @@ class LeadVaultTab(QtWidgets.QWidget):
         current_path = self.export_output_path.text().strip()
         known_default_paths = {self._default_export_output_path(preset) for preset in self._available_export_presets()}
         if not current_path or current_path == self._last_suggested_export_path or current_path in known_default_paths:
-            self.export_output_path.setText(suggested_path)
+            self._set_line_edit_path(self.export_output_path, suggested_path)
         self._last_suggested_export_path = suggested_path
 
     def _browse_export_output(self):
@@ -9792,7 +9871,7 @@ class LeadVaultTab(QtWidgets.QWidget):
             "CSV Files (*.csv);;All Files (*)",
         )
         if file_path:
-            self.export_output_path.setText(file_path)
+            self._set_line_edit_path(self.export_output_path, file_path)
 
     def _reset_preview_state(self):
         self.preview_result = None
@@ -9875,12 +9954,14 @@ class LeadVaultTab(QtWidgets.QWidget):
 
     def _handle_preview_finished(self, result: dict):
         self.preview_result = result
-        self.detected_headers_view.setPlainText("\n".join(result.get("detected_headers", [])))
+        self.detected_headers_view.clear()
+        self.detected_headers_view.addItems(result.get("detected_headers", []))
         mapped_lines = [
             f"{raw_header} -> {canonical_field}"
             for raw_header, canonical_field in sorted(result.get("mapped_headers", {}).items())
         ]
-        self.mapped_headers_view.setPlainText("\n".join(mapped_lines))
+        self.mapped_headers_view.clear()
+        self.mapped_headers_view.addItems(mapped_lines)
         self._populate_unmapped_table(result.get("unmapped_headers", []))
         self.summary_view.setPlainText(self._format_summary(result, preview_only=True))
         self.preview_button.setEnabled(True)

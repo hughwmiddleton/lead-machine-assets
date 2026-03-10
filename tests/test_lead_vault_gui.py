@@ -60,6 +60,15 @@ def test_preview_populates_unmapped_controls_and_blocks_import_until_resolved(qa
     )
 
     assert tab.unmapped_table.rowCount() == 1
+    assert isinstance(tab.detected_headers_view, QtWidgets.QListWidget)
+    assert isinstance(tab.mapped_headers_view, QtWidgets.QListWidget)
+    assert [tab.detected_headers_view.item(index).text() for index in range(tab.detected_headers_view.count())] == [
+        "Artist Name",
+        "Booking Email",
+    ]
+    assert [tab.mapped_headers_view.item(index).text() for index in range(tab.mapped_headers_view.count())] == [
+        "Artist Name -> Artist"
+    ]
     assert not tab.import_button.isEnabled()
 
     combo = tab.unmapped_table.cellWidget(0, 1)
@@ -67,6 +76,45 @@ def test_preview_populates_unmapped_controls_and_blocks_import_until_resolved(qa
     tab._refresh_import_button()
 
     assert tab.import_button.isEnabled()
+
+
+def test_lead_vault_layout_sets_minimum_heights_and_path_tooltips(qapp, monkeypatch, tmp_path):
+    module = _load_legacy_module()
+    master_path = tmp_path / "master.csv"
+    monkeypatch.setattr(module, "get_default_master_csv_path", lambda: master_path)
+
+    tab = module.LeadVaultTab()
+    source_path = tmp_path / "incoming.csv"
+    export_path = tmp_path / "custom_export.csv"
+    tab.source_edit.setText(str(source_path))
+    tab.export_output_path.setText(str(export_path))
+
+    assert tab.master_summary_view.minimumHeight() >= 100
+    assert isinstance(tab.detected_headers_view, QtWidgets.QListWidget)
+    assert isinstance(tab.mapped_headers_view, QtWidgets.QListWidget)
+    assert tab.detected_headers_view.minimumHeight() >= 80
+    assert tab.mapped_headers_view.minimumHeight() >= 80
+    assert tab.detected_headers_view.maximumHeight() <= 160
+    assert tab.mapped_headers_view.maximumHeight() <= 160
+    assert tab.detected_headers_view.sizePolicy().verticalPolicy() == QtWidgets.QSizePolicy.Maximum
+    assert tab.mapped_headers_view.sizePolicy().verticalPolicy() == QtWidgets.QSizePolicy.Maximum
+    assert tab.summary_view.minimumHeight() >= 100
+    assert tab.unmapped_table.minimumHeight() > tab.detected_headers_view.minimumHeight()
+
+    assert tab.source_edit.toolTip() == str(source_path)
+    assert tab.master_path_label.toolTip() == str(master_path)
+    assert tab.export_output_path.toolTip() == str(export_path)
+    assert tab.master_path_label.cursorPosition() == 0
+
+
+def test_manual_mapping_table_uses_conservative_column_sizing(qapp):
+    module = _load_legacy_module()
+    tab = module.LeadVaultTab()
+    header = tab.unmapped_table.horizontalHeader()
+
+    assert header.sectionResizeMode(0) == QtWidgets.QHeaderView.Interactive
+    assert header.sectionResizeMode(1) == QtWidgets.QHeaderView.Stretch
+    assert tab.unmapped_table.columnWidth(0) >= 250
 
 
 def test_manual_mapping_is_passed_to_backend_worker_and_summary_updates(qapp, monkeypatch, tmp_path):
