@@ -29,7 +29,7 @@ def test_summarize_master_dataset_counts_rows_emails_review_and_sources(tmp_path
         {
             "Artist": "Unearthed One",
             "Primary_Email": "two@example.com",
-            "Needs_Review": "No",
+            "Needs_Review": "1",
             "Source_Directory": "unearthed",
         },
         {
@@ -38,16 +38,23 @@ def test_summarize_master_dataset_counts_rows_emails_review_and_sources(tmp_path
             "Needs_Review": "Yes ",
             "Source_Directory": "",
         },
+        {
+            "Artist": "Bandcamp One",
+            "Primary_Email": "",
+            "Needs_Review": "No",
+            "Source_Directory": " bandcamp ",
+        },
     ]
     _write_canonical_csv(master_path, rows)
 
     result = summarize_master_dataset(master_path)
 
     assert result == {
-        "total_rows": 4,
+        "total_rows": 5,
         "rows_with_email": 2,
-        "needs_review": 1,
+        "needs_review": 4,
         "sources": {
+            "bandcamp": 1,
             "spotify": 2,
             "unearthed": 1,
         },
@@ -86,3 +93,34 @@ def test_summarize_master_dataset_treats_missing_columns_as_blank(tmp_path):
             "bandcamp": 1,
         },
     }
+
+
+def test_summarize_master_dataset_tolerates_legacy_needs_review_values(tmp_path):
+    master_path = tmp_path / "master.csv"
+    rows = [
+        {
+            "Artist": "Act One",
+            "Needs_Review": "TRUE",
+            "Source_Directory": "spotify",
+        },
+        {
+            "Artist": "Act Two",
+            "Needs_Review": "True",
+            "Source_Directory": "spotify",
+        },
+        {
+            "Artist": "Act Three",
+            "Needs_Review": "YES",
+            "Source_Directory": "spotify",
+        },
+        {
+            "Artist": "Act Four",
+            "Needs_Review": "0",
+            "Source_Directory": "spotify",
+        },
+    ]
+    _write_canonical_csv(master_path, rows)
+
+    result = summarize_master_dataset(master_path)
+
+    assert result["needs_review"] == 3

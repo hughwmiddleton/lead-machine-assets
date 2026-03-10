@@ -20,7 +20,8 @@ def summarize_master_dataset(master_csv_path: PathLike) -> Dict[str, object]:
         if primary_email.strip():
             rows_with_email += 1
 
-        if row.get("Needs_Review", "") == "Yes":
+        needs_review_value = str(row.get("Needs_Review", "") or "").strip().lower()
+        if needs_review_value in {"yes", "true", "1"}:
             needs_review += 1
 
         source_directory = str(row.get("Source_Directory", "") or "").strip()
