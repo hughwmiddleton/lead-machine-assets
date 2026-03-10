@@ -26,7 +26,7 @@ import tempfile
 import shutil
 import logging
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from fb_email_override import should_accept_email_override
 # ---------------------------
@@ -142,6 +142,8 @@ from spotify_scraper import scrape_spotify
 from origin_validator import _derive_origin_output_path, run_auto_validate
 from soundcloud_metadata_enricher import enrich_soundcloud_metadata
 import pipeline_runner
+from lead_vault.merge import merge_csv_into_master, preview_csv_import
+from lead_vault.schema import get_canonical_master_schema, get_default_master_csv_path
 
 cross_directory_enricher = None
 try:
@@ -9586,6 +9588,315 @@ class AutoValidateWorker(QtCore.QThread):
             pass
 
 
+class LeadVaultWorker(QtCore.QThread):
+    finished_signal = QtCore.pyqtSignal(dict)
+    error_signal = QtCore.pyqtSignal(str)
+
+    def __init__(
+        self,
+        mode: str,
+        source_path: str,
+        header_overrides: Optional[Dict[str, str]] = None,
+        ignored_headers: Optional[List[str]] = None,
+        master_path: Optional[str] = None,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.mode = mode
+        self.source_path = source_path
+        self.header_overrides = dict(header_overrides or {})
+        self.ignored_headers = list(ignored_headers or [])
+        self.master_path = master_path or str(get_default_master_csv_path())
+
+    def run(self):
+        try:
+            if self.mode == "preview":
+                result = preview_csv_import(
+                    self.source_path,
+                    header_overrides=self.header_overrides,
+                    ignored_headers=self.ignored_headers,
+                    master_path=self.master_path,
+                )
+            elif self.mode == "import":
+                result = merge_csv_into_master(
+                    self.source_path,
+                    header_overrides=self.header_overrides,
+                    ignored_headers=self.ignored_headers,
+                    master_path=self.master_path,
+                )
+            else:
+                raise ValueError(f"Unknown Lead Vault worker mode: {self.mode}")
+            self.finished_signal.emit(result)
+        except Exception as exc:
+            self.error_signal.emit(str(exc))
+
+
+class LeadVaultTab(QtWidgets.QWidget):
+    IGNORE_OPTION = "Ignore column"
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.worker: Optional[LeadVaultWorker] = None
+        self.preview_result: Optional[dict] = None
+        self._build_ui()
+
+    def _build_ui(self):
+        layout = QtWidgets.QVBoxLayout()
+
+        source_row = QtWidgets.QHBoxLayout()
+        source_label = QtWidgets.QLabel("Import CSV:")
+        self.source_edit = QtWidgets.QLineEdit()
+        self.source_edit.setPlaceholderText("Select a CSV to preview and merge into the Lead Vault.")
+        self.source_edit.textChanged.connect(self._reset_preview_state)
+        source_browse = QtWidgets.QPushButton("Browse...")
+        source_browse.clicked.connect(self._browse_csv)
+        self.preview_button = QtWidgets.QPushButton("Preview Import")
+        self.preview_button.clicked.connect(self._start_preview)
+        source_row.addWidget(source_label)
+        source_row.addWidget(self.source_edit)
+        source_row.addWidget(source_browse)
+        source_row.addWidget(self.preview_button)
+        layout.addLayout(source_row)
+
+        master_row = QtWidgets.QHBoxLayout()
+        master_label = QtWidgets.QLabel("Master CSV:")
+        self.master_path_label = QtWidgets.QLineEdit(str(get_default_master_csv_path()))
+        self.master_path_label.setReadOnly(True)
+        master_row.addWidget(master_label)
+        master_row.addWidget(self.master_path_label)
+        layout.addLayout(master_row)
+
+        detected_label = QtWidgets.QLabel("Detected Headers")
+        layout.addWidget(detected_label)
+        self.detected_headers_view = QtWidgets.QPlainTextEdit()
+        self.detected_headers_view.setReadOnly(True)
+        self.detected_headers_view.setPlaceholderText("Preview a CSV to inspect incoming headers.")
+        layout.addWidget(self.detected_headers_view)
+
+        mapped_label = QtWidgets.QLabel("Auto-Mapped Columns")
+        layout.addWidget(mapped_label)
+        self.mapped_headers_view = QtWidgets.QPlainTextEdit()
+        self.mapped_headers_view.setReadOnly(True)
+        self.mapped_headers_view.setPlaceholderText("Auto-mapped columns will appear here.")
+        layout.addWidget(self.mapped_headers_view)
+
+        unmapped_label = QtWidgets.QLabel("Manual Mapping For Unmapped Columns")
+        layout.addWidget(unmapped_label)
+        self.unmapped_table = QtWidgets.QTableWidget(0, 2)
+        self.unmapped_table.setHorizontalHeaderLabels(["Incoming Header", "Map To"])
+        self.unmapped_table.horizontalHeader().setStretchLastSection(True)
+        self.unmapped_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        layout.addWidget(self.unmapped_table)
+
+        controls = QtWidgets.QHBoxLayout()
+        self.import_button = QtWidgets.QPushButton("Run Lead Vault Import")
+        self.import_button.setEnabled(False)
+        self.import_button.clicked.connect(self._start_import)
+        controls.addWidget(self.import_button)
+        controls.addStretch()
+        layout.addLayout(controls)
+
+        summary_label = QtWidgets.QLabel("Import Summary")
+        layout.addWidget(summary_label)
+        self.summary_view = QtWidgets.QPlainTextEdit()
+        self.summary_view.setReadOnly(True)
+        self.summary_view.setPlaceholderText("Preview and import results will appear here.")
+        layout.addWidget(self.summary_view)
+
+        self.setLayout(layout)
+
+    def _browse_csv(self):
+        file_path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Select Lead Vault Import CSV",
+            "",
+            "CSV Files (*.csv);;All Files (*)",
+        )
+        if file_path:
+            self.source_edit.setText(file_path)
+
+    def _reset_preview_state(self):
+        self.preview_result = None
+        self.detected_headers_view.clear()
+        self.mapped_headers_view.clear()
+        self.summary_view.clear()
+        self.unmapped_table.setRowCount(0)
+        self.import_button.setEnabled(False)
+
+    def _start_preview(self):
+        if self.worker and self.worker.isRunning():
+            QtWidgets.QMessageBox.information(self, "Lead Vault", "A Lead Vault task is already running.")
+            return
+        source_path = self.source_edit.text().strip()
+        if not source_path or not os.path.exists(source_path):
+            QtWidgets.QMessageBox.warning(self, "Lead Vault", "Select a valid import CSV first.")
+            return
+        self.preview_button.setEnabled(False)
+        self.import_button.setEnabled(False)
+        self.summary_view.setPlainText("Previewing import...")
+        self._start_worker("preview", source_path, {}, [])
+
+    def _start_import(self):
+        if self.worker and self.worker.isRunning():
+            QtWidgets.QMessageBox.information(self, "Lead Vault", "A Lead Vault task is already running.")
+            return
+        if not self.preview_result:
+            QtWidgets.QMessageBox.warning(self, "Lead Vault", "Preview the CSV before importing.")
+            return
+        source_path = self.source_edit.text().strip()
+        if not source_path or not os.path.exists(source_path):
+            QtWidgets.QMessageBox.warning(self, "Lead Vault", "The selected import CSV no longer exists.")
+            return
+        header_overrides, ignored_headers, unresolved_headers = self._collect_manual_mapping_state()
+        if unresolved_headers:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Lead Vault",
+                "Resolve or ignore every unmapped column before importing.",
+            )
+            self._refresh_import_button()
+            return
+        self.preview_button.setEnabled(False)
+        self.import_button.setEnabled(False)
+        self.summary_view.setPlainText("Running Lead Vault import...")
+        self._start_worker("import", source_path, header_overrides, ignored_headers)
+
+    def _start_worker(
+        self,
+        mode: str,
+        source_path: str,
+        header_overrides: Dict[str, str],
+        ignored_headers: List[str],
+    ):
+        self._stop_worker()
+        self.worker = LeadVaultWorker(
+            mode=mode,
+            source_path=source_path,
+            header_overrides=header_overrides,
+            ignored_headers=ignored_headers,
+            master_path=self.master_path_label.text().strip(),
+        )
+        self.worker.finished_signal.connect(
+            self._handle_preview_finished if mode == "preview" else self._handle_import_finished
+        )
+        self.worker.error_signal.connect(self._handle_worker_error)
+        self.worker.start()
+
+    def _handle_preview_finished(self, result: dict):
+        self.preview_result = result
+        self.detected_headers_view.setPlainText("\n".join(result.get("detected_headers", [])))
+        mapped_lines = [
+            f"{raw_header} -> {canonical_field}"
+            for raw_header, canonical_field in sorted(result.get("mapped_headers", {}).items())
+        ]
+        self.mapped_headers_view.setPlainText("\n".join(mapped_lines))
+        self._populate_unmapped_table(result.get("unmapped_headers", []))
+        self.summary_view.setPlainText(self._format_summary(result, preview_only=True))
+        self.preview_button.setEnabled(True)
+        self._stop_worker()
+        self._refresh_import_button()
+
+    def _handle_import_finished(self, result: dict):
+        self.preview_result = result
+        self.summary_view.setPlainText(self._format_summary(result, preview_only=False))
+        self.preview_button.setEnabled(True)
+        self._stop_worker()
+        self._refresh_import_button()
+
+    def _handle_worker_error(self, message: str):
+        self.preview_button.setEnabled(True)
+        self._stop_worker()
+        self.import_button.setEnabled(False)
+        self.summary_view.setPlainText(f"Lead Vault task failed:\n{message}")
+        QtWidgets.QMessageBox.warning(self, "Lead Vault", message or "Lead Vault task failed safely.")
+
+    def _populate_unmapped_table(self, unmapped_headers: List[str]):
+        self.unmapped_table.setRowCount(len(unmapped_headers))
+        canonical_fields = get_canonical_master_schema()
+        for row_index, header in enumerate(unmapped_headers):
+            self.unmapped_table.setItem(row_index, 0, QtWidgets.QTableWidgetItem(header))
+            combo = QtWidgets.QComboBox()
+            combo.addItem("Select mapping...", "")
+            combo.addItem(self.IGNORE_OPTION, self.IGNORE_OPTION)
+            for canonical_field in canonical_fields:
+                combo.addItem(canonical_field, canonical_field)
+            combo.currentIndexChanged.connect(self._refresh_import_button)
+            self.unmapped_table.setCellWidget(row_index, 1, combo)
+
+    def _collect_manual_mapping_state(self) -> Tuple[Dict[str, str], List[str], List[str]]:
+        overrides: Dict[str, str] = {}
+        ignored_headers: List[str] = []
+        unresolved_headers: List[str] = []
+        for row_index in range(self.unmapped_table.rowCount()):
+            header_item = self.unmapped_table.item(row_index, 0)
+            combo = self.unmapped_table.cellWidget(row_index, 1)
+            header_name = header_item.text() if header_item else ""
+            if not header_name or combo is None:
+                continue
+            selected_value = combo.currentData() or ""
+            if not selected_value:
+                unresolved_headers.append(header_name)
+                continue
+            if selected_value == self.IGNORE_OPTION:
+                ignored_headers.append(header_name)
+                continue
+            overrides[header_name] = str(selected_value)
+        return overrides, ignored_headers, unresolved_headers
+
+    def _refresh_import_button(self):
+        if not self.preview_result or bool(getattr(self.worker, "isRunning", lambda: False)()):
+            self.import_button.setEnabled(False)
+            return
+        _, _, unresolved_headers = self._collect_manual_mapping_state()
+        self.import_button.setEnabled(not unresolved_headers)
+
+    def _format_summary(self, result: dict, preview_only: bool) -> str:
+        lines = [
+            f"Source: {result.get('source_path', '')}",
+            f"Master: {result.get('master_path', '')}",
+            f"Rows read: {result.get('row_count', 0)}",
+        ]
+        if preview_only:
+            lines.append(f"Detected headers: {len(result.get('detected_headers', []))}")
+            lines.append(f"Auto-mapped headers: {len(result.get('mapped_headers', {}))}")
+            lines.append(f"Unmapped headers: {len(result.get('unmapped_headers', []))}")
+        else:
+            lines.extend(
+                [
+                    f"Rows added: {result.get('rows_added', 0)}",
+                    f"Rows updated: {result.get('rows_updated', 0)}",
+                    f"Rows skipped as duplicates: {result.get('rows_skipped_duplicates', 0)}",
+                    f"Rows unresolved mapping: {result.get('rows_unresolved_mapping', 0)}",
+                    f"Rows ambiguous: {result.get('rows_ambiguous', 0)}",
+                    f"Rows errors: {result.get('rows_errors', 0)}",
+                ]
+            )
+        warnings = result.get("warnings", []) or []
+        if warnings:
+            lines.append("")
+            lines.append("Warnings:")
+            lines.extend(str(item) for item in warnings)
+        return "\n".join(lines)
+
+    def _stop_worker(self):
+        worker = self.worker
+        if not worker:
+            return
+        if worker.isRunning():
+            try:
+                worker.wait(2000)
+            except Exception:
+                try:
+                    worker.terminate()
+                    worker.wait(2000)
+                except Exception:
+                    pass
+        self.worker = None
+
+    def shutdown(self):
+        self._stop_worker()
+
+
 class CrossDirectoryEnricherTab(QtWidgets.QWidget):
     def __init__(self, parent=None, enricher_module=None):
         super().__init__(parent)
@@ -10845,6 +11156,8 @@ class MainWindow(QtWidgets.QMainWindow):
             enricher_module=cross_directory_enricher
         )
         self.tabs.addTab(self.cross_enricher_tab, "Cross-Directory Enricher")
+        self.lead_vault_tab = LeadVaultTab()
+        self.tabs.addTab(self.lead_vault_tab, "Lead Vault")
         self.auto_validate_tab = AutoValidateTab()
         self.tabs.addTab(self.auto_validate_tab, "Auto-Validate")
         self.final_export_tab = FinalExportTab()
@@ -11297,6 +11610,8 @@ class MainWindow(QtWidgets.QMainWindow):
             and hasattr(self.cross_enricher_tab, "shutdown")
         ):
             self.cross_enricher_tab.shutdown()
+        if hasattr(self, "lead_vault_tab") and hasattr(self.lead_vault_tab, "shutdown"):
+            self.lead_vault_tab.shutdown()
         if hasattr(self, "auto_validate_tab") and hasattr(self.auto_validate_tab, "shutdown"):
             self.auto_validate_tab.shutdown()
         if hasattr(self, "night_mode_tab") and hasattr(self.night_mode_tab, "shutdown"):
