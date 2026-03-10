@@ -427,6 +427,8 @@ def run_contact_phase(config: Any, run_dir: str, enrich_manifest: Dict[str, Any]
     phases = manifest.setdefault("phases", {})
     contact_phase = phases.setdefault("contact", {})
     outputs = contact_phase.setdefault("outputs", {})
+    outputs.pop("final_export", None)
+    outputs.pop("woodpecker_export", None)
 
     os.makedirs(run_dir, exist_ok=True)
 
@@ -434,8 +436,6 @@ def run_contact_phase(config: Any, run_dir: str, enrich_manifest: Dict[str, Any]
     master_post_fb_path = os.path.join(run_dir, "master_post_fb.csv")
     master_final_path = os.path.join(run_dir, "master_final.csv")
     master_export_path = os.path.join(run_dir, "master_export_leads.csv")
-    final_export_path = os.path.join(run_dir, "final_export.csv")
-    woodpecker_export_path = os.path.join(run_dir, "woodpecker_export.csv")
     fb_state_path = os.path.join(run_dir, "facebook_state.json")
 
     existing_post_df: Optional[pd.DataFrame] = None
@@ -467,8 +467,6 @@ def run_contact_phase(config: Any, run_dir: str, enrich_manifest: Dict[str, Any]
         _record_output(outputs, "master_post_fb", master_post_fb_path, df=existing_post_df)
         _record_output(outputs, "master_final", master_final_path)
         _record_output(outputs, "master_export_leads", master_export_path)
-        _record_output(outputs, "final_export", final_export_path)
-        _record_output(outputs, "woodpecker_export", woodpecker_export_path)
         contact_phase["status"] = "skipped_cached"
         manifest["phases"]["contact"] = contact_phase
         write_manifest(manifest_path, manifest)
@@ -546,8 +544,6 @@ def run_contact_phase(config: Any, run_dir: str, enrich_manifest: Dict[str, Any]
             output_csv=master_export_path,
             logger=logger,
             export_profile=(cfg.get("export_profile") or "full_dump"),
-            final_export_csv=final_export_path,
-            woodpecker_export_csv=woodpecker_export_path,
         )
     except Exception:
         contact_phase["status"] = "failed"
@@ -556,8 +552,6 @@ def run_contact_phase(config: Any, run_dir: str, enrich_manifest: Dict[str, Any]
         return manifest
 
     _record_output(outputs, "master_export_leads", master_export_path)
-    _record_output(outputs, "final_export", final_export_path)
-    _record_output(outputs, "woodpecker_export", woodpecker_export_path)
 
     contact_phase["status"] = "completed" if final_rows > 0 else "failed"
     manifest["phases"]["contact"] = contact_phase

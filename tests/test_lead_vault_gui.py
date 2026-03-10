@@ -35,6 +35,7 @@ def test_main_window_contains_lead_vault_tab(qapp):
     labels = [window.tabs.tabText(index) for index in range(window.tabs.count())]
 
     assert "Lead Vault" in labels
+    assert "Final Export View" not in labels
     window.close()
 
 
@@ -196,3 +197,53 @@ def test_generate_export_uses_master_csv_and_shows_summary(qapp, monkeypatch, tm
     assert info_calls
     assert "Export complete" in info_calls[0]
     assert "Rows exported: 1" in info_calls[0]
+
+
+def test_export_preset_selector_exposes_both_presets_and_updates_default_path(qapp, monkeypatch, tmp_path):
+    module = _load_legacy_module()
+    master_path = tmp_path / "master.csv"
+    monkeypatch.setattr(module, "get_default_master_csv_path", lambda: master_path)
+
+    tab = module.LeadVaultTab()
+
+    preset_names = [tab.preset_selector.itemText(index) for index in range(tab.preset_selector.count())]
+
+    assert preset_names == ["woodpecker", "final_export"]
+    assert tab.export_output_path.text().endswith("woodpecker_export.csv")
+
+    tab.preset_selector.setCurrentText("final_export")
+
+    assert tab._selected_export_preset()["name"] == "final_export"
+    assert tab.export_output_path.text().endswith("final_export.csv")
+
+
+def test_generate_export_uses_selected_preset(qapp, monkeypatch, tmp_path):
+    module = _load_legacy_module()
+    master_path = tmp_path / "master.csv"
+    master_path.write_text("Artist,Primary_Email\nAct,act@example.com\n", encoding="utf-8-sig")
+    calls = []
+
+    monkeypatch.setattr(module, "get_default_master_csv_path", lambda: master_path)
+
+    def fake_export_with_preset(preset, master_csv_path, target_output_path):
+        calls.append((preset, master_csv_path, target_output_path))
+        return {
+            "preset": str(preset["name"]),
+            "rows_read": 1,
+            "rows_exported": 1,
+            "rows_skipped": 0,
+            "output_file": str(target_output_path),
+        }
+
+    monkeypatch.setattr(module, "export_with_preset", fake_export_with_preset)
+    monkeypatch.setattr(module.QtWidgets.QMessageBox, "warning", lambda *args, **kwargs: None)
+    monkeypatch.setattr(module.QtWidgets.QMessageBox, "information", lambda *args, **kwargs: None)
+
+    tab = module.LeadVaultTab()
+    tab.preset_selector.setCurrentText("final_export")
+    tab.generate_export_button.click()
+
+    assert calls
+    assert calls[0][0]["name"] == "final_export"
+    assert calls[0][1] == master_path
+    assert calls[0][2].name == "final_export.csv"

@@ -46,13 +46,9 @@ def test_contact_phase_smoke(monkeypatch, tmp_path):
         df.to_csv(output_csv, index=False)
         return output_csv
 
-    def fake_export_master_leads(input_csv, output_csv, final_export_csv=None, woodpecker_export_csv=None, **kwargs):
+    def fake_export_master_leads(input_csv, output_csv, **kwargs):
         df = pd.read_csv(input_csv, dtype=str, keep_default_na=False)
         df.to_csv(output_csv, index=False)
-        Path(final_export_csv).parent.mkdir(parents=True, exist_ok=True)
-        df.to_csv(final_export_csv, index=False)
-        Path(woodpecker_export_csv).parent.mkdir(parents=True, exist_ok=True)
-        df.to_csv(woodpecker_export_csv, index=False)
 
     monkeypatch.setattr("pipeline_runner.run_facebook_global_pass_nightmode", fake_fb_pass)
     monkeypatch.setattr("pipeline_runner.run_enrichment", fake_enrich)
@@ -63,10 +59,7 @@ def test_contact_phase_smoke(monkeypatch, tmp_path):
     master_post_fb = run_dir / "master_post_fb.csv"
     master_final = run_dir / "master_final.csv"
     master_export = run_dir / "master_export_leads.csv"
-    final_export = run_dir / "final_export.csv"
-    woodpecker_export = run_dir / "woodpecker_export.csv"
-
-    for path in (master_post_fb, master_final, master_export, final_export, woodpecker_export):
+    for path in (master_post_fb, master_final, master_export):
         assert path.exists()
         assert pd.read_csv(path).shape[0] > 0
 
@@ -75,3 +68,6 @@ def test_contact_phase_smoke(monkeypatch, tmp_path):
     outputs = contact_phase["outputs"]
     assert outputs["master_post_fb"]["row_count"] > 0
     assert outputs["master_final"]["row_count"] > 0
+    assert outputs["master_export_leads"]["row_count"] > 0
+    assert "final_export" not in outputs
+    assert "woodpecker_export" not in outputs

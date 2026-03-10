@@ -117,16 +117,10 @@ def parity_stubs(monkeypatch, tmp_path):
             attempted_total=len(df.index),
         )
 
-    def fake_export_master_leads(input_csv, output_csv, logger=None, export_profile=None, final_export_csv=None, woodpecker_export_csv=None):
+    def fake_export_master_leads(input_csv, output_csv, logger=None, export_profile=None):
         df = _load_csv(Path(input_csv))
         Path(output_csv).parent.mkdir(parents=True, exist_ok=True)
         df.to_csv(output_csv, index=False)
-        if final_export_csv:
-            Path(final_export_csv).parent.mkdir(parents=True, exist_ok=True)
-            df.to_csv(final_export_csv, index=False)
-        if woodpecker_export_csv:
-            Path(woodpecker_export_csv).parent.mkdir(parents=True, exist_ok=True)
-            df.to_csv(woodpecker_export_csv, index=False)
 
     monkeypatch.setattr(pipeline_runner, "run_directory_job", fake_run_directory_job)
     monkeypatch.setattr(pipeline_runner, "run_master_enrichment", fake_run_master_enrichment)
@@ -246,4 +240,3 @@ def test_v1_v2_parity(monkeypatch, parity_stubs):
     _, v2_df = _build_v2_pipeline(tmp_path)
 
     _assert_parity(v1_df, v2_df)
-

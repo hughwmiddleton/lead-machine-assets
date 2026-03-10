@@ -1718,121 +1718,6 @@ def _build_final_export_frame(df: pd.DataFrame) -> pd.DataFrame:
                 pass
 
     return df_out
-
-
-def build_final_export_view(input_csv_path: Union[Path, str], output_csv_path: Union[Path, str], logger: Optional[logging.Logger] = None) -> None:
-    """
-    Read the enriched/master CSV and write a client-facing final export view.
-    """
-    export_logger = logger or logging.getLogger(__name__)
-    input_path = Path(input_csv_path)
-    output_path = Path(output_csv_path)
-    if not input_path.exists():
-        export_logger.warning("[Final Export] Input not found: %s", input_path)
-        return
-
-    try:
-        df = pd.read_csv(input_path, dtype=str, keep_default_na=False)
-    except Exception as exc:
-        export_logger.error("[Final Export] Failed to read %s: %s", input_path, exc)
-        return
-
-    df["Country_Derived"] = df.apply(infer_country_from_context, axis=1)
-    df["Location"] = df.apply(infer_location_for_export, axis=1)
-
-    total_rows = len(df.index)
-    final_df = _build_final_export_frame(df)
-    kept_rows = len(final_df.index)
-    needs_review_count = (
-        int(final_df["Needs_Review"].astype(str).str.upper().eq("TRUE").sum()) if "Needs_Review" in final_df else 0
-    )
-    export_logger.info(
-        "[Final Export] rows_in=%s rows_kept=%s needs_review=%s",
-        total_rows,
-        kept_rows,
-        needs_review_count,
-    )
-    _ensure_parent(str(output_path))
-    final_df.to_csv(output_path, index=False)
-    export_logger.info("[Final Export] Wrote final export CSV: %s", output_path)
-
-
-def _build_woodpecker_frame(final_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Build Woodpecker-friendly view from the already built final export DataFrame.
-    """
-    if final_df is None or final_df.empty:
-        return pd.DataFrame(columns=WOODPECKER_EXPORT_COLUMNS)
-    df = final_df.copy()
-    for col in WOODPECKER_EXPORT_COLUMNS:
-        if col not in df.columns:
-            df[col] = ""
-    # All Emails column is derived from canonical Email_All during export prep.
-    email_mask_source = "All Emails" if "All Emails" in df.columns else "Primary Email"
-    mask = df[email_mask_source].fillna("").astype(str).str.strip() != ""
-    filtered = df.loc[mask].copy()
-    return filtered.loc[:, list(WOODPECKER_EXPORT_COLUMNS)]
-
-
-def write_final_and_woodpecker_exports(
-    input_csv_path: Union[Path, str],
-    final_export_csv_path: Union[Path, str],
-    woodpecker_export_csv_path: Union[Path, str],
-    logger: Optional[logging.Logger] = None,
-    consolidated_df: Optional[pd.DataFrame] = None,
-) -> None:
-    export_logger = logger or logging.getLogger(__name__)
-    input_path = Path(input_csv_path)
-    if not input_path.exists():
-        export_logger.warning("[Final Export] Input not found: %s", input_path)
-        return
-    try:
-        if consolidated_df is not None:
-            df = consolidated_df.copy()
-        else:
-            df = pd.read_csv(input_path, dtype=str, keep_default_na=False)
-            df = df.fillna("")
-            df = _consolidate_email_all(df)
-        df = recompute_final_status_post_enrichment(df, export_logger)
-    except Exception as exc:
-        export_logger.error("[Final Export] Failed to read %s: %s", input_path, exc)
-        return
-
-    df["Country_Derived"] = df.apply(infer_country_from_context, axis=1)
-    df["Location"] = df.apply(infer_location_for_export, axis=1)
-
-    final_df = _build_final_export_frame(df)
-    total_rows = len(final_df.index)
-    needs_review_final = (
-        int(final_df["Needs_Review"].astype(str).str.upper().eq("TRUE").sum()) if "Needs_Review" in final_df else 0
-    )
-
-    _ensure_parent(str(final_export_csv_path))
-    final_df.to_csv(final_export_csv_path, index=False, encoding="utf-8")
-    export_logger.info(
-        "[Final Export] rows_kept=%s needs_review=%s -> %s",
-        total_rows,
-        needs_review_final,
-        final_export_csv_path,
-    )
-
-    woodpecker_df = _build_woodpecker_frame(final_df)
-    wood_rows = len(woodpecker_df.index)
-    wood_needs_review = (
-        int(woodpecker_df["Needs_Review"].astype(str).str.upper().eq("TRUE").sum())
-        if "Needs_Review" in woodpecker_df
-        else 0
-    )
-    _ensure_parent(str(woodpecker_export_csv_path))
-    woodpecker_df.to_csv(woodpecker_export_csv_path, index=False, encoding="utf-8")
-    export_logger.info(
-        "[Woodpecker Export] rows_with_email=%s needs_review=%s -> %s",
-        wood_rows,
-        wood_needs_review,
-        woodpecker_export_csv_path,
-    )
-
-
 def _merge_festival_expansion_output(
     main_output_csv_path: str,
     expansion_output_csv_path: str,
@@ -3159,8 +3044,6 @@ def export_master_leads(
     logger: Optional[logging.Logger] = None,
     export_columns: Optional[Sequence[str]] = None,
     export_profile: str = "full_dump",
-    final_export_csv: Optional[str] = None,
-    woodpecker_export_csv: Optional[str] = None,
 ) -> None:
     export_logger = logger or logging.getLogger(__name__)
     if not input_csv or not os.path.exists(input_csv):
@@ -3169,18 +3052,9 @@ def export_master_leads(
 
     columns = list(export_columns) if export_columns is not None else list(DEFAULT_EXPORT_COLUMNS)
     export_logger.info("[Master] Exporting client-facing CSV: %s -> %s", input_csv, output_csv)
-    if not final_export_csv:
-        final_export_csv = os.path.join(os.path.dirname(os.path.abspath(input_csv)), "final_export.csv")
-    else:
-        final_export_csv = str(final_export_csv)
-    if not woodpecker_export_csv:
-        woodpecker_export_csv = os.path.join(os.path.dirname(os.path.abspath(input_csv)), "woodpecker_export.csv")
-    else:
-        woodpecker_export_csv = str(woodpecker_export_csv)
 
     _ensure_parent(output_csv)
     row_count = 0
-    consolidated_df: Optional[pd.DataFrame] = None
     try:
         from final_checker import filter_rows_for_export
 
@@ -3211,15 +3085,3 @@ def export_master_leads(
         return
 
     export_logger.info("[Master] Export wrote %s rows to %s", row_count, output_csv)
-
-    try:
-        # Final export and Woodpecker export views; legacy export kept for compatibility.
-        write_final_and_woodpecker_exports(
-            input_csv_path=input_csv,
-            final_export_csv_path=final_export_csv,
-            woodpecker_export_csv_path=woodpecker_export_csv,
-            logger=export_logger,
-            consolidated_df=consolidated_df,
-        )
-    except Exception as exc:  # pragma: no cover - defensive
-        export_logger.error("[Master] Final export view failed safely: %s", exc)

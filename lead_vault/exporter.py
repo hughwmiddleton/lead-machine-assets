@@ -2,6 +2,8 @@ import csv
 from pathlib import Path
 from typing import Callable, Dict, Optional, Union
 
+import pandas as pd
+
 PathLike = Union[str, Path]
 
 
@@ -60,73 +62,39 @@ WOODPECKER_EXPORT_PRESET = {
 FINAL_EXPORT_PRESET = {
     "name": "final_export",
     "headers": [
-        "Artist",
-        "Primary_Email",
-        "All_Emails",
+        "Artist Name",
         "Location",
-        "Country",
-        "Primary_Genre",
-        "Secondary_Genre",
-        "Website",
-        "Domain",
+        "Country_Derived",
+        "Song Title",
+        "Primary Genre",
+        "Unearthed_Genre_Raw",
+        "Social Link",
+        "SoundCloud Link",
         "Spotify_URL",
-        "SoundCloud_URL",
-        "Instagram_URL",
-        "Bandcamp_URL",
-        "External_Links",
-        "Played_On_Triple_J",
-        "Played_On_Unearthed",
-        "Industry_Signals",
-        "Discovery_Source",
-        "Source_Directory",
-        "Source_URL",
-        "Import_Batch",
-        "Date_Added",
-        "First_Discovered_Date",
-        "Last_Updated",
-        "Lead_Status",
-        "Outreach_Status",
-        "Final_Status",
-        "Needs_Review",
-        "Review_Reason",
+        "External Links",
+        "Primary Email",
+        "All Emails",
+        "Email Source",
+        "Email_Source_URL",
+        "Email_Source_Type",
+        "Email_Extract_Method",
+        "Contact_Mode",
+        "Discovery Source",
+        "Source Directory",
+        "Source URL",
         "Review_Urls",
-        "Notes",
+        "Played on triple J",
+        "Played on Unearthed",
+        "Release Date",
+        "Date Added",
+        "final_status",
+        "Needs_Review",
+        "FB_Review_Reason",
     ],
-    "field_map": {
-        "Artist": "Artist",
-        "Primary_Email": "Primary_Email",
-        "All_Emails": "All_Emails",
-        "Location": "Location",
-        "Country": "Country",
-        "Primary_Genre": "Primary_Genre",
-        "Secondary_Genre": "Secondary_Genre",
-        "Website": "Website",
-        "Domain": "Domain",
-        "Spotify_URL": "Spotify_URL",
-        "SoundCloud_URL": "SoundCloud_URL",
-        "Instagram_URL": "Instagram_URL",
-        "Bandcamp_URL": "Bandcamp_URL",
-        "External_Links": "External_Links",
-        "Played_On_Triple_J": "Played_On_Triple_J",
-        "Played_On_Unearthed": "Played_On_Unearthed",
-        "Industry_Signals": "Industry_Signals",
-        "Discovery_Source": "Discovery_Source",
-        "Source_Directory": "Source_Directory",
-        "Source_URL": "Source_URL",
-        "Import_Batch": "Import_Batch",
-        "Date_Added": "Date_Added",
-        "First_Discovered_Date": "First_Discovered_Date",
-        "Last_Updated": "Last_Updated",
-        "Lead_Status": "Lead_Status",
-        "Outreach_Status": "Outreach_Status",
-        "Final_Status": "Final_Status",
-        "Needs_Review": "Needs_Review",
-        "Review_Reason": "Review_Reason",
-        "Review_Urls": "Review_Urls",
-        "Notes": "Notes",
-    },
+    "field_map": {},
     "row_filter": None,
     "filename_pattern": "final_export.csv",
+    "exporter": "legacy_final_export_bridge",
 }
 
 _ROW_FILTERS: Dict[str, Callable[[Dict[str, str]], bool]] = {
@@ -139,6 +107,10 @@ def export_with_preset(
     master_csv_path: PathLike,
     output_path: PathLike,
 ) -> dict:
+    custom_exporter = _resolve_exporter(preset.get("exporter"))
+    if custom_exporter is not None:
+        return custom_exporter(preset, master_csv_path, output_path)
+
     headers = list(preset["headers"])
     field_map = dict(preset["field_map"])
     row_filter = _resolve_row_filter(preset.get("row_filter"))
@@ -175,6 +147,79 @@ def export_with_preset(
     }
 
 
+def _export_legacy_final_export_bridge(
+    preset: dict,
+    master_csv_path: PathLike,
+    output_path: PathLike,
+) -> dict:
+    from pipeline_runner import _build_final_export_frame, recompute_final_status_post_enrichment
+
+    master_path = Path(master_csv_path)
+    export_path = Path(output_path)
+    export_path.parent.mkdir(parents=True, exist_ok=True)
+
+    master_df = pd.read_csv(master_path, dtype=str, keep_default_na=False).fillna("")
+    rows_read = len(master_df.index)
+
+    bridge_df = _build_legacy_final_export_bridge_frame(master_df)
+    bridge_df = recompute_final_status_post_enrichment(bridge_df, logger=None)
+    export_df = _build_final_export_frame(bridge_df)
+    export_df.to_csv(export_path, index=False, encoding="utf-8-sig")
+
+    rows_exported = len(export_df.index)
+    return {
+        "preset": str(preset["name"]),
+        "rows_read": rows_read,
+        "rows_exported": rows_exported,
+        "rows_skipped": rows_read - rows_exported,
+        "output_file": str(export_path),
+    }
+
+
+def _build_legacy_final_export_bridge_frame(df: pd.DataFrame) -> pd.DataFrame:
+    work = df.copy()
+
+    _backfill_column(work, "Artist Name", ["Artist"])
+    _backfill_column(work, "Email", ["Primary_Email"])
+    _backfill_column(work, "Email_All", ["All_Emails"])
+    _backfill_column(work, "Country_Derived", ["Country"])
+    _backfill_column(work, "Song Title", ["Song_Title"])
+    _backfill_column(work, "Primary Genre", ["Primary_Genre"])
+    _backfill_column(work, "SoundCloud Link", ["SoundCloud_URL"])
+    _backfill_column(work, "External Links", ["External_Links"])
+    _backfill_column(work, "Source Directory", ["Source_Directory"])
+    _backfill_column(work, "Source URL", ["Source_URL"])
+    _backfill_column(work, "Played on triple J", ["Played_On_Triple_J"])
+    _backfill_column(work, "Played on Unearthed", ["Played_On_Unearthed"])
+    _backfill_column(work, "Release Date", ["Release_Date"])
+    _backfill_column(work, "Date Added", ["Date_Added"])
+    _backfill_column(work, "final_status", ["Final_Status"])
+    _backfill_column(work, "FB_Review_Reason", ["Review_Reason"])
+    _backfill_column(work, "Spotify Playlist", ["Discovery_Source"])
+    _backfill_column(work, "Social Link", ["Facebook_URL", "Instagram_URL", "Twitter_URL", "TikTok_URL"])
+
+    if "FB_Status" not in work.columns:
+        work["FB_Status"] = ""
+    if "Email_Source_Type" in work.columns:
+        fb_status_blank = work["FB_Status"].fillna("").astype(str).str.strip() == ""
+        facebook_enriched = work["Email_Source_Type"].fillna("").astype(str).str.lower().eq("facebook_enrich")
+        work.loc[fb_status_blank & facebook_enriched, "FB_Status"] = "ok"
+
+    return work
+
+
+def _backfill_column(df: pd.DataFrame, target: str, sources: list[str]) -> None:
+    if target not in df.columns:
+        df[target] = ""
+    target_series = df[target].fillna("").astype(str)
+    source_columns = [column for column in sources if column in df.columns]
+    if not source_columns:
+        return
+    source_frame = df.loc[:, source_columns].fillna("").astype(str).replace("", pd.NA)
+    merged_source = source_frame.bfill(axis=1).iloc[:, 0].fillna("")
+    df[target] = target_series.where(target_series.str.strip() != "", merged_source)
+
+
 def _resolve_row_filter(
     row_filter: Optional[Union[str, Callable[[Dict[str, str]], bool]]],
 ) -> Optional[Callable[[Dict[str, str]], bool]]:
@@ -187,6 +232,18 @@ def _resolve_row_filter(
             raise ValueError(f"Unknown row filter: {row_filter}")
         return _ROW_FILTERS[row_filter]
     return _ROW_FILTERS[str(row_filter)]
+
+
+def _resolve_exporter(
+    exporter: Optional[Union[str, Callable[[dict, PathLike, PathLike], dict]]],
+) -> Optional[Callable[[dict, PathLike, PathLike], dict]]:
+    if exporter is None:
+        return None
+    if callable(exporter):
+        return exporter
+    if str(exporter) == "legacy_final_export_bridge":
+        return _export_legacy_final_export_bridge
+    raise ValueError(f"Unknown exporter: {exporter}")
 
 
 EXPORT_PRESETS = {
