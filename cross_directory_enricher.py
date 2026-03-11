@@ -673,6 +673,7 @@ LINK_HUB_HOSTS = {
     "bio.link",
     "lnk.bio",
     "bio.site",
+    "campsite.bio",
     "flow.page",
     "solo.to",
     "withkoji.com",
@@ -4088,6 +4089,34 @@ def _collect_website_enrich_candidate_urls(row: Any) -> List[str]:
     return candidates
 
 
+def _collect_website_enrich_link_hubs(row: Any) -> List[str]:
+    if row is None:
+        return []
+
+    hub_urls: List[str] = []
+    seen_urls: Set[str] = set()
+
+    def _add_value(value: Any) -> None:
+        for token in _split_multi_value(value):
+            normalised = _normalise_url(token)
+            if not normalised or normalised in seen_urls:
+                continue
+            if _host(normalised) not in LINK_HUB_HOSTS:
+                continue
+            seen_urls.add(normalised)
+            hub_urls.append(normalised)
+
+    _add_value(row.get("Spotify_Website_URL", ""))
+    _add_value(row.get("External Links", ""))
+
+    for field in WEBSITE_EMAIL_OPTIONAL_FIELDS:
+        if hasattr(row, "__contains__") and field not in row:
+            continue
+        _add_value(row.get(field, ""))
+
+    return hub_urls
+
+
 def _fetch_website_html_bounded(
     session: requests.Session,
     url: str,
@@ -6522,6 +6551,95 @@ class CrossDirectoryEnricherWorker(QThread):
         after_email = cell_to_str(seed_df.at[row_idx, "Email"]) if "Email" in seed_df.columns else ""
         return (before_social, before_external, before_email) != (after_social, after_external, after_email)
 
+    def _expand_bio_link_hubs_for_website_enrich(
+        self,
+        seed_df: pd.DataFrame,
+        row_idx,
+        ctx: Optional[Dict[str, Any]],
+    ) -> bool:
+        if MAX_LINK_HUB_HOPS_PER_ROW <= 0:
+            return False
+        row = seed_df.loc[row_idx]
+        hub_urls = _collect_website_enrich_link_hubs(row)
+        if not hub_urls:
+            return False
+
+        artist = (
+            ctx.get("artist")
+            if isinstance(ctx, dict)
+            else _clean_cell(row.get("Artist Name", ""))
+        ) or "<unknown>"
+        if "External Links" not in seed_df.columns:
+            seed_df["External Links"] = ""
+        before_external = cell_to_str(seed_df.at[row_idx, "External Links"])
+        existing_candidates = _collect_website_enrich_candidate_urls(row)
+        seen_domains = {
+            domain
+            for domain in (_website_cache_key(url) for url in existing_candidates)
+            if domain
+        }
+
+        existing_links: List[str] = []
+        seen_links: Set[str] = set()
+        for token in _split_multi_value(before_external):
+            normalised = _normalise_url(token)
+            if not normalised or _is_noise_url(normalised) or normalised in seen_links:
+                continue
+            seen_links.add(normalised)
+            existing_links.append(normalised)
+
+        discovered_websites: List[str] = []
+        hops = 0
+        for hub_url in hub_urls:
+            if hops >= MAX_LINK_HUB_HOPS_PER_ROW:
+                break
+            hops += 1
+            result = _fetch_website_html_bounded(
+                self.session,
+                hub_url,
+                timeout_s=WEBSITE_EMAIL_TIMEOUT,
+                max_bytes=WEBSITE_EMAIL_MAX_BYTES,
+            )
+            hub_final_url = result.final_url or hub_url
+            hub_ok = bool(result.is_html and result.html)
+            self.log_message.emit(
+                f"[Web] bio link hub fetched ok={hub_ok} artist='{artist}' url={hub_final_url}"
+            )
+            if not hub_ok:
+                continue
+            _, hub_websites, _, _ = _extract_links_from_profile(
+                result.html,
+                "website",
+                hub_final_url,
+            )
+            if not hub_websites:
+                continue
+            candidate_row = {
+                "Spotify_Website_URL": "",
+                "Bandcamp_URL": "",
+                "External Links": MULTI_VALUE_SEPARATOR.join(sorted(hub_websites)),
+            }
+            for website_url in _collect_website_enrich_candidate_urls(candidate_row):
+                website_domain = _website_cache_key(website_url)
+                if not website_domain or website_domain in seen_domains:
+                    continue
+                seen_domains.add(website_domain)
+                discovered_websites.append(website_url)
+
+        if not discovered_websites:
+            return False
+
+        merged_links = discovered_websites + existing_links
+        deduped_links: List[str] = []
+        seen_merged: Set[str] = set()
+        for url in merged_links:
+            if url in seen_merged:
+                continue
+            seen_merged.add(url)
+            deduped_links.append(url)
+        seed_df.at[row_idx, "External Links"] = MULTI_VALUE_SEPARATOR.join(deduped_links)
+        return before_external != cell_to_str(seed_df.at[row_idx, "External Links"])
+
     def _discover_facebook_identity(
         self,
         seed_df: pd.DataFrame,
@@ -6868,6 +6986,8 @@ class CrossDirectoryEnricherWorker(QThread):
             self._set_platform_state("website", "skipped")
             return False
 
+        self._expand_bio_link_hubs_for_website_enrich(seed_df, row_idx, ctx)
+        row = seed_df.loc[row_idx]
         website_candidates = _collect_website_enrich_candidate_urls(row)
         if not website_candidates:
             self._set_platform_state("website", "skipped")
