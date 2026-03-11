@@ -39,7 +39,7 @@
     "auto_resume_after_captcha": true,
     "cooldown_seconds": 600,
     "max_auto_resume_attempts": 1,
-    "max_rows_per_run": 80
+    "max_rows_per_run": 100
   },
   "master_enrichment": {
     "enabled": true

@@ -5309,6 +5309,7 @@ class CrossDirectoryEnricherWorker(QThread):
         self._live_context: Dict[str, Any] = {}
         self._row_enrichment_state: Dict[str, str] = {}
         self._fb_discovery_attempted_rows: Set[Any] = set()
+        self._spotify_discovery_attempted_rows: Set[Any] = set()
         self._night_sc_cache: Dict[str, Dict[str, Any]] = {}
         self._active_night_sc_attempt: Optional[_NightSCAttempt] = None
         self._night_sc_challenge_streak: int = 0  # consecutive challenge detections
@@ -5454,6 +5455,7 @@ class CrossDirectoryEnricherWorker(QThread):
         self._last_final_url = None
         self._last_resolved_profile_url = None
         self._fb_discovery_attempted_rows = set()
+        self._spotify_discovery_attempted_rows = set()
         self._domain_email_reuse_index = {}
         self._domain_profile_index = {}
         self._domain_email_reuse_rows = set()
@@ -5641,6 +5643,7 @@ class CrossDirectoryEnricherWorker(QThread):
                         if skip_rest:
                             self._update_progress(position, total)
                             continue
+                    enriched |= self._run_spotify_discovery_pass(seed_df, row_idx, ctx, fb_driver=fb_driver)
                     enriched |= self._enrich_row_instagram_email(seed_df, row_idx, ctx)
                     enriched |= self._enrich_row_website_email(seed_df, row_idx, ctx)
                     if ENABLE_FACEBOOK_ENRICHMENT and fb_driver:
@@ -6409,6 +6412,202 @@ class CrossDirectoryEnricherWorker(QThread):
             return not spotify_origin
         return False
 
+    def _spotify_identity_surface_snapshot(self, row: Any) -> Dict[str, Any]:
+        row_dict = row.to_dict() if hasattr(row, "to_dict") else dict(row)
+        socials, websites, _, link_hubs = _extract_directory_fields(row_dict)
+        identity_links = set(socials) | set(websites)
+        return {
+            "has_bandcamp": bool(_coerce_directory_value(row_dict.get("Bandcamp_URL", ""))),
+            "has_soundcloud": bool(_coerce_directory_value(row_dict.get("SoundCloud Link", ""))),
+            "has_facebook": bool(_get_canonical_fb_url(row_dict)),
+            "identity_link_count": len(identity_links),
+            "link_hubs": set(link_hubs),
+        }
+
+    def _expand_spotify_link_hubs(
+        self,
+        seed_df: pd.DataFrame,
+        row_idx,
+        ctx: Optional[Dict[str, Any]],
+    ) -> bool:
+        if MAX_LINK_HUB_HOPS_PER_ROW <= 0:
+            return False
+        row = seed_df.loc[row_idx]
+        snapshot = self._spotify_identity_surface_snapshot(row)
+        link_hubs = list(sorted(snapshot.get("link_hubs") or set()))
+        if not link_hubs:
+            return False
+
+        artist = (
+            ctx.get("artist")
+            if isinstance(ctx, dict)
+            else _clean_cell(row.get("Artist Name", ""))
+        ) or "<unknown>"
+        before_social = cell_to_str(seed_df.at[row_idx, "Social Link"]) if "Social Link" in seed_df.columns else ""
+        before_external = cell_to_str(seed_df.at[row_idx, "External Links"]) if "External Links" in seed_df.columns else ""
+        before_email = cell_to_str(seed_df.at[row_idx, "Email"]) if "Email" in seed_df.columns else ""
+
+        discovered_socials: Set[str] = set()
+        discovered_websites: Set[str] = set()
+        discovered_emails: Set[str] = set()
+        hops = 0
+        for hub_url in link_hubs:
+            if hops >= MAX_LINK_HUB_HOPS_PER_ROW:
+                break
+            hops += 1
+            self.log_message.emit(f"[Spotify Discovery] Expanding link hub for '{artist}': {hub_url}")
+            try:
+                response = self.session.get(hub_url, timeout=HTTP_TIMEOUT)
+                response.raise_for_status()
+            except Exception as exc:
+                self.log_message.emit(
+                    f"[Spotify Discovery] Link hub fetch failed for '{artist}' url={hub_url} err={exc}"
+                )
+                continue
+            hub_socials, hub_websites, hub_emails, _ = _extract_links_from_profile(
+                getattr(response, "text", "") or "",
+                "spotify",
+                hub_url,
+            )
+            discovered_socials |= hub_socials
+            discovered_websites |= hub_websites
+            discovered_emails |= hub_emails
+
+        if not (discovered_socials or discovered_websites or discovered_emails):
+            return False
+
+        self._apply_payload(
+            seed_df,
+            row_idx,
+            EnrichmentPayload(
+                socials=discovered_socials,
+                websites=discovered_websites,
+                emails=discovered_emails,
+                source_detail="Spotify Discovery",
+            ),
+        )
+        after_social = cell_to_str(seed_df.at[row_idx, "Social Link"]) if "Social Link" in seed_df.columns else ""
+        after_external = cell_to_str(seed_df.at[row_idx, "External Links"]) if "External Links" in seed_df.columns else ""
+        after_email = cell_to_str(seed_df.at[row_idx, "Email"]) if "Email" in seed_df.columns else ""
+        return (before_social, before_external, before_email) != (after_social, after_external, after_email)
+
+    def _discover_facebook_identity(
+        self,
+        seed_df: pd.DataFrame,
+        row_idx,
+        fb_driver,
+        ctx: Optional[Dict[str, Any]],
+    ) -> bool:
+        if not (ENABLE_FACEBOOK_ENRICHMENT and fb_driver):
+            return False
+        row = seed_df.loc[row_idx]
+        artist = (
+            ctx.get("artist")
+            if isinstance(ctx, dict)
+            else _clean_cell(row.get("Artist Name", ""))
+        ) or "<unknown>"
+        for col in ("facebook_url", "Facebook_URL", "Facebook URL"):
+            if col not in seed_df.columns:
+                seed_df[col] = ""
+        promoted_fb = promote_facebook_url(row, set_row=False)
+        promoted_norm = _canonicalize_fb_url(promoted_fb)
+        if promoted_norm:
+            if not cell_to_str(seed_df.at[row_idx, "facebook_url"]):
+                seed_df.at[row_idx, "facebook_url"] = promoted_norm
+            if "Facebook_URL" in seed_df.columns and not cell_to_str(seed_df.at[row_idx, "Facebook_URL"]):
+                seed_df.at[row_idx, "Facebook_URL"] = promoted_norm
+            elif "Facebook URL" in seed_df.columns and not cell_to_str(seed_df.at[row_idx, "Facebook URL"]):
+                seed_df.at[row_idx, "Facebook URL"] = promoted_norm
+
+        existing_fb_url = _get_canonical_fb_url(seed_df.loc[row_idx])
+        if existing_fb_url:
+            return False
+
+        if row_idx in getattr(self, "_fb_discovery_attempted_rows", set()):
+            self.log_message.emit(
+                f"[FB Discover] Skipping discovery for '{artist}' (already attempted this run)"
+            )
+            if "FB_Status" not in seed_df.columns:
+                seed_df["FB_Status"] = ""
+            seed_df.at[row_idx, "FB_Status"] = seed_df.at[row_idx, "FB_Status"] or "no_fb_url"
+            return False
+
+        decision = self._row_allows_heavy_enricher(seed_df.loc[row_idx], ctx, "facebook")
+        if not decision.allowed:
+            self._log_low_confidence_skip("fb", artist, decision)
+            return False
+
+        intake = classify_explicit_fb_intake(seed_df.loc[row_idx].to_dict())
+        source_summary = ",".join(intake.source_fields[:2]) if intake.source_fields else "<none>"
+        sample = ""
+        if intake.accepted_urls:
+            sample = intake.accepted_urls[0]
+        elif intake.rejected_invalid:
+            sample = intake.rejected_invalid[0]
+        elif intake.rejected_guard:
+            sample = intake.rejected_guard[0]
+        location = cell_to_str(seed_df.at[row_idx, "Location"]) if "Location" in seed_df.columns else ""
+        self.log_message.emit(
+            f"[FB Discover] No explicit facebook url for '{artist}'; attempting bounded discovery "
+            f"(explicit FB intake outcome='{intake.outcome}' source='{source_summary}' sample='{sample}')."
+        )
+        self._fb_discovery_attempted_rows.add(row_idx)
+        discovered_fb_url = _discover_facebook_url_bounded(
+            fb_driver, artist, location, self.log_message.emit
+        )
+        if not discovered_fb_url:
+            self.log_message.emit(f"[FB Discover] No safe candidate found for '{artist}'")
+            self.log_message.emit(
+                f"[FB Discover] Discovery failed for '{artist}'; locking FB discovery for this run"
+            )
+            if "FB_Status" not in seed_df.columns:
+                seed_df["FB_Status"] = ""
+            seed_df.at[row_idx, "FB_Status"] = seed_df.at[row_idx, "FB_Status"] or "no_fb_url"
+            return False
+
+        self.log_message.emit(
+            f"[FB Discover] Candidate accepted for '{artist}': {discovered_fb_url}"
+        )
+        for col in ("facebook_url", "Facebook_URL", "Facebook URL"):
+            if col in seed_df.columns and not cell_to_str(seed_df.at[row_idx, col]):
+                seed_df.at[row_idx, col] = discovered_fb_url
+        self.log_message.emit(
+            f"[FB Discover] Canonical facebook_url populated via discovery for '{artist}'"
+        )
+        return True
+
+    def _run_spotify_discovery_pass(
+        self,
+        seed_df: pd.DataFrame,
+        row_idx,
+        ctx: Optional[Dict[str, Any]],
+        fb_driver=None,
+    ) -> bool:
+        row = seed_df.loc[row_idx]
+        if not self._row_is_spotify_origin(row, ctx):
+            return False
+        if row_idx in getattr(self, "_spotify_discovery_attempted_rows", set()):
+            return False
+
+        snapshot = self._spotify_identity_surface_snapshot(row)
+        sparse_identity = (
+            not snapshot["has_bandcamp"]
+            or not snapshot["has_soundcloud"]
+            or not snapshot["has_facebook"]
+            or snapshot["identity_link_count"] < 2
+            or bool(snapshot["link_hubs"])
+        )
+        if not sparse_identity:
+            return False
+
+        self._spotify_discovery_attempted_rows.add(row_idx)
+        enriched = False
+        if snapshot["link_hubs"]:
+            enriched |= self._expand_spotify_link_hubs(seed_df, row_idx, ctx)
+        if not snapshot["has_facebook"]:
+            enriched |= self._discover_facebook_identity(seed_df, row_idx, fb_driver, ctx)
+        return enriched
+
     def _enrich_row_directories(self, seed_df, row_idx, directory_indexes, priority, ctx):
         """Directory matching for a single row. Returns True if any enrichment applied."""
         artist = ctx["artist"]
@@ -6892,51 +7091,10 @@ class CrossDirectoryEnricherWorker(QThread):
                     return False
 
                 if not existing_fb_links:
-                    if row_idx in getattr(self, "_fb_discovery_attempted_rows", set()):
-                        self.log_message.emit(
-                            f"[FB Discover] Skipping discovery for '{artist}' (already attempted this run)"
-                        )
-                        if "FB_Status" not in seed_df.columns:
-                            seed_df["FB_Status"] = ""
-                        seed_df.at[row_idx, "FB_Status"] = seed_df.at[row_idx, "FB_Status"] or "no_fb_url"
-                    else:
-                        intake = classify_explicit_fb_intake(seed_df.loc[row_idx].to_dict())
-                        source_summary = ",".join(intake.source_fields[:2]) if intake.source_fields else "<none>"
-                        sample = ""
-                        if intake.accepted_urls:
-                            sample = intake.accepted_urls[0]
-                        elif intake.rejected_invalid:
-                            sample = intake.rejected_invalid[0]
-                        elif intake.rejected_guard:
-                            sample = intake.rejected_guard[0]
-                        location = cell_to_str(seed_df.at[row_idx, "Location"]) if "Location" in seed_df.columns else ""
-                        self.log_message.emit(
-                            f"[FB Discover] No explicit facebook url for '{artist}'; attempting bounded discovery "
-                            f"(explicit FB intake outcome='{intake.outcome}' source='{source_summary}' sample='{sample}')."
-                        )
-                        self._fb_discovery_attempted_rows.add(row_idx)
-                        discovered_fb_url = _discover_facebook_url_bounded(
-                            fb_driver, artist, location, self.log_message.emit
-                        )
+                    if self._discover_facebook_identity(seed_df, row_idx, fb_driver, ctx):
+                        discovered_fb_url = _get_canonical_fb_url(seed_df.loc[row_idx])
                         if discovered_fb_url:
-                            self.log_message.emit(
-                                f"[FB Discover] Candidate accepted for '{artist}': {discovered_fb_url}"
-                            )
-                            for col in ("facebook_url", "Facebook_URL", "Facebook URL"):
-                                if col in seed_df.columns and not cell_to_str(seed_df.at[row_idx, col]):
-                                    seed_df.at[row_idx, col] = discovered_fb_url
-                            self.log_message.emit(
-                                f"[FB Discover] Canonical facebook_url populated via discovery for '{artist}'"
-                            )
                             existing_fb_links = [discovered_fb_url]
-                        else:
-                            self.log_message.emit(f"[FB Discover] No safe candidate found for '{artist}'")
-                            self.log_message.emit(
-                                f"[FB Discover] Discovery failed for '{artist}'; locking FB discovery for this run"
-                            )
-                            if "FB_Status" not in seed_df.columns:
-                                seed_df["FB_Status"] = ""
-                            seed_df.at[row_idx, "FB_Status"] = seed_df.at[row_idx, "FB_Status"] or "no_fb_url"
                 if existing_fb_links:
                     fb_emails: List[str] = []
                     page_url_used = ""
@@ -7198,6 +7356,7 @@ class CrossDirectoryEnricherWorker(QThread):
         self._phase_directory_matching(seed_df, directory_indexes, priority, total)
         if use_scheduler:
             # Keep IG extraction outside the scheduler as a bounded single-page pass.
+            self._phase_spotify_discovery(seed_df, total, fb_driver=fb_driver)
             self._phase_instagram_email(seed_df, total)
             self._phase_website_email(seed_df, total)
             self._run_interleaved_sources(seed_df, fb_driver, total)
@@ -7209,6 +7368,8 @@ class CrossDirectoryEnricherWorker(QThread):
         # Phase 2: General live lookup (BC + LF; SC mostly skipped since Phase 1 populated it)
         if self.enable_live_search:
             self._phase_live_lookup(seed_df, total)
+        # Phase 3: Spotify seed identity fan-out before contact stages.
+        self._phase_spotify_discovery(seed_df, total, fb_driver=fb_driver)
         # Phase 3: Instagram profile HTML email extraction (single fetch only)
         self._phase_instagram_email(seed_df, total)
         # Phase 4: bounded website contact crawl from canonical website field.
@@ -7585,6 +7746,25 @@ class CrossDirectoryEnricherWorker(QThread):
             f"skipped_disabled={skipped_disabled}, deferred={len(deferred_rows)})"
         )
         return deferred_rows
+
+    def _phase_spotify_discovery(self, seed_df, total, fb_driver=None):
+        self.log_message.emit("[Enricher][Spotify Discovery] Starting...")
+        eligible_rows = 0
+        enriched_count = 0
+        for position, row_idx in enumerate(seed_df.index, start=1):
+            ctx = self._build_row_context(seed_df, row_idx, position, total)
+            if not ctx:
+                continue
+            if not self._row_is_spotify_origin(seed_df.loc[row_idx], ctx):
+                continue
+            eligible_rows += 1
+            if self._should_short_circuit_after_domain_reuse(seed_df, row_idx, ctx):
+                continue
+            if self._run_spotify_discovery_pass(seed_df, row_idx, ctx, fb_driver=fb_driver):
+                enriched_count += 1
+        self.log_message.emit(
+            f"[Enricher][Spotify Discovery] Completed {eligible_rows} spotify rows (enriched={enriched_count})"
+        )
 
     def _phase_instagram_email(self, seed_df, total):
         for position, row_idx in enumerate(seed_df.index, start=1):

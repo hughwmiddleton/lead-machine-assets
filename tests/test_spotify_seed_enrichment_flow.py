@@ -330,3 +330,133 @@ def test_scheduler_fb_opportunity_remains_open_for_spotify_origin_rows_with_emai
 
     assert source_scheduler._row_source_opportunity(spotify_row, "FB") is True
     assert source_scheduler._row_source_opportunity(normal_row, "FB") is False
+
+
+def test_phase_spotify_discovery_only_targets_spotify_origin_rows(tmp_path, monkeypatch):
+    worker = _build_worker(tmp_path)
+    df = pd.DataFrame(
+        [
+            _base_row(),
+            _base_row(
+                Spotify_URL="",
+                Spotify_Artist_ID="",
+                **{"Source Directory": "bandcamp"},
+            ),
+        ]
+    )
+    seen = []
+
+    def fake_pass(seed_df, row_idx, ctx, fb_driver=None):
+        seen.append((row_idx, ctx["spotify_origin"]))
+        return False
+
+    monkeypatch.setattr(worker, "_run_spotify_discovery_pass", fake_pass)
+
+    worker._phase_spotify_discovery(df, total=len(df), fb_driver=None)
+
+    assert seen == [(0, True)]
+
+
+def test_spotify_discovery_pass_populates_facebook_identity(tmp_path, monkeypatch):
+    worker = _build_worker(tmp_path)
+    df = pd.DataFrame([_base_row()])
+    ctx = worker._build_row_context(df, 0, 1, 1)
+    discovered = {"count": 0}
+
+    def fake_discover(*args, **kwargs):
+        discovered["count"] += 1
+        return "https://www.facebook.com/artist-a"
+
+    monkeypatch.setattr(cde, "_discover_facebook_url_bounded", fake_discover)
+
+    enriched = worker._run_spotify_discovery_pass(df, 0, ctx, fb_driver=object())
+
+    assert enriched is True
+    assert discovered["count"] == 1
+    assert df.at[0, "Facebook_URL"] == "https://www.facebook.com/artist-a"
+
+
+def test_spotify_discovery_pass_does_not_overwrite_existing_facebook_url(tmp_path, monkeypatch):
+    worker = _build_worker(tmp_path)
+    existing = "https://www.facebook.com/existing-artist"
+    df = pd.DataFrame([_base_row(Facebook_URL=existing, facebook_url=existing)])
+    ctx = worker._build_row_context(df, 0, 1, 1)
+    discovered = {"count": 0}
+
+    def fake_discover(*args, **kwargs):
+        discovered["count"] += 1
+        return "https://www.facebook.com/weaker-match"
+
+    monkeypatch.setattr(cde, "_discover_facebook_url_bounded", fake_discover)
+
+    enriched = worker._run_spotify_discovery_pass(df, 0, ctx, fb_driver=object())
+
+    assert enriched is False
+    assert discovered["count"] == 0
+    assert df.at[0, "Facebook_URL"] == existing
+    assert df.at[0, "facebook_url"] == existing
+
+
+def test_spotify_discovery_pass_expands_link_hub_urls(tmp_path):
+    worker = _build_worker(tmp_path)
+    df = pd.DataFrame([_base_row(**{"External Links": "https://linktr.ee/artist-a"})])
+    ctx = worker._build_row_context(df, 0, 1, 1)
+    fetches = {"count": 0}
+
+    class _FakeResponse:
+        text = """
+        <html><body>
+        <a href="https://www.instagram.com/artista/">Instagram</a>
+        <a href="https://artist.test">Website</a>
+        </body></html>
+        """
+
+        def raise_for_status(self):
+            return None
+
+    def fake_get(url, timeout=None):
+        fetches["count"] += 1
+        assert url == "https://linktr.ee/artist-a"
+        return _FakeResponse()
+
+    worker.session.get = fake_get
+
+    enriched = worker._run_spotify_discovery_pass(df, 0, ctx, fb_driver=None)
+
+    assert enriched is True
+    assert fetches["count"] == 1
+    assert "https://www.instagram.com/artista" in df.at[0, "Social Link"]
+    assert "https://artist.test" in df.at[0, "External Links"]
+
+
+def test_spotify_discovery_pass_runs_once_per_row(tmp_path, monkeypatch):
+    worker = _build_worker(tmp_path)
+    df = pd.DataFrame([_base_row(**{"External Links": "https://linktr.ee/artist-a"})])
+    ctx = worker._build_row_context(df, 0, 1, 1)
+    hub_fetches = {"count": 0}
+    fb_discovers = {"count": 0}
+
+    class _FakeResponse:
+        text = '<html><body><a href="https://artist.test">Website</a></body></html>'
+
+        def raise_for_status(self):
+            return None
+
+    def fake_get(url, timeout=None):
+        hub_fetches["count"] += 1
+        return _FakeResponse()
+
+    def fake_discover(*args, **kwargs):
+        fb_discovers["count"] += 1
+        return "https://www.facebook.com/artist-a"
+
+    worker.session.get = fake_get
+    monkeypatch.setattr(cde, "_discover_facebook_url_bounded", fake_discover)
+
+    first = worker._run_spotify_discovery_pass(df, 0, ctx, fb_driver=object())
+    second = worker._run_spotify_discovery_pass(df, 0, ctx, fb_driver=object())
+
+    assert first is True
+    assert second is False
+    assert hub_fetches["count"] == 1
+    assert fb_discovers["count"] == 1
