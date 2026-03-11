@@ -6484,6 +6484,31 @@ class CrossDirectoryEnricherWorker(QThread):
             "link_hubs": set(link_hubs),
         }
 
+    def _spotify_snapshot_gained_identity_surface(
+        self,
+        before: Dict[str, Any],
+        after: Dict[str, Any],
+    ) -> bool:
+        return bool(
+            (after.get("has_bandcamp") and not before.get("has_bandcamp"))
+            or (after.get("has_soundcloud") and not before.get("has_soundcloud"))
+            or (after.get("has_facebook") and not before.get("has_facebook"))
+            or int(after.get("identity_link_count", 0) or 0) > int(before.get("identity_link_count", 0) or 0)
+        )
+
+    def _ensure_row_enrichment_state_platforms(self, *platforms: str) -> None:
+        state = getattr(self, "_row_enrichment_state", None)
+        if not isinstance(state, dict):
+            state = {}
+            self._row_enrichment_state = state
+        for platform in platforms:
+            if platform and platform not in state:
+                state[platform] = "pending"
+        if not hasattr(self, "_sc_blocked_for_row"):
+            self._sc_blocked_for_row = False
+        if not isinstance(getattr(self, "_last_bc_row_stats", None), dict):
+            self._last_bc_row_stats = {}
+
     def _expand_spotify_link_hubs(
         self,
         seed_df: pd.DataFrame,
@@ -6755,6 +6780,48 @@ class CrossDirectoryEnricherWorker(QThread):
             enriched |= self._expand_spotify_link_hubs(seed_df, row_idx, ctx)
         if not snapshot["has_facebook"]:
             enriched |= self._discover_facebook_identity(seed_df, row_idx, fb_driver, ctx)
+        snapshot = self._spotify_identity_surface_snapshot(seed_df.loc[row_idx])
+        sparse_identity = (
+            not snapshot["has_bandcamp"]
+            or not snapshot["has_soundcloud"]
+            or not snapshot["has_facebook"]
+            or snapshot["identity_link_count"] < 2
+            or bool(snapshot["link_hubs"])
+        )
+        if not (self.enable_live_search and sparse_identity):
+            return enriched
+
+        artist = (
+            ctx.get("artist")
+            if isinstance(ctx, dict)
+            else _clean_cell(seed_df.at[row_idx, "Artist Name"])
+        ) or "<unknown>"
+        spotify_id = ctx.get("spotify_id") if isinstance(ctx, dict) else ""
+        recovery_snapshot = snapshot
+        self._ensure_row_enrichment_state_platforms("bandcamp", "soundcloud", "lastfm")
+
+        bc_payload = self._live_search_bandcamp(artist)
+        if bc_payload:
+            bc_applied = self._apply_payload_guarded(
+                seed_df, row_idx, bc_payload, artist, spotify_id=spotify_id
+            )
+            enriched |= bc_applied
+            updated_snapshot = self._spotify_identity_surface_snapshot(seed_df.loc[row_idx])
+            if self._spotify_snapshot_gained_identity_surface(recovery_snapshot, updated_snapshot):
+                return enriched
+
+        sc_applied = self._night_sc_attempt_row(seed_df, row_idx, artist, spotify_id=spotify_id)
+        enriched |= sc_applied
+        updated_snapshot = self._spotify_identity_surface_snapshot(seed_df.loc[row_idx])
+        if self._spotify_snapshot_gained_identity_surface(recovery_snapshot, updated_snapshot):
+            return enriched
+
+        lf_payload = self._live_search_lastfm(artist)
+        if lf_payload:
+            lf_applied = self._apply_payload_guarded(
+                seed_df, row_idx, lf_payload, artist, spotify_id=spotify_id
+            )
+            enriched |= lf_applied
         return enriched
 
     def _enrich_row_directories(self, seed_df, row_idx, directory_indexes, priority, ctx):
