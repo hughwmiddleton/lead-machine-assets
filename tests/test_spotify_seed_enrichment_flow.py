@@ -403,6 +403,8 @@ def test_spotify_discovery_pass_populates_facebook_identity_for_higher_tier_spot
     assert enriched is True
     assert discovered["count"] == 1
     assert df.at[0, "Facebook_URL"] == "https://www.facebook.com/artist-a"
+    assert worker._spotify_identity_pass_attempted == 0
+    assert worker._spotify_identity_pass_enriched == 0
 
 
 def test_spotify_discovery_pass_skips_facebook_identity_for_low_tier_spotify_row(tmp_path, monkeypatch):
@@ -520,13 +522,14 @@ def test_spotify_discovery_pass_runs_once_per_row(tmp_path, monkeypatch):
     assert fb_discovers["count"] == 1
 
 
-def test_spotify_discovery_pass_skips_live_recovery_for_low_tier_spotify_row(tmp_path, monkeypatch):
+def test_spotify_discovery_pass_runs_identity_pass_before_low_tier_suppression(tmp_path, monkeypatch):
     recovery_calls = {"bandcamp": 0, "soundcloud": 0, "lastfm": 0}
     worker = _build_worker(tmp_path)
     worker.enable_live_search = True
     worker.max_live_searches = 5
-    df = pd.DataFrame([_base_row()])
+    df = pd.DataFrame([_base_row(Spotify_Genres="indie pop")])
     ctx = worker._build_row_context(df, 0, 1, 1)
+    discovered = {"count": 0}
 
     monkeypatch.setattr(
         worker,
@@ -536,19 +539,29 @@ def test_spotify_discovery_pass_skips_live_recovery_for_low_tier_spotify_row(tmp
     monkeypatch.setattr(
         worker,
         "_night_sc_attempt_row",
-        lambda *args, **kwargs: recovery_calls.__setitem__("soundcloud", recovery_calls["soundcloud"] + 1),
+        lambda *args, **kwargs: recovery_calls.__setitem__("soundcloud", recovery_calls["soundcloud"] + 1) or False,
     )
     monkeypatch.setattr(
         worker,
         "_live_search_lastfm",
         lambda _artist: recovery_calls.__setitem__("lastfm", recovery_calls["lastfm"] + 1),
     )
+    monkeypatch.setattr(
+        cde,
+        "_discover_facebook_url_bounded",
+        lambda *args, **kwargs: discovered.__setitem__("count", discovered["count"] + 1),
+    )
 
-    enriched = worker._run_spotify_discovery_pass(df, 0, ctx, fb_driver=None)
+    enriched = worker._run_spotify_discovery_pass(df, 0, ctx, fb_driver=object())
 
     assert enriched is False
     assert ctx["spotify_identity_tier"] == 3
-    assert recovery_calls == {"bandcamp": 0, "soundcloud": 0, "lastfm": 0}
+    assert recovery_calls == {"bandcamp": 1, "soundcloud": 1, "lastfm": 1}
+    assert discovered["count"] == 0
+    assert worker._spotify_identity_pass_attempted == 1
+    assert worker._spotify_identity_pass_enriched == 0
+    assert worker._spotify_identity_pass_no_signal == 1
+    assert worker._spotify_low_tier_fb_skips == 1
     assert worker._spotify_low_tier_recovery_skips == 1
 
 
@@ -620,6 +633,74 @@ def test_spotify_discovery_pass_recovers_soundcloud_before_lastfm(tmp_path, monk
     assert df.at[0, "SoundCloud Link"] == "https://soundcloud.com/artist-a"
     assert calls["bandcamp"] == 1
     assert calls["lastfm"] == 0
+    assert worker._spotify_identity_pass_attempted == 0
+
+
+def test_spotify_discovery_pass_low_tier_identity_pass_promotes_soundcloud(tmp_path, monkeypatch):
+    worker = _build_worker(tmp_path)
+    worker.enable_live_search = True
+    worker.max_live_searches = 5
+    df = pd.DataFrame([_base_row()])
+    ctx = worker._build_row_context(df, 0, 1, 1)
+    calls = {"bandcamp": 0, "lastfm": 0}
+
+    def fake_bandcamp(_artist):
+        calls["bandcamp"] += 1
+        return None
+
+    def fake_soundcloud(seed_df, row_idx, artist_name, spotify_id=""):
+        seed_df.at[row_idx, "SoundCloud Link"] = "https://soundcloud.com/artist-a"
+        return True
+
+    def fake_lastfm(_artist):
+        calls["lastfm"] += 1
+        return None
+
+    monkeypatch.setattr(worker, "_live_search_bandcamp", fake_bandcamp)
+    monkeypatch.setattr(worker, "_night_sc_attempt_row", fake_soundcloud)
+    monkeypatch.setattr(worker, "_live_search_lastfm", fake_lastfm)
+
+    enriched = worker._run_spotify_discovery_pass(df, 0, ctx, fb_driver=None)
+
+    assert enriched is True
+    assert df.at[0, "SoundCloud Link"] == "https://soundcloud.com/artist-a"
+    assert ctx["spotify_identity_tier"] == 2
+    assert worker._spotify_identity_pass_attempted == 1
+    assert worker._spotify_identity_pass_enriched == 1
+    assert worker._spotify_identity_pass_no_signal == 0
+    assert worker._spotify_identity_pass_promotions["soundcloud"] == 1
+    assert calls["bandcamp"] == 1
+    assert calls["lastfm"] == 0
+
+
+def test_spotify_discovery_pass_refreshes_ctx_after_identity_pass_mutation(tmp_path, monkeypatch):
+    worker = _build_worker(tmp_path)
+    worker.enable_live_search = True
+    worker.max_live_searches = 5
+    df = pd.DataFrame([_base_row(**{"Artist Name": "XY"})])
+    ctx = worker._build_row_context(df, 0, 1, 1)
+
+    before = worker._row_allows_heavy_enricher(df.loc[0], ctx, "soundcloud")
+
+    monkeypatch.setattr(worker, "_live_search_bandcamp", lambda _artist: None)
+    monkeypatch.setattr(
+        worker,
+        "_night_sc_attempt_row",
+        lambda seed_df, row_idx, artist_name, spotify_id="": seed_df.at.__setitem__(
+            (row_idx, "SoundCloud Link"),
+            "https://soundcloud.com/artist-a",
+        ) or True,
+    )
+    monkeypatch.setattr(worker, "_live_search_lastfm", lambda _artist: None)
+
+    worker._run_spotify_discovery_pass(df, 0, ctx, fb_driver=None)
+    after = worker._row_allows_heavy_enricher(df.loc[0], ctx, "soundcloud")
+
+    assert before.allowed is False
+    assert after.allowed is True
+    assert "explicit_soundcloud_link" in after.reasons
+    assert ctx["signal_snapshot"]["soundcloud_link"] == "https://soundcloud.com/artist-a"
+    assert worker._live_context["signal_snapshot"]["soundcloud_link"] == "https://soundcloud.com/artist-a"
 
 
 def test_spotify_discovery_pass_recovers_lastfm_via_apply_payload_guarded(tmp_path, monkeypatch):
