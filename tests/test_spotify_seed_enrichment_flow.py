@@ -386,9 +386,9 @@ def test_spotify_runtime_identity_uses_existing_seed_context(tmp_path):
     }
 
 
-def test_spotify_discovery_pass_populates_facebook_identity(tmp_path, monkeypatch):
+def test_spotify_discovery_pass_populates_facebook_identity_for_higher_tier_spotify_row(tmp_path, monkeypatch):
     worker = _build_worker(tmp_path)
-    df = pd.DataFrame([_base_row()])
+    df = pd.DataFrame([_base_row(Spotify_Website_URL="https://artist.test", Location="Melbourne")])
     ctx = worker._build_row_context(df, 0, 1, 1)
     discovered = {"count": 0}
 
@@ -403,6 +403,27 @@ def test_spotify_discovery_pass_populates_facebook_identity(tmp_path, monkeypatc
     assert enriched is True
     assert discovered["count"] == 1
     assert df.at[0, "Facebook_URL"] == "https://www.facebook.com/artist-a"
+
+
+def test_spotify_discovery_pass_skips_facebook_identity_for_low_tier_spotify_row(tmp_path, monkeypatch):
+    worker = _build_worker(tmp_path)
+    df = pd.DataFrame([_base_row()])
+    ctx = worker._build_row_context(df, 0, 1, 1)
+    discovered = {"count": 0}
+
+    def fake_discover(*args, **kwargs):
+        discovered["count"] += 1
+        return "https://www.facebook.com/artist-a"
+
+    monkeypatch.setattr(cde, "_discover_facebook_url_bounded", fake_discover)
+
+    enriched = worker._run_spotify_discovery_pass(df, 0, ctx, fb_driver=object())
+
+    assert enriched is False
+    assert ctx["spotify_identity_tier"] == 3
+    assert discovered["count"] == 0
+    assert df.at[0, "Facebook_URL"] == ""
+    assert worker._spotify_low_tier_fb_skips == 1
 
 
 def test_spotify_discovery_pass_does_not_overwrite_existing_facebook_url(tmp_path, monkeypatch):
@@ -460,7 +481,15 @@ def test_spotify_discovery_pass_expands_link_hub_urls(tmp_path):
 
 def test_spotify_discovery_pass_runs_once_per_row(tmp_path, monkeypatch):
     worker = _build_worker(tmp_path)
-    df = pd.DataFrame([_base_row(**{"External Links": "https://linktr.ee/artist-a"})])
+    df = pd.DataFrame(
+        [
+            _base_row(
+                Spotify_Website_URL="https://artist.test",
+                Location="Melbourne",
+                **{"External Links": "https://linktr.ee/artist-a"},
+            )
+        ]
+    )
     ctx = worker._build_row_context(df, 0, 1, 1)
     hub_fetches = {"count": 0}
     fb_discovers = {"count": 0}

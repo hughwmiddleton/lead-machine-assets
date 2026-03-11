@@ -5350,6 +5350,7 @@ class CrossDirectoryEnricherWorker(QThread):
         self._spotify_discovery_attempted_rows: Set[Any] = set()
         self._spotify_identity_tier_rows: Set[Any] = set()
         self._spotify_identity_tier_counts: Counter = Counter()
+        self._spotify_low_tier_fb_skips: int = 0
         self._spotify_low_tier_recovery_skips: int = 0
         self._night_sc_cache: Dict[str, Dict[str, Any]] = {}
         self._active_night_sc_attempt: Optional[_NightSCAttempt] = None
@@ -5499,6 +5500,7 @@ class CrossDirectoryEnricherWorker(QThread):
         self._spotify_discovery_attempted_rows = set()
         self._spotify_identity_tier_rows = set()
         self._spotify_identity_tier_counts = Counter()
+        self._spotify_low_tier_fb_skips = 0
         self._spotify_low_tier_recovery_skips = 0
         self._domain_email_reuse_index = {}
         self._domain_profile_index = {}
@@ -6303,12 +6305,17 @@ class CrossDirectoryEnricherWorker(QThread):
 
     def _log_spotify_discovery_summary(self, prefix: str) -> None:
         counts = getattr(self, "_spotify_identity_tier_counts", Counter()) or Counter()
-        if not counts and not getattr(self, "_spotify_low_tier_recovery_skips", 0):
+        if (
+            not counts
+            and not getattr(self, "_spotify_low_tier_fb_skips", 0)
+            and not getattr(self, "_spotify_low_tier_recovery_skips", 0)
+        ):
             return
         parts = [
             f"tier_1={int(counts.get('tier_1', 0))}",
             f"tier_2={int(counts.get('tier_2', 0))}",
             f"tier_3={int(counts.get('tier_3', 0))}",
+            f"low_tier_fb_skips={int(getattr(self, '_spotify_low_tier_fb_skips', 0))}",
             f"low_tier_live_skips={int(getattr(self, '_spotify_low_tier_recovery_skips', 0))}",
         ]
         self.log_message.emit(f"{prefix} Runtime tiers: " + " ".join(parts))
@@ -6896,8 +6903,23 @@ class CrossDirectoryEnricherWorker(QThread):
         enriched = False
         if snapshot["link_hubs"]:
             enriched |= self._expand_spotify_link_hubs(seed_df, row_idx, ctx)
+            snapshot = self._spotify_identity_surface_snapshot(seed_df.loc[row_idx])
         if not snapshot["has_facebook"]:
-            enriched |= self._discover_facebook_identity(seed_df, row_idx, fb_driver, ctx)
+            spotify_tier = spotify_identity.get("tier")
+            if spotify_tier == 3:
+                self._spotify_low_tier_fb_skips += 1
+                artist = (
+                    ctx.get("artist")
+                    if isinstance(ctx, dict)
+                    else _clean_cell(seed_df.at[row_idx, "Artist Name"])
+                ) or "<unknown>"
+                reasons = ",".join(spotify_identity.get("reasons") or ()) or "none"
+                self.log_message.emit(
+                    f"[Spotify Discovery] Skipping facebook discovery for '{artist}' "
+                    f"(tier=tier_3 score={int(spotify_identity.get('score') or 0)} reasons={reasons})"
+                )
+            else:
+                enriched |= self._discover_facebook_identity(seed_df, row_idx, fb_driver, ctx)
         snapshot = self._spotify_identity_surface_snapshot(seed_df.loc[row_idx])
         sparse_identity = (
             not snapshot["has_bandcamp"]
