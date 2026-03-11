@@ -252,9 +252,8 @@ def test_domain_reuse_ranking_ignores_reuse_propagation_counts():
     ).fillna("")
 
     assert worker._index_domain_email_reuse_from_row(seed_df, 0, "brightmusic.com") is True
-
-    ctx = worker._build_row_context(seed_df, 1, 3, 3)
-    assert worker._maybe_apply_domain_email_reuse(seed_df, 1, ctx) is True
+    assert seed_df.at[1, "Email"] == "hello@brightmusic.com"
+    assert seed_df.at[1, "Email_All"] == "hello@brightmusic.com"
     assert worker._domain_profile_index["brightmusic.com"]["contact_counts"] == {
         "hello@brightmusic.com": 1,
     }

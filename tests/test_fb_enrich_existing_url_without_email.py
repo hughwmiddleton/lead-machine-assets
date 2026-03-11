@@ -740,6 +740,206 @@ def test_domain_email_reuse_skips_when_only_email_all_is_populated():
     assert worker._domain_email_reuse_count == 0
 
 
+def test_domain_email_reuse_propagates_to_earlier_blank_same_domain_row():
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = pd.DataFrame(
+        [
+            {
+                "Artist Name": "Earlier Blank",
+                "Email": "",
+                "Email_All": "",
+                "Email_Type": "",
+                "Email_Source_URL": "",
+                "Email_Source_Type": "",
+                "Email_Extract_Method": "",
+                "Spotify_Website_URL": "https://brightmusic.com/about",
+            },
+            {
+                "Artist Name": "Later Discovery",
+                "Email": "mgmt@brightmusic.com",
+                "Email_All": "mgmt@brightmusic.com",
+                "Email_Type": "fb_enrich",
+                "Email_Source_URL": "https://www.facebook.com/brightone",
+                "Email_Source_Type": "facebook_enrich",
+                "Email_Extract_Method": "regex",
+                "Spotify_Website_URL": "https://brightmusic.com/contact",
+            },
+        ],
+        dtype=str,
+    ).fillna("")
+
+    assert worker._index_domain_email_reuse_from_row(seed_df, 1, "brightmusic.com") is True
+
+    assert seed_df.at[0, "Email"] == "mgmt@brightmusic.com"
+    assert seed_df.at[0, "Email_All"] == "mgmt@brightmusic.com"
+    assert seed_df.at[0, "Email_Type"] == "fb_enrich"
+    assert seed_df.at[0, "Email_Source_URL"] == "https://www.facebook.com/brightone"
+    assert seed_df.at[0, "Email_Source_Type"] == "facebook_enrich"
+    assert seed_df.at[0, "Email_Extract_Method"] == "regex"
+    assert seed_df.at[1, "Email"] == "mgmt@brightmusic.com"
+    assert worker._domain_email_reuse_count == 1
+    assert worker._yield_tracker.counts["domain_reuse"] == 1
+
+
+def test_domain_email_reuse_propagation_does_not_overwrite_existing_email():
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = pd.DataFrame(
+        [
+            {
+                "Artist Name": "Existing Email",
+                "Email": "existing@brightmusic.com",
+                "Email_All": "existing@brightmusic.com",
+                "Email_Type": "",
+                "Email_Source_URL": "",
+                "Email_Source_Type": "",
+                "Email_Extract_Method": "",
+                "Spotify_Website_URL": "https://brightmusic.com/about",
+            },
+            {
+                "Artist Name": "Later Discovery",
+                "Email": "mgmt@brightmusic.com",
+                "Email_All": "mgmt@brightmusic.com",
+                "Email_Type": "fb_enrich",
+                "Email_Source_URL": "https://www.facebook.com/brightone",
+                "Email_Source_Type": "facebook_enrich",
+                "Email_Extract_Method": "regex",
+                "Spotify_Website_URL": "https://brightmusic.com/contact",
+            },
+        ],
+        dtype=str,
+    ).fillna("")
+
+    assert worker._index_domain_email_reuse_from_row(seed_df, 1, "brightmusic.com") is True
+
+    assert seed_df.at[0, "Email"] == "existing@brightmusic.com"
+    assert seed_df.at[0, "Email_All"] == "existing@brightmusic.com"
+    assert worker._domain_email_reuse_count == 0
+
+
+def test_domain_email_reuse_propagation_skips_email_all_only_rows():
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = pd.DataFrame(
+        [
+            {
+                "Artist Name": "Email All Only",
+                "Email": "",
+                "Email_All": "existing@brightmusic.com",
+                "Email_Type": "",
+                "Email_Source_URL": "",
+                "Email_Source_Type": "",
+                "Email_Extract_Method": "",
+                "Spotify_Website_URL": "https://brightmusic.com/about",
+            },
+            {
+                "Artist Name": "Later Discovery",
+                "Email": "mgmt@brightmusic.com",
+                "Email_All": "mgmt@brightmusic.com",
+                "Email_Type": "fb_enrich",
+                "Email_Source_URL": "https://www.facebook.com/brightone",
+                "Email_Source_Type": "facebook_enrich",
+                "Email_Extract_Method": "regex",
+                "Spotify_Website_URL": "https://brightmusic.com/contact",
+            },
+        ],
+        dtype=str,
+    ).fillna("")
+
+    assert worker._index_domain_email_reuse_from_row(seed_df, 1, "brightmusic.com") is True
+
+    assert seed_df.at[0, "Email"] == ""
+    assert seed_df.at[0, "Email_All"] == "existing@brightmusic.com"
+    assert worker._domain_email_reuse_count == 0
+
+
+def test_domain_email_reuse_propagation_skips_different_domains():
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = pd.DataFrame(
+        [
+            {
+                "Artist Name": "Other Domain",
+                "Email": "",
+                "Email_All": "",
+                "Email_Type": "",
+                "Email_Source_URL": "",
+                "Email_Source_Type": "",
+                "Email_Extract_Method": "",
+                "Spotify_Website_URL": "https://othermusic.com/about",
+            },
+            {
+                "Artist Name": "Later Discovery",
+                "Email": "mgmt@brightmusic.com",
+                "Email_All": "mgmt@brightmusic.com",
+                "Email_Type": "fb_enrich",
+                "Email_Source_URL": "https://www.facebook.com/brightone",
+                "Email_Source_Type": "facebook_enrich",
+                "Email_Extract_Method": "regex",
+                "Spotify_Website_URL": "https://brightmusic.com/contact",
+            },
+        ],
+        dtype=str,
+    ).fillna("")
+
+    assert worker._index_domain_email_reuse_from_row(seed_df, 1, "brightmusic.com") is True
+
+    assert seed_df.at[0, "Email"] == ""
+    assert seed_df.at[0, "Email_All"] == ""
+    assert worker._domain_email_reuse_count == 0
+
+
+def test_domain_email_reuse_propagation_is_idempotent_for_repeated_same_email():
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = pd.DataFrame(
+        [
+            {
+                "Artist Name": "Earlier Blank",
+                "Email": "",
+                "Email_All": "",
+                "Email_Type": "",
+                "Email_Source_URL": "",
+                "Email_Source_Type": "",
+                "Email_Extract_Method": "",
+                "Spotify_Website_URL": "https://brightmusic.com/about",
+            },
+            {
+                "Artist Name": "First Discovery",
+                "Email": "mgmt@brightmusic.com",
+                "Email_All": "mgmt@brightmusic.com",
+                "Email_Type": "fb_enrich",
+                "Email_Source_URL": "https://www.facebook.com/brightone",
+                "Email_Source_Type": "facebook_enrich",
+                "Email_Extract_Method": "regex",
+                "Spotify_Website_URL": "https://brightmusic.com/contact",
+            },
+            {
+                "Artist Name": "Repeated Discovery",
+                "Email": "mgmt@brightmusic.com",
+                "Email_All": "mgmt@brightmusic.com",
+                "Email_Type": "fb_enrich",
+                "Email_Source_URL": "https://www.facebook.com/brighttwo",
+                "Email_Source_Type": "facebook_enrich",
+                "Email_Extract_Method": "regex",
+                "Spotify_Website_URL": "https://brightmusic.com/team",
+            },
+        ],
+        dtype=str,
+    ).fillna("")
+
+    assert worker._index_domain_email_reuse_from_row(seed_df, 1, "brightmusic.com") is True
+    assert worker._domain_email_reuse_count == 1
+
+    assert worker._index_domain_email_reuse_from_row(seed_df, 2, "brightmusic.com") is False
+
+    assert seed_df.at[0, "Email"] == "mgmt@brightmusic.com"
+    assert seed_df.at[0, "Email_All"] == "mgmt@brightmusic.com"
+    assert worker._domain_email_reuse_count == 1
+    assert worker._yield_tracker.counts["domain_reuse"] == 1
+
+
 def test_domain_email_reuse_index_is_worker_local():
     logs_one = []
     logs_two = []
@@ -846,6 +1046,11 @@ def test_late_domain_backfill_fills_earlier_empty_rows_without_fetches(monkeypat
                 "Email_Extract_Method": "",
                 "Spotify_Website_URL": "https://brightmusic.com/press",
             },
+        ],
+        dtype=str,
+    ).fillna("")
+    discovery_df = pd.DataFrame(
+        [
             {
                 "Artist Name": "Later Discovery",
                 "Email": "mgmt@brightmusic.com",
@@ -860,7 +1065,7 @@ def test_late_domain_backfill_fills_earlier_empty_rows_without_fetches(monkeypat
         dtype=str,
     ).fillna("")
 
-    assert worker._index_domain_email_reuse_from_row(seed_df, 3, "brightmusic.com") is True
+    assert worker._index_domain_email_reuse_from_row(discovery_df, 0, "brightmusic.com") is True
 
     def fail(*args, **kwargs):
         raise AssertionError("late-run backfill should not touch enrichment/fetch paths")
@@ -874,10 +1079,10 @@ def test_late_domain_backfill_fills_earlier_empty_rows_without_fetches(monkeypat
     stats = worker._run_late_domain_email_backfill(seed_df, total=4)
 
     assert stats == {
-        "rows_scanned": 4,
+        "rows_scanned": 3,
         "rows_eligible": 1,
         "rows_backfilled": 1,
-        "rows_skipped": 3,
+        "rows_skipped": 2,
     }
     assert seed_df.at[0, "Email"] == "mgmt@brightmusic.com"
     assert seed_df.at[0, "Email_All"] == "mgmt@brightmusic.com"
@@ -909,6 +1114,11 @@ def test_late_domain_backfill_applies_best_ranked_contact_and_preserves_all_same
                 "Email_Extract_Method": "",
                 "Spotify_Website_URL": "https://brightmusic.com/about",
             },
+        ],
+        dtype=str,
+    ).fillna("")
+    discovery_df = pd.DataFrame(
+        [
             {
                 "Artist Name": "Generic Discovery",
                 "Email": "info@brightmusic.com",
@@ -933,8 +1143,8 @@ def test_late_domain_backfill_applies_best_ranked_contact_and_preserves_all_same
         dtype=str,
     ).fillna("")
 
-    assert worker._index_domain_email_reuse_from_row(seed_df, 1, "brightmusic.com") is True
-    assert worker._index_domain_email_reuse_from_row(seed_df, 2, "brightmusic.com") is True
+    assert worker._index_domain_email_reuse_from_row(discovery_df, 0, "brightmusic.com") is True
+    assert worker._index_domain_email_reuse_from_row(discovery_df, 1, "brightmusic.com") is True
 
     def fail(*args, **kwargs):
         raise AssertionError("late-run backfill should not touch enrichment/fetch paths")
@@ -948,10 +1158,10 @@ def test_late_domain_backfill_applies_best_ranked_contact_and_preserves_all_same
     stats = worker._run_late_domain_email_backfill(seed_df, total=3)
 
     assert stats == {
-        "rows_scanned": 3,
+        "rows_scanned": 1,
         "rows_eligible": 1,
         "rows_backfilled": 1,
-        "rows_skipped": 2,
+        "rows_skipped": 0,
     }
     assert seed_df.at[0, "Email"] == "mgmt@brightmusic.com"
     assert pipeline_runner.normalize_emails(seed_df.at[0, "Email_All"]) == [
@@ -961,8 +1171,6 @@ def test_late_domain_backfill_applies_best_ranked_contact_and_preserves_all_same
     assert seed_df.at[0, "Email_Type"] == "fb_enrich"
     assert seed_df.at[0, "Email_Source_URL"] == "https://www.facebook.com/brightone"
     assert seed_df.at[0, "Email_Source_Type"] == "facebook_enrich"
-    assert seed_df.at[1, "Email"] == "info@brightmusic.com"
-    assert seed_df.at[2, "Email"] == "mgmt@brightmusic.com"
 
 
 def test_fb_enrich_rejects_invalid_discovered_candidate(monkeypatch):

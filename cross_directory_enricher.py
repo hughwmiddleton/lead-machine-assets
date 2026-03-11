@@ -5864,6 +5864,25 @@ class CrossDirectoryEnricherWorker(QThread):
         self._domain_email_reuse_index[domain_norm] = entry
         return changed
 
+    def _propagate_domain_email_to_rows(self, df: pd.DataFrame, source_row_idx, spotify_domain: str) -> int:
+        domain_norm = _clean_cell(spotify_domain).lower()
+        if df is None or df.empty or not domain_norm:
+            return 0
+
+        propagated = 0
+        total = len(df.index)
+        for position, target_row_idx in enumerate(df.index, start=1):
+            if target_row_idx == source_row_idx:
+                continue
+            ctx = self._build_row_context(df, target_row_idx, position, total)
+            if not ctx:
+                continue
+            if _clean_cell(ctx.get("spotify_domain", "")).lower() != domain_norm:
+                continue
+            if self._maybe_apply_domain_email_reuse(df, target_row_idx, ctx):
+                propagated += 1
+        return propagated
+
     def _index_domain_email_reuse_from_row(self, df: pd.DataFrame, row_idx, spotify_domain: str, source_label: str = "") -> bool:
         if df is None or row_idx not in df.index:
             return False
@@ -5894,7 +5913,7 @@ class CrossDirectoryEnricherWorker(QThread):
             email_type=email_type,
             source_label=effective_source_label,
         )
-        return self._index_domain_email_reuse(
+        changed = self._index_domain_email_reuse(
             spotify_domain,
             email=email_value,
             email_all=email_all_value,
@@ -5904,6 +5923,9 @@ class CrossDirectoryEnricherWorker(QThread):
             email_type=email_type,
             source_label=effective_source_label,
         )
+        if changed:
+            self._propagate_domain_email_to_rows(df, row_idx, spotify_domain)
+        return changed
 
     def _maybe_apply_domain_email_reuse(self, df: pd.DataFrame, row_idx, ctx: Optional[Dict[str, Any]]) -> bool:
         if df is None or row_idx not in df.index or row_idx in self._domain_email_reuse_rows:
