@@ -5348,6 +5348,9 @@ class CrossDirectoryEnricherWorker(QThread):
         self._row_enrichment_state: Dict[str, str] = {}
         self._fb_discovery_attempted_rows: Set[Any] = set()
         self._spotify_discovery_attempted_rows: Set[Any] = set()
+        self._spotify_identity_tier_rows: Set[Any] = set()
+        self._spotify_identity_tier_counts: Counter = Counter()
+        self._spotify_low_tier_recovery_skips: int = 0
         self._night_sc_cache: Dict[str, Dict[str, Any]] = {}
         self._active_night_sc_attempt: Optional[_NightSCAttempt] = None
         self._night_sc_challenge_streak: int = 0  # consecutive challenge detections
@@ -5494,6 +5497,9 @@ class CrossDirectoryEnricherWorker(QThread):
         self._last_resolved_profile_url = None
         self._fb_discovery_attempted_rows = set()
         self._spotify_discovery_attempted_rows = set()
+        self._spotify_identity_tier_rows = set()
+        self._spotify_identity_tier_counts = Counter()
+        self._spotify_low_tier_recovery_skips = 0
         self._domain_email_reuse_index = {}
         self._domain_profile_index = {}
         self._domain_email_reuse_rows = set()
@@ -5691,6 +5697,7 @@ class CrossDirectoryEnricherWorker(QThread):
                             f"[Enricher] Row {position}/{total}: no enrichment for {ctx['artist']!r}."
                         )
                     self._update_progress(position, total)
+                self._log_spotify_discovery_summary("[Enricher][Spotify Discovery]")
             self._run_late_domain_email_backfill(seed_df, total)
             # Bandcamp per-run summary (low noise)
             if self._bc_search_attempts:
@@ -6216,6 +6223,96 @@ class CrossDirectoryEnricherWorker(QThread):
             "signal_sources": tuple(sorted(signal_sources)),
         }
 
+    def _build_spotify_runtime_identity(
+        self,
+        row: Any,
+        *,
+        spotify_origin: bool = False,
+        signal_snapshot: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        if row is None or not spotify_origin:
+            return {"score": 0, "tier": None, "reasons": ()}
+
+        row_dict = row.to_dict() if hasattr(row, "to_dict") else dict(row)
+        snapshot = dict(signal_snapshot or {})
+        if not snapshot:
+            snapshot = self._build_row_signal_snapshot(row)
+
+        score = 0
+        reasons: List[str] = []
+
+        def _add(points: int, reason: str) -> None:
+            nonlocal score
+            if points <= 0 or not reason or reason in reasons:
+                return
+            score += points
+            reasons.append(reason)
+
+        bandcamp_url = _coerce_directory_value(row_dict.get("Bandcamp_URL", ""))
+        soundcloud_url = _clean_cell(row_dict.get("SoundCloud Link", "")) or _clean_cell(row_dict.get("SoundCloud URL", ""))
+        canonical_fb_url = _clean_cell(snapshot.get("canonical_fb_url", ""))
+        website_candidates = tuple(snapshot.get("website_candidates") or ())
+        seed_links_by_source = snapshot.get("seed_links_by_source") or {}
+        source_url_source = _clean_cell(snapshot.get("source_url_source", "")).lower()
+        location = _clean_cell(row_dict.get("Location", ""))
+        primary_genre = _coerce_directory_value(row_dict.get("Primary Genre", ""))
+        spotify_genres = _clean_cell(row_dict.get("Spotify_Genres", ""))
+        try:
+            match_score = float(snapshot.get("match_score") or 0.0)
+        except Exception:
+            match_score = 0.0
+
+        if bandcamp_url:
+            _add(3, "bandcamp_url")
+        if soundcloud_url or seed_links_by_source.get("soundcloud"):
+            _add(3, "soundcloud_link")
+        if canonical_fb_url:
+            _add(3, "facebook_url")
+        if website_candidates:
+            _add(2, "website_candidate")
+        if seed_links_by_source.get("lastfm") or source_url_source == "lastfm":
+            _add(1, "lastfm_clue")
+        if source_url_source in {"facebook", "soundcloud"}:
+            _add(1, f"source_url_{source_url_source}")
+        if location:
+            _add(1, "location")
+        if primary_genre or spotify_genres:
+            _add(1, "genre")
+        if match_score >= 0.7:
+            _add(1, "match_score")
+
+        if score >= 5:
+            tier = 1
+        elif score >= 2:
+            tier = 2
+        else:
+            tier = 3
+
+        return {"score": score, "tier": tier, "reasons": tuple(reasons)}
+
+    def _note_spotify_runtime_identity(self, row_idx: Any, spotify_identity: Optional[Dict[str, Any]]) -> None:
+        if row_idx in getattr(self, "_spotify_identity_tier_rows", set()):
+            return
+        tier = None
+        if isinstance(spotify_identity, dict):
+            tier = spotify_identity.get("tier")
+        if tier is None:
+            return
+        self._spotify_identity_tier_rows.add(row_idx)
+        self._spotify_identity_tier_counts[f"tier_{int(tier)}"] += 1
+
+    def _log_spotify_discovery_summary(self, prefix: str) -> None:
+        counts = getattr(self, "_spotify_identity_tier_counts", Counter()) or Counter()
+        if not counts and not getattr(self, "_spotify_low_tier_recovery_skips", 0):
+            return
+        parts = [
+            f"tier_1={int(counts.get('tier_1', 0))}",
+            f"tier_2={int(counts.get('tier_2', 0))}",
+            f"tier_3={int(counts.get('tier_3', 0))}",
+            f"low_tier_live_skips={int(getattr(self, '_spotify_low_tier_recovery_skips', 0))}",
+        ]
+        self.log_message.emit(f"{prefix} Runtime tiers: " + " ".join(parts))
+
     def _compute_row_confidence(
         self,
         row: Optional[Any],
@@ -6413,6 +6510,11 @@ class CrossDirectoryEnricherWorker(QThread):
             spotify_domain=spotify_domain,
             seed_links_by_source=seed_links_by_source,
         )
+        spotify_identity = self._build_spotify_runtime_identity(
+            row,
+            spotify_origin=spotify_origin,
+            signal_snapshot=signal_snapshot,
+        )
         self._live_context = {
             "artist": artist,
             "location": _clean_cell(row.get("Location")),
@@ -6425,6 +6527,9 @@ class CrossDirectoryEnricherWorker(QThread):
             "spotify_origin": spotify_origin,
             "seed_lastfm_urls": seed_links_by_source.get("lastfm", set()),
             "signal_snapshot": signal_snapshot,
+            "spotify_identity": spotify_identity,
+            "spotify_identity_score": spotify_identity.get("score", 0),
+            "spotify_identity_tier": spotify_identity.get("tier"),
         }
         spotify_id = self._live_context.get("spotify_id", "")
         return {
@@ -6440,6 +6545,9 @@ class CrossDirectoryEnricherWorker(QThread):
             "position": position,
             "total": total,
             "signal_snapshot": signal_snapshot,
+            "spotify_identity": spotify_identity,
+            "spotify_identity_score": spotify_identity.get("score", 0),
+            "spotify_identity_tier": spotify_identity.get("tier"),
         }
 
     def _row_is_spotify_origin(self, row: Optional[Any] = None, ctx: Optional[Dict[str, Any]] = None) -> bool:
@@ -6762,6 +6870,16 @@ class CrossDirectoryEnricherWorker(QThread):
             return False
         if row_idx in getattr(self, "_spotify_discovery_attempted_rows", set()):
             return False
+        spotify_identity = {}
+        if isinstance(ctx, dict):
+            spotify_identity = dict(ctx.get("spotify_identity") or {})
+        if not spotify_identity:
+            spotify_identity = self._build_spotify_runtime_identity(
+                row,
+                spotify_origin=True,
+                signal_snapshot=(ctx or {}).get("signal_snapshot") if isinstance(ctx, dict) else None,
+            )
+        self._note_spotify_runtime_identity(row_idx, spotify_identity)
 
         snapshot = self._spotify_identity_surface_snapshot(row)
         sparse_identity = (
@@ -6796,6 +6914,15 @@ class CrossDirectoryEnricherWorker(QThread):
             if isinstance(ctx, dict)
             else _clean_cell(seed_df.at[row_idx, "Artist Name"])
         ) or "<unknown>"
+        spotify_tier = spotify_identity.get("tier")
+        if spotify_tier == 3:
+            self._spotify_low_tier_recovery_skips += 1
+            reasons = ",".join(spotify_identity.get("reasons") or ()) or "none"
+            self.log_message.emit(
+                f"[Spotify Discovery] Skipping live recovery for '{artist}' "
+                f"(tier=tier_3 score={int(spotify_identity.get('score') or 0)} reasons={reasons})"
+            )
+            return enriched
         spotify_id = ctx.get("spotify_id") if isinstance(ctx, dict) else ""
         recovery_snapshot = snapshot
         self._ensure_row_enrichment_state_platforms("bandcamp", "soundcloud", "lastfm")
@@ -7983,6 +8110,7 @@ class CrossDirectoryEnricherWorker(QThread):
         self.log_message.emit(
             f"[Enricher][Spotify Discovery] Completed {eligible_rows} spotify rows (enriched={enriched_count})"
         )
+        self._log_spotify_discovery_summary("[Enricher][Spotify Discovery]")
 
     def _phase_instagram_email(self, seed_df, total):
         for position, row_idx in enumerate(seed_df.index, start=1):

@@ -30,6 +30,7 @@ def _base_row(**overrides):
         "Spotify_URL": "https://open.spotify.com/artist/artist-a",
         "Spotify_Artist_ID": "artist-a",
         "Spotify_Website_URL": "",
+        "Spotify_Genres": "",
         "SoundCloud Link": "",
         "Bandcamp_URL": "",
         "External Links": "",
@@ -357,6 +358,34 @@ def test_phase_spotify_discovery_only_targets_spotify_origin_rows(tmp_path, monk
     assert seen == [(0, True)]
 
 
+def test_spotify_runtime_identity_uses_existing_seed_context(tmp_path):
+    worker = _build_worker(tmp_path)
+    df = pd.DataFrame(
+        [
+            _base_row(),
+            _base_row(
+                Spotify_Website_URL="https://artist.test",
+                Location="Melbourne",
+                Spotify_Genres="indie pop",
+            ),
+        ]
+    )
+
+    low_ctx = worker._build_row_context(df, 0, 1, len(df))
+    mid_ctx = worker._build_row_context(df, 1, 2, len(df))
+
+    assert low_ctx["spotify_identity_score"] == 0
+    assert low_ctx["spotify_identity_tier"] == 3
+    assert low_ctx["spotify_identity"]["reasons"] == ()
+    assert mid_ctx["spotify_identity_score"] == 4
+    assert mid_ctx["spotify_identity_tier"] == 2
+    assert set(mid_ctx["spotify_identity"]["reasons"]) == {
+        "website_candidate",
+        "location",
+        "genre",
+    }
+
+
 def test_spotify_discovery_pass_populates_facebook_identity(tmp_path, monkeypatch):
     worker = _build_worker(tmp_path)
     df = pd.DataFrame([_base_row()])
@@ -462,11 +491,43 @@ def test_spotify_discovery_pass_runs_once_per_row(tmp_path, monkeypatch):
     assert fb_discovers["count"] == 1
 
 
-def test_spotify_discovery_pass_recovers_bandcamp_before_other_live_sources(tmp_path, monkeypatch):
+def test_spotify_discovery_pass_skips_live_recovery_for_low_tier_spotify_row(tmp_path, monkeypatch):
+    recovery_calls = {"bandcamp": 0, "soundcloud": 0, "lastfm": 0}
     worker = _build_worker(tmp_path)
     worker.enable_live_search = True
     worker.max_live_searches = 5
     df = pd.DataFrame([_base_row()])
+    ctx = worker._build_row_context(df, 0, 1, 1)
+
+    monkeypatch.setattr(
+        worker,
+        "_live_search_bandcamp",
+        lambda _artist: recovery_calls.__setitem__("bandcamp", recovery_calls["bandcamp"] + 1),
+    )
+    monkeypatch.setattr(
+        worker,
+        "_night_sc_attempt_row",
+        lambda *args, **kwargs: recovery_calls.__setitem__("soundcloud", recovery_calls["soundcloud"] + 1),
+    )
+    monkeypatch.setattr(
+        worker,
+        "_live_search_lastfm",
+        lambda _artist: recovery_calls.__setitem__("lastfm", recovery_calls["lastfm"] + 1),
+    )
+
+    enriched = worker._run_spotify_discovery_pass(df, 0, ctx, fb_driver=None)
+
+    assert enriched is False
+    assert ctx["spotify_identity_tier"] == 3
+    assert recovery_calls == {"bandcamp": 0, "soundcloud": 0, "lastfm": 0}
+    assert worker._spotify_low_tier_recovery_skips == 1
+
+
+def test_spotify_discovery_pass_recovers_bandcamp_before_other_live_sources(tmp_path, monkeypatch):
+    worker = _build_worker(tmp_path)
+    worker.enable_live_search = True
+    worker.max_live_searches = 5
+    df = pd.DataFrame([_base_row(Spotify_Website_URL="https://artist.test", Location="Melbourne")])
     ctx = worker._build_row_context(df, 0, 1, 1)
     calls = {"soundcloud": 0, "lastfm": 0}
 
@@ -504,7 +565,7 @@ def test_spotify_discovery_pass_recovers_soundcloud_before_lastfm(tmp_path, monk
     worker = _build_worker(tmp_path)
     worker.enable_live_search = True
     worker.max_live_searches = 5
-    df = pd.DataFrame([_base_row()])
+    df = pd.DataFrame([_base_row(Spotify_Website_URL="https://artist.test", Location="Melbourne")])
     ctx = worker._build_row_context(df, 0, 1, 1)
     calls = {"bandcamp": 0, "lastfm": 0}
 
@@ -536,7 +597,7 @@ def test_spotify_discovery_pass_recovers_lastfm_via_apply_payload_guarded(tmp_pa
     worker = _build_worker(tmp_path)
     worker.enable_live_search = True
     worker.max_live_searches = 5
-    df = pd.DataFrame([_base_row()])
+    df = pd.DataFrame([_base_row(Spotify_Website_URL="https://artist.test", Location="Melbourne")])
     ctx = worker._build_row_context(df, 0, 1, 1)
     apply_calls = []
     lastfm_payload = cde.EnrichmentPayload(
@@ -623,7 +684,7 @@ def test_spotify_discovery_pass_recovery_initializes_missing_row_state(tmp_path,
     worker.max_live_searches = 5
     if hasattr(worker, "_row_enrichment_state"):
         delattr(worker, "_row_enrichment_state")
-    df = pd.DataFrame([_base_row()])
+    df = pd.DataFrame([_base_row(Spotify_Website_URL="https://artist.test", Location="Melbourne")])
     ctx = worker._build_row_context(df, 0, 1, 1)
     state_seen = {}
 
