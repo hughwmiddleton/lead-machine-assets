@@ -9518,8 +9518,11 @@ class ArtistScraperThread(QtCore.QThread):
                     spotify_columns = [
                         "Artist Name", "Location", "Song Title", "Sounds Like", "Social Link",
                         "SoundCloud Link", "Played on triple J", "Played on Unearthed",
-                        "Release Date", "Primary Genre", "Date Added", "External Links", "Email",
-                        "Spotify_URL", "Spotify_Artist_ID", "Spotify_Website_URL"
+                        "Release Date", "Primary Genre", "Date Added", "Spotify Playlist",
+                        "External Links", "Email", "Spotify_URL", "Spotify_Artist_ID",
+                        "Spotify_Website_URL", "Spotify_Playlist_URL", "Spotify_Seed_Position",
+                        "Spotify_Genres", "Spotify_Followers", "Spotify_Popularity",
+                        "Spotify_Seed_Type", "Spotify_Seed_Query"
                     ]
                     try:
                         existing_df = pd.read_csv(self.output_csv) if os.path.exists(self.output_csv) else pd.DataFrame()

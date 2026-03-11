@@ -88,6 +88,13 @@ def _build_spotify_row(
     timestamp: str,
     spotify_url: str,
     artist_id: str,
+    spotify_playlist_url: str = "",
+    spotify_seed_position: str = "",
+    spotify_genres: str = "",
+    spotify_followers: str = "",
+    spotify_popularity: str = "",
+    spotify_seed_type: str = "",
+    spotify_seed_query: str = "",
 ) -> Row:
     return {
         "Artist Name": artist_name or "",
@@ -107,6 +114,13 @@ def _build_spotify_row(
         "Spotify_URL": spotify_url or "",
         "Spotify_Artist_ID": artist_id or "",
         "Spotify_Website_URL": "",
+        "Spotify_Playlist_URL": spotify_playlist_url or "",
+        "Spotify_Seed_Position": spotify_seed_position or "",
+        "Spotify_Genres": spotify_genres or "",
+        "Spotify_Followers": spotify_followers or "",
+        "Spotify_Popularity": spotify_popularity or "",
+        "Spotify_Seed_Type": spotify_seed_type or "",
+        "Spotify_Seed_Query": spotify_seed_query or "",
     }
 
 
@@ -525,6 +539,30 @@ def _resolve_playlist_label(
         return fallback_label
 
 
+def _build_playlist_url(playlist_id: str) -> str:
+    clean_id = (playlist_id or "").strip()
+    if not clean_id:
+        return ""
+    return f"https://open.spotify.com/playlist/{clean_id}"
+
+
+def _stringify_spotify_value(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _stringify_spotify_genres(genres: Any) -> str:
+    if not isinstance(genres, list):
+        return ""
+    deduped: List[str] = []
+    for genre in genres:
+        cleaned = _stringify_spotify_value(genre)
+        if cleaned and cleaned not in deduped:
+            deduped.append(cleaned)
+    return ", ".join(deduped)
+
+
 def _select_track_for_artist(
     artist_id: str,
     artist_name: str,
@@ -534,12 +572,15 @@ def _select_track_for_artist(
     used_song_titles: Set[str],
     spotify_client: Optional[SpotifyClient],
     logger: Optional[LoggerFn],
-) -> Tuple[str, str]:
+) -> Tuple[str, str, str, str]:
     """
     Choose a track for the given artist based on playlist membership.
-    Returns (track_name, playlist_label) with empty track_name when no match is found.
+    Returns (track_name, playlist_label, playlist_url, seed_position) with empty
+    track_name when no match is found.
     """
     playlist_label = stub_info.get("playlist_label") or ""
+    playlist_url = stub_info.get("playlist_url") or ""
+    seed_position = _stringify_spotify_value(stub_info.get("seed_position"))
     track_name = ""
     track_id = ""
 
@@ -585,6 +626,8 @@ def _select_track_for_artist(
                     "artist_id": artist_id,
                     "artist_name": artist_name,
                     "playlist_label": stub_info.get("playlist_label") or "",
+                    "playlist_url": (ordered_candidates[0].get("playlist_url") or "") if ordered_candidates else playlist_url,
+                    "seed_position": (ordered_candidates[0].get("seed_position") or "") if ordered_candidates else seed_position,
                     "order": ordered_candidates[0].get("order", 0) if ordered_candidates else 0,
                     "primary_for_artist": True,
                 }
@@ -595,6 +638,8 @@ def _select_track_for_artist(
         track_name = selected_track.get("track_name") or ""
         track_id = selected_track.get("track_id") or ""
         playlist_label = selected_track.get("playlist_label") or playlist_label
+        playlist_url = selected_track.get("playlist_url") or playlist_url
+        seed_position = _stringify_spotify_value(selected_track.get("seed_position") or seed_position)
         norm_title = _normalize_track_title(track_name)
         already_used = norm_title in used_song_titles if norm_title else False
         if norm_title:
@@ -629,7 +674,7 @@ def _select_track_for_artist(
                 f"(artist_id={artist_id or 'n/a'}), leaving Song Title blank"
             )
 
-    return track_name, playlist_label
+    return track_name, playlist_label, playlist_url, seed_position
 
 
 def scrape_spotify(
@@ -672,6 +717,8 @@ def scrape_spotify(
     playlist_ids_param = params.get("playlist_ids")
     search_input = (params.get("search_term") or "").strip()
     playlist_from_input = _extract_playlist_id(search_input)
+    spotify_seed_type = "playlist"
+    spotify_seed_query = search_input
 
     if playlist_ids_param:
         if isinstance(playlist_ids_param, str):
@@ -704,6 +751,7 @@ def scrape_spotify(
         if not playlist_id_clean:
             continue
         playlist_label = _resolve_playlist_label(client, playlist_id_clean, playlist_id_clean, logger)
+        playlist_url = _build_playlist_url(playlist_id_clean)
         try:
             if logger:
                 logger(f"[Spotify] Attempting API playlist fetch for {playlist_id_clean}...")
@@ -740,6 +788,8 @@ def scrape_spotify(
                         "artist_id": artist_id,
                         "artist_name": artist.get("artist_name") or "",
                         "playlist_label": fallback_label,
+                        "playlist_url": playlist_url,
+                        "seed_position": artist.get("track_position") or track_order,
                         "order": artist.get("track_position") or track_order,
                         "primary_for_artist": bool(artist.get("is_primary")),
                     }
@@ -753,6 +803,8 @@ def scrape_spotify(
                         "artist_stub": {"name": artist.get("artist_name") or "", "id": artist_id},
                         "sample_track": artist.get("track_name") or "",
                         "playlist_label": artist.get("playlist_name") or fallback_label,
+                        "playlist_url": playlist_url,
+                        "seed_position": artist.get("track_position") or track_order,
                         "artist_url": artist.get("artist_url") or "",
                     }
                 continue
@@ -762,7 +814,7 @@ def scrape_spotify(
                 continue
 
         total_tracks_scanned += len(tracks)
-        for entry in tracks:
+        for playlist_position, entry in enumerate(tracks, start=1):
             if len(artists_by_id) >= target_count:
                 break
             track_obj = entry.get("track") if isinstance(entry, dict) else entry
@@ -786,6 +838,8 @@ def scrape_spotify(
                     "artist_id": ta_id,
                     "artist_name": ta_name,
                     "playlist_label": playlist_label,
+                    "playlist_url": playlist_url,
+                    "seed_position": playlist_position,
                     "order": track_order,
                     "primary_for_artist": track_artist is artists[0],
                 }
@@ -803,6 +857,8 @@ def scrape_spotify(
                 "artist_stub": primary_artist,
                 "sample_track": track_name,
                 "playlist_label": playlist_label,
+                "playlist_url": playlist_url,
+                "seed_position": playlist_position,
                 "artist_url": spotify_url,
             }
 
@@ -831,6 +887,10 @@ def scrape_spotify(
         artist_name = artist_payload.get("name") or stub.get("name") or "Unknown Artist"
         spotify_url = (artist_payload.get("external_urls") or {}).get("spotify") or stub_info.get("artist_url") or ""
         genres = artist_payload.get("genres") or []
+        spotify_genres = _stringify_spotify_genres(genres)
+        followers_total = ((artist_payload.get("followers") or {}).get("total")) if isinstance(artist_payload, dict) else None
+        spotify_followers = _stringify_spotify_value(followers_total)
+        spotify_popularity = _stringify_spotify_value(artist_payload.get("popularity")) if isinstance(artist_payload, dict) else ""
         primary_genre = ", ".join(genres[:3])
         if not primary_genre:
             primary_genre = _fetch_additional_genres(spotify_client=client, artist_id=artist_id, logger=logger)
@@ -842,8 +902,10 @@ def scrape_spotify(
             primary_genre = _most_common_playlist_genre(playlist_genre_pool)
         track_name = ""
         playlist_label = stub_info.get("playlist_label") or ""
+        playlist_url = stub_info.get("playlist_url") or ""
+        seed_position = _stringify_spotify_value(stub_info.get("seed_position"))
 
-        track_name, playlist_label = _select_track_for_artist(
+        track_name, playlist_label, playlist_url, seed_position = _select_track_for_artist(
             artist_id=artist_id,
             artist_name=artist_name,
             stub_info=stub_info,
@@ -862,6 +924,13 @@ def scrape_spotify(
             timestamp=timestamp,
             spotify_url=spotify_url,
             artist_id=artist_id,
+            spotify_playlist_url=playlist_url,
+            spotify_seed_position=seed_position,
+            spotify_genres=spotify_genres,
+            spotify_followers=spotify_followers,
+            spotify_popularity=spotify_popularity,
+            spotify_seed_type=spotify_seed_type,
+            spotify_seed_query=spotify_seed_query,
         )
         rows.append(row)
         for token in (primary_genre or "").split(","):
