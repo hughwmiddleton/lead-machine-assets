@@ -322,6 +322,81 @@ def test_website_email_bandcamp_url_only_extracts_visible_email(monkeypatch):
     assert worker._website_email_cache["artist.bandcamp.com"]["emails"] == ["bookings@label.test"]
 
 
+def test_website_email_skips_spotify_platform_candidate(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Spotify Platform Artist",
+            "Email": "",
+            "Email_All": "",
+            "Spotify_Website_URL": "https://open.spotify.com/artist/artist-a",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+
+    def fail_fetch(*args, **kwargs):
+        raise AssertionError("website fetch should not run for Spotify platform URLs")
+
+    monkeypatch.setattr(cde, "_fetch_website_html_bounded", fail_fetch)
+
+    matched = worker._enrich_row_website_email(seed_df, 0, ctx)
+
+    assert matched is False
+    assert seed_df.at[0, "Email"] == ""
+    assert seed_df.at[0, "Email_All"] == ""
+
+
+def test_website_email_skips_music_apple_platform_candidate(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Apple Platform Artist",
+            "Email": "",
+            "Email_All": "",
+            "Website": "https://music.apple.com/us/artist/example/123",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+
+    def fail_fetch(*args, **kwargs):
+        raise AssertionError("website fetch should not run for Apple Music platform URLs")
+
+    monkeypatch.setattr(cde, "_fetch_website_html_bounded", fail_fetch)
+
+    matched = worker._enrich_row_website_email(seed_df, 0, ctx)
+
+    assert matched is False
+    assert seed_df.at[0, "Email"] == ""
+    assert seed_df.at[0, "Email_All"] == ""
+
+
+def test_website_email_skips_deezer_platform_candidate(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Deezer Platform Artist",
+            "Email": "",
+            "Email_All": "",
+            "External Links": "https://deezer.com/artist/123",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+
+    def fail_fetch(*args, **kwargs):
+        raise AssertionError("website fetch should not run for Deezer platform URLs")
+
+    monkeypatch.setattr(cde, "_fetch_website_html_bounded", fail_fetch)
+
+    matched = worker._enrich_row_website_email(seed_df, 0, ctx)
+
+    assert matched is False
+    assert seed_df.at[0, "Email"] == ""
+    assert seed_df.at[0, "Email_All"] == ""
+
+
 def test_website_email_external_links_only_extracts_mailto(monkeypatch):
     logs = []
     worker = _make_worker(logs)
@@ -363,6 +438,34 @@ def test_website_email_external_links_only_extracts_mailto(monkeypatch):
     assert seed_df.at[0, "Email_Source_URL"] == "https://artist.test"
     assert seed_df.at[0, "Email_Source_Type"] == "website_enrich"
     assert seed_df.at[0, "Email_Extract_Method"] == "mailto"
+
+
+def test_website_email_website_field_real_domain_still_fetches(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Website Field Artist",
+            "Email": "",
+            "Email_All": "",
+            "Website": "https://artist.test",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    calls = []
+
+    def fake_fetch(session, url, *, timeout_s, max_bytes):
+        calls.append(url)
+        return _result(url, html="<html><body>hello@artist.test</body></html>")
+
+    monkeypatch.setattr(cde, "_fetch_website_html_bounded", fake_fetch)
+
+    matched = worker._enrich_row_website_email(seed_df, 0, ctx)
+
+    assert matched is True
+    assert calls == ["https://artist.test"]
+    assert seed_df.at[0, "Email"] == "hello@artist.test"
+    assert seed_df.at[0, "Email_All"] == "hello@artist.test"
 
 
 def test_website_email_contact_follow_up_caps_requests_at_two(monkeypatch):

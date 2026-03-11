@@ -33,6 +33,7 @@ SOCIAL_DOMAINS = {
     "spotify.com",
     "music.apple.com",
     "soundcloud.com",
+    "deezer.com",
     "bandcamp.com",
     "linktr.ee",
     "beacons.ai",
@@ -165,7 +166,8 @@ def _collect_candidate_websites(row: Row) -> List[str]:
 
 
 def _is_social_url(url: str) -> bool:
-    parsed = urlparse(url)
+    normalized = _normalize_url(url)
+    parsed = urlparse(normalized or url)
     domain = (parsed.netloc or parsed.path or "").lower()
     domain = domain.strip()
     return any(domain.endswith(block) for block in SOCIAL_DOMAINS)

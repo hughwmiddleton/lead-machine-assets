@@ -45,6 +45,22 @@ def test_row_confidence_allows_explicit_website_clue():
     assert decision.reasons == ("website_domain",)
 
 
+def test_row_confidence_does_not_hard_allow_platform_url_as_website_domain():
+    worker = _make_worker()
+    ctx, df = _ctx_for(
+        worker,
+        {
+            "Artist Name": "XY",
+            "Website": "https://open.spotify.com/artist/artist-a",
+        },
+    )
+
+    decision = worker._row_allows_heavy_enricher(df.loc[0], ctx, "website")
+
+    assert decision.allowed is False
+    assert decision.score < decision.threshold
+
+
 def test_row_confidence_hard_allows_non_website_target_with_website_domain_clue():
     worker = _make_worker()
     ctx, df = _ctx_for(

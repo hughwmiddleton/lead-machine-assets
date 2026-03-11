@@ -721,6 +721,13 @@ PLATFORM_HOSTS = {
     "lastfm": ("last.fm", "lastfm.freetls.fastly.net"),
 }
 
+WEBSITE_ENRICH_PLATFORM_HOSTS = (
+    "open.spotify.com",
+    "spotify.com",
+    "music.apple.com",
+    "deezer.com",
+)
+
 JUNK_WEBSITE_HOSTS = {
     "creativecommons.org",
     "get.bandcamp.help",
@@ -4015,7 +4022,9 @@ def _website_cache_key(url: str) -> str:
 def _is_platform_host(host: str) -> bool:
     if not host:
         return False
-    return any(host.endswith(domain) for domains in PLATFORM_HOSTS.values() for domain in domains)
+    return any(host.endswith(domain) for domains in PLATFORM_HOSTS.values() for domain in domains) or any(
+        host.endswith(domain) for domain in WEBSITE_ENRICH_PLATFORM_HOSTS
+    )
 
 
 def _is_website_enrich_candidate_url(url: str, *, allow_platform: bool = False) -> bool:
