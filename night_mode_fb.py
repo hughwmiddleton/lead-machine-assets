@@ -2263,22 +2263,16 @@ def _is_driver_authenticated(driver) -> bool:
     return _has_cookie(driver, "c_user")
 
 
-def _session_looks_healthy(driver) -> Tuple[bool, str]:
-    """
-    Quick FB session health probe to catch login/verification walls.
-    Returns (healthy, reason_code).
-    """
+def _classify_fb_auth_surface(driver) -> str:
+    """Classify the current FB landing surface for early auth/session diagnostics."""
     try:
-        driver.get("https://www.facebook.com/")
-        time.sleep(0.6)
         current_url = (getattr(driver, "current_url", "") or "").lower()
-        page_source = (getattr(driver, "page_source", "") or "").lower()
-        time.sleep(0.4)
-        # second sampling to reduce transient blanks
-        current_url = (getattr(driver, "current_url", "") or "").lower() or current_url
-        page_source = (getattr(driver, "page_source", "") or "").lower() or page_source
     except Exception:
-        return False, "exception"
+        current_url = ""
+    try:
+        page_source = (getattr(driver, "page_source", "") or "").lower()
+    except Exception:
+        page_source = ""
 
     bad_url_tokens = (
         ("login", "redirect_login"),
@@ -2291,7 +2285,7 @@ def _session_looks_healthy(driver) -> Tuple[bool, str]:
     )
     for token, reason in bad_url_tokens:
         if token in current_url:
-            return False, reason
+            return reason
 
     bad_html_tokens = (
         ("checkpoint", "checkpoint"),
@@ -2303,7 +2297,28 @@ def _session_looks_healthy(driver) -> Tuple[bool, str]:
     )
     for token, reason in bad_html_tokens:
         if token in page_source:
-            return False, reason
+            return reason
+
+    return ""
+
+
+def _session_looks_healthy(driver) -> Tuple[bool, str]:
+    """
+    Quick FB session health probe to catch login/verification walls.
+    Returns (healthy, reason_code).
+    """
+    try:
+        driver.get("https://www.facebook.com/")
+        time.sleep(0.6)
+        _ = (getattr(driver, "current_url", "") or "").lower()
+        _ = (getattr(driver, "page_source", "") or "").lower()
+        time.sleep(0.4)
+    except Exception:
+        return False, "exception"
+
+    reason = _classify_fb_auth_surface(driver)
+    if reason:
+        return False, reason
 
     return True, ""
 
@@ -2760,7 +2775,21 @@ def _create_fb_driver_night_mode(headless: bool, logger: LoggerFn = None):
         chrome_options,
         logger=logger,
         profile_dir=profile_dir,
-        enable_temp_profile_fallback=True,
+        enable_temp_profile_fallback=False,
+    )
+    webdriver_mask_applied = _apply_repo_aligned_webdriver_mask(driver, logger=logger)
+    requested_profile = str(getattr(driver, "_night_fb_requested_profile_dir", profile_dir) or "")
+    active_profile = str(getattr(driver, "_night_fb_active_profile_dir", requested_profile) or "")
+    used_temp_profile = bool(getattr(driver, "_night_fb_used_temp_profile", False))
+    persistent_profile_used = bool(requested_profile and active_profile == requested_profile and not used_temp_profile)
+    _log(
+        logger,
+        "[Night FB][driver] "
+        f"requested_profile={requested_profile or '<none>'} "
+        f"active_profile={active_profile or '<none>'} "
+        f"persistent_profile={1 if persistent_profile_used else 0} "
+        f"temp_fallback={1 if used_temp_profile else 0} "
+        f"webdriver_mask={1 if webdriver_mask_applied else 0}",
     )
     return driver
 
@@ -2819,8 +2848,21 @@ class NightPersistentFacebookSession:
             raise FacebookDriverError(f"Failed to load Facebook homepage: {exc}")
 
         authed = _is_driver_authenticated(self.driver)
+        auth_surface = _classify_fb_auth_surface(self.driver) or ("authenticated" if authed else "unauthenticated")
         mode_label = "headless" if self.headless else "headed"
-        _log(self.logger, f"[Night FB] Auth check after FB homepage ({mode_label}): authed={authed}")
+        requested_profile = str(getattr(self.driver, "_night_fb_requested_profile_dir", "") or "")
+        active_profile = str(getattr(self.driver, "_night_fb_active_profile_dir", requested_profile) or "")
+        used_temp_profile = bool(getattr(self.driver, "_night_fb_used_temp_profile", False))
+        _log(
+            self.logger,
+            "[Night FB][auth_probe] "
+            f"mode={mode_label} "
+            f"requested_profile={requested_profile or '<none>'} "
+            f"active_profile={active_profile or '<none>'} "
+            f"temp_fallback={1 if used_temp_profile else 0} "
+            f"authed={1 if authed else 0} "
+            f"reason={auth_surface}",
+        )
 
         if authed:
             old_driver = self.driver
@@ -2895,14 +2937,18 @@ class NightPersistentFacebookSession:
                         self.driver = old_driver
             return self.driver
 
+        self.last_health_ok = False
+        self.last_health_reason = auth_surface
         _log(
             self.logger,
-            "[Night FB][WARN] Persistent FB profile appears logged out or expired; manual login is required. Image loading is enabled for login/captcha recovery.",
+            "[Night FB][WARN] "
+            f"Persistent FB profile launched without auth (reason={auth_surface}); manual login is required. "
+            "Image loading is enabled for login/captcha recovery.",
         )
         if self.headless:
-            self.last_health_ok = False
-            self.last_health_reason = "unauthenticated"
-            raise FacebookDriverError("Headless session unauthenticated (no c_user cookie present).")
+            raise FacebookDriverError(
+                f"Persistent FB profile launched but auth is missing (reason={auth_surface}; no c_user cookie present)."
+            )
 
         _log(self.logger, "[Night FB] Awaiting manual login to establish session (headed mode)...")
         self._wait_for_manual_login(self.driver)
@@ -2942,6 +2988,23 @@ class NightPersistentFacebookSession:
             pass
         self.driver = None
         return self.ensure_logged_in()
+
+
+def _apply_repo_aligned_webdriver_mask(driver, logger: LoggerFn = None) -> bool:
+    """Reuse the existing repo CDP webdriver mask for the authenticated Night FB launch."""
+    try:
+        driver.execute_cdp_cmd(
+            "Page.addScriptToEvaluateOnNewDocument",
+            {
+                "source": """
+                Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+            """
+            },
+        )
+        return True
+    except Exception as exc:
+        _log(logger, f"[Night FB][WARN] Failed to apply repo webdriver mask: {exc}")
+        return False
 
 
 def _start_chromedriver_with_retry(
@@ -3013,6 +3076,13 @@ def _start_chromedriver_with_retry(
         try:
             driver = webdriver.Chrome(service=service, options=attempt_opts)
             _register_driver_cleanup(driver)
+            try:
+                driver._night_fb_requested_profile_dir = profile_dir or ""  # type: ignore[attr-defined]
+                driver._night_fb_active_profile_dir = attempt_profile or ""  # type: ignore[attr-defined]
+                driver._night_fb_used_temp_profile = bool(temp_profile_dir and attempt_profile == temp_profile_dir)  # type: ignore[attr-defined]
+                driver._night_fb_temp_profile_attempted = bool(recovery_attempted)  # type: ignore[attr-defined]
+            except Exception:
+                pass
             if temp_profile_dir:
                 atexit.register(lambda: shutil.rmtree(temp_profile_dir, ignore_errors=True))
             return driver
@@ -3028,6 +3098,19 @@ def _start_chromedriver_with_retry(
                 attempt_profile = temp_profile_dir
                 max_attempts = attempt + 1  # allow one extra attempt for the temp profile
                 continue
+
+    if profile_dir and (not enable_temp_profile_fallback) and last_exc and _should_temp_recover(last_exc):
+        _log(
+            logger,
+            "[Night FB][profile] "
+            f"requested_profile={profile_dir} "
+            "persistent_profile=0 "
+            "temp_fallback=blocked "
+            f"reason={last_exc}",
+        )
+        raise FacebookDriverError(
+            f"Persistent FB profile could not be used ({profile_dir}); temp-profile fallback blocked for authenticated Night FB: {last_exc}"
+        )
 
     reason = str(last_exc) if last_exc else "unknown_error"
     raise FacebookDriverError(f"Failed to start ChromeDriver after {attempt} attempts: {reason}")
