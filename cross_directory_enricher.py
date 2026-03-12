@@ -2465,6 +2465,16 @@ def _normalise_facebook_name(value: str) -> str:
     cleaned = " ".join(cleaned.split())
     return cleaned
 
+
+def _normalize_fb_location_query(raw: str) -> str:
+    raw = cell_to_str(raw).strip()
+    if not raw:
+        return ""
+    parts = [part.strip() for part in re.split(r"[,|/]+", raw) if part.strip()]
+    if parts:
+        return parts[0]
+    return raw
+
 _FB_ALLOWED_CATEGORY_TOKENS = ("musician", "band", "artist", "music", "singer", "dj", "producer", "songwriter")
 _FB_BLOCKED_CATEGORY_TOKENS = (
     "church",
@@ -2734,70 +2744,92 @@ class FacebookSearchClient:
         if not self.ensure_facebook_logged_in():
             _safe_log(self.logger, "[FB Enrich] Facebook login not available, skipping.")
             return None
-        query_parts = [cell_to_str(artist_name)]
-        if location:
-            query_parts.append(cell_to_str(location))
-        query = " ".join(part for part in query_parts if part)
-        if not query:
+        primary_query = cell_to_str(artist_name).strip()
+        if not primary_query:
             return None
-        page_html, current_url, search_timed_out = self._fetch_search_surface(query, search_method="direct_route")
-        candidates = _fb_extract_candidates_from_search_dom(
-            page_html,
-            logger=self.logger,
-            debug=os.getenv("FB_DEBUG_DOM_GATE") == "1",
-            search_name=artist_name,
-        )
-        if not candidates:
-            miss_reason = _fb_search_surface_miss_reason(
+
+        location_query = _normalize_fb_location_query(location)
+        direct_query_list = [primary_query]
+        if location_query:
+            direct_query_list.append(f"{primary_query} {location_query}".strip())
+        direct_query_list.extend([f"{primary_query} musician".strip(), f"{primary_query} band".strip()])
+        direct_query_list = list(dict.fromkeys(query for query in direct_query_list if query))
+
+        page_html = ""
+        current_url = ""
+        search_timed_out = False
+        candidates: List[FbCandidate] = []
+        last_direct_miss_reason = ""
+
+        for direct_query in direct_query_list:
+            page_html, current_url, search_timed_out = self._fetch_search_surface(
+                direct_query,
+                search_method="direct_route",
+            )
+            candidates = _fb_extract_candidates_from_search_dom(
+                page_html,
+                logger=self.logger,
+                debug=os.getenv("FB_DEBUG_DOM_GATE") == "1",
+                search_name=artist_name,
+            )
+            if candidates:
+                last_direct_miss_reason = ""
+                break
+            last_direct_miss_reason = _fb_search_surface_miss_reason(
                 page_html,
                 driver=self.driver,
                 current_url=current_url,
                 timed_out=search_timed_out,
             )
-            if miss_reason:
+            if last_direct_miss_reason:
                 _safe_log(
                     self.logger,
                     "[FB Enrich] search_method=direct_route failure_mode=%s query='%s'",
-                    miss_reason,
-                    query,
+                    last_direct_miss_reason,
+                    direct_query,
                 )
-                page_html, current_url, search_timed_out = self._fetch_search_surface(query, search_method="homepage_ui")
-                candidates = _fb_extract_candidates_from_search_dom(
-                    page_html,
-                    logger=self.logger,
-                    debug=os.getenv("FB_DEBUG_DOM_GATE") == "1",
-                    search_name=artist_name,
+
+        if not candidates and last_direct_miss_reason:
+            page_html, current_url, search_timed_out = self._fetch_search_surface(
+                primary_query,
+                search_method="homepage_ui",
+            )
+            candidates = _fb_extract_candidates_from_search_dom(
+                page_html,
+                logger=self.logger,
+                debug=os.getenv("FB_DEBUG_DOM_GATE") == "1",
+                search_name=artist_name,
+            )
+            candidates, homepage_failure_mode = _guard_homepage_fb_search_candidates(
+                candidates,
+                page_html=page_html,
+                current_url=current_url,
+                logger=self.logger,
+                log_prefix="[FB Enrich]",
+                query=primary_query,
+            )
+            if homepage_failure_mode:
+                _safe_log(
+                    self.logger,
+                    "[FB Enrich] search_method=homepage_ui failure_mode=%s query='%s'",
+                    homepage_failure_mode,
+                    primary_query,
                 )
-                candidates, homepage_failure_mode = _guard_homepage_fb_search_candidates(
-                    candidates,
-                    page_html=page_html,
-                    current_url=current_url,
-                    logger=self.logger,
-                    log_prefix="[FB Enrich]",
-                    query=query,
-                )
-                if homepage_failure_mode:
-                    _safe_log(
-                        self.logger,
-                        "[FB Enrich] search_method=homepage_ui failure_mode=%s query='%s'",
-                        homepage_failure_mode,
-                        query,
+            if not candidates:
+                if not homepage_failure_mode:
+                    homepage_miss_reason = _fb_search_surface_miss_reason(
+                        page_html,
+                        driver=self.driver,
+                        current_url=current_url,
+                        timed_out=search_timed_out,
                     )
-                if not candidates:
-                    if not homepage_failure_mode:
-                        homepage_miss_reason = _fb_search_surface_miss_reason(
-                            page_html,
-                            driver=self.driver,
-                            current_url=current_url,
-                            timed_out=search_timed_out,
+                    if homepage_miss_reason:
+                        _safe_log(
+                            self.logger,
+                            "[FB Enrich] search_method=homepage_ui failure_mode=%s query='%s'",
+                            homepage_miss_reason,
+                            primary_query,
                         )
-                        if homepage_miss_reason:
-                            _safe_log(
-                                self.logger,
-                                "[FB Enrich] search_method=homepage_ui failure_mode=%s query='%s'",
-                                homepage_miss_reason,
-                                query,
-                            )
         dropped_business = 0
         gate_before = len(candidates)
         gate_reject_count = 0

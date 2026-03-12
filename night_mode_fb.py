@@ -1023,6 +1023,13 @@ def _fb_search_surface_miss_reason(
         return "timeout_no_results"
     if not page_html.strip():
         return "blank_html"
+    page_html_l = page_html.lower()
+    if (
+        "we didn’t find any results" in page_html_l
+        or "we didn't find any results" in page_html_l
+        or "we didn&#039;t find any results" in page_html_l
+    ):
+        return "no_results_text"
 
     selector, anchors_in_scope, _pre_gate_count, hrefs = _collect_search_candidates_from_html_v2(page_html)
     usable_hrefs = [href for href in hrefs if _is_candidate_usable(href)]
@@ -5354,19 +5361,62 @@ class NightModeFacebookEnricher:
             if not raw:
                 return ""
             parts = [p.strip() for p in re.split(r"[,|/]+", raw) if p.strip()]
-            if len(parts) >= 2:
-                return " ".join(parts[:2])
+            if parts:
+                return parts[0]
             return raw
 
         location_query = _normalize_location_for_query(location)
-        primary_query = " ".join(part for part in (artist, location_query) if part).strip()
+        primary_query = artist.strip()
         if not primary_query:
             return None
-        html, nav_driver, search_timed_out, current_search_url = self._fetch_search_surface(
-            primary_query,
-            search_method="direct_route",
-            session=session,
-        )
+        direct_query_list = [primary_query]
+        if location_query:
+            direct_query_list.append(f"{artist} {location_query}".strip())
+        direct_query_list.extend([f"{artist} musician".strip(), f"{artist} band".strip()])
+        direct_query_list = list(dict.fromkeys(query for query in direct_query_list if query))
+        if self.slow_mode_active:
+            direct_query_list = direct_query_list[:1]
+
+        html = ""
+        nav_driver = None
+        search_timed_out = False
+        current_search_url = ""
+        diagnostics: Dict[str, Any] = {}
+        candidates: List["facebook_enrich.FbCandidate"] = []
+        active_query = primary_query
+        last_direct_miss_reason = ""
+        for direct_query in direct_query_list:
+            active_query = direct_query
+            html, nav_driver, search_timed_out, current_search_url = self._fetch_search_surface(
+                direct_query,
+                search_method="direct_route",
+                session=session,
+            )
+            diagnostics = {}
+            candidates = _harvest_candidates(
+                html,
+                nav_driver,
+                artist,
+                logger=self.logger,
+                v2_enabled=v2_enabled,
+                session_unhealthy=session_unhealthy,
+                session_reason=session_reason,
+                diagnostics=diagnostics,
+            )
+            if candidates:
+                last_direct_miss_reason = ""
+                break
+            last_direct_miss_reason = _fb_search_surface_miss_reason(
+                getattr(nav_driver, "page_source", "") or html or "",
+                driver=nav_driver,
+                current_url=current_search_url,
+                timed_out=search_timed_out,
+            )
+            if last_direct_miss_reason:
+                _log(
+                    self.logger,
+                    f"[Night FB] search_method=direct_route failure_mode={last_direct_miss_reason} query='{direct_query}'",
+                )
 
         # Optional self-check: confirm shared URL gate predicate.
         if _bool_env("FB_DEBUG_CAND_GATE_ASSERT", default=False):
@@ -5375,15 +5425,11 @@ class NightModeFacebookEnricher:
             except Exception:
                 pass
 
-        refine_query_list = [f"{artist} musician", f"{artist} band"]
-        if location_query:
-            refine_query_list.insert(0, f"{artist} {location_query}")
-        if self.slow_mode_active:
-            refine_query_list = refine_query_list[:1]
-
         def _run_refine_queries(diagnostics: Optional[Dict[str, Any]] = None) -> List["facebook_enrich.FbCandidate"]:
             refine_candidates: List["facebook_enrich.FbCandidate"] = []
-            for refine_query in refine_query_list:
+            for refine_query in direct_query_list[1:]:
+                if refine_query == active_query:
+                    continue
                 html_refined, drv_refined, _timed_out_refined, _current_refined_url = self._fetch_search_surface(
                     refine_query,
                     search_method="direct_route",
@@ -5403,30 +5449,10 @@ class NightModeFacebookEnricher:
                 )
             return refine_candidates
 
-        diagnostics: Dict[str, Any] = {}
-        candidates = _harvest_candidates(
-            html,
-            nav_driver,
-            artist,
-            logger=self.logger,
-            v2_enabled=v2_enabled,
-            session_unhealthy=session_unhealthy,
-            session_reason=session_reason,
-            diagnostics=diagnostics,
-        )
         suppress_refine_queries = False
         if session and not candidates:
-            miss_reason = _fb_search_surface_miss_reason(
-                getattr(nav_driver, "page_source", "") or html or "",
-                driver=nav_driver,
-                current_url=current_search_url,
-                timed_out=search_timed_out,
-            )
+            miss_reason = last_direct_miss_reason
             if miss_reason:
-                _log(
-                    self.logger,
-                    f"[Night FB] search_method=direct_route failure_mode={miss_reason} query='{primary_query}'",
-                )
                 suppress_refine_queries = True
                 homepage_driver, homepage_precheck_failure = self._ensure_homepage_search_session_ready(session)
                 if homepage_precheck_failure:

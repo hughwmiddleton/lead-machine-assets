@@ -27,6 +27,17 @@ class _FakeDriver:
         raise Exception(f"unexpected locator: {by} {value}")
 
 
+def _patch_candidate_selection(monkeypatch, *, strong: bool = True) -> None:
+    monkeypatch.setattr(cde, "score_fb_candidate", lambda *args, **kwargs: (2.0, 1.0, 1.0))
+    monkeypatch.setattr(cde, "is_music_page", lambda *args, **kwargs: True)
+    monkeypatch.setattr(cde, "classify_corporate_signals", lambda *args, **kwargs: SimpleNamespace(has_hard=False, has_artist=True))
+    monkeypatch.setattr(
+        cde,
+        "_facebook_candidate_is_strong",
+        lambda *args, **kwargs: (strong, "music_category" if strong else "slug_or_name_only_match"),
+    )
+
+
 def test_find_best_page_url_falls_back_to_homepage_after_direct_surface_miss(monkeypatch) -> None:
     artist_url = "https://www.facebook.com/testartist"
     driver = _FakeDriver(
@@ -37,10 +48,10 @@ def test_find_best_page_url_falls_back_to_homepage_after_direct_surface_miss(mon
     client = cde.FacebookSearchClient(driver=driver, logger=None)
     monkeypatch.setattr(client, "ensure_facebook_logged_in", lambda: True)
 
-    search_methods = []
+    search_calls = []
 
     def _fake_fetch(query, *, search_method):  # noqa: ANN001
-        search_methods.append(search_method)
+        search_calls.append((search_method, query))
         if search_method == "direct_route":
             return "<html><body>direct-miss</body></html>", "https://www.facebook.com/search/pages/?q=test", False
         return (
@@ -50,15 +61,91 @@ def test_find_best_page_url_falls_back_to_homepage_after_direct_surface_miss(mon
         )
 
     monkeypatch.setattr(client, "_fetch_search_surface", _fake_fetch)
-    monkeypatch.setattr(cde, "score_fb_candidate", lambda *args, **kwargs: (2.0, 1.0, 1.0))
-    monkeypatch.setattr(cde, "is_music_page", lambda *args, **kwargs: True)
-    monkeypatch.setattr(cde, "classify_corporate_signals", lambda *args, **kwargs: SimpleNamespace(has_hard=False, has_artist=True))
-    monkeypatch.setattr(cde, "_facebook_candidate_is_strong", lambda *args, **kwargs: (True, "music_category"))
+    _patch_candidate_selection(monkeypatch)
 
-    result = client.find_best_page_url("Test Artist", require_strong_candidate=True)
+    result = client.find_best_page_url("Test Artist", location="London, Uk", require_strong_candidate=True)
 
     assert result == artist_url
-    assert search_methods == ["direct_route", "homepage_ui"]
+    assert search_calls == [
+        ("direct_route", "Test Artist"),
+        ("direct_route", "Test Artist London"),
+        ("direct_route", "Test Artist musician"),
+        ("direct_route", "Test Artist band"),
+        ("homepage_ui", "Test Artist"),
+    ]
+
+
+def test_find_best_page_url_tries_artist_only_first(monkeypatch) -> None:
+    artist_url = "https://www.facebook.com/jordanpaulrousseau"
+    driver = _FakeDriver(
+        {
+            artist_url: "<html><body><div>Musician/Band</div><a href='https://open.spotify.com/artist/test'>Spotify</a></body></html>",
+        }
+    )
+    client = cde.FacebookSearchClient(driver=driver, logger=None)
+    monkeypatch.setattr(client, "ensure_facebook_logged_in", lambda: True)
+
+    direct_queries = []
+
+    def _fake_fetch(query, *, search_method):  # noqa: ANN001
+        if search_method != "direct_route":
+            raise AssertionError("homepage fallback should not run when artist-only direct-route succeeds")
+        direct_queries.append(query)
+        return (
+            "<div role='main'><div aria-label='Search results'><a href='https://www.facebook.com/jordanpaulrousseau'>Jordan Paul Rousseau</a></div></div>",
+            "https://www.facebook.com/search/pages/?q=test",
+            False,
+        )
+
+    monkeypatch.setattr(client, "_fetch_search_surface", _fake_fetch)
+    _patch_candidate_selection(monkeypatch)
+
+    result = client.find_best_page_url("Jordan Paul Rousseau", location="London, Uk", require_strong_candidate=True)
+
+    assert result == artist_url
+    assert direct_queries == ["Jordan Paul Rousseau"]
+
+
+def test_find_best_page_url_tries_location_only_after_artist_only_no_results_miss(monkeypatch) -> None:
+    artist_url = "https://www.facebook.com/jordanpaulrousseau"
+    driver = _FakeDriver(
+        {
+            artist_url: "<html><body><div>Musician/Band</div><a href='https://open.spotify.com/artist/test'>Spotify</a></body></html>",
+        }
+    )
+    client = cde.FacebookSearchClient(driver=driver, logger=None)
+    monkeypatch.setattr(client, "ensure_facebook_logged_in", lambda: True)
+
+    direct_queries = []
+
+    def _fake_fetch(query, *, search_method):  # noqa: ANN001
+        if search_method != "direct_route":
+            raise AssertionError("homepage fallback should not run when the simplified-location direct query succeeds")
+        direct_queries.append(query)
+        if query == "Jordan Paul Rousseau":
+            return "<html><body>We didn’t find any results</body></html>", "https://www.facebook.com/search/pages/?q=test", False
+        return (
+            "<div role='main'><div aria-label='Search results'><a href='https://www.facebook.com/jordanpaulrousseau'>Jordan Paul Rousseau</a></div></div>",
+            "https://www.facebook.com/search/pages/?q=test",
+            False,
+        )
+
+    monkeypatch.setattr(client, "_fetch_search_surface", _fake_fetch)
+    _patch_candidate_selection(monkeypatch)
+
+    result = client.find_best_page_url("Jordan Paul Rousseau", location="London, Uk", require_strong_candidate=True)
+
+    assert result == artist_url
+    assert direct_queries == ["Jordan Paul Rousseau", "Jordan Paul Rousseau London"]
+
+
+def test_fb_search_surface_miss_reason_detects_no_results_text() -> None:
+    miss_reason = cde._fb_search_surface_miss_reason(
+        "<html><body>We didn’t find any results</body></html>",
+        current_url="https://www.facebook.com/search/pages/?q=test",
+    )
+
+    assert miss_reason == "no_results_text"
 
 
 def test_find_best_page_url_does_not_fallback_when_direct_candidates_later_reject(monkeypatch) -> None:
@@ -84,10 +171,7 @@ def test_find_best_page_url_does_not_fallback_when_direct_candidates_later_rejec
         )
 
     monkeypatch.setattr(client, "_fetch_search_surface", _fake_fetch)
-    monkeypatch.setattr(cde, "score_fb_candidate", lambda *args, **kwargs: (2.0, 1.0, 1.0))
-    monkeypatch.setattr(cde, "is_music_page", lambda *args, **kwargs: True)
-    monkeypatch.setattr(cde, "classify_corporate_signals", lambda *args, **kwargs: SimpleNamespace(has_hard=False, has_artist=True))
-    monkeypatch.setattr(cde, "_facebook_candidate_is_strong", lambda *args, **kwargs: (False, "slug_or_name_only_match"))
+    _patch_candidate_selection(monkeypatch, strong=False)
 
     result = client.find_best_page_url("Rejected Artist", require_strong_candidate=True)
 
@@ -123,6 +207,5 @@ def test_find_best_page_url_rejects_generic_homepage_auth_surface(monkeypatch) -
 
     assert result is None
     assert driver.visited_urls == []
-    assert search_methods == ["direct_route", "homepage_ui"]
-    assert any("search_method=homepage_ui junk_candidates_filtered=3" in message for message in logs)
+    assert search_methods == ["direct_route", "direct_route", "direct_route", "homepage_ui"]
     assert any("search_method=homepage_ui failure_mode=generic_auth_surface" in message for message in logs)
