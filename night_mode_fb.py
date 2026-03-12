@@ -1866,6 +1866,37 @@ def _clone_chrome_options(chrome_options: ChromeOptions, override_profile_dir: O
     return new_opts
 
 
+def _chrome_images_pref(chrome_options: ChromeOptions) -> Tuple[str, Optional[Any]]:
+    """Inspect the effective Chrome image-loading pref carried in experimental options."""
+    try:
+        experimental = getattr(chrome_options, "_experimental_options", {}) or {}
+        prefs = experimental.get("prefs", {}) or {}
+    except Exception:
+        return "inherit", None
+
+    managed_key = "profile.managed_default_content_settings.images"
+    default_key = "profile.default_content_setting_values.images"
+    if managed_key in prefs:
+        return managed_key, prefs.get(managed_key)
+    if default_key in prefs:
+        return default_key, prefs.get(default_key)
+    return "inherit", None
+
+
+def _chrome_images_policy_label(chrome_options: ChromeOptions) -> str:
+    pref_key, pref_value = _chrome_images_pref(chrome_options)
+    if pref_key == "inherit":
+        return "inherit"
+    scope = "managed" if "managed" in pref_key else "default"
+    if pref_value == 1:
+        state = "allow"
+    elif pref_value == 2:
+        state = "block"
+    else:
+        state = f"value_{pref_value}"
+    return f"{scope}_{state}"
+
+
 _night_fb_profile_dir_logged: bool = False
 
 
@@ -2473,7 +2504,9 @@ def _create_fb_driver_night_mode(headless: bool, logger: LoggerFn = None):
     chrome_options.add_argument(f"--user-data-dir={profile_dir}")
     chrome_options.add_argument("--profile-directory=Default")
     chrome_options.page_load_strategy = "eager"
-    prefs = {"profile.managed_default_content_settings.images": 2}
+    # Force images on for the persistent Night FB profile so manual login/challenge
+    # recovery remains possible even if a previous run left the shared profile blocked.
+    prefs = {"profile.managed_default_content_settings.images": 1}
     chrome_options.add_experimental_option("prefs", prefs)
     driver = _start_chromedriver_with_retry(
         chrome_options,
@@ -2560,6 +2593,11 @@ class NightPersistentFacebookSession:
                 self.last_health_ok = healthy
                 self.last_health_reason = reason or ""
             if not healthy:
+                if (reason or "").lower() in {"checkpoint", "captcha", "redirect_login", "recover", "two_factor", "consent"}:
+                    _log(
+                        self.logger,
+                        f"[Night FB][WARN] Persistent FB session needs manual recovery (reason={reason or 'unknown'}); image loading is enabled for login/captcha recovery.",
+                    )
                 if (reason or "").lower() == "checkpoint" and authed:
                     if self.checkpoint_restart_count == 0:
                         self.checkpoint_restart_count += 1
@@ -2609,6 +2647,10 @@ class NightPersistentFacebookSession:
                         self.driver = old_driver
             return self.driver
 
+        _log(
+            self.logger,
+            "[Night FB][WARN] Persistent FB profile appears logged out or expired; manual login is required. Image loading is enabled for login/captcha recovery.",
+        )
         if self.headless:
             self.last_health_ok = False
             self.last_health_reason = "unauthenticated"
@@ -2669,6 +2711,7 @@ def _start_chromedriver_with_retry(
         driver_version = _chromedriver_version(driver_path)
         driver_display = driver_path or "<selenium_manager>"
         profile_exists, profile_locks = _profile_dir_state(profile or "") if profile else (False, [])
+        image_policy = _chrome_images_policy_label(opts)
         _log(
             logger,
             "[Night FB][preflight] "
@@ -2678,6 +2721,7 @@ def _start_chromedriver_with_retry(
             f"chromedriver_version={driver_version or '<unknown>'} "
             f"profile_dir={profile or '<none>'} "
             f"profile_exists={profile_exists} profile_locks={profile_locks} "
+            f"image_policy={image_policy} "
             f"args={getattr(opts, 'arguments', [])}"
         )
 
