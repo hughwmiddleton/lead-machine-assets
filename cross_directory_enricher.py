@@ -77,10 +77,12 @@ from facebook_enrich import (
 from night_mode_fb import (
     classify_explicit_fb_intake,
     _extract_emails_from_html,
+    _fb_search_surface_miss_reason,
     _is_fb_login_or_security_url,
     _looks_like_fb_warning_or_block,
     _merge_email_all,
     _normalise_fb_url,
+    _run_fb_homepage_search,
 )
 
 
@@ -2657,6 +2659,62 @@ class FacebookSearchClient:
                 return False
         return False
 
+    def _fetch_search_surface(
+        self,
+        query: str,
+        *,
+        search_method: str,
+    ) -> Tuple[str, str, bool]:
+        try:
+            from selenium.webdriver.common.by import By
+            from selenium.webdriver.support.ui import WebDriverWait
+            from selenium.webdriver.support import expected_conditions as EC
+            from selenium.common.exceptions import TimeoutException, WebDriverException
+        except Exception as exc:
+            _safe_log(self.logger, "[FB Enrich] Selenium imports unavailable: %s", exc)
+            return "", "", False
+
+        if search_method == "direct_route":
+            search_url = f"{FACEBOOK_SEARCH_URL}?q={urllib.parse.quote_plus(query)}"
+            _safe_log(self.logger, "[FB Enrich] search_method=direct_route query='%s' url=%s", query, search_url)
+            try:
+                self.driver.get(search_url)
+            except WebDriverException as exc:
+                _safe_log(
+                    self.logger,
+                    "[FB Enrich] WebDriver error while navigating FB for '%s': %s",
+                    query,
+                    exc,
+                )
+                return "", search_url, False
+            timed_out = False
+            try:
+                WebDriverWait(self.driver, FACEBOOK_SEARCH_WAIT_SECONDS).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, "a[href*='facebook.com'], div[role='main']"))
+                )
+            except TimeoutException:
+                timed_out = True
+            try:
+                page_html = self.driver.page_source or ""
+            except Exception:
+                page_html = ""
+            try:
+                current_url = self.driver.current_url or search_url
+            except Exception:
+                current_url = search_url
+            return page_html, current_url, timed_out
+
+        if search_method == "homepage_ui":
+            _safe_log(self.logger, "[FB Enrich] search_method=homepage_ui query='%s'", query)
+            return _run_fb_homepage_search(
+                self.driver,
+                query,
+                logger=self.logger,
+                log_prefix="[FB Enrich]",
+            )
+
+        raise ValueError(f"Unsupported search_method: {search_method}")
+
     def find_best_page_url(
         self,
         artist_name: str,
@@ -2681,47 +2739,48 @@ class FacebookSearchClient:
         query = " ".join(part for part in query_parts if part)
         if not query:
             return None
-        search_url = f"{FACEBOOK_SEARCH_URL}?q={urllib.parse.quote_plus(query)}"
-        _safe_log(self.logger, "[FB Enrich] Selenium FB search URL: %s", search_url)
-        try:
-            self.driver.get(search_url)
-        except WebDriverException as exc:
-            _safe_log(
-                self.logger,
-                "[FB Enrich] WebDriver error while navigating FB for '%s': %s",
-                artist_name,
-                exc,
-            )
-            return None
-        try:
-            WebDriverWait(self.driver, FACEBOOK_SEARCH_WAIT_SECONDS).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, "a[href*='facebook.com']"))
-            )
-        except TimeoutException:
-            _safe_log(self.logger, "[FB Enrich] No FB results rendered for query '%s'", query)
-            return None
-        try:
-            page_html = self.driver.page_source or ""
-        except Exception:
-            page_html = ""
-        if not page_html:
-            return None
-        try:
-            soup = BeautifulSoup(page_html, "html.parser")
-        except Exception as exc:
-            _safe_log(
-                self.logger,
-                "[FB Enrich] Failed to parse FB search DOM for '%s': %s",
-                artist_name,
-                exc,
-            )
-            return None
+        page_html, current_url, search_timed_out = self._fetch_search_surface(query, search_method="direct_route")
         candidates = _fb_extract_candidates_from_search_dom(
             page_html,
             logger=self.logger,
             debug=os.getenv("FB_DEBUG_DOM_GATE") == "1",
             search_name=artist_name,
         )
+        if not candidates:
+            miss_reason = _fb_search_surface_miss_reason(
+                page_html,
+                driver=self.driver,
+                current_url=current_url,
+                timed_out=search_timed_out,
+            )
+            if miss_reason:
+                _safe_log(
+                    self.logger,
+                    "[FB Enrich] search_method=direct_route failure_mode=%s query='%s'",
+                    miss_reason,
+                    query,
+                )
+                page_html, current_url, search_timed_out = self._fetch_search_surface(query, search_method="homepage_ui")
+                candidates = _fb_extract_candidates_from_search_dom(
+                    page_html,
+                    logger=self.logger,
+                    debug=os.getenv("FB_DEBUG_DOM_GATE") == "1",
+                    search_name=artist_name,
+                )
+                if not candidates:
+                    homepage_miss_reason = _fb_search_surface_miss_reason(
+                        page_html,
+                        driver=self.driver,
+                        current_url=current_url,
+                        timed_out=search_timed_out,
+                    )
+                    if homepage_miss_reason:
+                        _safe_log(
+                            self.logger,
+                            "[FB Enrich] search_method=homepage_ui failure_mode=%s query='%s'",
+                            homepage_miss_reason,
+                            query,
+                        )
         dropped_business = 0
         gate_before = len(candidates)
         gate_reject_count = 0

@@ -29,6 +29,7 @@ from selenium import webdriver
 from selenium.webdriver.chrome.options import Options as ChromeOptions
 from selenium.webdriver.chrome.service import Service as ChromeService
 from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.common.exceptions import (
@@ -94,6 +95,16 @@ _EXPLICIT_FB_INTAKE_FIELDS = (
 _EXPLICIT_FB_ALLOWED_HOSTS = ("facebook.com", "m.facebook.com", "web.facebook.com", "touch.facebook.com", "fb.com", "fb.me")
 _EXPLICIT_FB_PREFILTER_PATHS = ("/r.php", "/login", "/share.php", "/l.php", "/dialog/")
 _DIRECT_FB_ROW_FIELDS = ("Facebook_URL", "Facebook URL", "facebook_url", "facebook url")
+_FB_HOME_SEARCH_INPUT_SELECTORS: Tuple[Tuple[str, str], ...] = (
+    (By.CSS_SELECTOR, 'input[aria-label="Search Facebook"]'),
+    (By.CSS_SELECTOR, 'input[placeholder="Search Facebook"]'),
+    (By.CSS_SELECTOR, 'input[type="search"]'),
+    (By.CSS_SELECTOR, 'input[role="combobox"]'),
+    (
+        By.XPATH,
+        "//input[contains(@aria-label, 'Search') or contains(@placeholder, 'Search')]",
+    ),
+)
 
 
 @dataclass
@@ -795,6 +806,127 @@ def _collect_search_candidates_from_html_v2(html: str) -> Tuple[str, int, int, L
     anchors_in_scope = chosen_entry.get("anchors_in_scope", 0)
     candidates_pre_url_gate = len(chosen_entry.get("hrefs", []) or [])
     return chosen_selector, anchors_in_scope, candidates_pre_url_gate, chosen_entry.get("hrefs", []) or []
+
+
+def _find_fb_home_search_input(driver, timeout: float = 12.0):
+    if driver is None:
+        return None
+    for by, selector in _FB_HOME_SEARCH_INPUT_SELECTORS:
+        try:
+            return WebDriverWait(driver, timeout).until(EC.element_to_be_clickable((by, selector)))
+        except TimeoutException:
+            continue
+        except Exception:
+            continue
+    return None
+
+
+def _run_fb_homepage_search(
+    driver,
+    query: str,
+    *,
+    logger: LoggerFn = None,
+    log_prefix: str = "[Night FB]",
+) -> Tuple[str, str, bool]:
+    if driver is None:
+        return "", "", False
+
+    html, current_url, timed_out = _load_fb_page_with_timeout(
+        driver,
+        "https://www.facebook.com/",
+        timeout_s=20.0,
+        logger=logger,
+    )
+    if timed_out:
+        return html or "", current_url or _safe_current_url(driver), True
+
+    search_input = _find_fb_home_search_input(driver)
+    if search_input is None:
+        return getattr(driver, "page_source", "") or html or "", _safe_current_url(driver) or current_url, False
+
+    before_url = current_url or _safe_current_url(driver)
+    try:
+        search_input.click()
+        try:
+            search_input.send_keys(Keys.COMMAND, "a")
+        except Exception:
+            search_input.send_keys(Keys.CONTROL, "a")
+        search_input.send_keys(Keys.DELETE)
+        search_input.send_keys(query)
+        search_input.send_keys(Keys.ENTER)
+    except Exception as exc:
+        _log(logger, f"{log_prefix} search_method=homepage_ui submit_failed={exc.__class__.__name__}")
+        return getattr(driver, "page_source", "") or "", _safe_current_url(driver) or before_url, False
+
+    timed_out_after_submit = False
+
+    def _search_surface_ready(drv) -> bool:
+        current = (_safe_current_url(drv) or "").lower()
+        if "/search/" in current:
+            return True
+        try:
+            surface_html = getattr(drv, "page_source", "") or ""
+        except Exception:
+            surface_html = ""
+        selector, anchors_in_scope, candidates_pre_url_gate, hrefs = _collect_search_candidates_from_html_v2(surface_html)
+        return bool(
+            selector != "NONE"
+            or anchors_in_scope > 0
+            or candidates_pre_url_gate > 0
+            or hrefs
+            or (_safe_current_url(drv) or "") != before_url
+        )
+
+    try:
+        WebDriverWait(driver, 12.0).until(_search_surface_ready)
+    except TimeoutException:
+        timed_out_after_submit = True
+    except Exception:
+        timed_out_after_submit = True
+
+    time.sleep(1.0)
+    return getattr(driver, "page_source", "") or "", _safe_current_url(driver) or before_url, timed_out_after_submit
+
+
+def _fb_search_surface_miss_reason(
+    html: str,
+    *,
+    driver=None,
+    current_url: str = "",
+    timed_out: bool = False,
+) -> str:
+    page_html = html or ""
+    resolved_url = current_url or _safe_current_url(driver)
+    resolved_url_l = (resolved_url or "").lower()
+
+    if resolved_url and (is_fb_login_redirect(resolved_url) or _is_fb_login_or_security_url(resolved_url)):
+        return ""
+    if _looks_like_fb_warning_or_block(page_html, resolved_url_l):
+        return ""
+    if timed_out and not page_html.strip():
+        return "timeout_no_results"
+    if not page_html.strip():
+        return "blank_html"
+
+    selector, anchors_in_scope, _pre_gate_count, hrefs = _collect_search_candidates_from_html_v2(page_html)
+    usable_hrefs = [href for href in hrefs if _is_candidate_usable(href)]
+
+    overlay_present = False
+    if driver is not None:
+        try:
+            overlay_present = bool(_has_checkpoint_overlay(driver))
+        except Exception:
+            overlay_present = False
+
+    if timed_out and (selector == "NONE" or not usable_hrefs):
+        return "timeout_no_results"
+    if selector == "NONE":
+        return "dom_container_missing"
+    if anchors_in_scope <= 0:
+        return "overlay_zero_anchors" if overlay_present else "zero_anchors"
+    if not usable_hrefs:
+        return "overlay_zero_anchors" if overlay_present else "zero_usable_hrefs"
+    return ""
 
 
 def _extract_anchor_hrefs(container) -> Tuple[List[str], List]:
@@ -4901,6 +5033,70 @@ class NightModeFacebookEnricher:
         self._skip_fb_due_to_checkpoint = True
         return False
 
+    def _fetch_search_surface(
+        self,
+        query_str: str,
+        *,
+        search_method: str,
+        session=None,
+    ) -> Tuple[str, Optional[Any], bool, str]:
+        if search_method == "direct_route":
+            encoded_q = urllib.parse.quote_plus(query_str)
+            search_url = f"https://www.facebook.com/search/pages/?q={encoded_q}"
+            _log(self.logger, f"[Night FB] search_method=direct_route query='{query_str}' url='{search_url}'")
+
+            def _nav_with_session() -> Tuple[str, Any, bool, str]:
+                drv = session.navigate(search_url)
+                time.sleep(1.5)
+                return (
+                    getattr(drv, "page_source", "") or "",
+                    drv,
+                    bool(getattr(session, "last_nav_timed_out", False)),
+                    getattr(session, "last_nav_current_url", "") or _safe_current_url(drv) or search_url,
+                )
+
+            def _nav_anon() -> Tuple[str, Any, bool, str]:
+                driver = self._get_anon_driver()
+                driver.get(search_url)
+                time.sleep(1.5)
+                return getattr(driver, "page_source", "") or "", driver, False, _safe_current_url(driver) or search_url
+
+            nav_fn = _nav_with_session if session else _nav_anon
+            try:
+                return nav_fn()
+            except Exception as exc:  # pragma: no cover - defensive
+                _log(self.logger, f"[Night FB] Search navigation failed (will refresh session): {exc}")
+                if session:
+                    try:
+                        self._refresh_driver(session)
+                    except FacebookDriverError as exc2:
+                        raise exc2
+            nav_fn = _nav_with_session if session else _nav_anon
+            try:
+                return nav_fn()
+            except FacebookDriverError as exc2:
+                raise exc2
+            except Exception as exc2:  # pragma: no cover - defensive
+                _log(self.logger, f"[Night FB] Search navigation failed after refresh: {exc2}")
+                raise FacebookDriverError(str(exc2))
+
+        if search_method == "homepage_ui":
+            if session is None:
+                return "", None, False, ""
+            _log(self.logger, f"[Night FB] search_method=homepage_ui query='{query_str}'")
+            driver = session.ensure_logged_in() if hasattr(session, "ensure_logged_in") else getattr(session, "driver", None)
+            if driver is None:
+                return "", None, False, ""
+            html, current_url, timed_out = _run_fb_homepage_search(
+                driver,
+                query_str,
+                logger=self.logger,
+                log_prefix="[Night FB]",
+            )
+            return html, driver, timed_out, current_url
+
+        raise ValueError(f"Unsupported search_method: {search_method}")
+
     def _search_for_page(self, artist: str, location: str, allow_anon: bool = False) -> Optional[str]:
         self._last_selected_candidate_context = None
         self._last_search_candidates = []
@@ -4971,40 +5167,6 @@ class NightModeFacebookEnricher:
                 self._last_search_candidates = [fallback_context]
             return fallback_url
 
-        def _fetch_search_html(query_str: str) -> Tuple[Optional[str], Optional[Any]]:
-            encoded_q = urllib.parse.quote_plus(query_str)
-            search_url = f"https://www.facebook.com/search/pages/?q={encoded_q}"
-            _log(self.logger, f"[Night FB] Searching Facebook for '{query_str}' -> {search_url}")
-            def _nav_with_session() -> Tuple[str, Any]:
-                drv = session.navigate(search_url)
-                time.sleep(1.5)
-                return getattr(drv, "page_source", ""), drv
-
-            def _nav_anon() -> Tuple[str, Any]:
-                driver = self._get_anon_driver()
-                driver.get(search_url)
-                time.sleep(1.5)
-                return getattr(driver, "page_source", ""), driver
-
-            nav_fn = _nav_with_session if session else _nav_anon
-            try:
-                return nav_fn()
-            except Exception as exc:  # pragma: no cover - defensive
-                _log(self.logger, f"[Night FB] Search navigation failed (will refresh session): {exc}")
-                if session:
-                    try:
-                        self._refresh_driver(session)
-                    except FacebookDriverError as exc2:
-                        raise exc2
-            nav_fn = _nav_with_session if session else _nav_anon
-            try:
-                return nav_fn()
-            except FacebookDriverError as exc2:
-                raise exc2
-            except Exception as exc2:  # pragma: no cover - defensive
-                _log(self.logger, f"[Night FB] Search navigation failed after refresh: {exc2}")
-                raise FacebookDriverError(str(exc2))
-
         def _normalize_location_for_query(raw: str) -> str:
             raw = (raw or "").strip()
             if not raw:
@@ -5018,7 +5180,11 @@ class NightModeFacebookEnricher:
         primary_query = " ".join(part for part in (artist, location_query) if part).strip()
         if not primary_query:
             return None
-        html, nav_driver = _fetch_search_html(primary_query)
+        html, nav_driver, search_timed_out, current_search_url = self._fetch_search_surface(
+            primary_query,
+            search_method="direct_route",
+            session=session,
+        )
 
         # Optional self-check: confirm shared URL gate predicate.
         if _bool_env("FB_DEBUG_CAND_GATE_ASSERT", default=False):
@@ -5036,7 +5202,11 @@ class NightModeFacebookEnricher:
         def _run_refine_queries(diagnostics: Optional[Dict[str, Any]] = None) -> List["facebook_enrich.FbCandidate"]:
             refine_candidates: List["facebook_enrich.FbCandidate"] = []
             for refine_query in refine_query_list:
-                html_refined, drv_refined = _fetch_search_html(refine_query)
+                html_refined, drv_refined, _timed_out_refined, _current_refined_url = self._fetch_search_surface(
+                    refine_query,
+                    search_method="direct_route",
+                    session=session,
+                )
                 refine_candidates.extend(
                     _harvest_candidates(
                         html_refined,
@@ -5062,6 +5232,48 @@ class NightModeFacebookEnricher:
             session_reason=session_reason,
             diagnostics=diagnostics,
         )
+        suppress_refine_queries = False
+        if session and not candidates:
+            miss_reason = _fb_search_surface_miss_reason(
+                getattr(nav_driver, "page_source", "") or html or "",
+                driver=nav_driver,
+                current_url=current_search_url,
+                timed_out=search_timed_out,
+            )
+            if miss_reason:
+                _log(
+                    self.logger,
+                    f"[Night FB] search_method=direct_route failure_mode={miss_reason} query='{primary_query}'",
+                )
+                suppress_refine_queries = True
+                diagnostics = {}
+                html, nav_driver, search_timed_out, current_search_url = self._fetch_search_surface(
+                    primary_query,
+                    search_method="homepage_ui",
+                    session=session,
+                )
+                candidates = _harvest_candidates(
+                    html,
+                    nav_driver,
+                    artist,
+                    logger=self.logger,
+                    v2_enabled=v2_enabled,
+                    session_unhealthy=session_unhealthy,
+                    session_reason=session_reason,
+                    diagnostics=diagnostics,
+                )
+                if not candidates:
+                    homepage_miss_reason = _fb_search_surface_miss_reason(
+                        getattr(nav_driver, "page_source", "") or html or "",
+                        driver=nav_driver,
+                        current_url=current_search_url,
+                        timed_out=search_timed_out,
+                    )
+                    if homepage_miss_reason:
+                        _log(
+                            self.logger,
+                            f"[Night FB] search_method=homepage_ui failure_mode={homepage_miss_reason} query='{primary_query}'",
+                        )
         soft_blocked = bool(diagnostics.get("overlay_soft_block"))
         ranked_for_preview = _rank_candidates_for_preview(artist, candidates)
 
@@ -5070,7 +5282,7 @@ class NightModeFacebookEnricher:
             self._enter_slow_mode("overlay_zero_anchors", max(self.slow_mode_multiplier, 1.5))
             # Skip refine cascade when soft-blocked; rely on slug/candidate fallback.
             need_refine = False
-        elif refine_enabled:
+        elif refine_enabled and not suppress_refine_queries:
             top_score = ranked_for_preview[0]["score"] if ranked_for_preview else 0
             music_present = any(item["features"].get("music_any") for item in ranked_for_preview)
             if (not music_present) and top_score <= 0:
@@ -5108,7 +5320,7 @@ class NightModeFacebookEnricher:
                         _log(self.logger, "[Night FB] Skipping refine due to overlay soft block.")
                         overlay_skip_logged = True
                     refine_forced = True
-                elif not refine_forced:
+                elif (not refine_forced) and (not suppress_refine_queries):
                     refine_forced = True
                     forced_refine_candidates = _run_refine_queries(diagnostics=diagnostics)
                     soft_blocked = soft_blocked or bool(diagnostics.get("overlay_soft_block"))
@@ -6106,21 +6318,6 @@ class NightModeFacebookEnricher:
                 session = self._ensure_session()
                 if (not session) and not allow_anon:
                     return result
-                if session and hasattr(self.legacy, "fb_find_page_and_emails_by_name"):
-                    try:
-                        driver = session.ensure_logged_in() if hasattr(session, "ensure_logged_in") else session.navigate("about:blank")
-                    except Exception:
-                        driver = None
-                    if driver:
-                        page_url, emails = self.legacy.fb_find_page_and_emails_by_name(
-                            driver,
-                            artist_name,
-                            location,
-                            log_fn=self.logger,
-                            log_prefix="[Night FB]",
-                            suppress_console=True,
-                            allow_soft_pass_category=True,
-                        )
             if not page_url:
                 page_url = self._search_for_page(artist_name, location, allow_anon=allow_anon) or ""
                 if self._search_disabled_due_to_checkpoint:
