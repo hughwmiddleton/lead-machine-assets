@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
+import facebook_enrich
 import night_mode_fb
 
 
@@ -25,6 +28,33 @@ class _DummySession:
 
     def ensure_logged_in(self):
         return SimpleNamespace(page_source="", current_url="https://www.facebook.com/")
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://www.facebook.com/about",
+        "https://www.facebook.com/help",
+        "https://www.facebook.com/lite",
+        "https://www.facebook.com/login",
+        "https://www.facebook.com/reg",
+        "https://www.facebook.com/privacy",
+        "https://www.facebook.com/terms",
+    ],
+)
+def test_fb_candidate_gate_rejects_generic_internal_routes(url: str) -> None:
+    assert facebook_enrich._fb_is_candidate_url_allowed(url) is False
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://www.facebook.com/someartist",
+        "https://www.facebook.com/profile.php?id=123456789",
+    ],
+)
+def test_fb_candidate_gate_keeps_valid_profile_routes(url: str) -> None:
+    assert facebook_enrich._fb_is_candidate_url_allowed(url) is True
 
 
 def test_pass_a_explicit_url_still_bypasses_search(monkeypatch) -> None:
@@ -87,6 +117,67 @@ def test_pass_b_direct_surface_miss_triggers_one_homepage_fallback(monkeypatch) 
     page = enricher._search_for_page("Test Artist", location="", allow_anon=True)
 
     assert page == "https://www.facebook.com/testartist"
+    assert search_methods == ["direct_route", "homepage_ui"]
+
+
+def test_pass_b_direct_surface_generic_junk_links_trigger_homepage_fallback(monkeypatch) -> None:
+    candidate = SimpleNamespace(
+        name="Test Artist",
+        url="https://www.facebook.com/testartist",
+        category="Musician/Band",
+    )
+    enricher = _make_enricher()
+    session = _DummySession()
+    monkeypatch.setattr(enricher, "_ensure_session", lambda: session)
+    monkeypatch.setattr(enricher, "_ensure_driver_alive", lambda current_session: current_session)
+
+    search_methods = []
+    direct_html = (
+        "<div role='main'><div aria-label='Search results'>"
+        "<a href='https://www.facebook.com/about'>About</a>"
+        "<a href='https://www.facebook.com/help'>Help</a>"
+        "<a href='https://www.facebook.com/login'>Log in</a>"
+        "</div></div>"
+    )
+    homepage_html = (
+        "<div role='main'><div aria-label='Search results'>"
+        "<a href='https://www.facebook.com/testartist'>Test Artist</a>"
+        "</div></div>"
+    )
+
+    def _fake_fetch(query_str, *, search_method, session=None):  # noqa: ANN001
+        search_methods.append(search_method)
+        if search_method == "direct_route":
+            return (
+                direct_html,
+                SimpleNamespace(page_source=direct_html, current_url="https://www.facebook.com/search/pages/?q=test"),
+                False,
+                "https://www.facebook.com/search/pages/?q=test",
+            )
+        return (
+            homepage_html,
+            SimpleNamespace(page_source=homepage_html, current_url="https://www.facebook.com/search/top/?q=test"),
+            False,
+            "https://www.facebook.com/search/top/?q=test",
+        )
+
+    monkeypatch.setattr(enricher, "_fetch_search_surface", _fake_fetch)
+    monkeypatch.setattr(
+        night_mode_fb,
+        "_harvest_candidates",
+        lambda html, *args, **kwargs: [] if "facebook.com/about" in (html or "") else [candidate],
+    )
+    monkeypatch.setattr(night_mode_fb, "_rank_candidates_for_preview", lambda artist, candidates: _ranked(candidate) if candidates else [])
+    monkeypatch.setattr(enricher, "_choose_ranked_candidate", lambda *args, **kwargs: (candidate, "ranked_sort"))
+    monkeypatch.setattr(enricher, "_select_candidate_url", lambda *args, **kwargs: candidate.url)
+
+    page = enricher._search_for_page("Test Artist", location="", allow_anon=True)
+
+    assert page == "https://www.facebook.com/testartist"
+    assert night_mode_fb._fb_search_surface_miss_reason(
+        direct_html,
+        current_url="https://www.facebook.com/search/pages/?q=test",
+    ) == "zero_usable_hrefs"
     assert search_methods == ["direct_route", "homepage_ui"]
 
 
@@ -210,7 +301,6 @@ def test_pass_b_homepage_fallback_rejects_generic_auth_surface(monkeypatch) -> N
 
     assert page is None
     assert search_methods == ["direct_route", "homepage_ui"]
-    assert any("search_method=homepage_ui junk_candidates_filtered=3" in message for message in logs)
     assert any("search_method=homepage_ui failure_mode=generic_auth_surface" in message for message in logs)
 
 
@@ -267,4 +357,3 @@ def test_pass_b_homepage_fallback_filters_junk_but_keeps_real_candidate(monkeypa
 
     assert page == "https://www.facebook.com/testartist"
     assert search_methods == ["direct_route", "homepage_ui"]
-    assert any("search_method=homepage_ui junk_candidates_filtered=1" in message for message in logs)

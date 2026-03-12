@@ -1488,7 +1488,8 @@ def _fb_is_candidate_url_allowed(url: str) -> bool:
     Strict allowlist for FB search candidates:
       - https://www.facebook.com/<username>
       - https://www.facebook.com/profile.php?id=<digits>
-    Rejects /groups, /watch, /reel, /events, /notifications, /afad and notif params.
+    Rejects generic internal routes plus /groups, /watch, /reel, /events,
+    /notifications, /afad and notif params.
     """
     if not url:
         return False
@@ -1511,7 +1512,25 @@ def _fb_is_candidate_url_allowed(url: str) -> bool:
     if not segments:
         return False
 
-    reserved = {"groups", "watch", "reel", "events", "notifications", "afad"}
+    reserved = {
+        "about",
+        "accessibility",
+        "afad",
+        "cookies",
+        "events",
+        "groups",
+        "help",
+        "lite",
+        "login",
+        "meta",
+        "notifications",
+        "policies",
+        "privacy",
+        "reel",
+        "reg",
+        "terms",
+        "watch",
+    }
     if segments[0].lower() in reserved:
         return False
 
