@@ -105,6 +105,43 @@ _FB_HOME_SEARCH_INPUT_SELECTORS: Tuple[Tuple[str, str], ...] = (
         "//input[contains(@aria-label, 'Search') or contains(@placeholder, 'Search')]",
     ),
 )
+_FB_HOMEPAGE_JUNK_SEGMENTS = frozenset(
+    {
+        "about",
+        "accessibility",
+        "cookies",
+        "help",
+        "lite",
+        "login",
+        "meta",
+        "policies",
+        "privacy",
+        "reg",
+        "terms",
+    }
+)
+_FB_HOMEPAGE_JUNK_TEXT_EXACT = frozenset(
+    {
+        "about",
+        "facebook lite",
+        "log in",
+        "privacy",
+        "sign up",
+        "terms",
+    }
+)
+_FB_HOMEPAGE_JUNK_TEXT_TOKENS = (
+    "accessibility",
+    "cookie",
+    "cookies",
+    "help center",
+    "meta",
+    "policy",
+    "privacy",
+    "sign up",
+    "log in",
+    "facebook lite",
+)
 
 
 @dataclass
@@ -886,6 +923,85 @@ def _run_fb_homepage_search(
 
     time.sleep(1.0)
     return getattr(driver, "page_source", "") or "", _safe_current_url(driver) or before_url, timed_out_after_submit
+
+
+def _fb_homepage_junk_href(href: str) -> bool:
+    href_clean = (href or "").strip()
+    if not href_clean:
+        return False
+    if is_junk_fb_candidate_url(href_clean):
+        return True
+    try:
+        parsed = urllib.parse.urlparse(href_clean)
+    except Exception:
+        return False
+    host = (parsed.netloc or "").lower()
+    if host and "facebook.com" not in host:
+        return False
+    path = (parsed.path or "").strip("/").lower()
+    if not path:
+        return False
+    first_segment = path.split("/", 1)[0]
+    if first_segment in _FB_HOMEPAGE_JUNK_SEGMENTS:
+        return True
+    return False
+
+
+def _fb_homepage_junk_candidate(candidate: Any) -> bool:
+    if candidate is None:
+        return False
+    url = (getattr(candidate, "url", "") or "").strip()
+    if _fb_homepage_junk_href(url):
+        return True
+
+    primary_texts = [
+        (getattr(candidate, "name", "") or "").strip().lower(),
+        (getattr(candidate, "aria_label", "") or "").strip().lower(),
+    ]
+    for text in primary_texts:
+        if not text:
+            continue
+        if text in _FB_HOMEPAGE_JUNK_TEXT_EXACT:
+            return True
+        if any(token in text for token in _FB_HOMEPAGE_JUNK_TEXT_TOKENS):
+            return True
+    return False
+
+
+def _fb_selector_has_search_results_signal(selector: str) -> bool:
+    selector_l = (selector or "").strip().lower()
+    if not selector_l or selector_l == "none":
+        return False
+    return "search results" in selector_l or "searchresults" in selector_l
+
+
+def _guard_homepage_fb_search_candidates(
+    candidates: Optional[List[Any]],
+    *,
+    page_html: str,
+    current_url: str,
+    logger: LoggerFn = None,
+    log_prefix: str = "[Night FB]",
+    query: str = "",
+) -> Tuple[List[Any], str]:
+    current_url_l = (current_url or "").lower()
+    selector, _anchors_in_scope, _pre_gate_count, hrefs = _collect_search_candidates_from_html_v2(page_html or "")
+    usable_hrefs = [href for href in hrefs if _is_candidate_usable(href)]
+    junk_hrefs = [href for href in usable_hrefs if _fb_homepage_junk_href(href)]
+    filtered = [cand for cand in (candidates or []) if not _fb_homepage_junk_candidate(cand)]
+    junk_count = max(len(candidates or []) - len(filtered), len(junk_hrefs))
+
+    if junk_count:
+        _log(
+            logger,
+            f"{log_prefix} search_method=homepage_ui junk_candidates_filtered={junk_count} query='{query}'",
+        )
+
+    if "/search/" not in current_url_l and not _fb_selector_has_search_results_signal(selector):
+        return [], "generic_auth_surface"
+    if not filtered and junk_hrefs:
+        return [], "only_junk_candidates"
+    return filtered, ""
 
 
 def _fb_search_surface_miss_reason(
@@ -5262,18 +5378,32 @@ class NightModeFacebookEnricher:
                     session_reason=session_reason,
                     diagnostics=diagnostics,
                 )
-                if not candidates:
-                    homepage_miss_reason = _fb_search_surface_miss_reason(
-                        getattr(nav_driver, "page_source", "") or html or "",
-                        driver=nav_driver,
-                        current_url=current_search_url,
-                        timed_out=search_timed_out,
+                candidates, homepage_failure_mode = _guard_homepage_fb_search_candidates(
+                    candidates,
+                    page_html=getattr(nav_driver, "page_source", "") or html or "",
+                    current_url=current_search_url,
+                    logger=self.logger,
+                    log_prefix="[Night FB]",
+                    query=primary_query,
+                )
+                if homepage_failure_mode:
+                    _log(
+                        self.logger,
+                        f"[Night FB] search_method=homepage_ui failure_mode={homepage_failure_mode} query='{primary_query}'",
                     )
-                    if homepage_miss_reason:
-                        _log(
-                            self.logger,
-                            f"[Night FB] search_method=homepage_ui failure_mode={homepage_miss_reason} query='{primary_query}'",
+                if not candidates:
+                    if not homepage_failure_mode:
+                        homepage_miss_reason = _fb_search_surface_miss_reason(
+                            getattr(nav_driver, "page_source", "") or html or "",
+                            driver=nav_driver,
+                            current_url=current_search_url,
+                            timed_out=search_timed_out,
                         )
+                        if homepage_miss_reason:
+                            _log(
+                                self.logger,
+                                f"[Night FB] search_method=homepage_ui failure_mode={homepage_miss_reason} query='{primary_query}'",
+                            )
         soft_blocked = bool(diagnostics.get("overlay_soft_block"))
         ranked_for_preview = _rank_candidates_for_preview(artist, candidates)
 

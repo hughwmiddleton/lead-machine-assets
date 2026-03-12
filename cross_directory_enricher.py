@@ -77,6 +77,7 @@ from facebook_enrich import (
 from night_mode_fb import (
     classify_explicit_fb_intake,
     _extract_emails_from_html,
+    _guard_homepage_fb_search_candidates,
     _fb_search_surface_miss_reason,
     _is_fb_login_or_security_url,
     _looks_like_fb_warning_or_block,
@@ -2767,20 +2768,36 @@ class FacebookSearchClient:
                     debug=os.getenv("FB_DEBUG_DOM_GATE") == "1",
                     search_name=artist_name,
                 )
-                if not candidates:
-                    homepage_miss_reason = _fb_search_surface_miss_reason(
-                        page_html,
-                        driver=self.driver,
-                        current_url=current_url,
-                        timed_out=search_timed_out,
+                candidates, homepage_failure_mode = _guard_homepage_fb_search_candidates(
+                    candidates,
+                    page_html=page_html,
+                    current_url=current_url,
+                    logger=self.logger,
+                    log_prefix="[FB Enrich]",
+                    query=query,
+                )
+                if homepage_failure_mode:
+                    _safe_log(
+                        self.logger,
+                        "[FB Enrich] search_method=homepage_ui failure_mode=%s query='%s'",
+                        homepage_failure_mode,
+                        query,
                     )
-                    if homepage_miss_reason:
-                        _safe_log(
-                            self.logger,
-                            "[FB Enrich] search_method=homepage_ui failure_mode=%s query='%s'",
-                            homepage_miss_reason,
-                            query,
+                if not candidates:
+                    if not homepage_failure_mode:
+                        homepage_miss_reason = _fb_search_surface_miss_reason(
+                            page_html,
+                            driver=self.driver,
+                            current_url=current_url,
+                            timed_out=search_timed_out,
                         )
+                        if homepage_miss_reason:
+                            _safe_log(
+                                self.logger,
+                                "[FB Enrich] search_method=homepage_ui failure_mode=%s query='%s'",
+                                homepage_miss_reason,
+                                query,
+                            )
         dropped_business = 0
         gate_before = len(candidates)
         gate_reject_count = 0

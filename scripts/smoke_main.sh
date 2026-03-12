@@ -62,10 +62,18 @@ sys.exit(1)
 PY
 }
 
-CONFIG=""
-if ! CONFIG="$(find_config 2>&1)"; then
-  fail "Config discovery failed: $CONFIG"
-  exit 2
+if [[ -n "${SMOKE_CONFIG:-}" ]]; then
+  if [[ ! -f "$SMOKE_CONFIG" ]]; then
+    fail "SMOKE_CONFIG does not exist: $SMOKE_CONFIG"
+    exit 2
+  fi
+  CONFIG="$SMOKE_CONFIG"
+else
+  CONFIG=""
+  if ! CONFIG="$(find_config 2>&1)"; then
+    fail "Config discovery failed: $CONFIG"
+    exit 2
+  fi
 fi
 
 log "Using config: $CONFIG"
