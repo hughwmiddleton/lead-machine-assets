@@ -10594,6 +10594,9 @@ class NightModeWorker(QtCore.QThread):
 
 
 class NightModeTab(QtWidgets.QWidget):
+    DEFAULT_NIGHT_FB_PROFILE_DIR = "/Users/hughmiddleton/Lead Machine/Lead Machine Code/night_fb_profile"
+    PERSISTENT_FB_SESSION_SENTINEL = "profile_session"
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.worker = None
@@ -10805,6 +10808,35 @@ class NightModeTab(QtWidgets.QWidget):
         if configured:
             return configured
         return os.path.join(os.path.dirname(os.path.abspath(__file__)), "overnight_runs")
+
+    def _resolve_night_mode_fb_profile_dir(self) -> str:
+        raw_path = str(os.environ.get("NIGHT_FB_PROFILE_DIR") or "").strip()
+        if not raw_path:
+            raw_path = self.DEFAULT_NIGHT_FB_PROFILE_DIR
+        expanded = os.path.expanduser(os.path.expandvars(raw_path))
+        try:
+            return str(Path(expanded).resolve())
+        except Exception:
+            return os.path.abspath(expanded)
+
+    def _build_night_mode_env(self, headless: bool) -> tuple[dict, list[str]]:
+        env = os.environ.copy()
+        fb_user = self.fb_user_edit.text().strip()
+        fb_pass = self.fb_pass_edit.text().strip()
+        effective_user = fb_user or str(env.get("FB_USERNAME") or "").strip()
+        effective_pass = fb_pass or str(env.get("FB_PASSWORD") or "").strip()
+        if not effective_user and not effective_pass:
+            # Match terminal smoke runs: the persistent Chrome profile is the auth source.
+            effective_user = self.PERSISTENT_FB_SESSION_SENTINEL
+            effective_pass = self.PERSISTENT_FB_SESSION_SENTINEL
+        if effective_user:
+            env["FB_USERNAME"] = effective_user
+        if effective_pass:
+            env["FB_PASSWORD"] = effective_pass
+        env["NIGHT_FB_PROFILE_DIR"] = self._resolve_night_mode_fb_profile_dir()
+        env["NIGHT_FB_HEADLESS"] = "1" if headless else "0"
+        secrets_to_mask = [fb_pass] if fb_pass else []
+        return env, secrets_to_mask
 
     def _refresh_run_summary(self):
         summary = _load_latest_night_mode_run_summary(self._night_mode_run_root())
@@ -11066,18 +11098,21 @@ class NightModeTab(QtWidgets.QWidget):
         self.status_label.setText(f"Status: running ({mode_label})")
         self.start_button.setEnabled(False)
         self.stop_button.setEnabled(True)
-        env = os.environ.copy()
         fb_user = self.fb_user_edit.text().strip()
         fb_pass = self.fb_pass_edit.text().strip()
-        secrets_to_mask = []
+        env, secrets_to_mask = self._build_night_mode_env(headless=headless)
         if fb_user:
-            env["FB_USERNAME"] = fb_user
             self._append_log(f"[Night Mode] FB username provided (len={len(fb_user)})")
-        if fb_pass:
-            env["FB_PASSWORD"] = fb_pass
-            secrets_to_mask.append(fb_pass)
-        # Force Night Mode FB to use persistent profile (mode controlled by env/defaults).
-        env["NIGHT_FB_PROFILE_DIR"] = "/Users/hughmiddleton/Lead Machine/Lead Machine Code/night_fb_profile"
+        elif env.get("FB_USERNAME") == self.PERSISTENT_FB_SESSION_SENTINEL and env.get("FB_PASSWORD") == self.PERSISTENT_FB_SESSION_SENTINEL:
+            self._append_log("[Night Mode] Using persistent FB profile session defaults.")
+        elif str(env.get("FB_USERNAME") or "").strip():
+            self._append_log("[Night Mode] Using inherited FB username (length only logged).")
+        effective_pass = str(env.get("FB_PASSWORD") or "").strip()
+        if effective_pass and not fb_pass and effective_pass != self.PERSISTENT_FB_SESSION_SENTINEL:
+            secrets_to_mask.append(effective_pass)
+        if bool(str(env.get("FB_USERNAME") or "").strip()) ^ bool(effective_pass):
+            self._append_log("[Night Mode][WARN] FB credentials are incomplete; Night FB may run unauthenticated.")
+        self._append_log(f"[Night Mode] FB profile dir: {env.get('NIGHT_FB_PROFILE_DIR', '')}")
         self.worker = NightModeWorker(cmd, workdir=base_dir, env=env, secrets=secrets_to_mask)
         self.worker.log_signal.connect(self._append_log)
         self.worker.finished_signal.connect(self._on_finished)

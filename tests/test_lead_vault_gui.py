@@ -399,3 +399,80 @@ def test_night_mode_run_summary_panel_renders_latest_summary(qapp, tmp_path):
         "Rows added: 47\n"
         "Rows updated: 11"
     )
+
+
+def test_night_mode_launch_preserves_inherited_fb_profile_session(qapp, monkeypatch, tmp_path):
+    module = _load_legacy_module()
+
+    class _Signal:
+        def connect(self, slot):
+            self._slot = slot
+
+    captured = {}
+
+    class FakeWorker:
+        def __init__(self, command, workdir, env=None, secrets=None, parent=None):
+            captured["command"] = list(command)
+            captured["workdir"] = workdir
+            captured["env"] = dict(env or {})
+            captured["secrets"] = list(secrets or [])
+            self.log_signal = _Signal()
+            self.finished_signal = _Signal()
+
+        def start(self):
+            captured["started"] = True
+
+    monkeypatch.setattr(module, "NightModeWorker", FakeWorker)
+    monkeypatch.setenv("FB_USERNAME", "profile_session")
+    monkeypatch.setenv("FB_PASSWORD", "profile_session")
+    monkeypatch.setenv("NIGHT_FB_PROFILE_DIR", str(tmp_path / "fb profile"))
+
+    tab = module.NightModeTab()
+    tab.jobs = [{"job_id": "job_one", "directory": "spotify", "target_valid_leads": 1}]
+    tab._launch_night_mode(headless=True)
+
+    env = captured["env"]
+    assert captured.get("started") is True
+    assert env["FB_USERNAME"] == "profile_session"
+    assert env["FB_PASSWORD"] == "profile_session"
+    assert env["NIGHT_FB_HEADLESS"] == "1"
+    assert env["NIGHT_FB_PROFILE_DIR"] == str((tmp_path / "fb profile").resolve())
+    tab.close()
+
+
+def test_night_mode_launch_defaults_to_persistent_fb_session_when_gui_fields_blank(qapp, monkeypatch):
+    module = _load_legacy_module()
+
+    class _Signal:
+        def connect(self, slot):
+            self._slot = slot
+
+    captured = {}
+
+    class FakeWorker:
+        def __init__(self, command, workdir, env=None, secrets=None, parent=None):
+            captured["env"] = dict(env or {})
+            captured["secrets"] = list(secrets or [])
+            self.log_signal = _Signal()
+            self.finished_signal = _Signal()
+
+        def start(self):
+            captured["started"] = True
+
+    monkeypatch.setattr(module, "NightModeWorker", FakeWorker)
+    monkeypatch.delenv("FB_USERNAME", raising=False)
+    monkeypatch.delenv("FB_PASSWORD", raising=False)
+    monkeypatch.delenv("NIGHT_FB_PROFILE_DIR", raising=False)
+
+    tab = module.NightModeTab()
+    tab.jobs = [{"job_id": "job_one", "directory": "spotify", "target_valid_leads": 1}]
+    tab._launch_night_mode(headless=False)
+
+    env = captured["env"]
+    assert captured.get("started") is True
+    assert env["FB_USERNAME"] == module.NightModeTab.PERSISTENT_FB_SESSION_SENTINEL
+    assert env["FB_PASSWORD"] == module.NightModeTab.PERSISTENT_FB_SESSION_SENTINEL
+    assert env["NIGHT_FB_HEADLESS"] == "0"
+    assert env["NIGHT_FB_PROFILE_DIR"] == str(Path(module.NightModeTab.DEFAULT_NIGHT_FB_PROFILE_DIR).resolve())
+    assert captured["secrets"] == []
+    tab.close()
