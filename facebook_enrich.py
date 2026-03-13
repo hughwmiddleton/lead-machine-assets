@@ -1891,11 +1891,138 @@ def _fb_extract_candidates_from_search_dom(html_or_driver, logger=None, debug: b
 
 _GOOGLE_SEARCH_URL = "https://www.google.com/search"
 _GOOGLE_SEARCH_TIMEOUT_S = 8.0
+_FB_DEBUG_GOOGLE_FIRST_ENV = "FB_DEBUG_GOOGLE_FIRST"
 
 
-def _google_fetch_html(query: str, *, session: Optional[requests.Session] = None, timeout_s: float = _GOOGLE_SEARCH_TIMEOUT_S) -> str:
-    if not query:
+def _fb_google_first_debug_enabled() -> bool:
+    return (os.getenv(_FB_DEBUG_GOOGLE_FIRST_ENV, "") or "").strip() == "1"
+
+
+def _fb_google_first_debug_log(logger=None, **fields: object) -> None:
+    if not _fb_google_first_debug_enabled():
+        return
+    ordered_keys = (
+        "stage",
+        "artist",
+        "query",
+        "query_idx",
+        "raw_href",
+        "extracted_url",
+        "canonical_url",
+        "normalized_url",
+        "host",
+        "path",
+        "accepted",
+        "rejection_reason",
+        "dedupe_key",
+        "html_len",
+        "accepted_before_merge",
+        "dropped_duplicate_across_queries",
+        "returned_so_far",
+        "fb_like_targets",
+        "dropped_duplicate_within_query",
+    )
+    parts: List[str] = []
+    for key in ordered_keys:
+        value = fields.get(key, "")
+        if value is None:
+            value = ""
+        try:
+            rendered = str(value)
+        except Exception:
+            rendered = ""
+        parts.append(f"{key}={rendered!r}")
+    _shared_fb_log(logger, "[FB Google Debug] " + " ".join(parts))
+
+
+def _fb_google_fetch_debug_log(logger=None, **fields: object) -> None:
+    if not _fb_google_first_debug_enabled():
+        return
+    ordered_keys = (
+        "query",
+        "outcome",
+        "status_code",
+        "final_url",
+        "redirect_count",
+        "content_type",
+        "body_len",
+        "exception_class",
+        "exception_message",
+        "used_ephemeral_session",
+        "timeout_s",
+        "page_hint",
+    )
+    parts: List[str] = []
+    for key in ordered_keys:
+        value = fields.get(key, "")
+        if value is None:
+            value = ""
+        try:
+            rendered = str(value)
+        except Exception:
+            rendered = ""
+        parts.append(f"{key}={rendered!r}")
+    _shared_fb_log(logger, "[FB Google Fetch Debug] " + " ".join(parts))
+
+
+def _google_fetch_page_hint(html: str) -> str:
+    lowered = (html or "").lower()
+    if not lowered:
         return ""
+    if "consent.google.com" in lowered or "before you continue to google" in lowered:
+        return "consent"
+    if "unusual traffic" in lowered or "/sorry/" in lowered or "our systems have detected unusual traffic" in lowered:
+        return "unusual_traffic"
+    if "<html" in lowered or "<!doctype html" in lowered:
+        return "normal"
+    return "unknown"
+
+
+def _google_href_has_fb_hint(raw_href: str) -> bool:
+    href = (raw_href or "").strip()
+    if not href:
+        return False
+    lowered = href.lower()
+    if "facebook.com" in lowered or "fb.com" in lowered or "fb.me" in lowered:
+        return True
+    try:
+        parsed = urllib.parse.urlparse(urllib.parse.urljoin("https://www.google.com", href))
+        qs = urllib.parse.parse_qs(parsed.query or "", keep_blank_values=False)
+    except Exception:
+        return False
+    for key in ("q", "url"):
+        for value in qs.get(key, []):
+            lowered_value = (value or "").lower()
+            if "facebook.com" in lowered_value or "fb.com" in lowered_value or "fb.me" in lowered_value:
+                return True
+    return False
+
+
+def _google_fetch_html(
+    query: str,
+    *,
+    session: Optional[requests.Session] = None,
+    timeout_s: float = _GOOGLE_SEARCH_TIMEOUT_S,
+    logger=None,
+) -> str:
+    if not query:
+        _fb_google_fetch_debug_log(
+            logger,
+            query=query,
+            outcome="query_empty",
+            status_code="",
+            final_url="",
+            redirect_count="",
+            content_type="",
+            body_len=0,
+            exception_class="",
+            exception_message="",
+            used_ephemeral_session=0 if session is not None else 1,
+            timeout_s=timeout_s,
+            page_hint="",
+        )
+        return ""
+    used_ephemeral_session = session is None
     sess = session or requests.Session()
     try:
         sess.headers.setdefault(
@@ -1911,11 +2038,64 @@ def _google_fetch_html(query: str, *, session: Optional[requests.Session] = None
             timeout=timeout_s,
             allow_redirects=True,
         )
-    except requests.RequestException:
+    except requests.RequestException as exc:
+        _fb_google_fetch_debug_log(
+            logger,
+            query=query,
+            outcome="request_exception",
+            status_code="",
+            final_url="",
+            redirect_count="",
+            content_type="",
+            body_len=0,
+            exception_class=exc.__class__.__name__,
+            exception_message=str(exc),
+            used_ephemeral_session=1 if used_ephemeral_session else 0,
+            timeout_s=timeout_s,
+            page_hint="",
+        )
         return ""
-    if getattr(response, "status_code", 0) != 200:
+    status_code = getattr(response, "status_code", 0)
+    final_url = getattr(response, "url", "") or ""
+    redirect_count = len(getattr(response, "history", []) or [])
+    content_type = (getattr(response, "headers", {}) or {}).get("Content-Type", "")
+    body = response.text or ""
+    body_len = len(body)
+    page_hint = _google_fetch_page_hint(body) if body else ""
+    if status_code != 200:
+        _fb_google_fetch_debug_log(
+            logger,
+            query=query,
+            outcome="status_non_200",
+            status_code=status_code,
+            final_url=final_url,
+            redirect_count=redirect_count,
+            content_type=content_type,
+            body_len=body_len,
+            exception_class="",
+            exception_message="",
+            used_ephemeral_session=1 if used_ephemeral_session else 0,
+            timeout_s=timeout_s,
+            page_hint=page_hint,
+        )
         return ""
-    return response.text or ""
+    outcome = "ok" if body else "empty_body"
+    _fb_google_fetch_debug_log(
+        logger,
+        query=query,
+        outcome=outcome,
+        status_code=status_code,
+        final_url=final_url,
+        redirect_count=redirect_count,
+        content_type=content_type,
+        body_len=body_len,
+        exception_class="",
+        exception_message="",
+        used_ephemeral_session=1 if used_ephemeral_session else 0,
+        timeout_s=timeout_s,
+        page_hint=page_hint,
+    )
+    return body
 
 
 def _google_extract_target_url(raw_href: str) -> str:
@@ -1984,6 +2164,10 @@ def _extract_google_fb_candidates_from_html(
     html: str,
     artist_name: str,
     *,
+    logger=None,
+    query: str = "",
+    query_idx: int = 0,
+    debug_stats: Optional[Dict[str, int]] = None,
     max_candidates: int = 3,
 ) -> List[FbCandidate]:
     if not html or max_candidates <= 0:
@@ -1991,25 +2175,148 @@ def _extract_google_fb_candidates_from_html(
     soup = BeautifulSoup(html, "html.parser")
     found: List[FbCandidate] = []
     seen_urls: set[str] = set()
+    stats = debug_stats if debug_stats is not None else {}
+    stats.setdefault("fb_like_targets", 0)
+    stats.setdefault("dropped_duplicate_within_query", 0)
     for anchor in soup.select("a[href]"):
         raw_href = anchor.get("href") or ""
+        raw_fb_hint = _google_href_has_fb_hint(raw_href)
         target_url = _google_extract_target_url(raw_href)
+        should_log = raw_fb_hint or bool(target_url)
         if not target_url:
+            if raw_fb_hint:
+                _fb_google_first_debug_log(
+                    logger,
+                    stage="candidate",
+                    artist=artist_name,
+                    query=query,
+                    query_idx=query_idx,
+                    raw_href=raw_href,
+                    extracted_url="",
+                    canonical_url="",
+                    normalized_url="",
+                    host="",
+                    path="",
+                    accepted=0,
+                    rejection_reason="target_extract_empty",
+                    dedupe_key="",
+                )
             continue
         target_lower = target_url.lower()
         if not any(host in target_lower for host in ("facebook.com", "fb.com", "fb.me")):
+            if should_log:
+                _fb_google_first_debug_log(
+                    logger,
+                    stage="candidate",
+                    artist=artist_name,
+                    query=query,
+                    query_idx=query_idx,
+                    raw_href=raw_href,
+                    extracted_url=target_url,
+                    canonical_url="",
+                    normalized_url="",
+                    host="",
+                    path="",
+                    accepted=0,
+                    rejection_reason="target_not_facebook",
+                    dedupe_key="",
+                )
             continue
+        stats["fb_like_targets"] += 1
         canonical_url = canonicalize_facebook_url(target_url)
         if not canonical_url:
+            _fb_google_first_debug_log(
+                logger,
+                stage="candidate",
+                artist=artist_name,
+                query=query,
+                query_idx=query_idx,
+                raw_href=raw_href,
+                extracted_url=target_url,
+                canonical_url="",
+                normalized_url="",
+                host="",
+                path="",
+                accepted=0,
+                rejection_reason="canonicalize_rejected",
+                dedupe_key="",
+            )
             continue
-        canonical_url = _fb_normalize_shared_candidate_url(canonical_url)
-        if not canonical_url:
+        normalized_url = _fb_normalize_shared_candidate_url(canonical_url)
+        if not normalized_url:
+            parsed = urllib.parse.urlparse(canonical_url)
+            _fb_google_first_debug_log(
+                logger,
+                stage="candidate",
+                artist=artist_name,
+                query=query,
+                query_idx=query_idx,
+                raw_href=raw_href,
+                extracted_url=target_url,
+                canonical_url=canonical_url,
+                normalized_url="",
+                host=parsed.netloc or "",
+                path=parsed.path or "",
+                accepted=0,
+                rejection_reason="shared_normalize_rejected",
+                dedupe_key=canonical_url,
+            )
             continue
-        if not fb_is_allowed_profile_candidate_url(canonical_url):
+        parsed = urllib.parse.urlparse(normalized_url)
+        if not fb_is_allowed_profile_candidate_url(normalized_url):
+            _fb_google_first_debug_log(
+                logger,
+                stage="candidate",
+                artist=artist_name,
+                query=query,
+                query_idx=query_idx,
+                raw_href=raw_href,
+                extracted_url=target_url,
+                canonical_url=canonical_url,
+                normalized_url=normalized_url,
+                host=parsed.netloc or "",
+                path=parsed.path or "",
+                accepted=0,
+                rejection_reason="profile_gate_rejected",
+                dedupe_key=normalized_url,
+            )
             continue
-        if not _fb_is_candidate_url_allowed(canonical_url):
+        if not _fb_is_candidate_url_allowed(normalized_url):
+            _fb_google_first_debug_log(
+                logger,
+                stage="candidate",
+                artist=artist_name,
+                query=query,
+                query_idx=query_idx,
+                raw_href=raw_href,
+                extracted_url=target_url,
+                canonical_url=canonical_url,
+                normalized_url=normalized_url,
+                host=parsed.netloc or "",
+                path=parsed.path or "",
+                accepted=0,
+                rejection_reason="candidate_gate_rejected",
+                dedupe_key=normalized_url,
+            )
             continue
-        if canonical_url in seen_urls:
+        if normalized_url in seen_urls:
+            stats["dropped_duplicate_within_query"] += 1
+            _fb_google_first_debug_log(
+                logger,
+                stage="candidate",
+                artist=artist_name,
+                query=query,
+                query_idx=query_idx,
+                raw_href=raw_href,
+                extracted_url=target_url,
+                canonical_url=canonical_url,
+                normalized_url=normalized_url,
+                host=parsed.netloc or "",
+                path=parsed.path or "",
+                accepted=0,
+                rejection_reason="duplicate_within_query",
+                dedupe_key=normalized_url,
+            )
             continue
 
         anchor_text = anchor.get_text(" ", strip=True) or ""
@@ -2029,8 +2336,8 @@ def _extract_google_fb_candidates_from_html(
         category = category_tokens[0] if category_tokens else ""
 
         candidate = FbCandidate(
-            name=_google_fb_candidate_name(anchor_text, artist_name, canonical_url) or (artist_name or "").strip(),
-            url=canonical_url,
+            name=_google_fb_candidate_name(anchor_text, artist_name, normalized_url) or (artist_name or "").strip(),
+            url=normalized_url,
             category=category,
         )
         try:
@@ -2043,7 +2350,23 @@ def _extract_google_fb_candidates_from_html(
         except Exception:
             pass
         found.append(candidate)
-        seen_urls.add(canonical_url)
+        seen_urls.add(normalized_url)
+        _fb_google_first_debug_log(
+            logger,
+            stage="candidate",
+            artist=artist_name,
+            query=query,
+            query_idx=query_idx,
+            raw_href=raw_href,
+            extracted_url=target_url,
+            canonical_url=canonical_url,
+            normalized_url=normalized_url,
+            host=parsed.netloc or "",
+            path=parsed.path or "",
+            accepted=1,
+            rejection_reason="accepted_candidate",
+            dedupe_key=normalized_url,
+        )
         if len(found) >= max_candidates:
             break
     return found
@@ -2068,24 +2391,79 @@ def discover_google_first_fb_candidates(
 
     for idx, query in enumerate(queries):
         attempted += 1
-        html = _google_fetch_html(query, session=session)
+        html = _google_fetch_html(query, session=session, logger=logger)
         if not html:
+            _fb_google_first_debug_log(
+                logger,
+                stage="query_summary",
+                artist=artist,
+                query=query,
+                query_idx=idx,
+                html_len=0,
+                accepted_before_merge=0,
+                dropped_duplicate_across_queries=0,
+                returned_so_far=len(candidates),
+                fb_like_targets=0,
+                dropped_duplicate_within_query=0,
+            )
             if idx == 0:
                 continue
             break
+        query_debug_stats: Dict[str, int] = {
+            "fb_like_targets": 0,
+            "dropped_duplicate_within_query": 0,
+        }
         extracted = _extract_google_fb_candidates_from_html(
             html,
             artist,
+            logger=logger,
+            query=query,
+            query_idx=idx,
+            debug_stats=query_debug_stats,
             max_candidates=max_candidates - len(candidates),
         )
+        dropped_duplicate_across_queries = 0
         for candidate in extracted:
             url = getattr(candidate, "url", "") or ""
-            if not url or url in seen_urls:
+            if not url:
+                continue
+            if url in seen_urls:
+                dropped_duplicate_across_queries += 1
+                parsed = urllib.parse.urlparse(url)
+                _fb_google_first_debug_log(
+                    logger,
+                    stage="candidate",
+                    artist=artist,
+                    query=query,
+                    query_idx=idx,
+                    raw_href="",
+                    extracted_url="",
+                    canonical_url=url,
+                    normalized_url=url,
+                    host=parsed.netloc or "",
+                    path=parsed.path or "",
+                    accepted=0,
+                    rejection_reason="duplicate_across_queries",
+                    dedupe_key=url,
+                )
                 continue
             seen_urls.add(url)
             candidates.append(candidate)
             if len(candidates) >= max_candidates:
                 break
+        _fb_google_first_debug_log(
+            logger,
+            stage="query_summary",
+            artist=artist,
+            query=query,
+            query_idx=idx,
+            html_len=len(html or ""),
+            accepted_before_merge=len(extracted),
+            dropped_duplicate_across_queries=dropped_duplicate_across_queries,
+            returned_so_far=len(candidates),
+            fb_like_targets=query_debug_stats.get("fb_like_targets", 0),
+            dropped_duplicate_within_query=query_debug_stats.get("dropped_duplicate_within_query", 0),
+        )
         if candidates or len(candidates) >= max_candidates:
             break
 
