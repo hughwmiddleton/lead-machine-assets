@@ -182,6 +182,74 @@ def test_google_first_candidate_discovery_keeps_page_style_candidates_and_normal
     ]
 
 
+def test_google_first_reuses_one_local_session_across_queries(monkeypatch):
+    sessions = []
+
+    def _fake_fetch(query, **kwargs):
+        sessions.append(kwargs.get("session"))
+        return ""
+
+    monkeypatch.setattr(facebook_enrich, "_google_fetch_html", _fake_fetch)
+
+    candidates = facebook_enrich.discover_google_first_fb_candidates("No Match Artist", logger=None, log_prefix="[Test]")
+
+    assert candidates == []
+    assert len(sessions) == 2
+    assert sessions[0] is not None
+    assert sessions[0] is sessions[1]
+
+
+def test_google_first_skips_second_query_after_clear_google_block(monkeypatch):
+    calls = []
+
+    def _fake_fetch(query, **kwargs):
+        calls.append(query)
+        diagnostics = kwargs.get("diagnostics")
+        if diagnostics is not None:
+            diagnostics.update(
+                {
+                    "status_code": 429,
+                    "final_url": "https://www.google.com/sorry/index?continue=1",
+                    "page_hint": "unusual_traffic",
+                }
+            )
+        return ""
+
+    monkeypatch.setattr(facebook_enrich, "_google_fetch_html", _fake_fetch)
+
+    candidates = facebook_enrich.discover_google_first_fb_candidates("Vorso", logger=None, log_prefix="[Test]")
+
+    assert candidates == []
+    assert calls == ['site:facebook.com "Vorso"']
+
+
+def test_google_first_keeps_second_query_for_non_blocked_empty_result(monkeypatch):
+    calls = []
+
+    def _fake_fetch(query, **kwargs):
+        calls.append(query)
+        diagnostics = kwargs.get("diagnostics")
+        if diagnostics is not None:
+            diagnostics.update(
+                {
+                    "status_code": 200,
+                    "final_url": "https://www.google.com/search?q=test",
+                    "page_hint": "normal",
+                }
+            )
+        return ""
+
+    monkeypatch.setattr(facebook_enrich, "_google_fetch_html", _fake_fetch)
+
+    candidates = facebook_enrich.discover_google_first_fb_candidates("Jos14H", logger=None, log_prefix="[Test]")
+
+    assert candidates == []
+    assert calls == [
+        'site:facebook.com "Jos14H"',
+        'site:facebook.com "Jos14H" band',
+    ]
+
+
 def test_order_candidates_unique_and_stable():
     a = _cand("A", "https://www.facebook.com/a", "Artist")
     b = _cand("B", "https://www.facebook.com/b", "Artist")

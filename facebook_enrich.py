@@ -1921,6 +1921,8 @@ def _fb_google_first_debug_log(logger=None, **fields: object) -> None:
         "returned_so_far",
         "fb_like_targets",
         "dropped_duplicate_within_query",
+        "fetch_blocked",
+        "session_scope",
     )
     parts: List[str] = []
     for key in ordered_keys:
@@ -2004,8 +2006,24 @@ def _google_fetch_html(
     session: Optional[requests.Session] = None,
     timeout_s: float = _GOOGLE_SEARCH_TIMEOUT_S,
     logger=None,
+    diagnostics: Optional[Dict[str, object]] = None,
 ) -> str:
+    if diagnostics is not None:
+        diagnostics.clear()
     if not query:
+        if diagnostics is not None:
+            diagnostics.update(
+                {
+                    "outcome": "query_empty",
+                    "status_code": "",
+                    "final_url": "",
+                    "redirect_count": "",
+                    "content_type": "",
+                    "body_len": 0,
+                    "page_hint": "",
+                    "used_ephemeral_session": 0 if session is not None else 1,
+                }
+            )
         _fb_google_fetch_debug_log(
             logger,
             query=query,
@@ -2039,6 +2057,19 @@ def _google_fetch_html(
             allow_redirects=True,
         )
     except requests.RequestException as exc:
+        if diagnostics is not None:
+            diagnostics.update(
+                {
+                    "outcome": "request_exception",
+                    "status_code": "",
+                    "final_url": "",
+                    "redirect_count": "",
+                    "content_type": "",
+                    "body_len": 0,
+                    "page_hint": "",
+                    "used_ephemeral_session": 1 if used_ephemeral_session else 0,
+                }
+            )
         _fb_google_fetch_debug_log(
             logger,
             query=query,
@@ -2062,7 +2093,21 @@ def _google_fetch_html(
     body = response.text or ""
     body_len = len(body)
     page_hint = _google_fetch_page_hint(body) if body else ""
+    if diagnostics is not None:
+        diagnostics.update(
+            {
+                "status_code": status_code,
+                "final_url": final_url,
+                "redirect_count": redirect_count,
+                "content_type": content_type,
+                "body_len": body_len,
+                "page_hint": page_hint,
+                "used_ephemeral_session": 1 if used_ephemeral_session else 0,
+            }
+        )
     if status_code != 200:
+        if diagnostics is not None:
+            diagnostics["outcome"] = "status_non_200"
         _fb_google_fetch_debug_log(
             logger,
             query=query,
@@ -2080,6 +2125,8 @@ def _google_fetch_html(
         )
         return ""
     outcome = "ok" if body else "empty_body"
+    if diagnostics is not None:
+        diagnostics["outcome"] = outcome
     _fb_google_fetch_debug_log(
         logger,
         query=query,
@@ -2096,6 +2143,18 @@ def _google_fetch_html(
         page_hint=page_hint,
     )
     return body
+
+
+def _google_fetch_indicates_block(diagnostics: Optional[Dict[str, object]]) -> bool:
+    if not diagnostics:
+        return False
+    try:
+        status_code = int(diagnostics.get("status_code") or 0)
+    except Exception:
+        status_code = 0
+    final_url = str(diagnostics.get("final_url") or "").lower()
+    page_hint = str(diagnostics.get("page_hint") or "").lower()
+    return status_code == 429 or "/sorry/" in final_url or page_hint == "unusual_traffic"
 
 
 def _google_extract_target_url(raw_href: str) -> str:
@@ -2388,84 +2447,114 @@ def discover_google_first_fb_candidates(
     candidates: List[FbCandidate] = []
     seen_urls: set[str] = set()
     attempted = 0
+    owned_session = session is None
+    google_session = session or requests.Session()
+    session_scope = "shared" if session is not None else "local_ephemeral"
 
-    for idx, query in enumerate(queries):
-        attempted += 1
-        html = _google_fetch_html(query, session=session, logger=logger)
-        if not html:
+    try:
+        for idx, query in enumerate(queries):
+            attempted += 1
+            fetch_diagnostics: Dict[str, object] = {}
+            html = _google_fetch_html(query, session=google_session, logger=logger, diagnostics=fetch_diagnostics)
+            fetch_blocked = _google_fetch_indicates_block(fetch_diagnostics)
+            if not html:
+                _fb_google_first_debug_log(
+                    logger,
+                    stage="query_summary",
+                    artist=artist,
+                    query=query,
+                    query_idx=idx,
+                    html_len=0,
+                    accepted_before_merge=0,
+                    dropped_duplicate_across_queries=0,
+                    returned_so_far=len(candidates),
+                    fb_like_targets=0,
+                    dropped_duplicate_within_query=0,
+                    fetch_blocked=1 if fetch_blocked else 0,
+                    session_scope=session_scope,
+                )
+                if idx == 0 and fetch_blocked:
+                    if len(queries) > 1:
+                        _fb_google_first_debug_log(
+                            logger,
+                            stage="query_skip",
+                            artist=artist,
+                            query=queries[1],
+                            query_idx=1,
+                            returned_so_far=len(candidates),
+                            rejection_reason="first_query_google_block",
+                            fetch_blocked=1,
+                            session_scope=session_scope,
+                        )
+                    break
+                if idx == 0:
+                    continue
+                break
+            query_debug_stats: Dict[str, int] = {
+                "fb_like_targets": 0,
+                "dropped_duplicate_within_query": 0,
+            }
+            extracted = _extract_google_fb_candidates_from_html(
+                html,
+                artist,
+                logger=logger,
+                query=query,
+                query_idx=idx,
+                debug_stats=query_debug_stats,
+                max_candidates=max_candidates - len(candidates),
+            )
+            dropped_duplicate_across_queries = 0
+            for candidate in extracted:
+                url = getattr(candidate, "url", "") or ""
+                if not url:
+                    continue
+                if url in seen_urls:
+                    dropped_duplicate_across_queries += 1
+                    parsed = urllib.parse.urlparse(url)
+                    _fb_google_first_debug_log(
+                        logger,
+                        stage="candidate",
+                        artist=artist,
+                        query=query,
+                        query_idx=idx,
+                        raw_href="",
+                        extracted_url="",
+                        canonical_url=url,
+                        normalized_url=url,
+                        host=parsed.netloc or "",
+                        path=parsed.path or "",
+                        accepted=0,
+                        rejection_reason="duplicate_across_queries",
+                        dedupe_key=url,
+                    )
+                    continue
+                seen_urls.add(url)
+                candidates.append(candidate)
+                if len(candidates) >= max_candidates:
+                    break
             _fb_google_first_debug_log(
                 logger,
                 stage="query_summary",
                 artist=artist,
                 query=query,
                 query_idx=idx,
-                html_len=0,
-                accepted_before_merge=0,
-                dropped_duplicate_across_queries=0,
+                html_len=len(html or ""),
+                accepted_before_merge=len(extracted),
+                dropped_duplicate_across_queries=dropped_duplicate_across_queries,
                 returned_so_far=len(candidates),
-                fb_like_targets=0,
-                dropped_duplicate_within_query=0,
+                fb_like_targets=query_debug_stats.get("fb_like_targets", 0),
+                dropped_duplicate_within_query=query_debug_stats.get("dropped_duplicate_within_query", 0),
+                fetch_blocked=1 if fetch_blocked else 0,
+                session_scope=session_scope,
             )
-            if idx == 0:
-                continue
-            break
-        query_debug_stats: Dict[str, int] = {
-            "fb_like_targets": 0,
-            "dropped_duplicate_within_query": 0,
-        }
-        extracted = _extract_google_fb_candidates_from_html(
-            html,
-            artist,
-            logger=logger,
-            query=query,
-            query_idx=idx,
-            debug_stats=query_debug_stats,
-            max_candidates=max_candidates - len(candidates),
-        )
-        dropped_duplicate_across_queries = 0
-        for candidate in extracted:
-            url = getattr(candidate, "url", "") or ""
-            if not url:
-                continue
-            if url in seen_urls:
-                dropped_duplicate_across_queries += 1
-                parsed = urllib.parse.urlparse(url)
-                _fb_google_first_debug_log(
-                    logger,
-                    stage="candidate",
-                    artist=artist,
-                    query=query,
-                    query_idx=idx,
-                    raw_href="",
-                    extracted_url="",
-                    canonical_url=url,
-                    normalized_url=url,
-                    host=parsed.netloc or "",
-                    path=parsed.path or "",
-                    accepted=0,
-                    rejection_reason="duplicate_across_queries",
-                    dedupe_key=url,
-                )
-                continue
-            seen_urls.add(url)
-            candidates.append(candidate)
-            if len(candidates) >= max_candidates:
+            if candidates or len(candidates) >= max_candidates:
                 break
-        _fb_google_first_debug_log(
-            logger,
-            stage="query_summary",
-            artist=artist,
-            query=query,
-            query_idx=idx,
-            html_len=len(html or ""),
-            accepted_before_merge=len(extracted),
-            dropped_duplicate_across_queries=dropped_duplicate_across_queries,
-            returned_so_far=len(candidates),
-            fb_like_targets=query_debug_stats.get("fb_like_targets", 0),
-            dropped_duplicate_within_query=query_debug_stats.get("dropped_duplicate_within_query", 0),
-        )
-        if candidates or len(candidates) >= max_candidates:
-            break
+    finally:
+        if owned_session:
+            try:
+                google_session.close()
+            except Exception:
+                pass
 
     _shared_fb_log(
         logger,
