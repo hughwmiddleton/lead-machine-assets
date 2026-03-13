@@ -120,17 +120,17 @@ def test_fb_global_pass_preserves_rows_and_emails(monkeypatch, tmp_path):
     assert existing_email_rows.iloc[0]["Email_All"] == "sc@example.com"
 
     # Rows attempted for FB enrichment get FB-derived email/status.
-    fb_attempted = df_out[df_out["__source_job"].isin(["job_fb_url", "job_social_fb"])]
+    fb_attempted = df_out[df_out["__source_job"].isin(["job_fb_url", "job_social_fb", "job_none"])]
     assert (fb_attempted["Email"] == "fb@example.com").all()
     assert (fb_attempted["Email_All"].str.contains("fb@example.com")).all()
     assert (fb_attempted["FB_Status"].str.lower() == "ok").all()
 
-    # Rows without canonical Facebook_URL stay unattempted, even without email.
+    # Rows without an explicit Facebook URL can now enter Night google-first discovery.
     no_clue_rows = df_out[df_out["__source_job"] == "job_none"]
     assert len(no_clue_rows) == 1
-    assert no_clue_rows.iloc[0]["Email"] == ""
-    assert no_clue_rows.iloc[0]["Email_All"] == ""
-    assert no_clue_rows.iloc[0]["FB_Status"] == ""
+    assert no_clue_rows.iloc[0]["Email"] == "fb@example.com"
+    assert "fb@example.com" in no_clue_rows.iloc[0]["Email_All"]
+    assert no_clue_rows.iloc[0]["FB_Status"].lower() == "ok"
 
     # Only rows without existing emails were attempted.
     assert helper.calls == len(fb_attempted.index)

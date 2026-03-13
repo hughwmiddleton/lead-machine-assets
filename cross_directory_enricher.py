@@ -2733,9 +2733,6 @@ class FacebookSearchClient:
         except Exception as exc:
             _safe_log(self.logger, "[FB Enrich] Selenium imports unavailable: %s", exc)
             return None
-        if not self.ensure_facebook_logged_in():
-            _safe_log(self.logger, "[FB Enrich] Facebook login not available, skipping.")
-            return None
         query_parts = [cell_to_str(artist_name)]
         if location:
             query_parts.append(cell_to_str(location))
@@ -2776,6 +2773,9 @@ class FacebookSearchClient:
                 len(candidates),
             )
         else:
+            if not self.ensure_facebook_logged_in():
+                _safe_log(self.logger, "[FB Enrich] Facebook login not available, skipping.")
+                return None
             if _skip_google_first:
                 _safe_log(
                     self.logger,
@@ -3293,6 +3293,18 @@ class FacebookSearchClient:
         try:
             self.driver.get(best_candidate.url)
             WebDriverWait(self.driver, 5).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+            try:
+                resolved_candidate_url = self.driver.current_url or best_candidate.url
+            except Exception:
+                resolved_candidate_url = best_candidate.url
+            if _is_fb_login_or_security_url(resolved_candidate_url):
+                _safe_log(
+                    self.logger,
+                    "[FB Enrich] Google-first candidate for '%s' resolved to login/security wall: %s",
+                    artist_name,
+                    resolved_candidate_url,
+                )
+                return _fallback_after_google("post_scrape_login_wall") if used_google_first else None
             page_html = self.driver.page_source or ""
             page_category_text = None
             page_text_blocks: List[str] = []

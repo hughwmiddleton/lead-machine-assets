@@ -5172,6 +5172,10 @@ class NightModeFacebookEnricher:
         healthy = True
         session = None
         try:
+            if self.session is None and not self._session_failed:
+                return True
+            if self._session_failed and self.session is None:
+                raise FacebookDriverError(self._session_failed_reason or "Facebook session previously failed.")
             session = self._ensure_session()
             if session:
                 healthy = bool(getattr(session, "last_health_ok", True))
@@ -5308,12 +5312,9 @@ class NightModeFacebookEnricher:
         if self._search_disabled_due_to_checkpoint:
             _log(self.logger, "[Night FB] search disabled due to checkpoint; skipping FB search.")
             return None
-        session = self._ensure_session()
-        if not session and not allow_anon:
-            return None
-        if session:
-            self._ensure_driver_alive(session)
-        _, session_unhealthy, session_reason = self._session_state_snapshot(session)
+        session = None
+        session_unhealthy = False
+        session_reason = ""
         refine_enabled = os.getenv("FB_REFINE_QUERY") == "1"
         quality_gate_enabled = _bool_env("NIGHT_FB_MIN_QUALITY_GATE", default=False)
         try:
@@ -5355,19 +5356,6 @@ class NightModeFacebookEnricher:
                 "base_score": base_score,
             }
             return fallback_url, context
-
-        checkpoint_limited = bool(session_unhealthy and "checkpoint" in (session_reason or "").lower())
-        if checkpoint_limited:
-            self._checkpoint_limited_active = True
-            self._register_checkpoint_event()
-            if not self._checkpoint_warned_this_row:
-                _log(self.logger, "[Night FB][WARN] checkpoint active; skipping search/refine; using fallback only.")
-                self._checkpoint_warned_this_row = True
-            fallback_url, fallback_context = _build_slug_fallback_context()
-            if fallback_context:
-                self._last_selected_candidate_context = fallback_context
-                self._last_search_candidates = [fallback_context]
-            return fallback_url
 
         def _normalize_location_for_query(raw: str) -> str:
             raw = (raw or "").strip()
@@ -5445,6 +5433,29 @@ class NightModeFacebookEnricher:
             suppress_refine_queries = True
             _log(self.logger, f"[Night FB] Using Google-first FB candidates for '{artist}' count={len(candidates)}.")
         else:
+            session = self._ensure_session()
+            if not session and not allow_anon:
+                return None
+            if session:
+                _, session_unhealthy, session_reason = self._session_state_snapshot(session)
+                checkpoint_limited = bool(session_unhealthy and "checkpoint" in (session_reason or "").lower())
+                if checkpoint_limited:
+                    self._checkpoint_limited_active = True
+                    self._register_checkpoint_event()
+                    if self._checkpoint_guard_enabled and not self._search_disabled_due_to_checkpoint:
+                        self._search_disabled_due_to_checkpoint = True
+                        _log(self.logger, "[Night FB] search disabled due to checkpoint")
+                        return None
+                    if not self._checkpoint_warned_this_row:
+                        _log(self.logger, "[Night FB][WARN] checkpoint active; skipping search/refine; using fallback only.")
+                        self._checkpoint_warned_this_row = True
+                    fallback_url, fallback_context = _build_slug_fallback_context()
+                    if fallback_context:
+                        self._last_selected_candidate_context = fallback_context
+                        self._last_search_candidates = [fallback_context]
+                    return fallback_url
+                self._ensure_driver_alive(session)
+                _, session_unhealthy, session_reason = self._session_state_snapshot(session)
             if _skip_google_first:
                 _log(self.logger, f"[Night FB] Running Facebook search fallback for '{artist}' after Google-first miss.")
             else:
@@ -5697,12 +5708,28 @@ class NightModeFacebookEnricher:
         outcome_hint = "fetch_error"
         reject_reason = ""
         timed_out_flag = False
+        prefer_public_fetch = bool((candidate_context or {}).get("search_source") == "google_first")
 
-        html, resolved_url = self._fetch_html_with_url(candidate_url, goto_about=False)
-        timed_out_flag = timed_out_flag or bool(getattr(self, "_last_fb_timeout", False))
-        if html:
-            outcome_hint = "fetched"
-        if (not html) and allow_anon:
+        html = None
+        resolved_url = None
+        if prefer_public_fetch:
+            _log(self.logger, "[Night FB] Google-first candidate -> trying public fetch before session fetch.")
+            html, resolved_url = self._fetch_html_with_url_anon(candidate_url, goto_about=False)
+            used_driver_kind = "anon_google_first"
+            timed_out_flag = timed_out_flag or bool(getattr(self, "_last_fb_timeout", False))
+            if html:
+                outcome_hint = "fetched"
+            else:
+                self._page_budget_remaining = getattr(self, "_page_budget_remaining", 0) + 1
+                self.fb_email_pages_visited = max(0, int(self.fb_email_pages_visited) - 1)
+
+        if not html:
+            html, resolved_url = self._fetch_html_with_url(candidate_url, goto_about=False)
+            used_driver_kind = "session" if not prefer_public_fetch else "session_after_public_miss"
+            timed_out_flag = timed_out_flag or bool(getattr(self, "_last_fb_timeout", False))
+            if html:
+                outcome_hint = "fetched"
+        if (not html) and allow_anon and not prefer_public_fetch:
             html, resolved_url = self._fetch_html_with_url_anon(candidate_url, goto_about=False)
             used_driver_kind = "anon_fallback"
             if html and outcome_hint != "fetched":
@@ -6563,19 +6590,17 @@ class NightModeFacebookEnricher:
                     _log(self.logger, "[Night FB] Falling back to PASS B (search) after PASS A.")
 
             if not page_url:
-                session = self._ensure_session()
-                if (not session) and not allow_anon:
-                    return result
-            if not page_url:
                 page_url = self._search_for_page(artist_name, location, allow_anon=allow_anon) or ""
                 if self._search_disabled_due_to_checkpoint:
-                    if not result.get("FB_Status"):
+                    current_status = str(result.get("FB_Status", "") or "")
+                    if (not current_status) or current_status.startswith("pass_a_skipped"):
                         result["FB_Status"] = "checkpoint_search_disabled"
                         result["FB_Reason"] = "checkpoint"
                     _log(self.logger, "[Night FB] search disabled due to checkpoint; skipping FB search.")
                     return result
                 if self._checkpoint_limited_active and not page_url:
-                    if not result.get("FB_Status") or result.get("FB_Status") == "no_candidates":
+                    current_status = str(result.get("FB_Status", "") or "")
+                    if (not current_status) or current_status in {"no_candidates"} or current_status.startswith("pass_a_skipped"):
                         result["FB_Status"] = "checkpoint_limited"
                     if not result.get("FB_Reason"):
                         result["FB_Reason"] = "checkpoint"

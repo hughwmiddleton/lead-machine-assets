@@ -139,7 +139,11 @@ def test_find_best_page_url_uses_google_first_candidates_before_fb_search(monkey
         }
     )
     client = cde.FacebookSearchClient(driver=driver, logger=None)
-    monkeypatch.setattr(client, "ensure_facebook_logged_in", lambda: True)
+    monkeypatch.setattr(
+        client,
+        "ensure_facebook_logged_in",
+        lambda: (_ for _ in ()).throw(AssertionError("Google-first success should not require FB login")),
+    )
     monkeypatch.setattr(
         cde,
         "discover_google_first_fb_candidates",
@@ -170,16 +174,23 @@ def test_find_best_page_url_falls_back_to_fb_search_when_google_candidate_fails_
         }
     )
     client = cde.FacebookSearchClient(driver=driver, logger=None)
-    monkeypatch.setattr(client, "ensure_facebook_logged_in", lambda: True)
+    call_order = []
+
+    def _fake_login():
+        call_order.append("login")
+        return True
+
+    monkeypatch.setattr(client, "ensure_facebook_logged_in", _fake_login)
     monkeypatch.setattr(
         cde,
         "discover_google_first_fb_candidates",
-        lambda *args, **kwargs: [cde.FbCandidate(name="Test Artist", url=google_url, category="Musician/Band")],
+        lambda *args, **kwargs: call_order.append("google") or [cde.FbCandidate(name="Test Artist", url=google_url, category="Musician/Band")],
     )
 
     search_methods = []
 
     def _fake_fetch(query, *, search_method):  # noqa: ANN001
+        call_order.append(f"search:{search_method}")
         search_methods.append(search_method)
         return (
             "<div role='main'><div aria-label='Search results'><a href='https://www.facebook.com/fallbackartist'>Fallback Artist</a></div></div>",
@@ -200,3 +211,4 @@ def test_find_best_page_url_falls_back_to_fb_search_when_google_candidate_fails_
 
     assert result == fallback_url
     assert search_methods == ["direct_route"]
+    assert call_order == ["google", "login", "search:direct_route"]

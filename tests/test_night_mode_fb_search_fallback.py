@@ -308,6 +308,85 @@ def test_pass_b_uses_google_first_candidates_before_fb_search_and_keeps_context(
     assert enricher._last_search_candidates[0]["url"] == "https://www.facebook.com/testartist"
 
 
+def test_pass_b_uses_google_first_before_session_start_for_normal_rows(monkeypatch) -> None:
+    candidate = SimpleNamespace(
+        name="Test Artist",
+        url="https://www.facebook.com/testartist",
+        category="Musician/Band",
+        search_source="google_first",
+    )
+    enricher = _make_enricher()
+    monkeypatch.setattr(
+        enricher,
+        "_ensure_session",
+        lambda: (_ for _ in ()).throw(AssertionError("Google-first success should not start FB session")),
+    )
+    monkeypatch.setattr(
+        night_mode_fb.facebook_enrich,
+        "discover_google_first_fb_candidates",
+        lambda *args, **kwargs: [candidate],
+    )
+    monkeypatch.setattr(
+        enricher,
+        "_fetch_search_surface",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("FB search should not run when Google-first returns candidates")),
+    )
+    monkeypatch.setattr(night_mode_fb, "_rank_candidates_for_preview", lambda artist, candidates: _ranked(candidate))
+    monkeypatch.setattr(enricher, "_choose_ranked_candidate", lambda *args, **kwargs: (candidate, "ranked_sort"))
+    monkeypatch.setattr(enricher, "_select_candidate_url", lambda *args, **kwargs: candidate.url)
+
+    page = enricher._search_for_page("Test Artist", location="", allow_anon=False)
+
+    assert page == "https://www.facebook.com/testartist"
+
+
+def test_rows_without_explicit_fb_urls_can_use_google_first_public_candidate_before_session(monkeypatch) -> None:
+    candidate = SimpleNamespace(
+        name="Test Artist",
+        url="https://www.facebook.com/testartist",
+        category="Musician/Band",
+        search_source="google_first",
+    )
+    enricher = _make_enricher()
+    monkeypatch.setattr(
+        enricher,
+        "_ensure_session",
+        lambda: (_ for _ in ()).throw(AssertionError("Google-first public candidate should not require FB session")),
+    )
+    monkeypatch.setattr(
+        night_mode_fb.facebook_enrich,
+        "discover_google_first_fb_candidates",
+        lambda *args, **kwargs: [candidate],
+    )
+    monkeypatch.setattr(
+        enricher,
+        "_fetch_search_surface",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("FB search fallback should not run when public Google-first candidate succeeds")),
+    )
+    monkeypatch.setattr(night_mode_fb, "_rank_candidates_for_preview", lambda artist, candidates: _ranked(candidate))
+    monkeypatch.setattr(enricher, "_choose_ranked_candidate", lambda *args, **kwargs: (candidate, "ranked_sort"))
+    monkeypatch.setattr(
+        enricher,
+        "_fetch_html_with_url_anon",
+        lambda url, goto_about=False: (
+            "<html><body><div>Musician/Band</div><a href='mailto:artist@test.com'>artist@test.com</a></body></html>",
+            url,
+        ),
+    )
+    monkeypatch.setattr(
+        enricher,
+        "_fetch_html_with_url",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Authenticated fetch should not run when public Google-first fetch succeeds")),
+    )
+    monkeypatch.setattr(night_mode_fb, "_night_fb_has_music_signals", lambda *args, **kwargs: True)
+
+    row = {"Artist Name": "Test Artist", "Email": "", "Email_All": "", "Social Link": "", "External Links": ""}
+    result = enricher.enrich_row_with_facebook_night(row)
+
+    assert "artist@test.com" in (result.get("Email_All") or "")
+    assert result.get("FB_Status") in {"ok", "pass_a_skipped_no_fb_url"}
+
+
 def test_pass_b_falls_back_to_fb_search_when_google_candidate_fails_final_selection(monkeypatch) -> None:
     google_candidate = SimpleNamespace(
         name="Test Artist",
