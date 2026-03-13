@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+import facebook_enrich
 import night_mode_fb
 import importlib.util
 from pathlib import Path
@@ -103,6 +104,23 @@ def test_rank_preview_does_not_mutate_candidate_choice():
     night_mode_fb._maybe_log_rank_preview(artist, cands, chosen, logger=lambda _: None)
     assert [c.url for c in cands] == original_order
     assert chosen is cands[0]
+
+
+def test_google_first_candidate_discovery_returns_canonical_allowed_fb_urls(monkeypatch):
+    html = """
+    <html><body>
+      <a href="/url?q=https://m.facebook.com/TestArtistOfficial/&sa=U">Test Artist Official | Facebook</a>
+      <div>Musician/band</div>
+      <a href="/url?q=https://www.facebook.com/watch/?v=123&sa=U">Watch</a>
+    </body></html>
+    """
+
+    monkeypatch.setattr(facebook_enrich, "_google_fetch_html", lambda *args, **kwargs: html)
+
+    candidates = facebook_enrich.discover_google_first_fb_candidates("Test Artist", logger=None, log_prefix="[Test]")
+
+    assert [cand.url for cand in candidates] == ["https://www.facebook.com/TestArtistOfficial"]
+    assert getattr(candidates[0], "category_tokens", []) == ["Musician/band"]
 
 
 def test_order_candidates_unique_and_stable():
@@ -264,6 +282,7 @@ def test_unsafe_candidate_filtered_before_navigation(monkeypatch):
     monkeypatch.setattr(night_mode_fb, "_rank_candidates_for_preview", lambda *args, **kwargs: ranked_for_preview)
     monkeypatch.setattr(night_mode_fb.NightModeFacebookEnricher, "_get_anon_driver", lambda self: _dummy_driver())
     monkeypatch.setattr(night_mode_fb.NightModeFacebookEnricher, "_ensure_session", lambda self: None)
+    monkeypatch.setattr(night_mode_fb.facebook_enrich, "discover_google_first_fb_candidates", lambda *args, **kwargs: [])
     monkeypatch.setattr(night_mode_fb.time, "sleep", lambda *_: None)
 
     enricher = night_mode_fb.NightModeFacebookEnricher(

@@ -42,6 +42,7 @@ def test_min_quality_gate_rejects_bad_candidate(monkeypatch):
     monkeypatch.setattr(enricher, "_ensure_session", lambda: _DummySession())
     monkeypatch.setattr(enricher, "_ensure_driver_alive", lambda session: session)
     monkeypatch.setattr(enricher, "_scrape_single_fb_candidate", lambda *args, **kwargs: None)
+    monkeypatch.setattr(night_mode_fb.facebook_enrich, "discover_google_first_fb_candidates", lambda *args, **kwargs: [])
 
     page = enricher._search_for_page("Runway", location="", allow_anon=True)
 

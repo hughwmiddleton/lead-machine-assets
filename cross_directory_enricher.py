@@ -51,6 +51,7 @@ from email_provenance import _set_email_with_provenance
 from facebook_enrich import (
     FbCandidate,
     detect_corporate_token,
+    discover_google_first_fb_candidates,
     extract_fb_category,
     classify_corporate_signals,
     has_corporate_token,
@@ -2722,6 +2723,7 @@ class FacebookSearchClient:
         location: Optional[str] = None,
         *,
         require_strong_candidate: bool = False,
+        _skip_google_first: bool = False,
     ) -> Optional[str]:
         try:
             from selenium.webdriver.common.by import By
@@ -2740,64 +2742,110 @@ class FacebookSearchClient:
         query = " ".join(part for part in query_parts if part)
         if not query:
             return None
-        page_html, current_url, search_timed_out = self._fetch_search_surface(query, search_method="direct_route")
-        candidates = _fb_extract_candidates_from_search_dom(
-            page_html,
-            logger=self.logger,
-            debug=os.getenv("FB_DEBUG_DOM_GATE") == "1",
-            search_name=artist_name,
-        )
-        if not candidates:
-            miss_reason = _fb_search_surface_miss_reason(
-                page_html,
-                driver=self.driver,
-                current_url=current_url,
-                timed_out=search_timed_out,
+
+        def _fallback_after_google(reason: str) -> Optional[str]:
+            if _skip_google_first:
+                return None
+            _safe_log(
+                self.logger,
+                "[FB Enrich] Google-first candidates for '%s' did not yield a usable final match (%s); falling back to Facebook search.",
+                artist_name,
+                reason,
             )
-            if miss_reason:
+            return self.find_best_page_url(
+                artist_name,
+                location,
+                require_strong_candidate=require_strong_candidate,
+                _skip_google_first=True,
+            )
+
+        candidates: List[FbCandidate] = []
+        used_google_first = False
+        if not _skip_google_first:
+            candidates = discover_google_first_fb_candidates(
+                artist_name,
+                logger=self.logger,
+                log_prefix="[FB Enrich]",
+            )
+            used_google_first = bool(candidates)
+        if used_google_first:
+            _safe_log(
+                self.logger,
+                "[FB Enrich] Using Google-first FB candidates for '%s' count=%s.",
+                artist_name,
+                len(candidates),
+            )
+        else:
+            if _skip_google_first:
                 _safe_log(
                     self.logger,
-                    "[FB Enrich] search_method=direct_route failure_mode=%s query='%s'",
-                    miss_reason,
-                    query,
+                    "[FB Enrich] Running Facebook search fallback for '%s' after Google-first miss.",
+                    artist_name,
                 )
-                page_html, current_url, search_timed_out = self._fetch_search_surface(query, search_method="homepage_ui")
-                candidates = _fb_extract_candidates_from_search_dom(
+            else:
+                _safe_log(
+                    self.logger,
+                    "[FB Enrich] Google-first returned no usable FB candidates for '%s'; falling back to Facebook search.",
+                    artist_name,
+                )
+            page_html, current_url, search_timed_out = self._fetch_search_surface(query, search_method="direct_route")
+            candidates = _fb_extract_candidates_from_search_dom(
+                page_html,
+                logger=self.logger,
+                debug=os.getenv("FB_DEBUG_DOM_GATE") == "1",
+                search_name=artist_name,
+            )
+            if not candidates:
+                miss_reason = _fb_search_surface_miss_reason(
                     page_html,
-                    logger=self.logger,
-                    debug=os.getenv("FB_DEBUG_DOM_GATE") == "1",
-                    search_name=artist_name,
-                )
-                candidates, homepage_failure_mode = _guard_homepage_fb_search_candidates(
-                    candidates,
-                    page_html=page_html,
+                    driver=self.driver,
                     current_url=current_url,
-                    logger=self.logger,
-                    log_prefix="[FB Enrich]",
-                    query=query,
+                    timed_out=search_timed_out,
                 )
-                if homepage_failure_mode:
+                if miss_reason:
                     _safe_log(
                         self.logger,
-                        "[FB Enrich] search_method=homepage_ui failure_mode=%s query='%s'",
-                        homepage_failure_mode,
+                        "[FB Enrich] search_method=direct_route failure_mode=%s query='%s'",
+                        miss_reason,
                         query,
                     )
-                if not candidates:
-                    if not homepage_failure_mode:
-                        homepage_miss_reason = _fb_search_surface_miss_reason(
-                            page_html,
-                            driver=self.driver,
-                            current_url=current_url,
-                            timed_out=search_timed_out,
+                    page_html, current_url, search_timed_out = self._fetch_search_surface(query, search_method="homepage_ui")
+                    candidates = _fb_extract_candidates_from_search_dom(
+                        page_html,
+                        logger=self.logger,
+                        debug=os.getenv("FB_DEBUG_DOM_GATE") == "1",
+                        search_name=artist_name,
+                    )
+                    candidates, homepage_failure_mode = _guard_homepage_fb_search_candidates(
+                        candidates,
+                        page_html=page_html,
+                        current_url=current_url,
+                        logger=self.logger,
+                        log_prefix="[FB Enrich]",
+                        query=query,
+                    )
+                    if homepage_failure_mode:
+                        _safe_log(
+                            self.logger,
+                            "[FB Enrich] search_method=homepage_ui failure_mode=%s query='%s'",
+                            homepage_failure_mode,
+                            query,
                         )
-                        if homepage_miss_reason:
-                            _safe_log(
-                                self.logger,
-                                "[FB Enrich] search_method=homepage_ui failure_mode=%s query='%s'",
-                                homepage_miss_reason,
-                                query,
+                    if not candidates:
+                        if not homepage_failure_mode:
+                            homepage_miss_reason = _fb_search_surface_miss_reason(
+                                page_html,
+                                driver=self.driver,
+                                current_url=current_url,
+                                timed_out=search_timed_out,
                             )
+                            if homepage_miss_reason:
+                                _safe_log(
+                                    self.logger,
+                                    "[FB Enrich] search_method=homepage_ui failure_mode=%s query='%s'",
+                                    homepage_miss_reason,
+                                    query,
+                                )
         dropped_business = 0
         gate_before = len(candidates)
         gate_reject_count = 0
@@ -2847,7 +2895,7 @@ class FacebookSearchClient:
                     "[FB Enrich] No safe Facebook page candidates for '%s'",
                     artist_name,
                 )
-                return None
+                return _fallback_after_google("no_safe_candidate_urls") if used_google_first else None
 
         if gate_debug:
             # Quick sanity: grep FB gate logs for /watch, /reel, /events/, notif_id to confirm junk candidates stop earlier.
@@ -3207,7 +3255,7 @@ class FacebookSearchClient:
         MIN_FINAL_SCORE = 1.0
         if not best_entry or best_entry[0] < MIN_FINAL_SCORE or not best_entry[3]:
             _safe_log(self.logger, "[FB Enrich] No high-confidence Facebook match for '%s'.", artist_name)
-            return None
+            return _fallback_after_google("no_high_confidence_match") if used_google_first else None
 
         if using_fallback and best_entry:
             _, base_score, _, _, _, cand = best_entry
@@ -3306,7 +3354,7 @@ class FacebookSearchClient:
                     artist_name,
                     page_category_text or "<none>",
                 )
-                return None
+                return _fallback_after_google("post_scrape_hard_corporate") if used_google_first else None
             category_non_music = bool(page_category_text and not sig_page.has_artist)
             if page_category_text and sig_page.has_artist:
                 _safe_log(
@@ -3369,7 +3417,7 @@ class FacebookSearchClient:
                         best_candidate.url,
                         artist_name,
                     )
-                return None
+                return _fallback_after_google("post_scrape_no_music") if used_google_first else None
         except Exception as exc:
             _safe_log(
                 self.logger,
@@ -3387,7 +3435,7 @@ class FacebookSearchClient:
                 best_candidate.url,
                 artist_name,
             )
-            return None
+            return _fallback_after_google("final_music_gate") if used_google_first else None
 
         if require_strong_candidate:
             is_strong, strong_reason = _facebook_candidate_is_strong(
@@ -3406,7 +3454,7 @@ class FacebookSearchClient:
                     artist_name,
                     strong_reason,
                 )
-                return None
+                return _fallback_after_google(f"weak_candidate:{strong_reason}") if used_google_first else None
 
         _safe_log(
             self.logger,

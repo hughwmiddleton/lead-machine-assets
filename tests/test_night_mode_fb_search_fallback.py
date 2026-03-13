@@ -65,6 +65,7 @@ def test_pass_b_direct_surface_miss_triggers_one_homepage_fallback(monkeypatch) 
     session = _DummySession()
     monkeypatch.setattr(enricher, "_ensure_session", lambda: session)
     monkeypatch.setattr(enricher, "_ensure_driver_alive", lambda current_session: current_session)
+    monkeypatch.setattr(night_mode_fb.facebook_enrich, "discover_google_first_fb_candidates", lambda *args, **kwargs: [])
 
     search_methods = []
 
@@ -100,6 +101,7 @@ def test_pass_b_no_homepage_fallback_on_no_safe_match(monkeypatch) -> None:
     session = _DummySession()
     monkeypatch.setattr(enricher, "_ensure_session", lambda: session)
     monkeypatch.setattr(enricher, "_ensure_driver_alive", lambda current_session: current_session)
+    monkeypatch.setattr(night_mode_fb.facebook_enrich, "discover_google_first_fb_candidates", lambda *args, **kwargs: [])
 
     search_methods = []
 
@@ -131,6 +133,7 @@ def test_pass_b_no_homepage_fallback_on_min_quality_reject(monkeypatch) -> None:
     session = _DummySession()
     monkeypatch.setattr(enricher, "_ensure_session", lambda: session)
     monkeypatch.setattr(enricher, "_ensure_driver_alive", lambda current_session: current_session)
+    monkeypatch.setattr(night_mode_fb.facebook_enrich, "discover_google_first_fb_candidates", lambda *args, **kwargs: [])
 
     search_methods = []
 
@@ -177,6 +180,7 @@ def test_pass_b_homepage_fallback_rejects_generic_auth_surface(monkeypatch) -> N
     session = _DummySession()
     monkeypatch.setattr(enricher, "_ensure_session", lambda: session)
     monkeypatch.setattr(enricher, "_ensure_driver_alive", lambda current_session: current_session)
+    monkeypatch.setattr(night_mode_fb.facebook_enrich, "discover_google_first_fb_candidates", lambda *args, **kwargs: [])
 
     search_methods = []
     direct_html = "<html><body>direct-miss</body></html>"
@@ -222,6 +226,7 @@ def test_pass_b_homepage_fallback_filters_junk_but_keeps_real_candidate(monkeypa
     session = _DummySession()
     monkeypatch.setattr(enricher, "_ensure_session", lambda: session)
     monkeypatch.setattr(enricher, "_ensure_driver_alive", lambda current_session: current_session)
+    monkeypatch.setattr(night_mode_fb.facebook_enrich, "discover_google_first_fb_candidates", lambda *args, **kwargs: [])
 
     search_methods = []
     direct_html = "<html><body>direct-miss</body></html>"
@@ -268,3 +273,94 @@ def test_pass_b_homepage_fallback_filters_junk_but_keeps_real_candidate(monkeypa
     assert page == "https://www.facebook.com/testartist"
     assert search_methods == ["direct_route", "homepage_ui"]
     assert any("search_method=homepage_ui junk_candidates_filtered=1" in message for message in logs)
+
+
+def test_pass_b_uses_google_first_candidates_before_fb_search_and_keeps_context(monkeypatch) -> None:
+    candidate = SimpleNamespace(
+        name="Test Artist",
+        url="https://www.facebook.com/testartist",
+        category="Musician/Band",
+        search_source="google_first",
+    )
+    enricher = _make_enricher()
+    session = _DummySession()
+    monkeypatch.setattr(enricher, "_ensure_session", lambda: session)
+    monkeypatch.setattr(enricher, "_ensure_driver_alive", lambda current_session: current_session)
+    monkeypatch.setattr(
+        night_mode_fb.facebook_enrich,
+        "discover_google_first_fb_candidates",
+        lambda *args, **kwargs: [candidate],
+    )
+    monkeypatch.setattr(
+        enricher,
+        "_fetch_search_surface",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("FB search should not run when Google-first returns candidates")),
+    )
+    monkeypatch.setattr(night_mode_fb, "_rank_candidates_for_preview", lambda artist, candidates: _ranked(candidate))
+    monkeypatch.setattr(enricher, "_choose_ranked_candidate", lambda *args, **kwargs: (candidate, "ranked_sort"))
+
+    page = enricher._search_for_page("Test Artist", location="", allow_anon=True)
+
+    assert page == "https://www.facebook.com/testartist"
+    assert enricher._last_selected_candidate_context["url"] == "https://www.facebook.com/testartist"
+    assert enricher._last_selected_candidate_context["selected_by"] == "ranked_sort"
+    assert enricher._last_selected_candidate_context["search_source"] == "google_first"
+    assert enricher._last_search_candidates[0]["url"] == "https://www.facebook.com/testartist"
+
+
+def test_pass_b_falls_back_to_fb_search_when_google_candidate_fails_final_selection(monkeypatch) -> None:
+    google_candidate = SimpleNamespace(
+        name="Test Artist",
+        url="https://www.facebook.com/googlecandidate",
+        category="Musician/Band",
+        search_source="google_first",
+    )
+    fallback_candidate = SimpleNamespace(
+        name="Fallback Artist",
+        url="https://www.facebook.com/fallbackartist",
+        category="Musician/Band",
+    )
+    enricher = _make_enricher()
+    session = _DummySession()
+    monkeypatch.setattr(enricher, "_ensure_session", lambda: session)
+    monkeypatch.setattr(enricher, "_ensure_driver_alive", lambda current_session: current_session)
+    monkeypatch.setattr(
+        night_mode_fb.facebook_enrich,
+        "discover_google_first_fb_candidates",
+        lambda *args, **kwargs: [google_candidate],
+    )
+
+    search_methods = []
+
+    def _fake_fetch(query_str, *, search_method, session=None):  # noqa: ANN001
+        search_methods.append(search_method)
+        html = "<div role='main'><div aria-label='Search results'><a href='https://www.facebook.com/fallbackartist'>Fallback Artist</a></div></div>"
+        return html, SimpleNamespace(page_source=html, current_url="https://www.facebook.com/search/pages/?q=test"), False, "https://www.facebook.com/search/pages/?q=test"
+
+    def _fake_rank(artist, candidates):  # noqa: ANN001
+        return [
+            {"candidate": candidate, "score": 10, "features": {"music_any": True}, "breakdown": ["music_any"]}
+            for candidate in candidates
+        ]
+
+    def _fake_choose(*args, **kwargs):  # noqa: ANN001
+        ranked = args[1] if len(args) > 1 else []
+        if not ranked:
+            return None, "no_safe_match"
+        candidate = ranked[0]["candidate"]
+        if candidate.url == google_candidate.url:
+            return None, "no_safe_match"
+        return candidate, "ranked_sort"
+
+    monkeypatch.setattr(enricher, "_fetch_search_surface", _fake_fetch)
+    monkeypatch.setattr(night_mode_fb, "_harvest_candidates", lambda *args, **kwargs: [fallback_candidate])
+    monkeypatch.setattr(night_mode_fb, "_rank_candidates_for_preview", _fake_rank)
+    monkeypatch.setattr(enricher, "_choose_ranked_candidate", _fake_choose)
+
+    page = enricher._search_for_page("Test Artist", location="", allow_anon=True)
+
+    assert page == "https://www.facebook.com/fallbackartist"
+    assert search_methods == ["direct_route"]
+    assert enricher._last_selected_candidate_context["url"] == "https://www.facebook.com/fallbackartist"
+    assert enricher._last_selected_candidate_context["selected_by"] == "ranked_sort"
+    assert enricher._last_selected_candidate_context.get("search_source", "") != "google_first"

@@ -12,7 +12,9 @@ from urllib.parse import urlparse
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
+import requests
 from bs4 import BeautifulSoup, NavigableString, Tag
+from source_scheduler import canonicalize_facebook_url
 
 # Blocks of common FB UI/notification text that should be ignored entirely.
 NOISY_FB_TOKENS = [
@@ -1876,6 +1878,211 @@ def _fb_extract_candidates_from_search_dom(html_or_driver, logger=None, debug: b
             raise AssertionError(f"FB DOM gate warnings: {warnings}")
 
     return filtered
+
+
+_GOOGLE_SEARCH_URL = "https://www.google.com/search"
+_GOOGLE_SEARCH_TIMEOUT_S = 8.0
+
+
+def _google_fetch_html(query: str, *, session: Optional[requests.Session] = None, timeout_s: float = _GOOGLE_SEARCH_TIMEOUT_S) -> str:
+    if not query:
+        return ""
+    sess = session or requests.Session()
+    try:
+        sess.headers.setdefault(
+            "User-Agent",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        )
+        sess.headers.setdefault("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+        sess.headers.setdefault("Accept-Language", "en-US,en;q=0.9")
+        response = sess.get(
+            _GOOGLE_SEARCH_URL,
+            params={"q": query, "num": "5", "hl": "en"},
+            timeout=timeout_s,
+            allow_redirects=True,
+        )
+    except requests.RequestException:
+        return ""
+    if getattr(response, "status_code", 0) != 200:
+        return ""
+    return response.text or ""
+
+
+def _google_extract_target_url(raw_href: str) -> str:
+    href = (raw_href or "").strip()
+    if not href:
+        return ""
+    if href.startswith("/url?") or href.startswith("https://www.google.com/url?"):
+        try:
+            parsed = urllib.parse.urlparse(urllib.parse.urljoin("https://www.google.com", href))
+            qs = urllib.parse.parse_qs(parsed.query or "", keep_blank_values=False)
+            href = (qs.get("q", [""]) or [""])[0] or (qs.get("url", [""]) or [""])[0]
+        except Exception:
+            return ""
+    elif href.startswith("/"):
+        return ""
+    return href.split("#", 1)[0]
+
+
+def _google_fb_candidate_name(anchor_text: str, artist_name: str, candidate_url: str) -> str:
+    text = re.sub(r"\s*(?:[-|:]\s*)?facebook\b.*$", "", anchor_text or "", flags=re.I).strip()
+    if text and text.lower() != "facebook":
+        return text
+    try:
+        parsed = urllib.parse.urlparse(candidate_url or "")
+        parts = [part for part in (parsed.path or "").split("/") if part]
+    except Exception:
+        parts = []
+    if parts and parts[0].lower() != "profile.php":
+        return urllib.parse.unquote(parts[0]).replace("-", " ").replace("_", " ").strip()
+    return (artist_name or "").strip()
+
+
+def _google_fb_category_tokens(result_text: str, anchor_text: str) -> List[str]:
+    text = re.sub(r"\s+", " ", result_text or "").strip()
+    if not text:
+        return []
+    anchor_clean = re.sub(r"\s+", " ", anchor_text or "").strip()
+    if anchor_clean:
+        text = text.replace(anchor_clean, " ").strip()
+    tokens: List[str] = []
+    seen: set[str] = set()
+    for part in re.split(r"[|·\n]", text):
+        cleaned = clean_fb_category_text(part)
+        cleaned = re.sub(r"\s+", " ", cleaned or "").strip(" -")
+        if not cleaned or len(cleaned) > 80:
+            continue
+        lowered = cleaned.lower()
+        matched_token = ""
+        for tok in sorted(MUSIC_TOKENS, key=len, reverse=True):
+            pos = lowered.find(tok)
+            if pos >= 0:
+                matched_token = cleaned[pos : pos + len(tok)].strip()
+                break
+        if not matched_token:
+            continue
+        cleaned = matched_token
+        lowered = cleaned.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        tokens.append(cleaned)
+    return tokens
+
+
+def _extract_google_fb_candidates_from_html(
+    html: str,
+    artist_name: str,
+    *,
+    max_candidates: int = 3,
+) -> List[FbCandidate]:
+    if not html or max_candidates <= 0:
+        return []
+    soup = BeautifulSoup(html, "html.parser")
+    found: List[FbCandidate] = []
+    seen_urls: set[str] = set()
+    for anchor in soup.select("a[href]"):
+        raw_href = anchor.get("href") or ""
+        target_url = _google_extract_target_url(raw_href)
+        if not target_url:
+            continue
+        target_lower = target_url.lower()
+        if not any(host in target_lower for host in ("facebook.com", "fb.com", "fb.me")):
+            continue
+        canonical_url = canonicalize_facebook_url(target_url)
+        if not canonical_url:
+            continue
+        if not fb_is_allowed_profile_candidate_url(canonical_url):
+            continue
+        if not _fb_is_candidate_url_allowed(canonical_url):
+            continue
+        if canonical_url in seen_urls:
+            continue
+
+        anchor_text = anchor.get_text(" ", strip=True) or ""
+        parent_text = ""
+        node = anchor
+        for _ in range(3):
+            node = getattr(node, "parent", None)
+            if node is None:
+                break
+            try:
+                parent_text = re.sub(r"\s+", " ", " ".join(node.stripped_strings)).strip()
+            except Exception:
+                parent_text = ""
+            if parent_text:
+                break
+        category_tokens = _google_fb_category_tokens(parent_text, anchor_text)
+        category = category_tokens[0] if category_tokens else ""
+
+        candidate = FbCandidate(
+            name=_google_fb_candidate_name(anchor_text, artist_name, canonical_url) or (artist_name or "").strip(),
+            url=canonical_url,
+            category=category,
+        )
+        try:
+            setattr(candidate, "descriptor", category_tokens[1] if len(category_tokens) > 1 else "")
+            setattr(candidate, "category_tokens", list(category_tokens))
+            setattr(candidate, "secondary_text", parent_text[:160] if category_tokens else "")
+            setattr(candidate, "search_source", "google_first")
+            if category:
+                setattr(candidate, "_raw_category", category)
+        except Exception:
+            pass
+        found.append(candidate)
+        seen_urls.add(canonical_url)
+        if len(found) >= max_candidates:
+            break
+    return found
+
+
+def discover_google_first_fb_candidates(
+    artist_name: str,
+    *,
+    logger=None,
+    session: Optional[requests.Session] = None,
+    max_candidates: int = 3,
+    log_prefix: str = "[FB Shared]",
+) -> List[FbCandidate]:
+    artist = (artist_name or "").strip()
+    if not artist or max_candidates <= 0:
+        return []
+
+    queries = [f'site:facebook.com "{artist}"', f'site:facebook.com "{artist}" band']
+    candidates: List[FbCandidate] = []
+    seen_urls: set[str] = set()
+    attempted = 0
+
+    for idx, query in enumerate(queries):
+        attempted += 1
+        html = _google_fetch_html(query, session=session)
+        if not html:
+            if idx == 0:
+                continue
+            break
+        extracted = _extract_google_fb_candidates_from_html(
+            html,
+            artist,
+            max_candidates=max_candidates - len(candidates),
+        )
+        for candidate in extracted:
+            url = getattr(candidate, "url", "") or ""
+            if not url or url in seen_urls:
+                continue
+            seen_urls.add(url)
+            candidates.append(candidate)
+            if len(candidates) >= max_candidates:
+                break
+        if candidates or len(candidates) >= max_candidates:
+            break
+
+    _shared_fb_log(
+        logger,
+        f"{log_prefix} Google-first attempted={attempted} candidates={len(candidates)} artist='{artist}'",
+        suppress_console=True,
+    )
+    return candidates
 
 
 def _fb_candidate_gate_self_check() -> None:

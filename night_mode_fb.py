@@ -4772,6 +4772,9 @@ class NightModeFacebookEnricher:
                 "match_level": match_level_ctx,
                 "selected_by": selected_by,
             }
+            search_source = getattr(cand, "search_source", "") or (cand.get("search_source") if isinstance(cand, dict) else "")
+            if search_source:
+                context["search_source"] = search_source
             if chosen_url_norm and norm_url == chosen_url_norm and selected_ctx is None:
                 selected_ctx = context
             collected_contexts.append((context, cand))
@@ -5296,7 +5299,7 @@ class NightModeFacebookEnricher:
 
         raise ValueError(f"Unsupported search_method: {search_method}")
 
-    def _search_for_page(self, artist: str, location: str, allow_anon: bool = False) -> Optional[str]:
+    def _search_for_page(self, artist: str, location: str, allow_anon: bool = False, _skip_google_first: bool = False) -> Optional[str]:
         self._last_selected_candidate_context = None
         self._last_search_candidates = []
         self._last_search_reject_reason = ""
@@ -5379,11 +5382,26 @@ class NightModeFacebookEnricher:
         primary_query = " ".join(part for part in (artist, location_query) if part).strip()
         if not primary_query:
             return None
-        html, nav_driver, search_timed_out, current_search_url = self._fetch_search_surface(
-            primary_query,
-            search_method="direct_route",
-            session=session,
-        )
+
+        def _fallback_after_google(reason: str) -> Optional[str]:
+            if _skip_google_first:
+                return None
+            _log(
+                self.logger,
+                f"[Night FB] Google-first candidates for '{artist}' did not yield a usable final selection ({reason}); falling back to Facebook search.",
+            )
+            return self._search_for_page(artist, location, allow_anon=allow_anon, _skip_google_first=True)
+
+        google_candidates: List["facebook_enrich.FbCandidate"] = []
+        used_google_first = False
+        google_helper = getattr(facebook_enrich, "discover_google_first_fb_candidates", None) if facebook_enrich is not None else None
+        if (not _skip_google_first) and callable(google_helper):
+            try:
+                google_candidates = list(google_helper(artist, logger=self.logger, log_prefix="[Night FB]") or [])
+            except Exception as exc:
+                _log(self.logger, f"[Night FB] Google-first discovery failed for '{artist}': {exc}")
+                google_candidates = []
+        used_google_first = bool(google_candidates)
 
         # Optional self-check: confirm shared URL gate predicate.
         if _bool_env("FB_DEBUG_CAND_GATE_ASSERT", default=False):
@@ -5421,72 +5439,86 @@ class NightModeFacebookEnricher:
             return refine_candidates
 
         diagnostics: Dict[str, Any] = {}
-        candidates = _harvest_candidates(
-            html,
-            nav_driver,
-            artist,
-            logger=self.logger,
-            v2_enabled=v2_enabled,
-            session_unhealthy=session_unhealthy,
-            session_reason=session_reason,
-            diagnostics=diagnostics,
-        )
         suppress_refine_queries = False
-        if session and not candidates:
-            miss_reason = _fb_search_surface_miss_reason(
-                getattr(nav_driver, "page_source", "") or html or "",
-                driver=nav_driver,
-                current_url=current_search_url,
-                timed_out=search_timed_out,
+        if google_candidates:
+            candidates = _dedupe_candidates(list(google_candidates))
+            suppress_refine_queries = True
+            _log(self.logger, f"[Night FB] Using Google-first FB candidates for '{artist}' count={len(candidates)}.")
+        else:
+            if _skip_google_first:
+                _log(self.logger, f"[Night FB] Running Facebook search fallback for '{artist}' after Google-first miss.")
+            else:
+                _log(self.logger, f"[Night FB] Google-first returned no usable FB candidates for '{artist}'; falling back to Facebook search.")
+            html, nav_driver, search_timed_out, current_search_url = self._fetch_search_surface(
+                primary_query,
+                search_method="direct_route",
+                session=session,
             )
-            if miss_reason:
-                _log(
-                    self.logger,
-                    f"[Night FB] search_method=direct_route failure_mode={miss_reason} query='{primary_query}'",
-                )
-                suppress_refine_queries = True
-                diagnostics = {}
-                html, nav_driver, search_timed_out, current_search_url = self._fetch_search_surface(
-                    primary_query,
-                    search_method="homepage_ui",
-                    session=session,
-                )
-                candidates = _harvest_candidates(
-                    html,
-                    nav_driver,
-                    artist,
-                    logger=self.logger,
-                    v2_enabled=v2_enabled,
-                    session_unhealthy=session_unhealthy,
-                    session_reason=session_reason,
-                    diagnostics=diagnostics,
-                )
-                candidates, homepage_failure_mode = _guard_homepage_fb_search_candidates(
-                    candidates,
-                    page_html=getattr(nav_driver, "page_source", "") or html or "",
+            candidates = _harvest_candidates(
+                html,
+                nav_driver,
+                artist,
+                logger=self.logger,
+                v2_enabled=v2_enabled,
+                session_unhealthy=session_unhealthy,
+                session_reason=session_reason,
+                diagnostics=diagnostics,
+            )
+            if session and not candidates:
+                miss_reason = _fb_search_surface_miss_reason(
+                    getattr(nav_driver, "page_source", "") or html or "",
+                    driver=nav_driver,
                     current_url=current_search_url,
-                    logger=self.logger,
-                    log_prefix="[Night FB]",
-                    query=primary_query,
+                    timed_out=search_timed_out,
                 )
-                if homepage_failure_mode:
+                if miss_reason:
                     _log(
                         self.logger,
-                        f"[Night FB] search_method=homepage_ui failure_mode={homepage_failure_mode} query='{primary_query}'",
+                        f"[Night FB] search_method=direct_route failure_mode={miss_reason} query='{primary_query}'",
                     )
-                if not candidates:
-                    if not homepage_failure_mode:
-                        homepage_miss_reason = _fb_search_surface_miss_reason(
-                            getattr(nav_driver, "page_source", "") or html or "",
-                            driver=nav_driver,
-                            current_url=current_search_url,
-                            timed_out=search_timed_out,
+                    suppress_refine_queries = True
+                    diagnostics = {}
+                    html, nav_driver, search_timed_out, current_search_url = self._fetch_search_surface(
+                        primary_query,
+                        search_method="homepage_ui",
+                        session=session,
+                    )
+                    candidates = _harvest_candidates(
+                        html,
+                        nav_driver,
+                        artist,
+                        logger=self.logger,
+                        v2_enabled=v2_enabled,
+                        session_unhealthy=session_unhealthy,
+                        session_reason=session_reason,
+                        diagnostics=diagnostics,
+                    )
+                    candidates, homepage_failure_mode = _guard_homepage_fb_search_candidates(
+                        candidates,
+                        page_html=getattr(nav_driver, "page_source", "") or html or "",
+                        current_url=current_search_url,
+                        logger=self.logger,
+                        log_prefix="[Night FB]",
+                        query=primary_query,
+                    )
+                    if homepage_failure_mode:
+                        _log(
+                            self.logger,
+                            f"[Night FB] search_method=homepage_ui failure_mode={homepage_failure_mode} query='{primary_query}'",
                         )
-                        if homepage_miss_reason:
-                            _log(
-                                self.logger,
-                                f"[Night FB] search_method=homepage_ui failure_mode={homepage_miss_reason} query='{primary_query}'",
+                    if not candidates:
+                        if not homepage_failure_mode:
+                            homepage_miss_reason = _fb_search_surface_miss_reason(
+                                getattr(nav_driver, "page_source", "") or html or "",
+                                driver=nav_driver,
+                                current_url=current_search_url,
+                                timed_out=search_timed_out,
                             )
+                            if homepage_miss_reason:
+                                _log(
+                                    self.logger,
+                                    f"[Night FB] search_method=homepage_ui failure_mode={homepage_miss_reason} query='{primary_query}'",
+                                )
         soft_blocked = bool(diagnostics.get("overlay_soft_block"))
         ranked_for_preview = _rank_candidates_for_preview(artist, candidates)
 
@@ -5517,7 +5549,7 @@ class NightModeFacebookEnricher:
         if not candidate:
             _log(self.logger, f"[Night FB] No viable FB candidates for '{artist}' after reject-cache and mismatch guard.")
             _maybe_log_rank_preview(artist, candidates, None, logger=self.logger, selected_by=selected_by)
-            return None
+            return _fallback_after_google("no_viable_ranked_candidate") if used_google_first else None
 
         if quality_gate_enabled and candidate:
             refine_forced = False
@@ -5576,14 +5608,14 @@ class NightModeFacebookEnricher:
                         ranked_candidates = [fallback_candidate]
                         break
                 _log(self.logger, "[Night FB][QualityGate] No acceptable FB candidates after quality gate; skipping FB search.")
-                return None
+                return _fallback_after_google("quality_gate_reject") if used_google_first else None
 
         if not candidate:
             _log(self.logger, f"[Night FB] No non-junk FB candidates for '{artist}', skipping Facebook.")
             _maybe_log_rank_preview(artist, candidates, None, logger=self.logger, selected_by=selected_by)
-            return None
+            return _fallback_after_google("no_candidate_after_quality_gate") if used_google_first else None
 
-        return self._select_candidate_url(
+        selected_url = self._select_candidate_url(
             artist,
             candidate,
             candidates,
@@ -5592,6 +5624,9 @@ class NightModeFacebookEnricher:
             selected_by,
             min_accept_score,
         )
+        if selected_url:
+            return selected_url
+        return _fallback_after_google("post_select_url_validation") if used_google_first else None
 
     def _can_identity_soft_pass(self, artist_name: str, page_name: str, resolved_url: str, base_score: float) -> bool:
         """
