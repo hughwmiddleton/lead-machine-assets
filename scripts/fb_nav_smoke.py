@@ -40,6 +40,18 @@ def print_search_location(driver: webdriver.Chrome) -> None:
     print(f"SEARCH TITLE: {driver.title}", flush=True)
 
 
+def wait_for_manual_auth(driver: webdriver.Chrome) -> None:
+    print(
+        "Log into Facebook / complete checkpoint if needed, then press Enter to continue...",
+        flush=True,
+    )
+    input()
+    print_location("POST-AUTH", driver)
+    has_auth_cookie = any(cookie.get("name") == "c_user" for cookie in driver.get_cookies())
+    print(f"AUTH COOKIE PRESENT: {'yes' if has_auth_cookie else 'no'}", flush=True)
+    print(flush=True)
+
+
 def main() -> int:
     profile_dir_raw = os.environ.get("NIGHT_FB_PROFILE_DIR", "").strip()
     if not profile_dir_raw:
@@ -64,6 +76,7 @@ def main() -> int:
         print_location("HOME", driver)
         save_screenshot(driver, "fb_home.png")
         print(flush=True)
+        wait_for_manual_auth(driver)
 
         print("[2] Opening known page...", flush=True)
         driver.get("https://www.facebook.com/facebook")
