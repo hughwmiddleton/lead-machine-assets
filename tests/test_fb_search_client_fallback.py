@@ -164,6 +164,40 @@ def test_find_best_page_url_uses_google_first_candidates_before_fb_search(monkey
     assert result == artist_url
 
 
+def test_find_best_page_url_inspects_google_first_page_style_candidate_without_fb_search(monkeypatch) -> None:
+    artist_url = "https://www.facebook.com/pages/Test-Artist/123456"
+    driver = _FakeDriver(
+        {
+            artist_url: "<html><body><div>Musician/Band</div><a href='https://open.spotify.com/artist/test'>Spotify</a></body></html>",
+        }
+    )
+    client = cde.FacebookSearchClient(driver=driver, logger=None)
+    monkeypatch.setattr(
+        client,
+        "ensure_facebook_logged_in",
+        lambda: (_ for _ in ()).throw(AssertionError("Google-first success should not require FB login")),
+    )
+    monkeypatch.setattr(
+        cde,
+        "discover_google_first_fb_candidates",
+        lambda *args, **kwargs: [cde.FbCandidate(name="Test Artist", url=artist_url, category="Musician/Band")],
+    )
+    monkeypatch.setattr(
+        client,
+        "_fetch_search_surface",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("FB search should not run when Google-first returns a viable page-style candidate")),
+    )
+    monkeypatch.setattr(cde, "score_fb_candidate", lambda *args, **kwargs: (2.0, 1.0, 1.0))
+    monkeypatch.setattr(cde, "is_music_page", lambda *args, **kwargs: True)
+    monkeypatch.setattr(cde, "classify_corporate_signals", lambda *args, **kwargs: SimpleNamespace(has_hard=False, has_artist=True))
+    monkeypatch.setattr(cde, "_facebook_candidate_is_strong", lambda *args, **kwargs: (True, "music_category"))
+
+    result = client.find_best_page_url("Test Artist", require_strong_candidate=True)
+
+    assert result == artist_url
+    assert driver.visited_urls == [artist_url]
+
+
 def test_find_best_page_url_falls_back_to_fb_search_when_google_candidate_fails_final_validation(monkeypatch) -> None:
     google_url = "https://www.facebook.com/googlecandidate"
     fallback_url = "https://www.facebook.com/fallbackartist"

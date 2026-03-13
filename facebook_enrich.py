@@ -248,6 +248,32 @@ def is_fb_login_redirect(url: str) -> bool:
         return False
     return path.startswith("r.php")
 
+
+_FB_SHARED_ALLOWED_HOSTS = {
+    "facebook.com",
+    "www.facebook.com",
+    "m.facebook.com",
+    "web.facebook.com",
+    "touch.facebook.com",
+}
+_FB_SHARED_REJECT_SEGMENTS = {
+    "afad",
+    "events",
+    "groups",
+    "login",
+    "marketplace",
+    "notifications",
+    "photos",
+    "posts",
+    "reel",
+    "reels",
+    "search",
+    "security",
+    "share",
+    "share.php",
+    "watch",
+}
+
 # If ANY of these strings appear in the candidate name, category or URL slug, hard-reject.
 BUSINESS_KILL_TOKENS = (
     "real estate",
@@ -1383,73 +1409,12 @@ def fb_is_allowed_profile_candidate_url(url: str) -> bool:
     True only if url is an allowed FB profile URL shape:
       - https://www.facebook.com/<username>[/]
       - https://www.facebook.com/profile.php?id=<digits> (and ONLY id param)
+      - https://www.facebook.com/pages/<name>/<digits>
+      - https://www.facebook.com/p/<slug>
+      - https://www.facebook.com/pg/<slug>/... normalized to https://www.facebook.com/<slug>
     Explicitly rejects known junk surfaces.
     """
-    if not url:
-        return False
-    raw = (url or "").strip()
-    if not raw:
-        return False
-    try:
-        parsed = urllib.parse.urlparse(raw)
-    except Exception:
-        return False
-
-    scheme = (parsed.scheme or "").lower()
-    if scheme and scheme not in ("http", "https"):
-        return False
-
-    host = (parsed.netloc or "").lower()
-    if not host:
-        return False
-    host_norm = "facebook.com" if host == "m.facebook.com" else host
-    allowed_hosts = {"facebook.com", "www.facebook.com", "m.facebook.com"}
-    if host_norm not in allowed_hosts and host not in allowed_hosts:
-        return False
-    if host.startswith("business.") or "business.facebook.com" in host:
-        return False
-
-    path = parsed.path or ""
-    query = parsed.query or ""
-    lowered_blob = f"{path}?{query}".lower() if query else path.lower()
-    reject_tokens = (
-        "/events/",
-        "/watch",
-        "/reel",
-        "/afad",
-        "/notifications",
-        "ref=notif",
-        "notif_id",
-        "notif_t",
-        "business.facebook.com",
-        "/latest/composer",
-        "/business/",
-    )
-    if any(tok in lowered_blob for tok in reject_tokens):
-        return False
-
-    path_clean = path.rstrip("/")
-    segments = [seg for seg in path.split("/") if seg]
-
-    if path_clean.lower() == "/profile.php":
-        qs = urllib.parse.parse_qs(query, keep_blank_values=False)
-        if set(qs.keys()) != {"id"}:
-            return False
-        ids = qs.get("id", [])
-        if len(ids) != 1:
-            return False
-        id_value = ids[0]
-        return bool(id_value and id_value.isdigit())
-
-    if len(segments) == 1:
-        username = segments[0]
-        if not username or username.lower() == "profile.php":
-            return False
-        if query:
-            return False
-        return True
-
-    return False
+    return bool(_fb_normalize_shared_candidate_url(url))
 
 
 def fb_reason_code_split(url: str, existing_reason: str) -> str:
@@ -1490,51 +1455,93 @@ def _fb_is_candidate_url_allowed(url: str) -> bool:
     Strict allowlist for FB search candidates:
       - https://www.facebook.com/<username>
       - https://www.facebook.com/profile.php?id=<digits>
-    Rejects /groups, /watch, /reel, /events, /notifications, /afad and notif params.
+      - https://www.facebook.com/pages/<name>/<digits>
+      - https://www.facebook.com/p/<slug>
+      - https://www.facebook.com/pg/<slug>/... normalized to https://www.facebook.com/<slug>
+    Rejects non-page surfaces and notif params.
     """
-    if not url:
-        return False
-    try:
-        parsed = urllib.parse.urlparse(url)
-    except Exception:
-        return False
-    host = (parsed.netloc or "").lower().strip()
-    if host.startswith("m."):
-        host = host[2:]
-    allowed_hosts = {"facebook.com", "www.facebook.com", "web.facebook.com"}
-    if not (host in allowed_hosts or host.endswith(".facebook.com")):
-        return False
+    return bool(_fb_normalize_shared_candidate_url(url))
 
-    path = parsed.path or ""
-    segments = [seg for seg in path.strip("/").split("/") if seg]
+
+def _fb_normalize_shared_candidate_url(url: str) -> str:
+    """Normalize the narrow Facebook allowlist used by shared Google-first and search gating."""
+    if not url:
+        return ""
+    raw = (url or "").strip()
+    if not raw:
+        return ""
+    try:
+        parsed = urllib.parse.urlparse(raw)
+    except Exception:
+        return ""
+
+    scheme = (parsed.scheme or "https").lower()
+    if scheme not in ("http", "https"):
+        return ""
+
+    host = (parsed.netloc or "").lower().strip()
+    if not host:
+        return ""
+    if host.startswith("business.") or "business.facebook.com" in host:
+        return ""
+    if host not in _FB_SHARED_ALLOWED_HOSTS:
+        return ""
+    host = "www.facebook.com"
+
     query = parsed.query or ""
     lowered_query = query.lower()
+    if any(tok in lowered_query for tok in ("ref=notif", "notif_id", "notif_t")):
+        return ""
+
+    path = parsed.path or ""
+    lowered_path = path.lower()
+    if "/latest/composer" in lowered_path or "/business/" in lowered_path:
+        return ""
+
+    segments = [seg for seg in path.split("/") if seg]
+    if segments and segments[0].lower() == "pg":
+        if len(segments) < 2 or not segments[1]:
+            return ""
+        path = f"/{segments[1]}"
+        query = ""
+        segments = [segments[1]]
+
+    if path.rstrip("/").lower() == "/profile.php":
+        qs = urllib.parse.parse_qs(query, keep_blank_values=False)
+        if set(qs.keys()) != {"id"}:
+            return ""
+        ids = qs.get("id", [])
+        if len(ids) != 1:
+            return ""
+        profile_id = (ids[0] or "").strip()
+        if not profile_id.isdigit():
+            return ""
+        return urllib.parse.urlunparse((scheme, host, "/profile.php", "", f"id={profile_id}", ""))
 
     if not segments:
-        return False
+        return ""
 
-    reserved = {"groups", "watch", "reel", "events", "notifications", "afad"}
-    if segments[0].lower() in reserved:
-        return False
+    first_segment = segments[0].lower()
+    if first_segment in _FB_SHARED_REJECT_SEGMENTS:
+        return ""
+    if query:
+        return ""
 
-    if any(tok in lowered_query for tok in ("ref=notif", "notif_id", "notif_t")):
-        return False
-
-    if segments[0].lower() == "profile.php":
-        if len(segments) != 1:
-            return False
-        qs = urllib.parse.parse_qs(query or "", keep_blank_values=False)
-        if set(qs.keys()) != {"id"}:
-            return False
-        ids = qs.get("id", [])
-        return len(ids) == 1 and ids[0].isdigit()
-
-    # Strict username: exactly one segment, no query params.
     if len(segments) == 1:
-        # username paths must have no query parameters
-        return query == ""
+        if first_segment == "profile.php":
+            return ""
+        return urllib.parse.urlunparse((scheme, host, f"/{segments[0]}", "", "", ""))
 
-    return False
+    if first_segment == "pages" and len(segments) == 3 and segments[1] and segments[2].isdigit():
+        return urllib.parse.urlunparse((scheme, host, f"/pages/{segments[1]}/{segments[2]}", "", "", ""))
+
+    if first_segment == "p":
+        if len(segments) == 2 and segments[1]:
+            return urllib.parse.urlunparse((scheme, host, f"/p/{segments[1]}", "", "", ""))
+        if len(segments) == 3 and segments[1] and segments[2].isdigit():
+            return urllib.parse.urlunparse((scheme, host, f"/p/{segments[1]}/{segments[2]}", "", "", ""))
+
+    return ""
 
 
 def _fb_extract_candidates_from_search_dom(html_or_driver, logger=None, debug: bool = False, search_name: str = "") -> List[FbCandidate]:
@@ -1834,9 +1841,11 @@ def _fb_extract_candidates_from_search_dom(html_or_driver, logger=None, debug: b
                 continue
         except Exception:
             pass
-        if not _fb_is_candidate_url_allowed(url_val):
+        normalized_url = _fb_normalize_shared_candidate_url(url_val)
+        if not normalized_url:
             gate_reject += 1
             continue
+        cand.url = normalized_url
         filtered.append(cand)
 
     candidates_post_url_gate = len(filtered)
@@ -1993,6 +2002,9 @@ def _extract_google_fb_candidates_from_html(
         canonical_url = canonicalize_facebook_url(target_url)
         if not canonical_url:
             continue
+        canonical_url = _fb_normalize_shared_candidate_url(canonical_url)
+        if not canonical_url:
+            continue
         if not fb_is_allowed_profile_candidate_url(canonical_url):
             continue
         if not _fb_is_candidate_url_allowed(canonical_url):
@@ -2089,10 +2101,21 @@ def _fb_candidate_gate_self_check() -> None:
     assert fb_is_allowed_profile_candidate_url("https://www.facebook.com/someband")
     assert fb_is_allowed_profile_candidate_url("https://www.facebook.com/someband/")
     assert fb_is_allowed_profile_candidate_url("https://www.facebook.com/profile.php?id=1234567890")
+    assert fb_is_allowed_profile_candidate_url("https://www.facebook.com/pages/Some-Band/1234567890")
+    assert fb_is_allowed_profile_candidate_url("https://www.facebook.com/p/SomeBand")
+    assert fb_is_allowed_profile_candidate_url("https://www.facebook.com/pg/SomeBand/about")
     assert not fb_is_allowed_profile_candidate_url("https://www.facebook.com/watch?v=123")
     assert not fb_is_allowed_profile_candidate_url("https://www.facebook.com/events/birthdays")
+    assert not fb_is_allowed_profile_candidate_url("https://www.facebook.com/posts/123")
     assert not fb_is_allowed_profile_candidate_url("https://www.facebook.com/reel/123")
+    assert not fb_is_allowed_profile_candidate_url("https://www.facebook.com/reels/123")
     assert not fb_is_allowed_profile_candidate_url("https://www.facebook.com/notifications")
+    assert not fb_is_allowed_profile_candidate_url("https://www.facebook.com/login")
+    assert not fb_is_allowed_profile_candidate_url("https://www.facebook.com/security")
+    assert not fb_is_allowed_profile_candidate_url("https://www.facebook.com/search")
+    assert not fb_is_allowed_profile_candidate_url("https://www.facebook.com/marketplace")
+    assert not fb_is_allowed_profile_candidate_url("https://www.facebook.com/photos")
+    assert not fb_is_allowed_profile_candidate_url("https://www.facebook.com/share/abc")
     assert not fb_is_allowed_profile_candidate_url("https://www.facebook.com/profile.php?id=123&foo=bar")
     assert not fb_is_allowed_profile_candidate_url("https://business.facebook.com/somepage")
 
@@ -2102,8 +2125,20 @@ if os.getenv("FB_DEBUG_CAND_GATE_ASSERT") == "1":
 if os.getenv("FB_DEBUG_CAND_URL_GATE") == "1":
     assert _fb_is_candidate_url_allowed("https://www.facebook.com/someband")
     assert _fb_is_candidate_url_allowed("https://www.facebook.com/profile.php?id=123456")
+    assert _fb_is_candidate_url_allowed("https://www.facebook.com/pages/Some-Band/123456")
+    assert _fb_is_candidate_url_allowed("https://www.facebook.com/p/SomeBand")
+    assert _fb_is_candidate_url_allowed("https://www.facebook.com/pg/SomeBand/about")
     assert not _fb_is_candidate_url_allowed("https://www.facebook.com/groups/")
     assert not _fb_is_candidate_url_allowed("https://www.facebook.com/groups/foo")
+    assert not _fb_is_candidate_url_allowed("https://www.facebook.com/posts/123")
+    assert not _fb_is_candidate_url_allowed("https://www.facebook.com/reels/123")
+    assert not _fb_is_candidate_url_allowed("https://www.facebook.com/watch?v=1")
+    assert not _fb_is_candidate_url_allowed("https://www.facebook.com/login")
+    assert not _fb_is_candidate_url_allowed("https://www.facebook.com/security")
+    assert not _fb_is_candidate_url_allowed("https://www.facebook.com/search")
+    assert not _fb_is_candidate_url_allowed("https://www.facebook.com/marketplace")
+    assert not _fb_is_candidate_url_allowed("https://www.facebook.com/photos")
+    assert not _fb_is_candidate_url_allowed("https://www.facebook.com/share/abc")
     assert not _fb_is_candidate_url_allowed("https://www.facebook.com/someband/about")
     assert not _fb_is_candidate_url_allowed("https://www.facebook.com/profile.php?id=12&foo=1")
     assert not _fb_is_candidate_url_allowed("https://www.facebook.com/someband?__tn__=%2Cd")

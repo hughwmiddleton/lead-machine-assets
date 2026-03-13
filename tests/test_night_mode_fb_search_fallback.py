@@ -308,6 +308,37 @@ def test_pass_b_uses_google_first_candidates_before_fb_search_and_keeps_context(
     assert enricher._last_search_candidates[0]["url"] == "https://www.facebook.com/testartist"
 
 
+def test_pass_b_google_first_pg_candidate_survives_select_candidate_url(monkeypatch) -> None:
+    candidate = SimpleNamespace(
+        name="Test Artist",
+        url="https://www.facebook.com/pg/TestArtist/about",
+        category="Musician/Band",
+        search_source="google_first",
+    )
+    enricher = _make_enricher()
+    session = _DummySession()
+    monkeypatch.setattr(enricher, "_ensure_session", lambda: session)
+    monkeypatch.setattr(enricher, "_ensure_driver_alive", lambda current_session: current_session)
+    monkeypatch.setattr(
+        night_mode_fb.facebook_enrich,
+        "discover_google_first_fb_candidates",
+        lambda *args, **kwargs: [candidate],
+    )
+    monkeypatch.setattr(
+        enricher,
+        "_fetch_search_surface",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("FB search should not run when Google-first returns a viable /pg page-style candidate")),
+    )
+    monkeypatch.setattr(night_mode_fb, "_rank_candidates_for_preview", lambda artist, candidates: _ranked(candidate))
+    monkeypatch.setattr(enricher, "_choose_ranked_candidate", lambda *args, **kwargs: (candidate, "ranked_sort"))
+
+    page = enricher._search_for_page("Test Artist", location="", allow_anon=True)
+
+    assert page == "https://www.facebook.com/testartist"
+    assert enricher._last_selected_candidate_context["url"] == "https://www.facebook.com/testartist"
+    assert enricher._last_selected_candidate_context["search_source"] == "google_first"
+
+
 def test_pass_b_uses_google_first_before_session_start_for_normal_rows(monkeypatch) -> None:
     candidate = SimpleNamespace(
         name="Test Artist",

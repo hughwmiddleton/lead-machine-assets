@@ -54,6 +54,22 @@ def test_discover_facebook_url_bounded_requires_strong_candidate(monkeypatch):
     ]
 
 
+def test_discover_facebook_url_bounded_accepts_page_style_result(monkeypatch):
+    class _DummyClient:
+        pass
+
+    monkeypatch.setattr(cde, "FacebookSearchClient", lambda driver, logger: _DummyClient())
+    monkeypatch.setattr(
+        cde,
+        "facebook_find_best_page",
+        lambda *args, **kwargs: "https://www.facebook.com/pages/The-Midnight-Echo/123456",
+    )
+
+    result = cde._discover_facebook_url_bounded(object(), "The Midnight Echo", "", logger=None)
+
+    assert result == "https://www.facebook.com/pages/the-midnight-echo/123456"
+
+
 def test_facebook_candidate_is_strong_accepts_music_category():
     candidate = cde.FbCandidate(
         name="The Midnight Echo",

@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import facebook_enrich
 import night_mode_fb
 import importlib.util
+import pytest
 from pathlib import Path
 
 
@@ -121,6 +122,64 @@ def test_google_first_candidate_discovery_returns_canonical_allowed_fb_urls(monk
 
     assert [cand.url for cand in candidates] == ["https://www.facebook.com/TestArtistOfficial"]
     assert getattr(candidates[0], "category_tokens", []) == ["Musician/band"]
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://www.facebook.com/ArtistName",
+        "https://www.facebook.com/profile.php?id=123456",
+        "https://www.facebook.com/pages/ArtistName/123456",
+        "https://www.facebook.com/p/ArtistName",
+        "https://www.facebook.com/pg/ArtistName/about",
+    ],
+)
+def test_shared_fb_candidate_gate_accepts_page_style_variants(url):
+    assert facebook_enrich.fb_is_allowed_profile_candidate_url(url)
+    assert facebook_enrich._fb_is_candidate_url_allowed(url)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://www.facebook.com/groups/foo",
+        "https://www.facebook.com/events/foo",
+        "https://www.facebook.com/posts/123",
+        "https://www.facebook.com/reels/123",
+        "https://www.facebook.com/watch?v=1",
+        "https://www.facebook.com/login",
+        "https://www.facebook.com/security",
+        "https://www.facebook.com/search",
+        "https://www.facebook.com/marketplace",
+        "https://www.facebook.com/photos",
+        "https://www.facebook.com/share/abc",
+    ],
+)
+def test_shared_fb_candidate_gate_rejects_non_page_surfaces(url):
+    assert not facebook_enrich.fb_is_allowed_profile_candidate_url(url)
+    assert not facebook_enrich._fb_is_candidate_url_allowed(url)
+
+
+def test_google_first_candidate_discovery_keeps_page_style_candidates_and_normalizes_pg(monkeypatch):
+    html = """
+    <html><body>
+      <a href="/url?q=https://www.facebook.com/pages/ArtistName/123456&sa=U">ArtistName | Facebook</a>
+      <a href="/url?q=https://www.facebook.com/p/ArtistName&sa=U">ArtistName P | Facebook</a>
+      <a href="/url?q=https://www.facebook.com/pg/ArtistName/about&sa=U">ArtistName PG | Facebook</a>
+      <a href="/url?q=https://www.facebook.com/groups/ArtistNameFans&sa=U">ArtistName Fans</a>
+      <div>Musician/band</div>
+    </body></html>
+    """
+
+    monkeypatch.setattr(facebook_enrich, "_google_fetch_html", lambda *args, **kwargs: html)
+
+    candidates = facebook_enrich.discover_google_first_fb_candidates("ArtistName", logger=None, log_prefix="[Test]")
+
+    assert [cand.url for cand in candidates] == [
+        "https://www.facebook.com/pages/ArtistName/123456",
+        "https://www.facebook.com/p/ArtistName",
+        "https://www.facebook.com/ArtistName",
+    ]
 
 
 def test_order_candidates_unique_and_stable():
