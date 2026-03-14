@@ -2580,12 +2580,25 @@ def _is_driver_authenticated(driver) -> bool:
     return _has_cookie(driver, "c_user")
 
 
+def _is_fb_hard_consent_url(current_url: str) -> bool:
+    parsed = urllib.parse.urlparse((current_url or "").lower())
+    path = parsed.path or ""
+    return (
+        path == "/consent"
+        or path == "/consent.php"
+        or path == "/legal/consent"
+        or path.startswith("/consent/")
+        or path.startswith("/legal/consent/")
+    )
+
+
 def _classify_fb_auth_surface_from_url(current_url: str) -> str:
     current_url = (current_url or "").lower()
+    if _is_fb_hard_consent_url(current_url):
+        return "consent"
     bad_url_tokens = (
         ("login", "redirect_login"),
         ("checkpoint", "checkpoint"),
-        ("consent", "consent"),
         ("recover", "recover"),
         ("two_factor", "two_factor"),
         ("two-factor", "two_factor"),
@@ -2616,7 +2629,11 @@ def _classify_fb_auth_surface_from_page(current_url: str, page_source: str) -> s
         (("help us confirm", "account"), "checkpoint"),
         (("checkpoint/",), "checkpoint"),
         (("checkpoint?next",), "checkpoint"),
-        (("consent",), "consent"),
+        (("before you continue to facebook",), "consent"),
+        (("please review and accept",), "consent"),
+        (("accept cookies to continue",), "consent"),
+        (("manage your data settings",), "consent"),
+        (("agree and continue",), "consent"),
         (("log in to facebook",), "redirect_login"),
         (("email or phone", "password"), "redirect_login"),
         (("two-factor",), "two_factor"),
