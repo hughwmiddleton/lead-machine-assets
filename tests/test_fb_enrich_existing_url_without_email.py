@@ -664,6 +664,58 @@ def test_fb_discovery_skips_when_shared_session_not_authenticated(monkeypatch):
     assert seed_df.at[0, "FB_Reason"] == "redirect_login"
 
 
+def test_ensure_fb_discovery_session_logs_authenticated_once(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    worker._fb_session_auth_checked = False
+    worker._fb_session_authenticated = False
+    worker._fb_session_auth_reason = ""
+
+    monkeypatch.setattr(cde, "_probe_fb_session_state", lambda driver, visit_home: (True, "authenticated"))
+
+    assert worker._ensure_fb_discovery_session(object()) == (True, "authenticated")
+    assert any("Shared Facebook session authenticated" in message for message in logs)
+
+    log_count = len(logs)
+    assert worker._ensure_fb_discovery_session(object()) == (True, "authenticated")
+    assert len(logs) == log_count
+
+
+def test_run_impl_disables_fb_discovery_when_auth_cookie_missing(tmp_path, monkeypatch):
+    logs = []
+    seed_csv = tmp_path / "missing.csv"
+    output_csv = tmp_path / "output.csv"
+    worker = cde.CrossDirectoryEnricherWorker(seed_csv.as_posix(), output_csv.as_posix(), enable_live_search=False)
+    worker.log_message = SimpleNamespace(emit=lambda msg: logs.append(msg))
+    worker.progress = SimpleNamespace(emit=lambda *args, **kwargs: None)
+    worker.finished = SimpleNamespace(emit=lambda *args, **kwargs: None)
+
+    class _Driver:
+        def __init__(self) -> None:
+            self.loaded_urls = []
+
+        def get(self, url):  # noqa: ANN001
+            self.loaded_urls.append(url)
+
+        def get_cookie(self, name):  # noqa: ANN001
+            return None
+
+        def execute_cdp_cmd(self, command, payload):  # noqa: ANN001
+            return {"cookies": []}
+
+    driver = _Driver()
+    monkeypatch.setattr(cde, "_get_enricher_facebook_driver", lambda: driver)
+    monkeypatch.setattr(cde, "_cleanup_enricher_facebook_driver", lambda: None)
+    monkeypatch.setattr(cde, "enricher_fb_profile_has_cookies", lambda: True)
+
+    worker._run_impl()
+
+    assert worker._fb_discovery_disabled is True
+    assert worker._fb_discovery_disabled_reason == "not_authenticated"
+    assert driver.loaded_urls == []
+    assert any("reason=not_authenticated" in message for message in logs)
+
+
 def test_fb_discovery_disables_remaining_run_after_invalid_session(monkeypatch):
     logs = []
     worker = _make_worker(logs)

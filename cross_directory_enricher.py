@@ -1133,6 +1133,37 @@ def _fb_exception_is_fatal_session(exc: Exception) -> bool:
     return any(token in message for token in fatal_tokens)
 
 
+def _fb_driver_has_auth_cookie(driver) -> Optional[bool]:
+    """
+    Best-effort c_user probe that avoids navigating to Facebook.
+    Returns True when authenticated state is confirmed, False when the cookie
+    is definitely absent, and None when the driver cannot report cookie state.
+    """
+    if driver is None:
+        return False
+    try:
+        cookie = driver.get_cookie("c_user")
+        if cookie:
+            return True
+    except Exception as exc:
+        if _fb_exception_is_fatal_session(exc):
+            raise
+    try:
+        payload = driver.execute_cdp_cmd("Storage.getCookies", {})
+    except Exception as exc:
+        if _fb_exception_is_fatal_session(exc):
+            raise
+        return None
+    cookies = payload.get("cookies", []) if isinstance(payload, dict) else []
+    for cookie in cookies:
+        if cell_to_str(cookie.get("name")) != "c_user":
+            continue
+        domain = cell_to_str(cookie.get("domain")).lower().lstrip(".")
+        if domain == "facebook.com" or domain.endswith(".facebook.com"):
+            return True
+    return False
+
+
 def _classify_fb_auth_surface(current_url: str, page_source: str) -> str:
     current_url = cell_to_str(current_url).lower()
     page_source = cell_to_str(page_source).lower()
@@ -5734,7 +5765,13 @@ class CrossDirectoryEnricherWorker(QThread):
                         except Exception:
                             pass
                         self._ensure_fb_discovery_session(fb_driver, force=True)
+                    else:
+                        auth_cookie_state = _fb_driver_has_auth_cookie(fb_driver)
+                        if auth_cookie_state is False:
+                            self._disable_fb_discovery_for_run("not_authenticated")
                 except Exception as exc:
+                    if _fb_exception_is_fatal_session(exc):
+                        self._disable_fb_discovery_for_run("session_invalid", session_invalid=True)
                     _safe_log(
                         self.log_message.emit,
                         "[FB Enrich] Failed to start Facebook driver: %s",
@@ -6042,8 +6079,13 @@ class CrossDirectoryEnricherWorker(QThread):
         self._fb_session_auth_checked = True
         self._fb_session_auth_reason = reason
         if is_authenticated:
+            should_log_authenticated = not self._fb_session_authenticated
             self._fb_session_authenticated = True
             self._fb_session_invalid = False
+            if should_log_authenticated:
+                self.log_message.emit(
+                    "[FB Discover] Shared Facebook session authenticated; discovery enabled for this run."
+                )
             return True, "authenticated"
         if reason == "session_invalid":
             reason = self._disable_fb_discovery_for_run(reason, session_invalid=True)
