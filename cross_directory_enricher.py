@@ -5566,6 +5566,8 @@ class CrossDirectoryEnricherWorker(QThread):
         self._fb_discovery_disable_logged: bool = False
         self._fb_session_auth_checked: bool = False
         self._fb_session_authenticated: bool = False
+        self._initial_fb_session_warmup_complete: bool = False
+        self._fb_session_warmup_complete: bool = False
         self._fb_session_auth_reason: str = ""
         self._fb_session_invalid: bool = False
         self._spotify_discovery_attempted_rows: Set[Any] = set()
@@ -5727,6 +5729,7 @@ class CrossDirectoryEnricherWorker(QThread):
         self._fb_discovery_disable_logged = False
         self._fb_session_auth_checked = False
         self._fb_session_authenticated = False
+        self._fb_session_warmup_complete = bool(getattr(self, "_initial_fb_session_warmup_complete", False))
         self._fb_session_auth_reason = ""
         self._fb_session_invalid = False
         self._spotify_discovery_attempted_rows = set()
@@ -6067,6 +6070,10 @@ class CrossDirectoryEnricherWorker(QThread):
             return False, reason
         if self._fb_session_auth_checked and not force:
             if self._fb_session_authenticated:
+                if not self._fb_session_warmup_complete:
+                    if not self._run_fb_session_warmup(fb_driver):
+                        reason = self._fb_discovery_disabled_reason or self._fb_session_auth_reason or "session_invalid"
+                        return False, reason
                 return True, "authenticated"
             reason = self._fb_discovery_disabled_reason or self._fb_session_auth_reason or "not_authenticated"
             self._disable_fb_discovery_for_run(reason, session_invalid=self._fb_session_invalid)
@@ -6086,12 +6093,40 @@ class CrossDirectoryEnricherWorker(QThread):
                 self.log_message.emit(
                     "[FB Discover] Shared Facebook session authenticated; discovery enabled for this run."
                 )
+            if not self._fb_session_warmup_complete:
+                if not self._run_fb_session_warmup(fb_driver):
+                    reason = self._fb_discovery_disabled_reason or self._fb_session_auth_reason or "session_invalid"
+                    return False, reason
             return True, "authenticated"
         if reason == "session_invalid":
             reason = self._disable_fb_discovery_for_run(reason, session_invalid=True)
         else:
             reason = self._disable_fb_discovery_for_run(reason)
         return False, reason
+
+    def _run_fb_session_warmup(self, fb_driver) -> bool:
+        if not (ENABLE_FACEBOOK_ENRICHMENT and fb_driver):
+            return False
+        if self._fb_discovery_disabled or self._fb_session_invalid or not self._fb_session_authenticated:
+            return False
+        if self._fb_session_warmup_complete:
+            return True
+        self.log_message.emit("[FB Warmup] Running Facebook session warm-up")
+        try:
+            fb_driver.get("https://www.facebook.com/")
+            time.sleep(random.uniform(3.0, 6.0))
+            try:
+                fb_driver.execute_script("window.scrollBy(0, 180);")
+            except Exception as exc:
+                if _fb_exception_is_fatal_session(exc):
+                    raise
+            time.sleep(random.uniform(1.0, 2.0))
+        except Exception as exc:
+            if _fb_exception_is_fatal_session(exc):
+                self._disable_fb_discovery_for_run("session_invalid", session_invalid=True)
+                return False
+        self._fb_session_warmup_complete = True
+        return True
 
     def _handle_fb_session_failure(
         self,
@@ -7930,6 +7965,19 @@ class CrossDirectoryEnricherWorker(QThread):
                 decision = self._row_allows_heavy_enricher(seed_df.loc[row_idx], ctx, "facebook")
                 if not decision.allowed:
                     self._log_low_confidence_skip("fb", artist, decision)
+                    self._set_platform_state("facebook", "skipped")
+                    return False
+                fb_ready, fb_reason = self._ensure_fb_discovery_session(fb_driver)
+                if not fb_ready:
+                    self._set_fb_discovery_row_status(
+                        seed_df,
+                        row_idx,
+                        status="fb_discovery_disabled",
+                        reason=fb_reason,
+                    )
+                    self.log_message.emit(
+                        f"[FB Enrich] Skipping Facebook enrichment for '{artist}' (reason={fb_reason})."
+                    )
                     self._set_platform_state("facebook", "skipped")
                     return False
 
@@ -12779,6 +12827,7 @@ def run_cross_directory_enrichment(
     logger=None,
     night_mode: bool = False,
     yield_tracker: Optional[EnrichmentYieldTracker] = None,
+    state_source: Optional[Dict[str, Any]] = None,
     state_sink: Optional[Dict[str, Any]] = None,
 ) -> str:
     """
@@ -12812,6 +12861,8 @@ def run_cross_directory_enrichment(
         yield_tracker=yield_tracker,
     )
     worker.night_mode = bool(night_mode)
+    if isinstance(state_source, dict):
+        worker._initial_fb_session_warmup_complete = bool(state_source.get("fb_session_warmup_complete"))
 
     # Bypass Qt event loop by providing simple emit stubs.
     worker.log_message = type("obj", (), {"emit": _log})
@@ -12820,6 +12871,7 @@ def run_cross_directory_enrichment(
 
     worker._run_impl()
     if isinstance(state_sink, dict):
+        state_sink["fb_session_warmup_complete"] = bool(getattr(worker, "_fb_session_warmup_complete", False))
         state_sink["domain_profile_index"] = copy.deepcopy(getattr(worker, "_domain_profile_index", {}) or {})
         state_sink["domain_email_reuse_index"] = copy.deepcopy(getattr(worker, "_domain_email_reuse_index", {}) or {})
     return output_csv_path

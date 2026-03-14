@@ -1943,6 +1943,7 @@ def run_master_enrichment(
                         logger=logger,
                         night_mode=night_mode,
                         yield_tracker=yield_tracker,
+                        state_source=first_pass_state,
                         state_sink=second_pass_state,
                     )
                     _merge_festival_expansion_output(

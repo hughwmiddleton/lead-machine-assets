@@ -223,6 +223,56 @@ def test_run_master_enrichment_skips_second_pass_when_no_expansions(tmp_path, mo
     assert len(calls) == 1
 
 
+def test_run_master_enrichment_passes_fb_warmup_state_to_second_pass(tmp_path, monkeypatch):
+    seed_csv = tmp_path / "master_raw.csv"
+    output_csv = tmp_path / "master_enriched.csv"
+    pd.DataFrame([{"Artist Name": "Atlas Bloom", "Seed Priority": "festival"}]).to_csv(seed_csv, index=False)
+
+    second_pass_sources = []
+
+    def fake_run_cross_directory_enrichment(seed_path, output_path, **kwargs):
+        if kwargs.get("state_source") is not None:
+            second_pass_sources.append(dict(kwargs["state_source"]))
+        if kwargs.get("state_sink") is not None:
+            kwargs["state_sink"]["fb_session_warmup_complete"] = True
+        if not second_pass_sources:
+            pd.DataFrame([{"Artist Name": "Atlas Bloom", "Source Directory": "Bandcamp"}]).to_csv(output_path, index=False)
+            pd.DataFrame(
+                [
+                    {
+                        "Artist Name": "Solar Harbor",
+                        "Expansion Parent": "Atlas Bloom",
+                        "Expansion Origin": "bandcamp",
+                        "Discovery Tier": "festival_expansion",
+                    }
+                ]
+            ).to_csv(cde._festival_expansion_raw_path(output_path), index=False)
+        else:
+            pd.DataFrame(
+                [
+                    {
+                        "Artist Name": "Solar Harbor",
+                        "Source Directory": "Bandcamp",
+                        "Expansion Parent": "Atlas Bloom",
+                        "Expansion Origin": "bandcamp",
+                        "Discovery Tier": "festival_expansion",
+                    }
+                ]
+            ).to_csv(output_path, index=False)
+
+    monkeypatch.setattr(cde, "run_cross_directory_enrichment", fake_run_cross_directory_enrichment)
+
+    pipeline_runner.run_master_enrichment(
+        seed_csv.as_posix(),
+        output_csv.as_posix(),
+        logger=None,
+        enable_live_search=False,
+        bandcamp_csv_path="",
+    )
+
+    assert second_pass_sources == [{"fb_session_warmup_complete": True}]
+
+
 def test_enrichment_yield_tracker_counts_only_empty_to_non_empty_once_per_source_row():
     tracker = cde.EnrichmentYieldTracker()
 

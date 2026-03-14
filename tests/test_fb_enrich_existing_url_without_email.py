@@ -681,6 +681,85 @@ def test_ensure_fb_discovery_session_logs_authenticated_once(monkeypatch):
     assert len(logs) == log_count
 
 
+def test_ensure_fb_discovery_session_runs_warmup_once(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    worker._fb_session_auth_checked = False
+    worker._fb_session_authenticated = False
+    worker._fb_session_warmup_complete = False
+
+    class _Driver:
+        def __init__(self) -> None:
+            self.loaded_urls = []
+            self.scripts = []
+
+        def get(self, url):  # noqa: ANN001
+            self.loaded_urls.append(url)
+
+        def execute_script(self, script):  # noqa: ANN001
+            self.scripts.append(script)
+
+    driver = _Driver()
+    sleep_calls = []
+
+    monkeypatch.setattr(cde, "_probe_fb_session_state", lambda driver, visit_home: (True, "authenticated"))
+    monkeypatch.setattr(cde.time, "sleep", lambda seconds: sleep_calls.append(seconds))
+
+    def fake_uniform(low, high):
+        if (low, high) == (3.0, 6.0):
+            return 3.5
+        if (low, high) == (1.0, 2.0):
+            return 1.5
+        raise AssertionError(f"unexpected range: {(low, high)}")
+
+    monkeypatch.setattr(cde.random, "uniform", fake_uniform)
+
+    assert worker._ensure_fb_discovery_session(driver) == (True, "authenticated")
+    assert worker._ensure_fb_discovery_session(driver) == (True, "authenticated")
+
+    assert worker._fb_session_warmup_complete is True
+    assert driver.loaded_urls == ["https://www.facebook.com/"]
+    assert driver.scripts == ["window.scrollBy(0, 180);"]
+    assert sleep_calls == [3.5, 1.5]
+    assert logs.count("[FB Warmup] Running Facebook session warm-up") == 1
+
+
+def test_fb_enrich_explicit_url_routes_through_fb_session_gate(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Warmup Gate",
+            "Email": "",
+            "Email_All": "",
+            "facebook_url": "https://www.facebook.com/warmupgate",
+            "Facebook_URL": "https://www.facebook.com/warmupgate",
+            "Social Link": "",
+            "External Links": "",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    driver = object()
+    gate_calls = []
+
+    monkeypatch.setattr(
+        worker,
+        "_ensure_fb_discovery_session",
+        lambda fb_driver, force=False: gate_calls.append((fb_driver, force)) or (True, "authenticated"),
+    )
+    monkeypatch.setattr(
+        cde,
+        "_extract_fb_emails_bounded",
+        lambda fb_driver, url, log_fn=None: (["fb@example.com"], url, ""),
+    )
+
+    assert worker._enrich_row_facebook(seed_df, 0, driver, ctx) is True
+    assert gate_calls == [(driver, False)]
+
+
 def test_run_impl_disables_fb_discovery_when_auth_cookie_missing(tmp_path, monkeypatch):
     logs = []
     seed_csv = tmp_path / "missing.csv"
