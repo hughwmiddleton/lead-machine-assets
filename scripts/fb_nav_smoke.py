@@ -35,9 +35,12 @@ def print_location(label: str, driver: webdriver.Chrome) -> None:
     print(f"{label} TITLE: {driver.title}", flush=True)
 
 
-def print_search_location(driver: webdriver.Chrome) -> None:
-    print(f"SEARCH URL AFTER LOAD: {driver.current_url}", flush=True)
-    print(f"SEARCH TITLE: {driver.title}", flush=True)
+def wait_for_settle(seconds: int = 2) -> None:
+    time.sleep(seconds)
+
+
+def prompt_continue(message: str) -> None:
+    input(f"{message}\nPress Enter to continue...")
 
 
 def main() -> int:
@@ -60,23 +63,54 @@ def main() -> int:
 
         print("[1] Opening Facebook home...", flush=True)
         driver.get("https://www.facebook.com/")
-        time.sleep(8)
-        print_location("HOME", driver)
+        wait_for_settle(3)
+        print_location("HOME_INITIAL", driver)
+        print(flush=True)
+
+        prompt_continue(
+            "Log into Facebook if needed.\n"
+            "If Facebook shows a captcha, checkpoint, or verification flow, finish that now.\n"
+            "Once the page is in the state you want to inspect, continue."
+        )
+
+        wait_for_settle(2)
+        print_location("HOME_READY", driver)
         save_screenshot(driver, "fb_home.png")
+        print("Saved screenshot: fb_home.png", flush=True)
         print(flush=True)
 
         print("[2] Opening known page...", flush=True)
         driver.get("https://www.facebook.com/facebook")
-        time.sleep(6)
-        print_location("KNOWN", driver)
+        wait_for_settle(4)
+        print_location("KNOWN_INITIAL", driver)
+        print(flush=True)
+
+        prompt_continue(
+            "Inspect the known page.\n"
+            "If Facebook redirected, partially loaded, or asked for more verification, resolve that now."
+        )
+
+        wait_for_settle(2)
+        print_location("KNOWN_READY", driver)
         save_screenshot(driver, "fb_known_page.png")
+        print("Saved screenshot: fb_known_page.png", flush=True)
         print(flush=True)
 
         print("[3] Opening search route...", flush=True)
         driver.get(search_url)
-        time.sleep(10)
-        print_search_location(driver)
+        wait_for_settle(5)
+        print_location("SEARCH_INITIAL", driver)
+        print(flush=True)
+
+        prompt_continue(
+            "Inspect the search route.\n"
+            "Wait for results, redirects, login walls, Not Found pages, or checkpoints to fully appear before continuing."
+        )
+
+        wait_for_settle(2)
+        print_location("SEARCH_READY", driver)
         save_screenshot(driver, "fb_search.png")
+        print("Saved screenshot: fb_search.png", flush=True)
         print(flush=True)
 
         print("Screenshots saved:", flush=True)
@@ -85,7 +119,7 @@ def main() -> int:
         print("fb_search.png", flush=True)
         print(flush=True)
 
-        input("Inspect browser, then press Enter to quit...")
+        input("Final inspection complete. Press Enter to quit...")
         return 0
     finally:
         if driver is not None:
