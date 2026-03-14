@@ -167,6 +167,62 @@ def test_probe_night_fb_session_decision_keeps_strong_checkpoint_html_distinct(m
     assert decision.checkpointed is True
 
 
+def test_probe_night_fb_session_decision_ignores_weak_captcha_html_when_authenticated():
+    driver = _ProbeDriver(
+        current_url="https://www.facebook.com/",
+        page_source="<html><body>captcha</body></html>",
+        c_user=True,
+    )
+
+    decision = nmfb.probe_night_fb_session_decision(driver, visit_home=False)
+
+    assert decision.state == "authenticated_and_usable"
+    assert decision.reason == "authenticated"
+    assert decision.authenticated is True
+    assert decision.usable is True
+    assert decision.checkpointed is False
+
+
+def test_probe_night_fb_session_decision_rechecks_transient_html_only_captcha(monkeypatch):
+    monkeypatch.setattr(nmfb.time, "sleep", lambda *_args, **_kwargs: None)
+    driver = _SequenceProbeDriver(
+        current_urls=["https://www.facebook.com/", "https://www.facebook.com/"],
+        page_sources=[
+            "<html><body>Help us confirm this login with a captcha challenge</body></html>",
+            "<html><body>News Feed</body></html>",
+        ],
+        c_user=True,
+    )
+
+    decision = nmfb.probe_night_fb_session_decision(driver, visit_home=False)
+
+    assert decision.state == "authenticated_and_usable"
+    assert decision.reason == "authenticated"
+    assert decision.authenticated is True
+    assert decision.usable is True
+    assert decision.checkpointed is False
+
+
+def test_probe_night_fb_session_decision_keeps_strong_captcha_html_distinct(monkeypatch):
+    monkeypatch.setattr(nmfb.time, "sleep", lambda *_args, **_kwargs: None)
+    driver = _SequenceProbeDriver(
+        current_urls=["https://www.facebook.com/", "https://www.facebook.com/"],
+        page_sources=[
+            "<html><body>Help us confirm this login with a captcha challenge</body></html>",
+            "<html><body>Help us confirm this login with a captcha challenge</body></html>",
+        ],
+        c_user=True,
+    )
+
+    decision = nmfb.probe_night_fb_session_decision(driver, visit_home=False)
+
+    assert decision.state == "disabled_for_run"
+    assert decision.reason == "captcha"
+    assert decision.authenticated is True
+    assert decision.usable is False
+    assert decision.checkpointed is False
+
+
 def test_probe_night_fb_session_decision_ignores_weak_consent_html_when_authenticated():
     driver = _ProbeDriver(
         current_url="https://www.facebook.com/",

@@ -229,3 +229,42 @@ def test_nightmode_fb_pass_respects_prior_run_disable(monkeypatch, tmp_path):
     assert df_out.loc[0, "FB_Status"] == ""
     assert status.completed is True
     assert status.total_rows == 1
+
+
+def test_nightmode_fb_pass_session_gate_logs_true_disable_reason(monkeypatch, tmp_path):
+    input_csv = tmp_path / "master_pre_fb.csv"
+    output_csv = tmp_path / "master_post_fb.csv"
+    state_path = tmp_path / "fb_state.json"
+    pd.DataFrame(
+        [
+            {
+                "Artist Name": "Has FB URL",
+                "Email": "",
+                "Email_All": "",
+                "Social Link": "",
+                "Facebook_URL": "https://facebook.com/hasfb",
+            }
+        ]
+    ).to_csv(input_csv, index=False)
+
+    run_state = nmfb.create_night_fb_run_state("profile_session", "profile_session")
+    nmfb.disable_night_fb_run_state(run_state, "captcha")
+    logs = []
+
+    monkeypatch.setattr(pipeline_runner, "_load_fb_state", lambda _: {})
+    monkeypatch.setattr(pipeline_runner, "_write_fb_state", lambda *args, **kwargs: None)
+
+    pipeline_runner.run_facebook_global_pass_nightmode(
+        input_csv=input_csv.as_posix(),
+        output_csv=output_csv.as_posix(),
+        state_path=state_path.as_posix(),
+        skip_rows_with_email=False,
+        night_fb_run_state=run_state,
+        logger=logs.append,
+    )
+
+    session_gate_logs = [msg for msg in logs if "[Night FB][Session Gate]" in msg]
+
+    assert session_gate_logs
+    assert any("reason=captcha" in msg for msg in session_gate_logs)
+    assert all("reason=profile_session" not in msg for msg in session_gate_logs)

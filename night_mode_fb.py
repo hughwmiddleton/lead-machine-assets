@@ -2637,7 +2637,12 @@ def _classify_fb_auth_surface_from_page(current_url: str, page_source: str) -> s
         (("log in to facebook",), "redirect_login"),
         (("email or phone", "password"), "redirect_login"),
         (("two-factor",), "two_factor"),
-        (("captcha",), "captcha"),
+        (("help us confirm", "captcha"), "captcha"),
+        (("complete the captcha",), "captcha"),
+        (("verify you are human",), "captcha"),
+        (("enter the characters you see",), "captcha"),
+        (("i'm not a robot",), "captcha"),
+        (("i’m not a robot",), "captcha"),
     )
     for tokens, reason in html_reason_patterns:
         if _page_contains_all(page_source, tokens):

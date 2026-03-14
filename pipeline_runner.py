@@ -2654,6 +2654,11 @@ def run_facebook_global_pass_nightmode(
         if night_fb_run_state.disabled_for_run
         else ("probe_pending" if night_fb_session_source.can_probe else "disabled_for_run")
     )
+    session_gate_reason = (
+        night_fb_run_state.disable_reason
+        if night_fb_run_state.disabled_for_run and night_fb_run_state.disable_reason
+        else night_fb_session_source.reason
+    )
     profile_suffix = (
         f" profile_dir={night_fb_session_source.profile_dir}"
         if night_fb_session_source.profile_dir
@@ -2661,7 +2666,7 @@ def run_facebook_global_pass_nightmode(
     )
     _safe_log_console(
         logger,
-        f"[Night FB][Session Gate] source={source_label} decision={decision_label} reason={night_fb_session_source.reason}{profile_suffix}",
+        f"[Night FB][Session Gate] source={source_label} decision={decision_label} reason={session_gate_reason}{profile_suffix}",
     )
 
     # Always start from the full input to avoid losing rows when smoke caps are used.
