@@ -20,6 +20,12 @@ def _build_worker(tmp_path):
         max_live_searches=0,
     )
     worker.log_message = SimpleNamespace(emit=lambda msg: None)
+    worker._fb_session_auth_checked = True
+    worker._fb_session_authenticated = True
+    worker._fb_session_auth_reason = "authenticated"
+    worker._fb_session_invalid = False
+    worker._fb_discovery_disabled = False
+    worker._fb_discovery_disabled_reason = ""
     return worker
 
 

@@ -14,6 +14,12 @@ def _make_worker(logs):
     worker.progress = SimpleNamespace(emit=lambda *args, **kwargs: None)
     worker._set_platform_state = lambda *args, **kwargs: None
     worker._platform_attempt_allowed = lambda *args, **kwargs: True
+    worker._fb_session_auth_checked = True
+    worker._fb_session_authenticated = True
+    worker._fb_session_auth_reason = "authenticated"
+    worker._fb_session_invalid = False
+    worker._fb_discovery_disabled = False
+    worker._fb_discovery_disabled_reason = ""
     return worker
 
 
@@ -30,12 +36,20 @@ def test_discover_facebook_url_bounded_requires_strong_candidate(monkeypatch):
 
     monkeypatch.setattr(cde, "FacebookSearchClient", lambda driver, logger: _DummyClient())
 
-    def fake_find_best_page(artist_name, location, fb_client, logger, require_strong_candidate=False):
+    def fake_find_best_page(
+        artist_name,
+        location,
+        fb_client,
+        logger,
+        require_strong_candidate=False,
+        skip_login_check=False,
+    ):
         calls.append(
             {
                 "artist_name": artist_name,
                 "location": location,
                 "require_strong_candidate": require_strong_candidate,
+                "skip_login_check": skip_login_check,
             }
         )
         return "https://www.facebook.com/strongband"
@@ -50,6 +64,7 @@ def test_discover_facebook_url_bounded_requires_strong_candidate(monkeypatch):
             "artist_name": "The Midnight Echo",
             "location": "",
             "require_strong_candidate": True,
+            "skip_login_check": True,
         }
     ]
 
@@ -484,7 +499,7 @@ def test_discovery_fail_locks_future_retry_but_preserves_no_fb_url_status(monkey
     assert second is False
     assert discover_calls == ["Locked Miss"]
     assert seed_df.at[0, "FB_Status"] == "no_fb_url"
-    assert any("locking fb discovery for this run" in msg.lower() for msg in logs)
+    assert any("row will not retry discovery this run" in msg.lower() for msg in logs)
     assert any("already attempted this run" in msg.lower() for msg in logs)
 
 
@@ -607,6 +622,104 @@ def test_fb_discovery_lock_does_not_leak_across_worker_runs(monkeypatch):
     assert len(discover_calls) == 2
     assert worker_one._fb_discovery_attempted_rows == {0}
     assert worker_two._fb_discovery_attempted_rows == {0}
+
+
+def test_fb_discovery_skips_when_shared_session_not_authenticated(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    worker._fb_session_auth_checked = False
+    worker._fb_session_authenticated = False
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Needs Auth",
+            "Email": "",
+            "Email_All": "",
+            "facebook_url": "",
+            "Facebook_URL": "",
+            "Social Link": "",
+            "External Links": "",
+            "FB_Status": "",
+            "FB_Reason": "",
+            "Location": "",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+
+    monkeypatch.setattr(cde, "_probe_fb_session_state", lambda driver, visit_home: (False, "redirect_login"))
+
+    discover_calls = []
+    monkeypatch.setattr(
+        cde,
+        "_discover_facebook_url_bounded",
+        lambda *args, **kwargs: discover_calls.append(args) or "https://www.facebook.com/should-not-run",
+    )
+
+    matched = worker._discover_facebook_identity(seed_df, 0, object(), ctx)
+
+    assert matched is False
+    assert discover_calls == []
+    assert worker._fb_discovery_disabled is True
+    assert worker._fb_discovery_disabled_reason == "redirect_login"
+    assert seed_df.at[0, "FB_Status"] == "fb_discovery_disabled"
+    assert seed_df.at[0, "FB_Reason"] == "redirect_login"
+
+
+def test_fb_discovery_disables_remaining_run_after_invalid_session(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    worker._fb_session_auth_checked = False
+    worker._fb_session_authenticated = False
+    seed_df = pd.DataFrame(
+        [
+            {
+                "Artist Name": "Dead Session A",
+                "Email": "",
+                "Email_All": "",
+                "facebook_url": "",
+                "Facebook_URL": "",
+                "Social Link": "",
+                "External Links": "",
+                "FB_Status": "",
+                "FB_Reason": "",
+                "Location": "",
+            },
+            {
+                "Artist Name": "Dead Session B",
+                "Email": "",
+                "Email_All": "",
+                "facebook_url": "",
+                "Facebook_URL": "",
+                "Social Link": "",
+                "External Links": "",
+                "FB_Status": "",
+                "FB_Reason": "",
+                "Location": "",
+            },
+        ],
+        dtype=str,
+    ).fillna("")
+    ctx_one = worker._build_row_context(seed_df, 0, 1, 2)
+    ctx_two = worker._build_row_context(seed_df, 1, 2, 2)
+
+    monkeypatch.setattr(cde, "_probe_fb_session_state", lambda driver, visit_home: (True, "authenticated"))
+
+    discover_calls = {"count": 0}
+
+    def _raise_invalid_session(*args, **kwargs):
+        discover_calls["count"] += 1
+        raise cde.InvalidSessionIdException("invalid session id")
+
+    monkeypatch.setattr(cde, "_discover_facebook_url_bounded", _raise_invalid_session)
+
+    assert worker._discover_facebook_identity(seed_df, 0, object(), ctx_one) is False
+    assert worker._discover_facebook_identity(seed_df, 1, object(), ctx_two) is False
+    assert discover_calls["count"] == 1
+    assert worker._fb_discovery_disabled is True
+    assert worker._fb_session_invalid is True
+    assert seed_df.at[0, "FB_Status"] == "fb_discovery_disabled"
+    assert seed_df.at[0, "FB_Reason"] == "session_invalid"
+    assert seed_df.at[1, "FB_Status"] == "fb_discovery_disabled"
+    assert seed_df.at[1, "FB_Reason"] == "session_invalid"
 
 
 def test_phase_facebook_reuses_indexed_domain_email_without_second_scrape(monkeypatch):
@@ -1187,7 +1300,14 @@ def test_fb_enrich_rejects_invalid_discovered_candidate(monkeypatch):
     )
     ctx = worker._build_row_context(seed_df, 0, 1, 1)
 
-    def fake_find_best_page(artist_name, location, fb_client, logger, require_strong_candidate=False):
+    def fake_find_best_page(
+        artist_name,
+        location,
+        fb_client,
+        logger,
+        require_strong_candidate=False,
+        skip_login_check=False,
+    ):
         return "https://www.facebook.com/share.php?u=bad"
 
     def fail_extract(*args, **kwargs):

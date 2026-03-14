@@ -37,6 +37,7 @@ from source_scheduler import (
 )
 from html_fetcher import fetch_html, _detect_soft_block
 from selenium import webdriver
+from selenium.common.exceptions import InvalidSessionIdException
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service as ChromeService
 from rapidfuzz import fuzz
@@ -1112,6 +1113,94 @@ def _cleanup_enricher_facebook_driver():
             except Exception:
                 pass
             _FB_DRIVER = None
+
+
+def _fb_exception_is_fatal_session(exc: Exception) -> bool:
+    if isinstance(exc, InvalidSessionIdException):
+        return True
+    message = cell_to_str(exc).lower()
+    fatal_tokens = (
+        "invalid session id",
+        "disconnected",
+        "not connected to devtools",
+        "chrome not reachable",
+        "target window already closed",
+        "no such window",
+        "web view not found",
+        "session deleted because of page crash",
+        "browser has disconnected",
+    )
+    return any(token in message for token in fatal_tokens)
+
+
+def _classify_fb_auth_surface(current_url: str, page_source: str) -> str:
+    current_url = cell_to_str(current_url).lower()
+    page_source = cell_to_str(page_source).lower()
+    if _is_fb_login_or_security_url(current_url):
+        if "checkpoint" in current_url:
+            return "checkpoint"
+        if "security" in current_url:
+            return "security"
+        return "redirect_login"
+    for token, reason in (
+        ("checkpoint", "checkpoint"),
+        ("consent", "consent"),
+        ("recover", "recover"),
+        ("two_factor", "two_factor"),
+        ("two-factor", "two_factor"),
+        ("mfa", "two_factor"),
+        ("login", "redirect_login"),
+        ("register", "redirect_login"),
+    ):
+        if token in current_url:
+            return reason
+    for token, reason in (
+        ("checkpoint", "checkpoint"),
+        ("consent", "consent"),
+        ("security check", "checkpoint"),
+        ("two-factor", "two_factor"),
+        ("captcha", "captcha"),
+    ):
+        if token in page_source:
+            return reason
+    if "log in" in page_source and "facebook" in page_source:
+        return "redirect_login"
+    return ""
+
+
+def _probe_fb_session_state(driver, *, visit_home: bool) -> Tuple[bool, str]:
+    if driver is None:
+        return False, "no_driver"
+    try:
+        if visit_home:
+            driver.get("https://www.facebook.com/")
+    except Exception as exc:
+        if _fb_exception_is_fatal_session(exc):
+            return False, "session_invalid"
+        return False, "driver_error"
+    try:
+        current_url = getattr(driver, "current_url", "") or ""
+    except Exception as exc:
+        if _fb_exception_is_fatal_session(exc):
+            return False, "session_invalid"
+        current_url = ""
+    try:
+        page_source = getattr(driver, "page_source", "") or ""
+    except Exception as exc:
+        if _fb_exception_is_fatal_session(exc):
+            return False, "session_invalid"
+        page_source = ""
+    reason = _classify_fb_auth_surface(current_url, page_source)
+    if reason:
+        return False, reason
+    try:
+        if driver.get_cookie("c_user"):
+            return True, "authenticated"
+    except Exception as exc:
+        if _fb_exception_is_fatal_session(exc):
+            return False, "session_invalid"
+        return False, "driver_error"
+    return False, "not_authenticated"
 
 
 def _is_music_related_facebook_candidate(
@@ -2395,6 +2484,8 @@ def _extract_fb_emails_bounded(fb_driver, fb_url: str, log_fn=None) -> tuple[lis
             found, _ = _extract_emails_from_html(html)
             return (found, resolved_url, html)
         except Exception as exc:  # pragma: no cover - defensive
+            if _fb_exception_is_fatal_session(exc):
+                raise
             last_reason = "fetch_error"
             _log(f"[FB Enrich] Error fetching FB page '{target_fetch}': {exc}")
             return ([], target_fetch, "")
@@ -2613,6 +2704,8 @@ class FacebookSearchClient:
         try:
             self.driver.get("https://www.facebook.com/")
         except Exception as exc:
+            if _fb_exception_is_fatal_session(exc):
+                raise
             _safe_log(self.logger, "[FB Enrich] Could not open facebook.com: %s", exc)
             return False
 
@@ -2633,6 +2726,8 @@ class FacebookSearchClient:
                 if self._is_logged_in():
                     return True
             except Exception as exc:
+                if _fb_exception_is_fatal_session(exc):
+                    raise
                 _safe_log(self.logger, "[FB Enrich] Failed to load FB cookies: %s", exc)
 
         # One-time manual login prompt
@@ -2645,6 +2740,8 @@ class FacebookSearchClient:
             try:
                 self.driver.get("https://www.facebook.com/")
             except Exception as exc:
+                if _fb_exception_is_fatal_session(exc):
+                    raise
                 _safe_log(self.logger, "[FB Enrich] Failed to open Facebook homepage: %s", exc)
                 return False
             try:
@@ -2681,6 +2778,8 @@ class FacebookSearchClient:
             try:
                 self.driver.get(search_url)
             except WebDriverException as exc:
+                if _fb_exception_is_fatal_session(exc):
+                    raise
                 _safe_log(
                     self.logger,
                     "[FB Enrich] WebDriver error while navigating FB for '%s': %s",
@@ -2722,6 +2821,7 @@ class FacebookSearchClient:
         location: Optional[str] = None,
         *,
         require_strong_candidate: bool = False,
+        skip_login_check: bool = False,
     ) -> Optional[str]:
         try:
             from selenium.webdriver.common.by import By
@@ -2731,7 +2831,7 @@ class FacebookSearchClient:
         except Exception as exc:
             _safe_log(self.logger, "[FB Enrich] Selenium imports unavailable: %s", exc)
             return None
-        if not self.ensure_facebook_logged_in():
+        if not skip_login_check and not self.ensure_facebook_logged_in():
             _safe_log(self.logger, "[FB Enrich] Facebook login not available, skipping.")
             return None
         query_parts = [cell_to_str(artist_name)]
@@ -3371,6 +3471,8 @@ class FacebookSearchClient:
                     )
                 return None
         except Exception as exc:
+            if _fb_exception_is_fatal_session(exc):
+                raise
             _safe_log(
                 self.logger,
                 "[FB Enrich] Failed to parse FB page '%s' for '%s': %s",
@@ -3583,6 +3685,7 @@ def facebook_find_best_page(
     logger,
     *,
     require_strong_candidate: bool = False,
+    skip_login_check: bool = False,
 ) -> Optional[str]:
     artist_name = cell_to_str(artist_name)
     location = cell_to_str(location)
@@ -3594,8 +3697,11 @@ def facebook_find_best_page(
             artist_name,
             location,
             require_strong_candidate=require_strong_candidate,
+            skip_login_check=skip_login_check,
         )
     except Exception as exc:
+        if _fb_exception_is_fatal_session(exc):
+            raise
         _safe_log(logger, "[FB Enrich] Facebook search client error for '%s': %s", artist_name, exc)
         return None
 
@@ -3618,6 +3724,7 @@ def _discover_facebook_url_bounded(fb_driver, artist_name: str, location: str, l
         fb_client,
         logger,
         require_strong_candidate=True,
+        skip_login_check=True,
     )
     canonical_fb_url = canonicalize_facebook_url(fb_url)
     if not canonical_fb_url:
@@ -5423,6 +5530,13 @@ class CrossDirectoryEnricherWorker(QThread):
         self._live_context: Dict[str, Any] = {}
         self._row_enrichment_state: Dict[str, str] = {}
         self._fb_discovery_attempted_rows: Set[Any] = set()
+        self._fb_discovery_disabled: bool = False
+        self._fb_discovery_disabled_reason: str = ""
+        self._fb_discovery_disable_logged: bool = False
+        self._fb_session_auth_checked: bool = False
+        self._fb_session_authenticated: bool = False
+        self._fb_session_auth_reason: str = ""
+        self._fb_session_invalid: bool = False
         self._spotify_discovery_attempted_rows: Set[Any] = set()
         self._spotify_identity_tier_rows: Set[Any] = set()
         self._spotify_identity_tier_counts: Counter = Counter()
@@ -5577,6 +5691,13 @@ class CrossDirectoryEnricherWorker(QThread):
         self._last_final_url = None
         self._last_resolved_profile_url = None
         self._fb_discovery_attempted_rows = set()
+        self._fb_discovery_disabled = False
+        self._fb_discovery_disabled_reason = ""
+        self._fb_discovery_disable_logged = False
+        self._fb_session_auth_checked = False
+        self._fb_session_authenticated = False
+        self._fb_session_auth_reason = ""
+        self._fb_session_invalid = False
         self._spotify_discovery_attempted_rows = set()
         self._spotify_identity_tier_rows = set()
         self._spotify_identity_tier_counts = Counter()
@@ -5597,29 +5718,22 @@ class CrossDirectoryEnricherWorker(QThread):
         try:
             if ENABLE_FACEBOOK_ENRICHMENT:
                 try:
-                    if not enricher_fb_profile_has_cookies():
-                        driver = None
-                        try:
-                            driver = persistent_fb_driver()
-                            try:
-                                driver.get("https://www.facebook.com/")
-                            except Exception:
-                                pass
-                            message = "[FB Enrich] Please manually log into Facebook in the opened window."
-                            _safe_log(self.log_message.emit, message)
-                            try:
-                                input("Press ENTER once logged in…")
-                            except EOFError:
-                                pass
-                            except Exception:
-                                pass
-                        finally:
-                            if driver:
-                                try:
-                                    driver.quit()
-                                except Exception:
-                                    pass
                     fb_driver = _get_enricher_facebook_driver()
+                    if not enricher_fb_profile_has_cookies():
+                        try:
+                            fb_driver.get("https://www.facebook.com/")
+                        except Exception as exc:
+                            if _fb_exception_is_fatal_session(exc):
+                                raise
+                        message = "[FB Enrich] Please manually log into Facebook in the opened window."
+                        _safe_log(self.log_message.emit, message)
+                        try:
+                            input("Press ENTER once logged in…")
+                        except EOFError:
+                            pass
+                        except Exception:
+                            pass
+                        self._ensure_fb_discovery_session(fb_driver, force=True)
                 except Exception as exc:
                     _safe_log(
                         self.log_message.emit,
@@ -5861,6 +5975,100 @@ class CrossDirectoryEnricherWorker(QThread):
         }
         self._sc_blocked_for_row = False
         self._last_bc_row_stats = {}
+
+    def _set_fb_discovery_row_status(
+        self,
+        seed_df: pd.DataFrame,
+        row_idx: Any,
+        *,
+        status: str,
+        reason: str,
+    ) -> None:
+        if "FB_Status" not in seed_df.columns:
+            seed_df["FB_Status"] = ""
+        if "FB_Reason" not in seed_df.columns:
+            seed_df["FB_Reason"] = ""
+        seed_df.at[row_idx, "FB_Status"] = status
+        seed_df.at[row_idx, "FB_Reason"] = reason
+
+    def _disable_fb_discovery_for_run(self, reason: str, *, session_invalid: bool = False) -> str:
+        reason_code = cell_to_str(reason) or ("session_invalid" if session_invalid else "not_authenticated")
+        previous_reason = self._fb_discovery_disabled_reason
+        self._fb_discovery_disabled = True
+        self._fb_discovery_disabled_reason = reason_code
+        self._fb_discovery_disable_logged = self._fb_discovery_disable_logged and previous_reason == reason_code
+        self._fb_session_auth_checked = True
+        self._fb_session_auth_reason = reason_code
+        self._fb_session_authenticated = False
+        if session_invalid:
+            self._fb_session_invalid = True
+        if not self._fb_discovery_disable_logged:
+            if session_invalid:
+                self.log_message.emit(
+                    f"[FB Discover] Shared Facebook session became invalid (reason={reason_code}); disabling FB discovery for the remainder of the run."
+                )
+            else:
+                self.log_message.emit(
+                    f"[FB Discover] Shared Facebook session is unavailable for discovery (reason={reason_code}); disabling FB discovery for the remainder of the run."
+                )
+            self._fb_discovery_disable_logged = True
+        return reason_code
+
+    def _ensure_fb_discovery_session(
+        self,
+        fb_driver,
+        *,
+        force: bool = False,
+    ) -> Tuple[bool, str]:
+        if not (ENABLE_FACEBOOK_ENRICHMENT and fb_driver):
+            return False, "no_driver"
+        if self._fb_discovery_disabled:
+            return False, self._fb_discovery_disabled_reason or "disabled"
+        if self._fb_session_invalid:
+            reason = self._fb_discovery_disabled_reason or "session_invalid"
+            self._disable_fb_discovery_for_run(reason, session_invalid=True)
+            return False, reason
+        if self._fb_session_auth_checked and not force:
+            if self._fb_session_authenticated:
+                return True, "authenticated"
+            reason = self._fb_discovery_disabled_reason or self._fb_session_auth_reason or "not_authenticated"
+            self._disable_fb_discovery_for_run(reason, session_invalid=self._fb_session_invalid)
+            return False, reason
+
+        is_authenticated, reason = _probe_fb_session_state(
+            fb_driver,
+            visit_home=force or not self._fb_session_auth_checked,
+        )
+        self._fb_session_auth_checked = True
+        self._fb_session_auth_reason = reason
+        if is_authenticated:
+            self._fb_session_authenticated = True
+            self._fb_session_invalid = False
+            return True, "authenticated"
+        if reason == "session_invalid":
+            reason = self._disable_fb_discovery_for_run(reason, session_invalid=True)
+        else:
+            reason = self._disable_fb_discovery_for_run(reason)
+        return False, reason
+
+    def _handle_fb_session_failure(
+        self,
+        seed_df: pd.DataFrame,
+        row_idx: Any,
+        artist: str,
+        exc: Exception,
+    ) -> bool:
+        if not _fb_exception_is_fatal_session(exc):
+            return False
+        reason = self._disable_fb_discovery_for_run("session_invalid", session_invalid=True)
+        self._set_fb_discovery_row_status(
+            seed_df,
+            row_idx,
+            status="fb_discovery_disabled",
+            reason=reason,
+        )
+        self.log_message.emit(f"[FB Discover] Skipping discovery for '{artist}' (reason={reason}).")
+        return True
 
     def _run_late_domain_email_backfill(self, seed_df: pd.DataFrame, total: int) -> Dict[str, int]:
         stats = {
@@ -7001,6 +7209,18 @@ class CrossDirectoryEnricherWorker(QThread):
         if not decision.allowed:
             self._log_low_confidence_skip("fb", artist, decision)
             return False
+        fb_ready, fb_reason = self._ensure_fb_discovery_session(fb_driver)
+        if not fb_ready:
+            self._set_fb_discovery_row_status(
+                seed_df,
+                row_idx,
+                status="fb_discovery_disabled",
+                reason=fb_reason,
+            )
+            self.log_message.emit(
+                f"[FB Discover] Skipping discovery for '{artist}' (reason={fb_reason})."
+            )
+            return False
 
         intake = classify_explicit_fb_intake(seed_df.loc[row_idx].to_dict())
         source_summary = ",".join(intake.source_fields[:2]) if intake.source_fields else "<none>"
@@ -7017,13 +7237,18 @@ class CrossDirectoryEnricherWorker(QThread):
             f"(explicit FB intake outcome='{intake.outcome}' source='{source_summary}' sample='{sample}')."
         )
         self._fb_discovery_attempted_rows.add(row_idx)
-        discovered_fb_url = _discover_facebook_url_bounded(
-            fb_driver, artist, location, self.log_message.emit
-        )
+        try:
+            discovered_fb_url = _discover_facebook_url_bounded(
+                fb_driver, artist, location, self.log_message.emit
+            )
+        except Exception as exc:
+            if self._handle_fb_session_failure(seed_df, row_idx, artist, exc):
+                return False
+            raise
         if not discovered_fb_url:
             self.log_message.emit(f"[FB Discover] No safe candidate found for '{artist}'")
             self.log_message.emit(
-                f"[FB Discover] Discovery failed for '{artist}'; locking FB discovery for this run"
+                f"[FB Discover] Discovery failed for '{artist}'; row will not retry discovery this run"
             )
             if "FB_Status" not in seed_df.columns:
                 seed_df["FB_Status"] = ""
@@ -7687,6 +7912,9 @@ class CrossDirectoryEnricherWorker(QThread):
                             if fb_status_reason in {"login_wall", "warning_interstitial", "checkpoint"}:
                                 break
                     except Exception as exc:  # pragma: no cover - defensive
+                        if self._handle_fb_session_failure(seed_df, row_idx, artist, exc):
+                            self._set_platform_state("facebook", "skipped")
+                            return False
                         self.log_message.emit(
                             f"[FB Enrich] Error enriching row {position}/{total} ({artist}): {exc}"
                         )
