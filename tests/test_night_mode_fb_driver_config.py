@@ -27,6 +27,34 @@ class _ProbeDriver:
         return None
 
 
+class _SequenceProbeDriver:
+    def __init__(self, current_urls, page_sources, c_user: bool) -> None:  # noqa: ANN001
+        self._current_urls = list(current_urls)
+        self._page_sources = list(page_sources)
+        self.c_user = c_user
+        self.loaded_urls = []
+
+    @property
+    def current_url(self):  # noqa: ANN201
+        if len(self._current_urls) > 1:
+            return self._current_urls.pop(0)
+        return self._current_urls[0]
+
+    @property
+    def page_source(self):  # noqa: ANN201
+        if len(self._page_sources) > 1:
+            return self._page_sources.pop(0)
+        return self._page_sources[0]
+
+    def get(self, url):  # noqa: ANN001
+        self.loaded_urls.append(url)
+
+    def get_cookie(self, name):  # noqa: ANN001
+        if name == "c_user" and self.c_user:
+            return {"name": "c_user", "value": "1"}
+        return None
+
+
 def test_create_fb_driver_night_mode_forces_images_on(monkeypatch):
     captured = {}
     sentinel_driver = _DummyDriver()
@@ -81,6 +109,77 @@ def test_probe_night_fb_session_decision_keeps_checkpoint_distinct():
     assert decision.authenticated is True
     assert decision.usable is False
     assert decision.checkpointed is True
+
+
+def test_probe_night_fb_session_decision_ignores_weak_checkpoint_html_when_authenticated():
+    driver = _ProbeDriver(
+        current_url="https://www.facebook.com/",
+        page_source="<html><body>checkpoint</body></html>",
+        c_user=True,
+    )
+
+    decision = nmfb.probe_night_fb_session_decision(driver, visit_home=False)
+
+    assert decision.state == "authenticated_and_usable"
+    assert decision.reason == "authenticated"
+    assert decision.authenticated is True
+    assert decision.usable is True
+    assert decision.checkpointed is False
+
+
+def test_probe_night_fb_session_decision_rechecks_transient_html_only_checkpoint(monkeypatch):
+    monkeypatch.setattr(nmfb.time, "sleep", lambda *_args, **_kwargs: None)
+    driver = _SequenceProbeDriver(
+        current_urls=["https://www.facebook.com/", "https://www.facebook.com/"],
+        page_sources=[
+            "<html><body>Security check in progress</body></html>",
+            "<html><body>News Feed</body></html>",
+        ],
+        c_user=True,
+    )
+
+    decision = nmfb.probe_night_fb_session_decision(driver, visit_home=False)
+
+    assert decision.state == "authenticated_and_usable"
+    assert decision.reason == "authenticated"
+    assert decision.authenticated is True
+    assert decision.usable is True
+    assert decision.checkpointed is False
+
+
+def test_probe_night_fb_session_decision_keeps_strong_checkpoint_html_distinct(monkeypatch):
+    monkeypatch.setattr(nmfb.time, "sleep", lambda *_args, **_kwargs: None)
+    driver = _SequenceProbeDriver(
+        current_urls=["https://www.facebook.com/", "https://www.facebook.com/"],
+        page_sources=[
+            "<html><body>Security check required</body></html>",
+            "<html><body>Security check required</body></html>",
+        ],
+        c_user=True,
+    )
+
+    decision = nmfb.probe_night_fb_session_decision(driver, visit_home=False)
+
+    assert decision.state == "authenticated_but_checkpointed"
+    assert decision.reason == "checkpoint"
+    assert decision.authenticated is True
+    assert decision.usable is False
+    assert decision.checkpointed is True
+
+
+def test_probe_night_fb_session_decision_detects_login_wall_from_html():
+    driver = _ProbeDriver(
+        current_url="https://www.facebook.com/",
+        page_source="<html><body>Log in to Facebook</body></html>",
+        c_user=False,
+    )
+
+    decision = nmfb.probe_night_fb_session_decision(driver, visit_home=False)
+
+    assert decision.state == "unauthenticated"
+    assert decision.reason == "redirect_login"
+    assert decision.authenticated is False
+    assert decision.usable is False
 
 
 def test_create_fb_driver_public_keeps_images_blocked(monkeypatch):

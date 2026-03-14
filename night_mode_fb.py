@@ -2538,6 +2538,14 @@ def probe_night_fb_session_decision(
             session_invalid=_is_session_death_exc(exc),
         )
     auth_surface = _classify_fb_auth_surface_from_page(current_url, page_source)
+    if authenticated and auth_surface and not _classify_fb_auth_surface_from_url(current_url):
+        try:
+            time.sleep(1.0)
+            current_url = (getattr(driver, "current_url", "") or "").lower()
+            page_source = (getattr(driver, "page_source", "") or "").lower()
+        except Exception:
+            pass
+        auth_surface = _classify_fb_auth_surface_from_page(current_url, page_source)
     return _build_night_fb_session_decision(
         authenticated=authenticated,
         reason=auth_surface,
@@ -2572,9 +2580,8 @@ def _is_driver_authenticated(driver) -> bool:
     return _has_cookie(driver, "c_user")
 
 
-def _classify_fb_auth_surface_from_page(current_url: str, page_source: str) -> str:
+def _classify_fb_auth_surface_from_url(current_url: str) -> str:
     current_url = (current_url or "").lower()
-    page_source = (page_source or "").lower()
     bad_url_tokens = (
         ("login", "redirect_login"),
         ("checkpoint", "checkpoint"),
@@ -2587,17 +2594,36 @@ def _classify_fb_auth_surface_from_page(current_url: str, page_source: str) -> s
     for token, reason in bad_url_tokens:
         if token in current_url:
             return reason
+    return ""
 
-    bad_html_tokens = (
-        ("checkpoint", "checkpoint"),
-        ("consent", "consent"),
-        ("log in", "redirect_login"),
-        ("two-factor", "two_factor"),
-        ("security check", "checkpoint"),
-        ("captcha", "captcha"),
+
+def _page_contains_all(text: str, tokens: Tuple[str, ...]) -> bool:
+    lower = (text or "").lower()
+    return all(token in lower for token in tokens)
+
+
+def _classify_fb_auth_surface_from_page(current_url: str, page_source: str) -> str:
+    url_reason = _classify_fb_auth_surface_from_url(current_url)
+    if url_reason:
+        return url_reason
+
+    page_source = (page_source or "").lower()
+    html_reason_patterns = (
+        (("security check",), "checkpoint"),
+        (("confirm it's you",), "checkpoint"),
+        (("confirm it’s you",), "checkpoint"),
+        (("review recent login",), "checkpoint"),
+        (("help us confirm", "account"), "checkpoint"),
+        (("checkpoint/",), "checkpoint"),
+        (("checkpoint?next",), "checkpoint"),
+        (("consent",), "consent"),
+        (("log in to facebook",), "redirect_login"),
+        (("email or phone", "password"), "redirect_login"),
+        (("two-factor",), "two_factor"),
+        (("captcha",), "captcha"),
     )
-    for token, reason in bad_html_tokens:
-        if token in page_source:
+    for tokens, reason in html_reason_patterns:
+        if _page_contains_all(page_source, tokens):
             return reason
 
     return ""
