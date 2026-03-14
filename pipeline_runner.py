@@ -2889,6 +2889,23 @@ def run_facebook_global_pass_nightmode(
             fb_status_val = fb_status_val_raw.lower()
 
             should_skip_due_to_email = _should_skip_row_due_to_email(row, skip_rows_with_email, logger)
+            terminal_statuses = {"no_candidates", "unearthed_no_emails"}
+            facebook_url_hint = str(row.get("Facebook_URL", "") or "").strip()
+            has_canonical_facebook_url = bool(canonicalize_facebook_url(facebook_url_hint))
+            final_fb_statuses = {"login_redirect", "no_candidates", "ok", "found"} | terminal_statuses
+            should_run_night_fb = (not has_email_effective) and (fb_status_val not in final_fb_statuses)
+            eligible_for_fb = bool(
+                has_canonical_facebook_url
+                and should_run_night_fb
+                and not should_skip_due_to_email
+                and fb_status_val not in terminal_statuses
+            )
+            _safe_log_console(
+                logger,
+                f"[Night FB][Row Gate] row={idx} artist={artist_label!r} "
+                f"email_present={has_email_effective} fb_url_present={has_canonical_facebook_url} "
+                f"eligible_for_fb={eligible_for_fb}",
+            )
 
             if should_skip_due_to_email:
                 _safe_log_console(
@@ -2908,7 +2925,6 @@ def run_facebook_global_pass_nightmode(
                 _write_state_with_pass_a(state)
                 continue
 
-            terminal_statuses = {"no_candidates", "unearthed_no_emails"}
             if fb_status_val in terminal_statuses:
                 _safe_log_console(
                     logger,
@@ -2927,10 +2943,6 @@ def run_facebook_global_pass_nightmode(
                 _write_state_with_pass_a(state)
                 continue
 
-            facebook_url_hint = str(row.get("Facebook_URL", "") or "").strip()
-            has_canonical_facebook_url = bool(canonicalize_facebook_url(facebook_url_hint))
-            final_fb_statuses = {"login_redirect", "no_candidates", "ok", "found"} | terminal_statuses
-            should_run_night_fb = (not has_email_effective) and (fb_status_val not in final_fb_statuses)
             if (
                 fb_status_val in final_fb_statuses
                 or not has_canonical_facebook_url

@@ -425,3 +425,82 @@ def test_guard_rejected_explicit_url_logs_reason(monkeypatch) -> None:
     assert result.get("FB_Status")
     assert any('[Night FB][Explicit Intake]' in msg and 'outcome="attempt"' in msg and 'guard_reason="shape_disallowed"' in msg for msg in logs)
     assert any('[Night FB][Explicit Guard]' in msg and 'reason="shape_disallowed"' in msg for msg in logs)
+
+
+def test_fetch_html_with_url_logs_healthy_page_health(monkeypatch) -> None:
+    logs = []
+    enricher = night_mode_fb.NightModeFacebookEnricher(
+        legacy_module=None,
+        username="",
+        password="",
+        logger=logs.append,
+        use_shared_session=False,
+    )
+
+    class _Session:
+        last_nav_timed_out = False
+
+        def navigate(self, url):  # noqa: ANN001
+            return type(
+                "_Driver",
+                (),
+                {
+                    "page_source": "<html><body>Artist page</body></html>",
+                    "current_url": url,
+                },
+            )()
+
+    monkeypatch.setattr(enricher, "_ensure_session", lambda: _Session())
+    monkeypatch.setattr(enricher, "_ensure_driver_alive", lambda session: session)
+
+    html, current_url = enricher._fetch_html_with_url("https://www.facebook.com/example", goto_about=False)
+
+    assert html
+    assert current_url == "https://www.facebook.com/example"
+    assert any(
+        "[Night FB][Health]" in msg
+        and "url=https://www.facebook.com/example" in msg
+        and "captcha=0" in msg
+        and "checkpoint=0" in msg
+        and "login_wall=0" in msg
+        for msg in logs
+    )
+
+
+def test_fetch_html_with_url_logs_login_wall_health(monkeypatch) -> None:
+    logs = []
+    enricher = night_mode_fb.NightModeFacebookEnricher(
+        legacy_module=None,
+        username="",
+        password="",
+        logger=logs.append,
+        use_shared_session=False,
+    )
+
+    class _Session:
+        last_nav_timed_out = False
+
+        def navigate(self, url):  # noqa: ANN001
+            return type(
+                "_Driver",
+                (),
+                {
+                    "page_source": "<html><body>Log in to Facebook</body></html>",
+                    "current_url": "https://www.facebook.com/login/?next=artist",
+                },
+            )()
+
+    monkeypatch.setattr(enricher, "_ensure_session", lambda: _Session())
+    monkeypatch.setattr(enricher, "_ensure_driver_alive", lambda session: session)
+    monkeypatch.setattr(enricher, "_refresh_driver", lambda session: None)
+
+    html, current_url = enricher._fetch_html_with_url("https://www.facebook.com/example", goto_about=False)
+
+    assert html is None
+    assert current_url == "https://www.facebook.com/login/?next=artist"
+    assert any(
+        "[Night FB][Health]" in msg
+        and "url=https://www.facebook.com/login/?next=artist" in msg
+        and "login_wall=1" in msg
+        for msg in logs
+    )

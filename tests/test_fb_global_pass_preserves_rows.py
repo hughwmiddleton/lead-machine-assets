@@ -268,3 +268,50 @@ def test_nightmode_fb_pass_session_gate_logs_true_disable_reason(monkeypatch, tm
     assert session_gate_logs
     assert any("reason=captcha" in msg for msg in session_gate_logs)
     assert all("reason=profile_session" not in msg for msg in session_gate_logs)
+
+
+def test_nightmode_fb_pass_logs_outer_row_gate(monkeypatch, tmp_path):
+    input_csv = tmp_path / "master_pre_fb.csv"
+    output_csv = tmp_path / "master_post_fb.csv"
+    state_path = tmp_path / "fb_state.json"
+    pd.DataFrame(
+        [
+            {
+                "Artist Name": "Skip Me",
+                "Email": "skip@example.com",
+                "Email_All": "skip@example.com",
+                "Social Link": "",
+                "Facebook_URL": "https://facebook.com/skipme",
+            },
+            {
+                "Artist Name": "Try Me",
+                "Email": "",
+                "Email_All": "",
+                "Social Link": "",
+                "Facebook_URL": "https://facebook.com/tryme",
+            },
+        ]
+    ).to_csv(input_csv, index=False)
+
+    helper = DummyFBHelper()
+    logs = []
+
+    monkeypatch.setenv("FB_USERNAME", "user")
+    monkeypatch.setenv("FB_PASSWORD", "pass")
+    monkeypatch.setattr(pipeline_runner, "NightModeFacebookEnricher", lambda *args, **kwargs: helper)
+    monkeypatch.setattr(pipeline_runner, "_load_legacy_module", _make_dummy_module)
+    monkeypatch.setattr(pipeline_runner, "_load_fb_state", lambda _: {})
+    monkeypatch.setattr(pipeline_runner, "_write_fb_state", lambda *args, **kwargs: None)
+
+    pipeline_runner.run_facebook_global_pass_nightmode(
+        input_csv=input_csv.as_posix(),
+        output_csv=output_csv.as_posix(),
+        state_path=state_path.as_posix(),
+        skip_rows_with_email=True,
+        logger=logs.append,
+    )
+
+    row_gate_logs = [msg for msg in logs if "[Night FB][Row Gate]" in msg]
+
+    assert any("row=0" in msg and "artist='Skip Me'" in msg and "email_present=True" in msg and "eligible_for_fb=False" in msg for msg in row_gate_logs)
+    assert any("row=1" in msg and "artist='Try Me'" in msg and "fb_url_present=True" in msg and "eligible_for_fb=True" in msg for msg in row_gate_logs)

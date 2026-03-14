@@ -2186,6 +2186,9 @@ class NightFBRunState:
     reusable: bool = False
     session_owner: str = ""
     session_warmup_complete: bool = False
+    trust_score: int = 0
+    search_disabled_for_run: bool = False
+    search_disable_reason: str = ""
 
 
 def _is_profile_session_sentinel(value: str) -> bool:
@@ -2439,6 +2442,18 @@ def disable_night_fb_run_state(
     return reason_code
 
 
+def disable_night_fb_search_run_state(
+    run_state: Optional[NightFBRunState],
+    reason: str,
+) -> str:
+    reason_code = str(reason or "").strip() or "session_unhealthy"
+    if run_state is None:
+        return reason_code
+    run_state.search_disabled_for_run = True
+    run_state.search_disable_reason = reason_code
+    return reason_code
+
+
 def close_night_fb_run_state(run_state: Optional[NightFBRunState]) -> None:
     if run_state is None:
         return
@@ -2451,6 +2466,32 @@ def close_night_fb_run_state(run_state: Optional[NightFBRunState]) -> None:
     run_state.authenticated = False
     run_state.reusable = False
     run_state.session_owner = ""
+
+
+def _night_fb_page_health_snapshot(
+    current_url: str,
+    page_html: Optional[str],
+    *,
+    search_miss_reason: str = "",
+    warning_reason: str = "",
+) -> Dict[str, Any]:
+    resolved_url = str(current_url or "").strip()
+    page_source = page_html or ""
+    auth_surface = _classify_fb_auth_surface_from_page(resolved_url, page_source)
+    warning = warning_reason or (_looks_like_fb_warning_or_block(page_source, resolved_url) or "")
+    captcha = auth_surface == "captcha"
+    checkpoint = auth_surface == "checkpoint"
+    login_wall = auth_surface in {"redirect_login", "recover", "two_factor", "consent"}
+    degraded_search = str(search_miss_reason or "").strip()
+    return {
+        "url": resolved_url,
+        "auth_surface": auth_surface,
+        "warning_reason": warning,
+        "search_miss_reason": degraded_search,
+        "captcha": captcha,
+        "checkpoint": checkpoint,
+        "login_wall": login_wall,
+    }
 
 
 def _build_night_fb_session_decision(
@@ -4977,6 +5018,7 @@ class NightModeFacebookEnricher:
                 atexit.register(self._emit_fb_url_flow_summary)
             except Exception:
                 pass
+        self._sync_search_disable_from_run_state()
 
         if (not self.headless) and self.require_display and _is_linux() and (not _display_env_present()):
             self._skip_fb_due_to_display = True
@@ -5054,6 +5096,133 @@ class NightModeFacebookEnricher:
             # Enter slow mode gently on first unhealthy detection.
             self._enter_slow_mode(reason or "session_unhealthy", max(self.slow_mode_multiplier, 1.5))
         return authed, unhealthy, reason
+
+    def _sync_search_disable_from_run_state(self) -> None:
+        if self._run_state is None:
+            return
+        if self._run_state.search_disabled_for_run:
+            self._search_disabled_due_to_checkpoint = True
+
+    def _current_trust_score(self) -> int:
+        if self._run_state is None:
+            return 0
+        try:
+            return int(getattr(self._run_state, "trust_score", 0) or 0)
+        except Exception:
+            return 0
+
+    def _set_trust_score(self, value: int) -> int:
+        if self._run_state is None:
+            return 0
+        try:
+            self._run_state.trust_score = int(value)
+        except Exception:
+            self._run_state.trust_score = 0
+        return int(self._run_state.trust_score or 0)
+
+    def _apply_trust_budget_health(
+        self,
+        health: Dict[str, Any],
+        *,
+        context: str,
+    ) -> None:
+        run_state = self._run_state
+        if run_state is None:
+            return
+
+        search_miss_reason = str(health.get("search_miss_reason") or "").strip()
+        auth_surface = str(health.get("auth_surface") or "").strip()
+        warning_reason = str(health.get("warning_reason") or "").strip()
+        delta = 0
+        event_reason = ""
+
+        if health.get("captcha") or auth_surface == "captcha":
+            delta = -3
+            event_reason = "captcha"
+        elif health.get("checkpoint") or auth_surface == "checkpoint":
+            delta = -3
+            event_reason = "checkpoint"
+        elif health.get("login_wall"):
+            delta = -2
+            event_reason = auth_surface or "login_wall"
+        elif warning_reason:
+            delta = -2
+            event_reason = warning_reason
+        elif search_miss_reason in {
+            "blank_html",
+            "dom_container_missing",
+            "overlay_zero_anchors",
+            "timeout_no_results",
+            "zero_anchors",
+            "zero_usable_hrefs",
+        }:
+            delta = -1
+            event_reason = search_miss_reason
+        elif self._current_trust_score() < 0:
+            delta = 1
+            event_reason = "healthy_page"
+
+        if delta == 0:
+            return
+
+        old_score = self._current_trust_score()
+        new_score = self._set_trust_score(old_score + delta)
+        action = ""
+
+        if new_score <= -5 and not run_state.disabled_for_run:
+            action = "disable_fb"
+            self._skip_fb_due_to_checkpoint = True
+            self._search_disabled_due_to_checkpoint = True
+            self.protective_shutdown = True
+            disable_night_fb_search_run_state(run_state, event_reason or "session_unhealthy")
+            disable_night_fb_run_state(
+                run_state,
+                event_reason or "session_unhealthy",
+                checkpointed=(event_reason == "checkpoint"),
+                session_unhealthy=True,
+            )
+        elif new_score <= -3 and not run_state.search_disabled_for_run:
+            action = "disable_search"
+            disable_night_fb_search_run_state(run_state, event_reason or "session_unhealthy")
+            self._search_disabled_due_to_checkpoint = True
+
+        self._sync_search_disable_from_run_state()
+        _log(
+            self.logger,
+            f"[Night FB][Trust Budget] score={new_score} delta={delta} reason={event_reason or 'unknown'} context={context}"
+            + (f" action={action}" if action else ""),
+        )
+
+    def _log_page_health(
+        self,
+        current_url: str,
+        page_html: Optional[str],
+        *,
+        context: str,
+        search_miss_reason: str = "",
+        warning_reason: str = "",
+    ) -> Dict[str, Any]:
+        health = _night_fb_page_health_snapshot(
+            current_url,
+            page_html,
+            search_miss_reason=search_miss_reason,
+            warning_reason=warning_reason,
+        )
+        parts = [
+            "[Night FB][Health]",
+            f"url={health.get('url') or '<unknown>'}",
+            f"captcha={1 if health.get('captcha') else 0}",
+            f"checkpoint={1 if health.get('checkpoint') else 0}",
+            f"login_wall={1 if health.get('login_wall') else 0}",
+        ]
+        if health.get("warning_reason"):
+            parts.append(f"warning={health.get('warning_reason')}")
+        if health.get("search_miss_reason"):
+            parts.append(f"search_miss={health.get('search_miss_reason')}")
+        parts.append(f"context={context}")
+        _log(self.logger, " ".join(parts))
+        self._apply_trust_budget_health(health, context=context)
+        return health
 
     def _log_session_state_once(self, session) -> None:
         if self._session_state_logged:
@@ -5348,6 +5517,7 @@ class NightModeFacebookEnricher:
             _log(self.logger, "[Night FB] Protective shutdown triggered by login wall; skipping FB for remainder of run.")
 
     def _ensure_session(self):
+        self._sync_search_disable_from_run_state()
         if self._session_failed:
             raise FacebookDriverError(self._session_failed_reason or "Facebook session previously failed.")
         if self.use_shared_session:
@@ -5617,6 +5787,13 @@ class NightModeFacebookEnricher:
                 raise FacebookDriverError(str(exc2))
 
         current_url = current_url or url
+        warning_reason = _looks_like_fb_warning_or_block(html, current_url)
+        self._log_page_health(
+            current_url,
+            html,
+            context="page",
+            warning_reason=warning_reason,
+        )
         if is_fb_login_redirect(current_url) or _is_fb_login_or_security_url(current_url):
             _log(self.logger, f"[Night FB] Ignoring login/redirect page: {current_url}")
             try:
@@ -5625,7 +5802,6 @@ class NightModeFacebookEnricher:
                 pass
             return None, current_url
 
-        warning_reason = _looks_like_fb_warning_or_block(html, current_url)
         if warning_reason:
             self._skip_fb_due_to_warning = True
             self._skip_fb_due_to_warning_reason = warning_reason
@@ -5665,6 +5841,7 @@ class NightModeFacebookEnricher:
                         pass
             time.sleep(1.0)
             current_url = getattr(driver, "current_url", None) or current_url or url
+            self._log_page_health(current_url, html, context="page")
             if is_fb_login_redirect(current_url) or _is_fb_login_or_security_url(current_url):
                 return None, current_url
             return driver.page_source, current_url
@@ -5713,6 +5890,7 @@ class NightModeFacebookEnricher:
         """
         if self._skip_fb_due_to_checkpoint:
             return False
+        self._sync_search_disable_from_run_state()
 
         reason = ""
         healthy = True
@@ -5816,7 +5994,7 @@ class NightModeFacebookEnricher:
 
             nav_fn = _nav_with_session if session else _nav_anon
             try:
-                return nav_fn()
+                html, driver, timed_out, current_url = nav_fn()
             except Exception as exc:  # pragma: no cover - defensive
                 _log(self.logger, f"[Night FB] Search navigation failed (will refresh session): {exc}")
                 if session:
@@ -5824,14 +6002,27 @@ class NightModeFacebookEnricher:
                         self._refresh_driver(session)
                     except FacebookDriverError as exc2:
                         raise exc2
-            nav_fn = _nav_with_session if session else _nav_anon
-            try:
-                return nav_fn()
-            except FacebookDriverError as exc2:
-                raise exc2
-            except Exception as exc2:  # pragma: no cover - defensive
-                _log(self.logger, f"[Night FB] Search navigation failed after refresh: {exc2}")
-                raise FacebookDriverError(str(exc2))
+                nav_fn = _nav_with_session if session else _nav_anon
+                try:
+                    html, driver, timed_out, current_url = nav_fn()
+                except FacebookDriverError as exc2:
+                    raise exc2
+                except Exception as exc2:  # pragma: no cover - defensive
+                    _log(self.logger, f"[Night FB] Search navigation failed after refresh: {exc2}")
+                    raise FacebookDriverError(str(exc2))
+            miss_reason = _fb_search_surface_miss_reason(
+                html,
+                driver=driver,
+                current_url=current_url,
+                timed_out=timed_out,
+            )
+            self._log_page_health(
+                current_url,
+                html,
+                context="search",
+                search_miss_reason=miss_reason,
+            )
+            return html, driver, timed_out, current_url
 
         if search_method == "homepage_ui":
             if session is None:
@@ -5846,11 +6037,24 @@ class NightModeFacebookEnricher:
                 logger=self.logger,
                 log_prefix="[Night FB]",
             )
+            miss_reason = _fb_search_surface_miss_reason(
+                html,
+                driver=driver,
+                current_url=current_url,
+                timed_out=timed_out,
+            )
+            self._log_page_health(
+                current_url,
+                html,
+                context="search",
+                search_miss_reason=miss_reason,
+            )
             return html, driver, timed_out, current_url
 
         raise ValueError(f"Unsupported search_method: {search_method}")
 
     def _search_for_page(self, artist: str, location: str, allow_anon: bool = False) -> Optional[str]:
+        self._sync_search_disable_from_run_state()
         self._last_selected_candidate_context = None
         self._last_search_candidates = []
         self._last_search_reject_reason = ""
@@ -5938,6 +6142,10 @@ class NightModeFacebookEnricher:
             search_method="direct_route",
             session=session,
         )
+        self._sync_search_disable_from_run_state()
+        if self._search_disabled_due_to_checkpoint:
+            _log(self.logger, "[Night FB] search disabled due to checkpoint; skipping FB search.")
+            return None
 
         # Optional self-check: confirm shared URL gate predicate.
         if _bool_env("FB_DEBUG_CAND_GATE_ASSERT", default=False):
@@ -6005,6 +6213,10 @@ class NightModeFacebookEnricher:
                     search_method="homepage_ui",
                     session=session,
                 )
+                self._sync_search_disable_from_run_state()
+                if self._search_disabled_due_to_checkpoint:
+                    _log(self.logger, "[Night FB] search disabled due to checkpoint; skipping FB search.")
+                    return None
                 candidates = _harvest_candidates(
                     html,
                     nav_driver,
@@ -6766,6 +6978,7 @@ class NightModeFacebookEnricher:
 
     def enrich_row_with_facebook_night(self, row: Dict[str, str], row_index: Optional[int] = None) -> Dict[str, str]:
         """Night-Mode-only FB enrichment for a single row."""
+        self._sync_search_disable_from_run_state()
         original_row = dict(row or {})
         result = dict(original_row)
         result["FB_Status"] = result.get("FB_Status", "") or ""
