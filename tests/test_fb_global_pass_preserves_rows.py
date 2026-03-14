@@ -1,6 +1,7 @@
 import os
 from types import SimpleNamespace
 
+import night_mode_fb as nmfb
 import pandas as pd
 import pipeline_runner
 
@@ -137,3 +138,94 @@ def test_fb_global_pass_preserves_rows_and_emails(monkeypatch, tmp_path):
 
     # Status object reflects that work happened but total rows equal input.
     assert status.total_rows == len(rows)
+
+
+def test_nightmode_fb_pass_allows_profile_backed_session_without_credentials(monkeypatch, tmp_path):
+    input_csv = tmp_path / "master_pre_fb.csv"
+    output_csv = tmp_path / "master_post_fb.csv"
+    state_path = tmp_path / "fb_state.json"
+    profile_dir = tmp_path / "night_fb_profile"
+    (profile_dir / "Default").mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "Artist Name": "Has FB URL",
+                "Email": "",
+                "Email_All": "",
+                "Social Link": "",
+                "Facebook_URL": "https://facebook.com/hasfb",
+            }
+        ]
+    ).to_csv(input_csv, index=False)
+
+    helper = DummyFBHelper()
+
+    monkeypatch.delenv("FB_USERNAME", raising=False)
+    monkeypatch.delenv("FB_PASSWORD", raising=False)
+    monkeypatch.setenv("NIGHT_FB_PROFILE_DIR", profile_dir.as_posix())
+    monkeypatch.setattr(pipeline_runner, "NightModeFacebookEnricher", lambda *args, **kwargs: helper)
+    monkeypatch.setattr(pipeline_runner, "_load_legacy_module", _make_dummy_module)
+    monkeypatch.setattr(pipeline_runner, "_load_fb_state", lambda _: {})
+    monkeypatch.setattr(pipeline_runner, "_write_fb_state", lambda *args, **kwargs: None)
+
+    status = pipeline_runner.run_facebook_global_pass_nightmode(
+        input_csv=input_csv.as_posix(),
+        output_csv=output_csv.as_posix(),
+        state_path=state_path.as_posix(),
+        skip_rows_with_email=False,
+    )
+
+    df_out = pd.read_csv(output_csv, dtype=str, keep_default_na=False).fillna("")
+
+    assert helper.calls == 1
+    assert df_out.loc[0, "FB_Status"] == "ok"
+    assert status.total_rows == 1
+
+
+def test_nightmode_fb_pass_respects_prior_run_disable(monkeypatch, tmp_path):
+    input_csv = tmp_path / "master_pre_fb.csv"
+    output_csv = tmp_path / "master_post_fb.csv"
+    state_path = tmp_path / "fb_state.json"
+    pd.DataFrame(
+        [
+            {
+                "Artist Name": "Has FB URL",
+                "Email": "",
+                "Email_All": "",
+                "Social Link": "",
+                "Facebook_URL": "https://facebook.com/hasfb",
+            }
+        ]
+    ).to_csv(input_csv, index=False)
+
+    run_state = nmfb.create_night_fb_run_state("user", "pass")
+    nmfb.disable_night_fb_run_state(
+        run_state,
+        "session_invalid",
+        session_invalid=True,
+    )
+    helper_calls = []
+
+    monkeypatch.setattr(
+        pipeline_runner,
+        "NightModeFacebookEnricher",
+        lambda *args, **kwargs: helper_calls.append((args, kwargs)),
+    )
+    monkeypatch.setattr(pipeline_runner, "_load_fb_state", lambda _: {})
+    monkeypatch.setattr(pipeline_runner, "_write_fb_state", lambda *args, **kwargs: None)
+
+    status = pipeline_runner.run_facebook_global_pass_nightmode(
+        input_csv=input_csv.as_posix(),
+        output_csv=output_csv.as_posix(),
+        state_path=state_path.as_posix(),
+        skip_rows_with_email=False,
+        night_fb_run_state=run_state,
+    )
+
+    df_out = pd.read_csv(output_csv, dtype=str, keep_default_na=False).fillna("")
+
+    assert helper_calls == []
+    assert df_out.loc[0, "Email"] == ""
+    assert df_out.loc[0, "FB_Status"] == ""
+    assert status.completed is True
+    assert status.total_rows == 1

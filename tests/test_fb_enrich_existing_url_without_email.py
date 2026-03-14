@@ -5,6 +5,7 @@ from types import SimpleNamespace
 pytest.importorskip("PyQt5")
 
 import cross_directory_enricher as cde
+import night_mode_fb as nmfb
 import pipeline_runner
 
 
@@ -679,6 +680,55 @@ def test_ensure_fb_discovery_session_logs_authenticated_once(monkeypatch):
     log_count = len(logs)
     assert worker._ensure_fb_discovery_session(object()) == (True, "authenticated")
     assert len(logs) == log_count
+
+
+def test_night_mode_fb_discovery_uses_canonical_checkpoint_decision(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    worker.night_mode = True
+    worker._fb_session_auth_checked = False
+    worker._fb_session_authenticated = False
+    worker._fb_session_auth_reason = ""
+
+    monkeypatch.setattr(
+        cde,
+        "probe_night_fb_session_decision",
+        lambda driver, visit_home: SimpleNamespace(
+            state="authenticated_but_checkpointed",
+            reason="checkpoint",
+            authenticated=True,
+            usable=False,
+        ),
+    )
+
+    assert worker._ensure_fb_discovery_session(object()) == (False, "checkpoint")
+    assert worker._fb_discovery_disabled is True
+    assert worker._fb_discovery_disabled_reason == "checkpoint"
+    assert any("reason=checkpoint" in message for message in logs)
+
+
+def test_night_mode_fb_discovery_respects_shared_run_disable(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    worker.night_mode = True
+    worker.night_fb_run_state = nmfb.create_night_fb_run_state("user", "pass")
+    nmfb.disable_night_fb_run_state(
+        worker.night_fb_run_state,
+        "checkpoint",
+        checkpointed=True,
+    )
+    probe_calls = []
+
+    monkeypatch.setattr(
+        cde,
+        "probe_night_fb_session_decision",
+        lambda driver, visit_home: probe_calls.append((driver, visit_home)),
+    )
+
+    assert worker._ensure_fb_discovery_session(object()) == (False, "checkpoint")
+    assert probe_calls == []
+    assert worker._fb_discovery_disabled is True
+    assert worker._fb_discovery_disabled_reason == "checkpoint"
 
 
 def test_ensure_fb_discovery_session_runs_warmup_once(monkeypatch):

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import inspect
 import json
 import logging
 import os
@@ -28,6 +29,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 
 from lead_vault.merge import preview_csv_merge_counts
+from night_mode_fb import close_night_fb_run_state, create_night_fb_run_state
 import pipeline_runner
 from pipeline_runner import (
     FacebookGlobalPassStatus,
@@ -38,6 +40,21 @@ from pipeline_runner import (
 )
 from source_scheduler import canonicalize_facebook_url, ensure_canonical_facebook_url, promote_facebook_url
 from soundcloud_metadata_enricher import enrich_soundcloud_metadata
+
+
+def _call_with_optional_night_fb_run_state(fn, *args, night_fb_run_state=None, **kwargs):
+    target = getattr(fn, "side_effect", None) or fn
+    try:
+        signature = inspect.signature(target)
+    except Exception:
+        signature = None
+    if signature is not None:
+        params = signature.parameters
+        if "night_fb_run_state" in params or any(
+            param.kind == inspect.Parameter.VAR_KEYWORD for param in params.values()
+        ):
+            kwargs["night_fb_run_state"] = night_fb_run_state
+    return fn(*args, **kwargs)
 
 def _ensure_string_columns(df: pd.DataFrame, cols: List[str]) -> None:
     for col in cols:
@@ -1527,112 +1544,125 @@ def run_night_mode(
     master_pre_fb = None
     master_post_fb = None
     master_final = None
+    night_fb_run_state = None
+    if export_mode in {"combined", "both"}:
+        night_fb_run_state = create_night_fb_run_state(
+            os.environ.get("FB_USERNAME", "").strip(),
+            os.environ.get("FB_PASSWORD", "").strip(),
+        )
     if export_mode in {"combined", "both"}:
         logger = master_logger
         stats_logger = _wrap_logger_for_stats(logger.info, stats)
-        if master_enrichment_enabled:
-            master_raw = _merge_raw_master(run_dir, job_states, logger, stats=stats)
-            if master_raw and os.path.exists(master_raw):
-                master_enriched = os.path.join(run_dir, "master_enriched.csv")
-                master_enriched = run_master_enrichment(
-                    master_raw,
-                    master_enriched,
-                    logger=stats_logger,
-                    enable_live_search=master_live_search_enabled,
-                    max_live_searches=master_max_live_searches,
-                    night_mode=True,
-                )
-                master_pre_fb = os.path.join(run_dir, "master_pre_fb.csv")
-                master_pre_fb = run_enrichment(master_enriched, master_pre_fb, logger=stats_logger, night_mode=True)
-                stats.enrichment_ran = True
-                try:
-                    stats.enrichment_rows = _count_rows(master_pre_fb)
-                except Exception:
-                    pass
-        else:
-            master_pre_fb = _merge_master(run_dir, job_states, logger)
-        if master_pre_fb and os.path.exists(master_pre_fb):
-            try:
-                df_master = pd.read_csv(master_pre_fb, dtype=str, keep_default_na=False).fillna("")
-                df_master = quarantine_repeated_emails(df_master, min_repeats=5, logger=logger)
-                df_master.to_csv(master_pre_fb, index=False)
-            except Exception as exc:
-                logger.warning("[Master] Quarantine repeated emails failed safely: %s", exc)
-
-            master_post_fb = os.path.join(run_dir, "master_post_fb.csv")
-            fb_state_path = os.path.join(run_dir, FACEBOOK_STATE_FILENAME)
-            fb_state = _load_state(fb_state_path)
-            fb_completed = bool(fb_state.get("fb_run_completed") and not fb_state.get("fb_captcha_flag"))
-            fb_limit_hit = bool(fb_state.get("fb_limit_reached"))
-            fb_rows_total = fb_state.get("fb_total_rows")
-            try:
-                fb_status: Optional[FacebookGlobalPassStatus] = None
-                if resume and fb_completed and os.path.exists(master_post_fb):
-                    logger.info("[Master] Resume: Facebook global pass already completed; skipping.")
-                    fb_status = FacebookGlobalPassStatus(
-                        processed_rows=fb_state.get("fb_completed", 0) or 0,
-                        total_rows=fb_state.get("fb_total_rows", 0) or 0,
-                        completed=True,
-                        hit_captcha=False,
-                        limit_reached=False,
-                        attempted_total=fb_state.get("fb_attempted_total", 0) or 0,
+        try:
+            if master_enrichment_enabled:
+                master_raw = _merge_raw_master(run_dir, job_states, logger, stats=stats)
+                if master_raw and os.path.exists(master_raw):
+                    master_enriched = os.path.join(run_dir, "master_enriched.csv")
+                    master_enriched = _call_with_optional_night_fb_run_state(
+                        run_master_enrichment,
+                        master_raw,
+                        master_enriched,
+                        logger=stats_logger,
+                        enable_live_search=master_live_search_enabled,
+                        max_live_searches=master_max_live_searches,
+                        night_mode=True,
+                        night_fb_run_state=night_fb_run_state,
                     )
-                else:
-                    attempt = 0
-                    while True:
-                        fb_status = run_facebook_global_pass_nightmode(
-                            master_pre_fb,
-                            master_post_fb,
-                            state_path=fb_state_path,
-                            max_rows_per_run=fb_max_rows_per_run,
-                            logger=logger.info,
-                        )
-                        fb_state = _load_state(fb_state_path)
-                        fb_completed = fb_status.completed
-                        fb_limit_hit = fb_status.limit_reached
-                        fb_rows_total = fb_state.get("fb_total_rows")
-                        if fb_status.hit_captcha and fb_auto_resume and attempt < fb_max_auto_resume_attempts:
-                            attempt += 1
-                            logger.info(
-                                "[Master] Captcha detected; cooling down for %s seconds before retry (%s/%s).",
-                                fb_cooldown_seconds,
-                                attempt,
-                                fb_max_auto_resume_attempts,
-                            )
-                            time.sleep(max(fb_cooldown_seconds, 0))
-                            continue
-                        break
-                if fb_status and fb_status.completed:
-                    logger.info("[Master] Facebook global pass completed: %s", master_post_fb)
-                else:
-                    logger.info(
-                        "[Master] Facebook global pass partial (limit_hit=%s captcha=%s total_rows=%s)",
-                        fb_limit_hit,
-                        bool(fb_state.get("fb_captcha_flag")),
-                        fb_rows_total,
-                    )
-            except Exception as exc:
-                logger.error("[Master] Facebook global pass failed safely: %s", exc)
-                master_post_fb = master_pre_fb
-                fb_completed = False
-            master_final = os.path.join(run_dir, "master_enriched_deduped.csv")
-            if fb_completed:
-                try:
-                    run_enrichment(master_post_fb, master_final, logger=logger.info, night_mode=True)
-                    logger.info("[Master] Validation completed: %s", master_final)
-                    export_path = os.path.join(run_dir, "master_export_leads.csv")
-                    pipeline_runner.export_master_leads(
-                        input_csv=master_final,
-                        output_csv=export_path,
-                        logger=logger,
-                        export_profile=export_profile,
-                    )
-                    logger.info("[Master] Exported client-facing leads CSV: %s", export_path)
-                except Exception as exc:
-                    logger.error("[Master] Final validation failed safely: %s", exc)
-                    master_final = master_post_fb
+                    master_pre_fb = os.path.join(run_dir, "master_pre_fb.csv")
+                    master_pre_fb = run_enrichment(master_enriched, master_pre_fb, logger=stats_logger, night_mode=True)
+                    stats.enrichment_ran = True
+                    try:
+                        stats.enrichment_rows = _count_rows(master_pre_fb)
+                    except Exception:
+                        pass
             else:
-                master_final = master_post_fb
+                master_pre_fb = _merge_master(run_dir, job_states, logger)
+            if master_pre_fb and os.path.exists(master_pre_fb):
+                try:
+                    df_master = pd.read_csv(master_pre_fb, dtype=str, keep_default_na=False).fillna("")
+                    df_master = quarantine_repeated_emails(df_master, min_repeats=5, logger=logger)
+                    df_master.to_csv(master_pre_fb, index=False)
+                except Exception as exc:
+                    logger.warning("[Master] Quarantine repeated emails failed safely: %s", exc)
+
+                master_post_fb = os.path.join(run_dir, "master_post_fb.csv")
+                fb_state_path = os.path.join(run_dir, FACEBOOK_STATE_FILENAME)
+                fb_state = _load_state(fb_state_path)
+                fb_completed = bool(fb_state.get("fb_run_completed") and not fb_state.get("fb_captcha_flag"))
+                fb_limit_hit = bool(fb_state.get("fb_limit_reached"))
+                fb_rows_total = fb_state.get("fb_total_rows")
+                try:
+                    fb_status: Optional[FacebookGlobalPassStatus] = None
+                    if resume and fb_completed and os.path.exists(master_post_fb):
+                        logger.info("[Master] Resume: Facebook global pass already completed; skipping.")
+                        fb_status = FacebookGlobalPassStatus(
+                            processed_rows=fb_state.get("fb_completed", 0) or 0,
+                            total_rows=fb_state.get("fb_total_rows", 0) or 0,
+                            completed=True,
+                            hit_captcha=False,
+                            limit_reached=False,
+                            attempted_total=fb_state.get("fb_attempted_total", 0) or 0,
+                        )
+                    else:
+                        attempt = 0
+                        while True:
+                            fb_status = _call_with_optional_night_fb_run_state(
+                                run_facebook_global_pass_nightmode,
+                                master_pre_fb,
+                                master_post_fb,
+                                state_path=fb_state_path,
+                                max_rows_per_run=fb_max_rows_per_run,
+                                logger=logger.info,
+                                night_fb_run_state=night_fb_run_state,
+                            )
+                            fb_state = _load_state(fb_state_path)
+                            fb_completed = fb_status.completed
+                            fb_limit_hit = fb_status.limit_reached
+                            fb_rows_total = fb_state.get("fb_total_rows")
+                            if fb_status.hit_captcha and fb_auto_resume and attempt < fb_max_auto_resume_attempts:
+                                attempt += 1
+                                logger.info(
+                                    "[Master] Captcha detected; cooling down for %s seconds before retry (%s/%s).",
+                                    fb_cooldown_seconds,
+                                    attempt,
+                                    fb_max_auto_resume_attempts,
+                                )
+                                time.sleep(max(fb_cooldown_seconds, 0))
+                                continue
+                            break
+                    if fb_status and fb_status.completed:
+                        logger.info("[Master] Facebook global pass completed: %s", master_post_fb)
+                    else:
+                        logger.info(
+                            "[Master] Facebook global pass partial (limit_hit=%s captcha=%s total_rows=%s)",
+                            fb_limit_hit,
+                            bool(fb_state.get("fb_captcha_flag")),
+                            fb_rows_total,
+                        )
+                except Exception as exc:
+                    logger.error("[Master] Facebook global pass failed safely: %s", exc)
+                    master_post_fb = master_pre_fb
+                    fb_completed = False
+                master_final = os.path.join(run_dir, "master_enriched_deduped.csv")
+                if fb_completed:
+                    try:
+                        run_enrichment(master_post_fb, master_final, logger=logger.info, night_mode=True)
+                        logger.info("[Master] Validation completed: %s", master_final)
+                        export_path = os.path.join(run_dir, "master_export_leads.csv")
+                        pipeline_runner.export_master_leads(
+                            input_csv=master_final,
+                            output_csv=export_path,
+                            logger=logger,
+                            export_profile=export_profile,
+                        )
+                        logger.info("[Master] Exported client-facing leads CSV: %s", export_path)
+                    except Exception as exc:
+                        logger.error("[Master] Final validation failed safely: %s", exc)
+                        master_final = master_post_fb
+                else:
+                    master_final = master_post_fb
+        finally:
+            close_night_fb_run_state(night_fb_run_state)
 
     summary_logger = master_logger or _setup_logger(os.path.join(run_dir, "master_log.txt"), "master")
     _emit_smoke_summary(stats, summary_logger)

@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
+from night_mode_fb import close_night_fb_run_state, create_night_fb_run_state
 from night_mode_v2.cache_policy import should_skip_phase
 from night_mode_v2.manifest import config_hash, load_manifest, write_manifest
 from night_mode_v2.schema_registry import validate_schema
@@ -283,7 +284,13 @@ def _record_output(outputs: Dict[str, Any], name: str, path: Optional[str], df: 
     return int(row_count)
 
 
-def run_enrich_phase(config: Any, run_dir: str, seed_result: Dict[str, Any], resume: bool = False) -> Dict[str, Any]:
+def run_enrich_phase(
+    config: Any,
+    run_dir: str,
+    seed_result: Dict[str, Any],
+    resume: bool = False,
+    night_fb_run_state: Optional[Any] = None,
+) -> Dict[str, Any]:
     """
     Phase 2: merge raw outputs, run master enrichment, run validation, then quarantine.
 
@@ -373,6 +380,7 @@ def run_enrich_phase(config: Any, run_dir: str, seed_result: Dict[str, Any], res
         enable_live_search=live_search_enabled,
         max_live_searches=max_live_searches,
         night_mode=True,
+        night_fb_run_state=night_fb_run_state,
     )
     enriched_rows = _record_output(outputs, "master_enriched", master_enriched)
     if not master_enriched or enriched_rows == 0:
@@ -480,6 +488,7 @@ def run_contact_phase(config: Any, run_dir: str, enrich_manifest: Dict[str, Any]
 
     log_path = os.path.join(run_dir, "contact_log_v2.txt")
     logger = night_mode_runner._setup_logger(log_path, "contact_v2")
+    night_fb_run_state = kwargs.get("night_fb_run_state")
 
     try:
         pipeline_runner.run_facebook_global_pass_nightmode(
@@ -487,6 +496,7 @@ def run_contact_phase(config: Any, run_dir: str, enrich_manifest: Dict[str, Any]
             master_post_fb_path,
             state_path=fb_state_path,
             logger=logger.info,
+            night_fb_run_state=night_fb_run_state,
         )
     except Exception:
         # Fall back to the pre-FB file if the pass fails.
@@ -584,8 +594,26 @@ def run_phased_night_mode(
     run_dir_path, _ = night_mode_runner._ensure_run_dir(resume=resume, run_root=root)
 
     cfg = _load_config(config_path)
-
-    seed_manifest = run_seed_phase(config_path, run_dir_path, resume=resume)
-    enrich_manifest = run_enrich_phase(cfg, run_dir_path, seed_manifest, resume=resume)
-    contact_manifest = run_contact_phase(cfg, run_dir_path, enrich_manifest, resume=resume)
+    night_fb_run_state = create_night_fb_run_state(
+        os.environ.get("FB_USERNAME", "").strip(),
+        os.environ.get("FB_PASSWORD", "").strip(),
+    )
+    try:
+        seed_manifest = run_seed_phase(config_path, run_dir_path, resume=resume)
+        enrich_manifest = run_enrich_phase(
+            cfg,
+            run_dir_path,
+            seed_manifest,
+            resume=resume,
+            night_fb_run_state=night_fb_run_state,
+        )
+        contact_manifest = run_contact_phase(
+            cfg,
+            run_dir_path,
+            enrich_manifest,
+            resume=resume,
+            night_fb_run_state=night_fb_run_state,
+        )
+    finally:
+        close_night_fb_run_state(night_fb_run_state)
     return contact_manifest

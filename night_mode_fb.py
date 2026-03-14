@@ -70,6 +70,8 @@ except Exception:  # pragma: no cover - defensive
 
 LoggerFn = Optional[Union[Callable[[str], None], logging.Logger]]
 
+_PROFILE_SESSION_SENTINELS = {"profile_session"}
+
 EMAIL_REGEX = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
 _FB_SPLIT_PATTERN = re.compile(r"[,\s;|]+")
 FB_CLUE_FIELDS = [
@@ -2148,6 +2150,48 @@ def _chrome_images_policy_label(chrome_options: ChromeOptions) -> str:
 _night_fb_profile_dir_logged: bool = False
 
 
+@dataclass(frozen=True)
+class NightFBSessionSource:
+    mode: str
+    reason: str
+    can_probe: bool
+    profile_dir: str = ""
+    explicit_profile: bool = False
+    has_credentials: bool = False
+    uses_profile: bool = False
+
+
+@dataclass(frozen=True)
+class NightFBSessionDecision:
+    state: str
+    reason: str
+    authenticated: bool
+    usable: bool
+    checkpointed: bool = False
+    disabled_for_run: bool = False
+    session_invalid: bool = False
+
+
+@dataclass
+class NightFBRunState:
+    session_source: NightFBSessionSource
+    session: Optional["NightPersistentFacebookSession"] = None
+    authenticated: bool = False
+    latest_session_decision: Optional[NightFBSessionDecision] = None
+    disabled_for_run: bool = False
+    disable_reason: str = ""
+    checkpointed: bool = False
+    session_unhealthy: bool = False
+    session_invalid: bool = False
+    reusable: bool = False
+    session_owner: str = ""
+    session_warmup_complete: bool = False
+
+
+def _is_profile_session_sentinel(value: str) -> bool:
+    return str(value or "").strip().lower() in _PROFILE_SESSION_SENTINELS
+
+
 def _normalize_profile_path(path: str) -> str:
     expanded = os.path.expanduser(os.path.expandvars(path))
     try:
@@ -2234,6 +2278,271 @@ def _night_fb_profile_dir_self_check(logger: LoggerFn = None) -> str:
     )
     return profile_dir
 
+
+def normalize_night_fb_session_source(username: str = "", password: str = "") -> NightFBSessionSource:
+    username = str(username or "").strip()
+    password = str(password or "").strip()
+    username_is_sentinel = _is_profile_session_sentinel(username)
+    password_is_sentinel = _is_profile_session_sentinel(password)
+    explicit_profile_raw = str(os.environ.get("NIGHT_FB_PROFILE_DIR", "") or "").strip()
+    explicit_profile_dir = _normalize_profile_path(explicit_profile_raw) if explicit_profile_raw else ""
+    explicit_profile_exists = bool(explicit_profile_dir and os.path.isdir(explicit_profile_dir))
+    has_username = bool(username)
+    has_password = bool(password)
+    has_credentials = bool(
+        username
+        and password
+        and not username_is_sentinel
+        and not password_is_sentinel
+    )
+    sentinel_only = (
+        (username_is_sentinel or not username)
+        and (password_is_sentinel or not password)
+        and (username_is_sentinel or password_is_sentinel)
+    )
+
+    if (username_is_sentinel and password and not password_is_sentinel) or (
+        password_is_sentinel and username and not username_is_sentinel
+    ):
+        return NightFBSessionSource(
+            mode="invalid",
+            reason="mixed_profile_session_credentials",
+            can_probe=False,
+            profile_dir=explicit_profile_dir,
+            explicit_profile=bool(explicit_profile_raw),
+            has_credentials=False,
+            uses_profile=bool(explicit_profile_raw),
+        )
+
+    if sentinel_only:
+        return NightFBSessionSource(
+            mode="profile",
+            reason="profile_session",
+            can_probe=True,
+            profile_dir=_resolve_night_fb_profile_dir(None),
+            explicit_profile=bool(explicit_profile_raw),
+            has_credentials=False,
+            uses_profile=True,
+        )
+
+    if (has_username and not has_password) or (has_password and not has_username):
+        return NightFBSessionSource(
+            mode="invalid",
+            reason="partial_credentials",
+            can_probe=False,
+            profile_dir=explicit_profile_dir,
+            explicit_profile=bool(explicit_profile_raw),
+            has_credentials=False,
+            uses_profile=explicit_profile_exists,
+        )
+
+    if explicit_profile_exists:
+        return NightFBSessionSource(
+            mode="profile",
+            reason="profile_dir",
+            can_probe=True,
+            profile_dir=explicit_profile_dir,
+            explicit_profile=True,
+            has_credentials=has_credentials,
+            uses_profile=True,
+        )
+
+    if has_credentials:
+        return NightFBSessionSource(
+            mode="credentials",
+            reason="credentials",
+            can_probe=True,
+            profile_dir=_resolve_night_fb_profile_dir(None),
+            explicit_profile=bool(explicit_profile_raw),
+            has_credentials=True,
+            uses_profile=True,
+        )
+
+    if explicit_profile_raw and not explicit_profile_exists:
+        return NightFBSessionSource(
+            mode="invalid",
+            reason="missing_profile_dir",
+            can_probe=False,
+            profile_dir=explicit_profile_dir,
+            explicit_profile=True,
+            has_credentials=False,
+            uses_profile=False,
+        )
+
+    return NightFBSessionSource(
+        mode="none",
+        reason="missing_session_source",
+        can_probe=False,
+        profile_dir="",
+        explicit_profile=False,
+        has_credentials=False,
+        uses_profile=False,
+    )
+
+
+def create_night_fb_run_state(username: str = "", password: str = "") -> NightFBRunState:
+    return NightFBRunState(session_source=normalize_night_fb_session_source(username, password))
+
+
+def update_night_fb_run_state(
+    run_state: Optional[NightFBRunState],
+    decision: NightFBSessionDecision,
+    *,
+    owner: str = "",
+) -> NightFBSessionDecision:
+    if run_state is None:
+        return decision
+    run_state.latest_session_decision = decision
+    run_state.authenticated = bool(decision.authenticated and decision.usable)
+    run_state.checkpointed = bool(decision.checkpointed)
+    run_state.session_invalid = bool(decision.session_invalid)
+    run_state.session_unhealthy = bool(decision.checkpointed or (decision.authenticated and not decision.usable))
+    if owner:
+        run_state.session_owner = owner
+    run_state.reusable = bool(
+        run_state.session
+        and decision.authenticated
+        and decision.usable
+        and not run_state.disabled_for_run
+        and not run_state.session_invalid
+    )
+    return decision
+
+
+def disable_night_fb_run_state(
+    run_state: Optional[NightFBRunState],
+    reason: str,
+    *,
+    session_invalid: bool = False,
+    checkpointed: bool = False,
+    session_unhealthy: bool = True,
+    close_session: bool = False,
+) -> str:
+    reason_code = str(reason or "").strip() or ("session_invalid" if session_invalid else "not_authenticated")
+    if run_state is None:
+        return reason_code
+    run_state.disabled_for_run = True
+    run_state.disable_reason = reason_code
+    run_state.checkpointed = bool(run_state.checkpointed or checkpointed or reason_code == "checkpoint")
+    run_state.session_invalid = bool(run_state.session_invalid or session_invalid)
+    run_state.session_unhealthy = bool(
+        run_state.session_unhealthy or session_unhealthy or run_state.checkpointed or run_state.session_invalid
+    )
+    run_state.authenticated = False
+    run_state.reusable = False
+    if close_session and run_state.session is not None:
+        try:
+            run_state.session.close()
+        except Exception:
+            pass
+        run_state.session = None
+    return reason_code
+
+
+def close_night_fb_run_state(run_state: Optional[NightFBRunState]) -> None:
+    if run_state is None:
+        return
+    if run_state.session is not None:
+        try:
+            run_state.session.close()
+        except Exception:
+            pass
+    run_state.session = None
+    run_state.authenticated = False
+    run_state.reusable = False
+    run_state.session_owner = ""
+
+
+def _build_night_fb_session_decision(
+    *,
+    authenticated: bool,
+    reason: str = "",
+    session_invalid: bool = False,
+) -> NightFBSessionDecision:
+    reason = str(reason or "").strip().lower()
+    checkpointed = "checkpoint" in reason
+    if session_invalid:
+        return NightFBSessionDecision(
+            state="session_invalid",
+            reason=reason or "session_invalid",
+            authenticated=False,
+            usable=False,
+            checkpointed=False,
+            disabled_for_run=True,
+            session_invalid=True,
+        )
+    if authenticated and not reason:
+        return NightFBSessionDecision(
+            state="authenticated_and_usable",
+            reason="authenticated",
+            authenticated=True,
+            usable=True,
+        )
+    if authenticated and checkpointed:
+        return NightFBSessionDecision(
+            state="authenticated_but_checkpointed",
+            reason=reason or "checkpoint",
+            authenticated=True,
+            usable=False,
+            checkpointed=True,
+        )
+    if authenticated:
+        return NightFBSessionDecision(
+            state="disabled_for_run",
+            reason=reason or "session_unhealthy",
+            authenticated=True,
+            usable=False,
+            checkpointed=checkpointed,
+            disabled_for_run=True,
+        )
+    if checkpointed:
+        return NightFBSessionDecision(
+            state="disabled_for_run",
+            reason=reason or "checkpoint",
+            authenticated=False,
+            usable=False,
+            checkpointed=True,
+            disabled_for_run=True,
+        )
+    return NightFBSessionDecision(
+        state="unauthenticated",
+        reason=reason or "not_authenticated",
+        authenticated=False,
+        usable=False,
+    )
+
+
+def probe_night_fb_session_decision(
+    driver,
+    *,
+    visit_home: bool = True,
+) -> NightFBSessionDecision:
+    if driver is None:
+        return NightFBSessionDecision(
+            state="disabled_for_run",
+            reason="no_driver",
+            authenticated=False,
+            usable=False,
+            disabled_for_run=True,
+        )
+    try:
+        if visit_home:
+            driver.get("https://www.facebook.com/")
+        current_url = (getattr(driver, "current_url", "") or "").lower()
+        page_source = (getattr(driver, "page_source", "") or "").lower()
+        authenticated = _is_driver_authenticated(driver)
+    except Exception as exc:
+        return _build_night_fb_session_decision(
+            authenticated=False,
+            reason="session_invalid" if _is_session_death_exc(exc) else "driver_error",
+            session_invalid=_is_session_death_exc(exc),
+        )
+    auth_surface = _classify_fb_auth_surface_from_page(current_url, page_source)
+    return _build_night_fb_session_decision(
+        authenticated=authenticated,
+        reason=auth_surface,
+    )
+
 # Manual smoke test (run outside prod jobs):
 # NIGHT_FB_CHROMEDRIVER_LOG=/tmp/night_fb_chromedriver.log python3 - <<'PY'
 # from night_mode_fb import _night_fb_profile_dir_self_check, _create_fb_driver_night_mode
@@ -2263,17 +2572,9 @@ def _is_driver_authenticated(driver) -> bool:
     return _has_cookie(driver, "c_user")
 
 
-def _classify_fb_auth_surface(driver) -> str:
-    """Classify the current FB landing surface for early auth/session diagnostics."""
-    try:
-        current_url = (getattr(driver, "current_url", "") or "").lower()
-    except Exception:
-        current_url = ""
-    try:
-        page_source = (getattr(driver, "page_source", "") or "").lower()
-    except Exception:
-        page_source = ""
-
+def _classify_fb_auth_surface_from_page(current_url: str, page_source: str) -> str:
+    current_url = (current_url or "").lower()
+    page_source = (page_source or "").lower()
     bad_url_tokens = (
         ("login", "redirect_login"),
         ("checkpoint", "checkpoint"),
@@ -2300,6 +2601,19 @@ def _classify_fb_auth_surface(driver) -> str:
             return reason
 
     return ""
+
+
+def _classify_fb_auth_surface(driver) -> str:
+    """Classify the current FB landing surface for early auth/session diagnostics."""
+    try:
+        current_url = getattr(driver, "current_url", "") or ""
+    except Exception:
+        current_url = ""
+    try:
+        page_source = getattr(driver, "page_source", "") or ""
+    except Exception:
+        page_source = ""
+    return _classify_fb_auth_surface_from_page(current_url, page_source)
 
 
 def _session_looks_healthy(driver) -> Tuple[bool, str]:
@@ -2329,7 +2643,17 @@ def _is_session_death_exc(exc: BaseException) -> bool:
         msg = (str(exc) or "").lower()
     except Exception:
         return False
-    death_tokens = ("no such window", "web view not found", "invalid session id")
+    death_tokens = (
+        "no such window",
+        "web view not found",
+        "invalid session id",
+        "disconnected",
+        "not connected to devtools",
+        "chrome not reachable",
+        "target window already closed",
+        "session deleted because of page crash",
+        "browser has disconnected",
+    )
     return any(tok in msg for tok in death_tokens)
 
 
@@ -2988,6 +3312,143 @@ class NightPersistentFacebookSession:
             pass
         self.driver = None
         return self.ensure_logged_in()
+
+
+def ensure_night_fb_run_session(
+    run_state: Optional[NightFBRunState],
+    *,
+    headless: bool,
+    logger: LoggerFn = None,
+    owner: str = "",
+) -> Optional[NightPersistentFacebookSession]:
+    if run_state is None:
+        return None
+    if run_state.disabled_for_run or run_state.session_invalid:
+        return None
+    if not run_state.session_source.can_probe:
+        return None
+
+    session = run_state.session
+    if isinstance(session, NightPersistentFacebookSession):
+        try:
+            driver = session.ensure_logged_in()
+            decision = update_night_fb_run_state(
+                run_state,
+                probe_night_fb_session_decision(driver, visit_home=False),
+                owner=owner or run_state.session_owner,
+            )
+            if decision.state == "session_invalid":
+                disable_night_fb_run_state(
+                    run_state,
+                    decision.reason or "session_invalid",
+                    session_invalid=True,
+                    close_session=True,
+                )
+                return None
+            if decision.state == "authenticated_but_checkpointed":
+                disable_night_fb_run_state(
+                    run_state,
+                    decision.reason or "checkpoint",
+                    checkpointed=True,
+                )
+                return None
+            if decision.authenticated and decision.usable:
+                if owner:
+                    run_state.session_owner = owner
+                return session
+            disable_night_fb_run_state(
+                run_state,
+                decision.reason or decision.state or "not_authenticated",
+                session_unhealthy=True,
+                close_session=not decision.authenticated,
+            )
+            return None
+        except FacebookDriverError as exc:
+            reason = str(exc) or "session_invalid"
+            disable_night_fb_run_state(
+                run_state,
+                reason,
+                session_invalid="invalid" in reason.lower() or "died" in reason.lower(),
+                checkpointed="checkpoint" in reason.lower(),
+                close_session=True,
+            )
+            return None
+        except Exception as exc:
+            reason = "session_invalid" if _is_session_death_exc(exc) else "driver_error"
+            disable_night_fb_run_state(
+                run_state,
+                reason,
+                session_invalid=_is_session_death_exc(exc),
+                close_session=True,
+            )
+            return None
+
+    driver_factory = lambda: _create_fb_driver_night_mode(headless, logger=logger)
+    session = NightPersistentFacebookSession(driver_factory, headless=headless, logger=logger)
+    try:
+        driver = session.ensure_logged_in()
+    except FacebookDriverError as exc:
+        reason = str(exc) or "session_start_failed"
+        run_state.latest_session_decision = _build_night_fb_session_decision(
+            authenticated=False,
+            reason=reason,
+            session_invalid="invalid" in reason.lower(),
+        )
+        disable_night_fb_run_state(
+            run_state,
+            reason,
+            session_invalid="invalid" in reason.lower(),
+            checkpointed="checkpoint" in reason.lower(),
+            close_session=True,
+        )
+        return None
+    except Exception as exc:
+        reason = "session_invalid" if _is_session_death_exc(exc) else "driver_error"
+        run_state.latest_session_decision = _build_night_fb_session_decision(
+            authenticated=False,
+            reason=reason,
+            session_invalid=_is_session_death_exc(exc),
+        )
+        disable_night_fb_run_state(
+            run_state,
+            reason,
+            session_invalid=_is_session_death_exc(exc),
+            close_session=True,
+        )
+        return None
+
+    run_state.session = session
+    if owner:
+        run_state.session_owner = owner
+    decision = update_night_fb_run_state(
+        run_state,
+        probe_night_fb_session_decision(driver, visit_home=False),
+        owner=owner or run_state.session_owner,
+    )
+    if decision.state == "authenticated_but_checkpointed":
+        disable_night_fb_run_state(
+            run_state,
+            decision.reason or "checkpoint",
+            checkpointed=True,
+        )
+        return None
+    if decision.state == "session_invalid":
+        disable_night_fb_run_state(
+            run_state,
+            decision.reason or "session_invalid",
+            session_invalid=True,
+            close_session=True,
+        )
+        return None
+    if decision.authenticated and decision.usable:
+        return session
+    disable_night_fb_run_state(
+        run_state,
+        decision.reason or decision.state or "not_authenticated",
+        session_unhealthy=True,
+        close_session=not decision.authenticated,
+    )
+    return None
 
 
 def _apply_repo_aligned_webdriver_mask(driver, logger: LoggerFn = None) -> bool:
@@ -4383,11 +4844,15 @@ class NightModeFacebookEnricher:
         password: str,
         logger: LoggerFn = None,
         use_shared_session: bool = True,
+        run_state: Optional[NightFBRunState] = None,
     ) -> None:
         self.legacy = legacy_module
         self.username = username
         self.password = password
         self.logger = self._coerce_logger(logger)
+        self._run_state = run_state
+        self._shared_run_state = run_state is not None
+        self._session_source = run_state.session_source if run_state is not None else normalize_night_fb_session_source(username, password)
         self.session = None
         self._owns_session = False
         self.use_shared_session = use_shared_session
@@ -4548,10 +5013,14 @@ class NightModeFacebookEnricher:
         if session is None:
             return
         authed, unhealthy, reason = self._session_state_snapshot(session)
+        decision = _build_night_fb_session_decision(
+            authenticated=authed,
+            reason=reason if unhealthy else "",
+        )
         v2_enabled = _bool_env("FB_SEARCH_HARVEST_V2", default=False)
         _log(
             self.logger,
-            f"[Night FB][session_state] authed={1 if authed else 0} unhealthy={1 if unhealthy else 0} reason={reason or ''} v2={1 if v2_enabled else 0}",
+            f"[Night FB][session_state] state={decision.state} authed={1 if authed else 0} unhealthy={1 if unhealthy else 0} reason={decision.reason or ''} v2={1 if v2_enabled else 0}",
         )
         self._session_state_logged = True
 
@@ -4823,6 +5292,11 @@ class NightModeFacebookEnricher:
             self.protective_shutdown = True
             self._skip_fb_due_to_checkpoint = True
             self._search_disabled_due_to_checkpoint = True
+            disable_night_fb_run_state(
+                self._run_state,
+                "login_wall",
+                session_unhealthy=True,
+            )
             _log(self.logger, "[Night FB] Protective shutdown triggered by login wall; skipping FB for remainder of run.")
 
     def _ensure_session(self):
@@ -4830,6 +5304,30 @@ class NightModeFacebookEnricher:
             raise FacebookDriverError(self._session_failed_reason or "Facebook session previously failed.")
         if self.use_shared_session:
             raise FacebookDriverError("Legacy/shared Facebook session is not allowed for Night Mode.")
+        if self._run_state is not None:
+            if self._run_state.disabled_for_run or self._run_state.session_invalid:
+                raise FacebookDriverError(self._run_state.disable_reason or "Facebook disabled for this Night run.")
+            if not self._session_source.can_probe:
+                _log(
+                    self.logger,
+                    f"[Night FB] No usable Night FB session source; running without live session (reason={self._session_source.reason}).",
+                )
+                return None
+            session = ensure_night_fb_run_session(
+                self._run_state,
+                headless=self.headless,
+                logger=self.logger,
+                owner="night_mode_fb",
+            )
+            self.session = session
+            self._owns_session = False
+            self._session_state_logged = False
+            if session is not None:
+                self._log_session_state_once(session)
+                return session
+            if self._run_state.disabled_for_run or self._run_state.session_invalid:
+                raise FacebookDriverError(self._run_state.disable_reason or "Facebook disabled for this Night run.")
+            return None
 
         if isinstance(self.session, NightPersistentFacebookSession):
             driver = getattr(self.session, "driver", None)
@@ -4861,8 +5359,11 @@ class NightModeFacebookEnricher:
             self.session = None
             self._session_state_logged = False
 
-        if not self.username or not self.password:
-            _log(self.logger, "[Night FB] Missing FB credentials; running without live session.")
+        if not self._session_source.can_probe:
+            _log(
+                self.logger,
+                f"[Night FB] No usable Night FB session source; running without live session (reason={self._session_source.reason}).",
+            )
             return None
         try:
             driver_factory = lambda: _create_fb_driver_night_mode(self.headless, logger=self.logger)
@@ -5230,6 +5731,11 @@ class NightModeFacebookEnricher:
         else:
             _log(self.logger, "[Night FB] Checkpoint detected; skipping FB for remainder of run (headed recovery disabled).")
         self._skip_fb_due_to_checkpoint = True
+        disable_night_fb_run_state(
+            self._run_state,
+            "checkpoint",
+            checkpointed=True,
+        )
         return False
 
     def _fetch_search_surface(

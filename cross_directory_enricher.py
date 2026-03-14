@@ -76,6 +76,7 @@ from facebook_enrich import (
     _fb_extract_candidates_from_search_dom,
 )
 from night_mode_fb import (
+    NightFBRunState,
     classify_explicit_fb_intake,
     _extract_emails_from_html,
     _guard_homepage_fb_search_candidates,
@@ -85,6 +86,11 @@ from night_mode_fb import (
     _merge_email_all,
     _normalise_fb_url,
     _run_fb_homepage_search,
+    disable_night_fb_run_state,
+    ensure_night_fb_run_session,
+    normalize_night_fb_session_source,
+    probe_night_fb_session_decision,
+    update_night_fb_run_state,
 )
 
 
@@ -1009,6 +1015,7 @@ def _get_t007_sc_helper():
 
 
 _FB_DRIVER = None
+_FB_DRIVER_PROFILE_DIR = ""
 _FB_DRIVER_LOCK = threading.Lock()
 setup_facebook_driver = None
 fb_scrape_emails_from_page = None
@@ -1060,11 +1067,13 @@ def normalize_external_url(u: str) -> str:
     return u
 
 
-def enricher_fb_profile_has_cookies() -> bool:
-    return os.path.exists(os.path.join(ENRICHER_FB_PROFILE, "Default", "Cookies"))
+def enricher_fb_profile_has_cookies(profile_dir: Optional[str] = None) -> bool:
+    target_profile = profile_dir or ENRICHER_FB_PROFILE
+    return os.path.exists(os.path.join(target_profile, "Default", "Cookies"))
 
 
-def persistent_fb_driver():
+def persistent_fb_driver(profile_dir: Optional[str] = None):
+    target_profile = profile_dir or ENRICHER_FB_PROFILE
     chrome_options = Options()
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--window-size=1920,1080")
@@ -1073,7 +1082,7 @@ def persistent_fb_driver():
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-blink-features=AutomationControlled")
     chrome_options.page_load_strategy = "eager"
-    chrome_options.add_argument(f"--user-data-dir={ENRICHER_FB_PROFILE}")
+    chrome_options.add_argument(f"--user-data-dir={target_profile}")
     chrome_options.add_argument("--profile-directory=Default")
     prefs = {
         "profile.managed_default_content_settings.images": 2,
@@ -1089,23 +1098,32 @@ def persistent_fb_driver():
     return driver
 
 
-def _get_enricher_facebook_driver():
+def _get_enricher_facebook_driver(profile_dir: Optional[str] = None):
     """
     Lazily initialize and return a shared Selenium Chrome driver for Facebook enrichment.
     Uses a persistent user-data-dir so login persists across runs.
     """
-    global _FB_DRIVER
+    global _FB_DRIVER, _FB_DRIVER_PROFILE_DIR
+    target_profile = profile_dir or ENRICHER_FB_PROFILE
     with _FB_DRIVER_LOCK:
+        if _FB_DRIVER is not None and _FB_DRIVER_PROFILE_DIR and _FB_DRIVER_PROFILE_DIR != target_profile:
+            try:
+                _FB_DRIVER.quit()
+            except Exception:
+                pass
+            _FB_DRIVER = None
+            _FB_DRIVER_PROFILE_DIR = ""
         if _FB_DRIVER is not None:
             return _FB_DRIVER
-        os.makedirs(ENRICHER_FB_PROFILE, exist_ok=True)
-        _FB_DRIVER = persistent_fb_driver()
+        os.makedirs(target_profile, exist_ok=True)
+        _FB_DRIVER = persistent_fb_driver(target_profile)
+        _FB_DRIVER_PROFILE_DIR = target_profile
         return _FB_DRIVER
 
 
 def _cleanup_enricher_facebook_driver():
     """Safely close the Enricher's shared Facebook driver, if one was created."""
-    global _FB_DRIVER
+    global _FB_DRIVER, _FB_DRIVER_PROFILE_DIR
     with _FB_DRIVER_LOCK:
         if _FB_DRIVER is not None:
             try:
@@ -1113,6 +1131,7 @@ def _cleanup_enricher_facebook_driver():
             except Exception:
                 pass
             _FB_DRIVER = None
+            _FB_DRIVER_PROFILE_DIR = ""
 
 
 def _fb_exception_is_fatal_session(exc: Exception) -> bool:
@@ -5570,6 +5589,7 @@ class CrossDirectoryEnricherWorker(QThread):
         self._fb_session_warmup_complete: bool = False
         self._fb_session_auth_reason: str = ""
         self._fb_session_invalid: bool = False
+        self.night_fb_run_state: Optional[NightFBRunState] = None
         self._spotify_discovery_attempted_rows: Set[Any] = set()
         self._spotify_identity_tier_rows: Set[Any] = set()
         self._spotify_identity_tier_counts: Counter = Counter()
@@ -5732,6 +5752,16 @@ class CrossDirectoryEnricherWorker(QThread):
         self._fb_session_warmup_complete = bool(getattr(self, "_initial_fb_session_warmup_complete", False))
         self._fb_session_auth_reason = ""
         self._fb_session_invalid = False
+        if getattr(self, "night_mode", False) and self.night_fb_run_state is not None:
+            self._initial_fb_session_warmup_complete = bool(self.night_fb_run_state.session_warmup_complete)
+            self._fb_session_warmup_complete = bool(self.night_fb_run_state.session_warmup_complete)
+            if self.night_fb_run_state.disabled_for_run or self.night_fb_run_state.session_invalid:
+                self._fb_discovery_disabled = bool(self.night_fb_run_state.disabled_for_run)
+                self._fb_discovery_disabled_reason = self.night_fb_run_state.disable_reason or "disabled"
+                self._fb_session_auth_checked = True
+                self._fb_session_authenticated = bool(self.night_fb_run_state.authenticated)
+                self._fb_session_auth_reason = self._fb_discovery_disabled_reason
+                self._fb_session_invalid = bool(self.night_fb_run_state.session_invalid)
         self._spotify_discovery_attempted_rows = set()
         self._spotify_identity_tier_rows = set()
         self._spotify_identity_tier_counts = Counter()
@@ -5752,26 +5782,55 @@ class CrossDirectoryEnricherWorker(QThread):
         try:
             if ENABLE_FACEBOOK_ENRICHMENT:
                 try:
-                    fb_driver = _get_enricher_facebook_driver()
-                    if not enricher_fb_profile_has_cookies():
-                        try:
-                            fb_driver.get("https://www.facebook.com/")
-                        except Exception as exc:
-                            if _fb_exception_is_fatal_session(exc):
-                                raise
-                        message = "[FB Enrich] Please manually log into Facebook in the opened window."
-                        _safe_log(self.log_message.emit, message)
-                        try:
-                            input("Press ENTER once logged in…")
-                        except EOFError:
-                            pass
-                        except Exception:
-                            pass
-                        self._ensure_fb_discovery_session(fb_driver, force=True)
+                    if getattr(self, "night_mode", False):
+                        night_fb_source = (
+                            self.night_fb_run_state.session_source
+                            if self.night_fb_run_state is not None
+                            else normalize_night_fb_session_source()
+                        )
+                        if not night_fb_source.can_probe:
+                            self._disable_fb_discovery_for_run(night_fb_source.reason)
+                        else:
+                            headless = str(os.environ.get("NIGHT_FB_HEADLESS", "") or "").strip().lower() in (
+                                "1",
+                                "true",
+                                "yes",
+                                "on",
+                            )
+                            if self.night_fb_run_state is not None:
+                                shared_session = ensure_night_fb_run_session(
+                                    self.night_fb_run_state,
+                                    headless=headless,
+                                    logger=self.log_message.emit,
+                                    owner="cross_directory_enricher",
+                                )
+                                fb_driver = getattr(shared_session, "driver", None) if shared_session is not None else None
+                            else:
+                                fb_driver = _get_enricher_facebook_driver(
+                                    profile_dir=night_fb_source.profile_dir or None
+                                )
+                            self._ensure_fb_discovery_session(fb_driver, force=True)
                     else:
-                        auth_cookie_state = _fb_driver_has_auth_cookie(fb_driver)
-                        if auth_cookie_state is False:
-                            self._disable_fb_discovery_for_run("not_authenticated")
+                        fb_driver = _get_enricher_facebook_driver()
+                        if not enricher_fb_profile_has_cookies():
+                            try:
+                                fb_driver.get("https://www.facebook.com/")
+                            except Exception as exc:
+                                if _fb_exception_is_fatal_session(exc):
+                                    raise
+                            message = "[FB Enrich] Please manually log into Facebook in the opened window."
+                            _safe_log(self.log_message.emit, message)
+                            try:
+                                input("Press ENTER once logged in…")
+                            except EOFError:
+                                pass
+                            except Exception:
+                                pass
+                            self._ensure_fb_discovery_session(fb_driver, force=True)
+                        else:
+                            auth_cookie_state = _fb_driver_has_auth_cookie(fb_driver)
+                            if auth_cookie_state is False:
+                                self._disable_fb_discovery_for_run("not_authenticated")
                 except Exception as exc:
                     if _fb_exception_is_fatal_session(exc):
                         self._disable_fb_discovery_for_run("session_invalid", session_invalid=True)
@@ -6034,6 +6093,14 @@ class CrossDirectoryEnricherWorker(QThread):
     def _disable_fb_discovery_for_run(self, reason: str, *, session_invalid: bool = False) -> str:
         reason_code = cell_to_str(reason) or ("session_invalid" if session_invalid else "not_authenticated")
         previous_reason = self._fb_discovery_disabled_reason
+        if getattr(self, "night_mode", False) and self.night_fb_run_state is not None:
+            reason_code = disable_night_fb_run_state(
+                self.night_fb_run_state,
+                reason_code,
+                session_invalid=session_invalid,
+                checkpointed=reason_code == "checkpoint",
+                close_session=session_invalid,
+            )
         self._fb_discovery_disabled = True
         self._fb_discovery_disabled_reason = reason_code
         self._fb_discovery_disable_logged = self._fb_discovery_disable_logged and previous_reason == reason_code
@@ -6062,6 +6129,16 @@ class CrossDirectoryEnricherWorker(QThread):
     ) -> Tuple[bool, str]:
         if not (ENABLE_FACEBOOK_ENRICHMENT and fb_driver):
             return False, "no_driver"
+        if getattr(self, "night_mode", False) and self.night_fb_run_state is not None:
+            if self.night_fb_run_state.disabled_for_run or self.night_fb_run_state.session_invalid:
+                reason = self.night_fb_run_state.disable_reason or "disabled"
+                self._fb_discovery_disabled = True
+                self._fb_discovery_disabled_reason = reason
+                self._fb_session_invalid = bool(self.night_fb_run_state.session_invalid)
+                self._fb_session_authenticated = False
+                self._fb_session_auth_checked = True
+                self._fb_session_auth_reason = reason
+                return False, reason
         if self._fb_discovery_disabled:
             return False, self._fb_discovery_disabled_reason or "disabled"
         if self._fb_session_invalid:
@@ -6079,10 +6156,28 @@ class CrossDirectoryEnricherWorker(QThread):
             self._disable_fb_discovery_for_run(reason, session_invalid=self._fb_session_invalid)
             return False, reason
 
-        is_authenticated, reason = _probe_fb_session_state(
-            fb_driver,
-            visit_home=force or not self._fb_session_auth_checked,
-        )
+        if getattr(self, "night_mode", False):
+            decision = probe_night_fb_session_decision(
+                fb_driver,
+                visit_home=force or not self._fb_session_auth_checked,
+            )
+            update_night_fb_run_state(
+                self.night_fb_run_state,
+                decision,
+                owner="cross_directory_enricher",
+            )
+            is_authenticated = bool(decision.authenticated and decision.usable)
+            if decision.state == "session_invalid":
+                reason = "session_invalid"
+            elif decision.state == "authenticated_but_checkpointed":
+                reason = "checkpoint"
+            else:
+                reason = decision.reason or decision.state or "not_authenticated"
+        else:
+            is_authenticated, reason = _probe_fb_session_state(
+                fb_driver,
+                visit_home=force or not self._fb_session_auth_checked,
+            )
         self._fb_session_auth_checked = True
         self._fb_session_auth_reason = reason
         if is_authenticated:
@@ -6093,6 +6188,9 @@ class CrossDirectoryEnricherWorker(QThread):
                 self.log_message.emit(
                     "[FB Discover] Shared Facebook session authenticated; discovery enabled for this run."
                 )
+            if getattr(self, "night_mode", False) and self.night_fb_run_state is not None:
+                self.night_fb_run_state.authenticated = True
+                self.night_fb_run_state.reusable = True
             if not self._fb_session_warmup_complete:
                 if not self._run_fb_session_warmup(fb_driver):
                     reason = self._fb_discovery_disabled_reason or self._fb_session_auth_reason or "session_invalid"
@@ -6126,6 +6224,8 @@ class CrossDirectoryEnricherWorker(QThread):
                 self._disable_fb_discovery_for_run("session_invalid", session_invalid=True)
                 return False
         self._fb_session_warmup_complete = True
+        if getattr(self, "night_mode", False) and self.night_fb_run_state is not None:
+            self.night_fb_run_state.session_warmup_complete = True
         return True
 
     def _handle_fb_session_failure(
@@ -12829,6 +12929,7 @@ def run_cross_directory_enrichment(
     yield_tracker: Optional[EnrichmentYieldTracker] = None,
     state_source: Optional[Dict[str, Any]] = None,
     state_sink: Optional[Dict[str, Any]] = None,
+    night_fb_run_state: Optional[NightFBRunState] = None,
 ) -> str:
     """
     Headless wrapper around the existing CrossDirectoryEnricherWorker for programmatic use.
@@ -12861,8 +12962,11 @@ def run_cross_directory_enrichment(
         yield_tracker=yield_tracker,
     )
     worker.night_mode = bool(night_mode)
+    worker.night_fb_run_state = night_fb_run_state
     if isinstance(state_source, dict):
         worker._initial_fb_session_warmup_complete = bool(state_source.get("fb_session_warmup_complete"))
+    if night_fb_run_state is not None:
+        worker._initial_fb_session_warmup_complete = bool(night_fb_run_state.session_warmup_complete)
 
     # Bypass Qt event loop by providing simple emit stubs.
     worker.log_message = type("obj", (), {"emit": _log})
@@ -12870,6 +12974,8 @@ def run_cross_directory_enrichment(
     worker.finished = type("obj", (), {"emit": lambda *args, **kwargs: None})
 
     worker._run_impl()
+    if night_fb_run_state is not None:
+        night_fb_run_state.session_warmup_complete = bool(getattr(worker, "_fb_session_warmup_complete", False))
     if isinstance(state_sink, dict):
         state_sink["fb_session_warmup_complete"] = bool(getattr(worker, "_fb_session_warmup_complete", False))
         state_sink["domain_profile_index"] = copy.deepcopy(getattr(worker, "_domain_profile_index", {}) or {})

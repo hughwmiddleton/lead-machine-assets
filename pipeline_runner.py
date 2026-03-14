@@ -33,7 +33,14 @@ except Exception:  # pragma: no cover - defensive
     def is_fb_login_redirect(url: str) -> bool:  # type: ignore
         return False
 
-from night_mode_fb import FacebookDriverError, NightModeFacebookEnricher
+from night_mode_fb import (
+    FacebookDriverError,
+    NightFBRunState,
+    NightModeFacebookEnricher,
+    close_night_fb_run_state,
+    create_night_fb_run_state,
+    normalize_night_fb_session_source,
+)
 
 LoggerFn = Optional[Callable[[str], None]]
 
@@ -1764,6 +1771,7 @@ def run_master_enrichment(
     max_live_searches: Optional[int] = None,
     night_mode: bool = False,
     bandcamp_csv_path: Optional[str] = None,
+    night_fb_run_state: Optional[NightFBRunState] = None,
 ) -> str:
     """
     Run the cross-directory enricher on a single combined CSV.
@@ -1771,6 +1779,13 @@ def run_master_enrichment(
     This wraps the existing cross_directory_enricher logic used by the standalone tool.
     """
     _safe_log(logger, f"[Master Enrich] Starting cross-directory enrichment for {seed_csv_path}")
+    local_night_fb_run_state = False
+    if night_mode and night_fb_run_state is None:
+        night_fb_run_state = create_night_fb_run_state(
+            os.environ.get("FB_USERNAME", "").strip(),
+            os.environ.get("FB_PASSWORD", "").strip(),
+        )
+        local_night_fb_run_state = True
     try:
         import cross_directory_enricher
     except Exception as exc:
@@ -1910,6 +1925,7 @@ def run_master_enrichment(
             night_mode=night_mode,
             yield_tracker=yield_tracker,
             state_sink=first_pass_state,
+            night_fb_run_state=night_fb_run_state,
         )
         try:
             expansion_raw_csv_path = cross_directory_enricher._festival_expansion_raw_path(output_csv_path)
@@ -1945,6 +1961,7 @@ def run_master_enrichment(
                         yield_tracker=yield_tracker,
                         state_source=first_pass_state,
                         state_sink=second_pass_state,
+                        night_fb_run_state=night_fb_run_state,
                     )
                     _merge_festival_expansion_output(
                         output_csv_path,
@@ -1977,6 +1994,9 @@ def run_master_enrichment(
         _safe_log(logger, f"[Master Enrich] Enricher failed safely: {exc}")
         shutil.copyfile(seed_csv_path, output_csv_path)
         return output_csv_path
+    finally:
+        if local_night_fb_run_state:
+            close_night_fb_run_state(night_fb_run_state)
 
     _safe_log(logger, f"[Master Enrich] Completed cross-directory enrichment -> {output_csv_path}")
     return output_csv_path
@@ -2604,6 +2624,7 @@ def run_facebook_global_pass_nightmode(
     long_break_range: tuple[float, float] = (120.0, 360.0),
     logger: LoggerFn = None,
     skip_rows_with_email: bool = True,
+    night_fb_run_state: Optional[NightFBRunState] = None,
 ) -> FacebookGlobalPassStatus:
     """
     Night Mode–specific global FB enrichment pass.
@@ -2622,10 +2643,26 @@ def run_facebook_global_pass_nightmode(
 
     fb_username = os.environ.get("FB_USERNAME", "").strip()
     fb_password = os.environ.get("FB_PASSWORD", "").strip()
-    if fb_username:
-        _safe_log_console(logger, "[Night FB] FB username provided (length only logged).")
-    else:
-        _safe_log_console(logger, "[Night FB] FB username missing; Night FB will run unauthenticated.")
+    local_night_fb_run_state = False
+    if night_fb_run_state is None:
+        night_fb_run_state = create_night_fb_run_state(fb_username, fb_password)
+        local_night_fb_run_state = True
+    night_fb_session_source = night_fb_run_state.session_source
+    source_label = night_fb_session_source.mode or "none"
+    decision_label = (
+        "disabled_for_run"
+        if night_fb_run_state.disabled_for_run
+        else ("probe_pending" if night_fb_session_source.can_probe else "disabled_for_run")
+    )
+    profile_suffix = (
+        f" profile_dir={night_fb_session_source.profile_dir}"
+        if night_fb_session_source.profile_dir
+        else ""
+    )
+    _safe_log_console(
+        logger,
+        f"[Night FB][Session Gate] source={source_label} decision={decision_label} reason={night_fb_session_source.reason}{profile_suffix}",
+    )
 
     # Always start from the full input to avoid losing rows when smoke caps are used.
     df = pd.read_csv(input_csv, dtype=str, keep_default_na=False).fillna("")
@@ -2698,7 +2735,38 @@ def run_facebook_global_pass_nightmode(
     except Exception:
         pass
 
-    if fb_username and fb_password:
+    if night_fb_run_state.disabled_for_run:
+        _safe_log_console(
+            logger,
+            f"[FB Night] Night FB already disabled for this run; passing through without enrichment (reason={night_fb_run_state.disable_reason or 'disabled'}).",
+        )
+        state.update(
+            {
+                "fb_last_index": total_rows - 1,
+                "fb_completed": total_rows,
+                "fb_attempted_total": attempted_total,
+                "fb_captcha_flag": False,
+                "fb_total_rows": total_rows,
+                "fb_run_completed": True,
+                "fb_limit_reached": False,
+                "fb_resume_input": os.path.abspath(input_csv),
+            }
+        )
+        _write_fb_state(state_path, state)
+        df.drop(columns=["__row_id"], inplace=True, errors="ignore")
+        df.to_csv(output_csv, index=False)
+        if local_night_fb_run_state:
+            close_night_fb_run_state(night_fb_run_state)
+        return FacebookGlobalPassStatus(
+            processed_rows=total_rows,
+            total_rows=total_rows,
+            completed=True,
+            hit_captcha=False,
+            limit_reached=False,
+            attempted_total=attempted_total,
+        )
+
+    if night_fb_session_source.can_probe:
         module = _load_legacy_module()
         if not hasattr(module, "scrape_csv"):
             _safe_log_console(logger, "[FB Night] scrape_csv missing on legacy module; skipping.")
@@ -2717,6 +2785,8 @@ def run_facebook_global_pass_nightmode(
             _write_fb_state(state_path, state)
             df.drop(columns=["__row_id"], inplace=True, errors="ignore")
             df.to_csv(output_csv, index=False)
+            if local_night_fb_run_state:
+                close_night_fb_run_state(night_fb_run_state)
             return FacebookGlobalPassStatus(
                 processed_rows=completed_rows,
                 total_rows=total_rows,
@@ -2726,7 +2796,10 @@ def run_facebook_global_pass_nightmode(
                 attempted_total=attempted_total,
             )
     else:
-        _safe_log_console(logger, "[FB Night] Missing FB credentials; passing through without enrichment.")
+        _safe_log_console(
+            logger,
+            f"[FB Night] No usable Night FB session source; passing through without enrichment (reason={night_fb_session_source.reason}).",
+        )
         state.update(
             {
                 "fb_last_index": total_rows - 1,
@@ -2742,6 +2815,8 @@ def run_facebook_global_pass_nightmode(
         _write_fb_state(state_path, state)
         df.drop(columns=["__row_id"], inplace=True, errors="ignore")
         df.to_csv(output_csv, index=False)
+        if local_night_fb_run_state:
+            close_night_fb_run_state(night_fb_run_state)
         return FacebookGlobalPassStatus(
             processed_rows=total_rows,
             total_rows=total_rows,
@@ -2760,6 +2835,7 @@ def run_facebook_global_pass_nightmode(
         fb_password,
         logger=lambda msg: _safe_log_console(logger, msg),
         use_shared_session=False,
+        run_state=night_fb_run_state,
     )
 
     def _write_state_with_pass_a(extra: Dict[str, Any]) -> None:
@@ -2776,6 +2852,8 @@ def run_facebook_global_pass_nightmode(
         failed, fail_reason = (fb_helper.get_session_failure() if hasattr(fb_helper, "get_session_failure") else (False, ""))  # type: ignore[attr-defined]
         if failed:
             _safe_log_console(logger, f"[FB Night] Skipping FB pass: session failed to start ({fail_reason or 'unknown'})")
+            if local_night_fb_run_state:
+                close_night_fb_run_state(night_fb_run_state)
             return df
 
         failure_logged = False
@@ -3038,6 +3116,8 @@ def run_facebook_global_pass_nightmode(
 
     df.drop(columns=["__row_id"], inplace=True, errors="ignore")
     df.to_csv(output_csv, index=False)
+    if local_night_fb_run_state:
+        close_night_fb_run_state(night_fb_run_state)
     return FacebookGlobalPassStatus(
         processed_rows=completed_rows,
         total_rows=total_rows,

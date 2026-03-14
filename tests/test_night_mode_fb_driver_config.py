@@ -11,6 +11,22 @@ class _DummyDriver:
         return {}
 
 
+class _ProbeDriver:
+    def __init__(self, current_url: str, page_source: str, c_user: bool) -> None:
+        self.current_url = current_url
+        self.page_source = page_source
+        self.c_user = c_user
+        self.loaded_urls = []
+
+    def get(self, url):  # noqa: ANN001
+        self.loaded_urls.append(url)
+
+    def get_cookie(self, name):  # noqa: ANN001
+        if name == "c_user" and self.c_user:
+            return {"name": "c_user", "value": "1"}
+        return None
+
+
 def test_create_fb_driver_night_mode_forces_images_on(monkeypatch):
     captured = {}
     sentinel_driver = _DummyDriver()
@@ -36,6 +52,35 @@ def test_create_fb_driver_night_mode_forces_images_on(monkeypatch):
     assert sentinel_driver.cdp_calls
     assert sentinel_driver.cdp_calls[0][0] == "Page.addScriptToEvaluateOnNewDocument"
     assert "navigator" in sentinel_driver.cdp_calls[0][1]["source"]
+
+
+def test_normalize_night_fb_session_source_allows_profile_without_credentials(monkeypatch, tmp_path):
+    profile_dir = tmp_path / "night_fb_profile"
+    (profile_dir / "Default").mkdir(parents=True)
+    monkeypatch.setenv("NIGHT_FB_PROFILE_DIR", profile_dir.as_posix())
+
+    source = nmfb.normalize_night_fb_session_source("", "")
+
+    assert source.can_probe is True
+    assert source.mode == "profile"
+    assert source.reason == "profile_dir"
+    assert source.profile_dir == str(profile_dir.resolve())
+
+
+def test_probe_night_fb_session_decision_keeps_checkpoint_distinct():
+    driver = _ProbeDriver(
+        current_url="https://www.facebook.com/checkpoint/",
+        page_source="<html><body>checkpoint</body></html>",
+        c_user=True,
+    )
+
+    decision = nmfb.probe_night_fb_session_decision(driver, visit_home=False)
+
+    assert decision.state == "authenticated_but_checkpointed"
+    assert decision.reason == "checkpoint"
+    assert decision.authenticated is True
+    assert decision.usable is False
+    assert decision.checkpointed is True
 
 
 def test_create_fb_driver_public_keeps_images_blocked(monkeypatch):

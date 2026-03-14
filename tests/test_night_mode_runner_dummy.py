@@ -258,6 +258,67 @@ class NightModeRunnerDummyTest(unittest.TestCase):
         self.assertEqual(summary["vault_rows_added"], 0)
         self.assertEqual(summary["vault_rows_updated"], 0)
 
+    def test_night_run_shares_authoritative_fb_run_state_across_active_phases(self) -> None:
+        config_path = os.path.join(self.tmpdir.name, "config.json")
+        self._write_config(config_path)
+
+        def fake_run_directory_job(job_config, raw_output_path, logger=None):
+            pd.DataFrame(
+                [
+                    {"Artist Name": f"{job_config['job_id']}_artist", "Email": ""},
+                ]
+            ).to_csv(raw_output_path, index=False)
+            return raw_output_path
+
+        def fake_run_enrichment(raw_csv_path, enriched_output_path, logger=None, night_mode=False):
+            shutil.copyfile(raw_csv_path, enriched_output_path)
+            return enriched_output_path
+
+        phase_run_states = []
+
+        def fake_run_master_enrichment(
+            input_csv,
+            output_csv,
+            logger=None,
+            enable_live_search=True,
+            max_live_searches=None,
+            night_mode=False,
+            night_fb_run_state=None,
+        ):
+            phase_run_states.append(("master", night_fb_run_state))
+            self.assertIsNotNone(night_fb_run_state)
+            night_fb_run_state.disabled_for_run = True
+            night_fb_run_state.disable_reason = "session_invalid"
+            night_fb_run_state.session_invalid = True
+            shutil.copyfile(input_csv, output_csv)
+            return output_csv
+
+        def fake_fb_pass(input_csv, output_csv, state_path, max_rows_per_run=100, night_fb_run_state=None, **kwargs):
+            phase_run_states.append(("fb_pass", night_fb_run_state))
+            self.assertIsNotNone(night_fb_run_state)
+            self.assertTrue(night_fb_run_state.disabled_for_run)
+            self.assertTrue(night_fb_run_state.session_invalid)
+            self.assertEqual(night_fb_run_state.disable_reason, "session_invalid")
+            shutil.copyfile(input_csv, output_csv)
+            return pipeline_runner.FacebookGlobalPassStatus(
+                processed_rows=2,
+                total_rows=2,
+                completed=True,
+                hit_captcha=False,
+                limit_reached=False,
+                attempted_total=0,
+            )
+
+        with mock.patch.object(night_mode_runner, "run_directory_job", side_effect=fake_run_directory_job), mock.patch.object(
+            night_mode_runner, "run_enrichment", side_effect=fake_run_enrichment
+        ), mock.patch.object(night_mode_runner, "run_master_enrichment", side_effect=fake_run_master_enrichment), mock.patch.object(
+            night_mode_runner, "run_facebook_global_pass_nightmode", side_effect=fake_fb_pass
+        ):
+            night_mode_runner.run_night_mode(config_path, run_root=self.run_root)
+
+        self.assertEqual([label for label, _ in phase_run_states], ["master", "fb_pass"])
+        self.assertIs(phase_run_states[0][1], phase_run_states[1][1])
+
     def test_facebook_global_pass_skip_rules(self) -> None:
         # Build a small CSV with various rows.
         tmpdir = self.tmpdir.name
