@@ -13,6 +13,35 @@ def _build_enricher(logs):  # noqa: ANN001
     return enricher
 
 
+class _FakeBodyElement:
+    def __init__(self, text: str):
+        self.text = text
+
+    def get_attribute(self, name: str):
+        if name == "innerText":
+            return self.text
+        return ""
+
+
+class _FbContainerTextDriver:
+    def __init__(self, body_text: str, container_texts):  # noqa: ANN001
+        self.body_text = body_text
+        self.container_texts = list(container_texts or [])
+
+    def find_element(self, _by, value):  # noqa: ANN001
+        if value == "body":
+            return _FakeBodyElement(self.body_text)
+        raise LookupError(value)
+
+    def execute_script(self, script):  # noqa: ANN001
+        script_text = str(script or "")
+        if "document.body" in script_text:
+            return self.body_text
+        if "role=\"main\"" in script_text or "role=\"complementary\"" in script_text:
+            return list(self.container_texts)
+        return []
+
+
 def test_main_page_html_email_stops_before_secondary_fetch(monkeypatch) -> None:
     logs = []
     enricher = _build_enricher(logs)
@@ -145,6 +174,61 @@ def test_main_page_rendered_visible_text_email_stops_before_secondary_fetch(monk
         calls.append(url)
         html, resolved, visible_text = pages[url]
         enricher._last_fb_visible_text = visible_text
+        return html, resolved
+
+    monkeypatch.setattr(enricher, "_fetch_html_with_url", fake_fetch)
+    monkeypatch.setattr(nmfb, "_night_fb_has_music_signals", lambda soup, context: False)
+    monkeypatch.setattr(nmfb, "should_accept_email_override", lambda *args, **kwargs: (True, "test_override"))
+
+    result = enricher._scrape_single_fb_candidate(
+        main_url,
+        {"Artist Name": "Artist", "Email_All": ""},
+        "Artist",
+        allow_anon=False,
+        candidate_context={},
+    )
+
+    assert result is not None
+    night_result, emails, driver_kind, outcome = result
+    assert emails == ["brighteyedbookings@gmail.com"]
+    assert night_result is not None
+    assert night_result.email == "brighteyedbookings@gmail.com"
+    assert night_result.about_attempted == "no"
+    assert calls == [main_url]
+    assert len(calls) == 1
+    assert driver_kind == "session"
+    assert outcome == "found_email"
+    assert any("[FB Email] Found email on main page: brighteyedbookings@gmail.com" in msg for msg in logs)
+    assert any("[FB Email] Skipping contact/about fetch because main page email already found" in msg for msg in logs)
+
+
+def test_main_page_fb_container_fallback_email_stops_before_secondary_fetch(monkeypatch) -> None:
+    logs = []
+    enricher = _build_enricher(logs)
+    calls = []
+    main_url = "https://www.facebook.com/artist"
+
+    pages = {
+        main_url: (
+            """
+            <html>
+              <body>
+                <div>No visible email on this page.</div>
+                <a href="/artist/about">About</a>
+              </body>
+            </html>
+            """,
+            main_url,
+            "No email on main page",
+            ["Intro Contact brighteyedbookings@gmail.com"],
+        ),
+    }
+
+    def fake_fetch(url, goto_about=False):  # noqa: ANN001
+        calls.append(url)
+        html, resolved, body_text, container_texts = pages[url]
+        driver = _FbContainerTextDriver(body_text, container_texts)
+        enricher._last_fb_visible_text = nmfb._extract_fb_visible_text_with_container_fallback(driver)
         return html, resolved
 
     monkeypatch.setattr(enricher, "_fetch_html_with_url", fake_fetch)

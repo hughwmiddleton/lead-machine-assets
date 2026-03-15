@@ -3773,6 +3773,70 @@ def _extract_rendered_visible_text_from_driver(driver) -> str:
         return str(state.get("last_text") or initial_text or "").strip()
 
 
+def _extract_fb_visible_text_with_container_fallback(driver) -> str:
+    """
+    Facebook-only supplement for already-open pages.
+    Keeps the generic body-text helper unchanged and adds a tiny semantic
+    fallback for visible main/sidebar regions when body text misses an email.
+    """
+    base_text = _extract_rendered_visible_text_from_driver(driver)
+    if driver is None or EMAIL_REGEX.search(base_text):
+        return base_text
+
+    try:
+        blocks = driver.execute_script(
+            """
+            const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+            const isVisible = (el) => {
+              if (!el || !el.isConnected) return false;
+              const style = window.getComputedStyle ? window.getComputedStyle(el) : null;
+              if (style && (style.display === 'none' || style.visibility === 'hidden')) return false;
+              const rects = typeof el.getClientRects === 'function' ? el.getClientRects() : null;
+              return !!(rects && rects.length);
+            };
+
+            const selectors = ['div[role="main"]', 'div[role="complementary"]'];
+            const seen = new Set();
+            const results = [];
+
+            for (const selector of selectors) {
+              const el = document.querySelector(selector);
+              if (!isVisible(el)) continue;
+              const text = normalize(el.innerText || el.textContent || '');
+              if (!text || seen.has(text)) continue;
+              seen.add(text);
+              results.push(text);
+            }
+
+            return results;
+            """
+        ) or []
+    except Exception:
+        blocks = []
+
+    if isinstance(blocks, str):
+        blocks = [blocks]
+
+    seen_blocks = set()
+    normalized_base = " ".join(str(base_text or "").split())
+    if normalized_base:
+        seen_blocks.add(normalized_base)
+
+    extra_blocks: List[str] = []
+    for block in blocks:
+        normalized = " ".join(str(block or "").split())
+        if not normalized or normalized in seen_blocks:
+            continue
+        seen_blocks.add(normalized)
+        extra_blocks.append(normalized)
+
+    if not extra_blocks:
+        return base_text
+    if not base_text:
+        return "\n".join(extra_blocks)
+    return "\n".join([str(base_text).strip()] + extra_blocks)
+
+
 def _log_fb_email_surface_debug(logger: LoggerFn, label: str, page_source: str, rendered_text: str) -> None:
     if os.getenv("FB_DEBUG_EMAIL_SURFACES") != "1":
         return
@@ -4516,7 +4580,7 @@ def _try_explicit_fb(driver, url: str, logger: LoggerFn = None) -> Tuple[List[st
     if any(phrase in page_source for phrase in not_found_phrases):
         return [], "not_found", ""
 
-    rendered_text = _extract_rendered_visible_text_from_driver(driver)
+    rendered_text = _extract_fb_visible_text_with_container_fallback(driver)
     _log_fb_email_surface_debug(logger, f"explicit:{current_url or url}", page_source_raw, rendered_text)
     emails, used_mailto = _extract_emails_from_html(page_source_raw, rendered_text=rendered_text)
     if emails:
@@ -5879,7 +5943,7 @@ class NightModeFacebookEnricher:
                         goto_about_fn(driver, url, timeout=5.0)
                     except Exception:
                         pass
-            self._last_fb_visible_text = _extract_rendered_visible_text_from_driver(driver)
+            self._last_fb_visible_text = _extract_fb_visible_text_with_container_fallback(driver)
             current_url = getattr(driver, "current_url", None) or url
             return driver.page_source, current_url
 
@@ -5953,7 +6017,7 @@ class NightModeFacebookEnricher:
                         goto_about_fn(driver, url, timeout=5.0)
                     except Exception:
                         pass
-            self._last_fb_visible_text = _extract_rendered_visible_text_from_driver(driver)
+            self._last_fb_visible_text = _extract_fb_visible_text_with_container_fallback(driver)
             current_url = getattr(driver, "current_url", None) or current_url or url
             self._log_page_health(current_url, html, context="page")
             if is_fb_login_redirect(current_url) or _is_fb_login_or_security_url(current_url):

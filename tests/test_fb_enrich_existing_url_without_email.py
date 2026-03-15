@@ -59,6 +59,15 @@ class _RenderedTextDriver:
             return _FakeBodyElement(self._rendered_text)
         raise LookupError(value)
 
+    def execute_script(self, script):  # noqa: ANN001
+        page = self.pages.get(self.current_url, {})
+        script_text = str(script or "")
+        if "document.body" in script_text:
+            return self._rendered_text
+        if "role=\"main\"" in script_text or "role=\"complementary\"" in script_text:
+            return list(page.get("fb_container_texts", []))
+        return []
+
 
 def test_discover_facebook_url_bounded_requires_strong_candidate(monkeypatch):
     calls = []
@@ -341,6 +350,50 @@ def test_fb_enrich_uses_main_page_rendered_visible_text_without_secondary_fetch(
     assert seed_df.at[0, "FB_Status"] == "found_email"
     assert driver.calls[-1] == "https://www.facebook.com/renderedmainfb"
     assert "https://www.facebook.com/renderedmainfb/about" not in driver.calls
+
+
+def test_fb_enrich_uses_fb_container_fallback_without_secondary_fetch() -> None:
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Rendered FB Container",
+            "Email": "",
+            "Email_All": "",
+            "facebook_url": "https://www.facebook.com/renderedcontainerfb",
+            "Facebook_URL": "https://www.facebook.com/renderedcontainerfb",
+            "Facebook URL": "https://www.facebook.com/renderedcontainerfb",
+            "Social Link": "",
+            "External Links": "",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    driver = _RenderedTextDriver(
+        {
+            "https://www.facebook.com/renderedcontainerfb": {
+                "html": '<html><body><a href="/renderedcontainerfb/about">About</a></body></html>',
+                "rendered_text": "No email on main page",
+                "fb_container_texts": ["Intro Contact brighteyedbookings@gmail.com"],
+            },
+            "https://www.facebook.com/renderedcontainerfb/about": {
+                "html": "<html><body><div>No email here</div></body></html>",
+                "rendered_text": "No email here",
+                "fb_container_texts": [],
+            },
+        }
+    )
+
+    matched = worker._enrich_row_facebook(seed_df, 0, driver, ctx)
+
+    assert matched is True
+    assert seed_df.at[0, "Email"] == "brighteyedbookings@gmail.com"
+    assert "brighteyedbookings@gmail.com" in seed_df.at[0, "Email_All"]
+    assert seed_df.at[0, "FB_Status"] == "found_email"
+    assert driver.calls[-1] == "https://www.facebook.com/renderedcontainerfb"
+    assert "https://www.facebook.com/renderedcontainerfb/about" not in driver.calls
 
 
 def test_fb_enrich_rendered_visible_text_without_email_keeps_no_email_status() -> None:
