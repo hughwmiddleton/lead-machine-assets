@@ -3694,32 +3694,102 @@ def _extract_rendered_visible_text_from_driver(driver) -> str:
     if driver is None:
         return ""
 
-    body = None
-    try:
-        body = driver.find_element(By.TAG_NAME, "body")
-    except Exception:
+    def _read_snapshot(drv) -> str:
         body = None
-
-    if body is not None:
         try:
-            text = body.get_attribute("innerText") or ""
+            body = drv.find_element(By.TAG_NAME, "body")
         except Exception:
-            text = ""
-        if not text:
+            body = None
+
+        if body is not None:
             try:
-                text = getattr(body, "text", "") or ""
+                text = body.get_attribute("innerText") or ""
             except Exception:
                 text = ""
-        if text:
-            return str(text).strip()
+            if not text:
+                try:
+                    text = getattr(body, "text", "") or ""
+                except Exception:
+                    text = ""
+            if text:
+                return str(text).strip()
+
+        try:
+            text = drv.execute_script(
+                "return document.body ? (document.body.innerText || '') : '';"
+            ) or ""
+        except Exception:
+            text = ""
+        return str(text).strip()
+
+    initial_text = _read_snapshot(driver)
+    if EMAIL_REGEX.search(initial_text):
+        return initial_text
 
     try:
-        text = driver.execute_script(
-            "return document.body ? (document.body.innerText || '') : '';"
-        ) or ""
+        timeout_s = float(os.getenv("FB_RENDERED_TEXT_WAIT_S", "1.5") or "1.5")
     except Exception:
-        text = ""
-    return str(text).strip()
+        timeout_s = 1.5
+    if timeout_s <= 0:
+        return initial_text
+
+    state = {
+        "last_text": initial_text,
+        "stable_hits": 0,
+        "saw_change": False,
+    }
+    baseline_len = len(initial_text)
+
+    def _rendered_text_ready(drv):
+        text = _read_snapshot(drv)
+        if EMAIL_REGEX.search(text):
+            state["last_text"] = text
+            return text
+
+        previous = state["last_text"] or ""
+        if text != previous:
+            state["saw_change"] = True
+            state["stable_hits"] = 0
+            state["last_text"] = text
+            return False
+
+        state["last_text"] = text or previous
+        if not text:
+            return False
+
+        state["stable_hits"] += 1
+        grew_materially = len(text) >= max(160, baseline_len + 40)
+        if (not initial_text) and state["stable_hits"] >= 1:
+            return text
+        if state["saw_change"] and state["stable_hits"] >= 2:
+            return text
+        if grew_materially and state["stable_hits"] >= 1:
+            return text
+        return False
+
+    try:
+        return WebDriverWait(driver, timeout_s, poll_frequency=0.2).until(_rendered_text_ready)
+    except TimeoutException:
+        return str(state.get("last_text") or initial_text or "").strip()
+
+
+def _log_fb_email_surface_debug(logger: LoggerFn, label: str, page_source: str, rendered_text: str) -> None:
+    if os.getenv("FB_DEBUG_EMAIL_SURFACES") != "1":
+        return
+
+    page_source = str(page_source or "")
+    rendered_text = str(rendered_text or "")
+    rendered_preview = " ".join(rendered_text.split())[:500]
+    rendered_match = bool(EMAIL_REGEX.search(rendered_text))
+    source_match = bool(EMAIL_REGEX.search(page_source))
+    _log(
+        logger,
+        "[FB Email][debug] "
+        f"surface={label} rendered_len={len(rendered_text)} "
+        f"rendered_match={1 if rendered_match else 0} "
+        f"source_match={1 if source_match else 0} "
+        f"rendered_preview={rendered_preview!r}",
+    )
 
 
 def _extract_emails_from_html(
@@ -4447,6 +4517,7 @@ def _try_explicit_fb(driver, url: str, logger: LoggerFn = None) -> Tuple[List[st
         return [], "not_found", ""
 
     rendered_text = _extract_rendered_visible_text_from_driver(driver)
+    _log_fb_email_surface_debug(logger, f"explicit:{current_url or url}", page_source_raw, rendered_text)
     emails, used_mailto = _extract_emails_from_html(page_source_raw, rendered_text=rendered_text)
     if emails:
         method = "mailto" if used_mailto else "regex"
@@ -5808,7 +5879,6 @@ class NightModeFacebookEnricher:
                         goto_about_fn(driver, url, timeout=5.0)
                     except Exception:
                         pass
-            time.sleep(1.0)
             self._last_fb_visible_text = _extract_rendered_visible_text_from_driver(driver)
             current_url = getattr(driver, "current_url", None) or url
             return driver.page_source, current_url
@@ -5883,7 +5953,6 @@ class NightModeFacebookEnricher:
                         goto_about_fn(driver, url, timeout=5.0)
                     except Exception:
                         pass
-            time.sleep(1.0)
             self._last_fb_visible_text = _extract_rendered_visible_text_from_driver(driver)
             current_url = getattr(driver, "current_url", None) or current_url or url
             self._log_page_health(current_url, html, context="page")
@@ -6517,6 +6586,7 @@ class NightModeFacebookEnricher:
         _log(self.logger, f"[FB Email] Scanning main page HTML for emails: {resolved_url}")
         has_music_signals_main = _night_fb_has_music_signals(soup, {"url": resolved_url})
         main_visible_text = getattr(self, "_last_fb_visible_text", "") or ""
+        _log_fb_email_surface_debug(self.logger, f"main:{resolved_url}", html or "", main_visible_text)
         emails, main_mailto = _extract_emails_from_html(html or "", rendered_text=main_visible_text)
         email_method = "mailto" if emails and main_mailto else ("regex" if emails else "")
         if emails:
@@ -6579,6 +6649,12 @@ class NightModeFacebookEnricher:
                                     _log(self.logger, f"[Night FB] Music signals found on About tab {final_about}.")
                             if not emails:
                                 about_visible_text = getattr(self, "_last_fb_visible_text", "") or ""
+                                _log_fb_email_surface_debug(
+                                    self.logger,
+                                    f"about:{final_about}",
+                                    about_html or "",
+                                    about_visible_text,
+                                )
                                 about_emails, about_mailto = _extract_emails_from_html(
                                     about_html or "",
                                     rendered_text=about_visible_text,

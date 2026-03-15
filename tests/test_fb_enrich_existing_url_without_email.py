@@ -301,6 +301,48 @@ def test_fb_enrich_uses_rendered_visible_text_when_page_source_has_no_email() ->
     ]
 
 
+def test_fb_enrich_uses_main_page_rendered_visible_text_without_secondary_fetch() -> None:
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Rendered FB Main",
+            "Email": "",
+            "Email_All": "",
+            "facebook_url": "https://www.facebook.com/renderedmainfb",
+            "Facebook_URL": "https://www.facebook.com/renderedmainfb",
+            "Facebook URL": "https://www.facebook.com/renderedmainfb",
+            "Social Link": "",
+            "External Links": "",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    driver = _RenderedTextDriver(
+        {
+            "https://www.facebook.com/renderedmainfb": {
+                "html": '<html><body><a href="/renderedmainfb/about">About</a></body></html>',
+                "rendered_text": "Intro Contact brighteyedbookings@gmail.com",
+            },
+            "https://www.facebook.com/renderedmainfb/about": {
+                "html": "<html><body><div>No email here</div></body></html>",
+                "rendered_text": "No email here",
+            },
+        }
+    )
+
+    matched = worker._enrich_row_facebook(seed_df, 0, driver, ctx)
+
+    assert matched is True
+    assert seed_df.at[0, "Email"] == "brighteyedbookings@gmail.com"
+    assert "brighteyedbookings@gmail.com" in seed_df.at[0, "Email_All"]
+    assert seed_df.at[0, "FB_Status"] == "found_email"
+    assert driver.calls[-1] == "https://www.facebook.com/renderedmainfb"
+    assert "https://www.facebook.com/renderedmainfb/about" not in driver.calls
+
+
 def test_fb_enrich_rendered_visible_text_without_email_keeps_no_email_status() -> None:
     logs = []
     worker = _make_worker(logs)
