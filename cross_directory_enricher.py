@@ -79,6 +79,7 @@ from night_mode_fb import (
     NightFBRunState,
     classify_explicit_fb_intake,
     _extract_emails_from_html,
+    _extract_rendered_visible_text_from_driver,
     _guard_homepage_fb_search_candidates,
     _fb_search_surface_miss_reason,
     _is_fb_login_or_security_url,
@@ -2531,7 +2532,8 @@ def _extract_fb_emails_bounded(fb_driver, fb_url: str, log_fn=None) -> tuple[lis
                 last_reason = warning
                 _log(f"[FB Enrich] Warning/block page detected ({warning}); skipping row.")
                 return ([], resolved_url, html)
-            found, _ = _extract_emails_from_html(html)
+            rendered_text = _extract_rendered_visible_text_from_driver(fb_driver)
+            found, _ = _extract_emails_from_html(html, rendered_text=rendered_text)
             return (found, resolved_url, html)
         except Exception as exc:  # pragma: no cover - defensive
             if _fb_exception_is_fatal_session(exc):

@@ -3690,7 +3690,43 @@ def _create_fb_driver_public(headless: bool = True):
     return _start_chromedriver_with_retry(chrome_options, logger=None, profile_dir=None, enable_temp_profile_fallback=False)
 
 
-def _extract_emails_from_html(html: str, soup: Optional[BeautifulSoup] = None) -> Tuple[List[str], bool]:
+def _extract_rendered_visible_text_from_driver(driver) -> str:
+    if driver is None:
+        return ""
+
+    body = None
+    try:
+        body = driver.find_element(By.TAG_NAME, "body")
+    except Exception:
+        body = None
+
+    if body is not None:
+        try:
+            text = body.get_attribute("innerText") or ""
+        except Exception:
+            text = ""
+        if not text:
+            try:
+                text = getattr(body, "text", "") or ""
+            except Exception:
+                text = ""
+        if text:
+            return str(text).strip()
+
+    try:
+        text = driver.execute_script(
+            "return document.body ? (document.body.innerText || '') : '';"
+        ) or ""
+    except Exception:
+        text = ""
+    return str(text).strip()
+
+
+def _extract_emails_from_html(
+    html: str,
+    soup: Optional[BeautifulSoup] = None,
+    rendered_text: str = "",
+) -> Tuple[List[str], bool]:
     emails: List[str] = []
     mailto_used = False
     if not html:
@@ -3734,6 +3770,9 @@ def _extract_emails_from_html(html: str, soup: Optional[BeautifulSoup] = None) -
         except Exception:
             replacements = 0
         emails.extend(match.group(0) for match in EMAIL_REGEX.finditer(raw_html))
+    if (not emails) and rendered_text:
+        visible_text = str(rendered_text or "")
+        emails.extend(match.group(0) for match in EMAIL_REGEX.finditer(visible_text))
     seen = set()
     unique: List[str] = []
     for email in emails:
@@ -4407,7 +4446,8 @@ def _try_explicit_fb(driver, url: str, logger: LoggerFn = None) -> Tuple[List[st
     if any(phrase in page_source for phrase in not_found_phrases):
         return [], "not_found", ""
 
-    emails, used_mailto = _extract_emails_from_html(page_source_raw)
+    rendered_text = _extract_rendered_visible_text_from_driver(driver)
+    emails, used_mailto = _extract_emails_from_html(page_source_raw, rendered_text=rendered_text)
     if emails:
         method = "mailto" if used_mailto else "regex"
         return emails, None, method
@@ -5005,6 +5045,7 @@ class NightModeFacebookEnricher:
         # Navigation timeout tracking
         self._last_fb_timeout: bool = False
         self._last_fb_timeout_url: str = ""
+        self._last_fb_visible_text: str = ""
         self.protective_shutdown: bool = False
         # Debug-only FB URL flow tracing; defaults to off.
         self._debug_fb_url_flow: bool = _bool_env("DEBUG_FB_URL_FLOW", default=False)
@@ -5742,6 +5783,7 @@ class NightModeFacebookEnricher:
 
     def _fetch_html_with_url(self, url: str, goto_about: bool = True) -> Tuple[Optional[str], Optional[str]]:
         budget = getattr(self, "_page_budget_remaining", 2)
+        self._last_fb_visible_text = ""
         if budget <= 0:
             _log(self.logger, "[FB Email] Skipped: page budget exhausted")
             return None, None
@@ -5767,6 +5809,7 @@ class NightModeFacebookEnricher:
                     except Exception:
                         pass
             time.sleep(1.0)
+            self._last_fb_visible_text = _extract_rendered_visible_text_from_driver(driver)
             current_url = getattr(driver, "current_url", None) or url
             return driver.page_source, current_url
 
@@ -5815,6 +5858,7 @@ class NightModeFacebookEnricher:
 
     def _fetch_html_with_url_anon(self, url: str, goto_about: bool = True) -> Tuple[Optional[str], Optional[str]]:
         budget = getattr(self, "_page_budget_remaining", 2)
+        self._last_fb_visible_text = ""
         if budget <= 0:
             _log(self.logger, "[FB Email] Skipped: page budget exhausted")
             return None, None
@@ -5840,6 +5884,7 @@ class NightModeFacebookEnricher:
                     except Exception:
                         pass
             time.sleep(1.0)
+            self._last_fb_visible_text = _extract_rendered_visible_text_from_driver(driver)
             current_url = getattr(driver, "current_url", None) or current_url or url
             self._log_page_health(current_url, html, context="page")
             if is_fb_login_redirect(current_url) or _is_fb_login_or_security_url(current_url):
@@ -6471,7 +6516,8 @@ class NightModeFacebookEnricher:
 
         _log(self.logger, f"[FB Email] Scanning main page HTML for emails: {resolved_url}")
         has_music_signals_main = _night_fb_has_music_signals(soup, {"url": resolved_url})
-        emails, main_mailto = _extract_emails_from_html(html or "")
+        main_visible_text = getattr(self, "_last_fb_visible_text", "") or ""
+        emails, main_mailto = _extract_emails_from_html(html or "", rendered_text=main_visible_text)
         email_method = "mailto" if emails and main_mailto else ("regex" if emails else "")
         if emails:
             for email in emails:
@@ -6532,7 +6578,11 @@ class NightModeFacebookEnricher:
                                     about_result = "music_signals"
                                     _log(self.logger, f"[Night FB] Music signals found on About tab {final_about}.")
                             if not emails:
-                                about_emails, about_mailto = _extract_emails_from_html(about_html or "")
+                                about_visible_text = getattr(self, "_last_fb_visible_text", "") or ""
+                                about_emails, about_mailto = _extract_emails_from_html(
+                                    about_html or "",
+                                    rendered_text=about_visible_text,
+                                )
                                 if about_emails:
                                     emails = about_emails
                                     email_method = "mailto" if about_mailto else "regex"

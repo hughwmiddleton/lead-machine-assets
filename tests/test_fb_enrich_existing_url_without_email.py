@@ -29,6 +29,37 @@ def _seed_df(row):
     return df
 
 
+class _FakeBodyElement:
+    def __init__(self, text: str):
+        self.text = text
+
+    def get_attribute(self, name: str):
+        if name == "innerText":
+            return self.text
+        return ""
+
+
+class _RenderedTextDriver:
+    def __init__(self, pages):
+        self.pages = pages
+        self.calls = []
+        self.current_url = ""
+        self.page_source = ""
+        self._rendered_text = ""
+
+    def get(self, url):  # noqa: ANN001
+        self.calls.append(url)
+        self.current_url = url
+        page = self.pages.get(url, {})
+        self.page_source = page.get("html", "")
+        self._rendered_text = page.get("rendered_text", "")
+
+    def find_element(self, _by, value):  # noqa: ANN001
+        if value == "body":
+            return _FakeBodyElement(self._rendered_text)
+        raise LookupError(value)
+
+
 def test_discover_facebook_url_bounded_requires_strong_candidate(monkeypatch):
     calls = []
 
@@ -224,6 +255,94 @@ def test_fb_enrich_runs_when_fb_url_present_or_promotable(monkeypatch, row_overr
     assert "fb@example.com" in seed_df.at[0, "Email_All"]
     assert seed_df.at[0, "FB_Status"].lower() == "found_email"
     assert not any("already has facebook link" in msg.lower() for msg in logs)
+
+
+def test_fb_enrich_uses_rendered_visible_text_when_page_source_has_no_email() -> None:
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Rendered FB",
+            "Email": "",
+            "Email_All": "",
+            "facebook_url": "https://www.facebook.com/renderedfb",
+            "Facebook_URL": "https://www.facebook.com/renderedfb",
+            "Facebook URL": "https://www.facebook.com/renderedfb",
+            "Social Link": "",
+            "External Links": "",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    driver = _RenderedTextDriver(
+        {
+            "https://www.facebook.com/renderedfb": {
+                "html": '<html><body><a href="/renderedfb/about">About</a></body></html>',
+                "rendered_text": "No email on main page",
+            },
+            "https://www.facebook.com/renderedfb/about": {
+                "html": "<html><body><div>About Contact and basic info Contact info</div></body></html>",
+                "rendered_text": "About Contact and basic info Contact info divebaryouth.artist@gmail.com",
+            },
+        }
+    )
+
+    matched = worker._enrich_row_facebook(seed_df, 0, driver, ctx)
+
+    assert matched is True
+    assert seed_df.at[0, "Email"] == "divebaryouth.artist@gmail.com"
+    assert "divebaryouth.artist@gmail.com" in seed_df.at[0, "Email_All"]
+    assert seed_df.at[0, "FB_Status"] == "found_email"
+    assert driver.calls[-2:] == [
+        "https://www.facebook.com/renderedfb",
+        "https://www.facebook.com/renderedfb/about",
+    ]
+
+
+def test_fb_enrich_rendered_visible_text_without_email_keeps_no_email_status() -> None:
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Rendered No Email",
+            "Email": "",
+            "Email_All": "",
+            "facebook_url": "https://www.facebook.com/renderednoemail",
+            "Facebook_URL": "https://www.facebook.com/renderednoemail",
+            "Facebook URL": "https://www.facebook.com/renderednoemail",
+            "Social Link": "",
+            "External Links": "",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    driver = _RenderedTextDriver(
+        {
+            "https://www.facebook.com/renderednoemail": {
+                "html": '<html><body><a href="/renderednoemail/about">About</a></body></html>',
+                "rendered_text": "No email on main page",
+            },
+            "https://www.facebook.com/renderednoemail/about": {
+                "html": "<html><body><div>About Contact and basic info Contact info</div></body></html>",
+                "rendered_text": "About Contact and basic info Contact info",
+            },
+        }
+    )
+
+    matched = worker._enrich_row_facebook(seed_df, 0, driver, ctx)
+
+    assert matched is False
+    assert seed_df.at[0, "Email"] == ""
+    assert seed_df.at[0, "Email_All"] == ""
+    assert seed_df.at[0, "FB_Status"] == "no_email_on_page"
+    assert driver.calls[-2:] == [
+        "https://www.facebook.com/renderednoemail",
+        "https://www.facebook.com/renderednoemail/about",
+    ]
 
 
 def test_fb_enrich_handles_missing_email_columns(monkeypatch):

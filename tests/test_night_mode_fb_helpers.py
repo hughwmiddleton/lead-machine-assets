@@ -158,6 +158,102 @@ def test_pass_a_uses_fb_url_from_social_link(monkeypatch) -> None:
     assert result.get("FB_Reason") == "explicit_url"
 
 
+def test_pass_a_uses_rendered_visible_text_when_page_source_has_no_email(monkeypatch) -> None:
+    logs = []
+    enricher = night_mode_fb.NightModeFacebookEnricher(
+        legacy_module=None,
+        username="",
+        password="",
+        logger=lambda msg: logs.append(msg),
+        use_shared_session=False,
+    )
+    monkeypatch.setattr(enricher, "_has_authenticated_session", lambda: True)
+    monkeypatch.setattr(night_mode_fb, "_night_fb_has_music_signals", lambda soup, context: False)
+    monkeypatch.setattr(night_mode_fb, "should_accept_email_override", lambda *args, **kwargs: (True, "test_override"))
+
+    pages = {
+        "https://www.facebook.com/renderednight": (
+            '<html><body><a href="/renderednight/about">About</a></body></html>',
+            "https://www.facebook.com/renderednight",
+            "No email on main page",
+        ),
+        "https://www.facebook.com/renderednight/about": (
+            "<html><body><div>About Contact and basic info Contact info</div></body></html>",
+            "https://www.facebook.com/renderednight/about",
+            "About Contact and basic info Contact info divebaryouth.artist@gmail.com",
+        ),
+    }
+
+    def fake_fetch(url, goto_about=False):  # noqa: ANN001
+        html, resolved, visible_text = pages[url]
+        enricher._last_fb_visible_text = visible_text
+        return html, resolved
+
+    monkeypatch.setattr(enricher, "_fetch_html_with_url", fake_fetch)
+
+    row = {
+        "Artist Name": "Rendered Night",
+        "Email": "",
+        "Email_All": "",
+        "facebook_url": "https://www.facebook.com/renderednight",
+        "Facebook_URL": "https://www.facebook.com/renderednight",
+    }
+
+    result = enricher.enrich_row_with_facebook_night(row)
+
+    assert result.get("Email") == "divebaryouth.artist@gmail.com"
+    assert "divebaryouth.artist@gmail.com" in (result.get("Email_All") or "")
+    assert result.get("FB_Status") == "pass_a_found_email"
+    assert result.get("FB_Reason") == "explicit_url"
+
+
+def test_pass_a_rendered_visible_text_without_email_keeps_no_email_status(monkeypatch) -> None:
+    logs = []
+    enricher = night_mode_fb.NightModeFacebookEnricher(
+        legacy_module=None,
+        username="",
+        password="",
+        logger=lambda msg: logs.append(msg),
+        use_shared_session=False,
+    )
+    monkeypatch.setattr(enricher, "_has_authenticated_session", lambda: True)
+    monkeypatch.setattr(night_mode_fb, "_night_fb_has_music_signals", lambda soup, context: False)
+    monkeypatch.setattr(night_mode_fb, "should_accept_email_override", lambda *args, **kwargs: (True, "test_override"))
+
+    pages = {
+        "https://www.facebook.com/renderednightnone": (
+            '<html><body><a href="/renderednightnone/about">About</a></body></html>',
+            "https://www.facebook.com/renderednightnone",
+            "No email on main page",
+        ),
+        "https://www.facebook.com/renderednightnone/about": (
+            "<html><body><div>About Contact and basic info Contact info</div></body></html>",
+            "https://www.facebook.com/renderednightnone/about",
+            "About Contact and basic info Contact info",
+        ),
+    }
+
+    def fake_fetch(url, goto_about=False):  # noqa: ANN001
+        html, resolved, visible_text = pages[url]
+        enricher._last_fb_visible_text = visible_text
+        return html, resolved
+
+    monkeypatch.setattr(enricher, "_fetch_html_with_url", fake_fetch)
+
+    row = {
+        "Artist Name": "Rendered Night None",
+        "Email": "",
+        "Email_All": "",
+        "facebook_url": "https://www.facebook.com/renderednightnone",
+        "Facebook_URL": "https://www.facebook.com/renderednightnone",
+    }
+
+    result = enricher.enrich_row_with_facebook_night(row)
+
+    assert result.get("Email", "") == ""
+    assert result.get("FB_Status") == "pass_a_no_email_on_page"
+
+
 def test_explicit_fb_urls_canonicalized_and_deduped(monkeypatch) -> None:
     enricher = night_mode_fb.NightModeFacebookEnricher(
         legacy_module=None,
