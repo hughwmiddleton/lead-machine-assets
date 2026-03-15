@@ -104,6 +104,39 @@ def test_instagram_email_body_scan_still_writes_email_and_provenance(monkeypatch
     ]
 
 
+def test_instagram_email_filters_telemetry_only_result(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "IG Artist",
+            "Email": "",
+            "Email_All": "",
+            "Instagram_URL": "https://instagram.com/igartist/?hl=en#bio",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+            "Email_Type": "",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+
+    def fake_fetch(session, url):
+        return ("<html><body>abc@o363271.ingest.us.sentry.io</body></html>", 200)
+
+    monkeypatch.setattr(cde, "_fetch_instagram_profile_html", fake_fetch)
+
+    matched = worker._enrich_row_instagram_email(seed_df, 0, ctx)
+
+    assert matched is False
+    assert seed_df.at[0, "Email"] == ""
+    assert seed_df.at[0, "Email_All"] == ""
+    assert logs == [
+        "[IG Email] Visiting https://www.instagram.com/igartist/",
+        "[IG Email] No email found",
+    ]
+
+
 @pytest.mark.parametrize(
     "row",
     [

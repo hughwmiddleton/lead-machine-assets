@@ -112,6 +112,38 @@ def test_website_email_gate_allows_explicit_website_clue(monkeypatch):
     assert seed_df.at[0, "Email"] == "hello@artist.test"
 
 
+def test_website_email_filters_telemetry_only_result(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Telemetry Artist",
+            "Email": "",
+            "Email_All": "",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+            "Email_Type": "",
+            "Spotify_Website_URL": "https://artist.test",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+
+    def fake_fetch(session, url, *, timeout_s, max_bytes):
+        return _result(
+            url,
+            html="<html><body>abc@o363271.ingest.us.sentry.io</body></html>",
+        )
+
+    monkeypatch.setattr(cde, "_fetch_website_html_bounded", fake_fetch)
+
+    matched = worker._enrich_row_website_email(seed_df, 0, ctx)
+
+    assert matched is False
+    assert seed_df.at[0, "Email"] == ""
+    assert seed_df.at[0, "Email_All"] == ""
+
+
 def test_website_email_same_domain_only(monkeypatch):
     logs = []
     worker = _make_worker(logs)

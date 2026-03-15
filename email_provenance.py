@@ -1,5 +1,6 @@
 from typing import Any, MutableMapping
 import pandas as pd
+from email_normalizer import filter_system_telemetry_emails
 
 
 def _set_email_with_provenance(
@@ -9,9 +10,10 @@ def _set_email_with_provenance(
     source_type: str = "",
     method: str = "regex",
 ) -> None:
-    email_clean = (email or "").strip()
-    if not email_clean:
+    filtered_emails = filter_system_telemetry_emails([email])
+    if not filtered_emails:
         return
+    email_clean = filtered_emails[0]
 
     # Dict row
     if isinstance(target, MutableMapping):

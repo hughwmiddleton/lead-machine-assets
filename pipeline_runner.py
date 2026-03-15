@@ -24,6 +24,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set,
 
 import pandas as pd
 from email_provenance import _set_email_with_provenance
+from email_normalizer import filter_system_telemetry_emails
 from html_fetcher import close_job_browser
 from source_scheduler import canonicalize_facebook_url, ensure_canonical_facebook_url, promote_facebook_url
 
@@ -479,8 +480,9 @@ def _guard_email_all_sources(row: pd.Series, email_all: str, logger: LoggerFn = 
 def _set_email_all(df: pd.DataFrame, idx: int, new_emails: Union[str, Sequence[str]], source: str, logger: LoggerFn = None) -> str:
     """Centralized Email_All setter with merge + logging + guard."""
     existing_val = _cell_str(df.at[idx, "Email_All"] if "Email_All" in df.columns else "")
-    before_count = len(normalize_emails(existing_val))
-    merged_list = _merge_email_lists(existing_val, new_emails)
+    before_list = filter_system_telemetry_emails(normalize_emails(existing_val))
+    before_count = len(before_list)
+    merged_list = filter_system_telemetry_emails(_merge_email_lists(existing_val, new_emails))
     merged_str = ";".join(merged_list)
     _bump_email_summary("emails_found", max(0, len(merged_list) - before_count))
     df.at[idx, "Email_All"] = merged_str
@@ -2490,28 +2492,45 @@ def run_facebook_global_pass(
                             rid_int = int(float(rid))
                         except Exception:
                             continue
+                        filtered_email = filter_system_telemetry_emails([email_val])
+                        filtered_email_all = filter_system_telemetry_emails(str(row.get("Email_All", "") or ""))
+                        if not filtered_email and not filtered_email_all:
+                            email_val = ""
+                        else:
+                            email_val = filtered_email[0] if filtered_email else ""
                         source_url = row.get("Email_Source_URL") or ""
                         if not source_url:
                             source_url = _facebook_about_url(fb_url_val)
                         source_url = source_url or fb_url_val or ""
                         source_type = row.get("Email_Source_Type") or "facebook_enrich"
                         method = row.get("Email_Extract_Method") or "regex"
-                        _set_email_with_provenance(
-                            (updated_df, rid_int),
-                            email_val,
-                            source_url,
-                            source_type,
-                            method,
+                        if email_val:
+                            _set_email_with_provenance(
+                                (updated_df, rid_int),
+                                email_val,
+                                source_url,
+                                source_type,
+                                method,
+                            )
+                            _fill_email_provenance_fields(
+                                updated_df,
+                                rid_int,
+                                source=row,
+                                fb_url_hint=fb_url_val,
+                                default_source_type="facebook_enrich",
+                                default_method=method or "regex",
+                            )
+                        if filtered_email_all:
+                            _set_email_all(
+                                updated_df,
+                                rid_int,
+                                filtered_email_all,
+                                source="fb_global_pass",
+                                logger=_LOGGER.info,
+                            )
+                        updated_df.at[rid_int, "FB_Status"] = (
+                            fb_status_val or ("ok" if email_val or filtered_email_all else "no_candidates")
                         )
-                        _fill_email_provenance_fields(
-                            updated_df,
-                            rid_int,
-                            source=row,
-                            fb_url_hint=fb_url_val,
-                            default_source_type="facebook_enrich",
-                            default_method=method or "regex",
-                        )
-                        updated_df.at[rid_int, "FB_Status"] = fb_status_val or "ok"
                         if fb_url_val:
                             updated_df.at[rid_int, "Facebook_URL"] = fb_url_val
                     elif not email_val and not fb_url_val and not pd.isna(rid):

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import Callable, Optional, Tuple
+from typing import Callable, Iterable, Optional, Tuple
 
 LoggerFn = Optional[Callable[[str], None]]
 
@@ -12,6 +12,7 @@ _OBFUSCATED_EMAIL_PATTERN = re.compile(
     r"([A-Za-z0-9._%+-]+)\s*(?:\[\s*at\s*\]|\(\s*at\s*\)|\bat\b)\s*([A-Za-z0-9.-]+\.[A-Za-z]{2,})",
     re.IGNORECASE,
 )
+_EMAIL_VALUE_SPLIT_RE = re.compile(r"[\s,;|]+")
 
 
 def normalize_obfuscated_email_patterns(text: str, logger: LoggerFn = None, max_logs: int = 3) -> Tuple[str, int]:
@@ -60,3 +61,42 @@ def normalize_email_value(value: str) -> str:
     if not local or not domain or "." not in domain:
         return ""
     return normalized
+
+
+def is_system_telemetry_email(value: str) -> bool:
+    """Return True for known non-contact telemetry/system destinations."""
+    normalized = normalize_email_value(value)
+    if not normalized:
+        return False
+    _, domain = normalized.split("@", 1)
+    return domain == "sentry.io" or domain.endswith(".sentry.io")
+
+
+def filter_system_telemetry_emails(values: Iterable[str] | str | None) -> list[str]:
+    """Normalize, dedupe, and drop known telemetry/system emails."""
+    if values is None:
+        return []
+
+    if isinstance(values, str):
+        raw_items = _EMAIL_VALUE_SPLIT_RE.split(values)
+    else:
+        raw_items = []
+        for value in values:
+            if value is None:
+                continue
+            if isinstance(value, str):
+                raw_items.extend(_EMAIL_VALUE_SPLIT_RE.split(value))
+            else:
+                raw_items.append(str(value))
+
+    filtered: list[str] = []
+    seen: set[str] = set()
+    for raw in raw_items:
+        normalized = normalize_email_value(raw)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        if is_system_telemetry_email(normalized):
+            continue
+        filtered.append(normalized)
+    return filtered

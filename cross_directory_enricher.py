@@ -46,7 +46,11 @@ from PyQt5.QtCore import QThread, pyqtSignal
 from webdriver_manager.chrome import ChromeDriverManager
 from urllib.parse import urlparse, parse_qs, unquote
 from unidecode import unidecode
-from email_normalizer import normalize_email_value, normalize_obfuscated_email_patterns
+from email_normalizer import (
+    filter_system_telemetry_emails,
+    normalize_email_value,
+    normalize_obfuscated_email_patterns,
+)
 from email_provenance import _set_email_with_provenance
 
 from facebook_enrich import (
@@ -6502,11 +6506,17 @@ class CrossDirectoryEnricherWorker(QThread):
         entry = self._domain_email_reuse_index.get(domain_norm)
         if not entry:
             return False
+        filtered_email_all = filter_system_telemetry_emails(
+            [entry.get("email_all") or "", entry.get("email") or ""]
+        )
+        if not filtered_email_all:
+            return False
+        filtered_email = filtered_email_all[0]
 
         email_before = _row_email_summary_snapshot(df, row_idx)
         _set_email_with_provenance(
             (df, row_idx),
-            entry.get("email", ""),
+            filtered_email,
             entry.get("source_url", ""),
             entry.get("source_type", ""),
             entry.get("extract_method", "regex") or "regex",
@@ -6521,7 +6531,7 @@ class CrossDirectoryEnricherWorker(QThread):
             _set_email_all(
                 df,
                 row_idx,
-                entry.get("email_all") or entry.get("email", ""),
+                filtered_email_all,
                 source="domain_reuse",
                 logger=self.log_message.emit,
             )
@@ -7818,7 +7828,7 @@ class CrossDirectoryEnricherWorker(QThread):
             extracted_meta_emails, _ = _extract_emails_from_html(meta_content)
             meta_emails.extend(extracted_meta_emails)
 
-        all_ig_emails = list(dict.fromkeys([*ig_emails, *meta_emails]))
+        all_ig_emails = filter_system_telemetry_emails([*ig_emails, *meta_emails])
         if not all_ig_emails:
             self.log_message.emit("[IG Email] No email found")
             self._set_platform_state("instagram", "skipped")
@@ -8008,7 +8018,7 @@ class CrossDirectoryEnricherWorker(QThread):
                     f"[Web] shallow sweep fetched={shallow_fetches} emails_found={shallow_emails_found}"
                 )
 
-            normalized_emails = _normalize_emails(";".join(emails_found))
+            normalized_emails = filter_system_telemetry_emails(_normalize_emails(";".join(emails_found)))
             cache_entry = {
                 "status": "hit" if normalized_emails else "miss",
                 "emails": list(normalized_emails),
@@ -8154,6 +8164,7 @@ class CrossDirectoryEnricherWorker(QThread):
                             fb_emails, resolved_url, fb_status_reason = _extract_fb_emails_bounded(
                                 fb_driver, candidate, log_fn=self.log_message.emit
                             )
+                            fb_emails = filter_system_telemetry_emails(fb_emails)
                             page_url_used = resolved_url or candidate
                             if fb_emails:
                                 break
@@ -10042,7 +10053,7 @@ class CrossDirectoryEnricherWorker(QThread):
                 new_socials |= _scrape_link_hub_socials(self.session, hub)
         socials_all = existing_socials | new_socials
         sites_all = existing_sites | new_sites
-        emails_all = existing_emails | new_emails
+        emails_all = set(filter_system_telemetry_emails([*existing_emails, *new_emails]))
         if socials_all:
             ordered_socials = sorted(socials_all, key=_social_sort_key)
             ordered_socials = _prioritise_facebook_first(ordered_socials)

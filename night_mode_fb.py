@@ -39,6 +39,7 @@ from selenium.common.exceptions import (
     WebDriverException,
 )
 from source_scheduler import canonicalize_facebook_url, ensure_canonical_facebook_url
+from email_normalizer import filter_system_telemetry_emails
 
 try:
     import facebook_enrich  # type: ignore
@@ -3934,17 +3935,7 @@ def _choose_primary_email(emails: Sequence[str], artist_slug: str) -> Optional[s
 
 
 def _merge_email_all(existing: str, new_emails: Sequence[str]) -> str:
-    merged: List[str] = []
-    seen = set()
-    try:
-        from email_normalizer import normalize_email_value
-    except Exception:
-        normalize_email_value = lambda v: (v or "").strip().lower()
-    for value in list(_split_multi(existing)) + list(new_emails):
-        cleaned = normalize_email_value(value)
-        if cleaned and cleaned not in seen:
-            seen.add(cleaned)
-            merged.append(cleaned)
+    merged = filter_system_telemetry_emails([*list(_split_multi(existing)), *list(new_emails)])
     return ";".join(merged)
 
 
@@ -6876,6 +6867,7 @@ class NightModeFacebookEnricher:
         candidate_url: str = "",
         email_extract_method: str = "",
     ) -> Optional[NightModeFacebookResult]:
+        emails = filter_system_telemetry_emails(emails)
         if not emails and not allow_empty:
             return None
         primary = _choose_primary_email(emails, artist_name) if emails else None

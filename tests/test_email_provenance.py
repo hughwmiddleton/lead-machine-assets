@@ -10,6 +10,7 @@ import night_mode_runner
 import night_mode_fb
 import pipeline_runner
 from cross_directory_enricher import CrossDirectoryEnricherWorker, EnrichmentPayload
+from email_provenance import _set_email_with_provenance
 
 
 def test_merge_raw_master_counts_missing_provenance(tmp_path: Path) -> None:
@@ -200,6 +201,66 @@ def test_apply_payload_same_row_same_email_does_not_double_count() -> None:
 
     assert df.at[0, "Email"] == "repeat@example.com"
     assert pipeline_runner.get_email_summary_counts()["emails_found"] == 1
+
+
+def test_set_email_with_provenance_ignores_telemetry_only_email() -> None:
+    df = pd.DataFrame(
+        [
+            {
+                "Email": "",
+                "Email_All": "",
+                "Email_Source_URL": "",
+                "Email_Source_Type": "",
+                "Email_Extract_Method": "",
+            }
+        ]
+    )
+
+    _set_email_with_provenance(
+        (df, 0),
+        "abc@o363271.ingest.us.sentry.io",
+        "https://artist.example/contact",
+        "website_enrich",
+        "regex",
+    )
+
+    assert df.at[0, "Email"] == ""
+    assert df.at[0, "Email_All"] == ""
+
+
+def test_apply_payload_ignores_telemetry_only_email() -> None:
+    pipeline_runner.reset_email_summary_counts()
+    df = pd.DataFrame(
+        [
+            {
+                "Social Link": "",
+                "External Links": "",
+                "Email": "",
+                "Email_All": "",
+                "Email_Source_URL": "",
+                "Email_Source_Type": "",
+                "Email_Extract_Method": "",
+                "SoundCloud Link": "",
+                "Source Directory": "",
+                "Source URL": "",
+            }
+        ]
+    )
+    payload = EnrichmentPayload(
+        socials=set(),
+        websites=set(),
+        emails={"abc@o363271.ingest.us.sentry.io"},
+        link_hubs=set(),
+        source_dir="bandcamp",
+        source_url="https://artist.bandcamp.com",
+        source_detail="bandcamp_live",
+    )
+
+    CrossDirectoryEnricherWorker._apply_payload(None, df, 0, payload)
+
+    assert df.at[0, "Email"] == ""
+    assert df.at[0, "Email_All"] == ""
+    assert pipeline_runner.get_email_summary_counts()["emails_found"] == 0
 
 
 def test_fill_email_provenance_fallback_about_url() -> None:

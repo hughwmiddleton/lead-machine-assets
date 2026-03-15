@@ -47,6 +47,25 @@ def test_extract_emails_from_script_json_and_escaped_variants() -> None:
     assert used_mailto is False
 
 
+def test_build_result_filters_telemetry_only_email() -> None:
+    enricher = night_mode_fb.NightModeFacebookEnricher(
+        legacy_module=None,
+        username="",
+        password="",
+        logger=None,
+        use_shared_session=False,
+    )
+
+    result = enricher._build_result(
+        ["abc@o363271.ingest.us.sentry.io"],
+        "",
+        "https://www.facebook.com/testartist",
+        "Test Artist",
+    )
+
+    assert result is None
+
+
 def test_dedupe_prefers_fb_in_night_mode() -> None:
     df = pd.DataFrame(
         [
