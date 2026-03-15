@@ -90,6 +90,91 @@ def test_pass_b_direct_surface_miss_triggers_one_homepage_fallback(monkeypatch) 
     assert search_methods == ["direct_route", "homepage_ui"]
 
 
+def test_build_fb_discovery_query_prefers_song_title_over_location() -> None:
+    query, secondary = night_mode_fb._build_fb_discovery_query(
+        "Signal Artist",
+        location="Melbourne, VIC",
+        song_title="TAKE//OVER",
+    )
+
+    assert secondary == "TAKE OVER"
+    assert query == "Signal Artist TAKE OVER"
+
+
+def test_build_fb_discovery_query_falls_back_to_normalized_location() -> None:
+    query, secondary = night_mode_fb._build_fb_discovery_query(
+        "Signal Artist",
+        location="Melbourne, VIC",
+        song_title="(Live)",
+    )
+
+    assert secondary == "Melbourne VIC"
+    assert query == "Signal Artist Melbourne VIC"
+
+
+def test_pass_b_secondary_signal_skips_refine_queries(monkeypatch) -> None:
+    monkeypatch.setenv("FB_REFINE_QUERY", "1")
+    enricher = _make_enricher()
+    session = _DummySession()
+    monkeypatch.setattr(enricher, "_ensure_session", lambda: session)
+    monkeypatch.setattr(enricher, "_ensure_driver_alive", lambda current_session: current_session)
+    monkeypatch.setattr(enricher, "_choose_ranked_candidate", lambda *args, **kwargs: (None, "no_safe_match"))
+    monkeypatch.setattr(night_mode_fb, "_harvest_candidates", lambda *args, **kwargs: [])
+    monkeypatch.setattr(night_mode_fb, "_rank_candidates_for_preview", lambda *args, **kwargs: [])
+    monkeypatch.setattr(night_mode_fb, "_fb_search_surface_miss_reason", lambda *args, **kwargs: None)
+
+    queries = []
+
+    def _fake_fetch(query_str, *, search_method, session=None):  # noqa: ANN001
+        queries.append((query_str, search_method))
+        html = "<div role='main'><div aria-label='Search results'></div></div>"
+        driver = SimpleNamespace(page_source=html, current_url="https://www.facebook.com/search/pages/?q=test")
+        return html, driver, False, driver.current_url
+
+    monkeypatch.setattr(enricher, "_fetch_search_surface", _fake_fetch)
+
+    page = enricher._search_for_page(
+        "Signal Artist",
+        location="Melbourne, VIC",
+        allow_anon=True,
+        song_title="Night Drive",
+    )
+
+    assert page is None
+    assert queries == [("Signal Artist Night Drive", "direct_route")]
+
+
+def test_pass_b_artist_only_still_uses_existing_refine_queries(monkeypatch) -> None:
+    monkeypatch.setenv("FB_REFINE_QUERY", "1")
+    enricher = _make_enricher()
+    session = _DummySession()
+    monkeypatch.setattr(enricher, "_ensure_session", lambda: session)
+    monkeypatch.setattr(enricher, "_ensure_driver_alive", lambda current_session: current_session)
+    monkeypatch.setattr(enricher, "_choose_ranked_candidate", lambda *args, **kwargs: (None, "no_safe_match"))
+    monkeypatch.setattr(night_mode_fb, "_harvest_candidates", lambda *args, **kwargs: [])
+    monkeypatch.setattr(night_mode_fb, "_rank_candidates_for_preview", lambda *args, **kwargs: [])
+    monkeypatch.setattr(night_mode_fb, "_fb_search_surface_miss_reason", lambda *args, **kwargs: None)
+
+    queries = []
+
+    def _fake_fetch(query_str, *, search_method, session=None):  # noqa: ANN001
+        queries.append((query_str, search_method))
+        html = "<div role='main'><div aria-label='Search results'></div></div>"
+        driver = SimpleNamespace(page_source=html, current_url="https://www.facebook.com/search/pages/?q=test")
+        return html, driver, False, driver.current_url
+
+    monkeypatch.setattr(enricher, "_fetch_search_surface", _fake_fetch)
+
+    page = enricher._search_for_page("Signal Artist", location="", allow_anon=True, song_title="")
+
+    assert page is None
+    assert queries == [
+        ("Signal Artist", "direct_route"),
+        ("Signal Artist musician", "direct_route"),
+        ("Signal Artist band", "direct_route"),
+    ]
+
+
 def test_pass_b_no_homepage_fallback_on_no_safe_match(monkeypatch) -> None:
     candidate = SimpleNamespace(
         name="Mismatch Artist",

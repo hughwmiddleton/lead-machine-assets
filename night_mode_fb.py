@@ -1560,6 +1560,39 @@ def _extract_fb_urls_for_night_mode(row):
     return urls
 
 
+def _sanitize_fb_song_title(title: str) -> str:
+    """Lightly clean a song title for Facebook discovery query use only."""
+    if not isinstance(title, str):
+        return ""
+
+    working = title.strip()
+    if not working:
+        return ""
+
+    working = re.sub(r"\([^)]*\)", " ", working)
+    working = re.sub(r"\s*[/\\\\|]+\s*", " ", working)
+    working = re.sub(r"\s+", " ", working)
+    return working.strip()
+
+
+def _normalize_fb_location_query(raw: str) -> str:
+    raw = (raw or "").strip()
+    if not raw:
+        return ""
+    parts = [p.strip() for p in re.split(r"[,|/]+", raw) if p.strip()]
+    if len(parts) >= 2:
+        return " ".join(parts[:2])
+    return raw
+
+
+def _build_fb_discovery_query(artist: str, location: str = "", song_title: str = "") -> Tuple[str, str]:
+    secondary_signal = _sanitize_fb_song_title(song_title)
+    if not secondary_signal:
+        secondary_signal = _normalize_fb_location_query(location)
+    query = " ".join(part for part in ((artist or "").strip(), secondary_signal) if part).strip()
+    return query, secondary_signal
+
+
 def _extract_fb_urls_from_row(row: Dict[str, str]) -> List[str]:
     """
     Collect explicit Facebook URLs from common clue fields in a row.
@@ -6222,7 +6255,13 @@ class NightModeFacebookEnricher:
 
         raise ValueError(f"Unsupported search_method: {search_method}")
 
-    def _search_for_page(self, artist: str, location: str, allow_anon: bool = False) -> Optional[str]:
+    def _search_for_page(
+        self,
+        artist: str,
+        location: str,
+        allow_anon: bool = False,
+        song_title: str = "",
+    ) -> Optional[str]:
         self._sync_search_disable_from_run_state()
         self._last_selected_candidate_context = None
         self._last_search_candidates = []
@@ -6293,17 +6332,12 @@ class NightModeFacebookEnricher:
                 self._last_search_candidates = [fallback_context]
             return fallback_url
 
-        def _normalize_location_for_query(raw: str) -> str:
-            raw = (raw or "").strip()
-            if not raw:
-                return ""
-            parts = [p.strip() for p in re.split(r"[,|/]+", raw) if p.strip()]
-            if len(parts) >= 2:
-                return " ".join(parts[:2])
-            return raw
-
-        location_query = _normalize_location_for_query(location)
-        primary_query = " ".join(part for part in (artist, location_query) if part).strip()
+        primary_query, secondary_signal = _build_fb_discovery_query(
+            artist,
+            location=location,
+            song_title=song_title,
+        )
+        has_secondary_signal = bool(secondary_signal)
         if not primary_query:
             return None
         html, nav_driver, search_timed_out, current_search_url = self._fetch_search_surface(
@@ -6324,10 +6358,9 @@ class NightModeFacebookEnricher:
                 pass
 
         refine_query_list = [f"{artist} musician", f"{artist} band"]
-        if location_query:
-            refine_query_list.insert(0, f"{artist} {location_query}")
         if self.slow_mode_active:
             refine_query_list = refine_query_list[:1]
+        refine_allowed = refine_enabled and not has_secondary_signal
 
         def _run_refine_queries(diagnostics: Optional[Dict[str, Any]] = None) -> List["facebook_enrich.FbCandidate"]:
             refine_candidates: List["facebook_enrich.FbCandidate"] = []
@@ -6430,7 +6463,7 @@ class NightModeFacebookEnricher:
             self._enter_slow_mode("overlay_zero_anchors", max(self.slow_mode_multiplier, 1.5))
             # Skip refine cascade when soft-blocked; rely on slug/candidate fallback.
             need_refine = False
-        elif refine_enabled and not suppress_refine_queries:
+        elif refine_allowed and not suppress_refine_queries:
             top_score = ranked_for_preview[0]["score"] if ranked_for_preview else 0
             music_present = any(item["features"].get("music_any") for item in ranked_for_preview)
             if (not music_present) and top_score <= 0:
@@ -6468,7 +6501,7 @@ class NightModeFacebookEnricher:
                         _log(self.logger, "[Night FB] Skipping refine due to overlay soft block.")
                         overlay_skip_logged = True
                     refine_forced = True
-                elif (not refine_forced) and (not suppress_refine_queries):
+                elif refine_allowed and (not refine_forced) and (not suppress_refine_queries):
                     refine_forced = True
                     forced_refine_candidates = _run_refine_queries(diagnostics=diagnostics)
                     soft_blocked = soft_blocked or bool(diagnostics.get("overlay_soft_block"))
@@ -7213,6 +7246,12 @@ class NightModeFacebookEnricher:
                 result["FB_Status"] = "ok"
             return result
         location = _clean_val(result.get("Location", ""))
+        song_title = _clean_val(
+            result.get("Song Title", "")
+            or result.get("song_title", "")
+            or result.get("Track Title", "")
+            or result.get("track_title", "")
+        )
         raw_fb_url = _clean_val(result.get("Facebook_URL", ""))
         if raw_fb_url and _is_invalid_fb_value(raw_fb_url) and self._debug_fb_url_flow:
             _log(self.logger, f"[Night FB] Skipping invalid facebook_url value: {raw_fb_url}")
@@ -7481,7 +7520,12 @@ class NightModeFacebookEnricher:
                 if (not session) and not allow_anon:
                     return result
             if not page_url:
-                page_url = self._search_for_page(artist_name, location, allow_anon=allow_anon) or ""
+                page_url = self._search_for_page(
+                    artist_name,
+                    location,
+                    allow_anon=allow_anon,
+                    song_title=song_title,
+                ) or ""
                 if self._search_disabled_due_to_checkpoint:
                     if not result.get("FB_Status"):
                         result["FB_Status"] = "checkpoint_search_disabled"
