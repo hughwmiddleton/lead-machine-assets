@@ -116,6 +116,12 @@ def test_discover_facebook_url_bounded_requires_strong_candidate(monkeypatch):
         ({"Location": "", "Song Title": ""}, ""),
         ({"Location": "Melbourne", "Song Title": "Night Drive"}, "Melbourne"),
         ({"Location": "", "Song Title": "Night Drive"}, "Night Drive"),
+        ({"Location": "", "Song Title": "Headside In Da Skiez (Babycham Supernova)"}, "Headside In Da Skiez"),
+        ({"Location": "", "Song Title": "TAKE//OVER"}, "TAKE OVER"),
+        ({"Location": "", "Song Title": "   Song   Title   "}, "Song Title"),
+        ({"Location": "", "Song Title": "(Live)"}, ""),
+        ({"Location": "", "Song Title": "Song feat. Artist"}, "Song feat. Artist"),
+        ({"Location": "Melbourne", "Song Title": "TAKE//OVER"}, "Melbourne"),
     ],
 )
 def test_discover_facebook_identity_selects_single_extra_signal(monkeypatch, row_overrides, expected_extra_signal):

@@ -33,6 +33,8 @@ class _FakeDriver:
         ("", "Test Artist"),
         ("Melbourne", "Test Artist Melbourne"),
         ("Night Drive", "Test Artist Night Drive"),
+        ("Headside In Da Skiez", "Test Artist Headside In Da Skiez"),
+        ("TAKE OVER", "Test Artist TAKE OVER"),
     ],
 )
 def test_find_best_page_url_builds_expected_query(monkeypatch, extra_signal, expected_query) -> None:

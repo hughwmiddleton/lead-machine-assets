@@ -1554,6 +1554,21 @@ def build_search_query(artist_name: str, song_title: str | None) -> str:
     return artist_name
 
 
+def _sanitize_fb_song_title(title: str) -> str:
+    """Lightly clean a song title for Facebook discovery query use only."""
+    if not isinstance(title, str):
+        return ""
+
+    working = title.strip()
+    if not working:
+        return ""
+
+    working = re.sub(r"\([^)]*\)", " ", working)
+    working = re.sub(r"\s*[/\\\\|]+\s*", " ", working)
+    working = re.sub(r"\s+", " ", working)
+    return working.strip()
+
+
 def _sanitize_lastfm_track_title(title: str) -> str:
     """Clean and shorten track titles to avoid Last.fm/WAF rejection.
 
@@ -7476,7 +7491,8 @@ class CrossDirectoryEnricherWorker(QThread):
             sample = intake.rejected_guard[0]
         location = cell_to_str(seed_df.at[row_idx, "Location"]) if "Location" in seed_df.columns else ""
         song_title = _extract_seed_track_text(row)
-        extra_signal = location or song_title
+        sanitized_song_title = _sanitize_fb_song_title(song_title)
+        extra_signal = location or sanitized_song_title
         self.log_message.emit(
             f"[FB Discover] No explicit facebook url for '{artist}'; attempting bounded discovery "
             f"(explicit FB intake outcome='{intake.outcome}' source='{source_summary}' sample='{sample}')."
