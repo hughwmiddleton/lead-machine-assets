@@ -2924,7 +2924,7 @@ class FacebookSearchClient:
     def find_best_page_url(
         self,
         artist_name: str,
-        location: Optional[str] = None,
+        extra_signal: Optional[str] = None,
         *,
         require_strong_candidate: bool = False,
         skip_login_check: bool = False,
@@ -2941,8 +2941,8 @@ class FacebookSearchClient:
             _safe_log(self.logger, "[FB Enrich] Facebook login not available, skipping.")
             return None
         query_parts = [cell_to_str(artist_name)]
-        if location:
-            query_parts.append(cell_to_str(location))
+        if extra_signal:
+            query_parts.append(cell_to_str(extra_signal))
         query = " ".join(part for part in query_parts if part)
         if not query:
             return None
@@ -3786,7 +3786,7 @@ def _facebook_candidate_is_strong(
 
 def facebook_find_best_page(
     artist_name: str,
-    location: str,
+    extra_signal: str,
     fb_client,
     logger,
     *,
@@ -3794,14 +3794,14 @@ def facebook_find_best_page(
     skip_login_check: bool = False,
 ) -> Optional[str]:
     artist_name = cell_to_str(artist_name)
-    location = cell_to_str(location)
+    extra_signal = cell_to_str(extra_signal)
     if not fb_client or not hasattr(fb_client, "find_best_page_url"):
         _safe_log(logger, "[FB Enrich] No Facebook search client available; skipping '%s'.", artist_name)
         return None
     try:
         return fb_client.find_best_page_url(
             artist_name,
-            location,
+            extra_signal,
             require_strong_candidate=require_strong_candidate,
             skip_login_check=skip_login_check,
         )
@@ -3812,12 +3812,12 @@ def facebook_find_best_page(
         return None
 
 
-def _discover_facebook_url_bounded(fb_driver, artist_name: str, location: str, logger) -> str:
+def _discover_facebook_url_bounded(fb_driver, artist_name: str, extra_signal: str, logger) -> str:
     """Attempt one bounded daytime Facebook discovery using the existing driver."""
     if not fb_driver:
         return ""
     artist_name = cell_to_str(artist_name)
-    location = cell_to_str(location)
+    extra_signal = cell_to_str(extra_signal)
     if not artist_name:
         return ""
     try:
@@ -3826,7 +3826,7 @@ def _discover_facebook_url_bounded(fb_driver, artist_name: str, location: str, l
         return ""
     fb_url = facebook_find_best_page(
         artist_name,
-        location,
+        extra_signal,
         fb_client,
         logger,
         require_strong_candidate=True,
@@ -7465,6 +7465,8 @@ class CrossDirectoryEnricherWorker(QThread):
         elif intake.rejected_guard:
             sample = intake.rejected_guard[0]
         location = cell_to_str(seed_df.at[row_idx, "Location"]) if "Location" in seed_df.columns else ""
+        song_title = _extract_seed_track_text(row)
+        extra_signal = location or song_title
         self.log_message.emit(
             f"[FB Discover] No explicit facebook url for '{artist}'; attempting bounded discovery "
             f"(explicit FB intake outcome='{intake.outcome}' source='{source_summary}' sample='{sample}')."
@@ -7472,7 +7474,7 @@ class CrossDirectoryEnricherWorker(QThread):
         self._fb_discovery_attempted_rows.add(row_idx)
         try:
             discovered_fb_url = _discover_facebook_url_bounded(
-                fb_driver, artist, location, self.log_message.emit
+                fb_driver, artist, extra_signal, self.log_message.emit
             )
         except Exception as exc:
             if self._handle_fb_session_failure(seed_df, row_idx, artist, exc):

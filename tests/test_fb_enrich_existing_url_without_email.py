@@ -79,7 +79,7 @@ def test_discover_facebook_url_bounded_requires_strong_candidate(monkeypatch):
 
     def fake_find_best_page(
         artist_name,
-        location,
+        extra_signal,
         fb_client,
         logger,
         require_strong_candidate=False,
@@ -88,7 +88,7 @@ def test_discover_facebook_url_bounded_requires_strong_candidate(monkeypatch):
         calls.append(
             {
                 "artist_name": artist_name,
-                "location": location,
+                "extra_signal": extra_signal,
                 "require_strong_candidate": require_strong_candidate,
                 "skip_login_check": skip_login_check,
             }
@@ -103,11 +103,58 @@ def test_discover_facebook_url_bounded_requires_strong_candidate(monkeypatch):
     assert calls == [
         {
             "artist_name": "The Midnight Echo",
-            "location": "",
+            "extra_signal": "",
             "require_strong_candidate": True,
             "skip_login_check": True,
         }
     ]
+
+
+@pytest.mark.parametrize(
+    ("row_overrides", "expected_extra_signal"),
+    [
+        ({"Location": "", "Song Title": ""}, ""),
+        ({"Location": "Melbourne", "Song Title": "Night Drive"}, "Melbourne"),
+        ({"Location": "", "Song Title": "Night Drive"}, "Night Drive"),
+    ],
+)
+def test_discover_facebook_identity_selects_single_extra_signal(monkeypatch, row_overrides, expected_extra_signal):
+    logs = []
+    worker = _make_worker(logs)
+    worker._row_allows_heavy_enricher = lambda *args, **kwargs: SimpleNamespace(allowed=True)
+    worker._ensure_fb_discovery_session = lambda driver: (True, "authenticated")
+    driver = object()
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Signal Artist",
+            "Email": "",
+            "Email_All": "",
+            "facebook_url": "",
+            "Facebook_URL": "",
+            "Social Link": "",
+            "External Links": "",
+            "FB_Status": "",
+            "FB_Reason": "",
+            "Location": "",
+            "Song Title": "",
+        }
+    )
+    for key, value in row_overrides.items():
+        seed_df.at[0, key] = value
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+
+    discover_calls = []
+
+    def fake_discover(fb_driver, artist_name, extra_signal, logger):
+        discover_calls.append((fb_driver, artist_name, extra_signal))
+        return ""
+
+    monkeypatch.setattr(cde, "_discover_facebook_url_bounded", fake_discover)
+
+    matched = worker._discover_facebook_identity(seed_df, 0, driver, ctx)
+
+    assert matched is False
+    assert discover_calls == [(driver, "Signal Artist", expected_extra_signal)]
 
 
 def test_facebook_candidate_is_strong_accepts_music_category():

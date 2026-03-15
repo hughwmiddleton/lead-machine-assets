@@ -27,6 +27,46 @@ class _FakeDriver:
         raise Exception(f"unexpected locator: {by} {value}")
 
 
+@pytest.mark.parametrize(
+    ("extra_signal", "expected_query"),
+    [
+        ("", "Test Artist"),
+        ("Melbourne", "Test Artist Melbourne"),
+        ("Night Drive", "Test Artist Night Drive"),
+    ],
+)
+def test_find_best_page_url_builds_expected_query(monkeypatch, extra_signal, expected_query) -> None:
+    artist_url = "https://www.facebook.com/testartist"
+    driver = _FakeDriver(
+        {
+            artist_url: "<html><body><div>Musician/Band</div><a href='https://open.spotify.com/artist/test'>Spotify</a></body></html>",
+        }
+    )
+    client = cde.FacebookSearchClient(driver=driver, logger=None)
+    monkeypatch.setattr(client, "ensure_facebook_logged_in", lambda: True)
+
+    fetch_calls = []
+
+    def _fake_fetch(query, *, search_method):  # noqa: ANN001
+        fetch_calls.append((query, search_method))
+        return (
+            "<div role='main'><div aria-label='Search results'><a href='https://www.facebook.com/testartist'>Test Artist</a></div></div>",
+            "https://www.facebook.com/search/pages/?q=test",
+            False,
+        )
+
+    monkeypatch.setattr(client, "_fetch_search_surface", _fake_fetch)
+    monkeypatch.setattr(cde, "score_fb_candidate", lambda *args, **kwargs: (2.0, 1.0, 1.0))
+    monkeypatch.setattr(cde, "is_music_page", lambda *args, **kwargs: True)
+    monkeypatch.setattr(cde, "classify_corporate_signals", lambda *args, **kwargs: SimpleNamespace(has_hard=False, has_artist=True))
+    monkeypatch.setattr(cde, "_facebook_candidate_is_strong", lambda *args, **kwargs: (True, "music_category"))
+
+    result = client.find_best_page_url("Test Artist", extra_signal, require_strong_candidate=True)
+
+    assert result == artist_url
+    assert fetch_calls == [(expected_query, "direct_route")]
+
+
 def test_find_best_page_url_falls_back_to_homepage_after_direct_surface_miss(monkeypatch) -> None:
     artist_url = "https://www.facebook.com/testartist"
     driver = _FakeDriver(
