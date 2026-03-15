@@ -86,6 +86,35 @@ _UNEARTHED_LINK_COLUMNS = (
     "TikTok_URL",
 )
 
+_EMAIL_ROLE_PRIORITY: Dict[str, int] = {
+    "booking": 0,
+    "bookings": 0,
+    "agent": 0,
+    "agents": 0,
+    "mgmt": 1,
+    "management": 1,
+    "manager": 1,
+    "press": 2,
+    "media": 2,
+    "pr": 2,
+    "contact": 3,
+    "info": 10,
+    "hello": 10,
+    "enquiries": 11,
+    "enquiry": 11,
+    "office": 12,
+    "support": 90,
+    "help": 90,
+    "admin": 91,
+    "accounts": 92,
+    "billing": 92,
+    "legal": 93,
+    "privacy": 93,
+    "webmaster": 94,
+    "noreply": 95,
+    "donotreply": 95,
+}
+
 _LINK_TOKEN_SPLIT_RE = re.compile(r"\s*\|\s*|\s*,\s*|\s+")
 
 
@@ -482,7 +511,7 @@ def _set_email_all(df: pd.DataFrame, idx: int, new_emails: Union[str, Sequence[s
     existing_val = _cell_str(df.at[idx, "Email_All"] if "Email_All" in df.columns else "")
     before_list = filter_system_telemetry_emails(normalize_emails(existing_val))
     before_count = len(before_list)
-    merged_list = filter_system_telemetry_emails(_merge_email_lists(existing_val, new_emails))
+    merged_list = _rank_contact_emails(_merge_email_lists(existing_val, new_emails))
     merged_str = ";".join(merged_list)
     _bump_email_summary("emails_found", max(0, len(merged_list) - before_count))
     df.at[idx, "Email_All"] = merged_str
@@ -631,6 +660,28 @@ def emails_to_string(emails: List[str]) -> str:
     return ", ".join(emails) if emails else ""
 
 
+def _email_role_priority(email: str) -> int:
+    normalized = str(email or "").strip().lower()
+    if "@" not in normalized:
+        return 50
+    local = normalized.split("@", 1)[0]
+    compact = re.sub(r"[^a-z0-9]+", "", local)
+    tokens = {token for token in re.split(r"[^a-z0-9]+", local) if token}
+
+    for alias, priority in _EMAIL_ROLE_PRIORITY.items():
+        alias_compact = re.sub(r"[^a-z0-9]+", "", alias)
+        if compact == alias_compact or alias in tokens:
+            return priority
+    return 50
+
+
+def _rank_contact_emails(values: Union[str, Sequence[str], None]) -> List[str]:
+    normalized = filter_system_telemetry_emails(_merge_email_lists("", values or []))
+    indexed = list(enumerate(normalized))
+    ranked = sorted(indexed, key=lambda item: (_email_role_priority(item[1]), item[0], item[1]))
+    return [email for _, email in ranked]
+
+
 def _consolidate_email_all(df: pd.DataFrame) -> pd.DataFrame:
     """Populate Email_All as canonical, normalized union of known email fields."""
     if df is None or df.empty:
@@ -673,6 +724,8 @@ def _consolidate_email_all(df: pd.DataFrame) -> pd.DataFrame:
 
     if "Email_All" not in df.columns:
         df["Email_All"] = ""
+    if "Email" not in df.columns:
+        df["Email"] = ""
 
     def _build_email_all(row: pd.Series) -> str:
         if _is_quarantined(row):
@@ -681,15 +734,17 @@ def _consolidate_email_all(df: pd.DataFrame) -> pd.DataFrame:
         for field in legacy_fields:
             if field in row:
                 collected.extend(normalize_emails(row.get(field, "")))
-        unique_sorted = sorted(set(collected)) if collected else []
-        return emails_to_string(unique_sorted)
+        ranked = _rank_contact_emails(collected)
+        return emails_to_string(ranked)
 
     df["Email_All"] = df.apply(_build_email_all, axis=1)
     try:
         for idx in range(len(df.index)):
             if _is_quarantined(df.loc[idx]):
                 continue
-            _set_email_all(df, idx, df.at[idx, "Email_All"], source="consolidate", logger=_LOGGER.info)
+            merged_str = _set_email_all(df, idx, df.at[idx, "Email_All"], source="consolidate", logger=_LOGGER.info)
+            ranked = _rank_contact_emails(merged_str)
+            df.at[idx, "Email"] = ranked[0] if ranked else ""
     except Exception:
         pass
     return df
@@ -1405,22 +1460,13 @@ def normalize_country_from_location(location_raw: str) -> str:
 
 
 def _derive_primary_email(email: str, email_all: str) -> str:
-    email_clean = (email or "").strip()
-    if email_clean:
-        return email_clean
-    combined = (email_all or "").strip()
-    if not combined:
-        return ""
-    candidates = [part.strip() for part in re.split(r"[;,]", combined) if part and part.strip()]
-    return candidates[0] if candidates else ""
+    ranked = _rank_contact_emails([email, email_all])
+    return ranked[0] if ranked else ""
 
 
 def _derive_all_emails(email: str, email_all: str) -> str:
-    combined = (email_all or "").strip()
-    if combined:
-        return combined
-    email_clean = (email or "").strip()
-    return email_clean if email_clean else ""
+    ranked = _rank_contact_emails([email_all, email])
+    return ";".join(ranked)
 
 
 def _derive_contact_mode(primary_email: str, social_link: str) -> str:
@@ -2296,6 +2342,13 @@ def run_enrichment(raw_csv_path: str, enriched_output_path: str, logger: LoggerF
         result_path = enriched_output_path
 
     final_path = result_path
+    try:
+        df_for_checker = pd.read_csv(result_path, dtype=str, keep_default_na=False)
+        df_for_checker = df_for_checker.fillna("")
+        df_for_checker = _consolidate_email_all(df_for_checker)
+        df_for_checker.to_csv(result_path, index=False)
+    except Exception as exc:  # pragma: no cover - defensive fallback
+        _safe_log(logger, f"[Enrich] Pre-check email consolidation failed safely: {exc}")
     try:
         checked_path = final_checker.run_final_checker(result_path)
         if checked_path and os.path.exists(checked_path):

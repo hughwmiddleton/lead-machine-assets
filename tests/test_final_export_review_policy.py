@@ -146,3 +146,22 @@ def test_final_export_preserves_upstream_review_flag() -> None:
     export_df = _build_final_export_frame(df)
 
     assert export_df.iloc[0]["Needs_Review"] == "TRUE"
+
+
+def test_final_export_prefers_ranked_primary_over_weaker_existing_email() -> None:
+    df = pd.DataFrame(
+        [
+            _build_export_row(
+                Email="support@bandcamp.com",
+                Email_All="support@bandcamp.com;booking@artist.com;press@artistlabel.com",
+            )
+        ]
+    )
+
+    export_df = _build_final_export_frame(df)
+
+    assert export_df.iloc[0]["Primary Email"] == "booking@artist.com"
+    assert (
+        export_df.iloc[0]["All Emails"]
+        == "booking@artist.com;press@artistlabel.com;support@bandcamp.com"
+    )

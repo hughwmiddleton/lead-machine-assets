@@ -72,3 +72,17 @@ def test_set_email_all_drops_telemetry_only_result():
 
     assert merged == ""
     assert df.at[0, "Email_All"] == ""
+
+
+def test_set_email_all_prefers_outreach_addresses_in_order():
+    df = pd.DataFrame([{"Artist Name": "Artist D", "Email_All": ""}])
+
+    merged = pipeline_runner._set_email_all(
+        df,
+        0,
+        ["support@bandcamp.com", "booking@artist.com", "press@artistlabel.com"],
+        source="test_rank",
+    )
+
+    assert merged == "booking@artist.com;press@artistlabel.com;support@bandcamp.com"
+    assert df.at[0, "Email_All"] == "booking@artist.com;press@artistlabel.com;support@bandcamp.com"
