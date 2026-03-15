@@ -1511,7 +1511,18 @@ def _fb_is_candidate_url_allowed(url: str) -> bool:
     if not segments:
         return False
 
-    reserved = {"groups", "watch", "reel", "events", "notifications", "afad"}
+    reserved = {
+        "groups",
+        "watch",
+        "reel",
+        "events",
+        "notifications",
+        "afad",
+        "photo.php",
+        "story.php",
+        "permalink.php",
+        "sharer.php",
+    }
     if segments[0].lower() in reserved:
         return False
 
@@ -1897,6 +1908,10 @@ if os.getenv("FB_DEBUG_CAND_URL_GATE") == "1":
     assert _fb_is_candidate_url_allowed("https://www.facebook.com/profile.php?id=123456")
     assert not _fb_is_candidate_url_allowed("https://www.facebook.com/groups/")
     assert not _fb_is_candidate_url_allowed("https://www.facebook.com/groups/foo")
+    assert not _fb_is_candidate_url_allowed("https://www.facebook.com/photo.php?fbid=123")
+    assert not _fb_is_candidate_url_allowed("https://www.facebook.com/story.php?story_fbid=123&id=456")
+    assert not _fb_is_candidate_url_allowed("https://www.facebook.com/permalink.php?story_fbid=123&id=456")
+    assert not _fb_is_candidate_url_allowed("https://www.facebook.com/sharer.php?u=https%3A%2F%2Fexample.com")
     assert not _fb_is_candidate_url_allowed("https://www.facebook.com/someband/about")
     assert not _fb_is_candidate_url_allowed("https://www.facebook.com/profile.php?id=12&foo=1")
     assert not _fb_is_candidate_url_allowed("https://www.facebook.com/someband?__tn__=%2Cd")

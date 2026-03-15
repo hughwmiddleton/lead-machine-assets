@@ -3417,16 +3417,28 @@ class FacebookSearchClient:
             else:
                 generic_candidates.append((max(final_score, 1.0), name_score, cat_boost, True, False, cand))
 
+        def _bucket_selection_key(item: Tuple[float, float, float, bool, bool, FbCandidate]) -> Tuple[float, int]:
+            score, _, _, _, _, cand = item
+            try:
+                path = (urllib.parse.urlparse(cand.url or "").path or "").strip("/").lower()
+            except Exception:
+                path = ""
+            if not path or path == "profile.php":
+                return (score, 0)
+            if path.startswith("pages/") or "/" not in path:
+                return (score, 1)
+            return (score, 0)
+
         best_entry: Optional[Tuple[float, float, float, bool, bool, FbCandidate]] = None
         using_fallback = False
         using_generic = False
         if strong_music_candidates:
-            best_entry = max(strong_music_candidates, key=lambda item: item[0])
+            best_entry = max(strong_music_candidates, key=_bucket_selection_key)
         elif fallback_candidates:
-            best_entry = max(fallback_candidates, key=lambda item: item[0])
+            best_entry = max(fallback_candidates, key=_bucket_selection_key)
             using_fallback = True
         elif generic_candidates:
-            best_entry = max(generic_candidates, key=lambda item: item[0])
+            best_entry = max(generic_candidates, key=_bucket_selection_key)
             using_generic = True
 
         MIN_FINAL_SCORE = 1.0
