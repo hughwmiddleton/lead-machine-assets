@@ -2274,6 +2274,58 @@ def _get_canonical_fb_url(row) -> str:
     return _canonicalize_fb_url(promoted)
 
 
+def _get_direct_canonical_fb_urls(row: Any) -> Set[str]:
+    canonical_urls: Set[str] = set()
+    if row is None:
+        return canonical_urls
+
+    for key in ("Facebook_URL", "facebook_url", "Facebook URL"):
+        try:
+            raw = row.get(key, "")
+        except AttributeError:
+            try:
+                raw = row[key]
+            except Exception:
+                raw = ""
+        canonical = canonicalize_facebook_url(cell_to_str(raw))
+        if canonical:
+            canonical_urls.add(canonical)
+    return canonical_urls
+
+
+def _get_payload_canonical_facebook_urls(payload: Optional["EnrichmentPayload"]) -> Set[str]:
+    canonical_urls: Set[str] = set()
+    if not payload:
+        return canonical_urls
+
+    for raw in set(getattr(payload, "socials", set()) or set()) | set(getattr(payload, "websites", set()) or set()):
+        canonical = canonicalize_facebook_url(raw)
+        if canonical:
+            canonical_urls.add(canonical)
+    return canonical_urls
+
+
+def _promote_payload_facebook_url(df: pd.DataFrame, row_idx, payload: Optional["EnrichmentPayload"]) -> bool:
+    canonical_urls = _get_payload_canonical_facebook_urls(payload)
+    if len(canonical_urls) != 1:
+        return False
+
+    promoted_url = next(iter(canonical_urls))
+    row = df.loc[row_idx]
+    existing_direct_urls = _get_direct_canonical_fb_urls(row)
+    current_canonical = canonicalize_facebook_url(_coerce_directory_value(row.get("Facebook_URL", "")))
+
+    if current_canonical:
+        return current_canonical == promoted_url
+    if any(existing_url != promoted_url for existing_url in existing_direct_urls):
+        return False
+
+    if "Facebook_URL" not in df.columns:
+        df["Facebook_URL"] = ""
+    df.at[row_idx, "Facebook_URL"] = promoted_url
+    return True
+
+
 _INSTAGRAM_ALLOWED_HOSTS = {
     "instagram.com",
     "www.instagram.com",
@@ -9856,6 +9908,7 @@ class CrossDirectoryEnricherWorker(QThread):
             return False
         self._update_row_match_score(df, row_idx, score)
         self._apply_payload(df, row_idx, payload)
+        _promote_payload_facebook_url(df, row_idx, payload)
         related_artists = getattr(payload, "related_artists", None) or []
         if related_artists and (payload.source_dir or "").startswith(FESTIVAL_EXPANSION_ORIGIN_BANDCAMP):
             self._stage_festival_expansion_candidates(

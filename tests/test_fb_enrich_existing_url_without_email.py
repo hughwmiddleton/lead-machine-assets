@@ -235,6 +235,8 @@ def test_fb_enrich_runs_when_fb_url_present_or_promotable(monkeypatch, row_overr
             "Facebook_URL": "",
             "Social Link": "",
             "External Links": "",
+            "Source Directory": "",
+            "Source URL": "",
             "Email_Source_URL": "",
             "Email_Source_Type": "",
             "Email_Extract_Method": "",
@@ -264,6 +266,59 @@ def test_fb_enrich_runs_when_fb_url_present_or_promotable(monkeypatch, row_overr
     assert "fb@example.com" in seed_df.at[0, "Email_All"]
     assert seed_df.at[0, "FB_Status"].lower() == "found_email"
     assert not any("already has facebook link" in msg.lower() for msg in logs)
+
+
+def test_fb_enrich_uses_payload_promoted_facebook_url_without_discovery(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Payload Promoted FB",
+            "Email": "",
+            "Email_All": "",
+            "facebook_url": "",
+            "Facebook_URL": "",
+            "Facebook URL": "",
+            "Social Link": "",
+            "External Links": "",
+            "Source Directory": "",
+            "Source URL": "",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+        }
+    )
+    payload = cde.EnrichmentPayload(
+        socials={"https://fb.com/payloadpromotedfb"},
+        websites=set(),
+        source_dir="soundcloud",
+        source_url="https://soundcloud.com/payloadpromotedfb",
+        match_score=0.95,
+    )
+
+    assert worker._apply_payload_guarded(seed_df, 0, payload, "Payload Promoted FB") is True
+    assert seed_df.at[0, "Facebook_URL"] == "https://www.facebook.com/payloadpromotedfb"
+
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    calls = []
+
+    def fake_extract(driver, url, log_fn=None):
+        calls.append(url)
+        return (["payloadfb@example.com"], "https://www.facebook.com/payloadpromotedfb/about", "")
+
+    def fail_discover(*args, **kwargs):
+        raise AssertionError("discovery should not run when accepted payload promotion already populated Facebook_URL")
+
+    monkeypatch.setattr(cde, "_discover_facebook_url_bounded", fail_discover)
+    monkeypatch.setattr(cde, "_extract_fb_emails_bounded", fake_extract)
+
+    matched = worker._enrich_row_facebook(seed_df, 0, object(), ctx)
+
+    assert matched is True
+    assert calls == ["https://www.facebook.com/payloadpromotedfb"]
+    assert seed_df.at[0, "Email"] == "payloadfb@example.com"
+    assert "payloadfb@example.com" in seed_df.at[0, "Email_All"]
+    assert seed_df.at[0, "FB_Status"].lower() == "found_email"
 
 
 def test_fb_enrich_uses_rendered_visible_text_when_page_source_has_no_email() -> None:

@@ -132,3 +132,76 @@ def test_dataframe_promotion_preserves_profile_php_urls():
     promoted = pipeline_runner._promote_fb_urls_df(df.copy())
 
     assert promoted.at[0, "Facebook_URL"] == "https://www.facebook.com/profile.php?id=123"
+
+
+def test_payload_promotion_backfills_canonical_facebook_url():
+    pytest.importorskip("PyQt5")
+    import cross_directory_enricher as cde
+
+    df = pytest.importorskip("pandas").DataFrame(
+        [{"Artist Name": "Payload FB", "Facebook_URL": "", "facebook_url": "", "Facebook URL": ""}],
+        dtype=str,
+    ).fillna("")
+    payload = cde.EnrichmentPayload(
+        socials={"https://fb.com/payloadband"},
+        websites=set(),
+        source_dir="soundcloud",
+        source_url="https://soundcloud.com/payloadband",
+        match_score=0.9,
+    )
+
+    promoted = cde._promote_payload_facebook_url(df, 0, payload)
+
+    assert promoted is True
+    assert df.at[0, "Facebook_URL"] == "https://www.facebook.com/payloadband"
+
+
+def test_payload_promotion_preserves_same_page_existing_canonical_without_churn():
+    pytest.importorskip("PyQt5")
+    import cross_directory_enricher as cde
+
+    df = pytest.importorskip("pandas").DataFrame(
+        [
+            {
+                "Artist Name": "Existing Canonical",
+                "Facebook_URL": "https://www.facebook.com/existingband",
+                "facebook_url": "",
+                "Facebook URL": "",
+            }
+        ],
+        dtype=str,
+    ).fillna("")
+    payload = cde.EnrichmentPayload(
+        socials={"https://fb.com/existingband", "https://www.facebook.com/existingband/"},
+        websites=set(),
+        source_dir="lastfm",
+        source_url="https://www.last.fm/music/Existing+Band",
+        match_score=0.9,
+    )
+
+    promoted = cde._promote_payload_facebook_url(df, 0, payload)
+
+    assert promoted is True
+    assert df.at[0, "Facebook_URL"] == "https://www.facebook.com/existingband"
+
+
+def test_payload_promotion_skips_conflicting_facebook_pages():
+    pytest.importorskip("PyQt5")
+    import cross_directory_enricher as cde
+
+    df = pytest.importorskip("pandas").DataFrame(
+        [{"Artist Name": "Conflicting Payload", "Facebook_URL": "", "facebook_url": "", "Facebook URL": ""}],
+        dtype=str,
+    ).fillna("")
+    payload = cde.EnrichmentPayload(
+        socials={"https://www.facebook.com/pageone", "https://www.facebook.com/pagetwo"},
+        websites=set(),
+        source_dir="bandcamp",
+        source_url="https://conflicting.bandcamp.com",
+        match_score=0.95,
+    )
+
+    promoted = cde._promote_payload_facebook_url(df, 0, payload)
+
+    assert promoted is False
+    assert df.at[0, "Facebook_URL"] == ""
