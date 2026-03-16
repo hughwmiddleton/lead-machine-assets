@@ -1,7 +1,7 @@
 import pytest
 
 import pipeline_runner
-from source_scheduler import extract_facebook_url_from_text, promote_facebook_url
+from source_scheduler import canonicalize_facebook_url, extract_facebook_url_from_text, promote_facebook_url
 
 
 def test_extract_facebook_url_normalizes_and_filters():
@@ -41,6 +41,17 @@ def test_extract_accepts_numeric_profile_and_rejects_groups():
     assert extract_facebook_url_from_text("https://www.facebook.com/profile.php?id=abc") is None
     assert extract_facebook_url_from_text("https://www.facebook.com/groups/mygroup") is None
     assert extract_facebook_url_from_text("https://www.facebook.com/nan") is None
+
+
+def test_canonicalize_facebook_url_collapses_equivalent_mobile_and_http_variants():
+    assert canonicalize_facebook_url("https://www.facebook.com/artist") == "https://www.facebook.com/artist"
+    assert canonicalize_facebook_url("http://www.facebook.com/artist/") == "https://www.facebook.com/artist"
+    assert canonicalize_facebook_url("http://m.facebook.com/artist") == "https://www.facebook.com/artist"
+
+
+def test_canonicalize_facebook_url_rejects_share_wrappers_predictably():
+    assert canonicalize_facebook_url("https://www.facebook.com/share.php?u=test") == ""
+    assert canonicalize_facebook_url("https://www.facebook.com/share/r/test") == ""
 
 
 def test_promote_accepts_fb_short_domains_and_profile_ids():

@@ -142,6 +142,7 @@ from spotify_scraper import scrape_spotify
 from origin_validator import _derive_origin_output_path, run_auto_validate
 from soundcloud_metadata_enricher import enrich_soundcloud_metadata
 import pipeline_runner
+from source_scheduler import canonicalize_facebook_url
 from lead_vault import EXPORT_PRESETS, WOODPECKER_EXPORT_PRESET, export_with_preset
 from lead_vault.merge import merge_csv_into_master, preview_csv_import
 from lead_vault.schema import get_canonical_master_schema, get_default_master_csv_path
@@ -8743,6 +8744,7 @@ class FacebookSessionManager:
         self.logged_in = False
         self.main_window_handle = None
         self.page_counter = 0
+        self._auto_login_disabled_logged = False
 
     def _log(self, msg: str):
         if not msg:
@@ -8768,7 +8770,9 @@ class FacebookSessionManager:
             return self.driver
         allow_auto_login = str(os.environ.get("FB_ALLOW_AUTOMATED_LOGIN", "") or "").strip().lower() in ("1", "true", "yes")
         if not allow_auto_login:
-            self._log("[FB Session] Automated login disabled (FB_ALLOW_AUTOMATED_LOGIN not set); skipping credential typing.")
+            if not self._auto_login_disabled_logged:
+                self._log("[FB Session] Automated login disabled (FB_ALLOW_AUTOMATED_LOGIN not set); skipping credential typing.")
+                self._auto_login_disabled_logged = True
             return self.driver
         login_facebook(self.driver, self.username, self.password)
         self.logged_in = True
@@ -8895,6 +8899,135 @@ def _extract_social_link_from_row(row):
     """Maintain backward compatibility: return the first social link if present."""
     links = _extract_social_links(row)
     return links[0] if links else ""
+
+
+def _legacy_fb_raw_field_candidates(row):
+    """Yield explicit Facebook URL candidates in stable preference order."""
+    candidate_fields = (
+        "Facebook_URL",
+        "facebook_url",
+        "Facebook URL",
+        "FB_URL",
+        "Facebook",
+        "facebook",
+        "FACEBOOK",
+        "Social Link",
+        "social link",
+        "SOCIAL LINK",
+    )
+    for field in candidate_fields:
+        if field not in row or pd.isna(row[field]):
+            continue
+        raw_value = str(row[field] or "").strip()
+        if not raw_value:
+            continue
+        for part in re.split(r"[|;,\n\r]+", raw_value):
+            candidate = part.strip()
+            if candidate:
+                yield field, candidate
+
+
+def _legacy_fb_is_explicit_candidate(text: str) -> bool:
+    lowered = (text or "").strip().lower()
+    return any(token in lowered for token in ("facebook.com", "fb.com", "fb.me"))
+
+
+def _legacy_fb_is_allowed_canonical_url(url: str) -> bool:
+    if not url:
+        return False
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return False
+    path = (parsed.path or "").rstrip("/")
+    if path.lower() == "/profile.php":
+        qs = parse_qs(parsed.query or "", keep_blank_values=False)
+        ids = qs.get("id", [])
+        return len(ids) == 1 and bool(ids[0]) and ids[0].isdigit()
+    if parsed.query:
+        return False
+    segments = [segment for segment in (parsed.path or "").split("/") if segment]
+    if len(segments) != 1:
+        return False
+    return segments[0].lower() != "profile.php"
+
+
+def _resolve_legacy_facebook_target(row) -> Tuple[str, str, str]:
+    """
+    Resolve one canonical FB URL for the legacy/day scrape path.
+
+    Returns ``(raw_input_url, canonical_url, status)`` where status is one of:
+    ``resolved``, ``unsafe_or_weak``, or ``missing``.
+    """
+    first_fb_like = ""
+    for _field, raw_candidate in _legacy_fb_raw_field_candidates(row):
+        if not _legacy_fb_is_explicit_candidate(raw_candidate):
+            continue
+        if not first_fb_like:
+            first_fb_like = raw_candidate
+        canonical = canonicalize_facebook_url(raw_candidate)
+        if not canonical:
+            continue
+        if _legacy_fb_is_allowed_canonical_url(canonical):
+            return raw_candidate, canonical, "resolved"
+    if first_fb_like:
+        return first_fb_like, "", "unsafe_or_weak"
+    return "", "", "missing"
+
+
+def _extract_emails_from_loaded_fb_page(driver) -> List[str]:
+    """Extract emails from the already-opened Facebook page without navigating."""
+    emails = []
+    seen = set()
+
+    def _record(values):
+        for value in values or []:
+            cleaned = (value or "").strip()
+            if cleaned and cleaned not in seen:
+                seen.add(cleaned)
+                emails.append(cleaned)
+
+    soup = None
+    try:
+        page_source = driver.page_source or ""
+    except Exception:
+        page_source = ""
+    if page_source:
+        try:
+            soup = BeautifulSoup(page_source, "html.parser")
+        except Exception:
+            soup = None
+    if soup is not None:
+        _record(extract_emails(soup.get_text(" ", strip=True)))
+        for anchor in soup.select('a[href^="mailto:"]'):
+            href = anchor.get("href") or ""
+            if href.startswith("mailto:"):
+                addr = href.split("mailto:", 1)[-1].split("?", 1)[0]
+                if addr:
+                    _record([addr])
+    try:
+        body = driver.find_element(By.TAG_NAME, "body")
+        _record(extract_emails(getattr(body, "text", "") or ""))
+    except Exception:
+        pass
+    try:
+        rendered_text = driver.execute_script("return document.body ? (document.body.innerText || '') : '';")
+        _record(extract_emails(str(rendered_text or "")))
+    except Exception:
+        pass
+    return emails
+
+
+def _log_legacy_fb_row_outcome(raw_input_url: str, canonical_url: str, final_page_url: str, main_found: bool, about_visited: bool, status: str):
+    print(
+        "[FB Legacy] "
+        f"raw={raw_input_url or '-'} "
+        f"canonical={canonical_url or '-'} "
+        f"final={final_page_url or '-'} "
+        f"main_email={'yes' if main_found else 'no'} "
+        f"about={'yes' if about_visited else 'no'} "
+        f"status={status}"
+    )
 
 def row_has_email(row, email_column: str = "Email") -> bool:
     """
@@ -9280,13 +9413,19 @@ def scrape_csv(input_csv, output_csv, fb_username, fb_password, max_emails=None,
         except Exception:
             pass
     if not existing_data.empty and "url" in existing_data.columns:
-        processed_urls = {
-            value.strip()
-            for value in existing_data["url"].astype(str).tolist()
-            if isinstance(value, str) and value.strip()
-        }
+        for value in existing_data["url"].astype(str).tolist():
+            if not isinstance(value, str):
+                continue
+            cleaned = value.strip()
+            if not cleaned:
+                continue
+            processed_urls.add(cleaned)
+            canonical = canonicalize_facebook_url(cleaned)
+            if canonical:
+                processed_urls.add(canonical)
     exclude_urls = {"https://www.facebook.com/triplejunearthed/", "https://www.facebook.com/abc/"}
     exclude_urls_lower = {url.lower() for url in exclude_urls}
+    exclude_urls_canonical = {canonicalize_facebook_url(url) for url in exclude_urls if canonicalize_facebook_url(url)}
     facebook_rows = []
     for index, row in data.iterrows():
         artist_name = ""
@@ -9317,19 +9456,20 @@ def scrape_csv(input_csv, output_csv, fb_username, fb_password, max_emails=None,
             print(f"[FB Scraper] Row {index + 1}: skipping '{artist_name}' because Email column is already populated.")
             continue
 
-        if not links:
+        raw_fb_url, canonical_fb_url, fb_target_status = _resolve_legacy_facebook_target(row)
+        if fb_target_status == "unsafe_or_weak":
+            _log_legacy_fb_row_outcome(raw_fb_url, "", "", False, False, "skip_unsafe_url")
             continue
 
-        for candidate in links:
-            url = candidate.strip()
-            if not url:
-                continue
-            url_lower = url.lower()
-            if url_lower in exclude_urls_lower or url in processed_urls:
-                continue
-            if "facebook.com" in url_lower:
-                facebook_rows.append((row, url, preexisting_emails))
-                break
+        if not links and not canonical_fb_url:
+            continue
+
+        if not canonical_fb_url:
+            continue
+        canonical_lower = canonical_fb_url.lower()
+        if canonical_lower in exclude_urls_lower or canonical_fb_url in exclude_urls_canonical or canonical_fb_url in processed_urls:
+            continue
+        facebook_rows.append((row, raw_fb_url or canonical_fb_url, canonical_fb_url, preexisting_emails))
     if not facebook_rows:
         if results:
             results_df = pd.DataFrame(results)
@@ -9360,14 +9500,17 @@ def scrape_csv(input_csv, output_csv, fb_username, fb_password, max_emails=None,
     session_counter = 0
     remaining_rows = []
     try:
-        for idx, (row, url, known_emails) in enumerate(facebook_rows):
+        for idx, (row, raw_input_url, url, known_emails) in enumerate(facebook_rows):
             if not url:
                 continue
             preexisting_emails = list(known_emails or [])
+            final_page_url = url
+            main_page_found_email = False
+            about_visited = False
+            status = "no_email"
             try:
                 if FACEBOOK_CLOSE_EXTRA_WINDOWS:
                     session.close_extra_windows()
-                print(f"Scraping Facebook page: {url}")
                 driver = session.navigate(url)
                 if FACEBOOK_CLOSE_EXTRA_WINDOWS:
                     session.close_extra_windows()
@@ -9376,37 +9519,52 @@ def scrape_csv(input_csv, output_csv, fb_username, fb_password, max_emails=None,
                 if session_counter % 20 == 0:
                     session.refresh_session()
                     driver = session.ensure_logged_in()
-                navigated = _goto_facebook_about(driver, url, timeout=5)
-                if FACEBOOK_CLOSE_EXTRA_WINDOWS:
-                    session.close_extra_windows()
-                if not navigated:
-                    print(f"Warning: could not open About section for {url}; scanning current page.")
                 time.sleep(1.0)
                 WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.TAG_NAME, 'body')))
-                soup = BeautifulSoup(driver.page_source, 'html.parser')
                 emails = list(preexisting_emails)
-                body_text = soup.get_text(" ", strip=True)
-                if body_text:
-                    emails.extend(extract_emails(body_text))
-                for anchor in soup.select('a[href^="mailto:"]'):
-                    href = anchor.get("href") or ""
-                    if href.startswith("mailto:"):
-                        addr = href.split("mailto:")[-1].split("?", 1)[0]
-                        if addr:
-                            emails.append(addr)
+                try:
+                    final_page_url = getattr(driver, "current_url", "") or url
+                except Exception:
+                    final_page_url = url
+                main_page_emails = _extract_emails_from_loaded_fb_page(driver)
+                if main_page_emails:
+                    main_page_found_email = True
+                    emails.extend(main_page_emails)
+                    status = "found_email_main"
+                else:
+                    navigated = _goto_facebook_about(driver, url, timeout=5)
+                    if FACEBOOK_CLOSE_EXTRA_WINDOWS:
+                        session.close_extra_windows()
+                    about_visited = bool(navigated)
+                    if navigated:
+                        time.sleep(1.0)
+                        WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.TAG_NAME, 'body')))
+                        try:
+                            final_page_url = getattr(driver, "current_url", "") or final_page_url
+                        except Exception:
+                            pass
+                        about_emails = _extract_emails_from_loaded_fb_page(driver)
+                        if about_emails:
+                            emails.extend(about_emails)
+                            status = "found_email_about"
                 payload, unique_emails = _build_email_result(row, url, emails, preferred_url=url)
                 if payload:
                     results.append(payload)
                     emails_found += len(unique_emails)
                     if max_emails is not None and emails_found >= max_emails:
                         remaining_rows = facebook_rows[idx + 1 :]
+                        _log_legacy_fb_row_outcome(raw_input_url, url, final_page_url, main_page_found_email, about_visited, status)
                         break
+                elif status.startswith("found_email"):
+                    status = "no_email"
             except Exception as e:
                 print(f"Error scraping {url}: {e}")
+                status = "error"
                 if preexisting_emails:
                     payload, _ = _build_email_result(row, url, preexisting_emails, preferred_url=url)
                     if payload:
                         results.append(payload)
+            _log_legacy_fb_row_outcome(raw_input_url, url, final_page_url, main_page_found_email, about_visited, status)
             processed_urls.add(url)
             # Random sleep between 1 and 2 seconds.
             time.sleep(random.uniform(1, 2))
@@ -9415,7 +9573,7 @@ def scrape_csv(input_csv, output_csv, fb_username, fb_password, max_emails=None,
     finally:
         if not use_shared_session:
             session.close()
-    for row, url, known_emails in remaining_rows:
+    for row, raw_input_url, url, known_emails in remaining_rows:
         if known_emails:
             payload, _ = _build_email_result(row, url, known_emails, preferred_url=url)
             if payload:
