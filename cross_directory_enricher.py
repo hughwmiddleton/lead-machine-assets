@@ -5098,6 +5098,165 @@ def _bandcamp_confidence(artist_name: str, display_name: str, profile_url: str, 
     return max(0.0, min(score, 1.0))
 
 
+_BC_SLUG_CONFIRM_ALLOWED_MODIFIERS = {"official", "music", "band"}
+_BC_SLUG_CONFIRM_DISQUALIFY_TOKENS = {
+    "records",
+    "recordings",
+    "label",
+    "store",
+    "shop",
+    "festival",
+    "dj",
+}
+
+
+def _bc_slug_extract_page_artist_text(html: str, fallback_text: str = "") -> str:
+    if not html:
+        return _clean_cell(fallback_text)
+    try:
+        soup = BeautifulSoup(html, "html.parser")
+    except Exception:
+        return _clean_cell(fallback_text)
+
+    def _clean(value: Any) -> str:
+        text = _clean_cell(value)
+        if not text:
+            return ""
+        return re.sub(r"^\s*by\s+", "", text, flags=re.IGNORECASE).strip()
+
+    def _extract_text(node: Any) -> str:
+        if not node:
+            return ""
+        for attr in ("content", "title", "aria-label"):
+            candidate = _clean(node.get(attr, "")) if hasattr(node, "get") else ""
+            if candidate:
+                return candidate
+        try:
+            name_node = node.select_one("[itemprop='name']")
+        except Exception:
+            name_node = None
+        if name_node:
+            nested = _extract_text(name_node)
+            if nested:
+                return nested
+        try:
+            return _clean(node.get_text(" ", strip=True))
+        except Exception:
+            return ""
+
+    try:
+        by_artist_nodes = soup.select("[itemprop='byArtist']")
+    except Exception:
+        by_artist_nodes = []
+    for node in by_artist_nodes:
+        candidate = _extract_text(node)
+        if candidate:
+            return candidate
+
+    og_title = soup.find("meta", attrs={"property": "og:title"}) or soup.find("meta", attrs={"name": "og:title"})
+    candidate = _extract_text(og_title)
+    if candidate:
+        return candidate
+
+    title_el = soup.find("title")
+    candidate = _extract_text(title_el)
+    if candidate:
+        return candidate
+    return _clean(fallback_text)
+
+
+def _bc_slug_has_strong_artist_name_confirmation(artist_name: str, page_artist: str) -> bool:
+    artist_tokens = [tok for tok in normalize_name(artist_name).split() if tok]
+    page_tokens = [tok for tok in normalize_name(page_artist).split() if tok]
+    if not artist_tokens or not page_tokens:
+        return False
+    if any(tok in _BC_SLUG_CONFIRM_DISQUALIFY_TOKENS for tok in page_tokens):
+        return False
+    if page_tokens == artist_tokens:
+        return True
+    span = len(artist_tokens)
+    for start_idx in range(len(page_tokens) - span + 1):
+        if page_tokens[start_idx : start_idx + span] != artist_tokens:
+            continue
+        extras = page_tokens[:start_idx] + page_tokens[start_idx + span :]
+        if extras and all(tok in _BC_SLUG_CONFIRM_ALLOWED_MODIFIERS for tok in extras):
+            return True
+    return False
+
+
+def _bc_slug_identity_matches_artist(artist_name: str, identity_text: str) -> bool:
+    artist_compact = re.sub(r"\s+", "", normalize_name(artist_name))
+    candidate_compact = re.sub(r"\s+", "", normalize_name(identity_text))
+    if not artist_compact or not candidate_compact:
+        return False
+    if any(token in candidate_compact for token in _BC_SLUG_CONFIRM_DISQUALIFY_TOKENS):
+        return False
+    if candidate_compact == artist_compact:
+        return True
+    trimmed = candidate_compact
+    used_modifier = False
+    changed = True
+    while changed and trimmed:
+        changed = False
+        for modifier in _BC_SLUG_CONFIRM_ALLOWED_MODIFIERS:
+            if trimmed.startswith(modifier) and len(trimmed) > len(modifier):
+                trimmed = trimmed[len(modifier) :]
+                used_modifier = True
+                changed = True
+                break
+        if changed:
+            continue
+        for modifier in _BC_SLUG_CONFIRM_ALLOWED_MODIFIERS:
+            if trimmed.endswith(modifier) and len(trimmed) > len(modifier):
+                trimmed = trimmed[: -len(modifier)]
+                used_modifier = True
+                changed = True
+                break
+    return used_modifier and trimmed == artist_compact
+
+
+def _bc_slug_outbound_identity_values(url: str) -> List[str]:
+    identities: List[str] = []
+    normalised = _normalise_url(url) or ""
+    if not normalised:
+        return identities
+    try:
+        parsed = urllib.parse.urlparse(normalised)
+    except Exception:
+        return identities
+    host = (parsed.netloc or "").lower()
+    if not host:
+        return identities
+    path_segments = [segment for segment in (parsed.path or "").split("/") if segment]
+
+    canonical_ig = _canonicalize_instagram_profile_url(normalised)
+    if canonical_ig:
+        identities.append(urllib.parse.urlparse(canonical_ig).path.strip("/"))
+        return identities
+
+    canonical_fb = canonicalize_facebook_url(normalised)
+    if canonical_fb:
+        fb_segment = urllib.parse.urlparse(canonical_fb).path.strip("/").split("/", 1)[0]
+        if fb_segment and fb_segment.lower() != "profile.php":
+            identities.append(fb_segment)
+
+    host_no_www = host[4:] if host.startswith("www.") else host
+    if host_no_www in LINK_HUB_HOSTS and path_segments:
+        identities.append(path_segments[0])
+    elif host_no_www not in _INSTAGRAM_ALLOWED_HOSTS:
+        identities.append(host_no_www.split(".", 1)[0])
+    return [identity for identity in identities if identity]
+
+
+def _bc_slug_has_strong_outbound_confirmation(artist_name: str, html: str, profile_url: str) -> bool:
+    socials, websites, _, link_hubs = _extract_links_from_profile(html, "bandcamp", profile_url)
+    for url in socials | websites | link_hubs:
+        for identity in _bc_slug_outbound_identity_values(url):
+            if _bc_slug_identity_matches_artist(artist_name, identity):
+                return True
+    return False
+
+
 def _bc_slug_candidates(artist_name: str) -> List[str]:
     """
     Conservative slug guesses for https://{slug}.bandcamp.com
@@ -10644,6 +10803,7 @@ class CrossDirectoryEnricherWorker(QThread):
                 slugs.append(cleaned)
         if not slugs:
             return None
+        debug_attempts = bool(os.getenv("BC_DEBUG_ATTEMPTS"))
         for slug in slugs:
             if self._bc_fallback_used >= BC_FALLBACK_MAX_PER_RUN:
                 break
@@ -10670,6 +10830,34 @@ class CrossDirectoryEnricherWorker(QThread):
             display_name = title_text or slug
             confidence = _bandcamp_confidence(artist_name, display_name, url, song_title=song_title)
             if confidence >= MIN_BC_CONFIDENCE:
+                page_artist = _bc_slug_extract_page_artist_text(html or "", fallback_text=title_text)
+                artist_confirmed = _bc_slug_has_strong_artist_name_confirmation(artist_name, page_artist)
+                outbound_confirmed = False
+                if not artist_confirmed and html:
+                    outbound_confirmed = _bc_slug_has_strong_outbound_confirmation(artist_name, html, url)
+                if not (artist_confirmed or outbound_confirmed):
+                    if debug_attempts:
+                        try:
+                            self.log_message.emit(
+                                "[BC Debug] slug_fallback: supplemental_failed slug='%s' confidence=%.2f page_artist='%s' url=%s"
+                                % (slug, confidence, page_artist or "", url)
+                            )
+                        except Exception:
+                            pass
+                    continue
+                if debug_attempts:
+                    try:
+                        reasons = []
+                        if artist_confirmed:
+                            reasons.append("artist_name")
+                        if outbound_confirmed:
+                            reasons.append("outbound")
+                        self.log_message.emit(
+                            "[BC Debug] slug_fallback: supplemental_pass slug='%s' confidence=%.2f reasons=%s page_artist='%s' url=%s"
+                            % (slug, confidence, ",".join(reasons) or "unknown", page_artist or "", url)
+                        )
+                    except Exception:
+                        pass
                 payload = self._fetch_profile_and_build(url, "bandcamp", confidence=confidence)
                 if payload:
                     payload.match_score = self._compute_match_score_for_candidate(

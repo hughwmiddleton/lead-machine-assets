@@ -61,6 +61,33 @@ def _base_row(**overrides):
     return row
 
 
+def _bandcamp_slug_html(title="Nightlight", by_artist="", og_title="", links=None):
+    parts = ["<html><head>"]
+    if title:
+        parts.append(f"<title>{title}</title>")
+    if og_title:
+        parts.append(f'<meta property="og:title" content="{og_title}">')
+    parts.append("</head><body>")
+    if by_artist:
+        parts.append(
+            '<div itemprop="byArtist"><span itemprop="name">%s</span></div>' % by_artist
+        )
+    for link in links or ():
+        parts.append(f'<a href="{link}">link</a>')
+    parts.append("</body></html>")
+    return "".join(parts)
+
+
+def _build_bandcamp_slug_payload(url: str) -> cde.EnrichmentPayload:
+    return cde.EnrichmentPayload(
+        socials={"https://www.instagram.com/nightlightmusic/"},
+        source_dir="bandcamp",
+        source_url=url,
+        source_detail="Bandcamp",
+        candidate_name="Nightlight",
+    )
+
+
 def test_run_master_enrichment_forwards_detected_directory_csvs(tmp_path, monkeypatch):
     seed_csv = tmp_path / "master_raw.csv"
     output_csv = tmp_path / "master_enriched.csv"
@@ -940,6 +967,125 @@ def test_spotify_sparse_bandcamp_recovery_runs_once_per_row(tmp_path, monkeypatc
     assert first is False
     assert second is False
     assert calls["count"] == 1
+
+
+def test_bc_slug_fallback_accepts_artist_style_name_variant(tmp_path, monkeypatch):
+    worker = _build_worker(tmp_path)
+    html = _bandcamp_slug_html(title="Nightlight", by_artist="Nightlight Music")
+    fetch_calls = []
+
+    monkeypatch.setattr(worker, "_bc_http_get", lambda *args, **kwargs: (html, 200))
+
+    def fake_fetch_profile(url, source_dir, confidence=None):
+        fetch_calls.append((url, source_dir, confidence))
+        return _build_bandcamp_slug_payload(url)
+
+    monkeypatch.setattr(worker, "_fetch_profile_and_build", fake_fetch_profile)
+
+    payload = worker._bc_slug_fallback("Nightlight", "", slug_candidates=["nightlight"])
+
+    assert payload is not None
+    assert fetch_calls and fetch_calls[0][0] == "https://nightlight.bandcamp.com/"
+
+
+def test_bc_slug_fallback_accepts_official_prefix_artist_name(tmp_path, monkeypatch):
+    worker = _build_worker(tmp_path)
+    html = _bandcamp_slug_html(title="Nightlight", by_artist="Official Nightlight")
+    fetch_calls = []
+
+    monkeypatch.setattr(worker, "_bc_http_get", lambda *args, **kwargs: (html, 200))
+
+    def fake_fetch_profile(url, source_dir, confidence=None):
+        fetch_calls.append(url)
+        return _build_bandcamp_slug_payload(url)
+
+    monkeypatch.setattr(worker, "_fetch_profile_and_build", fake_fetch_profile)
+
+    payload = worker._bc_slug_fallback("Nightlight", "", slug_candidates=["nightlight"])
+
+    assert payload is not None
+    assert fetch_calls == ["https://nightlight.bandcamp.com/"]
+
+
+def test_bc_slug_fallback_accepts_outbound_confirmation(tmp_path, monkeypatch):
+    worker = _build_worker(tmp_path)
+    html = _bandcamp_slug_html(
+        title="Nightlight",
+        og_title="Nightlight on Bandcamp",
+        links=["https://www.instagram.com/nightlightmusic/"],
+    )
+    fetch_calls = []
+
+    monkeypatch.setattr(worker, "_bc_http_get", lambda *args, **kwargs: (html, 200))
+
+    def fake_fetch_profile(url, source_dir, confidence=None):
+        fetch_calls.append(url)
+        return _build_bandcamp_slug_payload(url)
+
+    monkeypatch.setattr(worker, "_fetch_profile_and_build", fake_fetch_profile)
+
+    payload = worker._bc_slug_fallback("Nightlight", "", slug_candidates=["nightlight"])
+
+    assert payload is not None
+    assert fetch_calls == ["https://nightlight.bandcamp.com/"]
+
+
+def test_bc_slug_fallback_rejects_records_variant_without_outbound_confirmation(tmp_path, monkeypatch):
+    worker = _build_worker(tmp_path)
+    html = _bandcamp_slug_html(title="Nightlight", by_artist="Nightlight Records")
+    fetch_calls = []
+
+    monkeypatch.setattr(worker, "_bc_http_get", lambda *args, **kwargs: (html, 200))
+    monkeypatch.setattr(
+        worker,
+        "_fetch_profile_and_build",
+        lambda url, source_dir, confidence=None: fetch_calls.append(url) or _build_bandcamp_slug_payload(url),
+    )
+
+    payload = worker._bc_slug_fallback("Nightlight", "", slug_candidates=["nightlight"])
+
+    assert payload is None
+    assert fetch_calls == []
+
+
+def test_bc_slug_fallback_rejects_dj_variant_without_outbound_confirmation(tmp_path, monkeypatch):
+    worker = _build_worker(tmp_path)
+    html = _bandcamp_slug_html(title="Nightlight", og_title="DJ Nightlight")
+    fetch_calls = []
+
+    monkeypatch.setattr(worker, "_bc_http_get", lambda *args, **kwargs: (html, 200))
+    monkeypatch.setattr(
+        worker,
+        "_fetch_profile_and_build",
+        lambda url, source_dir, confidence=None: fetch_calls.append(url) or _build_bandcamp_slug_payload(url),
+    )
+
+    payload = worker._bc_slug_fallback("Nightlight", "", slug_candidates=["nightlight"])
+
+    assert payload is None
+    assert fetch_calls == []
+
+
+def test_bc_slug_fallback_rejects_outbound_mismatch(tmp_path, monkeypatch):
+    worker = _build_worker(tmp_path)
+    html = _bandcamp_slug_html(
+        title="Nightlight",
+        og_title="Nightlight on Bandcamp",
+        links=["https://www.instagram.com/nightlightrecords/"],
+    )
+    fetch_calls = []
+
+    monkeypatch.setattr(worker, "_bc_http_get", lambda *args, **kwargs: (html, 200))
+    monkeypatch.setattr(
+        worker,
+        "_fetch_profile_and_build",
+        lambda url, source_dir, confidence=None: fetch_calls.append(url) or _build_bandcamp_slug_payload(url),
+    )
+
+    payload = worker._bc_slug_fallback("Nightlight", "", slug_candidates=["nightlight"])
+
+    assert payload is None
+    assert fetch_calls == []
 
 
 def test_spotify_sparse_bandcamp_recovery_routes_links_via_apply_payload_guarded(tmp_path, monkeypatch):
