@@ -257,6 +257,57 @@ def test_main_page_fb_container_fallback_email_stops_before_secondary_fetch(monk
     assert any("[FB Email] Skipping contact/about fetch because main page email already found" in msg for msg in logs)
 
 
+def test_main_page_live_anchor_mailto_stops_before_secondary_fetch(monkeypatch) -> None:
+    logs = []
+    enricher = _build_enricher(logs)
+    calls = []
+    main_url = "https://www.facebook.com/artist"
+
+    pages = {
+        main_url: (
+            """
+            <html>
+              <body>
+                <div>No visible email on this page.</div>
+                <a href="/artist/about">About</a>
+              </body>
+            </html>
+            """,
+            main_url,
+            ["mailto:bookings@artist.com"],
+        ),
+    }
+
+    def fake_fetch(url, goto_about=False):  # noqa: ANN001
+        calls.append(url)
+        html, resolved, anchor_values = pages[url]
+        enricher._last_fb_visible_text = ""
+        enricher._last_fb_live_anchor_values = list(anchor_values)
+        return html, resolved
+
+    monkeypatch.setattr(enricher, "_fetch_html_with_url", fake_fetch)
+    monkeypatch.setattr(nmfb, "_night_fb_has_music_signals", lambda soup, context: False)
+    monkeypatch.setattr(nmfb, "should_accept_email_override", lambda *args, **kwargs: (True, "test_override"))
+
+    result = enricher._scrape_single_fb_candidate(
+        main_url,
+        {"Artist Name": "Artist", "Email_All": ""},
+        "Artist",
+        allow_anon=False,
+        candidate_context={},
+    )
+
+    assert result is not None
+    night_result, emails, driver_kind, outcome = result
+    assert emails == ["bookings@artist.com"]
+    assert night_result is not None
+    assert night_result.email == "bookings@artist.com"
+    assert night_result.about_attempted == "no"
+    assert calls == [main_url]
+    assert driver_kind == "session"
+    assert outcome == "found_email"
+
+
 def test_secondary_fetch_still_runs_when_main_page_has_no_email(monkeypatch) -> None:
     logs = []
     enricher = _build_enricher(logs)
@@ -391,6 +442,64 @@ def test_secondary_fetch_prefers_about_contact_and_basic_info_and_stays_within_c
     assert any(f"[FB Email] Visiting {contact_info_url}" in msg for msg in logs)
 
 
+def test_direct_about_fallback_runs_when_no_contact_link_detected(monkeypatch) -> None:
+    logs = []
+    enricher = _build_enricher(logs)
+    calls = []
+    main_url = "https://www.facebook.com/artist"
+    fallback_url = "https://www.facebook.com/artist/about_contact_and_basic_info"
+
+    pages = {
+        main_url: (
+            """
+            <html>
+              <body>
+                <div>No email on the main page.</div>
+              </body>
+            </html>
+            """,
+            main_url,
+        ),
+        fallback_url: (
+            """
+            <html>
+              <body>
+                <div>Bookings: bookings@artist.com</div>
+              </body>
+            </html>
+            """,
+            fallback_url,
+        ),
+    }
+
+    def fake_fetch(url, goto_about=False):  # noqa: ANN001
+        calls.append(url)
+        return pages[url]
+
+    monkeypatch.setattr(enricher, "_fetch_html_with_url", fake_fetch)
+    monkeypatch.setattr(nmfb, "_night_fb_has_music_signals", lambda soup, context: False)
+    monkeypatch.setattr(nmfb, "should_accept_email_override", lambda *args, **kwargs: (True, "test_override"))
+
+    result = enricher._scrape_single_fb_candidate(
+        main_url,
+        {"Artist Name": "Artist", "Email_All": ""},
+        "Artist",
+        allow_anon=False,
+        candidate_context={},
+    )
+
+    assert result is not None
+    night_result, emails, driver_kind, outcome = result
+    assert emails == ["bookings@artist.com"]
+    assert night_result is not None
+    assert night_result.about_attempted == "yes"
+    assert night_result.about_result == "emails_found"
+    assert calls == [main_url, fallback_url]
+    assert driver_kind == "session"
+    assert outcome == "found_email"
+    assert any("trying direct fallback" in msg for msg in logs)
+
+
 def test_candidate_fetch_budget_remains_capped_at_two_pages(monkeypatch) -> None:
     logs = []
     enricher = _build_enricher(logs)
@@ -451,11 +560,12 @@ def test_candidate_fetch_budget_remains_capped_at_two_pages(monkeypatch) -> None
     assert any("[FB Email] No email found on main page; evaluating contact/about fetch" in msg for msg in logs)
 
 
-def test_secondary_fetch_is_skipped_when_only_invalid_internal_surfaces_exist(monkeypatch) -> None:
+def test_secondary_fetch_uses_direct_about_fallback_when_only_invalid_internal_surfaces_exist(monkeypatch) -> None:
     logs = []
     enricher = _build_enricher(logs)
     calls = []
     main_url = "https://www.facebook.com/artist"
+    fallback_url = "https://www.facebook.com/artist/about_contact_and_basic_info"
 
     pages = {
         main_url: (
@@ -492,11 +602,11 @@ def test_secondary_fetch_is_skipped_when_only_invalid_internal_surfaces_exist(mo
     night_result, emails, driver_kind, outcome = result
     assert emails == []
     assert night_result is not None
-    assert night_result.about_attempted == "no"
-    assert night_result.about_result == "no_contact_link"
-    assert calls == [main_url]
-    assert len(calls) == 1
+    assert night_result.about_attempted == "yes"
+    assert night_result.about_result == "no_email"
+    assert calls == [main_url, fallback_url]
+    assert len(calls) == 2
     assert driver_kind == "session"
     assert outcome == "no_email_on_page"
     assert any("[FB Email] No email found on main page; evaluating contact/about fetch" in msg for msg in logs)
-    assert any("[FB Email] No valid contact surface found" in msg for msg in logs)
+    assert any("trying direct fallback" in msg for msg in logs)

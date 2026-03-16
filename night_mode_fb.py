@@ -75,6 +75,12 @@ _PROFILE_SESSION_SENTINELS = {"profile_session"}
 
 EMAIL_REGEX = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
 _FB_SPLIT_PATTERN = re.compile(r"[,\s;|]+")
+_FB_REVEAL_CONTROL_TERMS: Tuple[str, ...] = (
+    "contact info",
+    "see more",
+    "contact",
+    "about",
+)
 FB_CLUE_FIELDS = [
     "Social Link",
     "External Links",
@@ -3871,6 +3877,142 @@ def _extract_fb_visible_text_with_container_fallback(driver) -> str:
     return "\n".join([str(base_text).strip()] + extra_blocks)
 
 
+def _reveal_fb_contact_controls(driver, logger: LoggerFn = None, max_clicks: int = 2) -> List[str]:
+    """Bounded reveal pass for obvious, non-navigational contact expanders."""
+    if driver is None or max_clicks <= 0:
+        return []
+
+    try:
+        clicked = driver.execute_script(
+            """
+            /* fb_reveal_controls */
+            const terms = Array.isArray(arguments[0]) ? arguments[0] : [];
+            const maxClicks = Math.max(0, Number(arguments[1] || 0));
+            const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+            const isVisible = (el) => {
+              if (!el || !el.isConnected) return false;
+              const style = window.getComputedStyle ? window.getComputedStyle(el) : null;
+              if (style && (style.display === 'none' || style.visibility === 'hidden')) return false;
+              const rects = typeof el.getClientRects === 'function' ? el.getClientRects() : null;
+              return !!(rects && rects.length);
+            };
+            const selectors = [
+              'button',
+              'div[role="button"]',
+              'span[role="button"]',
+              'a[role="button"]',
+              'a[href="#"]',
+              'a[href=""]',
+            ];
+            const ordered = [];
+            const seen = new Set();
+            for (const selector of selectors) {
+              for (const el of document.querySelectorAll(selector)) {
+                if (!isVisible(el) || seen.has(el)) continue;
+                seen.add(el);
+                ordered.push(el);
+              }
+            }
+            const clicked = [];
+            const used = new Set();
+            for (const term of terms) {
+              if (clicked.length >= maxClicks) break;
+              for (const el of ordered) {
+                if (clicked.length >= maxClicks) break;
+                if (used.has(el)) continue;
+                const text = normalize(el.innerText || el.textContent || el.getAttribute('aria-label') || '');
+                const href = normalize(el.getAttribute('href') || '');
+                const tag = String(el.tagName || '').toLowerCase();
+                const isNavigationalAnchor = tag === 'a' && href && href !== '#' && !href.startsWith('javascript:');
+                if (isNavigationalAnchor) continue;
+                if (!text || (!text.includes(term) && text !== term)) continue;
+                try {
+                  el.click();
+                  used.add(el);
+                  clicked.push(text || term);
+                } catch (_err) {}
+              }
+            }
+            return clicked.slice(0, maxClicks);
+            """,
+            list(_FB_REVEAL_CONTROL_TERMS),
+            int(max_clicks),
+        ) or []
+    except Exception:
+        clicked = []
+
+    if isinstance(clicked, str):
+        clicked = [clicked]
+
+    normalized = [str(item or "").strip() for item in clicked if str(item or "").strip()][:max_clicks]
+    if normalized:
+        _log(logger, f"[FB Email] Reveal pass clicked: {normalized}")
+        time.sleep(0.25)
+    return normalized
+
+
+def _collect_fb_live_anchor_targets(driver, limit: int = 200) -> List[str]:
+    """Capture visible live anchor hrefs that look email-bearing."""
+    if driver is None or limit <= 0:
+        return []
+
+    try:
+        values = driver.execute_script(
+            """
+            /* fb_collect_anchor_hrefs */
+            const limit = Math.max(1, Number(arguments[0] || 200));
+            const isVisible = (el) => {
+              if (!el || !el.isConnected) return false;
+              const style = window.getComputedStyle ? window.getComputedStyle(el) : null;
+              if (style && (style.display === 'none' || style.visibility === 'hidden')) return false;
+              const rects = typeof el.getClientRects === 'function' ? el.getClientRects() : null;
+              return !!(rects && rects.length);
+            };
+            const out = [];
+            const seen = new Set();
+            for (const el of document.querySelectorAll('a[href]')) {
+              if (out.length >= limit) break;
+              if (!isVisible(el)) continue;
+              const href = String(el.getAttribute('href') || el.href || '').trim();
+              if (!href || seen.has(href)) continue;
+              const lowered = href.toLowerCase();
+              const looksEmailBearing = (
+                lowered.startsWith('mailto:')
+                || lowered.includes('@')
+                || lowered.includes('%40')
+                || lowered.includes('email=')
+                || lowered.includes('email%3d')
+              );
+              if (!looksEmailBearing) continue;
+              seen.add(href);
+              out.push(href);
+            }
+            return out;
+            """,
+            int(limit),
+        ) or []
+    except Exception:
+        values = []
+
+    if isinstance(values, str):
+        values = [values]
+    return [str(value or "").strip() for value in values if str(value or "").strip()]
+
+
+def _collect_fb_email_surface_state(
+    driver,
+    logger: LoggerFn = None,
+) -> Tuple[str, str, List[str], List[str]]:
+    reveal_actions = _reveal_fb_contact_controls(driver, logger=logger)
+    try:
+        page_source = getattr(driver, "page_source", "") or ""
+    except Exception:
+        page_source = ""
+    rendered_text = _extract_fb_visible_text_with_container_fallback(driver)
+    anchor_values = _collect_fb_live_anchor_targets(driver)
+    return page_source, rendered_text, anchor_values, reveal_actions
+
+
 def _log_fb_email_surface_debug(logger: LoggerFn, label: str, page_source: str, rendered_text: str) -> None:
     if os.getenv("FB_DEBUG_EMAIL_SURFACES") != "1":
         return
@@ -3894,6 +4036,7 @@ def _extract_emails_from_html(
     html: str,
     soup: Optional[BeautifulSoup] = None,
     rendered_text: str = "",
+    anchor_values: Optional[Sequence[str]] = None,
 ) -> Tuple[List[str], bool]:
     emails: List[str] = []
     mailto_used = False
@@ -3938,6 +4081,25 @@ def _extract_emails_from_html(
         except Exception:
             replacements = 0
         emails.extend(match.group(0) for match in EMAIL_REGEX.finditer(raw_html))
+    for raw_value in anchor_values or ():
+        raw_value = str(raw_value or "").strip()
+        if not raw_value:
+            continue
+        lowered = raw_value.lower()
+        if lowered.startswith("mailto:"):
+            addr = raw_value.split("mailto:", 1)[-1].split("?", 1)[0]
+            if addr:
+                emails.append(addr)
+                mailto_used = True
+        samples = [raw_value]
+        try:
+            decoded = urllib.parse.unquote(raw_value)
+        except Exception:
+            decoded = raw_value
+        if decoded and decoded not in samples:
+            samples.append(decoded)
+        for sample in samples:
+            emails.extend(match.group(0) for match in EMAIL_REGEX.finditer(sample))
     if (not emails) and rendered_text:
         visible_text = str(rendered_text or "")
         emails.extend(match.group(0) for match in EMAIL_REGEX.finditer(visible_text))
@@ -4605,8 +4767,13 @@ def _try_explicit_fb(driver, url: str, logger: LoggerFn = None) -> Tuple[List[st
         return [], "not_found", ""
 
     rendered_text = _extract_fb_visible_text_with_container_fallback(driver)
+    anchor_values = _collect_fb_live_anchor_targets(driver)
     _log_fb_email_surface_debug(logger, f"explicit:{current_url or url}", page_source_raw, rendered_text)
-    emails, used_mailto = _extract_emails_from_html(page_source_raw, rendered_text=rendered_text)
+    emails, used_mailto = _extract_emails_from_html(
+        page_source_raw,
+        rendered_text=rendered_text,
+        anchor_values=anchor_values,
+    )
     if emails:
         method = "mailto" if used_mailto else "regex"
         return emails, None, method
@@ -5205,6 +5372,8 @@ class NightModeFacebookEnricher:
         self._last_fb_timeout: bool = False
         self._last_fb_timeout_url: str = ""
         self._last_fb_visible_text: str = ""
+        self._last_fb_live_anchor_values: List[str] = []
+        self._last_fb_reveal_actions: List[str] = []
         self.protective_shutdown: bool = False
         # Debug-only FB URL flow tracing; defaults to off.
         self._debug_fb_url_flow: bool = _bool_env("DEBUG_FB_URL_FLOW", default=False)
@@ -5943,6 +6112,8 @@ class NightModeFacebookEnricher:
     def _fetch_html_with_url(self, url: str, goto_about: bool = True) -> Tuple[Optional[str], Optional[str]]:
         budget = getattr(self, "_page_budget_remaining", 2)
         self._last_fb_visible_text = ""
+        self._last_fb_live_anchor_values = []
+        self._last_fb_reveal_actions = []
         if budget <= 0:
             _log(self.logger, "[FB Email] Skipped: page budget exhausted")
             return None, None
@@ -5967,9 +6138,15 @@ class NightModeFacebookEnricher:
                         goto_about_fn(driver, url, timeout=5.0)
                     except Exception:
                         pass
-            self._last_fb_visible_text = _extract_fb_visible_text_with_container_fallback(driver)
+            page_source, rendered_text, anchor_values, reveal_actions = _collect_fb_email_surface_state(
+                driver,
+                logger=self.logger,
+            )
+            self._last_fb_visible_text = rendered_text
+            self._last_fb_live_anchor_values = anchor_values
+            self._last_fb_reveal_actions = reveal_actions
             current_url = getattr(driver, "current_url", None) or url
-            return driver.page_source, current_url
+            return page_source or driver.page_source, current_url
 
         html: Optional[str] = None
         current_url: Optional[str] = None
@@ -6017,6 +6194,8 @@ class NightModeFacebookEnricher:
     def _fetch_html_with_url_anon(self, url: str, goto_about: bool = True) -> Tuple[Optional[str], Optional[str]]:
         budget = getattr(self, "_page_budget_remaining", 2)
         self._last_fb_visible_text = ""
+        self._last_fb_live_anchor_values = []
+        self._last_fb_reveal_actions = []
         if budget <= 0:
             _log(self.logger, "[FB Email] Skipped: page budget exhausted")
             return None, None
@@ -6041,12 +6220,18 @@ class NightModeFacebookEnricher:
                         goto_about_fn(driver, url, timeout=5.0)
                     except Exception:
                         pass
-            self._last_fb_visible_text = _extract_fb_visible_text_with_container_fallback(driver)
+            page_source, rendered_text, anchor_values, reveal_actions = _collect_fb_email_surface_state(
+                driver,
+                logger=self.logger,
+            )
+            self._last_fb_visible_text = rendered_text
+            self._last_fb_live_anchor_values = anchor_values
+            self._last_fb_reveal_actions = reveal_actions
             current_url = getattr(driver, "current_url", None) or current_url or url
             self._log_page_health(current_url, html, context="page")
             if is_fb_login_redirect(current_url) or _is_fb_login_or_security_url(current_url):
                 return None, current_url
-            return driver.page_source, current_url
+            return page_source or driver.page_source, current_url
         except Exception as exc:
             _log(self.logger, f"[Night FB] Anonymous fetch failed for {url}: {exc}")
             return None, None
@@ -6674,8 +6859,13 @@ class NightModeFacebookEnricher:
         _log(self.logger, f"[FB Email] Scanning main page HTML for emails: {resolved_url}")
         has_music_signals_main = _night_fb_has_music_signals(soup, {"url": resolved_url})
         main_visible_text = getattr(self, "_last_fb_visible_text", "") or ""
+        main_anchor_values = list(getattr(self, "_last_fb_live_anchor_values", []) or [])
         _log_fb_email_surface_debug(self.logger, f"main:{resolved_url}", html or "", main_visible_text)
-        emails, main_mailto = _extract_emails_from_html(html or "", rendered_text=main_visible_text)
+        emails, main_mailto = _extract_emails_from_html(
+            html or "",
+            rendered_text=main_visible_text,
+            anchor_values=main_anchor_values,
+        )
         email_method = "mailto" if emails and main_mailto else ("regex" if emails else "")
         if emails:
             for email in emails:
@@ -6706,6 +6896,12 @@ class NightModeFacebookEnricher:
             if not has_music_signals:
                 _log(self.logger, f"[Night FB] No music signals on main page {resolved_url}, checking About/Contact...")
             contact_url = _pick_fb_contact_link(soup, resolved_url)
+            if not contact_url:
+                fallback_variants = _fetch_fb_about_variants(resolved_url)
+                fallback_url = fallback_variants[0] if fallback_variants else ""
+                if fallback_url:
+                    contact_url = fallback_url
+                    _log(self.logger, f"[FB Email] No valid contact surface found; trying direct fallback {contact_url}")
             if contact_url:
                 about_attempted = "yes"
                 _log(self.logger, f"[FB Email] Visiting {contact_url}")
@@ -6737,6 +6933,7 @@ class NightModeFacebookEnricher:
                                     _log(self.logger, f"[Night FB] Music signals found on About tab {final_about}.")
                             if not emails:
                                 about_visible_text = getattr(self, "_last_fb_visible_text", "") or ""
+                                about_anchor_values = list(getattr(self, "_last_fb_live_anchor_values", []) or [])
                                 _log_fb_email_surface_debug(
                                     self.logger,
                                     f"about:{final_about}",
@@ -6746,6 +6943,7 @@ class NightModeFacebookEnricher:
                                 about_emails, about_mailto = _extract_emails_from_html(
                                     about_html or "",
                                     rendered_text=about_visible_text,
+                                    anchor_values=about_anchor_values,
                                 )
                                 if about_emails:
                                     emails = about_emails

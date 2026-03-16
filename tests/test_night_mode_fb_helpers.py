@@ -47,6 +47,39 @@ def test_extract_emails_from_script_json_and_escaped_variants() -> None:
     assert used_mailto is False
 
 
+def test_extract_emails_from_live_anchor_values() -> None:
+    emails, used_mailto = night_mode_fb._extract_emails_from_html(
+        "<html><body><div>No visible email</div></body></html>",
+        anchor_values=[
+            "mailto:bookings@artist.com",
+            "https://example.com/contact?email=press%40artist.com",
+        ],
+    )
+
+    assert emails == ["bookings@artist.com", "press@artist.com"]
+    assert used_mailto is True
+
+
+class _RevealDriver:
+    def __init__(self, clicked=None):
+        self.clicked = list(clicked or [])
+        self.calls = []
+
+    def execute_script(self, script, *args):  # noqa: ANN001
+        self.calls.append((str(script or ""), args))
+        if "fb_reveal_controls" in str(script or ""):
+            return list(self.clicked)
+        return []
+
+
+def test_reveal_fb_contact_controls_is_bounded() -> None:
+    driver = _RevealDriver(clicked=["see more", "contact info", "about"])
+
+    clicked = night_mode_fb._reveal_fb_contact_controls(driver, max_clicks=2)
+
+    assert clicked == ["see more", "contact info"]
+
+
 def test_build_result_filters_telemetry_only_email() -> None:
     enricher = night_mode_fb.NightModeFacebookEnricher(
         legacy_module=None,
