@@ -280,6 +280,8 @@ BC_BREAKER_MIN_ATTEMPTS = 10
 BC_FALLBACK_MAX_PER_RUN = 12
 BC_FALLBACK_MAX_SLUGS = 4
 BC_DISCOVER_MAX_FETCHES = 25
+SPOTIFY_BC_RECOVERY_SUFFIXES: Tuple[str, ...] = ("music", "band", "official", "au")
+SPOTIFY_BC_RECOVERY_MAX_SLUGS = 6
 
 ENABLE_FACEBOOK_ENRICHMENT = True
 FACEBOOK_SEARCH_URL = "https://www.facebook.com/search/pages/"
@@ -5123,6 +5125,43 @@ def _bc_slug_candidates(artist_name: str) -> List[str]:
     return variants[:BC_FALLBACK_MAX_SLUGS]
 
 
+def _spotify_sparse_bandcamp_slug_candidates(artist_name: str) -> List[str]:
+    """
+    Spotify-local Bandcamp recovery variants: reuse the base slug guesses, then
+    add a tiny suffix set on compact artist roots.
+    """
+    candidates: List[str] = []
+    seen: Set[str] = set()
+
+    def _push(slug: str) -> bool:
+        cleaned = _clean_cell(slug).strip().lower()
+        if not cleaned or cleaned in seen:
+            return False
+        seen.add(cleaned)
+        candidates.append(cleaned)
+        return len(candidates) >= SPOTIFY_BC_RECOVERY_MAX_SLUGS
+
+    for slug in _bc_slug_candidates(artist_name):
+        if _push(slug):
+            return candidates
+
+    norm = normalize_name(artist_name)
+    words = [re.sub(r"[^a-z0-9]+", "", w) for w in norm.split() if re.sub(r"[^a-z0-9]+", "", w)]
+    if not words:
+        return candidates
+
+    suffix_roots: List[str] = []
+    if words[0] == "the" and len(words) > 1:
+        suffix_roots.append("".join(words[1:]))
+    suffix_roots.append("".join(words))
+
+    for root in suffix_roots:
+        for suffix in SPOTIFY_BC_RECOVERY_SUFFIXES:
+            if _push(f"{root}{suffix}"):
+                return candidates
+    return candidates
+
+
 def _lastfm_confidence(artist_name: str, candidate_name: str) -> float:
     artist_norm = normalize_name(artist_name)
     cand_norm = normalize_name(candidate_name)
@@ -5678,6 +5717,7 @@ class CrossDirectoryEnricherWorker(QThread):
         self._fb_session_invalid: bool = False
         self.night_fb_run_state: Optional[NightFBRunState] = None
         self._spotify_discovery_attempted_rows: Set[Any] = set()
+        self._spotify_sparse_bandcamp_attempted_rows: Set[Any] = set()
         self._spotify_identity_tier_rows: Set[Any] = set()
         self._spotify_identity_tier_counts: Counter = Counter()
         self._spotify_low_tier_fb_skips: int = 0
@@ -5850,6 +5890,7 @@ class CrossDirectoryEnricherWorker(QThread):
                 self._fb_session_auth_reason = self._fb_discovery_disabled_reason
                 self._fb_session_invalid = bool(self.night_fb_run_state.session_invalid)
         self._spotify_discovery_attempted_rows = set()
+        self._spotify_sparse_bandcamp_attempted_rows = set()
         self._spotify_identity_tier_rows = set()
         self._spotify_identity_tier_counts = Counter()
         self._spotify_low_tier_fb_skips = 0
@@ -7278,6 +7319,61 @@ class CrossDirectoryEnricherWorker(QThread):
             enriched |= lf_applied
         return enriched
 
+    def _run_spotify_sparse_bandcamp_recovery(
+        self,
+        seed_df: pd.DataFrame,
+        row_idx,
+        ctx: Optional[Dict[str, Any]],
+        snapshot: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        row = seed_df.loc[row_idx]
+        if not (self.enable_live_search and self._row_is_spotify_origin(row, ctx)):
+            return False
+        attempted_rows = getattr(self, "_spotify_sparse_bandcamp_attempted_rows", None)
+        if not isinstance(attempted_rows, set):
+            attempted_rows = set()
+            self._spotify_sparse_bandcamp_attempted_rows = attempted_rows
+        if row_idx in attempted_rows:
+            return False
+
+        current_snapshot = dict(snapshot or self._spotify_identity_surface_snapshot(row))
+        if int(current_snapshot.get("identity_link_count", 0) or 0) >= 2:
+            return False
+        if current_snapshot.get("has_bandcamp"):
+            return False
+
+        attempted_rows.add(row_idx)
+        artist = (
+            ctx.get("artist")
+            if isinstance(ctx, dict)
+            else _clean_cell(row.get("Artist Name", ""))
+        ) or "<unknown>"
+        slug_candidates = _spotify_sparse_bandcamp_slug_candidates(artist)
+        if not slug_candidates:
+            return False
+        if not self._increment_live_counter():
+            return False
+
+        self._ensure_row_enrichment_state_platforms("bandcamp", "soundcloud", "lastfm")
+        payload = self._bc_slug_fallback(
+            artist,
+            _extract_seed_track_text(row),
+            slug_candidates=slug_candidates,
+        )
+        if not payload:
+            return False
+
+        applied = self._apply_payload_guarded(
+            seed_df,
+            row_idx,
+            payload,
+            artist,
+            spotify_id=ctx.get("spotify_id") if isinstance(ctx, dict) else "",
+        )
+        if applied:
+            self._set_platform_state("bandcamp", "matched")
+        return applied
+
     def _expand_spotify_link_hubs(
         self,
         seed_df: pd.DataFrame,
@@ -7613,6 +7709,16 @@ class CrossDirectoryEnricherWorker(QThread):
                         self._spotify_identity_pass_promotions[counter_key] += 1
             else:
                 self._spotify_identity_pass_no_signal += 1
+        spotify_bc_recovered = self._run_spotify_sparse_bandcamp_recovery(
+            seed_df,
+            row_idx,
+            ctx,
+            snapshot=snapshot,
+        )
+        enriched |= spotify_bc_recovered
+        if spotify_bc_recovered:
+            spotify_identity = self._refresh_spotify_runtime_context(seed_df, row_idx, ctx)
+            snapshot = self._spotify_identity_surface_snapshot(seed_df.loc[row_idx])
         if not snapshot["has_facebook"]:
             spotify_tier = spotify_identity.get("tier")
             if spotify_tier == 3:
@@ -10516,18 +10622,31 @@ class CrossDirectoryEnricherWorker(QThread):
         self._set_platform_state("bandcamp", "skipped")
         return None
 
-    def _bc_slug_fallback(self, artist_name: str, song_title: str) -> Optional[EnrichmentPayload]:
+    def _bc_slug_fallback(
+        self,
+        artist_name: str,
+        song_title: str,
+        slug_candidates: Optional[Iterable[str]] = None,
+    ) -> Optional[EnrichmentPayload]:
         """
         Conservative fallback: test a few band subdomain guesses and verify with confidence gate.
         """
-        slugs = _bc_slug_candidates(artist_name)
+        if slug_candidates is None:
+            slugs = _bc_slug_candidates(artist_name)
+        else:
+            slugs = []
+            seen_slugs: Set[str] = set()
+            for slug in slug_candidates:
+                cleaned = _clean_cell(slug).strip().lower()
+                if not cleaned or cleaned in seen_slugs:
+                    continue
+                seen_slugs.add(cleaned)
+                slugs.append(cleaned)
         if not slugs:
             return None
-        used = 0
         for slug in slugs:
             if self._bc_fallback_used >= BC_FALLBACK_MAX_PER_RUN:
                 break
-            used += 1
             self._bc_fallback_used += 1
             url = f"https://{slug}.bandcamp.com/"
             html, status = self._bc_http_get(url, label="Bandcamp slug", count_breaker=False)

@@ -557,6 +557,7 @@ def test_spotify_discovery_pass_runs_identity_pass_before_low_tier_suppression(t
         "_discover_facebook_url_bounded",
         lambda *args, **kwargs: discovered.__setitem__("count", discovered["count"] + 1),
     )
+    monkeypatch.setattr(worker, "_bc_slug_fallback", lambda *args, **kwargs: None)
 
     enriched = worker._run_spotify_discovery_pass(df, 0, ctx, fb_driver=object())
 
@@ -600,6 +601,7 @@ def test_spotify_discovery_pass_recovers_bandcamp_before_other_live_sources(tmp_
         "_live_search_lastfm",
         lambda artist: calls.__setitem__("lastfm", calls["lastfm"] + 1),
     )
+    monkeypatch.setattr(worker, "_bc_slug_fallback", lambda *args, **kwargs: None)
 
     enriched = worker._run_spotify_discovery_pass(df, 0, ctx, fb_driver=None)
 
@@ -632,6 +634,7 @@ def test_spotify_discovery_pass_recovers_soundcloud_before_lastfm(tmp_path, monk
     monkeypatch.setattr(worker, "_live_search_bandcamp", fake_bandcamp)
     monkeypatch.setattr(worker, "_night_sc_attempt_row", fake_soundcloud)
     monkeypatch.setattr(worker, "_live_search_lastfm", fake_lastfm)
+    monkeypatch.setattr(worker, "_bc_slug_fallback", lambda *args, **kwargs: None)
 
     enriched = worker._run_spotify_discovery_pass(df, 0, ctx, fb_driver=None)
 
@@ -665,6 +668,7 @@ def test_spotify_discovery_pass_low_tier_identity_pass_promotes_soundcloud(tmp_p
     monkeypatch.setattr(worker, "_live_search_bandcamp", fake_bandcamp)
     monkeypatch.setattr(worker, "_night_sc_attempt_row", fake_soundcloud)
     monkeypatch.setattr(worker, "_live_search_lastfm", fake_lastfm)
+    monkeypatch.setattr(worker, "_bc_slug_fallback", lambda *args, **kwargs: None)
 
     enriched = worker._run_spotify_discovery_pass(df, 0, ctx, fb_driver=None)
 
@@ -698,6 +702,7 @@ def test_spotify_discovery_pass_refreshes_ctx_after_identity_pass_mutation(tmp_p
         ) or True,
     )
     monkeypatch.setattr(worker, "_live_search_lastfm", lambda _artist: None)
+    monkeypatch.setattr(worker, "_bc_slug_fallback", lambda *args, **kwargs: None)
 
     worker._run_spotify_discovery_pass(df, 0, ctx, fb_driver=None)
     after = worker._row_allows_heavy_enricher(df.loc[0], ctx, "soundcloud")
@@ -735,6 +740,7 @@ def test_spotify_discovery_pass_recovers_lastfm_via_apply_payload_guarded(tmp_pa
     monkeypatch.setattr(worker, "_night_sc_attempt_row", lambda *args, **kwargs: False)
     monkeypatch.setattr(worker, "_live_search_lastfm", lambda artist: lastfm_payload)
     monkeypatch.setattr(worker, "_apply_payload_guarded", wrapped_apply_payload_guarded)
+    monkeypatch.setattr(worker, "_bc_slug_fallback", lambda *args, **kwargs: None)
 
     enriched = worker._run_spotify_discovery_pass(df, 0, ctx, fb_driver=None)
 
@@ -745,7 +751,7 @@ def test_spotify_discovery_pass_recovers_lastfm_via_apply_payload_guarded(tmp_pa
 
 
 def test_spotify_discovery_pass_skips_live_recovery_when_gated(tmp_path, monkeypatch):
-    recovery_calls = {"bandcamp": 0, "soundcloud": 0, "lastfm": 0}
+    recovery_calls = {"bandcamp": 0, "soundcloud": 0, "lastfm": 0, "spotify_bc_slug": 0}
 
     def fake_bandcamp(_artist):
         recovery_calls["bandcamp"] += 1
@@ -757,6 +763,10 @@ def test_spotify_discovery_pass_skips_live_recovery_when_gated(tmp_path, monkeyp
 
     def fake_lastfm(_artist):
         recovery_calls["lastfm"] += 1
+        return None
+
+    def fake_spotify_bc_slug(*args, **kwargs):
+        recovery_calls["spotify_bc_slug"] += 1
         return None
 
     worker = _build_worker(tmp_path)
@@ -781,6 +791,7 @@ def test_spotify_discovery_pass_skips_live_recovery_when_gated(tmp_path, monkeyp
     monkeypatch.setattr(worker, "_live_search_bandcamp", fake_bandcamp)
     monkeypatch.setattr(worker, "_night_sc_attempt_row", fake_soundcloud)
     monkeypatch.setattr(worker, "_live_search_lastfm", fake_lastfm)
+    monkeypatch.setattr(worker, "_bc_slug_fallback", fake_spotify_bc_slug)
 
     ctx_non_spotify = worker._build_row_context(df, 0, 1, len(df))
     ctx_not_sparse = worker._build_row_context(df, 1, 2, len(df))
@@ -791,7 +802,7 @@ def test_spotify_discovery_pass_skips_live_recovery_when_gated(tmp_path, monkeyp
     worker.enable_live_search = False
     worker._run_spotify_discovery_pass(df, 2, ctx_live_disabled, fb_driver=None)
 
-    assert recovery_calls == {"bandcamp": 0, "soundcloud": 0, "lastfm": 0}
+    assert recovery_calls == {"bandcamp": 0, "soundcloud": 0, "lastfm": 0, "spotify_bc_slug": 0}
 
 
 def test_spotify_discovery_pass_recovery_initializes_missing_row_state(tmp_path, monkeypatch):
@@ -804,7 +815,7 @@ def test_spotify_discovery_pass_recovery_initializes_missing_row_state(tmp_path,
     ctx = worker._build_row_context(df, 0, 1, 1)
     state_seen = {}
 
-    def fake_bandcamp(artist):
+    def fake_bandcamp_slug(artist, song_title, slug_candidates=None):
         state_seen["bandcamp"] = worker._row_enrichment_state.get("bandcamp")
         state_seen["soundcloud"] = worker._row_enrichment_state.get("soundcloud")
         state_seen["lastfm"] = worker._row_enrichment_state.get("lastfm")
@@ -816,7 +827,8 @@ def test_spotify_discovery_pass_recovery_initializes_missing_row_state(tmp_path,
             candidate_name=artist,
         )
 
-    monkeypatch.setattr(worker, "_live_search_bandcamp", fake_bandcamp)
+    monkeypatch.setattr(worker, "_bc_slug_fallback", fake_bandcamp_slug)
+    monkeypatch.setattr(worker, "_live_search_bandcamp", lambda artist: None)
     monkeypatch.setattr(worker, "_night_sc_attempt_row", lambda *args, **kwargs: False)
     monkeypatch.setattr(worker, "_live_search_lastfm", lambda artist: None)
 
@@ -829,3 +841,145 @@ def test_spotify_discovery_pass_recovery_initializes_missing_row_state(tmp_path,
         "lastfm": "pending",
     }
     assert df.at[0, "Bandcamp_URL"] == "https://artist-a.bandcamp.com"
+
+
+def test_spotify_discovery_pass_sparse_bandcamp_recovery_requires_identity_light_snapshot(tmp_path, monkeypatch):
+    worker = _build_worker(tmp_path)
+    worker.enable_live_search = True
+    worker.max_live_searches = 5
+    df = pd.DataFrame(
+        [
+            _base_row(
+                Spotify_Website_URL="https://artist.test",
+                Location="Melbourne",
+                **{"External Links": "https://artist.test", "Social Link": "https://www.instagram.com/artista/"},
+            )
+        ]
+    )
+    ctx = worker._build_row_context(df, 0, 1, 1)
+    calls = {"count": 0}
+
+    def fake_bc_slug(*args, **kwargs):
+        calls["count"] += 1
+        return None
+
+    monkeypatch.setattr(worker, "_bc_slug_fallback", fake_bc_slug)
+    monkeypatch.setattr(worker, "_run_spotify_live_identity_recovery", lambda *args, **kwargs: False)
+
+    enriched = worker._run_spotify_discovery_pass(df, 0, ctx, fb_driver=None)
+
+    assert enriched is False
+    assert calls["count"] == 0
+
+
+def test_spotify_sparse_bandcamp_recovery_fills_empty_bandcamp_url_only(tmp_path, monkeypatch):
+    worker = _build_worker(tmp_path)
+    worker.enable_live_search = True
+    worker.max_live_searches = 5
+    payload = cde.EnrichmentPayload(
+        source_dir="bandcamp_directory",
+        source_url="https://artist-a.bandcamp.com/",
+        source_detail="Bandcamp Directory",
+        match_score=0.95,
+        candidate_name="Artist A",
+    )
+
+    empty_df = pd.DataFrame([_base_row(Spotify_Website_URL="https://artist.test", Location="Melbourne")])
+    empty_ctx = worker._build_row_context(empty_df, 0, 1, 1)
+    monkeypatch.setattr(worker, "_bc_slug_fallback", lambda *args, **kwargs: payload)
+
+    recovered = worker._run_spotify_sparse_bandcamp_recovery(empty_df, 0, empty_ctx)
+
+    assert recovered is True
+    assert empty_df.at[0, "Bandcamp_URL"] == "https://artist-a.bandcamp.com"
+
+    existing_worker = _build_worker(tmp_path)
+    existing_worker.enable_live_search = True
+    existing_worker.max_live_searches = 5
+    existing_df = pd.DataFrame(
+        [
+            _base_row(
+                Spotify_Website_URL="https://artist.test",
+                Location="Melbourne",
+                Bandcamp_URL="https://existing.bandcamp.com/",
+            )
+        ]
+    )
+    existing_ctx = existing_worker._build_row_context(existing_df, 0, 1, 1)
+    calls = {"count": 0}
+
+    def fake_existing_bc_slug(*args, **kwargs):
+        calls["count"] += 1
+        return payload
+
+    monkeypatch.setattr(existing_worker, "_bc_slug_fallback", fake_existing_bc_slug)
+    skipped = existing_worker._run_spotify_sparse_bandcamp_recovery(existing_df, 0, existing_ctx)
+
+    assert skipped is False
+    assert calls["count"] == 0
+    assert existing_df.at[0, "Bandcamp_URL"] == "https://existing.bandcamp.com/"
+
+
+def test_spotify_sparse_bandcamp_recovery_runs_once_per_row(tmp_path, monkeypatch):
+    worker = _build_worker(tmp_path)
+    worker.enable_live_search = True
+    worker.max_live_searches = 5
+    df = pd.DataFrame([_base_row(Spotify_Website_URL="https://artist.test", Location="Melbourne")])
+    ctx = worker._build_row_context(df, 0, 1, 1)
+    calls = {"count": 0}
+
+    def fake_bc_slug(*args, **kwargs):
+        calls["count"] += 1
+        return None
+
+    monkeypatch.setattr(worker, "_bc_slug_fallback", fake_bc_slug)
+
+    first = worker._run_spotify_sparse_bandcamp_recovery(df, 0, ctx)
+    second = worker._run_spotify_sparse_bandcamp_recovery(df, 0, ctx)
+
+    assert first is False
+    assert second is False
+    assert calls["count"] == 1
+
+
+def test_spotify_sparse_bandcamp_recovery_routes_links_via_apply_payload_guarded(tmp_path, monkeypatch):
+    worker = _build_worker(tmp_path)
+    worker.enable_live_search = True
+    worker.max_live_searches = 5
+    df = pd.DataFrame(
+        [
+            _base_row(
+                Spotify_Website_URL="https://artist.test",
+                Location="Melbourne",
+                **{"Social Link": "https://www.instagram.com/existing/"},
+            )
+        ]
+    )
+    ctx = worker._build_row_context(df, 0, 1, 1)
+    payload = cde.EnrichmentPayload(
+        socials={"https://www.facebook.com/artist-a/"},
+        websites={"https://artist.test/contact"},
+        source_dir="bandcamp_directory",
+        source_url="https://artist-a.bandcamp.com/",
+        source_detail="Bandcamp Directory",
+        match_score=0.95,
+        candidate_name="Artist A",
+    )
+    apply_calls = []
+    original_apply_payload_guarded = worker._apply_payload_guarded
+
+    def wrapped_apply_payload_guarded(seed_df, row_idx, payload_obj, artist_name, spotify_id=""):
+        apply_calls.append(payload_obj)
+        return original_apply_payload_guarded(seed_df, row_idx, payload_obj, artist_name, spotify_id=spotify_id)
+
+    monkeypatch.setattr(worker, "_bc_slug_fallback", lambda *args, **kwargs: payload)
+    monkeypatch.setattr(worker, "_apply_payload_guarded", wrapped_apply_payload_guarded)
+
+    recovered = worker._run_spotify_sparse_bandcamp_recovery(df, 0, ctx)
+
+    assert recovered is True
+    assert apply_calls == [payload]
+    assert "https://artist.test/contact" in df.at[0, "External Links"]
+    assert "https://www.facebook.com/artist-a" in df.at[0, "Social Link"]
+    assert "https://www.instagram.com/existing" in df.at[0, "Social Link"]
+    assert df.at[0, "Facebook_URL"] == "https://www.facebook.com/artist-a"
