@@ -3033,9 +3033,16 @@ def run_facebook_global_pass_nightmode(
             has_canonical_facebook_url = bool(canonicalize_facebook_url(facebook_url_hint))
             final_fb_statuses = {"login_redirect", "no_candidates", "ok", "found"} | terminal_statuses
             should_run_night_fb = (not has_email_effective) and (fb_status_val not in final_fb_statuses)
-            eligible_for_fb = bool(
-                has_canonical_facebook_url
+            discovery_fallback_eligible = bool(
+                (not has_canonical_facebook_url)
                 and should_run_night_fb
+                and not should_skip_due_to_email
+                and fb_status_val not in terminal_statuses
+            )
+            if discovery_fallback_eligible and _cell_str(df.at[idx, FB_OPPORTUNITY_STATE_COL]) in {"", "no_fb_opportunity"}:
+                df.at[idx, FB_OPPORTUNITY_STATE_COL] = "fb_discovery_fallback_eligible"
+            eligible_for_fb = bool(
+                should_run_night_fb
                 and not should_skip_due_to_email
                 and fb_status_val not in terminal_statuses
             )
@@ -3088,12 +3095,8 @@ def run_facebook_global_pass_nightmode(
                 _write_state_with_pass_a(state)
                 continue
 
-            if (
-                fb_status_val in final_fb_statuses
-                or not has_canonical_facebook_url
-                or not should_run_night_fb
-            ):
-                if not has_canonical_facebook_url:
+            if fb_status_val in final_fb_statuses or not should_run_night_fb:
+                if not has_canonical_facebook_url and not discovery_fallback_eligible:
                     if _cell_str(df.at[idx, FB_OPPORTUNITY_STATE_COL]) != "no_fb_opportunity":
                         df.at[idx, FB_GATE_STATE_COL] = "skipped_no_canonical_facebook_url"
                 else:

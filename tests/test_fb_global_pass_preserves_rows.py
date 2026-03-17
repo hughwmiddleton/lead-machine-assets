@@ -120,18 +120,18 @@ def test_fb_global_pass_preserves_rows_and_emails(monkeypatch, tmp_path):
     assert existing_email_rows.iloc[0]["Email"] == "sc@example.com"
     assert existing_email_rows.iloc[0]["Email_All"] == "sc@example.com"
 
-    # Rows attempted for FB enrichment get FB-derived email/status.
-    fb_attempted = df_out[df_out["__source_job"].isin(["job_fb_url", "job_social_fb"])]
+    # Rows attempted for FB enrichment get FB-derived email/status, including blank-FB fallback discovery.
+    fb_attempted = df_out[df_out["__source_job"].isin(["job_fb_url", "job_social_fb", "job_none"])]
     assert (fb_attempted["Email"] == "fb@example.com").all()
     assert (fb_attempted["Email_All"].str.contains("fb@example.com")).all()
     assert (fb_attempted["FB_Status"].str.lower() == "ok").all()
 
-    # Rows without canonical Facebook_URL stay unattempted, even without email.
+    # Rows without canonical Facebook_URL can now enter the bounded Night FB discovery path.
     no_clue_rows = df_out[df_out["__source_job"] == "job_none"]
     assert len(no_clue_rows) == 1
-    assert no_clue_rows.iloc[0]["Email"] == ""
-    assert no_clue_rows.iloc[0]["Email_All"] == ""
-    assert no_clue_rows.iloc[0]["FB_Status"] == ""
+    assert no_clue_rows.iloc[0]["Email"] == "fb@example.com"
+    assert "fb@example.com" in no_clue_rows.iloc[0]["Email_All"]
+    assert no_clue_rows.iloc[0]["FB_Status"].lower() == "ok"
 
     # Only rows without existing emails were attempted.
     assert helper.calls == len(fb_attempted.index)
@@ -288,7 +288,7 @@ def test_nightmode_fb_pass_logs_outer_row_gate(monkeypatch, tmp_path):
                 "Email": "",
                 "Email_All": "",
                 "Social Link": "",
-                "Facebook_URL": "https://facebook.com/tryme",
+                "Facebook_URL": "",
             },
         ]
     ).to_csv(input_csv, index=False)
@@ -314,4 +314,4 @@ def test_nightmode_fb_pass_logs_outer_row_gate(monkeypatch, tmp_path):
     row_gate_logs = [msg for msg in logs if "[Night FB][Row Gate]" in msg]
 
     assert any("row=0" in msg and "artist='Skip Me'" in msg and "email_present=True" in msg and "eligible_for_fb=False" in msg for msg in row_gate_logs)
-    assert any("row=1" in msg and "artist='Try Me'" in msg and "fb_url_present=True" in msg and "eligible_for_fb=True" in msg for msg in row_gate_logs)
+    assert any("row=1" in msg and "artist='Try Me'" in msg and "fb_url_present=False" in msg and "eligible_for_fb=True" in msg for msg in row_gate_logs)
