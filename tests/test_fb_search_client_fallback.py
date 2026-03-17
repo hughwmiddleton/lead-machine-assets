@@ -169,6 +169,53 @@ def test_find_best_page_url_rejects_zero_identity_music_candidate(monkeypatch) -
     assert search_methods == ["direct_route"]
 
 
+def test_find_best_page_url_tries_next_ranked_candidate_after_prescrape_identity_reject(monkeypatch) -> None:
+    logs = []
+    rejected_url = "https://www.facebook.com/fergie"
+    accepted_url = "https://www.facebook.com/tallulahargue"
+    driver = _FakeDriver(
+        {
+            accepted_url: (
+                "<html><body><div>Musician/Band</div>"
+                "<a href='https://open.spotify.com/artist/test'>Spotify</a></body></html>"
+            ),
+        }
+    )
+    client = cde.FacebookSearchClient(driver=driver, logger=logs.append)
+    monkeypatch.setattr(client, "ensure_facebook_logged_in", lambda: True)
+
+    def _fake_fetch(query, *, search_method):  # noqa: ANN001
+        return (
+            (
+                "<div role='main'><div aria-label='Search results'>"
+                f"<div class='card'><a href='{rejected_url}'>Fergie</a><div class='subtitle'>Musician/Band</div></div>"
+                f"<div class='card'><a href='{accepted_url}'>Tallulah Argue Music</a><div class='subtitle'>Musician/Band</div></div>"
+                "</div></div>"
+            ),
+            "https://www.facebook.com/search/pages/?q=tallulah+argue",
+            False,
+        )
+
+    def _fake_score(artist_name, candidate_name, candidate_url, category):  # noqa: ANN001
+        if candidate_url == rejected_url:
+            return (3.0, 0.0, 1.0)
+        if candidate_url == accepted_url:
+            return (2.0, 0.6, 1.0)
+        raise AssertionError(f"unexpected candidate: {candidate_url}")
+
+    monkeypatch.setattr(client, "_fetch_search_surface", _fake_fetch)
+    monkeypatch.setattr(cde, "score_fb_candidate", _fake_score)
+    monkeypatch.setattr(cde, "is_music_page", lambda *args, **kwargs: True)
+    monkeypatch.setattr(cde, "classify_corporate_signals", lambda *args, **kwargs: SimpleNamespace(has_hard=False, has_artist=True))
+    monkeypatch.setattr(cde, "_facebook_candidate_is_strong", lambda *args, **kwargs: (True, "music_category"))
+
+    result = client.find_best_page_url("Tallulah Argue", require_strong_candidate=True)
+
+    assert result == accepted_url
+    assert driver.visited_urls == [accepted_url]
+    assert any("Considering next plausible ranked candidate" in message for message in logs)
+
+
 def test_find_best_page_url_allows_weak_metadata_candidate_with_lexical_evidence() -> None:
     candidate = cde.FbCandidate(
         name="Tallulah Argue Live",
@@ -213,6 +260,60 @@ def test_find_best_page_url_accepts_plausible_music_candidate_with_identity(monk
 
     assert result == artist_url
     assert driver.visited_urls[-1] == artist_url
+
+
+def test_find_best_page_url_prescrape_candidate_walking_stays_bounded(monkeypatch) -> None:
+    first_url = "https://www.facebook.com/fergie"
+    second_url = "https://www.facebook.com/hotstuff"
+    third_url = "https://www.facebook.com/tallulahargue"
+    driver = _FakeDriver(
+        {
+            third_url: (
+                "<html><body><div>Musician/Band</div>"
+                "<a href='https://open.spotify.com/artist/test'>Spotify</a></body></html>"
+            ),
+        }
+    )
+    client = cde.FacebookSearchClient(driver=driver, logger=None)
+    monkeypatch.setattr(client, "ensure_facebook_logged_in", lambda: True)
+
+    identity_checks = []
+
+    def _fake_fetch(query, *, search_method):  # noqa: ANN001
+        return (
+            (
+                "<div role='main'><div aria-label='Search results'>"
+                f"<div class='card'><a href='{first_url}'>Fergie</a><div class='subtitle'>Musician/Band</div></div>"
+                f"<div class='card'><a href='{second_url}'>Hot Stuff!!</a><div class='subtitle'>Musician/Band</div></div>"
+                f"<div class='card'><a href='{third_url}'>Tallulah Argue Music</a><div class='subtitle'>Musician/Band</div></div>"
+                "</div></div>"
+            ),
+            "https://www.facebook.com/search/pages/?q=tallulah+argue",
+            False,
+        )
+
+    def _fake_score(artist_name, candidate_name, candidate_url, category):  # noqa: ANN001
+        scores = {
+            first_url: (3.0, 0.0, 1.0),
+            second_url: (2.5, 0.0, 1.0),
+            third_url: (2.0, 0.8, 1.0),
+        }
+        return scores[candidate_url]
+
+    def _fake_identity(artist_name, candidate, *, name_score=None):  # noqa: ANN001
+        identity_checks.append(candidate.url)
+        return (candidate.url == third_url, "name_score" if candidate.url == third_url else "identity_floor")
+
+    monkeypatch.setattr(client, "_fetch_search_surface", _fake_fetch)
+    monkeypatch.setattr(cde, "score_fb_candidate", _fake_score)
+    monkeypatch.setattr(cde, "is_music_page", lambda *args, **kwargs: True)
+    monkeypatch.setattr(cde, "_facebook_candidate_has_min_identity_evidence", _fake_identity)
+
+    result = client.find_best_page_url("Tallulah Argue", require_strong_candidate=True)
+
+    assert result is None
+    assert identity_checks == [first_url, second_url]
+    assert driver.visited_urls == []
 
 
 def test_find_best_page_url_rejects_generic_homepage_auth_surface(monkeypatch) -> None:
@@ -282,3 +383,57 @@ def test_find_best_page_url_prefers_page_style_url_over_profile_tie(monkeypatch)
 
     assert result == page_url
     assert driver.visited_urls[-1] == page_url
+
+
+def test_find_best_page_url_does_not_try_next_candidate_after_postscrape_reject(monkeypatch) -> None:
+    rejected_url = "https://www.facebook.com/rejectedartist"
+    skipped_url = "https://www.facebook.com/tallulahargue"
+    driver = _FakeDriver(
+        {
+            rejected_url: (
+                "<html><body><div>Musician/Band</div>"
+                "<a href='https://open.spotify.com/artist/test'>Spotify</a></body></html>"
+            ),
+            skipped_url: (
+                "<html><body><div>Musician/Band</div>"
+                "<a href='https://open.spotify.com/artist/test'>Spotify</a></body></html>"
+            ),
+        }
+    )
+    client = cde.FacebookSearchClient(driver=driver, logger=None)
+    monkeypatch.setattr(client, "ensure_facebook_logged_in", lambda: True)
+
+    def _fake_fetch(query, *, search_method):  # noqa: ANN001
+        return (
+            (
+                "<div role='main'><div aria-label='Search results'>"
+                f"<div class='card'><a href='{rejected_url}'>Rejected Artist</a><div class='subtitle'>Musician/Band</div></div>"
+                f"<div class='card'><a href='{skipped_url}'>Tallulah Argue Music</a><div class='subtitle'>Musician/Band</div></div>"
+                "</div></div>"
+            ),
+            "https://www.facebook.com/search/pages/?q=rejected+artist",
+            False,
+        )
+
+    def _fake_score(artist_name, candidate_name, candidate_url, category):  # noqa: ANN001
+        if candidate_url == rejected_url:
+            return (3.0, 1.0, 1.0)
+        if candidate_url == skipped_url:
+            return (2.0, 1.0, 1.0)
+        raise AssertionError(f"unexpected candidate: {candidate_url}")
+
+    def _fake_strong(artist_name, candidate, page_html, page_category_text, page_text_blocks, outbound_links, logger=None):  # noqa: ANN001
+        if candidate.url == rejected_url:
+            return (False, "slug_or_name_only_match")
+        return (True, "music_category")
+
+    monkeypatch.setattr(client, "_fetch_search_surface", _fake_fetch)
+    monkeypatch.setattr(cde, "score_fb_candidate", _fake_score)
+    monkeypatch.setattr(cde, "is_music_page", lambda *args, **kwargs: True)
+    monkeypatch.setattr(cde, "classify_corporate_signals", lambda *args, **kwargs: SimpleNamespace(has_hard=False, has_artist=True))
+    monkeypatch.setattr(cde, "_facebook_candidate_is_strong", _fake_strong)
+
+    result = client.find_best_page_url("Rejected Artist", require_strong_candidate=True)
+
+    assert result is None
+    assert driver.visited_urls == [rejected_url]

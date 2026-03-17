@@ -3475,252 +3475,258 @@ class FacebookSearchClient:
                 return (score, 1)
             return (score, 0)
 
-        best_entry: Optional[Tuple[float, float, float, bool, bool, FbCandidate]] = None
-        using_fallback = False
-        using_generic = False
-        if strong_music_candidates:
-            best_entry = max(strong_music_candidates, key=_bucket_selection_key)
-        elif fallback_candidates:
-            best_entry = max(fallback_candidates, key=_bucket_selection_key)
-            using_fallback = True
-        elif generic_candidates:
-            best_entry = max(generic_candidates, key=_bucket_selection_key)
-            using_generic = True
-
         MIN_FINAL_SCORE = 1.0
-        if not best_entry or best_entry[0] < MIN_FINAL_SCORE or not best_entry[3]:
+        MAX_PRE_SCRAPE_RANKED_CANDIDATES = 2
+
+        ranked_entries: List[Tuple[str, Tuple[float, float, float, bool, bool, FbCandidate]]] = []
+        for bucket_name, bucket in (
+            ("strong", strong_music_candidates),
+            ("fallback", fallback_candidates),
+            ("generic", generic_candidates),
+        ):
+            for entry in sorted(bucket, key=_bucket_selection_key, reverse=True):
+                if entry[0] < MIN_FINAL_SCORE or not entry[3]:
+                    continue
+                ranked_entries.append((bucket_name, entry))
+
+        if not ranked_entries:
             _safe_log(self.logger, "[FB Enrich] No high-confidence Facebook match for '%s'.", artist_name)
             return None
 
-        best_score, best_name_score, best_cat_boost, best_is_music, best_is_corp, best_candidate = best_entry
+        for ranked_index, (bucket_name, best_entry) in enumerate(
+            ranked_entries[:MAX_PRE_SCRAPE_RANKED_CANDIDATES],
+            start=1,
+        ):
+            best_score, best_name_score, best_cat_boost, best_is_music, best_is_corp, best_candidate = best_entry
 
-        if require_strong_candidate:
-            has_identity_evidence, identity_reason = _facebook_candidate_has_min_identity_evidence(
-                artist_name,
-                best_candidate,
-                name_score=best_name_score,
-            )
-            if not has_identity_evidence:
-                _safe_log(
-                    self.logger,
-                    "[FB Discover] Rejected candidate for '%s' before scrape - weak identity evidence: %s",
+            if require_strong_candidate:
+                has_identity_evidence, identity_reason = _facebook_candidate_has_min_identity_evidence(
                     artist_name,
-                    identity_reason,
+                    best_candidate,
+                    name_score=best_name_score,
                 )
-                return None
-
-        if using_fallback and best_entry:
-            _, base_score, _, _, _, cand = best_entry
-            _safe_log(
-                self.logger,
-                "[FB Enrich] Trying uncertain music FB candidate '%s' for '%s' (category='%s', base_score=%.2f).",
-                cand.name or cand.url,
-                artist_name,
-                cand.category or "<none>",
-                base_score,
-            )
-        elif using_generic and best_entry:
-            _, base_score, _, _, _, cand = best_entry
-            _safe_log(
-                self.logger,
-                "[FB Enrich] Trying very loose FB candidate '%s' for '%s' (category='%s', base_score=%.2f).",
-                cand.name or cand.url,
-                artist_name,
-                cand.category or "<none>",
-                base_score,
-            )
-
-        # Second-layer validation: fetch page category and reject late if corporate or not music.
-        page_music = False
-        confirmed_logged = False
-        best_name_norm = normalize_fb_name(best_candidate.name or "")
-        artist_norm = normalize_fb_name(artist_name)
-        try:
-            path_slug = urllib.parse.urlparse(best_candidate.url or "").path.strip("/").split("/")[0]
-        except Exception:
-            path_slug = ""
-        best_username_norm = normalize_fb_name(path_slug)
-        try:
-            self.driver.get(best_candidate.url)
-            WebDriverWait(self.driver, 5).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
-            page_html = self.driver.page_source or ""
-            page_category_text = None
-            page_text_blocks: List[str] = []
-            raw_html_lc = (page_html or "").lower()
-            outbound_links: List[str] = []
-            try:
-                soup = BeautifulSoup(page_html, "html.parser")
-                seen_blocks: Set[str] = set()
-
-                def _add_block(val: str) -> Optional[str]:
-                    val = (val or "").strip()
-                    if not val or len(val) > 160:
-                        return None
-                    if is_noisy_fb_text_block(val):
-                        return None
-                    if val in seen_blocks:
-                        return None
-                    seen_blocks.add(val)
-                    page_text_blocks.append(val)
-                    return val
-
-                meta_desc = soup.find("meta", attrs={"name": "description"}) or soup.find(
-                    "meta", attrs={"property": "og:description"}
-                )
-                if meta_desc:
-                    cleaned_meta = _add_block(meta_desc.get("content") or "")
-                    if cleaned_meta and not page_category_text:
-                        page_category_text = cleaned_meta
-                # Scan visible spans/divs for music-y labels.
-                MAX_FB_TEXT_BLOCKS = 80
-                for tag in soup.find_all(["span", "div"]):
-                    val = _add_block(tag.get_text(" ", strip=True))
-                    if not val:
-                        continue
-                    low = val.lower()
-                    if not page_category_text and ("/" in val or any(tok in low for tok in MUSIC_TOKENS)):
-                        page_category_text = val
-                    if len(page_text_blocks) >= MAX_FB_TEXT_BLOCKS:
-                        break
-                for tag in soup.find_all("a", href=True):
-                    href_val = (tag.get("href") or "").strip()
-                    if href_val.startswith("http"):
-                        outbound_links.append(href_val)
-                page_category_text = clean_fb_category_text(page_category_text) if page_category_text else None
-            except Exception:
-                page_category_text = None
-            if not page_category_text and raw_html_lc and "artist" in raw_html_lc:
-                if not any(bad in raw_html_lc for bad in non_music_artist_tokens):
-                    page_category_text = "Artist"
-            page_text_combined = " ".join(page_text_blocks)
-            sig_page = classify_corporate_signals(
-                best_candidate.url, best_candidate.name, page_category_text or "", page_text_combined
-            )
-            if sig_page.has_hard and not sig_page.has_artist:
-                _safe_log(
-                    self.logger,
-                    "[FB Enrich] Rejecting FB page '%s' for '%s' after scrape due to HARD corporate category '%s'.",
-                    best_candidate.url,
-                    artist_name,
-                    page_category_text or "<none>",
-                )
-                return None
-            category_non_music = bool(page_category_text and not sig_page.has_artist)
-            if page_category_text and sig_page.has_artist:
-                _safe_log(
-                    self.logger,
-                    "[FB Enrich] Confirmed music page for '%s' with FB category '%s'.",
-                    artist_name,
-                    page_category_text,
-                )
-                confirmed_logged = True
-            has_reliable_category = any(
-                (
-                    cat
-                    and any(tok in normalize_role_text(cat) for tok in FB_MUSIC_CATEGORY_TOKENS)
-                )
-                for cat in (page_category_text, best_candidate.category)
-            )
-            page_music = _is_music_page_final(
-                best_candidate.name or "",
-                best_candidate.url or "",
-                page_category_text or best_candidate.category,
-                page_text_combined,
-                outbound_links,
-                page_html,
-            )
-            if not page_music:
-                page_music = sig_page.has_artist or is_music_page(
-                    best_candidate.name or "",
-                    best_candidate.url or "",
-                    page_category_text or "",
-                )
-            if not page_music and not has_reliable_category and not category_non_music:
-                if looks_like_music_fallback(page_text_blocks, artist_name):
-                    page_music = True
+                if not has_identity_evidence:
                     _safe_log(
                         self.logger,
-                        "[FB Enrich] Falling back to text-based music detection for '%s' (no FB category; matched name+music tokens)",
+                        "[FB Discover] Rejected candidate for '%s' before scrape - weak identity evidence: %s",
                         artist_name,
+                        identity_reason,
                     )
-                    if not confirmed_logged:
+                    if ranked_index < min(len(ranked_entries), MAX_PRE_SCRAPE_RANKED_CANDIDATES):
                         _safe_log(
                             self.logger,
-                            "[FB Enrich] Confirmed music page for '%s' with FB category '%s'.",
+                            "[FB Discover] Considering next plausible ranked candidate for '%s'.",
                             artist_name,
-                            page_category_text or "<none>",
                         )
-                        confirmed_logged = True
-            if not page_music:
-                if category_non_music and page_category_text:
+                    continue
+
+            if bucket_name == "fallback":
+                _safe_log(
+                    self.logger,
+                    "[FB Enrich] Trying uncertain music FB candidate '%s' for '%s' (category='%s', base_score=%.2f).",
+                    best_candidate.name or best_candidate.url,
+                    artist_name,
+                    best_candidate.category or "<none>",
+                    best_name_score,
+                )
+            elif bucket_name == "generic":
+                _safe_log(
+                    self.logger,
+                    "[FB Enrich] Trying very loose FB candidate '%s' for '%s' (category='%s', base_score=%.2f).",
+                    best_candidate.name or best_candidate.url,
+                    artist_name,
+                    best_candidate.category or "<none>",
+                    best_name_score,
+                )
+
+            # Second-layer validation: fetch page category and reject late if corporate or not music.
+            page_music = False
+            confirmed_logged = False
+            page_html = ""
+            page_category_text = None
+            page_text_blocks: List[str] = []
+            outbound_links: List[str] = []
+            try:
+                self.driver.get(best_candidate.url)
+                WebDriverWait(self.driver, 5).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+                page_html = self.driver.page_source or ""
+                raw_html_lc = (page_html or "").lower()
+                try:
+                    soup = BeautifulSoup(page_html, "html.parser")
+                    seen_blocks: Set[str] = set()
+
+                    def _add_block(val: str) -> Optional[str]:
+                        val = (val or "").strip()
+                        if not val or len(val) > 160:
+                            return None
+                        if is_noisy_fb_text_block(val):
+                            return None
+                        if val in seen_blocks:
+                            return None
+                        seen_blocks.add(val)
+                        page_text_blocks.append(val)
+                        return val
+
+                    meta_desc = soup.find("meta", attrs={"name": "description"}) or soup.find(
+                        "meta", attrs={"property": "og:description"}
+                    )
+                    if meta_desc:
+                        cleaned_meta = _add_block(meta_desc.get("content") or "")
+                        if cleaned_meta and not page_category_text:
+                            page_category_text = cleaned_meta
+                    # Scan visible spans/divs for music-y labels.
+                    MAX_FB_TEXT_BLOCKS = 80
+                    for tag in soup.find_all(["span", "div"]):
+                        val = _add_block(tag.get_text(" ", strip=True))
+                        if not val:
+                            continue
+                        low = val.lower()
+                        if not page_category_text and ("/" in val or any(tok in low for tok in MUSIC_TOKENS)):
+                            page_category_text = val
+                        if len(page_text_blocks) >= MAX_FB_TEXT_BLOCKS:
+                            break
+                    for tag in soup.find_all("a", href=True):
+                        href_val = (tag.get("href") or "").strip()
+                        if href_val.startswith("http"):
+                            outbound_links.append(href_val)
+                    page_category_text = clean_fb_category_text(page_category_text) if page_category_text else None
+                except Exception:
+                    page_category_text = None
+                if not page_category_text and raw_html_lc and "artist" in raw_html_lc:
+                    if not any(bad in raw_html_lc for bad in non_music_artist_tokens):
+                        page_category_text = "Artist"
+                page_text_combined = " ".join(page_text_blocks)
+                sig_page = classify_corporate_signals(
+                    best_candidate.url, best_candidate.name, page_category_text or "", page_text_combined
+                )
+                if sig_page.has_hard and not sig_page.has_artist:
                     _safe_log(
                         self.logger,
-                        "[FB Enrich] Rejecting FB page '%s' for '%s' after scrape: category '%s' not music-related.",
+                        "[FB Enrich] Rejecting FB page '%s' for '%s' after scrape due to HARD corporate category '%s'.",
                         best_candidate.url,
                         artist_name,
                         page_category_text or "<none>",
                     )
-                else:
+                    return None
+                category_non_music = bool(page_category_text and not sig_page.has_artist)
+                if page_category_text and sig_page.has_artist:
                     _safe_log(
                         self.logger,
-                        "[FB Enrich] Rejecting FB page '%s' for '%s' after scrape: no music signals found.",
-                        best_candidate.url,
+                        "[FB Enrich] Confirmed music page for '%s' with FB category '%s'.",
                         artist_name,
+                        page_category_text,
                     )
-                return None
-        except Exception as exc:
-            if _fb_exception_is_fatal_session(exc):
-                raise
-            _safe_log(
-                self.logger,
-                "[FB Enrich] Failed to parse FB page '%s' for '%s': %s",
-                best_candidate.url,
-                artist_name,
-                exc,
-            )
-
-        # If we still have no music signal after page scrape, reject.
-        if not page_music:
-            _safe_log(
-                self.logger,
-                "[FB Enrich] Rejecting FB page '%s' for '%s' after scrape: no music signals found (final gate).",
-                best_candidate.url,
-                artist_name,
-            )
-            return None
-
-        if require_strong_candidate:
-            is_strong, strong_reason = _facebook_candidate_is_strong(
-                artist_name,
-                best_candidate,
-                page_html,
-                page_category_text,
-                page_text_blocks,
-                outbound_links,
-                logger=self.logger,
-            )
-            if not is_strong:
+                    confirmed_logged = True
+                has_reliable_category = any(
+                    (
+                        cat
+                        and any(tok in normalize_role_text(cat) for tok in FB_MUSIC_CATEGORY_TOKENS)
+                    )
+                    for cat in (page_category_text, best_candidate.category)
+                )
+                page_music = _is_music_page_final(
+                    best_candidate.name or "",
+                    best_candidate.url or "",
+                    page_category_text or best_candidate.category,
+                    page_text_combined,
+                    outbound_links,
+                    page_html,
+                )
+                if not page_music:
+                    page_music = sig_page.has_artist or is_music_page(
+                        best_candidate.name or "",
+                        best_candidate.url or "",
+                        page_category_text or "",
+                    )
+                if not page_music and not has_reliable_category and not category_non_music:
+                    if looks_like_music_fallback(page_text_blocks, artist_name):
+                        page_music = True
+                        _safe_log(
+                            self.logger,
+                            "[FB Enrich] Falling back to text-based music detection for '%s' (no FB category; matched name+music tokens)",
+                            artist_name,
+                        )
+                        if not confirmed_logged:
+                            _safe_log(
+                                self.logger,
+                                "[FB Enrich] Confirmed music page for '%s' with FB category '%s'.",
+                                artist_name,
+                                page_category_text or "<none>",
+                            )
+                            confirmed_logged = True
+                if not page_music:
+                    if category_non_music and page_category_text:
+                        _safe_log(
+                            self.logger,
+                            "[FB Enrich] Rejecting FB page '%s' for '%s' after scrape: category '%s' not music-related.",
+                            best_candidate.url,
+                            artist_name,
+                            page_category_text or "<none>",
+                        )
+                    else:
+                        _safe_log(
+                            self.logger,
+                            "[FB Enrich] Rejecting FB page '%s' for '%s' after scrape: no music signals found.",
+                            best_candidate.url,
+                            artist_name,
+                        )
+                    return None
+            except Exception as exc:
+                if _fb_exception_is_fatal_session(exc):
+                    raise
                 _safe_log(
                     self.logger,
-                    "[FB Discover] Rejected candidate for '%s' - weak candidate: %s",
+                    "[FB Enrich] Failed to parse FB page '%s' for '%s': %s",
+                    best_candidate.url,
                     artist_name,
-                    strong_reason,
+                    exc,
+                )
+
+            # If we still have no music signal after page scrape, reject.
+            if not page_music:
+                _safe_log(
+                    self.logger,
+                    "[FB Enrich] Rejecting FB page '%s' for '%s' after scrape: no music signals found (final gate).",
+                    best_candidate.url,
+                    artist_name,
                 )
                 return None
 
-        _safe_log(
-            self.logger,
-            "[FB Enrich] Best FB candidate for '%s' -> '%s' (final_score=%.2f, name_score=%.2f, cat_boost=%.2f, music=%s, corporate=%s, category='%s')",
-            artist_name,
-            best_candidate.name or best_candidate.url,
-            best_score,
-            best_name_score,
-            best_cat_boost,
-            best_is_music,
-            best_is_corp,
-            best_candidate.category or "<none>",
-        )
-        return best_candidate.url
+            if require_strong_candidate:
+                is_strong, strong_reason = _facebook_candidate_is_strong(
+                    artist_name,
+                    best_candidate,
+                    page_html,
+                    page_category_text,
+                    page_text_blocks,
+                    outbound_links,
+                    logger=self.logger,
+                )
+                if not is_strong:
+                    _safe_log(
+                        self.logger,
+                        "[FB Discover] Rejected candidate for '%s' - weak candidate: %s",
+                        artist_name,
+                        strong_reason,
+                    )
+                    return None
+
+            _safe_log(
+                self.logger,
+                "[FB Enrich] Best FB candidate for '%s' -> '%s' (final_score=%.2f, name_score=%.2f, cat_boost=%.2f, music=%s, corporate=%s, category='%s')",
+                artist_name,
+                best_candidate.name or best_candidate.url,
+                best_score,
+                best_name_score,
+                best_cat_boost,
+                best_is_music,
+                best_is_corp,
+                best_candidate.category or "<none>",
+            )
+            return best_candidate.url
+
+        _safe_log(self.logger, "[FB Enrich] No high-confidence Facebook match for '%s'.", artist_name)
+        return None
 
 
 def _build_facebook_search_client(logger) -> Tuple[Optional["FacebookSearchClient"], Optional[Any]]:
