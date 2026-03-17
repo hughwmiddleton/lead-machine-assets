@@ -75,6 +75,40 @@ def test_facebook_apply_sets_provenance() -> None:
     assert updated["Email_Extract_Method"] == "mailto"
 
 
+def test_facebook_apply_preserves_regex_provenance_for_obfuscated_rendered_email() -> None:
+    enricher = night_mode_fb.NightModeFacebookEnricher(legacy_module=None, username="", password="", logger=None)
+    row = {
+        "Artist Name": "FB Artist",
+        "Email": "",
+        "Email_All": "",
+        "Email_Source_URL": "",
+        "Email_Source_Type": "",
+        "Email_Extract_Method": "",
+    }
+    emails, used_mailto = night_mode_fb._extract_emails_from_html(
+        "<html><body><div>No visible email</div></body></html>",
+        rendered_text="Bookings name @ artist dot com",
+    )
+    assert emails == ["name@artist.com"]
+    assert used_mailto is False
+
+    fb_result = night_mode_fb.NightModeFacebookResult(
+        email="name@artist.com",
+        email_all="name@artist.com",
+        email_type="fb_night",
+        facebook_url="https://www.facebook.com/testartist",
+        email_source="main",
+        email_source_url="https://www.facebook.com/testartist",
+        email_extract_method="regex",
+    )
+    updated = enricher._apply_night_fb_result(row, fb_result, emails, "https://www.facebook.com/testartist")
+
+    assert updated["Email"] == "name@artist.com"
+    assert updated["Email_Source_URL"] == "https://www.facebook.com/testartist"
+    assert updated["Email_Source_Type"] == "facebook_enrich"
+    assert updated["Email_Extract_Method"] == "regex"
+
+
 def test_soundcloud_apply_sets_provenance() -> None:
     df = pd.DataFrame(
         [

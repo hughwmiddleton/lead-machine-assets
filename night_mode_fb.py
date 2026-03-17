@@ -4112,6 +4112,61 @@ def _log_fb_email_surface_debug(logger: LoggerFn, label: str, page_source: str, 
     )
 
 
+_FB_EMAIL_AT_TOKEN = r"(?:\[\s*at\s*\]|\(\s*at\s*\)|\bat\b|@)"
+_FB_EMAIL_DOT_TOKEN = r"(?:\[\s*dot\s*\]|\(\s*dot\s*\)|\bdot\b|\.)"
+_FB_OBFUSCATED_EMAIL_PATTERN = re.compile(
+    rf"([A-Z0-9._%+-]+)\s*{_FB_EMAIL_AT_TOKEN}\s*([A-Z0-9-]+(?:\s*{_FB_EMAIL_DOT_TOKEN}\s*[A-Z0-9-]+)+)",
+    re.IGNORECASE,
+)
+
+
+def _normalize_fb_obfuscated_email_text(text: str) -> Tuple[str, int]:
+    normalized = unicodedata.normalize("NFKC", str(text or ""))
+    replacements = 0
+    try:
+        from email_normalizer import normalize_obfuscated_email_patterns
+
+        normalized, base_replacements = normalize_obfuscated_email_patterns(normalized)
+        replacements += base_replacements
+    except Exception:
+        pass
+
+    def _repl(match: re.Match) -> str:
+        nonlocal replacements
+        local = (match.group(1) or "").strip()
+        domain = re.sub(_FB_EMAIL_DOT_TOKEN, ".", match.group(2) or "", flags=re.IGNORECASE)
+        domain = re.sub(r"\s+", "", domain)
+        domain = re.sub(r"\.{2,}", ".", domain).strip(".")
+        candidate = f"{local}@{domain}" if local and domain else match.group(0)
+        if candidate != match.group(0):
+            replacements += 1
+        return candidate
+
+    normalized = _FB_OBFUSCATED_EMAIL_PATTERN.sub(_repl, normalized)
+    return normalized, replacements
+
+
+def _extract_fb_emails_from_text_sample(sample: str) -> List[str]:
+    sample = str(sample or "")
+    if not sample:
+        return []
+    replacements = 0
+    normalized = sample
+    try:
+        normalized, replacements = _normalize_fb_obfuscated_email_text(sample)
+    except Exception:
+        normalized = sample
+        replacements = 0
+    if replacements:
+        try:
+            from pipeline_runner import increment_pattern_emails
+
+            increment_pattern_emails(replacements)
+        except Exception:
+            pass
+    return [match.group(0) for match in EMAIL_REGEX.finditer(normalized)]
+
+
 def _extract_emails_from_html(
     html: str,
     soup: Optional[BeautifulSoup] = None,
@@ -4120,9 +4175,10 @@ def _extract_emails_from_html(
 ) -> Tuple[List[str], bool]:
     emails: List[str] = []
     mailto_used = False
-    if not html:
+    raw_html = html if isinstance(html, str) else str(html or "")
+    if not raw_html and not rendered_text and not anchor_values:
         return emails, mailto_used
-    soup = soup or BeautifulSoup(html, "html.parser")
+    soup = soup or BeautifulSoup(raw_html, "html.parser")
     for anchor in soup.select('a[href^="mailto:"]'):
         href = anchor.get("href") or ""
         addr = href.split("mailto:", 1)[-1].split("?", 1)[0]
@@ -4131,36 +4187,9 @@ def _extract_emails_from_html(
             mailto_used = True
     text_blob = soup.get_text(" ", strip=True) if soup else ""
     if text_blob:
-        try:
-            from email_normalizer import normalize_obfuscated_email_patterns
-
-            text_blob, replacements = normalize_obfuscated_email_patterns(text_blob)
-            if replacements:
-                try:
-                    from pipeline_runner import increment_pattern_emails
-
-                    increment_pattern_emails(replacements)
-                except Exception:
-                    pass
-        except Exception:
-            replacements = 0
-        emails.extend(match.group(0) for match in EMAIL_REGEX.finditer(text_blob))
-    raw_html = html if isinstance(html, str) else str(html)
+        emails.extend(_extract_fb_emails_from_text_sample(text_blob))
     if raw_html:
-        try:
-            from email_normalizer import normalize_obfuscated_email_patterns
-
-            raw_html, replacements = normalize_obfuscated_email_patterns(raw_html)
-            if replacements:
-                try:
-                    from pipeline_runner import increment_pattern_emails
-
-                    increment_pattern_emails(replacements)
-                except Exception:
-                    pass
-        except Exception:
-            replacements = 0
-        emails.extend(match.group(0) for match in EMAIL_REGEX.finditer(raw_html))
+        emails.extend(_extract_fb_emails_from_text_sample(raw_html))
     for raw_value in anchor_values or ():
         raw_value = str(raw_value or "").strip()
         if not raw_value:
@@ -4179,10 +4208,10 @@ def _extract_emails_from_html(
         if decoded and decoded not in samples:
             samples.append(decoded)
         for sample in samples:
-            emails.extend(match.group(0) for match in EMAIL_REGEX.finditer(sample))
-    if (not emails) and rendered_text:
+            emails.extend(_extract_fb_emails_from_text_sample(sample))
+    if rendered_text:
         visible_text = str(rendered_text or "")
-        emails.extend(match.group(0) for match in EMAIL_REGEX.finditer(visible_text))
+        emails.extend(_extract_fb_emails_from_text_sample(visible_text))
     seen = set()
     unique: List[str] = []
     for email in emails:
