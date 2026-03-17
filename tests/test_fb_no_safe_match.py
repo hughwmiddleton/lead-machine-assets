@@ -62,7 +62,7 @@ def test_rank_threshold_blocks_low_score():
     assert enricher._last_search_reject_reason == "rank_below_threshold"
 
 
-def test_mismatch_with_music_signal_can_pass():
+def test_zero_identity_music_mismatch_is_rejected():
     enricher = _make_enricher()
     artist = "The Enhancer"
     music_mismatch = _cand("Moonrise Music Collective", "https://www.facebook.com/moonrisemusic", "Musician/Band")
@@ -70,8 +70,21 @@ def test_mismatch_with_music_signal_can_pass():
 
     chosen, selected_by = enricher._choose_ranked_candidate(artist, ranked)
 
-    assert chosen is music_mismatch
-    assert selected_by in {"ranked_sort", "mismatch_fallback"}
+    assert chosen is None
+    assert selected_by == "no_safe_match"
+    assert enricher._last_search_reject_reason == "identity_mismatch"
+
+
+def test_weak_music_match_still_passes_identity_floor():
+    enricher = _make_enricher()
+    artist = "The Enhancer"
+    plausible = _cand("Enhancer Live", "https://www.facebook.com/enhancerlive", "Musician/Band")
+    ranked = [_rank_item(artist, plausible)]
+
+    chosen, selected_by = enricher._choose_ranked_candidate(artist, ranked)
+
+    assert chosen is plausible
+    assert selected_by == "ranked_sort"
 
 
 def test_low_similarity_corporate_candidate_is_rejected():

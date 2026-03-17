@@ -1329,8 +1329,10 @@ def _candidate_is_safe_enough(item: Dict[str, Any], min_accept_score: int) -> Tu
         return False, "corporate_no_music_signal"
     if score < min_accept_score:
         return False, "rank_below_threshold"
-    if match_level == "mismatch" and not music_any:
-        return False, "mismatch_no_music_signal"
+    # Require at least some artist-identity signal before a music-looking page can
+    # enter the Night Mode candidate pipeline.
+    if match_level == "mismatch":
+        return False, "identity_mismatch"
     return True, ""
 
 
