@@ -4350,10 +4350,10 @@ if os.getenv("FB_DEBUG_CAND_URL_GATE") == "1":
     assert _candidate_url(type("X", (), {"url": "https://www.facebook.com/someband"})()) == "https://www.facebook.com/someband"
     assert _candidate_url({"url": "https://www.facebook.com/someband"}) == "https://www.facebook.com/someband"
     try:
-        assert not _fb_is_candidate_url_allowed("https://www.facebook.com/someband?__tn__=%2Cd")
+        assert _fb_is_candidate_url_allowed("https://www.facebook.com/someband?__tn__=%2Cd")
         assert not _fb_is_candidate_url_allowed("https://www.facebook.com/groups/foo")
         assert not _fb_is_candidate_url_allowed("https://www.facebook.com/someband/about")
-        assert not _fb_is_candidate_url_allowed("https://www.facebook.com/profile.php?id=12&foo=1")
+        assert _fb_is_candidate_url_allowed("https://www.facebook.com/profile.php?id=12&foo=1")
         assert _normalise_fb_url("https://www.facebook.com/shelaibd")
         assert _normalise_fb_url("https://www.facebook.com/profile.php?id=61554027368639")
         assert _normalise_fb_url("https://web.facebook.com/someband")

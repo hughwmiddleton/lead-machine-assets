@@ -62,9 +62,23 @@ def test_dom_gate_v2_zero_anchors_stays_zero():
     assert hrefs == []
 
 
+def test_dom_gate_allows_page_urls_with_tracking_query_wrappers():
+    html = """
+    <div aria-label="Search results">
+      <a href="https://www.facebook.com/testband?__tn__=%3C">Test Band</a>
+      <a href="https://www.facebook.com/profile.php?id=123456789&ref=share">Test Band Profile</a>
+    </div>
+    """
+    cands = facebook_enrich._fb_extract_candidates_from_search_dom(html, search_name="Test Band")
+    urls = [cand.url for cand in cands]
+    assert "https://www.facebook.com/testband?__tn__=%3C" in urls
+    assert "https://www.facebook.com/profile.php?id=123456789&ref=share" in urls
+
+
 @pytest.mark.parametrize(
     "bad_href",
     [
+        "https://business.facebook.com/testband",
         "https://www.facebook.com/photo.php?fbid=123",
         "https://www.facebook.com/story.php?story_fbid=123&id=456",
         "https://www.facebook.com/permalink.php?story_fbid=123&id=456",

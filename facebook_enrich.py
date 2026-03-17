@@ -1486,9 +1486,10 @@ if os.getenv("FB_DEBUG_REASON_SPLIT") == "1":
 def _fb_is_candidate_url_allowed(url: str) -> bool:
     """
     Strict allowlist for FB search candidates:
-      - https://www.facebook.com/<username>
-      - https://www.facebook.com/profile.php?id=<digits>
-    Rejects /groups, /watch, /reel, /events, /notifications, /afad and notif params.
+      - https://www.facebook.com/<username>[?<tracking params>]
+      - https://www.facebook.com/profile.php?id=<digits>[&<tracking params>]
+    Rejects non-page surfaces such as /groups, /watch, /reel, /events,
+    /notifications, /afad and notif params.
     """
     if not url:
         return False
@@ -1497,10 +1498,21 @@ def _fb_is_candidate_url_allowed(url: str) -> bool:
     except Exception:
         return False
     host = (parsed.netloc or "").lower().strip()
-    if host.startswith("m."):
-        host = host[2:]
-    allowed_hosts = {"facebook.com", "www.facebook.com", "web.facebook.com"}
-    if not (host in allowed_hosts or host.endswith(".facebook.com")):
+    while True:
+        if host.startswith("www."):
+            host = host[4:]
+            continue
+        if host.startswith("m."):
+            host = host[2:]
+            continue
+        if host.startswith("web."):
+            host = host[4:]
+            continue
+        if host.startswith("touch."):
+            host = host[6:]
+            continue
+        break
+    if host != "facebook.com":
         return False
 
     path = parsed.path or ""
@@ -1533,15 +1545,14 @@ def _fb_is_candidate_url_allowed(url: str) -> bool:
         if len(segments) != 1:
             return False
         qs = urllib.parse.parse_qs(query or "", keep_blank_values=False)
-        if set(qs.keys()) != {"id"}:
-            return False
         ids = qs.get("id", [])
         return len(ids) == 1 and ids[0].isdigit()
 
-    # Strict username: exactly one segment, no query params.
+    # Strict username path: exactly one segment. Query wrappers are tolerated
+    # here because downstream Night FB selection canonicalizes them back to the
+    # base page URL before navigation.
     if len(segments) == 1:
-        # username paths must have no query parameters
-        return query == ""
+        return True
 
     return False
 
@@ -1913,8 +1924,8 @@ if os.getenv("FB_DEBUG_CAND_URL_GATE") == "1":
     assert not _fb_is_candidate_url_allowed("https://www.facebook.com/permalink.php?story_fbid=123&id=456")
     assert not _fb_is_candidate_url_allowed("https://www.facebook.com/sharer.php?u=https%3A%2F%2Fexample.com")
     assert not _fb_is_candidate_url_allowed("https://www.facebook.com/someband/about")
-    assert not _fb_is_candidate_url_allowed("https://www.facebook.com/profile.php?id=12&foo=1")
-    assert not _fb_is_candidate_url_allowed("https://www.facebook.com/someband?__tn__=%2Cd")
+    assert _fb_is_candidate_url_allowed("https://www.facebook.com/profile.php?id=12&foo=1")
+    assert _fb_is_candidate_url_allowed("https://www.facebook.com/someband?__tn__=%2Cd")
 
 
 def select_best_facebook_candidate(

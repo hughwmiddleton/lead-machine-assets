@@ -215,6 +215,50 @@ def test_parse_search_candidates_does_not_duplicate_anchors():
     assert len(cands) == 2
 
 
+def test_tracked_slug_candidate_survives_to_ranking_and_normalizes_on_selection():
+    html = """
+    <div role="main">
+      <div aria-label="Search results">
+        <div class="card">
+          <a href="https://www.facebook.com/nightlightmusic?__tn__=%3C">Nightlight Music</a>
+          <div class="subtitle">Musician/band</div>
+        </div>
+        <div class="card">
+          <a href="https://business.facebook.com/nightlightmusic">Unread composer notice</a>
+          <div class="subtitle">5h</div>
+        </div>
+        <div class="card">
+          <a href="https://www.facebook.com/story.php?story_fbid=123&id=456">Story result</a>
+        </div>
+      </div>
+    </div>
+    """
+    candidates = night_mode_fb._parse_search_candidates(html, logger=None, search_name="Nightlight")
+    assert len(candidates) == 1
+    assert candidates[0].url == "https://www.facebook.com/nightlightmusic?__tn__=%3C"
+
+    ranked = night_mode_fb._rank_candidates_for_preview("Nightlight", candidates)
+    assert ranked[0]["candidate"].url == "https://www.facebook.com/nightlightmusic?__tn__=%3C"
+
+    enricher = night_mode_fb.NightModeFacebookEnricher(
+        legacy_module=None,
+        username="",
+        password="",
+        logger=None,
+        use_shared_session=False,
+    )
+    selected = enricher._select_candidate_url(
+        "Nightlight",
+        ranked[0]["candidate"],
+        candidates,
+        [item["candidate"] for item in ranked],
+        ranked,
+        "ranked_sort",
+        night_mode_fb._min_fb_accept_score(),
+    )
+    assert selected == "https://www.facebook.com/nightlightmusic"
+
+
 def test_is_profile_url_handles_queries_and_people_paths():
     assert night_mode_fb._is_profile_url("https://www.facebook.com/profile.php?id=123&__tn__=%3C")
     assert night_mode_fb._is_profile_url("https://www.facebook.com/people/some-name/1234567890")
