@@ -1623,14 +1623,56 @@ def _sanitize_lastfm_track_title(title: str) -> str:
     return working
 
 
-def build_bandcamp_queries(artist_name: str, track_title: Optional[str] = None) -> List[str]:
+def _bandcamp_location_signal(location_hint: str) -> str:
+    raw = (location_hint or "").strip()
+    if not raw:
+        return ""
+    first_segment = re.split(r"[|;/]", raw, maxsplit=1)[0].strip()
+    parts = [part.strip() for part in first_segment.split(",") if part.strip()]
+    preferred = parts[0] if parts else first_segment
+    tokens = [token for token in normalize_name(preferred).split() if len(token) >= 3]
+    return " ".join(tokens[:2])
+
+
+def _bandcamp_genre_signal(primary_genre_hint: str) -> str:
+    tokens = [token for token in normalize_name(primary_genre_hint or "").split() if len(token) >= 3]
+    return " ".join(tokens[:2])
+
+
+def _bandcamp_query_metadata_term(location_hint: str, primary_genre_hint: str) -> str:
+    return _bandcamp_location_signal(location_hint) or _bandcamp_genre_signal(primary_genre_hint)
+
+
+def _bandcamp_should_use_metadata_query(artist_name: str, metadata_term: str) -> bool:
+    if not metadata_term:
+        return False
+    artist_tokens = [token for token in normalize_name(artist_name).split() if token]
+    if not artist_tokens:
+        return False
+    total_chars = sum(len(token) for token in artist_tokens)
+    if len(artist_tokens) == 1:
+        return len(artist_tokens[0]) <= 12
+    return len(artist_tokens) == 2 and total_chars <= 12
+
+
+def build_bandcamp_queries(
+    artist_name: str,
+    track_title: Optional[str] = None,
+    location_hint: str = "",
+    primary_genre_hint: str = "",
+) -> List[str]:
     artist = (artist_name or "").strip()
     track = (track_title or "").strip()
+    metadata_term = _bandcamp_query_metadata_term(location_hint, primary_genre_hint)
 
     queries: List[str] = []
     if track:
-        queries.append(f'"{artist}" "{track}"')
-        queries.append(f'{artist} "{track}"')
+        if _bandcamp_should_use_metadata_query(artist, metadata_term):
+            queries.append(f'"{artist}" "{track}" "{metadata_term}"')
+            queries.append(f'"{artist}" "{track}"')
+        else:
+            queries.append(f'"{artist}" "{track}"')
+            queries.append(f'{artist} "{track}"')
     queries.append(artist)
 
     seen = set()
@@ -5079,7 +5121,29 @@ def _locale_rank_score(base_score: float, *texts: str) -> float:
     return min(1.0, base_score + bias)
 
 
-def _bandcamp_confidence(artist_name: str, display_name: str, profile_url: str, song_title: str = "") -> float:
+def _bandcamp_context_matches(signal: str, candidate_context: str) -> bool:
+    signal_norm = normalize_name(signal or "")
+    context_norm = normalize_name(candidate_context or "")
+    if not signal_norm or not context_norm:
+        return False
+    if signal_norm in context_norm:
+        return True
+    signal_tokens = [token for token in signal_norm.split() if len(token) >= 3]
+    if len(signal_tokens) < 2:
+        return False
+    context_tokens = set(context_norm.split())
+    return sum(1 for token in signal_tokens if token in context_tokens) >= 2
+
+
+def _bandcamp_confidence(
+    artist_name: str,
+    display_name: str,
+    profile_url: str,
+    song_title: str = "",
+    location_hint: str = "",
+    genre_hint: str = "",
+    candidate_context: str = "",
+) -> float:
     """
     Lightweight Bandcamp confidence:
     - Name similarity baseline
@@ -5091,6 +5155,7 @@ def _bandcamp_confidence(artist_name: str, display_name: str, profile_url: str, 
     disp_norm = normalize_name(display_name or "")
     if not artist_norm or not disp_norm:
         return 0.0
+    context_norm = normalize_name(candidate_context or display_name or "")
     score = difflib.SequenceMatcher(None, artist_norm, disp_norm).ratio()
     # Subdomain boost when it closely matches the artist.
     try:
@@ -5103,8 +5168,15 @@ def _bandcamp_confidence(artist_name: str, display_name: str, profile_url: str, 
         pass
     # Song-title boost if provided and appears in display text.
     song_norm = normalize_name(song_title or "")
-    if song_norm and song_norm in disp_norm:
+    if song_norm and song_norm in context_norm:
         score += 0.03
+    if score >= 0.84:
+        location_signal = _bandcamp_location_signal(location_hint)
+        if location_signal and _bandcamp_context_matches(location_signal, context_norm):
+            score += 0.03
+        genre_signal = _bandcamp_genre_signal(genre_hint)
+        if genre_signal and _bandcamp_context_matches(genre_signal, context_norm):
+            score += 0.02
     penalty_tokens = {"records", "recordings", "label", "store", "festival", "shop"}
     if any(tok in disp_norm for tok in penalty_tokens):
         score -= 0.1
@@ -10707,7 +10779,12 @@ class CrossDirectoryEnricherWorker(QThread):
         best_rank_score = 0.0
         best_match_score = 0.0
         if search_allowed:
-            queries = build_bandcamp_queries(artist_name, song_title)
+            queries = build_bandcamp_queries(
+                artist_name,
+                song_title,
+                location_hint=location_hint,
+                primary_genre_hint=primary_genre_hint,
+            )
 
             def _search(query: str) -> Tuple[Optional[EnrichmentPayload], float, float, Optional[int]]:
                 quoted = urllib.parse.quote_plus(query)
@@ -10728,12 +10805,14 @@ class CrossDirectoryEnricherWorker(QThread):
                     return (None, 0.0, 0.0, status)
                 display_name = ""
                 parent_li = first_link.find_parent("li")
+                candidate_context = ""
                 if parent_li:
+                    candidate_context = parent_li.get_text(" ", strip=True)
                     name_el = parent_li.select_one(".heading") or parent_li.select_one("div.heading")
                     if name_el:
                         display_name = name_el.get_text(" ", strip=True)
                     if not display_name:
-                        display_name = parent_li.get_text(" ", strip=True)
+                        display_name = candidate_context
                 if not display_name:
                     display_name = first_link.get_text(" ", strip=True)
                 profile_url = (first_link.get("href") or "").strip()
@@ -10757,7 +10836,13 @@ class CrossDirectoryEnricherWorker(QThread):
                     ):
                         return (None, 0.0, 0.0, status)
                 confidence = _bandcamp_confidence(
-                    artist_name, display_name, profile_url, song_title=song_title if query != artist_name else ""
+                    artist_name,
+                    display_name,
+                    profile_url,
+                    song_title=song_title if query != artist_name else "",
+                    location_hint=location_hint,
+                    genre_hint=primary_genre_hint,
+                    candidate_context=candidate_context,
                 )
                 rank_confidence = _locale_rank_score(confidence, display_name, profile_url)
                 payload: Optional[EnrichmentPayload] = None
