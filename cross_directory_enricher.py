@@ -52,6 +52,7 @@ from email_normalizer import (
     normalize_obfuscated_email_patterns,
 )
 from email_provenance import _set_email_with_provenance
+from fb_attribution import apply_fb_opportunity_state_df, ensure_fb_attribution_columns
 
 from facebook_enrich import (
     FbCandidate,
@@ -6155,6 +6156,9 @@ class CrossDirectoryEnricherWorker(QThread):
                 "[Schema] ensured email columns: Email, Email_All, Email_Type, Email_Source_URL, Email_Source_Type, Email_Extract_Method"
             )
             seed_df = _apply_fb_promotion_df(seed_df, log_fn=self.log_message.emit)
+            if getattr(self, "night_mode", False):
+                seed_df = ensure_fb_attribution_columns(seed_df)
+                seed_df = apply_fb_opportunity_state_df(seed_df, overwrite=True)
             total = len(seed_df.index)
             self.total_rows = total
             if getattr(self, "night_mode", False):

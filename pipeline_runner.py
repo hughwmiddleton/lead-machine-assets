@@ -25,6 +25,15 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set,
 import pandas as pd
 from email_provenance import _set_email_with_provenance
 from email_normalizer import filter_system_telemetry_emails
+from fb_attribution import (
+    FB_ATTEMPT_STATE_COL,
+    FB_ATTRIBUTION_COLUMNS,
+    FB_GATE_STATE_COL,
+    FB_OPPORTUNITY_STATE_COL,
+    FB_WRITE_STATE_COL,
+    apply_fb_opportunity_state_df,
+    ensure_fb_attribution_columns,
+)
 from html_fetcher import close_job_browser
 from source_scheduler import canonicalize_facebook_url, ensure_canonical_facebook_url, promote_facebook_url
 
@@ -522,6 +531,53 @@ def _set_email_all(df: pd.DataFrame, idx: int, new_emails: Union[str, Sequence[s
     # Guard may emit its own logs only when EMAIL_ALL_GUARD is enabled and a suspicious merge occurs.
     _guard_email_all_sources(df.loc[idx], merged_str, logger)
     return merged_str
+
+
+def _fb_write_surface_snapshot(row_like: Any) -> Dict[str, Any]:
+    email_val = _cell_str(row_like.get("Email", "")) if hasattr(row_like, "get") else ""
+    email_all_val = _cell_str(row_like.get("Email_All", "")) if hasattr(row_like, "get") else ""
+    return {
+        "email": email_val,
+        "email_all": email_all_val,
+        "email_set": set(normalize_emails(email_val)),
+        "email_all_set": set(normalize_emails(email_all_val)),
+    }
+
+
+def _classify_fb_write_state(before: Dict[str, Any], after: Dict[str, Any], attempt_state: str) -> str:
+    attempt_state_norm = _cell_str(attempt_state)
+    before_email = bool(before.get("email_set"))
+    after_email = bool(after.get("email_set"))
+    email_changed = bool(after.get("email_set", set()) - before.get("email_set", set()))
+    email_all_changed = bool(after.get("email_all_set", set()) - before.get("email_all_set", set()))
+
+    if attempt_state_norm == "attempted_fb_rejected_by_acceptance_guard":
+        return "fb_found_email_not_applied"
+    if email_changed and after_email:
+        return "fb_wrote_email"
+    if email_all_changed:
+        return "fb_wrote_email_all_only"
+    if attempt_state_norm == "attempted_fb_found_email":
+        return "fb_found_email_not_applied"
+    return "fb_no_email_written"
+
+
+def _classify_fb_attempt_state_from_status(status: str, existing: str = "") -> str:
+    existing_clean = _cell_str(existing)
+    if existing_clean and existing_clean != "attempted_fb":
+        return existing_clean
+    status_norm = _cell_str(status).lower()
+    if "reject" in status_norm or "blocked" in status_norm:
+        return "attempted_fb_rejected_by_acceptance_guard"
+    if any(token in status_norm for token in ("login_wall", "login_redirect", "checkpoint", "warning")):
+        return "attempted_fb_login_wall_or_checkpoint"
+    if "content_unavailable" in status_norm:
+        return "attempted_fb_content_unavailable"
+    if any(token in status_norm for token in ("timeout", "fetch_error", "driver_error", "no_display")):
+        return "attempted_fb_timeout_or_fetch_error"
+    if status_norm:
+        return "attempted_fb_no_email_on_page"
+    return existing_clean or "attempted_fb"
 
 
 def _row_has_valid_email(row: pd.Series) -> Tuple[bool, List[str]]:
@@ -1364,6 +1420,10 @@ FINAL_EXPORT_COLUMNS: Sequence[str] = [
     "final_status",
     "Needs_Review",
     "FB_Review_Reason",
+    FB_OPPORTUNITY_STATE_COL,
+    FB_GATE_STATE_COL,
+    FB_ATTEMPT_STATE_COL,
+    FB_WRITE_STATE_COL,
 ]
 
 WOODPECKER_EXPORT_COLUMNS: Sequence[str] = [
@@ -1746,6 +1806,10 @@ def _build_final_export_frame(df: pd.DataFrame) -> pd.DataFrame:
                 "final_status": final_status,
                 "Needs_Review": "TRUE" if needs_review else "FALSE",
                 "FB_Review_Reason": fb_review_reason,
+                FB_OPPORTUNITY_STATE_COL: str(row.get(FB_OPPORTUNITY_STATE_COL, "") or "").strip(),
+                FB_GATE_STATE_COL: str(row.get(FB_GATE_STATE_COL, "") or "").strip(),
+                FB_ATTEMPT_STATE_COL: str(row.get(FB_ATTEMPT_STATE_COL, "") or "").strip(),
+                FB_WRITE_STATE_COL: str(row.get(FB_WRITE_STATE_COL, "") or "").strip(),
             }
         )
 
@@ -2774,6 +2838,8 @@ def run_facebook_global_pass_nightmode(
         df["FB_Status"] = ""
     else:
         df["FB_Status"] = df["FB_Status"].fillna("")
+    df = ensure_fb_attribution_columns(df)
+    df = apply_fb_opportunity_state_df(df, overwrite=False)
     # Clear pandas NA values in FB-relevant string columns to avoid ambiguous boolean checks.
     for col in ("Facebook_URL", "Facebook URL", "Social Link", "External Links", "Email", "Email_All"):
         if col in df.columns:
@@ -2787,6 +2853,7 @@ def run_facebook_global_pass_nightmode(
             "Email_Type",
             "Facebook_URL",
             "FB_Status",
+            *FB_ATTRIBUTION_COLUMNS,
         ),
     )
 
@@ -2980,6 +3047,9 @@ def run_facebook_global_pass_nightmode(
             )
 
             if should_skip_due_to_email:
+                df.at[idx, FB_GATE_STATE_COL] = "skipped_existing_usable_email"
+                if not _cell_str(df.at[idx, FB_WRITE_STATE_COL]):
+                    df.at[idx, FB_WRITE_STATE_COL] = "fb_no_email_written"
                 _safe_log_console(
                     logger,
                     f"[Night FB] Skipping row {idx} ('{artist_label}') – email already present (Email_All='{email_all_clean}').",
@@ -2998,6 +3068,9 @@ def run_facebook_global_pass_nightmode(
                 continue
 
             if fb_status_val in terminal_statuses:
+                df.at[idx, FB_GATE_STATE_COL] = "skipped_terminal_fb_status"
+                if not _cell_str(df.at[idx, FB_WRITE_STATE_COL]):
+                    df.at[idx, FB_WRITE_STATE_COL] = "fb_no_email_written"
                 _safe_log_console(
                     logger,
                     f"[Night FB] Skipping row {idx} ('{artist_label}') – terminal FB_Status='{fb_status_val_raw}'.",
@@ -3020,6 +3093,13 @@ def run_facebook_global_pass_nightmode(
                 or not has_canonical_facebook_url
                 or not should_run_night_fb
             ):
+                if not has_canonical_facebook_url:
+                    if _cell_str(df.at[idx, FB_OPPORTUNITY_STATE_COL]) != "no_fb_opportunity":
+                        df.at[idx, FB_GATE_STATE_COL] = "skipped_no_canonical_facebook_url"
+                else:
+                    df.at[idx, FB_GATE_STATE_COL] = "skipped_other_gate"
+                if not _cell_str(df.at[idx, FB_WRITE_STATE_COL]):
+                    df.at[idx, FB_WRITE_STATE_COL] = "fb_no_email_written"
                 if fb_status_val in final_fb_statuses:
                     email_state = "present" if has_email_effective else "missing"
                     _safe_log_console(
@@ -3068,7 +3148,7 @@ def run_facebook_global_pass_nightmode(
                 enriched = fb_helper.enrich_row_with_facebook_night(clean_row, row_index=idx)
             except FacebookDriverError as exc:
                 _safe_log_console(logger, f"[FB Night] Driver error at row {idx}: {exc}")
-                enriched = {"FB_Status": "driver_error"}
+                enriched = {"FB_Status": "driver_error", FB_ATTEMPT_STATE_COL: "attempted_fb_timeout_or_fetch_error"}
             except Exception as exc:  # pragma: no cover - defensive
                 if _is_captcha_error(exc):
                     captcha_flag = True
@@ -3089,6 +3169,7 @@ def run_facebook_global_pass_nightmode(
                 _safe_log_console(logger, f"[FB Night] Night FB enrich failed at row {idx}: {exc}")
                 enriched = None
 
+            write_before = _fb_write_surface_snapshot(df.loc[idx])
             if enriched:
                 status_val = str(enriched.get("FB_Status", "") or "")
                 fb_rejected = _fb_status_is_rejected(status_val)
@@ -3137,9 +3218,19 @@ def run_facebook_global_pass_nightmode(
                     fb_url_now = enriched.get("Facebook_URL", "") or ""
                     status_val = "ok" if (str(email_now).strip() or fb_url_now) else "no_candidates"
                 df.at[idx, "FB_Status"] = status_val
+                attempt_state = _classify_fb_attempt_state_from_status(
+                    status_val,
+                    enriched.get(FB_ATTEMPT_STATE_COL, ""),
+                )
+                df.at[idx, FB_ATTEMPT_STATE_COL] = attempt_state
             else:
                 # Attempted but no enrichment result; mark as no_candidates to avoid repeated retries.
                 df.at[idx, "FB_Status"] = "no_candidates"
+                attempt_state = "attempted_fb_timeout_or_fetch_error"
+                df.at[idx, FB_ATTEMPT_STATE_COL] = attempt_state
+
+            write_after = _fb_write_surface_snapshot(df.loc[idx])
+            df.at[idx, FB_WRITE_STATE_COL] = _classify_fb_write_state(write_before, write_after, attempt_state)
 
             state.update(
                 {
@@ -3236,6 +3327,10 @@ DEFAULT_EXPORT_COLUMNS: Sequence[str] = [
     "Email_Extract_Method",
     "Email_Type",
     "FB_Status",
+    FB_OPPORTUNITY_STATE_COL,
+    FB_GATE_STATE_COL,
+    FB_ATTEMPT_STATE_COL,
+    FB_WRITE_STATE_COL,
     "Played on triple J",
     "Played on Unearthed",
     "Release Date",

@@ -23,6 +23,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set,
 import logging
 
 from fb_email_override import should_accept_email_override
+from fb_attribution import FB_ATTEMPT_STATE_COL
 
 from bs4 import BeautifulSoup
 from selenium import webdriver
@@ -329,6 +330,24 @@ def _log(logger: LoggerFn, message: str) -> None:
         print(message)
     except Exception:
         pass
+
+
+def _classify_night_fb_attempt_state(status: str, existing: str = "") -> str:
+    existing_clean = str(existing or "").strip()
+    if existing_clean and existing_clean != "attempted_fb":
+        return existing_clean
+    status_norm = str(status or "").strip().lower()
+    if "reject" in status_norm or "blocked" in status_norm:
+        return "attempted_fb_rejected_by_acceptance_guard"
+    if any(token in status_norm for token in ("login_wall", "login_redirect", "checkpoint", "warning")):
+        return "attempted_fb_login_wall_or_checkpoint"
+    if "content_unavailable" in status_norm:
+        return "attempted_fb_content_unavailable"
+    if any(token in status_norm for token in ("timeout", "fetch_error", "driver_error", "no_display")):
+        return "attempted_fb_timeout_or_fetch_error"
+    if status_norm:
+        return "attempted_fb_no_email_on_page"
+    return existing_clean or "attempted_fb"
 
 
 def _find_first(driver, css_selector: str):
@@ -7136,6 +7155,7 @@ class NightModeFacebookEnricher:
                 target_row["FB_Reason"] = reason
             if not target_row.get("FB_Status"):
                 target_row["FB_Status"] = "rejected"
+            target_row[FB_ATTEMPT_STATE_COL] = "attempted_fb_rejected_by_acceptance_guard"
             _log(
                 self.logger,
                 f"[FB Guard] Discarding emails from rejected FB page '{page_url or night_result.facebook_url or '<unknown>'}' for '{target_row.get('Artist Name', '') or target_row.get('Artist', '') or '<unknown>'}' (reason={reason})",
@@ -7147,6 +7167,7 @@ class NightModeFacebookEnricher:
         if _fb_status_is_rejected(fb_status_raw) or _fb_status_is_rejected(fb_reason):
             reason = fb_reason or fb_status_raw or "reject"
             page_label = page_url or "<unknown>"
+            target_row[FB_ATTEMPT_STATE_COL] = "attempted_fb_rejected_by_acceptance_guard"
             _log(
                 self.logger,
                 f"[FB Guard] Discarding emails from rejected FB page '{page_label}' for '{artist_name}' (reason={reason})",
@@ -7208,6 +7229,7 @@ class NightModeFacebookEnricher:
             if _coerce(target_row.get("Email_Extract_Method")) == "":
                 method = night_result.email_extract_method or "regex"
                 target_row["Email_Extract_Method"] = method
+        email_found = bool((night_result.email or "").strip() or emails)
         if emails:
             # Track FB-applied emails for downstream defensive stripping.
             normalized_emails = []
@@ -7219,6 +7241,8 @@ class NightModeFacebookEnricher:
                     normalized_emails.append(email_norm)
             if normalized_emails:
                 target_row["__fb_emails_applied"] = ";".join(sorted(normalized_emails))
+        if email_found:
+            target_row[FB_ATTEMPT_STATE_COL] = "attempted_fb_found_email"
         # Record ownership of the FB URL to prevent cross-artist reuse of the same page.
         artist_norm = _normalize_name_like(target_row.get("Artist Name", "") or target_row.get("Artist", "") or "")
         fb_url_norm = _normalise_fb_url(page_url or night_result.facebook_url or "")
@@ -7226,7 +7250,6 @@ class NightModeFacebookEnricher:
             self._fb_url_owner.setdefault(fb_url_norm, artist_norm)
         status_locked = _fb_status_is_terminal(fb_status_raw) or _fb_status_is_terminal(fb_reason)
         missing_url_statuses = {"no_fb_url", "pass_a_skipped_no_fb_url", "pass_a_no_email_on_page"}
-        email_found = bool((night_result.email or "").strip() or emails)
         fb_url_now = _coerce(target_row.get("Facebook_URL"))
         if not status_locked:
             if email_found and _coerce(target_row.get("Email")):
@@ -7407,30 +7430,40 @@ class NightModeFacebookEnricher:
                 pass
             return str(value or "").strip()
 
+        def _finish(payload: Dict[str, str], *, attempted: bool = True) -> Dict[str, str]:
+            if payload is None:
+                return payload
+            if attempted:
+                payload[FB_ATTEMPT_STATE_COL] = _classify_night_fb_attempt_state(
+                    payload.get("FB_Status", ""),
+                    payload.get(FB_ATTEMPT_STATE_COL, ""),
+                )
+            return payload
+
         if self._skip_fb_due_to_session_failure or self._session_failed:
             result["FB_Status"] = result.get("FB_Status", "") or "driver_error"
             result["FB_Reason"] = self._session_failed_reason or self._skip_fb_due_to_session_failure_reason or "session_start_failed"
-            return result
+            return _finish(result)
 
         if self._skip_fb_due_to_display:
             result["FB_Status"] = result.get("FB_Status", "") or "skipped_no_display"
             result["FB_Reason"] = "no_display_env"
-            return result
+            return _finish(result)
 
         if self._skip_fb_due_to_warning:
             result["FB_Status"] = result.get("FB_Status", "") or "skipped_warning"
             result["FB_Reason"] = self._skip_fb_due_to_warning_reason or "warning_interstitial"
-            return result
+            return _finish(result)
 
         if self.protective_shutdown:
             result["FB_Status"] = result.get("FB_Status", "") or "skipped_checkpoint"
             result["FB_Reason"] = result.get("FB_Reason", "") or "checkpoint"
             self.fb_rows_skipped["checkpoint"] += 1
-            return result
+            return _finish(result)
 
         if self._skip_fb_due_to_checkpoint:
             self.fb_rows_skipped["checkpoint"] += 1
-            return self._mark_row_checkpoint(result)
+            return _finish(self._mark_row_checkpoint(result))
 
         artist_name = _clean_val(result.get("Artist Name", ""))
         skip_due_to_email, email_all_clean = _row_has_usable_email_for_fb_skip(result)
@@ -7442,7 +7475,7 @@ class NightModeFacebookEnricher:
             )
             if not result.get("FB_Status"):
                 result["FB_Status"] = "ok"
-            return result
+            return _finish(result, attempted=False)
         location = _clean_val(result.get("Location", ""))
         song_title = _clean_val(
             result.get("Song Title", "")
@@ -7497,7 +7530,7 @@ class NightModeFacebookEnricher:
         try:
             if not self._maybe_recover_or_skip_on_checkpoint():
                 self.fb_rows_skipped["checkpoint"] += 1
-                return self._mark_row_checkpoint(result)
+                return _finish(self._mark_row_checkpoint(result))
             page_url = ""
             emails: List[str] = []
             # Guard for downstream reject_reason usage during PASS B apply phase.
@@ -7507,10 +7540,10 @@ class NightModeFacebookEnricher:
                 result["FB_Reason"] = "checkpoint"
                 _log(self.logger, "[Night FB] search disabled due to checkpoint; skipping FB search.")
                 self.fb_rows_skipped["checkpoint"] += 1
-                return result
+                return _finish(result)
             if is_unearthed:
                 _log(self.logger, "[Night FB] Detected Unearthed row -> using legacy no-login FB scrape.")
-                return self._enrich_row_unearthed_legacy(result, artist_name, fb_urls)
+                return _finish(self._enrich_row_unearthed_legacy(result, artist_name, fb_urls))
 
             allow_anon = self._should_allow_anonymous(result)
             # PASS A: explicit URL attempts (instrumentation only)
@@ -7614,7 +7647,7 @@ class NightModeFacebookEnricher:
                                 result["FB_Reason"] = "explicit_url"
                                 self._pass_a_bump("found_email")
                                 self._pass_a_log_row(artist_name, page_url, driver_kind, "found_email", reason_for_log, mode=pass_a_mode)
-                                return result
+                                return _finish(result)
                             else:
                                 page_url = night_result.facebook_url or _normalise_fb_url(direct_url)
                                 current_rank = outcome_rank.get(candidate_outcome, 99)
@@ -7693,7 +7726,7 @@ class NightModeFacebookEnricher:
                                 "explicit_url",
                                 mode=pass_a_mode,
                             )
-                            return result
+                            return _finish(result)
                     if reason_code:
                         if reason_code == "timeout":
                             result["FB_Status"] = "pass_a_timeout"
@@ -7716,7 +7749,7 @@ class NightModeFacebookEnricher:
             if not page_url:
                 session = self._ensure_session()
                 if (not session) and not allow_anon:
-                    return result
+                    return _finish(result)
             if not page_url:
                 page_url = self._search_for_page(
                     artist_name,
@@ -7729,13 +7762,13 @@ class NightModeFacebookEnricher:
                         result["FB_Status"] = "checkpoint_search_disabled"
                         result["FB_Reason"] = "checkpoint"
                     _log(self.logger, "[Night FB] search disabled due to checkpoint; skipping FB search.")
-                    return result
+                    return _finish(result)
                 if self._checkpoint_limited_active and not page_url:
                     if not result.get("FB_Status") or result.get("FB_Status") == "no_candidates":
                         result["FB_Status"] = "checkpoint_limited"
                     if not result.get("FB_Reason"):
                         result["FB_Reason"] = "checkpoint"
-                    return result
+                    return _finish(result)
                 if page_url:
                     candidate = self._scrape_single_fb_candidate(
                         page_url,
@@ -7759,7 +7792,7 @@ class NightModeFacebookEnricher:
                         )
                         if self._checkpoint_limited_active and not result.get("FB_Reason"):
                             result["FB_Reason"] = "checkpoint"
-                        return result
+                        return _finish(result)
                     if candidate_outcome == "content_unavailable":
                         fallback_candidates = self._last_search_candidates[1:] if len(self._last_search_candidates) > 1 else []
                         for idx, ctx in enumerate(fallback_candidates, start=2):
@@ -7787,14 +7820,14 @@ class NightModeFacebookEnricher:
                                 )
                                 if self._checkpoint_limited_active and not result.get("FB_Reason"):
                                     result["FB_Reason"] = "checkpoint"
-                                return result
+                                return _finish(result)
                             if alt_outcome != "content_unavailable":
                                 break
                         if not result.get("FB_Status"):
                             result["FB_Status"] = "content_unavailable"
                             result["FB_Reason"] = "content_unavailable"
                             _log(self.logger, f"[Night FB][PageUnavailable] No usable FB candidates for '{artist_name}' after content-unavailable fallbacks.")
-                            return result
+                            return _finish(result)
                 if not result.get("FB_Status"):
                     result["FB_Status"] = "checkpoint_limited" if self._checkpoint_limited_active else "no_candidates"
                 if self._last_search_reject_reason:
@@ -7808,7 +7841,7 @@ class NightModeFacebookEnricher:
                 if self._checkpoint_limited_active and not result.get("FB_Reason"):
                     result["FB_Reason"] = "checkpoint"
                 _log(self.logger, f"[Night FB] No usable FB candidates for '{artist_name}', marking FB_Status='{result.get('FB_Status')}'.")
-                return result
+                return _finish(result)
             night_result = self._build_result(
                 emails,
                 str(result.get("Email_All", "") or ""),
@@ -7835,7 +7868,7 @@ class NightModeFacebookEnricher:
                 else:
                     if not result.get("FB_Status"):
                         result["FB_Status"] = "ok"
-            return result
+            return _finish(result)
         except FacebookDriverError as exc:
             exc_msg = str(exc) or ""
             if exc_msg.startswith("fb_circuit_breaker:"):
@@ -7845,11 +7878,11 @@ class NightModeFacebookEnricher:
                 result["FB_Status"] = "skipped_warning"
                 result["FB_Reason"] = reason
                 _log(self.logger, f"[Night FB] Circuit breaker tripped ({reason}); skipping FB for remainder of run.")
-                return result
+                return _finish(result)
             result["FB_Status"] = "driver_error"
             _log(self.logger, f"[Night FB] Driver error while enriching '{result.get('Artist Name', '') or '<unknown>'}': {exc}")
-            return result
+            return _finish(result)
         except Exception as exc:  # pragma: no cover - defensive
             prefix = f"[FB Night] Night FB enrich failed at row {row_index}: {exc}" if row_index is not None else f"[FB Night] Night FB enrich failed: {exc}"
             _log(self.logger, prefix)
-            return original_row
+            return _finish(original_row)

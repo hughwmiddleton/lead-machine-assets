@@ -29,6 +29,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 
 from lead_vault.merge import preview_csv_merge_counts
+from fb_attribution import apply_fb_opportunity_state_df, ensure_fb_attribution_columns
 from night_mode_fb import close_night_fb_run_state, create_night_fb_run_state
 import pipeline_runner
 from pipeline_runner import (
@@ -1580,6 +1581,8 @@ def run_night_mode(
             if master_pre_fb and os.path.exists(master_pre_fb):
                 try:
                     df_master = pd.read_csv(master_pre_fb, dtype=str, keep_default_na=False).fillna("")
+                    df_master = ensure_fb_attribution_columns(df_master)
+                    df_master = apply_fb_opportunity_state_df(df_master, overwrite=False)
                     df_master = quarantine_repeated_emails(df_master, min_repeats=5, logger=logger)
                     df_master.to_csv(master_pre_fb, index=False)
                 except Exception as exc:

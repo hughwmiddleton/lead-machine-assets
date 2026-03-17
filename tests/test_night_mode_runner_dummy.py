@@ -410,7 +410,8 @@ class FacebookNightModeWrapperTest(unittest.TestCase):
                 self.calls.append(dict(row))
                 enriched = dict(row)
                 if not enriched.get("Email"):
-                    enriched["Email"] = f"fb_{enriched.get('Artist Name', '')}"
+                    artist_slug = str(enriched.get("Artist Name", "")).strip().lower()
+                    enriched["Email"] = f"fb_{artist_slug}@example.com"
                 enriched["Email_All"] = enriched.get("Email_All", "")
                 enriched["Email_Type"] = "fb_night"
                 return enriched
@@ -439,7 +440,7 @@ class FacebookNightModeWrapperTest(unittest.TestCase):
         self.assertFalse(first_state.get("fb_run_completed"))
         self.assertEqual(first_state.get("fb_attempted_total"), 1)
         df_first = pd.read_csv(self.output_csv)
-        self.assertEqual(df_first.loc[df_first["Artist Name"] == "NeedsFb1", "Email"].iloc[0], "fb_NeedsFb1")
+        self.assertEqual(df_first.loc[df_first["Artist Name"] == "NeedsFb1", "Email"].iloc[0], "fb_needsfb1@example.com")
         email_two = df_first.loc[df_first["Artist Name"] == "NeedsFb2", "Email"].iloc[0]
         self.assertTrue(pd.isna(email_two) or email_two == "")
 
@@ -469,7 +470,7 @@ class FacebookNightModeWrapperTest(unittest.TestCase):
         df_final = pd.read_csv(self.output_csv)
         name_only_email = df_final.loc[df_final["Artist Name"] == "NameOnly", "Email"].iloc[0]
         self.assertTrue(pd.isna(name_only_email) or name_only_email == "")
-        self.assertEqual(df_final.loc[df_final["Artist Name"] == "NeedsFb2", "Email"].iloc[0], "fb_NeedsFb2")
+        self.assertEqual(df_final.loc[df_final["Artist Name"] == "NeedsFb2", "Email"].iloc[0], "fb_needsfb2@example.com")
 
     def test_nightmode_wrapper_handles_captcha_signal(self) -> None:
         self._write_input()
