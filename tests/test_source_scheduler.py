@@ -1,4 +1,5 @@
 import pytest
+import source_scheduler
 
 from source_scheduler import (
     ADAPTIVE_PRIORITY_MAX_BONUS,
@@ -6,6 +7,7 @@ from source_scheduler import (
     SourceResult,
     SourceSpec,
     TimedRetry,
+    preferred_upstream_identity_hint,
     promote_facebook_url,
 )
 
@@ -133,6 +135,87 @@ def test_row_source_lock_does_not_apply_to_retry_later():
     assert calls == [0, 0, 1]
     assert summary["LF"]["attempted"] == 3
     assert summary["LF"]["enriched"] == 2
+
+
+def test_preferred_upstream_identity_hint_prefers_soundcloud_handle():
+    row = {
+        "SoundCloud Link": "https://soundcloud.com/SignalHandle/tracks?utm_source=feed",
+        "Bandcamp_URL": "https://signalartist.bandcamp.com/album/demo",
+        "Source URL": "https://fallback.bandcamp.com/track/night-drive",
+    }
+
+    assert preferred_upstream_identity_hint(row) == "signalhandle"
+
+
+def test_preferred_upstream_identity_hint_prefers_bandcamp_when_soundcloud_missing():
+    row = {
+        "SoundCloud Link": "",
+        "Bandcamp_URL": "https://Night-Light.bandcamp.com/album/demo?from=discover",
+        "Source URL": "",
+    }
+
+    assert preferred_upstream_identity_hint(row) == "night-light"
+
+
+def test_preferred_upstream_identity_hint_falls_back_to_provider_source_url():
+    row = {
+        "SoundCloud Link": "",
+        "Bandcamp_URL": "",
+        "Source URL": "https://soundcloud.com/fallbackhandle/night-drive",
+    }
+
+    assert preferred_upstream_identity_hint(row) == "fallbackhandle"
+
+
+def test_preferred_upstream_identity_hint_uses_shared_soundcloud_parser(monkeypatch):
+    monkeypatch.setattr(source_scheduler, "soundcloud_handle_from_profile_url", lambda value: "sharedhandle")
+
+    row = {"SoundCloud Link": "https://soundcloud.com/ignored", "Bandcamp_URL": "", "Source URL": ""}
+
+    assert preferred_upstream_identity_hint(row) == "sharedhandle"
+
+
+def test_preferred_upstream_identity_hint_uses_shared_bandcamp_parser(monkeypatch):
+    monkeypatch.setattr(source_scheduler, "soundcloud_handle_from_profile_url", lambda value: None)
+    monkeypatch.setattr(
+        source_scheduler,
+        "canonicalize_bandcamp_url",
+        lambda value: "https://shared-band.bandcamp.com/album/demo",
+    )
+
+    row = {"SoundCloud Link": "", "Bandcamp_URL": "https://ignored.bandcamp.com", "Source URL": ""}
+
+    assert preferred_upstream_identity_hint(row) == "shared-band"
+
+
+def test_preferred_upstream_identity_hint_ignores_unusable_provider_urls():
+    row = {
+        "SoundCloud Link": "https://soundcloud.com/charts/top",
+        "Bandcamp_URL": "https://blog.bandcamp.com/article",
+        "Source URL": "not a url",
+    }
+
+    assert preferred_upstream_identity_hint(row) == ""
+
+
+def test_preferred_upstream_identity_hint_rejects_help_and_search_style_provider_urls():
+    row = {
+        "SoundCloud Link": "https://soundcloud.com/search?q=signal",
+        "Bandcamp_URL": "https://help.bandcamp.com/hc/en-us",
+        "Source URL": "https://get.bandcamp.help/hc/en-us/articles/123",
+    }
+
+    assert preferred_upstream_identity_hint(row) == ""
+
+
+def test_preferred_upstream_identity_hint_returns_empty_without_provider_signal():
+    row = {
+        "SoundCloud Link": "",
+        "Bandcamp_URL": "",
+        "Source URL": "https://example.com/artist",
+    }
+
+    assert preferred_upstream_identity_hint(row) == ""
 
 
 def test_scheduler_mode_skips_legacy_phases(monkeypatch):

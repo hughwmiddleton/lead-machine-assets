@@ -114,6 +114,12 @@ def test_discover_facebook_url_bounded_requires_strong_candidate(monkeypatch):
     ("row_overrides", "expected_extra_signal"),
     [
         ({"Location": "", "Song Title": ""}, ""),
+        ({"SoundCloud Link": "https://soundcloud.com/signalhandle/sets/live", "Location": "", "Song Title": ""}, "signalhandle"),
+        ({"SoundCloud Link": "", "Bandcamp_URL": "https://night-light.bandcamp.com/album/demo", "Location": "", "Song Title": ""}, "night-light"),
+        ({"SoundCloud Link": "", "Bandcamp_URL": "", "Source URL": "https://soundcloud.com/sourcehandle/night-drive", "Location": "", "Song Title": ""}, "sourcehandle"),
+        ({"SoundCloud Link": "https://soundcloud.com/discover", "Bandcamp_URL": "https://bandcamp.com/discover/electronic", "Source URL": "https://example.com/artist", "Location": "", "Song Title": ""}, ""),
+        ({"SoundCloud Link": "https://soundcloud.com/charts/top", "Bandcamp_URL": "https://blog.bandcamp.com/article", "Location": "", "Song Title": ""}, ""),
+        ({"SoundCloud Link": "https://soundcloud.com/search?q=signal", "Bandcamp_URL": "https://help.bandcamp.com/hc/en-us", "Location": "", "Song Title": ""}, ""),
         ({"Location": "Melbourne", "Song Title": "Night Drive"}, "Night Drive"),
         ({"Location": "", "Song Title": "Night Drive"}, "Night Drive"),
         ({"Location": "", "Song Title": "Headside In Da Skiez (Babycham Supernova)"}, "Headside In Da Skiez"),
@@ -144,6 +150,9 @@ def test_discover_facebook_identity_selects_single_extra_signal(monkeypatch, row
             "FB_Reason": "",
             "Location": "",
             "Song Title": "",
+            "SoundCloud Link": "",
+            "Bandcamp_URL": "",
+            "Source URL": "",
         }
     )
     for key, value in row_overrides.items():

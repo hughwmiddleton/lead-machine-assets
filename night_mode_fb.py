@@ -39,7 +39,11 @@ from selenium.common.exceptions import (
     TimeoutException,
     WebDriverException,
 )
-from source_scheduler import canonicalize_facebook_url, ensure_canonical_facebook_url
+from source_scheduler import (
+    canonicalize_facebook_url,
+    ensure_canonical_facebook_url,
+    preferred_upstream_identity_hint,
+)
 from email_normalizer import filter_system_telemetry_emails
 
 try:
@@ -1671,8 +1675,15 @@ def _normalize_fb_location_query(raw: str) -> str:
     return raw
 
 
-def _build_fb_discovery_query(artist: str, location: str = "", song_title: str = "") -> Tuple[str, str]:
-    secondary_signal = _sanitize_fb_song_title(song_title)
+def _build_fb_discovery_query(
+    artist: str,
+    location: str = "",
+    song_title: str = "",
+    row: Any = None,
+) -> Tuple[str, str]:
+    secondary_signal = preferred_upstream_identity_hint(row)
+    if not secondary_signal:
+        secondary_signal = _sanitize_fb_song_title(song_title)
     if not secondary_signal:
         secondary_signal = _normalize_fb_location_query(location)
     query = " ".join(part for part in ((artist or "").strip(), secondary_signal) if part).strip()
@@ -6582,6 +6593,7 @@ class NightModeFacebookEnricher:
         location: str,
         allow_anon: bool = False,
         song_title: str = "",
+        row: Any = None,
     ) -> Optional[str]:
         self._sync_search_disable_from_run_state()
         self._last_selected_candidate_context = None
@@ -6653,12 +6665,17 @@ class NightModeFacebookEnricher:
                 self._last_search_candidates = [fallback_context]
             return fallback_url
 
+        legacy_secondary_signal = _sanitize_fb_song_title(song_title)
+        if not legacy_secondary_signal:
+            legacy_secondary_signal = _normalize_fb_location_query(location)
+
         primary_query, secondary_signal = _build_fb_discovery_query(
             artist,
             location=location,
             song_title=song_title,
+            row=row,
         )
-        has_secondary_signal = bool(secondary_signal)
+        has_secondary_signal = bool(legacy_secondary_signal)
         if not primary_query:
             return None
         html, nav_driver, search_timed_out, current_search_url = self._fetch_search_surface(
@@ -7884,6 +7901,7 @@ class NightModeFacebookEnricher:
                     location,
                     allow_anon=allow_anon,
                     song_title=song_title,
+                    row=result,
                 ) or ""
                 if self._search_disabled_due_to_checkpoint:
                     if not result.get("FB_Status"):

@@ -30,10 +30,13 @@ from source_scheduler import (
     SourceResult,
     SourceSpec,
     TimedRetry,
+    canonicalize_bandcamp_url as _shared_canonicalize_bandcamp_url,
     canonicalize_facebook_url,
     ensure_canonical_facebook_url,
     is_spotify_origin_row,
+    normalize_identity_url as _shared_normalize_identity_url,
     promote_facebook_url,
+    soundcloud_handle_from_profile_url as _shared_soundcloud_handle_from_profile_url,
 )
 from html_fetcher import fetch_html, _detect_soft_block
 from selenium import webdriver
@@ -4124,62 +4127,11 @@ def _is_noise_url(raw_url: str) -> bool:
 
 
 def _normalise_url(value: str) -> Optional[str]:
-    if not value:
-        return None
-    value = value.strip()
-    if not value:
-        return None
-    if value.startswith("//"):
-        value = "https:" + value
-    if "://" not in value:
-        value = "https://" + value.lstrip("/")
-    try:
-        parsed = urllib.parse.urlparse(value)
-    except Exception:
-        return None
-    if parsed.scheme not in ("http", "https"):
-        return None
-    netloc = parsed.netloc.lower()
-    path = re.sub(r"/+", "/", parsed.path or "")
-    if path.endswith("/") and path != "/":
-        path = path.rstrip("/")
-    return urllib.parse.urlunparse((parsed.scheme, netloc, path, "", parsed.query, ""))
+    return _shared_normalize_identity_url(value)
 
 
 def _canonicalise_bandcamp_url(value: str) -> str:
-    """
-    Bandcamp-only canonicalizer: keep scheme+host+path, drop query/fragment, force https.
-    Non-Bandcamp URLs are returned unchanged.
-    """
-    if not value:
-        return ""
-    raw_value = value.strip()
-    if not raw_value:
-        return ""
-    value = raw_value
-    # Ensure we have a scheme so urlsplit works consistently.
-    if value.startswith("//"):
-        value = "https:" + value
-    if "://" not in value:
-        value = f"https://{value.lstrip('/')}"
-    try:
-        parsed = urllib.parse.urlsplit(value)
-    except Exception:
-        return raw_value
-
-    netloc = (parsed.netloc or "").lower()
-    if netloc.startswith("www."):
-        netloc = netloc[4:]
-    # Only canonicalise Bandcamp hosts; otherwise, return the original value untouched.
-    if not netloc.endswith("bandcamp.com"):
-        return raw_value
-
-    path = re.sub(r"/+", "/", parsed.path or "")
-    if path == "/":
-        path = ""
-
-    # Force https and strip query/fragment.
-    return urllib.parse.urlunsplit(("https", netloc, path, "", ""))
+    return _shared_canonicalize_bandcamp_url(value)
 
 
 def _split_pipe_cell(value, is_email: bool = False) -> Set[str]:
@@ -5120,27 +5072,7 @@ def _sc_handle_from_url(url: str) -> str:
 
 
 def _sc_handle_from_profile_url(url: str) -> Optional[str]:
-    """
-    Extract a SoundCloud handle from a profile URL, ignoring query/fragment noise.
-    Returns None when the URL is not a SoundCloud profile.
-    """
-    if not url:
-        return None
-    try:
-        normalised = _normalise_url(url)
-        if not normalised:
-            return None
-        parsed = urllib.parse.urlparse(normalised)
-        host = parsed.netloc.lower()
-        if host.startswith("www."):
-            host = host[4:]
-        if host != "soundcloud.com":
-            return None
-        path = parsed.path.split("?", 1)[0]
-        handle = path.strip("/").split("/")[0]
-        return handle.lower() or None
-    except Exception:
-        return None
+    return _shared_soundcloud_handle_from_profile_url(url)
 
 
 def _sc_normalise_text(value: str) -> str:
@@ -7959,6 +7891,7 @@ class CrossDirectoryEnricherWorker(QThread):
             artist,
             location=location,
             song_title=song_title,
+            row=row,
         )
         self.log_message.emit(
             f"[FB Discover] No explicit facebook url for '{artist}'; attempting bounded discovery "

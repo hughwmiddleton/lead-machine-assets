@@ -48,6 +48,34 @@ _FB_REJECT_PATH_PREFIXES = (
     "/reel",
 )
 
+_SC_HINT_RESERVED_SEGMENTS_FALLBACK = frozenset(
+    {
+        "discover",
+        "explore",
+        "feed",
+        "imprint",
+        "pages",
+        "popular",
+        "stream",
+        "terms-of-use",
+        "transparency-reports",
+        "upload",
+        "you",
+    }
+)
+_SC_HINT_EXTRA_RESERVED_SEGMENTS = frozenset({"charts", "search"})
+_BC_HINT_RESERVED_SUBDOMAINS = frozenset(
+    {
+        "bandcamp",
+        "blog",
+        "daily",
+        "discover",
+        "get",
+        "help",
+        "music",
+    }
+)
+
 
 def canonicalize_facebook_url(raw: Any) -> str:
     """Return a canonical Facebook page/profile URL or an empty string."""
@@ -257,6 +285,159 @@ def _row_has_text(value: Any) -> bool:
     if isinstance(value, str):
         return bool(value.strip())
     return bool(value)
+
+
+def normalize_identity_url(value: str) -> Optional[str]:
+    if not value:
+        return None
+    value = value.strip()
+    if not value:
+        return None
+    if value.startswith("//"):
+        value = "https:" + value
+    if "://" not in value:
+        value = "https://" + value.lstrip("/")
+    try:
+        parsed = urllib.parse.urlparse(value)
+    except Exception:
+        return None
+    if parsed.scheme not in ("http", "https"):
+        return None
+    netloc = parsed.netloc.lower()
+    path = re.sub(r"/+", "/", parsed.path or "")
+    if path.endswith("/") and path != "/":
+        path = path.rstrip("/")
+    return urllib.parse.urlunparse((parsed.scheme, netloc, path, "", parsed.query, ""))
+
+
+def canonicalize_bandcamp_url(value: str) -> str:
+    """
+    Bandcamp-only canonicalizer: keep scheme+host+path, drop query/fragment, force https.
+    Non-Bandcamp URLs are returned unchanged.
+    """
+    if not value:
+        return ""
+    raw_value = value.strip()
+    if not raw_value:
+        return ""
+    value = raw_value
+    if value.startswith("//"):
+        value = "https:" + value
+    if "://" not in value:
+        value = f"https://{value.lstrip('/')}"
+    try:
+        parsed = urllib.parse.urlsplit(value)
+    except Exception:
+        return raw_value
+
+    netloc = (parsed.netloc or "").lower()
+    if netloc.startswith("www."):
+        netloc = netloc[4:]
+    if not netloc.endswith("bandcamp.com"):
+        return raw_value
+
+    path = re.sub(r"/+", "/", parsed.path or "")
+    if path == "/":
+        path = ""
+    return urllib.parse.urlunsplit(("https", netloc, path, "", ""))
+
+
+def soundcloud_handle_from_profile_url(url: str) -> Optional[str]:
+    """
+    Extract a SoundCloud handle from a profile URL, ignoring query/fragment noise.
+    Returns None when the URL is not a SoundCloud profile.
+    """
+    if not url:
+        return None
+    try:
+        normalised = normalize_identity_url(url)
+        if not normalised:
+            return None
+        parsed = urllib.parse.urlparse(normalised)
+        host = parsed.netloc.lower()
+        if host.startswith("www."):
+            host = host[4:]
+        if host != "soundcloud.com":
+            return None
+        path = parsed.path.split("?", 1)[0]
+        handle = path.strip("/").split("/")[0]
+        return handle.lower() or None
+    except Exception:
+        return None
+
+
+def _soundcloud_hint_reserved_segments() -> Set[str]:
+    reserved = set(_SC_HINT_RESERVED_SEGMENTS_FALLBACK)
+    reserved.update(_SC_HINT_EXTRA_RESERVED_SEGMENTS)
+    try:
+        from soundcloud_engine import SC_HANDLE_BAN as shared_reserved
+
+        reserved.update(str(item).lower() for item in shared_reserved)
+    except Exception:
+        pass
+    return reserved
+
+
+def _soundcloud_hint_from_url(raw: Any) -> str:
+    handle = soundcloud_handle_from_profile_url(str(raw or ""))
+    if not handle:
+        return ""
+    if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{1,49}", handle):
+        return ""
+    if handle in _soundcloud_hint_reserved_segments():
+        return ""
+    return handle
+
+
+def _bandcamp_hint_from_url(raw: Any) -> str:
+    canonical = canonicalize_bandcamp_url(str(raw or ""))
+    if not canonical:
+        return ""
+    try:
+        parsed = urllib.parse.urlparse(canonical)
+    except Exception:
+        return ""
+    host = (parsed.netloc or "").lower()
+    if host.startswith("www."):
+        host = host[4:]
+    if host == "bandcamp.com" or not host.endswith(".bandcamp.com"):
+        return ""
+    subdomain = host[: -len(".bandcamp.com")]
+    if not subdomain or "." in subdomain:
+        return ""
+    if subdomain in _BC_HINT_RESERVED_SUBDOMAINS:
+        return ""
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]{1,62}", subdomain):
+        return ""
+    return subdomain
+
+
+def preferred_upstream_identity_hint(row: Any) -> str:
+    """Return one safe provider-derived identity hint from persisted row data."""
+    soundcloud_url = _row_get_value(
+        row,
+        ("SoundCloud Link", "SoundCloud_URL", "SoundCloud URL", "soundcloud_url", "Soundcloud Link"),
+    )
+    soundcloud_handle = _soundcloud_hint_from_url(soundcloud_url)
+    if soundcloud_handle:
+        return soundcloud_handle
+
+    bandcamp_url = _row_get_value(
+        row,
+        ("Bandcamp_URL", "Bandcamp URL", "bandcamp_url"),
+    )
+    bandcamp_slug = _bandcamp_hint_from_url(bandcamp_url)
+    if bandcamp_slug:
+        return bandcamp_slug
+
+    source_url = _row_get_value(
+        row,
+        ("Source URL", "Source_URL", "source_url"),
+    )
+    source_hint = _soundcloud_hint_from_url(source_url)
+    if source_hint:
+        return source_hint
+    return _bandcamp_hint_from_url(source_url)
 
 
 def is_spotify_origin_row(row: Any) -> bool:
