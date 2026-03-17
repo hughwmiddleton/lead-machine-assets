@@ -215,6 +215,39 @@ def test_parse_search_candidates_does_not_duplicate_anchors():
     assert len(cands) == 2
 
 
+def test_parse_search_candidates_harvests_role_link_card_with_local_metadata():
+    html = """
+    <div role="main">
+      <div aria-label="Search results">
+        <div role="article" class="card">
+          <div role="link" data-href="https://www.facebook.com/nightechoesmusic">
+            <a aria-label="Night Echoes">Night Echoes</a>
+            <div class="subtitle">Musician/band</div>
+          </div>
+        </div>
+        <div role="article" class="card">
+          <div role="link" data-href="https://www.facebook.com/nightechoesstore">
+            <a aria-label="Night Echoes Store">Night Echoes Store</a>
+            <div class="subtitle">Gift shop</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    """
+    cands = night_mode_fb._parse_search_candidates(html, logger=None, search_name="Night Echoes")
+
+    assert len(cands) == 2
+    music = next(c for c in cands if c.url == "https://www.facebook.com/nightechoesmusic")
+    store = next(c for c in cands if c.url == "https://www.facebook.com/nightechoesstore")
+    assert music.name == "Night Echoes"
+    assert getattr(music, "category", "") == "Musician/band"
+    assert getattr(music, "music_hint", False) is True
+
+    ranked = night_mode_fb._rank_candidates_for_preview("Night Echoes", cands)
+    assert ranked[0]["candidate"] is music
+    assert ranked[1]["candidate"] is store
+
+
 def test_tracked_slug_candidate_survives_to_ranking_and_normalizes_on_selection():
     html = """
     <div role="main">

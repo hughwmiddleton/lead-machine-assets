@@ -93,3 +93,26 @@ def test_dom_gate_rejects_non_page_search_result_urls(bad_href):
     """
     cands = facebook_enrich._fb_extract_candidates_from_search_dom(html, search_name="Test Band")
     assert cands == []
+
+
+@pytest.mark.parametrize(
+    "bad_href",
+    [
+        "https://business.facebook.com/latest/composer",
+        "https://www.facebook.com/story.php?story_fbid=123&id=456",
+        "https://www.facebook.com/photo.php?fbid=123",
+    ],
+)
+def test_dom_gate_rejects_role_link_junk_urls(bad_href):
+    html = f"""
+    <div role="main">
+      <div aria-label="Search results">
+        <div role="link" data-href="{bad_href}">
+          <a aria-label="Test Band">Test Band</a>
+          <div class="subtitle">Musician/band</div>
+        </div>
+      </div>
+    </div>
+    """
+    cands = facebook_enrich._fb_extract_candidates_from_search_dom(html, search_name="Test Band")
+    assert cands == []

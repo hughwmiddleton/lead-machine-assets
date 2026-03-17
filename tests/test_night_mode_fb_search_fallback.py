@@ -375,3 +375,57 @@ def test_pass_b_homepage_fallback_filters_junk_but_keeps_real_candidate(monkeypa
     assert page == "https://www.facebook.com/testartist"
     assert search_methods == ["direct_route", "homepage_ui"]
     assert any("search_method=homepage_ui junk_candidates_filtered=1" in message for message in logs)
+
+
+def test_pass_b_homepage_fallback_harvests_role_link_card_candidate(monkeypatch) -> None:
+    monkeypatch.setenv("FB_SEARCH_HARVEST_V2", "0")
+    logs = []
+    enricher = _make_enricher()
+    enricher.logger = logs.append
+    session = _DummySession()
+    monkeypatch.setattr(enricher, "_ensure_session", lambda: session)
+    monkeypatch.setattr(enricher, "_ensure_driver_alive", lambda current_session: current_session)
+
+    search_methods = []
+    direct_html = "<html><body>direct-miss</body></html>"
+    homepage_html = """
+    <div role="main">
+      <div aria-label="Search results">
+        <div role="article" class="card">
+          <div role="link" data-href="https://www.facebook.com/testartistmusic">
+            <a aria-label="Test Artist">Test Artist</a>
+            <div class="subtitle">Musician/band</div>
+          </div>
+        </div>
+        <div role="article" class="card">
+          <div role="link" data-href="https://www.facebook.com/testartiststore">
+            <a aria-label="Test Artist Store">Test Artist Store</a>
+            <div class="subtitle">Gift shop</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    """
+
+    def _fake_fetch(query_str, *, search_method, session=None):  # noqa: ANN001
+        search_methods.append(search_method)
+        if search_method == "direct_route":
+            return (
+                direct_html,
+                SimpleNamespace(page_source=direct_html, current_url="https://www.facebook.com/search/pages/?q=test"),
+                False,
+                "https://www.facebook.com/search/pages/?q=test",
+            )
+        return (
+            homepage_html,
+            SimpleNamespace(page_source=homepage_html, current_url="https://www.facebook.com/search/top/?q=test"),
+            False,
+            "https://www.facebook.com/search/top/?q=test",
+        )
+
+    monkeypatch.setattr(enricher, "_fetch_search_surface", _fake_fetch)
+
+    page = enricher._search_for_page("Test Artist", location="", allow_anon=True)
+
+    assert page == "https://www.facebook.com/testartistmusic"
+    assert search_methods == ["direct_route", "homepage_ui"]

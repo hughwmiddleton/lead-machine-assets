@@ -1644,10 +1644,116 @@ def _fb_extract_candidates_from_search_dom(html_or_driver, logger=None, debug: b
         href = href.split("#", 1)[0]
         return href
 
+    def _extract_href_like_strings(value: str) -> List[str]:
+        if not value:
+            return []
+        text = str(value or "").strip()
+        if not text:
+            return []
+        results: List[str] = []
+        if text.startswith("/"):
+            results.append(text)
+        for match in re.findall(r"https?://[^\"'\s>]+", text, flags=re.I):
+            if "facebook.com" in match:
+                results.append(match)
+        return results
+
+    def _extract_href_from_candidate_element(element: Tag) -> Tuple[str, Optional[Tag]]:
+        label_el: Optional[Tag] = element
+        href_raw = ""
+        try:
+            href_raw = element.get("href") or ""
+        except Exception:
+            href_raw = ""
+
+        if not href_raw:
+            try:
+                nested = element.select_one("a[href]")
+            except Exception:
+                nested = None
+            if nested:
+                label_el = nested
+                try:
+                    href_raw = nested.get("href") or ""
+                except Exception:
+                    href_raw = ""
+
+        if not href_raw:
+            attr_names = (
+                "data-href",
+                "data-url",
+                "data-lynx-uri",
+                "data-target-href",
+                "data-redirect",
+                "data-redirect-url",
+                "data-uri",
+                "data-store",
+            )
+            for attr_name in attr_names:
+                try:
+                    raw_value = element.get(attr_name) or ""
+                except Exception:
+                    raw_value = ""
+                for hrefish in _extract_href_like_strings(raw_value):
+                    href = _normalize_href(hrefish)
+                    if href and "facebook.com" in href:
+                        if label_el is element:
+                            try:
+                                nested_label = element.find("a")
+                            except Exception:
+                                nested_label = None
+                            if nested_label is not None:
+                                label_el = nested_label
+                        return href, label_el
+
+        return _normalize_href(href_raw), label_el
+
+    def _candidate_name_from_element(element: Tag, label_el: Optional[Tag], href: str) -> str:
+        name = ""
+        label_target = label_el or element
+        try:
+            if label_target is not None and getattr(label_target, "name", None) == "a":
+                name = label_target.get_text(" ", strip=True) or ""
+        except Exception:
+            name = ""
+
+        if not name:
+            try:
+                aria_label = (label_target.get("aria-label") if label_target is not None else "") or ""
+            except Exception:
+                aria_label = ""
+            if aria_label and not is_fb_creator_category(aria_label) and not is_noisy_fb_text_block(aria_label):
+                name = aria_label.strip()
+
+        if not name:
+            try:
+                for text in element.stripped_strings:
+                    cleaned = re.sub(r"\s+", " ", str(text or "")).strip()
+                    if not cleaned or is_noisy_fb_text_block(cleaned):
+                        continue
+                    name = cleaned
+                    break
+            except Exception:
+                name = ""
+
+        return name or href
+
     def _gather_candidate_elements(container_list: List[Tag]) -> List[Tag]:
         scoped: List[Tag] = []
         seen_ids = set()
         for container in container_list:
+            try:
+                role_link_elements = container.find_all(attrs={"role": "link"})
+            except Exception:
+                role_link_elements = []
+            for el in role_link_elements:
+                if getattr(el, "name", None) == "a":
+                    continue
+                el_id = id(el)
+                if el_id in seen_ids:
+                    continue
+                seen_ids.add(el_id)
+                scoped.append(el)
             for selector in ("a", 'a[role="link"]'):
                 try:
                     found = container.select(selector)
@@ -1670,24 +1776,7 @@ def _fb_extract_candidates_from_search_dom(html_or_driver, logger=None, debug: b
             unique_elements.add(id(element))
 
             anchor = element
-            try:
-                href_raw = anchor.get("href") or ""
-            except Exception:
-                href_raw = ""
-
-            if not href_raw:
-                try:
-                    nested = anchor.select_one("a[href]")
-                except Exception:
-                    nested = None
-                if nested:
-                    anchor = nested
-                    try:
-                        href_raw = nested.get("href") or ""
-                    except Exception:
-                        href_raw = ""
-
-            href = _normalize_href(href_raw)
+            href, label_el = _extract_href_from_candidate_element(anchor)
             if not href or "facebook.com" not in href:
                 continue
             if href in href_seen:
@@ -1702,12 +1791,15 @@ def _fb_extract_candidates_from_search_dom(html_or_driver, logger=None, debug: b
             except Exception:
                 pass
 
-            name = anchor.get_text(" ", strip=True) or href
-            aria_label = anchor.get("aria-label") or ""
+            name = _candidate_name_from_element(anchor, label_el, href)
+            try:
+                aria_label = (label_el.get("aria-label") if label_el is not None else "") or anchor.get("aria-label") or ""
+            except Exception:
+                aria_label = ""
             category = ""
             category_candidates: List[str] = []
             if hasattr(anchor, "find_all"):
-                category_el = getattr(anchor, "parent", None)
+                category_el = anchor if anchor is not label_el else getattr(anchor, "parent", None)
                 if category_el is None and hasattr(anchor, "find_parent"):
                     try:
                         category_el = anchor.find_parent("div")
