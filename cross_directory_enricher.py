@@ -3492,6 +3492,23 @@ class FacebookSearchClient:
             _safe_log(self.logger, "[FB Enrich] No high-confidence Facebook match for '%s'.", artist_name)
             return None
 
+        best_score, best_name_score, best_cat_boost, best_is_music, best_is_corp, best_candidate = best_entry
+
+        if require_strong_candidate:
+            has_identity_evidence, identity_reason = _facebook_candidate_has_min_identity_evidence(
+                artist_name,
+                best_candidate,
+                name_score=best_name_score,
+            )
+            if not has_identity_evidence:
+                _safe_log(
+                    self.logger,
+                    "[FB Discover] Rejected candidate for '%s' before scrape - weak identity evidence: %s",
+                    artist_name,
+                    identity_reason,
+                )
+                return None
+
         if using_fallback and best_entry:
             _, base_score, _, _, _, cand = best_entry
             _safe_log(
@@ -3512,8 +3529,6 @@ class FacebookSearchClient:
                 cand.category or "<none>",
                 base_score,
             )
-
-        best_score, best_name_score, best_cat_boost, best_is_music, best_is_corp, best_candidate = best_entry
 
         # Second-layer validation: fetch page category and reject late if corporate or not music.
         page_music = False
@@ -3789,6 +3804,46 @@ def _facebook_candidate_has_personal_profile_phrase(
         if name_norm and f"{name_norm} is on facebook" in normalized_blob:
             return True
     return False
+
+
+def _facebook_candidate_has_min_identity_evidence(
+    artist_name: str,
+    candidate: FbCandidate,
+    *,
+    name_score: Optional[float] = None,
+) -> Tuple[bool, str]:
+    artist_norm = normalize_fb_name(artist_name)
+    if not artist_norm:
+        return False, "identity_floor"
+
+    if name_score is not None:
+        try:
+            if float(name_score) > 0.0:
+                return True, "name_score"
+        except Exception:
+            pass
+
+    candidate_name_norm = normalize_fb_name(cell_to_str(getattr(candidate, "name", "")))
+    candidate_url = cell_to_str(getattr(candidate, "url", ""))
+    try:
+        slug = urllib.parse.urlparse(candidate_url).path.strip("/").split("/")[0]
+    except Exception:
+        slug = ""
+    username_norm = normalize_fb_name(slug)
+
+    if candidate_name_norm == artist_norm or username_norm == artist_norm:
+        return True, "exact_norm"
+    if candidate_name_norm.startswith(artist_norm) or username_norm.startswith(artist_norm):
+        return True, "prefix_norm"
+    if candidate_name_norm and artist_norm in candidate_name_norm:
+        return True, "name_contains_artist"
+
+    artist_tokens = [token for token in artist_norm.split() if len(token) >= 4]
+    for token in artist_tokens:
+        if token in candidate_name_norm or token in username_norm:
+            return True, "token_overlap"
+
+    return False, "identity_floor"
 
 
 def _facebook_candidate_is_strong(

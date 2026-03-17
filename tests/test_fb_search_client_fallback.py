@@ -146,8 +146,10 @@ def test_find_best_page_url_rejects_zero_identity_music_candidate(monkeypatch) -
     )
     client = cde.FacebookSearchClient(driver=driver, logger=None)
     monkeypatch.setattr(client, "ensure_facebook_logged_in", lambda: True)
+    search_methods = []
 
     def _fake_fetch(query, *, search_method):  # noqa: ANN001
+        search_methods.append(search_method)
         return (
             (
                 "<div role='main'><div aria-label='Search results'>"
@@ -163,7 +165,25 @@ def test_find_best_page_url_rejects_zero_identity_music_candidate(monkeypatch) -
     result = client.find_best_page_url("Tallulah Argue", require_strong_candidate=True)
 
     assert result is None
-    assert driver.visited_urls[-1] == artist_url
+    assert driver.visited_urls == []
+    assert search_methods == ["direct_route"]
+
+
+def test_find_best_page_url_allows_weak_metadata_candidate_with_lexical_evidence() -> None:
+    candidate = cde.FbCandidate(
+        name="Tallulah Argue Live",
+        url="https://www.facebook.com/tallulah-argue-live",
+        category="Public figure",
+    )
+
+    allowed, reason = cde._facebook_candidate_has_min_identity_evidence(
+        "Tallulah Argue",
+        candidate,
+        name_score=0.5,
+    )
+
+    assert allowed is True
+    assert reason == "name_score"
 
 
 def test_find_best_page_url_accepts_plausible_music_candidate_with_identity(monkeypatch) -> None:
