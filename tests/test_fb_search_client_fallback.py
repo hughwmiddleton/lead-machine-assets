@@ -137,6 +137,64 @@ def test_find_best_page_url_does_not_fallback_when_direct_candidates_later_rejec
     assert search_methods == ["direct_route"]
 
 
+def test_find_best_page_url_rejects_zero_identity_music_candidate(monkeypatch) -> None:
+    artist_url = "https://www.facebook.com/fergie"
+    driver = _FakeDriver(
+        {
+            artist_url: "<html><body><div>Musician/Band</div><a href='https://open.spotify.com/artist/test'>Spotify</a></body></html>",
+        }
+    )
+    client = cde.FacebookSearchClient(driver=driver, logger=None)
+    monkeypatch.setattr(client, "ensure_facebook_logged_in", lambda: True)
+
+    def _fake_fetch(query, *, search_method):  # noqa: ANN001
+        return (
+            (
+                "<div role='main'><div aria-label='Search results'>"
+                f"<div class='card'><a href='{artist_url}'>Fergie</a><div class='subtitle'>Musician/Band</div></div>"
+                "</div></div>"
+            ),
+            "https://www.facebook.com/search/pages/?q=tallulah+argue",
+            False,
+        )
+
+    monkeypatch.setattr(client, "_fetch_search_surface", _fake_fetch)
+
+    result = client.find_best_page_url("Tallulah Argue", require_strong_candidate=True)
+
+    assert result is None
+    assert driver.visited_urls[-1] == artist_url
+
+
+def test_find_best_page_url_accepts_plausible_music_candidate_with_identity(monkeypatch) -> None:
+    artist_url = "https://www.facebook.com/tallulahargue"
+    driver = _FakeDriver(
+        {
+            artist_url: "<html><body><div>Musician/Band</div><a href='https://open.spotify.com/artist/test'>Spotify</a></body></html>",
+        }
+    )
+    client = cde.FacebookSearchClient(driver=driver, logger=None)
+    monkeypatch.setattr(client, "ensure_facebook_logged_in", lambda: True)
+
+    def _fake_fetch(query, *, search_method):  # noqa: ANN001
+        return (
+            (
+                "<div role='main'><div aria-label='Search results'>"
+                f"<div class='card'><a href='{artist_url}'>Tallulah Argue Music</a><div class='subtitle'>Musician/Band</div></div>"
+                "</div></div>"
+            ),
+            "https://www.facebook.com/search/pages/?q=tallulah+argue",
+            False,
+        )
+
+    monkeypatch.setattr(client, "_fetch_search_surface", _fake_fetch)
+
+    result = client.find_best_page_url("Tallulah Argue", require_strong_candidate=True)
+
+    assert result == artist_url
+    assert driver.visited_urls[-1] == artist_url
+
+
 def test_find_best_page_url_rejects_generic_homepage_auth_surface(monkeypatch) -> None:
     logs = []
     driver = _FakeDriver({})

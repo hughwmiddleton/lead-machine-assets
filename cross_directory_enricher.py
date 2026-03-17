@@ -3771,6 +3771,17 @@ def _facebook_candidate_is_strong(
     ):
         return False, "personal_profile_phrase"
 
+    scored = score_fb_candidate(
+        artist_name,
+        candidate_name,
+        candidate_url,
+        cell_to_str(getattr(candidate, "category", "")),
+    )
+    if scored is not None:
+        _, name_score, _ = scored
+        if name_score <= 0.0:
+            return False, "identity_floor"
+
     category_values: List[str] = []
     for raw_value in (
         page_category_text,
