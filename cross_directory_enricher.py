@@ -7884,7 +7884,11 @@ class CrossDirectoryEnricherWorker(QThread):
             snapshot = self._spotify_identity_surface_snapshot(seed_df.loc[row_idx])
         if not snapshot["has_facebook"]:
             spotify_tier = spotify_identity.get("tier")
-            if spotify_tier == 3:
+            low_tier_fb_eligible = (
+                spotify_tier == 3
+                and "location" in set(spotify_identity.get("reasons") or ())
+            )
+            if spotify_tier == 3 and not low_tier_fb_eligible:
                 self._spotify_low_tier_fb_skips += 1
                 artist = (
                     ctx.get("artist")
