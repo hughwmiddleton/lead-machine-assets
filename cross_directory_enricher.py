@@ -82,6 +82,7 @@ from facebook_enrich import (
 )
 from night_mode_fb import (
     NightFBRunState,
+    _build_fb_discovery_query,
     classify_explicit_fb_intake,
     _extract_emails_from_html,
     _log_fb_email_surface_debug,
@@ -7773,8 +7774,11 @@ class CrossDirectoryEnricherWorker(QThread):
             sample = intake.rejected_guard[0]
         location = cell_to_str(seed_df.at[row_idx, "Location"]) if "Location" in seed_df.columns else ""
         song_title = _extract_seed_track_text(row)
-        sanitized_song_title = _sanitize_fb_song_title(song_title)
-        extra_signal = sanitized_song_title or location
+        _fb_query, extra_signal = _build_fb_discovery_query(
+            artist,
+            location=location,
+            song_title=song_title,
+        )
         self.log_message.emit(
             f"[FB Discover] No explicit facebook url for '{artist}'; attempting bounded discovery "
             f"(explicit FB intake outcome='{intake.outcome}' source='{source_summary}' sample='{sample}')."

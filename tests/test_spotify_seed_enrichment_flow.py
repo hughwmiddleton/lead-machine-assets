@@ -490,6 +490,48 @@ def test_spotify_discovery_pass_allows_location_qualified_low_tier_spotify_row(t
     assert worker._spotify_low_tier_fb_skips == 0
 
 
+def test_spotify_discovery_pass_normalizes_location_signal_for_facebook_discovery(tmp_path, monkeypatch):
+    worker = _build_worker(tmp_path)
+    df = pd.DataFrame([_base_row(Location="Melbourne, VIC")])
+    ctx = worker._build_row_context(df, 0, 1, 1)
+    discovered = {"signals": []}
+
+    def fake_discover(_fb_driver, _artist_name, extra_signal, _logger):
+        discovered["signals"].append(extra_signal)
+        return ""
+
+    monkeypatch.setattr(cde, "_discover_facebook_url_bounded", fake_discover)
+
+    enriched = worker._run_spotify_discovery_pass(df, 0, ctx, fb_driver=object())
+
+    assert enriched is False
+    assert discovered["signals"] == ["Melbourne VIC"]
+    assert df.at[0, "Facebook_URL"] == ""
+
+
+def test_spotify_discovery_pass_normalized_location_can_create_facebook_opportunity(tmp_path, monkeypatch):
+    worker = _build_worker(tmp_path)
+    df = pd.DataFrame([_base_row(Location="Melbourne, VIC")])
+    ctx = worker._build_row_context(df, 0, 1, 1)
+    discovered = {"signals": []}
+
+    def fake_discover(_fb_driver, _artist_name, extra_signal, _logger):
+        discovered["signals"].append(extra_signal)
+        if extra_signal == "Melbourne VIC":
+            return "https://www.facebook.com/artist-a"
+        return ""
+
+    monkeypatch.setattr(cde, "_discover_facebook_url_bounded", fake_discover)
+
+    enriched = worker._run_spotify_discovery_pass(df, 0, ctx, fb_driver=object())
+    df = apply_fb_opportunity_state_df(df)
+
+    assert enriched is True
+    assert discovered["signals"] == ["Melbourne VIC"]
+    assert df.at[0, "Facebook_URL"] == "https://www.facebook.com/artist-a"
+    assert df.at[0, FB_OPPORTUNITY_STATE_COL] == "fb_opportunity_present"
+
+
 def test_spotify_discovery_pass_skips_facebook_identity_for_low_tier_spotify_row(tmp_path, monkeypatch):
     worker = _build_worker(tmp_path)
     df = pd.DataFrame([_base_row()])
