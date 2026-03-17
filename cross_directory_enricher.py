@@ -5423,6 +5423,38 @@ def _sc_location_match(hint: str, candidate: str) -> bool:
     return all(part in cand_norm for part in hint_parts)
 
 
+def _sc_title_metadata_boost(
+    song_title: str = "",
+    track_hint: str = "",
+    *texts: str,
+) -> float:
+    haystack = normalise_track_title(" ".join(text for text in texts if text))
+    if not haystack:
+        return 0.0
+    haystack_tokens = set(haystack.split())
+    best = 0.0
+    seen: Set[str] = set()
+    for raw_signal in (song_title, track_hint):
+        signal = normalise_track_title(raw_signal)
+        if not signal or signal in seen:
+            continue
+        seen.add(signal)
+        signal_tokens = [token for token in signal.split() if len(token) >= 3]
+        if not signal_tokens:
+            continue
+        if signal in haystack:
+            if len(signal_tokens) >= 2:
+                best = max(best, 0.07)
+            elif len(signal_tokens[0]) >= 6:
+                best = max(best, 0.04)
+            continue
+        if len(signal_tokens) >= 2:
+            overlap = sum(1 for token in signal_tokens if token in haystack_tokens)
+            if overlap >= 2:
+                best = max(best, 0.03)
+    return best
+
+
 def _sc_score_candidate(
     artist_name: str,
     candidate_name: str,
@@ -5430,11 +5462,15 @@ def _sc_score_candidate(
     location_hint: str = "",
     candidate_location: str = "",
     genre_hint: str = "",
+    candidate_context: str = "",
+    profile_url: str = "",
+    song_title: str = "",
+    track_hint: str = "",
 ) -> float:
     """
     Lightweight confidence score for SoundCloud candidates:
     - anchor on cleaned display name + handle similarity to artist name
-    - boost on location/genre hints when available
+    - boost on location/genre/title hints when available
     - penalise label/podcast-like handles to de-prioritise obvious mismatches
     """
     artist_norm = _sc_normalise_text(artist_name)
@@ -5457,12 +5493,24 @@ def _sc_score_candidate(
         score = max(score, 0.85)
     if artist_norm and handle_norm.startswith(artist_norm.split()[0]):
         score = max(score, score + 0.05)
+    name_score = score
     if location_hint and _sc_location_match(location_hint, candidate_location):
         score += 0.08
     if genre_hint:
         genre_norm = _sc_normalise_text(genre_hint)
         if genre_norm and genre_norm in _sc_normalise_text(candidate_name):
             score += 0.05
+    if name_score >= 0.55 or (
+        artist_norm_basic and artist_norm_basic in {cand_norm_basic, handle_norm_basic}
+    ):
+        score += _sc_title_metadata_boost(
+            song_title,
+            track_hint,
+            candidate_name,
+            handle,
+            candidate_context,
+            profile_url,
+        )
     if any(keyword in handle_norm for keyword in _SC_LABEL_PODCAST_KEYWORDS):
         score -= 0.25
     if any(keyword in cand_norm for keyword in _SC_LABEL_PODCAST_KEYWORDS):
@@ -11022,6 +11070,7 @@ class CrossDirectoryEnricherWorker(QThread):
         track_hint: str,
         attempt: _NightSCAttempt,
         country_hint: str = "",
+        song_title: str = "",
     ) -> Optional[Dict[str, Any]]:
         best_candidate: Optional[Dict[str, Any]] = None
         candidate_source = "none"
@@ -11119,7 +11168,12 @@ class CrossDirectoryEnricherWorker(QThread):
             if api_candidates:
                 candidate_source = "api"
                 candidate = self._pick_best_soundcloud_candidate(
-                    artist_name, api_candidates, location_hint, genre_hint
+                    artist_name,
+                    api_candidates,
+                    location_hint,
+                    genre_hint,
+                    song_title=song_title,
+                    track_hint=track_hint,
                 )
                 if candidate:
                     attempt.candidate_source = candidate_source
@@ -11160,7 +11214,12 @@ class CrossDirectoryEnricherWorker(QThread):
             if candidates and candidate_source == "none":
                 candidate_source = "html"
             candidate = self._pick_best_soundcloud_candidate(
-                artist_name, candidates, location_hint, genre_hint
+                artist_name,
+                candidates,
+                location_hint,
+                genre_hint,
+                song_title=song_title,
+                track_hint=track_hint,
             )
             if candidate and _is_better_candidate(candidate, best_candidate):
                 best_candidate = candidate
@@ -11177,7 +11236,12 @@ class CrossDirectoryEnricherWorker(QThread):
                 if candidates and candidate_source == "none":
                     candidate_source = "html"
                 candidate = self._pick_best_soundcloud_candidate(
-                    artist_name, candidates, location_hint, genre_hint
+                    artist_name,
+                    candidates,
+                    location_hint,
+                    genre_hint,
+                    song_title=song_title,
+                    track_hint=track_hint,
                 )
                 if candidate and _is_better_candidate(candidate, best_candidate):
                     best_candidate = candidate
@@ -11430,6 +11494,7 @@ class CrossDirectoryEnricherWorker(QThread):
                     track_hint,
                     attempt,
                     country_hint=country_hint,
+                    song_title=song_title,
                 )
                 if best_candidate:
                     handle = best_candidate.get("handle") or _sc_handle_from_profile_url(best_candidate.get("profile_url") or "") or ""
@@ -11713,6 +11778,7 @@ class CrossDirectoryEnricherWorker(QThread):
             track_hint,
             attempt,
             country_hint=country_hint,
+            song_title=song_title,
         )
         if not best_candidate:
             attempt.status = "no_confident_match"
@@ -13193,6 +13259,8 @@ class CrossDirectoryEnricherWorker(QThread):
         candidates: List[Dict[str, Any]],
         location_hint: str = "",
         genre_hint: str = "",
+        song_title: str = "",
+        track_hint: str = "",
     ) -> Optional[Dict[str, Any]]:
         best: Optional[Dict[str, Any]] = None
         artist_norm_basic = _sc_strip_basic(_sc_normalise_text(artist_name))
@@ -13200,6 +13268,8 @@ class CrossDirectoryEnricherWorker(QThread):
             handle = candidate.get("handle") or ""
             display = candidate.get("display_name") or ""
             location_text = candidate.get("location") or ""
+            context_text = candidate.get("context") or ""
+            profile_url = candidate.get("profile_url") or ""
             score = _sc_score_candidate(
                 artist_name,
                 display,
@@ -13207,8 +13277,12 @@ class CrossDirectoryEnricherWorker(QThread):
                 location_hint=location_hint,
                 candidate_location=location_text,
                 genre_hint=genre_hint,
+                candidate_context=context_text,
+                profile_url=profile_url,
+                song_title=song_title,
+                track_hint=track_hint,
             )
-            rank_score = _locale_rank_score(score, location_text, candidate.get("context", ""))
+            rank_score = _locale_rank_score(score, location_text, context_text)
             candidate["score"] = score
             candidate["rank_score"] = rank_score
             candidate_domain = extract_domain(candidate.get("profile_url") or "")

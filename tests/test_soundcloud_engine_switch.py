@@ -226,3 +226,96 @@ class SoundCloudEngineSwitchTests(unittest.TestCase):
 
         self.assertTrue(result)
         self.assertGreaterEqual(fallback_called["count"], 1)
+
+    def test_pick_best_soundcloud_candidate_prefers_metadata_aligned_ambiguous_match(self) -> None:
+        worker = self._make_worker()
+        worker._compute_match_score_for_candidate = lambda *args, **kwargs: 0.0
+
+        candidates = [
+            {
+                "profile_url": "https://soundcloud.com/nova",
+                "handle": "nova",
+                "display_name": "Nova",
+                "location": "Berlin, Germany",
+                "context": "Berlin shoegaze artist. Latest single Crystal Skin.",
+            },
+            {
+                "profile_url": "https://soundcloud.com/nova-official",
+                "handle": "nova-official",
+                "display_name": "Nova",
+                "location": "Los Angeles, United States",
+                "context": "Los Angeles hip hop producer.",
+            },
+        ]
+
+        best = worker._pick_best_soundcloud_candidate(
+            "Nova",
+            candidates,
+            location_hint="Berlin, Germany",
+            genre_hint="shoegaze",
+            song_title="Crystal Skin",
+            track_hint="crystal skin",
+        )
+
+        self.assertIsNotNone(best)
+        self.assertEqual(best["handle"], "nova")
+
+    def test_pick_best_soundcloud_candidate_title_evidence_can_flip_close_name_match(self) -> None:
+        worker = self._make_worker()
+        worker._compute_match_score_for_candidate = lambda *args, **kwargs: 0.0
+
+        candidates = [
+            {
+                "profile_url": "https://soundcloud.com/mooncrewlive",
+                "handle": "mooncrewlive",
+                "display_name": "Moon Crew Live",
+                "location": "",
+                "context": "Indie pop artist.",
+            },
+            {
+                "profile_url": "https://soundcloud.com/mooncrewmusic",
+                "handle": "mooncrewmusic",
+                "display_name": "Moon Crew Music",
+                "location": "",
+                "context": "Latest track Static Hearts.",
+            },
+        ]
+
+        without_title = worker._pick_best_soundcloud_candidate("Moon Crew", [dict(c) for c in candidates])
+        with_title = worker._pick_best_soundcloud_candidate(
+            "Moon Crew",
+            [dict(c) for c in candidates],
+            song_title="Static Hearts",
+            track_hint="static hearts",
+        )
+
+        self.assertIsNotNone(without_title)
+        self.assertIsNotNone(with_title)
+        self.assertEqual(without_title["handle"], "mooncrewlive")
+        self.assertEqual(with_title["handle"], "mooncrewmusic")
+
+    def test_pick_best_soundcloud_candidate_preserves_selection_when_metadata_missing(self) -> None:
+        worker = self._make_worker()
+        worker._compute_match_score_for_candidate = lambda *args, **kwargs: 0.0
+
+        candidates = [
+            {
+                "profile_url": "https://soundcloud.com/amber",
+                "handle": "amber",
+                "display_name": "Amber",
+                "location": "",
+                "context": "",
+            },
+            {
+                "profile_url": "https://soundcloud.com/amber-music",
+                "handle": "amber-music",
+                "display_name": "Amber Music",
+                "location": "",
+                "context": "",
+            },
+        ]
+
+        best = worker._pick_best_soundcloud_candidate("Amber", list(candidates))
+
+        self.assertIsNotNone(best)
+        self.assertEqual(best["handle"], "amber")
