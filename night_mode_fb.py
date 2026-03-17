@@ -4886,7 +4886,8 @@ def _fetch_fb_about_variants(base_url: str) -> List[str]:
 def _pick_fb_contact_link(soup: BeautifulSoup, base_url: str) -> Optional[str]:
     """
     Choose a single valid Facebook contact/about surface from the main page.
-    Prioritises about_contact_and_basic_info > about > contact.
+    Prioritises the strongest contact/about surfaces within the single
+    secondary-fetch budget.
     """
     if not soup:
         return None
@@ -4958,15 +4959,19 @@ def _pick_fb_contact_link(soup: BeautifulSoup, base_url: str) -> Optional[str]:
         priority: Optional[int] = None
         if path.endswith("/about_contact_and_basic_info"):
             priority = 0
-        elif path.endswith("/about"):
+        elif path.endswith("/contact_and_basic_info"):
             priority = 1
-        elif path.endswith("/contact"):
+        elif path.endswith("/about_details"):
             priority = 2
+        elif path.endswith("/about"):
+            priority = 3
+        elif path.endswith("/contact"):
+            priority = 4
         else:
             qs = urllib.parse.parse_qs(parsed.query or "", keep_blank_values=False)
             sk_value = ((qs.get("sk") or [""])[0] or "").strip().lower()
             if sk_value in allowed_sk and (path == base_path or path == "/profile.php"):
-                priority = 0 if sk_value == "about_contact_and_basic_info" else 1
+                priority = 0 if sk_value == "about_contact_and_basic_info" else 3
 
         if priority is None:
             continue
@@ -7044,12 +7049,23 @@ class NightModeFacebookEnricher:
         email_override_decision = True
         email_override_reason = ""
         if emails and not has_music_signals:
+            override_score = candidate_context.get("base_score") if candidate_context else 0.0
+            try:
+                override_score = float(override_score or 0.0)
+            except Exception:
+                override_score = 0.0
+            if (
+                override_score < 1.0
+                and seed_url_match
+                and self._can_identity_soft_pass(artist_name, page_title, resolved_url, 1.0)
+            ):
+                override_score = 1.0
             extracted = {
                 "has_music_signals": has_music_signals,
                 "category": meta_category,
                 "descriptor": page_title,
                 "music_hint": bool(candidate_context and candidate_context.get("category") and _category_is_music_like(candidate_context.get("category"))),
-                "score": candidate_context.get("base_score") if candidate_context else 0.0,
+                "score": override_score,
                 "seed_url_match": seed_url_match,
                 "artist_location": artist_location,
             }
@@ -7059,7 +7075,7 @@ class NightModeFacebookEnricher:
                     "name": page_title,
                     "category": meta_category,
                     "raw_category": meta_category,
-                    "base_score": candidate_context.get("base_score") if candidate_context else 0.0,
+                    "base_score": override_score,
                 },
                 extracted_signals=extracted,
             )

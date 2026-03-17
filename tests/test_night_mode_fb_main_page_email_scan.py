@@ -442,6 +442,79 @@ def test_secondary_fetch_prefers_about_contact_and_basic_info_and_stays_within_c
     assert any(f"[FB Email] Visiting {contact_info_url}" in msg for msg in logs)
 
 
+def test_secondary_fetch_prefers_contact_and_basic_info_over_about_and_stays_within_cap(monkeypatch) -> None:
+    logs = []
+    enricher = _build_enricher(logs)
+    calls = []
+    main_url = "https://www.facebook.com/artist"
+    about_url = "https://www.facebook.com/artist/about"
+    contact_info_url = "https://www.facebook.com/artist/contact_and_basic_info"
+
+    pages = {
+        main_url: (
+            """
+            <html>
+              <body>
+                <div>No email on the main page.</div>
+                <a href="/artist/about">About</a>
+                <a href="/artist/contact_and_basic_info">Contact info</a>
+              </body>
+            </html>
+            """,
+            main_url,
+        ),
+        about_url: (
+            """
+            <html>
+              <body>
+                <div>No email here.</div>
+              </body>
+            </html>
+            """,
+            about_url,
+        ),
+        contact_info_url: (
+            """
+            <html>
+              <body>
+                <div>Bookings: bookings@artist.com</div>
+              </body>
+            </html>
+            """,
+            contact_info_url,
+        ),
+    }
+
+    def fake_fetch(url, goto_about=False):  # noqa: ANN001
+        calls.append(url)
+        return pages[url]
+
+    monkeypatch.setattr(enricher, "_fetch_html_with_url", fake_fetch)
+    monkeypatch.setattr(nmfb, "_night_fb_has_music_signals", lambda soup, context: False)
+    monkeypatch.setattr(nmfb, "should_accept_email_override", lambda *args, **kwargs: (True, "test_override"))
+
+    result = enricher._scrape_single_fb_candidate(
+        main_url,
+        {"Artist Name": "Artist", "Email_All": ""},
+        "Artist",
+        allow_anon=False,
+        candidate_context={},
+    )
+
+    assert result is not None
+    night_result, emails, driver_kind, outcome = result
+    assert emails == ["bookings@artist.com"]
+    assert night_result is not None
+    assert night_result.about_attempted == "yes"
+    assert night_result.about_result == "emails_found"
+    assert calls == [main_url, contact_info_url]
+    assert len(calls) == 2
+    assert driver_kind == "session"
+    assert outcome == "found_email"
+    assert any("[FB Email] No email found on main page; evaluating contact/about fetch" in msg for msg in logs)
+    assert any(f"[FB Email] Visiting {contact_info_url}" in msg for msg in logs)
+
+
 def test_direct_about_fallback_runs_when_no_contact_link_detected(monkeypatch) -> None:
     logs = []
     enricher = _build_enricher(logs)
@@ -610,3 +683,56 @@ def test_secondary_fetch_uses_direct_about_fallback_when_only_invalid_internal_s
     assert outcome == "no_email_on_page"
     assert any("[FB Email] No email found on main page; evaluating contact/about fetch" in msg for msg in logs)
     assert any("trying direct fallback" in msg for msg in logs)
+
+
+def test_explicit_seed_url_keeps_main_page_email_without_candidate_context(monkeypatch) -> None:
+    logs = []
+    enricher = _build_enricher(logs)
+    calls = []
+    main_url = "https://www.facebook.com/exactartist"
+
+    pages = {
+        main_url: (
+            """
+            <html>
+              <head>
+                <title>Exact Artist</title>
+              </head>
+              <body>
+                <div>Bookings: bookings@artist.com</div>
+              </body>
+            </html>
+            """,
+            main_url,
+        ),
+    }
+
+    def fake_fetch(url, goto_about=False):  # noqa: ANN001
+        calls.append(url)
+        return pages[url]
+
+    monkeypatch.setattr(enricher, "_fetch_html_with_url", fake_fetch)
+    monkeypatch.setattr(nmfb, "_night_fb_has_music_signals", lambda soup, context: False)
+
+    result = enricher._scrape_single_fb_candidate(
+        main_url,
+        {
+            "Artist Name": "Exact Artist",
+            "Email_All": "",
+            "Facebook_URL": main_url,
+        },
+        "Exact Artist",
+        allow_anon=False,
+        candidate_context={},
+    )
+
+    assert result is not None
+    night_result, emails, driver_kind, outcome = result
+    assert emails == ["bookings@artist.com"]
+    assert night_result is not None
+    assert night_result.accepted is True
+    assert night_result.email == "bookings@artist.com"
+    assert night_result.about_attempted == "no"
+    assert calls == [main_url]
+    assert driver_kind == "session"
+    assert outcome == "found_email"

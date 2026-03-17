@@ -81,6 +81,14 @@ def test_night_mode_pick_fb_contact_link_accepts_about_contact_and_basic_info() 
     assert selected == "https://www.facebook.com/artist/about_contact_and_basic_info"
 
 
+def test_night_mode_pick_fb_contact_link_accepts_contact_and_basic_info() -> None:
+    html = '<html><body><a href="/artist/contact_and_basic_info">Contact info</a></body></html>'
+
+    selected = _pick_from_html("https://www.facebook.com/artist", html)
+
+    assert selected == "https://www.facebook.com/artist/contact_and_basic_info"
+
+
 def test_night_mode_pick_fb_contact_link_prefers_about_contact_and_basic_info_over_about() -> None:
     html = """
     <html><body>
@@ -94,12 +102,38 @@ def test_night_mode_pick_fb_contact_link_prefers_about_contact_and_basic_info_ov
     assert selected == "https://www.facebook.com/artist/about_contact_and_basic_info"
 
 
+def test_night_mode_pick_fb_contact_link_prefers_contact_and_basic_info_over_about() -> None:
+    html = """
+    <html><body>
+      <a href="/artist/about">About</a>
+      <a href="/artist/contact_and_basic_info">Contact info</a>
+    </body></html>
+    """
+
+    selected = _pick_from_html("https://www.facebook.com/artist", html)
+
+    assert selected == "https://www.facebook.com/artist/contact_and_basic_info"
+
+
 def test_night_mode_pick_fb_contact_link_accepts_contact_path() -> None:
     html = '<html><body><a href="/artist/contact">Contact</a></body></html>'
 
     selected = _pick_from_html("https://www.facebook.com/artist", html)
 
     assert selected == "https://www.facebook.com/artist/contact"
+
+
+def test_night_mode_pick_fb_contact_link_prefers_about_details_over_about() -> None:
+    html = """
+    <html><body>
+      <a href="/artist/about">About</a>
+      <a href="/artist/about_details">Details</a>
+    </body></html>
+    """
+
+    selected = _pick_from_html("https://www.facebook.com/artist", html)
+
+    assert selected == "https://www.facebook.com/artist/about_details"
 
 
 def test_night_mode_pick_fb_contact_link_falls_back_to_about_over_contact() -> None:
