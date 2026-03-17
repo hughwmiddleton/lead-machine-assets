@@ -215,6 +215,61 @@ def test_night_mode_pick_fb_contact_link_prefers_sk_about_contact_and_basic_info
     assert selected == "https://www.facebook.com/artist?sk=about_contact_and_basic_info"
 
 
+def test_night_mode_pick_fb_contact_link_accepts_profile_sk_about_details_surface() -> None:
+    html = '<html><body><a href="/profile.php?id=123&sk=about_details">Details</a></body></html>'
+
+    selected = _pick_from_html("https://www.facebook.com/profile.php?id=123", html)
+
+    assert selected == "https://www.facebook.com/profile.php?id=123&sk=about_details"
+
+
+def test_night_mode_pick_fb_contact_link_prefers_profile_sk_about_details_over_about() -> None:
+    html = """
+    <html><body>
+      <a href="/profile.php?id=123&sk=about">About</a>
+      <a href="/profile.php?id=123&sk=about_details">Details</a>
+    </body></html>
+    """
+
+    selected = _pick_from_html("https://www.facebook.com/profile.php?id=123", html)
+
+    assert selected == "https://www.facebook.com/profile.php?id=123&sk=about_details"
+
+
+def test_night_mode_pick_fb_contact_link_prefers_strongest_unique_profile_surface() -> None:
+    html = """
+    <html><body>
+      <a href="https://m.facebook.com/profile.php?id=123&sk=about#bio">About</a>
+      <a href="/profile.php?id=123&sk=about">About again</a>
+      <a href="https://touch.facebook.com/profile.php?id=123&sk=about_details#contact">Details</a>
+    </body></html>
+    """
+
+    selected = _pick_from_html("https://www.facebook.com/profile.php?id=123", html)
+
+    assert selected == "https://www.facebook.com/profile.php?id=123&sk=about_details"
+
+
+def test_fetch_fb_about_variants_profile_includes_about_details_between_contact_and_about() -> None:
+    variants = nmfb._fetch_fb_about_variants("https://www.facebook.com/profile.php?id=123")
+
+    assert variants == [
+        "https://www.facebook.com/profile.php?id=123&sk=about_contact_and_basic_info",
+        "https://www.facebook.com/profile.php?id=123&sk=about_details",
+        "https://www.facebook.com/profile.php?id=123&sk=about",
+    ]
+
+
+def test_fetch_fb_about_variants_slug_order_unchanged() -> None:
+    variants = nmfb._fetch_fb_about_variants("https://www.facebook.com/artist")
+
+    assert variants == [
+        "https://www.facebook.com/artist/about_contact_and_basic_info",
+        "https://www.facebook.com/artist/about_details",
+        "https://www.facebook.com/artist/about",
+    ]
+
+
 class _FakeFacebookDriver:
     def __init__(self, pages):
         self.pages = pages

@@ -4917,6 +4917,7 @@ def _fetch_fb_about_variants(base_url: str) -> List[str]:
         if fb_id and str(fb_id).isdigit():
             return [
                 f"https://www.facebook.com/profile.php?id={fb_id}&sk=about_contact_and_basic_info",
+                f"https://www.facebook.com/profile.php?id={fb_id}&sk=about_details",
                 f"https://www.facebook.com/profile.php?id={fb_id}&sk=about",
             ]
         return []
@@ -4956,7 +4957,7 @@ def _pick_fb_contact_link(soup: BeautifulSoup, base_url: str) -> Optional[str]:
         "watch",
         "videos",
     }
-    allowed_sk = {"about", "about_contact_and_basic_info"}
+    allowed_sk = {"about", "about_contact_and_basic_info", "about_details"}
 
     def _canonicalize_resolved(candidate_url: str) -> Optional[Tuple[str, urllib.parse.ParseResult]]:
         resolved = urllib.parse.urljoin(base, candidate_url or "").split("#", 1)[0]
@@ -5016,7 +5017,12 @@ def _pick_fb_contact_link(soup: BeautifulSoup, base_url: str) -> Optional[str]:
             qs = urllib.parse.parse_qs(parsed.query or "", keep_blank_values=False)
             sk_value = ((qs.get("sk") or [""])[0] or "").strip().lower()
             if sk_value in allowed_sk and (path == base_path or path == "/profile.php"):
-                priority = 0 if sk_value == "about_contact_and_basic_info" else 3
+                if sk_value == "about_contact_and_basic_info":
+                    priority = 0
+                elif sk_value == "about_details":
+                    priority = 2
+                else:
+                    priority = 3
 
         if priority is None:
             continue
