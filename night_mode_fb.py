@@ -4337,8 +4337,24 @@ if os.getenv("FB_DEBUG_CAND_URL_GATE") == "1":
         pass
 
 
+_FB_NAME_NOISE_TOKENS = {
+    "account",
+    "band",
+    "music",
+    "musician",
+    "official",
+    "page",
+    "record",
+    "records",
+    "verified",
+}
+
+
 def _candidate_tokens(text: str) -> List[str]:
-    return re.findall(r"[a-z0-9]+", (text or "").lower())
+    normalized = unicodedata.normalize("NFKD", (text or "").strip().lower())
+    normalized = "".join(ch for ch in normalized if not unicodedata.combining(ch))
+    tokens = re.findall(r"[a-z0-9]+", normalized)
+    return [tok for tok in tokens if tok not in _FB_NAME_NOISE_TOKENS]
 
 
 def _is_profile_url(url: str) -> bool:

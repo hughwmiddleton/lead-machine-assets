@@ -75,6 +75,31 @@ def test_zero_identity_music_mismatch_is_rejected():
     assert enricher._last_search_reject_reason == "identity_mismatch"
 
 
+def test_verified_account_name_noise_can_pass_with_real_identity_overlap():
+    enricher = _make_enricher()
+    artist = "Kai Banks"
+    plausible = _cand("BANKS Verified account", "https://www.facebook.com/banks", "Musician/Band")
+    ranked = [_rank_item(artist, plausible)]
+
+    chosen, selected_by = enricher._choose_ranked_candidate(artist, ranked)
+
+    assert chosen is plausible
+    assert selected_by == "ranked_sort"
+
+
+def test_verified_account_noise_does_not_rescue_unrelated_music_candidate():
+    enricher = _make_enricher()
+    artist = "Kai Banks"
+    unrelated = _cand("Fergie Verified account", "https://www.facebook.com/fergie", "Musician/Band")
+    ranked = [_rank_item(artist, unrelated)]
+
+    chosen, selected_by = enricher._choose_ranked_candidate(artist, ranked)
+
+    assert chosen is None
+    assert selected_by == "no_safe_match"
+    assert enricher._last_search_reject_reason == "identity_mismatch"
+
+
 def test_weak_music_match_still_passes_identity_floor():
     enricher = _make_enricher()
     artist = "The Enhancer"
