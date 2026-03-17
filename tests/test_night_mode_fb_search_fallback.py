@@ -112,6 +112,28 @@ def test_build_fb_discovery_query_falls_back_to_normalized_location() -> None:
     assert query == "Signal Artist Melbourne VIC"
 
 
+def test_build_fb_discovery_query_rejects_low_information_song_title_and_uses_location() -> None:
+    query, secondary = night_mode_fb._build_fb_discovery_query(
+        "Signal Artist",
+        location="Melbourne, VIC",
+        song_title="Demo Mix",
+    )
+
+    assert secondary == "Melbourne VIC"
+    assert query == "Signal Artist Melbourne VIC"
+
+
+def test_build_fb_discovery_query_rejects_low_information_song_title_without_location() -> None:
+    query, secondary = night_mode_fb._build_fb_discovery_query(
+        "Signal Artist",
+        location="",
+        song_title="Track 01",
+    )
+
+    assert secondary == ""
+    assert query == "Signal Artist"
+
+
 def test_pass_b_secondary_signal_skips_refine_queries(monkeypatch) -> None:
     monkeypatch.setenv("FB_REFINE_QUERY", "1")
     enricher = _make_enricher()

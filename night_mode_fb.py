@@ -1587,6 +1587,62 @@ def _extract_fb_urls_for_night_mode(row):
     return urls
 
 
+_FB_LOW_INFO_SONG_TITLE_TOKENS = frozenset(
+    {
+        "acoustic",
+        "bootleg",
+        "demo",
+        "dub",
+        "edit",
+        "instrumental",
+        "interlude",
+        "intro",
+        "live",
+        "mix",
+        "original",
+        "outro",
+        "radio",
+        "remaster",
+        "remastered",
+        "remix",
+        "reprise",
+        "session",
+        "sessions",
+        "snippet",
+        "song",
+        "tba",
+        "teaser",
+        "title",
+        "track",
+        "untitled",
+        "unknown",
+        "version",
+        "vip",
+    }
+)
+
+
+def _fb_song_title_is_usable(title: str) -> bool:
+    if len(title) < 3:
+        return False
+
+    tokens = [token for token in re.split(r"[\W_]+", title.lower()) if token]
+    if not tokens:
+        return False
+
+    alpha_tokens = [token for token in tokens if any(ch.isalpha() for ch in token)]
+    if not alpha_tokens:
+        return False
+
+    if all(token in _FB_LOW_INFO_SONG_TITLE_TOKENS for token in alpha_tokens):
+        return False
+
+    if all(token.isdigit() or token in _FB_LOW_INFO_SONG_TITLE_TOKENS for token in tokens):
+        return False
+
+    return True
+
+
 def _sanitize_fb_song_title(title: str) -> str:
     """Lightly clean a song title for Facebook discovery query use only."""
     if not isinstance(title, str):
@@ -1599,7 +1655,10 @@ def _sanitize_fb_song_title(title: str) -> str:
     working = re.sub(r"\([^)]*\)", " ", working)
     working = re.sub(r"\s*[/\\\\|]+\s*", " ", working)
     working = re.sub(r"\s+", " ", working)
-    return working.strip()
+    working = working.strip()
+    if not _fb_song_title_is_usable(working):
+        return ""
+    return working
 
 
 def _normalize_fb_location_query(raw: str) -> str:
