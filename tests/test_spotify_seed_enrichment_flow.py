@@ -5,6 +5,7 @@ import pandas as pd
 import cross_directory_enricher as cde
 import pipeline_runner
 import source_scheduler
+from fb_attribution import FB_OPPORTUNITY_STATE_COL, apply_fb_opportunity_state_df
 
 
 def _write_csv(path, rows):
@@ -438,6 +439,31 @@ def test_spotify_discovery_pass_populates_facebook_identity_for_higher_tier_spot
     assert df.at[0, "Facebook_URL"] == "https://www.facebook.com/artist-a"
     assert worker._spotify_identity_pass_attempted == 0
     assert worker._spotify_identity_pass_enriched == 0
+
+
+def test_spotify_discovery_pass_prefers_song_title_signal_for_facebook_opportunity(tmp_path, monkeypatch):
+    worker = _build_worker(tmp_path)
+    df = pd.DataFrame(
+        [_base_row(Spotify_Website_URL="https://artist.test", Location="Melbourne", **{"Song Title": "TAKE//OVER"})]
+    )
+    ctx = worker._build_row_context(df, 0, 1, 1)
+    discovered = {"calls": []}
+
+    def fake_discover(_fb_driver, _artist_name, extra_signal, _logger):
+        discovered["calls"].append(extra_signal)
+        if extra_signal == "TAKE OVER":
+            return "https://www.facebook.com/artist-a"
+        return ""
+
+    monkeypatch.setattr(cde, "_discover_facebook_url_bounded", fake_discover)
+
+    enriched = worker._run_spotify_discovery_pass(df, 0, ctx, fb_driver=object())
+    df = apply_fb_opportunity_state_df(df)
+
+    assert enriched is True
+    assert discovered["calls"] == ["TAKE OVER"]
+    assert df.at[0, "Facebook_URL"] == "https://www.facebook.com/artist-a"
+    assert df.at[0, FB_OPPORTUNITY_STATE_COL] == "fb_opportunity_present"
 
 
 def test_spotify_discovery_pass_skips_facebook_identity_for_low_tier_spotify_row(tmp_path, monkeypatch):
