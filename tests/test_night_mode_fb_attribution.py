@@ -70,7 +70,7 @@ def _run_night_fb_pass(monkeypatch, tmp_path, rows, helper):
     return _read_csv(output_csv), status
 
 
-def test_no_facebook_url_enters_discovery_fallback_path(monkeypatch, tmp_path):
+def test_upstream_identity_anchor_enters_discovery_fallback_path(monkeypatch, tmp_path):
     helper = StaticFBHelper(
         {
             "FB_Status": "pass_a_no_email_on_page",
@@ -85,6 +85,7 @@ def test_no_facebook_url_enters_discovery_fallback_path(monkeypatch, tmp_path):
                 "Artist Name": "No FB Artist",
                 "Email": "",
                 "Email_All": "",
+                "SoundCloud Link": "https://soundcloud.com/no-fb-artist/tracks",
                 "Social Link": "",
                 "Facebook_URL": "",
             }
@@ -97,6 +98,35 @@ def test_no_facebook_url_enters_discovery_fallback_path(monkeypatch, tmp_path):
     assert df_out.loc[0, FB_OPPORTUNITY_STATE_COL] == "fb_discovery_fallback_eligible"
     assert df_out.loc[0, FB_GATE_STATE_COL] == ""
     assert df_out.loc[0, FB_ATTEMPT_STATE_COL] == "attempted_fb_no_email_on_page"
+    assert df_out.loc[0, FB_WRITE_STATE_COL] == "fb_no_email_written"
+
+
+def test_no_facebook_url_without_identity_anchor_skips_night_discovery(monkeypatch, tmp_path):
+    helper = StaticFBHelper(
+        {
+            "FB_Status": "pass_a_no_email_on_page",
+            FB_ATTEMPT_STATE_COL: "attempted_fb_no_email_on_page",
+        }
+    )
+    df_out, _ = _run_night_fb_pass(
+        monkeypatch,
+        tmp_path,
+        [
+            {
+                "Artist Name": "Weak FB Artist",
+                "Email": "",
+                "Email_All": "",
+                "Social Link": "",
+                "Facebook_URL": "",
+            }
+        ],
+        helper,
+    )
+
+    assert helper.calls == 0
+    assert df_out.loc[0, FB_OPPORTUNITY_STATE_COL] == "no_fb_opportunity"
+    assert df_out.loc[0, FB_GATE_STATE_COL] == "skipped_no_identity_anchor"
+    assert df_out.loc[0, FB_ATTEMPT_STATE_COL] == ""
     assert df_out.loc[0, FB_WRITE_STATE_COL] == "fb_no_email_written"
 
 

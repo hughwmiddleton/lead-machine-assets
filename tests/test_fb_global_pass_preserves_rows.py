@@ -4,11 +4,13 @@ from types import SimpleNamespace
 import night_mode_fb as nmfb
 import pandas as pd
 import pipeline_runner
+from fb_attribution import FB_GATE_STATE_COL
 
 
 class DummyFBHelper:
     def __init__(self, *args, **kwargs):
         self.calls = 0
+        self.rows = []
 
     def __enter__(self):
         return self
@@ -24,6 +26,7 @@ class DummyFBHelper:
 
     def enrich_row_with_facebook_night(self, row, row_index=0):
         self.calls += 1
+        self.rows.append({"row": dict(row or {}), "row_index": row_index})
         return {
             "FB_Status": "ok",
             "Email": "fb@example.com",
@@ -68,6 +71,15 @@ def test_fb_global_pass_preserves_rows_and_emails(monkeypatch, tmp_path):
             "__source_job": "job_email",
             "Email": "sc@example.com",
             "Email_All": "sc@example.com",
+            "Social Link": "",
+            "Facebook_URL": "",
+        },
+        {
+            "Artist Name": "Anchored Only",
+            "__source_job": "job_anchor",
+            "Email": "",
+            "Email_All": "",
+            "SoundCloud Link": "https://soundcloud.com/anchored-only/tracks",
             "Social Link": "",
             "Facebook_URL": "",
         },
@@ -121,20 +133,34 @@ def test_fb_global_pass_preserves_rows_and_emails(monkeypatch, tmp_path):
     assert existing_email_rows.iloc[0]["Email_All"] == "sc@example.com"
 
     # Rows attempted for FB enrichment get FB-derived email/status, including blank-FB fallback discovery.
-    fb_attempted = df_out[df_out["__source_job"].isin(["job_fb_url", "job_social_fb", "job_none"])]
+    fb_attempted = df_out[df_out["__source_job"].isin(["job_fb_url", "job_social_fb", "job_anchor"])]
     assert (fb_attempted["Email"] == "fb@example.com").all()
     assert (fb_attempted["Email_All"].str.contains("fb@example.com")).all()
     assert (fb_attempted["FB_Status"].str.lower() == "ok").all()
 
-    # Rows without canonical Facebook_URL can now enter the bounded Night FB discovery path.
+    # Rows without canonical Facebook_URL can still enter the bounded Night FB discovery path
+    # when they carry a usable upstream identity anchor.
+    anchored_rows = df_out[df_out["__source_job"] == "job_anchor"]
+    assert len(anchored_rows) == 1
+    assert anchored_rows.iloc[0]["Email"] == "fb@example.com"
+    assert "fb@example.com" in anchored_rows.iloc[0]["Email_All"]
+    assert anchored_rows.iloc[0]["FB_Status"].lower() == "ok"
+
+    # Weak rows without a Facebook URL or upstream identity anchor are preserved but skipped.
     no_clue_rows = df_out[df_out["__source_job"] == "job_none"]
     assert len(no_clue_rows) == 1
-    assert no_clue_rows.iloc[0]["Email"] == "fb@example.com"
-    assert "fb@example.com" in no_clue_rows.iloc[0]["Email_All"]
-    assert no_clue_rows.iloc[0]["FB_Status"].lower() == "ok"
+    assert no_clue_rows.iloc[0]["Email"] == ""
+    assert no_clue_rows.iloc[0]["Email_All"] == ""
+    assert no_clue_rows.iloc[0]["FB_Status"] == ""
+    assert no_clue_rows.iloc[0][FB_GATE_STATE_COL] == "skipped_no_identity_anchor"
 
     # Only rows without existing emails were attempted.
     assert helper.calls == len(fb_attempted.index)
+    assert {entry["row"]["Artist Name"] for entry in helper.rows} == {
+        "Has FB URL",
+        "Social Link FB",
+        "Anchored Only",
+    }
 
     # Status object reflects that work happened but total rows equal input.
     assert status.total_rows == len(rows)
@@ -287,6 +313,7 @@ def test_nightmode_fb_pass_logs_outer_row_gate(monkeypatch, tmp_path):
                 "Artist Name": "Try Me",
                 "Email": "",
                 "Email_All": "",
+                "SoundCloud Link": "https://soundcloud.com/try-me/tracks",
                 "Social Link": "",
                 "Facebook_URL": "",
             },

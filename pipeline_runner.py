@@ -35,7 +35,12 @@ from fb_attribution import (
     ensure_fb_attribution_columns,
 )
 from html_fetcher import close_job_browser
-from source_scheduler import canonicalize_facebook_url, ensure_canonical_facebook_url, promote_facebook_url
+from source_scheduler import (
+    canonicalize_facebook_url,
+    ensure_canonical_facebook_url,
+    preferred_upstream_identity_hint,
+    promote_facebook_url,
+)
 
 try:  # Shared FB helper; safe fallback if unavailable.
     from facebook_enrich import is_fb_login_redirect  # type: ignore
@@ -2501,6 +2506,14 @@ def _should_skip_row_due_to_email(
     return bool(skip_rows_with_email and has_email_effective)
 
 
+def _night_fb_has_upstream_identity_anchor(row: pd.Series) -> bool:
+    try:
+        hint = preferred_upstream_identity_hint(row)
+    except Exception:
+        hint = ""
+    return bool(str(hint or "").strip())
+
+
 def run_facebook_global_pass(
     input_csv: str,
     output_csv: str,
@@ -3032,9 +3045,11 @@ def run_facebook_global_pass_nightmode(
             facebook_url_hint = str(row.get("Facebook_URL", "") or "").strip()
             has_canonical_facebook_url = bool(canonicalize_facebook_url(facebook_url_hint))
             final_fb_statuses = {"login_redirect", "no_candidates", "ok", "found"} | terminal_statuses
+            has_upstream_identity_anchor = _night_fb_has_upstream_identity_anchor(row)
             should_run_night_fb = (not has_email_effective) and (fb_status_val not in final_fb_statuses)
             discovery_fallback_eligible = bool(
                 (not has_canonical_facebook_url)
+                and has_upstream_identity_anchor
                 and should_run_night_fb
                 and not should_skip_due_to_email
                 and fb_status_val not in terminal_statuses
@@ -3045,6 +3060,7 @@ def run_facebook_global_pass_nightmode(
                 should_run_night_fb
                 and not should_skip_due_to_email
                 and fb_status_val not in terminal_statuses
+                and (has_canonical_facebook_url or has_upstream_identity_anchor)
             )
             _safe_log_console(
                 logger,
@@ -3081,6 +3097,27 @@ def run_facebook_global_pass_nightmode(
                 _safe_log_console(
                     logger,
                     f"[Night FB] Skipping row {idx} ('{artist_label}') – terminal FB_Status='{fb_status_val_raw}'.",
+                )
+                state.update(
+                    {
+                        "fb_last_index": last_index,
+                        "fb_completed": completed_rows,
+                        "fb_attempted_total": attempted_total,
+                        "fb_captcha_flag": captcha_flag,
+                        "fb_total_rows": total_rows,
+                        "fb_resume_input": os.path.abspath(input_csv),
+                    }
+                )
+                _write_state_with_pass_a(state)
+                continue
+
+            if not has_canonical_facebook_url and not has_upstream_identity_anchor:
+                df.at[idx, FB_GATE_STATE_COL] = "skipped_no_identity_anchor"
+                if not _cell_str(df.at[idx, FB_WRITE_STATE_COL]):
+                    df.at[idx, FB_WRITE_STATE_COL] = "fb_no_email_written"
+                _safe_log_console(
+                    logger,
+                    f"[Night FB] Skipping row {idx} ('{artist_label}') - no canonical Facebook URL or upstream identity anchor.",
                 )
                 state.update(
                     {
