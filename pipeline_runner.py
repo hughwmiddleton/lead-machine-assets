@@ -3048,8 +3048,8 @@ def run_facebook_global_pass_nightmode(
 
             should_skip_due_to_email = _should_skip_row_due_to_email(row, skip_rows_with_email, logger)
             terminal_statuses = {"no_candidates", "unearthed_no_emails"}
-            facebook_url_hint = str(row.get("Facebook_URL", "") or "").strip()
-            has_canonical_facebook_url = bool(canonicalize_facebook_url(facebook_url_hint))
+            canonical_facebook_url, _ = ensure_canonical_facebook_url(row, set_row=False)
+            has_canonical_facebook_url = bool(canonical_facebook_url)
             final_fb_statuses = {"login_redirect", "no_candidates", "ok", "found"} | terminal_statuses
             has_upstream_identity_anchor = _night_fb_has_upstream_identity_anchor(row)
             should_run_night_fb = (not has_email_effective) and (fb_status_val not in final_fb_statuses)
