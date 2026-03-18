@@ -38,6 +38,7 @@ from html_fetcher import close_job_browser
 from source_scheduler import (
     canonicalize_facebook_url,
     ensure_canonical_facebook_url,
+    is_spotify_origin_row,
     preferred_upstream_identity_hint,
     promote_facebook_url,
 )
@@ -2511,7 +2512,12 @@ def _night_fb_has_upstream_identity_anchor(row: pd.Series) -> bool:
         hint = preferred_upstream_identity_hint(row)
     except Exception:
         hint = ""
-    return bool(str(hint or "").strip())
+    if bool(str(hint or "").strip()):
+        return True
+    try:
+        return bool(is_spotify_origin_row(row))
+    except Exception:
+        return False
 
 
 def run_facebook_global_pass(

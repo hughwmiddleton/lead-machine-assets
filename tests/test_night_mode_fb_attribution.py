@@ -101,6 +101,38 @@ def test_upstream_identity_anchor_enters_discovery_fallback_path(monkeypatch, tm
     assert df_out.loc[0, FB_WRITE_STATE_COL] == "fb_no_email_written"
 
 
+def test_spotify_identity_anchor_enters_discovery_fallback_path(monkeypatch, tmp_path):
+    helper = StaticFBHelper(
+        {
+            "FB_Status": "pass_a_no_email_on_page",
+            FB_ATTEMPT_STATE_COL: "attempted_fb_no_email_on_page",
+        }
+    )
+    df_out, _ = _run_night_fb_pass(
+        monkeypatch,
+        tmp_path,
+        [
+            {
+                "Artist Name": "Spotify Seed Artist",
+                "Email": "",
+                "Email_All": "",
+                "Social Link": "",
+                "Facebook_URL": "",
+                "Spotify_URL": "https://open.spotify.com/artist/spotify-seed-artist",
+                "Spotify_Artist_ID": "spotify-seed-artist",
+            }
+        ],
+        helper,
+    )
+
+    assert helper.calls == 1
+    assert helper.rows[0]["row"]["Facebook_URL"] == ""
+    assert df_out.loc[0, FB_OPPORTUNITY_STATE_COL] == "fb_discovery_fallback_eligible"
+    assert df_out.loc[0, FB_GATE_STATE_COL] == ""
+    assert df_out.loc[0, FB_ATTEMPT_STATE_COL] == "attempted_fb_no_email_on_page"
+    assert df_out.loc[0, FB_WRITE_STATE_COL] == "fb_no_email_written"
+
+
 def test_no_facebook_url_without_identity_anchor_skips_night_discovery(monkeypatch, tmp_path):
     helper = StaticFBHelper(
         {
@@ -127,6 +159,35 @@ def test_no_facebook_url_without_identity_anchor_skips_night_discovery(monkeypat
     assert df_out.loc[0, FB_OPPORTUNITY_STATE_COL] == "no_fb_opportunity"
     assert df_out.loc[0, FB_GATE_STATE_COL] == "skipped_no_identity_anchor"
     assert df_out.loc[0, FB_ATTEMPT_STATE_COL] == ""
+    assert df_out.loc[0, FB_WRITE_STATE_COL] == "fb_no_email_written"
+
+
+def test_explicit_facebook_url_still_runs_without_identity_anchor(monkeypatch, tmp_path):
+    helper = StaticFBHelper(
+        {
+            "FB_Status": "pass_a_no_email_on_page",
+            FB_ATTEMPT_STATE_COL: "attempted_fb_no_email_on_page",
+        }
+    )
+    df_out, _ = _run_night_fb_pass(
+        monkeypatch,
+        tmp_path,
+        [
+            {
+                "Artist Name": "Explicit FB Artist",
+                "Email": "",
+                "Email_All": "",
+                "Social Link": "",
+                "Facebook_URL": "https://facebook.com/explicitfbartist",
+            }
+        ],
+        helper,
+    )
+
+    assert helper.calls == 1
+    assert df_out.loc[0, FB_OPPORTUNITY_STATE_COL] == "fb_opportunity_present"
+    assert df_out.loc[0, FB_GATE_STATE_COL] == ""
+    assert df_out.loc[0, FB_ATTEMPT_STATE_COL] == "attempted_fb_no_email_on_page"
     assert df_out.loc[0, FB_WRITE_STATE_COL] == "fb_no_email_written"
 
 
