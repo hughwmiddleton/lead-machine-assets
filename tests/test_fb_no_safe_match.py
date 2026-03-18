@@ -163,6 +163,23 @@ def test_profile_like_candidate_with_music_metadata_can_pass():
     assert selected_by in {"ranked_sort", "mismatch_fallback"}
 
 
+def test_profile_like_music_candidate_still_passes_default_threshold_when_only_option():
+    enricher = _make_enricher()
+    artist = "Night Drive"
+    good = _cand(
+        "Night Drive",
+        "https://www.facebook.com/profile.php?id=123456789",
+        "",
+        secondary="DJ / Producer",
+    )
+    ranked = [_rank_item(artist, good)]
+
+    chosen, selected_by = enricher._choose_ranked_candidate(artist, ranked)
+
+    assert chosen is good
+    assert selected_by == "ranked_sort"
+
+
 def test_exact_name_with_weak_metadata_still_allowed():
     enricher = _make_enricher()
     artist = "Exact Artist"

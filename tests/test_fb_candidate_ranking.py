@@ -78,6 +78,19 @@ def test_page_beats_profile_when_signals_equal():
     assert ranked[0]["candidate"] is page
 
 
+def test_music_page_outweighs_comparable_music_profile():
+    artist = "Night Drive"
+    profile = _cand("Night Drive", "https://www.facebook.com/profile.php?id=123456", "", secondary="DJ / Producer")
+    page = _cand("Night Drive Music", "https://www.facebook.com/nightdrivemusic", "", secondary="DJ / Producer")
+
+    ranked = night_mode_fb._rank_candidates_for_preview(artist, [profile, page])
+    assert ranked[0]["candidate"] is page
+
+    score_page, _, _ = night_mode_fb._score_fb_candidate_night(artist, page)
+    score_profile, _, _ = night_mode_fb._score_fb_candidate_night(artist, profile)
+    assert score_page > score_profile
+
+
 def test_page_style_url_variants_score_like_pages():
     artist = "Echo Star"
     page_slug = _cand("Echo Star", "https://www.facebook.com/echostar", "Musician/Band")

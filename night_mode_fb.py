@@ -196,7 +196,8 @@ _FB_RANK_WEIGHTS = {
     "near_name": 10,
     "name_mismatch": -25,
     "profile_penalty": -15,
-    "profile_penalty_music": -5,
+    "profile_penalty_music": -10,
+    "page_bonus_music": 5,
     "service_only": -45,
     "service_mixed": -15,
 }
@@ -4588,6 +4589,9 @@ def _score_fb_candidate_night(artist_name: str, cand) -> Tuple[int, List[str], D
         profile_penalty = weights["profile_penalty_music"] if has_music_signals else weights["profile_penalty"]
         breakdown.append("-profile_music" if has_music_signals else "-profile")
         score += profile_penalty
+    elif has_music_signals and is_page:
+        score += weights["page_bonus_music"]
+        breakdown.append("+page_music")
 
     if flags["service_only"]:
         score += weights["service_only"]
