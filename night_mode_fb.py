@@ -2930,6 +2930,22 @@ def _harvest_search_candidates_v2(
     attr_scan_max = int(os.getenv("FB_DOM_ATTR_SCAN_MAX", "50") or "50")
     low_yield_threshold = 3
     run_dir_env = os.getenv("RUN_DIR") or os.getenv("NIGHT_RUN_DIR")
+    try:
+        page_html = getattr(driver, "page_source", "") or ""
+    except Exception:
+        page_html = ""
+
+    def _shared_zero_result_fallback() -> List["facebook_enrich.FbCandidate"]:
+        if not page_html:
+            return []
+        shared_candidates = _parse_search_candidates(page_html, logger=logger, search_name=search_name)
+        if shared_candidates:
+            _log(
+                logger,
+                f"[Night FB][DOM Gate V2] zero_result_shared_fallback=1 recovered_candidates={len(shared_candidates)} "
+                f"search_name='{search_name or ''}'",
+            )
+        return shared_candidates
 
     try:
         selector_order = [
@@ -3163,6 +3179,9 @@ def _harvest_search_candidates_v2(
                     diagnostics["overlay_soft_block_logged"] = True
                 if not logged_already:
                     _log(logger, "[Night FB] Overlay/zero-anchors detected; treating as soft block and slowing down.")
+            shared_candidates = _shared_zero_result_fallback()
+            if shared_candidates:
+                return shared_candidates
             return []
 
         chosen_hrefs: List[str] = chosen_data.get("hrefs", [])[:]
@@ -3271,6 +3290,11 @@ def _harvest_search_candidates_v2(
             f"session_unhealthy={session_unhealthy_flag} session_reason={session_reason_clean} "
             f"anchor_waited={int(waited_for_population)}"
         )
+
+        if candidates_post_url_gate == 0:
+            shared_candidates = _shared_zero_result_fallback()
+            if shared_candidates:
+                return shared_candidates
 
         return filtered_candidates
     except Exception as exc:
