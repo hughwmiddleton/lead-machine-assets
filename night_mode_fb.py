@@ -7736,7 +7736,10 @@ class NightModeFacebookEnricher:
                 _log(self.logger, "[Night FB] search disabled due to checkpoint; skipping FB search.")
                 self.fb_rows_skipped["checkpoint"] += 1
                 return _finish(result)
-            if is_unearthed:
+            # Unearthed rows with an explicit accepted FB URL should use the
+            # same PASS A path as other explicit rows. Keep legacy fallback
+            # only for true no-URL Unearthed rows.
+            if is_unearthed and not fb_urls:
                 _log(self.logger, "[Night FB] Detected Unearthed row -> using legacy no-login FB scrape.")
                 return _finish(self._enrich_row_unearthed_legacy(result, artist_name, fb_urls))
 

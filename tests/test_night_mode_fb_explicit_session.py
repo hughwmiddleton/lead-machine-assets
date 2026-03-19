@@ -145,6 +145,176 @@ def test_explicit_fb_url_preserves_extracted_email_when_override_rejects(monkeyp
     assert result.get("FB_Reason") == "explicit_url"
 
 
+def test_unearthed_explicit_canonical_url_uses_normal_pass_a(monkeypatch, enricher):
+    monkeypatch.setattr(enricher, "_maybe_recover_or_skip_on_checkpoint", lambda: True)
+    monkeypatch.setattr(enricher, "_has_authenticated_session", lambda: True)
+    monkeypatch.setattr(
+        enricher,
+        "_enrich_row_unearthed_legacy",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("legacy path should not be used")),
+    )
+
+    observed = {}
+
+    def fake_scrape(self, fb_url, row, artist_name, allow_anon=False, candidate_context=None):
+        observed["fb_url"] = fb_url
+        observed["allow_anon"] = allow_anon
+        observed["explicit_accepted_url"] = bool(candidate_context and candidate_context.get("explicit_accepted_url"))
+        return (
+            nmfb.NightModeFacebookResult(
+                email="unearthed@example.com",
+                email_all="unearthed@example.com",
+                facebook_url=fb_url,
+                email_source_url=fb_url,
+                email_extract_method="regex",
+            ),
+            ["unearthed@example.com"],
+            "session",
+            "found_email",
+        )
+
+    monkeypatch.setattr(nmfb.NightModeFacebookEnricher, "_scrape_single_fb_candidate", fake_scrape)
+
+    row = {
+        "Artist Name": "Unearthed Explicit",
+        "Source Directory": "unearthed",
+        "Email": "",
+        "Email_All": "",
+        "Facebook_URL": "https://www.facebook.com/unearthed.explicit",
+    }
+
+    result = enricher.enrich_row_with_facebook_night(row)
+
+    assert observed["fb_url"] == "https://www.facebook.com/unearthed.explicit"
+    assert observed["allow_anon"] is False
+    assert observed["explicit_accepted_url"] is True
+    assert result.get("FB_Status") == "pass_a_found_email"
+    assert result.get("Email") == "unearthed@example.com"
+
+
+def test_unearthed_promotable_social_link_uses_normal_pass_a(monkeypatch, enricher):
+    monkeypatch.setattr(enricher, "_maybe_recover_or_skip_on_checkpoint", lambda: True)
+    monkeypatch.setattr(enricher, "_has_authenticated_session", lambda: True)
+    monkeypatch.setattr(
+        enricher,
+        "_enrich_row_unearthed_legacy",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("legacy path should not be used")),
+    )
+
+    observed = {}
+
+    def fake_scrape(self, fb_url, row, artist_name, allow_anon=False, candidate_context=None):
+        observed["fb_url"] = fb_url
+        observed["explicit_accepted_url"] = bool(candidate_context and candidate_context.get("explicit_accepted_url"))
+        return (
+            nmfb.NightModeFacebookResult(
+                email="promoted@example.com",
+                email_all="promoted@example.com",
+                facebook_url=fb_url,
+                email_source_url=fb_url,
+                email_extract_method="regex",
+            ),
+            ["promoted@example.com"],
+            "session",
+            "found_email",
+        )
+
+    monkeypatch.setattr(nmfb.NightModeFacebookEnricher, "_scrape_single_fb_candidate", fake_scrape)
+
+    row = {
+        "Artist Name": "Unearthed Promoted",
+        "Source Directory": "unearthed",
+        "Email": "",
+        "Email_All": "",
+        "Facebook_URL": "",
+        "Social Link": "https://www.facebook.com/unearthed.promoted",
+    }
+
+    result = enricher.enrich_row_with_facebook_night(row)
+
+    assert observed["fb_url"] == "https://www.facebook.com/unearthed.promoted"
+    assert observed["explicit_accepted_url"] is True
+    assert result.get("FB_Status") == "pass_a_found_email"
+    assert result.get("Email") == "promoted@example.com"
+
+
+def test_unearthed_without_explicit_url_keeps_legacy_path(monkeypatch, enricher):
+    monkeypatch.setattr(enricher, "_maybe_recover_or_skip_on_checkpoint", lambda: True)
+    monkeypatch.setattr(
+        enricher,
+        "_has_authenticated_session",
+        lambda: (_ for _ in ()).throw(AssertionError("explicit PASS A should not run")),
+    )
+
+    observed = {}
+
+    def fake_legacy(result, artist_name, fb_urls):
+        observed["artist_name"] = artist_name
+        observed["fb_urls"] = list(fb_urls)
+        updated = dict(result)
+        updated["FB_Status"] = "unearthed_no_emails"
+        return updated
+
+    monkeypatch.setattr(enricher, "_enrich_row_unearthed_legacy", fake_legacy)
+
+    row = {
+        "Artist Name": "Unearthed Legacy",
+        "Source Directory": "unearthed",
+        "Email": "",
+        "Email_All": "",
+        "Facebook_URL": "",
+        "Social Link": "",
+    }
+
+    result = enricher.enrich_row_with_facebook_night(row)
+
+    assert observed["artist_name"] == "Unearthed Legacy"
+    assert observed["fb_urls"] == []
+    assert result.get("FB_Status") == "unearthed_no_emails"
+
+
+def test_non_unearthed_explicit_url_still_skips_legacy_helper(monkeypatch, enricher):
+    monkeypatch.setattr(enricher, "_maybe_recover_or_skip_on_checkpoint", lambda: True)
+    monkeypatch.setattr(enricher, "_has_authenticated_session", lambda: True)
+    monkeypatch.setattr(
+        enricher,
+        "_enrich_row_unearthed_legacy",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("legacy Unearthed helper should not be used")),
+    )
+
+    observed = {}
+
+    def fake_scrape(self, fb_url, row, artist_name, allow_anon=False, candidate_context=None):
+        observed["fb_url"] = fb_url
+        return (
+            nmfb.NightModeFacebookResult(
+                email="normal@example.com",
+                email_all="normal@example.com",
+                facebook_url=fb_url,
+                email_source_url=fb_url,
+                email_extract_method="regex",
+            ),
+            ["normal@example.com"],
+            "session",
+            "found_email",
+        )
+
+    monkeypatch.setattr(nmfb.NightModeFacebookEnricher, "_scrape_single_fb_candidate", fake_scrape)
+
+    row = {
+        "Artist Name": "Normal Explicit",
+        "Source Directory": "spotify",
+        "Email": "",
+        "Email_All": "",
+        "Facebook_URL": "https://www.facebook.com/normal.explicit",
+    }
+
+    result = enricher.enrich_row_with_facebook_night(row)
+
+    assert observed["fb_url"] == "https://www.facebook.com/normal.explicit"
+    assert result.get("FB_Status") == "pass_a_found_email"
+
+
 def test_rows_without_explicit_fb_urls_unchanged(monkeypatch, enricher):
     # Ensure explicit-URL branch is untouched when no FB URLs exist.
     def _fail_session():
