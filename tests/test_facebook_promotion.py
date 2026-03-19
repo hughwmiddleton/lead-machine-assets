@@ -1,7 +1,7 @@
 import pytest
 
 import pipeline_runner
-from source_scheduler import canonicalize_facebook_url, extract_facebook_url_from_text, promote_facebook_url
+from source_scheduler import canonicalize_facebook_url, ensure_canonical_facebook_url, extract_facebook_url_from_text, promote_facebook_url
 
 
 def test_extract_facebook_url_normalizes_and_filters():
@@ -49,9 +49,31 @@ def test_canonicalize_facebook_url_collapses_equivalent_mobile_and_http_variants
     assert canonicalize_facebook_url("http://m.facebook.com/artist") == "https://www.facebook.com/artist"
 
 
+def test_direct_facebook_url_accepts_web_host_as_canonical():
+    row = {"Facebook_URL": "https://web.facebook.com/foo"}
+
+    canonical, source = ensure_canonical_facebook_url(row, set_row=False)
+
+    assert canonical == "https://www.facebook.com/foo"
+    assert source == "Facebook_URL"
+
+
+def test_promote_facebook_url_accepts_web_host_from_social_link():
+    row = {"Social Link": "https://web.facebook.com/foo", "facebook_url": "", "Facebook_URL": ""}
+
+    promote_facebook_url(row)
+
+    assert row["facebook_url"] == "https://www.facebook.com/foo"
+    assert row["Facebook_URL"] == "https://www.facebook.com/foo"
+
+
 def test_canonicalize_facebook_url_rejects_share_wrappers_predictably():
     assert canonicalize_facebook_url("https://www.facebook.com/share.php?u=test") == ""
     assert canonicalize_facebook_url("https://www.facebook.com/share/r/test") == ""
+
+
+def test_canonicalize_facebook_url_rejects_non_facebook_hosts():
+    assert canonicalize_facebook_url("https://example.com/foo") == ""
 
 
 def test_promote_accepts_fb_short_domains_and_profile_ids():

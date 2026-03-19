@@ -27,6 +27,7 @@ _FB_ALLOWED_HOSTS = {
     "facebook.com",
     "www.facebook.com",
     "m.facebook.com",
+    "web.facebook.com",
     "fb.com",
     "www.fb.com",
     "m.fb.com",
