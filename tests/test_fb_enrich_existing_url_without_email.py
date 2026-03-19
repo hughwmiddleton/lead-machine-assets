@@ -331,6 +331,50 @@ def test_fb_enrich_runs_when_fb_url_present_or_promotable(monkeypatch, row_overr
     assert not any("already has facebook link" in msg.lower() for msg in logs)
 
 
+def test_fb_enrich_uses_explicit_share_entrypoint_without_discovery(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    worker._row_allows_heavy_enricher = lambda *args, **kwargs: SimpleNamespace(allowed=True)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Share Entrypoint",
+            "Email": "",
+            "Email_All": "",
+            "facebook_url": "",
+            "Facebook_URL": "",
+            "Facebook URL": "",
+            "Social Link": "https://www.facebook.com/share/19bactwuev?mibextid=wwXIfr",
+            "External Links": "",
+            "Source Directory": "",
+            "Source URL": "",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+
+    calls = []
+
+    def fake_extract(driver, url, log_fn=None):
+        calls.append(url)
+        return (["sharefb@example.com"], "https://www.facebook.com/artistsharepage", "")
+
+    def fail_discover(*args, **kwargs):
+        raise AssertionError("discovery should not run when an explicit share entrypoint is present")
+
+    monkeypatch.setattr(cde, "_discover_facebook_url_bounded", fail_discover)
+    monkeypatch.setattr(cde, "_extract_fb_emails_bounded", fake_extract)
+
+    matched = worker._enrich_row_facebook(seed_df, 0, object(), ctx)
+
+    assert matched is True
+    assert calls == ["https://www.facebook.com/share/19bactwuev"]
+    assert seed_df.at[0, "Email"] == "sharefb@example.com"
+    assert seed_df.at[0, "Facebook_URL"] == "https://www.facebook.com/artistsharepage"
+    assert seed_df.at[0, "facebook_url"] == "https://www.facebook.com/artistsharepage"
+
+
 def test_fb_enrich_uses_payload_promoted_facebook_url_without_discovery(monkeypatch):
     logs = []
     worker = _make_worker(logs)

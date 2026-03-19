@@ -70,6 +70,7 @@ def test_promote_facebook_url_accepts_web_host_from_social_link():
 def test_canonicalize_facebook_url_rejects_share_wrappers_predictably():
     assert canonicalize_facebook_url("https://www.facebook.com/share.php?u=test") == ""
     assert canonicalize_facebook_url("https://www.facebook.com/share/r/test") == ""
+    assert canonicalize_facebook_url("https://www.facebook.com/share/19bactwuev?mibextid=wwXIfr") == ""
 
 
 def test_canonicalize_facebook_url_rejects_non_facebook_hosts():

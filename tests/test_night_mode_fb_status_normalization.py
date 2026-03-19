@@ -14,7 +14,7 @@ def test_missing_url_status_becomes_ok_when_fb_url_found():
     updated = enricher._apply_night_fb_result(row, result, emails=[], page_url=result.facebook_url)
 
     assert updated["FB_Status"] == "ok"
-    assert updated["Facebook_URL"] == "https://facebook.com/test-artist"
+    assert updated["Facebook_URL"] == "https://www.facebook.com/test-artist"
 
 
 def test_pass_a_skipped_status_becomes_ok_when_fb_url_found():
@@ -25,7 +25,20 @@ def test_pass_a_skipped_status_becomes_ok_when_fb_url_found():
     updated = enricher._apply_night_fb_result(row, result, emails=[], page_url=result.facebook_url)
 
     assert updated["FB_Status"] == "ok"
-    assert updated["Facebook_URL"] == "https://facebook.com/test-artist"
+    assert updated["Facebook_URL"] == "https://www.facebook.com/test-artist"
+
+
+def test_unresolved_share_url_does_not_become_canonical_facebook_url():
+    enricher = _enricher()
+    row = {"Artist Name": "Share Artist", "FB_Status": "pass_a_skipped_no_fb_url"}
+    result = night_mode_fb.NightModeFacebookResult(
+        facebook_url="https://www.facebook.com/share/19bactwuev?mibextid=wwXIfr"
+    )
+
+    updated = enricher._apply_night_fb_result(row, result, emails=[], page_url=result.facebook_url)
+
+    assert updated["FB_Status"] == "pass_a_skipped_no_fb_url"
+    assert updated.get("Facebook_URL", "") == ""
 
 
 def test_terminal_status_remains_blocked():

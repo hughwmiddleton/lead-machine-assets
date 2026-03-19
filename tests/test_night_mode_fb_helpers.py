@@ -166,6 +166,18 @@ def test_classify_explicit_fb_intake_rejects_guarded_shape() -> None:
     assert decision.guard_reason == "share_surface"
 
 
+def test_explicit_fb_entrypoint_urls_accept_share_entrypoint_but_block_share_php() -> None:
+    share_urls = night_mode_fb.explicit_fb_entrypoint_urls_for_row(
+        {"Social Link": "https://www.facebook.com/share/19bactwuev?mibextid=wwXIfr"}
+    )
+    share_php_urls = night_mode_fb.explicit_fb_entrypoint_urls_for_row(
+        {"Social Link": "https://www.facebook.com/share.php?u=test"}
+    )
+
+    assert share_urls == ["https://www.facebook.com/share/19bactwuev"]
+    assert share_php_urls == []
+
+
 def test_classify_explicit_fb_intake_reports_no_explicit_url() -> None:
     decision = night_mode_fb.classify_explicit_fb_intake(
         {"Artist Name": "No FB", "Social Link": "https://www.instagram.com/no-fb"}
@@ -208,6 +220,44 @@ def test_pass_a_uses_fb_url_from_social_link(monkeypatch) -> None:
     assert calls["urls"] == ["https://www.facebook.com/panicboomband"]
     assert result.get("FB_Status") == "pass_a_found_email"
     assert result.get("FB_Reason") == "explicit_url"
+
+
+def test_pass_a_uses_share_url_from_social_link(monkeypatch) -> None:
+    enricher = night_mode_fb.NightModeFacebookEnricher(
+        legacy_module=None,
+        username="",
+        password="",
+        logger=None,
+        use_shared_session=False,
+    )
+    monkeypatch.setattr(enricher, "_has_authenticated_session", lambda: True)
+
+    def fake_fetch(url, goto_about=False):  # noqa: ANN001
+        assert goto_about is False
+        assert url == "https://www.facebook.com/share/19bactwuev"
+        enricher._last_fb_visible_text = "Bookings shareartist@test.com"
+        enricher._last_fb_live_anchor_values = []
+        return (
+            "<html><body><div>Bookings shareartist@test.com</div></body></html>",
+            "https://www.facebook.com/artistsharepage",
+        )
+
+    monkeypatch.setattr(enricher, "_fetch_html_with_url", fake_fetch)
+
+    row = {
+        "Artist Name": "Share Artist",
+        "Social Link": "https://www.facebook.com/share/19bactwuev?mibextid=wwXIfr",
+        "Email": "",
+        "Email_All": "",
+        "Facebook_URL": "",
+    }
+
+    result = enricher.enrich_row_with_facebook_night(row)
+
+    assert result.get("Email") == "shareartist@test.com"
+    assert result.get("FB_Status") == "pass_a_found_email"
+    assert result.get("FB_Reason") == "explicit_url"
+    assert result.get("Facebook_URL") == "https://www.facebook.com/artistsharepage"
 
 
 def test_pass_a_uses_rendered_visible_text_when_page_source_has_no_email(monkeypatch) -> None:

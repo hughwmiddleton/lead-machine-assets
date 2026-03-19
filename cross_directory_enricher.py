@@ -87,6 +87,7 @@ from night_mode_fb import (
     NightFBRunState,
     _build_fb_discovery_query,
     classify_explicit_fb_intake,
+    explicit_fb_entrypoint_urls_for_row,
     _extract_emails_from_html,
     _log_fb_email_surface_debug,
     _extract_fb_visible_text_with_container_fallback,
@@ -7877,6 +7878,15 @@ class CrossDirectoryEnricherWorker(QThread):
         if existing_fb_url:
             return False
 
+        explicit_fb_entrypoints = explicit_fb_entrypoint_urls_for_row(
+            seed_df.loc[row_idx].to_dict()
+        )
+        if explicit_fb_entrypoints:
+            self.log_message.emit(
+                f"[FB Discover] Explicit FB entrypoint already present for '{artist}'; skipping bounded discovery."
+            )
+            return False
+
         if _row_has_fb_discovery_attempt_flag(seed_df.loc[row_idx]) or row_idx in getattr(self, "_fb_discovery_attempted_rows", set()):
             self.log_message.emit(
                 f"[FB Discover] Skipping discovery for '{artist}' (already attempted this run)"
@@ -8601,13 +8611,23 @@ class CrossDirectoryEnricherWorker(QThread):
                         seed_df.at[row_idx, "Facebook URL"] = promoted_norm
                 fb_url_val = _get_canonical_fb_url(seed_df.loc[row_idx])
                 existing_fb_links: List[str] = []
+                explicit_fb_entrypoints = explicit_fb_entrypoint_urls_for_row(row.to_dict())
+                seen_fb_links: Set[str] = set()
+
+                def _add_existing_fb_link(raw_url: str) -> None:
+                    normalised = _normalise_fb_url(normalize_external_url(raw_url))
+                    if not normalised or normalised in seen_fb_links:
+                        return
+                    seen_fb_links.add(normalised)
+                    existing_fb_links.append(normalised)
+
                 if fb_url_val:
                     parts = [part.strip() for part in str(fb_url_val).split(",") if part.strip()]
                     for part in parts:
                         if "facebook.com" in part.lower():
-                            normalised = _normalise_fb_url(normalize_external_url(part))
-                            if normalised:
-                                existing_fb_links.append(normalised)
+                            _add_existing_fb_link(part)
+                for explicit_fb_url in explicit_fb_entrypoints:
+                    _add_existing_fb_link(explicit_fb_url)
                 decision = self._row_allows_heavy_enricher(seed_df.loc[row_idx], ctx, "facebook")
                 if not decision.allowed:
                     self._log_low_confidence_skip("fb", artist, decision)
@@ -8671,10 +8691,11 @@ class CrossDirectoryEnricherWorker(QThread):
                                 seed_df.at[row_idx, "Email"] = fb_emails[0]
                             if page_url_used and not cell_to_str(seed_df.at[row_idx, "Social Link"]):
                                 seed_df.at[row_idx, "Social Link"] = page_url_used
-                            if page_url_used and "facebook_url" in seed_df.columns and not cell_to_str(seed_df.at[row_idx, "facebook_url"]):
-                                seed_df.at[row_idx, "facebook_url"] = page_url_used
-                            if page_url_used and not cell_to_str(seed_df.at[row_idx, "Facebook_URL"]):
-                                seed_df.at[row_idx, "Facebook_URL"] = page_url_used
+                            canonical_page_url_used = canonicalize_facebook_url(page_url_used)
+                            if canonical_page_url_used and "facebook_url" in seed_df.columns and not cell_to_str(seed_df.at[row_idx, "facebook_url"]):
+                                seed_df.at[row_idx, "facebook_url"] = canonical_page_url_used
+                            if canonical_page_url_used and not cell_to_str(seed_df.at[row_idx, "Facebook_URL"]):
+                                seed_df.at[row_idx, "Facebook_URL"] = canonical_page_url_used
                             seed_df.at[row_idx, "Email_All"] = _merge_email_all(
                                 seed_df.at[row_idx, "Email_All"], fb_emails
                             )

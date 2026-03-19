@@ -226,6 +226,37 @@ def test_web_host_explicit_facebook_link_still_runs_without_identity_anchor(monk
     assert df_out.loc[0, FB_WRITE_STATE_COL] == "fb_no_email_written"
 
 
+def test_share_entrypoint_runs_without_identity_anchor(monkeypatch, tmp_path):
+    helper = StaticFBHelper(
+        {
+            "FB_Status": "pass_a_no_email_on_page",
+            FB_ATTEMPT_STATE_COL: "attempted_fb_no_email_on_page",
+        }
+    )
+    df_out, _ = _run_night_fb_pass(
+        monkeypatch,
+        tmp_path,
+        [
+            {
+                "Artist Name": "Explicit Share FB Artist",
+                "Email": "",
+                "Email_All": "",
+                "Social Link": "https://www.facebook.com/share/19bactwuev?mibextid=wwXIfr",
+                "Facebook_URL": "",
+            }
+        ],
+        helper,
+    )
+
+    assert helper.calls == 1
+    assert helper.rows[0]["row"]["Facebook_URL"] == ""
+    assert helper.rows[0]["row"]["Social Link"] == "https://www.facebook.com/share/19bactwuev?mibextid=wwXIfr"
+    assert df_out.loc[0, FB_OPPORTUNITY_STATE_COL] == "fb_opportunity_present"
+    assert df_out.loc[0, FB_GATE_STATE_COL] == ""
+    assert df_out.loc[0, FB_ATTEMPT_STATE_COL] == "attempted_fb_no_email_on_page"
+    assert df_out.loc[0, FB_WRITE_STATE_COL] == "fb_no_email_written"
+
+
 def test_existing_email_sets_skip_gate_attribution(monkeypatch, tmp_path):
     helper = StaticFBHelper({})
     df_out, _ = _run_night_fb_pass(

@@ -1903,6 +1903,8 @@ def _explicit_fb_pre_scrape_guard_reason(url: str) -> Tuple[str, str]:
         raw_fb_url = "https://www.facebook.com" + raw_fb_url
     if _is_invalid_fb_value(raw_fb_url):
         return "invalid_placeholder", raw_fb_url or "<blank>"
+    if _is_allowed_fb_share_entrypoint_url(raw_fb_url):
+        return "", _normalise_fb_url(raw_fb_url) or raw_fb_url
     if not fb_is_allowed_profile_candidate_url(raw_fb_url):
         return "shape_disallowed", raw_fb_url or "<blank>"
     candidate_url = _normalise_fb_url(raw_fb_url or "")
@@ -2062,6 +2064,26 @@ def classify_explicit_fb_intake(
         guard_reason=guard_reason,
         message=message,
     )
+
+
+def explicit_fb_entrypoint_urls_for_row(
+    row: Dict[str, str],
+    *,
+    accepted_urls: Optional[Sequence[str]] = None,
+) -> List[str]:
+    urls = list(accepted_urls) if accepted_urls is not None else _canonicalize_and_dedupe_explicit_fb_urls(_extract_fb_urls_for_night_mode(row))
+    routed: List[str] = []
+    seen: Set[str] = set()
+    for url in urls:
+        guard_reason, _ = _explicit_fb_pre_scrape_guard_reason(url)
+        if guard_reason:
+            continue
+        key = _normalise_fb_url(url) or str(url or "").strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        routed.append(url)
+    return routed
 
 
 def _log_explicit_fb_intake(logger: LoggerFn, artist_name: str, decision: ExplicitFbIntakeDecision) -> None:
@@ -4349,6 +4371,34 @@ def _is_fb_share_url_str(url: str) -> bool:
         "web.facebook.com/share/",
         "touch.facebook.com/share/",
     ))
+
+
+def _is_allowed_fb_share_entrypoint_url(url: str) -> bool:
+    raw = str(url or "").strip()
+    if not raw:
+        return False
+    if raw.startswith("//"):
+        raw = "https:" + raw
+    elif raw.startswith("/"):
+        raw = "https://www.facebook.com" + raw
+    elif "://" not in raw:
+        raw = "https://" + raw
+    try:
+        parsed = urllib.parse.urlparse(raw)
+    except Exception:
+        return False
+
+    host = (parsed.netloc or "").lower()
+    if host not in {"facebook.com", "www.facebook.com", "m.facebook.com", "web.facebook.com", "touch.facebook.com"}:
+        return False
+
+    path = (parsed.path or "").rstrip("/")
+    segments = [segment for segment in path.split("/") if segment]
+    if len(segments) != 2 or segments[0].lower() != "share":
+        return False
+
+    token = (segments[1] or "").strip()
+    return bool(token and not token.lower().endswith(".php"))
 
 
 def _dedupe_candidates(candidates: Iterable["facebook_enrich.FbCandidate"]) -> List["facebook_enrich.FbCandidate"]:
@@ -7224,10 +7274,14 @@ class NightModeFacebookEnricher:
         else:
             _log(self.logger, "[FB Email] No email found")
 
+        persisted_facebook_url = canonicalize_facebook_url(resolved_url)
+        if persisted_facebook_url:
+            persisted_facebook_url = _normalise_fb_url(persisted_facebook_url) or persisted_facebook_url
+
         night_result = self._build_result(
             emails,
             str(row.get("Email_All", "") or ""),
-            resolved_url,
+            persisted_facebook_url,
             artist_name,
             allow_empty=True if not accepted else has_music_signals or emails or gate_soft_pass_category or gate_soft_pass_identity,
             accepted=accepted,
@@ -7375,8 +7429,9 @@ class NightModeFacebookEnricher:
         target_row["Email"] = night_result.email or target_row.get("Email", "")
         target_row["Email_All"] = night_result.email_all
         target_row["Email_Type"] = night_result.email_type
-        if night_result.facebook_url:
-            target_row["Facebook_URL"] = night_result.facebook_url
+        canonical_fb_url = canonicalize_facebook_url(night_result.facebook_url)
+        if canonical_fb_url:
+            target_row["Facebook_URL"] = canonical_fb_url
         merge_email_provenance_into_target(
             target_row,
             emails or night_result.email_all or night_result.email,
