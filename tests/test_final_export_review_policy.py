@@ -1,5 +1,8 @@
+import json
+
 import pandas as pd
 
+from email_provenance import EMAIL_PROVENANCE_JSON_COL
 from pipeline_runner import _build_final_export_frame
 
 
@@ -165,3 +168,43 @@ def test_final_export_prefers_ranked_primary_over_weaker_existing_email() -> Non
         export_df.iloc[0]["All Emails"]
         == "booking@artist.com;press@artistlabel.com;support@bandcamp.com"
     )
+
+
+def test_final_export_uses_selected_email_provenance_instead_of_stale_row_fields() -> None:
+    df = pd.DataFrame(
+        [
+            _build_export_row(
+                Email="to@nomograph.mastering",
+                Email_All="to@nomograph.mastering;admin@artist.test",
+                Email_Source_URL="https://nomograph.mastering/contact",
+                Email_Source_Type="website_enrich",
+                Email_Extract_Method="regex",
+                Spotify_Website_URL="https://artist.test",
+                **{
+                    EMAIL_PROVENANCE_JSON_COL: json.dumps(
+                        {
+                            "to@nomograph.mastering": {
+                                "source_type": "website_enrich",
+                                "surface": "website_contact_page",
+                                "source_url": "https://nomograph.mastering/contact",
+                                "extract_method": "regex",
+                            },
+                            "admin@artist.test": {
+                                "source_type": "facebook_enrich",
+                                "surface": "facebook_about",
+                                "source_url": "https://www.facebook.com/artist/about",
+                                "extract_method": "regex",
+                            },
+                        }
+                    )
+                },
+            )
+        ]
+    )
+
+    export_df = _build_final_export_frame(df)
+
+    assert export_df.iloc[0]["Primary Email"] == "admin@artist.test"
+    assert export_df.iloc[0]["Email Source"] == "Facebook About"
+    assert export_df.iloc[0]["Email_Source_URL"] == "https://www.facebook.com/artist/about"
+    assert export_df.iloc[0]["Needs_Review"] == "FALSE"

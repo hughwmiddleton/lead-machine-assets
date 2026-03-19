@@ -20,10 +20,18 @@ import datetime
 from urllib.parse import urlsplit
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple, Union, MutableMapping
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple, Union, MutableMapping
 
 import pandas as pd
-from email_provenance import _set_email_with_provenance
+from email_provenance import (
+    EMAIL_PROVENANCE_JSON_COL,
+    _set_email_with_provenance,
+    get_email_provenance_entry,
+    get_row_email_provenance,
+    merge_email_provenance_into_target,
+    normalize_email_key,
+    parse_email_provenance_json,
+)
 from email_normalizer import filter_system_telemetry_emails
 from fb_attribution import (
     FB_ATTEMPT_STATE_COL,
@@ -527,12 +535,32 @@ def _guard_email_all_sources(row: pd.Series, email_all: str, logger: LoggerFn = 
             )
 
 
-def _set_email_all(df: pd.DataFrame, idx: int, new_emails: Union[str, Sequence[str]], source: str, logger: LoggerFn = None) -> str:
+def _set_email_all(
+    df: pd.DataFrame,
+    idx: int,
+    new_emails: Union[str, Sequence[str]],
+    source: str,
+    logger: LoggerFn = None,
+    *,
+    source_url: str = "",
+    source_type: str = "",
+    method: str = "regex",
+    surface: str = "",
+) -> str:
     """Centralized Email_All setter with merge + logging + guard."""
     existing_val = _cell_str(df.at[idx, "Email_All"] if "Email_All" in df.columns else "")
     before_list = filter_system_telemetry_emails(normalize_emails(existing_val))
     before_count = len(before_list)
-    merged_list = _rank_contact_emails(_merge_email_lists(existing_val, new_emails))
+    if source_url or source_type or surface:
+        merge_email_provenance_into_target(
+            (df, idx),
+            new_emails,
+            source_url=source_url,
+            source_type=source_type,
+            method=method,
+            surface=surface,
+        )
+    merged_list = _rank_contact_emails_for_row(df.loc[idx], _merge_email_lists(existing_val, new_emails))
     merged_str = ";".join(merged_list)
     _bump_email_summary("emails_found", max(0, len(merged_list) - before_count))
     df.at[idx, "Email_All"] = merged_str
@@ -752,6 +780,202 @@ def _email_role_priority(email: str) -> int:
     return 50
 
 
+_ARTIST_OWNED_WEBSITE_FIELDS: Sequence[str] = (
+    "Spotify_Website_URL",
+    "Website",
+    "Website URL",
+    "Websites",
+    "External Links",
+    "Source URL",
+)
+_NON_ARTIST_WEBSITE_HOSTS: Tuple[str, ...] = (
+    "facebook.com",
+    "instagram.com",
+    "soundcloud.com",
+    "bandcamp.com",
+    "last.fm",
+    "spotify.com",
+    "youtube.com",
+    "youtu.be",
+    "tiktok.com",
+    "twitter.com",
+    "x.com",
+    "linktr.ee",
+    "beacons.ai",
+)
+_WEAK_EXTERNAL_EMAIL_DOMAINS: Tuple[str, ...] = (
+    "bandcamp.com",
+    "soundcloud.com",
+    "spotify.com",
+    "mailchimp.com",
+    "list-manage.com",
+    "substack.com",
+    "squarespace.com",
+    "wix.com",
+)
+_STRONG_DIRECT_SURFACES = {"facebook_about", "facebook_main", "website_contact_page", "website_homepage"}
+_PROFILE_DIRECT_SURFACES = {
+    "instagram_profile",
+    "soundcloud_profile",
+    "bandcamp_contact_follow",
+    "bandcamp_profile",
+    "bandcamp_track_follow",
+    "lastfm_profile",
+    "spotify_profile",
+}
+
+
+def _iter_urlish_tokens(value: Any) -> Iterable[str]:
+    text = _cell_str(value)
+    if not text:
+        return []
+    return [token for token in re.split(r"[\s,;|]+", text) if token.startswith(("http://", "https://"))]
+
+
+def _normalized_host(url: str) -> str:
+    raw = _cell_str(url)
+    if not raw:
+        return ""
+    try:
+        host = (urlsplit(raw).netloc or "").lower()
+    except Exception:
+        return ""
+    return host[4:] if host.startswith("www.") else host
+
+
+def _email_domain(email: str) -> str:
+    normalized = normalize_email_key(email)
+    if "@" not in normalized:
+        return ""
+    return normalized.split("@", 1)[1]
+
+
+def _row_artist_owned_domain(row_like: Any) -> str:
+    if row_like is None or not hasattr(row_like, "get"):
+        return ""
+
+    def _candidate_host(url: str) -> str:
+        host = _normalized_host(url)
+        if not host:
+            return ""
+        if any(host == blocked or host.endswith(f".{blocked}") for blocked in _NON_ARTIST_WEBSITE_HOSTS):
+            return ""
+        return host
+
+    for field in _ARTIST_OWNED_WEBSITE_FIELDS:
+        for token in _iter_urlish_tokens(row_like.get(field, "")):
+            host = _candidate_host(token)
+            if host:
+                return host
+
+    for meta in get_row_email_provenance(row_like).values():
+        source_type = _cell_str(meta.get("source_type", "")).lower()
+        source_url = _cell_str(meta.get("source_url", ""))
+        if not source_url or not source_type.startswith("website"):
+            continue
+        host = _candidate_host(source_url)
+        if host:
+            return host
+    return ""
+
+
+def _email_surface_bucket(row_like: Any, email: str, meta: Mapping[str, Any], artist_domain: str) -> int:
+    surface = _cell_str(meta.get("surface", "")).lower()
+    source_type = _cell_str(meta.get("source_type", "")).lower()
+    source_host = _normalized_host(meta.get("source_url", ""))
+    email_domain = _email_domain(email)
+    artist_match = bool(artist_domain and email_domain == artist_domain)
+    source_matches_artist = bool(artist_domain and source_host == artist_domain)
+
+    if surface in {"facebook_about", "facebook_main"} or source_type.startswith("facebook"):
+        return 0
+    if surface in {"website_contact_page", "website_homepage"} or source_type.startswith("website"):
+        weak_external_email = bool(
+            email_domain
+            and email_domain != artist_domain
+            and (
+                _email_role_priority(email) >= 90
+                or any(
+                    email_domain == blocked or email_domain.endswith(f".{blocked}")
+                    for blocked in _WEAK_EXTERNAL_EMAIL_DOMAINS
+                )
+            )
+        )
+        if artist_domain and source_matches_artist and weak_external_email and not artist_match:
+            return 2
+        if not artist_domain or artist_match or source_matches_artist:
+            return 0
+        return 2
+    if surface in _PROFILE_DIRECT_SURFACES:
+        return 1
+    return 2
+
+
+def _rank_contact_emails_for_row(row_like: Any, values: Union[str, Sequence[str], None]) -> List[str]:
+    normalized = filter_system_telemetry_emails(_merge_email_lists("", values or []))
+    if not normalized:
+        return []
+
+    artist_domain = _row_artist_owned_domain(row_like)
+    explicit_provenance = {}
+    if row_like is not None and hasattr(row_like, "get"):
+        explicit_provenance = parse_email_provenance_json(row_like.get(EMAIL_PROVENANCE_JSON_COL, ""))
+    current_selected = ""
+    preserve_legacy_current = False
+    if row_like is not None and hasattr(row_like, "get"):
+        current_selected = normalize_email_key(row_like.get("Email") or row_like.get("Primary Email") or "")
+    if current_selected:
+        preserve_legacy_current = (
+            _email_role_priority(current_selected) < 90
+            or bool(artist_domain and _email_domain(current_selected) == artist_domain)
+        )
+    indexed = list(enumerate(normalized))
+
+    def _sort_key(item: Tuple[int, str]) -> Tuple[int, int, int, int, int, int, str]:
+        index, email = item
+        meta = get_email_provenance_entry(row_like, email)
+        bucket = _email_surface_bucket(row_like, email, meta, artist_domain)
+        artist_domain_penalty = 0 if artist_domain and _email_domain(email) == artist_domain else 1
+        legacy_current_penalty = 0 if (not explicit_provenance and preserve_legacy_current and email == current_selected) else 1
+        has_provenance_penalty = 0 if meta else 1
+        return (
+            bucket,
+            artist_domain_penalty,
+            legacy_current_penalty,
+            _email_role_priority(email),
+            has_provenance_penalty,
+            index,
+            email,
+        )
+
+    ranked = sorted(indexed, key=_sort_key)
+    return [email for _, email in ranked]
+
+
+def _select_primary_email_for_row(row_like: Any, email: str, email_all: str) -> Tuple[str, List[str]]:
+    ranked = _rank_contact_emails_for_row(row_like, [email_all, email])
+    return (ranked[0] if ranked else "", ranked)
+
+
+def _align_row_email_provenance(df: pd.DataFrame, idx: int, selected_email: str) -> None:
+    if df is None or idx not in df.index or not selected_email:
+        return
+    meta = get_email_provenance_entry(df.loc[idx], selected_email)
+    if not meta:
+        return
+
+    for column, key in (
+        ("Email_Source_URL", "source_url"),
+        ("Email_Source_Type", "source_type"),
+        ("Email_Extract_Method", "extract_method"),
+    ):
+        if column not in df.columns:
+            df[column] = ""
+        value = _cell_str(meta.get(key, ""))
+        if value:
+            df.at[idx, column] = value
+
+
 def _rank_contact_emails(values: Union[str, Sequence[str], None]) -> List[str]:
     normalized = filter_system_telemetry_emails(_merge_email_lists("", values or []))
     indexed = list(enumerate(normalized))
@@ -820,8 +1044,9 @@ def _consolidate_email_all(df: pd.DataFrame) -> pd.DataFrame:
             if _is_quarantined(df.loc[idx]):
                 continue
             merged_str = _set_email_all(df, idx, df.at[idx, "Email_All"], source="consolidate", logger=_LOGGER.info)
-            ranked = _rank_contact_emails(merged_str)
-            df.at[idx, "Email"] = ranked[0] if ranked else ""
+            primary_email, ranked = _select_primary_email_for_row(df.loc[idx], df.at[idx, "Email"], merged_str)
+            df.at[idx, "Email"] = primary_email if ranked else ""
+            _align_row_email_provenance(df, idx, primary_email)
     except Exception:
         pass
     return df
@@ -1234,6 +1459,15 @@ def _fill_email_provenance_fields(
     source_type = source_type or default_source_type
     method = method or default_method
 
+    merge_email_provenance_into_target(
+        (df, idx),
+        [email_val],
+        source_url=source_url,
+        source_type=source_type,
+        method=method,
+        surface=_facebook_email_surface_hint(source) if source_type.startswith("facebook") else "",
+    )
+
     if source_url:
         if "Email_Source_URL" not in df.columns:
             df["Email_Source_URL"] = ""
@@ -1379,6 +1613,7 @@ RAW_FALLBACK_COLUMNS: List[str] = [
     "Email_Source_URL",
     "Email_Source_Type",
     "Email_Extract_Method",
+    EMAIL_PROVENANCE_JSON_COL,
     "Source Directory",
 ]
 
@@ -1540,13 +1775,13 @@ def normalize_country_from_location(location_raw: str) -> str:
     return ""
 
 
-def _derive_primary_email(email: str, email_all: str) -> str:
-    ranked = _rank_contact_emails([email, email_all])
+def _derive_primary_email(email: str, email_all: str, row_like: Any = None) -> str:
+    _, ranked = _select_primary_email_for_row(row_like, email, email_all)
     return ranked[0] if ranked else ""
 
 
-def _derive_all_emails(email: str, email_all: str) -> str:
-    ranked = _rank_contact_emails([email_all, email])
+def _derive_all_emails(email: str, email_all: str, row_like: Any = None) -> str:
+    ranked = _rank_contact_emails_for_row(row_like, [email_all, email])
     return ";".join(ranked)
 
 
@@ -1613,7 +1848,7 @@ def infer_email_source(row: pd.Series) -> str:
     src_dir = str(row.get("Source Directory") or "").lower()
     src_url = str(row.get("Source URL") or "").lower()
 
-    if email_type == "fb_night" or fb_status.startswith("ok"):
+    if email_type == "fb_night" or fb_status.startswith("ok") or email_source_type == "facebook_enrich":
         return "Facebook About"
 
     if email_type == "website_enrich" or email_source_type == "website_enrich":
@@ -1635,6 +1870,24 @@ def infer_email_source(row: pd.Series) -> str:
         return "Seed directory (site/email scrape)"
 
     return "Unknown"
+
+
+def _selected_email_provenance(row_like: Any, selected_email: str) -> Dict[str, str]:
+    if not selected_email:
+        return {}
+    return get_email_provenance_entry(row_like, selected_email)
+
+
+def _facebook_email_surface_hint(source: Any) -> str:
+    if source is None or not hasattr(source, "get"):
+        return "facebook_main"
+    surface_raw = _cell_str(source.get("FB_Email_Source") or source.get("email_source")).lower()
+    if surface_raw == "about":
+        return "facebook_about"
+    if surface_raw == "main":
+        return "facebook_main"
+    source_url = _cell_str(source.get("Email_Source_URL") or source.get("email_source_url") or source.get("Facebook_URL"))
+    return "facebook_about" if "/about" in source_url.lower() else "facebook_main"
 
 
 def infer_country_from_context(row: pd.Series) -> str:
@@ -1775,8 +2028,11 @@ def _build_final_export_frame(df: pd.DataFrame) -> pd.DataFrame:
                 email_all_list = [e for e in normalize_emails(email_all) if e not in fb_emails]
                 email = ";".join(email_list)
                 email_all = ";".join(email_all_list)
-        primary_email = _derive_primary_email(email, email_all)
-        all_emails = _derive_all_emails(email, email_all)
+        primary_email = _derive_primary_email(email, email_all, row)
+        all_emails = _derive_all_emails(email, email_all, row)
+        selected_meta = _selected_email_provenance(row, primary_email)
+        if selected_meta:
+            email_source_url_val = _cell_str(selected_meta.get("source_url", "")) or email_source_url_val
 
         social_link = str(row.get("Social Link", "") or "")
         contact_mode = _derive_contact_mode(primary_email, social_link)
@@ -1790,8 +2046,12 @@ def _build_final_export_frame(df: pd.DataFrame) -> pd.DataFrame:
 
         row_for_email_source = row.copy()
         row_for_email_source["Primary Email"] = primary_email
+        if selected_meta:
+            row_for_email_source["Email_Source_URL"] = _cell_str(selected_meta.get("source_url", ""))
+            row_for_email_source["Email_Source_Type"] = _cell_str(selected_meta.get("source_type", ""))
+            row_for_email_source["Email_Extract_Method"] = _cell_str(selected_meta.get("extract_method", ""))
         email_source = infer_email_source(row_for_email_source)
-        needs_review = _compute_export_needs_review(row, primary_email, email_source)
+        needs_review = _compute_export_needs_review(row_for_email_source, primary_email, email_source)
 
         external_links = str(row.get("External Links", "") or "").strip()
         review_urls = str(row.get("Review_Urls", "") or row.get("Review Urls", "") or "").strip()
@@ -1813,8 +2073,8 @@ def _build_final_export_frame(df: pd.DataFrame) -> pd.DataFrame:
                 "All Emails": all_emails,
                 "Email Source": email_source,
                 "Email_Source_URL": email_source_url_val,
-                "Email_Source_Type": str(row.get("Email_Source_Type", "") or "").strip(),
-                "Email_Extract_Method": str(row.get("Email_Extract_Method", "") or "").strip(),
+                "Email_Source_Type": _cell_str(row_for_email_source.get("Email_Source_Type", "")),
+                "Email_Extract_Method": _cell_str(row_for_email_source.get("Email_Extract_Method", "")),
                 "Contact_Mode": contact_mode,
                 "Discovery Source": discovery_source,
                 "Source Directory": source_directory,
@@ -2662,6 +2922,7 @@ def run_facebook_global_pass(
                                 source_url,
                                 source_type,
                                 method,
+                                _facebook_email_surface_hint(row),
                             )
                             _fill_email_provenance_fields(
                                 updated_df,
@@ -2678,6 +2939,10 @@ def run_facebook_global_pass(
                                 filtered_email_all,
                                 source="fb_global_pass",
                                 logger=_LOGGER.info,
+                                source_url=source_url,
+                                source_type=source_type,
+                                method=method,
+                                surface=_facebook_email_surface_hint(row),
                             )
                         updated_df.at[rid_int, "FB_Status"] = (
                             fb_status_val or ("ok" if email_val or filtered_email_all else "no_candidates")
@@ -3279,6 +3544,7 @@ def run_facebook_global_pass_nightmode(
                         source_url,
                         source_type,
                         method,
+                        _facebook_email_surface_hint(enriched),
                     )
                     _fill_email_provenance_fields(
                         df,
@@ -3289,7 +3555,17 @@ def run_facebook_global_pass_nightmode(
                         default_method=method or "regex",
                     )
                     if "Email_All" in enriched:
-                        _set_email_all(df, idx, enriched.get("Email_All", ""), source="fb_global_pass", logger=logger)
+                        _set_email_all(
+                            df,
+                            idx,
+                            enriched.get("Email_All", ""),
+                            source="fb_global_pass",
+                            logger=logger,
+                            source_url=source_url,
+                            source_type=source_type,
+                            method=method,
+                            surface=_facebook_email_surface_hint(enriched),
+                        )
                 cols_to_copy = ["Facebook_URL", "__fb_emails_applied", "FB_Match_Level", "FB_Selected_By", "FB_Name_Consistency_Flag", "FB_Review_Reason"]
                 if not fb_rejected:
                     cols_to_copy.append("Email_Type")
@@ -3408,6 +3684,7 @@ DEFAULT_EXPORT_COLUMNS: Sequence[str] = [
     "Email_Source_URL",
     "Email_Source_Type",
     "Email_Extract_Method",
+    EMAIL_PROVENANCE_JSON_COL,
     "Email_Type",
     "FB_Status",
     FB_OPPORTUNITY_STATE_COL,

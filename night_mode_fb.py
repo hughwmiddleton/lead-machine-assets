@@ -44,6 +44,7 @@ from source_scheduler import (
     ensure_canonical_facebook_url,
     preferred_upstream_identity_hint,
 )
+from email_provenance import merge_email_provenance_into_target
 from email_normalizer import filter_system_telemetry_emails
 
 try:
@@ -7376,6 +7377,19 @@ class NightModeFacebookEnricher:
         target_row["Email_Type"] = night_result.email_type
         if night_result.facebook_url:
             target_row["Facebook_URL"] = night_result.facebook_url
+        merge_email_provenance_into_target(
+            target_row,
+            emails or night_result.email_all or night_result.email,
+            source_url=(
+                page_url
+                or night_result.email_source_url
+                or night_result.facebook_url
+                or target_row.get("Facebook_URL", "")
+            ),
+            source_type="facebook_enrich",
+            method=night_result.email_extract_method or "regex",
+            surface="facebook_about" if (night_result.email_source or "").strip().lower() == "about" else "facebook_main",
+        )
         if night_result.email_source:
             target_row["FB_Email_Source"] = night_result.email_source
         if night_result.about_attempted:

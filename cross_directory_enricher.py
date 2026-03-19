@@ -54,7 +54,7 @@ from email_normalizer import (
     normalize_email_value,
     normalize_obfuscated_email_patterns,
 )
-from email_provenance import _set_email_with_provenance
+from email_provenance import EMAIL_PROVENANCE_JSON_COL, _set_email_with_provenance, merge_email_provenance_into_target
 from fb_attribution import apply_fb_opportunity_state_df, ensure_fb_attribution_columns
 
 from facebook_enrich import (
@@ -5868,6 +5868,7 @@ EMAIL_COLUMNS_PROVENANCE: Tuple[str, ...] = (
     "Email_Source_URL",
     "Email_Source_Type",
     "Email_Extract_Method",
+    EMAIL_PROVENANCE_JSON_COL,
 )
 
 
@@ -6300,7 +6301,7 @@ class CrossDirectoryEnricherWorker(QThread):
             }
             seed_df = _ensure_email_columns(seed_df)
             self.log_message.emit(
-                "[Schema] ensured email columns: Email, Email_All, Email_Type, Email_Source_URL, Email_Source_Type, Email_Extract_Method"
+                "[Schema] ensured email columns: Email, Email_All, Email_Type, Email_Source_URL, Email_Source_Type, Email_Extract_Method, Email_Provenance_JSON"
             )
             seed_df = _apply_fb_promotion_df(seed_df, log_fn=self.log_message.emit)
             if getattr(self, "night_mode", False):
@@ -6336,7 +6337,7 @@ class CrossDirectoryEnricherWorker(QThread):
                 "Facebook_URL",
                 "Bandcamp_URL",
             ]
-            provenance_columns = ("Email_Source_URL", "Email_Source_Type", "Email_Extract_Method")
+            provenance_columns = ("Email_Source_URL", "Email_Source_Type", "Email_Extract_Method", EMAIL_PROVENANCE_JSON_COL)
             # Bandcamp status columns (diagnostic)
             bc_diag_columns = ("BC_Status", "BC_Mode", "BC_Attempts", "BC_403_Count")
             for bc_col in bc_diag_columns:
@@ -6912,6 +6913,10 @@ class CrossDirectoryEnricherWorker(QThread):
                 filtered_email_all,
                 source="domain_reuse",
                 logger=self.log_message.emit,
+                source_url=entry.get("source_url", ""),
+                source_type=entry.get("source_type", ""),
+                method=entry.get("extract_method", "regex") or "regex",
+                surface="domain_reuse",
             )
         if entry.get("email_type") and not _coerce_directory_value(df.at[row_idx, "Email_Type"]):
             df.at[row_idx, "Email_Type"] = entry.get("email_type", "")
@@ -8294,6 +8299,14 @@ class CrossDirectoryEnricherWorker(QThread):
         if not cell_to_str(seed_df.at[row_idx, "Email"]):
             seed_df.at[row_idx, "Email"] = found_email
         seed_df.at[row_idx, "Email_All"] = _merge_email_all(seed_df.at[row_idx, "Email_All"], all_ig_emails)
+        merge_email_provenance_into_target(
+            (seed_df, row_idx),
+            all_ig_emails,
+            source_url=ig_url,
+            source_type="instagram_enrich",
+            method="regex",
+            surface="instagram_profile",
+        )
         seed_df.at[row_idx, "Email_Type"] = "ig_enrich"
         if not cell_to_str(seed_df.at[row_idx, "Email_Source_URL"]):
             seed_df.at[row_idx, "Email_Source_URL"] = ig_url
@@ -8514,6 +8527,9 @@ class CrossDirectoryEnricherWorker(QThread):
                 normalized_emails,
                 source="website_enrich",
                 logger=self.log_message.emit,
+                source_url=selected_source_url,
+                source_type="website_enrich",
+                method=selected_extract_method,
             )
             record_email_summary_row_change(
                 email_before,
@@ -8521,6 +8537,13 @@ class CrossDirectoryEnricherWorker(QThread):
             )
         except Exception:
             seed_df.at[row_idx, "Email_All"] = ";".join(normalized_emails)
+            merge_email_provenance_into_target(
+                (seed_df, row_idx),
+                normalized_emails,
+                source_url=selected_source_url,
+                source_type="website_enrich",
+                method=selected_extract_method,
+            )
         self._record_enrichment_yield(
             row_idx,
             email_before,
@@ -8654,6 +8677,14 @@ class CrossDirectoryEnricherWorker(QThread):
                                 seed_df.at[row_idx, "Facebook_URL"] = page_url_used
                             seed_df.at[row_idx, "Email_All"] = _merge_email_all(
                                 seed_df.at[row_idx, "Email_All"], fb_emails
+                            )
+                            merge_email_provenance_into_target(
+                                (seed_df, row_idx),
+                                fb_emails,
+                                source_url=page_url_used or "",
+                                source_type="facebook_enrich",
+                                method="regex",
+                                surface="facebook_about" if "/about" in (page_url_used or "").lower() else "facebook_main",
                             )
                             seed_df.at[row_idx, "Email_Type"] = "fb_enrich"
                             if not cell_to_str(seed_df.at[row_idx, "Email_Source_URL"]):
@@ -10527,6 +10558,13 @@ class CrossDirectoryEnricherWorker(QThread):
             df.at[row_idx, "Email"] = MULTI_VALUE_SEPARATOR.join(sorted(emails_all))
             provenance_url = payload.source_url or ""
             provenance_type = payload.source_dir or (payload.source_detail or "cross_directory_enricher")
+            merge_email_provenance_into_target(
+                (df, row_idx),
+                new_emails,
+                source_url=provenance_url,
+                source_type=provenance_type,
+                method="regex",
+            )
             _set_email_provenance(provenance_url, provenance_type, method="regex")
         if (
             payload.source_dir

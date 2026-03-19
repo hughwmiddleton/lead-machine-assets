@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pandas as pd
 
+from email_provenance import EMAIL_PROVENANCE_JSON_COL
 import night_mode_runner
 import pipeline_runner
 from fb_attribution import (
@@ -309,6 +310,9 @@ def test_attempted_with_accepted_email_records_write(monkeypatch, tmp_path):
     assert df_out.loc[0, "Email"] == "fb@example.com"
     assert df_out.loc[0, FB_ATTEMPT_STATE_COL] == "attempted_fb_found_email"
     assert df_out.loc[0, FB_WRITE_STATE_COL] == "fb_wrote_email"
+    provenance = json.loads(df_out.loc[0, EMAIL_PROVENANCE_JSON_COL])
+    assert provenance["fb@example.com"]["surface"] == "facebook_about"
+    assert provenance["fb@example.com"]["source_type"] == "facebook_enrich"
 
 
 def test_attempted_with_rejected_email_records_not_applied(monkeypatch, tmp_path):

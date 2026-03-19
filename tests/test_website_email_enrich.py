@@ -1,3 +1,5 @@
+import json
+
 import pandas as pd
 import pytest
 from types import SimpleNamespace
@@ -5,6 +7,7 @@ from types import SimpleNamespace
 pytest.importorskip("PyQt5")
 
 import cross_directory_enricher as cde
+from email_provenance import EMAIL_PROVENANCE_JSON_COL
 
 
 def _make_worker(logs):
@@ -74,6 +77,9 @@ def test_website_email_homepage_contact_mailto(monkeypatch):
     assert seed_df.at[0, "Email_Source_Type"] == "website_enrich"
     assert seed_df.at[0, "Email_Extract_Method"] == "mailto"
     assert seed_df.at[0, "Email_Type"] == "website_enrich"
+    provenance = json.loads(seed_df.at[0, EMAIL_PROVENANCE_JSON_COL])
+    assert provenance["bookings@artist.test"]["surface"] == "website_contact_page"
+    assert provenance["bookings@artist.test"]["source_url"] == "https://artist.test/contact"
     assert "artist.test" in worker._domain_email_reuse_index
     assert any("[Web] homepage fetched ok=True" in msg for msg in logs)
     assert any("[Web] emails_found=1 pages_fetched=2" in msg for msg in logs)

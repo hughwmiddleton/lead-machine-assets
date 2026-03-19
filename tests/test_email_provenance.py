@@ -1,4 +1,5 @@
 import logging
+import json
 from pathlib import Path
 
 import pandas as pd
@@ -10,7 +11,11 @@ import night_mode_runner
 import night_mode_fb
 import pipeline_runner
 from cross_directory_enricher import CrossDirectoryEnricherWorker, EnrichmentPayload
-from email_provenance import _set_email_with_provenance
+from email_provenance import (
+    EMAIL_PROVENANCE_JSON_COL,
+    _set_email_with_provenance,
+    get_row_email_provenance,
+)
 
 
 def test_merge_raw_master_counts_missing_provenance(tmp_path: Path) -> None:
@@ -140,6 +145,10 @@ def test_soundcloud_apply_sets_provenance() -> None:
     assert row["Email_Source_URL"] == "https://soundcloud.com/testartist"
     assert row["Email_Source_Type"] == "soundcloud"
     assert row["Email_Extract_Method"] == "regex"
+    provenance = json.loads(row[EMAIL_PROVENANCE_JSON_COL])
+    assert provenance["sc@example.com"]["source_type"] == "soundcloud"
+    assert provenance["sc@example.com"]["surface"] == "soundcloud_profile"
+    assert provenance["sc@example.com"]["source_url"] == "https://soundcloud.com/testartist"
 
 
 def test_apply_payload_email_mutation_increments_summary() -> None:
@@ -260,6 +269,51 @@ def test_set_email_with_provenance_ignores_telemetry_only_email() -> None:
 
     assert df.at[0, "Email"] == ""
     assert df.at[0, "Email_All"] == ""
+
+
+def test_set_email_with_provenance_populates_support_field() -> None:
+    df = pd.DataFrame(
+        [
+            {
+                "Email": "",
+                "Email_All": "",
+                "Email_Source_URL": "",
+                "Email_Source_Type": "",
+                "Email_Extract_Method": "",
+            }
+        ]
+    )
+
+    _set_email_with_provenance(
+        (df, 0),
+        "artist@example.com",
+        "https://www.facebook.com/example/about",
+        "facebook_enrich",
+        "regex",
+        "facebook_about",
+    )
+
+    provenance = json.loads(df.at[0, EMAIL_PROVENANCE_JSON_COL])
+    assert provenance["artist@example.com"]["source_type"] == "facebook_enrich"
+    assert provenance["artist@example.com"]["surface"] == "facebook_about"
+    assert provenance["artist@example.com"]["source_url"] == "https://www.facebook.com/example/about"
+
+
+def test_legacy_row_without_support_field_synthesizes_selected_email_provenance() -> None:
+    row = pd.Series(
+        {
+            "Email": "legacy@example.com",
+            "Email_All": "legacy@example.com;other@example.com",
+            "Email_Source_URL": "https://artist.example/contact",
+            "Email_Source_Type": "website_enrich",
+            "Email_Extract_Method": "regex",
+        }
+    )
+
+    provenance = get_row_email_provenance(row)
+
+    assert provenance["legacy@example.com"]["source_type"] == "website_enrich"
+    assert provenance["legacy@example.com"]["surface"] == "website_contact_page"
 
 
 def test_apply_payload_ignores_telemetry_only_email() -> None:

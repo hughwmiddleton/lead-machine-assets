@@ -1,6 +1,9 @@
+import json
+
 import pandas as pd
 
 from email_normalizer import filter_system_telemetry_emails
+from email_provenance import EMAIL_PROVENANCE_JSON_COL
 import pipeline_runner
 
 
@@ -86,3 +89,138 @@ def test_set_email_all_prefers_outreach_addresses_in_order():
 
     assert merged == "booking@artist.com;press@artistlabel.com;support@bandcamp.com"
     assert df.at[0, "Email_All"] == "booking@artist.com;press@artistlabel.com;support@bandcamp.com"
+
+
+def test_consolidate_email_all_prefers_direct_fb_email_over_external_contact_site():
+    df = pd.DataFrame(
+        [
+            {
+                "Artist Name": "Artist E",
+                "Spotify_Website_URL": "https://artist.test",
+                "Email": "",
+                "Email_All": "to@nomograph.mastering;admin@artist.test",
+                EMAIL_PROVENANCE_JSON_COL: json.dumps(
+                    {
+                        "to@nomograph.mastering": {
+                            "source_type": "website_enrich",
+                            "surface": "website_contact_page",
+                            "source_url": "https://nomograph.mastering/contact",
+                            "extract_method": "regex",
+                        },
+                        "admin@artist.test": {
+                            "source_type": "facebook_enrich",
+                            "surface": "facebook_about",
+                            "source_url": "https://www.facebook.com/artist/about",
+                            "extract_method": "regex",
+                        },
+                    }
+                ),
+                "Email_Source_URL": "https://nomograph.mastering/contact",
+                "Email_Source_Type": "website_enrich",
+                "Email_Extract_Method": "regex",
+            }
+        ]
+    )
+
+    consolidated = pipeline_runner._consolidate_email_all(df)
+
+    assert consolidated.at[0, "Email"] == "admin@artist.test"
+    assert consolidated.at[0, "Email_All"] == "admin@artist.test;to@nomograph.mastering"
+    assert consolidated.at[0, "Email_Source_URL"] == "https://www.facebook.com/artist/about"
+    assert consolidated.at[0, "Email_Source_Type"] == "facebook_enrich"
+
+
+def test_consolidate_email_all_prefers_artist_domain_generic_inbox_over_unrelated_external_domain():
+    df = pd.DataFrame(
+        [
+            {
+                "Artist Name": "Artist F",
+                "Spotify_Website_URL": "https://artist.test",
+                "Email": "",
+                "Email_All": "bookings@label.test;admin@artist.test",
+                EMAIL_PROVENANCE_JSON_COL: json.dumps(
+                    {
+                        "bookings@label.test": {
+                            "source_type": "soundcloud_live",
+                            "surface": "soundcloud_profile",
+                            "source_url": "https://soundcloud.com/artist",
+                            "extract_method": "regex",
+                        },
+                        "admin@artist.test": {
+                            "source_type": "soundcloud_live",
+                            "surface": "soundcloud_profile",
+                            "source_url": "https://soundcloud.com/artist",
+                            "extract_method": "regex",
+                        },
+                    }
+                ),
+            }
+        ]
+    )
+
+    consolidated = pipeline_runner._consolidate_email_all(df)
+
+    assert consolidated.at[0, "Email"] == "admin@artist.test"
+    assert consolidated.at[0, "Email_All"] == "admin@artist.test;bookings@label.test"
+
+
+def test_consolidate_email_all_keeps_only_service_email_when_only_option():
+    df = pd.DataFrame([{"Artist Name": "Artist G", "Email": "", "Email_All": "to@nomograph.mastering"}])
+
+    consolidated = pipeline_runner._consolidate_email_all(df)
+
+    assert consolidated.at[0, "Email"] == "to@nomograph.mastering"
+    assert consolidated.at[0, "Email_All"] == "to@nomograph.mastering"
+
+
+def test_consolidate_email_all_is_deterministic_for_same_artist_domain():
+    df = pd.DataFrame(
+        [
+            {
+                "Artist Name": "Artist H",
+                "Spotify_Website_URL": "https://artist.test",
+                "Email": "",
+                "Email_All": "info@artist.test;bookings@artist.test",
+                EMAIL_PROVENANCE_JSON_COL: json.dumps(
+                    {
+                        "info@artist.test": {
+                            "source_type": "website_enrich",
+                            "surface": "website_homepage",
+                            "source_url": "https://artist.test",
+                            "extract_method": "mailto",
+                        },
+                        "bookings@artist.test": {
+                            "source_type": "website_enrich",
+                            "surface": "website_homepage",
+                            "source_url": "https://artist.test",
+                            "extract_method": "mailto",
+                        },
+                    }
+                ),
+            }
+        ]
+    )
+
+    consolidated = pipeline_runner._consolidate_email_all(df)
+
+    assert consolidated.at[0, "Email"] == "bookings@artist.test"
+    assert consolidated.at[0, "Email_All"] == "bookings@artist.test;info@artist.test"
+
+
+def test_consolidate_email_all_keeps_legacy_selected_email_without_support_field():
+    df = pd.DataFrame(
+        [
+            {
+                "Artist Name": "Artist I",
+                "Email": "hello@artist.test",
+                "Email_All": "contact@artist.test;hello@artist.test",
+                "Email_Source_URL": "https://artist.test/contact",
+                "Email_Source_Type": "website_enrich",
+                "Email_Extract_Method": "regex",
+            }
+        ]
+    )
+
+    consolidated = pipeline_runner._consolidate_email_all(df)
+
+    assert consolidated.at[0, "Email"] == "hello@artist.test"
