@@ -850,6 +850,52 @@ def _email_domain(email: str) -> str:
     return normalized.split("@", 1)[1]
 
 
+def _identity_token_parts(value: Any) -> List[str]:
+    text = _cell_str(value).lower()
+    if not text:
+        return []
+    return [token for token in re.split(r"[^a-z0-9]+", text) if len(token) >= 3]
+
+
+def _row_email_identity_tokens(row_like: Any, artist_domain: str) -> Tuple[str, ...]:
+    if row_like is None or not hasattr(row_like, "get"):
+        return ()
+
+    ordered_tokens: List[str] = []
+    seen: Set[str] = set()
+
+    def _append_tokens(tokens: Iterable[str]) -> None:
+        for token in tokens:
+            if not token or token in seen:
+                continue
+            seen.add(token)
+            ordered_tokens.append(token)
+
+    _append_tokens(_identity_token_parts(row_like.get("Artist Name", "")))
+    _append_tokens(_identity_token_parts(preferred_upstream_identity_hint(row_like)))
+    if artist_domain:
+        for label in artist_domain.split(".")[:-1]:
+            _append_tokens(_identity_token_parts(label))
+
+    return tuple(ordered_tokens)
+
+
+def _email_identity_score(email: str, identity_tokens: Sequence[str]) -> int:
+    normalized = normalize_email_key(email)
+    if "@" not in normalized or not identity_tokens:
+        return 0
+
+    local_part, domain = normalized.split("@", 1)
+    domain_labels = [label for label in domain.split(".") if label]
+    local_match = any(token in local_part for token in identity_tokens)
+    domain_match = any(
+        token in label
+        for token in identity_tokens
+        for label in domain_labels
+    )
+    return (2 if local_match else 0) + (1 if domain_match else 0)
+
+
 def _row_artist_owned_domain(row_like: Any) -> str:
     if row_like is None or not hasattr(row_like, "get"):
         return ""
@@ -917,6 +963,7 @@ def _rank_contact_emails_for_row(row_like: Any, values: Union[str, Sequence[str]
         return []
 
     artist_domain = _row_artist_owned_domain(row_like)
+    identity_tokens = _row_email_identity_tokens(row_like, artist_domain)
     explicit_provenance = {}
     if row_like is not None and hasattr(row_like, "get"):
         explicit_provenance = parse_email_provenance_json(row_like.get(EMAIL_PROVENANCE_JSON_COL, ""))
@@ -931,16 +978,18 @@ def _rank_contact_emails_for_row(row_like: Any, values: Union[str, Sequence[str]
         )
     indexed = list(enumerate(normalized))
 
-    def _sort_key(item: Tuple[int, str]) -> Tuple[int, int, int, int, int, int, str]:
+    def _sort_key(item: Tuple[int, str]) -> Tuple[int, int, int, int, int, int, int, str]:
         index, email = item
         meta = get_email_provenance_entry(row_like, email)
         bucket = _email_surface_bucket(row_like, email, meta, artist_domain)
         artist_domain_penalty = 0 if artist_domain and _email_domain(email) == artist_domain else 1
+        identity_penalty = 0 if _email_identity_score(email, identity_tokens) > 0 else 1
         legacy_current_penalty = 0 if (not explicit_provenance and preserve_legacy_current and email == current_selected) else 1
         has_provenance_penalty = 0 if meta else 1
         return (
             bucket,
             artist_domain_penalty,
+            identity_penalty,
             legacy_current_penalty,
             _email_role_priority(email),
             has_provenance_penalty,

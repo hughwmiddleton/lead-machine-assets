@@ -224,3 +224,153 @@ def test_consolidate_email_all_keeps_legacy_selected_email_without_support_field
     consolidated = pipeline_runner._consolidate_email_all(df)
 
     assert consolidated.at[0, "Email"] == "hello@artist.test"
+
+
+def test_select_primary_email_prefers_identity_matched_email_when_provenance_is_equal():
+    row = {
+        "Artist Name": "Jazzy Dale",
+        "SoundCloud Link": "https://soundcloud.com/jazzypdale",
+        EMAIL_PROVENANCE_JSON_COL: json.dumps(
+            {
+                "for@faridani.co": {
+                    "source_type": "soundcloud_live",
+                    "surface": "soundcloud_profile",
+                    "source_url": "https://soundcloud.com/jazzypdale",
+                    "extract_method": "regex",
+                },
+                "jazzypdale@gmail.com": {
+                    "source_type": "soundcloud_live",
+                    "surface": "soundcloud_profile",
+                    "source_url": "https://soundcloud.com/jazzypdale",
+                    "extract_method": "regex",
+                },
+            }
+        ),
+    }
+
+    primary, ranked = pipeline_runner._select_primary_email_for_row(
+        row,
+        "",
+        "for@faridani.co;jazzypdale@gmail.com",
+    )
+
+    assert primary == "jazzypdale@gmail.com"
+    assert ranked == ["jazzypdale@gmail.com", "for@faridani.co"]
+
+
+def test_select_primary_email_prefers_artist_like_gmail_over_unrelated_domain_with_same_provenance():
+    row = {
+        "Artist Name": "Artistname Music",
+        "SoundCloud Link": "https://soundcloud.com/artistname",
+        EMAIL_PROVENANCE_JSON_COL: json.dumps(
+            {
+                "artistname.music@gmail.com": {
+                    "source_type": "soundcloud_live",
+                    "surface": "soundcloud_profile",
+                    "source_url": "https://soundcloud.com/artistname",
+                    "extract_method": "regex",
+                },
+                "bookings@label.test": {
+                    "source_type": "soundcloud_live",
+                    "surface": "soundcloud_profile",
+                    "source_url": "https://soundcloud.com/artistname",
+                    "extract_method": "regex",
+                },
+            }
+        ),
+    }
+
+    primary, ranked = pipeline_runner._select_primary_email_for_row(
+        row,
+        "",
+        "artistname.music@gmail.com;bookings@label.test",
+    )
+
+    assert primary == "artistname.music@gmail.com"
+    assert ranked == ["artistname.music@gmail.com", "bookings@label.test"]
+
+
+def test_select_primary_email_keeps_artist_domain_preference_over_artist_like_gmail():
+    row = {
+        "Artist Name": "Artistname",
+        "Spotify_Website_URL": "https://artistdomain.com",
+        EMAIL_PROVENANCE_JSON_COL: json.dumps(
+            {
+                "admin@artistdomain.com": {
+                    "source_type": "soundcloud_live",
+                    "surface": "soundcloud_profile",
+                    "source_url": "https://soundcloud.com/artistname",
+                    "extract_method": "regex",
+                },
+                "artistname@gmail.com": {
+                    "source_type": "soundcloud_live",
+                    "surface": "soundcloud_profile",
+                    "source_url": "https://soundcloud.com/artistname",
+                    "extract_method": "regex",
+                },
+            }
+        ),
+    }
+
+    primary, ranked = pipeline_runner._select_primary_email_for_row(
+        row,
+        "",
+        "admin@artistdomain.com;artistname@gmail.com",
+    )
+
+    assert primary == "admin@artistdomain.com"
+    assert ranked == ["admin@artistdomain.com", "artistname@gmail.com"]
+
+
+def test_select_primary_email_keeps_only_third_party_email_when_it_is_the_only_option():
+    primary, ranked = pipeline_runner._select_primary_email_for_row(
+        {"Artist Name": "Artistname"},
+        "",
+        "bookings@label.test",
+    )
+
+    assert primary == "bookings@label.test"
+    assert ranked == ["bookings@label.test"]
+
+
+def test_select_primary_email_leaves_deterministic_fallback_unchanged_without_identity_signal():
+    primary, ranked = pipeline_runner._select_primary_email_for_row(
+        {},
+        "",
+        "zeta@alpha.test;omega@beta.test",
+    )
+
+    assert primary == "omega@beta.test"
+    assert ranked == ["omega@beta.test", "zeta@alpha.test"]
+
+
+def test_select_primary_email_remains_deterministic_when_multiple_emails_match_identity():
+    row = {
+        "Artist Name": "Jazzy Dale",
+        "SoundCloud Link": "https://soundcloud.com/jazzydale",
+        EMAIL_PROVENANCE_JSON_COL: json.dumps(
+            {
+                "jazzydale@gmail.com": {
+                    "source_type": "soundcloud_live",
+                    "surface": "soundcloud_profile",
+                    "source_url": "https://soundcloud.com/jazzydale",
+                    "extract_method": "regex",
+                },
+                "jazzydale.music@gmail.com": {
+                    "source_type": "soundcloud_live",
+                    "surface": "soundcloud_profile",
+                    "source_url": "https://soundcloud.com/jazzydale",
+                    "extract_method": "regex",
+                },
+            }
+        ),
+    }
+
+    primary, ranked = pipeline_runner._select_primary_email_for_row(
+        row,
+        "",
+        "jazzydale@gmail.com;jazzydale.music@gmail.com",
+    )
+
+    assert primary == "jazzydale.music@gmail.com"
+    assert ranked == ["jazzydale.music@gmail.com", "jazzydale@gmail.com"]

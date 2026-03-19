@@ -3,7 +3,7 @@ import json
 import pandas as pd
 
 from email_provenance import EMAIL_PROVENANCE_JSON_COL
-from pipeline_runner import _build_final_export_frame
+from pipeline_runner import _build_final_export_frame, _derive_primary_email, _select_primary_email_for_row
 
 
 def _build_export_row(**overrides: str) -> dict[str, str]:
@@ -208,3 +208,38 @@ def test_final_export_uses_selected_email_provenance_instead_of_stale_row_fields
     assert export_df.iloc[0]["Email Source"] == "Facebook About"
     assert export_df.iloc[0]["Email_Source_URL"] == "https://www.facebook.com/artist/about"
     assert export_df.iloc[0]["Needs_Review"] == "FALSE"
+
+
+def test_final_export_matches_row_level_primary_email_selection_for_identity_tiebreak() -> None:
+    row = _build_export_row(
+        Email="for@faridani.co",
+        Email_All="for@faridani.co;jazzypdale@gmail.com",
+        **{
+            "Artist Name": "Jazzy Dale",
+            "SoundCloud Link": "https://soundcloud.com/jazzypdale",
+            EMAIL_PROVENANCE_JSON_COL: json.dumps(
+                {
+                    "for@faridani.co": {
+                        "source_type": "soundcloud_live",
+                        "surface": "soundcloud_profile",
+                        "source_url": "https://soundcloud.com/jazzypdale",
+                        "extract_method": "regex",
+                    },
+                    "jazzypdale@gmail.com": {
+                        "source_type": "soundcloud_live",
+                        "surface": "soundcloud_profile",
+                        "source_url": "https://soundcloud.com/jazzypdale",
+                        "extract_method": "regex",
+                    },
+                }
+            ),
+        },
+    )
+    expected_primary, _ = _select_primary_email_for_row(row, row["Email"], row["Email_All"])
+
+    assert _derive_primary_email(row["Email"], row["Email_All"], row) == expected_primary
+
+    export_df = _build_final_export_frame(pd.DataFrame([row]))
+
+    assert export_df.iloc[0]["Primary Email"] == expected_primary
+    assert export_df.iloc[0]["All Emails"] == "jazzypdale@gmail.com;for@faridani.co"
