@@ -97,6 +97,54 @@ def test_explicit_fb_url_falls_back_to_legacy_anon(monkeypatch, enricher):
     assert result.get("FB_Status", "")  # status still set/returned without crashing
 
 
+def test_explicit_fb_url_preserves_extracted_email_when_override_rejects(monkeypatch, enricher):
+    main_url = "https://www.facebook.com/explicit.override.test"
+    monkeypatch.setattr(enricher, "_has_authenticated_session", lambda: True)
+    monkeypatch.setattr(
+        enricher,
+        "_search_for_page",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("PASS A should not invoke PASS B search")),
+    )
+
+    def fake_fetch(url, goto_about=False):  # noqa: ANN001
+        assert url == main_url
+        return (
+            """
+            <html>
+              <head>
+                <title>Off-Brand Title</title>
+              </head>
+              <body>
+                <div>Bookings: keepme@artist.com</div>
+              </body>
+            </html>
+            """,
+            main_url,
+        )
+
+    monkeypatch.setattr(enricher, "_fetch_html_with_url", fake_fetch)
+    monkeypatch.setattr(nmfb, "_night_fb_has_music_signals", lambda soup, context: False)
+    monkeypatch.setattr(
+        nmfb,
+        "should_accept_email_override",
+        lambda *args, **kwargs: (False, "email_override_reject:name_mismatch"),
+    )
+
+    row = {
+        "Artist Name": "Explicit FB",
+        "Email": "",
+        "Email_All": "",
+        "Facebook_URL": main_url,
+    }
+
+    result = enricher.enrich_row_with_facebook_night(row)
+
+    assert result.get("Email") == "keepme@artist.com"
+    assert "keepme@artist.com" in (result.get("Email_All") or "")
+    assert result.get("FB_Status") == "pass_a_found_email"
+    assert result.get("FB_Reason") == "explicit_url"
+
+
 def test_rows_without_explicit_fb_urls_unchanged(monkeypatch, enricher):
     # Ensure explicit-URL branch is untouched when no FB URLs exist.
     def _fail_session():

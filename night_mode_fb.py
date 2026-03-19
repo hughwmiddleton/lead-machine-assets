@@ -7141,10 +7141,13 @@ class NightModeFacebookEnricher:
             _log(self.logger, f"[Night FB][PageUnavailable] {resolved_url} (about tab)")
             outcome_hint = "content_unavailable"
 
+        keep_explicit_pass_a_emails = bool(
+            emails and candidate_context and candidate_context.get("explicit_accepted_url")
+        )
         # Email override gating when music signals are missing.
         email_override_decision = True
         email_override_reason = ""
-        if emails and not has_music_signals:
+        if emails and not has_music_signals and not keep_explicit_pass_a_emails:
             override_score = candidate_context.get("base_score") if candidate_context else 0.0
             try:
                 override_score = float(override_score or 0.0)
@@ -7181,6 +7184,11 @@ class NightModeFacebookEnricher:
                 _log(self.logger, f"[Night FB][EmailOverrideReject] url='{resolved_url}' reason='{email_override_reason}' emails={len(emails)} category='{meta_category}' name='{page_title}'")
                 emails = []
                 reject_reason = email_override_reason or "email_override_reject"
+        elif keep_explicit_pass_a_emails:
+            _log(
+                self.logger,
+                f"[Night FB][PASS A] Preserving extracted email(s) from explicit accepted URL despite weak post-fetch music signals: {resolved_url}",
+            )
 
         gate_soft_pass_category = False
         gate_soft_pass_identity = False
@@ -7747,11 +7755,19 @@ class NightModeFacebookEnricher:
                     driver_kind = "session"
                     outcome_for_log = "fetch_error"
                     reason_for_log = ""
+                    explicit_candidate_context = {
+                        "url": _normalise_fb_url(direct_url),
+                        "explicit_accepted_url": True,
+                    }
                     self._pass_a_bump("attempted")
                     self._last_explicit_guard_reason = ""
                     try:
                         candidate = self._scrape_single_fb_candidate(
-                            direct_url, result, artist_name, allow_anon=allow_anon_for_explicit
+                            direct_url,
+                            result,
+                            artist_name,
+                            allow_anon=allow_anon_for_explicit,
+                            candidate_context=explicit_candidate_context,
                         )
                     except Exception as exc:
                         candidate = None

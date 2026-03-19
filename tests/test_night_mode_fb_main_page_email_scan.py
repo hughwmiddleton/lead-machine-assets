@@ -862,3 +862,55 @@ def test_explicit_seed_url_keeps_main_page_email_without_candidate_context(monke
     assert calls == [main_url]
     assert driver_kind == "session"
     assert outcome == "found_email"
+
+
+def test_search_candidate_still_rejects_extracted_email_without_music_signals(monkeypatch) -> None:
+    logs = []
+    enricher = _build_enricher(logs)
+    main_url = "https://www.facebook.com/searchcandidate"
+
+    def fake_fetch(url, goto_about=False):  # noqa: ANN001
+        assert url == main_url
+        return (
+            """
+            <html>
+              <head>
+                <title>Wrong Page</title>
+              </head>
+              <body>
+                <div>Bookings: rejectme@artist.com</div>
+              </body>
+            </html>
+            """,
+            main_url,
+        )
+
+    monkeypatch.setattr(enricher, "_fetch_html_with_url", fake_fetch)
+    monkeypatch.setattr(nmfb, "_night_fb_has_music_signals", lambda soup, context: False)
+    monkeypatch.setattr(
+        nmfb,
+        "should_accept_email_override",
+        lambda *args, **kwargs: (False, "email_override_reject:name_mismatch"),
+    )
+
+    result = enricher._scrape_single_fb_candidate(
+        main_url,
+        {
+            "Artist Name": "Exact Artist",
+            "Email_All": "",
+        },
+        "Exact Artist",
+        allow_anon=False,
+        candidate_context={"url": main_url, "base_score": 0.2, "match_level": "near"},
+    )
+
+    assert result is not None
+    night_result, emails, driver_kind, outcome = result
+    assert emails == []
+    assert night_result is not None
+    assert night_result.accepted is False
+    assert night_result.reject_reason == "email_override_reject:name_mismatch"
+    assert night_result.email is None
+    assert night_result.email_all == ""
+    assert driver_kind == "session"
+    assert outcome == "no_email_on_page"
