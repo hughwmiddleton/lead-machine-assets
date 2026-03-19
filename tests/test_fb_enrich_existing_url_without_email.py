@@ -770,6 +770,35 @@ def test_fb_enrich_discovery_miss_preserves_no_fb_url_status(monkeypatch):
     assert any("no safe candidate found" in msg.lower() for msg in logs)
 
 
+def test_fb_discovery_sets_shared_attempt_flag(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Flagged Once",
+            "Email": "",
+            "Email_All": "",
+            "Social Link": "",
+            "External Links": "",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+
+    monkeypatch.setattr(
+        cde,
+        "_discover_facebook_url_bounded",
+        lambda *args, **kwargs: "",
+    )
+    monkeypatch.setattr(
+        cde,
+        "_extract_fb_emails_bounded",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("extract should not run after discovery miss")),
+    )
+
+    assert worker._discover_facebook_identity(seed_df, 0, object(), ctx) is False
+    assert seed_df.at[0, cde.FB_DISCOVERY_ATTEMPT_FLAG_COL] == "1"
+
+
 def test_missing_facebook_url_discovery_allowed_once_per_row(monkeypatch):
     logs = []
     worker = _make_worker(logs)
@@ -801,6 +830,39 @@ def test_missing_facebook_url_discovery_allowed_once_per_row(monkeypatch):
     assert worker._enrich_row_facebook(seed_df, 0, object(), ctx) is False
     assert discover_calls == [("One Shot", "")]
     assert any("already attempted this run" in msg.lower() for msg in logs)
+
+
+def test_missing_facebook_url_discovery_shared_flag_blocks_new_worker_retry(monkeypatch):
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Shared Lock",
+            "Email": "",
+            "Email_All": "",
+            "Social Link": "",
+            "External Links": "",
+        }
+    )
+    logs_one = []
+    logs_two = []
+    worker_one = _make_worker(logs_one)
+    worker_two = _make_worker(logs_two)
+    ctx_one = worker_one._build_row_context(seed_df, 0, 1, 1)
+    ctx_two = worker_two._build_row_context(seed_df, 0, 1, 1)
+
+    discover_calls = []
+
+    def fake_discover(fb_driver, artist_name, location, logger):
+        discover_calls.append((artist_name, location))
+        return ""
+
+    monkeypatch.setattr(cde, "_discover_facebook_url_bounded", fake_discover)
+
+    assert worker_one._discover_facebook_identity(seed_df, 0, object(), ctx_one) is False
+    assert seed_df.at[0, cde.FB_DISCOVERY_ATTEMPT_FLAG_COL] == "1"
+    assert worker_two._discover_facebook_identity(seed_df, 0, object(), ctx_two) is False
+    assert discover_calls == [("Shared Lock", "")]
+    assert worker_two._fb_discovery_attempted_rows == set()
+    assert any("already attempted this run" in msg.lower() for msg in logs_two)
 
 
 def test_discovery_fail_locks_future_retry_but_preserves_no_fb_url_status(monkeypatch):

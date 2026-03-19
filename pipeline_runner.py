@@ -76,6 +76,12 @@ ENRICHMENT_YIELD_SOURCE_ORDER: Sequence[str] = (
     "unearthed",
     "instagram",
 )
+FB_DISCOVERY_ATTEMPT_FLAG_COL = "__fb_discovery_attempted_this_run"
+FB_DISCOVERY_ATTEMPT_FLAG_ALIASES: Sequence[str] = (
+    FB_DISCOVERY_ATTEMPT_FLAG_COL,
+    "__fb_discovery_attempted",
+    "fb_discovery_attempted",
+)
 
 ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _UNEARTHED_TRACK_URL_COLUMNS = (
@@ -548,6 +554,15 @@ def _fb_write_surface_snapshot(row_like: Any) -> Dict[str, Any]:
         "email_set": set(normalize_emails(email_val)),
         "email_all_set": set(normalize_emails(email_all_val)),
     }
+
+
+def _fb_discovery_attempt_already_recorded(row_like: Any) -> bool:
+    if row_like is None or not hasattr(row_like, "get"):
+        return False
+    for key in FB_DISCOVERY_ATTEMPT_FLAG_ALIASES:
+        if _cell_str(row_like.get(key, "")):
+            return True
+    return False
 
 
 def _classify_fb_write_state(before: Dict[str, Any], after: Dict[str, Any], attempt_state: str) -> str:
@@ -3050,6 +3065,7 @@ def run_facebook_global_pass_nightmode(
             terminal_statuses = {"no_candidates", "unearthed_no_emails"}
             canonical_facebook_url, _ = ensure_canonical_facebook_url(row, set_row=False)
             has_canonical_facebook_url = bool(canonical_facebook_url)
+            shared_discovery_attempted = _fb_discovery_attempt_already_recorded(row)
             final_fb_statuses = {"login_redirect", "no_candidates", "ok", "found"} | terminal_statuses
             has_upstream_identity_anchor = _night_fb_has_upstream_identity_anchor(row)
             should_run_night_fb = (not has_email_effective) and (fb_status_val not in final_fb_statuses)
@@ -3124,6 +3140,27 @@ def run_facebook_global_pass_nightmode(
                 _safe_log_console(
                     logger,
                     f"[Night FB] Skipping row {idx} ('{artist_label}') - no canonical Facebook URL or upstream identity anchor.",
+                )
+                state.update(
+                    {
+                        "fb_last_index": last_index,
+                        "fb_completed": completed_rows,
+                        "fb_attempted_total": attempted_total,
+                        "fb_captcha_flag": captcha_flag,
+                        "fb_total_rows": total_rows,
+                        "fb_resume_input": os.path.abspath(input_csv),
+                    }
+                )
+                _write_state_with_pass_a(state)
+                continue
+
+            if discovery_fallback_eligible and not has_canonical_facebook_url and shared_discovery_attempted:
+                df.at[idx, FB_GATE_STATE_COL] = "skipped_duplicate_fb_discovery"
+                if not _cell_str(df.at[idx, FB_WRITE_STATE_COL]):
+                    df.at[idx, FB_WRITE_STATE_COL] = "fb_no_email_written"
+                _safe_log_console(
+                    logger,
+                    f"[Night FB] Skipping discovery fallback for row {idx} ('{artist_label}') - discovery already attempted earlier this run.",
                 )
                 state.update(
                     {

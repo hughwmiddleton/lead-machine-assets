@@ -153,6 +153,12 @@ DOMAIN_ORG_SIDECAR_COLUMNS: Tuple[str, ...] = (
     "roles_seen",
     "sources_seen",
 )
+FB_DISCOVERY_ATTEMPT_FLAG_COL = "__fb_discovery_attempted_this_run"
+FB_DISCOVERY_ATTEMPT_FLAG_ALIASES: Tuple[str, ...] = (
+    FB_DISCOVERY_ATTEMPT_FLAG_COL,
+    "__fb_discovery_attempted",
+    "fb_discovery_attempted",
+)
 
 
 @dataclass
@@ -2340,6 +2346,22 @@ def _get_canonical_fb_url(row) -> str:
             return normalised
     promoted = promote_facebook_url(row, set_row=False)
     return _canonicalize_fb_url(promoted)
+
+
+def _row_has_fb_discovery_attempt_flag(row: Any) -> bool:
+    if row is None:
+        return False
+    for key in FB_DISCOVERY_ATTEMPT_FLAG_ALIASES:
+        try:
+            value = row.get(key, "")
+        except AttributeError:
+            try:
+                value = row[key]
+            except Exception:
+                value = ""
+        if _clean_cell(value):
+            return True
+    return False
 
 
 def _get_direct_canonical_fb_urls(row: Any) -> Set[str]:
@@ -7850,7 +7872,7 @@ class CrossDirectoryEnricherWorker(QThread):
         if existing_fb_url:
             return False
 
-        if row_idx in getattr(self, "_fb_discovery_attempted_rows", set()):
+        if _row_has_fb_discovery_attempt_flag(seed_df.loc[row_idx]) or row_idx in getattr(self, "_fb_discovery_attempted_rows", set()):
             self.log_message.emit(
                 f"[FB Discover] Skipping discovery for '{artist}' (already attempted this run)"
             )
@@ -7897,6 +7919,9 @@ class CrossDirectoryEnricherWorker(QThread):
             f"[FB Discover] No explicit facebook url for '{artist}'; attempting bounded discovery "
             f"(explicit FB intake outcome='{intake.outcome}' source='{source_summary}' sample='{sample}')."
         )
+        if FB_DISCOVERY_ATTEMPT_FLAG_COL not in seed_df.columns:
+            seed_df[FB_DISCOVERY_ATTEMPT_FLAG_COL] = ""
+        seed_df.at[row_idx, FB_DISCOVERY_ATTEMPT_FLAG_COL] = "1"
         self._fb_discovery_attempted_rows.add(row_idx)
         try:
             discovered_fb_url = _discover_facebook_url_bounded(
