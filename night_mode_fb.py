@@ -7624,10 +7624,13 @@ class NightModeFacebookEnricher:
                 result["FB_Status"] = "unearthed_no_emails"
                 _log(self.logger, "[Night FB] Unearthed row without FB URL -> FB_Status='unearthed_no_emails' (empty artist).")
                 return result
+            _log(self.logger, "[Unearthed Path] entering Unearthed no-URL FB discovery")
             page_url = self._search_for_page(query, location="", allow_anon=True) or ""
             if not page_url:
                 result["FB_Status"] = "unearthed_no_candidates"
+                _log(self.logger, "[Unearthed Path] discovery yielded no candidate")
                 return result
+            _log(self.logger, f"[Unearthed Path] discovery yielded candidate url='{page_url}'")
             try:
                 driver = self._get_unearthed_driver()
             except Exception as exc:
@@ -7805,6 +7808,7 @@ class NightModeFacebookEnricher:
             # same PASS A path as other explicit rows. Keep legacy fallback
             # only for true no-URL Unearthed rows.
             if is_unearthed and not fb_urls:
+                _log(self.logger, "[Unearthed Path] no usable FB URL; allowing bounded FB discovery")
                 _log(self.logger, "[Night FB] Detected Unearthed row -> using legacy no-login FB scrape.")
                 return _finish(self._enrich_row_unearthed_legacy(result, artist_name, fb_urls))
 

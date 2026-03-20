@@ -321,6 +321,85 @@ def test_unearthed_without_explicit_url_keeps_legacy_path(monkeypatch, enricher)
     assert result.get("FB_Status") == "unearthed_no_emails"
 
 
+def test_unearthed_no_url_blind_discovery_success(monkeypatch, enricher):
+    logs = []
+    enricher.logger = lambda msg: logs.append(msg)
+    monkeypatch.setattr(enricher, "_maybe_recover_or_skip_on_checkpoint", lambda: True)
+    monkeypatch.setattr(
+        nmfb.NightModeFacebookEnricher,
+        "_scrape_single_fb_candidate",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("explicit PASS A should not run")),
+    )
+    monkeypatch.setattr(
+        enricher,
+        "_search_for_page",
+        lambda query, location="", allow_anon=True: "https://www.facebook.com/unearthed.blind",
+    )
+    monkeypatch.setattr(enricher, "_get_unearthed_driver", lambda: object())
+    monkeypatch.setattr(
+        nmfb,
+        "_scrape_fb_page_unearthed_legacy",
+        lambda driver, fb_url, logger=None: (["blind@example.com"], "ok", fb_url),
+    )
+    monkeypatch.setattr(
+        enricher,
+        "_build_result",
+        lambda emails, existing_email_all, page_url, artist_name, email_extract_method="regex": nmfb.NightModeFacebookResult(
+            email=emails[0],
+            email_all=";".join(emails),
+            facebook_url=page_url,
+            email_source_url=page_url,
+            email_extract_method=email_extract_method,
+        ),
+    )
+
+    row = {
+        "Artist Name": "Unearthed Blind",
+        "Source Directory": "unearthed",
+        "Email": "",
+        "Email_All": "",
+        "Facebook_URL": "",
+        "Social Link": "",
+    }
+
+    result = enricher.enrich_row_with_facebook_night(row)
+
+    assert result.get("FB_Status") == "ok_unearthed_blind"
+    assert result.get("Email") == "blind@example.com"
+    assert result.get("Facebook_URL") == "https://www.facebook.com/unearthed.blind"
+    assert any("[Unearthed Path] no usable FB URL; allowing bounded FB discovery" in msg for msg in logs)
+    assert any("[Unearthed Path] entering Unearthed no-URL FB discovery" in msg for msg in logs)
+    assert any("[Unearthed Path] discovery yielded candidate" in msg for msg in logs)
+
+
+def test_unearthed_no_url_blind_discovery_miss(monkeypatch, enricher):
+    logs = []
+    enricher.logger = lambda msg: logs.append(msg)
+    monkeypatch.setattr(enricher, "_maybe_recover_or_skip_on_checkpoint", lambda: True)
+    monkeypatch.setattr(
+        nmfb.NightModeFacebookEnricher,
+        "_scrape_single_fb_candidate",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("explicit PASS A should not run")),
+    )
+    monkeypatch.setattr(enricher, "_search_for_page", lambda query, location="", allow_anon=True: "")
+
+    row = {
+        "Artist Name": "Unearthed Blind Miss",
+        "Source Directory": "unearthed",
+        "Email": "",
+        "Email_All": "",
+        "Facebook_URL": "",
+        "Social Link": "",
+    }
+
+    result = enricher.enrich_row_with_facebook_night(row)
+
+    assert result.get("FB_Status") == "unearthed_no_candidates"
+    assert any("[Unearthed Path] no usable FB URL; allowing bounded FB discovery" in msg for msg in logs)
+    assert any("[Unearthed Path] entering Unearthed no-URL FB discovery" in msg for msg in logs)
+    assert any("[Unearthed Path] discovery yielded no candidate" in msg for msg in logs)
+
+
 def test_non_unearthed_explicit_url_still_skips_legacy_helper(monkeypatch, enricher):
     monkeypatch.setattr(enricher, "_maybe_recover_or_skip_on_checkpoint", lambda: True)
     monkeypatch.setattr(enricher, "_has_authenticated_session", lambda: True)

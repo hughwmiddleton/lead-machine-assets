@@ -3436,13 +3436,21 @@ def run_facebook_global_pass_nightmode(
             should_run_night_fb = (
                 (not has_email_effective) or unearthed_fb_first_active
             ) and (fb_status_val not in final_fb_statuses)
-            discovery_fallback_eligible = bool(
-                (not has_canonical_facebook_url)
+            unearthed_no_url_discovery_eligible = bool(
+                is_unearthed_source
+                and (not has_canonical_facebook_url)
                 and (not has_explicit_fb_entrypoint)
-                and has_upstream_identity_anchor
                 and should_run_night_fb
                 and not effective_skip_due_to_email
                 and fb_status_val not in terminal_statuses
+            )
+            discovery_fallback_eligible = bool(
+                (not has_canonical_facebook_url)
+                and (not has_explicit_fb_entrypoint)
+                and should_run_night_fb
+                and not effective_skip_due_to_email
+                and fb_status_val not in terminal_statuses
+                and (has_upstream_identity_anchor or unearthed_no_url_discovery_eligible)
             )
             if has_explicit_fb_entrypoint and _cell_str(df.at[idx, FB_OPPORTUNITY_STATE_COL]) in {"", "no_fb_opportunity"}:
                 df.at[idx, FB_OPPORTUNITY_STATE_COL] = "fb_opportunity_present"
@@ -3452,7 +3460,12 @@ def run_facebook_global_pass_nightmode(
                 should_run_night_fb
                 and not effective_skip_due_to_email
                 and fb_status_val not in terminal_statuses
-                and (has_canonical_facebook_url or has_explicit_fb_entrypoint or has_upstream_identity_anchor)
+                and (
+                    has_canonical_facebook_url
+                    or has_explicit_fb_entrypoint
+                    or has_upstream_identity_anchor
+                    or unearthed_no_url_discovery_eligible
+                )
             )
             _safe_log_console(
                 logger,
@@ -3504,7 +3517,12 @@ def run_facebook_global_pass_nightmode(
                 _write_state_with_pass_a(state)
                 continue
 
-            if not has_canonical_facebook_url and not has_explicit_fb_entrypoint and not has_upstream_identity_anchor:
+            if (
+                not has_canonical_facebook_url
+                and not has_explicit_fb_entrypoint
+                and not has_upstream_identity_anchor
+                and not unearthed_no_url_discovery_eligible
+            ):
                 df.at[idx, FB_GATE_STATE_COL] = "skipped_no_identity_anchor"
                 if not _cell_str(df.at[idx, FB_WRITE_STATE_COL]):
                     df.at[idx, FB_WRITE_STATE_COL] = "fb_no_email_written"
