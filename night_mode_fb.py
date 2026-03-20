@@ -5667,6 +5667,7 @@ class NightModeFacebookResult:
     selected_by: str = ""
     name_consistency_flag: Optional[int] = None
     review_reason: str = ""
+    source_context: Optional[Dict] = None
 
 
 class NightModeFacebookEnricher:
@@ -7259,13 +7260,24 @@ class NightModeFacebookEnricher:
         )
         emails = _filter_low_quality_fb_emails(emails_raw)
         main_surface = _fb_email_surface_label("main", used_mailto=main_mailto)
-        main_surface_map = {email: main_surface for email in emails}
+        main_surface_map = {
+            email: {
+                "surface": main_surface,
+                "extract_method": "mailto" if main_mailto else "regex",
+            }
+            for email in emails
+        }
         about_surface_map: Dict[str, str] = {}
+        about_emails: List[str] = []
+        about_mailto = False
         email_method = "mailto" if emails and main_mailto else ("regex" if emails else "")
         if emails:
             for email in emails:
                 _log(self.logger, f"[FB Email] Found email on main page: {email}")
-            _log(self.logger, "[FB Email] Skipping contact/about fetch because main page email already found")
+            if self._page_budget_remaining > 0:
+                _log(self.logger, "[FB Email] Main page email found; About/Contact fetch remains enabled under the current page budget.")
+            else:
+                _log(self.logger, "[FB Email] Skipping contact/about fetch because the page budget is exhausted")
         else:
             _log(self.logger, "[FB Email] No email found on main page; evaluating contact/about fetch")
 
@@ -7285,9 +7297,9 @@ class NightModeFacebookEnricher:
         seed_url_match = bool(seed_fb_norm and resolved_url and _normalise_fb_url(resolved_url) == seed_fb_norm)
         artist_location = _coerce_str(row.get("Country_Derived") or row.get("Country") or row.get("Location"))
 
-        need_about_fetch = not emails
+        need_about_fetch = self._page_budget_remaining > 0
         contact_url: Optional[str] = None
-        if need_about_fetch and self._page_budget_remaining > 0:
+        if need_about_fetch:
             if not has_music_signals:
                 _log(self.logger, f"[Night FB] No music signals on main page {resolved_url}, checking About/Contact...")
             contact_url = _pick_fb_contact_link(soup, resolved_url)
@@ -7326,31 +7338,35 @@ class NightModeFacebookEnricher:
                                     has_music_signals = True
                                     about_result = "music_signals"
                                     _log(self.logger, f"[Night FB] Music signals found on About tab {final_about}.")
-                            if not emails:
-                                about_visible_text = getattr(self, "_last_fb_visible_text", "") or ""
-                                about_anchor_values = list(getattr(self, "_last_fb_live_anchor_values", []) or [])
-                                _log_fb_email_surface_debug(
-                                    self.logger,
-                                    f"about:{final_about}",
-                                    about_html or "",
-                                    about_visible_text,
-                                )
-                                about_emails_raw, about_mailto = _extract_emails_from_html(
-                                    about_html or "",
-                                    rendered_text=about_visible_text,
-                                    anchor_values=about_anchor_values,
-                                )
-                                about_emails = _filter_low_quality_fb_emails(about_emails_raw)
-                                about_surface = _fb_email_surface_label(
-                                    _fb_contact_surface_label(contact_url),
-                                    used_mailto=about_mailto,
-                                )
-                                about_surface_map = {email: about_surface for email in about_emails}
-                                if about_emails:
-                                    emails = about_emails
-                                    email_method = "mailto" if about_mailto else "regex"
-                                    email_source = contact_url.rsplit("/", 1)[-1] or "about"
-                                    about_result = "emails_found"
+                            about_visible_text = getattr(self, "_last_fb_visible_text", "") or ""
+                            about_anchor_values = list(getattr(self, "_last_fb_live_anchor_values", []) or [])
+                            _log_fb_email_surface_debug(
+                                self.logger,
+                                f"about:{final_about}",
+                                about_html or "",
+                                about_visible_text,
+                            )
+                            about_emails_raw, about_mailto = _extract_emails_from_html(
+                                about_html or "",
+                                rendered_text=about_visible_text,
+                                anchor_values=about_anchor_values,
+                            )
+                            about_emails = _filter_low_quality_fb_emails(about_emails_raw)
+                            about_surface = _fb_email_surface_label(
+                                _fb_contact_surface_label(contact_url),
+                                used_mailto=about_mailto,
+                            )
+                            about_surface_map = {
+                                email: {
+                                    "surface": about_surface,
+                                    "extract_method": "mailto" if about_mailto else "regex",
+                                }
+                                for email in about_emails
+                            }
+                            if about_emails:
+                                email_method = "mailto" if about_mailto else "regex"
+                                email_source = contact_url.rsplit("/", 1)[-1] or "about"
+                                about_result = "emails_found"
                             if not about_result:
                                 about_result = "no_email"
             elif need_about_fetch and not contact_url:
@@ -7361,13 +7377,14 @@ class NightModeFacebookEnricher:
             _log(self.logger, f"[Night FB][PageUnavailable] {resolved_url} (about tab)")
             outcome_hint = "content_unavailable"
 
+        combined_emails = filter_system_telemetry_emails([*emails, *about_emails])
         keep_explicit_pass_a_emails = bool(
-            emails and candidate_context and candidate_context.get("explicit_accepted_url")
+            combined_emails and candidate_context and candidate_context.get("explicit_accepted_url")
         )
         # Email override gating when music signals are missing.
         email_override_decision = True
         email_override_reason = ""
-        if emails and not has_music_signals and not keep_explicit_pass_a_emails:
+        if combined_emails and not has_music_signals and not keep_explicit_pass_a_emails:
             override_score = candidate_context.get("base_score") if candidate_context else 0.0
             try:
                 override_score = float(override_score or 0.0)
@@ -7399,10 +7416,12 @@ class NightModeFacebookEnricher:
                 extracted_signals=extracted,
             )
             if email_override_decision:
-                _log(self.logger, f"[Night FB][EmailOverrideAccept] url='{resolved_url}' reason='{email_override_reason}' emails={len(emails)} category='{meta_category}' name='{page_title}'")
+                _log(self.logger, f"[Night FB][EmailOverrideAccept] url='{resolved_url}' reason='{email_override_reason}' emails={len(combined_emails)} category='{meta_category}' name='{page_title}'")
             else:
-                _log(self.logger, f"[Night FB][EmailOverrideReject] url='{resolved_url}' reason='{email_override_reason}' emails={len(emails)} category='{meta_category}' name='{page_title}'")
+                _log(self.logger, f"[Night FB][EmailOverrideReject] url='{resolved_url}' reason='{email_override_reason}' emails={len(combined_emails)} category='{meta_category}' name='{page_title}'")
                 emails = []
+                about_emails = []
+                combined_emails = []
                 reject_reason = email_override_reason or "email_override_reject"
         elif keep_explicit_pass_a_emails:
             _log(
@@ -7412,7 +7431,7 @@ class NightModeFacebookEnricher:
 
         gate_soft_pass_category = False
         gate_soft_pass_identity = False
-        if not has_music_signals and not emails:
+        if not has_music_signals and not combined_emails:
             if _category_is_music_like(meta_category):
                 gate_soft_pass_category = True
                 _log(self.logger, f"[Night FB] Soft-pass music gate by category allowlist: category='{meta_category}' url='{resolved_url}'")
@@ -7429,14 +7448,16 @@ class NightModeFacebookEnricher:
                     _log(self.logger, f"[Night FB] No music signals detected on FB page {resolved_url}, skipping.")
                     reject_reason = reject_reason or "no_music_signals"
 
-        accepted = not bool(reject_reason) and bool(has_music_signals or emails or gate_soft_pass_category or gate_soft_pass_identity)
+        accepted = not bool(reject_reason) and bool(has_music_signals or combined_emails or gate_soft_pass_category or gate_soft_pass_identity)
         if not accepted:
             # On rejection, strip any collected emails and cache the reject for this run.
             emails = []
+            about_emails = []
+            combined_emails = []
             self._fb_mark_rejected(artist_name, resolved_url or candidate_url, reject_reason or outcome_hint)
 
-        if emails:
-            unique_emails = sorted(set(emails))
+        if combined_emails:
+            unique_emails = sorted(set(combined_emails))
             for email in unique_emails:
                 _log(self.logger, f"[FB Email] Found email: {email}")
             self.fb_emails_found += len(unique_emails)
@@ -7455,12 +7476,12 @@ class NightModeFacebookEnricher:
         }
 
         night_result = self._build_result(
-            emails,
+            combined_emails,
             str(row.get("Email_All", "") or ""),
             persisted_facebook_url,
             artist_name,
             source_context=source_context,
-            allow_empty=True if not accepted else has_music_signals or emails or gate_soft_pass_category or gate_soft_pass_identity,
+            allow_empty=True if not accepted else has_music_signals or combined_emails or gate_soft_pass_category or gate_soft_pass_identity,
             accepted=accepted,
             reject_reason=reject_reason,
             candidate_url=resolved_url,
@@ -7468,10 +7489,10 @@ class NightModeFacebookEnricher:
         )
         if not night_result:
             return None
+        night_result.source_context = source_context
         night_result.accepted = accepted
         night_result.reject_reason = reject_reason or ""
         night_result.candidate_url = resolved_url
-        night_result.email_source = email_source
         night_result.about_attempted = about_attempted
         night_result.about_result = about_result or ("soft_pass_identity" if gate_soft_pass_identity else "soft_pass_category" if gate_soft_pass_category else "")
         # Propagate confidence metadata for downstream review flagging.
@@ -7508,12 +7529,33 @@ class NightModeFacebookEnricher:
             row["FB_Gate"] = "soft_pass_category"
         if gate_soft_pass_identity:
             row["FB_Gate"] = "soft_pass_identity"
-        outcome_hint = "found_email" if emails else "no_email_on_page"
+        outcome_hint = "found_email" if combined_emails else "no_email_on_page"
         if night_result is None:
             if reject_reason:
                 self._fb_mark_rejected(artist_name, resolved_url or candidate_url, reject_reason)
-            return None, emails, used_driver_kind, reject_reason or outcome_hint
-        return night_result, emails, used_driver_kind, outcome_hint
+            return None, combined_emails, used_driver_kind, reject_reason or outcome_hint
+        selected_surface = ""
+        if isinstance(source_context.get("surfaces"), dict) and night_result.email:
+            normalized_selected = normalize_email_value(night_result.email)
+            selected_meta = source_context["surfaces"].get(normalized_selected) or source_context["surfaces"].get(night_result.email) or ""
+            if isinstance(selected_meta, dict):
+                selected_surface = str(
+                    selected_meta.get("surface")
+                    or selected_meta.get("email_source")
+                    or selected_meta.get("source")
+                    or ""
+                ).strip().lower()
+            else:
+                selected_surface = str(selected_meta or "").strip().lower()
+        if selected_surface:
+            night_result.email_source = "about" if ("about" in selected_surface or "contact" in selected_surface) else "main"
+            if night_result.email_source == "about" and about_emails and night_result.email in about_emails:
+                night_result.email_extract_method = "mailto" if about_mailto else "regex"
+            elif night_result.email_source == "main" and emails and night_result.email in emails:
+                night_result.email_extract_method = "mailto" if main_mailto else "regex"
+        else:
+            night_result.email_source = email_source
+        return night_result, combined_emails, used_driver_kind, outcome_hint
 
     def _build_result(
         self,
@@ -7610,19 +7652,57 @@ class NightModeFacebookEnricher:
         canonical_fb_url = canonicalize_facebook_url(night_result.facebook_url)
         if canonical_fb_url:
             target_row["Facebook_URL"] = canonical_fb_url
-        merge_email_provenance_into_target(
-            target_row,
-            emails or night_result.email_all or night_result.email,
-            source_url=(
-                page_url
-                or night_result.email_source_url
-                or night_result.facebook_url
-                or target_row.get("Facebook_URL", "")
-            ),
-            source_type="facebook_enrich",
-            method=night_result.email_extract_method or "regex",
-            surface="facebook_about" if (night_result.email_source or "").strip().lower() == "about" else "facebook_main",
-        )
+        provenance_emails = emails or night_result.email_all or night_result.email
+        provenance_surface = "facebook_about" if (night_result.email_source or "").strip().lower() == "about" else "facebook_main"
+        provenance_source_context = getattr(night_result, "source_context", None)
+        if isinstance(provenance_source_context, dict) and isinstance(provenance_source_context.get("surfaces"), dict):
+            grouped_emails: Dict[str, List[Tuple[str, str]]] = {}
+            for email in filter_system_telemetry_emails(provenance_emails):
+                normalized_email = normalize_email_value(email)
+                raw_surface = provenance_source_context["surfaces"].get(normalized_email) or provenance_source_context["surfaces"].get(email) or ""
+                if isinstance(raw_surface, dict):
+                    surface_norm = str(
+                        raw_surface.get("surface")
+                        or raw_surface.get("email_source")
+                        or raw_surface.get("source")
+                        or ""
+                    ).strip().lower()
+                    extract_method = str(raw_surface.get("extract_method") or night_result.email_extract_method or "regex")
+                else:
+                    surface_norm = str(raw_surface or "").strip().lower()
+                    extract_method = night_result.email_extract_method or "regex"
+                surface = "facebook_about" if ("about" in surface_norm or "contact" in surface_norm) else "facebook_main"
+                grouped_emails.setdefault(surface, []).append((email, extract_method))
+            for surface, bucket in grouped_emails.items():
+                bucket_emails = [email for email, _method in bucket]
+                bucket_method = bucket[0][1] if bucket else night_result.email_extract_method or "regex"
+                merge_email_provenance_into_target(
+                    target_row,
+                    bucket_emails,
+                    source_url=(
+                        page_url
+                        or night_result.email_source_url
+                        or night_result.facebook_url
+                        or target_row.get("Facebook_URL", "")
+                    ),
+                    source_type="facebook_enrich",
+                    method=bucket_method,
+                    surface=surface,
+                )
+        else:
+            merge_email_provenance_into_target(
+                target_row,
+                provenance_emails,
+                source_url=(
+                    page_url
+                    or night_result.email_source_url
+                    or night_result.facebook_url
+                    or target_row.get("Facebook_URL", "")
+                ),
+                source_type="facebook_enrich",
+                method=night_result.email_extract_method or "regex",
+                surface=provenance_surface,
+            )
         if night_result.email_source:
             target_row["FB_Email_Source"] = night_result.email_source
         if night_result.about_attempted:

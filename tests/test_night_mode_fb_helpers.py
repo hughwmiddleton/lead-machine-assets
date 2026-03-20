@@ -206,6 +206,33 @@ def test_build_result_filters_telemetry_only_email() -> None:
     assert result is None
 
 
+def test_build_result_ranks_primary_from_combined_main_and_about_surfaces() -> None:
+    enricher = night_mode_fb.NightModeFacebookEnricher(
+        legacy_module=None,
+        username="",
+        password="",
+        logger=None,
+        use_shared_session=False,
+    )
+
+    result = enricher._build_result(
+        ["bookings@artist.com", "about@artist.com"],
+        "",
+        "https://www.facebook.com/testartist",
+        "Test Artist",
+        source_context={
+            "surfaces": {
+                "bookings@artist.com": "main",
+                "about@artist.com": "about",
+            }
+        },
+    )
+
+    assert result is not None
+    assert result.email == "about@artist.com"
+    assert result.email_all == "bookings@artist.com;about@artist.com"
+
+
 def test_dedupe_prefers_fb_in_night_mode() -> None:
     df = pd.DataFrame(
         [

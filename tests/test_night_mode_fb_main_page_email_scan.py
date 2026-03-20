@@ -42,11 +42,12 @@ class _FbContainerTextDriver:
         return []
 
 
-def test_main_page_html_email_stops_before_secondary_fetch(monkeypatch) -> None:
+def test_main_page_html_email_allows_secondary_fetch(monkeypatch) -> None:
     logs = []
     enricher = _build_enricher(logs)
     calls = []
     main_url = "https://www.facebook.com/artist"
+    about_url = "https://www.facebook.com/artist/about"
 
     pages = {
         main_url: (
@@ -61,6 +62,16 @@ def test_main_page_html_email_stops_before_secondary_fetch(monkeypatch) -> None:
             </html>
             """,
             main_url,
+        ),
+        about_url: (
+            """
+            <html>
+              <body>
+                <div>About: about@artist.com</div>
+              </body>
+            </html>
+            """,
+            about_url,
         ),
     }
 
@@ -82,24 +93,28 @@ def test_main_page_html_email_stops_before_secondary_fetch(monkeypatch) -> None:
 
     assert result is not None
     night_result, emails, driver_kind, outcome = result
-    assert emails == ["bookings@artist.com"]
+    assert set(emails) == {"bookings@artist.com", "about@artist.com"}
     assert night_result is not None
-    assert night_result.email == "bookings@artist.com"
-    assert night_result.about_attempted == "no"
-    assert calls == [main_url]
-    assert len(calls) == 1
+    assert night_result.email == "about@artist.com"
+    assert set((night_result.email_all or "").split(";")) == {"bookings@artist.com", "about@artist.com"}
+    assert night_result.about_attempted == "yes"
+    assert night_result.about_result == "emails_found"
+    assert calls == [main_url, about_url]
+    assert len(calls) == 2
     assert driver_kind == "session"
     assert outcome == "found_email"
     assert any("[FB Email] Scanning main page HTML for emails" in msg for msg in logs)
     assert any("[FB Email] Found email on main page: bookings@artist.com" in msg for msg in logs)
-    assert any("[FB Email] Skipping contact/about fetch because main page email already found" in msg for msg in logs)
+    assert any(f"[FB Email] Visiting {about_url}" in msg for msg in logs)
+    assert not any("[FB Email] Skipping contact/about fetch because main page email already found" in msg for msg in logs)
 
 
-def test_main_page_script_email_stops_before_secondary_fetch(monkeypatch) -> None:
+def test_main_page_script_email_allows_secondary_fetch(monkeypatch) -> None:
     logs = []
     enricher = _build_enricher(logs)
     calls = []
     main_url = "https://www.facebook.com/artist"
+    about_url = "https://www.facebook.com/artist/about"
 
     pages = {
         main_url: (
@@ -116,6 +131,16 @@ def test_main_page_script_email_stops_before_secondary_fetch(monkeypatch) -> Non
             """,
             main_url,
         ),
+        about_url: (
+            """
+            <html>
+              <body>
+                <div>About: about@artist.com</div>
+              </body>
+            </html>
+            """,
+            about_url,
+        ),
     }
 
     def fake_fetch(url, goto_about=False):  # noqa: ANN001
@@ -136,24 +161,28 @@ def test_main_page_script_email_stops_before_secondary_fetch(monkeypatch) -> Non
 
     assert result is not None
     night_result, emails, driver_kind, outcome = result
-    assert emails == ["booking@artist.com"]
+    assert set(emails) == {"booking@artist.com", "about@artist.com"}
     assert night_result is not None
-    assert night_result.email == "booking@artist.com"
-    assert night_result.about_attempted == "no"
-    assert calls == [main_url]
-    assert len(calls) == 1
+    assert night_result.email == "about@artist.com"
+    assert set((night_result.email_all or "").split(";")) == {"booking@artist.com", "about@artist.com"}
+    assert night_result.about_attempted == "yes"
+    assert night_result.about_result == "emails_found"
+    assert calls == [main_url, about_url]
+    assert len(calls) == 2
     assert driver_kind == "session"
     assert outcome == "found_email"
     assert any("[FB Email] Scanning main page HTML for emails" in msg for msg in logs)
     assert any("[FB Email] Found email on main page: booking@artist.com" in msg for msg in logs)
-    assert any("[FB Email] Skipping contact/about fetch because main page email already found" in msg for msg in logs)
+    assert any(f"[FB Email] Visiting {about_url}" in msg for msg in logs)
+    assert not any("[FB Email] Skipping contact/about fetch because main page email already found" in msg for msg in logs)
 
 
-def test_main_page_rendered_visible_text_email_stops_before_secondary_fetch(monkeypatch) -> None:
+def test_main_page_rendered_visible_text_email_allows_secondary_fetch(monkeypatch) -> None:
     logs = []
     enricher = _build_enricher(logs)
     calls = []
     main_url = "https://www.facebook.com/artist"
+    about_url = "https://www.facebook.com/artist/about"
 
     pages = {
         main_url: (
@@ -168,58 +197,16 @@ def test_main_page_rendered_visible_text_email_stops_before_secondary_fetch(monk
             main_url,
             "Intro Contact brighteyedbookings@gmail.com",
         ),
-    }
-
-    def fake_fetch(url, goto_about=False):  # noqa: ANN001
-        calls.append(url)
-        html, resolved, visible_text = pages[url]
-        enricher._last_fb_visible_text = visible_text
-        return html, resolved
-
-    monkeypatch.setattr(enricher, "_fetch_html_with_url", fake_fetch)
-    monkeypatch.setattr(nmfb, "_night_fb_has_music_signals", lambda soup, context: False)
-    monkeypatch.setattr(nmfb, "should_accept_email_override", lambda *args, **kwargs: (True, "test_override"))
-
-    result = enricher._scrape_single_fb_candidate(
-        main_url,
-        {"Artist Name": "Artist", "Email_All": ""},
-        "Artist",
-        allow_anon=False,
-        candidate_context={},
-    )
-
-    assert result is not None
-    night_result, emails, driver_kind, outcome = result
-    assert emails == ["brighteyedbookings@gmail.com"]
-    assert night_result is not None
-    assert night_result.email == "brighteyedbookings@gmail.com"
-    assert night_result.about_attempted == "no"
-    assert calls == [main_url]
-    assert len(calls) == 1
-    assert driver_kind == "session"
-    assert outcome == "found_email"
-    assert any("[FB Email] Found email on main page: brighteyedbookings@gmail.com" in msg for msg in logs)
-    assert any("[FB Email] Skipping contact/about fetch because main page email already found" in msg for msg in logs)
-
-
-def test_main_page_rendered_obfuscated_visible_text_email_stops_before_secondary_fetch(monkeypatch) -> None:
-    logs = []
-    enricher = _build_enricher(logs)
-    calls = []
-    main_url = "https://www.facebook.com/artist"
-
-    pages = {
-        main_url: (
+        about_url: (
             """
             <html>
               <body>
-                <div>No visible email on this page.</div>
-                <a href="/artist/about">About</a>
+                <div>About: about@artist.com</div>
               </body>
             </html>
             """,
-            main_url,
-            "Bookings name [at] artist [dot] com",
+            about_url,
+            "",
         ),
     }
 
@@ -243,23 +230,95 @@ def test_main_page_rendered_obfuscated_visible_text_email_stops_before_secondary
 
     assert result is not None
     night_result, emails, driver_kind, outcome = result
-    assert emails == ["name@artist.com"]
+    assert set(emails) == {"brighteyedbookings@gmail.com", "about@artist.com"}
     assert night_result is not None
-    assert night_result.email == "name@artist.com"
-    assert night_result.about_attempted == "no"
-    assert calls == [main_url]
-    assert len(calls) == 1
+    assert night_result.email == "about@artist.com"
+    assert set((night_result.email_all or "").split(";")) == {"brighteyedbookings@gmail.com", "about@artist.com"}
+    assert night_result.about_attempted == "yes"
+    assert night_result.about_result == "emails_found"
+    assert calls == [main_url, about_url]
+    assert len(calls) == 2
     assert driver_kind == "session"
     assert outcome == "found_email"
-    assert any("[FB Email] Found email on main page: name@artist.com" in msg for msg in logs)
-    assert any("[FB Email] Skipping contact/about fetch because main page email already found" in msg for msg in logs)
+    assert any("[FB Email] Found email on main page: brighteyedbookings@gmail.com" in msg for msg in logs)
+    assert any(f"[FB Email] Visiting {about_url}" in msg for msg in logs)
+    assert not any("[FB Email] Skipping contact/about fetch because main page email already found" in msg for msg in logs)
 
 
-def test_main_page_fb_container_fallback_email_stops_before_secondary_fetch(monkeypatch) -> None:
+def test_main_page_rendered_obfuscated_visible_text_email_allows_secondary_fetch(monkeypatch) -> None:
     logs = []
     enricher = _build_enricher(logs)
     calls = []
     main_url = "https://www.facebook.com/artist"
+    about_url = "https://www.facebook.com/artist/about"
+
+    pages = {
+        main_url: (
+            """
+            <html>
+              <body>
+                <div>No visible email on this page.</div>
+                <a href="/artist/about">About</a>
+              </body>
+            </html>
+            """,
+            main_url,
+            "Bookings name [at] artist [dot] com",
+        ),
+        about_url: (
+            """
+            <html>
+              <body>
+                <div>About: about@artist.com</div>
+              </body>
+            </html>
+            """,
+            about_url,
+            "",
+        ),
+    }
+
+    def fake_fetch(url, goto_about=False):  # noqa: ANN001
+        calls.append(url)
+        html, resolved, visible_text = pages[url]
+        enricher._last_fb_visible_text = visible_text
+        return html, resolved
+
+    monkeypatch.setattr(enricher, "_fetch_html_with_url", fake_fetch)
+    monkeypatch.setattr(nmfb, "_night_fb_has_music_signals", lambda soup, context: False)
+    monkeypatch.setattr(nmfb, "should_accept_email_override", lambda *args, **kwargs: (True, "test_override"))
+
+    result = enricher._scrape_single_fb_candidate(
+        main_url,
+        {"Artist Name": "Artist", "Email_All": ""},
+        "Artist",
+        allow_anon=False,
+        candidate_context={},
+    )
+
+    assert result is not None
+    night_result, emails, driver_kind, outcome = result
+    assert set(emails) == {"name@artist.com", "about@artist.com"}
+    assert night_result is not None
+    assert night_result.email == "about@artist.com"
+    assert set((night_result.email_all or "").split(";")) == {"name@artist.com", "about@artist.com"}
+    assert night_result.about_attempted == "yes"
+    assert night_result.about_result == "emails_found"
+    assert calls == [main_url, about_url]
+    assert len(calls) == 2
+    assert driver_kind == "session"
+    assert outcome == "found_email"
+    assert any("[FB Email] Found email on main page: name@artist.com" in msg for msg in logs)
+    assert any(f"[FB Email] Visiting {about_url}" in msg for msg in logs)
+    assert not any("[FB Email] Skipping contact/about fetch because main page email already found" in msg for msg in logs)
+
+
+def test_main_page_fb_container_fallback_email_allows_secondary_fetch(monkeypatch) -> None:
+    logs = []
+    enricher = _build_enricher(logs)
+    calls = []
+    main_url = "https://www.facebook.com/artist"
+    about_url = "https://www.facebook.com/artist/about"
 
     pages = {
         main_url: (
@@ -274,6 +333,18 @@ def test_main_page_fb_container_fallback_email_stops_before_secondary_fetch(monk
             main_url,
             "No email on main page",
             ["Intro Contact brighteyedbookings@gmail.com"],
+        ),
+        about_url: (
+            """
+            <html>
+              <body>
+                <div>About: about@artist.com</div>
+              </body>
+            </html>
+            """,
+            about_url,
+            "",
+            [],
         ),
     }
 
@@ -298,23 +369,27 @@ def test_main_page_fb_container_fallback_email_stops_before_secondary_fetch(monk
 
     assert result is not None
     night_result, emails, driver_kind, outcome = result
-    assert emails == ["brighteyedbookings@gmail.com"]
+    assert set(emails) == {"brighteyedbookings@gmail.com", "about@artist.com"}
     assert night_result is not None
-    assert night_result.email == "brighteyedbookings@gmail.com"
-    assert night_result.about_attempted == "no"
-    assert calls == [main_url]
-    assert len(calls) == 1
+    assert night_result.email == "about@artist.com"
+    assert set((night_result.email_all or "").split(";")) == {"brighteyedbookings@gmail.com", "about@artist.com"}
+    assert night_result.about_attempted == "yes"
+    assert night_result.about_result == "emails_found"
+    assert calls == [main_url, about_url]
+    assert len(calls) == 2
     assert driver_kind == "session"
     assert outcome == "found_email"
     assert any("[FB Email] Found email on main page: brighteyedbookings@gmail.com" in msg for msg in logs)
-    assert any("[FB Email] Skipping contact/about fetch because main page email already found" in msg for msg in logs)
+    assert any(f"[FB Email] Visiting {about_url}" in msg for msg in logs)
+    assert not any("[FB Email] Skipping contact/about fetch because main page email already found" in msg for msg in logs)
 
 
-def test_main_page_live_anchor_mailto_stops_before_secondary_fetch(monkeypatch) -> None:
+def test_main_page_live_anchor_mailto_allows_secondary_fetch(monkeypatch) -> None:
     logs = []
     enricher = _build_enricher(logs)
     calls = []
     main_url = "https://www.facebook.com/artist"
+    about_url = "https://www.facebook.com/artist/about"
 
     pages = {
         main_url: (
@@ -327,7 +402,18 @@ def test_main_page_live_anchor_mailto_stops_before_secondary_fetch(monkeypatch) 
             </html>
             """,
             main_url,
-            ["mailto:bookings@artist.com"],
+            ["mailto:info@artist.com"],
+        ),
+        about_url: (
+            """
+            <html>
+              <body>
+                <div>About: about@artist.com</div>
+              </body>
+            </html>
+            """,
+            about_url,
+            [],
         ),
     }
 
@@ -352,13 +438,18 @@ def test_main_page_live_anchor_mailto_stops_before_secondary_fetch(monkeypatch) 
 
     assert result is not None
     night_result, emails, driver_kind, outcome = result
-    assert emails == ["bookings@artist.com"]
+    assert set(emails) == {"info@artist.com", "about@artist.com"}
     assert night_result is not None
-    assert night_result.email == "bookings@artist.com"
-    assert night_result.about_attempted == "no"
-    assert calls == [main_url]
+    assert night_result.email == "about@artist.com"
+    assert set((night_result.email_all or "").split(";")) == {"info@artist.com", "about@artist.com"}
+    assert night_result.about_attempted == "yes"
+    assert night_result.about_result == "emails_found"
+    assert calls == [main_url, about_url]
+    assert len(calls) == 2
     assert driver_kind == "session"
     assert outcome == "found_email"
+    assert any(f"[FB Email] Visiting {about_url}" in msg for msg in logs)
+    assert not any("[FB Email] Skipping contact/about fetch because main page email already found" in msg for msg in logs)
 
 
 def test_secondary_fetch_still_runs_when_main_page_has_no_email(monkeypatch) -> None:
@@ -876,6 +967,7 @@ def test_explicit_seed_url_keeps_main_page_email_without_candidate_context(monke
     enricher = _build_enricher(logs)
     calls = []
     main_url = "https://www.facebook.com/exactartist"
+    contact_info_url = "https://www.facebook.com/exactartist/about_contact_and_basic_info"
 
     pages = {
         main_url: (
@@ -890,6 +982,16 @@ def test_explicit_seed_url_keeps_main_page_email_without_candidate_context(monke
             </html>
             """,
             main_url,
+        ),
+        contact_info_url: (
+            """
+            <html>
+              <body>
+                <div>No email on the about page.</div>
+              </body>
+            </html>
+            """,
+            contact_info_url,
         ),
     }
 
@@ -918,8 +1020,9 @@ def test_explicit_seed_url_keeps_main_page_email_without_candidate_context(monke
     assert night_result is not None
     assert night_result.accepted is True
     assert night_result.email == "bookings@artist.com"
-    assert night_result.about_attempted == "no"
-    assert calls == [main_url]
+    assert night_result.about_attempted == "yes"
+    assert night_result.about_result == "no_email"
+    assert calls == [main_url, contact_info_url]
     assert driver_kind == "session"
     assert outcome == "found_email"
 
