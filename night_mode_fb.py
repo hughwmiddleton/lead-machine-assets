@@ -45,7 +45,7 @@ from source_scheduler import (
     preferred_upstream_identity_hint,
 )
 from email_provenance import merge_email_provenance_into_target
-from email_normalizer import filter_system_telemetry_emails
+from email_normalizer import filter_system_telemetry_emails, normalize_email_value
 
 try:
     import facebook_enrich  # type: ignore
@@ -81,6 +81,8 @@ _PROFILE_SESSION_SENTINELS = {"profile_session"}
 
 EMAIL_REGEX = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
 _FB_SPLIT_PATTERN = re.compile(r"[,\s;|]+")
+_FB_LOW_QUALITY_FILE_EXTENSIONS: Tuple[str, ...] = ("jpg", "jpeg", "png", "gif", "wav", "mp3", "mp4", "pdf", "zip")
+_FB_LOW_QUALITY_SHORT_LOCAL_PARTS = frozenset({"to", "by", "at"})
 _FB_REVEAL_CONTROL_TERMS: Tuple[str, ...] = (
     "contact info",
     "see more",
@@ -4286,6 +4288,48 @@ def _extract_emails_from_html(
     return unique, mailto_used
 
 
+def _fb_domain_has_file_like_artifact(domain: str) -> bool:
+    domain = str(domain or "").strip().lower().strip(".")
+    if not domain:
+        return False
+    dotted_domain = f".{domain}"
+    for extension in _FB_LOW_QUALITY_FILE_EXTENSIONS:
+        token = f".{extension}"
+        if dotted_domain.endswith(token) or f"{token}." in dotted_domain:
+            return True
+    return False
+
+
+def _fb_email_looks_like_artifact_text(local: str, domain: str) -> bool:
+    local = str(local or "").strip().lower()
+    if local not in _FB_LOW_QUALITY_SHORT_LOCAL_PARTS:
+        return False
+    labels = [label for label in str(domain or "").strip().lower().split(".") if label]
+    if len(labels) != 2:
+        return False
+    registrable, tld = labels
+    if not (registrable.isalpha() and tld.isalpha()):
+        return False
+    return len(registrable) >= 6 and len(tld) >= 8
+
+
+def _filter_low_quality_fb_emails(emails: List[str]) -> List[str]:
+    filtered: List[str] = []
+    seen: Set[str] = set()
+    for raw_email in emails or []:
+        normalized = normalize_email_value(raw_email)
+        if not normalized or normalized in seen:
+            continue
+        local, domain = normalized.split("@", 1)
+        if _fb_domain_has_file_like_artifact(domain):
+            continue
+        if _fb_email_looks_like_artifact_text(local, domain):
+            continue
+        seen.add(normalized)
+        filtered.append(normalized)
+    return filtered
+
+
 def _choose_primary_email(emails: Sequence[str], artist_slug: str) -> Optional[str]:
     if not emails:
         return None
@@ -7093,11 +7137,12 @@ class NightModeFacebookEnricher:
         main_visible_text = getattr(self, "_last_fb_visible_text", "") or ""
         main_anchor_values = list(getattr(self, "_last_fb_live_anchor_values", []) or [])
         _log_fb_email_surface_debug(self.logger, f"main:{resolved_url}", html or "", main_visible_text)
-        emails, main_mailto = _extract_emails_from_html(
+        emails_raw, main_mailto = _extract_emails_from_html(
             html or "",
             rendered_text=main_visible_text,
             anchor_values=main_anchor_values,
         )
+        emails = _filter_low_quality_fb_emails(emails_raw)
         email_method = "mailto" if emails and main_mailto else ("regex" if emails else "")
         if emails:
             for email in emails:
@@ -7172,11 +7217,12 @@ class NightModeFacebookEnricher:
                                     about_html or "",
                                     about_visible_text,
                                 )
-                                about_emails, about_mailto = _extract_emails_from_html(
+                                about_emails_raw, about_mailto = _extract_emails_from_html(
                                     about_html or "",
                                     rendered_text=about_visible_text,
                                     anchor_values=about_anchor_values,
                                 )
+                                about_emails = _filter_low_quality_fb_emails(about_emails_raw)
                                 if about_emails:
                                     emails = about_emails
                                     email_method = "mailto" if about_mailto else "regex"

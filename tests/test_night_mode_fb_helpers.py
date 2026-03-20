@@ -60,6 +60,25 @@ def test_extract_emails_from_live_anchor_values() -> None:
     assert used_mailto is True
 
 
+def test_filter_low_quality_fb_emails_rejects_file_like_and_artifact_candidates() -> None:
+    emails = night_mode_fb._filter_low_quality_fb_emails(
+        [
+            "to@nomograph.mastering",
+            "at@melroseplace.wav",
+            "by@tyrant.jpg",
+            "artist@band.music",
+            "hello@studio.studio",
+            "booking@artist.com",
+        ]
+    )
+
+    assert emails == [
+        "artist@band.music",
+        "hello@studio.studio",
+        "booking@artist.com",
+    ]
+
+
 class _RevealDriver:
     def __init__(self, clicked=None):
         self.clicked = list(clicked or [])
