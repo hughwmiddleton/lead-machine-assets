@@ -734,6 +734,54 @@ def test_fb_enrich_skips_when_email_present(monkeypatch):
     assert "skip" in " ".join(logs).lower()
 
 
+def test_row_has_usable_email_for_fb_skip_ignores_placeholder_only_values():
+    row = pd.Series({"Email": "", "Email_All": "user@domain.com"})
+
+    assert cde._row_has_usable_email_for_fb_skip(row) is False
+
+
+def test_row_has_usable_email_for_fb_skip_treats_mixed_placeholder_and_real_as_present():
+    row = pd.Series({"Email": "", "Email_All": "user@domain.com;artist@gmail.com"})
+
+    assert cde._row_has_usable_email_for_fb_skip(row) is True
+
+
+def test_fb_enrich_allows_placeholder_email_with_explicit_fb_url(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Placeholder Email",
+            "Email": "user@domain.com",
+            "Email_All": "user@domain.com",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+            "Email_Type": "",
+            "facebook_url": "https://www.facebook.com/socialfb",
+            "Facebook_URL": "https://www.facebook.com/socialfb",
+            "Social Link": "",
+            "External Links": "",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+
+    called = False
+
+    def fake_extract(*args, **kwargs):
+        nonlocal called
+        called = True
+        return (["real@artist.com"], "https://www.facebook.com/socialfb/about", "")
+
+    monkeypatch.setattr(cde, "_extract_fb_emails_bounded", fake_extract)
+
+    matched = worker._enrich_row_facebook(seed_df, 0, object(), ctx)
+
+    assert matched is True
+    assert called is True
+    assert "real@artist.com" in seed_df.at[0, "Email_All"]
+
+
 def test_fb_enrich_skips_when_fb_url_missing(monkeypatch):
     logs = []
     worker = _make_worker(logs)

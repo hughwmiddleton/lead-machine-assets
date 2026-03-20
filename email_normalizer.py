@@ -13,6 +13,13 @@ _OBFUSCATED_EMAIL_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _EMAIL_VALUE_SPLIT_RE = re.compile(r"[\s,;|]+")
+_OBVIOUS_PLACEHOLDER_EMAILS = frozenset(
+    {
+        "user@domain.com",
+        "name@example.com",
+        "test@test.com",
+    }
+)
 
 
 def normalize_obfuscated_email_patterns(text: str, logger: LoggerFn = None, max_logs: int = 3) -> Tuple[str, int]:
@@ -61,6 +68,14 @@ def normalize_email_value(value: str) -> str:
     if not local or not domain or "." not in domain:
         return ""
     return normalized
+
+
+def is_obvious_placeholder_email(value: str) -> bool:
+    """Return True for a tiny set of exact placeholder emails."""
+    normalized = normalize_email_value(value)
+    if not normalized:
+        return False
+    return normalized in _OBVIOUS_PLACEHOLDER_EMAILS
 
 
 def is_system_telemetry_email(value: str) -> bool:

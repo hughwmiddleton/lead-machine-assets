@@ -32,7 +32,7 @@ from email_provenance import (
     normalize_email_key,
     parse_email_provenance_json,
 )
-from email_normalizer import filter_system_telemetry_emails
+from email_normalizer import filter_system_telemetry_emails, is_obvious_placeholder_email
 from fb_attribution import (
     FB_ATTEMPT_STATE_COL,
     FB_ATTRIBUTION_COLUMNS,
@@ -2815,10 +2815,14 @@ def _should_skip_row_due_to_email(
     suspect_email = _cell_str(row.get("Suspect_Email"))
     suspect_email_all = _cell_str(row.get("Suspect_Email_All"))
     suspect_present = bool(suspect_email or suspect_email_all)
+    normalized_emails = normalize_emails(email_all_clean)
     has_email_raw = bool(email_all_clean)
+    has_non_placeholder_email = any(not is_obvious_placeholder_email(email) for email in normalized_emails)
+    if has_email_raw and not normalized_emails:
+        has_non_placeholder_email = True
     quarantined_repeat = _is_quarantined_repeat(row)
     # Suspect email flags override Email_All presence; treat as no usable email.
-    has_email_effective = has_email_raw and not quarantined_repeat and not suspect_present
+    has_email_effective = has_non_placeholder_email and not quarantined_repeat and not suspect_present
 
     if quarantined_repeat and has_email_raw:
         row_id = row.get("__row_id", row.name)
@@ -3369,9 +3373,13 @@ def run_facebook_global_pass_nightmode(
             if pd.isna(email_all_val):
                 email_all_val = ""
             email_all_clean = str(email_all_val or "").strip()
+            normalized_emails = normalize_emails(email_all_clean)
             has_email_raw = bool(email_all_clean)
+            has_non_placeholder_email = any(not is_obvious_placeholder_email(email) for email in normalized_emails)
+            if has_email_raw and not normalized_emails:
+                has_non_placeholder_email = True
             quarantined_repeat = _is_quarantined_repeat(row)
-            has_email_effective = has_email_raw and not quarantined_repeat
+            has_email_effective = has_non_placeholder_email and not quarantined_repeat
 
             fb_status_val_raw = str(row.get("FB_Status", "") or "").strip()
             fb_status_val = fb_status_val_raw.lower()

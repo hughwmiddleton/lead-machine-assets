@@ -51,6 +51,7 @@ from urllib.parse import urlparse, parse_qs, unquote
 from unidecode import unidecode
 from email_normalizer import (
     filter_system_telemetry_emails,
+    is_obvious_placeholder_email,
     normalize_email_value,
     normalize_obfuscated_email_patterns,
 )
@@ -1839,6 +1840,31 @@ def _row_has_email(row) -> bool:
     email_primary = _get("Email")
     email_all = _get("Email_All") or _get("Email All")
     return bool(email_primary or email_all)
+
+
+def _row_has_usable_email_for_fb_skip(row) -> bool:
+    if row is None:
+        return False
+
+    emails: List[str] = []
+    for key in ("Email", "Email_All", "Email All"):
+        try:
+            raw = row.get(key, "")
+        except AttributeError:
+            try:
+                raw = row[key]
+            except Exception:
+                raw = ""
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        for token in re.split(r"[\s,;|]+", text):
+            normalized = normalize_email_value(token)
+            if normalized:
+                emails.append(normalized)
+    if not emails:
+        return False
+    return any(not is_obvious_placeholder_email(email) for email in emails)
 
 
 def _classify_contact_role_from_email(email: str) -> Optional[str]:
@@ -8581,7 +8607,6 @@ class CrossDirectoryEnricherWorker(QThread):
         artist = ctx["artist"]
         position = ctx["position"]
         total = ctx["total"]
-        had_email_from_seed = ctx.get("had_email_from_seed") or ctx.get("had_fb_or_email_from_seed")
         spotify_origin = self._row_is_spotify_origin(seed_df.loc[row_idx], ctx)
         email_before = _row_email_summary_snapshot(seed_df, row_idx)
         fb_attempted = False
@@ -8590,8 +8615,8 @@ class CrossDirectoryEnricherWorker(QThread):
             fb_attempted = False
         else:
             fb_attempted = True
-            has_email_after_directories = _row_has_email(seed_df.loc[row_idx])
-            if (had_email_from_seed or has_email_after_directories) and not spotify_origin:
+            has_usable_email_for_fb_skip = _row_has_usable_email_for_fb_skip(seed_df.loc[row_idx])
+            if has_usable_email_for_fb_skip and not spotify_origin:
                 self.log_message.emit(
                     f"[FB Enrich] Skipping Facebook enrichment for '{artist}' (already has email from seed or directory enrichment)."
                 )

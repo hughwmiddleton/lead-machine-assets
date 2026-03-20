@@ -16,6 +16,24 @@ def test_skip_gate_skips_when_email_and_not_quarantined():
     assert _should_skip_row_due_to_email(row) is True
 
 
+def test_skip_gate_allows_placeholder_only_email():
+    row = _row(Email_All="user@domain.com", **{"Artist Name": "Artist Placeholder"})
+    assert _should_skip_row_due_to_email(row) is False
+
+
+def test_skip_gate_skips_when_real_email_present():
+    row = _row(Email_All="artist@gmail.com", **{"Artist Name": "Artist Real"})
+    assert _should_skip_row_due_to_email(row) is True
+
+
+def test_skip_gate_skips_when_placeholder_and_real_email_present():
+    row = _row(
+        Email_All="user@domain.com;artist@gmail.com",
+        **{"Artist Name": "Artist Mixed"},
+    )
+    assert _should_skip_row_due_to_email(row) is True
+
+
 def test_skip_gate_allows_when_quarantined_even_with_email():
     messages = []
     row = _row(

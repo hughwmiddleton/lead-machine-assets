@@ -280,6 +280,41 @@ def test_existing_email_sets_skip_gate_attribution(monkeypatch, tmp_path):
     assert df_out.loc[0, FB_WRITE_STATE_COL] == "fb_no_email_written"
 
 
+def test_placeholder_email_does_not_set_skip_gate_attribution(monkeypatch, tmp_path):
+    helper = StaticFBHelper(
+        {
+            "FB_Status": "pass_a_found_email",
+            FB_ATTEMPT_STATE_COL: "attempted_fb_found_email",
+            "Email": "fb@example.com",
+            "Email_All": "fb@example.com",
+            "Email_Type": "fb_night",
+            "Email_Source_URL": "https://facebook.com/hasemail/about",
+            "Email_Source_Type": "facebook_enrich",
+            "Email_Extract_Method": "regex",
+            "Facebook_URL": "https://facebook.com/hasemail",
+        }
+    )
+    df_out, _ = _run_night_fb_pass(
+        monkeypatch,
+        tmp_path,
+        [
+            {
+                "Artist Name": "Has Placeholder Email",
+                "Email": "user@domain.com",
+                "Email_All": "user@domain.com",
+                "Social Link": "",
+                "Facebook_URL": "https://facebook.com/hasemail",
+            }
+        ],
+        helper,
+    )
+
+    assert helper.calls == 1
+    assert df_out.loc[0, "Email"] == "fb@example.com"
+    assert df_out.loc[0, FB_GATE_STATE_COL] == ""
+    assert df_out.loc[0, FB_WRITE_STATE_COL] == "fb_wrote_email"
+
+
 def test_attempted_without_email_records_attempt_outcome(monkeypatch, tmp_path):
     helper = StaticFBHelper(
         {
