@@ -4346,10 +4346,18 @@ def _filter_low_quality_fb_emails(emails: List[str]) -> List[str]:
     return filtered
 
 
-def _choose_primary_email(emails: Sequence[str], artist_slug: str) -> Optional[str]:
+def _choose_primary_email(
+    emails: Sequence[str],
+    artist_slug: str,
+    source_context: Optional[Dict] = None,
+) -> Optional[str]:
     if not emails:
         return None
-    ranked = _rank_fb_email_candidates(list(emails), artist_slug=artist_slug)
+    ranked = _rank_fb_email_candidates(
+        list(emails),
+        artist_slug=artist_slug,
+        source_context=source_context,
+    )
     return ranked[0] if ranked else None
 
 
@@ -4377,6 +4385,22 @@ def _fb_email_surface_bonus(email: str, source_context: Optional[Dict]) -> int:
     if "mailto" in surface:
         return 1
     return 0
+
+
+def _fb_email_surface_label(surface: str, *, used_mailto: bool = False) -> str:
+    normalized_surface = str(surface or "").strip().lower() or "main"
+    if not used_mailto:
+        return normalized_surface
+    if normalized_surface in {"about", "contact"}:
+        return f"{normalized_surface}_mailto"
+    return "mailto"
+
+
+def _fb_contact_surface_label(contact_url: str) -> str:
+    lowered = str(contact_url or "").strip().lower()
+    if "contact" in lowered:
+        return "contact"
+    return "about"
 
 
 def _fb_email_domain_quality_bonus(domain: str, artist_slug: str = "") -> int:
@@ -7234,6 +7258,9 @@ class NightModeFacebookEnricher:
             anchor_values=main_anchor_values,
         )
         emails = _filter_low_quality_fb_emails(emails_raw)
+        main_surface = _fb_email_surface_label("main", used_mailto=main_mailto)
+        main_surface_map = {email: main_surface for email in emails}
+        about_surface_map: Dict[str, str] = {}
         email_method = "mailto" if emails and main_mailto else ("regex" if emails else "")
         if emails:
             for email in emails:
@@ -7314,6 +7341,11 @@ class NightModeFacebookEnricher:
                                     anchor_values=about_anchor_values,
                                 )
                                 about_emails = _filter_low_quality_fb_emails(about_emails_raw)
+                                about_surface = _fb_email_surface_label(
+                                    _fb_contact_surface_label(contact_url),
+                                    used_mailto=about_mailto,
+                                )
+                                about_surface_map = {email: about_surface for email in about_emails}
                                 if about_emails:
                                     emails = about_emails
                                     email_method = "mailto" if about_mailto else "regex"
@@ -7415,11 +7447,19 @@ class NightModeFacebookEnricher:
         if persisted_facebook_url:
             persisted_facebook_url = _normalise_fb_url(persisted_facebook_url) or persisted_facebook_url
 
+        source_context = {
+            "surfaces": {
+                **main_surface_map,
+                **about_surface_map,
+            }
+        }
+
         night_result = self._build_result(
             emails,
             str(row.get("Email_All", "") or ""),
             persisted_facebook_url,
             artist_name,
+            source_context=source_context,
             allow_empty=True if not accepted else has_music_signals or emails or gate_soft_pass_category or gate_soft_pass_identity,
             accepted=accepted,
             reject_reason=reject_reason,
@@ -7481,6 +7521,7 @@ class NightModeFacebookEnricher:
         email_all_existing: str,
         facebook_url: str,
         artist_name: str,
+        source_context: Optional[Dict] = None,
         email_source: str = "main",
         about_attempted: str = "no",
         about_result: str = "",
@@ -7493,7 +7534,7 @@ class NightModeFacebookEnricher:
         emails = filter_system_telemetry_emails(emails)
         if not emails and not allow_empty:
             return None
-        primary = _choose_primary_email(emails, artist_name) if emails else None
+        primary = _choose_primary_email(emails, artist_name, source_context=source_context) if emails else None
         merged_all = _merge_email_all(email_all_existing, emails)
         email_type = "fb_night"
         return NightModeFacebookResult(

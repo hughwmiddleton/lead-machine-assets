@@ -81,17 +81,32 @@ def test_filter_low_quality_fb_emails_rejects_file_like_and_artifact_candidates(
 
 def test_rank_fb_email_candidates_prefers_about_surface() -> None:
     ranked = night_mode_fb._rank_fb_email_candidates(
-        ["contact@randomsite.com", "bookings@artist.com"],
-        artist_slug="artist",
+        ["contact@randomsite.com", "contact@artist.com"],
+        artist_slug="",
         source_context={
             "surfaces": {
-                "contact@randomsite.com": "main_html_regex",
-                "bookings@artist.com": "about",
+                "contact@randomsite.com": "main",
+                "contact@artist.com": "about",
             }
         },
     )
 
-    assert ranked[0] == "bookings@artist.com"
+    assert ranked[0] == "contact@artist.com"
+
+
+def test_rank_fb_email_candidates_prefers_about_surface_over_booking_bonus() -> None:
+    ranked = night_mode_fb._rank_fb_email_candidates(
+        ["mgmt@randomagency.com", "team@artist.com"],
+        artist_slug="",
+        source_context={
+            "surfaces": {
+                "mgmt@randomagency.com": "main",
+                "team@artist.com": "about",
+            }
+        },
+    )
+
+    assert ranked[0] == "team@artist.com"
 
 
 def test_choose_primary_email_prefers_artist_slug_match() -> None:
@@ -110,6 +125,37 @@ def test_rank_fb_email_candidates_prefers_booking_over_generic() -> None:
     )
 
     assert ranked[0] == "bookings@artist.com"
+
+
+def test_rank_fb_email_candidates_is_unchanged_without_context() -> None:
+    emails = ["info@artist.com", "bookings@artist.com"]
+
+    ranked_without_context = night_mode_fb._rank_fb_email_candidates(
+        emails,
+        artist_slug="artist",
+    )
+    ranked_with_none = night_mode_fb._rank_fb_email_candidates(
+        emails,
+        artist_slug="artist",
+        source_context=None,
+    )
+
+    assert ranked_with_none == ranked_without_context
+
+
+def test_rank_fb_email_candidates_mailto_gets_small_boost() -> None:
+    ranked = night_mode_fb._rank_fb_email_candidates(
+        ["press@artist.com", "team@artist.com"],
+        artist_slug="artist",
+        source_context={
+            "surfaces": {
+                "press@artist.com": "main",
+                "team@artist.com": "mailto",
+            }
+        },
+    )
+
+    assert ranked[0] == "team@artist.com"
 
 
 def test_rank_fb_email_candidates_preserves_order_on_tie() -> None:
