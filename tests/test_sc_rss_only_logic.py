@@ -459,6 +459,123 @@ def test_source_phased_top_level_order_unchanged(monkeypatch):
     ]
 
 
+def test_unearthed_fb_first_source_phased_bypasses_shared_enrichers(monkeypatch):
+    import cross_directory_enricher as cde
+
+    w = _mk_worker()
+    w.enable_live_search = True
+    w.max_live_searches = 0
+    w.live_search_attempts = 0
+    logs = []
+
+    class Log:
+        @staticmethod
+        def emit(msg, *args, **kwargs):
+            logs.append(str(msg))
+
+    w.log_message = Log()
+    w._should_short_circuit_after_domain_reuse = lambda *args, **kwargs: False
+    w._init_row_enrichment_state = lambda: None
+    w._update_progress = lambda *args, **kwargs: None
+    w._phase_spotify_discovery = lambda *args, **kwargs: None
+    w._retry_deferred_soundcloud_rows = lambda *args, **kwargs: {}
+    w._reset_live_lookup_bclf_stats = lambda: None
+    w._lf_endpoint_in_cooldown = lambda *args, **kwargs: False
+    w._set_platform_state = lambda *args, **kwargs: None
+    monkeypatch.setattr(cde, "ENABLE_FACEBOOK_ENRICHMENT", True)
+    monkeypatch.setattr(cde, "_apply_fb_promotion_df", lambda df, log_fn=None: df)
+
+    calls = {"dir": [], "sc": [], "lf": [], "ig": [], "website": [], "fb": []}
+
+    def build_ctx(df, row_idx, position, total):
+        return {
+            "artist": df.at[row_idx, "Artist Name"],
+            "position": position,
+            "total": total,
+            "spotify_id": "",
+            "seed_lastfm_urls": [],
+        }
+
+    def record_dir(df, row_idx, directory_indexes, priority, ctx):
+        calls["dir"].append(row_idx)
+        return False
+
+    def record_sc(df, row_idx, ctx):
+        calls["sc"].append(row_idx)
+        return False, False
+
+    def record_lf(df, row_idx, ctx, skip_lastfm=False):
+        calls["lf"].append(row_idx)
+        return False, False
+
+    def record_ig(df, row_idx, ctx):
+        calls["ig"].append(row_idx)
+        return False
+
+    def record_website(df, row_idx, ctx):
+        calls["website"].append(row_idx)
+        return False
+
+    def record_fb(df, row_idx, fb_driver, ctx):
+        calls["fb"].append(row_idx)
+        return False
+
+    w._build_row_context = build_ctx
+    w._enrich_row_directories = record_dir
+    w._enrich_row_sc_live = record_sc
+    w._enrich_row_live_lookup = record_lf
+    w._enrich_row_instagram_email = record_ig
+    w._enrich_row_website_email = record_website
+    w._enrich_row_facebook = record_fb
+
+    seed_df = pd.DataFrame(
+        [
+            {
+                "Artist Name": "Unearthed FB First",
+                "Source Directory": "Unearthed",
+                "Email": "",
+                "Email_All": "",
+                "Social Link": "https://www.facebook.com/unearthed.fb.first",
+                "External Links": "",
+                "Facebook_URL": "",
+                "SoundCloud Link": "",
+            },
+            {
+                "Artist Name": "Unearthed Fallback",
+                "Source Directory": "Unearthed",
+                "Email": "",
+                "Email_All": "",
+                "Social Link": "",
+                "External Links": "",
+                "Facebook_URL": "",
+                "SoundCloud Link": "",
+            },
+            {
+                "Artist Name": "Spotify Control",
+                "Source Directory": "Spotify",
+                "Email": "",
+                "Email_All": "",
+                "Social Link": "",
+                "External Links": "",
+                "Facebook_URL": "",
+                "SoundCloud Link": "",
+            },
+        ],
+        dtype=str,
+    ).fillna("")
+
+    w._run_source_phased(seed_df, directory_indexes={}, priority=[], fb_driver=object(), total=len(seed_df))
+
+    for phase_name in ("dir", "ig", "website", "fb"):
+        assert 0 not in calls[phase_name]
+        assert 1 in calls[phase_name]
+        assert 2 in calls[phase_name]
+    assert 0 not in calls["sc"]
+    assert 0 not in calls["lf"]
+    assert any("[Unearthed Path] activated artist='Unearthed FB First' row=0" in line for line in logs)
+    assert any("[Unearthed Path] no usable FB URL, resuming standard path artist='Unearthed Fallback' row=1" in line for line in logs)
+
+
 def test_breaker_has_grace_period():
     w = _mk_worker()
     # Failures before grace rows should not trip breaker.

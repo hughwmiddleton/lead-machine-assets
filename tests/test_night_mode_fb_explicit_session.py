@@ -238,6 +238,54 @@ def test_unearthed_promotable_social_link_uses_normal_pass_a(monkeypatch, enrich
     assert result.get("Email") == "promoted@example.com"
 
 
+def test_unearthed_promotable_social_link_with_existing_email_uses_normal_pass_a(monkeypatch, enricher):
+    monkeypatch.setattr(enricher, "_maybe_recover_or_skip_on_checkpoint", lambda: True)
+    monkeypatch.setattr(enricher, "_has_authenticated_session", lambda: True)
+    monkeypatch.setattr(
+        enricher,
+        "_enrich_row_unearthed_legacy",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("legacy path should not be used")),
+    )
+
+    observed = {}
+
+    def fake_scrape(self, fb_url, row, artist_name, allow_anon=False, candidate_context=None):
+        observed["fb_url"] = fb_url
+        observed["explicit_accepted_url"] = bool(candidate_context and candidate_context.get("explicit_accepted_url"))
+        observed["email_all_before"] = row.get("Email_All")
+        return (
+            nmfb.NightModeFacebookResult(
+                email="fbwin@example.com",
+                email_all="seed@example.com;fbwin@example.com",
+                facebook_url=fb_url,
+                email_source_url=fb_url,
+                email_extract_method="regex",
+            ),
+            ["fbwin@example.com"],
+            "session",
+            "found_email",
+        )
+
+    monkeypatch.setattr(nmfb.NightModeFacebookEnricher, "_scrape_single_fb_candidate", fake_scrape)
+
+    row = {
+        "Artist Name": "Unearthed Promoted Existing Email",
+        "Source Directory": "unearthed",
+        "Email": "seed@example.com",
+        "Email_All": "seed@example.com",
+        "Facebook_URL": "",
+        "Social Link": "https://www.facebook.com/unearthed.promoted.existing",
+    }
+
+    result = enricher.enrich_row_with_facebook_night(row)
+
+    assert observed["fb_url"] == "https://www.facebook.com/unearthed.promoted.existing"
+    assert observed["explicit_accepted_url"] is True
+    assert observed["email_all_before"] == "seed@example.com"
+    assert result.get("FB_Status") == "pass_a_found_email"
+    assert "fbwin@example.com" in (result.get("Email_All") or "")
+
+
 def test_unearthed_without_explicit_url_keeps_legacy_path(monkeypatch, enricher):
     monkeypatch.setattr(enricher, "_maybe_recover_or_skip_on_checkpoint", lambda: True)
     monkeypatch.setattr(

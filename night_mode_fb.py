@@ -7716,8 +7716,14 @@ class NightModeFacebookEnricher:
             return _finish(self._mark_row_checkpoint(result))
 
         artist_name = _clean_val(result.get("Artist Name", ""))
+        is_unearthed = self._is_unearthed_source(result)
+        explicit_fb_entrypoints = explicit_fb_entrypoint_urls_for_row(result)
+        promoted_fb_url, _ = ensure_canonical_facebook_url(result, set_row=False)
+        unearthed_fb_first_active = bool(
+            is_unearthed and (promoted_fb_url or explicit_fb_entrypoints)
+        )
         skip_due_to_email, email_all_clean = _row_has_usable_email_for_fb_skip(result)
-        if skip_due_to_email:
+        if skip_due_to_email and not unearthed_fb_first_active:
             self.fb_rows_skipped["no_opportunity"] += 1
             _log(
                 self.logger,
@@ -7726,6 +7732,11 @@ class NightModeFacebookEnricher:
             if not result.get("FB_Status"):
                 result["FB_Status"] = "ok"
             return _finish(result, attempted=False)
+        if skip_due_to_email and unearthed_fb_first_active:
+            _log(
+                self.logger,
+                f"[Unearthed Path] forcing FB extraction despite existing email artist='{artist_name or '<unknown>'}'",
+            )
         location = _clean_val(result.get("Location", ""))
         song_title = _clean_val(
             result.get("Song Title", "")
@@ -7757,7 +7768,6 @@ class NightModeFacebookEnricher:
                     self.logger,
                     f"[Night FB] Skipping row - invalid facebook_url value: {explicit_intake.rejected_invalid[0]} artist='{artist_name or '<unknown>'}'",
                 )
-        is_unearthed = self._is_unearthed_source(result)
 
         if self._debug_fb_url_flow and self._debug_fb_url_flow_seen < self._debug_fb_url_flow_limit:
             self._debug_fb_url_flow_seen += 1

@@ -1867,6 +1867,45 @@ def _row_has_usable_email_for_fb_skip(row) -> bool:
     return any(not is_obvious_placeholder_email(email) for email in emails)
 
 
+def _row_is_unearthed_source(row: Any) -> bool:
+    if row is None:
+        return False
+
+    values: List[str] = []
+    for key in ("Source Directory", "Source Tag", "__source_job"):
+        try:
+            raw = row.get(key, "")
+        except AttributeError:
+            try:
+                raw = row[key]
+            except Exception:
+                raw = ""
+        text = str(raw or "").strip().lower()
+        if text:
+            values.append(text)
+    return any(("unearthed" in value) or ("triple j" in value) for value in values)
+
+
+def _row_has_usable_unearthed_fb_entrypoint(row: Any) -> bool:
+    if row is None:
+        return False
+    try:
+        canonical_url, _ = ensure_canonical_facebook_url(row, set_row=False)
+    except Exception:
+        canonical_url = ""
+    if canonicalize_facebook_url(canonical_url):
+        return True
+    try:
+        row_payload = row.to_dict() if hasattr(row, "to_dict") else row
+    except Exception:
+        row_payload = row
+    try:
+        explicit_urls = explicit_fb_entrypoint_urls_for_row(row_payload)
+    except Exception:
+        explicit_urls = []
+    return bool(explicit_urls)
+
+
 def _classify_contact_role_from_email(email: str) -> Optional[str]:
     """Classify a reusable org email from its normalized local-part only."""
     normalized = normalize_email_value(email)
@@ -8945,49 +8984,53 @@ class CrossDirectoryEnricherWorker(QThread):
         use_scheduler = (
             os.getenv("SOURCE_DIVERSITY_SCHEDULER", "0").strip().lower() in {"1", "true", "yes", "on"}
         )
+        self._unearthed_fb_first_row_ids = self._collect_unearthed_fb_first_row_ids(seed_df)
         if use_scheduler:
             self.log_message.emit("[Enricher] Source diversity scheduler=ON (round-robin)")
-        # Phase 0: Directory matching (fast, no network)
-        self._phase_directory_matching(seed_df, directory_indexes, priority, total)
-        if use_scheduler:
-            # Keep IG extraction outside the scheduler as a bounded single-page pass.
+        try:
+            # Phase 0: Directory matching (fast, no network)
+            self._phase_directory_matching(seed_df, directory_indexes, priority, total)
+            if use_scheduler:
+                # Keep IG extraction outside the scheduler as a bounded single-page pass.
+                self._phase_spotify_discovery(seed_df, total, fb_driver=fb_driver)
+                self._phase_instagram_email(seed_df, total)
+                self._phase_website_email(seed_df, total)
+                self._run_interleaved_sources(seed_df, fb_driver, total)
+                return
+            sc_deferred_rows: Dict[Any, Dict[str, Any]] = {}
+            # Phase 1: Dedicated SoundCloud live check
+            if self.enable_live_search:
+                sc_deferred_rows = self._phase_soundcloud(seed_df, total)
+            # Phase 2: General live lookup (BC + LF; SC mostly skipped since Phase 1 populated it)
+            if self.enable_live_search:
+                self._phase_live_lookup(seed_df, total)
+            # Phase 3: Spotify seed identity fan-out before contact stages.
             self._phase_spotify_discovery(seed_df, total, fb_driver=fb_driver)
+            # Phase 3: Instagram profile HTML email extraction (single fetch only)
             self._phase_instagram_email(seed_df, total)
+            # Phase 4: bounded website contact crawl from canonical website field.
             self._phase_website_email(seed_df, total)
-            self._run_interleaved_sources(seed_df, fb_driver, total)
-            return
-        sc_deferred_rows: Dict[Any, Dict[str, Any]] = {}
-        # Phase 1: Dedicated SoundCloud live check
-        if self.enable_live_search:
-            sc_deferred_rows = self._phase_soundcloud(seed_df, total)
-        # Phase 2: General live lookup (BC + LF; SC mostly skipped since Phase 1 populated it)
-        if self.enable_live_search:
-            self._phase_live_lookup(seed_df, total)
-        # Phase 3: Spotify seed identity fan-out before contact stages.
-        self._phase_spotify_discovery(seed_df, total, fb_driver=fb_driver)
-        # Phase 3: Instagram profile HTML email extraction (single fetch only)
-        self._phase_instagram_email(seed_df, total)
-        # Phase 4: bounded website contact crawl from canonical website field.
-        self._phase_website_email(seed_df, total)
-        if self.enable_live_search and sc_deferred_rows:
-            sc_deferred_rows = self._retry_deferred_soundcloud_rows(
-                seed_df,
-                total,
-                sc_deferred_rows,
-                phase_label="post_website",
-            )
-        # Refresh Facebook promotion after live/directory phases so newly discovered FB links are usable.
-        seed_df = _apply_fb_promotion_df(seed_df, log_fn=self.log_message.emit)
-        # Phase 5: Facebook
-        if ENABLE_FACEBOOK_ENRICHMENT and fb_driver:
-            self._phase_facebook(seed_df, fb_driver, total)
             if self.enable_live_search and sc_deferred_rows:
-                self._retry_deferred_soundcloud_rows(
+                sc_deferred_rows = self._retry_deferred_soundcloud_rows(
                     seed_df,
                     total,
                     sc_deferred_rows,
-                    phase_label="final_window",
+                    phase_label="post_website",
                 )
+            # Refresh Facebook promotion after live/directory phases so newly discovered FB links are usable.
+            seed_df = _apply_fb_promotion_df(seed_df, log_fn=self.log_message.emit)
+            # Phase 5: Facebook
+            if ENABLE_FACEBOOK_ENRICHMENT and fb_driver:
+                self._phase_facebook(seed_df, fb_driver, total)
+                if self.enable_live_search and sc_deferred_rows:
+                    self._retry_deferred_soundcloud_rows(
+                        seed_df,
+                        total,
+                        sc_deferred_rows,
+                        phase_label="final_window",
+                    )
+        finally:
+            self._unearthed_fb_first_row_ids = set()
 
     def _festival_seed_priority_tier(self, row: Any) -> int:
         if row is None:
@@ -9002,6 +9045,31 @@ class CrossDirectoryEnricherWorker(QThread):
             return 1
         return 2
 
+    def _collect_unearthed_fb_first_row_ids(self, seed_df: pd.DataFrame) -> Set[Any]:
+        streamlined_rows: Set[Any] = set()
+        for row_idx in seed_df.index:
+            row = seed_df.loc[row_idx]
+            if not _row_is_unearthed_source(row):
+                continue
+            artist = cell_to_str(row.get("Artist Name", "")) or "<unknown>"
+            if _row_has_usable_unearthed_fb_entrypoint(row):
+                streamlined_rows.add(row_idx)
+                self.log_message.emit(
+                    f"[Unearthed Path] activated artist='{artist}' row={row_idx}"
+                )
+                self.log_message.emit(
+                    f"[Unearthed Path] skipping non-essential enrichers artist='{artist}' row={row_idx}"
+                )
+            else:
+                self.log_message.emit(
+                    f"[Unearthed Path] no usable FB URL, resuming standard path artist='{artist}' row={row_idx}"
+                )
+        return streamlined_rows
+
+    def _should_bypass_unearthed_shared_enrichers(self, row_idx: Any) -> bool:
+        streamlined_rows = self.__dict__.get("_unearthed_fb_first_row_ids")
+        return bool(streamlined_rows and row_idx in streamlined_rows)
+
     def _ordered_interleaved_row_ids(self, seed_df: pd.DataFrame) -> List[Any]:
         rows = list(seed_df.index)
         return sorted(rows, key=lambda row_idx: self._festival_seed_priority_tier(seed_df.loc[row_idx]))
@@ -9010,7 +9078,11 @@ class CrossDirectoryEnricherWorker(QThread):
         """Interleave SC, LF (live lookup), and FB across rows to avoid bursts."""
 
         seed_df = _apply_fb_promotion_df(seed_df, log_fn=self.log_message.emit)
-        rows = self._ordered_interleaved_row_ids(seed_df)
+        rows = [
+            row_idx
+            for row_idx in self._ordered_interleaved_row_ids(seed_df)
+            if not self._should_bypass_unearthed_shared_enrichers(row_idx)
+        ]
         position_by_row = {row_idx: pos for pos, row_idx in enumerate(seed_df.index, start=1)}
         priority_summary = {"festival_high": 0, "festival": 0, "normal": 0}
         for row_idx in rows:
@@ -9247,6 +9319,9 @@ class CrossDirectoryEnricherWorker(QThread):
         self.log_message.emit("[Enricher][Directory Phase] Starting...")
         enriched_count = 0
         for position, row_idx in enumerate(seed_df.index, start=1):
+            if self._should_bypass_unearthed_shared_enrichers(row_idx):
+                self._update_progress(position, total)
+                continue
             ctx = self._build_row_context(seed_df, row_idx, position, total)
             if not ctx:
                 self._update_progress(position, total)
@@ -9270,6 +9345,8 @@ class CrossDirectoryEnricherWorker(QThread):
         deferred_rows: Dict[Any, Dict[str, Any]] = {}
         stopped_max_live = False
         for position, row_idx in enumerate(seed_df.index, start=1):
+            if self._should_bypass_unearthed_shared_enrichers(row_idx):
+                continue
             if self.max_live_searches > 0 and self.live_search_attempts >= self.max_live_searches:
                 stopped_max_live = True
                 break
@@ -9364,6 +9441,8 @@ class CrossDirectoryEnricherWorker(QThread):
 
     def _phase_instagram_email(self, seed_df, total):
         for position, row_idx in enumerate(seed_df.index, start=1):
+            if self._should_bypass_unearthed_shared_enrichers(row_idx):
+                continue
             ctx = self._build_row_context(seed_df, row_idx, position, total)
             if not ctx:
                 continue
@@ -9375,6 +9454,8 @@ class CrossDirectoryEnricherWorker(QThread):
 
     def _phase_website_email(self, seed_df, total):
         for position, row_idx in enumerate(seed_df.index, start=1):
+            if self._should_bypass_unearthed_shared_enrichers(row_idx):
+                continue
             ctx = self._build_row_context(seed_df, row_idx, position, total)
             if not ctx:
                 continue
@@ -9395,6 +9476,8 @@ class CrossDirectoryEnricherWorker(QThread):
             skipped_profile_cooldown = 0
             stopped_max_live = False
             for position, row_idx in enumerate(seed_df.index, start=1):
+                if self._should_bypass_unearthed_shared_enrichers(row_idx):
+                    continue
                 ctx = self._build_row_context(seed_df, row_idx, position, total)
                 if not ctx:
                     continue
@@ -9464,6 +9547,8 @@ class CrossDirectoryEnricherWorker(QThread):
         processed_rows = 0
         stop_reason = ""
         for position, row_idx in enumerate(seed_df.index, start=1):
+            if self._should_bypass_unearthed_shared_enrichers(row_idx):
+                continue
             ctx = self._build_row_context(seed_df, row_idx, position, total)
             if not ctx:
                 continue

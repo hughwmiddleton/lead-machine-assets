@@ -229,6 +229,7 @@ def test_scheduler_mode_skips_legacy_phases(monkeypatch):
     calls = {"dir": 0, "ig": 0, "sc": 0, "lf": 0, "fb": 0, "sched": 0}
 
     monkeypatch.setattr(worker, "_phase_directory_matching", lambda *a, **k: calls.__setitem__("dir", calls["dir"] + 1))
+    monkeypatch.setattr(worker, "_phase_spotify_discovery", lambda *a, **k: None)
     monkeypatch.setattr(worker, "_phase_instagram_email", lambda *a, **k: calls.__setitem__("ig", calls["ig"] + 1))
     monkeypatch.setattr(worker, "_phase_soundcloud", lambda *a, **k: calls.__setitem__("sc", calls["sc"] + 1))
     monkeypatch.setattr(worker, "_phase_live_lookup", lambda *a, **k: calls.__setitem__("lf", calls["lf"] + 1))
@@ -292,6 +293,45 @@ def test_interleaved_fb_run_maps_login_wall_to_retry_later(monkeypatch):
     assert result.attempted is True
     assert result.enriched is False
     assert result.retry_later is True
+
+
+def test_scheduler_mode_excludes_unearthed_fb_first_rows(monkeypatch):
+    import pandas as pd
+    import cross_directory_enricher as cde
+
+    monkeypatch.setattr(cde.CrossDirectoryEnricherWorker, "__init__", lambda self, *a, **k: None)
+    monkeypatch.setattr(cde, "ENABLE_FACEBOOK_ENRICHMENT", True)
+    monkeypatch.setattr(cde, "_apply_fb_promotion_df", lambda df, log_fn=None: df)
+
+    captured = {}
+
+    class FakeScheduler:
+        def __init__(self, sources, row_label=None, log_fn=None, short_circuit_fn=None):
+            captured["rows_by_source"] = {spec.name: list(spec.rows) for spec in sources}
+
+        def run(self):
+            return {}
+
+    monkeypatch.setattr(cde, "SourceDiversityScheduler", FakeScheduler)
+
+    worker = cde.CrossDirectoryEnricherWorker(None, None)
+    worker.enable_live_search = True
+    worker.log_message = type("Logger", (), {"emit": lambda *args, **kwargs: None})()
+    worker._unearthed_fb_first_row_ids = {0}
+
+    seed_df = pd.DataFrame(
+        [
+            {"Artist Name": "Unearthed FB First", "Source Directory": "Unearthed"},
+            {"Artist Name": "Control Artist", "Source Directory": "Spotify"},
+        ],
+        dtype=str,
+    ).fillna("")
+
+    worker._run_interleaved_sources(seed_df, fb_driver=object(), total=len(seed_df))
+
+    assert captured["rows_by_source"]["SC"] == [1]
+    assert captured["rows_by_source"]["LF"] == [1]
+    assert captured["rows_by_source"]["FB"] == [1]
 
 
 def test_interleaved_lf_run_maps_search_cooldown_to_timed_retry(monkeypatch):

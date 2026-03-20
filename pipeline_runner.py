@@ -2829,6 +2829,15 @@ def _is_quarantined_repeat(row: pd.Series) -> bool:
     return email_source == "Quarantined (repeat email)" or (cleared_email_fields and suspect_present)
 
 
+def _is_unearthed_source_row(row: pd.Series) -> bool:
+    values = (
+        _cell_str(row.get("Source Directory")).lower(),
+        _cell_str(row.get("Source Tag")).lower(),
+        _cell_str(row.get("__source_job")).lower(),
+    )
+    return any(("unearthed" in value) or ("triple j" in value) for value in values)
+
+
 def _should_skip_row_due_to_email(
     row: pd.Series, skip_rows_with_email: bool = True, logger: LoggerFn = _LOGGER
 ) -> bool:
@@ -3411,16 +3420,28 @@ def run_facebook_global_pass_nightmode(
             has_canonical_facebook_url = bool(canonical_facebook_url)
             explicit_fb_entrypoints = explicit_fb_entrypoint_urls_for_row(row.to_dict())
             has_explicit_fb_entrypoint = bool(explicit_fb_entrypoints)
+            is_unearthed_source = _is_unearthed_source_row(row)
+            unearthed_fb_first_active = bool(
+                is_unearthed_source and (has_canonical_facebook_url or has_explicit_fb_entrypoint)
+            )
+            if should_skip_due_to_email and unearthed_fb_first_active:
+                _safe_log_console(
+                    logger,
+                    f"[Unearthed Path] forcing FB extraction despite existing email row={idx} artist={artist_label!r}",
+                )
+            effective_skip_due_to_email = bool(should_skip_due_to_email and not unearthed_fb_first_active)
             shared_discovery_attempted = _fb_discovery_attempt_already_recorded(row)
             final_fb_statuses = {"login_redirect", "no_candidates", "ok", "found"} | terminal_statuses
             has_upstream_identity_anchor = _night_fb_has_upstream_identity_anchor(row)
-            should_run_night_fb = (not has_email_effective) and (fb_status_val not in final_fb_statuses)
+            should_run_night_fb = (
+                (not has_email_effective) or unearthed_fb_first_active
+            ) and (fb_status_val not in final_fb_statuses)
             discovery_fallback_eligible = bool(
                 (not has_canonical_facebook_url)
                 and (not has_explicit_fb_entrypoint)
                 and has_upstream_identity_anchor
                 and should_run_night_fb
-                and not should_skip_due_to_email
+                and not effective_skip_due_to_email
                 and fb_status_val not in terminal_statuses
             )
             if has_explicit_fb_entrypoint and _cell_str(df.at[idx, FB_OPPORTUNITY_STATE_COL]) in {"", "no_fb_opportunity"}:
@@ -3429,7 +3450,7 @@ def run_facebook_global_pass_nightmode(
                 df.at[idx, FB_OPPORTUNITY_STATE_COL] = "fb_discovery_fallback_eligible"
             eligible_for_fb = bool(
                 should_run_night_fb
-                and not should_skip_due_to_email
+                and not effective_skip_due_to_email
                 and fb_status_val not in terminal_statuses
                 and (has_canonical_facebook_url or has_explicit_fb_entrypoint or has_upstream_identity_anchor)
             )
@@ -3441,7 +3462,7 @@ def run_facebook_global_pass_nightmode(
                 f"eligible_for_fb={eligible_for_fb}",
             )
 
-            if should_skip_due_to_email:
+            if effective_skip_due_to_email:
                 df.at[idx, FB_GATE_STATE_COL] = "skipped_existing_usable_email"
                 if not _cell_str(df.at[idx, FB_WRITE_STATE_COL]):
                     df.at[idx, FB_WRITE_STATE_COL] = "fb_no_email_written"
@@ -3537,7 +3558,7 @@ def run_facebook_global_pass_nightmode(
                     email_state = "present" if has_email_effective else "missing"
                     _safe_log_console(
                         logger,
-                        f"[Night FB] Skipping FB lookup for '{artist_label}' (FB_Status='{fb_status_val_raw}', email='{email_state}', skipped_due_to_email={int(should_skip_due_to_email)}).",
+                        f"[Night FB] Skipping FB lookup for '{artist_label}' (FB_Status='{fb_status_val_raw}', email='{email_state}', skipped_due_to_email={int(effective_skip_due_to_email)}).",
                     )
                 state.update(
                     {

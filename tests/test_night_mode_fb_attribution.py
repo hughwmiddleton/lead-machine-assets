@@ -280,6 +280,37 @@ def test_existing_email_sets_skip_gate_attribution(monkeypatch, tmp_path):
     assert df_out.loc[0, FB_WRITE_STATE_COL] == "fb_no_email_written"
 
 
+def test_unearthed_existing_email_with_explicit_fb_still_runs(monkeypatch, tmp_path):
+    helper = StaticFBHelper(
+        {
+            "FB_Status": "pass_a_no_email_on_page",
+            FB_ATTEMPT_STATE_COL: "attempted_fb_no_email_on_page",
+            "Facebook_URL": "https://facebook.com/unearthed-hasemail",
+        }
+    )
+    df_out, _ = _run_night_fb_pass(
+        monkeypatch,
+        tmp_path,
+        [
+            {
+                "Artist Name": "Unearthed Has Email",
+                "Source Directory": "Unearthed",
+                "Email": "seed@example.com",
+                "Email_All": "seed@example.com",
+                "Social Link": "",
+                "Facebook_URL": "https://facebook.com/unearthed-hasemail",
+            }
+        ],
+        helper,
+    )
+
+    assert helper.calls == 1
+    assert df_out.loc[0, FB_OPPORTUNITY_STATE_COL] in {"", "fb_opportunity_present"}
+    assert df_out.loc[0, FB_GATE_STATE_COL] == ""
+    assert df_out.loc[0, FB_ATTEMPT_STATE_COL] == "attempted_fb_no_email_on_page"
+    assert df_out.loc[0, FB_WRITE_STATE_COL] == "fb_no_email_written"
+
+
 def test_placeholder_email_does_not_set_skip_gate_attribution(monkeypatch, tmp_path):
     helper = StaticFBHelper(
         {
