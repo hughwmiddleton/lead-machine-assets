@@ -79,6 +79,48 @@ def test_filter_low_quality_fb_emails_rejects_file_like_and_artifact_candidates(
     ]
 
 
+def test_rank_fb_email_candidates_prefers_about_surface() -> None:
+    ranked = night_mode_fb._rank_fb_email_candidates(
+        ["contact@randomsite.com", "bookings@artist.com"],
+        artist_slug="artist",
+        source_context={
+            "surfaces": {
+                "contact@randomsite.com": "main_html_regex",
+                "bookings@artist.com": "about",
+            }
+        },
+    )
+
+    assert ranked[0] == "bookings@artist.com"
+
+
+def test_choose_primary_email_prefers_artist_slug_match() -> None:
+    primary = night_mode_fb._choose_primary_email(
+        ["info@label.com", "mitchsantiago@gmail.com"],
+        "mitchsantiago",
+    )
+
+    assert primary == "mitchsantiago@gmail.com"
+
+
+def test_rank_fb_email_candidates_prefers_booking_over_generic() -> None:
+    ranked = night_mode_fb._rank_fb_email_candidates(
+        ["info@artist.com", "bookings@artist.com"],
+        artist_slug="artist",
+    )
+
+    assert ranked[0] == "bookings@artist.com"
+
+
+def test_rank_fb_email_candidates_preserves_order_on_tie() -> None:
+    ranked = night_mode_fb._rank_fb_email_candidates(
+        ["press@artist.com", "team@artist.com"],
+        artist_slug="artist",
+    )
+
+    assert ranked == ["press@artist.com", "team@artist.com"]
+
+
 class _RevealDriver:
     def __init__(self, clicked=None):
         self.clicked = list(clicked or [])

@@ -83,6 +83,22 @@ EMAIL_REGEX = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE
 _FB_SPLIT_PATTERN = re.compile(r"[,\s;|]+")
 _FB_LOW_QUALITY_FILE_EXTENSIONS: Tuple[str, ...] = ("jpg", "jpeg", "png", "gif", "wav", "mp3", "mp4", "pdf", "zip")
 _FB_LOW_QUALITY_SHORT_LOCAL_PARTS = frozenset({"to", "by", "at"})
+_FB_GENERIC_EMAIL_PROVIDER_DOMAINS = frozenset(
+    {
+        "aol.com",
+        "gmail.com",
+        "googlemail.com",
+        "hotmail.com",
+        "icloud.com",
+        "live.com",
+        "outlook.com",
+        "proton.me",
+        "protonmail.com",
+        "yahoo.com",
+    }
+)
+_FB_ROLE_EMAIL_PREFIXES: Tuple[str, ...] = ("info", "contact", "admin", "hello")
+_FB_BOOKING_EMAIL_TOKENS: Tuple[str, ...] = ("booking", "bookings", "mgmt", "management")
 _FB_REVEAL_CONTROL_TERMS: Tuple[str, ...] = (
     "contact info",
     "see more",
@@ -4333,12 +4349,87 @@ def _filter_low_quality_fb_emails(emails: List[str]) -> List[str]:
 def _choose_primary_email(emails: Sequence[str], artist_slug: str) -> Optional[str]:
     if not emails:
         return None
+    ranked = _rank_fb_email_candidates(list(emails), artist_slug=artist_slug)
+    return ranked[0] if ranked else None
+
+
+def _fb_email_surface_bonus(email: str, source_context: Optional[Dict]) -> int:
+    if not source_context:
+        return 0
+
+    normalized = normalize_email_value(email)
+    raw_surface: Any = None
+
+    if isinstance(source_context.get("surfaces"), dict):
+        raw_surface = source_context["surfaces"].get(normalized) or source_context["surfaces"].get(email)
+
+    if raw_surface is None:
+        raw_surface = source_context.get(normalized) or source_context.get(email) or source_context.get("surface")
+
+    if isinstance(raw_surface, dict):
+        raw_surface = raw_surface.get("surface") or raw_surface.get("email_source") or raw_surface.get("source")
+
+    surface = str(raw_surface or "").strip().lower()
+    if not surface:
+        return 0
+    if "about" in surface or "contact" in surface:
+        return 3
+    if "mailto" in surface:
+        return 1
+    return 0
+
+
+def _fb_email_domain_quality_bonus(domain: str, artist_slug: str = "") -> int:
+    cleaned = str(domain or "").strip().lower().strip(".")
+    if not cleaned or cleaned in _FB_GENERIC_EMAIL_PROVIDER_DOMAINS:
+        return 0
+    labels = [label for label in cleaned.split(".") if label]
+    if len(labels) < 2:
+        return 0
+    if _fb_domain_has_file_like_artifact(cleaned):
+        return 0
+    if any(not label.replace("-", "").isalnum() for label in labels):
+        return 0
+    tld = labels[-1]
+    if not tld.isalpha() or len(tld) < 2:
+        return 0
     slug = _slugify(artist_slug)
-    if slug:
-        for email in emails:
-            if slug in _slugify(email):
-                return email
-    return emails[0]
+    if slug and slug not in _slugify(cleaned):
+        return 0
+    return 3
+
+
+def _rank_fb_email_candidates(
+    emails: List[str],
+    *,
+    artist_slug: str,
+    source_context: Optional[Dict] = None,
+) -> List[str]:
+    slug = _slugify(artist_slug)
+    scored: List[Tuple[int, int, str]] = []
+
+    for index, email in enumerate(emails or []):
+        normalized = normalize_email_value(email)
+        if "@" not in normalized:
+            scored.append((0, index, email))
+            continue
+
+        local, domain = normalized.split("@", 1)
+        score = 0
+
+        if slug and slug in _slugify(normalized):
+            score += 5
+        score += _fb_email_domain_quality_bonus(domain, artist_slug)
+        if any(local.startswith(prefix) for prefix in _FB_ROLE_EMAIL_PREFIXES):
+            score -= 2
+        if any(token in local for token in _FB_BOOKING_EMAIL_TOKENS):
+            score += 2
+        score += _fb_email_surface_bonus(normalized, source_context)
+
+        scored.append((score, index, email))
+
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    return [email for _score, _index, email in scored]
 
 
 def _merge_email_all(existing: str, new_emails: Sequence[str]) -> str:
