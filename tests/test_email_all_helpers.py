@@ -374,3 +374,156 @@ def test_select_primary_email_remains_deterministic_when_multiple_emails_match_i
 
     assert primary == "jazzydale.music@gmail.com"
     assert ranked == ["jazzydale.music@gmail.com", "jazzydale@gmail.com"]
+
+
+def test_consolidate_email_all_promotes_facebook_email_over_website_primary():
+    df = pd.DataFrame(
+        [
+            {
+                "Artist Name": "Artistname",
+                "Spotify_Website_URL": "https://artistname.test",
+                "Email": "contact@bandsite.com",
+                "Email_All": "contact@bandsite.com;artistname@gmail.com",
+                EMAIL_PROVENANCE_JSON_COL: json.dumps(
+                    {
+                        "contact@bandsite.com": {
+                            "source_type": "website_enrich",
+                            "surface": "website_contact_page",
+                            "source_url": "https://artistname.test/contact",
+                            "extract_method": "regex",
+                        },
+                        "artistname@gmail.com": {
+                            "source_type": "facebook_enrich",
+                            "surface": "facebook_about",
+                            "source_url": "https://www.facebook.com/artistname/about",
+                            "extract_method": "regex",
+                        },
+                    }
+                ),
+                "Email_Source_URL": "https://artistname.test/contact",
+                "Email_Source_Type": "website_enrich",
+                "Email_Extract_Method": "regex",
+            }
+        ]
+    )
+
+    consolidated = pipeline_runner._consolidate_email_all(df)
+
+    assert consolidated.at[0, "Email"] == "artistname@gmail.com"
+    assert consolidated.at[0, "Email_All"] == "artistname@gmail.com;contact@bandsite.com"
+    assert consolidated.at[0, "Email_Source_Type"] == "facebook_enrich"
+    assert consolidated.at[0, "Email_Source_URL"] == "https://www.facebook.com/artistname/about"
+
+
+def test_select_primary_email_keeps_facebook_primary_when_website_email_is_added_later():
+    row = {
+        "Artist Name": "Artistname",
+        "Spotify_Website_URL": "https://artistname.test",
+        "Email": "artistname@gmail.com",
+        "Email_All": "artistname@gmail.com;contact@bandsite.com",
+        EMAIL_PROVENANCE_JSON_COL: json.dumps(
+            {
+                "artistname@gmail.com": {
+                    "source_type": "facebook_enrich",
+                    "surface": "facebook_about",
+                    "source_url": "https://www.facebook.com/artistname/about",
+                    "extract_method": "regex",
+                },
+                "contact@bandsite.com": {
+                    "source_type": "website_enrich",
+                    "surface": "website_contact_page",
+                    "source_url": "https://artistname.test/contact",
+                    "extract_method": "regex",
+                },
+            }
+        ),
+    }
+
+    primary, ranked = pipeline_runner._select_primary_email_for_row(
+        row,
+        row["Email"],
+        row["Email_All"],
+    )
+
+    assert primary == "artistname@gmail.com"
+    assert ranked == ["artistname@gmail.com", "contact@bandsite.com"]
+
+
+def test_select_primary_email_preserves_existing_behaviour_with_same_trust_candidates():
+    row = {
+        "Artist Name": "Artistname",
+        "Spotify_Website_URL": "https://artistname.test",
+        EMAIL_PROVENANCE_JSON_COL: json.dumps(
+            {
+                "info@artistname.test": {
+                    "source_type": "website_enrich",
+                    "surface": "website_homepage",
+                    "source_url": "https://artistname.test",
+                    "extract_method": "mailto",
+                },
+                "bookings@artistname.test": {
+                    "source_type": "website_enrich",
+                    "surface": "website_homepage",
+                    "source_url": "https://artistname.test",
+                    "extract_method": "mailto",
+                },
+            }
+        ),
+    }
+
+    primary, ranked = pipeline_runner._select_primary_email_for_row(
+        row,
+        "",
+        "info@artistname.test;bookings@artistname.test",
+    )
+
+    assert primary == "bookings@artistname.test"
+    assert ranked == ["bookings@artistname.test", "info@artistname.test"]
+
+
+def test_consolidate_email_all_prefers_facebook_over_placeholder_website_email():
+    df = pd.DataFrame(
+        [
+            {
+                "Artist Name": "Artistname",
+                "Spotify_Website_URL": "https://artistname.test",
+                "Email": "user@domain.com",
+                "Email_All": "user@domain.com;artistname@gmail.com",
+                EMAIL_PROVENANCE_JSON_COL: json.dumps(
+                    {
+                        "user@domain.com": {
+                            "source_type": "website_enrich",
+                            "surface": "website_homepage",
+                            "source_url": "https://artistname.test",
+                            "extract_method": "regex",
+                        },
+                        "artistname@gmail.com": {
+                            "source_type": "facebook_enrich",
+                            "surface": "facebook_about",
+                            "source_url": "https://www.facebook.com/artistname/about",
+                            "extract_method": "regex",
+                        },
+                    }
+                ),
+                "Email_Source_URL": "https://artistname.test",
+                "Email_Source_Type": "website_enrich",
+                "Email_Extract_Method": "regex",
+            }
+        ]
+    )
+
+    consolidated = pipeline_runner._consolidate_email_all(df)
+
+    assert consolidated.at[0, "Email"] == "artistname@gmail.com"
+    assert consolidated.at[0, "Email_All"] == "artistname@gmail.com;user@domain.com"
+
+
+def test_select_primary_email_falls_back_to_existing_order_without_source_metadata():
+    primary, ranked = pipeline_runner._select_primary_email_for_row(
+        {},
+        "",
+        "zeta@alpha.test;omega@beta.test",
+    )
+
+    assert primary == "omega@beta.test"
+    assert ranked == ["omega@beta.test", "zeta@alpha.test"]

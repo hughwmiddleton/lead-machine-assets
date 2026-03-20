@@ -958,6 +958,22 @@ def _email_surface_bucket(row_like: Any, email: str, meta: Mapping[str, Any], ar
     return 2
 
 
+def _get_email_source_trust(source_type: Any = "", surface: Any = "") -> int:
+    source_type_clean = _cell_str(source_type).lower()
+    surface_clean = _cell_str(surface).lower()
+    if source_type_clean.startswith(("facebook", "instagram")) or surface_clean.startswith(("facebook_", "instagram_")):
+        return 3
+    if source_type_clean.startswith("website") or surface_clean.startswith("website_"):
+        return 2
+    if source_type_clean.startswith(("soundcloud", "bandcamp", "lastfm", "spotify", "unearthed")):
+        return 1
+    if source_type_clean in {"domain_reuse", "live_search"}:
+        return 1
+    if surface_clean in _PROFILE_DIRECT_SURFACES or surface_clean in {"domain_reuse", "live_search"}:
+        return 1
+    return 0
+
+
 def _rank_contact_emails_for_row(row_like: Any, values: Union[str, Sequence[str], None]) -> List[str]:
     normalized = filter_system_telemetry_emails(_merge_email_lists("", values or []))
     if not normalized:
@@ -983,11 +999,16 @@ def _rank_contact_emails_for_row(row_like: Any, values: Union[str, Sequence[str]
         index, email = item
         meta = get_email_provenance_entry(row_like, email)
         bucket = _email_surface_bucket(row_like, email, meta, artist_domain)
+        source_trust = _get_email_source_trust(meta.get("source_type", ""), meta.get("surface", ""))
+        if source_trust == 2 and bucket >= 2:
+            # Keep weak/external website finds from outranking profile evidence just because they were website-sourced.
+            source_trust = 1
         artist_domain_penalty = 0 if artist_domain and _email_domain(email) == artist_domain else 1
         identity_penalty = 0 if _email_identity_score(email, identity_tokens) > 0 else 1
         legacy_current_penalty = 0 if (not explicit_provenance and preserve_legacy_current and email == current_selected) else 1
         has_provenance_penalty = 0 if meta else 1
         return (
+            3 - source_trust,
             bucket,
             artist_domain_penalty,
             identity_penalty,
