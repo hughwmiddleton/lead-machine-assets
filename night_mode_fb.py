@@ -8222,7 +8222,9 @@ class NightModeFacebookEnricher:
                         result["FB_Status"] = "pass_a_no_email_on_page"
                         result["FB_Reason"] = best_reason or ("anon_fetch_ok_no_email" if best_driver.startswith("anon") else "session_fetch_ok_no_email")
                         self._pass_a_bump("no_email_on_page")
-                    page_url = best_page_url or page_url
+                    # Only a retained unavailable explicit outcome should allow the
+                    # row's single bounded PASS B discovery fallback.
+                    page_url = "" if best_outcome == "content_unavailable" else (best_page_url or page_url)
                 else:
                     # Diagnostics fallback for first URL
                     reason_code: Optional[str] = None

@@ -535,3 +535,146 @@ def test_explicit_fb_timeout_with_salvage_html(monkeypatch, enricher):
     assert driver.stop_called is True
     # Salvaged HTML should still be parsed and produce the email.
     assert "artist@test.com" in (result.get("Email_All") or "") or result.get("Email") == "artist@test.com"
+
+
+def test_explicit_content_unavailable_allows_one_pass_b_discovery_fallback(monkeypatch, enricher):
+    explicit_primary = "https://www.facebook.com/stale.primary"
+    explicit_secondary = "https://www.facebook.com/stale.secondary"
+    discovered_primary = "https://www.facebook.com/discovered.primary"
+    discovered_fallback = "https://www.facebook.com/discovered.fallback"
+    events = []
+    search_calls = []
+
+    monkeypatch.setattr(enricher, "_has_authenticated_session", lambda: True)
+    monkeypatch.setattr(enricher, "_ensure_session", lambda: object())
+
+    def fake_search(artist_name, location="", allow_anon=True, song_title="", row=None):
+        search_calls.append((artist_name, location, allow_anon, song_title))
+        events.append(("search", artist_name))
+        enricher._last_search_candidates = [
+            {"url": discovered_primary},
+            {"url": discovered_fallback},
+        ]
+        enricher._last_selected_candidate_context = enricher._last_search_candidates[0]
+        return discovered_primary
+
+    def fake_scrape(self, fb_url, row, artist_name, allow_anon=False, candidate_context=None):
+        events.append(("scrape", fb_url))
+        if fb_url in {explicit_primary, explicit_secondary, discovered_primary}:
+            return None, [], "session", "content_unavailable"
+        if fb_url == discovered_fallback:
+            return (
+                nmfb.NightModeFacebookResult(
+                    email="fallback@example.com",
+                    email_all="fallback@example.com",
+                    facebook_url=fb_url,
+                    email_source_url=fb_url,
+                    email_extract_method="regex",
+                ),
+                ["fallback@example.com"],
+                "session",
+                "found_email",
+            )
+        raise AssertionError(f"unexpected FB scrape target: {fb_url}")
+
+    monkeypatch.setattr(enricher, "_search_for_page", fake_search)
+    monkeypatch.setattr(nmfb.NightModeFacebookEnricher, "_scrape_single_fb_candidate", fake_scrape)
+
+    row = {
+        "Artist Name": "Fallback Artist",
+        "Email": "",
+        "Email_All": "",
+        "Facebook_URL": explicit_primary,
+        "Social Link": explicit_secondary,
+    }
+
+    result = enricher.enrich_row_with_facebook_night(row)
+
+    assert search_calls == [("Fallback Artist", "", False, "")]
+    assert [event for event in events if event[0] == "search"] == [("search", "Fallback Artist")]
+    assert result.get("Email") == "fallback@example.com"
+    assert "fallback@example.com" in (result.get("Email_All") or "")
+    assert discovered_fallback in (result.get("Facebook_URL") or result.get("facebook_url") or "")
+
+
+def test_explicit_content_unavailable_triggers_search_once_per_row(monkeypatch, enricher):
+    explicit_primary = "https://www.facebook.com/stale.primary.onlyonce"
+    explicit_secondary = "https://www.facebook.com/stale.secondary.onlyonce"
+    scrape_calls = []
+    search_calls = []
+
+    monkeypatch.setattr(enricher, "_has_authenticated_session", lambda: True)
+    monkeypatch.setattr(enricher, "_ensure_session", lambda: object())
+
+    def fake_scrape(self, fb_url, row, artist_name, allow_anon=False, candidate_context=None):
+        scrape_calls.append(fb_url)
+        return None, [], "session", "content_unavailable"
+
+    def fake_search(artist_name, location="", allow_anon=True, song_title="", row=None):
+        search_calls.append((artist_name, location, allow_anon, song_title))
+        return ""
+
+    monkeypatch.setattr(nmfb.NightModeFacebookEnricher, "_scrape_single_fb_candidate", fake_scrape)
+    monkeypatch.setattr(enricher, "_search_for_page", fake_search)
+
+    row = {
+        "Artist Name": "Single Search Artist",
+        "Email": "",
+        "Email_All": "",
+        "Facebook_URL": explicit_primary,
+        "Social Link": explicit_secondary,
+    }
+
+    result = enricher.enrich_row_with_facebook_night(row)
+
+    assert scrape_calls == [explicit_primary, explicit_secondary]
+    assert search_calls == [("Single Search Artist", "", False, "")]
+    assert result.get("FB_Status") == "pass_a_no_email_on_page"
+
+
+def test_mixed_explicit_outcomes_do_not_broaden_into_discovery(monkeypatch, enricher):
+    explicit_unavailable = "https://www.facebook.com/stale.mixed"
+    explicit_usable = "https://www.facebook.com/usable.mixed"
+    search_calls = []
+
+    monkeypatch.setattr(enricher, "_has_authenticated_session", lambda: True)
+    monkeypatch.setattr(enricher, "_ensure_session", lambda: object())
+
+    def fake_scrape(self, fb_url, row, artist_name, allow_anon=False, candidate_context=None):
+        if fb_url == explicit_unavailable:
+            return None, [], "session", "content_unavailable"
+        if fb_url == explicit_usable:
+            return (
+                nmfb.NightModeFacebookResult(
+                    email="",
+                    email_all="",
+                    facebook_url=fb_url,
+                    email_source_url=fb_url,
+                    email_extract_method="regex",
+                ),
+                [],
+                "session",
+                "no_email_on_page",
+            )
+        raise AssertionError(f"unexpected FB scrape target: {fb_url}")
+
+    def fail_search(*args, **kwargs):
+        search_calls.append((args, kwargs))
+        raise AssertionError("mixed explicit outcomes should not invoke PASS B search")
+
+    monkeypatch.setattr(nmfb.NightModeFacebookEnricher, "_scrape_single_fb_candidate", fake_scrape)
+    monkeypatch.setattr(enricher, "_search_for_page", fail_search)
+
+    row = {
+        "Artist Name": "Mixed Explicit Artist",
+        "Email": "",
+        "Email_All": "",
+        "Facebook_URL": explicit_unavailable,
+        "Social Link": explicit_usable,
+    }
+
+    result = enricher.enrich_row_with_facebook_night(row)
+
+    assert search_calls == []
+    assert result.get("FB_Status") == "pass_a_no_email_on_page"
+    assert result.get("FB_Reason") == "session_fetch_ok_no_email"
