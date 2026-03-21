@@ -278,6 +278,20 @@ def test_classify_explicit_fb_intake_attempt_with_promotion_gap() -> None:
     assert "Social Link" in decision.source_fields
 
 
+def test_classify_explicit_fb_intake_accepts_pages_category_url_as_canonical_slug() -> None:
+    row = {
+        "Artist Name": "Tbish",
+        "Facebook_URL": "",
+        "Social Link": "https://www.facebook.com/pages/category/Musician-Band/tbish-123456789/",
+    }
+
+    decision = night_mode_fb.classify_explicit_fb_intake(row)
+
+    assert decision.outcome == "attempt"
+    assert decision.accepted_urls == ["https://www.facebook.com/tbish"]
+    assert decision.rejected_guard == []
+
+
 def test_classify_explicit_fb_intake_rejects_invalid_placeholder() -> None:
     decision = night_mode_fb.classify_explicit_fb_intake(
         {"Artist Name": "Bad FB", "Facebook_URL": "https://facebook.com/nan/about"}
@@ -310,6 +324,43 @@ def test_explicit_fb_entrypoint_urls_accept_share_entrypoint_but_block_share_php
 
     assert share_urls == ["https://www.facebook.com/share/19bactwuev"]
     assert share_php_urls == []
+
+
+def test_explicit_fb_entrypoint_urls_reject_malformed_pages_category_url() -> None:
+    row = {
+        "Artist Name": "Tbish",
+        "Social Link": "https://www.facebook.com/pages/category/Musician-Band/tbish/",
+    }
+
+    decision = night_mode_fb.classify_explicit_fb_intake(row)
+
+    assert decision.accepted_urls == []
+    assert night_mode_fb.explicit_fb_entrypoint_urls_for_row(row) == []
+
+
+def test_pages_category_url_guard_rejection_is_respected(monkeypatch) -> None:
+    original_guard = night_mode_fb._explicit_fb_pre_scrape_guard_reason
+
+    def fake_guard(url):  # noqa: ANN001
+        if url in {
+            "https://www.facebook.com/tbish",
+            "https://www.facebook.com/profile.php?id=123456789",
+        }:
+            return "shape_disallowed", url
+        return original_guard(url)
+
+    monkeypatch.setattr(night_mode_fb, "_explicit_fb_pre_scrape_guard_reason", fake_guard)
+
+    row = {
+        "Artist Name": "Tbish",
+        "Social Link": "https://www.facebook.com/pages/category/Musician-Band/tbish-123456789/",
+    }
+
+    decision = night_mode_fb.classify_explicit_fb_intake(row)
+
+    assert decision.outcome == "reject_guard"
+    assert decision.accepted_urls == []
+    assert night_mode_fb.explicit_fb_entrypoint_urls_for_row(row) == []
 
 
 def test_classify_explicit_fb_intake_reports_no_explicit_url() -> None:
@@ -737,6 +788,24 @@ def test_profile_php_explicit_urls_deduped(monkeypatch) -> None:
     assert len(calls) == 1, "Profile profile.php variants should be visited once"
     assert night_mode_fb._normalise_fb_url(calls[0]) == "https://www.facebook.com/profile.php?id=123"
     assert result.get("FB_Status"), "PASS A should still produce a status even without emails"
+
+
+def test_prepare_explicit_fb_urls_for_pass_a_uses_pages_category_canonical_url_without_fetch() -> None:
+    enricher = night_mode_fb.NightModeFacebookEnricher(
+        legacy_module=None,
+        username="",
+        password="",
+        logger=None,
+        use_shared_session=False,
+    )
+    enricher._fetch_html_with_url = lambda *args, **kwargs: pytest.fail("unexpected fetch")  # type: ignore[attr-defined]
+    enricher._fetch_html_with_url_anon = lambda *args, **kwargs: pytest.fail("unexpected anon fetch")  # type: ignore[attr-defined]
+
+    urls = enricher._prepare_explicit_fb_urls_for_pass_a(
+        ["https://www.facebook.com/pages/category/Musician-Band/tbish-123456789/"]
+    )
+
+    assert urls == ["https://www.facebook.com/tbish"]
 
 
 def test_guard_rejected_explicit_url_logs_reason(monkeypatch) -> None:

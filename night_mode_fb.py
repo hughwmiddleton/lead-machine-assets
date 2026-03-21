@@ -83,6 +83,7 @@ EMAIL_REGEX = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE
 _FB_SPLIT_PATTERN = re.compile(r"[,\s;|]+")
 _FB_LOW_QUALITY_FILE_EXTENSIONS: Tuple[str, ...] = ("jpg", "jpeg", "png", "gif", "wav", "mp3", "mp4", "pdf", "zip")
 _FB_LOW_QUALITY_SHORT_LOCAL_PARTS = frozenset({"to", "by", "at"})
+_FB_PAGES_CATEGORY_ENTITY_RE = re.compile(r"^(?P<slug>.+)-(?P<id>\d+)$")
 _FB_GENERIC_EMAIL_PROVIDER_DOMAINS = frozenset(
     {
         "aol.com",
@@ -1732,6 +1733,96 @@ def _parse_existing_fb_url(row: Dict[str, str]) -> str:
     return ""
 
 
+def _is_fb_pages_category_url(url: str) -> bool:
+    normalized = _normalise_fb_url(url or "")
+    if not normalized:
+        return False
+    try:
+        parsed = urllib.parse.urlparse(normalized)
+    except Exception:
+        return False
+
+    host = (parsed.netloc or "").lower()
+    if host not in {"facebook.com", "www.facebook.com", "m.facebook.com", "web.facebook.com", "touch.facebook.com"}:
+        return False
+
+    segments = [segment for segment in (parsed.path or "").split("/") if segment]
+    return len(segments) >= 3 and segments[0].lower() == "pages" and segments[1].lower() == "category"
+
+
+def _looks_like_pages_category_slug(slug: str) -> bool:
+    cleaned = str(slug or "").strip().strip("._-")
+    if not cleaned:
+        return False
+    if cleaned.lower() in {"nan", "none", "null"}:
+        return False
+    if cleaned.isdigit() or cleaned.lower().endswith(".php"):
+        return False
+    return bool(re.fullmatch(r"[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?", cleaned.lower()))
+
+
+def _pages_category_candidate_urls(url: str) -> List[str]:
+    normalized = _normalise_fb_url(url or "")
+    if not normalized:
+        return []
+    try:
+        parsed = urllib.parse.urlparse(normalized)
+    except Exception:
+        return []
+
+    segments = [urllib.parse.unquote(segment or "").strip() for segment in (parsed.path or "").split("/") if segment]
+    if len(segments) != 4 or segments[0].lower() != "pages" or segments[1].lower() != "category":
+        return []
+
+    entity_segment = segments[3]
+    match = _FB_PAGES_CATEGORY_ENTITY_RE.fullmatch(entity_segment)
+    if not match:
+        return []
+
+    slug = (match.group("slug") or "").strip()
+    profile_id = (match.group("id") or "").strip()
+    candidates: List[str] = []
+
+    if _looks_like_pages_category_slug(slug):
+        candidates.append(f"https://www.facebook.com/{slug.lower()}")
+    if profile_id.isdigit():
+        candidates.append(f"https://www.facebook.com/profile.php?id={profile_id}")
+
+    deduped: List[str] = []
+    seen: Set[str] = set()
+    for candidate in candidates:
+        key = _normalise_fb_url(candidate)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(candidate)
+    return deduped
+
+
+def _resolve_pages_category_url(url: str) -> Tuple[str, str]:
+    candidates = _pages_category_candidate_urls(url)
+    if not candidates:
+        return "", "canonicalization_dropped"
+
+    first_guard_reason = ""
+    for candidate in candidates:
+        guard_reason, _ = _explicit_fb_pre_scrape_guard_reason(candidate)
+        if not guard_reason:
+            return candidate, ""
+        if not first_guard_reason:
+            first_guard_reason = guard_reason
+    return "", first_guard_reason or "canonicalization_dropped"
+
+
+def _canonicalize_explicit_fb_url(url: str) -> Tuple[str, str]:
+    normalized = _normalise_fb_url(url or "")
+    if not normalized:
+        return "", "canonicalization_dropped"
+    if not _is_fb_pages_category_url(normalized):
+        return normalized, ""
+    return _resolve_pages_category_url(normalized)
+
+
 def _normalise_fb_url(url: str) -> str:
     if _is_invalid_fb_value(url):
         return ""
@@ -1938,7 +2029,7 @@ def _canonicalize_and_dedupe_explicit_fb_urls(
             if debug and logger:
                 _log(logger, f"[Night FB] Skipping invalid facebook_url value: {raw}")
             continue
-        norm = _normalise_fb_url(raw)
+        norm, _ = _canonicalize_explicit_fb_url(raw)
         if not norm:
             continue
         try:
@@ -2150,13 +2241,20 @@ def classify_explicit_fb_intake(
                 if not guard_reason:
                     guard_reason = prefilter_reason
                 continue
-            canonical = _normalise_fb_url(candidate)
+            canonical, canonical_reason = _canonicalize_explicit_fb_url(candidate)
             if not canonical:
-                if candidate not in rejected_invalid_seen:
-                    rejected_invalid.append(candidate)
-                    rejected_invalid_seen.add(candidate)
-                if not invalid_reason:
-                    invalid_reason = "canonicalization_dropped"
+                if canonical_reason and canonical_reason != "canonicalization_dropped":
+                    if candidate not in rejected_guard_seen:
+                        rejected_guard.append(candidate)
+                        rejected_guard_seen.add(candidate)
+                    if not guard_reason:
+                        guard_reason = canonical_reason
+                else:
+                    if candidate not in rejected_invalid_seen:
+                        rejected_invalid.append(candidate)
+                        rejected_invalid_seen.add(candidate)
+                    if not invalid_reason:
+                        invalid_reason = "canonicalization_dropped"
                 continue
             accepted_sources_by_url.setdefault(canonical, source_label)
             guard_reject_reason, guard_sample = _explicit_fb_pre_scrape_guard_reason(canonical)
@@ -7432,7 +7530,7 @@ class NightModeFacebookEnricher:
         seen: Set[str] = set()
 
         for raw_url in fb_urls or []:
-            candidate_url = _normalise_fb_url(raw_url)
+            candidate_url, _ = _canonicalize_explicit_fb_url(raw_url)
             if not candidate_url:
                 continue
             if _is_allowed_fb_share_entrypoint_url(candidate_url):
