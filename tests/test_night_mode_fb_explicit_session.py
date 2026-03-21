@@ -545,6 +545,171 @@ def test_rows_without_explicit_fb_urls_unchanged(monkeypatch, enricher):
     assert result.get("FB_Status", "").startswith("pass_a_skipped") or result.get("FB_Status", "") == "ok" or not result.get("FB_Status", "")
 
 
+def test_pass_a_resolves_share_entrypoint_before_scrape(monkeypatch, enricher):
+    share_url = "https://www.facebook.com/share/19bactwuev"
+    canonical_url = "https://www.facebook.com/artistsharepage"
+    observed = {"fetch_calls": [], "scrape_calls": []}
+
+    monkeypatch.setattr(enricher, "_has_authenticated_session", lambda: True)
+    monkeypatch.setattr(enricher, "_ensure_session", lambda: object())
+
+    def fake_fetch(url, goto_about=False, collect_surfaces=True):
+        observed["fetch_calls"].append((url, goto_about, collect_surfaces))
+        return "<html><body>share landing</body></html>", canonical_url
+
+    def fake_scrape(self, fb_url, row, artist_name, allow_anon=False, candidate_context=None):
+        observed["scrape_calls"].append(fb_url)
+        assert fb_url == canonical_url
+        return (
+            nmfb.NightModeFacebookResult(
+                email="share@example.com",
+                email_all="share@example.com",
+                facebook_url=fb_url,
+                email_source_url=fb_url,
+                email_extract_method="regex",
+            ),
+            ["share@example.com"],
+            "session",
+            "found_email",
+        )
+
+    monkeypatch.setattr(enricher, "_fetch_html_with_url", fake_fetch)
+    monkeypatch.setattr(nmfb.NightModeFacebookEnricher, "_scrape_single_fb_candidate", fake_scrape)
+
+    row = {
+        "Artist Name": "Share Artist",
+        "Email": "",
+        "Email_All": "",
+        "Social Link": "https://www.facebook.com/share/19bactwuev?mibextid=wwXIfr",
+    }
+
+    result = enricher.enrich_row_with_facebook_night(row)
+
+    assert observed["fetch_calls"] == [(share_url, False, False)]
+    assert observed["scrape_calls"] == [canonical_url]
+    assert result.get("Email") == "share@example.com"
+    assert result.get("FB_Status") == "pass_a_found_email"
+    assert result.get("Facebook_URL") == canonical_url
+
+
+def test_unresolvable_share_entrypoint_fails_closed_without_explicit_scrape(monkeypatch, enricher):
+    share_url = "https://www.facebook.com/share/19bactwuev"
+    observed = {"scrape_calls": [], "search_calls": []}
+
+    monkeypatch.setattr(enricher, "_has_authenticated_session", lambda: True)
+    monkeypatch.setattr(enricher, "_ensure_session", lambda: object())
+    monkeypatch.setattr(
+        enricher,
+        "_fetch_html_with_url",
+        lambda url, goto_about=False, collect_surfaces=True: ("<html><body>share</body></html>", share_url),
+    )
+
+    def fake_scrape(self, fb_url, row, artist_name, allow_anon=False, candidate_context=None):
+        observed["scrape_calls"].append(fb_url)
+        raise AssertionError("unresolved share URL should not reach explicit scrape")
+
+    def fake_search(artist_name, location="", allow_anon=True, song_title="", row=None):
+        observed["search_calls"].append((artist_name, location, allow_anon, song_title))
+        return ""
+
+    monkeypatch.setattr(nmfb.NightModeFacebookEnricher, "_scrape_single_fb_candidate", fake_scrape)
+    monkeypatch.setattr(enricher, "_search_for_page", fake_search)
+
+    row = {
+        "Artist Name": "Share Artist",
+        "Email": "",
+        "Email_All": "",
+        "Social Link": "https://www.facebook.com/share/19bactwuev?mibextid=wwXIfr",
+    }
+
+    result = enricher.enrich_row_with_facebook_night(row)
+
+    assert observed["scrape_calls"] == []
+    assert observed["search_calls"] == [("Share Artist", "", False, "")]
+    assert result.get("FB_Status") == "pass_a_skipped_no_fb_url"
+
+
+def test_share_entrypoint_resolved_junk_surface_is_rejected_before_scrape(monkeypatch, enricher):
+    observed = {"scrape_calls": [], "search_calls": []}
+
+    monkeypatch.setattr(enricher, "_has_authenticated_session", lambda: True)
+    monkeypatch.setattr(enricher, "_ensure_session", lambda: object())
+    monkeypatch.setattr(
+        enricher,
+        "_fetch_html_with_url",
+        lambda url, goto_about=False, collect_surfaces=True: (
+            "<html><body>junk surface</body></html>",
+            "https://www.facebook.com/groups/artistshare",
+        ),
+    )
+
+    def fake_scrape(self, fb_url, row, artist_name, allow_anon=False, candidate_context=None):
+        observed["scrape_calls"].append(fb_url)
+        raise AssertionError("junk resolved share URL should not reach explicit scrape")
+
+    def fake_search(artist_name, location="", allow_anon=True, song_title="", row=None):
+        observed["search_calls"].append((artist_name, location, allow_anon, song_title))
+        return ""
+
+    monkeypatch.setattr(nmfb.NightModeFacebookEnricher, "_scrape_single_fb_candidate", fake_scrape)
+    monkeypatch.setattr(enricher, "_search_for_page", fake_search)
+
+    row = {
+        "Artist Name": "Share Artist",
+        "Email": "",
+        "Email_All": "",
+        "Social Link": "https://www.facebook.com/share/19bactwuev?mibextid=wwXIfr",
+    }
+
+    result = enricher.enrich_row_with_facebook_night(row)
+
+    assert observed["scrape_calls"] == []
+    assert observed["search_calls"] == [("Share Artist", "", False, "")]
+    assert result.get("FB_Status") == "pass_a_skipped_no_fb_url"
+
+
+def test_prepare_explicit_fb_urls_leaves_canonical_urls_unchanged(monkeypatch, enricher):
+    observed = {"resolved": 0}
+
+    def fail_share_resolve(*args, **kwargs):
+        observed["resolved"] += 1
+        raise AssertionError("canonical explicit URLs should not trigger share resolution")
+
+    monkeypatch.setattr(enricher, "_resolve_explicit_fb_share_url", fail_share_resolve)
+
+    urls = enricher._prepare_explicit_fb_urls_for_pass_a(
+        [
+            "https://www.facebook.com/artistpage",
+            "https://www.facebook.com/profile.php?id=123",
+        ],
+        allow_anon=False,
+    )
+
+    assert urls == [
+        "https://www.facebook.com/artistpage",
+        "https://www.facebook.com/profile.php?id=123",
+    ]
+    assert observed["resolved"] == 0
+
+
+def test_share_resolution_restores_pass_a_page_budget(monkeypatch, enricher):
+    enricher._page_budget_remaining = 2
+
+    def fake_fetch(url, goto_about=False, collect_surfaces=True):
+        enricher._page_budget_remaining -= 1
+        return "<html><body>share landing</body></html>", "https://www.facebook.com/artistsharepage"
+
+    monkeypatch.setattr(enricher, "_fetch_html_with_url", fake_fetch)
+
+    resolved = enricher._resolve_explicit_fb_share_url(
+        "https://www.facebook.com/share/19bactwuev",
+        allow_anon=False,
+    )
+
+    assert resolved == "https://www.facebook.com/artistsharepage"
+    assert enricher._page_budget_remaining == 2
+
+
 class _TimeoutDriver:
     def __init__(self, html: str = ""):
         self._html = html

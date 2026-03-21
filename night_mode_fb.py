@@ -1865,6 +1865,18 @@ def _fb_entity_key(url: str) -> Optional[Tuple[str, str]]:
     return ("slug", slug)
 
 
+def _fb_entity_canonical_url(url: str) -> str:
+    entity_key = _fb_entity_key(url)
+    if not entity_key:
+        return ""
+    entity_kind, entity_value = entity_key
+    if entity_kind == "profile":
+        return f"https://www.facebook.com/profile.php?id={entity_value}"
+    if entity_kind == "slug":
+        return f"https://www.facebook.com/{entity_value}"
+    return ""
+
+
 def _fb_is_about_contact_surface_url(url: str) -> bool:
     raw = _normalize_fb_href(url or "")
     if not raw:
@@ -7348,6 +7360,93 @@ class NightModeFacebookEnricher:
             return False
         return True
 
+    def _resolve_explicit_fb_share_url(self, fb_url: str, *, allow_anon: bool = False) -> str:
+        share_url = _normalise_fb_url(fb_url or "")
+        if not _is_allowed_fb_share_entrypoint_url(share_url):
+            return ""
+
+        original_budget = getattr(self, "_page_budget_remaining", 2)
+        html: Optional[str] = None
+        resolved_url: Optional[str] = None
+        resolution_reason = ""
+
+        def _fetch_with_optional_collect(fetcher):
+            try:
+                return fetcher(
+                    share_url,
+                    goto_about=False,
+                    collect_surfaces=False,
+                )
+            except TypeError:
+                return fetcher(share_url, goto_about=False)
+
+        try:
+            html, resolved_url = _fetch_with_optional_collect(self._fetch_html_with_url)
+        except Exception as exc:
+            resolution_reason = f"session_exception:{exc.__class__.__name__}"
+        finally:
+            self._page_budget_remaining = original_budget
+
+        if (not html) and allow_anon:
+            try:
+                html, resolved_url = _fetch_with_optional_collect(self._fetch_html_with_url_anon)
+            except Exception as exc:
+                resolution_reason = resolution_reason or f"anon_exception:{exc.__class__.__name__}"
+            finally:
+                self._page_budget_remaining = original_budget
+
+        normalized_resolved = _normalise_fb_url(resolved_url or "")
+        if not html:
+            resolution_reason = resolution_reason or "blank_html"
+        elif _is_fb_login_or_security_url(normalized_resolved):
+            resolution_reason = "login_wall"
+        elif _is_fb_content_unavailable_page(html):
+            resolution_reason = "content_unavailable"
+
+        candidate_url = ""
+        if not resolution_reason:
+            candidate_url = _fb_entity_canonical_url(normalized_resolved)
+            if not candidate_url:
+                resolution_reason = "resolved_shape_disallowed"
+            else:
+                guard_reason, _ = _explicit_fb_pre_scrape_guard_reason(candidate_url)
+                if guard_reason:
+                    resolution_reason = guard_reason
+                    candidate_url = ""
+
+        if candidate_url:
+            _log(
+                self.logger,
+                f'[Night FB][Share Resolve] share_url="{share_url}" resolved_url="{normalized_resolved or share_url}" canonical_url="{candidate_url}"',
+            )
+            return candidate_url
+
+        _log(
+            self.logger,
+            f'[Night FB][Share Resolve] share_url="{share_url}" resolved_url="{normalized_resolved or resolved_url or "<blank>"}" rejected_reason="{resolution_reason or "unresolved"}"',
+        )
+        return ""
+
+    def _prepare_explicit_fb_urls_for_pass_a(self, fb_urls: Sequence[str], *, allow_anon: bool = False) -> List[str]:
+        prepared: List[str] = []
+        seen: Set[str] = set()
+
+        for raw_url in fb_urls or []:
+            candidate_url = _normalise_fb_url(raw_url)
+            if not candidate_url:
+                continue
+            if _is_allowed_fb_share_entrypoint_url(candidate_url):
+                candidate_url = self._resolve_explicit_fb_share_url(candidate_url, allow_anon=allow_anon)
+                if not candidate_url:
+                    continue
+            key = _normalise_fb_url(candidate_url)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            prepared.append(candidate_url)
+
+        return prepared
+
     def _scrape_single_fb_candidate(
         self,
         fb_url: str,
@@ -8338,6 +8437,14 @@ class NightModeFacebookEnricher:
             emails: List[str] = []
             # Guard for downstream reject_reason usage during PASS B apply phase.
             reject_reason = ""
+            allow_anon = self._should_allow_anonymous(result)
+            authed_session_available = self._has_authenticated_session() if fb_urls else False
+            allow_anon_for_explicit = False if authed_session_available else allow_anon
+            pass_a_fb_urls = (
+                self._prepare_explicit_fb_urls_for_pass_a(fb_urls, allow_anon=allow_anon_for_explicit)
+                if fb_urls
+                else []
+            )
             if not fb_urls and self._search_disabled_due_to_checkpoint:
                 result["FB_Status"] = "checkpoint_search_disabled"
                 result["FB_Reason"] = "checkpoint"
@@ -8347,12 +8454,11 @@ class NightModeFacebookEnricher:
             # Unearthed rows with an explicit accepted FB URL should use the
             # same PASS A path as other explicit rows. Keep legacy fallback
             # only for true no-URL Unearthed rows.
-            if is_unearthed and not fb_urls:
+            if is_unearthed and not pass_a_fb_urls:
                 _log(self.logger, "[Unearthed Path] no usable FB URL; allowing bounded FB discovery")
                 _log(self.logger, "[Night FB] Detected Unearthed row -> using legacy no-login FB scrape.")
-                return _finish(self._enrich_row_unearthed_legacy(result, artist_name, fb_urls))
+                return _finish(self._enrich_row_unearthed_legacy(result, artist_name, pass_a_fb_urls))
 
-            allow_anon = self._should_allow_anonymous(result)
             # PASS A: explicit URL attempts (instrumentation only)
             outcome_rank = {"found_email": 0, "login_wall": 1, "timeout": 2, "fetch_error": 3, "no_email_on_page": 4}
             best_outcome = None
@@ -8360,7 +8466,7 @@ class NightModeFacebookEnricher:
             best_driver = ""
             best_page_url = ""
 
-            if not fb_urls:
+            if not pass_a_fb_urls:
                 if not result.get("FB_Status"):
                     result["FB_Status"] = "pass_a_skipped_no_fb_url"
                 if not result.get("FB_Reason"):
@@ -8369,15 +8475,13 @@ class NightModeFacebookEnricher:
                     self._debug_fb_url_flow_skipped += 1
                 _log(self.logger, "[Night FB][PASS A] skipped (no explicit FB URL); proceeding to v2 search")
             else:
-                authed_session_available = self._has_authenticated_session()
                 pass_a_mode = "session" if authed_session_available else "legacy_anon_probe"
                 if authed_session_available:
-                    _log(self.logger, f"[Night FB] Using explicit FB URLs with authenticated session: {fb_urls}")
+                    _log(self.logger, f"[Night FB] Using explicit FB URLs with authenticated session: {pass_a_fb_urls}")
                 else:
-                    _log(self.logger, f"[Night FB] Falling back to legacy anon probe for explicit FB URLs: {fb_urls}")
-                _log(self.logger, f"[Night FB] Using explicit FB URLs: {fb_urls}")
-                allow_anon_for_explicit = False if authed_session_available else allow_anon
-                for direct_url in fb_urls:
+                    _log(self.logger, f"[Night FB] Falling back to legacy anon probe for explicit FB URLs: {pass_a_fb_urls}")
+                _log(self.logger, f"[Night FB] Using explicit FB URLs: {pass_a_fb_urls}")
+                for direct_url in pass_a_fb_urls:
                     driver_kind = "session"
                     outcome_for_log = "fetch_error"
                     reason_for_log = ""

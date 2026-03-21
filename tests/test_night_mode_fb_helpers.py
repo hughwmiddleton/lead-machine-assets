@@ -365,12 +365,19 @@ def test_pass_a_uses_share_url_from_social_link(monkeypatch) -> None:
         use_shared_session=False,
     )
     monkeypatch.setattr(enricher, "_has_authenticated_session", lambda: True)
+    fetch_calls = []
 
-    def fake_fetch(url, goto_about=False):  # noqa: ANN001
+    def fake_fetch(url, goto_about=False, collect_surfaces=True):  # noqa: ANN001
         assert goto_about is False
-        assert url == "https://www.facebook.com/share/19bactwuev"
+        fetch_calls.append((url, collect_surfaces))
         enricher._last_fb_visible_text = "Bookings shareartist@test.com"
         enricher._last_fb_live_anchor_values = []
+        if url == "https://www.facebook.com/share/19bactwuev":
+            return (
+                "<html><body><div>Bookings shareartist@test.com</div></body></html>",
+                "https://www.facebook.com/artistsharepage",
+            )
+        assert url == "https://www.facebook.com/artistsharepage"
         return (
             "<html><body><div>Bookings shareartist@test.com</div></body></html>",
             "https://www.facebook.com/artistsharepage",
@@ -388,6 +395,8 @@ def test_pass_a_uses_share_url_from_social_link(monkeypatch) -> None:
 
     result = enricher.enrich_row_with_facebook_night(row)
 
+    assert fetch_calls[0] == ("https://www.facebook.com/share/19bactwuev", False)
+    assert fetch_calls[1][0] == "https://www.facebook.com/artistsharepage"
     assert result.get("Email") == "shareartist@test.com"
     assert result.get("FB_Status") == "pass_a_found_email"
     assert result.get("FB_Reason") == "explicit_url"
