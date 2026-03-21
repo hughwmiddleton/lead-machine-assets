@@ -7280,12 +7280,15 @@ class NightModeFacebookEnricher:
         about_emails: List[str] = []
         about_mailto = False
         email_method = "mailto" if emails and main_mailto else ("regex" if emails else "")
+        need_about_fetch = self._page_budget_remaining > 0
+        if emails and candidate_context and candidate_context.get("explicit_accepted_url"):
+            need_about_fetch = False
         if emails:
             for email in emails:
                 _log(self.logger, f"[FB Email] Found email on main page: {email}")
-            if self._page_budget_remaining > 0:
+            if need_about_fetch:
                 _log(self.logger, "[FB Email] Main page email found; About/Contact fetch remains enabled under the current page budget.")
-            else:
+            elif self._page_budget_remaining <= 0:
                 _log(self.logger, "[FB Email] Skipping contact/about fetch because the page budget is exhausted")
         else:
             _log(self.logger, "[FB Email] No email found on main page; evaluating contact/about fetch")
@@ -7306,7 +7309,6 @@ class NightModeFacebookEnricher:
         seed_url_match = bool(seed_fb_norm and resolved_url and _normalise_fb_url(resolved_url) == seed_fb_norm)
         artist_location = _coerce_str(row.get("Country_Derived") or row.get("Country") or row.get("Location"))
 
-        need_about_fetch = self._page_budget_remaining > 0
         contact_url: Optional[str] = None
         if need_about_fetch:
             if not has_music_signals:
