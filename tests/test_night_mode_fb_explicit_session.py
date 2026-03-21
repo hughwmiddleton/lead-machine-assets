@@ -9,6 +9,12 @@ class _DummyLegacy:
         return object()
 
 
+class _LegacyVisitedPage:
+    def __init__(self, current_url: str, page_source: str):
+        self.current_url = current_url
+        self.page_source = page_source
+
+
 @pytest.fixture
 def enricher(monkeypatch):
     helper = nmfb.NightModeFacebookEnricher(
@@ -17,6 +23,46 @@ def enricher(monkeypatch):
     # Avoid real network/driver work.
     monkeypatch.setattr(helper, "_ensure_driver_alive", lambda session: session)
     return helper
+
+
+def _run_unearthed_blind_case(monkeypatch, enricher, *, page_html: str, scrape_result):
+    logs = []
+    counts = {"search": 0, "scrape": 0}
+    candidate_url = "https://www.facebook.com/unearthed.blind"
+    driver = _LegacyVisitedPage(candidate_url, page_html)
+
+    enricher.logger = lambda msg: logs.append(msg)
+    monkeypatch.setattr(enricher, "_maybe_recover_or_skip_on_checkpoint", lambda: True)
+    monkeypatch.setattr(
+        nmfb.NightModeFacebookEnricher,
+        "_scrape_single_fb_candidate",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("explicit PASS A should not run")),
+    )
+
+    def fake_search(query, location="", allow_anon=True):
+        counts["search"] += 1
+        return candidate_url
+
+    def fake_scrape(driver_obj, fb_url, logger=None):
+        counts["scrape"] += 1
+        assert driver_obj is driver
+        assert fb_url == candidate_url
+        return scrape_result
+
+    monkeypatch.setattr(enricher, "_search_for_page", fake_search)
+    monkeypatch.setattr(enricher, "_get_unearthed_driver", lambda: driver)
+    monkeypatch.setattr(nmfb, "_scrape_fb_page_unearthed_legacy", fake_scrape)
+
+    row = {
+        "Artist Name": "Unearthed Blind",
+        "Source Directory": "unearthed",
+        "Email": "",
+        "Email_All": "",
+        "Facebook_URL": "",
+        "Social Link": "",
+    }
+
+    return enricher.enrich_row_with_facebook_night(row), counts, logs
 
 
 def test_explicit_fb_url_prefers_authenticated_session(monkeypatch, enricher):
@@ -322,54 +368,90 @@ def test_unearthed_without_explicit_url_keeps_legacy_path(monkeypatch, enricher)
 
 
 def test_unearthed_no_url_blind_discovery_success(monkeypatch, enricher):
-    logs = []
-    enricher.logger = lambda msg: logs.append(msg)
-    monkeypatch.setattr(enricher, "_maybe_recover_or_skip_on_checkpoint", lambda: True)
-    monkeypatch.setattr(
-        nmfb.NightModeFacebookEnricher,
-        "_scrape_single_fb_candidate",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("explicit PASS A should not run")),
-    )
-    monkeypatch.setattr(
+    result, counts, logs = _run_unearthed_blind_case(
+        monkeypatch,
         enricher,
-        "_search_for_page",
-        lambda query, location="", allow_anon=True: "https://www.facebook.com/unearthed.blind",
+        page_html="<html><body><div>Bookings: blind@example.com</div></body></html>",
+        scrape_result=(["blind@example.com"], "ok", "https://www.facebook.com/unearthed.blind"),
     )
-    monkeypatch.setattr(enricher, "_get_unearthed_driver", lambda: object())
-    monkeypatch.setattr(
-        nmfb,
-        "_scrape_fb_page_unearthed_legacy",
-        lambda driver, fb_url, logger=None: (["blind@example.com"], "ok", fb_url),
-    )
-    monkeypatch.setattr(
-        enricher,
-        "_build_result",
-        lambda emails, existing_email_all, page_url, artist_name, email_extract_method="regex": nmfb.NightModeFacebookResult(
-            email=emails[0],
-            email_all=";".join(emails),
-            facebook_url=page_url,
-            email_source_url=page_url,
-            email_extract_method=email_extract_method,
-        ),
-    )
-
-    row = {
-        "Artist Name": "Unearthed Blind",
-        "Source Directory": "unearthed",
-        "Email": "",
-        "Email_All": "",
-        "Facebook_URL": "",
-        "Social Link": "",
-    }
-
-    result = enricher.enrich_row_with_facebook_night(row)
 
     assert result.get("FB_Status") == "ok_unearthed_blind"
     assert result.get("Email") == "blind@example.com"
     assert result.get("Facebook_URL") == "https://www.facebook.com/unearthed.blind"
+    assert counts == {"search": 1, "scrape": 1}
     assert any("[Unearthed Path] no usable FB URL; allowing bounded FB discovery" in msg for msg in logs)
     assert any("[Unearthed Path] entering Unearthed no-URL FB discovery" in msg for msg in logs)
     assert any("[Unearthed Path] discovery yielded candidate" in msg for msg in logs)
+
+
+def test_unearthed_no_url_blind_discovery_no_email_keeps_legacy_result(monkeypatch, enricher):
+    result, counts, _logs = _run_unearthed_blind_case(
+        monkeypatch,
+        enricher,
+        page_html="<html><body><div>No contact details here.</div></body></html>",
+        scrape_result=([], "no_emails", "https://www.facebook.com/unearthed.blind"),
+    )
+
+    assert result.get("FB_Status") == "no_emails"
+    assert result.get("FB_Reason", "") == ""
+    assert result.get("Email", "") == ""
+    assert counts == {"search": 1, "scrape": 1}
+
+
+def test_unearthed_no_url_blind_discovery_checkpoint_uses_night_classification(monkeypatch, enricher):
+    result, _counts, logs = _run_unearthed_blind_case(
+        monkeypatch,
+        enricher,
+        page_html="<html><body>Security Check. Confirm it's you.</body></html>",
+        scrape_result=([], "no_emails", "https://www.facebook.com/unearthed.blind"),
+    )
+
+    assert result.get("FB_Status") == "checkpoint"
+    assert result.get("FB_Reason") == "checkpoint"
+    assert result.get(nmfb.FB_ATTEMPT_STATE_COL) == "attempted_fb_login_wall_or_checkpoint"
+    assert any("context=unearthed_legacy_final_page" in msg and "checkpoint=1" in msg for msg in logs)
+
+
+def test_unearthed_no_url_blind_discovery_login_wall_uses_night_classification(monkeypatch, enricher):
+    result, _counts, logs = _run_unearthed_blind_case(
+        monkeypatch,
+        enricher,
+        page_html="<html><body>Log in to Facebook</body></html>",
+        scrape_result=([], "no_emails", "https://www.facebook.com/unearthed.blind"),
+    )
+
+    assert result.get("FB_Status") == "login_wall"
+    assert result.get("FB_Reason") == "redirect_login"
+    assert result.get(nmfb.FB_ATTEMPT_STATE_COL) == "attempted_fb_login_wall_or_checkpoint"
+    assert any("context=unearthed_legacy_final_page" in msg and "login_wall=1" in msg for msg in logs)
+
+
+def test_unearthed_no_url_blind_discovery_captcha_uses_night_classification(monkeypatch, enricher):
+    result, _counts, logs = _run_unearthed_blind_case(
+        monkeypatch,
+        enricher,
+        page_html="<html><body>Help us confirm captcha before you continue.</body></html>",
+        scrape_result=([], "no_emails", "https://www.facebook.com/unearthed.blind"),
+    )
+
+    assert result.get("FB_Status") == "login_wall"
+    assert result.get("FB_Reason") == "captcha"
+    assert result.get(nmfb.FB_ATTEMPT_STATE_COL) == "attempted_fb_login_wall_or_checkpoint"
+    assert any("context=unearthed_legacy_final_page" in msg and "captcha=1" in msg for msg in logs)
+
+
+def test_unearthed_no_url_blind_discovery_warning_uses_night_classification(monkeypatch, enricher):
+    result, _counts, logs = _run_unearthed_blind_case(
+        monkeypatch,
+        enricher,
+        page_html="<html><body>Try again later.</body></html>",
+        scrape_result=([], "no_emails", "https://www.facebook.com/unearthed.blind"),
+    )
+
+    assert result.get("FB_Status") == "warning_interstitial"
+    assert result.get("FB_Reason") == "warning_interstitial"
+    assert result.get(nmfb.FB_ATTEMPT_STATE_COL) == "attempted_fb_login_wall_or_checkpoint"
+    assert any("context=unearthed_legacy_final_page" in msg and "warning=warning_interstitial" in msg for msg in logs)
 
 
 def test_unearthed_no_url_blind_discovery_miss(monkeypatch, enricher):

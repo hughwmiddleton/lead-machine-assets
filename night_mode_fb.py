@@ -2878,6 +2878,17 @@ def _classify_fb_auth_surface(driver) -> str:
     return _classify_fb_auth_surface_from_page(current_url, page_source)
 
 
+def _is_fb_content_unavailable_page(page_html: Optional[str]) -> bool:
+    lower_html = (page_html or "").lower()
+    not_found_phrases = (
+        "page isn\u2019t available",
+        "page isn't available",
+        "content isn't available",
+        "not available right now",
+    )
+    return any(phrase in lower_html for phrase in not_found_phrases)
+
+
 def _session_looks_healthy(driver) -> Tuple[bool, str]:
     """
     Quick FB session health probe to catch login/verification walls.
@@ -7228,9 +7239,7 @@ class NightModeFacebookEnricher:
             self.fb_rows_skipped["challenge"] += 1
             return None, [], used_driver_kind, "login_wall"
 
-        lower_html = (html or "").lower()
-        not_found_phrases = ("page isn\u2019t available", "page isn't available", "content isn't available", "not available right now")
-        if any(p in lower_html for p in not_found_phrases):
+        if _is_fb_content_unavailable_page(html):
             _log(self.logger, f"[Night FB][PageUnavailable] {resolved_url}")
             return None, [], used_driver_kind, "content_unavailable"
 
@@ -7819,7 +7828,58 @@ class NightModeFacebookEnricher:
         artist_name: str,
         fb_urls: List[str],
     ) -> Dict[str, str]:
-        def _map_unearthed_outcome(emails: List[str], status: str) -> Tuple[str, str]:
+        def _night_classify_unearthed_final_page(
+            driver,
+            fallback_url: str,
+            status_hint: str,
+            resolved_url_hint: str = "",
+        ) -> Tuple[str, str, str]:
+            resolved_url = _normalise_fb_url(
+                (getattr(driver, "current_url", "") or resolved_url_hint or fallback_url)
+            ) or _normalise_fb_url(resolved_url_hint or fallback_url) or (resolved_url_hint or fallback_url)
+            try:
+                page_html = getattr(driver, "page_source", "") or ""
+            except Exception:
+                page_html = ""
+
+            warning_reason = _looks_like_fb_warning_or_block(page_html, resolved_url) or ""
+            health = _night_fb_page_health_snapshot(
+                resolved_url,
+                page_html,
+                warning_reason=warning_reason,
+            )
+            health_parts = [
+                "[Night FB][Health]",
+                f"url={health.get('url') or '<unknown>'}",
+                f"captcha={1 if health.get('captcha') else 0}",
+                f"checkpoint={1 if health.get('checkpoint') else 0}",
+                f"login_wall={1 if health.get('login_wall') else 0}",
+            ]
+            if health.get("warning_reason"):
+                health_parts.append(f"warning={health.get('warning_reason')}")
+            health_parts.append("context=unearthed_legacy_final_page")
+            _log(self.logger, " ".join(health_parts))
+
+            auth_surface = str(health.get("auth_surface") or "").strip()
+            status_norm = str(status_hint or "").strip().lower()
+            if health.get("captcha") or auth_surface == "captcha":
+                return "login_wall", "captcha", resolved_url
+            if health.get("checkpoint") or auth_surface == "checkpoint":
+                return "checkpoint", "checkpoint", resolved_url
+            if health.get("login_wall"):
+                return "login_wall", auth_surface or "login_wall", resolved_url
+            if warning_reason:
+                return "warning_interstitial", warning_reason, resolved_url
+            if _is_fb_content_unavailable_page(page_html):
+                _log(self.logger, f"[Night FB][PageUnavailable] {resolved_url}")
+                return "content_unavailable", "content_unavailable", resolved_url
+            if status_norm == "login_redirect":
+                return "login_wall", "login_redirect", resolved_url
+            if status_norm == "checkpoint":
+                return "checkpoint", "checkpoint", resolved_url
+            return status_hint, "", resolved_url
+
+        def _map_unearthed_outcome(emails: List[str], status: str, reason: str = "") -> Tuple[str, str]:
             """
             Map legacy Unearthed scrape status to PASS A counters/log reasons.
             Outcome values must match PASS A summary buckets.
@@ -7827,10 +7887,13 @@ class NightModeFacebookEnricher:
             if emails:
                 return "found_email", "explicit_url"
             status_norm = (status or "").lower()
-            if status_norm in ("login_redirect", "checkpoint"):
-                return "login_wall", "anon_login_wall"
+            reason_norm = (reason or "").lower()
+            if status_norm in ("login_redirect", "login_wall", "checkpoint", "warning_interstitial"):
+                return "login_wall", reason_norm or ("login_redirect" if status_norm == "login_wall" else status_norm)
             if status_norm in ("error", "fetch_error"):
                 return "fetch_error", "legacy_error"
+            if status_norm == "content_unavailable":
+                return "no_email_on_page", "content_unavailable"
             return "no_email_on_page", "legacy_no_email"
 
         # Always prefer explicit URLs first.
@@ -7897,7 +7960,13 @@ class NightModeFacebookEnricher:
                 return result
             self._pass_a_bump("attempted")
             emails, status, resolved_url = _scrape_fb_page_unearthed_legacy(driver, page_url, logger=self.logger)
-            outcome, base_reason = _map_unearthed_outcome(emails, status)
+            status, status_reason, resolved_url = _night_classify_unearthed_final_page(
+                driver,
+                page_url,
+                status,
+                resolved_url,
+            )
+            outcome, base_reason = _map_unearthed_outcome(emails, status, status_reason)
             reason = "share_url" if _is_fb_share_url_str(page_url) else base_reason
             self._pass_a_bump(outcome)
             self._pass_a_log_row(artist_name, resolved_url or page_url, "legacy_unearthed_anon", outcome, reason)
@@ -7921,6 +7990,8 @@ class NightModeFacebookEnricher:
                     result["FB_Status"] = "ok_unearthed_blind"
                     return result
             result["FB_Status"] = status or "unearthed_no_emails"
+            if status_reason:
+                result["FB_Reason"] = status_reason
             return result
 
     def enrich_row_with_facebook_night(self, row: Dict[str, str], row_index: Optional[int] = None) -> Dict[str, str]:
