@@ -250,6 +250,22 @@ def test_night_mode_pick_fb_contact_link_prefers_strongest_unique_profile_surfac
     assert selected == "https://www.facebook.com/profile.php?id=123&sk=about_details"
 
 
+def test_night_mode_pick_fb_contact_link_rejects_wrong_entity_about_anchor() -> None:
+    html = '<html><body><a href="/charlotte.holding/about">About</a></body></html>'
+
+    selected = _pick_from_html("https://www.facebook.com/wetdenim", html)
+
+    assert selected is None
+
+
+def test_night_mode_pick_fb_contact_link_rejects_profile_about_for_different_id() -> None:
+    html = '<html><body><a href="/profile.php?id=999&sk=about_details">Details</a></body></html>'
+
+    selected = _pick_from_html("https://www.facebook.com/profile.php?id=123", html)
+
+    assert selected is None
+
+
 def test_fetch_fb_about_variants_profile_includes_about_details_between_contact_and_about() -> None:
     variants = nmfb._fetch_fb_about_variants("https://www.facebook.com/profile.php?id=123")
 

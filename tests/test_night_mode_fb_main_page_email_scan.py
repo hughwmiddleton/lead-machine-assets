@@ -1236,6 +1236,67 @@ def test_secondary_fetch_uses_direct_about_fallback_when_only_invalid_internal_s
     assert any("trying direct fallback" in msg for msg in logs)
 
 
+def test_secondary_fetch_rejects_redirected_posts_final_landing(monkeypatch) -> None:
+    logs = []
+    enricher = _build_enricher(logs)
+    calls = []
+    main_url = "https://www.facebook.com/wetdenim"
+    about_url = "https://www.facebook.com/wetdenim/about"
+    posts_url = "https://www.facebook.com/charlotte.holding/posts/123"
+
+    pages = {
+        main_url: (
+            """
+            <html>
+              <body>
+                <div>No email on the main page.</div>
+                <a href="/wetdenim/about">About</a>
+              </body>
+            </html>
+            """,
+            main_url,
+        ),
+        about_url: (
+            """
+            <html>
+              <body>
+                <div>Bookings: bookings@wrong-page.com</div>
+              </body>
+            </html>
+            """,
+            posts_url,
+        ),
+    }
+
+    def fake_fetch(url, goto_about=False):  # noqa: ANN001
+        calls.append(url)
+        return pages[url]
+
+    monkeypatch.setattr(enricher, "_fetch_html_with_url", fake_fetch)
+    monkeypatch.setattr(nmfb, "_night_fb_has_music_signals", lambda soup, context: False)
+    monkeypatch.setattr(nmfb, "should_accept_email_override", lambda *args, **kwargs: (True, "test_override"))
+
+    result = enricher._scrape_single_fb_candidate(
+        main_url,
+        {"Artist Name": "Wet Denim", "Email_All": ""},
+        "Wet Denim",
+        allow_anon=False,
+        candidate_context={},
+    )
+
+    assert result is not None
+    night_result, emails, driver_kind, outcome = result
+    assert emails == []
+    assert night_result is not None
+    assert night_result.about_attempted == "yes"
+    assert night_result.about_result == "invalid_destination"
+    assert calls == [main_url, about_url]
+    assert len(calls) == 2
+    assert driver_kind == "session"
+    assert outcome == "no_email_on_page"
+    assert any("Ignoring About/contact result due to entity/surface mismatch" in msg for msg in logs)
+
+
 def test_explicit_seed_url_keeps_main_page_email_without_candidate_context(monkeypatch) -> None:
     logs = []
     enricher = _build_enricher(logs)

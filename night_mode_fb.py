@@ -1787,6 +1787,131 @@ def _normalise_fb_url(url: str) -> str:
     return urllib.parse.urlunparse((scheme, host, path, "", "", ""))
 
 
+_FB_ABOUT_ALLOWED_PATH_SUFFIXES = {
+    "about",
+    "about_contact_and_basic_info",
+    "about_details",
+    "contact",
+    "contact_and_basic_info",
+}
+_FB_ABOUT_ALLOWED_SK_VALUES = {
+    "about",
+    "about_contact_and_basic_info",
+    "about_details",
+}
+_FB_ABOUT_REJECTED_SURFACE_TOKENS = {
+    "events",
+    "groups",
+    "permalink",
+    "permalink.php",
+    "photo.php",
+    "photos",
+    "posts",
+    "reel",
+    "reels",
+    "story.php",
+    "videos",
+    "watch",
+}
+
+
+def _fb_entity_key(url: str) -> Optional[Tuple[str, str]]:
+    raw = _normalize_fb_href(url or "")
+    if not raw:
+        return None
+    try:
+        parsed = urllib.parse.urlparse(raw)
+    except Exception:
+        return None
+
+    host = (parsed.netloc or "").lower()
+    if host in {"facebook.com", "m.facebook.com", "web.facebook.com", "touch.facebook.com"}:
+        host = "www.facebook.com"
+    if host != "www.facebook.com":
+        return None
+
+    path = (parsed.path or "").rstrip("/")
+    if path.lower() == "/profile.php":
+        qs = urllib.parse.parse_qs(parsed.query or "", keep_blank_values=False)
+        fb_id = ((qs.get("id") or [""])[0] or "").strip()
+        if fb_id.isdigit():
+            return ("profile", fb_id)
+        return None
+
+    parts = [part.lower() for part in path.split("/") if part]
+    if parts[:1] == ["pg"] and len(parts) >= 2:
+        parts = parts[1:]
+    while parts and parts[-1] in _FB_ABOUT_ALLOWED_PATH_SUFFIXES:
+        parts = parts[:-1]
+    if len(parts) != 1:
+        return None
+
+    slug = parts[0]
+    if slug in {
+        "events",
+        "groups",
+        "pages",
+        "people",
+        "permalink.php",
+        "photo.php",
+        "profile.php",
+        "reel",
+        "reels",
+        "story.php",
+        "videos",
+        "watch",
+    }:
+        return None
+    return ("slug", slug)
+
+
+def _fb_is_about_contact_surface_url(url: str) -> bool:
+    raw = _normalize_fb_href(url or "")
+    if not raw:
+        return False
+    try:
+        parsed = urllib.parse.urlparse(raw)
+    except Exception:
+        return False
+
+    host = (parsed.netloc or "").lower()
+    if host not in {"facebook.com", "www.facebook.com", "m.facebook.com", "web.facebook.com", "touch.facebook.com"}:
+        return False
+
+    path = (parsed.path or "").rstrip("/").lower()
+    if path == "/profile.php":
+        qs = urllib.parse.parse_qs(parsed.query or "", keep_blank_values=False)
+        fb_id = ((qs.get("id") or [""])[0] or "").strip()
+        sk_value = ((qs.get("sk") or [""])[0] or "").strip().lower()
+        return bool(fb_id.isdigit() and sk_value in _FB_ABOUT_ALLOWED_SK_VALUES)
+
+    segments = [segment for segment in path.split("/") if segment]
+    if any(segment in _FB_ABOUT_REJECTED_SURFACE_TOKENS for segment in segments):
+        return False
+    qs = urllib.parse.parse_qs(parsed.query or "", keep_blank_values=False)
+    sk_value = ((qs.get("sk") or [""])[0] or "").strip().lower()
+    if len(segments) == 1 and sk_value in _FB_ABOUT_ALLOWED_SK_VALUES:
+        return True
+    return len(segments) >= 2 and segments[-1] in _FB_ABOUT_ALLOWED_PATH_SUFFIXES
+
+
+def _fb_is_same_entity_about_url(url: str, *expected_urls: str) -> bool:
+    if not _fb_is_about_contact_surface_url(url):
+        return False
+    target_key = _fb_entity_key(url)
+    if not target_key:
+        return False
+
+    expected_keys = [
+        key
+        for key in (_fb_entity_key(expected_url) for expected_url in expected_urls if expected_url)
+        if key
+    ]
+    if not expected_keys:
+        return False
+    return all(key == target_key for key in expected_keys)
+
+
 def _canonicalize_and_dedupe_explicit_fb_urls(
     urls: Sequence[str], logger: LoggerFn = None, debug: bool = False
 ) -> List[str]:
@@ -5228,17 +5353,8 @@ def _pick_fb_contact_link(soup: BeautifulSoup, base_url: str) -> Optional[str]:
         "touch.facebook.com",
     }
     alias_hosts = {"facebook.com", "m.facebook.com", "web.facebook.com", "touch.facebook.com"}
-    rejected_surface_tokens = {
-        "events",
-        "birthdays",
-        "groups",
-        "posts",
-        "permalink",
-        "photos",
-        "watch",
-        "videos",
-    }
-    allowed_sk = {"about", "about_contact_and_basic_info", "about_details"}
+    rejected_surface_tokens = _FB_ABOUT_REJECTED_SURFACE_TOKENS | {"birthdays"}
+    allowed_sk = _FB_ABOUT_ALLOWED_SK_VALUES
 
     def _canonicalize_resolved(candidate_url: str) -> Optional[Tuple[str, urllib.parse.ParseResult]]:
         resolved = urllib.parse.urljoin(base, candidate_url or "").split("#", 1)[0]
@@ -5306,6 +5422,8 @@ def _pick_fb_contact_link(soup: BeautifulSoup, base_url: str) -> Optional[str]:
                     priority = 3
 
         if priority is None:
+            continue
+        if not _fb_is_same_entity_about_url(resolved, base):
             continue
 
         text = " ".join(anchor.get_text(" ", strip=True).lower().split())
@@ -7391,10 +7509,16 @@ class NightModeFacebookEnricher:
             if not has_music_signals:
                 _log(self.logger, f"[Night FB] No music signals on main page {resolved_url}, checking About/Contact...")
             contact_url = _pick_fb_contact_link(soup, resolved_url)
+            if contact_url and not _fb_is_same_entity_about_url(contact_url, candidate_url, resolved_url):
+                _log(
+                    self.logger,
+                    f"[FB Email] Rejected contact/about target due to entity/surface mismatch: target={contact_url} main={resolved_url}",
+                )
+                contact_url = None
             if not contact_url:
                 fallback_variants = _fetch_fb_about_variants(resolved_url)
                 fallback_url = fallback_variants[0] if fallback_variants else ""
-                if fallback_url:
+                if fallback_url and _fb_is_same_entity_about_url(fallback_url, candidate_url, resolved_url):
                     contact_url = fallback_url
                     _log(self.logger, f"[FB Email] No valid contact surface found; trying direct fallback {contact_url}")
             if contact_url:
@@ -7406,7 +7530,8 @@ class NightModeFacebookEnricher:
                         about_html, about_resolved = self._fetch_html_with_url_anon(contact_url, goto_about=False)
                 except Exception:
                     about_html, about_resolved = "", contact_url
-                final_about = _normalise_fb_url(about_resolved or contact_url)
+                final_about_raw = about_resolved or contact_url
+                final_about = _normalise_fb_url(final_about_raw)
                 if _is_fb_login_or_security_url(final_about):
                     about_result = "blocked_login"
                     self.fb_rows_skipped["challenge"] += 1
@@ -7419,6 +7544,13 @@ class NightModeFacebookEnricher:
                         not_found_phrases = ("page isn’t available", "page isn't available", "content isn't available", "not available right now")
                         if any(p in lower_html for p in not_found_phrases):
                             about_result = "not_found"
+                        elif not _fb_is_same_entity_about_url(final_about_raw, candidate_url, resolved_url):
+                            about_result = "invalid_destination"
+                            _log(
+                                self.logger,
+                                "[FB Email] Ignoring About/contact result due to entity/surface mismatch: "
+                                f"target={contact_url} final={final_about_raw or final_about or contact_url} main={resolved_url}",
+                            )
                         else:
                             about_soup = BeautifulSoup(about_html or "", "html.parser") if about_html else None
                             if (not has_music_signals) and about_soup:
