@@ -6527,11 +6527,33 @@ class NightModeFacebookEnricher:
             self._refresh_driver(session)
         return session
 
-    def _fetch_html_with_url(self, url: str, goto_about: bool = True) -> Tuple[Optional[str], Optional[str]]:
-        budget = getattr(self, "_page_budget_remaining", 2)
+    def _clear_last_fb_email_surface_state(self) -> None:
         self._last_fb_visible_text = ""
         self._last_fb_live_anchor_values = []
         self._last_fb_reveal_actions = []
+
+    def _collect_current_fb_email_surface_state(self, driver_kind: str = "session") -> Tuple[str, str, List[str], List[str]]:
+        self._clear_last_fb_email_surface_state()
+        driver = None
+        if str(driver_kind or "").startswith("anon"):
+            driver = getattr(self, "_anon_driver", None)
+        else:
+            session = getattr(self, "session", None)
+            driver = getattr(session, "driver", None)
+        if driver is None:
+            return "", "", [], []
+        page_source, rendered_text, anchor_values, reveal_actions = _collect_fb_email_surface_state(
+            driver,
+            logger=self.logger,
+        )
+        self._last_fb_visible_text = rendered_text
+        self._last_fb_live_anchor_values = list(anchor_values or [])
+        self._last_fb_reveal_actions = list(reveal_actions or [])
+        return page_source, rendered_text, list(anchor_values or []), list(reveal_actions or [])
+
+    def _fetch_html_with_url(self, url: str, goto_about: bool = True, collect_surfaces: bool = True) -> Tuple[Optional[str], Optional[str]]:
+        budget = getattr(self, "_page_budget_remaining", 2)
+        self._clear_last_fb_email_surface_state()
         if budget <= 0:
             _log(self.logger, "[FB Email] Skipped: page budget exhausted")
             return None, None
@@ -6556,13 +6578,15 @@ class NightModeFacebookEnricher:
                         goto_about_fn(driver, url, timeout=5.0)
                     except Exception:
                         pass
-            page_source, rendered_text, anchor_values, reveal_actions = _collect_fb_email_surface_state(
-                driver,
-                logger=self.logger,
-            )
-            self._last_fb_visible_text = rendered_text
-            self._last_fb_live_anchor_values = anchor_values
-            self._last_fb_reveal_actions = reveal_actions
+            page_source = getattr(driver, "page_source", "") or ""
+            if collect_surfaces:
+                page_source, rendered_text, anchor_values, reveal_actions = _collect_fb_email_surface_state(
+                    driver,
+                    logger=self.logger,
+                )
+                self._last_fb_visible_text = rendered_text
+                self._last_fb_live_anchor_values = list(anchor_values or [])
+                self._last_fb_reveal_actions = list(reveal_actions or [])
             current_url = getattr(driver, "current_url", None) or url
             return page_source or driver.page_source, current_url
 
@@ -6609,11 +6633,9 @@ class NightModeFacebookEnricher:
 
         return html, current_url
 
-    def _fetch_html_with_url_anon(self, url: str, goto_about: bool = True) -> Tuple[Optional[str], Optional[str]]:
+    def _fetch_html_with_url_anon(self, url: str, goto_about: bool = True, collect_surfaces: bool = True) -> Tuple[Optional[str], Optional[str]]:
         budget = getattr(self, "_page_budget_remaining", 2)
-        self._last_fb_visible_text = ""
-        self._last_fb_live_anchor_values = []
-        self._last_fb_reveal_actions = []
+        self._clear_last_fb_email_surface_state()
         if budget <= 0:
             _log(self.logger, "[FB Email] Skipped: page budget exhausted")
             return None, None
@@ -6638,13 +6660,15 @@ class NightModeFacebookEnricher:
                         goto_about_fn(driver, url, timeout=5.0)
                     except Exception:
                         pass
-            page_source, rendered_text, anchor_values, reveal_actions = _collect_fb_email_surface_state(
-                driver,
-                logger=self.logger,
-            )
-            self._last_fb_visible_text = rendered_text
-            self._last_fb_live_anchor_values = anchor_values
-            self._last_fb_reveal_actions = reveal_actions
+            page_source = getattr(driver, "page_source", "") or ""
+            if collect_surfaces:
+                page_source, rendered_text, anchor_values, reveal_actions = _collect_fb_email_surface_state(
+                    driver,
+                    logger=self.logger,
+                )
+                self._last_fb_visible_text = rendered_text
+                self._last_fb_live_anchor_values = list(anchor_values or [])
+                self._last_fb_reveal_actions = list(reveal_actions or [])
             current_url = getattr(driver, "current_url", None) or current_url or url
             self._log_page_health(current_url, html, context="page")
             if is_fb_login_redirect(current_url) or _is_fb_login_or_security_url(current_url):
@@ -6654,8 +6678,8 @@ class NightModeFacebookEnricher:
             _log(self.logger, f"[Night FB] Anonymous fetch failed for {url}: {exc}")
             return None, None
 
-    def _fetch_html(self, url: str) -> Optional[str]:
-        html, _ = self._fetch_html_with_url(url, goto_about=True)
+    def _fetch_html(self, url: str, collect_surfaces: bool = True) -> Optional[str]:
+        html, _ = self._fetch_html_with_url(url, goto_about=True, collect_surfaces=collect_surfaces)
         return html
 
     def _should_allow_anonymous(self, row: Dict[str, str]) -> bool:
@@ -7239,13 +7263,28 @@ class NightModeFacebookEnricher:
         outcome_hint = "fetch_error"
         reject_reason = ""
         timed_out_flag = False
+        staged_main_page_surfaces = bool(candidate_context) and not bool(candidate_context.get("explicit_accepted_url"))
 
-        html, resolved_url = self._fetch_html_with_url(candidate_url, goto_about=False)
+        if staged_main_page_surfaces:
+            html, resolved_url = self._fetch_html_with_url(
+                candidate_url,
+                goto_about=False,
+                collect_surfaces=False,
+            )
+        else:
+            html, resolved_url = self._fetch_html_with_url(candidate_url, goto_about=False)
         timed_out_flag = timed_out_flag or bool(getattr(self, "_last_fb_timeout", False))
         if html:
             outcome_hint = "fetched"
         if (not html) and allow_anon:
-            html, resolved_url = self._fetch_html_with_url_anon(candidate_url, goto_about=False)
+            if staged_main_page_surfaces:
+                html, resolved_url = self._fetch_html_with_url_anon(
+                    candidate_url,
+                    goto_about=False,
+                    collect_surfaces=False,
+                )
+            else:
+                html, resolved_url = self._fetch_html_with_url_anon(candidate_url, goto_about=False)
             used_driver_kind = "anon_fallback"
             if html and outcome_hint != "fetched":
                 outcome_hint = "fetched"
@@ -7289,6 +7328,21 @@ class NightModeFacebookEnricher:
             anchor_values=main_anchor_values,
             stop_after_first_filtered=bool(candidate_context and candidate_context.get("explicit_accepted_url")),
         )
+        if staged_main_page_surfaces and not _filter_low_quality_fb_emails(emails_raw):
+            main_surface_html, main_visible_text, main_anchor_values, _ = self._collect_current_fb_email_surface_state(
+                driver_kind=used_driver_kind,
+            )
+            if main_surface_html:
+                html = main_surface_html
+                soup = BeautifulSoup(html, "html.parser")
+            _log_fb_email_surface_debug(self.logger, f"main:{resolved_url}", html or "", main_visible_text)
+            emails_raw, main_mailto = _extract_emails_from_html(
+                html or "",
+                soup=soup,
+                rendered_text=main_visible_text,
+                anchor_values=main_anchor_values,
+                stop_after_first_filtered=False,
+            )
         emails = _filter_low_quality_fb_emails(emails_raw)
         main_surface = _fb_email_surface_label("main", used_mailto=main_mailto)
         main_surface_map = {

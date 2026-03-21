@@ -799,6 +799,59 @@ def test_fetch_html_with_url_logs_healthy_page_health(monkeypatch) -> None:
     )
 
 
+def test_fetch_html_with_url_light_fetch_clears_stale_surfaces(monkeypatch) -> None:
+    logs = []
+    enricher = night_mode_fb.NightModeFacebookEnricher(
+        legacy_module=None,
+        username="",
+        password="",
+        logger=logs.append,
+        use_shared_session=False,
+    )
+    enricher._last_fb_visible_text = "stale@artist.com"
+    enricher._last_fb_live_anchor_values = ["mailto:stale@artist.com"]
+    enricher._last_fb_reveal_actions = ["expand"]
+
+    class _Session:
+        last_nav_timed_out = False
+
+        def __init__(self) -> None:
+            self.driver = None
+
+        def navigate(self, url):  # noqa: ANN001
+            self.driver = type(
+                "_Driver",
+                (),
+                {
+                    "page_source": "<html><body>No email on page.</body></html>",
+                    "current_url": url,
+                },
+            )()
+            return self.driver
+
+    monkeypatch.setattr(enricher, "_ensure_session", lambda: _Session())
+    monkeypatch.setattr(enricher, "_ensure_driver_alive", lambda session: session)
+
+    html, current_url = enricher._fetch_html_with_url(
+        "https://www.facebook.com/example",
+        goto_about=False,
+        collect_surfaces=False,
+    )
+    emails, used_mailto = night_mode_fb._extract_emails_from_html(
+        html or "",
+        rendered_text=enricher._last_fb_visible_text,
+        anchor_values=enricher._last_fb_live_anchor_values,
+    )
+
+    assert html == "<html><body>No email on page.</body></html>"
+    assert current_url == "https://www.facebook.com/example"
+    assert enricher._last_fb_visible_text == ""
+    assert enricher._last_fb_live_anchor_values == []
+    assert enricher._last_fb_reveal_actions == []
+    assert emails == []
+    assert used_mailto is False
+
+
 def test_fetch_html_with_url_logs_login_wall_health(monkeypatch) -> None:
     logs = []
     enricher = night_mode_fb.NightModeFacebookEnricher(
