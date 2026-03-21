@@ -4260,6 +4260,7 @@ def _extract_emails_from_html(
     soup: Optional[BeautifulSoup] = None,
     rendered_text: str = "",
     anchor_values: Optional[Sequence[str]] = None,
+    stop_after_first_filtered: bool = False,
 ) -> Tuple[List[str], bool]:
     emails: List[str] = []
     mailto_used = False
@@ -4273,11 +4274,23 @@ def _extract_emails_from_html(
         if addr:
             emails.append(addr)
             mailto_used = True
+    if stop_after_first_filtered:
+        filtered_emails = _filter_low_quality_fb_emails(emails)
+        if filtered_emails:
+            return filtered_emails, mailto_used
     text_blob = soup.get_text(" ", strip=True) if soup else ""
     if text_blob:
         emails.extend(_extract_fb_emails_from_text_sample(text_blob))
+        if stop_after_first_filtered:
+            filtered_emails = _filter_low_quality_fb_emails(emails)
+            if filtered_emails:
+                return filtered_emails, mailto_used
     if raw_html:
         emails.extend(_extract_fb_emails_from_text_sample(raw_html))
+        if stop_after_first_filtered:
+            filtered_emails = _filter_low_quality_fb_emails(emails)
+            if filtered_emails:
+                return filtered_emails, mailto_used
     for raw_value in anchor_values or ():
         raw_value = str(raw_value or "").strip()
         if not raw_value:
@@ -4297,9 +4310,17 @@ def _extract_emails_from_html(
             samples.append(decoded)
         for sample in samples:
             emails.extend(_extract_fb_emails_from_text_sample(sample))
+            if stop_after_first_filtered:
+                filtered_emails = _filter_low_quality_fb_emails(emails)
+                if filtered_emails:
+                    return filtered_emails, mailto_used
     if rendered_text:
         visible_text = str(rendered_text or "")
         emails.extend(_extract_fb_emails_from_text_sample(visible_text))
+        if stop_after_first_filtered:
+            filtered_emails = _filter_low_quality_fb_emails(emails)
+            if filtered_emails:
+                return filtered_emails, mailto_used
     seen = set()
     unique: List[str] = []
     for email in emails:
@@ -7266,6 +7287,7 @@ class NightModeFacebookEnricher:
             html or "",
             rendered_text=main_visible_text,
             anchor_values=main_anchor_values,
+            stop_after_first_filtered=bool(candidate_context and candidate_context.get("explicit_accepted_url")),
         )
         emails = _filter_low_quality_fb_emails(emails_raw)
         main_surface = _fb_email_surface_label("main", used_mailto=main_mailto)

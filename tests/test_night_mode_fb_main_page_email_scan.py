@@ -456,6 +456,7 @@ def test_explicit_pass_a_main_page_email_skips_secondary_fetch(monkeypatch) -> N
     logs = []
     enricher = _build_enricher(logs)
     calls = []
+    extract_calls = []
     main_url = "https://www.facebook.com/artist"
     about_url = "https://www.facebook.com/artist/about"
 
@@ -477,7 +478,14 @@ def test_explicit_pass_a_main_page_email_skips_secondary_fetch(monkeypatch) -> N
         calls.append(url)
         return pages[url]
 
+    def fake_extract(sample: str):  # noqa: ANN001
+        extract_calls.append(sample)
+        if len(extract_calls) == 1:
+            return ["bookings@artist.com"]
+        raise AssertionError("explicit PASS A main-page scan should stop after first usable email")
+
     monkeypatch.setattr(enricher, "_fetch_html_with_url", fake_fetch)
+    monkeypatch.setattr(nmfb, "_extract_fb_emails_from_text_sample", fake_extract)
     monkeypatch.setattr(nmfb, "_night_fb_has_music_signals", lambda soup, context: False)
 
     result = enricher._scrape_single_fb_candidate(
@@ -497,6 +505,7 @@ def test_explicit_pass_a_main_page_email_skips_secondary_fetch(monkeypatch) -> N
     assert night_result.about_result == ""
     assert calls == [main_url]
     assert about_url not in calls
+    assert len(extract_calls) == 1
     assert driver_kind == "session"
     assert outcome == "found_email"
     assert not any(f"[FB Email] Visiting {about_url}" in msg for msg in logs)
