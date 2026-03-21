@@ -369,8 +369,10 @@ def test_unsafe_candidate_filtered_before_navigation(monkeypatch):
 
     assert selected == safe_norm
     assert enricher._last_selected_candidate_context["url"] == safe_norm
+    assert enricher._last_selected_candidate_context["search_discovery_accepted"] is True
     assert len(enricher._last_search_candidates) == 1
     assert enricher._last_search_candidates[0]["url"] == safe_norm
+    assert enricher._last_search_candidates[0]["search_discovery_accepted"] is True
 
 
 def test_all_unsafe_candidates_skip_scrape(monkeypatch):

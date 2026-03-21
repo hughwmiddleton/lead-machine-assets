@@ -509,7 +509,7 @@ def test_discovery_main_page_html_email_uses_light_fetch_and_keeps_about_fetch(m
         {"Artist Name": "Artist", "Email_All": ""},
         "Artist",
         allow_anon=False,
-        candidate_context={"url": main_url, "base_score": 1.2, "match_level": "near"},
+        candidate_context={"url": main_url, "base_score": 1.2, "match_level": "near", "search_discovery_accepted": True},
     )
 
     assert result is not None
@@ -580,7 +580,7 @@ def test_discovery_main_page_rendered_text_email_escalates_after_light_fetch(mon
         {"Artist Name": "Artist", "Email_All": ""},
         "Artist",
         allow_anon=False,
-        candidate_context={"url": main_url, "base_score": 1.2, "match_level": "near"},
+        candidate_context={"url": main_url, "base_score": 1.2, "match_level": "near", "search_discovery_accepted": True},
     )
 
     assert result is not None
@@ -651,7 +651,7 @@ def test_discovery_main_page_live_anchor_mailto_escalates_after_light_fetch(monk
         {"Artist Name": "Artist", "Email_All": ""},
         "Artist",
         allow_anon=False,
-        candidate_context={"url": main_url, "base_score": 1.2, "match_level": "near"},
+        candidate_context={"url": main_url, "base_score": 1.2, "match_level": "near", "search_discovery_accepted": True},
     )
 
     assert result is not None
@@ -689,8 +689,8 @@ def test_explicit_pass_a_main_page_email_skips_secondary_fetch(monkeypatch) -> N
         ),
     }
 
-    def fake_fetch(url, goto_about=False):  # noqa: ANN001
-        calls.append(url)
+    def fake_fetch(url, goto_about=False, collect_surfaces=True):  # noqa: ANN001
+        calls.append((url, collect_surfaces))
         return pages[url]
 
     def fake_extract(sample: str):  # noqa: ANN001
@@ -718,8 +718,8 @@ def test_explicit_pass_a_main_page_email_skips_secondary_fetch(monkeypatch) -> N
     assert night_result.email == "bookings@artist.com"
     assert night_result.about_attempted == "no"
     assert night_result.about_result == ""
-    assert calls == [main_url]
-    assert about_url not in calls
+    assert calls == [(main_url, True)]
+    assert all(url != about_url for url, _collect_surfaces in calls)
     assert len(extract_calls) == 1
     assert driver_kind == "session"
     assert outcome == "found_email"
@@ -1308,7 +1308,7 @@ def test_search_candidate_still_rejects_extracted_email_without_music_signals(mo
 
     def fake_fetch(url, goto_about=False, collect_surfaces=True):  # noqa: ANN001
         assert url == main_url
-        assert collect_surfaces is False
+        assert collect_surfaces is True
         return (
             """
             <html>

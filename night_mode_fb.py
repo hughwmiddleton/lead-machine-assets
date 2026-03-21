@@ -6244,6 +6244,7 @@ class NightModeFacebookEnricher:
                 "base_score": base_score,
                 "match_level": match_level_ctx,
                 "selected_by": selected_by,
+                "search_discovery_accepted": True,
             }
             if chosen_url_norm and norm_url == chosen_url_norm and selected_ctx is None:
                 selected_ctx = context
@@ -7263,7 +7264,7 @@ class NightModeFacebookEnricher:
         outcome_hint = "fetch_error"
         reject_reason = ""
         timed_out_flag = False
-        staged_main_page_surfaces = bool(candidate_context) and not bool(candidate_context.get("explicit_accepted_url"))
+        staged_main_page_surfaces = bool(candidate_context and candidate_context.get("search_discovery_accepted"))
 
         if staged_main_page_surfaces:
             html, resolved_url = self._fetch_html_with_url(
