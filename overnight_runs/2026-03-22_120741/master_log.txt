@@ -1,0 +1,78 @@
+2026-03-22 12:08:06,441 [INFO] [Seed Summary]
+2026-03-22 12:08:06,441 [INFO] unearthed=15
+2026-03-22 12:08:06,470 [INFO] [FB Promotion] facebook_url populated for 9 rows
+2026-03-22 12:08:06,471 [INFO] [FB Promotion] canonical Facebook_URL backfilled from Social Link / External Links for 9 rows
+2026-03-22 12:08:06,533 [INFO] [Master] Wrote merged raw CSV: overnight_runs/2026-03-22_120741/master_raw.csv (rows=15)
+2026-03-22 12:08:06,533 [INFO] [Master Enrich] Starting cross-directory enrichment for overnight_runs/2026-03-22_120741/master_raw.csv
+2026-03-22 12:08:11,554 [INFO] [Master] Bandcamp directory CSV -> (none) in /Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/overnight_runs/2026-03-22_120741 (attempts=6)
+2026-03-22 12:08:16,583 [INFO] [Master] SoundCloud directory CSV -> (none) in /Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/overnight_runs/2026-03-22_120741 (attempts=6)
+2026-03-22 12:08:21,642 [INFO] [Master] Last.fm directory CSV -> (none) in /Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/overnight_runs/2026-03-22_120741 (attempts=6)
+2026-03-22 12:08:21,643 [INFO] [Master] Unearthed directory CSV -> /Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/overnight_runs/2026-03-22_120741/job_unearthed_1/raw.csv (rows=15, kind=raw)
+2026-03-22 12:08:21,698 [INFO] [Master] Passing bandcamp_csv_path=
+2026-03-22 12:08:21,698 [INFO] [Master] Passing soundcloud_csv_path=
+2026-03-22 12:08:21,698 [INFO] [Master] Passing lastfm_csv_path=
+2026-03-22 12:08:21,698 [INFO] [Master] Passing unearthed_csv_path=/Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/overnight_runs/2026-03-22_120741/job_unearthed_1/raw.csv
+2026-03-22 12:08:21,708 [INFO] [Night FB] Using Chrome profile dir: /Users/hughmiddleton/Lead Machine/Lead Machine Code/night_fb_profile
+2026-03-22 12:08:21,917 [INFO] [Night FB][preflight] chrome_binary=/Applications/Google Chrome.app/Contents/MacOS/Google Chrome chrome_version=Google Chrome 146.0.7680.81 chromedriver=<selenium_manager> chromedriver_version=<selenium_manager> profile_dir=/Users/hughmiddleton/Lead Machine/Lead Machine Code/night_fb_profile profile_exists=True profile_locks=[] image_policy=managed_allow args=['--disable-gpu', '--window-size=1920x1080', '--disable-extensions', '--disable-dev-shm-usage', '--no-sandbox', '--disable-blink-features=AutomationControlled', '--user-data-dir=/Users/hughmiddleton/Lead Machine/Lead Machine Code/night_fb_profile', '--profile-directory=Default']
+2026-03-22 12:08:24,710 [INFO] [Night FB][driver] requested_profile=/Users/hughmiddleton/Lead Machine/Lead Machine Code/night_fb_profile active_profile=/Users/hughmiddleton/Lead Machine/Lead Machine Code/night_fb_profile persistent_profile=1 temp_fallback=0 webdriver_mask=1
+2026-03-22 12:08:32,086 [INFO] [Night FB][auth_probe] mode=headed requested_profile=/Users/hughmiddleton/Lead Machine/Lead Machine Code/night_fb_profile active_profile=/Users/hughmiddleton/Lead Machine/Lead Machine Code/night_fb_profile temp_fallback=0 authed=1 reason=authenticated
+2026-03-22 12:08:52,694 [INFO] [FB Discover] Shared Facebook session authenticated; discovery enabled for this run.
+2026-03-22 12:08:52,696 [INFO] [FB Warmup] Running Facebook session warm-up
+2026-03-22 12:09:03,950 [INFO] [Enricher] Loading seed CSV: overnight_runs/2026-03-22_120741/master_raw.csv
+2026-03-22 12:09:04,098 [INFO] [Deduper] Removed 0 duplicate rows (kept 15 unique rows)
+2026-03-22 12:09:04,128 [INFO] [Schema] ensured email columns: Email, Email_All, Email_Type, Email_Source_URL, Email_Source_Type, Email_Extract_Method, Email_Provenance_JSON
+2026-03-22 12:09:04,162 [INFO] [Enricher] Starting enrichment for 15 rows...
+2026-03-22 12:09:04,162 [INFO] [Enricher] Live search enabled=True max=50
+2026-03-22 12:09:04,162 [INFO] [Enricher] mode=row_linear
+2026-03-22 12:09:04,185 [INFO] [Enricher] Row 1/15: matched 'cheeky-leash' via Triple J Unearthed.
+2026-03-22 12:09:04,186 [INFO] [Enricher] skipping soundcloud heavy enrichment for 'cheeky-leash' due to low row confidence (score=0.00 threshold=0.30 reasons=none)
+2026-03-22 12:09:05,113 [INFO] [Enricher] Bandcamp: status=no_match mode=directory_discover attempts=0 403=0 artist='cheeky-leash'
+2026-03-22 12:09:05,115 [INFO] [Enricher] skipping lastfm heavy enrichment for 'cheeky-leash' due to low row confidence (score=0.00 threshold=0.30 reasons=none)
+2026-03-22 12:09:05,127 [INFO] [IG Email] Visiting https://www.instagram.com/cheekyleashband/
+2026-03-22 12:09:08,261 [INFO] [IG Email] No email found
+2026-03-22 12:09:08,265 [INFO] [Enricher] skipping fb heavy enrichment for 'cheeky-leash' due to low row confidence (score=0.00 threshold=0.30 reasons=none)
+2026-03-22 12:09:08,271 [INFO] [Enricher] Row 2/15: matched 'dylan-voller' via Triple J Unearthed.
+2026-03-22 12:09:08,271 [INFO] [Enricher] skipping soundcloud heavy enrichment for 'dylan-voller' due to low row confidence (score=0.00 threshold=0.30 reasons=none)
+2026-03-22 12:09:09,286 [INFO] [Enricher] Bandcamp: status=no_match mode=directory_discover attempts=0 403=0 artist='dylan-voller'
+2026-03-22 12:09:09,288 [INFO] [Enricher] skipping lastfm heavy enrichment for 'dylan-voller' due to low row confidence (score=0.00 threshold=0.30 reasons=none)
+2026-03-22 12:09:09,289 [INFO] [IG Email] Visiting https://www.instagram.com/dylan.voller/
+2026-03-22 12:09:12,792 [INFO] [IG Email] No email found
+2026-03-22 12:09:12,897 [INFO] [Enricher] skipping fb heavy enrichment for 'dylan-voller' due to low row confidence (score=0.00 threshold=0.30 reasons=none)
+2026-03-22 12:09:12,911 [INFO] [Enricher] Row 3/15: matched 'gia-darcy' via Triple J Unearthed.
+2026-03-22 12:09:12,914 [INFO] [Enricher] SoundCloud live check for 'gia-darcy' (current SC link missing).
+2026-03-22 12:09:12,914 [INFO] [Night SC] using day-mode candidate pipeline: SoundCloudEngine.people_search_candidates_v2 + HTML fallback
+2026-03-22 12:09:12,914 [INFO] [Night SC] API people search place='NSW' source=location_derived
+2026-03-22 12:09:14,930 [INFO] [Night SC] API people search -> handles=0 query='gia-darcy' place='NSW'
+2026-03-22 12:09:14,930 [INFO] [Night SC] API people search returned 0 handles for place='NSW'; retrying without place filter.
+2026-03-22 12:09:15,420 [INFO] [Night SC] API people search -> handles=12 query='gia-darcy' place=''
+2026-03-22 12:09:19,717 [INFO] [Night SC] rss_first=1 handle=giadarcy-sc url=https://soundcloud.com/giadarcy-sc rss_attempted=1 outcome=rss_fail flags_used_rss=1 rss_used_total=1
+2026-03-22 12:09:19,717 [INFO] [SC] tracks API blocked (401/403); continuing with HTML/about fallback (SC_ALLOW_FALLBACK_ON_TRACKS_401_403=1)
+2026-03-22 12:09:19,721 [INFO] [Night SC] candidate_source=api profile_source=none root_fetch_disabled=0 about_disabled=0 tracks_api_blocked=1 used_user_api=0 used_rss=1 rss_used_total=1
+2026-03-22 12:09:19,721 [INFO] [Night SC] Final status: no_confident_match handle=giadarcy-sc http= confidence=0.99 ms=6807 fetches=0 reason=budget_exceeded
+2026-03-22 12:09:20,435 [INFO] [Enricher] Bandcamp: status=no_match mode=directory_discover attempts=0 403=0 artist='gia-darcy'
+2026-03-22 12:09:20,438 [INFO] [Enricher] Last.fm live search: https://www.last.fm/search?q=%22gia-darcy%22+%22Illuminate%22&type=artist
+2026-03-22 12:09:21,653 [INFO] [Enricher][LF] Last.fm search: status=200 attempt=1/1 headers=lastfm_html
+2026-03-22 12:09:21,709 [INFO] [Enricher] Last.fm Enrich: candidate 'Gia Darcy' for 'gia-darcy' has confidence=0.89.
+2026-03-22 12:09:21,709 [INFO] [Enricher] Last.fm Enrich: no safe match for 'gia-darcy' (best_confidence=0.89), skipping.
+2026-03-22 12:09:21,710 [INFO] [IG Email] Visiting https://www.instagram.com/giadarcy/
+2026-03-22 12:09:24,643 [INFO] [IG Email] No email found
+2026-03-22 12:09:24,658 [INFO] [FB Enrich] Visiting https://www.facebook.com/giadarcymusic
+2026-03-22 12:13:19,284 [INFO] [Enricher] Row 4/15: matched 'laces' via Triple J Unearthed.
+2026-03-22 12:13:19,288 [INFO] [Enricher] SoundCloud live check for 'laces' (current SC link missing).
+2026-03-22 12:13:19,289 [INFO] [Night SC] API people search place='VIC' source=location_derived
+2026-03-22 12:13:19,786 [INFO] [Night SC] API people search -> handles=0 query='laces' place='VIC'
+2026-03-22 12:13:19,786 [INFO] [Night SC] API people search returned 0 handles for place='VIC'; retrying without place filter.
+2026-03-22 12:13:20,282 [INFO] [Night SC] API people search -> handles=12 query='laces' place=''
+2026-03-22 12:13:24,002 [INFO] [Night SC] rss_first=1 handle=lacesallcaps url=https://soundcloud.com/lacesallcaps rss_attempted=1 outcome=rss_fail flags_used_rss=1 rss_used_total=2
+2026-03-22 12:13:24,013 [INFO] [Night SC] candidate_source=api profile_source=engine root_fetch_disabled=0 about_disabled=0 tracks_api_blocked=1 used_user_api=0 used_rss=1 rss_used_total=2
+2026-03-22 12:13:24,013 [INFO] [Night SC] Final status: actionable handle=lacesallcaps http=200 confidence=1.00 ms=4724 fetches=1 reason=
+2026-03-22 12:13:25,509 [INFO] [Enricher] Bandcamp: status=no_match mode=directory_discover attempts=0 403=0 artist='laces'
+2026-03-22 12:13:25,510 [INFO] [Enricher] Last.fm live search: https://www.last.fm/search?q=%22laces%22+%22Doormen%22&type=artist
+2026-03-22 12:13:26,569 [INFO] [Enricher][LF] Last.fm search: status=200 attempt=1/1 headers=lastfm_html
+2026-03-22 12:13:26,603 [INFO] [Enricher] Last.fm Enrich: candidate 'https://www.last.fm/music/Laces/Oekno+I+%5BClean%5D+%5BClean%5D' for 'laces' has confidence=0.00.
+2026-03-22 12:13:26,604 [INFO] [Enricher] Last.fm Enrich: no safe match for 'laces' (best_confidence=0.00), skipping.
+2026-03-22 12:13:26,604 [INFO] [IG Email] Visiting https://www.instagram.com/lacesallcaps/
+2026-03-22 12:13:29,530 [INFO] [IG Email] No email found
+2026-03-22 12:13:30,919 [INFO] [Web] homepage fetched ok=True artist='laces' url=https://www.headbitchmusic.com/
+2026-03-22 12:13:31,284 [INFO] [Web] emails_found=1 pages_fetched=1 artist='laces'
+2026-03-22 12:13:31,291 [INFO] [FB Enrich] Visiting https://www.facebook.com/laceslaceslaceslaces

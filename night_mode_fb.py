@@ -1805,6 +1805,11 @@ def _canonicalize_fb_pages_category_url(url: str) -> Optional[str]:
     page = (parts[3] or "").strip()
     if not page or page.lower() in {"nan", "none", "null"}:
         return None
+    page_name, sep, numeric_suffix = page.rpartition("-")
+    if sep and numeric_suffix.isdigit() and len(numeric_suffix) >= 10:
+        page = page_name.strip()
+        if not page or page.lower() in {"nan", "none", "null"}:
+            return None
     return urllib.parse.urlunparse(("https", "www.facebook.com", f"/{page}", "", "", ""))
 
 

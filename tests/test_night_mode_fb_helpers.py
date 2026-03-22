@@ -322,6 +322,12 @@ def test_explicit_fb_entrypoint_urls_canonicalize_pages_category_shapes() -> Non
     assert night_mode_fb.explicit_fb_entrypoint_urls_for_row(
         {"Facebook_URL": "https://www.facebook.com/pages/category/Musician-Band/tbish/about"}
     ) == ["https://www.facebook.com/tbish"]
+    assert night_mode_fb.explicit_fb_entrypoint_urls_for_row(
+        {"Facebook_URL": "https://www.facebook.com/pages/category/Musician-Band/tbish-2105329779689847"}
+    ) == ["https://www.facebook.com/tbish"]
+    assert night_mode_fb.explicit_fb_entrypoint_urls_for_row(
+        {"Facebook_URL": "https://www.facebook.com/pages/category/Musician-Band/tbish-2105329779689847/about"}
+    ) == ["https://www.facebook.com/tbish"]
 
 
 def test_explicit_fb_entrypoint_urls_reject_ambiguous_pages_category_shapes() -> None:
@@ -336,6 +342,12 @@ def test_explicit_fb_entrypoint_urls_reject_ambiguous_pages_category_shapes() ->
     ) == []
     assert night_mode_fb.explicit_fb_entrypoint_urls_for_row(
         {"Facebook_URL": "https://www.facebook.com/pages/category/Musician-Band/tbish/videos"}
+    ) == []
+    assert night_mode_fb.explicit_fb_entrypoint_urls_for_row(
+        {"Facebook_URL": "https://www.facebook.com/pages/category/Musician-Band/tbish-live"}
+    ) == ["https://www.facebook.com/tbish-live"]
+    assert night_mode_fb.explicit_fb_entrypoint_urls_for_row(
+        {"Facebook_URL": "https://www.facebook.com/pages/category/Musician-Band/-2105329779689847"}
     ) == []
 
 
