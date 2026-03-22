@@ -1,0 +1,5 @@
+2026-03-22 13:58:04,241 [INFO] Starting scrape for job job_unearthed_1
+2026-03-22 13:58:04,643 [INFO] [Directory] Running job for directory=unearthed slug= job_id=job_unearthed_1
+2026-03-22 13:58:04,644 [INFO] [Unearthed] Using FULL pipeline entrypoint: run_unearthed_pipeline
+2026-03-22 13:58:25,973 [INFO] [Unearthed] Deduped temp CSV: removed 61 duplicates (kept 15).
+2026-03-22 13:58:25,977 [INFO] Completed job job_unearthed_1 (raw only; master enrichment pending)

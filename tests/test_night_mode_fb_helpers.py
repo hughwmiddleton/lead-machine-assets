@@ -60,6 +60,95 @@ def test_extract_emails_from_live_anchor_values() -> None:
     assert used_mailto is True
 
 
+def test_extract_emails_fast_path_finds_rendered_email_without_raw_html(monkeypatch) -> None:
+    html = "<html><body></body></html>"
+    samples = []
+
+    def fake_extract(sample: str):  # noqa: ANN001
+        samples.append(sample)
+        if sample == "Rendered bookings@artist.com":
+            return ["bookings@artist.com"]
+        if sample == html:
+            raise AssertionError("raw_html should be skipped on the fast path")
+        return []
+
+    monkeypatch.setattr(night_mode_fb, "_extract_fb_emails_from_text_sample", fake_extract)
+
+    emails, used_mailto = night_mode_fb._extract_emails_from_html(
+        html,
+        rendered_text="Rendered bookings@artist.com",
+        stop_after_first_filtered=True,
+    )
+
+    assert emails == ["bookings@artist.com"]
+    assert used_mailto is False
+    assert html not in samples
+
+
+def test_extract_emails_fast_path_skips_raw_html_branch(monkeypatch) -> None:
+    html = "<html><body></body></html>"
+    samples = []
+
+    def fake_extract(sample: str):  # noqa: ANN001
+        samples.append(sample)
+        if sample == html:
+            raise AssertionError("raw_html should not be scanned when stop_after_first_filtered=True")
+        return []
+
+    monkeypatch.setattr(night_mode_fb, "_extract_fb_emails_from_text_sample", fake_extract)
+
+    emails, used_mailto = night_mode_fb._extract_emails_from_html(
+        html,
+        rendered_text="No email here",
+        stop_after_first_filtered=True,
+    )
+
+    assert emails == []
+    assert used_mailto is False
+    assert samples == ["No email here"]
+
+
+def test_extract_emails_non_fast_path_still_scans_raw_html(monkeypatch) -> None:
+    html = "<html><body><script>bookings@artist.com</script></body></html>"
+    samples = []
+
+    def fake_extract(sample: str):  # noqa: ANN001
+        samples.append(sample)
+        if sample == html:
+            return ["bookings@artist.com"]
+        return []
+
+    monkeypatch.setattr(night_mode_fb, "_extract_fb_emails_from_text_sample", fake_extract)
+
+    emails, used_mailto = night_mode_fb._extract_emails_from_html(
+        html,
+        stop_after_first_filtered=False,
+    )
+
+    assert emails == ["bookings@artist.com"]
+    assert used_mailto is False
+    assert html in samples
+
+
+def test_extract_emails_fast_path_still_short_circuits_on_mailto(monkeypatch) -> None:
+    html = '<html><body><a href="mailto:bookings@artist.com">Email</a></body></html>'
+
+    def fail_extract(sample: str):  # noqa: ANN001
+        raise AssertionError(f"unexpected extractor call for sample: {sample}")
+
+    monkeypatch.setattr(night_mode_fb, "_extract_fb_emails_from_text_sample", fail_extract)
+
+    emails, used_mailto = night_mode_fb._extract_emails_from_html(
+        html,
+        rendered_text="Rendered press@artist.com",
+        anchor_values=["https://example.com/contact?email=press%40artist.com"],
+        stop_after_first_filtered=True,
+    )
+
+    assert emails == ["bookings@artist.com"]
+    assert used_mailto is True
+
+
 def test_filter_low_quality_fb_emails_rejects_file_like_and_artifact_candidates() -> None:
     emails = night_mode_fb._filter_low_quality_fb_emails(
         [

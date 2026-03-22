@@ -4335,7 +4335,7 @@ def _extract_emails_from_html(
             filtered_emails = _filter_low_quality_fb_emails(emails)
             if filtered_emails:
                 return filtered_emails, mailto_used
-    if raw_html:
+    if raw_html and not stop_after_first_filtered:
         emails.extend(_extract_fb_emails_from_text_sample(raw_html))
         if stop_after_first_filtered:
             filtered_emails = _filter_low_quality_fb_emails(emails)
