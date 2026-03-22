@@ -1,0 +1,15 @@
+{
+  "fb_last_index": 5,
+  "fb_completed": 6,
+  "fb_attempted_total": 6,
+  "fb_captcha_flag": false,
+  "fb_total_rows": 15,
+  "fb_resume_input": "/Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/overnight_runs/2026-03-22_122729/master_pre_fb.csv",
+  "pass_a_attempted": 6,
+  "pass_a_found_email": 4,
+  "pass_a_no_email_on_page": 2,
+  "pass_a_login_wall": 0,
+  "pass_a_fetch_error": 0,
+  "pass_a_skipped_no_fb_url": 0,
+  "timestamp": "2026-03-22T01:36:01.815749+00:00"
+}

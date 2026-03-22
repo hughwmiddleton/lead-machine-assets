@@ -6470,38 +6470,7 @@ class CrossDirectoryEnricherWorker(QThread):
             if _enrichment_mode == "source_phased":
                 self._run_source_phased(seed_df, directory_indexes, priority, fb_driver, total)
             else:
-                for position, row_idx in enumerate(seed_df.index, start=1):
-                    ctx = self._build_row_context(seed_df, row_idx, position, total)
-                    if not ctx:
-                        self._update_progress(position, total)
-                        continue
-                    if self._should_short_circuit_after_domain_reuse(seed_df, row_idx, ctx):
-                        self._update_progress(position, total)
-                        continue
-                    self._init_row_enrichment_state()
-                    enriched = self._enrich_row_directories(seed_df, row_idx, directory_indexes, priority, ctx)
-                    if self.enable_live_search:
-                        sc_enriched, skip_rest = self._enrich_row_sc_live(seed_df, row_idx, ctx)
-                        enriched |= sc_enriched
-                        if skip_rest:
-                            self._update_progress(position, total)
-                            continue
-                        ll_enriched, skip_rest = self._enrich_row_live_lookup(seed_df, row_idx, ctx)
-                        enriched |= ll_enriched
-                        if skip_rest:
-                            self._update_progress(position, total)
-                            continue
-                    enriched |= self._run_spotify_discovery_pass(seed_df, row_idx, ctx, fb_driver=fb_driver)
-                    enriched |= self._enrich_row_instagram_email(seed_df, row_idx, ctx)
-                    enriched |= self._enrich_row_website_email(seed_df, row_idx, ctx)
-                    if ENABLE_FACEBOOK_ENRICHMENT and fb_driver:
-                        enriched |= self._enrich_row_facebook(seed_df, row_idx, fb_driver, ctx)
-                    if not enriched:
-                        self.log_message.emit(
-                            f"[Enricher] Row {position}/{total}: no enrichment for {ctx['artist']!r}."
-                        )
-                    self._update_progress(position, total)
-                self._log_spotify_discovery_summary("[Enricher][Spotify Discovery]")
+                self._run_row_linear(seed_df, directory_indexes, priority, fb_driver, total)
             self._run_late_domain_email_backfill(seed_df, total)
             # Bandcamp per-run summary (low noise)
             if self._bc_search_attempts:
@@ -9029,6 +8998,48 @@ class CrossDirectoryEnricherWorker(QThread):
                         sc_deferred_rows,
                         phase_label="final_window",
                     )
+        finally:
+            self._unearthed_fb_first_row_ids = set()
+
+    def _run_row_linear(self, seed_df, directory_indexes, priority, fb_driver, total):
+        """Run row-linear enrichment while preserving the Unearthed explicit-FB fast path."""
+        self._unearthed_fb_first_row_ids = self._collect_unearthed_fb_first_row_ids(seed_df)
+        try:
+            for position, row_idx in enumerate(seed_df.index, start=1):
+                if self._should_bypass_unearthed_shared_enrichers(row_idx):
+                    self._update_progress(position, total)
+                    continue
+                ctx = self._build_row_context(seed_df, row_idx, position, total)
+                if not ctx:
+                    self._update_progress(position, total)
+                    continue
+                if self._should_short_circuit_after_domain_reuse(seed_df, row_idx, ctx):
+                    self._update_progress(position, total)
+                    continue
+                self._init_row_enrichment_state()
+                enriched = self._enrich_row_directories(seed_df, row_idx, directory_indexes, priority, ctx)
+                if self.enable_live_search:
+                    sc_enriched, skip_rest = self._enrich_row_sc_live(seed_df, row_idx, ctx)
+                    enriched |= sc_enriched
+                    if skip_rest:
+                        self._update_progress(position, total)
+                        continue
+                    ll_enriched, skip_rest = self._enrich_row_live_lookup(seed_df, row_idx, ctx)
+                    enriched |= ll_enriched
+                    if skip_rest:
+                        self._update_progress(position, total)
+                        continue
+                enriched |= self._run_spotify_discovery_pass(seed_df, row_idx, ctx, fb_driver=fb_driver)
+                enriched |= self._enrich_row_instagram_email(seed_df, row_idx, ctx)
+                enriched |= self._enrich_row_website_email(seed_df, row_idx, ctx)
+                if ENABLE_FACEBOOK_ENRICHMENT and fb_driver:
+                    enriched |= self._enrich_row_facebook(seed_df, row_idx, fb_driver, ctx)
+                if not enriched:
+                    self.log_message.emit(
+                        f"[Enricher] Row {position}/{total}: no enrichment for {ctx['artist']!r}."
+                    )
+                self._update_progress(position, total)
+            self._log_spotify_discovery_summary("[Enricher][Spotify Discovery]")
         finally:
             self._unearthed_fb_first_row_ids = set()
 
