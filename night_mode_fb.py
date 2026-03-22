@@ -4205,6 +4205,27 @@ def _collect_fb_email_surface_state(
 ) -> Tuple[str, str, List[str], List[str]]:
     reveal_actions = _reveal_fb_contact_controls(driver, logger=logger)
     try:
+        scrolled = driver.execute_script(
+            """
+            /* fb_email_surface_post_reveal_scroll */
+            const scrollRoot = document.scrollingElement || document.documentElement || document.body;
+            const viewportHeight = Math.max(0, Number(window.innerHeight || 0));
+            const maxScrollTop = Math.max(0, Number((scrollRoot && scrollRoot.scrollHeight) || 0) - viewportHeight);
+            const targetOffset = Math.max(320, Math.min(900, Math.round(Number((scrollRoot && scrollRoot.scrollHeight) || 0) * 0.25)));
+            const currentOffset = Math.max(0, Number(window.pageYOffset || window.scrollY || 0));
+            const nextOffset = Math.min(maxScrollTop, targetOffset);
+            const delta = Math.max(0, nextOffset - currentOffset);
+            if (delta > 0) {
+              window.scrollBy(0, delta);
+            }
+            return delta;
+            """
+        ) or 0
+    except Exception:
+        scrolled = 0
+    if scrolled:
+        time.sleep(0.15)
+    try:
         page_source = getattr(driver, "page_source", "") or ""
     except Exception:
         page_source = ""

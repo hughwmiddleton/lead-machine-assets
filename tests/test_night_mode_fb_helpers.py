@@ -276,6 +276,110 @@ def test_reveal_fb_contact_controls_is_bounded() -> None:
     assert clicked == ["see more", "contact info"]
 
 
+class _CollectSurfaceDriver:
+    def __init__(self, page_source: str = "<html></html>", scroll_delta: int = 480):
+        self._page_source = page_source
+        self.scroll_delta = scroll_delta
+        self.events = []
+        self.capture_count = 0
+        self.navigation_attempts = 0
+        self.scroll_scripts = []
+
+    @property
+    def page_source(self) -> str:
+        self.events.append("page_source")
+        self.capture_count += 1
+        return self._page_source
+
+    def execute_script(self, script, *args):  # noqa: ANN001
+        script_text = str(script or "")
+        if "fb_email_surface_post_reveal_scroll" in script_text:
+            self.events.append("scroll")
+            self.scroll_scripts.append(script_text)
+            return self.scroll_delta
+        raise AssertionError(f"unexpected execute_script call: {script_text[:80]}")
+
+    def get(self, url):  # noqa: ANN001
+        self.navigation_attempts += 1
+        raise AssertionError(f"unexpected navigation to {url}")
+
+
+def test_collect_fb_email_surface_state_sequences_reveal_scroll_then_capture(monkeypatch) -> None:
+    driver = _CollectSurfaceDriver(page_source="<html>visible@artist.com</html>")
+    events = driver.events
+    capture_calls = {"rendered": 0, "anchors": 0}
+
+    monkeypatch.setattr(
+        night_mode_fb,
+        "_reveal_fb_contact_controls",
+        lambda driver, logger=None: events.append("reveal") or ["see more"],
+    )
+    monkeypatch.setattr(
+        night_mode_fb,
+        "_extract_fb_visible_text_with_container_fallback",
+        lambda driver: events.append("rendered_text") or capture_calls.__setitem__("rendered", capture_calls["rendered"] + 1) or "Contact visible@artist.com",
+    )
+    monkeypatch.setattr(
+        night_mode_fb,
+        "_collect_fb_live_anchor_targets",
+        lambda driver: events.append("anchors") or capture_calls.__setitem__("anchors", capture_calls["anchors"] + 1) or ["mailto:visible@artist.com"],
+    )
+    sleep_calls = []
+    monkeypatch.setattr(night_mode_fb.time, "sleep", lambda seconds: sleep_calls.append(seconds))
+
+    page_source, rendered_text, anchor_values, reveal_actions = night_mode_fb._collect_fb_email_surface_state(driver)
+
+    assert reveal_actions == ["see more"]
+    assert page_source == "<html>visible@artist.com</html>"
+    assert rendered_text == "Contact visible@artist.com"
+    assert anchor_values == ["mailto:visible@artist.com"]
+    assert events == ["reveal", "scroll", "page_source", "rendered_text", "anchors"]
+    assert len(driver.scroll_scripts) == 1
+    assert driver.capture_count == 1
+    assert capture_calls == {"rendered": 1, "anchors": 1}
+    assert sleep_calls == [0.15]
+
+
+def test_collect_fb_email_surface_state_keeps_single_capture_without_navigation_or_retries(monkeypatch) -> None:
+    driver = _CollectSurfaceDriver(
+        page_source="<html><body>Already visible bookings@artist.com</body></html>",
+        scroll_delta=0,
+    )
+    events = driver.events
+    capture_calls = {"rendered": 0, "anchors": 0}
+
+    monkeypatch.setattr(
+        night_mode_fb,
+        "_reveal_fb_contact_controls",
+        lambda driver, logger=None: events.append("reveal") or [],
+    )
+    monkeypatch.setattr(
+        night_mode_fb,
+        "_extract_fb_visible_text_with_container_fallback",
+        lambda driver: events.append("rendered_text") or capture_calls.__setitem__("rendered", capture_calls["rendered"] + 1) or "Already visible bookings@artist.com",
+    )
+    monkeypatch.setattr(
+        night_mode_fb,
+        "_collect_fb_live_anchor_targets",
+        lambda driver: events.append("anchors") or capture_calls.__setitem__("anchors", capture_calls["anchors"] + 1) or [],
+    )
+    sleep_calls = []
+    monkeypatch.setattr(night_mode_fb.time, "sleep", lambda seconds: sleep_calls.append(seconds))
+
+    page_source, rendered_text, anchor_values, reveal_actions = night_mode_fb._collect_fb_email_surface_state(driver)
+
+    assert reveal_actions == []
+    assert page_source == "<html><body>Already visible bookings@artist.com</body></html>"
+    assert rendered_text == "Already visible bookings@artist.com"
+    assert anchor_values == []
+    assert events == ["reveal", "scroll", "page_source", "rendered_text", "anchors"]
+    assert len(driver.scroll_scripts) == 1
+    assert driver.capture_count == 1
+    assert capture_calls == {"rendered": 1, "anchors": 1}
+    assert driver.navigation_attempts == 0
+    assert sleep_calls == []
+
+
 def test_build_result_filters_telemetry_only_email() -> None:
     enricher = night_mode_fb.NightModeFacebookEnricher(
         legacy_module=None,
