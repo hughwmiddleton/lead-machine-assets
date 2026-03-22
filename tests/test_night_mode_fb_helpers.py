@@ -304,6 +304,64 @@ class _CollectSurfaceDriver:
         raise AssertionError(f"unexpected navigation to {url}")
 
 
+class _ContainerFallbackDriver:
+    def __init__(self, blocks):  # noqa: ANN001
+        self.blocks = list(blocks or [])
+        self.execute_calls = 0
+
+    def execute_script(self, script, *args):  # noqa: ANN001
+        script_text = str(script or "")
+        if "role=\"main\"" in script_text or "role=\"complementary\"" in script_text or "aside" in script_text:
+            self.execute_calls += 1
+            return list(self.blocks)
+        raise AssertionError(f"unexpected execute_script call: {script_text[:80]}")
+
+
+def test_extract_fb_visible_text_with_container_fallback_includes_visible_sidebar_blocks(monkeypatch) -> None:
+    driver = _ContainerFallbackDriver(
+        ["Photos and videos", "Intro Contact elliot@rustmgmt.com"]
+    )
+
+    monkeypatch.setattr(
+        night_mode_fb,
+        "_extract_rendered_visible_text_from_driver",
+        lambda driver: "Late 90s Upcoming shows",
+    )
+
+    rendered_text = night_mode_fb._extract_fb_visible_text_with_container_fallback(driver)
+    emails, used_mailto = night_mode_fb._extract_emails_from_html(
+        "<html><body>No email in source</body></html>",
+        rendered_text=rendered_text,
+        stop_after_first_filtered=True,
+    )
+
+    assert rendered_text == "\n".join(
+        [
+            "Late 90s Upcoming shows",
+            "Photos and videos",
+            "Intro Contact elliot@rustmgmt.com",
+        ]
+    )
+    assert driver.execute_calls == 1
+    assert emails == ["elliot@rustmgmt.com"]
+    assert used_mailto is False
+
+
+def test_extract_fb_visible_text_with_container_fallback_preserves_main_email_fast_path(monkeypatch) -> None:
+    driver = _ContainerFallbackDriver(["Intro Contact elliot@rustmgmt.com"])
+
+    monkeypatch.setattr(
+        night_mode_fb,
+        "_extract_rendered_visible_text_from_driver",
+        lambda driver: "Main stage contact bookings@artist.com",
+    )
+
+    rendered_text = night_mode_fb._extract_fb_visible_text_with_container_fallback(driver)
+
+    assert rendered_text == "Main stage contact bookings@artist.com"
+    assert driver.execute_calls == 0
+
+
 def test_collect_fb_email_surface_state_sequences_reveal_scroll_then_capture(monkeypatch) -> None:
     driver = _CollectSurfaceDriver(page_source="<html>visible@artist.com</html>")
     events = driver.events

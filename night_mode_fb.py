@@ -4035,17 +4035,18 @@ def _extract_fb_visible_text_with_container_fallback(driver) -> str:
               return !!(rects && rects.length);
             };
 
-            const selectors = ['div[role="main"]', 'div[role="complementary"]'];
+            const selectors = ['div[role="main"]', 'div[role="complementary"]', 'aside'];
             const seen = new Set();
             const results = [];
 
             for (const selector of selectors) {
-              const el = document.querySelector(selector);
-              if (!isVisible(el)) continue;
-              const text = normalize(el.innerText || el.textContent || '');
-              if (!text || seen.has(text)) continue;
-              seen.add(text);
-              results.push(text);
+              for (const el of document.querySelectorAll(selector)) {
+                if (!isVisible(el)) continue;
+                const text = normalize(el.innerText || el.textContent || '');
+                if (!text || seen.has(text)) continue;
+                seen.add(text);
+                results.push(text);
+              }
             }
 
             return results;
