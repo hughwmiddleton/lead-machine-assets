@@ -1,0 +1,12 @@
+{
+  "job_id": "job_unearthed_feelds",
+  "raw_csv": "overnight_runs/2026-03-22_224256/job_unearthed_feelds/raw.csv",
+  "enriched_csv": "overnight_runs/2026-03-22_224256/job_unearthed_feelds/raw.csv",
+  "input_seed_csv": "/tmp/feelds_seed.csv",
+  "status": "completed",
+  "error_count": 0,
+  "last_update": "2026-03-22T11:43:01.725934+00:00",
+  "row_count": 0,
+  "current_row_index": 0,
+  "valid_leads_so_far": 0
+}

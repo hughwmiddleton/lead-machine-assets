@@ -1,0 +1,27 @@
+{
+  "export_mode": "both",
+  "jobs": [
+    {
+      "directory": "unearthed",
+      "mode": "",
+      "input_seed_csv": "/tmp/feelds_seed.csv",
+      "target_valid_leads": 1,
+      "max_hours": 0,
+      "job_id": "job_unearthed_feelds"
+    }
+  ],
+  "phased": false,
+  "facebook": {
+    "auto_resume_after_captcha": true,
+    "cooldown_seconds": 900,
+    "max_auto_resume_attempts": 1,
+    "max_rows_per_run": 1
+  },
+  "master_enrichment": {
+    "enabled": true
+  },
+  "soundcloud_meta_enricher": {
+    "enabled": false
+  },
+  "last_update": "2026-03-22T11:45:16.204871+00:00"
+}
