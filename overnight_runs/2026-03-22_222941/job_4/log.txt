@@ -1,0 +1,11 @@
+2026-03-22 22:29:41,644 [INFO] Starting scrape for job job_4
+2026-03-22 22:29:41,844 [INFO] [Directory] Running job for directory= slug= job_id=
+2026-03-22 22:29:41,844 [INFO] [Directory] Job failed for directory=: ValueError: Unsupported directory: 
+2026-03-22 22:29:41,846 [ERROR] Job job_4 failed: Unsupported directory: 
+2026-03-22 22:29:41,846 [ERROR] Traceback (most recent call last):
+  File "/Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/night_mode_runner.py", line 1302, in _process_job
+    run_directory_job(job, state["raw_csv"], logger=logger.info)
+  File "/Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/pipeline_runner.py", line 2695, in run_directory_job
+    raise ValueError(f"Unsupported directory: {directory}")
+ValueError: Unsupported directory: 
+

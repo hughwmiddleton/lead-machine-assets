@@ -1,0 +1,3 @@
+2026-03-22 22:30:31,115 [INFO] Starting scrape for job job_4
+2026-03-22 22:30:31,253 [INFO] [Directory] Running job for directory=unearthed slug= job_id=
+2026-03-22 22:30:31,253 [INFO] [Unearthed] Using FULL pipeline entrypoint: run_unearthed_pipeline

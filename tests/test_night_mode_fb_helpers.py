@@ -268,6 +268,32 @@ class _RevealDriver:
         return []
 
 
+class _RevealPriorityDriver:
+    def __init__(self):
+        self.calls = []
+
+    def execute_script(self, script, *args):  # noqa: ANN001
+        script_text = str(script or "")
+        self.calls.append((script_text, args))
+        if "fb_reveal_controls" not in script_text:
+            return []
+        assert "div[role=\"main\"]" in script_text
+        assert "contact info" in script_text
+        assert "details" in script_text
+        assert "ordered.sort" in script_text
+        return ["main details see more", "profile see more"]
+
+
+def test_reveal_fb_contact_controls_prefers_main_details_expander() -> None:
+    driver = _RevealPriorityDriver()
+
+    clicked = night_mode_fb._reveal_fb_contact_controls(driver, max_clicks=1)
+
+    assert clicked == ["main details see more"]
+    assert len(driver.calls) == 1
+    assert driver.calls[0][1][1] == 1
+
+
 def test_reveal_fb_contact_controls_is_bounded() -> None:
     driver = _RevealDriver(clicked=["see more", "contact info", "about"])
 

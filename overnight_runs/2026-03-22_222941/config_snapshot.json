@@ -1,0 +1,23 @@
+{
+  "facebook": {
+    "enabled": true
+  },
+  "jobs": [
+    {
+      "source": "unearthed",
+      "name": "FEELDS",
+      "limit": 1,
+      "rows": [
+        {
+          "Artist Name": "feelds-0",
+          "Location": "Melbourne,VIC",
+          "Song Title": "Mayhem",
+          "Sounds Like": "",
+          "Social Link": "https://www.instagram.com/feeldsmusic/ | https://www.facebook.com/thisisfeelds/",
+          "Facebook_URL": "https://www.facebook.com/thisisfeelds"
+        }
+      ]
+    }
+  ],
+  "last_update": "2026-03-22T11:29:41.644194+00:00"
+}

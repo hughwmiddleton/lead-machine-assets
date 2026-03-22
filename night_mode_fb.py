@@ -4097,6 +4097,24 @@ def _reveal_fb_contact_controls(driver, logger: LoggerFn = None, max_clicks: int
               const rects = typeof el.getClientRects === 'function' ? el.getClientRects() : null;
               return !!(rects && rects.length);
             };
+            const getRevealPriority = (el) => {
+              const mainRoot = typeof el.closest === 'function' ? el.closest('div[role="main"]') : null;
+              if (!mainRoot) return 0;
+              let hasContactInfo = false;
+              let hasDetails = false;
+              let hasContact = false;
+              let node = el;
+              for (let depth = 0; node && depth < 5; depth += 1, node = node.parentElement) {
+                const text = normalize(node.getAttribute('aria-label') || node.innerText || node.textContent || '');
+                if (text.includes('contact info')) hasContactInfo = true;
+                if (text.includes('details')) hasDetails = true;
+                if (text.includes('contact')) hasContact = true;
+              }
+              if (hasContactInfo) return 300;
+              if (hasDetails) return 200;
+              if (hasContact) return 100;
+              return 10;
+            };
             const selectors = [
               'button',
               'div[role="button"]',
@@ -4111,15 +4129,20 @@ def _reveal_fb_contact_controls(driver, logger: LoggerFn = None, max_clicks: int
               for (const el of document.querySelectorAll(selector)) {
                 if (!isVisible(el) || seen.has(el)) continue;
                 seen.add(el);
-                ordered.push(el);
+                ordered.push({ el, priority: getRevealPriority(el), index: ordered.length });
               }
             }
+            ordered.sort((left, right) => {
+              if (right.priority !== left.priority) return right.priority - left.priority;
+              return left.index - right.index;
+            });
             const clicked = [];
             const used = new Set();
             for (const term of terms) {
               if (clicked.length >= maxClicks) break;
-              for (const el of ordered) {
+              for (const candidate of ordered) {
                 if (clicked.length >= maxClicks) break;
+                const el = candidate.el;
                 if (used.has(el)) continue;
                 const text = normalize(el.innerText || el.textContent || el.getAttribute('aria-label') || '');
                 const href = normalize(el.getAttribute('href') || '');

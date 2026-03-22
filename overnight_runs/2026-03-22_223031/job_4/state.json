@@ -1,0 +1,9 @@
+{
+  "job_id": "job_4",
+  "raw_csv": "overnight_runs/2026-03-22_223031/job_4/raw.csv",
+  "enriched_csv": "overnight_runs/2026-03-22_223031/job_4/enriched.csv",
+  "input_seed_csv": "",
+  "status": "running",
+  "error_count": 0,
+  "last_update": "2026-03-22T11:30:31.115580+00:00"
+}
