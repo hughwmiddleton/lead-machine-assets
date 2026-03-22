@@ -1,0 +1,442 @@
+2026-03-22 19:16:03,527 [INFO] [Seed Summary]
+2026-03-22 19:16:03,527 [INFO] unearthed=15
+2026-03-22 19:16:03,536 [INFO] [FB Promotion] facebook_url populated for 11 rows
+2026-03-22 19:16:03,536 [INFO] [FB Promotion] canonical Facebook_URL backfilled from Social Link / External Links for 11 rows
+2026-03-22 19:16:03,541 [INFO] [Master] Wrote merged raw CSV: overnight_runs/2026-03-22_191542/master_raw.csv (rows=15)
+2026-03-22 19:16:03,541 [INFO] [Master Enrich] Starting cross-directory enrichment for overnight_runs/2026-03-22_191542/master_raw.csv
+2026-03-22 19:16:08,564 [INFO] [Master] Bandcamp directory CSV -> (none) in /Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/overnight_runs/2026-03-22_191542 (attempts=6)
+2026-03-22 19:16:13,586 [INFO] [Master] SoundCloud directory CSV -> (none) in /Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/overnight_runs/2026-03-22_191542 (attempts=6)
+2026-03-22 19:16:18,612 [INFO] [Master] Last.fm directory CSV -> (none) in /Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/overnight_runs/2026-03-22_191542 (attempts=6)
+2026-03-22 19:16:18,614 [INFO] [Master] Unearthed directory CSV -> /Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/overnight_runs/2026-03-22_191542/job_unearthed_1/raw.csv (rows=15, kind=raw)
+2026-03-22 19:16:18,615 [INFO] [Master] Passing bandcamp_csv_path=
+2026-03-22 19:16:18,615 [INFO] [Master] Passing soundcloud_csv_path=
+2026-03-22 19:16:18,615 [INFO] [Master] Passing lastfm_csv_path=
+2026-03-22 19:16:18,615 [INFO] [Master] Passing unearthed_csv_path=/Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/overnight_runs/2026-03-22_191542/job_unearthed_1/raw.csv
+2026-03-22 19:16:18,625 [INFO] [Night FB] Using Chrome profile dir: /Users/hughmiddleton/Lead Machine/Lead Machine Code/night_fb_profile
+2026-03-22 19:16:18,819 [INFO] [Night FB][preflight] chrome_binary=/Applications/Google Chrome.app/Contents/MacOS/Google Chrome chrome_version=Google Chrome 146.0.7680.81 chromedriver=<selenium_manager> chromedriver_version=<selenium_manager> profile_dir=/Users/hughmiddleton/Lead Machine/Lead Machine Code/night_fb_profile profile_exists=True profile_locks=[] image_policy=managed_allow args=['--disable-gpu', '--window-size=1920x1080', '--disable-extensions', '--disable-dev-shm-usage', '--no-sandbox', '--disable-blink-features=AutomationControlled', '--user-data-dir=/Users/hughmiddleton/Lead Machine/Lead Machine Code/night_fb_profile', '--profile-directory=Default']
+2026-03-22 19:16:20,484 [INFO] [Night FB][driver] requested_profile=/Users/hughmiddleton/Lead Machine/Lead Machine Code/night_fb_profile active_profile=/Users/hughmiddleton/Lead Machine/Lead Machine Code/night_fb_profile persistent_profile=1 temp_fallback=0 webdriver_mask=1
+2026-03-22 19:16:25,498 [INFO] [Night FB][auth_probe] mode=headed requested_profile=/Users/hughmiddleton/Lead Machine/Lead Machine Code/night_fb_profile active_profile=/Users/hughmiddleton/Lead Machine/Lead Machine Code/night_fb_profile temp_fallback=0 authed=1 reason=authenticated
+2026-03-22 19:16:35,227 [INFO] [FB Discover] Shared Facebook session authenticated; discovery enabled for this run.
+2026-03-22 19:16:35,228 [INFO] [FB Warmup] Running Facebook session warm-up
+2026-03-22 19:16:44,071 [INFO] [Enricher] Loading seed CSV: overnight_runs/2026-03-22_191542/master_raw.csv
+2026-03-22 19:16:44,207 [INFO] [Deduper] Removed 0 duplicate rows (kept 15 unique rows)
+2026-03-22 19:16:44,213 [INFO] [Schema] ensured email columns: Email, Email_All, Email_Type, Email_Source_URL, Email_Source_Type, Email_Extract_Method, Email_Provenance_JSON
+2026-03-22 19:16:44,346 [INFO] [Enricher] Starting enrichment for 15 rows...
+2026-03-22 19:16:44,346 [INFO] [Enricher] Live search enabled=True max=50
+2026-03-22 19:16:44,346 [INFO] [Enricher] mode=row_linear
+2026-03-22 19:16:44,350 [INFO] [Unearthed Path] activated artist='laces' row=0
+2026-03-22 19:16:44,350 [INFO] [Unearthed Path] skipping non-essential enrichers artist='laces' row=0
+2026-03-22 19:16:44,352 [INFO] [Unearthed Path] no usable FB URL, resuming standard path artist='i-m-fine' row=1
+2026-03-22 19:16:44,353 [INFO] [Unearthed Path] no usable FB URL, resuming standard path artist='dylan-voller' row=2
+2026-03-22 19:16:44,356 [INFO] [Unearthed Path] no usable FB URL, resuming standard path artist='beefheart-mcquinn' row=3
+2026-03-22 19:16:44,357 [INFO] [Unearthed Path] activated artist='drainingband' row=4
+2026-03-22 19:16:44,357 [INFO] [Unearthed Path] skipping non-essential enrichers artist='drainingband' row=4
+2026-03-22 19:16:44,357 [INFO] [Unearthed Path] activated artist='wet-denim' row=5
+2026-03-22 19:16:44,357 [INFO] [Unearthed Path] skipping non-essential enrichers artist='wet-denim' row=5
+2026-03-22 19:16:44,357 [INFO] [Unearthed Path] activated artist='jess-reiss' row=6
+2026-03-22 19:16:44,358 [INFO] [Unearthed Path] skipping non-essential enrichers artist='jess-reiss' row=6
+2026-03-22 19:16:44,358 [INFO] [Unearthed Path] activated artist='feelds-0' row=7
+2026-03-22 19:16:44,358 [INFO] [Unearthed Path] skipping non-essential enrichers artist='feelds-0' row=7
+2026-03-22 19:16:44,359 [INFO] [Unearthed Path] activated artist='baby-cool' row=8
+2026-03-22 19:16:44,359 [INFO] [Unearthed Path] skipping non-essential enrichers artist='baby-cool' row=8
+2026-03-22 19:16:44,359 [INFO] [Unearthed Path] activated artist='joe-mungovan' row=9
+2026-03-22 19:16:44,359 [INFO] [Unearthed Path] skipping non-essential enrichers artist='joe-mungovan' row=9
+2026-03-22 19:16:44,359 [INFO] [Unearthed Path] activated artist='late-90s' row=10
+2026-03-22 19:16:44,361 [INFO] [Unearthed Path] skipping non-essential enrichers artist='late-90s' row=10
+2026-03-22 19:16:44,361 [INFO] [Unearthed Path] activated artist='sophie-edwards' row=11
+2026-03-22 19:16:44,361 [INFO] [Unearthed Path] skipping non-essential enrichers artist='sophie-edwards' row=11
+2026-03-22 19:16:44,362 [INFO] [Unearthed Path] activated artist='mitch-santiago' row=12
+2026-03-22 19:16:44,363 [INFO] [Unearthed Path] skipping non-essential enrichers artist='mitch-santiago' row=12
+2026-03-22 19:16:44,364 [INFO] [Unearthed Path] activated artist='saltysw33t' row=13
+2026-03-22 19:16:44,364 [INFO] [Unearthed Path] skipping non-essential enrichers artist='saltysw33t' row=13
+2026-03-22 19:16:44,366 [INFO] [Unearthed Path] no usable FB URL, resuming standard path artist='hannah-brewer' row=14
+2026-03-22 19:16:44,459 [INFO] [Enricher] Row 2/15: matched 'i-m-fine' via Triple J Unearthed.
+2026-03-22 19:16:44,461 [INFO] [Enricher] SoundCloud live check for 'i-m-fine' (current SC link missing).
+2026-03-22 19:16:44,462 [INFO] [Night SC] using day-mode candidate pipeline: SoundCloudEngine.people_search_candidates_v2 + HTML fallback
+2026-03-22 19:16:44,462 [INFO] [Night SC] API people search place='NSW' source=location_derived
+2026-03-22 19:16:46,369 [INFO] [Night SC] API people search -> handles=0 query='i-m-fine' place='NSW'
+2026-03-22 19:16:46,369 [INFO] [Night SC] API people search returned 0 handles for place='NSW'; retrying without place filter.
+2026-03-22 19:16:46,890 [INFO] [Night SC] API people search -> handles=12 query='i-m-fine' place=''
+2026-03-22 19:16:48,072 [INFO] [Night SC] rss_first=1 handle=imfineee url=https://soundcloud.com/imfineee rss_attempted=1 outcome=rss_success flags_used_rss=1 rss_used_total=1
+2026-03-22 19:16:48,073 [INFO] [Enricher] low-confidence match skipped for 'i-m-fine' (Spotify ID <unknown>) – score=0.65, candidate=im.fine | SoundCloud (live search) | https://soundcloud.com/imfineee
+2026-03-22 19:16:48,076 [INFO] [Night SC] candidate_source=api profile_source=none root_fetch_disabled=0 about_disabled=0 tracks_api_blocked=0 used_user_api=0 used_rss=1 rss_used_total=1
+2026-03-22 19:16:48,076 [INFO] [Night SC] Final status: rss_success handle=imfineee http= confidence=1.00 ms=3614 fetches=0 reason=rss_success
+2026-03-22 19:16:49,344 [INFO] [Enricher] Bandcamp: status=no_match mode=directory_discover attempts=0 403=0 artist='i-m-fine'
+2026-03-22 19:16:49,345 [INFO] [Enricher] Last.fm live search: https://www.last.fm/search?q=%22i-m-fine%22+%22Airplane+Mode%22&type=artist
+2026-03-22 19:16:50,452 [INFO] [Enricher][LF] Last.fm search: status=200 attempt=1/1 headers=lastfm_html
+2026-03-22 19:16:50,495 [INFO] [Enricher] Last.fm Enrich: candidate 'NOIR(느와르) "Airplane Mode" M' for 'i-m-fine' has confidence=0.22.
+2026-03-22 19:16:50,495 [INFO] [Enricher] Last.fm Enrich: no safe match for 'i-m-fine' (best_confidence=0.22), skipping.
+2026-03-22 19:16:50,496 [INFO] [IG Email] Visiting https://www.instagram.com/imfine_aus/
+2026-03-22 19:16:51,387 [INFO] [IG Email] No email found
+2026-03-22 19:16:51,391 [INFO] [FB Discover] No explicit facebook url for 'i-m-fine'; attempting bounded discovery (explicit FB intake outcome='no_explicit_url' source='<none>' sample='').
+2026-03-22 19:16:51,392 [INFO] [FB Enrich] search_method=direct_route query='i-m-fine Airplane Mode' url=https://www.facebook.com/search/pages/?q=i-m-fine+Airplane+Mode
+2026-03-22 19:16:53,085 [INFO] [FB Shared][DOM Gate] reason=zero_usable_hrefs_in_scope containers_found=1 anchors_in_scope=0 candidates_pre_url_gate=0 fallback=0 search_name='i-m-fine'
+2026-03-22 19:16:53,086 [INFO] [FB Shared][DOM Gate] chosen_container_selector=div[aria-label="Search results"] containers_found=1 anchors_in_scope=0 candidates_pre_url_gate=0 candidates_post_url_gate=0 url_gate_rejected=0 dropped_by_dom_gate=13 reason=container_match search_name='i-m-fine'
+2026-03-22 19:16:53,289 [INFO] [FB Enrich] search_method=direct_route failure_mode=overlay_zero_anchors query='i-m-fine Airplane Mode'
+2026-03-22 19:16:53,289 [INFO] [FB Enrich] search_method=homepage_ui query='i-m-fine Airplane Mode'
+2026-03-22 19:16:59,407 [INFO] [FB Shared][DOM Gate] reason=zero_usable_hrefs_in_scope containers_found=1 anchors_in_scope=0 candidates_pre_url_gate=0 fallback=0 search_name='i-m-fine'
+2026-03-22 19:16:59,408 [INFO] [FB Shared][DOM Gate] chosen_container_selector=div[role="main"] div[role="feed"] containers_found=1 anchors_in_scope=0 candidates_pre_url_gate=0 candidates_post_url_gate=0 url_gate_rejected=0 dropped_by_dom_gate=80 reason=container_match search_name='i-m-fine'
+2026-03-22 19:17:00,173 [INFO] [FB Enrich] No FB search candidates for 'i-m-fine'; trying slug fallback 'https://www.facebook.com/imfine'.
+2026-03-22 19:17:00,173 [INFO] -> 'i-m-fine' (cat='<none>', name_score=1.50, cat_boost=0.00, final=1.50, music=True, corporate=False)
+2026-03-22 19:17:00,173 [INFO] [FB Enrich] Trying uncertain music FB candidate 'i-m-fine' for 'i-m-fine' (category='<none>', base_score=1.50).
+2026-03-22 19:17:02,147 [INFO] [FB Enrich] Rejecting FB page 'https://www.facebook.com/imfine' for 'i-m-fine' after scrape: no music signals found.
+2026-03-22 19:17:02,148 [INFO] [FB Discover] No safe candidate found for 'i-m-fine'
+2026-03-22 19:17:02,148 [INFO] [FB Discover] Discovery failed for 'i-m-fine'; row will not retry discovery this run
+2026-03-22 19:17:02,154 [INFO] [Enricher] Row 3/15: matched 'dylan-voller' via Triple J Unearthed.
+2026-03-22 19:17:02,155 [INFO] [Enricher] skipping soundcloud heavy enrichment for 'dylan-voller' due to low row confidence (score=0.00 threshold=0.30 reasons=none)
+2026-03-22 19:17:03,457 [INFO] [Enricher] Bandcamp: status=no_match mode=directory_discover attempts=0 403=0 artist='dylan-voller'
+2026-03-22 19:17:03,459 [INFO] [Enricher] skipping lastfm heavy enrichment for 'dylan-voller' due to low row confidence (score=0.00 threshold=0.30 reasons=none)
+2026-03-22 19:17:03,459 [INFO] [IG Email] Visiting https://www.instagram.com/dylan.voller/
+2026-03-22 19:17:04,295 [INFO] [IG Email] No email found
+2026-03-22 19:17:04,296 [INFO] [Enricher] skipping fb heavy enrichment for 'dylan-voller' due to low row confidence (score=0.00 threshold=0.30 reasons=none)
+2026-03-22 19:17:04,299 [INFO] [Enricher] Row 4/15: matched 'beefheart-mcquinn' via Triple J Unearthed.
+2026-03-22 19:17:04,299 [INFO] [Enricher] skipping soundcloud heavy enrichment for 'beefheart-mcquinn' due to low row confidence (score=0.00 threshold=0.30 reasons=none)
+2026-03-22 19:17:05,126 [INFO] [Enricher] Bandcamp: status=no_match mode=directory_discover attempts=0 403=0 artist='beefheart-mcquinn'
+2026-03-22 19:17:05,128 [INFO] [Enricher] skipping lastfm heavy enrichment for 'beefheart-mcquinn' due to low row confidence (score=0.00 threshold=0.30 reasons=none)
+2026-03-22 19:17:05,129 [INFO] [IG Email] Visiting https://www.instagram.com/beefheartandmcquinn/
+2026-03-22 19:17:06,027 [INFO] [IG Email] No email found
+2026-03-22 19:17:06,028 [INFO] [Enricher] skipping fb heavy enrichment for 'beefheart-mcquinn' due to low row confidence (score=0.00 threshold=0.30 reasons=none)
+2026-03-22 19:17:06,030 [INFO] [Enricher] Row 15/15: matched 'hannah-brewer' via Triple J Unearthed.
+2026-03-22 19:17:06,030 [INFO] [Enricher] skipping soundcloud heavy enrichment for 'hannah-brewer' due to low row confidence (score=0.00 threshold=0.30 reasons=none)
+2026-03-22 19:17:06,793 [INFO] [Enricher] Bandcamp: status=no_match mode=directory_discover attempts=0 403=0 artist='hannah-brewer'
+2026-03-22 19:17:06,794 [INFO] [Enricher] skipping lastfm heavy enrichment for 'hannah-brewer' due to low row confidence (score=0.00 threshold=0.30 reasons=none)
+2026-03-22 19:17:06,794 [INFO] [IG Email] Visiting https://www.instagram.com/hannahbrew3r/
+2026-03-22 19:17:07,550 [INFO] [IG Email] No email found
+2026-03-22 19:17:07,551 [INFO] [Enricher] skipping fb heavy enrichment for 'hannah-brewer' due to low row confidence (score=0.00 threshold=0.30 reasons=none)
+2026-03-22 19:17:07,552 [INFO] [Enricher] Late domain reuse backfill: rows_scanned=0 rows_eligible=0 rows_backfilled=0 rows_skipped=0
+2026-03-22 19:17:07,552 [INFO] [Enricher] Domain email reuse summary: indexed_domains=0 rows_reused=0
+2026-03-22 19:17:07,556 [INFO] [Enricher] Enriched CSV written to overnight_runs/2026-03-22_191542/master_enriched.csv
+2026-03-22 19:17:07,556 [INFO] [DomainOrg] No exportable domain/org data; sidecar skipped.
+2026-03-22 19:17:07,557 [INFO] [Enrichment Yield]
+2026-03-22 19:17:07,557 [INFO] [Master Enrich] Completed cross-directory enrichment -> overnight_runs/2026-03-22_191542/master_enriched.csv
+2026-03-22 19:17:07,558 [INFO] [Enrich] Starting enrichment for overnight_runs/2026-03-22_191542/master_enriched.csv
+2026-03-22 19:17:07,565 [INFO] [Auto-Validate] Loaded 15 deduped rows (from 15), validating 0 selected rows...
+2026-03-22 19:17:07,565 [INFO] [Auto-Validate] Selection reasons: none
+2026-03-22 19:17:07,582 [INFO] [Auto-Validate] Completed. Upgraded: 0, Blocked: 0. Output: overnight_runs/2026-03-22_191542/master_pre_fb.csv
+2026-03-22 19:17:07,607 [INFO] [Enrich] Completed enrichment -> overnight_runs/2026-03-22_191542/master_pre_fb.csv
+2026-03-22 19:17:07,613 [INFO] [Night FB][Session Gate] source=profile decision=probe_pending reason=profile_dir profile_dir=/Users/hughmiddleton/Lead Machine/Lead Machine Code/night_fb_profile
+2026-03-22 19:17:07,621 [INFO] [Night FB] Starting session mode=headed headless_env=<unset> require_display=False os=darwin
+2026-03-22 19:17:08,197 [INFO] [Night FB][session_state] state=authenticated_and_usable authed=1 unhealthy=0 reason=authenticated v2=0
+2026-03-22 19:17:08,198 [INFO] [Night FB][Row Gate] row=0 artist='laces' email_present=False fb_url_present=True fb_entrypoint_present=True eligible_for_fb=True
+2026-03-22 19:17:08,199 [INFO] [Night FB][Explicit Intake] artist="laces" outcome="attempt" source="facebook_url,Facebook URL,Social Link" urls="https://www.facebook.com/laceslaceslaceslaces" canonical_field="present"
+2026-03-22 19:17:08,774 [INFO] [Night FB][session_state] state=authenticated_and_usable authed=1 unhealthy=0 reason=authenticated v2=0
+2026-03-22 19:17:09,419 [INFO] [Night FB][session_state] state=authenticated_and_usable authed=1 unhealthy=0 reason=authenticated v2=0
+2026-03-22 19:17:09,432 [INFO] [Night FB] Using explicit FB URLs with authenticated session: ['https://www.facebook.com/laceslaceslaceslaces']
+2026-03-22 19:17:09,432 [INFO] [Night FB] Using explicit FB URLs: ['https://www.facebook.com/laceslaceslaceslaces']
+2026-03-22 19:17:09,432 [INFO] [Night FB] Starting FB scrape for artist="laces" url="https://www.facebook.com/laceslaceslaceslaces"
+2026-03-22 19:17:09,432 [INFO] [FB Email] Visiting https://www.facebook.com/laceslaceslaceslaces
+2026-03-22 19:17:09,987 [INFO] [Night FB][session_state] state=authenticated_and_usable authed=1 unhealthy=0 reason=authenticated v2=0
+2026-03-22 19:17:20,718 [INFO] [FB Email] Reveal pass clicked: ['profile settings see more options']
+2026-03-22 19:17:21,588 [INFO] [Night FB][Health] url=https://www.facebook.com/laceslaceslaceslaces captcha=0 checkpoint=0 login_wall=0 context=page
+2026-03-22 19:17:21,655 [INFO] [FB Email] Scanning main page HTML for emails: https://www.facebook.com/laceslaceslaceslaces
+2026-03-22 19:17:21,739 [INFO] [FB Email] Found email on main page: laceslaceslaceslaces@gmail.com
+2026-03-22 19:17:21,739 [INFO] [Night FB][PASS A] Preserving extracted email(s) from explicit accepted URL despite weak post-fetch music signals: https://www.facebook.com/laceslaceslaceslaces
+2026-03-22 19:17:21,740 [INFO] [FB Email] Found email: laceslaceslaceslaces@gmail.com
+2026-03-22 19:17:21,740 [INFO] [Night FB] extracted email(s) ['laceslaceslaceslaces@gmail.com'] from https://www.facebook.com/laceslaceslaceslaces
+2026-03-22 19:17:21,740 [INFO] [Night FB][PASS A] artist="laces" url="https://www.facebook.com/laceslaceslaceslaces" mode="session" driver="session" outcome="found_email" reason="explicit_url"
+2026-03-22 19:17:21,746 [INFO] [Night FB][Row Gate] row=1 artist='i-m-fine' email_present=False fb_url_present=False fb_entrypoint_present=False eligible_for_fb=True
+2026-03-22 19:17:21,746 [INFO] [Night FB] Skipping discovery fallback for row 1 ('i-m-fine') - discovery already attempted earlier this run.
+2026-03-22 19:17:21,747 [INFO] [Night FB][Row Gate] row=2 artist='dylan-voller' email_present=False fb_url_present=False fb_entrypoint_present=False eligible_for_fb=True
+2026-03-22 19:17:21,748 [INFO] [FB Night] Sleeping 4.91s before next row (index=2).
+2026-03-22 19:17:26,666 [INFO] [Night FB][Explicit Intake] artist="dylan-voller" outcome="no_explicit_url"
+2026-03-22 19:17:27,219 [INFO] [Night FB][session_state] state=authenticated_and_usable authed=1 unhealthy=0 reason=authenticated v2=0
+2026-03-22 19:17:27,219 [INFO] [Unearthed Path] no usable FB URL; allowing bounded FB discovery
+2026-03-22 19:17:27,219 [INFO] [Night FB] Detected Unearthed row -> using legacy no-login FB scrape.
+2026-03-22 19:17:27,219 [INFO] [Unearthed Path] entering Unearthed no-URL FB discovery
+2026-03-22 19:17:27,729 [INFO] [Night FB][session_state] state=authenticated_and_usable authed=1 unhealthy=0 reason=authenticated v2=0
+2026-03-22 19:17:27,738 [INFO] [Night FB] search_method=direct_route query='dylan-voller' url='https://www.facebook.com/search/pages/?q=dylan-voller'
+2026-03-22 19:17:31,628 [INFO] [Night FB][Health] url=https://www.facebook.com/search/pages/?q=dylan-voller captcha=0 checkpoint=0 login_wall=0 search_miss=overlay_zero_anchors context=search
+2026-03-22 19:17:31,628 [INFO] [Night FB][Trust Budget] score=-1 delta=-1 reason=overlay_zero_anchors context=search
+2026-03-22 19:17:31,674 [INFO] [FB Shared][DOM Gate] reason=zero_usable_hrefs_in_scope containers_found=1 anchors_in_scope=0 candidates_pre_url_gate=0 fallback=0 search_name='dylan-voller'
+2026-03-22 19:17:31,674 [INFO] [FB Shared][DOM Gate] chosen_container_selector=div[aria-label="Search results"] containers_found=1 anchors_in_scope=0 candidates_pre_url_gate=0 candidates_post_url_gate=0 url_gate_rejected=0 dropped_by_dom_gate=19 reason=container_match search_name='dylan-voller'
+2026-03-22 19:17:32,034 [INFO] [Night FB] search_method=direct_route failure_mode=overlay_zero_anchors query='dylan-voller'
+2026-03-22 19:17:32,034 [INFO] [Night FB] search_method=homepage_ui query='dylan-voller'
+2026-03-22 19:17:39,602 [INFO] [Night FB][Health] url=https://www.facebook.com/search/top/?q=dylan-voller captcha=0 checkpoint=0 login_wall=0 context=search
+2026-03-22 19:17:39,602 [INFO] [Night FB][Trust Budget] score=0 delta=1 reason=healthy_page context=search
+2026-03-22 19:17:39,690 [INFO] [FB Shared][DOM Gate] chosen_container_selector=div[role="main"] div[role="feed"] containers_found=1 anchors_in_scope=13 candidates_pre_url_gate=10 candidates_post_url_gate=10 url_gate_rejected=0 dropped_by_dom_gate=79 reason=container_match search_name='dylan-voller'
+2026-03-22 19:17:40,299 [INFO] [Night FB][Rank Preview] query="dylan-voller" top=5 flag=0 selected_by="ranked_sort"
+2026-03-22 19:17:40,299 [INFO] [Night FB][Rank Preview] 1) name="Profile photo of Dylan Voller" cat="" cat_raw="" is_profile=False page_url=True music_hint=False music_primary=False name_match=near score=10 (+near_match)
+2026-03-22 19:17:40,299 [INFO] [Night FB][Rank Preview] 2) name="Profile photo of Dylan Voller" cat="" cat_raw="" is_profile=False page_url=True music_hint=False music_primary=False name_match=near score=10 (+near_match)
+2026-03-22 19:17:40,299 [INFO] [Night FB][Rank Preview] 3) name="Profile photo of Dylan Voller" cat="" cat_raw="" is_profile=False page_url=True music_hint=False music_primary=False name_match=near score=10 (+near_match)
+2026-03-22 19:17:40,299 [INFO] [Night FB][Rank Preview] 4) name="Profile photo for Dylan Fowler" cat="" cat_raw="" is_profile=False page_url=True music_hint=False music_primary=False name_match=mismatch score=-25 (-name_mismatch)
+2026-03-22 19:17:40,299 [INFO] [Night FB][Rank Preview] 5) name="Profile photo of Dylan Fowler" cat="" cat_raw="" is_profile=False page_url=True music_hint=False music_primary=False name_match=mismatch score=-25 (-name_mismatch)
+2026-03-22 19:17:40,299 [INFO] [Night FB][Rank Preview] chosen_current="Profile photo of Dylan Voller"
+2026-03-22 19:17:40,299 [INFO] [Night FB] Selected FB candidate 'Profile photo of Dylan Voller' -> https://www.facebook.com/dylan.voller.75 (category='Profile photo of Dylan Voller') selected_by=ranked_sort
+2026-03-22 19:17:40,301 [INFO] [Unearthed Path] discovery yielded candidate url='https://www.facebook.com/dylan.voller.75'
+2026-03-22 19:17:42,782 [INFO] [Night FB][Unearthed] Legacy-style scrape for FB page: https://www.facebook.com/dylan.voller.75
+2026-03-22 19:17:44,130 [INFO] [Night FB][Unearthed] 'About' button not clickable; continuing on main page.
+2026-03-22 19:17:44,206 [INFO] [Night FB][Unearthed] No emails found on https://www.facebook.com/dylan.voller.75
+2026-03-22 19:17:44,285 [INFO] [Night FB][Health] url=https://www.facebook.com/dylan.voller.75 captcha=0 checkpoint=0 login_wall=1 context=unearthed_legacy_final_page
+2026-03-22 19:17:44,285 [INFO] [Night FB][PASS A] artist="dylan-voller" url="https://www.facebook.com/dylan.voller.75" mode="legacy_anon_probe" driver="legacy_unearthed_anon" outcome="login_wall" reason="redirect_login"
+2026-03-22 19:17:44,302 [INFO] [Night FB][Row Gate] row=3 artist='beefheart-mcquinn' email_present=False fb_url_present=False fb_entrypoint_present=False eligible_for_fb=True
+2026-03-22 19:17:44,303 [INFO] [FB Night] Sleeping 5.44s before next row (index=3).
+2026-03-22 19:17:49,748 [INFO] [Night FB][Explicit Intake] artist="beefheart-mcquinn" outcome="no_explicit_url"
+2026-03-22 19:17:50,609 [INFO] [Night FB][session_state] state=authenticated_and_usable authed=1 unhealthy=0 reason=authenticated v2=0
+2026-03-22 19:17:50,609 [INFO] [Unearthed Path] no usable FB URL; allowing bounded FB discovery
+2026-03-22 19:17:50,609 [INFO] [Night FB] Detected Unearthed row -> using legacy no-login FB scrape.
+2026-03-22 19:17:50,609 [INFO] [Unearthed Path] entering Unearthed no-URL FB discovery
+2026-03-22 19:17:51,392 [INFO] [Night FB][session_state] state=authenticated_and_usable authed=1 unhealthy=0 reason=authenticated v2=0
+2026-03-22 19:17:51,401 [INFO] [Night FB] search_method=direct_route query='beefheart-mcquinn' url='https://www.facebook.com/search/pages/?q=beefheart-mcquinn'
+2026-03-22 19:17:55,737 [INFO] [Night FB][Health] url=https://www.facebook.com/search/pages/?q=beefheart-mcquinn captcha=0 checkpoint=0 login_wall=0 search_miss=overlay_zero_anchors context=search
+2026-03-22 19:17:55,745 [INFO] [Night FB][Trust Budget] score=-1 delta=-1 reason=overlay_zero_anchors context=search
+2026-03-22 19:17:55,976 [INFO] [FB Shared][DOM Gate] reason=zero_usable_hrefs_in_scope containers_found=1 anchors_in_scope=0 candidates_pre_url_gate=0 fallback=0 search_name='beefheart-mcquinn'
+2026-03-22 19:17:55,976 [INFO] [FB Shared][DOM Gate] chosen_container_selector=div[aria-label="Search results"] containers_found=1 anchors_in_scope=0 candidates_pre_url_gate=0 candidates_post_url_gate=0 url_gate_rejected=0 dropped_by_dom_gate=19 reason=container_match search_name='beefheart-mcquinn'
+2026-03-22 19:17:56,667 [INFO] [Night FB] search_method=direct_route failure_mode=overlay_zero_anchors query='beefheart-mcquinn'
+2026-03-22 19:17:56,667 [INFO] [Night FB] search_method=homepage_ui query='beefheart-mcquinn'
+2026-03-22 19:18:03,851 [INFO] [Night FB][Health] url=https://www.facebook.com/search/top/?q=beefheart-mcquinn captcha=0 checkpoint=0 login_wall=0 context=search
+2026-03-22 19:18:03,852 [INFO] [Night FB][Trust Budget] score=0 delta=1 reason=healthy_page context=search
+2026-03-22 19:18:03,943 [INFO] [FB Shared][DOM Gate] chosen_container_selector=div[role="main"] div[role="feed"] containers_found=1 anchors_in_scope=11 candidates_pre_url_gate=10 candidates_post_url_gate=10 url_gate_rejected=0 dropped_by_dom_gate=78 reason=container_match search_name='beefheart-mcquinn'
+2026-03-22 19:18:04,472 [INFO] [Night FB][NoSafeMatch] 'beefheart-mcquinn' no safe FB candidate (best_score=20) reason=identity_mismatch
+2026-03-22 19:18:04,472 [INFO] [Night FB] No viable FB candidates for 'beefheart-mcquinn' after reject-cache and mismatch guard.
+2026-03-22 19:18:04,473 [INFO] [Night FB][Rank Preview] query="beefheart-mcquinn" top=5 flag=0 selected_by="no_safe_match"
+2026-03-22 19:18:04,473 [INFO] [Night FB][Rank Preview] 1) name="Profile photo of Buford McQueen" cat="" cat_raw="" is_profile=False page_url=True music_hint=True music_primary=False name_match=mismatch score=20 (+descriptor_music +page_music -name_mismatch)
+2026-03-22 19:18:04,473 [INFO] [Night FB][Rank Preview] 2) name="Profile photo of Mccuen Pafford" cat="" cat_raw="" is_profile=False page_url=True music_hint=True music_primary=False name_match=mismatch score=20 (+descriptor_music +page_music -name_mismatch)
+2026-03-22 19:18:04,473 [INFO] [Night FB][Rank Preview] 3) name="Profile photo of Buford Mccann" cat="" cat_raw="" is_profile=False page_url=True music_hint=True music_primary=False name_match=mismatch score=20 (+descriptor_music +page_music -name_mismatch)
+2026-03-22 19:18:04,474 [INFO] [Night FB][Rank Preview] 4) name="Profile photo of Buford Mcqueen" cat="" cat_raw="" is_profile=False page_url=True music_hint=True music_primary=False name_match=mismatch score=20 (+descriptor_music +page_music -name_mismatch)
+2026-03-22 19:18:04,474 [INFO] [Night FB][Rank Preview] 5) name="Profile photo of Buford Mccann" cat="" cat_raw="" is_profile=False page_url=True music_hint=True music_primary=False name_match=mismatch score=20 (+descriptor_music +page_music -name_mismatch)
+2026-03-22 19:18:04,474 [INFO] [Unearthed Path] discovery yielded no candidate
+2026-03-22 19:18:04,484 [INFO] [Night FB][Row Gate] row=4 artist='drainingband' email_present=False fb_url_present=True fb_entrypoint_present=True eligible_for_fb=True
+2026-03-22 19:18:04,485 [INFO] [FB Night] Sleeping 4.10s before next row (index=4).
+2026-03-22 19:18:08,591 [INFO] [Night FB][Explicit Intake] artist="drainingband" outcome="attempt" source="facebook_url,Facebook URL,Social Link" urls="https://www.facebook.com/drainingband" canonical_field="present"
+2026-03-22 19:18:09,715 [INFO] [Night FB][session_state] state=authenticated_and_usable authed=1 unhealthy=0 reason=authenticated v2=0
+2026-03-22 19:18:10,793 [INFO] [Night FB][session_state] state=authenticated_and_usable authed=1 unhealthy=0 reason=authenticated v2=0
+2026-03-22 19:18:10,799 [INFO] [Night FB] Using explicit FB URLs with authenticated session: ['https://www.facebook.com/drainingband']
+2026-03-22 19:18:10,799 [INFO] [Night FB] Using explicit FB URLs: ['https://www.facebook.com/drainingband']
+2026-03-22 19:18:10,800 [INFO] [Night FB] Starting FB scrape for artist="drainingband" url="https://www.facebook.com/drainingband"
+2026-03-22 19:18:10,800 [INFO] [FB Email] Visiting https://www.facebook.com/drainingband
+2026-03-22 19:18:11,878 [INFO] [Night FB][session_state] state=authenticated_and_usable authed=1 unhealthy=0 reason=authenticated v2=0
+2026-03-22 19:18:14,081 [INFO] [FB Email] Reveal pass clicked: ['profile settings see more options', 'see more']
+2026-03-22 19:18:16,550 [INFO] [Night FB][Health] url=https://www.facebook.com/drainingband captcha=0 checkpoint=0 login_wall=0 context=page
+2026-03-22 19:18:16,616 [INFO] [FB Email] Scanning main page HTML for emails: https://www.facebook.com/drainingband
+2026-03-22 19:18:16,750 [INFO] [FB Email] No email found on main page; evaluating contact/about fetch
+2026-03-22 19:18:16,751 [INFO] [FB Email] Visiting https://www.facebook.com/drainingband/about
+2026-03-22 19:18:17,324 [INFO] [Night FB][session_state] state=authenticated_and_usable authed=1 unhealthy=0 reason=authenticated v2=0
+2026-03-22 19:18:30,133 [INFO] [FB Email] Reveal pass clicked: ['profile settings see more options']
+2026-03-22 19:18:32,585 [INFO] [Night FB][Health] url=https://www.facebook.com/drainingband/about captcha=0 checkpoint=0 login_wall=0 context=page
+2026-03-22 19:18:32,600 [INFO] [FB Email] No email found
+2026-03-22 19:18:32,603 [INFO] [Night FB][PASS A] artist="drainingband" url="https://www.facebook.com/drainingband" mode="session" driver="session" outcome="no_email_on_page" reason="session_fetch_ok_no_email"
+2026-03-22 19:18:32,607 [INFO] [Night FB][Row Gate] row=5 artist='wet-denim' email_present=False fb_url_present=True fb_entrypoint_present=True eligible_for_fb=True
+2026-03-22 19:18:32,607 [INFO] [FB Night] Sleeping 5.52s before next row (index=5).
+2026-03-22 19:18:38,140 [INFO] [Night FB][Explicit Intake] artist="wet-denim" outcome="attempt" source="facebook_url,Facebook URL,Social Link" urls="https://www.facebook.com/wetdenimband" canonical_field="present"
+2026-03-22 19:18:38,691 [INFO] [Night FB][session_state] state=authenticated_and_usable authed=1 unhealthy=0 reason=authenticated v2=0
+2026-03-22 19:18:39,192 [INFO] [Night FB][session_state] state=authenticated_and_usable authed=1 unhealthy=0 reason=authenticated v2=0
+2026-03-22 19:18:39,200 [INFO] [Night FB] Using explicit FB URLs with authenticated session: ['https://www.facebook.com/wetdenimband']
+2026-03-22 19:18:39,200 [INFO] [Night FB] Using explicit FB URLs: ['https://www.facebook.com/wetdenimband']
+2026-03-22 19:18:39,200 [INFO] [Night FB] Starting FB scrape for artist="wet-denim" url="https://www.facebook.com/wetdenimband"
+2026-03-22 19:18:39,200 [INFO] [FB Email] Visiting https://www.facebook.com/wetdenimband
+2026-03-22 19:18:39,695 [INFO] [Night FB][session_state] state=authenticated_and_usable authed=1 unhealthy=0 reason=authenticated v2=0
+2026-03-22 19:18:41,814 [INFO] [FB Email] Reveal pass clicked: ['profile settings see more options', 'see more']
+2026-03-22 19:18:44,231 [INFO] [Night FB][Health] url=https://www.facebook.com/wetdenimband captcha=0 checkpoint=0 login_wall=0 context=page
+2026-03-22 19:18:44,307 [INFO] [FB Email] Scanning main page HTML for emails: https://www.facebook.com/wetdenimband
+2026-03-22 19:18:44,389 [INFO] [FB Email] No email found on main page; evaluating contact/about fetch
+2026-03-22 19:18:44,390 [INFO] [FB Email] Visiting https://www.facebook.com/wetdenimband/about
+2026-03-22 19:18:45,002 [INFO] [Night FB][session_state] state=authenticated_and_usable authed=1 unhealthy=0 reason=authenticated v2=0
+2026-03-22 19:18:47,280 [INFO] [Night FB][Health] url=https://www.facebook.com/wetdenimband/about captcha=0 checkpoint=0 login_wall=0 context=page
+2026-03-22 19:18:47,434 [INFO] [FB Email] No email found
+2026-03-22 19:18:47,437 [INFO] [Night FB][PASS A] artist="wet-denim" url="https://www.facebook.com/wetdenimband" mode="session" driver="session" outcome="no_email_on_page" reason="session_fetch_ok_no_email"
+2026-03-22 19:18:47,475 [INFO] [Night FB][Row Gate] row=6 artist='jess-reiss' email_present=False fb_url_present=True fb_entrypoint_present=True eligible_for_fb=True
+2026-03-22 19:18:47,476 [INFO] [FB Night] Sleeping 2.87s before next row (index=6).
+2026-03-22 19:18:50,349 [INFO] [Night FB][Explicit Intake] artist="jess-reiss" outcome="attempt" source="facebook_url,Facebook URL,Social Link" urls="https://www.facebook.com/jessreissmusic" canonical_field="present"
+2026-03-22 19:18:50,389 [INFO] [Night FB][session_state] state=authenticated_and_usable authed=1 unhealthy=0 reason=authenticated v2=0
+2026-03-22 19:18:50,405 [INFO] [Night FB][session_state] state=authenticated_and_usable authed=1 unhealthy=0 reason=authenticated v2=0
+2026-03-22 19:18:50,412 [INFO] [Night FB] Using explicit FB URLs with authenticated session: ['https://www.facebook.com/jessreissmusic']
+2026-03-22 19:18:50,412 [INFO] [Night FB] Using explicit FB URLs: ['https://www.facebook.com/jessreissmusic']
+2026-03-22 19:18:50,413 [INFO] [Night FB] Starting FB scrape for artist="jess-reiss" url="https://www.facebook.com/jessreissmusic"
+2026-03-22 19:18:50,413 [INFO] [FB Email] Visiting https://www.facebook.com/jessreissmusic
+2026-03-22 19:18:50,430 [INFO] [Night FB][session_state] state=authenticated_and_usable authed=1 unhealthy=0 reason=authenticated v2=0
+2026-03-22 19:18:52,876 [INFO] [FB Email] Reveal pass clicked: ['profile settings see more options']
+2026-03-22 19:18:53,756 [INFO] [Night FB][Health] url=https://www.facebook.com/jessreissmusic captcha=0 checkpoint=0 login_wall=0 context=page
+2026-03-22 19:18:53,821 [INFO] [FB Email] Scanning main page HTML for emails: https://www.facebook.com/jessreissmusic
+2026-03-22 19:18:53,912 [INFO] [FB Email] Found email on main page: jessreissmusic@gmail.com
+2026-03-22 19:18:53,912 [INFO] [Night FB][PASS A] Preserving extracted email(s) from explicit accepted URL despite weak post-fetch music signals: https://www.facebook.com/jessreissmusic
+2026-03-22 19:18:53,912 [INFO] [FB Email] Found email: jessreissmusic@gmail.com
+2026-03-22 19:18:53,912 [INFO] [Night FB] extracted email(s) ['jessreissmusic@gmail.com'] from https://www.facebook.com/jessreissmusic
+2026-03-22 19:18:53,913 [INFO] [Night FB][PASS A] artist="jess-reiss" url="https://www.facebook.com/jessreissmusic" mode="session" driver="session" outcome="found_email" reason="explicit_url"
+2026-03-22 19:18:53,917 [INFO] [Night FB][Row Gate] row=7 artist='feelds-0' email_present=False fb_url_present=True fb_entrypoint_present=True eligible_for_fb=True
+2026-03-22 19:18:53,918 [INFO] [FB Night] Sleeping 5.20s before next row (index=7).
+2026-03-22 19:18:59,121 [INFO] [Night FB][Explicit Intake] artist="feelds-0" outcome="attempt" source="facebook_url,Facebook URL,Social Link" urls="https://www.facebook.com/thisisfeelds" canonical_field="present"
+2026-03-22 19:18:59,673 [INFO] [Night FB][session_state] state=authenticated_and_usable authed=1 unhealthy=0 reason=authenticated v2=0
+2026-03-22 19:19:00,226 [INFO] [Night FB][session_state] state=authenticated_and_usable authed=1 unhealthy=0 reason=authenticated v2=0
+2026-03-22 19:19:00,233 [INFO] [Night FB] Using explicit FB URLs with authenticated session: ['https://www.facebook.com/thisisfeelds']
+2026-03-22 19:19:00,233 [INFO] [Night FB] Using explicit FB URLs: ['https://www.facebook.com/thisisfeelds']
+2026-03-22 19:19:00,233 [INFO] [Night FB] Starting FB scrape for artist="feelds-0" url="https://www.facebook.com/thisisfeelds"
+2026-03-22 19:19:00,233 [INFO] [FB Email] Visiting https://www.facebook.com/thisisfeelds
+2026-03-22 19:19:00,755 [INFO] [Night FB][session_state] state=authenticated_and_usable authed=1 unhealthy=0 reason=authenticated v2=0
+2026-03-22 19:19:03,363 [INFO] [FB Email] Reveal pass clicked: ['profile settings see more options', 'see more']
+2026-03-22 19:19:05,828 [INFO] [Night FB][Health] url=https://www.facebook.com/thisisfeelds captcha=0 checkpoint=0 login_wall=0 context=page
+2026-03-22 19:19:05,907 [INFO] [FB Email] Scanning main page HTML for emails: https://www.facebook.com/thisisfeelds
+2026-03-22 19:19:06,083 [INFO] [FB Email] No email found on main page; evaluating contact/about fetch
+2026-03-22 19:19:06,084 [INFO] [FB Email] Visiting https://www.facebook.com/thisisfeelds/about
+2026-03-22 19:19:06,664 [INFO] [Night FB][session_state] state=authenticated_and_usable authed=1 unhealthy=0 reason=authenticated v2=0
+2026-03-22 19:19:09,254 [INFO] [FB Email] Reveal pass clicked: ['profile settings see more options']
+2026-03-22 19:19:11,711 [INFO] [Night FB][Health] url=https://www.facebook.com/thisisfeelds/about captcha=0 checkpoint=0 login_wall=0 context=page
+2026-03-22 19:19:11,726 [INFO] [FB Email] No email found
+2026-03-22 19:19:11,728 [INFO] [Night FB][PASS A] artist="feelds-0" url="https://www.facebook.com/thisisfeelds" mode="session" driver="session" outcome="no_email_on_page" reason="session_fetch_ok_no_email"
+2026-03-22 19:19:11,737 [INFO] [Night FB][Row Gate] row=8 artist='baby-cool' email_present=False fb_url_present=True fb_entrypoint_present=True eligible_for_fb=True
+2026-03-22 19:19:11,737 [INFO] [FB Night] Sleeping 5.89s before next row (index=8).
+2026-03-22 19:19:17,636 [INFO] [Night FB][Explicit Intake] artist="baby-cool" outcome="attempt" source="facebook_url,Facebook URL,Social Link" urls="https://www.facebook.com/babycool.music" canonical_field="present"
+2026-03-22 19:19:18,228 [INFO] [Night FB][session_state] state=authenticated_and_usable authed=1 unhealthy=0 reason=authenticated v2=0
+2026-03-22 19:19:18,729 [INFO] [Night FB][session_state] state=authenticated_and_usable authed=1 unhealthy=0 reason=authenticated v2=0
+2026-03-22 19:19:18,737 [INFO] [Night FB] Using explicit FB URLs with authenticated session: ['https://www.facebook.com/babycool.music']
+2026-03-22 19:19:18,737 [INFO] [Night FB] Using explicit FB URLs: ['https://www.facebook.com/babycool.music']
+2026-03-22 19:19:18,737 [INFO] [Night FB] Starting FB scrape for artist="baby-cool" url="https://www.facebook.com/babycool.music"
+2026-03-22 19:19:18,737 [INFO] [FB Email] Visiting https://www.facebook.com/babycool.music
+2026-03-22 19:19:19,258 [INFO] [Night FB][session_state] state=authenticated_and_usable authed=1 unhealthy=0 reason=authenticated v2=0
+2026-03-22 19:19:21,438 [INFO] [FB Email] Reveal pass clicked: ['profile settings see more options', 'see more']
+2026-03-22 19:19:22,380 [INFO] [Night FB][Health] url=https://www.facebook.com/babycool.music captcha=0 checkpoint=0 login_wall=0 context=page
+2026-03-22 19:19:22,455 [INFO] [FB Email] Scanning main page HTML for emails: https://www.facebook.com/babycool.music
+2026-03-22 19:19:22,559 [INFO] [FB Email] Found email on main page: babycool.music@gmail.com
+2026-03-22 19:19:22,559 [INFO] [Night FB][PASS A] Preserving extracted email(s) from explicit accepted URL despite weak post-fetch music signals: https://www.facebook.com/babycool.music
+2026-03-22 19:19:22,559 [INFO] [FB Email] Found email: babycool.music@gmail.com
+2026-03-22 19:19:22,559 [INFO] [Night FB] extracted email(s) ['babycool.music@gmail.com'] from https://www.facebook.com/babycool.music
+2026-03-22 19:19:22,559 [INFO] [Night FB][PASS A] artist="baby-cool" url="https://www.facebook.com/babycool.music" mode="session" driver="session" outcome="found_email" reason="explicit_url"
+2026-03-22 19:19:22,563 [INFO] [Night FB][Row Gate] row=9 artist='joe-mungovan' email_present=False fb_url_present=True fb_entrypoint_present=True eligible_for_fb=True
+2026-03-22 19:19:22,563 [INFO] [FB Night] Sleeping 4.32s before next row (index=9).
+2026-03-22 19:19:26,888 [INFO] [Night FB][Explicit Intake] artist="joe-mungovan" outcome="attempt" source="facebook_url,Facebook URL,Social Link" urls="https://www.facebook.com/joemungovanmusic" canonical_field="present"
+2026-03-22 19:19:27,512 [INFO] [Night FB][session_state] state=authenticated_and_usable authed=1 unhealthy=0 reason=authenticated v2=0
+2026-03-22 19:19:28,069 [INFO] [Night FB][session_state] state=authenticated_and_usable authed=1 unhealthy=0 reason=authenticated v2=0
+2026-03-22 19:19:28,075 [INFO] [Night FB] Using explicit FB URLs with authenticated session: ['https://www.facebook.com/joemungovanmusic']
+2026-03-22 19:19:28,075 [INFO] [Night FB] Using explicit FB URLs: ['https://www.facebook.com/joemungovanmusic']
+2026-03-22 19:19:28,075 [INFO] [Night FB] Starting FB scrape for artist="joe-mungovan" url="https://www.facebook.com/joemungovanmusic"
+2026-03-22 19:19:28,075 [INFO] [FB Email] Visiting https://www.facebook.com/joemungovanmusic
+2026-03-22 19:19:28,632 [INFO] [Night FB][session_state] state=authenticated_and_usable authed=1 unhealthy=0 reason=authenticated v2=0
+2026-03-22 19:19:30,874 [INFO] [FB Email] Reveal pass clicked: ['profile settings see more options', 'see more']
+2026-03-22 19:19:31,837 [INFO] [Night FB][Health] url=https://www.facebook.com/joemungovanmusic captcha=0 checkpoint=0 login_wall=0 context=page
+2026-03-22 19:19:31,920 [INFO] [FB Email] Scanning main page HTML for emails: https://www.facebook.com/joemungovanmusic
+2026-03-22 19:19:32,032 [INFO] [FB Email] Found email on main page: joemungovanmusic@gmail.com
+2026-03-22 19:19:32,033 [INFO] [Night FB][PASS A] Preserving extracted email(s) from explicit accepted URL despite weak post-fetch music signals: https://www.facebook.com/joemungovanmusic
+2026-03-22 19:19:32,033 [INFO] [FB Email] Found email: joemungovanmusic@gmail.com
+2026-03-22 19:19:32,035 [INFO] [Night FB] extracted email(s) ['joemungovanmusic@gmail.com'] from https://www.facebook.com/joemungovanmusic
+2026-03-22 19:19:32,035 [INFO] [Night FB][PASS A] artist="joe-mungovan" url="https://www.facebook.com/joemungovanmusic" mode="session" driver="session" outcome="found_email" reason="explicit_url"
+2026-03-22 19:19:32,041 [INFO] [Night FB][Row Gate] row=10 artist='late-90s' email_present=False fb_url_present=True fb_entrypoint_present=True eligible_for_fb=True
+2026-03-22 19:19:32,041 [INFO] [FB Night] Sleeping 3.10s before next row (index=10).
+2026-03-22 19:19:35,144 [INFO] [Night FB][Explicit Intake] artist="late-90s" outcome="attempt" source="facebook_url,Facebook URL,Social Link" urls="https://www.facebook.com/late90sband" canonical_field="present"
+2026-03-22 19:19:35,848 [INFO] [Night FB][session_state] state=authenticated_and_usable authed=1 unhealthy=0 reason=authenticated v2=0
+2026-03-22 19:19:36,478 [INFO] [Night FB][session_state] state=authenticated_and_usable authed=1 unhealthy=0 reason=authenticated v2=0
+2026-03-22 19:19:36,485 [INFO] [Night FB] Using explicit FB URLs with authenticated session: ['https://www.facebook.com/late90sband']
+2026-03-22 19:19:36,485 [INFO] [Night FB] Using explicit FB URLs: ['https://www.facebook.com/late90sband']
+2026-03-22 19:19:36,485 [INFO] [Night FB] Starting FB scrape for artist="late-90s" url="https://www.facebook.com/late90sband"
+2026-03-22 19:19:36,485 [INFO] [FB Email] Visiting https://www.facebook.com/late90sband
+2026-03-22 19:19:37,104 [INFO] [Night FB][session_state] state=authenticated_and_usable authed=1 unhealthy=0 reason=authenticated v2=0
+2026-03-22 19:19:39,240 [INFO] [FB Email] Reveal pass clicked: ['profile settings see more options', 'see more']
+2026-03-22 19:19:41,727 [INFO] [Night FB][Health] url=https://www.facebook.com/late90sband captcha=0 checkpoint=0 login_wall=0 context=page
+2026-03-22 19:19:41,796 [INFO] [FB Email] Scanning main page HTML for emails: https://www.facebook.com/late90sband
+2026-03-22 19:19:41,870 [INFO] [FB Email] No email found on main page; evaluating contact/about fetch
+2026-03-22 19:19:41,872 [INFO] [FB Email] Visiting https://www.facebook.com/late90sband/about
+2026-03-22 19:19:42,518 [INFO] [Night FB][session_state] state=authenticated_and_usable authed=1 unhealthy=0 reason=authenticated v2=0
+2026-03-22 19:19:44,799 [INFO] [FB Email] Reveal pass clicked: ['profile settings see more options']
+2026-03-22 19:19:47,163 [INFO] [Night FB][Health] url=https://www.facebook.com/late90sband/about captcha=0 checkpoint=0 login_wall=0 context=page
+2026-03-22 19:19:47,182 [INFO] [FB Email] No email found
+2026-03-22 19:19:47,186 [INFO] [Night FB][PASS A] artist="late-90s" url="https://www.facebook.com/late90sband" mode="session" driver="session" outcome="no_email_on_page" reason="session_fetch_ok_no_email"
+2026-03-22 19:19:47,191 [INFO] [Night FB][Row Gate] row=11 artist='sophie-edwards' email_present=False fb_url_present=True fb_entrypoint_present=True eligible_for_fb=True
+2026-03-22 19:19:47,191 [INFO] [FB Night] Sleeping 4.80s before next row (index=11).
+2026-03-22 19:19:51,998 [INFO] [Night FB][Explicit Intake] artist="sophie-edwards" outcome="attempt" source="facebook_url,Facebook URL,Social Link" urls="https://www.facebook.com/sophieedwardsmusic" canonical_field="present"
+2026-03-22 19:19:52,537 [INFO] [Night FB][session_state] state=authenticated_and_usable authed=1 unhealthy=0 reason=authenticated v2=0
+2026-03-22 19:19:53,033 [INFO] [Night FB][session_state] state=authenticated_and_usable authed=1 unhealthy=0 reason=authenticated v2=0
+2026-03-22 19:19:53,040 [INFO] [Night FB] Using explicit FB URLs with authenticated session: ['https://www.facebook.com/sophieedwardsmusic']
+2026-03-22 19:19:53,041 [INFO] [Night FB] Using explicit FB URLs: ['https://www.facebook.com/sophieedwardsmusic']
+2026-03-22 19:19:53,041 [INFO] [Night FB] Starting FB scrape for artist="sophie-edwards" url="https://www.facebook.com/sophieedwardsmusic"
+2026-03-22 19:19:53,041 [INFO] [FB Email] Visiting https://www.facebook.com/sophieedwardsmusic
+2026-03-22 19:19:53,555 [INFO] [Night FB][session_state] state=authenticated_and_usable authed=1 unhealthy=0 reason=authenticated v2=0
+2026-03-22 19:19:56,040 [INFO] [FB Email] Reveal pass clicked: ['profile settings see more options']
+2026-03-22 19:19:56,986 [INFO] [Night FB][Health] url=https://www.facebook.com/sophieedwardsmusic captcha=0 checkpoint=0 login_wall=0 context=page
+2026-03-22 19:19:57,241 [INFO] [FB Email] Scanning main page HTML for emails: https://www.facebook.com/sophieedwardsmusic
+2026-03-22 19:19:57,330 [INFO] [FB Email] Found email on main page: sophieedwardsmusic@gmail.com
+2026-03-22 19:19:57,330 [INFO] [Night FB][PASS A] Preserving extracted email(s) from explicit accepted URL despite weak post-fetch music signals: https://www.facebook.com/sophieedwardsmusic
+2026-03-22 19:19:57,330 [INFO] [FB Email] Found email: sophieedwardsmusic@gmail.com
+2026-03-22 19:19:57,330 [INFO] [Night FB] extracted email(s) ['sophieedwardsmusic@gmail.com'] from https://www.facebook.com/sophieedwardsmusic
+2026-03-22 19:19:57,330 [INFO] [Night FB][PASS A] artist="sophie-edwards" url="https://www.facebook.com/sophieedwardsmusic" mode="session" driver="session" outcome="found_email" reason="explicit_url"
+2026-03-22 19:19:57,332 [INFO] [Night FB][Row Gate] row=12 artist='mitch-santiago' email_present=False fb_url_present=True fb_entrypoint_present=True eligible_for_fb=True
+2026-03-22 19:19:57,332 [INFO] [FB Night] Sleeping 5.91s before next row (index=12).
+2026-03-22 19:20:03,254 [INFO] [Night FB][Explicit Intake] artist="mitch-santiago" outcome="attempt" source="facebook_url,Facebook URL,Social Link" urls="https://www.facebook.com/mitchsantiagomusic" canonical_field="present"
+2026-03-22 19:20:03,902 [INFO] [Night FB][session_state] state=authenticated_and_usable authed=1 unhealthy=0 reason=authenticated v2=0
+2026-03-22 19:20:04,504 [INFO] [Night FB][session_state] state=authenticated_and_usable authed=1 unhealthy=0 reason=authenticated v2=0
+2026-03-22 19:20:04,511 [INFO] [Night FB] Using explicit FB URLs with authenticated session: ['https://www.facebook.com/mitchsantiagomusic']
+2026-03-22 19:20:04,511 [INFO] [Night FB] Using explicit FB URLs: ['https://www.facebook.com/mitchsantiagomusic']
+2026-03-22 19:20:04,512 [INFO] [Night FB] Starting FB scrape for artist="mitch-santiago" url="https://www.facebook.com/mitchsantiagomusic"
+2026-03-22 19:20:04,512 [INFO] [FB Email] Visiting https://www.facebook.com/mitchsantiagomusic
+2026-03-22 19:20:05,107 [INFO] [Night FB][session_state] state=authenticated_and_usable authed=1 unhealthy=0 reason=authenticated v2=0
+2026-03-22 19:20:07,880 [INFO] [FB Email] Reveal pass clicked: ['profile settings see more options', 'see more']
+2026-03-22 19:20:10,416 [INFO] [Night FB][Health] url=https://www.facebook.com/mitchsantiagomusic captcha=0 checkpoint=0 login_wall=0 context=page
+2026-03-22 19:20:10,510 [INFO] [FB Email] Scanning main page HTML for emails: https://www.facebook.com/mitchsantiagomusic
+2026-03-22 19:20:10,611 [INFO] [FB Email] No email found on main page; evaluating contact/about fetch
+2026-03-22 19:20:10,615 [INFO] [FB Email] Visiting https://www.facebook.com/mitchsantiagomusic/about
+2026-03-22 19:20:11,266 [INFO] [Night FB][session_state] state=authenticated_and_usable authed=1 unhealthy=0 reason=authenticated v2=0
+2026-03-22 19:20:13,516 [INFO] [FB Email] Reveal pass clicked: ['profile settings see more options', 'see more']
+2026-03-22 19:20:14,895 [INFO] [Night FB][Health] url=https://www.facebook.com/marie.rowe.35/posts/pfbid0bbGiNqBLtd3RA6D2FNqwQqAenapHzJJzU56XHryHjasxMPRgVhV2kwj61GPUDhEZl captcha=0 checkpoint=0 login_wall=0 context=page
+2026-03-22 19:20:14,910 [INFO] [FB Email] No email found
+2026-03-22 19:20:14,912 [INFO] [Night FB][PASS A] artist="mitch-santiago" url="https://www.facebook.com/mitchsantiagomusic" mode="session" driver="session" outcome="no_email_on_page" reason="session_fetch_ok_no_email"
+2026-03-22 19:20:14,915 [INFO] [Night FB][Row Gate] row=13 artist='saltysw33t' email_present=False fb_url_present=True fb_entrypoint_present=True eligible_for_fb=True
+2026-03-22 19:20:14,916 [INFO] [FB Night] Sleeping 4.81s before next row (index=13).
+2026-03-22 19:20:19,731 [INFO] [Night FB][Explicit Intake] artist="saltysw33t" outcome="attempt" source="facebook_url,Facebook URL,Social Link" urls="https://www.facebook.com/kirstentsoltoudis" canonical_field="present"
+2026-03-22 19:20:20,286 [INFO] [Night FB][session_state] state=authenticated_and_usable authed=1 unhealthy=0 reason=authenticated v2=0
+2026-03-22 19:20:20,804 [INFO] [Night FB][session_state] state=authenticated_and_usable authed=1 unhealthy=0 reason=authenticated v2=0
+2026-03-22 19:20:20,811 [INFO] [Night FB] Using explicit FB URLs with authenticated session: ['https://www.facebook.com/kirstentsoltoudis']
+2026-03-22 19:20:20,812 [INFO] [Night FB] Using explicit FB URLs: ['https://www.facebook.com/kirstentsoltoudis']
+2026-03-22 19:20:20,812 [INFO] [Night FB] Starting FB scrape for artist="saltysw33t" url="https://www.facebook.com/kirstentsoltoudis"
+2026-03-22 19:20:20,812 [INFO] [FB Email] Visiting https://www.facebook.com/kirstentsoltoudis
+2026-03-22 19:20:21,329 [INFO] [Night FB][session_state] state=authenticated_and_usable authed=1 unhealthy=0 reason=authenticated v2=0
+2026-03-22 19:20:24,851 [INFO] [Night FB][Health] url=https://www.facebook.com/kirstentsoltoudis captcha=0 checkpoint=0 login_wall=0 context=page
+2026-03-22 19:20:24,854 [INFO] [Night FB][PageUnavailable] https://www.facebook.com/kirstentsoltoudis
+2026-03-22 19:20:24,854 [INFO] [Night FB][PASS A] artist="saltysw33t" url="https://www.facebook.com/kirstentsoltoudis" mode="session" driver="session" outcome="content_unavailable" reason="content_unavailable"
+2026-03-22 19:20:24,979 [INFO] [Night FB][session_state] state=authenticated_and_usable authed=1 unhealthy=0 reason=authenticated v2=0
+2026-03-22 19:20:25,104 [INFO] [Night FB][session_state] state=authenticated_and_usable authed=1 unhealthy=0 reason=authenticated v2=0
+2026-03-22 19:20:25,113 [INFO] [Night FB] search_method=direct_route query='saltysw33t TOUCH GRASS' url='https://www.facebook.com/search/pages/?q=saltysw33t+TOUCH+GRASS'
+2026-03-22 19:20:29,418 [INFO] [Night FB][Health] url=https://www.facebook.com/search/pages/?q=saltysw33t%20TOUCH%20GRASS captcha=0 checkpoint=0 login_wall=0 search_miss=overlay_zero_anchors context=search
+2026-03-22 19:20:29,420 [INFO] [Night FB][Trust Budget] score=-1 delta=-1 reason=overlay_zero_anchors context=search
+2026-03-22 19:20:29,457 [INFO] [FB Shared][DOM Gate] reason=zero_usable_hrefs_in_scope containers_found=1 anchors_in_scope=0 candidates_pre_url_gate=0 fallback=0 search_name='saltysw33t'
+2026-03-22 19:20:29,457 [INFO] [FB Shared][DOM Gate] chosen_container_selector=div[aria-label="Search results"] containers_found=1 anchors_in_scope=0 candidates_pre_url_gate=0 candidates_post_url_gate=0 url_gate_rejected=0 dropped_by_dom_gate=19 reason=container_match search_name='saltysw33t'
+2026-03-22 19:20:29,810 [INFO] [Night FB] search_method=direct_route failure_mode=overlay_zero_anchors query='saltysw33t TOUCH GRASS'
+2026-03-22 19:20:29,810 [INFO] [Night FB] search_method=homepage_ui query='saltysw33t TOUCH GRASS'
+2026-03-22 19:20:44,796 [INFO] [Night FB][Health] url=https://www.facebook.com/search/top/?q=saltysw33t%20TOUCH%20GRASS captcha=0 checkpoint=0 login_wall=0 context=search
+2026-03-22 19:20:44,797 [INFO] [Night FB][Trust Budget] score=0 delta=1 reason=healthy_page context=search
+2026-03-22 19:20:44,873 [INFO] [FB Shared][DOM Gate] reason=zero_usable_hrefs_in_scope containers_found=1 anchors_in_scope=0 candidates_pre_url_gate=0 fallback=0 search_name='saltysw33t'
+2026-03-22 19:20:44,873 [INFO] [FB Shared][DOM Gate] chosen_container_selector=div[role="main"] div[role="feed"] containers_found=1 anchors_in_scope=0 candidates_pre_url_gate=0 candidates_post_url_gate=0 url_gate_rejected=0 dropped_by_dom_gate=81 reason=container_match search_name='saltysw33t'
+2026-03-22 19:20:46,426 [INFO] [Night FB] No viable FB candidates for 'saltysw33t' after reject-cache and mismatch guard.
+2026-03-22 19:20:46,427 [INFO] [Night FB] No usable FB candidates for 'saltysw33t', marking FB_Status='pass_a_no_email_on_page'.
+2026-03-22 19:20:46,429 [INFO] [Night FB][Row Gate] row=14 artist='hannah-brewer' email_present=False fb_url_present=False fb_entrypoint_present=False eligible_for_fb=True
+2026-03-22 19:20:46,429 [INFO] [FB Night] Sleeping 2.44s before next row (index=14).
+2026-03-22 19:20:48,876 [INFO] [Night FB][Explicit Intake] artist="hannah-brewer" outcome="no_explicit_url"
+2026-03-22 19:20:49,695 [INFO] [Night FB][session_state] state=authenticated_and_usable authed=1 unhealthy=0 reason=authenticated v2=0
+2026-03-22 19:20:49,695 [INFO] [Unearthed Path] no usable FB URL; allowing bounded FB discovery
+2026-03-22 19:20:49,695 [INFO] [Night FB] Detected Unearthed row -> using legacy no-login FB scrape.
+2026-03-22 19:20:49,695 [INFO] [Unearthed Path] entering Unearthed no-URL FB discovery
+2026-03-22 19:20:50,459 [INFO] [Night FB][session_state] state=authenticated_and_usable authed=1 unhealthy=0 reason=authenticated v2=0
+2026-03-22 19:20:50,467 [INFO] [Night FB] search_method=direct_route query='hannah-brewer' url='https://www.facebook.com/search/pages/?q=hannah-brewer'
+2026-03-22 19:20:54,452 [INFO] [Night FB][Health] url=https://www.facebook.com/search/pages/?q=hannah-brewer captcha=0 checkpoint=0 login_wall=0 context=search
+2026-03-22 19:20:54,601 [INFO] [FB Shared][DOM Gate] chosen_container_selector=div[role="main"] div[role="feed"] containers_found=1 anchors_in_scope=2 candidates_pre_url_gate=2 candidates_post_url_gate=2 url_gate_rejected=0 dropped_by_dom_gate=19 reason=container_match search_name='hannah-brewer'
+2026-03-22 19:20:54,601 [INFO] [Night FB][NoSafeMatch] 'hannah-brewer' no safe FB candidate (best_score=-15) reason=profile_no_music_signal
+2026-03-22 19:20:54,601 [INFO] [Night FB] No viable FB candidates for 'hannah-brewer' after reject-cache and mismatch guard.
+2026-03-22 19:20:54,601 [INFO] [Night FB][Rank Preview] query="hannah-brewer" top=5 flag=0 selected_by="no_safe_match"
+2026-03-22 19:20:54,601 [INFO] [Night FB][Rank Preview] 1) name="Profile photo of Brewer Hannah" cat="" cat_raw="" is_profile=True page_url=False music_hint=False music_primary=False name_match=weak score=-15 (-profile)
+2026-03-22 19:20:54,601 [INFO] [Unearthed Path] discovery yielded no candidate
+2026-03-22 19:20:54,737 [INFO] [FB Night][PASS A Summary] attempted=12 found_email=5 no_email_on_page=6 login_wall=1 fetch_error=0 skipped_no_fb_url=0
+2026-03-22 19:20:54,737 [INFO] [FB Email][Summary] pages_visited=16 emails_found=5 skipped_checkpoint=4 skipped_challenge=0 skipped_cooldown=0 skipped_no_opportunity=0
+2026-03-22 19:20:54,754 [INFO] [Master] Facebook global pass completed: overnight_runs/2026-03-22_191542/master_post_fb.csv
+2026-03-22 19:20:54,754 [INFO] [Enrich] Starting enrichment for overnight_runs/2026-03-22_191542/master_post_fb.csv
+2026-03-22 19:20:54,762 [INFO] [Auto-Validate] Loaded 15 deduped rows (from 15), validating 5 selected rows...
+2026-03-22 19:20:54,762 [INFO] [Auto-Validate] Selection reasons: uncertain_score=5
+2026-03-22 19:20:55,545 [INFO] [Auto-Validate] unearthed: checked 1 URL(s)
+2026-03-22 19:20:55,546 [INFO] [Auto-Validate] Completed. Upgraded: 0, Blocked: 0. Output: overnight_runs/2026-03-22_191542/master_enriched_deduped.csv
+2026-03-22 19:20:55,581 [INFO] [Enrich] Completed enrichment -> overnight_runs/2026-03-22_191542/master_enriched_deduped.csv
+2026-03-22 19:20:55,581 [INFO] [Master] Validation completed: overnight_runs/2026-03-22_191542/master_enriched_deduped.csv
+2026-03-22 19:20:55,581 [INFO] [Master] Exporting client-facing CSV: overnight_runs/2026-03-22_191542/master_enriched_deduped.csv -> overnight_runs/2026-03-22_191542/master_export_leads.csv
+2026-03-22 19:20:55,592 [INFO] [Exporter] Export profile=full_dump: input rows=15, exported rows=15
+2026-03-22 19:20:55,592 [INFO] [Master] Export wrote 15 rows to overnight_runs/2026-03-22_191542/master_export_leads.csv
+2026-03-22 19:20:55,592 [INFO] [Master] Exported client-facing leads CSV: overnight_runs/2026-03-22_191542/master_export_leads.csv
+2026-03-22 19:20:55,874 [INFO] SMOKE RESULT: PASS (DEGRADED: bandcamp 403s)
+2026-03-22 19:20:55,874 [INFO] Smoke Summary:
+2026-03-22 19:20:55,874 [INFO]  - jobs attempted: 1
+2026-03-22 19:20:55,874 [INFO]  - jobs merged: 1
+2026-03-22 19:20:55,874 [INFO]  - jobs skipped (read errors): 0
+2026-03-22 19:20:55,874 [INFO]  - master_raw rows: 15
+2026-03-22 19:20:55,874 [INFO]  - enrichment ran: yes
+2026-03-22 19:20:55,874 [INFO]  - enrichment rows: 16
+2026-03-22 19:20:55,874 [INFO]  - SC challenges: 0
+2026-03-22 19:20:55,875 [INFO]  - SC breaker tripped: False
+2026-03-22 19:20:55,875 [INFO]  - SC live disabled reason: n/a
+2026-03-22 19:20:55,875 [INFO]  - Bandcamp HTTP 403 count: 4
+2026-03-22 19:20:55,875 [INFO]  - Last.fm HTTP 406 count: 0
+2026-03-22 19:20:55,875 [INFO]  - Emails with missing provenance URL: 0
+2026-03-22 19:20:55,875 [INFO]  - Emails total (raw merged): 0
+2026-03-22 19:20:55,884 [INFO] [Run Summary] Wrote run summary: overnight_runs/2026-03-22_191542/run_summary.json
