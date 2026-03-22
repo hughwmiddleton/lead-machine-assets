@@ -5253,6 +5253,7 @@ def _fetch_fb_about_variants(base_url: str) -> List[str]:
             ]
         return []
     variants = [
+        f"{normalized}/directory_contact_info",
         f"{normalized}/about_contact_and_basic_info",
         f"{normalized}/about_details",
         f"{normalized}/about",
