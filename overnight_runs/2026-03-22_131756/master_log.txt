@@ -1,0 +1,152 @@
+2026-03-22 13:18:22,868 [INFO] [Seed Summary]
+2026-03-22 13:18:22,868 [INFO] unearthed=15
+2026-03-22 13:18:22,878 [INFO] [FB Promotion] facebook_url populated for 8 rows
+2026-03-22 13:18:22,878 [INFO] [FB Promotion] canonical Facebook_URL backfilled from Social Link / External Links for 8 rows
+2026-03-22 13:18:22,883 [INFO] [Master] Wrote merged raw CSV: overnight_runs/2026-03-22_131756/master_raw.csv (rows=15)
+2026-03-22 13:18:22,884 [INFO] [Master Enrich] Starting cross-directory enrichment for overnight_runs/2026-03-22_131756/master_raw.csv
+2026-03-22 13:18:27,912 [INFO] [Master] Bandcamp directory CSV -> (none) in /Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/overnight_runs/2026-03-22_131756 (attempts=6)
+2026-03-22 13:18:32,968 [INFO] [Master] SoundCloud directory CSV -> (none) in /Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/overnight_runs/2026-03-22_131756 (attempts=6)
+2026-03-22 13:18:38,003 [INFO] [Master] Last.fm directory CSV -> (none) in /Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/overnight_runs/2026-03-22_131756 (attempts=6)
+2026-03-22 13:18:38,004 [INFO] [Master] Unearthed directory CSV -> /Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/overnight_runs/2026-03-22_131756/job_unearthed_1/raw.csv (rows=15, kind=raw)
+2026-03-22 13:18:38,004 [INFO] [Master] Passing bandcamp_csv_path=
+2026-03-22 13:18:38,004 [INFO] [Master] Passing soundcloud_csv_path=
+2026-03-22 13:18:38,004 [INFO] [Master] Passing lastfm_csv_path=
+2026-03-22 13:18:38,004 [INFO] [Master] Passing unearthed_csv_path=/Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/overnight_runs/2026-03-22_131756/job_unearthed_1/raw.csv
+2026-03-22 13:18:38,013 [INFO] [Night FB] Using Chrome profile dir: /Users/hughmiddleton/Lead Machine/Lead Machine Code/night_fb_profile
+2026-03-22 13:18:38,186 [INFO] [Night FB][preflight] chrome_binary=/Applications/Google Chrome.app/Contents/MacOS/Google Chrome chrome_version=Google Chrome 146.0.7680.81 chromedriver=<selenium_manager> chromedriver_version=<selenium_manager> profile_dir=/Users/hughmiddleton/Lead Machine/Lead Machine Code/night_fb_profile profile_exists=True profile_locks=['SingletonSocket'] image_policy=managed_allow args=['--disable-gpu', '--window-size=1920x1080', '--disable-extensions', '--disable-dev-shm-usage', '--no-sandbox', '--disable-blink-features=AutomationControlled', '--user-data-dir=/Users/hughmiddleton/Lead Machine/Lead Machine Code/night_fb_profile', '--profile-directory=Default']
+2026-03-22 13:18:40,578 [INFO] [Night FB][driver] requested_profile=/Users/hughmiddleton/Lead Machine/Lead Machine Code/night_fb_profile active_profile=/Users/hughmiddleton/Lead Machine/Lead Machine Code/night_fb_profile persistent_profile=1 temp_fallback=0 webdriver_mask=1
+2026-03-22 13:18:50,421 [INFO] [Night FB][auth_probe] mode=headed requested_profile=/Users/hughmiddleton/Lead Machine/Lead Machine Code/night_fb_profile active_profile=/Users/hughmiddleton/Lead Machine/Lead Machine Code/night_fb_profile temp_fallback=0 authed=1 reason=authenticated
+2026-03-22 13:19:03,920 [INFO] [FB Discover] Shared Facebook session authenticated; discovery enabled for this run.
+2026-03-22 13:19:03,925 [INFO] [FB Warmup] Running Facebook session warm-up
+2026-03-22 13:19:13,210 [INFO] [Enricher] Loading seed CSV: overnight_runs/2026-03-22_131756/master_raw.csv
+2026-03-22 13:19:13,297 [INFO] [Deduper] Removed 0 duplicate rows (kept 15 unique rows)
+2026-03-22 13:19:13,302 [INFO] [Schema] ensured email columns: Email, Email_All, Email_Type, Email_Source_URL, Email_Source_Type, Email_Extract_Method, Email_Provenance_JSON
+2026-03-22 13:19:13,331 [INFO] [Enricher] Starting enrichment for 15 rows...
+2026-03-22 13:19:13,331 [INFO] [Enricher] Live search enabled=True max=50
+2026-03-22 13:19:13,332 [INFO] [Enricher] mode=row_linear
+2026-03-22 13:19:13,332 [INFO] [Unearthed Path] activated artist='jazzy-dale' row=0
+2026-03-22 13:19:13,332 [INFO] [Unearthed Path] skipping non-essential enrichers artist='jazzy-dale' row=0
+2026-03-22 13:19:13,333 [INFO] [Unearthed Path] no usable FB URL, resuming standard path artist='cheeky-leash' row=1
+2026-03-22 13:19:13,334 [INFO] [Unearthed Path] no usable FB URL, resuming standard path artist='dylan-voller' row=2
+2026-03-22 13:19:13,334 [INFO] [Unearthed Path] activated artist='persia' row=3
+2026-03-22 13:19:13,334 [INFO] [Unearthed Path] skipping non-essential enrichers artist='persia' row=3
+2026-03-22 13:19:13,334 [INFO] [Unearthed Path] activated artist='gia-darcy' row=4
+2026-03-22 13:19:13,334 [INFO] [Unearthed Path] skipping non-essential enrichers artist='gia-darcy' row=4
+2026-03-22 13:19:13,334 [INFO] [Unearthed Path] activated artist='divers' row=5
+2026-03-22 13:19:13,334 [INFO] [Unearthed Path] skipping non-essential enrichers artist='divers' row=5
+2026-03-22 13:19:13,334 [INFO] [Unearthed Path] no usable FB URL, resuming standard path artist='saith' row=6
+2026-03-22 13:19:13,334 [INFO] [Unearthed Path] activated artist='keely-music' row=7
+2026-03-22 13:19:13,334 [INFO] [Unearthed Path] skipping non-essential enrichers artist='keely-music' row=7
+2026-03-22 13:19:13,335 [INFO] [Unearthed Path] no usable FB URL, resuming standard path artist='i-m-fine' row=8
+2026-03-22 13:19:13,335 [INFO] [Unearthed Path] no usable FB URL, resuming standard path artist='vv-ace' row=9
+2026-03-22 13:19:13,335 [INFO] [Unearthed Path] no usable FB URL, resuming standard path artist='lowbrain' row=10
+2026-03-22 13:19:13,335 [INFO] [Unearthed Path] activated artist='tbish' row=11
+2026-03-22 13:19:13,335 [INFO] [Unearthed Path] skipping non-essential enrichers artist='tbish' row=11
+2026-03-22 13:19:13,335 [INFO] [Unearthed Path] activated artist='late-90s' row=12
+2026-03-22 13:19:13,335 [INFO] [Unearthed Path] skipping non-essential enrichers artist='late-90s' row=12
+2026-03-22 13:19:13,335 [INFO] [Unearthed Path] activated artist='jess-reiss' row=13
+2026-03-22 13:19:13,335 [INFO] [Unearthed Path] skipping non-essential enrichers artist='jess-reiss' row=13
+2026-03-22 13:19:13,342 [INFO] [Unearthed Path] no usable FB URL, resuming standard path artist='ksmba' row=14
+2026-03-22 13:19:13,367 [INFO] [Enricher] Row 2/15: matched 'cheeky-leash' via Triple J Unearthed.
+2026-03-22 13:19:13,367 [INFO] [Enricher] skipping soundcloud heavy enrichment for 'cheeky-leash' due to low row confidence (score=0.00 threshold=0.30 reasons=none)
+2026-03-22 13:19:14,203 [INFO] [Enricher] Bandcamp: status=no_match mode=directory_discover attempts=0 403=0 artist='cheeky-leash'
+2026-03-22 13:19:14,203 [INFO] [Enricher] skipping lastfm heavy enrichment for 'cheeky-leash' due to low row confidence (score=0.00 threshold=0.30 reasons=none)
+2026-03-22 13:19:14,204 [INFO] [IG Email] Visiting https://www.instagram.com/cheekyleashband/
+2026-03-22 13:19:15,637 [INFO] [IG Email] No email found
+2026-03-22 13:19:15,650 [INFO] [Enricher] skipping fb heavy enrichment for 'cheeky-leash' due to low row confidence (score=0.00 threshold=0.30 reasons=none)
+2026-03-22 13:19:15,661 [INFO] [Enricher] Row 3/15: matched 'dylan-voller' via Triple J Unearthed.
+2026-03-22 13:19:15,661 [INFO] [Enricher] skipping soundcloud heavy enrichment for 'dylan-voller' due to low row confidence (score=0.00 threshold=0.30 reasons=none)
+2026-03-22 13:19:16,521 [INFO] [Enricher] Bandcamp: status=no_match mode=directory_discover attempts=0 403=0 artist='dylan-voller'
+2026-03-22 13:19:16,523 [INFO] [Enricher] skipping lastfm heavy enrichment for 'dylan-voller' due to low row confidence (score=0.00 threshold=0.30 reasons=none)
+2026-03-22 13:19:16,525 [INFO] [IG Email] Visiting https://www.instagram.com/dylan.voller/
+2026-03-22 13:19:17,422 [INFO] [IG Email] No email found
+2026-03-22 13:19:17,424 [INFO] [Enricher] skipping fb heavy enrichment for 'dylan-voller' due to low row confidence (score=0.00 threshold=0.30 reasons=none)
+2026-03-22 13:19:17,430 [INFO] [Enricher] Row 7/15: matched 'saith' via Triple J Unearthed.
+2026-03-22 13:19:17,430 [INFO] [Enricher] skipping soundcloud heavy enrichment for 'saith' due to low row confidence (score=0.00 threshold=0.30 reasons=none)
+2026-03-22 13:19:18,709 [INFO] [Enricher] Bandcamp: status=no_match mode=directory_discover attempts=0 403=0 artist='saith'
+2026-03-22 13:19:18,709 [INFO] [Enricher] skipping lastfm heavy enrichment for 'saith' due to low row confidence (score=0.00 threshold=0.30 reasons=none)
+2026-03-22 13:19:18,709 [INFO] [IG Email] Visiting https://www.instagram.com/saithh_____/
+2026-03-22 13:19:19,635 [INFO] [IG Email] No email found
+2026-03-22 13:19:19,636 [INFO] [Enricher] skipping fb heavy enrichment for 'saith' due to low row confidence (score=0.00 threshold=0.30 reasons=none)
+2026-03-22 13:19:19,638 [INFO] [Enricher] Row 9/15: matched 'i-m-fine' via Triple J Unearthed.
+2026-03-22 13:19:19,638 [INFO] [Enricher] SoundCloud live check for 'i-m-fine' (current SC link missing).
+2026-03-22 13:19:19,638 [INFO] [Night SC] using day-mode candidate pipeline: SoundCloudEngine.people_search_candidates_v2 + HTML fallback
+2026-03-22 13:19:19,638 [INFO] [Night SC] API people search place='NSW' source=location_derived
+2026-03-22 13:19:21,694 [INFO] [Night SC] API people search -> handles=0 query='i-m-fine' place='NSW'
+2026-03-22 13:19:21,694 [INFO] [Night SC] API people search returned 0 handles for place='NSW'; retrying without place filter.
+2026-03-22 13:19:22,277 [INFO] [Night SC] API people search -> handles=12 query='i-m-fine' place=''
+2026-03-22 13:19:23,404 [INFO] [Night SC] rss_first=1 handle=imfineee url=https://soundcloud.com/imfineee rss_attempted=1 outcome=rss_success flags_used_rss=1 rss_used_total=1
+2026-03-22 13:19:23,404 [INFO] [Enricher] low-confidence match skipped for 'i-m-fine' (Spotify ID <unknown>) – score=0.65, candidate=im.fine | SoundCloud (live search) | https://soundcloud.com/imfineee
+2026-03-22 13:19:23,407 [INFO] [Night SC] candidate_source=api profile_source=none root_fetch_disabled=0 about_disabled=0 tracks_api_blocked=0 used_user_api=0 used_rss=1 rss_used_total=1
+2026-03-22 13:19:23,407 [INFO] [Night SC] Final status: rss_success handle=imfineee http= confidence=1.00 ms=3769 fetches=0 reason=rss_success
+2026-03-22 13:19:24,758 [INFO] [Enricher] Bandcamp: status=no_match mode=directory_discover attempts=0 403=0 artist='i-m-fine'
+2026-03-22 13:19:24,761 [INFO] [Enricher] Last.fm live search: https://www.last.fm/search?q=%22i-m-fine%22+%22Airplane+Mode%22&type=artist
+2026-03-22 13:19:26,340 [INFO] [Enricher][LF] Last.fm search: status=200 attempt=1/1 headers=lastfm_html
+2026-03-22 13:19:26,363 [INFO] [Enricher] Last.fm Enrich: candidate 'NOIR(느와르) "Airplane Mode" M' for 'i-m-fine' has confidence=0.22.
+2026-03-22 13:19:26,363 [INFO] [Enricher] Last.fm Enrich: no safe match for 'i-m-fine' (best_confidence=0.22), skipping.
+2026-03-22 13:19:26,364 [INFO] [IG Email] Visiting https://www.instagram.com/imfine_aus/
+2026-03-22 13:19:27,334 [INFO] [IG Email] No email found
+2026-03-22 13:19:27,338 [INFO] [FB Discover] No explicit facebook url for 'i-m-fine'; attempting bounded discovery (explicit FB intake outcome='no_explicit_url' source='<none>' sample='').
+2026-03-22 13:19:27,343 [INFO] [FB Enrich] search_method=direct_route query='i-m-fine Airplane Mode' url=https://www.facebook.com/search/pages/?q=i-m-fine+Airplane+Mode
+2026-03-22 13:19:29,456 [INFO] [FB Shared][DOM Gate] reason=zero_usable_hrefs_in_scope containers_found=1 anchors_in_scope=0 candidates_pre_url_gate=0 fallback=0 search_name='i-m-fine'
+2026-03-22 13:19:29,457 [INFO] [FB Shared][DOM Gate] chosen_container_selector=div[aria-label="Search results"] containers_found=1 anchors_in_scope=0 candidates_pre_url_gate=0 candidates_post_url_gate=0 url_gate_rejected=0 dropped_by_dom_gate=13 reason=container_match search_name='i-m-fine'
+2026-03-22 13:19:29,701 [INFO] [FB Enrich] search_method=direct_route failure_mode=overlay_zero_anchors query='i-m-fine Airplane Mode'
+2026-03-22 13:19:29,701 [INFO] [FB Enrich] search_method=homepage_ui query='i-m-fine Airplane Mode'
+2026-03-22 13:19:38,350 [INFO] [FB Shared][DOM Gate] chosen_container_selector=div[role="main"] div[role="feed"] containers_found=1 anchors_in_scope=18 candidates_pre_url_gate=16 candidates_post_url_gate=7 url_gate_rejected=9 dropped_by_dom_gate=80 reason=container_match search_name='i-m-fine'
+2026-03-22 13:19:38,713 [INFO] -> 'Favour Ukpe' (cat='is', name_score=0.00, cat_boost=-0.50, final=-0.50, music=False, corporate=False)
+2026-03-22 13:19:38,714 [INFO] -> 'Aniefon Ukpe' (cat='and', name_score=0.00, cat_boost=-0.50, final=-0.50, music=False, corporate=False)
+2026-03-22 13:19:38,715 [INFO] -> 'No photo description available.' (cat='+6', name_score=0.00, cat_boost=-0.50, final=-0.50, music=False, corporate=False)
+2026-03-22 13:19:38,716 [INFO] -> 'No photo description available.' (cat='+6', name_score=0.00, cat_boost=-0.50, final=-0.50, music=False, corporate=False)
+2026-03-22 13:19:38,717 [INFO] -> 'May be an image of one or more people, braids and people smiling' (cat='+6', name_score=0.00, cat_boost=-0.50, final=-0.50, music=False, corporate=False)
+2026-03-22 13:19:38,718 [INFO] -> 'May be an image of smiling' (cat='+6', name_score=0.00, cat_boost=-0.50, final=-0.50, music=False, corporate=False)
+2026-03-22 13:19:38,719 [INFO] -> '+6' (cat='May be an image of smiling, 6 remaining items', name_score=0.00, cat_boost=-0.50, final=-0.50, music=False, corporate=False)
+2026-03-22 13:19:38,719 [INFO] [FB Discover] Rejected candidate for 'i-m-fine' before scrape - weak identity evidence: identity_floor
+2026-03-22 13:19:38,719 [INFO] [FB Discover] Considering next plausible ranked candidate for 'i-m-fine'.
+2026-03-22 13:19:38,719 [INFO] [FB Discover] Rejected candidate for 'i-m-fine' before scrape - weak identity evidence: identity_floor
+2026-03-22 13:19:38,719 [INFO] [FB Enrich] No high-confidence Facebook match for 'i-m-fine'.
+2026-03-22 13:19:38,720 [INFO] [FB Discover] No safe candidate found for 'i-m-fine'
+2026-03-22 13:19:38,720 [INFO] [FB Discover] Discovery failed for 'i-m-fine'; row will not retry discovery this run
+2026-03-22 13:19:38,760 [INFO] [Enricher] Row 10/15: matched 'vv-ace' via Triple J Unearthed.
+2026-03-22 13:19:38,760 [INFO] [Enricher] SoundCloud live check for 'vv-ace' (current SC link missing).
+2026-03-22 13:19:38,760 [INFO] [Night SC] API people search place='VIC' source=location_derived
+2026-03-22 13:19:39,153 [INFO] [Night SC] API people search -> handles=0 query='vv-ace' place='VIC'
+2026-03-22 13:19:39,153 [INFO] [Night SC] API people search returned 0 handles for place='VIC'; retrying without place filter.
+2026-03-22 13:19:39,593 [INFO] [Night SC] API people search -> handles=10 query='vv-ace' place=''
+2026-03-22 13:19:43,268 [INFO] [Night SC] rss_first=1 handle=vv-ace url=https://soundcloud.com/vv-ace rss_attempted=1 outcome=rss_fail flags_used_rss=1 rss_used_total=2
+2026-03-22 13:19:43,270 [INFO] [SC] tracks API blocked (401/403); continuing with HTML/about fallback (SC_ALLOW_FALLBACK_ON_TRACKS_401_403=1)
+2026-03-22 13:19:47,771 [INFO] [Night SC] candidate_source=api profile_source=engine root_fetch_disabled=1 about_disabled=0 tracks_api_blocked=1 used_user_api=0 used_rss=1 rss_used_total=2
+2026-03-22 13:19:47,772 [INFO] [Night SC] Final status: non_actionable_challenge handle=vv-ace http=200 confidence=1.00 ms=9011 fetches=1 reason=challenge_page
+2026-03-22 13:19:47,772 [INFO] [Night SC] forcing rss_only due to html challenges=2
+2026-03-22 13:19:47,772 [INFO] [Night SC] Entering RSS-only mode (reason=consecutive_challenges row=<unknown> challenges=2 html_streak=2 api_403_streak=0 threshold_403=3)
+2026-03-22 13:19:48,727 [INFO] [Enricher] Bandcamp: status=no_match mode=directory_discover attempts=0 403=0 artist='vv-ace'
+2026-03-22 13:19:48,728 [INFO] [Enricher] Last.fm live search: https://www.last.fm/search?q=%22vv-ace%22+%22Greenlight%22&type=artist
+2026-03-22 13:19:49,885 [INFO] [Enricher][LF] Last.fm search: status=200 attempt=1/1 headers=lastfm_html
+2026-03-22 13:19:49,909 [INFO] [Enricher] Last.fm Enrich: candidate 'VV-Ace' for 'vv-ace' has confidence=1.00.
+2026-03-22 13:19:49,909 [INFO] [Enricher] Fetching lastfm profile: https://www.last.fm/music/VV-Ace
+2026-03-22 13:19:49,932 [INFO] [Enricher][LF] lastfm profile: status=200 attempt=1/3 headers=lastfm_html
+2026-03-22 13:19:50,091 [INFO] [Enricher] No actionable data on lastfm profile: https://www.last.fm/music/VV-Ace | fetch_ok=True http=200 actionable=False
+2026-03-22 13:19:50,091 [INFO] [Enricher] Last.fm Enrich: candidate 'VV-Ace' for 'vv-ace' has confidence=1.00 | fetch_ok=True http=200
+2026-03-22 13:19:50,091 [INFO] [IG Email] Visiting https://www.instagram.com/vv.ace/
+2026-03-22 13:19:51,250 [INFO] [IG Email] No email found
+2026-03-22 13:19:51,253 [INFO] [FB Discover] No explicit facebook url for 'vv-ace'; attempting bounded discovery (explicit FB intake outcome='no_explicit_url' source='<none>' sample='').
+2026-03-22 13:19:51,253 [INFO] [FB Enrich] search_method=direct_route query='vv-ace Greenlight' url=https://www.facebook.com/search/pages/?q=vv-ace+Greenlight
+2026-03-22 13:19:53,086 [INFO] [FB Shared][DOM Gate] reason=zero_usable_hrefs_in_scope containers_found=1 anchors_in_scope=0 candidates_pre_url_gate=0 fallback=0 search_name='vv-ace'
+2026-03-22 13:19:53,086 [INFO] [FB Shared][DOM Gate] chosen_container_selector=div[aria-label="Search results"] containers_found=1 anchors_in_scope=0 candidates_pre_url_gate=0 candidates_post_url_gate=0 url_gate_rejected=0 dropped_by_dom_gate=13 reason=container_match search_name='vv-ace'
+2026-03-22 13:19:53,247 [INFO] [FB Enrich] search_method=direct_route failure_mode=overlay_zero_anchors query='vv-ace Greenlight'
+2026-03-22 13:19:53,247 [INFO] [FB Enrich] search_method=homepage_ui query='vv-ace Greenlight'
+2026-03-22 13:20:00,092 [INFO] [FB Shared][DOM Gate] reason=zero_usable_hrefs_in_scope containers_found=1 anchors_in_scope=0 candidates_pre_url_gate=0 fallback=0 search_name='vv-ace'
+2026-03-22 13:20:00,093 [INFO] [FB Shared][DOM Gate] chosen_container_selector=div[role="main"] div[role="feed"] containers_found=1 anchors_in_scope=0 candidates_pre_url_gate=0 candidates_post_url_gate=0 url_gate_rejected=0 dropped_by_dom_gate=84 reason=container_match search_name='vv-ace'
+2026-03-22 13:20:01,217 [INFO] [FB Enrich] No FB search candidates for 'vv-ace'; trying slug fallback 'https://www.facebook.com/vvace'.
+2026-03-22 13:20:01,219 [INFO] -> 'vv-ace' (cat='<none>', name_score=1.50, cat_boost=0.00, final=1.50, music=True, corporate=False)
+2026-03-22 13:20:01,219 [INFO] [FB Enrich] Trying uncertain music FB candidate 'vv-ace' for 'vv-ace' (category='<none>', base_score=1.50).
+2026-03-22 13:20:04,164 [INFO] [FB Enrich] Confirmed music page for 'vv-ace' with FB category '4mzR2AeWT.com Ace's cover photo 8jQlDaMXAOdl9NcwiNSTYXhSStaDJoGhwOvzkgj0tO3ChWAhxUXRi1TxlEyqKnYnXNsiyi'.
+2026-03-22 13:20:04,743 [INFO] [FB Enrich] Best FB candidate for 'vv-ace' -> 'vv-ace' (final_score=1.50, name_score=1.50, cat_boost=0.00, music=True, corporate=False, category='<none>')
+2026-03-22 13:20:04,744 [INFO] [FB Discover] Candidate accepted for 'vv-ace': https://www.facebook.com/vvace
+2026-03-22 13:20:04,746 [INFO] [FB Discover] Canonical facebook_url populated via discovery for 'vv-ace'
+2026-03-22 13:20:04,747 [INFO] [FB Enrich] Visiting https://www.facebook.com/vvace
+2026-03-22 13:22:16,732 [INFO] [FB Enrich] Visiting contact/about page: https://www.facebook.com/vva.c.e/about
+2026-03-22 13:24:15,160 [INFO] [Enricher] Row 11/15: matched 'lowbrain' via Triple J Unearthed.
+2026-03-22 13:24:15,162 [INFO] [Enricher] SoundCloud live check for 'lowbrain' (current SC link missing).
+2026-03-22 13:24:15,163 [INFO] [Night SC] API people search place='Perth,WA' source=location_raw
+2026-03-22 13:24:15,713 [INFO] [Night SC] API people search -> handles=0 query='lowbrain' place='Perth,WA'
+2026-03-22 13:24:15,718 [INFO] [Night SC] API people search returned 0 handles for place='Perth,WA'; retrying without place filter.

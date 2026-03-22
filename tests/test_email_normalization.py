@@ -67,3 +67,49 @@ def test_night_fb_invalid_obfuscation_does_not_produce_email() -> None:
 
     assert emails == []
     assert used_mailto is False
+
+
+def test_night_fb_text_sample_direct_email_uses_fast_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fail_normalize(_sample: str):  # noqa: ANN001
+        raise AssertionError("direct email path should not normalize")
+
+    monkeypatch.setattr(night_mode_fb, "_normalize_fb_obfuscated_email_text", fail_normalize)
+
+    emails = night_mode_fb._extract_fb_emails_from_text_sample("Bookings: bookings@artist.com")
+
+    assert emails == ["bookings@artist.com"]
+
+
+def test_night_fb_text_sample_obfuscated_email_still_normalizes() -> None:
+    emails = night_mode_fb._extract_fb_emails_from_text_sample("Bookings: bookings (at) artist (dot) com")
+
+    assert emails == ["bookings@artist.com"]
+
+
+def test_night_fb_text_sample_plain_non_email_skips_normalization(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fail_normalize(_sample: str):  # noqa: ANN001
+        raise AssertionError("plain non-email path should not normalize")
+
+    monkeypatch.setattr(night_mode_fb, "_normalize_fb_obfuscated_email_text", fail_normalize)
+
+    emails = night_mode_fb._extract_fb_emails_from_text_sample(
+        "This is a long plain text blob with profile copy, tour dates, and no contact address."
+    )
+
+    assert emails == []
+
+
+@pytest.mark.parametrize(
+    ("sample", "expected"),
+    [
+        ("Bookings: bookings@artist.com", False),
+        ("Bookings: bookings (at) artist (dot) com", True),
+        ("Bookings: bookings [at] artist [dot] com", True),
+        ("Bookings: bookings at artist dot com", True),
+        ("Bookings: bookings @ artist . com", True),
+        ("https://example.com/contact?email=press%40artist.com", True),
+        ("Just a plain biography paragraph without contact info", False),
+    ],
+)
+def test_night_fb_obfuscation_guard_distinguishes_needed_normalization(sample: str, expected: bool) -> None:
+    assert night_mode_fb._fb_sample_needs_obfuscation_normalization(sample) is expected

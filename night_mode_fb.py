@@ -4266,17 +4266,35 @@ def _normalize_fb_obfuscated_email_text(text: str) -> Tuple[str, int]:
     return normalized, replacements
 
 
+def _fb_sample_needs_obfuscation_normalization(sample: str) -> bool:
+    sample = str(sample or "")
+    if not sample:
+        return False
+
+    normalized = unicodedata.normalize("NFKC", sample)
+    lowered = normalized.lower()
+
+    if any(token in lowered for token in ("[at]", "(at)", " at ", "[dot]", "(dot)", " dot ", "%40")):
+        return True
+
+    if re.search(r"[A-Z0-9._%+-]+\s+@\s+[A-Z0-9.-]+\s*\.\s*[A-Z]{2,}", normalized, re.IGNORECASE):
+        return True
+
+    return False
+
+
 def _extract_fb_emails_from_text_sample(sample: str) -> List[str]:
     sample = str(sample or "")
     if not sample:
         return []
     replacements = 0
     normalized = sample
-    try:
-        normalized, replacements = _normalize_fb_obfuscated_email_text(sample)
-    except Exception:
-        normalized = sample
-        replacements = 0
+    if _fb_sample_needs_obfuscation_normalization(sample):
+        try:
+            normalized, replacements = _normalize_fb_obfuscated_email_text(sample)
+        except Exception:
+            normalized = sample
+            replacements = 0
     if replacements:
         try:
             from pipeline_runner import increment_pattern_emails
