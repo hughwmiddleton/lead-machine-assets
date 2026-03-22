@@ -1787,6 +1787,27 @@ def _normalise_fb_url(url: str) -> str:
     return urllib.parse.urlunparse((scheme, host, path, "", "", ""))
 
 
+def _canonicalize_fb_pages_category_url(url: str) -> Optional[str]:
+    raw = str(url or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = urllib.parse.urlparse(raw)
+    except Exception:
+        return None
+    parts = [part for part in (parsed.path or "").split("/") if part]
+    if len(parts) < 4 or parts[0].lower() != "pages" or parts[1].lower() != "category":
+        return None
+    if len(parts) > 4:
+        tail = [part.lower() for part in parts[4:]]
+        if len(tail) != 1 or tail[0] not in {"about", "posts", "photos"}:
+            return None
+    page = (parts[3] or "").strip()
+    if not page or page.lower() in {"nan", "none", "null"}:
+        return None
+    return urllib.parse.urlunparse(("https", "www.facebook.com", f"/{page}", "", "", ""))
+
+
 def _canonicalize_and_dedupe_explicit_fb_urls(
     urls: Sequence[str], logger: LoggerFn = None, debug: bool = False
 ) -> List[str]:
@@ -1804,6 +1825,9 @@ def _canonicalize_and_dedupe_explicit_fb_urls(
         norm = _normalise_fb_url(raw)
         if not norm:
             continue
+        pages_category_norm = _canonicalize_fb_pages_category_url(norm)
+        if pages_category_norm:
+            norm = _normalise_fb_url(pages_category_norm) or pages_category_norm
         try:
             parsed = urllib.parse.urlsplit(norm)
             path = parsed.path.rstrip("/") or "/"
@@ -2021,6 +2045,9 @@ def classify_explicit_fb_intake(
                 if not invalid_reason:
                     invalid_reason = "canonicalization_dropped"
                 continue
+            pages_category_canonical = _canonicalize_fb_pages_category_url(canonical)
+            if pages_category_canonical:
+                canonical = _normalise_fb_url(pages_category_canonical) or pages_category_canonical
             accepted_sources_by_url.setdefault(canonical, source_label)
             guard_reject_reason, guard_sample = _explicit_fb_pre_scrape_guard_reason(canonical)
             if guard_reject_reason:

@@ -312,6 +312,42 @@ def test_explicit_fb_entrypoint_urls_accept_share_entrypoint_but_block_share_php
     assert share_php_urls == []
 
 
+def test_explicit_fb_entrypoint_urls_canonicalize_pages_category_shapes() -> None:
+    assert night_mode_fb.explicit_fb_entrypoint_urls_for_row(
+        {"Facebook_URL": "https://www.facebook.com/pages/category/Musician-Band/tbish"}
+    ) == ["https://www.facebook.com/tbish"]
+    assert night_mode_fb.explicit_fb_entrypoint_urls_for_row(
+        {"Facebook_URL": "https://www.facebook.com/pages/category/Musician-Band/tbish/"}
+    ) == ["https://www.facebook.com/tbish"]
+    assert night_mode_fb.explicit_fb_entrypoint_urls_for_row(
+        {"Facebook_URL": "https://www.facebook.com/pages/category/Musician-Band/tbish/about"}
+    ) == ["https://www.facebook.com/tbish"]
+
+
+def test_explicit_fb_entrypoint_urls_reject_ambiguous_pages_category_shapes() -> None:
+    assert night_mode_fb.explicit_fb_entrypoint_urls_for_row(
+        {"Facebook_URL": "https://www.facebook.com/pages/category/"}
+    ) == []
+    assert night_mode_fb.explicit_fb_entrypoint_urls_for_row(
+        {"Facebook_URL": "https://www.facebook.com/pages/category/Musician-Band/"}
+    ) == []
+    assert night_mode_fb.explicit_fb_entrypoint_urls_for_row(
+        {"Facebook_URL": "https://www.facebook.com/pages/category/Musician-Band/nan"}
+    ) == []
+    assert night_mode_fb.explicit_fb_entrypoint_urls_for_row(
+        {"Facebook_URL": "https://www.facebook.com/pages/category/Musician-Band/tbish/videos"}
+    ) == []
+
+
+def test_classify_explicit_fb_intake_uses_canonicalized_pages_category_url() -> None:
+    decision = night_mode_fb.classify_explicit_fb_intake(
+        {"Artist Name": "tbish", "Facebook_URL": "https://www.facebook.com/pages/category/Musician-Band/tbish/about"}
+    )
+
+    assert decision.accepted_urls == ["https://www.facebook.com/tbish"]
+    assert decision.guard_reason == ""
+
+
 def test_classify_explicit_fb_intake_reports_no_explicit_url() -> None:
     decision = night_mode_fb.classify_explicit_fb_intake(
         {"Artist Name": "No FB", "Social Link": "https://www.instagram.com/no-fb"}
@@ -352,6 +388,39 @@ def test_pass_a_uses_fb_url_from_social_link(monkeypatch) -> None:
     result = enricher.enrich_row_with_facebook_night(row)
 
     assert calls["urls"] == ["https://www.facebook.com/panicboomband"]
+    assert result.get("FB_Status") == "pass_a_found_email"
+    assert result.get("FB_Reason") == "explicit_url"
+
+
+def test_pass_a_uses_canonicalized_pages_category_url(monkeypatch) -> None:
+    enricher = night_mode_fb.NightModeFacebookEnricher(
+        legacy_module=None,
+        username="",
+        password="",
+        logger=None,
+        use_shared_session=False,
+    )
+    monkeypatch.setattr(enricher, "_ensure_session", lambda: None)
+
+    calls = {"urls": []}
+
+    def _fake_scrape(url, *args, **kwargs):  # noqa: ANN001
+        calls["urls"].append(url)
+        night_result = night_mode_fb.NightModeFacebookResult(
+            email="artist@test.com",
+            email_all="artist@test.com",
+            facebook_url=night_mode_fb._normalise_fb_url(url),
+            email_extract_method="regex",
+        )
+        return night_result, ["artist@test.com"], "session", "found_email"
+
+    monkeypatch.setattr(enricher, "_scrape_single_fb_candidate", _fake_scrape)
+
+    row = {"Artist Name": "Test Artist", "Social Link": "https://www.facebook.com/pages/category/Musician-Band/tbish/about"}
+
+    result = enricher.enrich_row_with_facebook_night(row)
+
+    assert calls["urls"] == ["https://www.facebook.com/tbish"]
     assert result.get("FB_Status") == "pass_a_found_email"
     assert result.get("FB_Reason") == "explicit_url"
 

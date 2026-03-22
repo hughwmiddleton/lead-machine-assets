@@ -10,7 +10,6 @@
       "job_id": "job_unearthed_1"
     }
   ],
-  "phased": false,
   "facebook": {
     "auto_resume_after_captcha": true,
     "cooldown_seconds": 900,
