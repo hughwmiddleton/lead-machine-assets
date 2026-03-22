@@ -7442,6 +7442,19 @@ class NightModeFacebookEnricher:
             if not has_music_signals:
                 _log(self.logger, f"[Night FB] No music signals on main page {resolved_url}, checking About/Contact...")
             contact_url = _pick_fb_contact_link(soup, resolved_url)
+            if contact_url and contact_url.endswith("/about"):
+                resolved_url_lower = (resolved_url or "").strip().lower()
+                slug_style_url = (
+                    resolved_url_lower.startswith("https://www.facebook.com/")
+                    and "?" not in resolved_url_lower
+                    and not resolved_url_lower.startswith("https://www.facebook.com/profile.php")
+                    and not resolved_url_lower.startswith("https://www.facebook.com/pages/")
+                    and not resolved_url_lower.startswith("https://www.facebook.com/people/")
+                )
+                if slug_style_url:
+                    fallback_variants = _fetch_fb_about_variants(resolved_url)
+                    if fallback_variants:
+                        contact_url = fallback_variants[0]
             if not contact_url:
                 fallback_variants = _fetch_fb_about_variants(resolved_url)
                 fallback_url = fallback_variants[0] if fallback_variants else ""
