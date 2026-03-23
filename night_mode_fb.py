@@ -2921,6 +2921,46 @@ def _is_fb_content_unavailable_page(page_html: Optional[str]) -> bool:
     return any(phrase in lower_html for phrase in not_found_phrases)
 
 
+def _explicit_fb_render_state_invalid_reason(
+    page_html: Optional[str],
+    *,
+    resolved_url: str = "",
+    rendered_text: str = "",
+    anchor_values: Optional[Sequence[str]] = None,
+) -> str:
+    combined_text = "\n".join(
+        value for value in (str(page_html or ""), str(rendered_text or "")) if value
+    )
+    if _is_fb_content_unavailable_page(combined_text):
+        return "content_unavailable"
+
+    anchor_values = [str(value or "").strip() for value in (anchor_values or []) if str(value or "").strip()]
+    if anchor_values:
+        return ""
+
+    html_text = str(page_html or "")
+    rendered_text = str(rendered_text or "").strip()
+    if rendered_text:
+        return ""
+    if "mailto:" in html_text.lower() or EMAIL_REGEX.search(html_text):
+        return ""
+
+    soup = BeautifulSoup(html_text, "html.parser") if html_text else None
+    if soup and _pick_fb_contact_link(soup, resolved_url or ""):
+        return ""
+
+    dom_text = ""
+    if soup:
+        try:
+            dom_text = " ".join(soup.stripped_strings)
+        except Exception:
+            dom_text = ""
+
+    if len(dom_text) < 24:
+        return "empty_shell"
+    return ""
+
+
 def _session_looks_healthy(driver) -> Tuple[bool, str]:
     """
     Quick FB session health probe to catch login/verification walls.
@@ -7395,6 +7435,37 @@ class NightModeFacebookEnricher:
             _log(self.logger, f"[Night FB] Ignoring login/redirect page: {resolved_url}")
             self.fb_rows_skipped["challenge"] += 1
             return None, [], used_driver_kind, "login_wall"
+
+        explicit_pass_a = bool(candidate_context and candidate_context.get("explicit_accepted_url"))
+        if explicit_pass_a:
+            main_render_reason = _explicit_fb_render_state_invalid_reason(
+                html,
+                resolved_url=resolved_url,
+                rendered_text=getattr(self, "_last_fb_visible_text", "") or "",
+                anchor_values=getattr(self, "_last_fb_live_anchor_values", []) or [],
+            )
+            if main_render_reason:
+                _log(
+                    self.logger,
+                    f"[Night FB][RenderGate] explicit page state invalid; recollecting current surface once url='{resolved_url}' reason='{main_render_reason}'",
+                )
+                refreshed_html, refreshed_text, refreshed_anchor_values, _ = self._collect_current_fb_email_surface_state(
+                    driver_kind=used_driver_kind,
+                )
+                if refreshed_html:
+                    html = refreshed_html
+                main_render_reason = _explicit_fb_render_state_invalid_reason(
+                    html,
+                    resolved_url=resolved_url,
+                    rendered_text=refreshed_text,
+                    anchor_values=refreshed_anchor_values,
+                )
+                if main_render_reason:
+                    _log(
+                        self.logger,
+                        f"[Night FB][PageUnavailable] {resolved_url} (render_state={main_render_reason})",
+                    )
+                    return None, [], used_driver_kind, "content_unavailable"
 
         if _is_fb_content_unavailable_page(html):
             _log(self.logger, f"[Night FB][PageUnavailable] {resolved_url}")

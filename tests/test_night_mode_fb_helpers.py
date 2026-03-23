@@ -848,6 +848,180 @@ def test_pass_a_rendered_visible_text_without_email_keeps_no_email_status(monkey
     assert result.get("FB_Status") == "pass_a_no_email_on_page"
 
 
+def test_explicit_pass_a_valid_render_state_passes_without_recovery(monkeypatch) -> None:
+    enricher = night_mode_fb.NightModeFacebookEnricher(
+        legacy_module=None,
+        username="",
+        password="",
+        logger=None,
+        use_shared_session=False,
+    )
+    monkeypatch.setattr(night_mode_fb, "_night_fb_has_music_signals", lambda *args, **kwargs: True)
+
+    def fake_fetch(url, goto_about=False):  # noqa: ANN001
+        assert goto_about is False
+        enricher._last_fb_visible_text = "Bookings healthy@artist.com"
+        enricher._last_fb_live_anchor_values = []
+        return "<html><body><div>Contact</div></body></html>", url
+
+    monkeypatch.setattr(enricher, "_fetch_html_with_url", fake_fetch)
+    monkeypatch.setattr(
+        enricher,
+        "_collect_current_fb_email_surface_state",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("healthy explicit PASS A page should not restabilize")),
+    )
+
+    candidate = enricher._scrape_single_fb_candidate(
+        "https://www.facebook.com/healthyartist",
+        {"Email_All": ""},
+        "Healthy Artist",
+        candidate_context={"explicit_accepted_url": True},
+    )
+
+    night_result, emails, driver_kind, outcome = candidate
+
+    assert night_result is not None
+    assert night_result.email == "healthy@artist.com"
+    assert emails == ["healthy@artist.com"]
+    assert driver_kind == "session"
+    assert outcome == "found_email"
+
+
+def test_explicit_pass_a_invalid_render_state_recollects_once_and_recovers(monkeypatch) -> None:
+    enricher = night_mode_fb.NightModeFacebookEnricher(
+        legacy_module=None,
+        username="",
+        password="",
+        logger=None,
+        use_shared_session=False,
+    )
+    monkeypatch.setattr(night_mode_fb, "_night_fb_has_music_signals", lambda *args, **kwargs: True)
+
+    def fake_fetch(url, goto_about=False):  # noqa: ANN001
+        assert goto_about is False
+        enricher._last_fb_visible_text = ""
+        enricher._last_fb_live_anchor_values = []
+        return "<html><body></body></html>", url
+
+    restabilized = {"count": 0}
+
+    def fake_recollect(*args, **kwargs):  # noqa: ANN001
+        restabilized["count"] += 1
+        return (
+            "<html><body><div>Bookings recovered@artist.com</div></body></html>",
+            "Bookings recovered@artist.com",
+            [],
+            [],
+        )
+
+    monkeypatch.setattr(enricher, "_fetch_html_with_url", fake_fetch)
+    monkeypatch.setattr(enricher, "_collect_current_fb_email_surface_state", fake_recollect)
+
+    candidate = enricher._scrape_single_fb_candidate(
+        "https://www.facebook.com/recoverableartist",
+        {"Email_All": ""},
+        "Recoverable Artist",
+        candidate_context={"explicit_accepted_url": True},
+    )
+
+    night_result, emails, driver_kind, outcome = candidate
+
+    assert restabilized["count"] == 1
+    assert night_result is not None
+    assert night_result.email == "recovered@artist.com"
+    assert emails == ["recovered@artist.com"]
+    assert driver_kind == "session"
+    assert outcome == "found_email"
+
+
+def test_explicit_pass_a_invalid_render_state_returns_content_unavailable_after_single_recovery(monkeypatch) -> None:
+    enricher = night_mode_fb.NightModeFacebookEnricher(
+        legacy_module=None,
+        username="",
+        password="",
+        logger=None,
+        use_shared_session=False,
+    )
+
+    def fake_fetch(url, goto_about=False):  # noqa: ANN001
+        assert goto_about is False
+        enricher._last_fb_visible_text = ""
+        enricher._last_fb_live_anchor_values = []
+        return "<html><body></body></html>", url
+
+    restabilized = {"count": 0}
+
+    def fake_recollect(*args, **kwargs):  # noqa: ANN001
+        restabilized["count"] += 1
+        return "<html><body></body></html>", "", [], []
+
+    monkeypatch.setattr(enricher, "_fetch_html_with_url", fake_fetch)
+    monkeypatch.setattr(enricher, "_collect_current_fb_email_surface_state", fake_recollect)
+
+    candidate = enricher._scrape_single_fb_candidate(
+        "https://www.facebook.com/brokenartist",
+        {"Email_All": ""},
+        "Broken Artist",
+        candidate_context={"explicit_accepted_url": True},
+    )
+
+    night_result, emails, driver_kind, outcome = candidate
+
+    assert restabilized["count"] == 1
+    assert night_result is None
+    assert emails == []
+    assert driver_kind == "session"
+    assert outcome == "content_unavailable"
+
+
+def test_explicit_pass_a_invalid_render_state_preserves_content_unavailable_reason_for_fallback(monkeypatch) -> None:
+    logs = []
+    enricher = night_mode_fb.NightModeFacebookEnricher(
+        legacy_module=None,
+        username="",
+        password="",
+        logger=logs.append,
+        use_shared_session=False,
+    )
+    monkeypatch.setattr(enricher, "_has_authenticated_session", lambda: True)
+    monkeypatch.setattr(enricher, "_ensure_session", lambda: object())
+    monkeypatch.setattr(enricher, "_maybe_recover_or_skip_on_checkpoint", lambda: True)
+
+    def fake_fetch(url, goto_about=False):  # noqa: ANN001
+        assert goto_about is False
+        enricher._last_fb_visible_text = ""
+        enricher._last_fb_live_anchor_values = []
+        return "<html><body></body></html>", url
+
+    search_calls = []
+
+    def fake_search(*args, **kwargs):  # noqa: ANN001
+        search_calls.append((args, kwargs))
+        return ""
+
+    monkeypatch.setattr(enricher, "_fetch_html_with_url", fake_fetch)
+    monkeypatch.setattr(
+        enricher,
+        "_collect_current_fb_email_surface_state",
+        lambda *args, **kwargs: ("<html><body></body></html>", "", [], []),
+    )
+    monkeypatch.setattr(enricher, "_search_for_page", fake_search)
+
+    row = {
+        "Artist Name": "Broken Artist",
+        "Email": "",
+        "Email_All": "",
+        "Facebook_URL": "https://www.facebook.com/brokenartist",
+    }
+
+    result = enricher.enrich_row_with_facebook_night(row)
+
+    assert len(search_calls) == 1
+    assert result.get("FB_Status") == "pass_a_no_email_on_page"
+    assert result.get("FB_Reason") == "content_unavailable"
+    assert any("[Night FB][RenderGate]" in msg for msg in logs)
+
+
 def test_explicit_fb_urls_canonicalized_and_deduped(monkeypatch) -> None:
     enricher = night_mode_fb.NightModeFacebookEnricher(
         legacy_module=None,
