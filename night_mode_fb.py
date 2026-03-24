@@ -6962,6 +6962,30 @@ class NightModeFacebookEnricher:
         self._last_fb_reveal_actions = list(reveal_actions or [])
         return page_source, rendered_text, list(anchor_values or []), list(reveal_actions or [])
 
+    @staticmethod
+    def _explicit_main_page_surface_capture_is_weak(
+        rendered_text: Optional[str],
+        anchor_values: Optional[List[str]],
+    ) -> bool:
+        visible_text = str(rendered_text or "").strip()
+        live_anchor_values = [str(value or "").strip() for value in list(anchor_values or []) if str(value or "").strip()]
+        return not visible_text and not live_anchor_values
+
+    def _restabilize_explicit_main_page_surface_capture(
+        self,
+        driver_kind: str = "session",
+    ) -> Tuple[str, str, List[str], List[str]]:
+        driver = None
+        if str(driver_kind or "").startswith("anon"):
+            driver = getattr(self, "_anon_driver", None)
+        else:
+            session = getattr(self, "session", None)
+            driver = getattr(session, "driver", None)
+        if driver is None:
+            return "", "", [], []
+        time.sleep(0.8)
+        return self._collect_current_fb_email_surface_state(driver_kind=driver_kind)
+
     def _targeted_explicit_content_unavailable_restabilization(
         self,
         driver_kind: str = "session",
@@ -7916,6 +7940,19 @@ class NightModeFacebookEnricher:
         has_music_signals_main = _night_fb_has_music_signals(soup, {"url": resolved_url})
         main_visible_text = getattr(self, "_last_fb_visible_text", "") or ""
         main_anchor_values = list(getattr(self, "_last_fb_live_anchor_values", []) or [])
+        if explicit_pass_a and self._explicit_main_page_surface_capture_is_weak(main_visible_text, main_anchor_values):
+            _log(
+                self.logger,
+                f"[Night FB][Explicit Stabilize] weak main-page capture detected; recollecting once url='{resolved_url}'",
+            )
+            refreshed_html, refreshed_text, refreshed_anchor_values, _ = self._restabilize_explicit_main_page_surface_capture(
+                driver_kind=used_driver_kind,
+            )
+            if refreshed_html:
+                html = refreshed_html
+                soup = BeautifulSoup(html, "html.parser")
+            main_visible_text = refreshed_text
+            main_anchor_values = list(refreshed_anchor_values or [])
         _log_fb_email_surface_debug(self.logger, f"main:{resolved_url}", html or "", main_visible_text)
         emails_raw, main_mailto = _extract_emails_from_html(
             html or "",

@@ -726,6 +726,129 @@ def test_explicit_pass_a_main_page_email_skips_secondary_fetch(monkeypatch) -> N
     assert not any(f"[FB Email] Visiting {about_url}" in msg for msg in logs)
 
 
+def test_explicit_pass_a_weak_main_capture_recollects_once_and_skips_about(monkeypatch) -> None:
+    logs = []
+    enricher = _build_enricher(logs)
+    enricher.session = type("SessionStub", (), {"driver": object()})()
+    calls = []
+    surface_calls = []
+    main_url = "https://www.facebook.com/tbish"
+    about_url = "https://www.facebook.com/tbish/about"
+    main_html = """
+        <html>
+          <body>
+            <div>Intro is still mounting.</div>
+            <a href="/tbish/about">About</a>
+          </body>
+        </html>
+    """
+
+    pages = {
+        main_url: (
+            main_html,
+            main_url,
+        ),
+    }
+
+    def fake_fetch(url, goto_about=False, collect_surfaces=True):  # noqa: ANN001
+        calls.append((url, collect_surfaces))
+        enricher._last_fb_visible_text = ""
+        enricher._last_fb_live_anchor_values = []
+        return pages[url]
+
+    def fake_collect(driver_kind="session"):  # noqa: ANN001
+        surface_calls.append(driver_kind)
+        return main_html, "Intro zac@altchord.com", [], []
+
+    monkeypatch.setattr(enricher, "_fetch_html_with_url", fake_fetch)
+    monkeypatch.setattr(enricher, "_collect_current_fb_email_surface_state", fake_collect)
+    monkeypatch.setattr(nmfb.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(nmfb, "_night_fb_has_music_signals", lambda soup, context: False)
+
+    result = enricher._scrape_single_fb_candidate(
+        main_url,
+        {"Artist Name": "tbish", "Email_All": ""},
+        "tbish",
+        allow_anon=False,
+        candidate_context={"explicit_accepted_url": True},
+    )
+
+    assert result is not None
+    night_result, emails, driver_kind, outcome = result
+    assert emails == ["zac@altchord.com"]
+    assert night_result is not None
+    assert night_result.email == "zac@altchord.com"
+    assert night_result.about_attempted == "no"
+    assert night_result.about_result == ""
+    assert calls == [(main_url, True)]
+    assert all(url != about_url for url, _collect_surfaces in calls)
+    assert surface_calls == ["session"]
+    assert driver_kind == "session"
+    assert outcome == "found_email"
+    assert any("[Night FB][Explicit Stabilize] weak main-page capture detected" in msg for msg in logs)
+    assert not any(f"[FB Email] Visiting {about_url}" in msg for msg in logs)
+
+
+def test_explicit_pass_a_good_visible_text_skips_recollect(monkeypatch) -> None:
+    logs = []
+    enricher = _build_enricher(logs)
+    calls = []
+    surface_calls = []
+    main_url = "https://www.facebook.com/artist"
+    about_url = "https://www.facebook.com/artist/about"
+
+    pages = {
+        main_url: (
+            """
+            <html>
+              <body>
+                <div>No email in HTML.</div>
+                <a href="/artist/about">About</a>
+              </body>
+            </html>
+            """,
+            main_url,
+        ),
+    }
+
+    def fake_fetch(url, goto_about=False, collect_surfaces=True):  # noqa: ANN001
+        calls.append((url, collect_surfaces))
+        enricher._last_fb_visible_text = "Intro bookings@artist.com"
+        enricher._last_fb_live_anchor_values = []
+        return pages[url]
+
+    def fake_collect(driver_kind="session"):  # noqa: ANN001
+        surface_calls.append(driver_kind)
+        raise AssertionError("explicit PASS A should not recollect when the first main-page capture already has visible text")
+
+    monkeypatch.setattr(enricher, "_fetch_html_with_url", fake_fetch)
+    monkeypatch.setattr(enricher, "_collect_current_fb_email_surface_state", fake_collect)
+    monkeypatch.setattr(nmfb, "_night_fb_has_music_signals", lambda soup, context: False)
+
+    result = enricher._scrape_single_fb_candidate(
+        main_url,
+        {"Artist Name": "Artist", "Email_All": ""},
+        "Artist",
+        allow_anon=False,
+        candidate_context={"explicit_accepted_url": True},
+    )
+
+    assert result is not None
+    night_result, emails, driver_kind, outcome = result
+    assert emails == ["bookings@artist.com"]
+    assert night_result is not None
+    assert night_result.email == "bookings@artist.com"
+    assert night_result.about_attempted == "no"
+    assert night_result.about_result == ""
+    assert calls == [(main_url, True)]
+    assert all(url != about_url for url, _collect_surfaces in calls)
+    assert surface_calls == []
+    assert driver_kind == "session"
+    assert outcome == "found_email"
+    assert not any("[Night FB][Explicit Stabilize] weak main-page capture detected" in msg for msg in logs)
+    assert not any(f"[FB Email] Visiting {about_url}" in msg for msg in logs)
+
+
 def test_secondary_fetch_still_runs_when_main_page_has_no_email(monkeypatch) -> None:
     logs = []
     enricher = _build_enricher(logs)
