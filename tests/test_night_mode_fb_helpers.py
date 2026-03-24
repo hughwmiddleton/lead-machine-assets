@@ -829,7 +829,7 @@ def test_classify_explicit_fb_intake_rejects_link_shim_wrapper() -> None:
     assert decision.guard_reason == "link_shim_surface"
 
 
-def test_pass_a_uses_share_url_from_social_link(monkeypatch) -> None:
+def test_pass_a_resolves_share_url_before_scrape(monkeypatch) -> None:
     enricher = night_mode_fb.NightModeFacebookEnricher(
         legacy_module=None,
         username="",
@@ -838,18 +838,37 @@ def test_pass_a_uses_share_url_from_social_link(monkeypatch) -> None:
         use_shared_session=False,
     )
     monkeypatch.setattr(enricher, "_has_authenticated_session", lambda: True)
+    monkeypatch.setattr(
+        enricher,
+        "_search_for_page",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("PASS B should not run for resolved explicit share URLs")),
+    )
 
-    def fake_fetch(url, goto_about=False):  # noqa: ANN001
-        assert goto_about is False
-        assert url == "https://www.facebook.com/share/19bactwuev"
-        enricher._last_fb_visible_text = "Bookings shareartist@test.com"
-        enricher._last_fb_live_anchor_values = []
-        return (
-            "<html><body><div>Bookings shareartist@test.com</div></body></html>",
-            "https://www.facebook.com/artistsharepage",
+    navigate_calls = []
+
+    class _FakeSession:
+        last_nav_current_url = ""
+
+        def navigate(self, url, logger=None):  # noqa: ANN001
+            navigate_calls.append(url)
+            self.last_nav_current_url = "https://www.facebook.com/artistsharepage"
+            return object()
+
+    monkeypatch.setattr(enricher, "_ensure_session", lambda: _FakeSession())
+
+    calls = {"urls": []}
+
+    def _fake_scrape(url, *args, **kwargs):  # noqa: ANN001
+        calls["urls"].append(url)
+        night_result = night_mode_fb.NightModeFacebookResult(
+            email="shareartist@test.com",
+            email_all="shareartist@test.com",
+            facebook_url=night_mode_fb._normalise_fb_url(url),
+            email_extract_method="regex",
         )
+        return night_result, ["shareartist@test.com"], "session", "found_email"
 
-    monkeypatch.setattr(enricher, "_fetch_html_with_url", fake_fetch)
+    monkeypatch.setattr(enricher, "_scrape_single_fb_candidate", _fake_scrape)
 
     row = {
         "Artist Name": "Share Artist",
@@ -861,9 +880,114 @@ def test_pass_a_uses_share_url_from_social_link(monkeypatch) -> None:
 
     result = enricher.enrich_row_with_facebook_night(row)
 
+    assert navigate_calls == ["https://www.facebook.com/share/19bactwuev"]
+    assert calls["urls"] == ["https://www.facebook.com/artistsharepage"]
     assert result.get("Email") == "shareartist@test.com"
     assert result.get("FB_Status") == "pass_a_found_email"
     assert result.get("FB_Reason") == "explicit_url"
+    assert result.get("Facebook_URL") == "https://www.facebook.com/artistsharepage"
+
+
+def test_pass_a_leaves_canonical_url_unchanged_without_resolution(monkeypatch) -> None:
+    enricher = night_mode_fb.NightModeFacebookEnricher(
+        legacy_module=None,
+        username="",
+        password="",
+        logger=None,
+        use_shared_session=False,
+    )
+    monkeypatch.setattr(enricher, "_has_authenticated_session", lambda: True)
+
+    navigate_calls = []
+
+    class _FakeSession:
+        last_nav_current_url = ""
+
+        def navigate(self, url, logger=None):  # noqa: ANN001
+            navigate_calls.append(url)
+            self.last_nav_current_url = url
+            return object()
+
+    monkeypatch.setattr(enricher, "_ensure_session", lambda: _FakeSession())
+
+    calls = {"urls": []}
+
+    def _fake_scrape(url, *args, **kwargs):  # noqa: ANN001
+        calls["urls"].append(url)
+        night_result = night_mode_fb.NightModeFacebookResult(
+            email="artist@test.com",
+            email_all="artist@test.com",
+            facebook_url=night_mode_fb._normalise_fb_url(url),
+            email_extract_method="regex",
+        )
+        return night_result, ["artist@test.com"], "session", "found_email"
+
+    monkeypatch.setattr(enricher, "_scrape_single_fb_candidate", _fake_scrape)
+
+    row = {
+        "Artist Name": "Canonical Artist",
+        "Facebook_URL": "https://www.facebook.com/canonicalartist",
+        "Email": "",
+        "Email_All": "",
+    }
+
+    result = enricher.enrich_row_with_facebook_night(row)
+
+    assert navigate_calls == []
+    assert calls["urls"] == ["https://www.facebook.com/canonicalartist"]
+    assert result.get("FB_Status") == "pass_a_found_email"
+    assert result.get("Facebook_URL") == "https://www.facebook.com/canonicalartist"
+
+
+def test_pass_a_strips_tracking_params_from_resolved_share_url(monkeypatch) -> None:
+    enricher = night_mode_fb.NightModeFacebookEnricher(
+        legacy_module=None,
+        username="",
+        password="",
+        logger=None,
+        use_shared_session=False,
+    )
+    monkeypatch.setattr(enricher, "_has_authenticated_session", lambda: True)
+
+    navigate_calls = []
+
+    class _FakeSession:
+        last_nav_current_url = ""
+
+        def navigate(self, url, logger=None):  # noqa: ANN001
+            navigate_calls.append(url)
+            self.last_nav_current_url = "https://m.facebook.com/artistsharepage/?mibextid=wwXIfr&foo=bar"
+            return object()
+
+    monkeypatch.setattr(enricher, "_ensure_session", lambda: _FakeSession())
+
+    calls = {"urls": []}
+
+    def _fake_scrape(url, *args, **kwargs):  # noqa: ANN001
+        calls["urls"].append(url)
+        night_result = night_mode_fb.NightModeFacebookResult(
+            email="artist@test.com",
+            email_all="artist@test.com",
+            facebook_url=night_mode_fb._normalise_fb_url(url),
+            email_extract_method="regex",
+        )
+        return night_result, ["artist@test.com"], "session", "found_email"
+
+    monkeypatch.setattr(enricher, "_scrape_single_fb_candidate", _fake_scrape)
+
+    row = {
+        "Artist Name": "Tracked Share Artist",
+        "Social Link": "https://www.facebook.com/share/19bactwuev?mibextid=wwXIfr",
+        "Email": "",
+        "Email_All": "",
+        "Facebook_URL": "",
+    }
+
+    result = enricher.enrich_row_with_facebook_night(row)
+
+    assert navigate_calls == ["https://www.facebook.com/share/19bactwuev"]
+    assert calls["urls"] == ["https://www.facebook.com/artistsharepage"]
+    assert result.get("FB_Status") == "pass_a_found_email"
     assert result.get("Facebook_URL") == "https://www.facebook.com/artistsharepage"
 
 

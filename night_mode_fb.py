@@ -6819,6 +6819,49 @@ class NightModeFacebookEnricher:
         except Exception:
             return False
 
+    def _resolve_pass_a_explicit_scrape_url(self, direct_url: str, *, authed_session_available: bool) -> str:
+        """
+        Resolve explicit PASS A share-style entrypoints once via the existing
+        authenticated Night FB session and return a canonical scrape URL.
+        """
+        target_url = str(direct_url or "").strip()
+        if not target_url:
+            return target_url
+        if not _is_allowed_fb_share_entrypoint_url(target_url):
+            return target_url
+        if not authed_session_available:
+            return target_url
+
+        try:
+            session = self._ensure_session()
+        except Exception as exc:
+            _log(self.logger, f"[Night FB][PASS A] share wrapper resolution skipped for '{target_url}': {exc}")
+            return target_url
+        if not session:
+            return target_url
+
+        try:
+            driver = session.navigate(target_url, logger=self.logger)
+            resolved_url = (
+                str(getattr(session, "last_nav_current_url", "") or "").strip()
+                or _safe_current_url(driver)
+                or target_url
+            )
+        except Exception as exc:
+            _log(self.logger, f"[Night FB][PASS A] share wrapper resolution failed for '{target_url}': {exc}")
+            return target_url
+
+        canonical_resolved = _normalise_fb_url(resolved_url)
+        if not canonical_resolved or _is_allowed_fb_share_entrypoint_url(canonical_resolved):
+            return target_url
+
+        if canonical_resolved != target_url:
+            _log(
+                self.logger,
+                f"[Night FB][PASS A] resolved explicit wrapper '{target_url}' -> '{canonical_resolved}'",
+            )
+        return canonical_resolved
+
     def get_pass_a_counts(self) -> Dict[str, int]:
         return dict(self._pass_a_counts)
 
@@ -8830,18 +8873,22 @@ class NightModeFacebookEnricher:
                 _log(self.logger, f"[Night FB] Using explicit FB URLs: {fb_urls}")
                 allow_anon_for_explicit = False if authed_session_available else allow_anon
                 for direct_url in fb_urls:
+                    scrape_target_url = self._resolve_pass_a_explicit_scrape_url(
+                        direct_url,
+                        authed_session_available=authed_session_available,
+                    )
                     driver_kind = "session"
                     outcome_for_log = "fetch_error"
                     reason_for_log = ""
                     explicit_candidate_context = {
-                        "url": _normalise_fb_url(direct_url),
+                        "url": _normalise_fb_url(scrape_target_url),
                         "explicit_accepted_url": True,
                     }
                     self._pass_a_bump("attempted")
                     self._last_explicit_guard_reason = ""
                     try:
                         candidate = self._scrape_single_fb_candidate(
-                            direct_url,
+                            scrape_target_url,
                             result,
                             artist_name,
                             allow_anon=allow_anon_for_explicit,
@@ -8863,14 +8910,14 @@ class NightModeFacebookEnricher:
                                     best_outcome = "login_wall"
                                     best_reason = reason_for_log
                                     best_driver = driver_kind
-                                    best_page_url = _normalise_fb_url(direct_url)
+                                    best_page_url = _normalise_fb_url(scrape_target_url)
                             elif candidate_outcome == "content_unavailable":
                                 reason_for_log = "content_unavailable"
                                 if best_outcome is None:
                                     best_outcome = "content_unavailable"
                                     best_reason = reason_for_log
                                     best_driver = driver_kind
-                                    best_page_url = _normalise_fb_url(direct_url)
+                                    best_page_url = _normalise_fb_url(scrape_target_url)
                             elif candidate_outcome == "timeout":
                                 reason_for_log = "timeout"
                                 self._pass_a_bump("fetch_error")
@@ -8879,7 +8926,7 @@ class NightModeFacebookEnricher:
                                     best_outcome = "timeout"
                                     best_reason = reason_for_log
                                     best_driver = driver_kind
-                                    best_page_url = _normalise_fb_url(direct_url)
+                                    best_page_url = _normalise_fb_url(scrape_target_url)
                             else:
                                 reason_for_log = f"{driver_kind}_exception:unknown"
                                 self._pass_a_bump("fetch_error")
@@ -8887,7 +8934,7 @@ class NightModeFacebookEnricher:
                                     best_outcome = "fetch_error"
                                     best_reason = reason_for_log
                                     best_driver = driver_kind
-                                    best_page_url = _normalise_fb_url(direct_url)
+                                    best_page_url = _normalise_fb_url(scrape_target_url)
                         else:
                             outcome_for_log = candidate_outcome
                             if candidate_outcome == "found_email":
@@ -8935,8 +8982,8 @@ class NightModeFacebookEnricher:
                             best_outcome = "fetch_error"
                             best_reason = reason_for_log
                             best_driver = driver_kind
-                            best_page_url = _normalise_fb_url(direct_url)
-                    self._pass_a_log_row(artist_name, direct_url, driver_kind, outcome_for_log, reason_for_log, mode=pass_a_mode)
+                            best_page_url = _normalise_fb_url(scrape_target_url)
+                    self._pass_a_log_row(artist_name, scrape_target_url, driver_kind, outcome_for_log, reason_for_log, mode=pass_a_mode)
 
                 if best_outcome:
                     if best_outcome == "login_wall":
