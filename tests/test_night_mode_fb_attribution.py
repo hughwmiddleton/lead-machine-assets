@@ -9,6 +9,7 @@ import night_mode_runner
 import pipeline_runner
 from fb_attribution import (
     FB_ATTEMPT_STATE_COL,
+    FB_DEBUG_REASON_COL,
     FB_GATE_STATE_COL,
     FB_OPPORTUNITY_STATE_COL,
     FB_WRITE_STATE_COL,
@@ -539,9 +540,103 @@ def test_attempted_with_accepted_email_records_write(monkeypatch, tmp_path):
     assert df_out.loc[0, "Email"] == "fb@example.com"
     assert df_out.loc[0, FB_ATTEMPT_STATE_COL] == "attempted_fb_found_email"
     assert df_out.loc[0, FB_WRITE_STATE_COL] == "fb_wrote_email"
+    assert df_out.loc[0, FB_DEBUG_REASON_COL] == "email_found_about_page"
     provenance = json.loads(df_out.loc[0, EMAIL_PROVENANCE_JSON_COL])
     assert provenance["fb@example.com"]["surface"] == "facebook_about"
     assert provenance["fb@example.com"]["source_type"] == "facebook_enrich"
+
+
+def test_attempted_main_page_mailto_maps_debug_reason(monkeypatch, tmp_path):
+    helper = StaticFBHelper(
+        {
+            "FB_Status": "pass_a_found_email",
+            FB_ATTEMPT_STATE_COL: "attempted_fb_found_email",
+            "Email": "mailto@example.com",
+            "Email_All": "mailto@example.com",
+            "Email_Type": "fb_night",
+            "Email_Source_URL": "https://facebook.com/mailto",
+            "Email_Source_Type": "facebook_enrich",
+            "Email_Extract_Method": "mailto",
+            "Facebook_URL": "https://facebook.com/mailto",
+        }
+    )
+    df_out, _ = _run_night_fb_pass(
+        monkeypatch,
+        tmp_path,
+        [
+            {
+                "Artist Name": "FB Mailto",
+                "Email": "",
+                "Email_All": "",
+                "Social Link": "",
+                "Facebook_URL": "https://facebook.com/mailto",
+            }
+        ],
+        helper,
+    )
+
+    assert helper.calls == 1
+    assert df_out.loc[0, FB_WRITE_STATE_COL] == "fb_wrote_email"
+    assert df_out.loc[0, FB_DEBUG_REASON_COL] == "email_found_mailto"
+
+
+def test_attempted_about_page_no_email_maps_debug_reason(monkeypatch, tmp_path):
+    helper = StaticFBHelper(
+        {
+            "FB_Status": "pass_a_no_email_on_page",
+            FB_ATTEMPT_STATE_COL: "attempted_fb_no_email_on_page",
+            "FB_About_Attempted": "yes",
+            "FB_About_Result": "no_email",
+            "Facebook_URL": "https://facebook.com/about-miss",
+        }
+    )
+    df_out, _ = _run_night_fb_pass(
+        monkeypatch,
+        tmp_path,
+        [
+            {
+                "Artist Name": "FB About Miss",
+                "Email": "",
+                "Email_All": "",
+                "Social Link": "",
+                "Facebook_URL": "https://facebook.com/about-miss",
+            }
+        ],
+        helper,
+    )
+
+    assert helper.calls == 1
+    assert df_out.loc[0, FB_WRITE_STATE_COL] == "fb_no_email_written"
+    assert df_out.loc[0, FB_DEBUG_REASON_COL] == "about_page_no_email"
+
+
+def test_attempted_no_contact_surface_maps_debug_reason(monkeypatch, tmp_path):
+    helper = StaticFBHelper(
+        {
+            "FB_Status": "pass_a_no_email_on_page",
+            FB_ATTEMPT_STATE_COL: "attempted_fb_no_email_on_page",
+            "FB_About_Attempted": "yes",
+            "FB_About_Result": "no_contact_link",
+            "Facebook_URL": "https://facebook.com/no-contact",
+        }
+    )
+    df_out, _ = _run_night_fb_pass(
+        monkeypatch,
+        tmp_path,
+        [
+            {
+                "Artist Name": "FB No Contact",
+                "Email": "",
+                "Email_All": "",
+                "Social Link": "",
+                "Facebook_URL": "https://facebook.com/no-contact",
+            }
+        ],
+        helper,
+    )
+
+    assert helper.calls == 1
+    assert df_out.loc[0, FB_DEBUG_REASON_COL] == "no_contact_surface_found"
 
 
 def test_attempted_with_rejected_email_records_not_applied(monkeypatch, tmp_path):
@@ -572,6 +667,62 @@ def test_attempted_with_rejected_email_records_not_applied(monkeypatch, tmp_path
     assert df_out.loc[0, "Email"] == ""
     assert df_out.loc[0, FB_ATTEMPT_STATE_COL] == "attempted_fb_rejected_by_acceptance_guard"
     assert df_out.loc[0, FB_WRITE_STATE_COL] == "fb_found_email_not_applied"
+    assert df_out.loc[0, FB_DEBUG_REASON_COL] == "main_no_email_visible"
+
+
+def test_no_safe_candidate_maps_pre_scrape_reject_debug_reason(monkeypatch, tmp_path):
+    helper = StaticFBHelper(
+        {
+            "FB_Status": "no_candidates",
+            "FB_Reason": "non_music_category",
+            FB_ATTEMPT_STATE_COL: "attempted_fb_no_email_on_page",
+        }
+    )
+    df_out, _ = _run_night_fb_pass(
+        monkeypatch,
+        tmp_path,
+        [
+            {
+                "Artist Name": "Rejected Candidate",
+                "Email": "",
+                "Email_All": "",
+                "Social Link": "",
+                "Spotify_URL": "https://open.spotify.com/artist/rejected-candidate",
+                "Facebook_URL": "",
+            }
+        ],
+        helper,
+    )
+
+    assert helper.calls == 1
+    assert df_out.loc[0, FB_DEBUG_REASON_COL] == "candidate_rejected_pre_scrape"
+
+
+def test_skipped_no_identity_anchor_maps_no_fb_candidate(monkeypatch, tmp_path):
+    helper = StaticFBHelper(
+        {
+            "FB_Status": "pass_a_no_email_on_page",
+            FB_ATTEMPT_STATE_COL: "attempted_fb_no_email_on_page",
+        }
+    )
+    df_out, _ = _run_night_fb_pass(
+        monkeypatch,
+        tmp_path,
+        [
+            {
+                "Artist Name": "No Anchor Artist",
+                "Email": "",
+                "Email_All": "",
+                "Social Link": "",
+                "Facebook_URL": "",
+            }
+        ],
+        helper,
+    )
+
+    assert helper.calls == 0
+    assert df_out.loc[0, FB_GATE_STATE_COL] == "skipped_no_identity_anchor"
+    assert df_out.loc[0, FB_DEBUG_REASON_COL] == "no_fb_candidate"
 
 
 def test_night_mode_outputs_preserve_fb_attribution(monkeypatch, tmp_path):
@@ -625,6 +776,7 @@ def test_night_mode_outputs_preserve_fb_attribution(monkeypatch, tmp_path):
         df[FB_GATE_STATE_COL] = ""
         df[FB_ATTEMPT_STATE_COL] = "attempted_fb_found_email"
         df[FB_WRITE_STATE_COL] = "fb_wrote_email"
+        df[FB_DEBUG_REASON_COL] = "email_found_main_text"
         df["FB_Status"] = "pass_a_found_email"
         df["Email"] = "persist@example.com"
         df["Email_All"] = "persist@example.com"
@@ -666,6 +818,7 @@ def test_night_mode_outputs_preserve_fb_attribution(monkeypatch, tmp_path):
         assert FB_GATE_STATE_COL in df.columns
         assert FB_ATTEMPT_STATE_COL in df.columns
         assert FB_WRITE_STATE_COL in df.columns
+        assert FB_DEBUG_REASON_COL in df.columns
         assert df.loc[0, FB_OPPORTUNITY_STATE_COL] == "fb_opportunity_present"
         if filename in expected_attempt_files:
             assert df.loc[0, FB_ATTEMPT_STATE_COL] == "attempted_fb_found_email"

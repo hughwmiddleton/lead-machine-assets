@@ -36,6 +36,7 @@ from email_normalizer import filter_system_telemetry_emails, is_obvious_placehol
 from fb_attribution import (
     FB_ATTEMPT_STATE_COL,
     FB_ATTRIBUTION_COLUMNS,
+    FB_DEBUG_REASON_COL,
     FB_GATE_STATE_COL,
     FB_OPPORTUNITY_STATE_COL,
     FB_WRITE_STATE_COL,
@@ -628,6 +629,120 @@ def _classify_fb_attempt_state_from_status(status: str, existing: str = "") -> s
     if status_norm:
         return "attempted_fb_no_email_on_page"
     return existing_clean or "attempted_fb"
+
+
+def _fb_debug_reason_value(
+    row_like: Any,
+    enriched: Optional[Mapping[str, Any]],
+    key: str,
+) -> str:
+    if isinstance(enriched, Mapping):
+        enriched_val = _cell_str(enriched.get(key, ""))
+        if enriched_val:
+            return enriched_val
+    if row_like is not None and hasattr(row_like, "get"):
+        return _cell_str(row_like.get(key, ""))
+    return ""
+
+
+def _fb_reason_is_candidate_reject(reason: str) -> bool:
+    reason_norm = _cell_str(reason).lower()
+    if not reason_norm:
+        return False
+    reject_tokens = (
+        "email_override_reject",
+        "identity_mismatch",
+        "invalid_placeholder",
+        "junk_surface",
+        "missing_fb_host",
+        "no_safe_match",
+        "non_music",
+        "normalize_failed",
+        "profile_no_music_signal",
+        "rank_below_threshold",
+        "shape_disallowed",
+    )
+    return any(token in reason_norm for token in reject_tokens)
+
+
+def _classify_fb_debug_reason(
+    row_like: Any,
+    *,
+    enriched: Optional[Mapping[str, Any]] = None,
+    attempt_state: str = "",
+    write_state: str = "",
+) -> str:
+    status_norm = _fb_debug_reason_value(row_like, enriched, "FB_Status").lower()
+    reason_norm = _fb_debug_reason_value(row_like, enriched, "FB_Reason").lower()
+    gate_norm = _fb_debug_reason_value(row_like, enriched, FB_GATE_STATE_COL).lower()
+    about_result_norm = _fb_debug_reason_value(row_like, enriched, "FB_About_Result").lower()
+    about_attempted_norm = _fb_debug_reason_value(row_like, enriched, "FB_About_Attempted").lower()
+    email_source_norm = _fb_debug_reason_value(row_like, enriched, "FB_Email_Source").lower()
+    email_method_norm = _fb_debug_reason_value(row_like, enriched, "Email_Extract_Method").lower()
+    email_source_url_norm = _fb_debug_reason_value(row_like, enriched, "Email_Source_URL").lower()
+    attempt_state_norm = _cell_str(attempt_state or _fb_debug_reason_value(row_like, enriched, FB_ATTEMPT_STATE_COL)).lower()
+
+    if attempt_state_norm == "attempted_fb_found_email":
+        if (
+            email_source_norm == "about"
+            or about_result_norm == "emails_found"
+            or any(token in email_source_url_norm for token in ("about", "contact_and_basic_info", "directory_contact_info"))
+        ):
+            return "email_found_about_page"
+        if email_method_norm == "mailto":
+            return "email_found_mailto"
+        return "email_found_main_text"
+
+    if attempt_state_norm == "attempted_fb_login_wall_or_checkpoint" or any(
+        token in status_norm
+        for token in ("checkpoint", "login_redirect", "login_wall", "skipped_warning", "warning")
+    ):
+        return "login_required_or_blocked"
+
+    if attempt_state_norm == "attempted_fb_content_unavailable" or "content_unavailable" in status_norm:
+        return "content_unavailable"
+
+    if about_attempted_norm == "yes":
+        if about_result_norm == "no_email":
+            return "about_page_no_email"
+        if about_result_norm == "no_contact_link":
+            return "no_contact_surface_found"
+        if about_result_norm in {"blocked_login", "checkpoint"}:
+            return "login_required_or_blocked"
+
+    if status_norm in {"no_candidates", "unearthed_no_candidates"}:
+        if _fb_reason_is_candidate_reject(reason_norm):
+            return "candidate_rejected_pre_scrape"
+        return "no_fb_candidate"
+
+    if gate_norm in {"skipped_no_identity_anchor", "skipped_no_canonical_facebook_url"}:
+        return "no_fb_candidate"
+
+    if gate_norm in {
+        "skipped_duplicate_fb_discovery",
+        "skipped_existing_usable_email",
+        "skipped_other_gate",
+        "skipped_terminal_fb_status",
+    }:
+        return ""
+
+    attempted_like = bool(
+        attempt_state_norm.startswith("attempted_")
+        or status_norm.startswith("pass_a_")
+        or status_norm in {
+            "content_unavailable",
+            "driver_error",
+            "login_redirect",
+            "ok",
+            "ok_unearthed_blind",
+            "ok_unearthed_legacy",
+            "skipped_checkpoint",
+        }
+    )
+    if attempted_like:
+        return "main_no_email_visible"
+
+    return ""
 
 
 def _row_has_valid_email(row: pd.Series) -> Tuple[bool, List[str]]:
@@ -1751,6 +1866,7 @@ FINAL_EXPORT_COLUMNS: Sequence[str] = [
     FB_GATE_STATE_COL,
     FB_ATTEMPT_STATE_COL,
     FB_WRITE_STATE_COL,
+    FB_DEBUG_REASON_COL,
 ]
 
 WOODPECKER_EXPORT_COLUMNS: Sequence[str] = [
@@ -2162,6 +2278,7 @@ def _build_final_export_frame(df: pd.DataFrame) -> pd.DataFrame:
                 FB_GATE_STATE_COL: str(row.get(FB_GATE_STATE_COL, "") or "").strip(),
                 FB_ATTEMPT_STATE_COL: str(row.get(FB_ATTEMPT_STATE_COL, "") or "").strip(),
                 FB_WRITE_STATE_COL: str(row.get(FB_WRITE_STATE_COL, "") or "").strip(),
+                FB_DEBUG_REASON_COL: str(row.get(FB_DEBUG_REASON_COL, "") or "").strip(),
             }
         )
 
@@ -3479,6 +3596,7 @@ def run_facebook_global_pass_nightmode(
                 df.at[idx, FB_GATE_STATE_COL] = "skipped_existing_usable_email"
                 if not _cell_str(df.at[idx, FB_WRITE_STATE_COL]):
                     df.at[idx, FB_WRITE_STATE_COL] = "fb_no_email_written"
+                df.at[idx, FB_DEBUG_REASON_COL] = _classify_fb_debug_reason(df.loc[idx])
                 _safe_log_console(
                     logger,
                     f"[Night FB] Skipping row {idx} ('{artist_label}') – email already present (Email_All='{email_all_clean}').",
@@ -3500,6 +3618,7 @@ def run_facebook_global_pass_nightmode(
                 df.at[idx, FB_GATE_STATE_COL] = "skipped_terminal_fb_status"
                 if not _cell_str(df.at[idx, FB_WRITE_STATE_COL]):
                     df.at[idx, FB_WRITE_STATE_COL] = "fb_no_email_written"
+                df.at[idx, FB_DEBUG_REASON_COL] = _classify_fb_debug_reason(df.loc[idx])
                 _safe_log_console(
                     logger,
                     f"[Night FB] Skipping row {idx} ('{artist_label}') – terminal FB_Status='{fb_status_val_raw}'.",
@@ -3526,6 +3645,7 @@ def run_facebook_global_pass_nightmode(
                 df.at[idx, FB_GATE_STATE_COL] = "skipped_no_identity_anchor"
                 if not _cell_str(df.at[idx, FB_WRITE_STATE_COL]):
                     df.at[idx, FB_WRITE_STATE_COL] = "fb_no_email_written"
+                df.at[idx, FB_DEBUG_REASON_COL] = _classify_fb_debug_reason(df.loc[idx])
                 _safe_log_console(
                     logger,
                     f"[Night FB] Skipping row {idx} ('{artist_label}') - no canonical Facebook URL, explicit FB entrypoint, or upstream identity anchor.",
@@ -3558,6 +3678,7 @@ def run_facebook_global_pass_nightmode(
                 df.at[idx, FB_GATE_STATE_COL] = "skipped_duplicate_fb_discovery"
                 if not _cell_str(df.at[idx, FB_WRITE_STATE_COL]):
                     df.at[idx, FB_WRITE_STATE_COL] = "fb_no_email_written"
+                df.at[idx, FB_DEBUG_REASON_COL] = _classify_fb_debug_reason(df.loc[idx])
                 _safe_log_console(
                     logger,
                     f"[Night FB] Skipping discovery fallback for row {idx} ('{artist_label}') - discovery already attempted earlier this run.",
@@ -3583,6 +3704,7 @@ def run_facebook_global_pass_nightmode(
                     df.at[idx, FB_GATE_STATE_COL] = "skipped_other_gate"
                 if not _cell_str(df.at[idx, FB_WRITE_STATE_COL]):
                     df.at[idx, FB_WRITE_STATE_COL] = "fb_no_email_written"
+                df.at[idx, FB_DEBUG_REASON_COL] = _classify_fb_debug_reason(df.loc[idx])
                 if fb_status_val in final_fb_statuses:
                     email_state = "present" if has_email_effective else "missing"
                     _safe_log_console(
@@ -3725,6 +3847,12 @@ def run_facebook_global_pass_nightmode(
 
             write_after = _fb_write_surface_snapshot(df.loc[idx])
             df.at[idx, FB_WRITE_STATE_COL] = _classify_fb_write_state(write_before, write_after, attempt_state)
+            df.at[idx, FB_DEBUG_REASON_COL] = _classify_fb_debug_reason(
+                df.loc[idx],
+                enriched=enriched if isinstance(enriched, Mapping) else None,
+                attempt_state=attempt_state,
+                write_state=df.at[idx, FB_WRITE_STATE_COL],
+            )
 
             state.update(
                 {
@@ -3826,6 +3954,7 @@ DEFAULT_EXPORT_COLUMNS: Sequence[str] = [
     FB_GATE_STATE_COL,
     FB_ATTEMPT_STATE_COL,
     FB_WRITE_STATE_COL,
+    FB_DEBUG_REASON_COL,
     "Played on triple J",
     "Played on Unearthed",
     "Release Date",
