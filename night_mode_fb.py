@@ -7723,6 +7723,7 @@ class NightModeFacebookEnricher:
 
         explicit_pass_a = bool(candidate_context and candidate_context.get("explicit_accepted_url"))
         if explicit_pass_a:
+            targeted_restabilization_attempted = False
             main_render_reason = _explicit_fb_render_state_invalid_reason(
                 html,
                 resolved_url=resolved_url,
@@ -7746,6 +7747,7 @@ class NightModeFacebookEnricher:
                     and not health.get("login_wall")
                 )
                 if targeted_restabilization:
+                    targeted_restabilization_attempted = True
                     _log(
                         self.logger,
                         "[Night FB][RenderGate] content_unavailable -> targeted restabilization",
@@ -7771,11 +7773,82 @@ class NightModeFacebookEnricher:
                 )
                 self._last_fb_render_invalid_reason = str(main_render_reason or "")
                 if main_render_reason:
-                    _log(
-                        self.logger,
-                        f"[Night FB][PageUnavailable] {resolved_url} (render_state={main_render_reason})",
+                    about_fallback_applied = False
+                    about_fallback_warning_reason = _looks_like_fb_warning_or_block(html, resolved_url) or ""
+                    about_fallback_health = _night_fb_page_health_snapshot(
+                        resolved_url,
+                        html,
+                        warning_reason=about_fallback_warning_reason,
                     )
-                    return None, [], used_driver_kind, "content_unavailable"
+                    about_fallback_eligible = (
+                        main_render_reason == "content_unavailable"
+                        and targeted_restabilization_attempted
+                        and self._page_budget_remaining > 0
+                        and not about_fallback_warning_reason
+                        and not about_fallback_health.get("captcha")
+                        and not about_fallback_health.get("checkpoint")
+                        and not about_fallback_health.get("login_wall")
+                    )
+                    if about_fallback_eligible:
+                        fallback_variants = _fetch_fb_about_variants(resolved_url)
+                        about_fallback_url = fallback_variants[0] if fallback_variants else ""
+                        if about_fallback_url:
+                            _log(
+                                self.logger,
+                                "[FB Night][RenderGate] content_unavailable -> about fallback",
+                            )
+                            about_html: Optional[str] = None
+                            about_resolved: Optional[str] = about_fallback_url
+                            try:
+                                about_html, about_resolved = self._fetch_html_with_url(
+                                    about_fallback_url,
+                                    goto_about=False,
+                                )
+                                if (not about_html) and allow_anon:
+                                    about_html, about_resolved = self._fetch_html_with_url_anon(
+                                        about_fallback_url,
+                                        goto_about=False,
+                                    )
+                                    if about_html:
+                                        used_driver_kind = "anon_fallback"
+                                        self._last_fb_surface_driver_kind = used_driver_kind
+                            except Exception:
+                                about_html, about_resolved = None, about_fallback_url
+
+                            about_surface_url = _normalise_fb_url(about_resolved or about_fallback_url)
+                            if about_html and not _is_fb_login_or_security_url(about_surface_url):
+                                about_warning_reason = _looks_like_fb_warning_or_block(
+                                    about_html,
+                                    about_surface_url,
+                                ) or ""
+                                about_health = _night_fb_page_health_snapshot(
+                                    about_surface_url,
+                                    about_html,
+                                    warning_reason=about_warning_reason,
+                                )
+                                about_render_reason = _explicit_fb_render_state_invalid_reason(
+                                    about_html,
+                                    resolved_url=about_surface_url,
+                                    rendered_text=getattr(self, "_last_fb_visible_text", "") or "",
+                                    anchor_values=getattr(self, "_last_fb_live_anchor_values", []) or [],
+                                )
+                                if (
+                                    not about_render_reason
+                                    and not about_warning_reason
+                                    and not about_health.get("captcha")
+                                    and not about_health.get("checkpoint")
+                                    and not about_health.get("login_wall")
+                                ):
+                                    html = about_html
+                                    self._last_fb_render_invalid_reason = ""
+                                    about_fallback_applied = True
+                    if not about_fallback_applied:
+                        self._last_fb_render_invalid_reason = "content_unavailable"
+                        _log(
+                            self.logger,
+                            f"[Night FB][PageUnavailable] {resolved_url} (render_state={main_render_reason})",
+                        )
+                        return None, [], used_driver_kind, "content_unavailable"
 
         if _is_fb_content_unavailable_page(html):
             self._last_fb_render_invalid_reason = "content_unavailable"

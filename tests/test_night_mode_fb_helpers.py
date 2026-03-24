@@ -978,6 +978,11 @@ def test_explicit_pass_a_valid_render_state_passes_without_recovery(monkeypatch)
         "_collect_current_fb_email_surface_state",
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("healthy explicit PASS A page should not restabilize")),
     )
+    monkeypatch.setattr(
+        night_mode_fb,
+        "_fetch_fb_about_variants",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("healthy explicit PASS A page should not about-fallback")),
+    )
 
     candidate = enricher._scrape_single_fb_candidate(
         "https://www.facebook.com/healthyartist",
@@ -1050,24 +1055,38 @@ def test_explicit_pass_a_invalid_render_state_returns_content_unavailable_after_
         logger=None,
         use_shared_session=False,
     )
+    main_url = "https://www.facebook.com/brokenartist"
+    about_url = "https://www.facebook.com/brokenartist/about_contact_and_basic_info"
+    fetch_calls = []
 
     def fake_fetch(url, goto_about=False):  # noqa: ANN001
         assert goto_about is False
+        fetch_calls.append(url)
         enricher._last_fb_visible_text = ""
         enricher._last_fb_live_anchor_values = []
-        return "<html><body>Content isn't available right now</body></html>", url
+        if url == main_url:
+            return "<html><body>Content isn't available right now</body></html>", url
+        if url == about_url:
+            return "<html><body>Content isn't available right now</body></html>", url
+        raise AssertionError(f"unexpected fetch target: {url}")
 
     restabilized = {"count": 0}
 
     def fake_targeted_restabilize(*args, **kwargs):  # noqa: ANN001
         restabilized["count"] += 1
-        return "<html><body></body></html>", "", [], []
+        return (
+            "<html><body>Content isn't available right now</body></html>",
+            "Content isn't available right now",
+            [],
+            [],
+        )
 
     monkeypatch.setattr(enricher, "_fetch_html_with_url", fake_fetch)
     monkeypatch.setattr(enricher, "_targeted_explicit_content_unavailable_restabilization", fake_targeted_restabilize)
+    monkeypatch.setattr(night_mode_fb, "_fetch_fb_about_variants", lambda url: [about_url])
 
     candidate = enricher._scrape_single_fb_candidate(
-        "https://www.facebook.com/brokenartist",
+        main_url,
         {"Email_All": ""},
         "Broken Artist",
         candidate_context={"explicit_accepted_url": True},
@@ -1076,10 +1095,68 @@ def test_explicit_pass_a_invalid_render_state_returns_content_unavailable_after_
     night_result, emails, driver_kind, outcome = candidate
 
     assert restabilized["count"] == 1
+    assert fetch_calls == [main_url, about_url]
     assert night_result is None
     assert emails == []
     assert driver_kind == "session"
     assert outcome == "content_unavailable"
+
+
+def test_explicit_pass_a_invalid_render_state_about_fallback_recovers_without_persisting_about_url(monkeypatch) -> None:
+    enricher = night_mode_fb.NightModeFacebookEnricher(
+        legacy_module=None,
+        username="",
+        password="",
+        logger=None,
+        use_shared_session=False,
+    )
+    monkeypatch.setattr(night_mode_fb, "_night_fb_has_music_signals", lambda *args, **kwargs: True)
+    main_url = "https://www.facebook.com/aboutfallbackartist"
+    about_url = "https://www.facebook.com/aboutfallbackartist/about_contact_and_basic_info"
+    fetch_calls = []
+
+    def fake_fetch(url, goto_about=False):  # noqa: ANN001
+        assert goto_about is False
+        fetch_calls.append(url)
+        if url == main_url:
+            enricher._last_fb_visible_text = ""
+            enricher._last_fb_live_anchor_values = []
+            return "<html><body>Content isn't available right now</body></html>", url
+        if url == about_url:
+            enricher._last_fb_visible_text = "Bookings recovered@artist.com"
+            enricher._last_fb_live_anchor_values = []
+            return "<html><body><div>Bookings recovered@artist.com</div></body></html>", url
+        raise AssertionError(f"unexpected fetch target: {url}")
+
+    monkeypatch.setattr(enricher, "_fetch_html_with_url", fake_fetch)
+    monkeypatch.setattr(
+        enricher,
+        "_targeted_explicit_content_unavailable_restabilization",
+        lambda *args, **kwargs: (
+            "<html><body>Content isn't available right now</body></html>",
+            "Content isn't available right now",
+            [],
+            [],
+        ),
+    )
+    monkeypatch.setattr(night_mode_fb, "_fetch_fb_about_variants", lambda url: [about_url])
+
+    candidate = enricher._scrape_single_fb_candidate(
+        main_url,
+        {"Email_All": ""},
+        "Recovered Artist",
+        candidate_context={"explicit_accepted_url": True},
+    )
+
+    night_result, emails, driver_kind, outcome = candidate
+
+    assert fetch_calls == [main_url, about_url]
+    assert night_result is not None
+    assert night_result.email == "recovered@artist.com"
+    assert night_result.facebook_url == main_url
+    assert emails == ["recovered@artist.com"]
+    assert driver_kind == "session"
+    assert outcome == "found_email"
 
 
 def test_explicit_pass_a_invalid_render_state_preserves_content_unavailable_reason_for_fallback(monkeypatch) -> None:
