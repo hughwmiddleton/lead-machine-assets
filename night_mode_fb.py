@@ -1977,7 +1977,8 @@ def _canonicalize_fb_p_url(url: str) -> Optional[str]:
     parts = [part for part in (parsed.path or "").split("/") if part]
     if len(parts) < 2 or parts[0].lower() != "p":
         return None
-    tail = [part.lower() for part in parts[2:]]
+    tail_parts = parts[2:]
+    tail = [part.lower() for part in tail_parts]
     if tail:
         allowed_tail = {"about", "posts", "photos"}
         if len(tail) > 2:
@@ -1989,11 +1990,19 @@ def _canonicalize_fb_p_url(url: str) -> Optional[str]:
     page = (parts[1] or "").strip()
     if not page or page.lower() in {"nan", "none", "null"}:
         return None
+    numeric_id = ""
+    if tail_parts:
+        tail_id = (tail_parts[0] or "").strip()
+        if tail_id.isdigit() and len(tail_id) >= 10:
+            numeric_id = tail_id
     page_name, sep, numeric_suffix = page.rpartition("-")
     if sep and numeric_suffix.isdigit() and len(numeric_suffix) >= 10:
         page = page_name.strip()
         if not page or page.lower() in {"nan", "none", "null"}:
             return None
+        numeric_id = numeric_suffix
+    if numeric_id:
+        return urllib.parse.urlunparse(("https", "www.facebook.com", f"/people/{page}/{numeric_id}", "", "", ""))
     return urllib.parse.urlunparse(("https", "www.facebook.com", f"/{page}", "", "", ""))
 
 

@@ -1380,6 +1380,7 @@ def fb_is_allowed_profile_candidate_url(url: str) -> bool:
     Deterministic hard gate.
     True only if url is an allowed FB profile URL shape:
       - https://www.facebook.com/<username>[/]
+      - https://www.facebook.com/people/<slug>/<digits>
       - https://www.facebook.com/profile.php?id=<digits> (and ONLY id param)
     Explicitly rejects known junk surfaces.
     """
@@ -1438,6 +1439,13 @@ def fb_is_allowed_profile_candidate_url(url: str) -> bool:
             return False
         id_value = ids[0]
         return bool(id_value and id_value.isdigit())
+
+    if len(segments) == 3 and (segments[0] or "").lower() == "people":
+        slug = segments[1]
+        profile_id = segments[2]
+        if query:
+            return False
+        return bool(slug and profile_id.isdigit() and len(profile_id) >= 10)
 
     if len(segments) == 1:
         username = segments[0]

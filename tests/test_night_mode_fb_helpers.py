@@ -610,12 +610,21 @@ def test_explicit_fb_entrypoint_urls_canonicalize_pages_category_shapes() -> Non
 def test_explicit_fb_entrypoint_urls_canonicalize_p_shapes() -> None:
     assert night_mode_fb.explicit_fb_entrypoint_urls_for_row(
         {"Facebook_URL": "https://www.facebook.com/p/Kyla-Belle-100063568093299"}
-    ) == ["https://www.facebook.com/kyla-belle"]
+    ) == ["https://www.facebook.com/people/kyla-belle/100063568093299"]
     assert night_mode_fb.explicit_fb_entrypoint_urls_for_row(
-        {"Facebook_URL": "https://www.facebook.com/p/echostar/123"}
-    ) == ["https://www.facebook.com/echostar"]
+        {"Facebook_URL": "https://www.facebook.com/p/echostar/1000000000123"}
+    ) == ["https://www.facebook.com/people/echostar/1000000000123"]
     assert night_mode_fb.explicit_fb_entrypoint_urls_for_row(
-        {"Facebook_URL": "https://www.facebook.com/p/echostar/123/about"}
+        {"Facebook_URL": "https://www.facebook.com/p/echostar/1000000000123/about"}
+    ) == ["https://www.facebook.com/people/echostar/1000000000123"]
+    assert night_mode_fb.explicit_fb_entrypoint_urls_for_row(
+        {"Facebook_URL": "https://www.facebook.com/p/echostar/1000000000123/posts"}
+    ) == ["https://www.facebook.com/people/echostar/1000000000123"]
+    assert night_mode_fb.explicit_fb_entrypoint_urls_for_row(
+        {"Facebook_URL": "https://www.facebook.com/p/echostar/1000000000123/photos"}
+    ) == ["https://www.facebook.com/people/echostar/1000000000123"]
+    assert night_mode_fb.explicit_fb_entrypoint_urls_for_row(
+        {"Facebook_URL": "https://www.facebook.com/p/echostar"}
     ) == ["https://www.facebook.com/echostar"]
 
 
@@ -625,8 +634,29 @@ def test_classify_explicit_fb_intake_accepts_canonicalized_p_url() -> None:
     )
 
     assert decision.outcome == "attempt"
-    assert decision.accepted_urls == ["https://www.facebook.com/kyla-belle"]
+    assert decision.accepted_urls == ["https://www.facebook.com/people/kyla-belle/100063568093299"]
     assert decision.guard_reason == ""
+
+
+def test_fb_profile_candidate_guard_accepts_only_exact_people_shape() -> None:
+    assert (
+        night_mode_fb.fb_is_allowed_profile_candidate_url(
+            "https://www.facebook.com/people/Kyla-Belle/100063568093299"
+        )
+        is True
+    )
+    assert (
+        night_mode_fb.fb_is_allowed_profile_candidate_url(
+            "https://www.facebook.com/people/Kyla-Belle"
+        )
+        is False
+    )
+    assert (
+        night_mode_fb.fb_is_allowed_profile_candidate_url(
+            "https://www.facebook.com/people/Kyla-Belle/100063568093299/posts"
+        )
+        is False
+    )
 
 
 def test_explicit_fb_entrypoint_urls_reject_ambiguous_pages_category_shapes() -> None:
@@ -769,9 +799,22 @@ def test_pass_a_uses_canonicalized_p_url_without_search(monkeypatch) -> None:
 
     result = enricher.enrich_row_with_facebook_night(row)
 
-    assert calls["urls"] == ["https://www.facebook.com/kyla-belle"]
+    assert calls["urls"] == ["https://www.facebook.com/people/kyla-belle/100063568093299"]
     assert result.get("FB_Status") == "pass_a_found_email"
     assert result.get("FB_Reason") == "explicit_url"
+
+
+def test_classify_explicit_fb_intake_rejects_link_shim_wrapper() -> None:
+    decision = night_mode_fb.classify_explicit_fb_intake(
+        {"Artist Name": "Wrapped FB", "Facebook_URL": "https://www.facebook.com/l.php?u=https%3A%2F%2Fwww.facebook.com%2Fartist"}
+    )
+
+    assert decision.outcome == "reject_guard"
+    assert decision.accepted_urls == []
+    assert decision.rejected_guard == [
+        "https://www.facebook.com/l.php?u=https%3A%2F%2Fwww.facebook.com%2Fartist"
+    ]
+    assert decision.guard_reason == "link_shim_surface"
 
 
 def test_pass_a_uses_share_url_from_social_link(monkeypatch) -> None:
