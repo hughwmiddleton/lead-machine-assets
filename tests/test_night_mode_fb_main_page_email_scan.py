@@ -737,7 +737,7 @@ def test_explicit_pass_a_weak_main_capture_recollects_once_and_skips_about(monke
     main_html = """
         <html>
           <body>
-            <div>Intro is still mounting.</div>
+            <div>Intro</div>
             <a href="/tbish/about">About</a>
           </body>
         </html>
@@ -787,6 +787,74 @@ def test_explicit_pass_a_weak_main_capture_recollects_once_and_skips_about(monke
     assert outcome == "found_email"
     assert any("[Night FB][Explicit Stabilize] weak main-page capture detected" in msg for msg in logs)
     assert not any(f"[FB Email] Visiting {about_url}" in msg for msg in logs)
+
+
+def test_explicit_pass_a_meaningful_empty_main_page_skips_recollect_and_uses_fallback(monkeypatch) -> None:
+    logs = []
+    enricher = _build_enricher(logs)
+    calls = []
+    surface_calls = []
+    main_url = "https://www.facebook.com/artist"
+    fallback_url = "https://www.facebook.com/artist/directory_contact_info"
+
+    pages = {
+        main_url: (
+            """
+            <html>
+              <body>
+                <div>This page is live, but the main page does not list an email address.</div>
+              </body>
+            </html>
+            """,
+            main_url,
+        ),
+        fallback_url: (
+            """
+            <html>
+              <body>
+                <div>Bookings: bookings@artist.com</div>
+              </body>
+            </html>
+            """,
+            fallback_url,
+        ),
+    }
+
+    def fake_fetch(url, goto_about=False):  # noqa: ANN001
+        calls.append(url)
+        enricher._last_fb_visible_text = ""
+        enricher._last_fb_live_anchor_values = []
+        return pages[url]
+
+    def fake_collect(driver_kind="session"):  # noqa: ANN001
+        surface_calls.append(driver_kind)
+        raise AssertionError("explicit PASS A should not recollect when the first main-page capture is meaningfully rendered")
+
+    monkeypatch.setattr(enricher, "_fetch_html_with_url", fake_fetch)
+    monkeypatch.setattr(enricher, "_collect_current_fb_email_surface_state", fake_collect)
+    monkeypatch.setattr(nmfb, "_night_fb_has_music_signals", lambda soup, context: False)
+    monkeypatch.setattr(nmfb, "should_accept_email_override", lambda *args, **kwargs: (True, "test_override"))
+
+    result = enricher._scrape_single_fb_candidate(
+        main_url,
+        {"Artist Name": "Artist", "Email_All": ""},
+        "Artist",
+        allow_anon=False,
+        candidate_context={"explicit_accepted_url": True},
+    )
+
+    assert result is not None
+    night_result, emails, driver_kind, outcome = result
+    assert emails == ["bookings@artist.com"]
+    assert night_result is not None
+    assert night_result.about_attempted == "yes"
+    assert night_result.about_result == "emails_found"
+    assert calls == [main_url, fallback_url]
+    assert surface_calls == []
+    assert driver_kind == "session"
+    assert outcome == "found_email"
+    assert not any("[Night FB][Explicit Stabilize] weak main-page capture detected" in msg for msg in logs)
+    assert any(f"[FB Email] Visiting {fallback_url}" in msg for msg in logs)
 
 
 def test_explicit_pass_a_good_visible_text_skips_recollect(monkeypatch) -> None:
@@ -1194,7 +1262,7 @@ def test_direct_about_fallback_runs_when_no_contact_link_detected(monkeypatch) -
     enricher = _build_enricher(logs)
     calls = []
     main_url = "https://www.facebook.com/artist"
-    fallback_url = "https://www.facebook.com/artist/about_contact_and_basic_info"
+    fallback_url = "https://www.facebook.com/artist/directory_contact_info"
 
     pages = {
         main_url: (
@@ -1312,7 +1380,7 @@ def test_secondary_fetch_uses_direct_about_fallback_when_only_invalid_internal_s
     enricher = _build_enricher(logs)
     calls = []
     main_url = "https://www.facebook.com/artist"
-    fallback_url = "https://www.facebook.com/artist/about_contact_and_basic_info"
+    fallback_url = "https://www.facebook.com/artist/directory_contact_info"
 
     pages = {
         main_url: (
@@ -1364,7 +1432,7 @@ def test_explicit_seed_url_keeps_main_page_email_without_candidate_context(monke
     enricher = _build_enricher(logs)
     calls = []
     main_url = "https://www.facebook.com/exactartist"
-    contact_info_url = "https://www.facebook.com/exactartist/about_contact_and_basic_info"
+    contact_info_url = "https://www.facebook.com/exactartist/directory_contact_info"
 
     pages = {
         main_url: (

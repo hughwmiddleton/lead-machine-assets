@@ -6964,12 +6964,25 @@ class NightModeFacebookEnricher:
 
     @staticmethod
     def _explicit_main_page_surface_capture_is_weak(
+        page_html: Optional[str],
         rendered_text: Optional[str],
         anchor_values: Optional[List[str]],
     ) -> bool:
         visible_text = str(rendered_text or "").strip()
         live_anchor_values = [str(value or "").strip() for value in list(anchor_values or []) if str(value or "").strip()]
-        return not visible_text and not live_anchor_values
+        if visible_text or live_anchor_values:
+            return False
+
+        html_text = str(page_html or "")
+        if not html_text.strip():
+            return True
+
+        soup = BeautifulSoup(html_text, "html.parser")
+        try:
+            dom_text = " ".join(soup.stripped_strings)
+        except Exception:
+            dom_text = ""
+        return len(dom_text) < 24
 
     def _restabilize_explicit_main_page_surface_capture(
         self,
@@ -7940,7 +7953,7 @@ class NightModeFacebookEnricher:
         has_music_signals_main = _night_fb_has_music_signals(soup, {"url": resolved_url})
         main_visible_text = getattr(self, "_last_fb_visible_text", "") or ""
         main_anchor_values = list(getattr(self, "_last_fb_live_anchor_values", []) or [])
-        if explicit_pass_a and self._explicit_main_page_surface_capture_is_weak(main_visible_text, main_anchor_values):
+        if explicit_pass_a and self._explicit_main_page_surface_capture_is_weak(html, main_visible_text, main_anchor_values):
             _log(
                 self.logger,
                 f"[Night FB][Explicit Stabilize] weak main-page capture detected; recollecting once url='{resolved_url}'",
