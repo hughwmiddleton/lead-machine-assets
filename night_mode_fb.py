@@ -10,6 +10,7 @@ import re
 import time
 import urllib.parse
 import shutil
+import json
 import unicodedata
 from pathlib import Path
 import sys
@@ -645,6 +646,158 @@ def _sanitize_fs_key(text: str, max_len: int = 80) -> str:
     if len(val) > max_len:
         val = val[:max_len]
     return val
+
+
+def _write_night_fb_fail_evidence_debug(
+    payload: Dict[str, str],
+    *,
+    row_index: Optional[int],
+    collector_state: Optional[Dict[str, Any]],
+    logger: LoggerFn = None,
+) -> Optional[str]:
+    if os.getenv("NIGHT_FB_EVIDENCE_DEBUG") != "1":
+        return None
+    if not isinstance(payload, dict):
+        return None
+
+    status = str(payload.get("FB_Status", "") or "").strip()
+    status_norm = status.lower()
+    qualifying_exact = {
+        "pass_a_no_email_on_page",
+        "pass_a_content_unavailable",
+        "pass_a_fetch_error",
+        "content_unavailable",
+        "no_candidates",
+    }
+    if status_norm not in qualifying_exact and not (
+        status_norm.endswith("_no_email_on_page")
+        or status_norm.endswith("_content_unavailable")
+        or status_norm.endswith("_fetch_error")
+    ):
+        return None
+    if str(payload.get("Email", "") or "").strip() or str(payload.get("Email_All", "") or "").strip():
+        return None
+
+    run_dir = os.getenv("RUN_DIR") or os.getenv("NIGHT_RUN_DIR")
+    if not run_dir:
+        return None
+
+    state = dict(collector_state or {})
+    html_available = bool(state.get("html_available"))
+    text_available = bool(state.get("visible_text_available"))
+    anchor_available = bool(state.get("anchor_values_available"))
+    reveal_available = bool(state.get("reveal_actions_available"))
+    raw_html = state.get("html")
+    visible_text = state.get("visible_text")
+    anchor_values = state.get("anchor_values")
+    reveal_actions = state.get("reveal_actions")
+    resolved_url = str(
+        state.get("resolved_url")
+        or payload.get("Facebook_URL")
+        or payload.get("Facebook URL")
+        or ""
+    ).strip()
+
+    if html_available:
+        html_source = str(raw_html or "")
+        emails_from_html, _ = _extract_emails_from_html(html_source)
+        html_contains_at: Optional[bool] = "@" in html_source
+    else:
+        html_source = ""
+        emails_from_html = None
+        html_contains_at = None
+
+    if text_available:
+        text_source = str(visible_text or "")
+        emails_from_text, _ = _extract_emails_from_html("", rendered_text=text_source)
+        visible_text_contains_at: Optional[bool] = "@" in text_source
+    else:
+        text_source = ""
+        emails_from_text = None
+        visible_text_contains_at = None
+
+    if anchor_available:
+        anchor_source = [str(value or "").strip() for value in (anchor_values or []) if str(value or "").strip()]
+        emails_from_anchors, _ = _extract_emails_from_html("", anchor_values=anchor_source)
+        anchor_count: Optional[int] = len(anchor_source)
+        anchor_has_mailto: Optional[bool] = any(value.lower().startswith("mailto:") for value in anchor_source)
+    else:
+        anchor_source = []
+        emails_from_anchors = None
+        anchor_count = None
+        anchor_has_mailto = None
+
+    if html_available or text_available or anchor_available:
+        raw_merged_candidates, _ = _extract_emails_from_html(
+            html_source,
+            rendered_text=text_source,
+            anchor_values=anchor_source,
+        )
+    else:
+        raw_merged_candidates = None
+
+    if resolved_url or html_available:
+        health = _night_fb_page_health_snapshot(resolved_url, html_source or None)
+        captcha: Optional[bool] = bool(health.get("captcha"))
+        checkpoint: Optional[bool] = bool(health.get("checkpoint"))
+        login_wall: Optional[bool] = bool(health.get("login_wall"))
+        warning_flag: Optional[bool] = bool(health.get("warning_reason"))
+    else:
+        captcha = None
+        checkpoint = None
+        login_wall = None
+        warning_flag = None
+
+    artist = str(payload.get("Artist Name", "") or payload.get("Artist", "") or "").strip()
+    artist_key = _sanitize_fs_key(artist or "unknown")
+    row_key = f"row_{int(row_index):06d}" if isinstance(row_index, int) else "row_unknown"
+    output_dir = Path(run_dir) / "fb_evidence_debug"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / f"{row_key}__{artist_key}.json"
+
+    evidence = {
+        "identity": {
+            "artist": artist or None,
+            "row_index": row_index,
+            "path": "explicit_pass_a" if status_norm.startswith("pass_a_") else "pass_b",
+            "resolved_url": resolved_url or None,
+            "FB_Status": status or None,
+            "FB_Reason": str(payload.get("FB_Reason", "") or "") or None,
+            "FB_Attempt_State": str(payload.get(FB_ATTEMPT_STATE_COL, "") or "") or None,
+            "FB_Write_State": str(payload.get("FB_Write_State", "") or "") or None,
+        },
+        "render_health": {
+            "render_invalid_reason": str(state.get("render_invalid_reason", "") or "") or None,
+            "captcha": captcha,
+            "checkpoint": checkpoint,
+            "login_wall": login_wall,
+            "warning": warning_flag,
+            "driver_kind": str(state.get("driver_kind", "") or "") or None,
+        },
+        "collector": {
+            "html_contains_at": html_contains_at,
+            "visible_text_contains_at": visible_text_contains_at,
+            "anchor_count": anchor_count,
+            "anchor_has_mailto": anchor_has_mailto,
+            "reveal_actions": list(reveal_actions or []) if reveal_available else None,
+        },
+        "extraction": {
+            "emails_from_html": emails_from_html,
+            "emails_from_text": emails_from_text,
+            "emails_from_anchors": emails_from_anchors,
+            "raw_merged_candidates": raw_merged_candidates,
+        },
+        "writeback": {
+            "final_email": str(payload.get("Email", "") or "") or None,
+            "final_email_all": str(payload.get("Email_All", "") or "") or None,
+            "had_upstream_email_candidate": bool(raw_merged_candidates),
+        },
+    }
+
+    with output_path.open("w", encoding="utf-8") as fh:
+        json.dump(evidence, fh, indent=2, sort_keys=True)
+    _log(logger, f"[Night FB][EvidenceDebug] wrote fail-case evidence pack: {output_path}")
+    return str(output_path)
 
 
 def _maybe_dump_dom_gate_debug(
@@ -5928,6 +6081,14 @@ class NightModeFacebookEnricher:
         self._last_fb_visible_text: str = ""
         self._last_fb_live_anchor_values: List[str] = []
         self._last_fb_reveal_actions: List[str] = []
+        self._last_fb_surface_html: Optional[str] = None
+        self._last_fb_surface_url: str = ""
+        self._last_fb_surface_driver_kind: str = ""
+        self._last_fb_render_invalid_reason: str = ""
+        self._last_fb_surface_html_available: bool = False
+        self._last_fb_visible_text_available: bool = False
+        self._last_fb_anchor_values_available: bool = False
+        self._last_fb_reveal_actions_available: bool = False
         self.protective_shutdown: bool = False
         # Debug-only FB URL flow tracing; defaults to off.
         self._debug_fb_url_flow: bool = _bool_env("DEBUG_FB_URL_FLOW", default=False)
@@ -6668,6 +6829,14 @@ class NightModeFacebookEnricher:
         self._last_fb_visible_text = ""
         self._last_fb_live_anchor_values = []
         self._last_fb_reveal_actions = []
+        self._last_fb_surface_html = None
+        self._last_fb_surface_url = ""
+        self._last_fb_surface_driver_kind = ""
+        self._last_fb_render_invalid_reason = ""
+        self._last_fb_surface_html_available = False
+        self._last_fb_visible_text_available = False
+        self._last_fb_anchor_values_available = False
+        self._last_fb_reveal_actions_available = False
 
     def _collect_current_fb_email_surface_state(self, driver_kind: str = "session") -> Tuple[str, str, List[str], List[str]]:
         self._clear_last_fb_email_surface_state()
@@ -6683,6 +6852,13 @@ class NightModeFacebookEnricher:
             driver,
             logger=self.logger,
         )
+        self._last_fb_surface_html = page_source
+        self._last_fb_surface_url = str(getattr(driver, "current_url", "") or "")
+        self._last_fb_surface_driver_kind = str(driver_kind or "")
+        self._last_fb_surface_html_available = True
+        self._last_fb_visible_text_available = True
+        self._last_fb_anchor_values_available = True
+        self._last_fb_reveal_actions_available = True
         self._last_fb_visible_text = rendered_text
         self._last_fb_live_anchor_values = list(anchor_values or [])
         self._last_fb_reveal_actions = list(reveal_actions or [])
@@ -6749,9 +6925,21 @@ class NightModeFacebookEnricher:
                     driver,
                     logger=self.logger,
                 )
+                self._last_fb_surface_html = page_source
+                self._last_fb_surface_url = str(getattr(driver, "current_url", None) or url)
+                self._last_fb_surface_driver_kind = "session"
+                self._last_fb_surface_html_available = True
+                self._last_fb_visible_text_available = True
+                self._last_fb_anchor_values_available = True
+                self._last_fb_reveal_actions_available = True
                 self._last_fb_visible_text = rendered_text
                 self._last_fb_live_anchor_values = list(anchor_values or [])
                 self._last_fb_reveal_actions = list(reveal_actions or [])
+            else:
+                self._last_fb_surface_html = page_source or html
+                self._last_fb_surface_url = str(getattr(driver, "current_url", None) or url)
+                self._last_fb_surface_driver_kind = "session"
+                self._last_fb_surface_html_available = True
             current_url = getattr(driver, "current_url", None) or url
             return page_source or driver.page_source, current_url
 
@@ -6831,9 +7019,21 @@ class NightModeFacebookEnricher:
                     driver,
                     logger=self.logger,
                 )
+                self._last_fb_surface_html = page_source
+                self._last_fb_surface_url = str(getattr(driver, "current_url", None) or current_url or url)
+                self._last_fb_surface_driver_kind = "anon_fallback"
+                self._last_fb_surface_html_available = True
+                self._last_fb_visible_text_available = True
+                self._last_fb_anchor_values_available = True
+                self._last_fb_reveal_actions_available = True
                 self._last_fb_visible_text = rendered_text
                 self._last_fb_live_anchor_values = list(anchor_values or [])
                 self._last_fb_reveal_actions = list(reveal_actions or [])
+            else:
+                self._last_fb_surface_html = page_source or html
+                self._last_fb_surface_url = str(getattr(driver, "current_url", None) or current_url or url)
+                self._last_fb_surface_driver_kind = "anon_fallback"
+                self._last_fb_surface_html_available = True
             current_url = getattr(driver, "current_url", None) or current_url or url
             self._log_page_health(current_url, html, context="page")
             if is_fb_login_redirect(current_url) or _is_fb_login_or_security_url(current_url):
@@ -7425,6 +7625,7 @@ class NightModeFacebookEnricher:
         _log(self.logger, f"[FB Email] Visiting {candidate_url}")
 
         used_driver_kind = "session"
+        self._last_fb_surface_driver_kind = used_driver_kind
         outcome_hint = "fetch_error"
         reject_reason = ""
         timed_out_flag = False
@@ -7451,6 +7652,7 @@ class NightModeFacebookEnricher:
             else:
                 html, resolved_url = self._fetch_html_with_url_anon(candidate_url, goto_about=False)
             used_driver_kind = "anon_fallback"
+            self._last_fb_surface_driver_kind = used_driver_kind
             if html and outcome_hint != "fetched":
                 outcome_hint = "fetched"
             timed_out_flag = timed_out_flag or bool(getattr(self, "_last_fb_timeout", False))
@@ -7472,6 +7674,7 @@ class NightModeFacebookEnricher:
                 rendered_text=getattr(self, "_last_fb_visible_text", "") or "",
                 anchor_values=getattr(self, "_last_fb_live_anchor_values", []) or [],
             )
+            self._last_fb_render_invalid_reason = str(main_render_reason or "")
             if main_render_reason:
                 warning_reason = _looks_like_fb_warning_or_block(html, resolved_url) or ""
                 health = _night_fb_page_health_snapshot(
@@ -7511,6 +7714,7 @@ class NightModeFacebookEnricher:
                     rendered_text=refreshed_text,
                     anchor_values=refreshed_anchor_values,
                 )
+                self._last_fb_render_invalid_reason = str(main_render_reason or "")
                 if main_render_reason:
                     _log(
                         self.logger,
@@ -7519,6 +7723,7 @@ class NightModeFacebookEnricher:
                     return None, [], used_driver_kind, "content_unavailable"
 
         if _is_fb_content_unavailable_page(html):
+            self._last_fb_render_invalid_reason = "content_unavailable"
             _log(self.logger, f"[Night FB][PageUnavailable] {resolved_url}")
             return None, [], used_driver_kind, "content_unavailable"
 
@@ -8299,6 +8504,7 @@ class NightModeFacebookEnricher:
         result["FB_Status"] = result.get("FB_Status", "") or ""
         self._checkpoint_warned_this_row = False
         self._page_budget_remaining = 2
+        self._clear_last_fb_email_surface_state()
 
         def _clean_val(value: str) -> str:
             try:
@@ -8317,6 +8523,24 @@ class NightModeFacebookEnricher:
                     payload.get("FB_Status", ""),
                     payload.get(FB_ATTEMPT_STATE_COL, ""),
                 )
+            _write_night_fb_fail_evidence_debug(
+                payload,
+                row_index=row_index,
+                collector_state={
+                    "html": self._last_fb_surface_html,
+                    "html_available": self._last_fb_surface_html_available,
+                    "visible_text": self._last_fb_visible_text,
+                    "visible_text_available": self._last_fb_visible_text_available,
+                    "anchor_values": list(self._last_fb_live_anchor_values or []),
+                    "anchor_values_available": self._last_fb_anchor_values_available,
+                    "reveal_actions": list(self._last_fb_reveal_actions or []),
+                    "reveal_actions_available": self._last_fb_reveal_actions_available,
+                    "resolved_url": self._last_fb_surface_url,
+                    "driver_kind": self._last_fb_surface_driver_kind,
+                    "render_invalid_reason": self._last_fb_render_invalid_reason,
+                },
+                logger=self.logger,
+            )
             return payload
 
         def _finalize_explicit_content_unavailable(payload: Dict[str, str]) -> Dict[str, str]:
