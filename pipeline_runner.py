@@ -3543,7 +3543,18 @@ def run_facebook_global_pass_nightmode(
                 _write_state_with_pass_a(state)
                 continue
 
-            if discovery_fallback_eligible and not has_canonical_facebook_url and shared_discovery_attempted:
+            allow_unearthed_night_no_url_path = bool(
+                unearthed_no_url_discovery_eligible
+                and not has_canonical_facebook_url
+                and not has_explicit_fb_entrypoint
+            )
+
+            if (
+                discovery_fallback_eligible
+                and not has_canonical_facebook_url
+                and shared_discovery_attempted
+                and not allow_unearthed_night_no_url_path
+            ):
                 df.at[idx, FB_GATE_STATE_COL] = "skipped_duplicate_fb_discovery"
                 if not _cell_str(df.at[idx, FB_WRITE_STATE_COL]):
                     df.at[idx, FB_WRITE_STATE_COL] = "fb_no_email_written"

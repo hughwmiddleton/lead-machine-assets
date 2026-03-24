@@ -234,6 +234,39 @@ def test_unearthed_no_facebook_url_discovery_miss_stays_safe(monkeypatch, tmp_pa
     assert df_out.loc[0, FB_WRITE_STATE_COL] == "fb_no_email_written"
 
 
+def test_unearthed_no_facebook_url_with_discovery_flag_still_uses_helper_states(monkeypatch, tmp_path):
+    helper = StaticFBHelper(
+        {
+            "FB_Status": "unearthed_no_candidates",
+            FB_ATTEMPT_STATE_COL: "attempted_fb_no_email_on_page",
+        }
+    )
+    df_out, _ = _run_night_fb_pass(
+        monkeypatch,
+        tmp_path,
+        [
+            {
+                "Artist Name": "Unearthed Missing FB",
+                "Source Directory": "Unearthed",
+                "Email": "",
+                "Email_All": "",
+                "Social Link": "",
+                "Facebook_URL": "",
+                pipeline_runner.FB_DISCOVERY_ATTEMPT_FLAG_COL: "1",
+            }
+        ],
+        helper,
+    )
+
+    assert helper.calls == 1
+    assert helper.rows[0]["row"]["Facebook_URL"] == ""
+    assert df_out.loc[0, "FB_Status"] == "unearthed_no_candidates"
+    assert df_out.loc[0, FB_OPPORTUNITY_STATE_COL] == "fb_discovery_fallback_eligible"
+    assert df_out.loc[0, FB_GATE_STATE_COL] == ""
+    assert df_out.loc[0, FB_ATTEMPT_STATE_COL] == "attempted_fb_no_email_on_page"
+    assert df_out.loc[0, FB_WRITE_STATE_COL] == "fb_no_email_written"
+
+
 def test_canonical_detectable_explicit_facebook_link_still_runs_without_identity_anchor(monkeypatch, tmp_path):
     helper = StaticFBHelper(
         {

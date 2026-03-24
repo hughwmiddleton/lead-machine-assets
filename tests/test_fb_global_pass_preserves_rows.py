@@ -209,6 +209,51 @@ def test_nightmode_fb_pass_skips_duplicate_discovery_fallback(monkeypatch, tmp_p
     assert status.total_rows == 1
 
 
+def test_nightmode_fb_pass_allows_unearthed_no_url_even_when_discovery_attempted(monkeypatch, tmp_path):
+    input_csv = tmp_path / "master_pre_fb.csv"
+    output_csv = tmp_path / "master_post_fb.csv"
+    state_path = tmp_path / "fb_state.json"
+    pd.DataFrame(
+        [
+            {
+                "Artist Name": "Unearthed Missing FB",
+                "Source Directory": "Unearthed",
+                "Email": "",
+                "Email_All": "",
+                "Social Link": "",
+                "Facebook_URL": "",
+                pipeline_runner.FB_DISCOVERY_ATTEMPT_FLAG_COL: "1",
+            }
+        ]
+    ).to_csv(input_csv, index=False)
+
+    helper = DummyFBHelper()
+
+    monkeypatch.setenv("FB_USERNAME", "user")
+    monkeypatch.setenv("FB_PASSWORD", "pass")
+    monkeypatch.setattr(pipeline_runner, "NightModeFacebookEnricher", lambda *args, **kwargs: helper)
+    monkeypatch.setattr(pipeline_runner, "_load_legacy_module", _make_dummy_module)
+    monkeypatch.setattr(pipeline_runner, "_load_fb_state", lambda _: {})
+    monkeypatch.setattr(pipeline_runner, "_write_fb_state", lambda *args, **kwargs: None)
+
+    status = pipeline_runner.run_facebook_global_pass_nightmode(
+        input_csv=input_csv.as_posix(),
+        output_csv=output_csv.as_posix(),
+        state_path=state_path.as_posix(),
+        skip_rows_with_email=True,
+    )
+
+    df_out = pd.read_csv(output_csv, dtype=str, keep_default_na=False).fillna("")
+
+    assert helper.calls == 1
+    assert helper.rows[0]["row"]["Facebook_URL"] == ""
+    assert helper.rows[0]["row"]["Source Directory"] == "Unearthed"
+    assert df_out.loc[0, "Email"] == "fb@example.com"
+    assert df_out.loc[0, "FB_Status"] == "ok"
+    assert df_out.loc[0, FB_GATE_STATE_COL] != "skipped_duplicate_fb_discovery"
+    assert status.total_rows == 1
+
+
 def test_nightmode_fb_pass_allows_explicit_url_even_when_discovery_attempted(monkeypatch, tmp_path):
     input_csv = tmp_path / "master_pre_fb.csv"
     output_csv = tmp_path / "master_post_fb.csv"
@@ -246,6 +291,50 @@ def test_nightmode_fb_pass_allows_explicit_url_even_when_discovery_attempted(mon
 
     assert helper.calls == 1
     assert helper.rows[0]["row"]["Facebook_URL"] == "https://www.facebook.com/expliciturl"
+    assert df_out.loc[0, "Email"] == "fb@example.com"
+    assert df_out.loc[0, "FB_Status"] == "ok"
+    assert df_out.loc[0, FB_GATE_STATE_COL] != "skipped_duplicate_fb_discovery"
+    assert status.total_rows == 1
+
+
+def test_nightmode_fb_pass_allows_unearthed_explicit_url_even_when_discovery_attempted(monkeypatch, tmp_path):
+    input_csv = tmp_path / "master_pre_fb.csv"
+    output_csv = tmp_path / "master_post_fb.csv"
+    state_path = tmp_path / "fb_state.json"
+    pd.DataFrame(
+        [
+            {
+                "Artist Name": "Unearthed Explicit URL",
+                "Source Directory": "Unearthed",
+                "Email": "",
+                "Email_All": "",
+                "Social Link": "",
+                "Facebook_URL": "https://facebook.com/unearthedexplicit",
+                pipeline_runner.FB_DISCOVERY_ATTEMPT_FLAG_COL: "1",
+            }
+        ]
+    ).to_csv(input_csv, index=False)
+
+    helper = DummyFBHelper()
+
+    monkeypatch.setenv("FB_USERNAME", "user")
+    monkeypatch.setenv("FB_PASSWORD", "pass")
+    monkeypatch.setattr(pipeline_runner, "NightModeFacebookEnricher", lambda *args, **kwargs: helper)
+    monkeypatch.setattr(pipeline_runner, "_load_legacy_module", _make_dummy_module)
+    monkeypatch.setattr(pipeline_runner, "_load_fb_state", lambda _: {})
+    monkeypatch.setattr(pipeline_runner, "_write_fb_state", lambda *args, **kwargs: None)
+
+    status = pipeline_runner.run_facebook_global_pass_nightmode(
+        input_csv=input_csv.as_posix(),
+        output_csv=output_csv.as_posix(),
+        state_path=state_path.as_posix(),
+        skip_rows_with_email=True,
+    )
+
+    df_out = pd.read_csv(output_csv, dtype=str, keep_default_na=False).fillna("")
+
+    assert helper.calls == 1
+    assert helper.rows[0]["row"]["Facebook_URL"] == "https://www.facebook.com/unearthedexplicit"
     assert df_out.loc[0, "Email"] == "fb@example.com"
     assert df_out.loc[0, "FB_Status"] == "ok"
     assert df_out.loc[0, FB_GATE_STATE_COL] != "skipped_duplicate_fb_discovery"
