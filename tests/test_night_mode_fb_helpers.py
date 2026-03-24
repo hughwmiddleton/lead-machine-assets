@@ -607,6 +607,28 @@ def test_explicit_fb_entrypoint_urls_canonicalize_pages_category_shapes() -> Non
     ) == ["https://www.facebook.com/tbish"]
 
 
+def test_explicit_fb_entrypoint_urls_canonicalize_p_shapes() -> None:
+    assert night_mode_fb.explicit_fb_entrypoint_urls_for_row(
+        {"Facebook_URL": "https://www.facebook.com/p/Kyla-Belle-100063568093299"}
+    ) == ["https://www.facebook.com/kyla-belle"]
+    assert night_mode_fb.explicit_fb_entrypoint_urls_for_row(
+        {"Facebook_URL": "https://www.facebook.com/p/echostar/123"}
+    ) == ["https://www.facebook.com/echostar"]
+    assert night_mode_fb.explicit_fb_entrypoint_urls_for_row(
+        {"Facebook_URL": "https://www.facebook.com/p/echostar/123/about"}
+    ) == ["https://www.facebook.com/echostar"]
+
+
+def test_classify_explicit_fb_intake_accepts_canonicalized_p_url() -> None:
+    decision = night_mode_fb.classify_explicit_fb_intake(
+        {"Artist Name": "Kyla Belle", "Facebook_URL": "https://www.facebook.com/p/Kyla-Belle-100063568093299"}
+    )
+
+    assert decision.outcome == "attempt"
+    assert decision.accepted_urls == ["https://www.facebook.com/kyla-belle"]
+    assert decision.guard_reason == ""
+
+
 def test_explicit_fb_entrypoint_urls_reject_ambiguous_pages_category_shapes() -> None:
     assert night_mode_fb.explicit_fb_entrypoint_urls_for_row(
         {"Facebook_URL": "https://www.facebook.com/pages/category/"}
@@ -710,6 +732,44 @@ def test_pass_a_uses_canonicalized_pages_category_url(monkeypatch) -> None:
     result = enricher.enrich_row_with_facebook_night(row)
 
     assert calls["urls"] == ["https://www.facebook.com/tbish"]
+    assert result.get("FB_Status") == "pass_a_found_email"
+    assert result.get("FB_Reason") == "explicit_url"
+
+
+def test_pass_a_uses_canonicalized_p_url_without_search(monkeypatch) -> None:
+    enricher = night_mode_fb.NightModeFacebookEnricher(
+        legacy_module=None,
+        username="",
+        password="",
+        logger=None,
+        use_shared_session=False,
+    )
+    monkeypatch.setattr(enricher, "_ensure_session", lambda: None)
+    monkeypatch.setattr(
+        enricher,
+        "_search_for_page",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("PASS B should not run for accepted /p/ explicit URLs")),
+    )
+
+    calls = {"urls": []}
+
+    def _fake_scrape(url, *args, **kwargs):  # noqa: ANN001
+        calls["urls"].append(url)
+        night_result = night_mode_fb.NightModeFacebookResult(
+            email="artist@test.com",
+            email_all="artist@test.com",
+            facebook_url=night_mode_fb._normalise_fb_url(url),
+            email_extract_method="regex",
+        )
+        return night_result, ["artist@test.com"], "session", "found_email"
+
+    monkeypatch.setattr(enricher, "_scrape_single_fb_candidate", _fake_scrape)
+
+    row = {"Artist Name": "Test Artist", "Social Link": "https://www.facebook.com/p/Kyla-Belle-100063568093299"}
+
+    result = enricher.enrich_row_with_facebook_night(row)
+
+    assert calls["urls"] == ["https://www.facebook.com/kyla-belle"]
     assert result.get("FB_Status") == "pass_a_found_email"
     assert result.get("FB_Reason") == "explicit_url"
 

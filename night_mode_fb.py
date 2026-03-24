@@ -1966,6 +1966,48 @@ def _canonicalize_fb_pages_category_url(url: str) -> Optional[str]:
     return urllib.parse.urlunparse(("https", "www.facebook.com", f"/{page}", "", "", ""))
 
 
+def _canonicalize_fb_p_url(url: str) -> Optional[str]:
+    raw = str(url or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = urllib.parse.urlparse(raw)
+    except Exception:
+        return None
+    parts = [part for part in (parsed.path or "").split("/") if part]
+    if len(parts) < 2 or parts[0].lower() != "p":
+        return None
+    tail = [part.lower() for part in parts[2:]]
+    if tail:
+        allowed_tail = {"about", "posts", "photos"}
+        if len(tail) > 2:
+            return None
+        if not all(part.isdigit() or part in allowed_tail for part in tail):
+            return None
+        if len(tail) == 2 and (not tail[0].isdigit() or tail[1] not in allowed_tail):
+            return None
+    page = (parts[1] or "").strip()
+    if not page or page.lower() in {"nan", "none", "null"}:
+        return None
+    page_name, sep, numeric_suffix = page.rpartition("-")
+    if sep and numeric_suffix.isdigit() and len(numeric_suffix) >= 10:
+        page = page_name.strip()
+        if not page or page.lower() in {"nan", "none", "null"}:
+            return None
+    return urllib.parse.urlunparse(("https", "www.facebook.com", f"/{page}", "", "", ""))
+
+
+def _canonicalize_explicit_fb_entrypoint_url(url: str) -> str:
+    norm = _normalise_fb_url(url)
+    if not norm:
+        return ""
+    for canonicalizer in (_canonicalize_fb_pages_category_url, _canonicalize_fb_p_url):
+        rewritten = canonicalizer(norm)
+        if rewritten:
+            norm = _normalise_fb_url(rewritten) or rewritten
+    return norm
+
+
 def _canonicalize_and_dedupe_explicit_fb_urls(
     urls: Sequence[str], logger: LoggerFn = None, debug: bool = False
 ) -> List[str]:
@@ -1980,12 +2022,9 @@ def _canonicalize_and_dedupe_explicit_fb_urls(
             if debug and logger:
                 _log(logger, f"[Night FB] Skipping invalid facebook_url value: {raw}")
             continue
-        norm = _normalise_fb_url(raw)
+        norm = _canonicalize_explicit_fb_entrypoint_url(raw)
         if not norm:
             continue
-        pages_category_norm = _canonicalize_fb_pages_category_url(norm)
-        if pages_category_norm:
-            norm = _normalise_fb_url(pages_category_norm) or pages_category_norm
         try:
             parsed = urllib.parse.urlsplit(norm)
             path = parsed.path.rstrip("/") or "/"
@@ -2105,9 +2144,11 @@ def _explicit_fb_pre_scrape_guard_reason(url: str) -> Tuple[str, str]:
         return "invalid_placeholder", raw_fb_url or "<blank>"
     if _is_allowed_fb_share_entrypoint_url(raw_fb_url):
         return "", _normalise_fb_url(raw_fb_url) or raw_fb_url
-    if not fb_is_allowed_profile_candidate_url(raw_fb_url):
+    canonical_candidate_url = _canonicalize_explicit_fb_entrypoint_url(raw_fb_url)
+    guard_input = canonical_candidate_url or raw_fb_url
+    if not fb_is_allowed_profile_candidate_url(guard_input):
         return "shape_disallowed", raw_fb_url or "<blank>"
-    candidate_url = _normalise_fb_url(raw_fb_url or "")
+    candidate_url = canonical_candidate_url or _normalise_fb_url(raw_fb_url or "")
     if not candidate_url:
         return "normalize_failed", raw_fb_url or "<blank>"
     if _is_junk_fb_candidate(candidate_url):
@@ -2203,9 +2244,14 @@ def classify_explicit_fb_intake(
                 if not invalid_reason:
                     invalid_reason = "canonicalization_dropped"
                 continue
-            pages_category_canonical = _canonicalize_fb_pages_category_url(canonical)
-            if pages_category_canonical:
-                canonical = _normalise_fb_url(pages_category_canonical) or pages_category_canonical
+            canonical = _canonicalize_explicit_fb_entrypoint_url(canonical)
+            if not canonical:
+                if candidate not in rejected_invalid_seen:
+                    rejected_invalid.append(candidate)
+                    rejected_invalid_seen.add(candidate)
+                if not invalid_reason:
+                    invalid_reason = "canonicalization_dropped"
+                continue
             accepted_sources_by_url.setdefault(canonical, source_label)
             guard_reject_reason, guard_sample = _explicit_fb_pre_scrape_guard_reason(canonical)
             if guard_reject_reason:

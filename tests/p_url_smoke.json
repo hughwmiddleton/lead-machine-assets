@@ -1,0 +1,9 @@
+{
+  "jobs": [
+    {
+      "name": "p_url_smoke",
+      "type": "csv",
+      "path": "tests/p_url_input.csv"
+    }
+  ]
+}

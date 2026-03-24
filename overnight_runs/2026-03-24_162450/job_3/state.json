@@ -1,0 +1,10 @@
+{
+  "job_id": "job_3",
+  "raw_csv": "overnight_runs/2026-03-24_162450/job_3/raw.csv",
+  "enriched_csv": "overnight_runs/2026-03-24_162450/job_3/enriched.csv",
+  "input_seed_csv": "",
+  "status": "partial_error",
+  "error_count": 1,
+  "last_update": "2026-03-24T05:24:51.235979+00:00",
+  "last_error": "ValueError: Unsupported directory: "
+}
