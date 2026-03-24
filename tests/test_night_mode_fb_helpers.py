@@ -373,7 +373,7 @@ def test_extract_fb_visible_text_with_container_fallback_includes_visible_sideba
     assert used_mailto is False
 
 
-def test_extract_fb_visible_text_with_container_fallback_preserves_main_email_fast_path(monkeypatch) -> None:
+def test_extract_fb_visible_text_with_container_fallback_includes_sidebar_even_when_base_text_has_email(monkeypatch) -> None:
     driver = _ContainerFallbackDriver(["Intro Contact elliot@rustmgmt.com"])
 
     monkeypatch.setattr(
@@ -383,9 +383,21 @@ def test_extract_fb_visible_text_with_container_fallback_preserves_main_email_fa
     )
 
     rendered_text = night_mode_fb._extract_fb_visible_text_with_container_fallback(driver)
+    emails, used_mailto = night_mode_fb._extract_emails_from_html(
+        "<html><body>No email in source</body></html>",
+        rendered_text=rendered_text,
+        stop_after_first_filtered=False,
+    )
 
-    assert rendered_text == "Main stage contact bookings@artist.com"
-    assert driver.execute_calls == 0
+    assert rendered_text == "\n".join(
+        [
+            "Main stage contact bookings@artist.com",
+            "Intro Contact elliot@rustmgmt.com",
+        ]
+    )
+    assert driver.execute_calls == 1
+    assert emails == ["bookings@artist.com", "elliot@rustmgmt.com"]
+    assert used_mailto is False
 
 
 def test_collect_fb_email_surface_state_sequences_reveal_scroll_then_capture(monkeypatch) -> None:

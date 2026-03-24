@@ -1,0 +1,6 @@
+2026-03-24 19:35:44,113 [INFO] Starting scrape for job job_unearthed_1
+2026-03-24 19:35:44,516 [INFO] [Directory] Running job for directory=unearthed slug= job_id=job_unearthed_1
+2026-03-24 19:35:44,516 [INFO] [Unearthed] FB creds supplied but automated login is disabled (set FB_ALLOW_AUTOMATED_LOGIN=1 to enable); proceeding without shared session.
+2026-03-24 19:35:44,516 [INFO] [Unearthed] Using FULL pipeline entrypoint: run_unearthed_pipeline
+2026-03-24 19:36:09,117 [INFO] [Unearthed] Deduped temp CSV: removed 70 duplicates (kept 15).
+2026-03-24 19:36:09,122 [INFO] Completed job job_unearthed_1 (raw only; master enrichment pending)

@@ -4265,10 +4265,10 @@ def _extract_fb_visible_text_with_container_fallback(driver) -> str:
     """
     Facebook-only supplement for already-open pages.
     Keeps the generic body-text helper unchanged and adds a tiny semantic
-    fallback for visible main/sidebar regions when body text misses an email.
+    fallback for visible main/sidebar regions.
     """
     base_text = _extract_rendered_visible_text_from_driver(driver)
-    if driver is None or EMAIL_REGEX.search(base_text):
+    if driver is None:
         return base_text
 
     try:
