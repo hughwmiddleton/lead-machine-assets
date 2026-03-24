@@ -445,6 +445,34 @@ def test_attempted_without_email_records_attempt_outcome(monkeypatch, tmp_path):
     assert df_out.loc[0, FB_WRITE_STATE_COL] == "fb_no_email_written"
 
 
+def test_content_unavailable_status_preserves_distinct_attempt_outcome(monkeypatch, tmp_path):
+    helper = StaticFBHelper(
+        {
+            "FB_Status": "pass_a_content_unavailable",
+            "FB_Reason": "content_unavailable",
+            "Facebook_URL": "https://facebook.com/unavailable",
+        }
+    )
+    df_out, _ = _run_night_fb_pass(
+        monkeypatch,
+        tmp_path,
+        [
+            {
+                "Artist Name": "FB Unavailable",
+                "Email": "",
+                "Email_All": "",
+                "Social Link": "",
+                "Facebook_URL": "https://facebook.com/unavailable",
+            }
+        ],
+        helper,
+    )
+
+    assert helper.calls == 1
+    assert df_out.loc[0, FB_ATTEMPT_STATE_COL] == "attempted_fb_content_unavailable"
+    assert df_out.loc[0, FB_WRITE_STATE_COL] == "fb_no_email_written"
+
+
 def test_attempted_with_accepted_email_records_write(monkeypatch, tmp_path):
     helper = StaticFBHelper(
         {

@@ -677,6 +677,7 @@ def test_explicit_content_unavailable_allows_one_pass_b_discovery_fallback(monke
     assert result.get("Email") == "fallback@example.com"
     assert "fallback@example.com" in (result.get("Email_All") or "")
     assert discovered_fallback in (result.get("Facebook_URL") or result.get("facebook_url") or "")
+    assert result.get("FB_Status") != "pass_a_content_unavailable"
 
 
 def test_explicit_content_unavailable_triggers_search_once_per_row(monkeypatch, enricher):
@@ -711,7 +712,7 @@ def test_explicit_content_unavailable_triggers_search_once_per_row(monkeypatch, 
 
     assert scrape_calls == [explicit_primary, explicit_secondary]
     assert search_calls == [("Single Search Artist", "", False, "")]
-    assert result.get("FB_Status") == "pass_a_no_email_on_page"
+    assert result.get("FB_Status") == "pass_a_content_unavailable"
 
 
 def test_mixed_explicit_outcomes_do_not_broaden_into_discovery(monkeypatch, enricher):

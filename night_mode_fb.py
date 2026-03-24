@@ -6688,6 +6688,34 @@ class NightModeFacebookEnricher:
         self._last_fb_reveal_actions = list(reveal_actions or [])
         return page_source, rendered_text, list(anchor_values or []), list(reveal_actions or [])
 
+    def _targeted_explicit_content_unavailable_restabilization(
+        self,
+        driver_kind: str = "session",
+    ) -> Tuple[str, str, List[str], List[str]]:
+        driver = None
+        if not str(driver_kind or "").startswith("anon"):
+            session = getattr(self, "session", None)
+            driver = getattr(session, "driver", None)
+        if driver is not None:
+            try:
+                _reveal_fb_contact_controls(driver, logger=self.logger)
+            except Exception:
+                pass
+            try:
+                driver.execute_script(
+                    """
+                    /* fb_content_unavailable_targeted_restabilization */
+                    const delta = 400;
+                    window.scrollBy(0, delta);
+                    window.scrollTo(0, 0);
+                    return delta;
+                    """
+                )
+            except Exception:
+                pass
+            time.sleep(1.2)
+        return self._collect_current_fb_email_surface_state(driver_kind=driver_kind)
+
     def _fetch_html_with_url(self, url: str, goto_about: bool = True, collect_surfaces: bool = True) -> Tuple[Optional[str], Optional[str]]:
         budget = getattr(self, "_page_budget_remaining", 2)
         self._clear_last_fb_email_surface_state()
@@ -7445,13 +7473,36 @@ class NightModeFacebookEnricher:
                 anchor_values=getattr(self, "_last_fb_live_anchor_values", []) or [],
             )
             if main_render_reason:
-                _log(
-                    self.logger,
-                    f"[Night FB][RenderGate] explicit page state invalid; recollecting current surface once url='{resolved_url}' reason='{main_render_reason}'",
+                warning_reason = _looks_like_fb_warning_or_block(html, resolved_url) or ""
+                health = _night_fb_page_health_snapshot(
+                    resolved_url,
+                    html,
+                    warning_reason=warning_reason,
                 )
-                refreshed_html, refreshed_text, refreshed_anchor_values, _ = self._collect_current_fb_email_surface_state(
-                    driver_kind=used_driver_kind,
+                targeted_restabilization = (
+                    main_render_reason == "content_unavailable"
+                    and used_driver_kind == "session"
+                    and not warning_reason
+                    and not health.get("captcha")
+                    and not health.get("checkpoint")
+                    and not health.get("login_wall")
                 )
+                if targeted_restabilization:
+                    _log(
+                        self.logger,
+                        "[Night FB][RenderGate] content_unavailable -> targeted restabilization",
+                    )
+                    refreshed_html, refreshed_text, refreshed_anchor_values, _ = self._targeted_explicit_content_unavailable_restabilization(
+                        driver_kind=used_driver_kind,
+                    )
+                else:
+                    _log(
+                        self.logger,
+                        f"[Night FB][RenderGate] explicit page state invalid; recollecting current surface once url='{resolved_url}' reason='{main_render_reason}'",
+                    )
+                    refreshed_html, refreshed_text, refreshed_anchor_values, _ = self._collect_current_fb_email_surface_state(
+                        driver_kind=used_driver_kind,
+                    )
                 if refreshed_html:
                     html = refreshed_html
                 main_render_reason = _explicit_fb_render_state_invalid_reason(
@@ -8268,6 +8319,19 @@ class NightModeFacebookEnricher:
                 )
             return payload
 
+        def _finalize_explicit_content_unavailable(payload: Dict[str, str]) -> Dict[str, str]:
+            if payload is None or not explicit_content_unavailable_unrecovered:
+                return payload
+            if _clean_val(payload.get("Email", "")) or _clean_val(payload.get("Email_All", "")):
+                return payload
+            status_norm = _clean_val(payload.get("FB_Status", "")).lower()
+            if status_norm not in {"", "no_candidates", "content_unavailable", "pass_a_no_email_on_page"}:
+                return payload
+            payload["FB_Status"] = "pass_a_content_unavailable"
+            if not payload.get("FB_Reason"):
+                payload["FB_Reason"] = "content_unavailable"
+            return payload
+
         if self._skip_fb_due_to_session_failure or self._session_failed:
             result["FB_Status"] = result.get("FB_Status", "") or "driver_error"
             result["FB_Reason"] = self._session_failed_reason or self._skip_fb_due_to_session_failure_reason or "session_start_failed"
@@ -8394,6 +8458,7 @@ class NightModeFacebookEnricher:
             best_reason = ""
             best_driver = ""
             best_page_url = ""
+            explicit_content_unavailable_unrecovered = False
 
             if not fb_urls:
                 if not result.get("FB_Status"):
@@ -8535,6 +8600,8 @@ class NightModeFacebookEnricher:
                         result["FB_Status"] = "pass_a_fetch_error"
                         result["FB_Reason"] = best_reason or ("anon_exception:unknown" if best_driver.startswith("anon") else "session_exception:unknown")
                         self._pass_a_bump("fetch_error")
+                    elif best_outcome == "content_unavailable":
+                        explicit_content_unavailable_unrecovered = True
                     else:
                         result["FB_Status"] = "pass_a_no_email_on_page"
                         result["FB_Reason"] = best_reason or ("anon_fetch_ok_no_email" if best_driver.startswith("anon") else "session_fetch_ok_no_email")
@@ -8601,7 +8668,7 @@ class NightModeFacebookEnricher:
             if not page_url:
                 session = self._ensure_session()
                 if (not session) and not allow_anon:
-                    return _finish(result)
+                    return _finish(_finalize_explicit_content_unavailable(result))
             if not page_url:
                 page_url = self._search_for_page(
                     artist_name,
@@ -8694,7 +8761,7 @@ class NightModeFacebookEnricher:
                 if self._checkpoint_limited_active and not result.get("FB_Reason"):
                     result["FB_Reason"] = "checkpoint"
                 _log(self.logger, f"[Night FB] No usable FB candidates for '{artist_name}', marking FB_Status='{result.get('FB_Status')}'.")
-                return _finish(result)
+                return _finish(_finalize_explicit_content_unavailable(result))
             night_result = self._build_result(
                 emails,
                 str(result.get("Email_All", "") or ""),

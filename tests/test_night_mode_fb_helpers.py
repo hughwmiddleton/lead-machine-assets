@@ -867,6 +867,11 @@ def test_explicit_pass_a_valid_render_state_passes_without_recovery(monkeypatch)
     monkeypatch.setattr(enricher, "_fetch_html_with_url", fake_fetch)
     monkeypatch.setattr(
         enricher,
+        "_targeted_explicit_content_unavailable_restabilization",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("healthy explicit PASS A page should not targeted-restabilize")),
+    )
+    monkeypatch.setattr(
+        enricher,
         "_collect_current_fb_email_surface_state",
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("healthy explicit PASS A page should not restabilize")),
     )
@@ -901,11 +906,11 @@ def test_explicit_pass_a_invalid_render_state_recollects_once_and_recovers(monke
         assert goto_about is False
         enricher._last_fb_visible_text = ""
         enricher._last_fb_live_anchor_values = []
-        return "<html><body></body></html>", url
+        return "<html><body>Content isn't available right now</body></html>", url
 
     restabilized = {"count": 0}
 
-    def fake_recollect(*args, **kwargs):  # noqa: ANN001
+    def fake_targeted_restabilize(*args, **kwargs):  # noqa: ANN001
         restabilized["count"] += 1
         return (
             "<html><body><div>Bookings recovered@artist.com</div></body></html>",
@@ -915,10 +920,10 @@ def test_explicit_pass_a_invalid_render_state_recollects_once_and_recovers(monke
         )
 
     monkeypatch.setattr(enricher, "_fetch_html_with_url", fake_fetch)
-    monkeypatch.setattr(enricher, "_collect_current_fb_email_surface_state", fake_recollect)
+    monkeypatch.setattr(enricher, "_targeted_explicit_content_unavailable_restabilization", fake_targeted_restabilize)
 
     candidate = enricher._scrape_single_fb_candidate(
-        "https://www.facebook.com/recoverableartist",
+        "https://www.facebook.com/restoredartist",
         {"Email_All": ""},
         "Recoverable Artist",
         candidate_context={"explicit_accepted_url": True},
@@ -947,16 +952,16 @@ def test_explicit_pass_a_invalid_render_state_returns_content_unavailable_after_
         assert goto_about is False
         enricher._last_fb_visible_text = ""
         enricher._last_fb_live_anchor_values = []
-        return "<html><body></body></html>", url
+        return "<html><body>Content isn't available right now</body></html>", url
 
     restabilized = {"count": 0}
 
-    def fake_recollect(*args, **kwargs):  # noqa: ANN001
+    def fake_targeted_restabilize(*args, **kwargs):  # noqa: ANN001
         restabilized["count"] += 1
         return "<html><body></body></html>", "", [], []
 
     monkeypatch.setattr(enricher, "_fetch_html_with_url", fake_fetch)
-    monkeypatch.setattr(enricher, "_collect_current_fb_email_surface_state", fake_recollect)
+    monkeypatch.setattr(enricher, "_targeted_explicit_content_unavailable_restabilization", fake_targeted_restabilize)
 
     candidate = enricher._scrape_single_fb_candidate(
         "https://www.facebook.com/brokenartist",
@@ -991,7 +996,7 @@ def test_explicit_pass_a_invalid_render_state_preserves_content_unavailable_reas
         assert goto_about is False
         enricher._last_fb_visible_text = ""
         enricher._last_fb_live_anchor_values = []
-        return "<html><body></body></html>", url
+        return "<html><body>Content isn't available right now</body></html>", url
 
     search_calls = []
 
@@ -1002,7 +1007,7 @@ def test_explicit_pass_a_invalid_render_state_preserves_content_unavailable_reas
     monkeypatch.setattr(enricher, "_fetch_html_with_url", fake_fetch)
     monkeypatch.setattr(
         enricher,
-        "_collect_current_fb_email_surface_state",
+        "_targeted_explicit_content_unavailable_restabilization",
         lambda *args, **kwargs: ("<html><body></body></html>", "", [], []),
     )
     monkeypatch.setattr(enricher, "_search_for_page", fake_search)
@@ -1017,9 +1022,9 @@ def test_explicit_pass_a_invalid_render_state_preserves_content_unavailable_reas
     result = enricher.enrich_row_with_facebook_night(row)
 
     assert len(search_calls) == 1
-    assert result.get("FB_Status") == "pass_a_no_email_on_page"
+    assert result.get("FB_Status") == "pass_a_content_unavailable"
     assert result.get("FB_Reason") == "content_unavailable"
-    assert any("[Night FB][RenderGate]" in msg for msg in logs)
+    assert any("[Night FB][RenderGate] content_unavailable -> targeted restabilization" in msg for msg in logs)
 
 
 def test_explicit_fb_urls_canonicalized_and_deduped(monkeypatch) -> None:
