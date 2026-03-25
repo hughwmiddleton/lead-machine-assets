@@ -85,6 +85,7 @@ from facebook_enrich import (
     _fb_extract_candidates_from_search_dom,
 )
 from night_mode_fb import (
+    FacebookAcceptedPageFetchResult,
     NightFBRunState,
     _build_fb_discovery_query,
     classify_explicit_fb_intake,
@@ -98,6 +99,7 @@ from night_mode_fb import (
     _looks_like_fb_warning_or_block,
     _merge_email_all,
     _normalise_fb_url,
+    _run_bounded_fb_accepted_page_sweep,
     _run_fb_homepage_search,
     disable_night_fb_run_state,
     ensure_night_fb_run_session,
@@ -2702,15 +2704,6 @@ def _extract_fb_emails_bounded(fb_driver, fb_url: str, log_fn=None) -> tuple[lis
     Visit at most two Facebook pages (main + about/info/contact) to extract emails.
     Returns (emails, resolved_url, status_reason).
     """
-    emails: list[str] = []
-    resolved_url = fb_url or ""
-    last_reason = ""
-    if not fb_driver or not fb_url:
-        return (emails, resolved_url, "no_fb_url")
-
-    budget = 2
-    visited: set[str] = set()
-
     def _log(msg: str) -> None:
         if log_fn:
             try:
@@ -2718,67 +2711,80 @@ def _extract_fb_emails_bounded(fb_driver, fb_url: str, log_fn=None) -> tuple[lis
             except Exception:
                 pass
 
-    def _fetch(target: str) -> tuple[list[str], str, str]:
-        nonlocal budget, last_reason, resolved_url
-        if budget <= 0 or not target:
-            return ([], resolved_url, "")
+    if not fb_driver or not fb_url:
+        return ([], fb_url or "", "no_fb_url")
+
+    def _fetch_surface(target: str) -> FacebookAcceptedPageFetchResult:
         target_fetch = _normalise_fb_surface_url(target) or _normalise_fb_url(normalize_external_url(target))
-        if not target_fetch or target_fetch in visited:
-            return ([], resolved_url, "")
-        visited.add(target_fetch)
-        budget -= 1
+        if not target_fetch:
+            return FacebookAcceptedPageFetchResult(
+                requested_url=target or "",
+                resolved_url=fb_url or "",
+                status_reason="fetch_error",
+            )
         try:
             fb_driver.get(target_fetch)
             current_url = getattr(fb_driver, "current_url", "") or target_fetch
             resolved_url = _normalise_fb_surface_url(current_url) or _normalise_fb_url(normalize_external_url(current_url) or current_url) or current_url
             if _is_fb_login_or_security_url(current_url):
-                last_reason = "login_wall"
                 _log("[FB Enrich] Facebook login/checkpoint detected; skipping.")
-                return ([], resolved_url, "")
+                return FacebookAcceptedPageFetchResult(
+                    requested_url=target_fetch,
+                    resolved_url=resolved_url,
+                    status_reason="login_wall",
+                )
             html = getattr(fb_driver, "page_source", "") or ""
             warning = _looks_like_fb_warning_or_block(html, current_url)
             if warning:
-                last_reason = warning
                 _log(f"[FB Enrich] Warning/block page detected ({warning}); skipping row.")
-                return ([], resolved_url, html)
+                return FacebookAcceptedPageFetchResult(
+                    requested_url=target_fetch,
+                    resolved_url=resolved_url,
+                    status_reason=warning,
+                )
             rendered_text = _extract_fb_visible_text_with_container_fallback(fb_driver)
             _log_fb_email_surface_debug(log_fn, f"page:{resolved_url}", html, rendered_text)
-            found, _ = _extract_emails_from_html(html, rendered_text=rendered_text)
-            return (found, resolved_url, html)
+            return FacebookAcceptedPageFetchResult(
+                requested_url=target_fetch,
+                resolved_url=resolved_url,
+                html=html,
+                rendered_text=rendered_text,
+            )
         except Exception as exc:  # pragma: no cover - defensive
             if _fb_exception_is_fatal_session(exc):
                 raise
-            last_reason = "fetch_error"
             _log(f"[FB Enrich] Error fetching FB page '{target_fetch}': {exc}")
-            return ([], target_fetch, "")
+            return FacebookAcceptedPageFetchResult(
+                requested_url=target_fetch,
+                resolved_url=target_fetch,
+                status_reason="fetch_error",
+            )
 
     main_target = _normalise_fb_surface_url(fb_url) or _normalise_fb_url(normalize_external_url(fb_url))
     if main_target:
         _log(f"[FB Enrich] Visiting {main_target}")
-    main_emails, resolved, main_html = _fetch(fb_url)
-    if main_emails:
-        return (main_emails, resolved, last_reason)
 
-    selected_url = _select_fb_contact_surface_url(resolved or fb_url, main_html)
-    if selected_url:
-        _log(f"[FB Enrich] Visiting contact/about page: {selected_url}")
-        more_emails, resolved, _ = _fetch(selected_url)
-        if more_emails:
-            return (more_emails, resolved, last_reason)
-    else:
-        _log("[FB Enrich] No contact/about link found")
-        if budget > 0:
-            parsed = urllib.parse.urlparse(resolved or fb_url)
-            base_path = (parsed.path or "").rstrip("/") or "/"
-            fallback_url = urllib.parse.urlunparse(
-                parsed._replace(path=base_path + "/about", query="", fragment="")
-            )
-            _log(f"[FB Enrich] Visiting contact/about page: {fallback_url}")
-            more_emails, resolved, _ = _fetch(fallback_url)
-            if more_emails:
-                return (more_emails, resolved, last_reason)
+    def _fallback_about_urls(base_url: str) -> List[str]:
+        parsed = urllib.parse.urlparse(base_url or fb_url)
+        base_path = (parsed.path or "").rstrip("/") or "/"
+        fallback_url = urllib.parse.urlunparse(
+            parsed._replace(path=base_path + "/about", query="", fragment="")
+        )
+        return [fallback_url]
 
-    return ([], resolved or fb_url, last_reason)
+    sweep_result = _run_bounded_fb_accepted_page_sweep(
+        fb_url,
+        _fetch_surface,
+        select_secondary_url=_select_fb_contact_surface_url,
+        fallback_secondary_urls=_fallback_about_urls,
+        on_secondary_selected=lambda target: _log(f"[FB Enrich] Visiting contact/about page: {target}"),
+        on_secondary_fallback=lambda target: _log(f"[FB Enrich] Visiting contact/about page: {target}"),
+        on_no_secondary=lambda: _log("[FB Enrich] No contact/about link found"),
+    )
+
+    status_reason = sweep_result.secondary_status_reason or sweep_result.status_reason or ""
+    resolved = sweep_result.final_resolved_url or fb_url
+    return (list(sweep_result.combined_emails or []), resolved, status_reason)
 
 
 def _safe_log(logger, message: str, *args) -> None:

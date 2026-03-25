@@ -19,7 +19,7 @@ import weakref
 import subprocess
 import tempfile
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple, Union
 import logging
 
@@ -4778,6 +4778,180 @@ def _fb_contact_surface_label(contact_url: str) -> str:
     return "about"
 
 
+@dataclass
+class FacebookAcceptedPageFetchResult:
+    requested_url: str = ""
+    resolved_url: str = ""
+    html: str = ""
+    rendered_text: str = ""
+    anchor_values: List[str] = field(default_factory=list)
+    status_reason: str = ""
+
+
+@dataclass
+class FacebookAcceptedPageSweepResult:
+    main_surface: Optional[FacebookAcceptedPageFetchResult] = None
+    secondary_surface: Optional[FacebookAcceptedPageFetchResult] = None
+    main_emails: List[str] = field(default_factory=list)
+    secondary_emails: List[str] = field(default_factory=list)
+    combined_emails: List[str] = field(default_factory=list)
+    main_mailto: bool = False
+    secondary_mailto: bool = False
+    secondary_attempted: bool = False
+    status_reason: str = ""
+    secondary_status_reason: str = ""
+    final_resolved_url: str = ""
+
+
+def _run_bounded_fb_accepted_page_sweep(
+    fb_url: str,
+    fetch_surface,
+    *,
+    select_secondary_url=None,
+    fallback_secondary_urls=None,
+    refresh_main_surface=None,
+    continue_after_main_email: bool = False,
+    stop_after_first_filtered: bool = False,
+    on_secondary_selected=None,
+    on_secondary_fallback=None,
+    on_no_secondary=None,
+) -> FacebookAcceptedPageSweepResult:
+    """
+    Neutral accepted-page sweep shared by daytime and Night wrappers.
+
+    The helper stays bounded to at most two fetches:
+      - main page
+      - one selected/fallback contact/about page
+    """
+
+    result = FacebookAcceptedPageSweepResult()
+    target_url = str(fb_url or "").strip()
+    if not target_url:
+        result.status_reason = "no_fb_url"
+        return result
+
+    visited: Set[str] = set()
+
+    def _visit_key(url: str) -> str:
+        return str(url or "").split("#", 1)[0].strip()
+
+    def _extract_surface_emails(surface: Optional[FacebookAcceptedPageFetchResult]) -> Tuple[List[str], bool]:
+        if surface is None:
+            return [], False
+        return _extract_emails_from_html(
+            surface.html or "",
+            rendered_text=surface.rendered_text or "",
+            anchor_values=surface.anchor_values or [],
+            stop_after_first_filtered=stop_after_first_filtered,
+        )
+
+    def _dedupe(values: Sequence[str]) -> List[str]:
+        deduped: List[str] = []
+        seen: Set[str] = set()
+        for value in values or ():
+            normalized = normalize_email_value(value)
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            deduped.append(normalized)
+        return deduped
+
+    main_surface = fetch_surface(target_url)
+    result.main_surface = main_surface
+    if main_surface is None:
+        result.status_reason = "fetch_error"
+        return result
+
+    main_key = _visit_key(main_surface.resolved_url or main_surface.requested_url or target_url)
+    if main_key:
+        visited.add(main_key)
+    result.status_reason = str(main_surface.status_reason or "")
+    result.final_resolved_url = main_surface.resolved_url or target_url
+
+    if result.status_reason and not (main_surface.html or main_surface.rendered_text or main_surface.anchor_values):
+        return result
+
+    main_emails, main_mailto = _extract_surface_emails(main_surface)
+    result.main_emails = list(main_emails or [])
+    result.main_mailto = bool(main_mailto)
+
+    if refresh_main_surface and not result.main_emails and not result.status_reason:
+        refreshed_surface = refresh_main_surface(main_surface, list(result.main_emails))
+        if refreshed_surface is not None:
+            result.main_surface = main_surface = refreshed_surface
+            refreshed_key = _visit_key(main_surface.resolved_url or main_surface.requested_url or target_url)
+            if refreshed_key:
+                visited.add(refreshed_key)
+            result.status_reason = str(main_surface.status_reason or "")
+            result.final_resolved_url = main_surface.resolved_url or result.final_resolved_url or target_url
+            if result.status_reason and not (main_surface.html or main_surface.rendered_text or main_surface.anchor_values):
+                return result
+            main_emails, main_mailto = _extract_surface_emails(main_surface)
+            result.main_emails = list(main_emails or [])
+            result.main_mailto = bool(main_mailto)
+
+    result.combined_emails = _dedupe(result.main_emails)
+    if result.main_emails and not continue_after_main_email:
+        return result
+
+    main_html = main_surface.html or ""
+    base_url = main_surface.resolved_url or target_url
+    secondary_url = ""
+    fallback_used = False
+
+    if select_secondary_url and main_html:
+        try:
+            secondary_url = str(select_secondary_url(base_url, main_html) or "").strip()
+        except Exception:
+            secondary_url = ""
+
+    if not secondary_url and fallback_secondary_urls:
+        try:
+            fallback_candidates = list(fallback_secondary_urls(base_url) or [])
+        except Exception:
+            fallback_candidates = []
+        for candidate in fallback_candidates:
+            candidate_url = str(candidate or "").strip()
+            if not candidate_url:
+                continue
+            if _visit_key(candidate_url) in visited:
+                continue
+            secondary_url = candidate_url
+            fallback_used = True
+            break
+
+    if not secondary_url:
+        if callable(on_no_secondary):
+            on_no_secondary()
+        return result
+
+    if fallback_used:
+        if callable(on_secondary_fallback):
+            on_secondary_fallback(secondary_url)
+    elif callable(on_secondary_selected):
+        on_secondary_selected(secondary_url)
+
+    secondary_surface = fetch_surface(secondary_url)
+    result.secondary_attempted = True
+    result.secondary_surface = secondary_surface
+    if secondary_surface is None:
+        result.secondary_status_reason = "fetch_error"
+        return result
+
+    result.secondary_status_reason = str(secondary_surface.status_reason or "")
+    result.final_resolved_url = secondary_surface.resolved_url or result.final_resolved_url or secondary_url
+    if result.secondary_status_reason and not (
+        secondary_surface.html or secondary_surface.rendered_text or secondary_surface.anchor_values
+    ):
+        return result
+
+    secondary_emails, secondary_mailto = _extract_surface_emails(secondary_surface)
+    result.secondary_emails = list(secondary_emails or [])
+    result.secondary_mailto = bool(secondary_mailto)
+    result.combined_emails = _dedupe([*result.main_emails, *result.secondary_emails])
+    return result
+
+
 def _fb_email_domain_quality_bonus(domain: str, artist_slug: str = "") -> int:
     cleaned = str(domain or "").strip().lower().strip(".")
     if not cleaned or cleaned in _FB_GENERIC_EMAIL_PROVIDER_DOMAINS:
@@ -7967,27 +8141,102 @@ class NightModeFacebookEnricher:
             main_visible_text = refreshed_text
             main_anchor_values = list(refreshed_anchor_values or [])
         _log_fb_email_surface_debug(self.logger, f"main:{resolved_url}", html or "", main_visible_text)
-        emails_raw, main_mailto = _extract_emails_from_html(
-            html or "",
-            rendered_text=main_visible_text,
-            anchor_values=main_anchor_values,
-            stop_after_first_filtered=bool(candidate_context and candidate_context.get("explicit_accepted_url")),
-        )
-        if staged_main_page_surfaces and not _filter_low_quality_fb_emails(emails_raw):
-            main_surface_html, main_visible_text, main_anchor_values, _ = self._collect_current_fb_email_surface_state(
+
+        main_surface_url = resolved_url
+        main_surface_html = html or ""
+        main_surface_visible_text = main_visible_text
+        main_surface_anchor_values = list(main_anchor_values or [])
+        main_surface_served = False
+
+        def _fetch_shared_surface(target_url: str) -> FacebookAcceptedPageFetchResult:
+            nonlocal used_driver_kind, main_surface_served
+            requested_url = str(target_url or "").strip()
+            if not main_surface_served:
+                main_surface_served = True
+                return FacebookAcceptedPageFetchResult(
+                    requested_url=requested_url,
+                    resolved_url=main_surface_url,
+                    html=main_surface_html,
+                    rendered_text=main_surface_visible_text,
+                    anchor_values=list(main_surface_anchor_values or []),
+                )
+
+            fetched_html = ""
+            fetched_resolved = requested_url
+            try:
+                fetched_html, fetched_resolved = self._fetch_html_with_url(requested_url, goto_about=False)
+                if (not fetched_html) and allow_anon:
+                    fetched_html, fetched_resolved = self._fetch_html_with_url_anon(requested_url, goto_about=False)
+                    if fetched_html:
+                        used_driver_kind = "anon_fallback"
+                        self._last_fb_surface_driver_kind = used_driver_kind
+            except Exception:
+                fetched_html, fetched_resolved = "", requested_url
+
+            final_resolved = str(fetched_resolved or requested_url).strip() or requested_url
+            if _is_fb_login_or_security_url(final_resolved):
+                return FacebookAcceptedPageFetchResult(
+                    requested_url=requested_url,
+                    resolved_url=final_resolved,
+                    status_reason="login_wall",
+                )
+
+            return FacebookAcceptedPageFetchResult(
+                requested_url=requested_url,
+                resolved_url=final_resolved,
+                html=fetched_html or "",
+                rendered_text=getattr(self, "_last_fb_visible_text", "") or "",
+                anchor_values=list(getattr(self, "_last_fb_live_anchor_values", []) or []),
+            )
+
+        def _refresh_shared_main_surface(
+            _surface: FacebookAcceptedPageFetchResult,
+            extracted_emails: List[str],
+        ) -> Optional[FacebookAcceptedPageFetchResult]:
+            nonlocal html, soup, main_surface_html, main_surface_visible_text, main_surface_anchor_values
+            if not staged_main_page_surfaces or _filter_low_quality_fb_emails(extracted_emails):
+                return None
+            refreshed_html, refreshed_text, refreshed_anchor_values, _ = self._collect_current_fb_email_surface_state(
                 driver_kind=used_driver_kind,
             )
-            if main_surface_html:
-                html = main_surface_html
+            if refreshed_html:
+                html = refreshed_html
                 soup = BeautifulSoup(html, "html.parser")
-            _log_fb_email_surface_debug(self.logger, f"main:{resolved_url}", html or "", main_visible_text)
-            emails_raw, main_mailto = _extract_emails_from_html(
-                html or "",
-                soup=soup,
-                rendered_text=main_visible_text,
-                anchor_values=main_anchor_values,
-                stop_after_first_filtered=False,
+            main_surface_html = html or refreshed_html or ""
+            main_surface_visible_text = refreshed_text
+            main_surface_anchor_values = list(refreshed_anchor_values or [])
+            _log_fb_email_surface_debug(self.logger, f"main:{resolved_url}", main_surface_html, main_surface_visible_text)
+            return FacebookAcceptedPageFetchResult(
+                requested_url=candidate_url,
+                resolved_url=resolved_url,
+                html=main_surface_html,
+                rendered_text=main_surface_visible_text,
+                anchor_values=list(main_surface_anchor_values or []),
             )
+
+        def _select_shared_secondary_url(base_url: str, page_html: str) -> Optional[str]:
+            if not page_html:
+                return None
+            return _pick_fb_contact_link(BeautifulSoup(page_html, "html.parser"), base_url)
+
+        sweep_result = _run_bounded_fb_accepted_page_sweep(
+            candidate_url,
+            _fetch_shared_surface,
+            select_secondary_url=_select_shared_secondary_url,
+            fallback_secondary_urls=_fetch_fb_about_variants,
+            refresh_main_surface=_refresh_shared_main_surface,
+            continue_after_main_email=bool(self._page_budget_remaining > 0 and not explicit_pass_a),
+            stop_after_first_filtered=explicit_pass_a,
+            on_secondary_selected=lambda target: _log(self.logger, f"[FB Email] Visiting {target}"),
+            on_secondary_fallback=lambda target: (
+                _log(self.logger, f"[FB Email] No valid contact surface found; trying direct fallback {target}"),
+                _log(self.logger, f"[FB Email] Visiting {target}"),
+            ),
+            on_no_secondary=lambda: _log(self.logger, "[FB Email] No valid contact surface found"),
+        )
+
+        emails_raw = list(sweep_result.main_emails or [])
+        main_mailto = bool(sweep_result.main_mailto)
         emails = _filter_low_quality_fb_emails(emails_raw)
         main_surface = _fb_email_surface_label("main", used_mailto=main_mailto)
         main_surface_map = {
@@ -8001,9 +8250,7 @@ class NightModeFacebookEnricher:
         about_emails: List[str] = []
         about_mailto = False
         email_method = "mailto" if emails and main_mailto else ("regex" if emails else "")
-        need_about_fetch = self._page_budget_remaining > 0
-        if emails and candidate_context and candidate_context.get("explicit_accepted_url"):
-            need_about_fetch = False
+        need_about_fetch = bool(sweep_result.secondary_attempted or (self._page_budget_remaining > 0 and not explicit_pass_a))
         if emails:
             for email in emails:
                 _log(self.logger, f"[FB Email] Found email on main page: {email}")
@@ -8031,79 +8278,61 @@ class NightModeFacebookEnricher:
         artist_location = _coerce_str(row.get("Country_Derived") or row.get("Country") or row.get("Location"))
 
         contact_url: Optional[str] = None
-        if need_about_fetch:
+        if sweep_result.secondary_attempted:
             if not has_music_signals:
                 _log(self.logger, f"[Night FB] No music signals on main page {resolved_url}, checking About/Contact...")
-            contact_url = _pick_fb_contact_link(soup, resolved_url)
-            if not contact_url:
-                fallback_variants = _fetch_fb_about_variants(resolved_url)
-                fallback_url = fallback_variants[0] if fallback_variants else ""
-                if fallback_url:
-                    contact_url = fallback_url
-                    _log(self.logger, f"[FB Email] No valid contact surface found; trying direct fallback {contact_url}")
-            if contact_url:
-                about_attempted = "yes"
-                _log(self.logger, f"[FB Email] Visiting {contact_url}")
-                try:
-                    about_html, about_resolved = self._fetch_html_with_url(contact_url, goto_about=False)
-                    if (not about_html) and allow_anon:
-                        about_html, about_resolved = self._fetch_html_with_url_anon(contact_url, goto_about=False)
-                except Exception:
-                    about_html, about_resolved = "", contact_url
-                final_about = _normalise_fb_url(about_resolved or contact_url)
-                if _is_fb_login_or_security_url(final_about):
-                    about_result = "blocked_login"
-                    self.fb_rows_skipped["challenge"] += 1
+            contact_url = sweep_result.secondary_surface.requested_url if sweep_result.secondary_surface else ""
+            about_attempted = "yes"
+            about_html = sweep_result.secondary_surface.html if sweep_result.secondary_surface else ""
+            about_resolved = sweep_result.secondary_surface.resolved_url if sweep_result.secondary_surface else contact_url
+            final_about = _normalise_fb_url(about_resolved or contact_url)
+            if sweep_result.secondary_status_reason == "login_wall" or _is_fb_login_or_security_url(final_about):
+                about_result = "blocked_login"
+                self.fb_rows_skipped["challenge"] += 1
+            else:
+                lower_html = (about_html or "").lower()
+                if any(tok in lower_html for tok in ("checkpoint", "consent", "cookie", "privacy")):
+                    about_result = "checkpoint"
+                    self.fb_rows_skipped["checkpoint"] += 1
                 else:
-                    lower_html = (about_html or "").lower()
-                    if any(tok in lower_html for tok in ("checkpoint", "consent", "cookie", "privacy")):
-                        about_result = "checkpoint"
-                        self.fb_rows_skipped["checkpoint"] += 1
+                    not_found_phrases = ("page isn’t available", "page isn't available", "content isn't available", "not available right now")
+                    if any(p in lower_html for p in not_found_phrases):
+                        about_result = "not_found"
                     else:
-                        not_found_phrases = ("page isn’t available", "page isn't available", "content isn't available", "not available right now")
-                        if any(p in lower_html for p in not_found_phrases):
-                            about_result = "not_found"
-                        else:
-                            about_soup = BeautifulSoup(about_html or "", "html.parser") if about_html else None
-                            if (not has_music_signals) and about_soup:
-                                if _night_fb_has_music_signals(about_soup, {"url": final_about}):
-                                    has_music_signals = True
-                                    about_result = "music_signals"
-                                    _log(self.logger, f"[Night FB] Music signals found on About tab {final_about}.")
-                            about_visible_text = getattr(self, "_last_fb_visible_text", "") or ""
-                            about_anchor_values = list(getattr(self, "_last_fb_live_anchor_values", []) or [])
-                            _log_fb_email_surface_debug(
-                                self.logger,
-                                f"about:{final_about}",
-                                about_html or "",
-                                about_visible_text,
-                            )
-                            about_emails_raw, about_mailto = _extract_emails_from_html(
-                                about_html or "",
-                                rendered_text=about_visible_text,
-                                anchor_values=about_anchor_values,
-                            )
-                            about_emails = _filter_low_quality_fb_emails(about_emails_raw)
-                            about_surface = _fb_email_surface_label(
-                                _fb_contact_surface_label(contact_url),
-                                used_mailto=about_mailto,
-                            )
-                            about_surface_map = {
-                                email: {
-                                    "surface": about_surface,
-                                    "extract_method": "mailto" if about_mailto else "regex",
-                                }
-                                for email in about_emails
+                        about_soup = BeautifulSoup(about_html or "", "html.parser") if about_html else None
+                        if (not has_music_signals) and about_soup:
+                            if _night_fb_has_music_signals(about_soup, {"url": final_about}):
+                                has_music_signals = True
+                                about_result = "music_signals"
+                                _log(self.logger, f"[Night FB] Music signals found on About tab {final_about}.")
+                        about_visible_text = sweep_result.secondary_surface.rendered_text if sweep_result.secondary_surface else ""
+                        _log_fb_email_surface_debug(
+                            self.logger,
+                            f"about:{final_about}",
+                            about_html or "",
+                            about_visible_text,
+                        )
+                        about_emails = _filter_low_quality_fb_emails(sweep_result.secondary_emails)
+                        about_mailto = bool(sweep_result.secondary_mailto)
+                        about_surface = _fb_email_surface_label(
+                            _fb_contact_surface_label(contact_url),
+                            used_mailto=about_mailto,
+                        )
+                        about_surface_map = {
+                            email: {
+                                "surface": about_surface,
+                                "extract_method": "mailto" if about_mailto else "regex",
                             }
-                            if about_emails:
-                                email_method = "mailto" if about_mailto else "regex"
-                                email_source = contact_url.rsplit("/", 1)[-1] or "about"
-                                about_result = "emails_found"
-                            if not about_result:
-                                about_result = "no_email"
-            elif need_about_fetch and not contact_url:
-                _log(self.logger, "[FB Email] No valid contact surface found")
-                about_result = "no_contact_link"
+                            for email in about_emails
+                        }
+                        if about_emails:
+                            email_method = "mailto" if about_mailto else "regex"
+                            email_source = contact_url.rsplit("/", 1)[-1] or "about"
+                            about_result = "emails_found"
+                        if not about_result:
+                            about_result = "no_email"
+        elif need_about_fetch and not sweep_result.secondary_attempted:
+            about_result = "no_contact_link"
 
         if about_result == "not_found" and not emails and not has_music_signals:
             _log(self.logger, f"[Night FB][PageUnavailable] {resolved_url} (about tab)")

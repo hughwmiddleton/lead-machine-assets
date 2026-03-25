@@ -667,6 +667,71 @@ def test_discovery_main_page_live_anchor_mailto_escalates_after_light_fetch(monk
     assert outcome == "found_email"
 
 
+def test_discovery_candidate_uses_shared_accepted_page_sweep(monkeypatch) -> None:
+    logs = []
+    enricher = _build_enricher(logs)
+    calls = []
+    main_url = "https://www.facebook.com/artist"
+    about_url = "https://www.facebook.com/artist/about"
+    observed = {}
+
+    def fake_fetch(url, goto_about=False, collect_surfaces=True):  # noqa: ANN001
+        calls.append((url, collect_surfaces))
+        return "<html><body><a href='/artist/about'>About</a></body></html>", main_url
+
+    def fake_shared_sweep(fb_url, fetch_surface, **kwargs):  # noqa: ANN001
+        observed["fb_url"] = fb_url
+        observed["continue_after_main_email"] = kwargs.get("continue_after_main_email")
+        observed["stop_after_first_filtered"] = kwargs.get("stop_after_first_filtered")
+        observed["refresh_main_surface"] = kwargs.get("refresh_main_surface")
+        return nmfb.FacebookAcceptedPageSweepResult(
+            main_surface=nmfb.FacebookAcceptedPageFetchResult(
+                requested_url=fb_url,
+                resolved_url=main_url,
+                html="<html><body><a href='/artist/about'>About</a></body></html>",
+            ),
+            secondary_surface=nmfb.FacebookAcceptedPageFetchResult(
+                requested_url=about_url,
+                resolved_url=about_url,
+                html="<html><body>About: about@artist.com</body></html>",
+                rendered_text="About: about@artist.com",
+            ),
+            main_emails=["info@artist.com"],
+            secondary_emails=["about@artist.com"],
+            combined_emails=["info@artist.com", "about@artist.com"],
+            secondary_attempted=True,
+            final_resolved_url=about_url,
+        )
+
+    monkeypatch.setattr(enricher, "_fetch_html_with_url", fake_fetch)
+    monkeypatch.setattr(nmfb, "_run_bounded_fb_accepted_page_sweep", fake_shared_sweep)
+    monkeypatch.setattr(nmfb, "_night_fb_has_music_signals", lambda soup, context: False)
+    monkeypatch.setattr(nmfb, "should_accept_email_override", lambda *args, **kwargs: (True, "test_override"))
+
+    result = enricher._scrape_single_fb_candidate(
+        main_url,
+        {"Artist Name": "Artist", "Email_All": ""},
+        "Artist",
+        allow_anon=False,
+        candidate_context={"url": main_url, "base_score": 1.2, "match_level": "near", "search_discovery_accepted": True},
+    )
+
+    assert result is not None
+    night_result, emails, driver_kind, outcome = result
+    assert observed["fb_url"] == main_url
+    assert observed["continue_after_main_email"] is True
+    assert observed["stop_after_first_filtered"] is False
+    assert callable(observed["refresh_main_surface"])
+    assert calls == [(main_url, False)]
+    assert set(emails) == {"info@artist.com", "about@artist.com"}
+    assert night_result is not None
+    assert night_result.email == "about@artist.com"
+    assert night_result.about_attempted == "yes"
+    assert night_result.about_result == "emails_found"
+    assert driver_kind == "session"
+    assert outcome == "found_email"
+
+
 def test_explicit_pass_a_main_page_email_skips_secondary_fetch(monkeypatch) -> None:
     logs = []
     enricher = _build_enricher(logs)
@@ -724,6 +789,56 @@ def test_explicit_pass_a_main_page_email_skips_secondary_fetch(monkeypatch) -> N
     assert driver_kind == "session"
     assert outcome == "found_email"
     assert not any(f"[FB Email] Visiting {about_url}" in msg for msg in logs)
+
+
+def test_explicit_pass_a_uses_shared_accepted_page_sweep(monkeypatch) -> None:
+    logs = []
+    enricher = _build_enricher(logs)
+    main_url = "https://www.facebook.com/artist"
+    observed = {}
+
+    def fake_fetch(url, goto_about=False, collect_surfaces=True):  # noqa: ANN001
+        return "<html><body>Bookings: explicit@example.com</body></html>", main_url
+
+    def fake_shared_sweep(fb_url, fetch_surface, **kwargs):  # noqa: ANN001
+        observed["fb_url"] = fb_url
+        observed["continue_after_main_email"] = kwargs.get("continue_after_main_email")
+        observed["stop_after_first_filtered"] = kwargs.get("stop_after_first_filtered")
+        return nmfb.FacebookAcceptedPageSweepResult(
+            main_surface=nmfb.FacebookAcceptedPageFetchResult(
+                requested_url=fb_url,
+                resolved_url=main_url,
+                html="<html><body>Bookings: explicit@example.com</body></html>",
+                rendered_text="Bookings: explicit@example.com",
+            ),
+            main_emails=["explicit@example.com"],
+            combined_emails=["explicit@example.com"],
+            final_resolved_url=main_url,
+        )
+
+    monkeypatch.setattr(enricher, "_fetch_html_with_url", fake_fetch)
+    monkeypatch.setattr(nmfb, "_run_bounded_fb_accepted_page_sweep", fake_shared_sweep)
+
+    result = enricher._scrape_single_fb_candidate(
+        main_url,
+        {"Artist Name": "Artist", "Email_All": ""},
+        "Artist",
+        allow_anon=False,
+        candidate_context={"explicit_accepted_url": True},
+    )
+
+    assert result is not None
+    night_result, emails, driver_kind, outcome = result
+    assert observed["fb_url"] == main_url
+    assert observed["continue_after_main_email"] is False
+    assert observed["stop_after_first_filtered"] is True
+    assert emails == ["explicit@example.com"]
+    assert night_result is not None
+    assert night_result.email == "explicit@example.com"
+    assert night_result.about_attempted == "no"
+    assert night_result.about_result == ""
+    assert driver_kind == "session"
+    assert outcome == "found_email"
 
 
 def test_explicit_pass_a_weak_main_capture_recollects_once_and_skips_about(monkeypatch) -> None:

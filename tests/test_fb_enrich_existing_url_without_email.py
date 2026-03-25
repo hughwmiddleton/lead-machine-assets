@@ -862,6 +862,69 @@ def test_fb_enrich_discovery_miss_preserves_no_fb_url_status(monkeypatch):
     assert any("no safe candidate found" in msg.lower() for msg in logs)
 
 
+def test_fb_enrich_discovered_url_uses_shared_accepted_page_sweep(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    worker._row_allows_heavy_enricher = lambda *args, **kwargs: SimpleNamespace(allowed=True)
+    worker._ensure_fb_discovery_session = lambda driver: (True, "authenticated")
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Shared Sweep Day",
+            "Email": "",
+            "Email_All": "",
+            "facebook_url": "",
+            "Facebook_URL": "",
+            "Facebook URL": "",
+            "Social Link": "",
+            "External Links": "",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+            "FB_Status": "",
+            "FB_Reason": "",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    observed = {}
+
+    monkeypatch.setattr(
+        cde,
+        "_discover_facebook_url_bounded",
+        lambda fb_driver, artist_name, extra_signal, logger: "https://www.facebook.com/sharedsweepday",
+    )
+
+    def fake_shared_sweep(fb_url, fetch_surface, **kwargs):  # noqa: ANN001
+        observed["fb_url"] = fb_url
+        observed["select_secondary_url"] = kwargs.get("select_secondary_url")
+        observed["fallback_secondary_urls"] = kwargs.get("fallback_secondary_urls")
+        return nmfb.FacebookAcceptedPageSweepResult(
+            main_surface=nmfb.FacebookAcceptedPageFetchResult(
+                requested_url=fb_url,
+                resolved_url=fb_url,
+                html="<html><body>Bookings: shared@example.com</body></html>",
+                rendered_text="Bookings: shared@example.com",
+            ),
+            main_emails=["shared@example.com"],
+            combined_emails=["shared@example.com"],
+            final_resolved_url=fb_url,
+        )
+
+    monkeypatch.setattr(cde, "_run_bounded_fb_accepted_page_sweep", fake_shared_sweep)
+
+    matched = worker._enrich_row_facebook(seed_df, 0, object(), ctx)
+
+    assert matched is True
+    assert observed["fb_url"] == "https://www.facebook.com/sharedsweepday"
+    assert callable(observed["select_secondary_url"])
+    assert callable(observed["fallback_secondary_urls"])
+    assert seed_df.at[0, "Email"] == "shared@example.com"
+    assert seed_df.at[0, "FB_Status"] == "found_email"
+    assert seed_df.at[0, "Email_Type"] == "fb_enrich"
+    assert seed_df.at[0, "Email_Source_Type"] == "facebook_enrich"
+    assert seed_df.at[0, "facebook_url"] == "https://www.facebook.com/sharedsweepday"
+    assert seed_df.at[0, "Facebook_URL"] == "https://www.facebook.com/sharedsweepday"
+
+
 def test_fb_discovery_sets_shared_attempt_flag(monkeypatch):
     logs = []
     worker = _make_worker(logs)
