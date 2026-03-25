@@ -233,6 +233,75 @@ def test_find_best_page_url_allows_weak_metadata_candidate_with_lexical_evidence
     assert reason == "name_score"
 
 
+def test_facebook_candidate_identity_allows_compact_normalized_variant() -> None:
+    candidate = cde.FbCandidate(
+        name="Low Brain Official",
+        url="https://www.facebook.com/low-brain-official",
+        category="Musician/Band",
+    )
+
+    allowed, reason = cde._facebook_candidate_has_min_identity_evidence(
+        "Lowbrain",
+        candidate,
+        name_score=0.0,
+    )
+
+    assert allowed is True
+    assert reason == "compact_norm"
+
+
+def test_facebook_candidate_identity_rejects_zero_evidence_profile_junk() -> None:
+    candidate = cde.FbCandidate(
+        name="Profile Photos",
+        url="https://www.facebook.com/profile.php?id=123456789",
+        category="",
+    )
+
+    allowed, reason = cde._facebook_candidate_has_min_identity_evidence(
+        "Lowbrain",
+        candidate,
+        name_score=0.0,
+    )
+
+    assert allowed is False
+    assert reason == "identity_floor"
+
+
+def test_find_best_page_url_allows_compact_normalized_candidate_through_identity_floor(monkeypatch) -> None:
+    artist_url = "https://www.facebook.com/low-brain-official"
+    driver = _FakeDriver(
+        {
+            artist_url: (
+                "<html><body><div>Musician/Band</div>"
+                "<a href='https://open.spotify.com/artist/test'>Spotify</a></body></html>"
+            ),
+        }
+    )
+    client = cde.FacebookSearchClient(driver=driver, logger=None)
+    monkeypatch.setattr(client, "ensure_facebook_logged_in", lambda: True)
+    monkeypatch.setattr(cde, "score_fb_candidate", lambda *args, **kwargs: (1.0, 0.0, 1.0))
+    monkeypatch.setattr(cde, "is_music_page", lambda *args, **kwargs: True)
+    monkeypatch.setattr(cde, "_facebook_candidate_is_strong", lambda *args, **kwargs: (True, "music_category"))
+
+    def _fake_fetch(query, *, search_method):  # noqa: ANN001
+        return (
+            (
+                "<div role='main'><div aria-label='Search results'>"
+                f"<div class='card'><a href='{artist_url}'>Low Brain Official</a><div class='subtitle'>Musician/Band</div></div>"
+                "</div></div>"
+            ),
+            "https://www.facebook.com/search/pages/?q=lowbrain",
+            False,
+        )
+
+    monkeypatch.setattr(client, "_fetch_search_surface", _fake_fetch)
+
+    result = client.find_best_page_url("Lowbrain", require_strong_candidate=True)
+
+    assert result == artist_url
+    assert driver.visited_urls == [artist_url]
+
+
 def test_find_best_page_url_accepts_plausible_music_candidate_with_identity(monkeypatch) -> None:
     artist_url = "https://www.facebook.com/tallulahargue"
     driver = _FakeDriver(

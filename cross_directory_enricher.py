@@ -3918,6 +3918,7 @@ def _facebook_candidate_has_min_identity_evidence(
     artist_norm = normalize_fb_name(artist_name)
     if not artist_norm:
         return False, "identity_floor"
+    artist_compact = artist_norm.replace(" ", "")
 
     if name_score is not None:
         try:
@@ -3933,13 +3934,27 @@ def _facebook_candidate_has_min_identity_evidence(
     except Exception:
         slug = ""
     username_norm = normalize_fb_name(slug)
+    candidate_name_compact = candidate_name_norm.replace(" ", "")
+    username_compact = username_norm.replace(" ", "")
 
     if candidate_name_norm == artist_norm or username_norm == artist_norm:
         return True, "exact_norm"
+    if artist_compact and (candidate_name_compact == artist_compact or username_compact == artist_compact):
+        return True, "compact_norm"
     if candidate_name_norm.startswith(artist_norm) or username_norm.startswith(artist_norm):
         return True, "prefix_norm"
+    compact_spacing_variant = (
+        (candidate_name_norm and candidate_name_compact != candidate_name_norm)
+        or (username_norm and username_compact != username_norm)
+        or (artist_norm and artist_compact != artist_norm)
+    )
+    if compact_spacing_variant and len(artist_compact) >= 5:
+        if candidate_name_compact.startswith(artist_compact) or username_compact.startswith(artist_compact):
+            return True, "compact_prefix_norm"
     if candidate_name_norm and artist_norm in candidate_name_norm:
         return True, "name_contains_artist"
+    if compact_spacing_variant and len(artist_compact) >= 5 and candidate_name_compact and artist_compact in candidate_name_compact:
+        return True, "compact_name_contains_artist"
 
     artist_tokens = [token for token in artist_norm.split() if len(token) >= 4]
     for token in artist_tokens:
