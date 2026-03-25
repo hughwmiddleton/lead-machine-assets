@@ -1,0 +1,19 @@
+2026-03-25 11:06:13,430 [INFO] [Seed Summary]
+2026-03-25 11:06:13,430 [INFO] unearthed=15
+2026-03-25 11:06:13,442 [INFO] [FB Promotion] facebook_url populated for 7 rows
+2026-03-25 11:06:13,442 [INFO] [FB Promotion] canonical Facebook_URL backfilled from Social Link / External Links for 7 rows
+2026-03-25 11:06:13,449 [INFO] [Master] Wrote merged raw CSV: overnight_runs/2026-03-25_110553/master_raw.csv (rows=15)
+2026-03-25 11:06:13,449 [INFO] [Master Enrich] Starting cross-directory enrichment for overnight_runs/2026-03-25_110553/master_raw.csv
+2026-03-25 11:06:18,461 [INFO] [Master] Bandcamp directory CSV -> (none) in /Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/overnight_runs/2026-03-25_110553 (attempts=6)
+2026-03-25 11:06:23,490 [INFO] [Master] SoundCloud directory CSV -> (none) in /Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/overnight_runs/2026-03-25_110553 (attempts=6)
+2026-03-25 11:06:28,504 [INFO] [Master] Last.fm directory CSV -> (none) in /Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/overnight_runs/2026-03-25_110553 (attempts=6)
+2026-03-25 11:06:28,505 [INFO] [Master] Unearthed directory CSV -> /Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/overnight_runs/2026-03-25_110553/job_unearthed_1/raw.csv (rows=15, kind=raw)
+2026-03-25 11:06:28,505 [INFO] [Master] Passing bandcamp_csv_path=
+2026-03-25 11:06:28,505 [INFO] [Master] Passing soundcloud_csv_path=
+2026-03-25 11:06:28,505 [INFO] [Master] Passing lastfm_csv_path=
+2026-03-25 11:06:28,505 [INFO] [Master] Passing unearthed_csv_path=/Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/overnight_runs/2026-03-25_110553/job_unearthed_1/raw.csv
+2026-03-25 11:06:28,662 [INFO] [Night FB][preflight] chrome_binary=/Applications/Google Chrome.app/Contents/MacOS/Google Chrome chrome_version=Google Chrome 146.0.7680.154 chromedriver=<selenium_manager> chromedriver_version=<selenium_manager> profile_dir=/Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/... profile_exists=True profile_locks=[] image_policy=managed_allow args=['--disable-gpu', '--window-size=1920x1080', '--disable-extensions', '--disable-dev-shm-usage', '--no-sandbox', '--disable-blink-features=AutomationControlled', '--user-data-dir=/Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/...', '--profile-directory=Default']
+2026-03-25 11:06:31,088 [INFO] [Night FB][driver] requested_profile=/Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/... active_profile=/Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/... persistent_profile=1 temp_fallback=0 webdriver_mask=1
+2026-03-25 11:06:31,867 [INFO] [Night FB][auth_probe] mode=headed requested_profile=/Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/... active_profile=/Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/... temp_fallback=0 authed=0 reason=redirect_login
+2026-03-25 11:06:31,868 [INFO] [Night FB][WARN] Persistent FB profile launched without auth (reason=redirect_login); manual login is required. Image loading is enabled for login/captcha recovery.
+2026-03-25 11:06:31,868 [INFO] [Night FB] Awaiting manual login to establish session (headed mode)...

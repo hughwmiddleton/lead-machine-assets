@@ -1,0 +1,210 @@
+2026-03-25 11:02:52,103 [INFO] [Seed Summary]
+2026-03-25 11:02:52,103 [INFO] unearthed=15
+2026-03-25 11:02:52,111 [INFO] [FB Promotion] facebook_url populated for 4 rows
+2026-03-25 11:02:52,111 [INFO] [FB Promotion] canonical Facebook_URL backfilled from Social Link / External Links for 4 rows
+2026-03-25 11:02:52,115 [INFO] [Master] Wrote merged raw CSV: overnight_runs/2026-03-25_110232/master_raw.csv (rows=15)
+2026-03-25 11:02:52,115 [INFO] [Master Enrich] Starting cross-directory enrichment for overnight_runs/2026-03-25_110232/master_raw.csv
+2026-03-25 11:02:57,129 [INFO] [Master] Bandcamp directory CSV -> (none) in /Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/overnight_runs/2026-03-25_110232 (attempts=6)
+2026-03-25 11:03:02,153 [INFO] [Master] SoundCloud directory CSV -> (none) in /Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/overnight_runs/2026-03-25_110232 (attempts=6)
+2026-03-25 11:03:07,170 [INFO] [Master] Last.fm directory CSV -> (none) in /Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/overnight_runs/2026-03-25_110232 (attempts=6)
+2026-03-25 11:03:07,172 [INFO] [Master] Unearthed directory CSV -> /Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/overnight_runs/2026-03-25_110232/job_unearthed_1/raw.csv (rows=15, kind=raw)
+2026-03-25 11:03:07,172 [INFO] [Master] Passing bandcamp_csv_path=
+2026-03-25 11:03:07,172 [INFO] [Master] Passing soundcloud_csv_path=
+2026-03-25 11:03:07,172 [INFO] [Master] Passing lastfm_csv_path=
+2026-03-25 11:03:07,172 [INFO] [Master] Passing unearthed_csv_path=/Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/overnight_runs/2026-03-25_110232/job_unearthed_1/raw.csv
+2026-03-25 11:03:07,176 [INFO] [FB Discover] Shared Facebook session is unavailable for discovery (reason=missing_session_source); disabling FB discovery for the remainder of the run.
+2026-03-25 11:03:07,176 [INFO] [Enricher] Loading seed CSV: overnight_runs/2026-03-25_110232/master_raw.csv
+2026-03-25 11:03:07,187 [INFO] [Deduper] Removed 0 duplicate rows (kept 15 unique rows)
+2026-03-25 11:03:07,189 [INFO] [Schema] ensured email columns: Email, Email_All, Email_Type, Email_Source_URL, Email_Source_Type, Email_Extract_Method, Email_Provenance_JSON
+2026-03-25 11:03:07,207 [INFO] [Enricher] Starting enrichment for 15 rows...
+2026-03-25 11:03:07,207 [INFO] [Enricher] Live search enabled=True max=50
+2026-03-25 11:03:07,207 [INFO] [Enricher] mode=row_linear
+2026-03-25 11:03:07,207 [INFO] [Unearthed Path] no usable FB URL, resuming standard path artist='amoss-teal' row=0
+2026-03-25 11:03:07,208 [INFO] [Unearthed Path] no usable FB URL, resuming standard path artist='lover-wav' row=1
+2026-03-25 11:03:07,208 [INFO] [Unearthed Path] no usable FB URL, resuming standard path artist='chantz' row=2
+2026-03-25 11:03:07,208 [INFO] [Unearthed Path] no usable FB URL, resuming standard path artist='rain-delusion' row=3
+2026-03-25 11:03:07,209 [INFO] [Unearthed Path] activated artist='keely-music' row=4
+2026-03-25 11:03:07,209 [INFO] [Unearthed Path] skipping non-essential enrichers artist='keely-music' row=4
+2026-03-25 11:03:07,209 [INFO] [Unearthed Path] no usable FB URL, resuming standard path artist='i-m-fine' row=5
+2026-03-25 11:03:07,210 [INFO] [Unearthed Path] no usable FB URL, resuming standard path artist='wil-skinner' row=6
+2026-03-25 11:03:07,210 [INFO] [Unearthed Path] activated artist='rum-jungle' row=7
+2026-03-25 11:03:07,210 [INFO] [Unearthed Path] skipping non-essential enrichers artist='rum-jungle' row=7
+2026-03-25 11:03:07,211 [INFO] [Unearthed Path] no usable FB URL, resuming standard path artist='jski' row=8
+2026-03-25 11:03:07,211 [INFO] [Unearthed Path] activated artist='gypsy-lee' row=9
+2026-03-25 11:03:07,211 [INFO] [Unearthed Path] skipping non-essential enrichers artist='gypsy-lee' row=9
+2026-03-25 11:03:07,212 [INFO] [Unearthed Path] no usable FB URL, resuming standard path artist='eyeblind' row=10
+2026-03-25 11:03:07,212 [INFO] [Unearthed Path] no usable FB URL, resuming standard path artist='guano-c' row=11
+2026-03-25 11:03:07,213 [INFO] [Unearthed Path] no usable FB URL, resuming standard path artist='thomas003' row=12
+2026-03-25 11:03:07,213 [INFO] [Unearthed Path] activated artist='umbra-moon' row=13
+2026-03-25 11:03:07,213 [INFO] [Unearthed Path] skipping non-essential enrichers artist='umbra-moon' row=13
+2026-03-25 11:03:07,213 [INFO] [Unearthed Path] activated artist='mincy' row=14
+2026-03-25 11:03:07,214 [INFO] [Unearthed Path] skipping non-essential enrichers artist='mincy' row=14
+2026-03-25 11:03:07,225 [INFO] [Enricher] Row 1/15: matched 'amoss-teal' via Triple J Unearthed.
+2026-03-25 11:03:07,225 [INFO] [Enricher] skipping soundcloud heavy enrichment for 'amoss-teal' due to low row confidence (score=0.00 threshold=0.30 reasons=none)
+2026-03-25 11:03:08,115 [INFO] [Enricher] Bandcamp: status=no_match mode=directory_discover attempts=0 403=0 artist='amoss-teal'
+2026-03-25 11:03:08,116 [INFO] [Enricher] skipping lastfm heavy enrichment for 'amoss-teal' due to low row confidence (score=0.00 threshold=0.30 reasons=none)
+2026-03-25 11:03:08,117 [INFO] [IG Email] Visiting https://www.instagram.com/amossteal/
+2026-03-25 11:03:08,954 [INFO] [IG Email] No email found
+2026-03-25 11:03:08,956 [INFO] [Enricher] Row 2/15: matched 'lover-wav' via Triple J Unearthed.
+2026-03-25 11:03:08,957 [INFO] [Enricher] skipping soundcloud heavy enrichment for 'lover-wav' due to low row confidence (score=0.00 threshold=0.30 reasons=none)
+2026-03-25 11:03:09,776 [INFO] [Enricher] Bandcamp: status=no_match mode=directory_discover attempts=0 403=0 artist='lover-wav'
+2026-03-25 11:03:09,777 [INFO] [Enricher] skipping lastfm heavy enrichment for 'lover-wav' due to low row confidence (score=0.00 threshold=0.30 reasons=none)
+2026-03-25 11:03:09,778 [INFO] [IG Email] Visiting https://www.instagram.com/lover.wav/
+2026-03-25 11:03:11,534 [INFO] [IG Email] No email found
+2026-03-25 11:03:11,535 [INFO] [Enricher] Row 3/15: matched 'chantz' via Triple J Unearthed.
+2026-03-25 11:03:11,535 [INFO] [Enricher] skipping soundcloud heavy enrichment for 'chantz' due to low row confidence (score=0.00 threshold=0.30 reasons=none)
+2026-03-25 11:03:13,075 [INFO] [Enricher] Bandcamp: status=no_match mode=directory_discover attempts=0 403=0 artist='chantz'
+2026-03-25 11:03:13,076 [INFO] [Enricher] skipping lastfm heavy enrichment for 'chantz' due to low row confidence (score=0.00 threshold=0.30 reasons=none)
+2026-03-25 11:03:13,076 [INFO] [IG Email] Visiting https://www.instagram.com/chantz_girlgroup/
+2026-03-25 11:03:13,977 [INFO] [IG Email] No email found
+2026-03-25 11:03:13,979 [INFO] [Enricher] Row 4/15: matched 'rain-delusion' via Triple J Unearthed.
+2026-03-25 11:03:13,979 [INFO] [Enricher] SoundCloud live check for 'rain-delusion' (current SC link missing).
+2026-03-25 11:03:13,979 [INFO] [Night SC] using day-mode candidate pipeline: SoundCloudEngine.people_search_candidates_v2 + HTML fallback
+2026-03-25 11:03:13,979 [INFO] [Night SC] API people search place='QLD' source=location_derived
+2026-03-25 11:03:16,033 [INFO] [Night SC] API people search -> handles=0 query='rain-delusion' place='QLD'
+2026-03-25 11:03:16,034 [INFO] [Night SC] API people search returned 0 handles for place='QLD'; retrying without place filter.
+2026-03-25 11:03:16,477 [INFO] [Night SC] API people search -> handles=5 query='rain-delusion' place=''
+2026-03-25 11:03:16,890 [INFO] [Night SC] rss_first=1 handle=raindelusion url=https://soundcloud.com/raindelusion rss_attempted=1 outcome=rss_success flags_used_rss=1 rss_used_total=1
+2026-03-25 11:03:16,892 [INFO] [Night SC] candidate_source=api profile_source=none root_fetch_disabled=0 about_disabled=0 tracks_api_blocked=0 used_user_api=0 used_rss=1 rss_used_total=1
+2026-03-25 11:03:16,892 [INFO] [Night SC] Final status: rss_success handle=raindelusion http= confidence=1.00 ms=2913 fetches=0 reason=rss_success
+2026-03-25 11:03:17,710 [INFO] [Enricher] Bandcamp: status=no_match mode=directory_discover attempts=0 403=0 artist='rain-delusion'
+2026-03-25 11:03:17,711 [INFO] [Enricher] Last.fm live search: https://www.last.fm/search?q=%22rain-delusion%22+%22Fever%22&type=artist
+2026-03-25 11:03:19,019 [INFO] [Enricher][LF] Last.fm search: status=200 attempt=1/1 headers=lastfm_html
+2026-03-25 11:03:19,064 [INFO] [Enricher] Last.fm Enrich: candidate 'Rain B Fever' for 'rain-delusion' has confidence=0.40.
+2026-03-25 11:03:19,064 [INFO] [Enricher] Last.fm Enrich: no safe match for 'rain-delusion' (best_confidence=0.40), skipping.
+2026-03-25 11:03:19,064 [INFO] [IG Email] Visiting https://www.instagram.com/rain.delusion/
+2026-03-25 11:03:20,051 [INFO] [IG Email] No email found
+2026-03-25 11:03:20,053 [INFO] [Enricher] Row 6/15: matched 'i-m-fine' via Triple J Unearthed.
+2026-03-25 11:03:20,053 [INFO] [Enricher] SoundCloud live check for 'i-m-fine' (current SC link missing).
+2026-03-25 11:03:20,053 [INFO] [Night SC] API people search place='NSW' source=location_derived
+2026-03-25 11:03:20,537 [INFO] [Night SC] API people search -> handles=0 query='i-m-fine' place='NSW'
+2026-03-25 11:03:20,537 [INFO] [Night SC] API people search returned 0 handles for place='NSW'; retrying without place filter.
+2026-03-25 11:03:21,050 [INFO] [Night SC] API people search -> handles=12 query='i-m-fine' place=''
+2026-03-25 11:03:21,460 [INFO] [Night SC] rss_first=1 handle=imfineee url=https://soundcloud.com/imfineee rss_attempted=1 outcome=rss_success flags_used_rss=1 rss_used_total=2
+2026-03-25 11:03:21,460 [INFO] [Enricher] low-confidence match skipped for 'i-m-fine' (Spotify ID <unknown>) – score=0.65, candidate=im.fine | SoundCloud (live search) | https://soundcloud.com/imfineee
+2026-03-25 11:03:21,461 [INFO] [Night SC] candidate_source=api profile_source=none root_fetch_disabled=0 about_disabled=0 tracks_api_blocked=0 used_user_api=0 used_rss=1 rss_used_total=2
+2026-03-25 11:03:21,461 [INFO] [Night SC] Final status: rss_success handle=imfineee http=200 confidence=1.00 ms=1407 fetches=0 reason=rss_success
+2026-03-25 11:03:22,891 [INFO] [Enricher] Bandcamp: status=no_match mode=directory_discover attempts=0 403=0 artist='i-m-fine'
+2026-03-25 11:03:22,892 [INFO] [Enricher] Last.fm live search: https://www.last.fm/search?q=%22i-m-fine%22+%22Airplane+Mode%22&type=artist
+2026-03-25 11:03:23,805 [INFO] [Enricher][LF] Last.fm search: status=200 attempt=1/1 headers=lastfm_html
+2026-03-25 11:03:23,846 [INFO] [Enricher] Last.fm Enrich: candidate 'NOIR(느와르) "Airplane Mode" M' for 'i-m-fine' has confidence=0.22.
+2026-03-25 11:03:23,846 [INFO] [Enricher] Last.fm Enrich: no safe match for 'i-m-fine' (best_confidence=0.22), skipping.
+2026-03-25 11:03:23,846 [INFO] [IG Email] Visiting https://www.instagram.com/imfine_aus/
+2026-03-25 11:03:24,622 [INFO] [IG Email] No email found
+2026-03-25 11:03:24,624 [INFO] [Enricher] Row 7/15: matched 'wil-skinner' via Triple J Unearthed.
+2026-03-25 11:03:24,624 [INFO] [Enricher] skipping soundcloud heavy enrichment for 'wil-skinner' due to low row confidence (score=0.00 threshold=0.30 reasons=none)
+2026-03-25 11:03:25,438 [INFO] [Enricher] Bandcamp: status=no_match mode=directory_discover attempts=0 403=0 artist='wil-skinner'
+2026-03-25 11:03:25,438 [INFO] [Enricher] skipping lastfm heavy enrichment for 'wil-skinner' due to low row confidence (score=0.00 threshold=0.30 reasons=none)
+2026-03-25 11:03:25,439 [INFO] [IG Email] Visiting https://www.instagram.com/willyeskinner/
+2026-03-25 11:03:26,541 [INFO] [IG Email] No email found
+2026-03-25 11:03:26,542 [INFO] [Enricher] Row 9/15: matched 'jski' via Triple J Unearthed.
+2026-03-25 11:03:26,543 [INFO] [Enricher] SoundCloud live check for 'jski' (current SC link missing).
+2026-03-25 11:03:26,543 [INFO] [Night SC] API people search place='QLD' source=location_derived
+2026-03-25 11:03:26,916 [INFO] [Night SC] API people search -> handles=0 query='jski' place='QLD'
+2026-03-25 11:03:26,916 [INFO] [Night SC] API people search returned 0 handles for place='QLD'; retrying without place filter.
+2026-03-25 11:03:27,399 [INFO] [Night SC] API people search -> handles=12 query='jski' place=''
+2026-03-25 11:03:28,424 [INFO] [Night SC] rss_first=1 handle=musicbyjski url=https://soundcloud.com/musicbyjski rss_attempted=1 outcome=rss_success flags_used_rss=1 rss_used_total=3
+2026-03-25 11:03:28,426 [INFO] [Night SC] candidate_source=api profile_source=none root_fetch_disabled=0 about_disabled=0 tracks_api_blocked=0 used_user_api=0 used_rss=1 rss_used_total=3
+2026-03-25 11:03:28,426 [INFO] [Night SC] Final status: rss_success handle=musicbyjski http=200 confidence=1.00 ms=1883 fetches=0 reason=rss_success
+2026-03-25 11:03:29,166 [INFO] [Enricher] Bandcamp: status=no_match mode=directory_discover attempts=0 403=0 artist='jski'
+2026-03-25 11:03:29,167 [INFO] [Enricher][LF] Skipping track query (sanitized empty); using artist-only.
+2026-03-25 11:03:29,167 [INFO] [Enricher] Last.fm Enrich: artist-only search for 'jski'.
+2026-03-25 11:03:30,688 [INFO] [Enricher][LF] Last.fm search (fallback): status=200 attempt=1/1 headers=lastfm_html
+2026-03-25 11:03:30,734 [INFO] [Enricher] Last.fm Enrich: candidate 'jski' for 'jski' has confidence=1.00.
+2026-03-25 11:03:30,735 [INFO] [Enricher] Fetching lastfm profile: https://www.last.fm/music/jski
+2026-03-25 11:03:30,757 [INFO] [Enricher][LF] lastfm profile: status=200 attempt=1/3 headers=lastfm_html
+2026-03-25 11:03:30,869 [INFO] [Enricher] No actionable data on lastfm profile: https://www.last.fm/music/jski | fetch_ok=True http=200 actionable=False
+2026-03-25 11:03:30,869 [INFO] [Enricher] Last.fm Enrich: candidate 'jski' for 'jski' has confidence=1.00 | fetch_ok=True http=200
+2026-03-25 11:03:30,871 [INFO] [Enricher] Row 11/15: matched 'eyeblind' via Triple J Unearthed.
+2026-03-25 11:03:30,871 [INFO] [Enricher] SoundCloud live check for 'eyeblind' (current SC link missing).
+2026-03-25 11:03:30,871 [INFO] [Night SC] API people search place='Adelaide, SA' source=location_raw
+2026-03-25 11:03:31,289 [INFO] [Night SC] API people search -> handles=0 query='eyeblind' place='Adelaide, SA'
+2026-03-25 11:03:31,290 [INFO] [Night SC] API people search returned 0 handles for place='Adelaide, SA'; retrying without place filter.
+2026-03-25 11:03:31,700 [INFO] [Night SC] API people search -> handles=12 query='eyeblind' place=''
+2026-03-25 11:03:35,489 [INFO] [Night SC] rss_first=1 handle=eyeblind url=https://soundcloud.com/eyeblind rss_attempted=1 outcome=rss_fail flags_used_rss=1 rss_used_total=4
+2026-03-25 11:03:35,490 [INFO] [SC] tracks API blocked (401/403); continuing with HTML/about fallback (SC_ALLOW_FALLBACK_ON_TRACKS_401_403=1)
+2026-03-25 11:03:40,717 [INFO] [Night SC] candidate_source=api profile_source=engine root_fetch_disabled=1 about_disabled=0 tracks_api_blocked=1 used_user_api=0 used_rss=1 rss_used_total=4
+2026-03-25 11:03:40,717 [INFO] [Night SC] Final status: non_actionable_challenge handle=eyeblind http=200 confidence=1.00 ms=9845 fetches=1 reason=challenge_page
+2026-03-25 11:03:40,718 [INFO] [Night SC] forcing rss_only due to html challenges=2
+2026-03-25 11:03:40,718 [INFO] [Night SC] Entering RSS-only mode (reason=consecutive_challenges row=<unknown> challenges=2 html_streak=2 api_403_streak=0 threshold_403=3)
+2026-03-25 11:03:41,396 [INFO] [Enricher] Bandcamp: status=no_match mode=directory_discover attempts=0 403=0 artist='eyeblind'
+2026-03-25 11:03:41,397 [INFO] [Enricher] Last.fm live search: https://www.last.fm/search?q=%22eyeblind%22+%22thank+you+for+being+my+friend%22&type=artist
+2026-03-25 11:03:42,455 [INFO] [Enricher][LF] Last.fm search: status=200 attempt=1/1 headers=lastfm_html
+2026-03-25 11:03:42,496 [INFO] [Enricher] Last.fm Enrich: candidate 'Thank You For Being A Friend' for 'eyeblind' has confidence=0.22.
+2026-03-25 11:03:42,496 [INFO] [Enricher] Last.fm Enrich: no safe match for 'eyeblind' (best_confidence=0.22), skipping.
+2026-03-25 11:03:42,497 [INFO] [IG Email] Visiting https://www.instagram.com/eyeblindsucks/
+2026-03-25 11:03:43,447 [INFO] [IG Email] No email found
+2026-03-25 11:03:43,448 [INFO] [Enricher] Row 12/15: matched 'guano-c' via Triple J Unearthed.
+2026-03-25 11:03:43,449 [INFO] [Enricher] SoundCloud live check for 'guano-c' (current SC link missing).
+2026-03-25 11:03:43,449 [INFO] [Night SC] API people search place='NSW' source=location_derived
+2026-03-25 11:03:43,868 [INFO] [Night SC] API people search -> handles=0 query='guano-c' place='NSW'
+2026-03-25 11:03:43,869 [INFO] [Night SC] API people search returned 0 handles for place='NSW'; retrying without place filter.
+2026-03-25 11:03:44,397 [INFO] [Night SC] API people search -> handles=12 query='guano-c' place=''
+2026-03-25 11:03:45,422 [INFO] [Night SC] rss_only=1 handle=guanoc url=https://soundcloud.com/guanoc rss_attempted=1 outcome=rss_success flags_used_rss=1 rss_used_total=5
+2026-03-25 11:03:45,424 [INFO] [Night SC] candidate_source=api profile_source=rss_only root_fetch_disabled=1 about_disabled=0 tracks_api_blocked=1 used_user_api=0 used_rss=1 rss_used_total=5
+2026-03-25 11:03:45,425 [INFO] [Night SC] Final status: rss_success handle=guanoc http=200 confidence=0.97 ms=1975 fetches=0 reason=rss_success
+2026-03-25 11:03:46,268 [INFO] [Enricher] Bandcamp: status=no_match mode=directory_discover attempts=0 403=0 artist='guano-c'
+2026-03-25 11:03:46,268 [INFO] [Enricher] Last.fm live search: https://www.last.fm/search?q=%22guano-c%22+%22Luigi+bros%22&type=artist
+2026-03-25 11:03:47,269 [INFO] [Enricher][LF] Last.fm search: status=200 attempt=1/1 headers=lastfm_html
+2026-03-25 11:03:47,294 [INFO] [Enricher] Last.fm Enrich: candidate 'LUIGI BROS' for 'guano-c' has confidence=0.24.
+2026-03-25 11:03:47,294 [INFO] [Enricher] Last.fm Enrich: no safe match for 'guano-c' (best_confidence=0.24), skipping.
+2026-03-25 11:03:47,295 [INFO] [IG Email] Visiting https://www.instagram.com/theguanoc/
+2026-03-25 11:03:48,165 [INFO] [IG Email] No email found
+2026-03-25 11:03:48,167 [INFO] [Enricher] Row 13/15: matched 'thomas003' via Triple J Unearthed.
+2026-03-25 11:03:48,167 [INFO] [Enricher] SoundCloud live check for 'thomas003' (current SC link missing).
+2026-03-25 11:03:48,167 [INFO] [Night SC] API people search place='NSW' source=location_derived
+2026-03-25 11:03:48,596 [INFO] [Night SC] API people search -> handles=0 query='thomas003' place='NSW'
+2026-03-25 11:03:48,596 [INFO] [Night SC] API people search returned 0 handles for place='NSW'; retrying without place filter.
+2026-03-25 11:03:49,212 [INFO] [Night SC] API people search -> handles=12 query='thomas003' place=''
+2026-03-25 11:03:53,613 [INFO] [Night SC] rss_only=1 handle=user-182858296 url=https://soundcloud.com/user-182858296 rss_attempted=1 outcome=rss_fail flags_used_rss=1 rss_used_total=6
+2026-03-25 11:03:53,614 [INFO] [Night SC] candidate_source=api profile_source=rss_only root_fetch_disabled=1 about_disabled=0 tracks_api_blocked=1 used_user_api=0 used_rss=1 rss_used_total=6
+2026-03-25 11:03:53,615 [INFO] [Night SC] Final status: rss_fail handle=user-182858296 http=200 confidence=1.00 ms=5447 fetches=0 reason=rss_fail
+2026-03-25 11:03:54,964 [INFO] [Enricher] Bandcamp: status=no_match mode=directory_discover attempts=0 403=0 artist='thomas003'
+2026-03-25 11:03:54,965 [INFO] [Enricher][LF] Sanitized track title: orig='Someday (ft. Cherry Rype)' -> cleaned='Someday ft. Cherry Rype'
+2026-03-25 11:03:54,965 [INFO] [Enricher] Last.fm live search: https://www.last.fm/search?q=%22thomas003%22+%22Someday+ft.+Cherry+Rype%22&type=artist
+2026-03-25 11:03:55,973 [INFO] [Enricher][LF] Last.fm search: status=200 attempt=1/1 headers=lastfm_html
+2026-03-25 11:03:55,997 [INFO] [Enricher] Last.fm Enrich: candidate 'Free Music Downloads' for 'thomas003' has confidence=0.21.
+2026-03-25 11:03:55,997 [INFO] [Enricher] Last.fm Enrich: no safe match for 'thomas003' (best_confidence=0.21), skipping.
+2026-03-25 11:03:55,998 [INFO] [IG Email] Visiting https://www.instagram.com/thomas003__/
+2026-03-25 11:03:56,989 [INFO] [IG Email] No email found
+2026-03-25 11:03:56,990 [INFO] [Enricher] Late domain reuse backfill: rows_scanned=0 rows_eligible=0 rows_backfilled=0 rows_skipped=0
+2026-03-25 11:03:56,990 [INFO] [Enricher] Domain email reuse summary: indexed_domains=0 rows_reused=0
+2026-03-25 11:03:56,992 [INFO] [Enricher] Enriched CSV written to overnight_runs/2026-03-25_110232/master_enriched.csv
+2026-03-25 11:03:56,992 [INFO] [DomainOrg] No exportable domain/org data; sidecar skipped.
+2026-03-25 11:03:56,992 [INFO] [Enrichment Yield]
+2026-03-25 11:03:56,992 [INFO] [Master Enrich] Completed cross-directory enrichment -> overnight_runs/2026-03-25_110232/master_enriched.csv
+2026-03-25 11:03:56,993 [INFO] [Enrich] Starting enrichment for overnight_runs/2026-03-25_110232/master_enriched.csv
+2026-03-25 11:03:56,997 [INFO] [Auto-Validate] Loaded 15 deduped rows (from 15), validating 0 selected rows...
+2026-03-25 11:03:56,997 [INFO] [Auto-Validate] Selection reasons: none
+2026-03-25 11:03:57,012 [INFO] [Auto-Validate] Completed. Upgraded: 0, Blocked: 0. Output: overnight_runs/2026-03-25_110232/master_pre_fb.csv
+2026-03-25 11:03:57,031 [INFO] [Enrich] Completed enrichment -> overnight_runs/2026-03-25_110232/master_pre_fb.csv
+2026-03-25 11:03:57,036 [INFO] [Night FB][Session Gate] source=none decision=disabled_for_run reason=missing_session_source
+2026-03-25 11:03:57,043 [INFO] [FB Night] Night FB already disabled for this run; passing through without enrichment (reason=missing_session_source).
+2026-03-25 11:03:57,046 [INFO] [Master] Facebook global pass completed: overnight_runs/2026-03-25_110232/master_post_fb.csv
+2026-03-25 11:03:57,046 [INFO] [Enrich] Starting enrichment for overnight_runs/2026-03-25_110232/master_post_fb.csv
+2026-03-25 11:03:57,049 [INFO] [Auto-Validate] Loaded 15 deduped rows (from 15), validating 3 selected rows...
+2026-03-25 11:03:57,049 [INFO] [Auto-Validate] Selection reasons: uncertain_score=3
+2026-03-25 11:03:58,169 [INFO] [Auto-Validate] unearthed: checked 2 URL(s)
+2026-03-25 11:03:58,169 [INFO] [Auto-Validate] Completed. Upgraded: 0, Blocked: 0. Output: overnight_runs/2026-03-25_110232/master_enriched_deduped.csv
+2026-03-25 11:03:58,188 [INFO] [Enrich] Completed enrichment -> overnight_runs/2026-03-25_110232/master_enriched_deduped.csv
+2026-03-25 11:03:58,188 [INFO] [Master] Validation completed: overnight_runs/2026-03-25_110232/master_enriched_deduped.csv
+2026-03-25 11:03:58,188 [INFO] [Master] Exporting client-facing CSV: overnight_runs/2026-03-25_110232/master_enriched_deduped.csv -> overnight_runs/2026-03-25_110232/master_export_leads.csv
+2026-03-25 11:03:58,196 [INFO] [Exporter] Export profile=full_dump: input rows=15, exported rows=15
+2026-03-25 11:03:58,196 [INFO] [Master] Export wrote 15 rows to overnight_runs/2026-03-25_110232/master_export_leads.csv
+2026-03-25 11:03:58,196 [INFO] [Master] Exported client-facing leads CSV: overnight_runs/2026-03-25_110232/master_export_leads.csv
+2026-03-25 11:03:58,196 [INFO] SMOKE RESULT: PASS (DEGRADED: bandcamp 403s, soundcloud challenges/breaker)
+2026-03-25 11:03:58,196 [INFO] Smoke Summary:
+2026-03-25 11:03:58,196 [INFO]  - jobs attempted: 1
+2026-03-25 11:03:58,196 [INFO]  - jobs merged: 1
+2026-03-25 11:03:58,196 [INFO]  - jobs skipped (read errors): 0
+2026-03-25 11:03:58,196 [INFO]  - master_raw rows: 15
+2026-03-25 11:03:58,196 [INFO]  - enrichment ran: yes
+2026-03-25 11:03:58,196 [INFO]  - enrichment rows: 16
+2026-03-25 11:03:58,196 [INFO]  - SC challenges: 1
+2026-03-25 11:03:58,196 [INFO]  - SC breaker tripped: False
+2026-03-25 11:03:58,196 [INFO]  - SC live disabled reason: n/a
+2026-03-25 11:03:58,196 [INFO]  - Bandcamp HTTP 403 count: 10
+2026-03-25 11:03:58,196 [INFO]  - Last.fm HTTP 406 count: 0
+2026-03-25 11:03:58,197 [INFO]  - Emails with missing provenance URL: 0
+2026-03-25 11:03:58,197 [INFO]  - Emails total (raw merged): 0
+2026-03-25 11:03:58,204 [INFO] [Run Summary] Wrote run summary: overnight_runs/2026-03-25_110232/run_summary.json

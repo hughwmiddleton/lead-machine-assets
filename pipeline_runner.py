@@ -631,93 +631,29 @@ def _classify_fb_attempt_state_from_status(status: str, existing: str = "") -> s
     return existing_clean or "attempted_fb"
 
 
-def _fb_debug_reason_value(
-    row_like: Any,
-    enriched: Optional[Mapping[str, Any]],
-    key: str,
-) -> str:
-    if isinstance(enriched, Mapping):
-        enriched_val = _cell_str(enriched.get(key, ""))
-        if enriched_val:
-            return enriched_val
-    if row_like is not None and hasattr(row_like, "get"):
-        return _cell_str(row_like.get(key, ""))
-    return ""
+def _classify_fb_debug_reason(row_like: Any) -> str:
+    status_norm = _cell_str(row_like.get("FB_Status", "")).lower() if hasattr(row_like, "get") else ""
+    opportunity_norm = _cell_str(row_like.get(FB_OPPORTUNITY_STATE_COL, "")).lower() if hasattr(row_like, "get") else ""
+    gate_norm = _cell_str(row_like.get(FB_GATE_STATE_COL, "")).lower() if hasattr(row_like, "get") else ""
+    attempt_state_norm = _cell_str(row_like.get(FB_ATTEMPT_STATE_COL, "")).lower() if hasattr(row_like, "get") else ""
+    write_state_norm = _cell_str(row_like.get(FB_WRITE_STATE_COL, "")).lower() if hasattr(row_like, "get") else ""
 
+    if write_state_norm in {"fb_wrote_email", "fb_wrote_email_all_only"}:
+        return "email_written"
+    if write_state_norm == "fb_found_email_not_applied":
+        return "email_found_not_applied"
 
-def _fb_reason_is_candidate_reject(reason: str) -> bool:
-    reason_norm = _cell_str(reason).lower()
-    if not reason_norm:
-        return False
-    reject_tokens = (
-        "email_override_reject",
-        "identity_mismatch",
-        "invalid_placeholder",
-        "junk_surface",
-        "missing_fb_host",
-        "no_safe_match",
-        "non_music",
-        "normalize_failed",
-        "profile_no_music_signal",
-        "rank_below_threshold",
-        "shape_disallowed",
-    )
-    return any(token in reason_norm for token in reject_tokens)
-
-
-def _classify_fb_debug_reason(
-    row_like: Any,
-    *,
-    enriched: Optional[Mapping[str, Any]] = None,
-    attempt_state: str = "",
-    write_state: str = "",
-) -> str:
-    status_norm = _fb_debug_reason_value(row_like, enriched, "FB_Status").lower()
-    reason_norm = _fb_debug_reason_value(row_like, enriched, "FB_Reason").lower()
-    gate_norm = _fb_debug_reason_value(row_like, enriched, FB_GATE_STATE_COL).lower()
-    about_result_norm = _fb_debug_reason_value(row_like, enriched, "FB_About_Result").lower()
-    about_attempted_norm = _fb_debug_reason_value(row_like, enriched, "FB_About_Attempted").lower()
-    email_source_norm = _fb_debug_reason_value(row_like, enriched, "FB_Email_Source").lower()
-    email_method_norm = _fb_debug_reason_value(row_like, enriched, "Email_Extract_Method").lower()
-    email_source_url_norm = _fb_debug_reason_value(row_like, enriched, "Email_Source_URL").lower()
-    attempt_state_norm = _cell_str(attempt_state or _fb_debug_reason_value(row_like, enriched, FB_ATTEMPT_STATE_COL)).lower()
-
-    if attempt_state_norm == "attempted_fb_found_email":
-        if (
-            email_source_norm == "about"
-            or about_result_norm == "emails_found"
-            or any(token in email_source_url_norm for token in ("about", "contact_and_basic_info", "directory_contact_info"))
-        ):
-            return "email_found_about_page"
-        if email_method_norm == "mailto":
-            return "email_found_mailto"
-        return "email_found_main_text"
-
-    if attempt_state_norm == "attempted_fb_login_wall_or_checkpoint" or any(
-        token in status_norm
-        for token in ("checkpoint", "login_redirect", "login_wall", "skipped_warning", "warning")
-    ):
+    if attempt_state_norm == "attempted_fb_login_wall_or_checkpoint":
         return "login_required_or_blocked"
-
-    if attempt_state_norm == "attempted_fb_content_unavailable" or "content_unavailable" in status_norm:
+    if attempt_state_norm == "attempted_fb_content_unavailable":
         return "content_unavailable"
-
-    if about_attempted_norm == "yes":
-        if about_result_norm == "no_email":
-            return "about_page_no_email"
-        if about_result_norm == "no_contact_link":
-            return "no_contact_surface_found"
-        if about_result_norm in {"blocked_login", "checkpoint"}:
-            return "login_required_or_blocked"
-
-    if status_norm in {"no_candidates", "unearthed_no_candidates"}:
-        if _fb_reason_is_candidate_reject(reason_norm):
-            return "candidate_rejected_pre_scrape"
-        return "no_fb_candidate"
+    if attempt_state_norm == "attempted_fb_timeout_or_fetch_error":
+        return "timeout_or_fetch_error"
+    if attempt_state_norm in {"attempted_fb_no_email_on_page", "attempted_fb"}:
+        return "no_email_visible"
 
     if gate_norm in {"skipped_no_identity_anchor", "skipped_no_canonical_facebook_url"}:
         return "no_fb_candidate"
-
     if gate_norm in {
         "skipped_duplicate_fb_discovery",
         "skipped_existing_usable_email",
@@ -725,22 +661,17 @@ def _classify_fb_debug_reason(
         "skipped_terminal_fb_status",
     }:
         return ""
+    if opportunity_norm == "no_fb_opportunity":
+        return "no_fb_candidate"
 
-    attempted_like = bool(
-        attempt_state_norm.startswith("attempted_")
-        or status_norm.startswith("pass_a_")
-        or status_norm in {
-            "content_unavailable",
-            "driver_error",
-            "login_redirect",
-            "ok",
-            "ok_unearthed_blind",
-            "ok_unearthed_legacy",
-            "skipped_checkpoint",
-        }
-    )
-    if attempted_like:
-        return "main_no_email_visible"
+    if any(token in status_norm for token in ("checkpoint", "login_redirect", "login_wall", "skipped_warning", "warning")):
+        return "login_required_or_blocked"
+    if "content_unavailable" in status_norm:
+        return "content_unavailable"
+    if any(token in status_norm for token in ("timeout", "fetch_error", "driver_error", "no_display")):
+        return "timeout_or_fetch_error"
+    if status_norm in {"no_candidates", "unearthed_no_candidates"}:
+        return "no_fb_candidate"
 
     return ""
 
@@ -3592,51 +3523,29 @@ def run_facebook_global_pass_nightmode(
                 f"eligible_for_fb={eligible_for_fb}",
             )
 
+            skip_row = False
+
             if effective_skip_due_to_email:
                 df.at[idx, FB_GATE_STATE_COL] = "skipped_existing_usable_email"
                 if not _cell_str(df.at[idx, FB_WRITE_STATE_COL]):
                     df.at[idx, FB_WRITE_STATE_COL] = "fb_no_email_written"
-                df.at[idx, FB_DEBUG_REASON_COL] = _classify_fb_debug_reason(df.loc[idx])
                 _safe_log_console(
                     logger,
                     f"[Night FB] Skipping row {idx} ('{artist_label}') – email already present (Email_All='{email_all_clean}').",
                 )
-                state.update(
-                    {
-                        "fb_last_index": last_index,
-                        "fb_completed": completed_rows,
-                        "fb_attempted_total": attempted_total,
-                        "fb_captcha_flag": captcha_flag,
-                        "fb_total_rows": total_rows,
-                        "fb_resume_input": os.path.abspath(input_csv),
-                    }
-                )
-                _write_state_with_pass_a(state)
-                continue
+                skip_row = True
 
-            if fb_status_val in terminal_statuses:
+            elif fb_status_val in terminal_statuses:
                 df.at[idx, FB_GATE_STATE_COL] = "skipped_terminal_fb_status"
                 if not _cell_str(df.at[idx, FB_WRITE_STATE_COL]):
                     df.at[idx, FB_WRITE_STATE_COL] = "fb_no_email_written"
-                df.at[idx, FB_DEBUG_REASON_COL] = _classify_fb_debug_reason(df.loc[idx])
                 _safe_log_console(
                     logger,
                     f"[Night FB] Skipping row {idx} ('{artist_label}') – terminal FB_Status='{fb_status_val_raw}'.",
                 )
-                state.update(
-                    {
-                        "fb_last_index": last_index,
-                        "fb_completed": completed_rows,
-                        "fb_attempted_total": attempted_total,
-                        "fb_captcha_flag": captcha_flag,
-                        "fb_total_rows": total_rows,
-                        "fb_resume_input": os.path.abspath(input_csv),
-                    }
-                )
-                _write_state_with_pass_a(state)
-                continue
+                skip_row = True
 
-            if (
+            elif (
                 not has_canonical_facebook_url
                 and not has_explicit_fb_entrypoint
                 and not has_upstream_identity_anchor
@@ -3645,23 +3554,11 @@ def run_facebook_global_pass_nightmode(
                 df.at[idx, FB_GATE_STATE_COL] = "skipped_no_identity_anchor"
                 if not _cell_str(df.at[idx, FB_WRITE_STATE_COL]):
                     df.at[idx, FB_WRITE_STATE_COL] = "fb_no_email_written"
-                df.at[idx, FB_DEBUG_REASON_COL] = _classify_fb_debug_reason(df.loc[idx])
                 _safe_log_console(
                     logger,
                     f"[Night FB] Skipping row {idx} ('{artist_label}') - no canonical Facebook URL, explicit FB entrypoint, or upstream identity anchor.",
                 )
-                state.update(
-                    {
-                        "fb_last_index": last_index,
-                        "fb_completed": completed_rows,
-                        "fb_attempted_total": attempted_total,
-                        "fb_captcha_flag": captcha_flag,
-                        "fb_total_rows": total_rows,
-                        "fb_resume_input": os.path.abspath(input_csv),
-                    }
-                )
-                _write_state_with_pass_a(state)
-                continue
+                skip_row = True
 
             allow_unearthed_night_no_url_path = bool(
                 unearthed_no_url_discovery_eligible
@@ -3669,7 +3566,7 @@ def run_facebook_global_pass_nightmode(
                 and not has_explicit_fb_entrypoint
             )
 
-            if (
+            if not skip_row and (
                 discovery_fallback_eligible
                 and not has_canonical_facebook_url
                 and shared_discovery_attempted
@@ -3678,25 +3575,13 @@ def run_facebook_global_pass_nightmode(
                 df.at[idx, FB_GATE_STATE_COL] = "skipped_duplicate_fb_discovery"
                 if not _cell_str(df.at[idx, FB_WRITE_STATE_COL]):
                     df.at[idx, FB_WRITE_STATE_COL] = "fb_no_email_written"
-                df.at[idx, FB_DEBUG_REASON_COL] = _classify_fb_debug_reason(df.loc[idx])
                 _safe_log_console(
                     logger,
                     f"[Night FB] Skipping discovery fallback for row {idx} ('{artist_label}') - discovery already attempted earlier this run.",
                 )
-                state.update(
-                    {
-                        "fb_last_index": last_index,
-                        "fb_completed": completed_rows,
-                        "fb_attempted_total": attempted_total,
-                        "fb_captcha_flag": captcha_flag,
-                        "fb_total_rows": total_rows,
-                        "fb_resume_input": os.path.abspath(input_csv),
-                    }
-                )
-                _write_state_with_pass_a(state)
-                continue
+                skip_row = True
 
-            if fb_status_val in final_fb_statuses or not should_run_night_fb:
+            elif not skip_row and (fb_status_val in final_fb_statuses or not should_run_night_fb):
                 if not has_canonical_facebook_url and not discovery_fallback_eligible:
                     if _cell_str(df.at[idx, FB_OPPORTUNITY_STATE_COL]) != "no_fb_opportunity":
                         df.at[idx, FB_GATE_STATE_COL] = "skipped_no_canonical_facebook_url"
@@ -3704,155 +3589,140 @@ def run_facebook_global_pass_nightmode(
                     df.at[idx, FB_GATE_STATE_COL] = "skipped_other_gate"
                 if not _cell_str(df.at[idx, FB_WRITE_STATE_COL]):
                     df.at[idx, FB_WRITE_STATE_COL] = "fb_no_email_written"
-                df.at[idx, FB_DEBUG_REASON_COL] = _classify_fb_debug_reason(df.loc[idx])
                 if fb_status_val in final_fb_statuses:
                     email_state = "present" if has_email_effective else "missing"
                     _safe_log_console(
                         logger,
                         f"[Night FB] Skipping FB lookup for '{artist_label}' (FB_Status='{fb_status_val_raw}', email='{email_state}', skipped_due_to_email={int(effective_skip_due_to_email)}).",
                     )
-                state.update(
-                    {
-                        "fb_last_index": last_index,
-                        "fb_completed": completed_rows,
-                        "fb_attempted_total": attempted_total,
-                        "fb_captcha_flag": captcha_flag,
-                        "fb_total_rows": total_rows,
-                        "fb_resume_input": os.path.abspath(input_csv),
-                    }
-                )
-                _write_state_with_pass_a(state)
-                continue
+                skip_row = True
 
-            multiplier = 1.0
-            try:
-                if hasattr(fb_helper, "get_slow_mode_multiplier"):
-                    multiplier = max(1.0, float(fb_helper.get_slow_mode_multiplier()))
-            except Exception:
+            elif not skip_row:
                 multiplier = 1.0
+                try:
+                    if hasattr(fb_helper, "get_slow_mode_multiplier"):
+                        multiplier = max(1.0, float(fb_helper.get_slow_mode_multiplier()))
+                except Exception:
+                    multiplier = 1.0
 
-            if processed_this_run > 0:
-                delay = (random.uniform(*per_row_delay_range) if per_row_delay_range else 0.0) * multiplier
-                _safe_log_console(logger, f"[FB Night] Sleeping {delay:.2f}s before next row (index={idx}).")
-                _safe_sleep(delay)
+                if processed_this_run > 0:
+                    delay = (random.uniform(*per_row_delay_range) if per_row_delay_range else 0.0) * multiplier
+                    _safe_log_console(logger, f"[FB Night] Sleeping {delay:.2f}s before next row (index={idx}).")
+                    _safe_sleep(delay)
 
-            processed_this_run += 1
-            attempted_total += 1
+                processed_this_run += 1
+                attempted_total += 1
 
-            if short_break_every > 0 and processed_this_run % short_break_every == 0:
-                pause = (random.uniform(*short_break_range) if short_break_range else 0.0) * multiplier
-                _safe_log_console(logger, f"[FB Night] Short break for {pause:.2f}s after {processed_this_run} rows.")
-                _safe_sleep(pause)
-            if long_break_every > 0 and processed_this_run % long_break_every == 0:
-                pause = (random.uniform(*long_break_range) if long_break_range else 0.0) * multiplier
-                _safe_log_console(logger, f"[FB Night] Long break for {pause:.2f}s after {processed_this_run} rows.")
-                _safe_sleep(pause)
+                if short_break_every > 0 and processed_this_run % short_break_every == 0:
+                    pause = (random.uniform(*short_break_range) if short_break_range else 0.0) * multiplier
+                    _safe_log_console(logger, f"[FB Night] Short break for {pause:.2f}s after {processed_this_run} rows.")
+                    _safe_sleep(pause)
+                if long_break_every > 0 and processed_this_run % long_break_every == 0:
+                    pause = (random.uniform(*long_break_range) if long_break_range else 0.0) * multiplier
+                    _safe_log_console(logger, f"[FB Night] Long break for {pause:.2f}s after {processed_this_run} rows.")
+                    _safe_sleep(pause)
 
-            try:
-                clean_row = {k: ("" if pd.isna(v) else v) for k, v in row.to_dict().items()}
-                enriched = fb_helper.enrich_row_with_facebook_night(clean_row, row_index=idx)
-            except FacebookDriverError as exc:
-                _safe_log_console(logger, f"[FB Night] Driver error at row {idx}: {exc}")
-                enriched = {"FB_Status": "driver_error", FB_ATTEMPT_STATE_COL: "attempted_fb_timeout_or_fetch_error"}
-            except Exception as exc:  # pragma: no cover - defensive
-                if _is_captcha_error(exc):
-                    captcha_flag = True
-                    captcha_detected = True
-                    _safe_log_console(logger, f"[FB Night] Captcha detected at row {idx}; stopping early.")
-                    state.update(
-                        {
-                            "fb_last_index": last_index,
-                            "fb_completed": completed_rows,
-                            "fb_attempted_total": attempted_total,
-                            "fb_captcha_flag": True,
-                            "fb_total_rows": total_rows,
-                            "fb_resume_input": os.path.abspath(input_csv),
-                        }
-                    )
-                    _write_state_with_pass_a(state)
-                    break
-                _safe_log_console(logger, f"[FB Night] Night FB enrich failed at row {idx}: {exc}")
-                enriched = None
+                try:
+                    clean_row = {k: ("" if pd.isna(v) else v) for k, v in row.to_dict().items()}
+                    enriched = fb_helper.enrich_row_with_facebook_night(clean_row, row_index=idx)
+                except FacebookDriverError as exc:
+                    _safe_log_console(logger, f"[FB Night] Driver error at row {idx}: {exc}")
+                    enriched = {"FB_Status": "driver_error", FB_ATTEMPT_STATE_COL: "attempted_fb_timeout_or_fetch_error"}
+                except Exception as exc:  # pragma: no cover - defensive
+                    if _is_captcha_error(exc):
+                        captcha_flag = True
+                        captcha_detected = True
+                        _safe_log_console(logger, f"[FB Night] Captcha detected at row {idx}; stopping early.")
+                        state.update(
+                            {
+                                "fb_last_index": last_index,
+                                "fb_completed": completed_rows,
+                                "fb_attempted_total": attempted_total,
+                                "fb_captcha_flag": True,
+                                "fb_total_rows": total_rows,
+                                "fb_resume_input": os.path.abspath(input_csv),
+                            }
+                        )
+                        _write_state_with_pass_a(state)
+                        break
+                    _safe_log_console(logger, f"[FB Night] Night FB enrich failed at row {idx}: {exc}")
+                    enriched = None
 
-            write_before = _fb_write_surface_snapshot(df.loc[idx])
-            if enriched:
-                status_val = str(enriched.get("FB_Status", "") or "")
-                fb_rejected = _fb_status_is_rejected(status_val)
-                if fb_rejected:
-                    artist_label = row.get("Artist Name", "") or row.get("Artist", "") or "<unknown>"
-                    fb_url = enriched.get("Facebook_URL") or (df.at[idx, "Facebook_URL"] if "Facebook_URL" in df.columns else "")
-                    fb_url = str(fb_url or "").strip() or "<unknown>"
-                    reason = status_val or str(enriched.get("FB_Reason", "") or "reject")
-                    _safe_log_console(
-                        logger,
-                        f"[FB Guard] Discarding emails from rejected FB page '{fb_url}' for '{artist_label}' (reason={reason})",
-                    )
-                else:
-                    source_url = enriched.get("Email_Source_URL") or ""
-                    fb_url_hint = enriched.get("Facebook_URL") or ""
-                    if not source_url:
-                        source_url = _facebook_about_url(fb_url_hint)
-                    source_url = source_url or fb_url_hint or ""
-                    source_type = enriched.get("Email_Source_Type") or "facebook_enrich"
-                    method = enriched.get("Email_Extract_Method") or "regex"
-                    _set_email_with_provenance(
-                        (df, idx),
-                        enriched.get("Email"),
-                        source_url,
-                        source_type,
-                        method,
-                        _facebook_email_surface_hint(enriched),
-                    )
-                    _fill_email_provenance_fields(
-                        df,
-                        idx,
-                        source=enriched,
-                        fb_url_hint=fb_url_hint,
-                        default_source_type=source_type or "facebook_enrich",
-                        default_method=method or "regex",
-                    )
-                    if "Email_All" in enriched:
-                        _set_email_all(
+                write_before = _fb_write_surface_snapshot(df.loc[idx])
+                if enriched:
+                    status_val = str(enriched.get("FB_Status", "") or "")
+                    fb_rejected = _fb_status_is_rejected(status_val)
+                    if fb_rejected:
+                        artist_label = row.get("Artist Name", "") or row.get("Artist", "") or "<unknown>"
+                        fb_url = enriched.get("Facebook_URL") or (df.at[idx, "Facebook_URL"] if "Facebook_URL" in df.columns else "")
+                        fb_url = str(fb_url or "").strip() or "<unknown>"
+                        reason = status_val or str(enriched.get("FB_Reason", "") or "reject")
+                        _safe_log_console(
+                            logger,
+                            f"[FB Guard] Discarding emails from rejected FB page '{fb_url}' for '{artist_label}' (reason={reason})",
+                        )
+                    else:
+                        source_url = enriched.get("Email_Source_URL") or ""
+                        fb_url_hint = enriched.get("Facebook_URL") or ""
+                        if not source_url:
+                            source_url = _facebook_about_url(fb_url_hint)
+                        source_url = source_url or fb_url_hint or ""
+                        source_type = enriched.get("Email_Source_Type") or "facebook_enrich"
+                        method = enriched.get("Email_Extract_Method") or "regex"
+                        _set_email_with_provenance(
+                            (df, idx),
+                            enriched.get("Email"),
+                            source_url,
+                            source_type,
+                            method,
+                            _facebook_email_surface_hint(enriched),
+                        )
+                        _fill_email_provenance_fields(
                             df,
                             idx,
-                            enriched.get("Email_All", ""),
-                            source="fb_global_pass",
-                            logger=logger,
-                            source_url=source_url,
-                            source_type=source_type,
-                            method=method,
-                            surface=_facebook_email_surface_hint(enriched),
+                            source=enriched,
+                            fb_url_hint=fb_url_hint,
+                            default_source_type=source_type or "facebook_enrich",
+                            default_method=method or "regex",
                         )
-                cols_to_copy = ["Facebook_URL", "__fb_emails_applied", "FB_Match_Level", "FB_Selected_By", "FB_Name_Consistency_Flag", "FB_Review_Reason"]
-                if not fb_rejected:
-                    cols_to_copy.append("Email_Type")
-                for col in cols_to_copy:
-                    if col in enriched:
-                        df.at[idx, col] = enriched.get(col, "")
-                if not status_val:
-                    email_now = enriched.get("Email", "") or ""
-                    fb_url_now = enriched.get("Facebook_URL", "") or ""
-                    status_val = "ok" if (str(email_now).strip() or fb_url_now) else "no_candidates"
-                df.at[idx, "FB_Status"] = status_val
-                attempt_state = _classify_fb_attempt_state_from_status(
-                    status_val,
-                    enriched.get(FB_ATTEMPT_STATE_COL, ""),
-                )
-                df.at[idx, FB_ATTEMPT_STATE_COL] = attempt_state
-            else:
-                # Attempted but no enrichment result; mark as no_candidates to avoid repeated retries.
-                df.at[idx, "FB_Status"] = "no_candidates"
-                attempt_state = "attempted_fb_timeout_or_fetch_error"
-                df.at[idx, FB_ATTEMPT_STATE_COL] = attempt_state
+                        if "Email_All" in enriched:
+                            _set_email_all(
+                                df,
+                                idx,
+                                enriched.get("Email_All", ""),
+                                source="fb_global_pass",
+                                logger=logger,
+                                source_url=source_url,
+                                source_type=source_type,
+                                method=method,
+                                surface=_facebook_email_surface_hint(enriched),
+                            )
+                    cols_to_copy = ["Facebook_URL", "__fb_emails_applied", "FB_Match_Level", "FB_Selected_By", "FB_Name_Consistency_Flag", "FB_Review_Reason"]
+                    if not fb_rejected:
+                        cols_to_copy.append("Email_Type")
+                    for col in cols_to_copy:
+                        if col in enriched:
+                            df.at[idx, col] = enriched.get(col, "")
+                    if not status_val:
+                        email_now = enriched.get("Email", "") or ""
+                        fb_url_now = enriched.get("Facebook_URL", "") or ""
+                        status_val = "ok" if (str(email_now).strip() or fb_url_now) else "no_candidates"
+                    df.at[idx, "FB_Status"] = status_val
+                    attempt_state = _classify_fb_attempt_state_from_status(
+                        status_val,
+                        enriched.get(FB_ATTEMPT_STATE_COL, ""),
+                    )
+                    df.at[idx, FB_ATTEMPT_STATE_COL] = attempt_state
+                else:
+                    # Attempted but no enrichment result; mark as no_candidates to avoid repeated retries.
+                    df.at[idx, "FB_Status"] = "no_candidates"
+                    attempt_state = "attempted_fb_timeout_or_fetch_error"
+                    df.at[idx, FB_ATTEMPT_STATE_COL] = attempt_state
 
-            write_after = _fb_write_surface_snapshot(df.loc[idx])
-            df.at[idx, FB_WRITE_STATE_COL] = _classify_fb_write_state(write_before, write_after, attempt_state)
-            df.at[idx, FB_DEBUG_REASON_COL] = _classify_fb_debug_reason(
-                df.loc[idx],
-                enriched=enriched if isinstance(enriched, Mapping) else None,
-                attempt_state=attempt_state,
-                write_state=df.at[idx, FB_WRITE_STATE_COL],
-            )
+                write_after = _fb_write_surface_snapshot(df.loc[idx])
+                df.at[idx, FB_WRITE_STATE_COL] = _classify_fb_write_state(write_before, write_after, attempt_state)
+
+            df.at[idx, FB_DEBUG_REASON_COL] = _classify_fb_debug_reason(df.loc[idx])
 
             state.update(
                 {
@@ -3865,6 +3735,9 @@ def run_facebook_global_pass_nightmode(
                 }
             )
             _write_state_with_pass_a(state)
+
+            if skip_row:
+                continue
 
             if max_rows_per_run and processed_this_run >= max_rows_per_run:
                 limit_reached = True

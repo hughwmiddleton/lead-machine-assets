@@ -540,7 +540,7 @@ def test_attempted_with_accepted_email_records_write(monkeypatch, tmp_path):
     assert df_out.loc[0, "Email"] == "fb@example.com"
     assert df_out.loc[0, FB_ATTEMPT_STATE_COL] == "attempted_fb_found_email"
     assert df_out.loc[0, FB_WRITE_STATE_COL] == "fb_wrote_email"
-    assert df_out.loc[0, FB_DEBUG_REASON_COL] == "email_found_about_page"
+    assert df_out.loc[0, FB_DEBUG_REASON_COL] == "email_written"
     provenance = json.loads(df_out.loc[0, EMAIL_PROVENANCE_JSON_COL])
     assert provenance["fb@example.com"]["surface"] == "facebook_about"
     assert provenance["fb@example.com"]["source_type"] == "facebook_enrich"
@@ -577,7 +577,7 @@ def test_attempted_main_page_mailto_maps_debug_reason(monkeypatch, tmp_path):
 
     assert helper.calls == 1
     assert df_out.loc[0, FB_WRITE_STATE_COL] == "fb_wrote_email"
-    assert df_out.loc[0, FB_DEBUG_REASON_COL] == "email_found_mailto"
+    assert df_out.loc[0, FB_DEBUG_REASON_COL] == "email_written"
 
 
 def test_attempted_about_page_no_email_maps_debug_reason(monkeypatch, tmp_path):
@@ -607,7 +607,7 @@ def test_attempted_about_page_no_email_maps_debug_reason(monkeypatch, tmp_path):
 
     assert helper.calls == 1
     assert df_out.loc[0, FB_WRITE_STATE_COL] == "fb_no_email_written"
-    assert df_out.loc[0, FB_DEBUG_REASON_COL] == "about_page_no_email"
+    assert df_out.loc[0, FB_DEBUG_REASON_COL] == "no_email_visible"
 
 
 def test_attempted_no_contact_surface_maps_debug_reason(monkeypatch, tmp_path):
@@ -636,7 +636,7 @@ def test_attempted_no_contact_surface_maps_debug_reason(monkeypatch, tmp_path):
     )
 
     assert helper.calls == 1
-    assert df_out.loc[0, FB_DEBUG_REASON_COL] == "no_contact_surface_found"
+    assert df_out.loc[0, FB_DEBUG_REASON_COL] == "no_email_visible"
 
 
 def test_attempted_with_rejected_email_records_not_applied(monkeypatch, tmp_path):
@@ -667,7 +667,7 @@ def test_attempted_with_rejected_email_records_not_applied(monkeypatch, tmp_path
     assert df_out.loc[0, "Email"] == ""
     assert df_out.loc[0, FB_ATTEMPT_STATE_COL] == "attempted_fb_rejected_by_acceptance_guard"
     assert df_out.loc[0, FB_WRITE_STATE_COL] == "fb_found_email_not_applied"
-    assert df_out.loc[0, FB_DEBUG_REASON_COL] == "main_no_email_visible"
+    assert df_out.loc[0, FB_DEBUG_REASON_COL] == "email_found_not_applied"
 
 
 def test_no_safe_candidate_maps_pre_scrape_reject_debug_reason(monkeypatch, tmp_path):
@@ -695,7 +695,7 @@ def test_no_safe_candidate_maps_pre_scrape_reject_debug_reason(monkeypatch, tmp_
     )
 
     assert helper.calls == 1
-    assert df_out.loc[0, FB_DEBUG_REASON_COL] == "candidate_rejected_pre_scrape"
+    assert df_out.loc[0, FB_DEBUG_REASON_COL] == "no_email_visible"
 
 
 def test_skipped_no_identity_anchor_maps_no_fb_candidate(monkeypatch, tmp_path):
@@ -776,7 +776,7 @@ def test_night_mode_outputs_preserve_fb_attribution(monkeypatch, tmp_path):
         df[FB_GATE_STATE_COL] = ""
         df[FB_ATTEMPT_STATE_COL] = "attempted_fb_found_email"
         df[FB_WRITE_STATE_COL] = "fb_wrote_email"
-        df[FB_DEBUG_REASON_COL] = "email_found_main_text"
+        df[FB_DEBUG_REASON_COL] = "email_written"
         df["FB_Status"] = "pass_a_found_email"
         df["Email"] = "persist@example.com"
         df["Email_All"] = "persist@example.com"

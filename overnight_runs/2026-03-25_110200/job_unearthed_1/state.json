@@ -1,0 +1,10 @@
+{
+  "job_id": "job_unearthed_1",
+  "raw_csv": "overnight_runs/2026-03-25_110200/job_unearthed_1/raw.csv",
+  "enriched_csv": "overnight_runs/2026-03-25_110200/job_unearthed_1/enriched.csv",
+  "input_seed_csv": "",
+  "status": "partial_error",
+  "error_count": 1,
+  "last_update": "2026-03-25T00:02:02.240844+00:00",
+  "last_error": "ConnectionError: Could not reach host. Are you offline?"
+}
