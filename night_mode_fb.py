@@ -9071,6 +9071,7 @@ class NightModeFacebookEnricher:
         is_unearthed = self._is_unearthed_source(result)
         explicit_fb_entrypoints = explicit_fb_entrypoint_urls_for_row(result)
         promoted_fb_url, _ = ensure_canonical_facebook_url(result, set_row=False)
+        has_seeded_fb = bool(promoted_fb_url)
         unearthed_fb_first_active = bool(
             is_unearthed and (promoted_fb_url or explicit_fb_entrypoints)
         )
@@ -9156,6 +9157,9 @@ class NightModeFacebookEnricher:
             # Unearthed rows with an explicit accepted FB URL should use the
             # same PASS A path as other explicit rows. Keep legacy fallback
             # only for true no-URL Unearthed rows.
+            if is_unearthed and not has_seeded_fb:
+                _log(self.logger, "[Unearthed Path] no usable FB URL; skipping Night FB discovery")
+                return _finish(result, attempted=False)
             if is_unearthed and not fb_urls:
                 _log(self.logger, "[Unearthed Path] no usable FB URL; allowing bounded FB discovery")
                 _log(self.logger, "[Night FB] Detected Unearthed row -> using legacy no-login FB scrape.")

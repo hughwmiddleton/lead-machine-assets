@@ -1,0 +1,294 @@
+Source config : /Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/tests/UE_NM_Run_Test500.json
+Smoke config  : /var/folders/wx/4_twj5kx0vd_k0084xbzg2k80000gn/T/ue_nm_smoke_54csqn84/UE_NM_Run_Test500.smoke.json
+Clamped fields:
+ - config.facebook.max_rows_per_run: 100 -> 15
+Executing    : /usr/local/bin/python3 /Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/night_mode_runner.py --config /var/folders/wx/4_twj5kx0vd_k0084xbzg2k80000gn/T/ue_nm_smoke_54csqn84/UE_NM_Run_Test500.smoke.json
+2026-03-26 09:49:40,932 [INFO] Starting scrape for job job_unearthed_1
+2026-03-26 09:49:41,222 [INFO] [Directory] Running job for directory=unearthed slug= job_id=job_unearthed_1
+2026-03-26 09:49:41,222 [INFO] [Unearthed] FB creds supplied but automated login is disabled (set FB_ALLOW_AUTOMATED_LOGIN=1 to enable); proceeding without shared session.
+2026-03-26 09:49:41,223 [INFO] [Unearthed] Using FULL pipeline entrypoint: run_unearthed_pipeline
+Found 6 artist profile URLs so far...
+No more 'Load More' button found or error: Message: 
+Stacktrace:
+0   chromedriver                        0x000000010322399c cxxbridge1$str$ptr + 3160104
+1   chromedriver                        0x000000010321ba28 cxxbridge1$str$ptr + 3127476
+2   chromedriver                        0x0000000102cef904 _RNvCskE0kXQ3GIWk_7___rustc35___rust_no_alloc_shim_is_unstable_v2 + 75036
+3   chromedriver                        0x0000000102d377d8 _RNvCskE0kXQ3GIWk_7___rustc35___rust_no_alloc_shim_is_unstable_v2 + 369648
+4   chromedriver                        0x0000000102d764d4 _RNvCskE0kXQ3GIWk_7___rustc35___rust_no_alloc_shim_is_unstable_v2 + 626924
+5   chromedriver                        0x0000000102d2d1a0 _RNvCskE0kXQ3GIWk_7___rustc35___rust_no_alloc_shim_is_unstable_v2 + 327096
+6   chromedriver                        0x00000001031e2220 cxxbridge1$str$ptr + 2891948
+7   chromedriver                        0x00000001031e5910 cxxbridge1$str$ptr + 2906012
+8   chromedriver                        0x00000001031c75d8 cxxbridge1$str$ptr + 2782308
+9   chromedriver                        0x00000001031e6194 cxxbridge1$str$ptr + 2908192
+10  chromedriver                        0x00000001031b8090 cxxbridge1$str$ptr + 2719516
+11  chromedriver                        0x000000010320ab30 cxxbridge1$str$ptr + 3058108
+12  chromedriver                        0x000000010320acac cxxbridge1$str$ptr + 3058488
+13  chromedriver                        0x000000010321b680 cxxbridge1$str$ptr + 3126540
+14  libsystem_pthread.dylib             0x000000019ff902e4 _pthread_start + 136
+15  libsystem_pthread.dylib             0x000000019ff8b0fc thread_start + 8
+
+Total artist profile URLs to scrape: 6
+Data saved to overnight_runs/2026-03-26_094940/job_unearthed_1/raw.tmp.csv
+2026-03-26 09:50:01,451 [INFO] [Unearthed] Deduped temp CSV: removed 24 duplicates (kept 6).
+2026-03-26 09:50:01,454 [INFO] Completed job job_unearthed_1 (raw only; master enrichment pending)
+2026-03-26 09:50:01,454 [INFO] [Seed Summary]
+2026-03-26 09:50:01,455 [INFO] unearthed=6
+[Night FB] Using Chrome profile dir: /Users/hughmiddleton/Lead Machine/Lead Machine Code/night_fb_profile
+2026-03-26 09:50:01,466 [INFO] [FB Promotion] facebook_url populated for 1 rows
+2026-03-26 09:50:01,466 [INFO] [FB Promotion] canonical Facebook_URL backfilled from Social Link / External Links for 1 rows
+2026-03-26 09:50:01,472 [INFO] [Master] Wrote merged raw CSV: overnight_runs/2026-03-26_094940/master_raw.csv (rows=6)
+2026-03-26 09:50:01,472 [INFO] [Master Enrich] Starting cross-directory enrichment for overnight_runs/2026-03-26_094940/master_raw.csv
+2026-03-26 09:50:06,507 [INFO] [Master] Bandcamp directory CSV -> (none) in /Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/overnight_runs/2026-03-26_094940 (attempts=6)
+2026-03-26 09:50:11,534 [INFO] [Master] SoundCloud directory CSV -> (none) in /Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/overnight_runs/2026-03-26_094940 (attempts=6)
+2026-03-26 09:50:16,567 [INFO] [Master] Last.fm directory CSV -> (none) in /Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/overnight_runs/2026-03-26_094940 (attempts=6)
+2026-03-26 09:50:16,570 [INFO] [Master] Unearthed directory CSV -> /Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/overnight_runs/2026-03-26_094940/job_unearthed_1/raw.csv (rows=6, kind=raw)
+2026-03-26 09:50:16,570 [INFO] [Master] Passing bandcamp_csv_path=
+2026-03-26 09:50:16,570 [INFO] [Master] Passing soundcloud_csv_path=
+2026-03-26 09:50:16,570 [INFO] [Master] Passing lastfm_csv_path=
+2026-03-26 09:50:16,570 [INFO] [Master] Passing unearthed_csv_path=/Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/overnight_runs/2026-03-26_094940/job_unearthed_1/raw.csv
+2026-03-26 09:50:16,806 [INFO] [Night FB][preflight] chrome_binary=/Applications/Google Chrome.app/Contents/MacOS/Google Chrome chrome_version=Google Chrome 146.0.7680.154 chromedriver=<selenium_manager> chromedriver_version=<selenium_manager> profile_dir=/Users/hughmiddleton/Lead Machine/Lead Machine Code/night_fb_profile profile_exists=True profile_locks=[] image_policy=managed_allow args=['--disable-gpu', '--window-size=1920x1080', '--disable-extensions', '--disable-dev-shm-usage', '--no-sandbox', '--disable-blink-features=AutomationControlled', '--user-data-dir=/Users/hughmiddleton/Lead Machine/Lead Machine Code/night_fb_profile', '--profile-directory=Default']
+2026-03-26 09:50:19,306 [INFO] [Night FB][driver] requested_profile=/Users/hughmiddleton/Lead Machine/Lead Machine Code/night_fb_profile active_profile=/Users/hughmiddleton/Lead Machine/Lead Machine Code/night_fb_profile persistent_profile=1 temp_fallback=0 webdriver_mask=1
+2026-03-26 09:50:25,629 [INFO] [Night FB][auth_probe] mode=headed requested_profile=/Users/hughmiddleton/Lead Machine/Lead Machine Code/night_fb_profile active_profile=/Users/hughmiddleton/Lead Machine/Lead Machine Code/night_fb_profile temp_fallback=0 authed=1 reason=authenticated
+2026-03-26 09:50:41,030 [INFO] [FB Discover] Shared Facebook session authenticated; discovery enabled for this run.
+2026-03-26 09:50:41,032 [INFO] [FB Warmup] Running Facebook session warm-up
+2026-03-26 09:50:46,905 [INFO] [Enricher] Loading seed CSV: overnight_runs/2026-03-26_094940/master_raw.csv
+[Deduper] Removed 0 duplicate rows (kept 6 unique rows)
+2026-03-26 09:50:47,156 [INFO] [Deduper] Removed 0 duplicate rows (kept 6 unique rows)
+2026-03-26 09:50:47,168 [INFO] [Schema] ensured email columns: Email, Email_All, Email_Type, Email_Source_URL, Email_Source_Type, Email_Extract_Method, Email_Provenance_JSON
+[Enricher] Loaded 6 artists for Unearthed from /Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/overnight_runs/2026-03-26_094940/job_unearthed_1/raw.csv
+2026-03-26 09:50:47,212 [INFO] [Enricher] Starting enrichment for 6 rows...
+2026-03-26 09:50:47,212 [INFO] [Enricher] Live search enabled=True max=50
+2026-03-26 09:50:47,213 [INFO] [Enricher] mode=source_phased
+2026-03-26 09:50:47,214 [INFO] [Unearthed Path] no usable FB URL, resuming standard path artist='olivia-escuyos' row=0
+2026-03-26 09:50:47,214 [INFO] [Unearthed Path] no usable FB URL, resuming standard path artist='local-the-neighbour' row=1
+2026-03-26 09:50:47,215 [INFO] [Unearthed Path] no usable FB URL, resuming standard path artist='any-young-mechanic' row=2
+2026-03-26 09:50:47,215 [INFO] [Unearthed Path] activated artist='betty-0' row=3
+2026-03-26 09:50:47,215 [INFO] [Unearthed Path] skipping non-essential enrichers artist='betty-0' row=3
+2026-03-26 09:50:47,216 [INFO] [Unearthed Path] activated artist='kaviita' row=4
+2026-03-26 09:50:47,217 [INFO] [Unearthed Path] skipping non-essential enrichers artist='kaviita' row=4
+2026-03-26 09:50:47,217 [INFO] [Unearthed Path] no usable FB URL, resuming standard path artist='kaybee' row=5
+2026-03-26 09:50:47,217 [INFO] [Enricher] Source diversity scheduler=ON (round-robin)
+2026-03-26 09:50:47,218 [INFO] [Enricher][Directory Phase] Starting...
+2026-03-26 09:50:47,293 [INFO] [Enricher] Row 1/6: matched 'olivia-escuyos' via Triple J Unearthed.
+2026-03-26 09:50:47,299 [INFO] [Enricher] Row 2/6: matched 'local-the-neighbour' via Triple J Unearthed.
+2026-03-26 09:50:47,305 [INFO] [Enricher] Row 3/6: matched 'any-young-mechanic' via Triple J Unearthed.
+2026-03-26 09:50:47,308 [INFO] [Enricher] Row 6/6: matched 'kaybee' via Triple J Unearthed.
+2026-03-26 09:50:47,308 [INFO] [Enricher][Directory Phase] Completed 6 rows (enriched=4)
+2026-03-26 09:50:47,309 [INFO] [Enricher][Spotify Discovery] Starting...
+2026-03-26 09:50:47,332 [INFO] [Enricher][Spotify Discovery] Completed 0 spotify rows (enriched=0)
+2026-03-26 09:50:47,337 [INFO] [IG Email] Visiting https://www.instagram.com/oliviaexcuses/
+[Playwright Fallback] directory=instagram domain=www.instagram.com reason=missing_selectors status=200 ms=7871 url=https://www.instagram.com/oliviaexcuses/
+2026-03-26 09:51:12,531 [INFO] [IG Email] Found email: bookingsoliviaescuyos@gmail.com
+2026-03-26 09:51:12,555 [INFO] [IG Email] Visiting https://www.instagram.com/localtheneighbour/
+[Playwright Fallback] directory=instagram domain=www.instagram.com reason=missing_selectors status=200 ms=2948 url=https://www.instagram.com/localtheneighbour/
+2026-03-26 09:51:28,922 [INFO] [IG Email] no_email_visible
+2026-03-26 09:51:28,926 [INFO] [IG Email] Visiting https://www.instagram.com/anyyoungmechanicband/
+[Playwright Fallback] directory=instagram domain=www.instagram.com reason=missing_selectors status=200 ms=3308 url=https://www.instagram.com/anyyoungmechanicband/
+2026-03-26 09:51:46,250 [INFO] [IG Email] Found email: arwen@variousartistsmanagement.com
+2026-03-26 09:51:46,259 [INFO] [IG Email] Visiting https://www.instagram.com/k4ybeee/
+[Playwright Fallback] directory=instagram domain=www.instagram.com reason=missing_selectors status=200 ms=2792 url=https://www.instagram.com/k4ybeee/
+2026-03-26 09:51:51,789 [INFO] [IG Email] no_email_visible
+2026-03-26 09:51:51,815 [INFO] [Scheduler] running SC for row 1/6
+2026-03-26 09:51:51,819 [INFO] [Enricher] SoundCloud live check for 'olivia-escuyos' (current SC link missing).
+2026-03-26 09:51:51,828 [INFO] [Night SC] using day-mode candidate pipeline: SoundCloudEngine.people_search_candidates_v2 + HTML fallback
+2026-03-26 09:51:51,843 [INFO] [Night SC] API people search place='VIC' source=location_derived
+SoundCloud: v2 people search API -> query='olivia-escuyos' place='VIC' max_results=12
+SoundCloud: v2 people search API -> 0 unique handles (query='olivia-escuyos' place='VIC')
+2026-03-26 09:51:53,924 [INFO] [Night SC] API people search -> handles=0 query='olivia-escuyos' place='VIC'
+2026-03-26 09:51:53,925 [INFO] [Night SC] API people search returned 0 handles for place='VIC'; retrying without place filter.
+SoundCloud: v2 people search API -> query='olivia-escuyos' place='' max_results=12
+SoundCloud: v2 people search API -> 1 unique handles (query='olivia-escuyos' place='')
+2026-03-26 09:51:54,367 [INFO] [Night SC] API people search -> handles=1 query='olivia-escuyos' place=''
+2026-03-26 09:51:55,422 [INFO] [Night SC] rss_first=1 handle=oliviaescuyos url=https://soundcloud.com/oliviaescuyos rss_attempted=1 outcome=rss_success flags_used_rss=1 rss_used_total=1
+2026-03-26 09:51:55,428 [INFO] [Night SC] candidate_source=api profile_source=none root_fetch_disabled=0 about_disabled=0 tracks_api_blocked=0 used_user_api=0 used_rss=1 rss_used_total=1
+2026-03-26 09:51:55,429 [INFO] [Night SC] Final status: rss_success handle=oliviaescuyos http= confidence=1.00 ms=3598 fetches=0 reason=rss_success
+2026-03-26 09:51:55,439 [INFO] [Scheduler] row 1/6 email found; short-circuiting remaining sources
+2026-03-26 09:51:55,439 [INFO] [Scheduler] running LF for row 2/6
+2026-03-26 09:51:56,067 [INFO] [Enricher] Bandcamp: status=no_match mode=directory_discover attempts=0 403=0 artist='local-the-neighbour'
+2026-03-26 09:51:56,069 [INFO] [Enricher] Last.fm live search: https://www.last.fm/search?q=%22local-the-neighbour%22+%22Midday+Pilates%22&type=artist
+2026-03-26 09:51:57,025 [INFO] [Enricher][LF] Last.fm search: status=200 attempt=1/1 headers=lastfm_html
+2026-03-26 09:51:57,052 [INFO] [Enricher] Last.fm Enrich: candidate 'Midday Pilates' for 'local-the-neighbour' has confidence=0.24.
+2026-03-26 09:51:57,052 [INFO] [Enricher] Last.fm Enrich: no safe match for 'local-the-neighbour' (best_confidence=0.24), skipping.
+2026-03-26 09:51:57,052 [INFO] [Scheduler] running FB for row 2/6
+2026-03-26 09:51:57,055 [INFO] [FB Discovery][Skip] Unearthed row without seeded Facebook_URL
+2026-03-26 09:51:57,055 [INFO] [Scheduler] running SC for row 2/6
+2026-03-26 09:51:57,056 [INFO] [Enricher] SoundCloud live check for 'local-the-neighbour' (current SC link missing).
+2026-03-26 09:51:57,056 [INFO] [Night SC] API people search place='VIC' source=location_derived
+SoundCloud: v2 people search API -> query='local-the-neighbour' place='VIC' max_results=12
+SoundCloud: v2 people search API -> 0 unique handles (query='local-the-neighbour' place='VIC')
+2026-03-26 09:51:58,046 [INFO] [Night SC] API people search -> handles=0 query='local-the-neighbour' place='VIC'
+2026-03-26 09:51:58,046 [INFO] [Night SC] API people search returned 0 handles for place='VIC'; retrying without place filter.
+SoundCloud: v2 people search API -> query='local-the-neighbour' place='' max_results=12
+SoundCloud: v2 people search API -> 12 unique handles (query='local-the-neighbour' place='')
+2026-03-26 09:51:58,518 [INFO] [Night SC] API people search -> handles=12 query='local-the-neighbour' place=''
+2026-03-26 09:52:01,491 [INFO] [Night SC] rss_first=1 handle=localtheneighbour url=https://soundcloud.com/localtheneighbour rss_attempted=1 outcome=rss_fail flags_used_rss=1 rss_used_total=2
+2026-03-26 09:52:01,491 [INFO] [SC] tracks API blocked (401/403); continuing with HTML/about fallback (SC_ALLOW_FALLBACK_ON_TRACKS_401_403=1)
+2026-03-26 09:52:06,839 [INFO] [Night SC] candidate_source=api profile_source=engine root_fetch_disabled=1 about_disabled=0 tracks_api_blocked=1 used_user_api=0 used_rss=1 rss_used_total=2
+2026-03-26 09:52:06,841 [INFO] [Night SC] Final status: non_actionable_challenge handle=localtheneighbour http=200 confidence=0.99 ms=9784 fetches=1 reason=challenge_page
+2026-03-26 09:52:06,842 [INFO] [Night SC] forcing rss_only due to html challenges=2
+2026-03-26 09:52:06,842 [INFO] [Night SC] Entering RSS-only mode (reason=consecutive_challenges row=<unknown> challenges=2 html_streak=2 api_403_streak=0 threshold_403=3)
+2026-03-26 09:52:06,843 [INFO] [Scheduler] running LF for row 3/6
+2026-03-26 09:52:07,596 [INFO] [Enricher] Bandcamp: status=no_match mode=directory_discover attempts=0 403=0 artist='any-young-mechanic'
+2026-03-26 09:52:07,597 [INFO] [Enricher] Last.fm live search: https://www.last.fm/search?q=%22any-young-mechanic%22+%22My+House+Divides%22&type=artist
+2026-03-26 09:52:08,647 [INFO] [Enricher][LF] Last.fm search: status=200 attempt=1/1 headers=lastfm_html
+2026-03-26 09:52:08,669 [INFO] [Enricher] Last.fm Enrich: candidate 'My House Divides' for 'any-young-mechanic' has confidence=0.29.
+2026-03-26 09:52:08,669 [INFO] [Enricher] Last.fm Enrich: no safe match for 'any-young-mechanic' (best_confidence=0.29), skipping.
+2026-03-26 09:52:08,670 [INFO] [Scheduler] row 3/6 email found; short-circuiting remaining sources
+2026-03-26 09:52:08,671 [INFO] [Scheduler] running FB for row 6/6
+2026-03-26 09:52:08,674 [INFO] [FB Discovery][Skip] Unearthed row without seeded Facebook_URL
+2026-03-26 09:52:08,675 [INFO] [Scheduler] running SC for row 6/6
+2026-03-26 09:52:08,676 [INFO] [Enricher] SoundCloud live check for 'kaybee' (current SC link missing).
+2026-03-26 09:52:08,676 [INFO] [Night SC] API people search place='Perth,WA' source=location_raw
+SoundCloud: v2 people search API -> query='kaybee' place='Perth,WA' max_results=12
+SoundCloud: v2 people search API -> 0 unique handles (query='kaybee' place='Perth,WA')
+2026-03-26 09:52:09,064 [INFO] [Night SC] API people search -> handles=0 query='kaybee' place='Perth,WA'
+2026-03-26 09:52:09,064 [INFO] [Night SC] API people search returned 0 handles for place='Perth,WA'; retrying without place filter.
+SoundCloud: v2 people search API -> query='kaybee' place='' max_results=12
+SoundCloud: v2 people search API -> 12 unique handles (query='kaybee' place='')
+2026-03-26 09:52:09,551 [INFO] [Night SC] API people search -> handles=12 query='kaybee' place=''
+2026-03-26 09:52:13,034 [INFO] [Night SC] rss_only=1 handle=kaybee-529003570 url=https://soundcloud.com/kaybee-529003570 rss_attempted=1 outcome=rss_fail flags_used_rss=1 rss_used_total=3
+2026-03-26 09:52:13,036 [INFO] [Night SC] candidate_source=api profile_source=rss_only root_fetch_disabled=1 about_disabled=0 tracks_api_blocked=1 used_user_api=0 used_rss=1 rss_used_total=3
+2026-03-26 09:52:13,036 [INFO] [Night SC] Final status: rss_fail handle=kaybee-529003570 http=200 confidence=0.85 ms=4360 fetches=0 reason=rss_fail
+2026-03-26 09:52:13,038 [INFO] [Scheduler] running LF for row 6/6
+2026-03-26 09:52:14,144 [INFO] [Enricher] Bandcamp: status=no_match mode=directory_discover attempts=0 403=0 artist='kaybee'
+2026-03-26 09:52:14,145 [INFO] [Enricher][LF] Sanitized track title: orig='WEEK11 (ft. Marlowe Wilton)' -> cleaned='WEEK11 ft. Marlowe Wilton'
+2026-03-26 09:52:14,145 [INFO] [Enricher] Last.fm live search: https://www.last.fm/search?q=%22kaybee%22+%22WEEK11+ft.+Marlowe+Wilton%22&type=artist
+2026-03-26 09:52:15,126 [INFO] [Enricher][LF] Last.fm search: status=200 attempt=1/1 headers=lastfm_html
+2026-03-26 09:52:15,145 [INFO] [Enricher] Last.fm Enrich: candidate 'Free Music Downloads' for 'kaybee' has confidence=0.15.
+2026-03-26 09:52:15,145 [INFO] [Enricher] Last.fm Enrich: no safe match for 'kaybee' (best_confidence=0.15), skipping.
+2026-03-26 09:52:15,146 [INFO] [Scheduler][Summary] SC attempted=3 enriched=1 skipped_cooldown=0 skipped_opportunity=0
+2026-03-26 09:52:15,146 [INFO] [Scheduler][Summary] LF attempted=3 enriched=0 skipped_cooldown=0 skipped_opportunity=0
+2026-03-26 09:52:15,146 [INFO] [Scheduler][Summary] FB attempted=2 enriched=0 skipped_cooldown=0 skipped_opportunity=0
+2026-03-26 09:52:15,146 [INFO] [Scheduler][Summary] emails_found=11 pattern_emails=8
+2026-03-26 09:52:15,146 [INFO] [Enricher] Late domain reuse backfill: rows_scanned=0 rows_eligible=0 rows_backfilled=0 rows_skipped=0
+2026-03-26 09:52:15,146 [INFO] [Enricher] Domain email reuse summary: indexed_domains=0 rows_reused=0
+2026-03-26 09:52:15,159 [INFO] [Enricher] Enriched CSV written to overnight_runs/2026-03-26_094940/master_enriched.csv
+2026-03-26 09:52:15,159 [INFO] [DomainOrg] No exportable domain/org data; sidecar skipped.
+2026-03-26 09:52:15,159 [INFO] [Enrichment Yield]
+2026-03-26 09:52:15,159 [INFO] instagram=2
+2026-03-26 09:52:15,159 [INFO] [Master Enrich] Completed cross-directory enrichment -> overnight_runs/2026-03-26_094940/master_enriched.csv
+2026-03-26 09:52:15,161 [INFO] [Enrich] Starting enrichment for overnight_runs/2026-03-26_094940/master_enriched.csv
+[Deduper] Removed 0 duplicate rows before Auto-Validate (kept 6 unique rows)
+2026-03-26 09:52:15,179 [INFO] [Auto-Validate] Loaded 6 deduped rows (from 6), validating 0 selected rows...
+2026-03-26 09:52:15,179 [INFO] [Auto-Validate] Selection reasons: none
+2026-03-26 09:52:15,195 [INFO] [Auto-Validate] Completed. Upgraded: 0, Blocked: 0. Output: overnight_runs/2026-03-26_094940/master_pre_fb.csv
+2026-03-26 09:52:15,242 [INFO] [Enrich] Completed enrichment -> overnight_runs/2026-03-26_094940/master_pre_fb.csv
+2026-03-26 09:52:15,250 [INFO] [Night FB][Session Gate] source=profile decision=probe_pending reason=profile_session profile_dir=/Users/hughmiddleton/Lead Machine/Lead Machine Code/night_fb_profile
+2026-03-26 09:52:15,269 [INFO] [Night FB] Starting session mode=headed headless_env=<unset> require_display=False os=darwin
+2026-03-26 09:52:19,531 [INFO] [Night FB][session_state] state=authenticated_and_usable authed=1 unhealthy=0 reason=authenticated v2=0
+2026-03-26 09:52:19,535 [INFO] [Night FB][Row Gate] row=0 artist='olivia-escuyos' email_present=True fb_url_present=False fb_entrypoint_present=False eligible_for_fb=False
+2026-03-26 09:52:19,535 [INFO] [Night FB] Skipping row 0 ('olivia-escuyos') – email already present (Email_All='bookingsoliviaescuyos@gmail.com;stephanie@slpmgmt.com.au;vinceevans___@yaseer.prod').
+2026-03-26 09:52:19,539 [INFO] [Night FB][Row Gate] row=1 artist='local-the-neighbour' email_present=False fb_url_present=False fb_entrypoint_present=False eligible_for_fb=True
+2026-03-26 09:52:19,540 [INFO] [Night FB][Explicit Intake] artist="local-the-neighbour" outcome="no_explicit_url"
+2026-03-26 09:52:21,904 [INFO] [Night FB][session_state] state=authenticated_and_usable authed=1 unhealthy=0 reason=authenticated v2=0
+2026-03-26 09:52:21,904 [INFO] [Unearthed Path] no usable FB URL; skipping Night FB discovery
+2026-03-26 09:52:21,908 [INFO] [Night FB][Row Gate] row=2 artist='any-young-mechanic' email_present=True fb_url_present=False fb_entrypoint_present=False eligible_for_fb=False
+2026-03-26 09:52:21,909 [INFO] [Night FB] Skipping row 2 ('any-young-mechanic') – email already present (Email_All='sale@anyyoungmechanic.com;arwen@variousartistsmanagement.com;harrydeansamton@thea.lucia;mix@thats.alright.thanks;n0sferatugrrrl@naomi.keyte;on@flowerpil.io;pals@juicemoviejuice.it;swald@wmeagency.com').
+2026-03-26 09:52:21,910 [INFO] [Night FB][Row Gate] row=3 artist='betty-0' email_present=False fb_url_present=True fb_entrypoint_present=True eligible_for_fb=True
+2026-03-26 09:52:21,910 [INFO] [FB Night] Sleeping 4.31s before next row (index=3).
+2026-03-26 09:52:26,233 [INFO] [Night FB][Explicit Intake] artist="betty-0" outcome="attempt" source="facebook_url,Facebook URL,Social Link" urls="https://www.facebook.com/bettymusicau" canonical_field="present"
+2026-03-26 09:52:28,036 [INFO] [Night FB][session_state] state=authenticated_and_usable authed=1 unhealthy=0 reason=authenticated v2=0
+2026-03-26 09:52:30,187 [INFO] [Night FB][session_state] state=authenticated_and_usable authed=1 unhealthy=0 reason=authenticated v2=0
+2026-03-26 09:52:30,199 [INFO] [Night FB] Using explicit FB URLs with authenticated session: ['https://www.facebook.com/bettymusicau']
+2026-03-26 09:52:30,199 [INFO] [Night FB] Using explicit FB URLs: ['https://www.facebook.com/bettymusicau']
+2026-03-26 09:52:30,200 [INFO] [Night FB] Starting FB scrape for artist="betty-0" url="https://www.facebook.com/bettymusicau"
+2026-03-26 09:52:30,200 [INFO] [FB Email] Visiting https://www.facebook.com/bettymusicau
+2026-03-26 09:52:32,116 [INFO] [Night FB][session_state] state=authenticated_and_usable authed=1 unhealthy=0 reason=authenticated v2=0
+2026-03-26 09:52:35,733 [INFO] [FB Email] Reveal pass clicked: ['profile settings see more options', 'see more']
+2026-03-26 09:52:39,536 [INFO] [Night FB][Health] url=https://www.facebook.com/bettymusicau captcha=0 checkpoint=0 login_wall=0 context=page
+2026-03-26 09:52:39,773 [INFO] [FB Email] Scanning main page HTML for emails: https://www.facebook.com/bettymusicau
+2026-03-26 09:52:40,083 [INFO] [FB Email] Visiting https://www.facebook.com/bettymusicau/about
+2026-03-26 09:52:41,767 [INFO] [Night FB][session_state] state=authenticated_and_usable authed=1 unhealthy=0 reason=authenticated v2=0
+2026-03-26 09:52:44,231 [INFO] [FB Email] Reveal pass clicked: ['profile settings see more options']
+2026-03-26 09:52:47,782 [INFO] [Night FB][Health] url=https://www.facebook.com/bettymusicau/about captcha=0 checkpoint=0 login_wall=0 context=page
+2026-03-26 09:52:48,051 [INFO] [FB Email] No email found on main page; evaluating contact/about fetch
+2026-03-26 09:52:48,077 [INFO] [FB Email] No email found
+2026-03-26 09:52:48,078 [INFO] [Night FB][PASS A] artist="betty-0" url="https://www.facebook.com/bettymusicau" mode="session" driver="session" outcome="no_email_on_page" reason="session_fetch_ok_no_email"
+2026-03-26 09:52:48,082 [INFO] [Night FB][Row Gate] row=4 artist='kaviita' email_present=False fb_url_present=False fb_entrypoint_present=True eligible_for_fb=True
+2026-03-26 09:52:48,082 [INFO] [FB Night] Sleeping 2.35s before next row (index=4).
+2026-03-26 09:52:50,446 [INFO] [Night FB][Explicit Intake] artist="kaviita" outcome="attempt" source="Social Link" urls="https://www.facebook.com/share/19bactwuev"
+2026-03-26 09:52:51,640 [INFO] [Night FB][session_state] state=authenticated_and_usable authed=1 unhealthy=0 reason=authenticated v2=0
+2026-03-26 09:52:51,640 [INFO] [Unearthed Path] no usable FB URL; skipping Night FB discovery
+2026-03-26 09:52:51,658 [INFO] [Night FB][Row Gate] row=5 artist='kaybee' email_present=False fb_url_present=False fb_entrypoint_present=False eligible_for_fb=True
+2026-03-26 09:52:51,658 [INFO] [FB Night] Sleeping 4.87s before next row (index=5).
+2026-03-26 09:52:56,534 [INFO] [Night FB][Explicit Intake] artist="kaybee" outcome="no_explicit_url"
+2026-03-26 09:52:57,404 [INFO] [Night FB][session_state] state=authenticated_and_usable authed=1 unhealthy=0 reason=authenticated v2=0
+2026-03-26 09:52:57,404 [INFO] [Unearthed Path] no usable FB URL; skipping Night FB discovery
+2026-03-26 09:52:57,408 [INFO] [FB Night][PASS A Summary] attempted=1 found_email=0 no_email_on_page=1 login_wall=0 fetch_error=0 skipped_no_fb_url=0
+2026-03-26 09:52:57,408 [INFO] [FB Email][Summary] pages_visited=2 emails_found=0 skipped_checkpoint=1 skipped_challenge=0 skipped_cooldown=0 skipped_no_opportunity=0
+2026-03-26 09:52:57,493 [INFO] [FB Debug Summary]
+2026-03-26 09:52:57,493 [INFO] email_written=0
+2026-03-26 09:52:57,493 [INFO] email_found_not_applied=0
+2026-03-26 09:52:57,494 [INFO] no_email_visible=4
+2026-03-26 09:52:57,494 [INFO] login_required_or_blocked=0
+2026-03-26 09:52:57,494 [INFO] content_unavailable=0
+2026-03-26 09:52:57,494 [INFO] timeout_or_fetch_error=0
+2026-03-26 09:52:57,494 [INFO] no_fb_candidate=0
+2026-03-26 09:52:57,494 [INFO] [Master] Facebook global pass completed: overnight_runs/2026-03-26_094940/master_post_fb.csv
+2026-03-26 09:52:57,494 [INFO] [Enrich] Starting enrichment for overnight_runs/2026-03-26_094940/master_post_fb.csv
+[Deduper] Removed 0 duplicate rows before Auto-Validate (kept 6 unique rows)
+2026-03-26 09:52:57,507 [INFO] [Auto-Validate] Loaded 6 deduped rows (from 6), validating 3 selected rows...
+2026-03-26 09:52:57,507 [INFO] [Auto-Validate] Selection reasons: uncertain_score=3
+[Playwright Fallback] directory=origin_validator domain=soundcloud.com reason=status_403 status=200 ms=1993 url=https://soundcloud.com/oliviaescuyos
+2026-03-26 09:52:59,590 [INFO] [Auto-Validate] soundcloud: checked 1 URL(s)
+2026-03-26 09:52:59,591 [INFO] [Auto-Validate] Completed. Upgraded: 0, Blocked: 0. Output: overnight_runs/2026-03-26_094940/master_enriched_deduped.csv
+2026-03-26 09:52:59,626 [INFO] [Enrich] Completed enrichment -> overnight_runs/2026-03-26_094940/master_enriched_deduped.csv
+2026-03-26 09:52:59,626 [INFO] [Master] Validation completed: overnight_runs/2026-03-26_094940/master_enriched_deduped.csv
+2026-03-26 09:52:59,627 [INFO] [Master] Exporting client-facing CSV: overnight_runs/2026-03-26_094940/master_enriched_deduped.csv -> overnight_runs/2026-03-26_094940/master_export_leads.csv
+2026-03-26 09:52:59,643 [INFO] [Exporter] Export profile=full_dump: input rows=6, exported rows=6
+2026-03-26 09:52:59,644 [INFO] [Master] Export wrote 6 rows to overnight_runs/2026-03-26_094940/master_export_leads.csv
+2026-03-26 09:52:59,644 [INFO] [Master] Exported client-facing leads CSV: overnight_runs/2026-03-26_094940/master_export_leads.csv
+2026-03-26 09:53:00,078 [INFO] SMOKE RESULT: PASS (DEGRADED: bandcamp 403s, soundcloud challenges/breaker)
+2026-03-26 09:53:00,078 [INFO] Smoke Summary:
+2026-03-26 09:53:00,078 [INFO]  - jobs attempted: 1
+2026-03-26 09:53:00,078 [INFO]  - jobs merged: 1
+2026-03-26 09:53:00,078 [INFO]  - jobs skipped (read errors): 0
+2026-03-26 09:53:00,078 [INFO]  - master_raw rows: 6
+2026-03-26 09:53:00,078 [INFO]  - enrichment ran: yes
+2026-03-26 09:53:00,078 [INFO]  - enrichment rows: 7
+2026-03-26 09:53:00,078 [INFO]  - SC challenges: 1
+2026-03-26 09:53:00,079 [INFO]  - SC breaker tripped: False
+2026-03-26 09:53:00,079 [INFO]  - SC live disabled reason: n/a
+2026-03-26 09:53:00,079 [INFO]  - Bandcamp HTTP 403 count: 3
+2026-03-26 09:53:00,079 [INFO]  - Last.fm HTTP 406 count: 0
+2026-03-26 09:53:00,079 [INFO]  - Emails with missing provenance URL: 0
+2026-03-26 09:53:00,079 [INFO]  - Emails total (raw merged): 0
+2026-03-26 09:53:00,102 [INFO] [Run Summary] Wrote run summary: overnight_runs/2026-03-26_094940/run_summary.json
+{
+  "run_dir": "overnight_runs/2026-03-26_094940",
+  "jobs": [
+    {
+      "job_id": "job_unearthed_1",
+      "raw_csv": "overnight_runs/2026-03-26_094940/job_unearthed_1/raw.csv",
+      "enriched_csv": "overnight_runs/2026-03-26_094940/job_unearthed_1/raw.csv",
+      "input_seed_csv": "",
+      "status": "completed",
+      "error_count": 0,
+      "last_update": "2026-03-25T22:50:01.454738+00:00",
+      "row_count": 6,
+      "current_row_index": 6,
+      "valid_leads_so_far": 6
+    }
+  ],
+  "master_raw": "overnight_runs/2026-03-26_094940/master_raw.csv",
+  "master_enriched": "overnight_runs/2026-03-26_094940/master_enriched.csv",
+  "master_pre_fb": "overnight_runs/2026-03-26_094940/master_pre_fb.csv",
+  "master_post_fb": "overnight_runs/2026-03-26_094940/master_post_fb.csv",
+  "master_csv": "overnight_runs/2026-03-26_094940/master_enriched_deduped.csv",
+  "export_mode": "both",
+  "smoke_stats": {
+    "jobs_attempted": 1,
+    "jobs_merged": 1,
+    "jobs_skipped": [],
+    "raw_rows": 6,
+    "enrichment_ran": true,
+    "enrichment_rows": 7,
+    "sc_challenge_detected": 1,
+    "sc_breaker_tripped": false,
+    "sc_live_disabled_reason": "",
+    "bandcamp_http_403_count": 3,
+    "lastfm_http_406_count": 0,
+    "emails_missing_source_url": 0,
+    "emails_total": 0
+  }
+}
