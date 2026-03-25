@@ -91,6 +91,33 @@ def test_music_page_outweighs_comparable_music_profile():
     assert score_page > score_profile
 
 
+def test_candidate_name_match_keeps_music_and_official_suffixes_near():
+    assert night_mode_fb._candidate_name_match("Echo Star", "Echo Star Music") == "near"
+    assert night_mode_fb._candidate_name_match("Echo Star", "Echo Star Official") == "near"
+
+
+def test_candidate_name_match_decorated_and_partial_names_stay_weak():
+    assert night_mode_fb._candidate_name_match("Echo Star", "Echo Star Fan Club") == "weak"
+    assert night_mode_fb._candidate_name_match("Echo Star", "Echo Star Melbourne") == "weak"
+    assert night_mode_fb._candidate_name_match("Echo Star", "Echo Star Tribute") == "weak"
+    assert night_mode_fb._candidate_name_match("Echo Star", "Echo") == "weak"
+
+
+def test_ranking_prefers_exact_identity_over_ambiguous_decorated_music_candidate():
+    artist = "Echo Star"
+    ambiguous = _cand("Echo Star Fan Club", "https://www.facebook.com/echostarfanclub", "Musician/Band")
+    exact = _cand("Echo Star", "https://www.facebook.com/echostarofficial", "Musician/Band")
+
+    ranked = night_mode_fb._rank_candidates_for_preview(artist, [ambiguous, exact])
+    weak_score, _, weak_features = night_mode_fb._score_fb_candidate_night(artist, ambiguous)
+    exact_score, _, exact_features = night_mode_fb._score_fb_candidate_night(artist, exact)
+
+    assert weak_features["match_level"] == "weak"
+    assert exact_features["match_level"] == "exact"
+    assert exact_score > weak_score
+    assert ranked[0]["candidate"] is exact
+
+
 def test_page_style_url_variants_score_like_pages():
     artist = "Echo Star"
     page_slug = _cand("Echo Star", "https://www.facebook.com/echostar", "Musician/Band")

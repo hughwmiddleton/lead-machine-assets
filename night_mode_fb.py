@@ -5265,7 +5265,9 @@ def _candidate_name_match(artist_name: str, cand_name: str) -> str:
     overlap = len(artist_tokens & cand_tokens)
     union = len(artist_tokens | cand_tokens) or 1
     jaccard = overlap / union
-    if jaccard >= 0.75 or artist_slug and artist_slug in name_slug or name_slug and name_slug in artist_slug:
+    # Keep "near" limited to strong token overlap. Raw slug containment is too
+    # permissive and upgrades fan/tribute/location variants that should stay weak.
+    if jaccard >= 0.75:
         return "near"
     if jaccard <= 0.25:
         return "mismatch"

@@ -154,10 +154,14 @@ def test_weak_music_match_still_passes_identity_floor():
     enricher = _make_enricher()
     artist = "The Enhancer"
     plausible = _cand("Enhancer Live", "https://www.facebook.com/enhancerlive", "Musician/Band")
+    score, breakdown, features = night_mode_fb._score_fb_candidate_night(artist, plausible)
     ranked = [_rank_item(artist, plausible)]
 
     chosen, selected_by = enricher._choose_ranked_candidate(artist, ranked)
 
+    assert score > 0
+    assert "+near_match" not in breakdown
+    assert features["match_level"] == "weak"
     assert chosen is plausible
     assert selected_by == "ranked_sort"
 
