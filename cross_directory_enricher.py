@@ -8769,7 +8769,15 @@ class CrossDirectoryEnricherWorker(QThread):
                     return False
 
                 if not existing_fb_links:
-                    if self._discover_facebook_identity(seed_df, row_idx, fb_driver, ctx):
+                    discovery_row = seed_df.loc[row_idx]
+                    is_unearthed = _row_is_unearthed_source(discovery_row)
+                    seeded_fb_url, _ = ensure_canonical_facebook_url(discovery_row, set_row=False)
+                    has_seeded_fb = bool(seeded_fb_url)
+                    if is_unearthed and not has_seeded_fb:
+                        self.log_message.emit(
+                            "[FB Discovery][Skip] Unearthed row without seeded Facebook_URL"
+                        )
+                    elif self._discover_facebook_identity(seed_df, row_idx, fb_driver, ctx):
                         discovered_fb_url = _get_canonical_fb_url(seed_df.loc[row_idx])
                         if discovered_fb_url:
                             existing_fb_links = [discovered_fb_url]

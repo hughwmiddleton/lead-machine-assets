@@ -827,6 +827,132 @@ def test_fb_enrich_skips_when_fb_url_missing(monkeypatch):
     assert any("canonical facebook_url populated via discovery" in msg.lower() for msg in logs)
 
 
+def test_fb_enrich_skips_discovery_for_unearthed_row_without_seeded_fb(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    worker._row_allows_heavy_enricher = lambda *args, **kwargs: SimpleNamespace(allowed=True)
+    worker._ensure_fb_discovery_session = lambda driver: (True, "authenticated")
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Unearthed No Seed",
+            "Email": "",
+            "Email_All": "",
+            "facebook_url": "",
+            "Facebook_URL": "",
+            "Facebook URL": "",
+            "Social Link": "",
+            "External Links": "",
+            "Source Directory": "Triple J Unearthed",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+
+    discover_calls = []
+
+    monkeypatch.setattr(
+        worker,
+        "_discover_facebook_identity",
+        lambda *args, **kwargs: discover_calls.append(args) or False,
+    )
+    monkeypatch.setattr(
+        cde,
+        "_extract_fb_emails_bounded",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("_extract_fb_emails_bounded should not run")),
+    )
+
+    matched = worker._enrich_row_facebook(seed_df, 0, object(), ctx)
+
+    assert matched is False
+    assert discover_calls == []
+    assert seed_df.at[0, "facebook_url"] == ""
+    assert seed_df.at[0, "Facebook_URL"] == ""
+    assert seed_df.at[0, "Facebook URL"] == ""
+    assert any("[FB Discovery][Skip] Unearthed row without seeded Facebook_URL" in msg for msg in logs)
+
+
+def test_fb_enrich_preserves_seeded_unearthed_fb_scrape(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    worker._row_allows_heavy_enricher = lambda *args, **kwargs: SimpleNamespace(allowed=True)
+    worker._ensure_fb_discovery_session = lambda driver: (True, "authenticated")
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Unearthed Seeded",
+            "Email": "",
+            "Email_All": "",
+            "facebook_url": "",
+            "Facebook_URL": "",
+            "Facebook URL": "",
+            "Social Link": "https://www.facebook.com/unearthedseeded",
+            "External Links": "",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+            "Source Directory": "Triple J Unearthed",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+
+    discover_calls = []
+    extract_calls = []
+
+    monkeypatch.setattr(
+        worker,
+        "_discover_facebook_identity",
+        lambda *args, **kwargs: discover_calls.append(args) or False,
+    )
+
+    def fake_extract(driver_obj, url, log_fn=None):
+        extract_calls.append(url)
+        return (["seeded@example.com"], url, "")
+
+    monkeypatch.setattr(cde, "_extract_fb_emails_bounded", fake_extract)
+
+    matched = worker._enrich_row_facebook(seed_df, 0, object(), ctx)
+
+    assert matched is True
+    assert discover_calls == []
+    assert extract_calls == ["https://www.facebook.com/unearthedseeded"]
+    assert seed_df.at[0, "Email"] == "seeded@example.com"
+    assert seed_df.at[0, "Facebook_URL"] == "https://www.facebook.com/unearthedseeded"
+    assert not any("[FB Discovery][Skip] Unearthed row without seeded Facebook_URL" in msg for msg in logs)
+
+
+def test_fb_enrich_non_unearthed_row_without_seeded_fb_still_calls_discovery(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    worker._row_allows_heavy_enricher = lambda *args, **kwargs: SimpleNamespace(allowed=True)
+    worker._ensure_fb_discovery_session = lambda driver: (True, "authenticated")
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Bandcamp No Seed",
+            "Email": "",
+            "Email_All": "",
+            "facebook_url": "",
+            "Facebook_URL": "",
+            "Facebook URL": "",
+            "Social Link": "",
+            "External Links": "",
+            "Source Directory": "bandcamp",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+
+    discover_calls = []
+
+    monkeypatch.setattr(
+        worker,
+        "_discover_facebook_identity",
+        lambda *args, **kwargs: discover_calls.append(args) or False,
+    )
+
+    matched = worker._enrich_row_facebook(seed_df, 0, object(), ctx)
+
+    assert matched is False
+    assert len(discover_calls) == 1
+    assert not any("[FB Discovery][Skip] Unearthed row without seeded Facebook_URL" in msg for msg in logs)
+
+
 def test_fb_enrich_discovery_miss_preserves_no_fb_url_status(monkeypatch):
     logs = []
     worker = _make_worker(logs)
