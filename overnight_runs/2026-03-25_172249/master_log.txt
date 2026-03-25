@@ -1,21 +1,5 @@
-Source config : /Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/tests/UE_NM_Run_Test500.json
-Smoke config  : /var/folders/wx/4_twj5kx0vd_k0084xbzg2k80000gn/T/ue_nm_smoke_6egv92ov/UE_NM_Run_Test500.smoke.json
-Clamped fields:
- - config.facebook.max_rows_per_run: 100 -> 15
-Executing    : /usr/local/bin/python3 /Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/night_mode_runner.py --config /var/folders/wx/4_twj5kx0vd_k0084xbzg2k80000gn/T/ue_nm_smoke_6egv92ov/UE_NM_Run_Test500.smoke.json
-2026-03-25 17:22:49,719 [INFO] Starting scrape for job job_unearthed_1
-2026-03-25 17:22:50,034 [INFO] [Directory] Running job for directory=unearthed slug= job_id=job_unearthed_1
-2026-03-25 17:22:50,035 [INFO] [Unearthed] FB creds supplied but automated login is disabled (set FB_ALLOW_AUTOMATED_LOGIN=1 to enable); proceeding without shared session.
-2026-03-25 17:22:50,035 [INFO] [Unearthed] Using FULL pipeline entrypoint: run_unearthed_pipeline
-Found 10 artist profile URLs so far...
-Found 41 artist profile URLs so far...
-Total artist profile URLs to scrape: 15
-Data saved to overnight_runs/2026-03-25_172249/job_unearthed_1/raw.tmp.csv
-2026-03-25 17:23:15,187 [INFO] [Unearthed] Deduped temp CSV: removed 58 duplicates (kept 15).
-2026-03-25 17:23:15,239 [INFO] Completed job job_unearthed_1 (raw only; master enrichment pending)
 2026-03-25 17:23:15,239 [INFO] [Seed Summary]
 2026-03-25 17:23:15,239 [INFO] unearthed=15
-[Night FB] Using Chrome profile dir: /Users/hughmiddleton/Lead Machine/Lead Machine Code/night_fb_profile
 2026-03-25 17:23:15,262 [INFO] [FB Promotion] facebook_url populated for 6 rows
 2026-03-25 17:23:15,262 [INFO] [FB Promotion] canonical Facebook_URL backfilled from Social Link / External Links for 6 rows
 2026-03-25 17:23:15,269 [INFO] [Master] Wrote merged raw CSV: overnight_runs/2026-03-25_172249/master_raw.csv (rows=15)
@@ -34,10 +18,8 @@ Data saved to overnight_runs/2026-03-25_172249/job_unearthed_1/raw.tmp.csv
 2026-03-25 17:23:54,780 [INFO] [FB Discover] Shared Facebook session authenticated; discovery enabled for this run.
 2026-03-25 17:23:54,832 [INFO] [FB Warmup] Running Facebook session warm-up
 2026-03-25 17:24:02,840 [INFO] [Enricher] Loading seed CSV: overnight_runs/2026-03-25_172249/master_raw.csv
-[Deduper] Removed 0 duplicate rows (kept 15 unique rows)
 2026-03-25 17:24:02,903 [INFO] [Deduper] Removed 0 duplicate rows (kept 15 unique rows)
 2026-03-25 17:24:02,906 [INFO] [Schema] ensured email columns: Email, Email_All, Email_Type, Email_Source_URL, Email_Source_Type, Email_Extract_Method, Email_Provenance_JSON
-[Enricher] Loaded 15 artists for Unearthed from /Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/overnight_runs/2026-03-25_172249/job_unearthed_1/raw.csv
 2026-03-25 17:24:02,934 [INFO] [Enricher] Starting enrichment for 15 rows...
 2026-03-25 17:24:02,934 [INFO] [Enricher] Live search enabled=True max=50
 2026-03-25 17:24:02,934 [INFO] [Enricher] mode=source_phased
@@ -77,36 +59,25 @@ Data saved to overnight_runs/2026-03-25_172249/job_unearthed_1/raw.tmp.csv
 2026-03-25 17:24:03,070 [INFO] [Enricher][Spotify Discovery] Starting...
 2026-03-25 17:24:03,078 [INFO] [Enricher][Spotify Discovery] Completed 0 spotify rows (enriched=0)
 2026-03-25 17:24:03,080 [INFO] [IG Email] Visiting https://www.instagram.com/imfine_aus/
-[Playwright Fallback] directory=instagram domain=www.instagram.com reason=missing_selectors status=200 ms=5511 url=https://www.instagram.com/imfine_aus/
 2026-03-25 17:24:22,864 [INFO] [IG Email] Found email: imfine.wav@gmail.com
 2026-03-25 17:24:22,873 [INFO] [IG Email] Visiting https://www.instagram.com/syrup___e/
-[Playwright Fallback] directory=instagram domain=www.instagram.com reason=missing_selectors status=200 ms=4189 url=https://www.instagram.com/syrup___e/
 2026-03-25 17:24:52,154 [INFO] [IG Email] Found email: syrup.eee@gmail.com
 2026-03-25 17:24:52,168 [INFO] [IG Email] Visiting https://www.instagram.com/vvpete/
-[Playwright Fallback] directory=instagram domain=www.instagram.com reason=missing_selectors status=200 ms=2597 url=https://www.instagram.com/vvpete/
 2026-03-25 17:25:07,867 [INFO] [IG Email] Found email: contact@trackwork.work
 2026-03-25 17:25:07,872 [INFO] [IG Email] Visiting https://www.instagram.com/localtheneighbour/
-[Playwright Fallback] directory=instagram domain=www.instagram.com reason=missing_selectors status=200 ms=2557 url=https://www.instagram.com/localtheneighbour/
 2026-03-25 17:25:20,020 [INFO] [IG Email] Found email: and@cultartists.may
 2026-03-25 17:25:20,027 [INFO] [IG Email] Visiting https://www.instagram.com/theguanoc/
-[Playwright Fallback] directory=instagram domain=www.instagram.com reason=missing_selectors status=200 ms=3253 url=https://www.instagram.com/theguanoc/
 2026-03-25 17:25:34,792 [INFO] [IG Email] Found email: guanoc.contact@gmail.com
 2026-03-25 17:25:34,803 [INFO] [IG Email] Visiting https://www.instagram.com/lover.wav/
-[Playwright Fallback] directory=instagram domain=www.instagram.com reason=missing_selectors status=200 ms=2675 url=https://www.instagram.com/lover.wav/
 2026-03-25 17:25:46,832 [INFO] [IG Email] Found email: joe@pollenarts.club
 2026-03-25 17:25:46,842 [INFO] [IG Email] Visiting https://www.instagram.com/mais.2407/
-[Playwright Fallback] directory=instagram domain=www.instagram.com reason=missing_selectors status=200 ms=2172 url=https://www.instagram.com/mais.2407/
 2026-03-25 17:25:52,127 [INFO] [IG Email] no_email_visible
 2026-03-25 17:25:52,214 [INFO] [Scheduler] running SC for row 1/15
 2026-03-25 17:25:52,215 [INFO] [Enricher] SoundCloud live check for 'i-m-fine' (current SC link missing).
 2026-03-25 17:25:52,215 [INFO] [Night SC] using day-mode candidate pipeline: SoundCloudEngine.people_search_candidates_v2 + HTML fallback
 2026-03-25 17:25:52,217 [INFO] [Night SC] API people search place='NSW' source=location_derived
-SoundCloud: v2 people search API -> query='i-m-fine' place='NSW' max_results=12
-SoundCloud: v2 people search API -> 0 unique handles (query='i-m-fine' place='NSW')
 2026-03-25 17:25:54,294 [INFO] [Night SC] API people search -> handles=0 query='i-m-fine' place='NSW'
 2026-03-25 17:25:54,294 [INFO] [Night SC] API people search returned 0 handles for place='NSW'; retrying without place filter.
-SoundCloud: v2 people search API -> query='i-m-fine' place='' max_results=12
-SoundCloud: v2 people search API -> 12 unique handles (query='i-m-fine' place='')
 2026-03-25 17:25:54,805 [INFO] [Night SC] API people search -> handles=12 query='i-m-fine' place=''
 2026-03-25 17:25:55,854 [INFO] [Night SC] rss_first=1 handle=imfineee url=https://soundcloud.com/imfineee rss_attempted=1 outcome=rss_success flags_used_rss=1 rss_used_total=1
 2026-03-25 17:25:55,854 [INFO] [Enricher] low-confidence match skipped for 'i-m-fine' (Spotify ID <unknown>) – score=0.65, candidate=im.fine | SoundCloud (live search) | https://soundcloud.com/imfineee
@@ -125,12 +96,8 @@ SoundCloud: v2 people search API -> 12 unique handles (query='i-m-fine' place=''
 2026-03-25 17:25:57,912 [INFO] [Scheduler] running SC for row 3/15
 2026-03-25 17:25:57,913 [INFO] [Enricher] SoundCloud live check for 'vv-pete' (current SC link missing).
 2026-03-25 17:25:57,913 [INFO] [Night SC] API people search place='NSW' source=location_derived
-SoundCloud: v2 people search API -> query='vv-pete' place='NSW' max_results=12
-SoundCloud: v2 people search API -> 0 unique handles (query='vv-pete' place='NSW')
 2026-03-25 17:25:58,284 [INFO] [Night SC] API people search -> handles=0 query='vv-pete' place='NSW'
 2026-03-25 17:25:58,285 [INFO] [Night SC] API people search returned 0 handles for place='NSW'; retrying without place filter.
-SoundCloud: v2 people search API -> query='vv-pete' place='' max_results=12
-SoundCloud: v2 people search API -> 12 unique handles (query='vv-pete' place='')
 2026-03-25 17:25:58,755 [INFO] [Night SC] API people search -> handles=12 query='vv-pete' place=''
 2026-03-25 17:26:02,373 [INFO] [Night SC] rss_first=1 handle=vvpete url=https://soundcloud.com/vvpete rss_attempted=1 outcome=rss_fail flags_used_rss=1 rss_used_total=2
 2026-03-25 17:26:02,374 [INFO] [SC] tracks API blocked (401/403); continuing with HTML/about fallback (SC_ALLOW_FALLBACK_ON_TRACKS_401_403=1)
@@ -164,12 +131,8 @@ SoundCloud: v2 people search API -> 12 unique handles (query='vv-pete' place='')
 2026-03-25 17:26:22,599 [INFO] [Scheduler] running SC for row 4/15
 2026-03-25 17:26:22,601 [INFO] [Enricher] SoundCloud live check for 'chaosister' (current SC link missing).
 2026-03-25 17:26:22,602 [INFO] [Night SC] API people search place='ACT' source=location_derived
-SoundCloud: v2 people search API -> query='chaosister' place='ACT' max_results=12
-SoundCloud: v2 people search API -> 0 unique handles (query='chaosister' place='ACT')
 2026-03-25 17:26:23,095 [INFO] [Night SC] API people search -> handles=0 query='chaosister' place='ACT'
 2026-03-25 17:26:23,097 [INFO] [Night SC] API people search returned 0 handles for place='ACT'; retrying without place filter.
-SoundCloud: v2 people search API -> query='chaosister' place='' max_results=12
-SoundCloud: v2 people search API -> 0 unique handles (query='chaosister' place='')
 2026-03-25 17:26:23,502 [INFO] [Night SC] API people search -> handles=0 query='chaosister' place=''
 2026-03-25 17:26:23,502 [INFO] [Night SC] API people search returned 0 handles; falling back to HTML search.
 2026-03-25 17:26:23,502 [INFO] [Night SC] rss_only=1 handle=<missing> url= rss_attempted=0 outcome=rss_unavailable flags_used_rss=1 rss_used_total=2
@@ -193,12 +156,8 @@ SoundCloud: v2 people search API -> 0 unique handles (query='chaosister' place='
 2026-03-25 17:26:27,237 [INFO] [Scheduler] running SC for row 9/15
 2026-03-25 17:26:27,238 [INFO] [Enricher] SoundCloud live check for 'lover-wav' (current SC link missing).
 2026-03-25 17:26:27,238 [INFO] [Night SC] API people search place='VIC' source=location_derived
-SoundCloud: v2 people search API -> query='lover-wav' place='VIC' max_results=12
-SoundCloud: v2 people search API -> 0 unique handles (query='lover-wav' place='VIC')
 2026-03-25 17:26:27,627 [INFO] [Night SC] API people search -> handles=0 query='lover-wav' place='VIC'
 2026-03-25 17:26:27,627 [INFO] [Night SC] API people search returned 0 handles for place='VIC'; retrying without place filter.
-SoundCloud: v2 people search API -> query='lover-wav' place='' max_results=12
-SoundCloud: v2 people search API -> 12 unique handles (query='lover-wav' place='')
 2026-03-25 17:26:28,167 [INFO] [Night SC] API people search -> handles=12 query='lover-wav' place=''
 2026-03-25 17:26:30,828 [INFO] [Night SC] rss_only=1 handle=lover-sav url=https://soundcloud.com/lover-sav rss_attempted=1 outcome=rss_fail flags_used_rss=1 rss_used_total=3
 2026-03-25 17:26:30,829 [INFO] [Night SC] candidate_source=api profile_source=rss_only root_fetch_disabled=1 about_disabled=0 tracks_api_blocked=1 used_user_api=0 used_rss=1 rss_used_total=3
@@ -244,12 +203,8 @@ SoundCloud: v2 people search API -> 12 unique handles (query='lover-wav' place='
 2026-03-25 17:27:04,613 [INFO] [Scheduler] running SC for row 11/15
 2026-03-25 17:27:04,614 [INFO] [Enricher] SoundCloud live check for 'maisy-woodhouse' (current SC link missing).
 2026-03-25 17:27:04,614 [INFO] [Night SC] API people search place='VIC' source=location_derived
-SoundCloud: v2 people search API -> query='maisy-woodhouse' place='VIC' max_results=12
-SoundCloud: v2 people search API -> 0 unique handles (query='maisy-woodhouse' place='VIC')
 2026-03-25 17:27:05,129 [INFO] [Night SC] API people search -> handles=0 query='maisy-woodhouse' place='VIC'
 2026-03-25 17:27:05,130 [INFO] [Night SC] API people search returned 0 handles for place='VIC'; retrying without place filter.
-SoundCloud: v2 people search API -> query='maisy-woodhouse' place='' max_results=12
-SoundCloud: v2 people search API -> 3 unique handles (query='maisy-woodhouse' place='')
 2026-03-25 17:27:05,575 [INFO] [Night SC] API people search -> handles=3 query='maisy-woodhouse' place=''
 2026-03-25 17:27:08,620 [INFO] [Night SC] rss_only=1 handle=daisy-woodhouse url=https://soundcloud.com/daisy-woodhouse rss_attempted=1 outcome=rss_fail flags_used_rss=1 rss_used_total=4
 2026-03-25 17:27:08,622 [INFO] [Night SC] candidate_source=api profile_source=rss_only root_fetch_disabled=1 about_disabled=0 tracks_api_blocked=1 used_user_api=0 used_rss=1 rss_used_total=4
@@ -257,12 +212,8 @@ SoundCloud: v2 people search API -> 3 unique handles (query='maisy-woodhouse' pl
 2026-03-25 17:27:08,625 [INFO] [Scheduler] running SC for row 13/15
 2026-03-25 17:27:08,626 [INFO] [Enricher] SoundCloud live check for 'ghoolz-band' (current SC link missing).
 2026-03-25 17:27:08,626 [INFO] [Night SC] API people search place='VIC' source=location_derived
-SoundCloud: v2 people search API -> query='ghoolz-band' place='VIC' max_results=12
-SoundCloud: v2 people search API -> 0 unique handles (query='ghoolz-band' place='VIC')
 2026-03-25 17:27:09,046 [INFO] [Night SC] API people search -> handles=0 query='ghoolz-band' place='VIC'
 2026-03-25 17:27:09,046 [INFO] [Night SC] API people search returned 0 handles for place='VIC'; retrying without place filter.
-SoundCloud: v2 people search API -> query='ghoolz-band' place='' max_results=12
-SoundCloud: v2 people search API -> 0 unique handles (query='ghoolz-band' place='')
 2026-03-25 17:27:09,439 [INFO] [Night SC] API people search -> handles=0 query='ghoolz-band' place=''
 2026-03-25 17:27:09,439 [INFO] [Night SC] API people search returned 0 handles; falling back to HTML search.
 2026-03-25 17:27:09,439 [INFO] [Night SC] rss_only=1 handle=<missing> url= rss_attempted=0 outcome=rss_unavailable flags_used_rss=1 rss_used_total=4
@@ -286,7 +237,6 @@ SoundCloud: v2 people search API -> 0 unique handles (query='ghoolz-band' place=
 2026-03-25 17:27:11,685 [INFO] instagram=6
 2026-03-25 17:27:11,685 [INFO] [Master Enrich] Completed cross-directory enrichment -> overnight_runs/2026-03-25_172249/master_enriched.csv
 2026-03-25 17:27:11,689 [INFO] [Enrich] Starting enrichment for overnight_runs/2026-03-25_172249/master_enriched.csv
-[Deduper] Removed 0 duplicate rows before Auto-Validate (kept 15 unique rows)
 2026-03-25 17:27:11,723 [INFO] [Auto-Validate] Loaded 15 deduped rows (from 15), validating 0 selected rows...
 2026-03-25 17:27:11,723 [INFO] [Auto-Validate] Selection reasons: none
 2026-03-25 17:27:11,755 [INFO] [Auto-Validate] Completed. Upgraded: 0, Blocked: 0. Output: overnight_runs/2026-03-25_172249/master_pre_fb.csv
@@ -412,8 +362,6 @@ SoundCloud: v2 people search API -> 0 unique handles (query='ghoolz-band' place=
 2026-03-25 17:28:57,385 [INFO] [Night FB][Rank Preview] 4) name="Profile photo of Maisy Felstead" cat="" cat_raw="" is_profile=False page_url=True music_hint=False music_primary=False name_match=mismatch score=-25 (-name_mismatch)
 2026-03-25 17:28:57,385 [INFO] [Night FB][Rank Preview] 5) name="Profile photo of Missy Woodhouse" cat="" cat_raw="" is_profile=True page_url=False music_hint=False music_primary=False name_match=mismatch score=-40 (-profile -name_mismatch)
 2026-03-25 17:28:57,387 [INFO] [Unearthed Path] discovery yielded no candidate
-/Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/pipeline_runner.py:3733: FutureWarning: Setting an item of incompatible dtype is deprecated and will raise an error in a future version of pandas. Value '' has dtype incompatible with float64, please explicitly cast to a compatible dtype first.
-  df.at[idx, col] = enriched.get(col, "")
 2026-03-25 17:28:57,393 [INFO] [Night FB][Row Gate] row=11 artist='cenobia' email_present=False fb_url_present=True fb_entrypoint_present=True eligible_for_fb=True
 2026-03-25 17:28:57,393 [INFO] [FB Night] Sleeping 2.80s before next row (index=11).
 2026-03-25 17:29:00,204 [INFO] [Night FB][Explicit Intake] artist="cenobia" outcome="attempt" source="facebook_url,Facebook URL,Social Link" urls="https://www.facebook.com/cenobiaofficial" canonical_field="present"
@@ -501,7 +449,6 @@ SoundCloud: v2 people search API -> 0 unique handles (query='ghoolz-band' place=
 2026-03-25 17:30:10,647 [INFO] no_fb_candidate=0
 2026-03-25 17:30:10,648 [INFO] [Master] Facebook global pass completed: overnight_runs/2026-03-25_172249/master_post_fb.csv
 2026-03-25 17:30:10,649 [INFO] [Enrich] Starting enrichment for overnight_runs/2026-03-25_172249/master_post_fb.csv
-[Deduper] Removed 0 duplicate rows before Auto-Validate (kept 15 unique rows)
 2026-03-25 17:30:10,666 [INFO] [Auto-Validate] Loaded 15 deduped rows (from 15), validating 5 selected rows...
 2026-03-25 17:30:10,666 [INFO] [Auto-Validate] Selection reasons: uncertain_score=5
 2026-03-25 17:30:12,480 [INFO] [Auto-Validate] unearthed: checked 3 URL(s)
@@ -528,41 +475,3 @@ SoundCloud: v2 people search API -> 0 unique handles (query='ghoolz-band' place=
 2026-03-25 17:30:13,143 [INFO]  - Emails with missing provenance URL: 0
 2026-03-25 17:30:13,143 [INFO]  - Emails total (raw merged): 0
 2026-03-25 17:30:13,162 [INFO] [Run Summary] Wrote run summary: overnight_runs/2026-03-25_172249/run_summary.json
-{
-  "run_dir": "overnight_runs/2026-03-25_172249",
-  "jobs": [
-    {
-      "job_id": "job_unearthed_1",
-      "raw_csv": "overnight_runs/2026-03-25_172249/job_unearthed_1/raw.csv",
-      "enriched_csv": "overnight_runs/2026-03-25_172249/job_unearthed_1/raw.csv",
-      "input_seed_csv": "",
-      "status": "completed",
-      "error_count": 0,
-      "last_update": "2026-03-25T06:23:15.238945+00:00",
-      "row_count": 15,
-      "current_row_index": 15,
-      "valid_leads_so_far": 15
-    }
-  ],
-  "master_raw": "overnight_runs/2026-03-25_172249/master_raw.csv",
-  "master_enriched": "overnight_runs/2026-03-25_172249/master_enriched.csv",
-  "master_pre_fb": "overnight_runs/2026-03-25_172249/master_pre_fb.csv",
-  "master_post_fb": "overnight_runs/2026-03-25_172249/master_post_fb.csv",
-  "master_csv": "overnight_runs/2026-03-25_172249/master_enriched_deduped.csv",
-  "export_mode": "both",
-  "smoke_stats": {
-    "jobs_attempted": 1,
-    "jobs_merged": 1,
-    "jobs_skipped": [],
-    "raw_rows": 15,
-    "enrichment_ran": true,
-    "enrichment_rows": 16,
-    "sc_challenge_detected": 1,
-    "sc_breaker_tripped": false,
-    "sc_live_disabled_reason": "",
-    "bandcamp_http_403_count": 6,
-    "lastfm_http_406_count": 0,
-    "emails_missing_source_url": 0,
-    "emails_total": 0
-  }
-}

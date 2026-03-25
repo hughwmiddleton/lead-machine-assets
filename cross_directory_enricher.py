@@ -2566,6 +2566,42 @@ def _instagram_profile_fetch_usable(status: Optional[int], html: str) -> bool:
     return True
 
 
+def _extract_instagram_profile_candidate_emails(
+    html: str,
+    *,
+    soup: Optional[BeautifulSoup] = None,
+) -> List[str]:
+    html_text = html if isinstance(html, str) else str(html or "")
+    if not html_text.strip():
+        return []
+    soup_obj = soup or BeautifulSoup(html_text, "html.parser")
+    anchor_values = []
+    for anchor in soup_obj.select("a[href]"):
+        href = cell_to_str(anchor.get("href"))
+        if href:
+            anchor_values.append(href)
+    ig_emails, _ = _extract_emails_from_html(html_text, soup=soup_obj, anchor_values=anchor_values)
+
+    meta_emails: List[str] = []
+    for meta_tag in soup_obj.select('meta[property="og:description"], meta[name="description"]'):
+        meta_content = cell_to_str(meta_tag.get("content"))
+        if not meta_content:
+            continue
+        extracted_meta_emails, _ = _extract_emails_from_html(meta_content)
+        meta_emails.extend(extracted_meta_emails)
+    return filter_system_telemetry_emails([*ig_emails, *meta_emails])
+
+
+def _instagram_profile_requests_html_usable(status: Optional[int], html: str) -> bool:
+    if not _instagram_profile_fetch_usable(status, html):
+        return False
+    html_text = html if isinstance(html, str) else str(html or "")
+    soup = BeautifulSoup(html_text, "html.parser")
+    if _extract_instagram_profile_candidate_emails(html_text, soup=soup):
+        return True
+    return soup.select_one(_INSTAGRAM_REQUIRED_SELECTOR) is not None
+
+
 def _fetch_instagram_profile_html(session: requests.Session, url: str) -> Tuple[str, Optional[int]]:
     """Fetch a single Instagram profile page with one bounded shared fallback."""
     if not session or not url:
@@ -2579,7 +2615,7 @@ def _fetch_instagram_profile_html(session: requests.Session, url: str) -> Tuple[
     except Exception:
         status = None
         html = ""
-    if _instagram_profile_fetch_usable(status, html):
+    if _instagram_profile_requests_html_usable(status, html):
         return (html, status)
     try:
         fallback = fetch_html(
@@ -8384,22 +8420,7 @@ class CrossDirectoryEnricherWorker(QThread):
             return False
 
         soup = BeautifulSoup(html, "html.parser")
-        anchor_values = []
-        for anchor in soup.select("a[href]"):
-            href = cell_to_str(anchor.get("href"))
-            if href:
-                anchor_values.append(href)
-        ig_emails, _ = _extract_emails_from_html(html, soup=soup, anchor_values=anchor_values)
-
-        meta_emails: List[str] = []
-        for meta_tag in soup.select('meta[property="og:description"], meta[name="description"]'):
-            meta_content = cell_to_str(meta_tag.get("content"))
-            if not meta_content:
-                continue
-            extracted_meta_emails, _ = _extract_emails_from_html(meta_content)
-            meta_emails.extend(extracted_meta_emails)
-
-        all_ig_emails = filter_system_telemetry_emails([*ig_emails, *meta_emails])
+        all_ig_emails = _extract_instagram_profile_candidate_emails(html, soup=soup)
         if not all_ig_emails:
             self.log_message.emit("[IG Email] no_email_visible")
             self._set_platform_state("instagram", "skipped")

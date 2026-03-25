@@ -56,6 +56,149 @@ def test_fetch_instagram_profile_html_uses_shared_fallback_for_unusable_initial_
     assert fallback_kwargs["timeout_s"] == cde.HTTP_TIMEOUT
 
 
+def test_instagram_email_falls_back_when_requests_html_has_no_profile_signal(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    worker.session = SimpleNamespace(
+        get=lambda url, timeout=None, allow_redirects=None: SimpleNamespace(
+            status_code=200,
+            text="<html><body>Official profile shell with no contact details loaded yet.</body></html>",
+        )
+    )
+    seed_df = _seed_df(
+        {
+            "Artist Name": "IG Artist",
+            "Email": "",
+            "Email_All": "",
+            "Instagram_URL": "https://instagram.com/igartist/?hl=en#bio",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+            "Email_Type": "",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    fetch_html_calls = []
+
+    def fake_fetch_html(url, **kwargs):  # noqa: ANN001
+        fetch_html_calls.append((url, kwargs))
+        return {
+            "status": 200,
+            "html": (
+                "<html><head><meta property='og:description' content='Bookings: bookings@artist.com'></head>"
+                "<body><div>Rendered profile</div></body></html>"
+            ),
+            "mode_used": "playwright",
+            "reason": "missing_selectors",
+        }
+
+    monkeypatch.setattr(cde, "fetch_html", fake_fetch_html)
+
+    matched = worker._enrich_row_instagram_email(seed_df, 0, ctx)
+
+    assert matched is True
+    assert len(fetch_html_calls) == 1
+    assert seed_df.at[0, "Email"] == "bookings@artist.com"
+    assert seed_df.at[0, "Email_All"] == "bookings@artist.com"
+    assert logs == [
+        "[IG Email] Visiting https://www.instagram.com/igartist/",
+        "[IG Email] Found email: bookings@artist.com",
+    ]
+
+
+def test_instagram_email_keeps_requests_fast_path_when_requests_html_already_has_email(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    worker.session = SimpleNamespace(
+        get=lambda url, timeout=None, allow_redirects=None: SimpleNamespace(
+            status_code=200,
+            text=(
+                "<html><head><meta property='og:description' content='Bookings: bookings@artist.com'></head>"
+                "<body><div>Official profile</div></body></html>"
+            ),
+        )
+    )
+    seed_df = _seed_df(
+        {
+            "Artist Name": "IG Artist",
+            "Email": "",
+            "Email_All": "",
+            "Instagram_URL": "https://instagram.com/igartist/?hl=en#bio",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+            "Email_Type": "",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+
+    monkeypatch.setattr(
+        cde,
+        "fetch_html",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("fallback should not run")),
+    )
+
+    matched = worker._enrich_row_instagram_email(seed_df, 0, ctx)
+
+    assert matched is True
+    assert seed_df.at[0, "Email"] == "bookings@artist.com"
+    assert seed_df.at[0, "Email_All"] == "bookings@artist.com"
+    assert logs == [
+        "[IG Email] Visiting https://www.instagram.com/igartist/",
+        "[IG Email] Found email: bookings@artist.com",
+    ]
+
+
+def test_instagram_email_no_email_visible_after_requests_and_fallback_are_exhausted(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    worker.session = SimpleNamespace(
+        get=lambda url, timeout=None, allow_redirects=None: SimpleNamespace(
+            status_code=200,
+            text="<html><body>Official profile shell with no contact details loaded yet.</body></html>",
+        )
+    )
+    seed_df = _seed_df(
+        {
+            "Artist Name": "No Email Here",
+            "Email": "",
+            "Email_All": "",
+            "Instagram_URL": "https://www.instagram.com/noemailhere/",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+            "Email_Type": "",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    before = seed_df.copy(deep=True)
+    fetch_html_calls = []
+
+    def fake_fetch_html(url, **kwargs):  # noqa: ANN001
+        fetch_html_calls.append((url, kwargs))
+        return {
+            "status": 200,
+            "html": (
+                "<html><head><meta property='og:description' content='Official profile'></head>"
+                "<body><a href='https://example.com/contact'>Contact</a></body></html>"
+            ),
+            "mode_used": "playwright",
+            "reason": "missing_selectors",
+        }
+
+    monkeypatch.setattr(cde, "fetch_html", fake_fetch_html)
+
+    matched = worker._enrich_row_instagram_email(seed_df, 0, ctx)
+
+    assert matched is False
+    assert len(fetch_html_calls) == 1
+    assert seed_df.equals(before)
+    assert logs == [
+        "[IG Email] Visiting https://www.instagram.com/noemailhere/",
+        "[IG Email] no_email_visible",
+    ]
+
+
 def test_instagram_email_meta_description_writes_email_and_provenance(monkeypatch):
     logs = []
     worker = _make_worker(logs)
