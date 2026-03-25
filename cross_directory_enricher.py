@@ -2549,18 +2549,54 @@ def _get_canonical_instagram_url(row) -> str:
     return ""
 
 
+_INSTAGRAM_MIN_PROFILE_HTML_CHARS = 48
+_INSTAGRAM_REQUIRED_SELECTOR = 'meta[property="og:description"]'
+
+
+def _instagram_profile_fetch_usable(status: Optional[int], html: str) -> bool:
+    html_text = html if isinstance(html, str) else str(html or "")
+    if status != 200:
+        return False
+    if not html_text or not html_text.strip():
+        return False
+    if len(html_text.strip()) < _INSTAGRAM_MIN_PROFILE_HTML_CHARS:
+        return False
+    if _detect_soft_block(html_text):
+        return False
+    return True
+
+
 def _fetch_instagram_profile_html(session: requests.Session, url: str) -> Tuple[str, Optional[int]]:
-    """Fetch a single Instagram profile page with the worker session and no retries."""
+    """Fetch a single Instagram profile page with one bounded shared fallback."""
     if not session or not url:
         return ("", None)
+    html = ""
+    status = None
     try:
         resp = session.get(url, timeout=HTTP_TIMEOUT, allow_redirects=False)
+        status = getattr(resp, "status_code", None)
+        html = getattr(resp, "text", "") or ""
     except Exception:
-        return ("", None)
-    status = getattr(resp, "status_code", None)
-    if status != 200:
-        return ("", status)
-    return (getattr(resp, "text", "") or "", status)
+        status = None
+        html = ""
+    if _instagram_profile_fetch_usable(status, html):
+        return (html, status)
+    try:
+        fallback = fetch_html(
+            url,
+            session=session,
+            directory="instagram",
+            required_selectors=[_INSTAGRAM_REQUIRED_SELECTOR],
+            allow_browser_fallback=True,
+            timeout_s=HTTP_TIMEOUT,
+        )
+    except Exception:
+        return (html, status)
+    fallback_html = str(fallback.get("html") or "")
+    fallback_status = fallback.get("status")
+    if fallback_status == 200 and fallback_html:
+        return (fallback_html, fallback_status)
+    return (html, status)
 
 
 def _row_has_facebook_or_email(row) -> bool:
@@ -8337,13 +8373,23 @@ class CrossDirectoryEnricherWorker(QThread):
         email_before = _row_email_summary_snapshot(seed_df, row_idx)
         self.log_message.emit(f"[IG Email] Visiting {ig_url}")
         html, status = _fetch_instagram_profile_html(self.session, ig_url)
-        if status != 200 or not html:
-            self.log_message.emit("[IG Email] No email found")
+        if status != 200:
+            self.log_message.emit(f"[IG Email] fetch_failed status={status}")
+            self._set_platform_state("instagram", "skipped")
+            return False
+        if not _instagram_profile_fetch_usable(status, html):
+            html_chars = len((html or "").strip())
+            self.log_message.emit(f"[IG Email] blocked_or_empty status={status} chars={html_chars}")
             self._set_platform_state("instagram", "skipped")
             return False
 
         soup = BeautifulSoup(html, "html.parser")
-        ig_emails, _ = _extract_emails_from_html(html, soup=soup)
+        anchor_values = []
+        for anchor in soup.select("a[href]"):
+            href = cell_to_str(anchor.get("href"))
+            if href:
+                anchor_values.append(href)
+        ig_emails, _ = _extract_emails_from_html(html, soup=soup, anchor_values=anchor_values)
 
         meta_emails: List[str] = []
         for meta_tag in soup.select('meta[property="og:description"], meta[name="description"]'):
@@ -8355,7 +8401,7 @@ class CrossDirectoryEnricherWorker(QThread):
 
         all_ig_emails = filter_system_telemetry_emails([*ig_emails, *meta_emails])
         if not all_ig_emails:
-            self.log_message.emit("[IG Email] No email found")
+            self.log_message.emit("[IG Email] no_email_visible")
             self._set_platform_state("instagram", "skipped")
             return False
 
