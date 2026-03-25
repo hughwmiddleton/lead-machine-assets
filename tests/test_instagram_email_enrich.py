@@ -244,6 +244,44 @@ def test_instagram_email_meta_description_writes_email_and_provenance(monkeypatc
     ]
 
 
+def test_instagram_email_filters_malformed_candidates_before_write(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "IG Artist",
+            "Email": "",
+            "Email_All": "",
+            "Instagram_URL": "https://instagram.com/igartist/?hl=en#bio",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+            "Email_Type": "",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+
+    def fake_fetch(session, url):  # noqa: ANN001
+        return (
+            "<html><head>"
+            "<meta property='og:description' content='and@cultartists.may bookings@artist.com +@lover.wav'>"
+            "</head><body><div>with@dill.flamenco</div></body></html>",
+            200,
+        )
+
+    monkeypatch.setattr(cde, "_fetch_instagram_profile_html", fake_fetch)
+
+    matched = worker._enrich_row_instagram_email(seed_df, 0, ctx)
+
+    assert matched is True
+    assert seed_df.at[0, "Email"] == "bookings@artist.com"
+    assert seed_df.at[0, "Email_All"] == "bookings@artist.com"
+    assert logs == [
+        "[IG Email] Visiting https://www.instagram.com/igartist/",
+        "[IG Email] Found email: bookings@artist.com",
+    ]
+
+
 def test_instagram_email_body_scan_still_writes_email_and_provenance(monkeypatch):
     logs = []
     worker = _make_worker(logs)

@@ -84,6 +84,8 @@ EMAIL_REGEX = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE
 _FB_SPLIT_PATTERN = re.compile(r"[,\s;|]+")
 _FB_LOW_QUALITY_FILE_EXTENSIONS: Tuple[str, ...] = ("jpg", "jpeg", "png", "gif", "wav", "mp3", "mp4", "pdf", "zip")
 _FB_LOW_QUALITY_SHORT_LOCAL_PARTS = frozenset({"to", "by", "at"})
+_CONTACT_QUALITY_REJECT_LOCAL_PARTS = frozenset({"and", "with", "by", "in", "at", "tagging"})
+_CONTACT_QUALITY_REJECT_DOMAIN_SUFFIXES = (".jpg", ".png", ".mp3", ".wav", ".pdf")
 _FB_GENERIC_EMAIL_PROVIDER_DOMAINS = frozenset(
     {
         "aol.com",
@@ -4679,10 +4681,36 @@ def _extract_emails_from_html(
         except Exception:
             normalize_email_value = lambda v: (v or "").strip().lower()
         normalized = normalize_email_value(cleaned)
-        if normalized and normalized not in seen:
+        if normalized and _is_contact_quality_email(normalized) and normalized not in seen:
             seen.add(normalized)
             unique.append(normalized)
     return unique, mailto_used
+
+
+def _is_contact_quality_email(email: str) -> bool:
+    normalized = normalize_email_value(email)
+    if not normalized:
+        return False
+    if any(char.isspace() for char in normalized):
+        return False
+
+    local, domain = normalized.split("@", 1)
+    if not local or not domain:
+        return False
+    if not local[0].isalnum():
+        return False
+    if not any(char.isalpha() for char in local):
+        return False
+    if local in _CONTACT_QUALITY_REJECT_LOCAL_PARTS:
+        return False
+
+    domain_lower = domain.lower().rstrip(".")
+    if not domain_lower:
+        return False
+    if any(domain_lower.endswith(suffix) for suffix in _CONTACT_QUALITY_REJECT_DOMAIN_SUFFIXES):
+        return False
+
+    return True
 
 
 def _fb_domain_has_file_like_artifact(domain: str) -> bool:

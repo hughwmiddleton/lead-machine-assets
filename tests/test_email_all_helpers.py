@@ -4,6 +4,7 @@ import pandas as pd
 
 from email_normalizer import filter_system_telemetry_emails
 from email_provenance import EMAIL_PROVENANCE_JSON_COL
+import night_mode_fb
 import pipeline_runner
 
 
@@ -128,6 +129,19 @@ def test_consolidate_email_all_prefers_direct_fb_email_over_external_contact_sit
     assert consolidated.at[0, "Email_All"] == "admin@artist.test;to@nomograph.mastering"
     assert consolidated.at[0, "Email_Source_URL"] == "https://www.facebook.com/artist/about"
     assert consolidated.at[0, "Email_Source_Type"] == "facebook_enrich"
+
+
+def test_consolidate_email_all_keeps_valid_email_when_extractor_filters_fragments():
+    extracted, _ = night_mode_fb._extract_emails_from_html(
+        "<html><body>and@cultartists.may admin@artist.test +@lover.wav</body></html>"
+    )
+    df = pd.DataFrame([{"Artist Name": "Artist E2", "Email": "", "Email_All": ";".join(extracted)}])
+
+    consolidated = pipeline_runner._consolidate_email_all(df)
+
+    assert extracted == ["admin@artist.test"]
+    assert consolidated.at[0, "Email"] == "admin@artist.test"
+    assert consolidated.at[0, "Email_All"] == "admin@artist.test"
 
 
 def test_consolidate_email_all_prefers_artist_domain_generic_inbox_over_unrelated_external_domain():

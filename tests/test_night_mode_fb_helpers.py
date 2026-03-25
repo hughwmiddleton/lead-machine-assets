@@ -47,6 +47,32 @@ def test_extract_emails_from_script_json_and_escaped_variants() -> None:
     assert used_mailto is False
 
 
+def test_extract_emails_filters_context_fragment_candidates_at_admission_boundary() -> None:
+    html = """
+    <html>
+      <body>
+        joe@pollenarts.club bookings@artist.com contact@band.co.uk hello@label.io
+        contact-us@band.co hello.world@label.fm bookings_au@artist.com
+        and@cultartists.may -@bozo.au +@lover.wav with@dill.flamenco
+        tagging@hannah.donnelly in@coolstudio.jpg
+      </body>
+    </html>
+    """
+
+    emails, used_mailto = night_mode_fb._extract_emails_from_html(html)
+
+    assert emails == [
+        "joe@pollenarts.club",
+        "bookings@artist.com",
+        "contact@band.co.uk",
+        "hello@label.io",
+        "contact-us@band.co",
+        "hello.world@label.fm",
+        "bookings_au@artist.com",
+    ]
+    assert used_mailto is False
+
+
 def test_extract_emails_from_live_anchor_values() -> None:
     emails, used_mailto = night_mode_fb._extract_emails_from_html(
         "<html><body><div>No visible email</div></body></html>",
