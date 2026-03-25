@@ -676,6 +676,31 @@ def _classify_fb_debug_reason(row_like: Any) -> str:
     return ""
 
 
+FB_DEBUG_SUMMARY_ORDER: Sequence[str] = (
+    "email_written",
+    "email_found_not_applied",
+    "no_email_visible",
+    "login_required_or_blocked",
+    "content_unavailable",
+    "timeout_or_fetch_error",
+    "no_fb_candidate",
+)
+FB_DEBUG_SUMMARY_VALID: Set[str] = set(FB_DEBUG_SUMMARY_ORDER)
+
+
+def _log_fb_debug_summary(df: Optional[pd.DataFrame], logger: LoggerFn = None) -> None:
+    counts = {reason: 0 for reason in FB_DEBUG_SUMMARY_ORDER}
+    if isinstance(df, pd.DataFrame) and FB_DEBUG_REASON_COL in df.columns:
+        for raw_value in df[FB_DEBUG_REASON_COL].tolist():
+            reason = _cell_str(raw_value)
+            if reason in FB_DEBUG_SUMMARY_VALID:
+                counts[reason] += 1
+
+    _safe_log_console(logger, "[FB Debug Summary]")
+    for reason in FB_DEBUG_SUMMARY_ORDER:
+        _safe_log_console(logger, f"{reason}={counts[reason]}")
+
+
 def _row_has_valid_email(row: pd.Series) -> Tuple[bool, List[str]]:
     """Return (has_email, normalized_emails) using the pipeline's permissive parser."""
     emails = _merge_email_lists(row.get("Email", ""), row.get("Email_All", ""))
@@ -3330,6 +3355,7 @@ def run_facebook_global_pass_nightmode(
         _write_fb_state(state_path, state)
         df.drop(columns=["__row_id"], inplace=True, errors="ignore")
         df.to_csv(output_csv, index=False)
+        _log_fb_debug_summary(df, logger)
         if local_night_fb_run_state:
             close_night_fb_run_state(night_fb_run_state)
         return FacebookGlobalPassStatus(
@@ -3360,6 +3386,7 @@ def run_facebook_global_pass_nightmode(
             _write_fb_state(state_path, state)
             df.drop(columns=["__row_id"], inplace=True, errors="ignore")
             df.to_csv(output_csv, index=False)
+            _log_fb_debug_summary(df, logger)
             if local_night_fb_run_state:
                 close_night_fb_run_state(night_fb_run_state)
             return FacebookGlobalPassStatus(
@@ -3390,6 +3417,7 @@ def run_facebook_global_pass_nightmode(
         _write_fb_state(state_path, state)
         df.drop(columns=["__row_id"], inplace=True, errors="ignore")
         df.to_csv(output_csv, index=False)
+        _log_fb_debug_summary(df, logger)
         if local_night_fb_run_state:
             close_night_fb_run_state(night_fb_run_state)
         return FacebookGlobalPassStatus(
@@ -3791,6 +3819,7 @@ def run_facebook_global_pass_nightmode(
 
     df.drop(columns=["__row_id"], inplace=True, errors="ignore")
     df.to_csv(output_csv, index=False)
+    _log_fb_debug_summary(df, logger)
     if local_night_fb_run_state:
         close_night_fb_run_state(night_fb_run_state)
     return FacebookGlobalPassStatus(

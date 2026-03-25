@@ -50,7 +50,7 @@ def _read_csv(path: Path) -> pd.DataFrame:
     return pd.read_csv(path, dtype=str, keep_default_na=False).fillna("")
 
 
-def _run_night_fb_pass(monkeypatch, tmp_path, rows, helper):
+def _run_night_fb_pass(monkeypatch, tmp_path, rows, helper, logger=None):
     input_csv = tmp_path / "master_pre_fb.csv"
     output_csv = tmp_path / "master_post_fb.csv"
     state_path = tmp_path / "fb_state.json"
@@ -68,6 +68,7 @@ def _run_night_fb_pass(monkeypatch, tmp_path, rows, helper):
         output_csv=output_csv.as_posix(),
         state_path=state_path.as_posix(),
         skip_rows_with_email=True,
+        logger=logger,
     )
     return _read_csv(output_csv), status
 
@@ -723,6 +724,39 @@ def test_skipped_no_identity_anchor_maps_no_fb_candidate(monkeypatch, tmp_path):
     assert helper.calls == 0
     assert df_out.loc[0, FB_GATE_STATE_COL] == "skipped_no_identity_anchor"
     assert df_out.loc[0, FB_DEBUG_REASON_COL] == "no_fb_candidate"
+
+
+def test_night_fb_logs_debug_summary_in_fixed_order():
+    logs = []
+    df = pd.DataFrame(
+        {
+            FB_DEBUG_REASON_COL: [
+                "email_written",
+                "email_found_not_applied",
+                "no_email_visible",
+                "no_email_visible",
+                "login_required_or_blocked",
+                "content_unavailable",
+                "timeout_or_fetch_error",
+                "no_fb_candidate",
+                "",
+                None,
+                "unexpected_value",
+            ]
+        }
+    )
+    pipeline_runner._log_fb_debug_summary(df, logger=logs.append)
+
+    assert logs == [
+        "[FB Debug Summary]",
+        "email_written=1",
+        "email_found_not_applied=1",
+        "no_email_visible=2",
+        "login_required_or_blocked=1",
+        "content_unavailable=1",
+        "timeout_or_fetch_error=1",
+        "no_fb_candidate=1",
+    ]
 
 
 def test_night_mode_outputs_preserve_fb_attribution(monkeypatch, tmp_path):
