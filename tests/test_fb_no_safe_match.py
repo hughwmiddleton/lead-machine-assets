@@ -75,6 +75,56 @@ def test_zero_identity_music_mismatch_is_rejected():
     assert enricher._last_search_reject_reason == "identity_mismatch"
 
 
+def test_placeholder_profile_photo_label_is_rejected():
+    enricher = _make_enricher()
+    artist = "Skinner"
+    placeholder = _cand("Profile photo of Skinner", "https://www.facebook.com/skinner", "Musician/Band")
+    ranked = [_rank_item(artist, placeholder)]
+
+    chosen, selected_by = enricher._choose_ranked_candidate(artist, ranked)
+
+    assert chosen is None
+    assert selected_by == "no_safe_match"
+    assert enricher._last_search_reject_reason == "placeholder_label"
+
+
+def test_none_match_is_rejected_before_score_threshold():
+    enricher = _make_enricher()
+    artist = "Skinner"
+    candidate = _cand("Skinner Result", "https://www.facebook.com/skinnerresult", "Musician/Band")
+    ranked = [
+        {
+            "candidate": candidate,
+            "score": 50,
+            "breakdown": ["+primary_music"],
+            "features": {
+                "name": candidate.name,
+                "url": candidate.url,
+                "category": "Musician/Band",
+                "descriptor": "",
+                "aria_label": "",
+                "secondary_text": "",
+                "category_tokens": ["Musician", "Band"],
+                "match_level": "none",
+                "music_primary": True,
+                "music_descriptor": False,
+                "music_any": True,
+                "service_any": False,
+                "service_only": False,
+                "is_profile": False,
+                "is_page": True,
+                "is_page_style_url": True,
+            },
+        }
+    ]
+
+    chosen, selected_by = enricher._choose_ranked_candidate(artist, ranked, min_accept_score=-50)
+
+    assert chosen is None
+    assert selected_by == "no_safe_match"
+    assert enricher._last_search_reject_reason == "identity_none"
+
+
 def test_verified_account_name_noise_can_pass_with_real_identity_overlap():
     enricher = _make_enricher()
     artist = "Kai Banks"

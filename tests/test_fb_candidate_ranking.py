@@ -428,6 +428,83 @@ def test_all_unsafe_candidates_skip_scrape(monkeypatch):
     assert enricher._last_search_reject_score == -10
     assert enricher._last_search_reject_reason == "non_music_category"
 
+
+def test_placeholder_candidate_filtered_before_real_artist_navigation(monkeypatch):
+    artist = "Skinner"
+    placeholder = _cand("Profile photo of Skinner", "https://www.facebook.com/skinnerjunk", "Musician/Band")
+    real = _cand("Skinner", "https://www.facebook.com/skinnermusic", "Musician/Band")
+    candidates = [placeholder, real]
+
+    ranked_for_preview = [
+        {
+            "candidate": placeholder,
+            "score": 85,
+            "breakdown": ["+primary_music", "+page_music", "+near_match"],
+            "features": {
+                "name": placeholder.name,
+                "url": placeholder.url,
+                "category": "Musician/Band",
+                "descriptor": "",
+                "aria_label": "",
+                "secondary_text": "",
+                "category_tokens": ["Musician", "Band"],
+                "match_level": "near",
+                "music_primary": True,
+                "music_descriptor": False,
+                "music_any": True,
+                "service_any": False,
+                "service_only": False,
+                "is_profile": False,
+                "is_page": True,
+                "is_page_style_url": True,
+            },
+        },
+        {
+            "candidate": real,
+            "score": 95,
+            "breakdown": ["+primary_music", "+page_music", "+exact_match"],
+            "features": {
+                "name": real.name,
+                "url": real.url,
+                "category": "Musician/Band",
+                "descriptor": "",
+                "aria_label": "",
+                "secondary_text": "",
+                "category_tokens": ["Musician", "Band"],
+                "match_level": "exact",
+                "music_primary": True,
+                "music_descriptor": False,
+                "music_any": True,
+                "service_any": False,
+                "service_only": False,
+                "is_profile": False,
+                "is_page": True,
+                "is_page_style_url": True,
+            },
+        },
+    ]
+
+    monkeypatch.setattr(night_mode_fb, "_harvest_candidates", lambda *args, **kwargs: candidates)
+    monkeypatch.setattr(night_mode_fb, "_rank_candidates_for_preview", lambda *args, **kwargs: ranked_for_preview)
+    monkeypatch.setattr(night_mode_fb.NightModeFacebookEnricher, "_get_anon_driver", lambda self: _dummy_driver())
+    monkeypatch.setattr(night_mode_fb.NightModeFacebookEnricher, "_ensure_session", lambda self: None)
+    monkeypatch.setattr(night_mode_fb.time, "sleep", lambda *_: None)
+
+    enricher = night_mode_fb.NightModeFacebookEnricher(
+        legacy_module=None,
+        username="",
+        password="",
+        logger=None,
+        use_shared_session=False,
+    )
+
+    selected = enricher._search_for_page(artist, location="", allow_anon=True)
+    real_norm = night_mode_fb._normalise_fb_url(real.url)
+
+    assert selected == real_norm
+    assert enricher._last_selected_candidate_context["url"] == real_norm
+    assert [ctx["url"] for ctx in enricher._last_search_candidates] == [real_norm]
+
 def _load_legacy_module():
     path = Path(__file__).resolve().parents[1] / "Lead Machine (Final Update 5).py"
     spec = importlib.util.spec_from_file_location("lead_machine_legacy", path)

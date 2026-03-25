@@ -1491,11 +1491,13 @@ def _candidate_is_safe_enough(item: Dict[str, Any], min_accept_score: int) -> Tu
     """
     score = int(item.get("score") or 0)
     features = item.get("features") or {}
+    name = str(features.get("name") or "")
     match_level = features.get("match_level") or "none"
     music_any = bool(features.get("music_any"))
     music_positive = bool(features.get("music_any") or features.get("music_primary") or features.get("music_descriptor"))
     strong_identity = match_level in {"exact", "near"}
     is_profile = bool(features.get("is_profile"))
+    name_norm = re.sub(r"\s+", " ", name).strip().lower()
 
     if _candidate_has_non_music_deny(features):
         return False, "non_music_category"
@@ -1504,6 +1506,10 @@ def _candidate_is_safe_enough(item: Dict[str, Any], min_accept_score: int) -> Tu
     corporate_risk, _corporate_token, artist_like_signal = _candidate_corporate_risk(features)
     if corporate_risk and (not strong_identity) and (not music_positive) and (not artist_like_signal):
         return False, "corporate_no_music_signal"
+    if name_norm.startswith("profile photo of ") or name_norm.endswith(" profile photo"):
+        return False, "placeholder_label"
+    if match_level == "none":
+        return False, "identity_none"
     if score < min_accept_score:
         return False, "rank_below_threshold"
     # Require at least some artist-identity signal before a music-looking page can
