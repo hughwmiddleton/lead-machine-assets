@@ -2551,6 +2551,7 @@ def _get_canonical_instagram_url(row) -> str:
 
 _INSTAGRAM_MIN_PROFILE_HTML_CHARS = 48
 _INSTAGRAM_REQUIRED_SELECTOR = 'meta[property="og:description"]'
+_CONTACT_SURFACE_EXTRA_ATTR_NAMES = {"content", "title", "aria-label", "alt", "value"}
 
 
 def _instagram_profile_fetch_usable(status: Optional[int], html: str) -> bool:
@@ -2566,40 +2567,40 @@ def _instagram_profile_fetch_usable(status: Optional[int], html: str) -> bool:
     return True
 
 
-def _extract_instagram_profile_candidate_emails(
+def _append_contact_surface_value(values: List[str], seen: Set[str], raw_value: Any) -> None:
+    value = cell_to_str(raw_value)
+    if not value or value in seen:
+        return
+    seen.add(value)
+    values.append(value)
+
+
+def _collect_contact_surface_attribute_values(soup_obj: BeautifulSoup) -> List[str]:
+    values: List[str] = []
+    seen: Set[str] = set()
+    for tag in soup_obj.find_all(True):
+        attrs = getattr(tag, "attrs", {}) or {}
+        for attr_name, raw_value in attrs.items():
+            attr_key = cell_to_str(attr_name).strip().lower()
+            if not attr_key:
+                continue
+            if attr_key == "href":
+                continue
+            if attr_key not in _CONTACT_SURFACE_EXTRA_ATTR_NAMES and not attr_key.startswith("data-"):
+                continue
+            if isinstance(raw_value, (list, tuple, set)):
+                for item in raw_value:
+                    _append_contact_surface_value(values, seen, item)
+            else:
+                _append_contact_surface_value(values, seen, raw_value)
+    return values
+
+
+def _extract_static_page_candidate_emails(
     html: str,
     *,
     soup: Optional[BeautifulSoup] = None,
 ) -> List[str]:
-    extra_attr_names = {"content", "title", "aria-label", "alt", "value"}
-
-    def _append_unique(values: List[str], seen: Set[str], raw_value: Any) -> None:
-        value = cell_to_str(raw_value)
-        if not value or value in seen:
-            return
-        seen.add(value)
-        values.append(value)
-
-    def _collect_attribute_values(soup_obj: BeautifulSoup) -> List[str]:
-        values: List[str] = []
-        seen: Set[str] = set()
-        for tag in soup_obj.find_all(True):
-            attrs = getattr(tag, "attrs", {}) or {}
-            for attr_name, raw_value in attrs.items():
-                attr_key = cell_to_str(attr_name).strip().lower()
-                if not attr_key:
-                    continue
-                if attr_key == "href":
-                    continue
-                if attr_key not in extra_attr_names and not attr_key.startswith("data-"):
-                    continue
-                if isinstance(raw_value, (list, tuple, set)):
-                    for item in raw_value:
-                        _append_unique(values, seen, item)
-                else:
-                    _append_unique(values, seen, raw_value)
-        return values
-
     html_text = html if isinstance(html, str) else str(html or "")
     if not html_text.strip():
         return []
@@ -2607,21 +2608,23 @@ def _extract_instagram_profile_candidate_emails(
     anchor_values: List[str] = []
     anchor_seen: Set[str] = set()
     for anchor in soup_obj.select("a[href]"):
-        _append_unique(anchor_values, anchor_seen, anchor.get("href"))
+        _append_contact_surface_value(anchor_values, anchor_seen, anchor.get("href"))
 
-    meta_contents: List[str] = []
+    surface_texts: List[str] = []
     meta_seen: Set[str] = set()
     for meta_tag in soup_obj.select('meta[property="og:description"], meta[name="description"]'):
-        _append_unique(meta_contents, meta_seen, meta_tag.get("content"))
+        _append_contact_surface_value(surface_texts, meta_seen, meta_tag.get("content"))
+    for title_tag in soup_obj.select("title"):
+        _append_contact_surface_value(surface_texts, meta_seen, title_tag.get_text(" ", strip=True))
 
     ig_emails, _ = _extract_emails_from_html(
         html_text,
         soup=soup_obj,
-        rendered_text=" ".join(meta_contents),
+        rendered_text=" ".join(surface_texts),
         anchor_values=anchor_values,
     )
 
-    attribute_values = _collect_attribute_values(soup_obj)
+    attribute_values = _collect_contact_surface_attribute_values(soup_obj)
     attribute_emails: List[str] = []
     if attribute_values:
         attribute_emails, _ = _extract_emails_from_html(
@@ -2631,6 +2634,81 @@ def _extract_instagram_profile_candidate_emails(
         )
 
     return filter_system_telemetry_emails([*ig_emails, *attribute_emails])
+
+
+def _extract_instagram_profile_candidate_emails(
+    html: str,
+    *,
+    soup: Optional[BeautifulSoup] = None,
+) -> List[str]:
+    return _extract_static_page_candidate_emails(html, soup=soup)
+
+
+def _normalise_instagram_bio_link_fetch_url(raw: str, *, base_url: str = "") -> str:
+    candidate = cell_to_str(raw)
+    if not candidate:
+        return ""
+    lowered = candidate.strip().lower()
+    if lowered.startswith(("#", "javascript:", "data:", "mailto:", "tel:")):
+        return ""
+    resolved = normalize_external_url(candidate) or candidate
+    try:
+        if base_url:
+            resolved = urllib.parse.urljoin(base_url, resolved)
+    except Exception:
+        return ""
+    normalised = _normalise_url(resolved)
+    if not normalised or _is_noise_url(normalised):
+        return ""
+    try:
+        parsed = urllib.parse.urlparse(normalised)
+    except Exception:
+        return ""
+    if (parsed.scheme or "").lower() not in {"http", "https"}:
+        return ""
+    host = (parsed.netloc or "").lower()
+    if host.startswith("www."):
+        host = host[4:]
+    if not host or host in {"instagram.com", "instagr.am"}:
+        return ""
+    return normalised
+
+
+def _collect_instagram_bio_link_fetch_urls(
+    html: str,
+    *,
+    soup: Optional[BeautifulSoup] = None,
+    profile_url: str = "",
+) -> List[str]:
+    html_text = html if isinstance(html, str) else str(html or "")
+    if not html_text.strip():
+        return []
+    soup_obj = soup or BeautifulSoup(html_text, "html.parser")
+    hub_candidates: List[str] = []
+    direct_candidates: List[str] = []
+    seen: Set[str] = set()
+
+    def _add_candidate(raw_value: Any) -> None:
+        normalised = _normalise_instagram_bio_link_fetch_url(raw_value, base_url=profile_url)
+        if not normalised or normalised in seen:
+            return
+        seen.add(normalised)
+        host = _host(normalised)
+        if host.startswith("www."):
+            host = host[4:]
+        if host in LINK_HUB_HOSTS:
+            hub_candidates.append(normalised)
+        else:
+            direct_candidates.append(normalised)
+
+    for anchor in soup_obj.select("a[href]"):
+        _add_candidate(anchor.get("href"))
+    if hub_candidates or direct_candidates:
+        return [*hub_candidates, *direct_candidates]
+
+    for raw_value in _collect_contact_surface_attribute_values(soup_obj):
+        _add_candidate(raw_value)
+    return [*hub_candidates, *direct_candidates]
 
 
 def _instagram_profile_requests_html_usable(status: Optional[int], html: str) -> bool:
@@ -8462,6 +8540,33 @@ class CrossDirectoryEnricherWorker(QThread):
 
         soup = BeautifulSoup(html, "html.parser")
         all_ig_emails = _extract_instagram_profile_candidate_emails(html, soup=soup)
+        selected_source_url = ig_url
+        selected_extract_method = "regex"
+        selected_surface = "instagram_profile"
+        if not all_ig_emails and not _row_has_email(seed_df.loc[row_idx]):
+            bio_link_urls = _collect_instagram_bio_link_fetch_urls(
+                html,
+                soup=soup,
+                profile_url=ig_url,
+            )
+            if bio_link_urls:
+                bio_link_result = _fetch_website_html_bounded(
+                    self.session,
+                    bio_link_urls[0],
+                    timeout_s=WEBSITE_EMAIL_TIMEOUT,
+                    max_bytes=WEBSITE_EMAIL_MAX_BYTES,
+                )
+                if bio_link_result.is_html and bio_link_result.html:
+                    bio_link_soup = BeautifulSoup(bio_link_result.html, "html.parser")
+                    all_ig_emails = _extract_static_page_candidate_emails(
+                        bio_link_result.html,
+                        soup=bio_link_soup,
+                    )
+                    _, used_mailto = _mailto_emails_from_soup(bio_link_soup)
+                    if all_ig_emails:
+                        selected_source_url = bio_link_result.final_url or bio_link_urls[0]
+                        selected_extract_method = "mailto" if used_mailto else "regex"
+                        selected_surface = "instagram_bio_link_one_hop"
         if not all_ig_emails:
             self.log_message.emit("[IG Email] no_email_visible")
             self._set_platform_state("instagram", "skipped")
@@ -8475,18 +8580,18 @@ class CrossDirectoryEnricherWorker(QThread):
         merge_email_provenance_into_target(
             (seed_df, row_idx),
             all_ig_emails,
-            source_url=ig_url,
+            source_url=selected_source_url,
             source_type="instagram_enrich",
-            method="regex",
-            surface="instagram_profile",
+            method=selected_extract_method,
+            surface=selected_surface,
         )
         seed_df.at[row_idx, "Email_Type"] = "ig_enrich"
         if not cell_to_str(seed_df.at[row_idx, "Email_Source_URL"]):
-            seed_df.at[row_idx, "Email_Source_URL"] = ig_url
+            seed_df.at[row_idx, "Email_Source_URL"] = selected_source_url
         if not cell_to_str(seed_df.at[row_idx, "Email_Source_Type"]):
             seed_df.at[row_idx, "Email_Source_Type"] = "instagram_enrich"
         if not cell_to_str(seed_df.at[row_idx, "Email_Extract_Method"]):
-            seed_df.at[row_idx, "Email_Extract_Method"] = "regex"
+            seed_df.at[row_idx, "Email_Extract_Method"] = selected_extract_method
         try:
             from pipeline_runner import record_email_summary_row_change
 

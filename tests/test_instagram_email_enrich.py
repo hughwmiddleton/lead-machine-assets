@@ -406,7 +406,7 @@ def test_instagram_email_negative_skips_without_fetch(monkeypatch, row):
     assert logs == []
 
 
-def test_instagram_email_no_visible_or_meta_email_keeps_single_fetch(monkeypatch):
+def test_instagram_email_no_visible_or_meta_email_keeps_one_hop_bounded_and_no_extract(monkeypatch):
     logs = []
     worker = _make_worker(logs)
     seed_df = _seed_df(
@@ -424,10 +424,11 @@ def test_instagram_email_no_visible_or_meta_email_keeps_single_fetch(monkeypatch
     ctx = worker._build_row_context(seed_df, 0, 1, 1)
     before = seed_df.copy(deep=True)
 
-    fetch_calls = []
+    ig_fetch_calls = []
+    bio_fetch_calls = []
 
     def fake_fetch(session, url):
-        fetch_calls.append(url)
+        ig_fetch_calls.append(url)
         return (
             "<html><head><meta property='og:description' content='Official profile'>"
             "<meta name='description' content='Music artist'></head><body><a href='https://example.com/contact'>Contact</a>"
@@ -436,11 +437,24 @@ def test_instagram_email_no_visible_or_meta_email_keeps_single_fetch(monkeypatch
         )
 
     monkeypatch.setattr(cde, "_fetch_instagram_profile_html", fake_fetch)
+    monkeypatch.setattr(
+        cde,
+        "_fetch_website_html_bounded",
+        lambda session, url, **kwargs: bio_fetch_calls.append(url) or cde.WebsiteFetchResult(
+            url=url,
+            final_url=url,
+            status=200,
+            content_type="text/html",
+            html="<html><body><a href='https://example.com/contact'>Contact</a></body></html>",
+            is_html=True,
+        ),
+    )
 
     matched = worker._enrich_row_instagram_email(seed_df, 0, ctx)
 
     assert matched is False
-    assert fetch_calls == ["https://www.instagram.com/noemailhere/"]
+    assert ig_fetch_calls == ["https://www.instagram.com/noemailhere/"]
+    assert bio_fetch_calls == ["https://linktr.ee/noemailhere"]
     assert seed_df.equals(before)
     assert logs == [
         "[IG Email] Visiting https://www.instagram.com/noemailhere/",
@@ -586,6 +600,337 @@ def test_instagram_email_extracts_obfuscated_email_from_existing_dom_attribute(m
     assert logs == [
         "[IG Email] Visiting https://www.instagram.com/attributeartist/",
         "[IG Email] Found email: contact@artist.com",
+    ]
+
+
+def test_instagram_email_one_hop_bio_link_recovers_direct_email(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "One Hop Artist",
+            "Email": "",
+            "Email_All": "",
+            "Instagram_URL": "https://instagram.com/onehopartist/?hl=en#bio",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+            "Email_Type": "",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    bio_fetch_calls = []
+
+    monkeypatch.setattr(
+        cde,
+        "_fetch_instagram_profile_html",
+        lambda session, url: (
+            "<html><body><a href='https://linktr.ee/onehopartist'>Bio</a></body></html>",
+            200,
+        ),
+    )
+    monkeypatch.setattr(
+        cde,
+        "_fetch_website_html_bounded",
+        lambda session, url, **kwargs: bio_fetch_calls.append(url) or cde.WebsiteFetchResult(
+            url=url,
+            final_url="https://linktr.ee/onehopartist",
+            status=200,
+            content_type="text/html",
+            html="<html><body>Bookings: bookings@artist.com</body></html>",
+            is_html=True,
+        ),
+    )
+
+    matched = worker._enrich_row_instagram_email(seed_df, 0, ctx)
+
+    assert matched is True
+    assert bio_fetch_calls == ["https://linktr.ee/onehopartist"]
+    assert seed_df.at[0, "Email"] == "bookings@artist.com"
+    assert seed_df.at[0, "Email_All"] == "bookings@artist.com"
+    assert seed_df.at[0, "Email_Source_URL"] == "https://linktr.ee/onehopartist"
+    assert seed_df.at[0, "Email_Source_Type"] == "instagram_enrich"
+    assert seed_df.at[0, "Email_Extract_Method"] == "regex"
+    assert seed_df.at[0, "Email_Type"] == "ig_enrich"
+    assert logs == [
+        "[IG Email] Visiting https://www.instagram.com/onehopartist/",
+        "[IG Email] Found email: bookings@artist.com",
+    ]
+
+
+def test_instagram_email_one_hop_bio_link_recovers_mailto(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Bio Mailto Artist",
+            "Email": "",
+            "Email_All": "",
+            "Instagram_URL": "https://instagram.com/biomailtoartist/?hl=en#bio",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+            "Email_Type": "",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+
+    monkeypatch.setattr(
+        cde,
+        "_fetch_instagram_profile_html",
+        lambda session, url: (
+            "<html><body><a href='https://beacons.ai/biomailtoartist'>Bio</a></body></html>",
+            200,
+        ),
+    )
+    monkeypatch.setattr(
+        cde,
+        "_fetch_website_html_bounded",
+        lambda session, url, **kwargs: cde.WebsiteFetchResult(
+            url=url,
+            final_url=url,
+            status=200,
+            content_type="text/html",
+            html="<html><body><a href='mailto:hello@artist.com?subject=booking'>Email</a></body></html>",
+            is_html=True,
+        ),
+    )
+
+    matched = worker._enrich_row_instagram_email(seed_df, 0, ctx)
+
+    assert matched is True
+    assert seed_df.at[0, "Email"] == "hello@artist.com"
+    assert seed_df.at[0, "Email_All"] == "hello@artist.com"
+    assert seed_df.at[0, "Email_Source_URL"] == "https://beacons.ai/biomailtoartist"
+    assert seed_df.at[0, "Email_Extract_Method"] == "mailto"
+    assert logs == [
+        "[IG Email] Visiting https://www.instagram.com/biomailtoartist/",
+        "[IG Email] Found email: hello@artist.com",
+    ]
+
+
+def test_instagram_email_invalid_bio_link_skips_one_hop_fetch(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Invalid Bio Link",
+            "Email": "",
+            "Email_All": "",
+            "Instagram_URL": "https://instagram.com/invalidbiolink/",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+            "Email_Type": "",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+
+    monkeypatch.setattr(
+        cde,
+        "_fetch_instagram_profile_html",
+        lambda session, url: ("<html><body><a href='javascript:void(0)'>Bio</a></body></html>", 200),
+    )
+    monkeypatch.setattr(
+        cde,
+        "_fetch_website_html_bounded",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("one-hop fetch should not run")),
+    )
+
+    matched = worker._enrich_row_instagram_email(seed_df, 0, ctx)
+
+    assert matched is False
+    assert seed_df.at[0, "Email"] == ""
+    assert seed_df.at[0, "Email_All"] == ""
+    assert logs == [
+        "[IG Email] Visiting https://www.instagram.com/invalidbiolink/",
+        "[IG Email] no_email_visible",
+    ]
+
+
+def test_instagram_email_one_hop_preserves_multiple_emails_in_aggregate_output(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Bio Multi Artist",
+            "Email": "",
+            "Email_All": "",
+            "Instagram_URL": "https://instagram.com/biomultiartist/",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+            "Email_Type": "",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+
+    monkeypatch.setattr(
+        cde,
+        "_fetch_instagram_profile_html",
+        lambda session, url: (
+            "<html><body><a href='https://solo.to/biomultiartist'>Bio</a></body></html>",
+            200,
+        ),
+    )
+    monkeypatch.setattr(
+        cde,
+        "_fetch_website_html_bounded",
+        lambda session, url, **kwargs: cde.WebsiteFetchResult(
+            url=url,
+            final_url=url,
+            status=200,
+            content_type="text/html",
+            html="<html><body>Bookings: first@artist.com Management: second@artist.com</body></html>",
+            is_html=True,
+        ),
+    )
+
+    matched = worker._enrich_row_instagram_email(seed_df, 0, ctx)
+
+    assert matched is True
+    assert seed_df.at[0, "Email"] == "first@artist.com"
+    assert seed_df.at[0, "Email_All"] == "first@artist.com;second@artist.com"
+    assert seed_df.at[0, "Email_Source_URL"] == "https://solo.to/biomultiartist"
+    assert logs == [
+        "[IG Email] Visiting https://www.instagram.com/biomultiartist/",
+        "[IG Email] Found email: first@artist.com",
+    ]
+
+
+def test_instagram_email_existing_row_email_skips_one_hop_stage(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Existing Email Artist",
+            "Email": "existing@artist.com",
+            "Email_All": "existing@artist.com",
+            "Instagram_URL": "https://instagram.com/existingemailartist/",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+            "Email_Type": "",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+
+    monkeypatch.setattr(
+        cde,
+        "_fetch_instagram_profile_html",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("instagram fetch should not run")),
+    )
+    monkeypatch.setattr(
+        cde,
+        "_fetch_website_html_bounded",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("one-hop fetch should not run")),
+    )
+
+    matched = worker._enrich_row_instagram_email(seed_df, 0, ctx)
+
+    assert matched is False
+    assert seed_df.at[0, "Email"] == "existing@artist.com"
+    assert seed_df.at[0, "Email_All"] == "existing@artist.com"
+    assert logs == []
+
+
+def test_instagram_email_one_hop_fetches_only_first_eligible_bio_link(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Single Hop Only",
+            "Email": "",
+            "Email_All": "",
+            "Instagram_URL": "https://instagram.com/singlehoponly/",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+            "Email_Type": "",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    bio_fetch_calls = []
+
+    monkeypatch.setattr(
+        cde,
+        "_fetch_instagram_profile_html",
+        lambda session, url: (
+            "<html><body>"
+            "<a href='https://linktr.ee/firsttarget'>First</a>"
+            "<a href='https://beacons.ai/secondtarget'>Second</a>"
+            "</body></html>",
+            200,
+        ),
+    )
+    monkeypatch.setattr(
+        cde,
+        "_fetch_website_html_bounded",
+        lambda session, url, **kwargs: bio_fetch_calls.append(url) or cde.WebsiteFetchResult(
+            url=url,
+            final_url=url,
+            status=200,
+            content_type="text/html",
+            html="<html><body>bookings@artist.com</body></html>",
+            is_html=True,
+        ),
+    )
+
+    matched = worker._enrich_row_instagram_email(seed_df, 0, ctx)
+
+    assert matched is True
+    assert bio_fetch_calls == ["https://linktr.ee/firsttarget"]
+    assert seed_df.at[0, "Email"] == "bookings@artist.com"
+
+
+def test_instagram_email_one_hop_does_not_follow_links_found_on_fetched_page(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "No Second Hop",
+            "Email": "",
+            "Email_All": "",
+            "Instagram_URL": "https://instagram.com/nosecondhop/",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+            "Email_Type": "",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    bio_fetch_calls = []
+
+    monkeypatch.setattr(
+        cde,
+        "_fetch_instagram_profile_html",
+        lambda session, url: (
+            "<html><body><a href='https://campsite.bio/nosecondhop'>Bio</a></body></html>",
+            200,
+        ),
+    )
+    monkeypatch.setattr(
+        cde,
+        "_fetch_website_html_bounded",
+        lambda session, url, **kwargs: bio_fetch_calls.append(url) or cde.WebsiteFetchResult(
+            url=url,
+            final_url=url,
+            status=200,
+            content_type="text/html",
+            html="<html><body><a href='https://artist.com/contact'>Contact</a></body></html>",
+            is_html=True,
+        ),
+    )
+
+    matched = worker._enrich_row_instagram_email(seed_df, 0, ctx)
+
+    assert matched is False
+    assert bio_fetch_calls == ["https://campsite.bio/nosecondhop"]
+    assert seed_df.at[0, "Email"] == ""
+    assert seed_df.at[0, "Email_All"] == ""
+    assert logs == [
+        "[IG Email] Visiting https://www.instagram.com/nosecondhop/",
+        "[IG Email] no_email_visible",
     ]
 
 
