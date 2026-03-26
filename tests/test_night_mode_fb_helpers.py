@@ -1584,6 +1584,34 @@ def test_canonicalize_explicit_urls_drop_invalid_nan_entries() -> None:
     assert result == ["https://www.facebook.com/artist"]
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://www.facebook.com/photo.php?fbid=123",
+        "https://www.facebook.com/permalink.php?story_fbid=123&id=456",
+        "https://www.facebook.com/watch/?v=123",
+        "https://www.facebook.com/reel/123",
+        "https://www.facebook.com/reels/123",
+    ],
+)
+def test_canonicalize_explicit_fb_entrypoint_url_rejects_non_page_content_routes(url: str) -> None:
+    assert night_mode_fb._canonicalize_explicit_fb_entrypoint_url(url) is None
+
+
+@pytest.mark.parametrize(
+    "value_key,url",
+    [
+        ("Facebook_URL", "https://www.facebook.com/photo.php?fbid=123"),
+        ("Facebook_URL", "https://www.facebook.com/permalink.php?story_fbid=123&id=456"),
+        ("Facebook_URL", "https://www.facebook.com/watch/?v=123"),
+        ("Social Link", "https://www.facebook.com/reel/123"),
+        ("Social Link", "https://www.facebook.com/reels/123"),
+    ],
+)
+def test_explicit_fb_entrypoint_urls_reject_non_page_content_routes(value_key: str, url: str) -> None:
+    assert night_mode_fb.explicit_fb_entrypoint_urls_for_row({"Artist Name": "Test Artist", value_key: url}) == []
+
+
 def test_profile_php_explicit_urls_deduped(monkeypatch) -> None:
     enricher = night_mode_fb.NightModeFacebookEnricher(
         legacy_module=None,
@@ -1647,6 +1675,48 @@ def test_guard_rejected_explicit_url_logs_reason(monkeypatch) -> None:
     assert result.get("FB_Status")
     assert any('[Night FB][Explicit Intake]' in msg and 'outcome="attempt"' in msg and 'guard_reason="shape_disallowed"' in msg for msg in logs)
     assert any('[Night FB][Explicit Guard]' in msg and 'reason="shape_disallowed"' in msg for msg in logs)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://www.facebook.com/photo.php?fbid=123",
+        "https://www.facebook.com/permalink.php?story_fbid=123&id=456",
+        "https://www.facebook.com/watch/?v=123",
+        "https://www.facebook.com/reel/123",
+        "https://www.facebook.com/reels/123",
+    ],
+)
+def test_non_page_explicit_fb_content_routes_do_not_trigger_pass_a(monkeypatch, url: str) -> None:
+    enricher = night_mode_fb.NightModeFacebookEnricher(
+        legacy_module=None,
+        username="",
+        password="",
+        logger=None,
+        use_shared_session=False,
+    )
+    monkeypatch.setattr(enricher, "_ensure_session", lambda: None)
+    monkeypatch.setattr(
+        enricher,
+        "_search_for_page",
+        lambda *args, **kwargs: "",
+    )
+    monkeypatch.setattr(
+        night_mode_fb.NightModeFacebookEnricher,
+        "_scrape_single_fb_candidate",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("explicit PASS A should not run for non-page content routes")),
+    )
+
+    result = enricher.enrich_row_with_facebook_night(
+        {
+            "Artist Name": "Content Route",
+            "Email": "",
+            "Email_All": "",
+            "Facebook_URL": url,
+        }
+    )
+
+    assert result.get("FB_Status") == "pass_a_skipped_no_fb_url"
 
 
 def test_fetch_html_with_url_logs_healthy_page_health(monkeypatch) -> None:
