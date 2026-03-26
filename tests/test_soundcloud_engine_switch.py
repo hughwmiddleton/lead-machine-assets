@@ -227,6 +227,43 @@ class SoundCloudEngineSwitchTests(unittest.TestCase):
         self.assertTrue(result)
         self.assertGreaterEqual(fallback_called["count"], 1)
 
+    def test_night_sc_attempt_uses_promoted_unearthed_seed_url_first(self) -> None:
+        df = pd.DataFrame(
+            [
+                {
+                    "Artist Name": "jski",
+                    "Source Directory": "Triple J Unearthed",
+                    "Social Link": "https://on.soundcloud.com/fTC9tqogxYPeIMMA3P",
+                    "External Links": "",
+                    "SoundCloud Link": "",
+                    "SC_Status": "",
+                    "SC_Reason": "",
+                }
+            ]
+        ).fillna("")
+        enricher._apply_unearthed_platform_promotion_df(df)
+
+        worker = self._make_worker()
+        worker.night_mode = True
+        worker._live_context = {"song_title": "", "location": "", "track": "", "genre": ""}
+
+        seen = {}
+
+        def fake_cache_lookup(handle, profile_url):
+            seen["handle"] = handle
+            seen["profile_url"] = profile_url
+            return {"payload": None, "reason": "cache_hit", "http": 200, "fetches": 0, "confidence": 1.0, "match_score": 1.0}
+
+        worker._night_sc_cache_lookup = fake_cache_lookup
+        worker._apply_sc_snapshot_to_row = lambda *args, **kwargs: False
+        worker._finalize_night_sc = lambda *args, **kwargs: None
+
+        result = worker._night_sc_attempt_row(df, 0, "jski")
+
+        self.assertFalse(result)
+        self.assertEqual(df.at[0, "SoundCloud Link"], "https://on.soundcloud.com/fTC9tqogxYPeIMMA3P")
+        self.assertEqual(seen["profile_url"], "https://on.soundcloud.com/fTC9tqogxYPeIMMA3P")
+
     def test_pick_best_soundcloud_candidate_prefers_metadata_aligned_ambiguous_match(self) -> None:
         worker = self._make_worker()
         worker._compute_match_score_for_candidate = lambda *args, **kwargs: 0.0

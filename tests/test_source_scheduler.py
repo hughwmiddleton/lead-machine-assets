@@ -218,6 +218,174 @@ def test_preferred_upstream_identity_hint_returns_empty_without_provider_signal(
     assert preferred_upstream_identity_hint(row) == ""
 
 
+def test_unearthed_soundcloud_source_link_promotes_into_soundcloud_field():
+    import pandas as pd
+    import cross_directory_enricher as cde
+
+    df = pd.DataFrame(
+        [
+            {
+                "Artist Name": "jski",
+                "Source Directory": "Triple J Unearthed",
+                "Social Link": "https://on.soundcloud.com/fTC9tqogxYPeIMMA3P | https://www.instagram.com/jski",
+                "External Links": "",
+                "SoundCloud Link": "",
+                "Bandcamp_URL": "",
+            }
+        ],
+        dtype=str,
+    ).fillna("")
+
+    promoted = cde._apply_unearthed_platform_promotion_df(df.copy())
+
+    assert promoted.at[0, "SoundCloud Link"] == "https://on.soundcloud.com/fTC9tqogxYPeIMMA3P"
+
+
+def test_unearthed_soundcloud_directory_discovery_skips_when_source_url_present(monkeypatch):
+    import pandas as pd
+    import cross_directory_enricher as cde
+
+    monkeypatch.setattr(cde.CrossDirectoryEnricherWorker, "__init__", lambda self, *a, **k: None)
+
+    logs = []
+
+    class Log:
+        @staticmethod
+        def emit(msg, *args, **kwargs):
+            logs.append(str(msg))
+
+    worker = cde.CrossDirectoryEnricherWorker(None, None)
+    worker.log_message = Log()
+    worker._find_directory_matches = lambda *args, **kwargs: pytest.fail("same-platform discovery should be skipped")
+    worker._payload_from_directory_matches = lambda *args, **kwargs: pytest.fail("payload build should be skipped")
+    worker._apply_payload_guarded = lambda *args, **kwargs: pytest.fail("payload apply should be skipped")
+    worker._apply_structured_fields = lambda *args, **kwargs: False
+
+    seed_df = pd.DataFrame(
+        [
+            {
+                "Artist Name": "jski",
+                "Source Directory": "Triple J Unearthed",
+                "Social Link": "https://on.soundcloud.com/fTC9tqogxYPeIMMA3P",
+                "External Links": "",
+                "SoundCloud Link": "",
+                "Bandcamp_URL": "",
+            }
+        ],
+        dtype=str,
+    ).fillna("")
+    seed_df = cde._apply_unearthed_platform_promotion_df(seed_df)
+
+    result = worker._enrich_row_directories(
+        seed_df,
+        0,
+        directory_indexes={"soundcloud": object()},
+        priority=["soundcloud"],
+        ctx={
+            "artist": "jski",
+            "key": "jski",
+            "track_key": "",
+            "spotify_id": "",
+            "seed_links_by_source": {},
+            "position": 1,
+            "total": 1,
+        },
+    )
+
+    assert result is False
+    assert any("[SoundCloud] skipping discovery (Unearthed URL present)" in line for line in logs)
+
+
+def test_unearthed_soundcloud_fallback_runs_when_seed_url_invalid(monkeypatch):
+    import pandas as pd
+    import types
+    import cross_directory_enricher as cde
+
+    monkeypatch.setattr(cde.CrossDirectoryEnricherWorker, "__init__", lambda self, *a, **k: None)
+
+    worker = cde.CrossDirectoryEnricherWorker(None, None)
+    worker.log_message = type("Logger", (), {"emit": lambda *args, **kwargs: None})()
+    worker.night_mode = False
+    worker._sc_live_enrich_disabled = False
+    worker._row_allows_heavy_enricher = lambda *args, **kwargs: types.SimpleNamespace(allowed=True)
+    live_calls = []
+    worker._live_search_soundcloud = lambda artist: live_calls.append(artist) or None
+    worker._mark_sc_blocked_row = lambda *args, **kwargs: False
+    worker._apply_payload_guarded = lambda *args, **kwargs: False
+    worker._set_platform_state = lambda *args, **kwargs: None
+    worker._log_low_confidence_skip = lambda *args, **kwargs: None
+
+    seed_df = pd.DataFrame(
+        [
+            {
+                "Artist Name": "jski",
+                "Source Directory": "Triple J Unearthed",
+                "Social Link": "https://soundcloud.com/search?q=jski",
+                "External Links": "",
+                "SoundCloud Link": "",
+            }
+        ],
+        dtype=str,
+    ).fillna("")
+    seed_df = cde._apply_unearthed_platform_promotion_df(seed_df)
+
+    enriched, skip_rest = worker._enrich_row_sc_live(
+        seed_df,
+        0,
+        {"artist": "jski", "spotify_id": ""},
+    )
+
+    assert seed_df.at[0, "SoundCloud Link"] == ""
+    assert enriched is False
+    assert skip_rest is False
+    assert live_calls == ["jski"]
+
+
+def test_non_unearthed_soundcloud_social_link_does_not_change_sc_behavior(monkeypatch):
+    import pandas as pd
+    import types
+    import cross_directory_enricher as cde
+
+    monkeypatch.setattr(cde.CrossDirectoryEnricherWorker, "__init__", lambda self, *a, **k: None)
+
+    worker = cde.CrossDirectoryEnricherWorker(None, None)
+    worker.log_message = type("Logger", (), {"emit": lambda *args, **kwargs: None})()
+    worker.night_mode = False
+    worker._sc_live_enrich_disabled = False
+    worker._row_allows_heavy_enricher = lambda *args, **kwargs: types.SimpleNamespace(allowed=True)
+    live_calls = []
+    worker._live_search_soundcloud = lambda artist: live_calls.append(artist) or None
+    worker._mark_sc_blocked_row = lambda *args, **kwargs: False
+    worker._apply_payload_guarded = lambda *args, **kwargs: False
+    worker._set_platform_state = lambda *args, **kwargs: None
+    worker._log_low_confidence_skip = lambda *args, **kwargs: None
+
+    seed_df = pd.DataFrame(
+        [
+            {
+                "Artist Name": "Control Artist",
+                "Source Directory": "Spotify",
+                "Social Link": "https://on.soundcloud.com/fTC9tqogxYPeIMMA3P",
+                "External Links": "",
+                "SoundCloud Link": "",
+            }
+        ],
+        dtype=str,
+    ).fillna("")
+    seed_df = cde._apply_unearthed_platform_promotion_df(seed_df)
+
+    enriched, skip_rest = worker._enrich_row_sc_live(
+        seed_df,
+        0,
+        {"artist": "Control Artist", "spotify_id": ""},
+    )
+
+    assert seed_df.at[0, "SoundCloud Link"] == ""
+    assert enriched is False
+    assert skip_rest is False
+    assert live_calls == ["Control Artist"]
+
+
 def test_scheduler_mode_skips_legacy_phases(monkeypatch):
     # Build a worker instance without running QThread.__init__
     from cross_directory_enricher import CrossDirectoryEnricherWorker

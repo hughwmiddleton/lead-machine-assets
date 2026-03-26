@@ -6510,6 +6510,147 @@ def _apply_fb_promotion_df(df: pd.DataFrame, log_fn: Optional[Callable[[str], No
     return df
 
 
+_UNEARTHED_BC_RESERVED_SUBDOMAINS = frozenset(
+    {
+        "bandcamp",
+        "blog",
+        "daily",
+        "discover",
+        "get",
+        "help",
+        "music",
+    }
+)
+_UNEARTHED_SC_RESERVED_HANDLES = frozenset(
+    {
+        "charts",
+        "discover",
+        "explore",
+        "feed",
+        "imprint",
+        "pages",
+        "popular",
+        "search",
+        "stream",
+        "terms-of-use",
+        "transparency-reports",
+        "upload",
+        "you",
+    }
+)
+
+
+def _is_valid_unearthed_soundcloud_url(value: str) -> bool:
+    normalised = _normalise_url(value or "")
+    if not normalised:
+        return False
+    try:
+        parsed = urllib.parse.urlparse(normalised)
+    except Exception:
+        return False
+    host = (parsed.netloc or "").lower()
+    if host.startswith("www."):
+        host = host[4:]
+    if host == "on.soundcloud.com":
+        return bool((parsed.path or "").strip("/"))
+    handle = _sc_handle_from_profile_url(normalised)
+    return bool(handle and handle not in _UNEARTHED_SC_RESERVED_HANDLES)
+
+
+def _is_valid_unearthed_bandcamp_url(value: str) -> bool:
+    canonical = _canonicalise_bandcamp_url(value or "")
+    if not canonical:
+        return False
+    try:
+        parsed = urllib.parse.urlparse(canonical)
+    except Exception:
+        return False
+    host = (parsed.netloc or "").lower()
+    if host.startswith("www."):
+        host = host[4:]
+    if host == "bandcamp.com" or not host.endswith(".bandcamp.com"):
+        return False
+    subdomain = host[: -len(".bandcamp.com")]
+    if not subdomain or "." in subdomain:
+        return False
+    return subdomain not in _UNEARTHED_BC_RESERVED_SUBDOMAINS
+
+
+def _extract_unearthed_platform_url(row: Any, platform: str) -> str:
+    if row is None or not _row_is_unearthed_source(row):
+        return ""
+
+    if platform == "soundcloud":
+        fields = (
+            "SoundCloud Link",
+            "SoundCloud URL",
+            "SoundCloud_URL",
+            "Soundcloud Link",
+            "soundcloud_url",
+            "Social Link",
+            "External Links",
+        )
+        validator = _is_valid_unearthed_soundcloud_url
+        canonicalizer = _normalise_url
+    elif platform == "bandcamp":
+        fields = (
+            "Bandcamp_URL",
+            "Bandcamp URL",
+            "Bandcamp Link",
+            "bandcamp_url",
+            "Social Link",
+            "External Links",
+        )
+        validator = _is_valid_unearthed_bandcamp_url
+        canonicalizer = _canonicalise_bandcamp_url
+    else:
+        return ""
+
+    for field in fields:
+        try:
+            raw_value = row.get(field, "") if hasattr(row, "get") else row[field]
+        except Exception:
+            raw_value = ""
+        for token in _split_multi_value(raw_value):
+            if not validator(token):
+                continue
+            canonical = canonicalizer(token)
+            return canonical or token
+    return ""
+
+
+def _apply_unearthed_platform_promotion_df(
+    df: pd.DataFrame,
+    log_fn: Optional[Callable[[str], None]] = None,
+) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    if "SoundCloud Link" not in df.columns:
+        df["SoundCloud Link"] = ""
+    if "Bandcamp_URL" not in df.columns:
+        df["Bandcamp_URL"] = ""
+
+    promoted_soundcloud = 0
+    promoted_bandcamp = 0
+    for idx in df.index:
+        row = df.loc[idx]
+        soundcloud_url = _extract_unearthed_platform_url(row, "soundcloud")
+        if soundcloud_url and not _is_valid_unearthed_soundcloud_url(_coerce_directory_value(df.at[idx, "SoundCloud Link"])):
+            df.at[idx, "SoundCloud Link"] = soundcloud_url
+            promoted_soundcloud += 1
+
+        bandcamp_url = _extract_unearthed_platform_url(row, "bandcamp")
+        if bandcamp_url and not _is_valid_unearthed_bandcamp_url(_coerce_directory_value(df.at[idx, "Bandcamp_URL"])):
+            df.at[idx, "Bandcamp_URL"] = bandcamp_url
+            promoted_bandcamp += 1
+
+    if log_fn and promoted_soundcloud:
+        _safe_log(log_fn, "[Unearthed Links] promoted SoundCloud from source for %s rows", promoted_soundcloud)
+    if log_fn and promoted_bandcamp:
+        _safe_log(log_fn, "[Unearthed Links] promoted Bandcamp from source for %s rows", promoted_bandcamp)
+    return df
+
+
 def _dedupe_rows(rows: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
     deduped: List[Dict[str, Any]] = []
     seen_ids: Set[int] = set()
@@ -8676,12 +8817,21 @@ class CrossDirectoryEnricherWorker(QThread):
         seed_links_by_source = ctx["seed_links_by_source"]
         position = ctx["position"]
         total = ctx["total"]
+        row = seed_df.loc[row_idx]
+        unearthed_soundcloud_url = _extract_unearthed_platform_url(row, "soundcloud")
+        unearthed_bandcamp_url = _extract_unearthed_platform_url(row, "bandcamp")
         enriched = False
         matches_used: List[Tuple[str, Dict[str, Any]]] = []
         sources_logged: List[str] = []
         for source in priority:
             directory_index = directory_indexes.get(source)
             if not directory_index:
+                continue
+            if source == "soundcloud" and unearthed_soundcloud_url:
+                self.log_message.emit("[SoundCloud] skipping discovery (Unearthed URL present)")
+                continue
+            if source == "bandcamp" and unearthed_bandcamp_url:
+                self.log_message.emit("[Bandcamp] skipping discovery (Unearthed URL present)")
                 continue
             url_candidates = list(seed_links_by_source.get(source, ()))
             matches = self._find_directory_matches(
@@ -8731,18 +8881,26 @@ class CrossDirectoryEnricherWorker(QThread):
         """
         artist = ctx["artist"]
         spotify_id = ctx["spotify_id"]
+        unearthed_soundcloud_url = _extract_unearthed_platform_url(seed_df.loc[row_idx], "soundcloud")
         decision = self._row_allows_heavy_enricher(seed_df.loc[row_idx], ctx, "soundcloud")
         if not decision.allowed:
             self._log_low_confidence_skip("soundcloud", artist, decision)
             self._set_platform_state("soundcloud", "skipped")
             return (False, False)
-        if not _coerce_directory_value(seed_df.at[row_idx, "SoundCloud Link"]):
+        current_sc_link = _coerce_directory_value(seed_df.at[row_idx, "SoundCloud Link"])
+        if current_sc_link:
+            if unearthed_soundcloud_url:
+                self.log_message.emit("[SoundCloud] skipping discovery (Unearthed URL present)")
+            return (False, False)
+        if not current_sc_link:
             if getattr(self, "_sc_live_enrich_disabled", False):
                 reason = self._sc_live_enrich_disabled_reason or "first_challenge_page"
                 self.log_message.emit(
                     f"[Enricher][SC] Live enrichment disabled (reason={reason}); skipping live SC check for '{artist}'."
                 )
             else:
+                if _row_is_unearthed_source(seed_df.loc[row_idx]) and not unearthed_soundcloud_url:
+                    self.log_message.emit("[SoundCloud] using discovery fallback (no valid Unearthed URL)")
                 self.log_message.emit(
                     f"[Enricher] SoundCloud live check for '{artist}' (current SC link missing)."
                 )
@@ -9528,6 +9686,7 @@ class CrossDirectoryEnricherWorker(QThread):
             os.getenv("SOURCE_DIVERSITY_SCHEDULER", "0").strip().lower() in {"1", "true", "yes", "on"}
         )
         self._unearthed_fb_first_row_ids = self._collect_unearthed_fb_first_row_ids(seed_df)
+        seed_df = _apply_unearthed_platform_promotion_df(seed_df, log_fn=self.log_message.emit)
         if use_scheduler:
             self.log_message.emit("[Enricher] Source diversity scheduler=ON (round-robin)")
         try:
@@ -9578,6 +9737,7 @@ class CrossDirectoryEnricherWorker(QThread):
     def _run_row_linear(self, seed_df, directory_indexes, priority, fb_driver, total):
         """Run row-linear enrichment while preserving the Unearthed explicit-FB fast path."""
         self._unearthed_fb_first_row_ids = self._collect_unearthed_fb_first_row_ids(seed_df)
+        seed_df = _apply_unearthed_platform_promotion_df(seed_df, log_fn=self.log_message.emit)
         try:
             for position, row_idx in enumerate(seed_df.index, start=1):
                 if self._should_bypass_unearthed_shared_enrichers(row_idx):
@@ -9662,6 +9822,7 @@ class CrossDirectoryEnricherWorker(QThread):
     def _run_interleaved_sources(self, seed_df, fb_driver, total):
         """Interleave SC, LF (live lookup), and FB across rows to avoid bursts."""
 
+        seed_df = _apply_unearthed_platform_promotion_df(seed_df, log_fn=self.log_message.emit)
         seed_df = _apply_fb_promotion_df(seed_df, log_fn=self.log_message.emit)
         rows = [
             row_idx
