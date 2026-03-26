@@ -9163,7 +9163,10 @@ class NightModeFacebookEnricher:
             # Unearthed rows with an explicit accepted FB URL should use the
             # same PASS A path as other explicit rows. Keep legacy fallback
             # only for true no-URL Unearthed rows.
-            if is_unearthed and not has_seeded_fb:
+            rejected_seeded_fb = bool(
+                explicit_intake.outcome == "reject_invalid" and explicit_intake.rejected_invalid
+            )
+            if is_unearthed and not has_seeded_fb and not rejected_seeded_fb:
                 _log(self.logger, "[Unearthed Path] no usable FB URL; skipping Night FB discovery")
                 return _finish(result, attempted=False)
             if is_unearthed and not fb_urls:

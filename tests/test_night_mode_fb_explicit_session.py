@@ -329,6 +329,59 @@ def test_unearthed_without_seeded_fb_skips_night_discovery(monkeypatch, enricher
     assert not any("[Unearthed Path] entering Unearthed no-URL FB discovery" in msg for msg in logs)
 
 
+def test_unearthed_rejected_invalid_share_url_uses_existing_no_url_recovery(monkeypatch, enricher):
+    logs = []
+    enricher.logger = lambda msg: logs.append(msg)
+    monkeypatch.setattr(enricher, "_maybe_recover_or_skip_on_checkpoint", lambda: True)
+    monkeypatch.setattr(
+        enricher,
+        "_has_authenticated_session",
+        lambda: (_ for _ in ()).throw(AssertionError("rejected share URL must not enter PASS A")),
+    )
+
+    observed = {}
+
+    def fake_unearthed_legacy(result, artist_name, fb_urls):
+        observed["artist_name"] = artist_name
+        observed["fb_urls"] = list(fb_urls)
+        payload = dict(result)
+        payload["FB_Status"] = "unearthed_no_candidates"
+        return payload
+
+    monkeypatch.setattr(enricher, "_enrich_row_unearthed_legacy", fake_unearthed_legacy)
+    monkeypatch.setattr(
+        nmfb.NightModeFacebookEnricher,
+        "_scrape_single_fb_candidate",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("rejected share URL must not be scraped")),
+    )
+
+    row = {
+        "Artist Name": "Unearthed Rejected Share",
+        "Source Directory": "unearthed",
+        "Email": "",
+        "Email_All": "",
+        "Facebook_URL": "",
+        "Social Link": "https://www.facebook.com/share/19BActwuev?mibextid=wwXIfr",
+    }
+
+    decision = nmfb.classify_explicit_fb_intake(row)
+
+    result = enricher.enrich_row_with_facebook_night(row)
+
+    assert decision.outcome == "reject_invalid"
+    assert decision.accepted_urls == []
+    assert decision.rejected_invalid == ["https://www.facebook.com/share/19BActwuev?mibextid=wwXIfr"]
+    assert nmfb.explicit_fb_entrypoint_urls_for_row(row) == []
+    assert observed == {
+        "artist_name": "Unearthed Rejected Share",
+        "fb_urls": [],
+    }
+    assert result.get("FB_Status") == "unearthed_no_candidates"
+    assert any('[Night FB][Explicit Intake]' in msg and 'outcome="reject_invalid"' in msg for msg in logs)
+    assert any("[Unearthed Path] no usable FB URL; allowing bounded FB discovery" in msg for msg in logs)
+    assert not any("[Unearthed Path] no usable FB URL; skipping Night FB discovery" in msg for msg in logs)
+
+
 def test_non_unearthed_without_seeded_fb_still_runs_search(monkeypatch, enricher):
     search_calls = []
     monkeypatch.setattr(enricher, "_maybe_recover_or_skip_on_checkpoint", lambda: True)
@@ -360,6 +413,42 @@ def test_non_unearthed_without_seeded_fb_still_runs_search(monkeypatch, enricher
 
     assert search_calls == [("Spotify Discovery", "", True, "")]
     assert result.get("FB_Status") == "pass_a_skipped_no_fb_url"
+
+
+def test_non_unearthed_rejected_invalid_share_url_still_uses_standard_search(monkeypatch, enricher):
+    logs = []
+    enricher.logger = lambda msg: logs.append(msg)
+    search_calls = []
+    monkeypatch.setattr(enricher, "_maybe_recover_or_skip_on_checkpoint", lambda: True)
+    monkeypatch.setattr(enricher, "_ensure_session", lambda: None)
+    monkeypatch.setattr(enricher, "_should_allow_anonymous", lambda row: True)
+    monkeypatch.setattr(
+        enricher,
+        "_search_for_page",
+        lambda artist_name, location="", allow_anon=True, song_title="", row=None: search_calls.append(
+            (artist_name, location, allow_anon, song_title)
+        ) or "",
+    )
+    monkeypatch.setattr(
+        nmfb.NightModeFacebookEnricher,
+        "_scrape_single_fb_candidate",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("rejected share URL must not be scraped")),
+    )
+
+    row = {
+        "Artist Name": "Spotify Rejected Share",
+        "Source Directory": "spotify",
+        "Email": "",
+        "Email_All": "",
+        "Facebook_URL": "",
+        "Social Link": "https://www.facebook.com/share/19BActwuev?mibextid=wwXIfr",
+    }
+
+    result = enricher.enrich_row_with_facebook_night(row)
+
+    assert search_calls == [("Spotify Rejected Share", "", True, "")]
+    assert result.get("FB_Status") == "pass_a_skipped_no_fb_url"
+    assert any('[Night FB][Explicit Intake]' in msg and 'outcome="reject_invalid"' in msg for msg in logs)
 
 
 def test_non_unearthed_explicit_url_still_skips_legacy_helper(monkeypatch, enricher):
