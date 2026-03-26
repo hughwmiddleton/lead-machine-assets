@@ -56,6 +56,93 @@ def test_fetch_instagram_profile_html_uses_shared_fallback_for_unusable_initial_
     assert fallback_kwargs["timeout_s"] == cde.HTTP_TIMEOUT
 
 
+def test_instagram_profile_fetch_scope_static_mode_does_not_open_live_page(monkeypatch):
+    class DummySession:
+        def get(self, url, timeout=None, allow_redirects=None):  # noqa: ANN001
+            return SimpleNamespace(
+                status_code=200,
+                text=(
+                    "<html><head><meta property='og:description' content='Bookings: bookings@artist.com'></head>"
+                    "<body><div>Official profile</div></body></html>"
+                ),
+            )
+
+    monkeypatch.setattr(
+        cde,
+        "_open_instagram_live_page_bridge",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("live bridge should not open")),
+    )
+
+    with cde._instagram_profile_fetch_scope(
+        DummySession(),
+        "https://www.instagram.com/igartist/",
+        retain_live_page=False,
+    ) as result:
+        assert result.status == 200
+        assert "bookings@artist.com" in result.html
+        assert result.live_page is None
+
+
+def test_instagram_profile_fetch_scope_bridge_returns_live_page_and_closes_it(monkeypatch):
+    class DummySession:
+        def get(self, url, timeout=None, allow_redirects=None):  # noqa: ANN001
+            return SimpleNamespace(
+                status_code=200,
+                text=(
+                    "<html><head><meta property='og:description' content='Official profile'></head>"
+                    "<body><div>No email yet</div></body></html>"
+                ),
+            )
+
+    class DummyClosable:
+        def __init__(self):
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    class DummyPage(DummyClosable):
+        def __init__(self, html):
+            super().__init__()
+            self._html = html
+            self.click_calls = 0
+
+        def content(self):
+            return self._html
+
+        def click(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            self.click_calls += 1
+
+    bridge = cde.InstagramLivePageBridge(
+        playwright=DummyClosable(),
+        browser=DummyClosable(),
+        context=DummyClosable(),
+        page=DummyPage(
+            "<html><head><meta property='og:description' content='Official live profile'></head>"
+            "<body><div>Rendered profile</div></body></html>"
+        ),
+    )
+
+    monkeypatch.setattr(cde, "_open_instagram_live_page_bridge", lambda *args, **kwargs: bridge)
+
+    with cde._instagram_profile_fetch_scope(
+        DummySession(),
+        "https://www.instagram.com/igartist/",
+        retain_live_page=True,
+    ) as result:
+        assert result.status == 200
+        assert "Official live profile" in result.html
+        assert result.live_page is bridge
+        assert result.live_page.page.click_calls == 0
+        assert result.live_page.closed is False
+
+    assert bridge.closed is True
+    assert bridge.page.closed is True
+    assert bridge.context.closed is True
+    assert bridge.browser.closed is True
+    assert bridge.playwright.closed is True
+
+
 def test_instagram_email_falls_back_when_requests_html_has_no_profile_signal(monkeypatch):
     logs = []
     worker = _make_worker(logs)

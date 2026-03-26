@@ -17,6 +17,7 @@ import time
 import unicodedata
 import urllib.parse
 from collections import Counter, deque
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
@@ -2721,8 +2722,111 @@ def _instagram_profile_requests_html_usable(status: Optional[int], html: str) ->
     return soup.select_one(_INSTAGRAM_REQUIRED_SELECTOR) is not None
 
 
-def _fetch_instagram_profile_html(session: requests.Session, url: str) -> Tuple[str, Optional[int]]:
-    """Fetch a single Instagram profile page with one bounded shared fallback."""
+@dataclass
+class InstagramLivePageBridge:
+    playwright: Any
+    browser: Any
+    context: Any
+    page: Any
+    closed: bool = False
+
+    def snapshot_html(self) -> str:
+        if self.closed:
+            return ""
+        try:
+            return cell_to_str(self.page.content())
+        except Exception:
+            return ""
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        self.closed = True
+        try:
+            self.page.close()
+        except Exception:
+            pass
+        try:
+            self.context.close()
+        except Exception:
+            pass
+        try:
+            self.browser.close()
+        except Exception:
+            pass
+        try:
+            stop_fn = getattr(self.playwright, "stop", None)
+            if callable(stop_fn):
+                stop_fn()
+            else:
+                close_fn = getattr(self.playwright, "close", None)
+                if callable(close_fn):
+                    close_fn()
+        except Exception:
+            pass
+
+
+@dataclass
+class InstagramProfileFetchResult:
+    html: str
+    status: Optional[int]
+    live_page: Optional[InstagramLivePageBridge] = None
+
+
+def _load_instagram_playwright():
+    from playwright.sync_api import sync_playwright
+
+    return sync_playwright
+
+
+def _open_instagram_live_page_bridge(
+    url: str,
+    *,
+    timeout_s: float = HTTP_TIMEOUT,
+) -> Optional[InstagramLivePageBridge]:
+    playwright = None
+    browser = None
+    context = None
+    page = None
+    try:
+        sync_playwright = _load_instagram_playwright()
+        playwright = sync_playwright().start()
+        headless = str(os.getenv("PLAYWRIGHT_HEADLESS", "1")).lower() not in {"0", "false", "off"}
+        browser = playwright.chromium.launch(headless=headless)
+        context = browser.new_context()
+        page = context.new_page()
+        page.goto(url, wait_until="domcontentloaded", timeout=timeout_s * 1000)
+        return InstagramLivePageBridge(
+            playwright=playwright,
+            browser=browser,
+            context=context,
+            page=page,
+        )
+    except Exception:
+        if page is not None:
+            try:
+                page.close()
+            except Exception:
+                pass
+        if context is not None:
+            try:
+                context.close()
+            except Exception:
+                pass
+        if browser is not None:
+            try:
+                browser.close()
+            except Exception:
+                pass
+        if playwright is not None:
+            try:
+                playwright.stop()
+            except Exception:
+                pass
+        return None
+
+
+def _request_instagram_profile_html(session: requests.Session, url: str) -> Tuple[str, Optional[int]]:
     if not session or not url:
         return ("", None)
     html = ""
@@ -2734,9 +2838,46 @@ def _fetch_instagram_profile_html(session: requests.Session, url: str) -> Tuple[
     except Exception:
         status = None
         html = ""
+    return (html, status)
+
+
+def _fetch_instagram_profile_result(
+    session: requests.Session,
+    url: str,
+    *,
+    retain_live_page: bool = False,
+) -> InstagramProfileFetchResult:
+    html, status = _request_instagram_profile_html(session, url)
     if _instagram_profile_requests_html_usable(status, html):
-        return (html, status)
+        if not retain_live_page:
+            return InstagramProfileFetchResult(html=html, status=status)
+        soup = BeautifulSoup(html, "html.parser")
+        if _extract_instagram_profile_candidate_emails(html, soup=soup):
+            return InstagramProfileFetchResult(html=html, status=status)
+        live_page = _open_instagram_live_page_bridge(url, timeout_s=HTTP_TIMEOUT)
+        if live_page is not None:
+            live_html = live_page.snapshot_html()
+            if _instagram_profile_fetch_usable(200, live_html):
+                return InstagramProfileFetchResult(
+                    html=live_html,
+                    status=200,
+                    live_page=live_page,
+                )
+            live_page.close()
+        return InstagramProfileFetchResult(html=html, status=status)
+
     try:
+        if retain_live_page:
+            live_page = _open_instagram_live_page_bridge(url, timeout_s=HTTP_TIMEOUT)
+            if live_page is not None:
+                live_html = live_page.snapshot_html()
+                if _instagram_profile_fetch_usable(200, live_html):
+                    return InstagramProfileFetchResult(
+                        html=live_html,
+                        status=200,
+                        live_page=live_page,
+                    )
+                live_page.close()
         fallback = fetch_html(
             url,
             session=session,
@@ -2746,12 +2887,41 @@ def _fetch_instagram_profile_html(session: requests.Session, url: str) -> Tuple[
             timeout_s=HTTP_TIMEOUT,
         )
     except Exception:
-        return (html, status)
+        return InstagramProfileFetchResult(html=html, status=status)
     fallback_html = str(fallback.get("html") or "")
     fallback_status = fallback.get("status")
     if fallback_status == 200 and fallback_html:
-        return (fallback_html, fallback_status)
-    return (html, status)
+        return InstagramProfileFetchResult(html=fallback_html, status=fallback_status)
+    return InstagramProfileFetchResult(html=html, status=status)
+
+
+@contextmanager
+def _instagram_profile_fetch_scope(
+    session: requests.Session,
+    url: str,
+    *,
+    retain_live_page: bool = False,
+):
+    if retain_live_page:
+        result = _fetch_instagram_profile_result(
+            session,
+            url,
+            retain_live_page=True,
+        )
+    else:
+        html, status = _fetch_instagram_profile_html(session, url)
+        result = InstagramProfileFetchResult(html=html, status=status)
+    try:
+        yield result
+    finally:
+        if result.live_page is not None:
+            result.live_page.close()
+
+
+def _fetch_instagram_profile_html(session: requests.Session, url: str) -> Tuple[str, Optional[int]]:
+    """Fetch a single Instagram profile page with one bounded shared fallback."""
+    result = _fetch_instagram_profile_result(session, url, retain_live_page=False)
+    return (result.html, result.status)
 
 
 def _row_has_facebook_or_email(row) -> bool:
@@ -8527,46 +8697,48 @@ class CrossDirectoryEnricherWorker(QThread):
 
         email_before = _row_email_summary_snapshot(seed_df, row_idx)
         self.log_message.emit(f"[IG Email] Visiting {ig_url}")
-        html, status = _fetch_instagram_profile_html(self.session, ig_url)
-        if status != 200:
-            self.log_message.emit(f"[IG Email] fetch_failed status={status}")
-            self._set_platform_state("instagram", "skipped")
-            return False
-        if not _instagram_profile_fetch_usable(status, html):
-            html_chars = len((html or "").strip())
-            self.log_message.emit(f"[IG Email] blocked_or_empty status={status} chars={html_chars}")
-            self._set_platform_state("instagram", "skipped")
-            return False
+        with _instagram_profile_fetch_scope(self.session, ig_url, retain_live_page=False) as profile_fetch:
+            html = profile_fetch.html
+            status = profile_fetch.status
+            if status != 200:
+                self.log_message.emit(f"[IG Email] fetch_failed status={status}")
+                self._set_platform_state("instagram", "skipped")
+                return False
+            if not _instagram_profile_fetch_usable(status, html):
+                html_chars = len((html or "").strip())
+                self.log_message.emit(f"[IG Email] blocked_or_empty status={status} chars={html_chars}")
+                self._set_platform_state("instagram", "skipped")
+                return False
 
-        soup = BeautifulSoup(html, "html.parser")
-        all_ig_emails = _extract_instagram_profile_candidate_emails(html, soup=soup)
-        selected_source_url = ig_url
-        selected_extract_method = "regex"
-        selected_surface = "instagram_profile"
-        if not all_ig_emails and not _row_has_email(seed_df.loc[row_idx]):
-            bio_link_urls = _collect_instagram_bio_link_fetch_urls(
-                html,
-                soup=soup,
-                profile_url=ig_url,
-            )
-            if bio_link_urls:
-                bio_link_result = _fetch_website_html_bounded(
-                    self.session,
-                    bio_link_urls[0],
-                    timeout_s=WEBSITE_EMAIL_TIMEOUT,
-                    max_bytes=WEBSITE_EMAIL_MAX_BYTES,
+            soup = BeautifulSoup(html, "html.parser")
+            all_ig_emails = _extract_instagram_profile_candidate_emails(html, soup=soup)
+            selected_source_url = ig_url
+            selected_extract_method = "regex"
+            selected_surface = "instagram_profile"
+            if not all_ig_emails and not _row_has_email(seed_df.loc[row_idx]):
+                bio_link_urls = _collect_instagram_bio_link_fetch_urls(
+                    html,
+                    soup=soup,
+                    profile_url=ig_url,
                 )
-                if bio_link_result.is_html and bio_link_result.html:
-                    bio_link_soup = BeautifulSoup(bio_link_result.html, "html.parser")
-                    all_ig_emails = _extract_static_page_candidate_emails(
-                        bio_link_result.html,
-                        soup=bio_link_soup,
+                if bio_link_urls:
+                    bio_link_result = _fetch_website_html_bounded(
+                        self.session,
+                        bio_link_urls[0],
+                        timeout_s=WEBSITE_EMAIL_TIMEOUT,
+                        max_bytes=WEBSITE_EMAIL_MAX_BYTES,
                     )
-                    _, used_mailto = _mailto_emails_from_soup(bio_link_soup)
-                    if all_ig_emails:
-                        selected_source_url = bio_link_result.final_url or bio_link_urls[0]
-                        selected_extract_method = "mailto" if used_mailto else "regex"
-                        selected_surface = "instagram_bio_link_one_hop"
+                    if bio_link_result.is_html and bio_link_result.html:
+                        bio_link_soup = BeautifulSoup(bio_link_result.html, "html.parser")
+                        all_ig_emails = _extract_static_page_candidate_emails(
+                            bio_link_result.html,
+                            soup=bio_link_soup,
+                        )
+                        _, used_mailto = _mailto_emails_from_soup(bio_link_soup)
+                        if all_ig_emails:
+                            selected_source_url = bio_link_result.final_url or bio_link_urls[0]
+                            selected_extract_method = "mailto" if used_mailto else "regex"
+                            selected_surface = "instagram_bio_link_one_hop"
         if not all_ig_emails:
             self.log_message.emit("[IG Email] no_email_visible")
             self._set_platform_state("instagram", "skipped")
