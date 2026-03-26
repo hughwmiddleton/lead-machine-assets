@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 import pandas as pd
 import pytest
 from types import SimpleNamespace
@@ -16,6 +17,104 @@ def _make_worker(logs):
 
 def _seed_df(row):
     return pd.DataFrame([row], dtype=str).fillna("")
+
+
+@pytest.fixture(autouse=True)
+def _disable_real_instagram_live_bridge(monkeypatch):
+    monkeypatch.setattr(cde, "_open_instagram_live_page_bridge", lambda *args, **kwargs: None)
+
+
+class _DummyClosable:
+    def __init__(self):
+        self.closed = False
+
+    def close(self):
+        self.closed = True
+
+
+class _DummyInstagramHiddenContactPage(_DummyClosable):
+    def __init__(self, html, *, candidates=None, click_effects=None):
+        super().__init__()
+        self._html = html
+        self._candidates = list(candidates or [])
+        self._click_effects = dict(click_effects or {})
+        self.click_calls = []
+        self.wait_calls = []
+
+    def content(self):
+        return self._html
+
+    def evaluate(self, script):  # noqa: ANN001
+        return [
+            {
+                "selector": candidate.get(
+                    "selector",
+                    f'[data-ig-hidden-contact="ig-hidden-contact-{idx}"]',
+                ),
+                "dom_index": candidate.get("dom_index", idx),
+                "text": candidate.get("text", ""),
+                "aria_label": candidate.get("aria_label", ""),
+                "title": candidate.get("title", ""),
+                "value": candidate.get("value", ""),
+            }
+            for idx, candidate in enumerate(self._candidates)
+        ]
+
+    def click(self, selector, *args, **kwargs):  # noqa: ANN002, ANN003
+        self.click_calls.append(selector)
+        effect = self._click_effects.get(selector)
+        if callable(effect):
+            effect(self)
+        elif isinstance(effect, str):
+            self._html = effect
+
+    def wait_for_timeout(self, timeout_ms):  # noqa: ANN001
+        self.wait_calls.append(timeout_ms)
+
+
+def _make_instagram_live_bridge(page):
+    return cde.InstagramLivePageBridge(
+        playwright=_DummyClosable(),
+        browser=_DummyClosable(),
+        context=_DummyClosable(),
+        page=page,
+    )
+
+
+def _install_instagram_profile_fetch_scope(
+    monkeypatch,
+    *,
+    static_html,
+    live_page_factory,
+    static_status=200,
+):
+    live_pages = []
+
+    @contextmanager
+    def fake_scope(session, url, retain_live_page=False):  # noqa: ANN001
+        if retain_live_page:
+            page = live_page_factory()
+            live_pages.append(page)
+            result = cde.InstagramProfileFetchResult(
+                html=page.content(),
+                status=200,
+                live_page=_make_instagram_live_bridge(page),
+            )
+        else:
+            result = cde.InstagramProfileFetchResult(html=static_html, status=static_status)
+        try:
+            yield result
+        finally:
+            if result.live_page is not None:
+                result.live_page.close()
+
+    monkeypatch.setattr(cde, "_instagram_profile_fetch_scope", fake_scope)
+    monkeypatch.setattr(
+        cde,
+        "_open_instagram_live_page_bridge",
+        lambda *args, **kwargs: live_pages.append(live_page_factory()) or _make_instagram_live_bridge(live_pages[-1]),
+    )
+    return live_pages
 
 
 def test_fetch_instagram_profile_html_uses_shared_fallback_for_unusable_initial_response(monkeypatch):
@@ -1124,3 +1223,360 @@ def test_instagram_email_preserves_multiple_emails_in_aggregate_output(monkeypat
         "[IG Email] Visiting https://www.instagram.com/multiartist/",
         "[IG Email] Found email: first@artist.com",
     ]
+
+
+def test_instagram_hidden_contact_one_action_recovers_visible_email(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Hidden Contact Artist",
+            "Email": "",
+            "Email_All": "",
+            "Instagram_URL": "https://instagram.com/hiddencontactartist/",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+            "Email_Provenance_JSON": "",
+            "Email_Type": "",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    live_pages = _install_instagram_profile_fetch_scope(
+        monkeypatch,
+        static_html="<html><body><div>Profile with no visible email</div></body></html>",
+        live_page_factory=lambda: _DummyInstagramHiddenContactPage(
+            "<html><body><button>Email</button></body></html>",
+            candidates=[{"text": "Email"}],
+            click_effects={
+                '[data-ig-hidden-contact="ig-hidden-contact-0"]': (
+                    "<html><body><div role='dialog'>Bookings: bookings@artist.com</div></body></html>"
+                )
+            },
+        ),
+    )
+
+    matched = worker._enrich_row_instagram_email(seed_df, 0, ctx)
+
+    assert matched is True
+    assert len(live_pages) == 1
+    assert live_pages[0].click_calls == ['[data-ig-hidden-contact="ig-hidden-contact-0"]']
+    assert seed_df.at[0, "Email"] == "bookings@artist.com"
+    assert seed_df.at[0, "Email_All"] == "bookings@artist.com"
+    assert seed_df.at[0, "Email_Source_URL"] == "https://www.instagram.com/hiddencontactartist/"
+    assert seed_df.at[0, "Email_Source_Type"] == "instagram_enrich"
+    assert seed_df.at[0, "Email_Extract_Method"] == "regex"
+    assert seed_df.at[0, "Email_Type"] == "ig_enrich"
+    assert "instagram_hidden_contact_one_action" in seed_df.at[0, "Email_Provenance_JSON"]
+    assert logs == [
+        "[IG Email] Visiting https://www.instagram.com/hiddencontactartist/",
+        "[IG Email] Found email: bookings@artist.com",
+    ]
+
+
+def test_instagram_hidden_contact_one_action_recovers_mailto(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Hidden Mailto Artist",
+            "Email": "",
+            "Email_All": "",
+            "Instagram_URL": "https://instagram.com/hiddenmailtoartist/",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+            "Email_Provenance_JSON": "",
+            "Email_Type": "",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    live_pages = _install_instagram_profile_fetch_scope(
+        monkeypatch,
+        static_html="<html><body><div>Profile with no visible email</div></body></html>",
+        live_page_factory=lambda: _DummyInstagramHiddenContactPage(
+            "<html><body><button>Email</button></body></html>",
+            candidates=[{"text": "Email"}],
+            click_effects={
+                '[data-ig-hidden-contact="ig-hidden-contact-0"]': (
+                    "<html><body><a href='mailto:hello@artist.com?subject=booking'>Email</a></body></html>"
+                )
+            },
+        ),
+    )
+
+    matched = worker._enrich_row_instagram_email(seed_df, 0, ctx)
+
+    assert matched is True
+    assert len(live_pages) == 1
+    assert live_pages[0].click_calls == ['[data-ig-hidden-contact="ig-hidden-contact-0"]']
+    assert seed_df.at[0, "Email"] == "hello@artist.com"
+    assert seed_df.at[0, "Email_All"] == "hello@artist.com"
+    assert seed_df.at[0, "Email_Extract_Method"] == "mailto"
+    assert "instagram_hidden_contact_one_action" in seed_df.at[0, "Email_Provenance_JSON"]
+
+
+def test_instagram_hidden_contact_one_action_skips_when_no_eligible_cta(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "No CTA Artist",
+            "Email": "",
+            "Email_All": "",
+            "Instagram_URL": "https://instagram.com/noctaartist/",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+            "Email_Type": "",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    live_pages = _install_instagram_profile_fetch_scope(
+        monkeypatch,
+        static_html="<html><body><div>No email on profile</div></body></html>",
+        live_page_factory=lambda: _DummyInstagramHiddenContactPage(
+            "<html><body><button>Website</button><button>Subscribe</button></body></html>",
+            candidates=[{"text": "Website"}, {"text": "Subscribe"}],
+        ),
+    )
+
+    matched = worker._enrich_row_instagram_email(seed_df, 0, ctx)
+
+    assert matched is False
+    assert len(live_pages) == 1
+    assert live_pages[0].click_calls == []
+    assert seed_df.at[0, "Email"] == ""
+    assert seed_df.at[0, "Email_All"] == ""
+    assert logs == [
+        "[IG Email] Visiting https://www.instagram.com/noctaartist/",
+        "[IG Email] no_email_visible",
+    ]
+
+
+def test_instagram_hidden_contact_one_action_clicks_only_clear_contact_cta(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Single CTA Artist",
+            "Email": "",
+            "Email_All": "",
+            "Instagram_URL": "https://instagram.com/singlectaartist/",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+            "Email_Type": "",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    live_pages = _install_instagram_profile_fetch_scope(
+        monkeypatch,
+        static_html="<html><body><div>No email yet</div></body></html>",
+        live_page_factory=lambda: _DummyInstagramHiddenContactPage(
+            "<html><body><button>Website</button><button>Subscribe</button><button>Email</button></body></html>",
+            candidates=[{"text": "Website"}, {"text": "Subscribe"}, {"text": "Email"}],
+            click_effects={
+                '[data-ig-hidden-contact="ig-hidden-contact-2"]': (
+                    "<html><body><div>press@artist.com</div></body></html>"
+                )
+            },
+        ),
+    )
+
+    matched = worker._enrich_row_instagram_email(seed_df, 0, ctx)
+
+    assert matched is True
+    assert len(live_pages) == 1
+    assert live_pages[0].click_calls == ['[data-ig-hidden-contact="ig-hidden-contact-2"]']
+    assert seed_df.at[0, "Email"] == "press@artist.com"
+
+
+def test_instagram_hidden_contact_one_action_prefers_highest_priority_candidate(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Priority Artist",
+            "Email": "",
+            "Email_All": "",
+            "Instagram_URL": "https://instagram.com/priorityartist/",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+            "Email_Type": "",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    live_pages = _install_instagram_profile_fetch_scope(
+        monkeypatch,
+        static_html="<html><body><div>No email yet</div></body></html>",
+        live_page_factory=lambda: _DummyInstagramHiddenContactPage(
+            "<html><body><button>Contact</button><button>Show email</button></body></html>",
+            candidates=[{"text": "Contact"}, {"text": "Show email"}],
+            click_effects={
+                '[data-ig-hidden-contact="ig-hidden-contact-1"]': (
+                    "<html><body><div>hello@artist.com</div></body></html>"
+                )
+            },
+        ),
+    )
+
+    matched = worker._enrich_row_instagram_email(seed_df, 0, ctx)
+
+    assert matched is True
+    assert len(live_pages) == 1
+    assert live_pages[0].click_calls == ['[data-ig-hidden-contact="ig-hidden-contact-1"]']
+    assert seed_df.at[0, "Email"] == "hello@artist.com"
+
+
+def test_instagram_hidden_contact_one_action_stops_after_empty_reveal(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "No Reveal Artist",
+            "Email": "",
+            "Email_All": "",
+            "Instagram_URL": "https://instagram.com/norevealartist/",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+            "Email_Type": "",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    live_pages = _install_instagram_profile_fetch_scope(
+        monkeypatch,
+        static_html="<html><body><div>No email yet</div></body></html>",
+        live_page_factory=lambda: _DummyInstagramHiddenContactPage(
+            "<html><body><button>Email</button><button>Contact</button></body></html>",
+            candidates=[{"text": "Email"}, {"text": "Contact"}],
+            click_effects={
+                '[data-ig-hidden-contact="ig-hidden-contact-0"]': (
+                    "<html><body><div role='dialog'>No email here</div></body></html>"
+                )
+            },
+        ),
+    )
+
+    matched = worker._enrich_row_instagram_email(seed_df, 0, ctx)
+
+    assert matched is False
+    assert len(live_pages) == 1
+    assert live_pages[0].click_calls == ['[data-ig-hidden-contact="ig-hidden-contact-0"]']
+    assert seed_df.at[0, "Email"] == ""
+    assert seed_df.at[0, "Email_All"] == ""
+    assert logs == [
+        "[IG Email] Visiting https://www.instagram.com/norevealartist/",
+        "[IG Email] no_email_visible",
+    ]
+
+
+def test_instagram_hidden_contact_one_action_budget_is_one_attempt_per_row(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Budget Artist",
+            "Email": "",
+            "Email_All": "",
+            "Instagram_URL": "https://instagram.com/budgetartist/",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+            "Email_Type": "",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    live_pages = _install_instagram_profile_fetch_scope(
+        monkeypatch,
+        static_html="<html><body><div>No email yet</div></body></html>",
+        live_page_factory=lambda: _DummyInstagramHiddenContactPage(
+            "<html><body><button>Email</button></body></html>",
+            candidates=[{"text": "Email"}],
+            click_effects={
+                '[data-ig-hidden-contact="ig-hidden-contact-0"]': (
+                    "<html><body><div>No email revealed</div></body></html>"
+                )
+            },
+        ),
+    )
+
+    first_matched = worker._enrich_row_instagram_email(seed_df, 0, ctx)
+    second_matched = worker._enrich_row_instagram_email(seed_df, 0, ctx)
+
+    assert first_matched is False
+    assert second_matched is False
+    assert len(live_pages) == 1
+    assert live_pages[0].click_calls == ['[data-ig-hidden-contact="ig-hidden-contact-0"]']
+
+
+def test_instagram_hidden_contact_one_action_skips_ambiguous_cta(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Ambiguous Artist",
+            "Email": "",
+            "Email_All": "",
+            "Instagram_URL": "https://instagram.com/ambiguousartist/",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+            "Email_Type": "",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    live_pages = _install_instagram_profile_fetch_scope(
+        monkeypatch,
+        static_html="<html><body><div>No email yet</div></body></html>",
+        live_page_factory=lambda: _DummyInstagramHiddenContactPage(
+            "<html><body><button>More</button></body></html>",
+            candidates=[{"text": "More"}],
+        ),
+    )
+
+    matched = worker._enrich_row_instagram_email(seed_df, 0, ctx)
+
+    assert matched is False
+    assert len(live_pages) == 1
+    assert live_pages[0].click_calls == []
+
+
+def test_instagram_hidden_contact_one_action_reads_overlay_without_second_click(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Overlay Artist",
+            "Email": "",
+            "Email_All": "",
+            "Instagram_URL": "https://instagram.com/overlayartist/",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+            "Email_Type": "",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    live_pages = _install_instagram_profile_fetch_scope(
+        monkeypatch,
+        static_html="<html><body><div>No email yet</div></body></html>",
+        live_page_factory=lambda: _DummyInstagramHiddenContactPage(
+            "<html><body><button>Email</button></body></html>",
+            candidates=[{"text": "Email"}],
+            click_effects={
+                '[data-ig-hidden-contact="ig-hidden-contact-0"]': (
+                    "<html><body><div role='dialog'><button>Copy</button><div>stage@artist.com</div></div></body></html>"
+                )
+            },
+        ),
+    )
+
+    matched = worker._enrich_row_instagram_email(seed_df, 0, ctx)
+
+    assert matched is True
+    assert len(live_pages) == 1
+    assert live_pages[0].click_calls == ['[data-ig-hidden-contact="ig-hidden-contact-0"]']
+    assert seed_df.at[0, "Email"] == "stage@artist.com"

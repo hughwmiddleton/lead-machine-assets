@@ -2712,6 +2712,135 @@ def _collect_instagram_bio_link_fetch_urls(
     return [*hub_candidates, *direct_candidates]
 
 
+_INSTAGRAM_HIDDEN_CONTACT_LABEL_PRIORITY = {
+    "show email": 0,
+    "bookings email": 1,
+    "email": 2,
+    "e mail": 2,
+    "contact info": 3,
+    "contact": 4,
+    "get in touch": 5,
+}
+
+_INSTAGRAM_HIDDEN_CONTACT_INTERACTIVE_SELECTOR = (
+    "a[href], button, div[role='button'], span[role='button'], a[role='button']"
+)
+
+
+def _normalise_instagram_hidden_contact_label(value: Any) -> str:
+    raw_value = unidecode(cell_to_str(value)).lower()
+    return re.sub(r"[^a-z0-9]+", " ", raw_value).strip()
+
+
+def _instagram_hidden_contact_candidate_priority(
+    candidate: Dict[str, Any],
+) -> Optional[Tuple[int, int, int]]:
+    field_values = (
+        (0, candidate.get("text")),
+        (1, candidate.get("aria_label")),
+        (2, candidate.get("title")),
+        (3, candidate.get("value")),
+    )
+    best_priority: Optional[Tuple[int, int, int]] = None
+    for field_rank, raw_value in field_values:
+        normalized = _normalise_instagram_hidden_contact_label(raw_value)
+        if not normalized:
+            continue
+        label_priority = _INSTAGRAM_HIDDEN_CONTACT_LABEL_PRIORITY.get(normalized)
+        if label_priority is None:
+            continue
+        priority = (label_priority, field_rank, int(candidate.get("dom_index", 0) or 0))
+        if best_priority is None or priority < best_priority:
+            best_priority = priority
+    return best_priority
+
+
+def _collect_instagram_hidden_contact_candidates(page: Any) -> List[Dict[str, Any]]:
+    if page is None or not hasattr(page, "evaluate"):
+        return []
+    try:
+        raw_candidates = page.evaluate(
+            f"""
+() => {{
+  const selectors = "{_INSTAGRAM_HIDDEN_CONTACT_INTERACTIVE_SELECTOR}";
+  const nodes = Array.from(document.querySelectorAll(selectors));
+  const isVisible = (el) => {{
+    if (!el) return false;
+    if (el.closest('[hidden], [aria-hidden="true"]')) return false;
+    const style = window.getComputedStyle(el);
+    if (!style || style.display === 'none' || style.visibility === 'hidden') return false;
+    const rect = el.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  }};
+  return nodes
+    .filter(isVisible)
+    .map((el, index) => {{
+      const marker = `ig-hidden-contact-${{index}}`;
+      el.setAttribute('data-ig-hidden-contact', marker);
+      return {{
+        selector: `[data-ig-hidden-contact="${{marker}}"]`,
+        dom_index: index,
+        text: (el.innerText || el.textContent || '').trim(),
+        aria_label: (el.getAttribute('aria-label') || '').trim(),
+        title: (el.getAttribute('title') || '').trim(),
+        value: (el.getAttribute('value') || '').trim(),
+      }};
+    }});
+}}
+"""
+        )
+    except Exception:
+        return []
+
+    candidates: List[Dict[str, Any]] = []
+    for raw_candidate in raw_candidates or []:
+        if not isinstance(raw_candidate, dict):
+            continue
+        selector = cell_to_str(raw_candidate.get("selector"))
+        if not selector:
+            continue
+        candidate = dict(raw_candidate)
+        priority = _instagram_hidden_contact_candidate_priority(candidate)
+        if priority is None:
+            continue
+        candidate["_priority"] = priority
+        candidates.append(candidate)
+    candidates.sort(key=lambda item: item.get("_priority") or (999, 999, 999))
+    return candidates
+
+
+def _click_instagram_hidden_contact_candidate(page: Any, candidate: Dict[str, Any]) -> bool:
+    selector = cell_to_str(candidate.get("selector"))
+    if page is None or not selector:
+        return False
+    try:
+        page.click(selector, timeout=750)
+    except TypeError:
+        try:
+            page.click(selector)
+        except Exception:
+            return False
+    except Exception:
+        return False
+    wait_for_timeout = getattr(page, "wait_for_timeout", None)
+    if callable(wait_for_timeout):
+        try:
+            wait_for_timeout(250)
+        except Exception:
+            pass
+    return True
+
+
+def _extract_instagram_hidden_contact_emails(html: str) -> Tuple[List[str], str]:
+    html_text = html if isinstance(html, str) else str(html or "")
+    if not html_text.strip():
+        return ([], "regex")
+    soup = BeautifulSoup(html_text, "html.parser")
+    emails = _extract_instagram_profile_candidate_emails(html_text, soup=soup)
+    _, used_mailto = _mailto_emails_from_soup(soup)
+    return (emails, "mailto" if used_mailto else "regex")
+
+
 def _instagram_profile_requests_html_usable(status: Optional[int], html: str) -> bool:
     if not _instagram_profile_fetch_usable(status, html):
         return False
@@ -8696,6 +8825,11 @@ class CrossDirectoryEnricherWorker(QThread):
             return False
 
         email_before = _row_email_summary_snapshot(seed_df, row_idx)
+        hidden_surface_attempt_keys = getattr(self, "_instagram_hidden_contact_attempt_keys", None)
+        if hidden_surface_attempt_keys is None:
+            hidden_surface_attempt_keys = set()
+            self._instagram_hidden_contact_attempt_keys = hidden_surface_attempt_keys
+        hidden_surface_attempt_key = (id(seed_df), int(row_idx))
         self.log_message.emit(f"[IG Email] Visiting {ig_url}")
         with _instagram_profile_fetch_scope(self.session, ig_url, retain_live_page=False) as profile_fetch:
             html = profile_fetch.html
@@ -8739,6 +8873,32 @@ class CrossDirectoryEnricherWorker(QThread):
                             selected_source_url = bio_link_result.final_url or bio_link_urls[0]
                             selected_extract_method = "mailto" if used_mailto else "regex"
                             selected_surface = "instagram_bio_link_one_hop"
+            if (
+                not all_ig_emails
+                and not _row_has_email(seed_df.loc[row_idx])
+                and hidden_surface_attempt_key not in hidden_surface_attempt_keys
+            ):
+                live_page = _open_instagram_live_page_bridge(ig_url, timeout_s=HTTP_TIMEOUT)
+                if live_page is not None:
+                    try:
+                        candidate = next(
+                            iter(_collect_instagram_hidden_contact_candidates(live_page.page)),
+                            None,
+                        )
+                        if candidate is not None:
+                            hidden_surface_attempt_keys.add(hidden_surface_attempt_key)
+                            if _click_instagram_hidden_contact_candidate(live_page.page, candidate):
+                                rescanned_html = live_page.snapshot_html()
+                                hidden_surface_emails, hidden_extract_method = (
+                                    _extract_instagram_hidden_contact_emails(rescanned_html)
+                                )
+                                if hidden_surface_emails:
+                                    all_ig_emails = hidden_surface_emails
+                                    selected_source_url = ig_url
+                                    selected_extract_method = hidden_extract_method
+                                    selected_surface = "instagram_hidden_contact_one_action"
+                    finally:
+                        live_page.close()
         if not all_ig_emails:
             self.log_message.emit("[IG Email] no_email_visible")
             self._set_platform_state("instagram", "skipped")
