@@ -623,7 +623,7 @@ def test_explicit_fb_entrypoint_urls_accept_share_entrypoint_but_block_share_php
         {"Social Link": "https://www.facebook.com/share.php?u=test"}
     )
 
-    assert share_urls == ["https://www.facebook.com/share/19bactwuev"]
+    assert share_urls == []
     assert share_php_urls == []
 
 
@@ -864,11 +864,13 @@ def test_pass_a_resolves_share_url_before_scrape(monkeypatch) -> None:
         use_shared_session=False,
     )
     monkeypatch.setattr(enricher, "_has_authenticated_session", lambda: True)
-    monkeypatch.setattr(
-        enricher,
-        "_search_for_page",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("PASS B should not run for resolved explicit share URLs")),
-    )
+    search_calls = []
+
+    def _fake_search(*args, **kwargs):  # noqa: ANN001
+        search_calls.append((args, kwargs))
+        return "https://www.facebook.com/artistsharepage"
+
+    monkeypatch.setattr(enricher, "_search_for_page", _fake_search)
 
     navigate_calls = []
 
@@ -906,11 +908,12 @@ def test_pass_a_resolves_share_url_before_scrape(monkeypatch) -> None:
 
     result = enricher.enrich_row_with_facebook_night(row)
 
-    assert navigate_calls == ["https://www.facebook.com/share/19bactwuev"]
+    assert search_calls
+    assert navigate_calls == []
     assert calls["urls"] == ["https://www.facebook.com/artistsharepage"]
     assert result.get("Email") == "shareartist@test.com"
-    assert result.get("FB_Status") == "pass_a_found_email"
-    assert result.get("FB_Reason") == "explicit_url"
+    assert result.get("FB_Status") == "pass_a_skipped_no_fb_url"
+    assert result.get("FB_Reason") == "skipped_no_fb_url"
     assert result.get("Facebook_URL") == "https://www.facebook.com/artistsharepage"
 
 
@@ -974,6 +977,11 @@ def test_pass_a_strips_tracking_params_from_resolved_share_url(monkeypatch) -> N
         use_shared_session=False,
     )
     monkeypatch.setattr(enricher, "_has_authenticated_session", lambda: True)
+    search_calls = []
+
+    def _fake_search(*args, **kwargs):  # noqa: ANN001
+        search_calls.append((args, kwargs))
+        return "https://www.facebook.com/artistsharepage"
 
     navigate_calls = []
 
@@ -1000,6 +1008,7 @@ def test_pass_a_strips_tracking_params_from_resolved_share_url(monkeypatch) -> N
         return night_result, ["artist@test.com"], "session", "found_email"
 
     monkeypatch.setattr(enricher, "_scrape_single_fb_candidate", _fake_scrape)
+    monkeypatch.setattr(enricher, "_search_for_page", _fake_search)
 
     row = {
         "Artist Name": "Tracked Share Artist",
@@ -1011,9 +1020,11 @@ def test_pass_a_strips_tracking_params_from_resolved_share_url(monkeypatch) -> N
 
     result = enricher.enrich_row_with_facebook_night(row)
 
-    assert navigate_calls == ["https://www.facebook.com/share/19bactwuev"]
+    assert search_calls
+    assert navigate_calls == []
     assert calls["urls"] == ["https://www.facebook.com/artistsharepage"]
-    assert result.get("FB_Status") == "pass_a_found_email"
+    assert result.get("FB_Status") == "pass_a_skipped_no_fb_url"
+    assert result.get("FB_Reason") == "skipped_no_fb_url"
     assert result.get("Facebook_URL") == "https://www.facebook.com/artistsharepage"
 
 

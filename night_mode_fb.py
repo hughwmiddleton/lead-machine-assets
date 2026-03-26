@@ -2014,10 +2014,16 @@ def _canonicalize_fb_p_url(url: str) -> Optional[str]:
     return urllib.parse.urlunparse(("https", "www.facebook.com", f"/{page}", "", "", ""))
 
 
-def _canonicalize_explicit_fb_entrypoint_url(url: str) -> str:
+def _canonicalize_explicit_fb_entrypoint_url(url: str) -> Optional[str]:
     norm = _normalise_fb_url(url)
     if not norm:
-        return ""
+        return None
+    try:
+        path_parts = [part for part in (urllib.parse.urlsplit(norm).path or "").split("/") if part]
+    except Exception:
+        path_parts = []
+    if path_parts and path_parts[0].lower() == "share":
+        return None
     for canonicalizer in (_canonicalize_fb_pages_category_url, _canonicalize_fb_p_url):
         rewritten = canonicalizer(norm)
         if rewritten:
