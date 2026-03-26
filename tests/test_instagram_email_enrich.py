@@ -551,3 +551,144 @@ def test_instagram_email_extracts_href_only_email_and_preserves_writeback(monkey
         "[IG Email] Visiting https://www.instagram.com/hrefartist/",
         "[IG Email] Found email: press@artist.com",
     ]
+
+
+def test_instagram_email_extracts_obfuscated_email_from_existing_dom_attribute(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Attribute Artist",
+            "Email": "",
+            "Email_All": "",
+            "Instagram_URL": "https://instagram.com/attributeartist/?hl=en#bio",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+            "Email_Type": "",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+
+    def fake_fetch(session, url):
+        return (
+            "<html><body><div data-contact='contact (at) artist (dot) com'>Official profile</div></body></html>",
+            200,
+        )
+
+    monkeypatch.setattr(cde, "_fetch_instagram_profile_html", fake_fetch)
+
+    matched = worker._enrich_row_instagram_email(seed_df, 0, ctx)
+
+    assert matched is True
+    assert seed_df.at[0, "Email"] == "contact@artist.com"
+    assert seed_df.at[0, "Email_All"] == "contact@artist.com"
+    assert logs == [
+        "[IG Email] Visiting https://www.instagram.com/attributeartist/",
+        "[IG Email] Found email: contact@artist.com",
+    ]
+
+
+def test_instagram_email_extracts_spaced_email(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Spaced Artist",
+            "Email": "",
+            "Email_All": "",
+            "Instagram_URL": "https://instagram.com/spacedartist/?hl=en#bio",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+            "Email_Type": "",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+
+    def fake_fetch(session, url):
+        return ("<html><body>Bookings: hello @ artist . com</body></html>", 200)
+
+    monkeypatch.setattr(cde, "_fetch_instagram_profile_html", fake_fetch)
+
+    matched = worker._enrich_row_instagram_email(seed_df, 0, ctx)
+
+    assert matched is True
+    assert seed_df.at[0, "Email"] == "hello@artist.com"
+    assert seed_df.at[0, "Email_All"] == "hello@artist.com"
+    assert logs == [
+        "[IG Email] Visiting https://www.instagram.com/spacedartist/",
+        "[IG Email] Found email: hello@artist.com",
+    ]
+
+
+def test_instagram_email_extracts_direct_mailto(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Mailto Artist",
+            "Email": "",
+            "Email_All": "",
+            "Instagram_URL": "https://instagram.com/mailtoartist/?hl=en#bio",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+            "Email_Type": "",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+
+    def fake_fetch(session, url):
+        return (
+            "<html><body><a href='mailto:hello@artist.com?subject=booking'>Email</a></body></html>",
+            200,
+        )
+
+    monkeypatch.setattr(cde, "_fetch_instagram_profile_html", fake_fetch)
+
+    matched = worker._enrich_row_instagram_email(seed_df, 0, ctx)
+
+    assert matched is True
+    assert seed_df.at[0, "Email"] == "hello@artist.com"
+    assert seed_df.at[0, "Email_All"] == "hello@artist.com"
+    assert logs == [
+        "[IG Email] Visiting https://www.instagram.com/mailtoartist/",
+        "[IG Email] Found email: hello@artist.com",
+    ]
+
+
+def test_instagram_email_preserves_multiple_emails_in_aggregate_output(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Multi Artist",
+            "Email": "",
+            "Email_All": "",
+            "Instagram_URL": "https://instagram.com/multiartist/?hl=en#bio",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+            "Email_Type": "",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+
+    def fake_fetch(session, url):
+        return (
+            "<html><body>Bookings: first@artist.com Management: second@artist.com</body></html>",
+            200,
+        )
+
+    monkeypatch.setattr(cde, "_fetch_instagram_profile_html", fake_fetch)
+
+    matched = worker._enrich_row_instagram_email(seed_df, 0, ctx)
+
+    assert matched is True
+    assert seed_df.at[0, "Email"] == "first@artist.com"
+    assert seed_df.at[0, "Email_All"] == "first@artist.com;second@artist.com"
+    assert logs == [
+        "[IG Email] Visiting https://www.instagram.com/multiartist/",
+        "[IG Email] Found email: first@artist.com",
+    ]

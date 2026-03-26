@@ -2571,25 +2571,66 @@ def _extract_instagram_profile_candidate_emails(
     *,
     soup: Optional[BeautifulSoup] = None,
 ) -> List[str]:
+    extra_attr_names = {"content", "title", "aria-label", "alt", "value"}
+
+    def _append_unique(values: List[str], seen: Set[str], raw_value: Any) -> None:
+        value = cell_to_str(raw_value)
+        if not value or value in seen:
+            return
+        seen.add(value)
+        values.append(value)
+
+    def _collect_attribute_values(soup_obj: BeautifulSoup) -> List[str]:
+        values: List[str] = []
+        seen: Set[str] = set()
+        for tag in soup_obj.find_all(True):
+            attrs = getattr(tag, "attrs", {}) or {}
+            for attr_name, raw_value in attrs.items():
+                attr_key = cell_to_str(attr_name).strip().lower()
+                if not attr_key:
+                    continue
+                if attr_key == "href":
+                    continue
+                if attr_key not in extra_attr_names and not attr_key.startswith("data-"):
+                    continue
+                if isinstance(raw_value, (list, tuple, set)):
+                    for item in raw_value:
+                        _append_unique(values, seen, item)
+                else:
+                    _append_unique(values, seen, raw_value)
+        return values
+
     html_text = html if isinstance(html, str) else str(html or "")
     if not html_text.strip():
         return []
     soup_obj = soup or BeautifulSoup(html_text, "html.parser")
-    anchor_values = []
+    anchor_values: List[str] = []
+    anchor_seen: Set[str] = set()
     for anchor in soup_obj.select("a[href]"):
-        href = cell_to_str(anchor.get("href"))
-        if href:
-            anchor_values.append(href)
-    ig_emails, _ = _extract_emails_from_html(html_text, soup=soup_obj, anchor_values=anchor_values)
+        _append_unique(anchor_values, anchor_seen, anchor.get("href"))
 
-    meta_emails: List[str] = []
+    meta_contents: List[str] = []
+    meta_seen: Set[str] = set()
     for meta_tag in soup_obj.select('meta[property="og:description"], meta[name="description"]'):
-        meta_content = cell_to_str(meta_tag.get("content"))
-        if not meta_content:
-            continue
-        extracted_meta_emails, _ = _extract_emails_from_html(meta_content)
-        meta_emails.extend(extracted_meta_emails)
-    return filter_system_telemetry_emails([*ig_emails, *meta_emails])
+        _append_unique(meta_contents, meta_seen, meta_tag.get("content"))
+
+    ig_emails, _ = _extract_emails_from_html(
+        html_text,
+        soup=soup_obj,
+        rendered_text=" ".join(meta_contents),
+        anchor_values=anchor_values,
+    )
+
+    attribute_values = _collect_attribute_values(soup_obj)
+    attribute_emails: List[str] = []
+    if attribute_values:
+        attribute_emails, _ = _extract_emails_from_html(
+            "",
+            rendered_text=" ".join(attribute_values),
+            anchor_values=attribute_values,
+        )
+
+    return filter_system_telemetry_emails([*ig_emails, *attribute_emails])
 
 
 def _instagram_profile_requests_html_usable(status: Optional[int], html: str) -> bool:
