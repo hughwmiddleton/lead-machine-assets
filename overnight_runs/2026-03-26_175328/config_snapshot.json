@@ -1,0 +1,27 @@
+{
+  "export_mode": "both",
+  "jobs": [
+    {
+      "directory": "unearthed",
+      "mode": "",
+      "input_seed_csv": "",
+      "target_valid_leads": 15,
+      "max_hours": 0,
+      "job_id": "job_unearthed_1"
+    }
+  ],
+  "phased": false,
+  "facebook": {
+    "auto_resume_after_captcha": true,
+    "cooldown_seconds": 900,
+    "max_auto_resume_attempts": 1,
+    "max_rows_per_run": 25
+  },
+  "master_enrichment": {
+    "enabled": true
+  },
+  "soundcloud_meta_enricher": {
+    "enabled": false
+  },
+  "last_update": "2026-03-26T06:53:28.960449+00:00"
+}
