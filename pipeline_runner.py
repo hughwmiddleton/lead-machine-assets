@@ -742,16 +742,11 @@ def _strong_domain_match_short_name(artist_name: str, emails: List[str]) -> bool
 
 def recompute_final_status_post_enrichment(df: pd.DataFrame, logger: LoggerFn = None) -> pd.DataFrame:
     """
-    Post-enrichment guardrail to prevent origin/directory BLOCKs from remaining sticky
-    once we have a valid, name-consistent email.
+    Post-enrichment guardrail to repair stale non-OK statuses after enrichment.
 
-    Downgrades BLOCK -> WARN when:
-      - origin mismatch OR directory conflict flagged
-      - no duplicate email/artist flags
-      - email present and shape-valid
-      - name_consistency_flag == 1
-
-    Hard BLOCK signals (duplicates, FB rejects, invalid email shapes) are never downgraded.
+    Existing BLOCK repair behaviour is preserved for origin/directory cases.
+    Other non-OK rows are reclassified with the canonical final checker so
+    stale WARN rows can be promoted to OK after successful enrichment.
     """
     if df is None or df.empty:
         return df
@@ -765,70 +760,112 @@ def recompute_final_status_post_enrichment(df: pd.DataFrame, logger: LoggerFn = 
     if not status_col:
         return df
 
+    import final_checker
+
     def _truthy(val) -> bool:
         return str(val).strip().lower() in {"1", "true", "yes", "y"}
 
+    def _parse_floatlike(val, default: float = 0.0) -> float:
+        text = str(val or "").strip()
+        if not text:
+            return default
+        try:
+            parsed = float(text)
+        except Exception:
+            return default
+        if parsed != parsed:
+            return default
+        return parsed
+
+    def _parse_intlike(val, default: int = 0) -> int:
+        try:
+            return int(_parse_floatlike(val, float(default)))
+        except Exception:
+            return default
+
     for idx, row in df.iterrows():
         status = str(row.get(status_col, "") or "").strip().upper()
-        if status != "BLOCK":
+        if status == "OK":
             continue
 
-        # Hard block guards: never downgrade
-        if "FB_Status" in df.columns:
-            fb_status_raw = str(row.get("FB_Status", "") or "")
-            if _fb_status_is_rejected(fb_status_raw):
+        if status == "BLOCK":
+            # Preserve the existing late BLOCK repair contract.
+            if "FB_Status" in df.columns:
+                fb_status_raw = str(row.get("FB_Status", "") or "")
+                if _fb_status_is_rejected(fb_status_raw):
+                    continue
+            if "duplicate_email_flag" in df.columns and _truthy(row.get("duplicate_email_flag", 0)):
                 continue
-        if "duplicate_email_flag" in df.columns and _truthy(row.get("duplicate_email_flag", 0)):
-            continue
-        if "duplicate_artist_flag" in df.columns and _truthy(row.get("duplicate_artist_flag", 0)):
+            if "duplicate_artist_flag" in df.columns and _truthy(row.get("duplicate_artist_flag", 0)):
+                continue
+
+            dup_email = _parse_intlike(row.get("duplicate_email_flag", 0), 0)
+            dup_artist = _parse_intlike(row.get("duplicate_artist_flag", 0), 0)
+            origin_flag = _parse_intlike(row.get("origin_match_flag", 1), 1)
+            dir_conflict = _parse_intlike(row.get("directory_conflict_flag", 0), 0)
+            name_flag = _parse_intlike(row.get("name_consistency_flag", 0), 0)
+
+            # Hard BLOCK guards
+            fb_status_val = str(row.get("FB_Status", "") or "")
+            if _fb_status_is_rejected(fb_status_val):
+                continue
+            if dup_email == 1 or dup_artist == 1:
+                continue
+
+            has_email, emails = _row_has_valid_email(row)
+            if not has_email:
+                continue
+            if not emails or not all(_is_valid_email_shape(e) for e in emails):
+                continue
+
+            origin_or_dir_conflict = (origin_flag == 0) or (dir_conflict == 1)
+            short_name_domain_match = _strong_domain_match_short_name(str(row.get("Artist Name", "")), emails)
+            if not origin_or_dir_conflict and not short_name_domain_match:
+                continue
+            if name_flag != 1:
+                continue
+
+            df.at[idx, status_col] = "WARN"
+            df.at[idx, "Needs_Review"] = "TRUE"
+            df.at[idx, "FB_Review_Reason"] = "origin_mismatch_downgraded"
+
+            artist = str(row.get("Artist Name", "") or "").strip()
+            primary_email = emails[0] if emails else ""
+            log_msg = (
+                f"[PostEnrichStatus] Downgraded '{artist}' email='{primary_email}' "
+                f"from BLOCK -> WARN (reason=origin_mismatch_downgraded)"
+            )
+            try:
+                if logger and hasattr(logger, "debug"):
+                    logger.debug(log_msg)
+                elif _LOGGER.isEnabledFor(logging.DEBUG):
+                    _LOGGER.debug(log_msg)
+            except Exception:
+                pass
             continue
 
-        try:
-            dup_email = int(row.get("duplicate_email_flag", 0) or 0)
-            dup_artist = int(row.get("duplicate_artist_flag", 0) or 0)
-            origin_flag = int(row.get("origin_match_flag", 1) or 0)
-            dir_conflict = int(row.get("directory_conflict_flag", 0) or 0)
-            name_flag = int(row.get("name_consistency_flag", 0) or 0)
-        except Exception:
-            continue
-
-        # Hard BLOCK guards
-        fb_status_val = str(row.get("FB_Status", "") or "")
-        if _fb_status_is_rejected(fb_status_val):
-            continue
-        if dup_email == 1 or dup_artist == 1:
-            continue
-
-        has_email, emails = _row_has_valid_email(row)
-        if not has_email:
-            continue
-        if not emails or not all(_is_valid_email_shape(e) for e in emails):
-            continue
-
-        origin_or_dir_conflict = (origin_flag == 0) or (dir_conflict == 1)
-        short_name_domain_match = _strong_domain_match_short_name(str(row.get("Artist Name", "")), emails)
-        if not origin_or_dir_conflict and not short_name_domain_match:
-            continue
-        if name_flag != 1:
-            continue
-
-        df.at[idx, status_col] = "WARN"
-        df.at[idx, "Needs_Review"] = "TRUE"
-        df.at[idx, "FB_Review_Reason"] = "origin_mismatch_downgraded"
-
-        artist = str(row.get("Artist Name", "") or "").strip()
-        primary_email = emails[0] if emails else ""
-        log_msg = (
-            f"[PostEnrichStatus] Downgraded '{artist}' email='{primary_email}' "
-            f"from BLOCK -> WARN (reason=origin_mismatch_downgraded)"
+        row_dict = df.loc[idx].to_dict()
+        required_classifier_inputs = (
+            "name_consistency_flag",
+            "directory_conflict_flag",
+            "duplicate_email_flag",
+            "duplicate_artist_flag",
+            "match_score_overall",
         )
-        try:
-            if logger and hasattr(logger, "debug"):
-                logger.debug(log_msg)
-            elif _LOGGER.isEnabledFor(logging.DEBUG):
-                _LOGGER.debug(log_msg)
-        except Exception:
-            pass
+        if any(str(row_dict.get(column, "") or "").strip() == "" for column in required_classifier_inputs):
+            continue
+        name_consistency_flag = _parse_intlike(row_dict.get("name_consistency_flag", 0), 0)
+        flags = {
+            "name_flag": 0 if name_consistency_flag == 1 else 1,
+            "dir_conflict_flag": _parse_intlike(row_dict.get("directory_conflict_flag", 0), 0),
+            "dup_email_flag": _parse_intlike(row_dict.get("duplicate_email_flag", 0), 0),
+            "dup_artist_flag": _parse_intlike(row_dict.get("duplicate_artist_flag", 0), 0),
+            "genre_outlier_flag": _parse_intlike(row_dict.get("genre_outlier_flag", 0), 0),
+        }
+        match_score = _parse_floatlike(row_dict.get("match_score_overall", 0), 0.0)
+        computed_status = final_checker.compute_final_status(row_dict, flags, match_score)
+        if computed_status != status:
+            df.at[idx, status_col] = computed_status
 
     return df
 
