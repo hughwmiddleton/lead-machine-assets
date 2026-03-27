@@ -8351,8 +8351,6 @@ class CrossDirectoryEnricherWorker(QThread):
             return False
 
         current_snapshot = dict(snapshot or self._spotify_identity_surface_snapshot(row))
-        if int(current_snapshot.get("identity_link_count", 0) or 0) >= 2:
-            return False
         if current_snapshot.get("has_bandcamp"):
             return False
 
