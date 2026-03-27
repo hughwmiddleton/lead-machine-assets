@@ -8696,6 +8696,15 @@ class CrossDirectoryEnricherWorker(QThread):
         )
         if not sparse_identity:
             return False
+        self._ensure_row_enrichment_state_platforms("bandcamp")
+        # Spotify discovery gets one Bandcamp recovery chance even if an earlier
+        # generic Bandcamp no-match marked the row as skipped.
+        if (
+            self.enable_live_search
+            and self._row_enrichment_state.get("bandcamp") == "skipped"
+            and not snapshot["has_bandcamp"]
+        ):
+            self._set_platform_state("bandcamp", "pending")
 
         self._spotify_discovery_attempted_rows.add(row_idx)
         enriched = False

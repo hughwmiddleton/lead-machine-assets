@@ -1093,6 +1093,130 @@ def test_spotify_discovery_pass_recovery_initializes_missing_row_state(tmp_path,
     assert df.at[0, "Bandcamp_URL"] == "https://artist-a.bandcamp.com"
 
 
+def test_spotify_discovery_pass_reopens_stale_bandcamp_skip_for_spotify_recovery(tmp_path, monkeypatch):
+    worker = _build_worker(tmp_path)
+    worker.enable_live_search = True
+    worker.max_live_searches = 5
+    worker._row_enrichment_state = {
+        "bandcamp": "skipped",
+        "soundcloud": "matched",
+        "lastfm": "skipped",
+    }
+    df = pd.DataFrame([_base_row()])
+    ctx = worker._build_row_context(df, 0, 1, 1)
+    calls = {"live_bandcamp": 0, "spotify_bc_slug": 0}
+    state_seen = {}
+
+    def fake_live_search_bandcamp(_artist):
+        calls["live_bandcamp"] += 1
+        state_seen["bandcamp"] = worker._row_enrichment_state.get("bandcamp")
+        state_seen["soundcloud"] = worker._row_enrichment_state.get("soundcloud")
+        state_seen["lastfm"] = worker._row_enrichment_state.get("lastfm")
+        worker._set_platform_state("bandcamp", "skipped")
+        return None
+
+    def fake_bandcamp_slug(*args, **kwargs):
+        calls["spotify_bc_slug"] += 1
+        return cde.EnrichmentPayload(
+            source_dir="bandcamp_directory",
+            source_url="https://artist-a.bandcamp.com/",
+            source_detail="Bandcamp Directory",
+            match_score=0.95,
+            candidate_name="Artist A",
+        )
+
+    monkeypatch.setattr(worker, "_live_search_bandcamp", fake_live_search_bandcamp)
+    monkeypatch.setattr(worker, "_night_sc_attempt_row", lambda *args, **kwargs: False)
+    monkeypatch.setattr(worker, "_live_search_lastfm", lambda _artist: None)
+    monkeypatch.setattr(worker, "_bc_slug_fallback", fake_bandcamp_slug)
+
+    enriched = worker._run_spotify_discovery_pass(df, 0, ctx, fb_driver=None)
+
+    assert enriched is True
+    assert calls == {"live_bandcamp": 1, "spotify_bc_slug": 1}
+    assert state_seen == {
+        "bandcamp": "pending",
+        "soundcloud": "matched",
+        "lastfm": "skipped",
+    }
+    assert worker._row_enrichment_state["soundcloud"] == "matched"
+    assert worker._row_enrichment_state["lastfm"] == "skipped"
+    assert df.at[0, "Bandcamp_URL"] == "https://artist-a.bandcamp.com"
+
+
+def test_spotify_discovery_pass_keeps_matched_bandcamp_terminal(tmp_path, monkeypatch):
+    worker = _build_worker(tmp_path)
+    worker.enable_live_search = True
+    worker.max_live_searches = 5
+    worker._row_enrichment_state = {
+        "bandcamp": "matched",
+        "soundcloud": "pending",
+        "lastfm": "pending",
+    }
+    df = pd.DataFrame([_base_row(Bandcamp_URL="https://existing.bandcamp.com/")])
+    ctx = worker._build_row_context(df, 0, 1, 1)
+    calls = {"live_bandcamp": 0}
+    original_live_search_bandcamp = worker._live_search_bandcamp
+
+    def wrapped_live_search_bandcamp(artist):
+        calls["live_bandcamp"] += 1
+        return original_live_search_bandcamp(artist)
+
+    monkeypatch.setattr(worker, "_live_search_bandcamp", wrapped_live_search_bandcamp)
+    monkeypatch.setattr(
+        worker,
+        "_increment_live_counter",
+        lambda: (_ for _ in ()).throw(AssertionError("matched bandcamp should stay terminal")),
+    )
+    monkeypatch.setattr(worker, "_night_sc_attempt_row", lambda *args, **kwargs: False)
+    monkeypatch.setattr(worker, "_live_search_lastfm", lambda _artist: None)
+    monkeypatch.setattr(
+        worker,
+        "_bc_slug_fallback",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("existing bandcamp should not rerun slug recovery")),
+    )
+
+    enriched = worker._run_spotify_discovery_pass(df, 0, ctx, fb_driver=None)
+
+    assert enriched is False
+    assert calls == {"live_bandcamp": 1}
+    assert df.at[0, "Bandcamp_URL"] == "https://existing.bandcamp.com/"
+    assert worker._row_enrichment_state["bandcamp"] == "matched"
+
+
+def test_spotify_discovery_pass_does_not_reopen_bandcamp_for_non_spotify_rows(tmp_path, monkeypatch):
+    worker = _build_worker(tmp_path)
+    worker.enable_live_search = True
+    worker.max_live_searches = 5
+    worker._row_enrichment_state = {"bandcamp": "skipped"}
+    df = pd.DataFrame(
+        [
+            _base_row(
+                Spotify_URL="",
+                Spotify_Artist_ID="",
+                **{"Source Directory": "bandcamp"},
+            )
+        ]
+    )
+    ctx = worker._build_row_context(df, 0, 1, 1)
+
+    monkeypatch.setattr(
+        worker,
+        "_live_search_bandcamp",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("non-spotify rows should not retry bandcamp")),
+    )
+    monkeypatch.setattr(
+        worker,
+        "_bc_slug_fallback",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("non-spotify rows should not enter spotify slug recovery")),
+    )
+
+    enriched = worker._run_spotify_discovery_pass(df, 0, ctx, fb_driver=None)
+
+    assert enriched is False
+    assert worker._row_enrichment_state["bandcamp"] == "skipped"
+
+
 def test_spotify_sparse_bandcamp_recovery_allows_identity_links_when_bandcamp_missing(tmp_path, monkeypatch):
     worker = _build_worker(tmp_path)
     worker.enable_live_search = True
