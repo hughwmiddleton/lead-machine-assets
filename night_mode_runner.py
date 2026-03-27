@@ -1668,6 +1668,20 @@ def run_night_mode(
             close_night_fb_run_state(night_fb_run_state)
 
     summary_logger = master_logger or _setup_logger(os.path.join(run_dir, "master_log.txt"), "master")
+    final_artifact = _select_existing_artifact(
+        _final_master_candidates(
+            run_dir,
+            master_final=master_final,
+            master_post_fb=master_post_fb,
+            master_pre_fb=master_pre_fb,
+            master_enriched=master_enriched,
+        )
+    )
+    if final_artifact:
+        try:
+            stats.emails_total = _count_nonempty_email_rows(final_artifact)
+        except Exception:
+            pass
     _emit_smoke_summary(stats, summary_logger)
     try:
         run_summary = _build_run_summary(

@@ -258,6 +258,62 @@ class NightModeRunnerDummyTest(unittest.TestCase):
         self.assertEqual(summary["vault_rows_added"], 0)
         self.assertEqual(summary["vault_rows_updated"], 0)
 
+    def test_smoke_summary_email_total_uses_final_artifact_count(self) -> None:
+        config_path = os.path.join(self.tmpdir.name, "config.json")
+        self._write_config(config_path)
+
+        def fake_run_directory_job(job_config, raw_output_path, logger=None):
+            pd.DataFrame(
+                [
+                    {"Artist Name": f"{job_config['job_id']}_artist_a", "Email": "", "Email_All": ""},
+                    {"Artist Name": f"{job_config['job_id']}_artist_b", "Email": "", "Email_All": ""},
+                ]
+            ).to_csv(raw_output_path, index=False)
+            return raw_output_path
+
+        def fake_run_master_enrichment(
+            input_csv, output_csv, logger=None, enable_live_search=True, max_live_searches=None, night_mode=False
+        ):
+            shutil.copyfile(input_csv, output_csv)
+            return output_csv
+
+        def fake_run_enrichment(raw_csv_path, enriched_output_path, logger=None, night_mode=False):
+            shutil.copyfile(raw_csv_path, enriched_output_path)
+            return enriched_output_path
+
+        def fake_fb_pass(input_csv, output_csv, state_path, max_rows_per_run=100, **kwargs):
+            df = pd.read_csv(input_csv, dtype=str, keep_default_na=False).fillna("")
+            df.loc[0, "Email"] = "final@example.com"
+            df.loc[0, "Email_All"] = "final@example.com"
+            df.to_csv(output_csv, index=False)
+            return pipeline_runner.FacebookGlobalPassStatus(
+                processed_rows=len(df.index),
+                total_rows=len(df.index),
+                completed=True,
+                hit_captcha=False,
+                limit_reached=False,
+                attempted_total=len(df.index),
+            )
+
+        with mock.patch.object(night_mode_runner, "run_directory_job", side_effect=fake_run_directory_job), mock.patch.object(
+            night_mode_runner, "run_enrichment", side_effect=fake_run_enrichment
+        ), mock.patch.object(night_mode_runner, "run_master_enrichment", side_effect=fake_run_master_enrichment), mock.patch.object(
+            night_mode_runner, "run_facebook_global_pass_nightmode", side_effect=fake_fb_pass
+        ):
+            result = night_mode_runner.run_night_mode(config_path, run_root=self.run_root)
+
+        master_raw = pd.read_csv(result["master_raw"], dtype=str, keep_default_na=False).fillna("")
+        self.assertEqual(int(master_raw["Email"].str.strip().ne("").sum()), 0)
+
+        master_final = pd.read_csv(result["master_csv"], dtype=str, keep_default_na=False).fillna("")
+        self.assertEqual(int(master_final["Email"].str.strip().ne("").sum()), 1)
+        self.assertEqual(result["smoke_stats"]["emails_total"], 1)
+
+        master_log_path = os.path.join(result["run_dir"], "master_log.txt")
+        with open(master_log_path, "r", encoding="utf-8") as f:
+            master_log = f.read()
+        self.assertIn("Emails total (raw merged): 1", master_log)
+
     def test_night_run_shares_authoritative_fb_run_state_across_active_phases(self) -> None:
         config_path = os.path.join(self.tmpdir.name, "config.json")
         self._write_config(config_path)
