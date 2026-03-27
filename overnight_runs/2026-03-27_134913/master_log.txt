@@ -1,0 +1,60 @@
+2026-03-27 13:49:14,139 [INFO] [Spotify][Seed] 0 artists discovered from playlist.
+2026-03-27 13:49:14,139 [INFO] Reason: playlist empty / inaccessible / extraction returned no artists.
+2026-03-27 13:49:14,139 [INFO] Continuing pipeline.
+2026-03-27 13:49:14,139 [INFO] [Seed Summary]
+2026-03-27 13:49:14,139 [INFO] spotify=0
+2026-03-27 13:49:14,155 [INFO] [Master] Wrote merged raw CSV: overnight_runs/2026-03-27_134913/master_raw.csv (rows=0)
+2026-03-27 13:49:14,155 [INFO] [Master Enrich] Starting cross-directory enrichment for overnight_runs/2026-03-27_134913/master_raw.csv
+2026-03-27 13:49:19,192 [INFO] [Master] Bandcamp directory CSV -> (none) in /Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/overnight_runs/2026-03-27_134913 (attempts=6)
+2026-03-27 13:49:24,343 [INFO] [Master] SoundCloud directory CSV -> (none) in /Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/overnight_runs/2026-03-27_134913 (attempts=6)
+2026-03-27 13:49:29,367 [INFO] [Master] Last.fm directory CSV -> (none) in /Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/overnight_runs/2026-03-27_134913 (attempts=6)
+2026-03-27 13:49:34,395 [INFO] [Master] Unearthed directory CSV -> (none) in /Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/overnight_runs/2026-03-27_134913 (attempts=6)
+2026-03-27 13:49:34,395 [INFO] [Master] Passing bandcamp_csv_path=
+2026-03-27 13:49:34,395 [INFO] [Master] Passing soundcloud_csv_path=
+2026-03-27 13:49:34,396 [INFO] [Master] Passing lastfm_csv_path=
+2026-03-27 13:49:34,396 [INFO] [Master] Passing unearthed_csv_path=
+2026-03-27 13:49:34,398 [INFO] [FB Discover] Shared Facebook session is unavailable for discovery (reason=missing_session_source); disabling FB discovery for the remainder of the run.
+2026-03-27 13:49:34,399 [INFO] [Enricher] Loading seed CSV: overnight_runs/2026-03-27_134913/master_raw.csv
+2026-03-27 13:49:34,410 [INFO] [Deduper] Removed 0 duplicate rows (kept 0 unique rows)
+2026-03-27 13:49:34,416 [INFO] [Schema] ensured email columns: Email, Email_All, Email_Type, Email_Source_URL, Email_Source_Type, Email_Extract_Method, Email_Provenance_JSON
+2026-03-27 13:49:34,422 [INFO] [Enricher] Seed CSV has no rows; wrote empty output with headers -> overnight_runs/2026-03-27_134913/master_enriched.csv
+2026-03-27 13:49:34,422 [INFO] [Enrichment Yield]
+2026-03-27 13:49:34,423 [INFO] [Master Enrich] Completed cross-directory enrichment -> overnight_runs/2026-03-27_134913/master_enriched.csv
+2026-03-27 13:49:34,426 [INFO] [Enrich] Starting enrichment for overnight_runs/2026-03-27_134913/master_enriched.csv
+2026-03-27 13:49:34,433 [INFO] [Auto-Validate] CSV is empty; nothing to validate.
+2026-03-27 13:49:34,488 [INFO] [Enrich] Completed enrichment -> overnight_runs/2026-03-27_134913/master_pre_fb.csv
+2026-03-27 13:49:34,509 [INFO] [Night FB][Session Gate] source=none decision=disabled_for_run reason=missing_session_source
+2026-03-27 13:49:34,523 [INFO] [FB Night] Night FB already disabled for this run; passing through without enrichment (reason=missing_session_source).
+2026-03-27 13:49:34,525 [INFO] [FB Debug Summary]
+2026-03-27 13:49:34,525 [INFO] email_written=0
+2026-03-27 13:49:34,525 [INFO] email_found_not_applied=0
+2026-03-27 13:49:34,525 [INFO] no_email_visible=0
+2026-03-27 13:49:34,525 [INFO] login_required_or_blocked=0
+2026-03-27 13:49:34,525 [INFO] content_unavailable=0
+2026-03-27 13:49:34,525 [INFO] timeout_or_fetch_error=0
+2026-03-27 13:49:34,526 [INFO] no_fb_candidate=0
+2026-03-27 13:49:34,526 [INFO] [Master] Facebook global pass completed: overnight_runs/2026-03-27_134913/master_post_fb.csv
+2026-03-27 13:49:34,526 [INFO] [Enrich] Starting enrichment for overnight_runs/2026-03-27_134913/master_post_fb.csv
+2026-03-27 13:49:34,531 [INFO] [Auto-Validate] CSV is empty; nothing to validate.
+2026-03-27 13:49:34,564 [INFO] [Enrich] Completed enrichment -> overnight_runs/2026-03-27_134913/master_enriched_deduped.csv
+2026-03-27 13:49:34,564 [INFO] [Master] Validation completed: overnight_runs/2026-03-27_134913/master_enriched_deduped.csv
+2026-03-27 13:49:34,564 [INFO] [Master] Exporting client-facing CSV: overnight_runs/2026-03-27_134913/master_enriched_deduped.csv -> overnight_runs/2026-03-27_134913/master_export_leads.csv
+2026-03-27 13:49:34,574 [INFO] [Exporter] Export profile=full_dump: input rows=0, exported rows=0
+2026-03-27 13:49:34,574 [INFO] [Master] Export wrote 0 rows to overnight_runs/2026-03-27_134913/master_export_leads.csv
+2026-03-27 13:49:34,574 [INFO] [Master] Exported client-facing leads CSV: overnight_runs/2026-03-27_134913/master_export_leads.csv
+2026-03-27 13:49:34,582 [INFO] SMOKE RESULT: PASS (DEGRADED: master_raw has zero rows)
+2026-03-27 13:49:34,582 [INFO] Smoke Summary:
+2026-03-27 13:49:34,582 [INFO]  - jobs attempted: 1
+2026-03-27 13:49:34,582 [INFO]  - jobs merged: 0
+2026-03-27 13:49:34,582 [INFO]  - jobs skipped (read errors): 0
+2026-03-27 13:49:34,583 [INFO]  - master_raw rows: 0
+2026-03-27 13:49:34,583 [INFO]  - enrichment ran: yes
+2026-03-27 13:49:34,583 [INFO]  - enrichment rows: 1
+2026-03-27 13:49:34,583 [INFO]  - SC challenges: 0
+2026-03-27 13:49:34,584 [INFO]  - SC breaker tripped: False
+2026-03-27 13:49:34,584 [INFO]  - SC live disabled reason: n/a
+2026-03-27 13:49:34,584 [INFO]  - Bandcamp HTTP 403 count: 0
+2026-03-27 13:49:34,584 [INFO]  - Last.fm HTTP 406 count: 0
+2026-03-27 13:49:34,584 [INFO]  - Emails with missing provenance URL: 0
+2026-03-27 13:49:34,584 [INFO]  - Emails total (raw merged): 0
+2026-03-27 13:49:34,606 [INFO] [Run Summary] Wrote run summary: overnight_runs/2026-03-27_134913/run_summary.json

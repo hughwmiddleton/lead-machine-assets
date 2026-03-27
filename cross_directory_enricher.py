@@ -10896,21 +10896,60 @@ class CrossDirectoryEnricherWorker(QThread):
         self._sc_rss_fail_last_reasons.clear()
         self._sc_reset_403_streak()
 
+    def _sc_engine_surfaces_unstable(self, flags: Optional[Dict[str, Any]] = None) -> Tuple[bool, str]:
+        if flags is None:
+            try:
+                flags = _SC_SHARED_ENGINE.get_run_flags()
+            except Exception:
+                flags = {}
+        root_fetch_disabled = int((flags or {}).get("root_fetch_disabled", 0) or 0)
+        if root_fetch_disabled:
+            return (True, "root_fetch_disabled")
+        tracks_api_blocked = int((flags or {}).get("tracks_api_blocked", 0) or 0)
+        if tracks_api_blocked:
+            return (True, "tracks_api_blocked")
+        last_challenge_at = float(getattr(self, "_sc_last_challenge_at", 0.0) or 0.0)
+        challenge_count = int(getattr(self, "_sc_html_challenge_count", 0) or 0)
+        if challenge_count and last_challenge_at:
+            try:
+                if (time.time() - last_challenge_at) <= SC_CHALLENGE_ACTIVE_SECONDS:
+                    return (True, "challenge_window_active")
+            except Exception:
+                pass
+        return (False, "")
+
     def _sc_maybe_exit_rss_only(self, row_idx: Optional[int] = None) -> None:
         if not getattr(self, "_sc_rss_only_mode", False):
             return
         elapsed = time.time() - (getattr(self, "_sc_rss_only_entered_at", 0.0) or 0.0)
         rows = getattr(self, "_sc_rss_only_rows", 0)
         successes = getattr(self, "_sc_rss_successes", 0)
-        if (
+        exit_ready = (
             elapsed >= SC_RSS_ONLY_COOLDOWN_SECONDS
             or rows >= SC_RSS_ONLY_COOLDOWN_ROWS
             or successes >= SC_RSS_ONLY_SUCCESS_RESET
-        ):
-            self._sc_exit_rss_only_mode(
-                reason="cooldown_elapsed" if elapsed >= SC_RSS_ONLY_COOLDOWN_SECONDS else "rss_success_reset",
-                row_idx=row_idx,
-            )
+        )
+        if not exit_ready:
+            return
+        unstable, unstable_reason = self._sc_engine_surfaces_unstable()
+        if unstable:
+            try:
+                self.log_message.emit(
+                    "[Night SC] RSS-only exit deferred (reason=%s row=%s rss_successes=%d rows_since=%d)"
+                    % (
+                        unstable_reason,
+                        row_idx if row_idx is not None else "<unknown>",
+                        int(successes),
+                        int(rows),
+                    )
+                )
+            except Exception:
+                pass
+            return
+        self._sc_exit_rss_only_mode(
+            reason="cooldown_elapsed" if elapsed >= SC_RSS_ONLY_COOLDOWN_SECONDS else "rss_success_reset",
+            row_idx=row_idx,
+        )
 
     def _sc_fail_stats_snapshot(self) -> str:
         counts_summary = dict(getattr(self, "_sc_rss_fail_counts", Counter()).most_common(4))
@@ -12648,7 +12687,7 @@ class CrossDirectoryEnricherWorker(QThread):
             tracks_api_blocked = int(flags.get("tracks_api_blocked", 0) or 0)
             allow_tracks_fallback = _sc_allow_fallback_on_tracks_api_block()
             tracks_blocking = tracks_api_blocked == 1 and not allow_tracks_fallback
-            engine_unstable = tracks_blocking
+            engine_unstable, engine_unstable_reason = self._sc_engine_surfaces_unstable(flags)
             fallback_allowed = (
                 not getattr(self, "_sc_rss_only_mode", False)
                 and not sc_fallback_used
@@ -12684,8 +12723,9 @@ class CrossDirectoryEnricherWorker(QThread):
             if sc_rss_first_attempted and not fallback_allowed and engine_unstable:
                 try:
                     self.log_message.emit(
-                        "[Night SC] fallback_blocked=1 reason=engine_unstable root_fetch_disabled=%d tracks_api_blocked=%d html_challenges=%d"
+                        "[Night SC] fallback_blocked=1 reason=%s root_fetch_disabled=%d tracks_api_blocked=%d html_challenges=%d"
                         % (
+                            engine_unstable_reason or "engine_unstable",
                             root_fetch_disabled,
                             tracks_api_blocked,
                             getattr(self, "_sc_html_challenge_count", 0),
@@ -12875,7 +12915,7 @@ class CrossDirectoryEnricherWorker(QThread):
         tracks_api_blocked = int(flags.get("tracks_api_blocked", 0) or 0)
         allow_tracks_fallback = _sc_allow_fallback_on_tracks_api_block()
         tracks_blocking = tracks_api_blocked == 1 and not allow_tracks_fallback
-        engine_unstable = tracks_blocking
+        engine_unstable, engine_unstable_reason = self._sc_engine_surfaces_unstable(flags)
         fallback_allowed = (
             not getattr(self, "_sc_rss_only_mode", False)
             and not sc_fallback_used
@@ -12911,8 +12951,9 @@ class CrossDirectoryEnricherWorker(QThread):
         if sc_rss_first_attempted and not fallback_allowed and engine_unstable:
             try:
                 self.log_message.emit(
-                    "[Night SC] fallback_blocked=1 reason=engine_unstable root_fetch_disabled=%d tracks_api_blocked=%d html_challenges=%d"
+                    "[Night SC] fallback_blocked=1 reason=%s root_fetch_disabled=%d tracks_api_blocked=%d html_challenges=%d"
                     % (
+                        engine_unstable_reason or "engine_unstable",
                         root_fetch_disabled,
                         tracks_api_blocked,
                         getattr(self, "_sc_html_challenge_count", 0),

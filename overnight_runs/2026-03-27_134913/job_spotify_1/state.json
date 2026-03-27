@@ -1,0 +1,12 @@
+{
+  "job_id": "job_spotify_1",
+  "raw_csv": "overnight_runs/2026-03-27_134913/job_spotify_1/raw.csv",
+  "enriched_csv": "overnight_runs/2026-03-27_134913/job_spotify_1/raw.csv",
+  "input_seed_csv": "https://open.spotify.com/playlist/37i9dQZF1DWVxStm5ni6tl?si=868025fc12ef4a7d",
+  "status": "completed",
+  "error_count": 0,
+  "last_update": "2026-03-27T02:49:14.138651+00:00",
+  "row_count": 0,
+  "current_row_index": 0,
+  "valid_leads_so_far": 0
+}

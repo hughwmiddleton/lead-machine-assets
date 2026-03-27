@@ -1,4 +1,5 @@
 import os
+import time
 import types
 import importlib.util
 import unittest
@@ -160,6 +161,13 @@ class SoundCloudEngineSwitchTests(unittest.TestCase):
             source_detail=_format_source_display("soundcloud_live"),
         )
         worker._sc_build_rss_payload = lambda handle, base_payload, row_idx=None: (payload, True, True, "rss_success")
+        fallback_called = {"count": 0}
+
+        def fake_fallback(url, attempt):
+            fallback_called["count"] += 1
+            return (None, False)
+
+        worker._night_sc_fetch_profile_payload = fake_fallback
         worker._apply_payload_guarded = lambda *args, **kwargs: True
         worker._finalize_night_sc = lambda *args, **kwargs: None
 
@@ -178,9 +186,50 @@ class SoundCloudEngineSwitchTests(unittest.TestCase):
 
         self.assertTrue(result)
         self.assertTrue(any("rss_only=1" in msg for msg in logs))
+        self.assertEqual(fallback_called["count"], 0)
         self.assertFalse(any("fallback_blocked" in msg for msg in logs))
 
-    def test_tracks_api_block_allows_html_fallback_by_default(self) -> None:
+    def test_rss_only_exit_stays_active_while_challenge_window_is_active(self) -> None:
+        worker = self._make_worker()
+        worker._sc_enter_rss_only_mode(reason="consecutive_challenges")
+        worker._sc_rss_successes = 999
+        worker._sc_html_challenge_count = 2
+        worker._sc_last_challenge_at = time.time()
+
+        original_get_flags = enricher._SC_SHARED_ENGINE.get_run_flags
+        enricher._SC_SHARED_ENGINE.get_run_flags = lambda: {
+            "root_fetch_disabled": 0,
+            "tracks_api_blocked": 0,
+            "used_rss": 1,
+        }
+        try:
+            worker._sc_maybe_exit_rss_only(row_idx=0)
+        finally:
+            enricher._SC_SHARED_ENGINE.get_run_flags = original_get_flags
+
+        self.assertTrue(worker._sc_rss_only_mode)
+
+    def test_rss_only_exit_clears_when_instability_clears(self) -> None:
+        worker = self._make_worker()
+        worker._sc_enter_rss_only_mode(reason="consecutive_challenges")
+        worker._sc_rss_successes = 999
+        worker._sc_html_challenge_count = 2
+        worker._sc_last_challenge_at = time.time() - (enricher.SC_CHALLENGE_ACTIVE_SECONDS + 1)
+
+        original_get_flags = enricher._SC_SHARED_ENGINE.get_run_flags
+        enricher._SC_SHARED_ENGINE.get_run_flags = lambda: {
+            "root_fetch_disabled": 0,
+            "tracks_api_blocked": 0,
+            "used_rss": 1,
+        }
+        try:
+            worker._sc_maybe_exit_rss_only(row_idx=0)
+        finally:
+            enricher._SC_SHARED_ENGINE.get_run_flags = original_get_flags
+
+        self.assertFalse(worker._sc_rss_only_mode)
+
+    def test_tracks_api_block_suppresses_html_fallback_even_when_env_allows_it(self) -> None:
         worker = self._make_worker()
         worker.night_mode = True
         worker._live_context = {"song_title": "", "location": "", "track": "", "genre": ""}
@@ -224,8 +273,52 @@ class SoundCloudEngineSwitchTests(unittest.TestCase):
         finally:
             enricher._SC_SHARED_ENGINE.get_run_flags = original_get_flags
 
+        self.assertFalse(result)
+        self.assertEqual(fallback_called["count"], 0)
+
+    def test_rss_miss_allows_html_fallback_when_run_is_stable(self) -> None:
+        worker = self._make_worker()
+        worker.night_mode = True
+        worker._live_context = {"song_title": "", "location": "", "track": "", "genre": ""}
+        worker._night_sc_cache_lookup = lambda handle, profile_url: None
+        worker._sc_build_rss_payload = lambda handle, base_payload, row_idx=None: (None, False, True, "rss_fail")
+
+        fallback_called = {"count": 0}
+
+        def fake_fallback(url, attempt):
+            fallback_called["count"] += 1
+            return (
+                EnrichmentPayload(
+                    socials=set(),
+                    websites=set(),
+                    emails=set(),
+                    link_hubs=set(),
+                    source_dir="soundcloud",
+                    source_url=url,
+                    source_detail=_format_source_display("soundcloud_live"),
+                ),
+                True,
+            )
+
+        worker._night_sc_fetch_profile_payload = fake_fallback
+        worker._apply_payload_guarded = lambda *args, **kwargs: True
+        worker._finalize_night_sc = lambda *args, **kwargs: None
+
+        original_get_flags = enricher._SC_SHARED_ENGINE.get_run_flags
+        enricher._SC_SHARED_ENGINE.get_run_flags = lambda: {
+            "root_fetch_disabled": 0,
+            "tracks_api_blocked": 0,
+            "used_rss": 0,
+        }
+
+        df = pd.DataFrame([{"SoundCloud Link": "https://soundcloud.com/test-handle"}])
+        try:
+            result = worker._night_sc_attempt_row(df, 0, "Test Artist")
+        finally:
+            enricher._SC_SHARED_ENGINE.get_run_flags = original_get_flags
+
         self.assertTrue(result)
-        self.assertGreaterEqual(fallback_called["count"], 1)
+        self.assertEqual(fallback_called["count"], 1)
 
     def test_night_sc_attempt_uses_promoted_unearthed_seed_url_first(self) -> None:
         df = pd.DataFrame(
