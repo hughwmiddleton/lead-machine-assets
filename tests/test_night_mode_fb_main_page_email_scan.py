@@ -514,12 +514,12 @@ def test_discovery_main_page_html_email_uses_light_fetch_and_keeps_about_fetch(m
 
     assert result is not None
     night_result, emails, driver_kind, outcome = result
-    assert set(emails) == {"bookings@artist.com", "about@artist.com"}
+    assert emails == ["bookings@artist.com"]
     assert night_result is not None
-    assert night_result.email == "about@artist.com"
-    assert night_result.about_attempted == "yes"
-    assert night_result.about_result == "emails_found"
-    assert calls == [(main_url, False), (about_url, True)]
+    assert night_result.email == "bookings@artist.com"
+    assert night_result.about_attempted == "no"
+    assert night_result.about_result == ""
+    assert calls == [(main_url, False)]
     assert surface_calls == []
     assert driver_kind == "session"
     assert outcome == "found_email"
@@ -585,12 +585,12 @@ def test_discovery_main_page_rendered_text_email_escalates_after_light_fetch(mon
 
     assert result is not None
     night_result, emails, driver_kind, outcome = result
-    assert set(emails) == {"brighteyedbookings@gmail.com", "about@artist.com"}
+    assert emails == ["brighteyedbookings@gmail.com"]
     assert night_result is not None
-    assert night_result.email == "about@artist.com"
-    assert night_result.about_attempted == "yes"
-    assert night_result.about_result == "emails_found"
-    assert calls == [(main_url, False), (about_url, True)]
+    assert night_result.email == "brighteyedbookings@gmail.com"
+    assert night_result.about_attempted == "no"
+    assert night_result.about_result == ""
+    assert calls == [(main_url, False)]
     assert surface_calls == ["session"]
     assert driver_kind == "session"
     assert outcome == "found_email"
@@ -656,12 +656,12 @@ def test_discovery_main_page_live_anchor_mailto_escalates_after_light_fetch(monk
 
     assert result is not None
     night_result, emails, driver_kind, outcome = result
-    assert set(emails) == {"info@artist.com", "about@artist.com"}
+    assert emails == ["info@artist.com"]
     assert night_result is not None
-    assert night_result.email == "about@artist.com"
-    assert night_result.about_attempted == "yes"
-    assert night_result.about_result == "emails_found"
-    assert calls == [(main_url, False), (about_url, True)]
+    assert night_result.email == "info@artist.com"
+    assert night_result.about_attempted == "no"
+    assert night_result.about_result == ""
+    assert calls == [(main_url, False)]
     assert surface_calls == ["session"]
     assert driver_kind == "session"
     assert outcome == "found_email"
@@ -690,17 +690,9 @@ def test_discovery_candidate_uses_shared_accepted_page_sweep(monkeypatch) -> Non
                 resolved_url=main_url,
                 html="<html><body><a href='/artist/about'>About</a></body></html>",
             ),
-            secondary_surface=nmfb.FacebookAcceptedPageFetchResult(
-                requested_url=about_url,
-                resolved_url=about_url,
-                html="<html><body>About: about@artist.com</body></html>",
-                rendered_text="About: about@artist.com",
-            ),
             main_emails=["info@artist.com"],
-            secondary_emails=["about@artist.com"],
-            combined_emails=["info@artist.com", "about@artist.com"],
-            secondary_attempted=True,
-            final_resolved_url=about_url,
+            combined_emails=["info@artist.com"],
+            final_resolved_url=main_url,
         )
 
     monkeypatch.setattr(enricher, "_fetch_html_with_url", fake_fetch)
@@ -719,15 +711,15 @@ def test_discovery_candidate_uses_shared_accepted_page_sweep(monkeypatch) -> Non
     assert result is not None
     night_result, emails, driver_kind, outcome = result
     assert observed["fb_url"] == main_url
-    assert observed["continue_after_main_email"] is True
+    assert observed["continue_after_main_email"] is False
     assert observed["stop_after_first_filtered"] is False
     assert callable(observed["refresh_main_surface"])
     assert calls == [(main_url, False)]
-    assert set(emails) == {"info@artist.com", "about@artist.com"}
+    assert emails == ["info@artist.com"]
     assert night_result is not None
-    assert night_result.email == "about@artist.com"
-    assert night_result.about_attempted == "yes"
-    assert night_result.about_result == "emails_found"
+    assert night_result.email == "info@artist.com"
+    assert night_result.about_attempted == "no"
+    assert night_result.about_result == ""
     assert driver_kind == "session"
     assert outcome == "found_email"
 

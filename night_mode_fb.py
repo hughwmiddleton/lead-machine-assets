@@ -8017,6 +8017,7 @@ class NightModeFacebookEnricher:
             self.fb_rows_skipped["challenge"] += 1
             return None, [], used_driver_kind, "login_wall"
 
+        is_discovery = bool(candidate_context and candidate_context.get("search_discovery_accepted"))
         explicit_pass_a = bool(candidate_context and candidate_context.get("explicit_accepted_url"))
         if explicit_pass_a:
             targeted_restabilization_attempted = False
@@ -8261,13 +8262,17 @@ class NightModeFacebookEnricher:
                 return None
             return _pick_fb_contact_link(BeautifulSoup(page_html, "html.parser"), base_url)
 
+        continue_after_main_email = bool(self._page_budget_remaining > 0 and not explicit_pass_a)
+        if is_discovery:
+            continue_after_main_email = False
+
         sweep_result = _run_bounded_fb_accepted_page_sweep(
             candidate_url,
             _fetch_shared_surface,
             select_secondary_url=_select_shared_secondary_url,
             fallback_secondary_urls=_fetch_fb_about_variants,
             refresh_main_surface=_refresh_shared_main_surface,
-            continue_after_main_email=bool(self._page_budget_remaining > 0 and not explicit_pass_a),
+            continue_after_main_email=continue_after_main_email,
             stop_after_first_filtered=explicit_pass_a,
             on_secondary_selected=lambda target: _log(self.logger, f"[FB Email] Visiting {target}"),
             on_secondary_fallback=lambda target: (
@@ -8292,7 +8297,7 @@ class NightModeFacebookEnricher:
         about_emails: List[str] = []
         about_mailto = False
         email_method = "mailto" if emails and main_mailto else ("regex" if emails else "")
-        need_about_fetch = bool(sweep_result.secondary_attempted or (self._page_budget_remaining > 0 and not explicit_pass_a))
+        need_about_fetch = bool(sweep_result.secondary_attempted or continue_after_main_email)
         if emails:
             for email in emails:
                 _log(self.logger, f"[FB Email] Found email on main page: {email}")
