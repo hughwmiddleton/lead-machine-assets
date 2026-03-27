@@ -869,6 +869,137 @@ def test_spotify_discovery_pass_recovers_lastfm_via_apply_payload_guarded(tmp_pa
     assert "https://www.instagram.com/artista" in df.at[0, "Social Link"]
 
 
+def test_spotify_identity_pass_allows_conservative_low_score_bandcamp_promotion(tmp_path, monkeypatch):
+    worker = _build_worker(tmp_path)
+    worker.enable_live_search = True
+    worker.max_live_searches = 5
+    df = pd.DataFrame([_base_row()])
+    ctx = worker._build_row_context(df, 0, 1, 1)
+    payload = cde.EnrichmentPayload(
+        source_dir="bandcamp_directory",
+        source_url="https://artist-a.bandcamp.com/",
+        source_detail="Bandcamp Directory",
+        match_score=cde.MATCH_THRESHOLD - 0.05,
+        candidate_name="Artist A",
+    )
+
+    monkeypatch.setattr(worker, "_live_search_bandcamp", lambda _artist: payload)
+    monkeypatch.setattr(worker, "_night_sc_attempt_row", lambda *args, **kwargs: False)
+    monkeypatch.setattr(worker, "_live_search_lastfm", lambda _artist: None)
+    monkeypatch.setattr(worker, "_bc_slug_fallback", lambda *args, **kwargs: None)
+
+    enriched = worker._run_spotify_discovery_pass(df, 0, ctx, fb_driver=None)
+
+    assert enriched is True
+    assert df.at[0, "Bandcamp_URL"] == "https://artist-a.bandcamp.com"
+    assert worker._spotify_identity_pass_attempted == 1
+    assert worker._spotify_identity_pass_enriched == 1
+    assert worker._spotify_identity_pass_no_signal == 0
+    assert worker._spotify_identity_pass_promotions["bandcamp"] == 1
+
+
+def test_spotify_identity_pass_still_blocks_ambiguous_low_score_payload(tmp_path, monkeypatch):
+    worker = _build_worker(tmp_path)
+    worker.enable_live_search = True
+    worker.max_live_searches = 5
+    df = pd.DataFrame([_base_row()])
+    ctx = worker._build_row_context(df, 0, 1, 1)
+    payload = cde.EnrichmentPayload(
+        source_dir="bandcamp_directory",
+        source_url="https://wrong-artist.bandcamp.com/",
+        source_detail="Bandcamp Directory",
+        match_score=cde.MATCH_THRESHOLD - 0.05,
+        candidate_name="Wrong Artist",
+    )
+
+    monkeypatch.setattr(worker, "_live_search_bandcamp", lambda _artist: payload)
+    monkeypatch.setattr(worker, "_night_sc_attempt_row", lambda *args, **kwargs: False)
+    monkeypatch.setattr(worker, "_live_search_lastfm", lambda _artist: None)
+    monkeypatch.setattr(worker, "_bc_slug_fallback", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        cde,
+        "_discover_facebook_url_bounded",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("facebook discovery should stay skipped")),
+    )
+
+    enriched = worker._run_spotify_discovery_pass(df, 0, ctx, fb_driver=object())
+
+    assert enriched is False
+    assert df.at[0, "Bandcamp_URL"] == ""
+    assert ctx["spotify_identity_tier"] == 3
+    assert worker._spotify_identity_pass_attempted == 1
+    assert worker._spotify_identity_pass_enriched == 0
+    assert worker._spotify_identity_pass_no_signal == 1
+
+
+def test_spotify_identity_pass_propagates_promoted_identity_to_same_run_facebook_logic(tmp_path, monkeypatch):
+    worker = _build_worker(tmp_path)
+    worker.enable_live_search = True
+    worker.max_live_searches = 5
+    df = pd.DataFrame([_base_row()])
+    ctx = worker._build_row_context(df, 0, 1, 1)
+    payload = cde.EnrichmentPayload(
+        websites={"https://artist.test"},
+        source_dir="bandcamp_directory",
+        source_url="https://artist-a.bandcamp.com/",
+        source_detail="Bandcamp Directory",
+        match_score=cde.MATCH_THRESHOLD - 0.05,
+        candidate_name="Artist A",
+    )
+    discover_calls = {"count": 0}
+
+    def fake_discover(*args, **kwargs):
+        discover_calls["count"] += 1
+        return "https://www.facebook.com/artist-a"
+
+    monkeypatch.setattr(worker, "_live_search_bandcamp", lambda _artist: payload)
+    monkeypatch.setattr(worker, "_night_sc_attempt_row", lambda *args, **kwargs: False)
+    monkeypatch.setattr(worker, "_live_search_lastfm", lambda _artist: None)
+    monkeypatch.setattr(worker, "_bc_slug_fallback", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cde, "_discover_facebook_url_bounded", fake_discover)
+
+    enriched = worker._run_spotify_discovery_pass(df, 0, ctx, fb_driver=object())
+    df = apply_fb_opportunity_state_df(df)
+
+    assert enriched is True
+    assert discover_calls["count"] == 1
+    assert df.at[0, "Bandcamp_URL"] == "https://artist-a.bandcamp.com"
+    assert df.at[0, "Facebook_URL"] == "https://www.facebook.com/artist-a"
+    assert df.at[0, FB_OPPORTUNITY_STATE_COL] == "fb_opportunity_present"
+    assert ctx["spotify_identity_tier"] != 3
+    assert worker._live_context["spotify_identity_tier"] != 3
+    assert "https://artist.test" in df.at[0, "External Links"]
+
+
+def test_low_score_guard_still_blocks_non_spotify_and_unearthed_rows(tmp_path):
+    worker = _build_worker(tmp_path)
+    payload = cde.EnrichmentPayload(
+        source_dir="bandcamp_directory",
+        source_url="https://artist-a.bandcamp.com/",
+        source_detail="Bandcamp Directory",
+        match_score=cde.MATCH_THRESHOLD - 0.05,
+        candidate_name="Artist A",
+    )
+
+    non_spotify_df = pd.DataFrame(
+        [_base_row(Spotify_URL="", Spotify_Artist_ID="", **{"Source Directory": "bandcamp"})]
+    )
+    unearthed_df = pd.DataFrame(
+        [
+            _base_row(
+                Spotify_URL="",
+                Spotify_Artist_ID="",
+                **{"Source Directory": "unearthed", "Played on Unearthed": "Yes"},
+            )
+        ]
+    )
+
+    assert worker._apply_payload_guarded(non_spotify_df, 0, payload, "Artist A") is False
+    assert worker._apply_payload_guarded(unearthed_df, 0, payload, "Artist A") is False
+    assert non_spotify_df.at[0, "Bandcamp_URL"] == ""
+    assert unearthed_df.at[0, "Bandcamp_URL"] == ""
+
+
 def test_spotify_discovery_pass_skips_live_recovery_when_gated(tmp_path, monkeypatch):
     recovery_calls = {"bandcamp": 0, "soundcloud": 0, "lastfm": 0, "spotify_bc_slug": 0}
 

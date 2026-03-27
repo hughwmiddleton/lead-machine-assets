@@ -6752,6 +6752,7 @@ class CrossDirectoryEnricherWorker(QThread):
         self._spotify_identity_pass_enriched: int = 0
         self._spotify_identity_pass_no_signal: int = 0
         self._spotify_identity_pass_promotions: Counter = Counter()
+        self._spotify_identity_guard_ctx: Dict[str, Any] = {}
         self._night_sc_cache: Dict[str, Dict[str, Any]] = {}
         self._active_night_sc_attempt: Optional[_NightSCAttempt] = None
         self._night_sc_challenge_streak: int = 0  # consecutive challenge detections
@@ -6925,6 +6926,7 @@ class CrossDirectoryEnricherWorker(QThread):
         self._spotify_identity_pass_enriched = 0
         self._spotify_identity_pass_no_signal = 0
         self._spotify_identity_pass_promotions = Counter()
+        self._spotify_identity_guard_ctx = {}
         self._domain_email_reuse_index = {}
         self._domain_profile_index = {}
         self._domain_email_reuse_rows = set()
@@ -8294,32 +8296,42 @@ class CrossDirectoryEnricherWorker(QThread):
         spotify_id: str,
         recovery_snapshot: Dict[str, Any],
     ) -> bool:
-        enriched = False
-        self._ensure_row_enrichment_state_platforms("bandcamp", "soundcloud", "lastfm")
+        previous_guard_ctx = dict(getattr(self, "_spotify_identity_guard_ctx", {}) or {})
+        self._spotify_identity_guard_ctx = {
+            "active": True,
+            "row_idx": row_idx,
+            "artist": artist,
+            "spotify_id": spotify_id,
+        }
+        try:
+            enriched = False
+            self._ensure_row_enrichment_state_platforms("bandcamp", "soundcloud", "lastfm")
 
-        bc_payload = self._live_search_bandcamp(artist)
-        if bc_payload:
-            bc_applied = self._apply_payload_guarded(
-                seed_df, row_idx, bc_payload, artist, spotify_id=spotify_id
-            )
-            enriched |= bc_applied
+            bc_payload = self._live_search_bandcamp(artist)
+            if bc_payload:
+                bc_applied = self._apply_payload_guarded(
+                    seed_df, row_idx, bc_payload, artist, spotify_id=spotify_id
+                )
+                enriched |= bc_applied
+                updated_snapshot = self._spotify_identity_surface_snapshot(seed_df.loc[row_idx])
+                if self._spotify_snapshot_gained_identity_surface(recovery_snapshot, updated_snapshot):
+                    return enriched
+
+            sc_applied = self._night_sc_attempt_row(seed_df, row_idx, artist, spotify_id=spotify_id)
+            enriched |= sc_applied
             updated_snapshot = self._spotify_identity_surface_snapshot(seed_df.loc[row_idx])
             if self._spotify_snapshot_gained_identity_surface(recovery_snapshot, updated_snapshot):
                 return enriched
 
-        sc_applied = self._night_sc_attempt_row(seed_df, row_idx, artist, spotify_id=spotify_id)
-        enriched |= sc_applied
-        updated_snapshot = self._spotify_identity_surface_snapshot(seed_df.loc[row_idx])
-        if self._spotify_snapshot_gained_identity_surface(recovery_snapshot, updated_snapshot):
+            lf_payload = self._live_search_lastfm(artist)
+            if lf_payload:
+                lf_applied = self._apply_payload_guarded(
+                    seed_df, row_idx, lf_payload, artist, spotify_id=spotify_id
+                )
+                enriched |= lf_applied
             return enriched
-
-        lf_payload = self._live_search_lastfm(artist)
-        if lf_payload:
-            lf_applied = self._apply_payload_guarded(
-                seed_df, row_idx, lf_payload, artist, spotify_id=spotify_id
-            )
-            enriched |= lf_applied
-        return enriched
+        finally:
+            self._spotify_identity_guard_ctx = previous_guard_ctx
 
     def _run_spotify_sparse_bandcamp_recovery(
         self,
@@ -11315,12 +11327,42 @@ class CrossDirectoryEnricherWorker(QThread):
         if not payload:
             return False
         score = max(0.0, min(float(getattr(payload, "match_score", 0.0) or 0.0), 1.0))
+        bypass_strict_guard = False
         if STRICT_MATCHING and score < MATCH_THRESHOLD:
-            self.log_message.emit(
-                f"[Enricher] low-confidence match skipped for '{artist_name}' (Spotify ID {spotify_id or '<unknown>'}) – "
-                f"score={score:.2f}, candidate={payload.summary() or '<none>'}"
+            guard_ctx = getattr(self, "_spotify_identity_guard_ctx", {}) or {}
+            live_ctx = getattr(self, "_live_context", {}) or {}
+            live_row = df.loc[row_idx] if df is not None and row_idx in getattr(df, "index", ()) else None
+            source_key = _clean_cell(getattr(payload, "source_dir", "")).lower()
+            seed_artist = _clean_cell(artist_name) or _clean_cell(live_ctx.get("artist", ""))
+            candidate_name = _clean_cell(getattr(payload, "candidate_name", ""))
+            conservative_name_match = False
+            if seed_artist and candidate_name:
+                conservative_name_match = normalise_artist_name(seed_artist) == normalise_artist_name(candidate_name)
+                if not conservative_name_match and source_key.startswith("bandcamp"):
+                    conservative_name_match = _bc_slug_has_strong_artist_name_confirmation(
+                        seed_artist,
+                        candidate_name,
+                    )
+            bypass_strict_guard = bool(
+                guard_ctx.get("active")
+                and guard_ctx.get("row_idx") == row_idx
+                and self._row_is_spotify_origin(live_row, live_ctx)
+                and int(live_ctx.get("spotify_identity_tier") or 0) == 3
+                and source_key.startswith(("bandcamp", "soundcloud", "lastfm"))
+                and conservative_name_match
+                and (_payload_actionable(payload) or _clean_cell(getattr(payload, "source_url", "")))
             )
-            return False
+            if bypass_strict_guard:
+                self.log_message.emit(
+                    f"[Enricher] allowing spotify identity-pass conservative recovery for '{artist_name}' "
+                    f"(Spotify ID {spotify_id or '<unknown>'}) – score={score:.2f}, candidate={payload.summary() or '<none>'}"
+                )
+            else:
+                self.log_message.emit(
+                    f"[Enricher] low-confidence match skipped for '{artist_name}' (Spotify ID {spotify_id or '<unknown>'}) – "
+                    f"score={score:.2f}, candidate={payload.summary() or '<none>'}"
+                )
+                return False
         self._update_row_match_score(df, row_idx, score)
         self._apply_payload(df, row_idx, payload)
         _promote_payload_facebook_url(df, row_idx, payload)
