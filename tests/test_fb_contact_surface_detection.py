@@ -306,6 +306,35 @@ class _FakeFacebookDriver:
         self.page_source = self.pages.get(url, "")
 
 
+class _NoRawGetFacebookDriver:
+    def __init__(self):
+        self.current_url = ""
+        self.page_source = ""
+
+    def get(self, url):  # noqa: ANN001
+        raise AssertionError(f"raw driver.get should not be used for bounded Night navigation: {url}")
+
+
+class _FakeBoundedFacebookSession:
+    def __init__(self, driver, pages):
+        self.driver = driver
+        self.pages = pages
+        self.calls = []
+        self.last_nav_current_url = ""
+        self.last_nav_page_source = ""
+
+    def navigate(self, url, logger=None):  # noqa: ANN001
+        self.calls.append(url)
+        page = self.pages.get(url, {})
+        resolved_url = page.get("resolved_url", url)
+        html = page.get("html", "")
+        self.driver.current_url = resolved_url
+        self.driver.page_source = html
+        self.last_nav_current_url = resolved_url
+        self.last_nav_page_source = html
+        return self.driver
+
+
 def test_extract_fb_emails_bounded_caps_fetches_at_two_with_detected_surface() -> None:
     driver = _FakeFacebookDriver(
         {
@@ -344,6 +373,35 @@ def test_extract_fb_emails_bounded_no_candidate_still_caps_fetches_at_two() -> N
         "https://www.facebook.com/artist/about",
     ]
     assert len(driver.calls) == 2
+
+
+def test_extract_fb_emails_bounded_uses_shared_session_navigation_for_main_and_secondary() -> None:
+    driver = _NoRawGetFacebookDriver()
+    session = _FakeBoundedFacebookSession(
+        driver,
+        {
+            "https://www.facebook.com/artist": {
+                "html": '<html><body><a href="/artist/about">About</a></body></html>',
+            },
+            "https://www.facebook.com/artist/about": {
+                "html": '<html><body><a href="mailto:test@artist.com">Email</a></body></html>',
+            },
+        },
+    )
+
+    emails, resolved, reason = cde._extract_fb_emails_bounded(
+        driver,
+        "https://www.facebook.com/artist",
+        fb_session=session,
+    )
+
+    assert emails == ["test@artist.com"]
+    assert resolved == "https://www.facebook.com/artist/about"
+    assert reason == ""
+    assert session.calls == [
+        "https://www.facebook.com/artist",
+        "https://www.facebook.com/artist/about",
+    ]
 
 
 def test_scrape_single_fb_candidate_direct_fallback_prefers_directory_contact_info_without_extra_fetches(monkeypatch) -> None:

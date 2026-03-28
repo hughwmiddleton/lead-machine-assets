@@ -1485,6 +1485,47 @@ def test_fb_enrich_explicit_url_routes_through_fb_session_gate(monkeypatch):
     assert gate_calls == [(driver, False)]
 
 
+def test_night_mode_fb_enrich_threads_shared_session_into_bounded_extract(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    worker.night_mode = True
+    worker._row_allows_heavy_enricher = lambda *args, **kwargs: SimpleNamespace(allowed=True)
+    worker._ensure_fb_discovery_session = lambda fb_driver, force=False: (True, "authenticated")
+    shared_session = object()
+    worker.night_fb_run_state = SimpleNamespace(session=shared_session)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Night Session Artist",
+            "Email": "",
+            "Email_All": "",
+            "facebook_url": "https://www.facebook.com/nightsessionartist",
+            "Facebook_URL": "https://www.facebook.com/nightsessionartist",
+            "Social Link": "",
+            "External Links": "",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+            "FB_Status": "",
+            "FB_Reason": "",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    observed = {}
+
+    def fake_extract(fb_driver, url, log_fn=None, fb_session=None):  # noqa: ANN001
+        observed["fb_driver"] = fb_driver
+        observed["url"] = url
+        observed["fb_session"] = fb_session
+        return (["night@example.com"], url, "")
+
+    monkeypatch.setattr(cde, "_extract_fb_emails_bounded", fake_extract)
+
+    assert worker._enrich_row_facebook(seed_df, 0, object(), ctx) is True
+    assert observed["url"] == "https://www.facebook.com/nightsessionartist"
+    assert observed["fb_session"] is shared_session
+    assert seed_df.at[0, "Email"] == "night@example.com"
+
+
 def test_run_impl_disables_fb_discovery_when_auth_cookie_missing(tmp_path, monkeypatch):
     logs = []
     seed_csv = tmp_path / "missing.csv"

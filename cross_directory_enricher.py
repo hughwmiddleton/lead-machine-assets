@@ -3189,7 +3189,7 @@ def _select_fb_contact_surface_url(base_url: str, html: str) -> Optional[str]:
     return candidates[0][3]
 
 
-def _extract_fb_emails_bounded(fb_driver, fb_url: str, log_fn=None) -> tuple[list[str], str, str]:
+def _extract_fb_emails_bounded(fb_driver, fb_url: str, log_fn=None, fb_session=None) -> tuple[list[str], str, str]:
     """
     Visit at most two Facebook pages (main + about/info/contact) to extract emails.
     Returns (emails, resolved_url, status_reason).
@@ -3213,8 +3213,20 @@ def _extract_fb_emails_bounded(fb_driver, fb_url: str, log_fn=None) -> tuple[lis
                 status_reason="fetch_error",
             )
         try:
-            fb_driver.get(target_fetch)
-            current_url = getattr(fb_driver, "current_url", "") or target_fetch
+            active_driver = fb_driver
+            nav_current_url = ""
+            nav_html = ""
+            if fb_session is not None and hasattr(fb_session, "navigate"):
+                try:
+                    active_driver = fb_session.navigate(target_fetch, logger=log_fn)
+                except TypeError:
+                    active_driver = fb_session.navigate(target_fetch)
+                active_driver = active_driver or getattr(fb_session, "driver", None) or fb_driver
+                nav_current_url = str(getattr(fb_session, "last_nav_current_url", "") or "").strip()
+                nav_html = getattr(fb_session, "last_nav_page_source", "") or ""
+            else:
+                fb_driver.get(target_fetch)
+            current_url = nav_current_url or getattr(active_driver, "current_url", "") or target_fetch
             resolved_url = _normalise_fb_surface_url(current_url) or _normalise_fb_url(normalize_external_url(current_url) or current_url) or current_url
             if _is_fb_login_or_security_url(current_url):
                 _log("[FB Enrich] Facebook login/checkpoint detected; skipping.")
@@ -3223,7 +3235,7 @@ def _extract_fb_emails_bounded(fb_driver, fb_url: str, log_fn=None) -> tuple[lis
                     resolved_url=resolved_url,
                     status_reason="login_wall",
                 )
-            html = getattr(fb_driver, "page_source", "") or ""
+            html = nav_html or getattr(active_driver, "page_source", "") or ""
             warning = _looks_like_fb_warning_or_block(html, current_url)
             if warning:
                 _log(f"[FB Enrich] Warning/block page detected ({warning}); skipping row.")
@@ -3232,7 +3244,7 @@ def _extract_fb_emails_bounded(fb_driver, fb_url: str, log_fn=None) -> tuple[lis
                     resolved_url=resolved_url,
                     status_reason=warning,
                 )
-            rendered_text = _extract_fb_visible_text_with_container_fallback(fb_driver)
+            rendered_text = _extract_fb_visible_text_with_container_fallback(active_driver)
             _log_fb_email_surface_debug(log_fn, f"page:{resolved_url}", html, rendered_text)
             return FacebookAcceptedPageFetchResult(
                 requested_url=target_fetch,
@@ -9440,12 +9452,25 @@ class CrossDirectoryEnricherWorker(QThread):
                     fb_emails: List[str] = []
                     page_url_used = ""
                     fb_status_reason = ""
+                    fb_session = None
+                    if getattr(self, "night_mode", False) and self.night_fb_run_state is not None:
+                        fb_session = getattr(self.night_fb_run_state, "session", None)
 
                     try:
                         for candidate in existing_fb_links:
-                            fb_emails, resolved_url, fb_status_reason = _extract_fb_emails_bounded(
-                                fb_driver, candidate, log_fn=self.log_message.emit
-                            )
+                            if fb_session is not None:
+                                fb_emails, resolved_url, fb_status_reason = _extract_fb_emails_bounded(
+                                    fb_driver,
+                                    candidate,
+                                    log_fn=self.log_message.emit,
+                                    fb_session=fb_session,
+                                )
+                            else:
+                                fb_emails, resolved_url, fb_status_reason = _extract_fb_emails_bounded(
+                                    fb_driver,
+                                    candidate,
+                                    log_fn=self.log_message.emit,
+                                )
                             fb_emails = filter_system_telemetry_emails(fb_emails)
                             page_url_used = resolved_url or candidate
                             if fb_emails:
