@@ -4209,36 +4209,118 @@ def _create_fb_driver_public(headless: bool = True):
     return _start_chromedriver_with_retry(chrome_options, logger=None, profile_dir=None, enable_temp_profile_fallback=False)
 
 
+_FB_BOUNDED_RENDERED_TEXT_SCRIPT = """
+    /* fb_rendered_visible_text_bounded */
+    const maxChars = Math.max(512, Number(arguments[0] || 6000));
+    const maxNodes = Math.max(24, Number(arguments[1] || 180));
+    const rootSelectors = ['div[role="main"]', 'div[role="complementary"]', 'aside'];
+    const leafTags = new Set(['A', 'BUTTON', 'DIV', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'LI', 'P', 'SPAN']);
+    const semanticTags = new Set(['A', 'BUTTON', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'LI', 'P']);
+    const interestingPattern = /@|contact|email|book|booking|mgmt|management|business|about|intro/i;
+    const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+    const isVisible = (el) => {
+      if (!el || !el.isConnected) return false;
+      const style = window.getComputedStyle ? window.getComputedStyle(el) : null;
+      if (style && (style.display === 'none' || style.visibility === 'hidden')) return false;
+      const rects = typeof el.getClientRects === 'function' ? el.getClientRects() : null;
+      return !!(rects && rects.length);
+    };
+
+    const roots = [];
+    const seenRoots = new Set();
+    for (const selector of rootSelectors) {
+      for (const el of document.querySelectorAll(selector)) {
+        if (!isVisible(el) || seenRoots.has(el)) continue;
+        seenRoots.add(el);
+        roots.push(el);
+      }
+    }
+    if (!roots.length && document.body) {
+      roots.push(document.body);
+    }
+
+    const seenTexts = new Set();
+    const results = [];
+    let totalChars = 0;
+    let visitedNodes = 0;
+
+    const pushText = (value) => {
+      const text = normalize(value);
+      if (!text || seenTexts.has(text)) return false;
+      const remaining = maxChars - totalChars;
+      if (remaining <= 0) return true;
+      const clipped = remaining >= text.length ? text : text.slice(0, remaining);
+      if (!clipped) return totalChars >= maxChars;
+      seenTexts.add(text);
+      results.push(clipped);
+      totalChars += clipped.length;
+      return totalChars >= maxChars;
+    };
+
+    const collectRoot = (root) => {
+      if (!root || totalChars >= maxChars || visitedNodes >= maxNodes) return;
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT, {
+        acceptNode(node) {
+          if (!node || node === root) return NodeFilter.FILTER_SKIP;
+          if (!leafTags.has(node.tagName)) return NodeFilter.FILTER_SKIP;
+          if (!isVisible(node)) return NodeFilter.FILTER_SKIP;
+          if (node.children && node.children.length && !semanticTags.has(node.tagName)) {
+            return NodeFilter.FILTER_SKIP;
+          }
+          return NodeFilter.FILTER_ACCEPT;
+        },
+      });
+
+      let node = walker.nextNode();
+      while (node && totalChars < maxChars && visitedNodes < maxNodes) {
+        visitedNodes += 1;
+        const text = normalize(node.innerText || node.textContent || '');
+        if (text && (interestingPattern.test(text) || results.length < 8)) {
+          if (pushText(text)) return;
+        }
+        node = walker.nextNode();
+      }
+    };
+
+    for (const root of roots) {
+      collectRoot(root);
+      if (totalChars >= maxChars || visitedNodes >= maxNodes) break;
+    }
+
+    return results.join('\\n');
+"""
+
+
+def _execute_fb_bounded_rendered_text_snapshot(driver, max_chars: int, max_nodes: int):
+    try:
+        return driver.execute_script(_FB_BOUNDED_RENDERED_TEXT_SCRIPT, max_chars, max_nodes)
+    except TypeError:
+        return driver.execute_script(_FB_BOUNDED_RENDERED_TEXT_SCRIPT)
+
+
 def _extract_rendered_visible_text_from_driver(driver) -> str:
     if driver is None:
         return ""
 
+    try:
+        max_chars = int(os.getenv("FB_RENDERED_TEXT_MAX_CHARS", "6000") or "6000")
+    except Exception:
+        max_chars = 6000
+    max_chars = max(512, min(max_chars, 24000))
+
+    try:
+        max_nodes = int(os.getenv("FB_RENDERED_TEXT_MAX_NODES", "180") or "180")
+    except Exception:
+        max_nodes = 180
+    max_nodes = max(24, min(max_nodes, 600))
+
     def _read_snapshot(drv) -> str:
-        body = None
         try:
-            body = drv.find_element(By.TAG_NAME, "body")
-        except Exception:
-            body = None
-
-        if body is not None:
-            try:
-                text = body.get_attribute("innerText") or ""
-            except Exception:
-                text = ""
-            if not text:
-                try:
-                    text = getattr(body, "text", "") or ""
-                except Exception:
-                    text = ""
-            if text:
-                return str(text).strip()
-
-        try:
-            text = drv.execute_script(
-                "return document.body ? (document.body.innerText || '') : '';"
-            ) or ""
+            text = _execute_fb_bounded_rendered_text_snapshot(drv, max_chars, max_nodes) or ""
         except Exception:
             text = ""
+        if isinstance(text, list):
+            text = "\n".join(str(part or "").strip() for part in text if str(part or "").strip())
         return str(text).strip()
 
     initial_text = _read_snapshot(driver)
@@ -4295,7 +4377,7 @@ def _extract_rendered_visible_text_from_driver(driver) -> str:
 def _extract_fb_visible_text_with_container_fallback(driver) -> str:
     """
     Facebook-only supplement for already-open pages.
-    Keeps the generic body-text helper unchanged and adds a tiny semantic
+    Starts with the bounded rendered-text helper and adds a tiny semantic
     fallback for visible main/sidebar regions.
     """
     base_text = _extract_rendered_visible_text_from_driver(driver)
@@ -4346,6 +4428,8 @@ def _extract_fb_visible_text_with_container_fallback(driver) -> str:
     for block in blocks:
         normalized = " ".join(str(block or "").split())
         if not normalized or normalized in seen_blocks:
+            continue
+        if normalized_base and normalized in normalized_base:
             continue
         seen_blocks.add(normalized)
         extra_blocks.append(normalized)

@@ -369,6 +369,35 @@ class _ContainerFallbackDriver:
         raise AssertionError(f"unexpected execute_script call: {script_text[:80]}")
 
 
+class _BoundedRenderedTextDriver:
+    def __init__(self, rendered_text: str):
+        self.rendered_text = rendered_text
+        self.execute_calls = 0
+        self.find_calls = 0
+
+    def find_element(self, *_args, **_kwargs):  # noqa: ANN001
+        self.find_calls += 1
+        raise AssertionError("full-body element lookup should be skipped for bounded rendered-text extraction")
+
+    def execute_script(self, script, *args):  # noqa: ANN001
+        script_text = str(script or "")
+        if "fb_rendered_visible_text_bounded" not in script_text:
+            raise AssertionError(f"unexpected execute_script call: {script_text[:80]}")
+        self.execute_calls += 1
+        assert args == (6000, 180)
+        return self.rendered_text
+
+
+def test_extract_rendered_visible_text_from_driver_uses_bounded_script_before_any_body_read() -> None:
+    driver = _BoundedRenderedTextDriver("Intro Contact bookings@artist.com")
+
+    rendered_text = night_mode_fb._extract_rendered_visible_text_from_driver(driver)
+
+    assert rendered_text == "Intro Contact bookings@artist.com"
+    assert driver.execute_calls == 1
+    assert driver.find_calls == 0
+
+
 def test_extract_fb_visible_text_with_container_fallback_includes_visible_sidebar_blocks(monkeypatch) -> None:
     driver = _ContainerFallbackDriver(
         ["Photos and videos", "Intro Contact elliot@rustmgmt.com"]
