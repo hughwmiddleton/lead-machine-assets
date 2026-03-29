@@ -1909,7 +1909,7 @@ def test_load_fb_page_with_timeout_unblocks_on_ready_surface(monkeypatch) -> Non
             raise AssertionError("driver.get should not be used when unblock_on_ready succeeds")
 
         def execute_script(self, script, *args):  # noqa: ANN001
-            if "window.location.assign" in script:
+            if "window.setTimeout" in script:
                 self.nav_target = args[0]
                 self.ready_checks = 0
                 return True
@@ -1942,6 +1942,43 @@ def test_load_fb_page_with_timeout_unblocks_on_ready_surface(monkeypatch) -> Non
     assert html == "<html><body>Artist page</body></html>"
     assert driver.get_calls == 0
     assert driver.stop_called is False
+    assert driver.timeout_seconds == 5.0
+
+
+def test_load_fb_page_with_timeout_falls_back_to_blocking_get_when_unblocked_start_fails() -> None:
+    class _Driver:
+        def __init__(self) -> None:
+            self.current_url = "about:blank"
+            self.page_source = ""
+            self.get_calls = []
+            self.timeout_seconds = None
+
+        def set_page_load_timeout(self, seconds):  # noqa: ANN001
+            self.timeout_seconds = seconds
+
+        def get(self, url):  # noqa: ANN001
+            self.get_calls.append(url)
+            self.current_url = url
+            self.page_source = "<html><body>Fallback page</body></html>"
+
+        def execute_script(self, script, *args):  # noqa: ANN001
+            if "window.setTimeout" in script:
+                raise RuntimeError("cannot start unblocked navigation")
+            raise AssertionError(f"unexpected script: {script}")
+
+    driver = _Driver()
+
+    html, current_url, timed_out = night_mode_fb._load_fb_page_with_timeout(
+        driver,
+        "https://www.facebook.com/example",
+        timeout_s=5.0,
+        unblock_on_ready=True,
+    )
+
+    assert timed_out is False
+    assert current_url == "https://www.facebook.com/example"
+    assert html == "<html><body>Fallback page</body></html>"
+    assert driver.get_calls == ["https://www.facebook.com/example"]
     assert driver.timeout_seconds == 5.0
 
 

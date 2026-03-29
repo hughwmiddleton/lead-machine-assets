@@ -435,7 +435,9 @@ def _load_fb_page_with_timeout(
                 nav_started = bool(
                     driver.execute_script(
                         """
-                        window.location.assign(arguments[0]);
+                        window.setTimeout(function(targetUrl) {
+                            window.location.assign(targetUrl);
+                        }, 0, arguments[0]);
                         return true;
                         """,
                         url,
