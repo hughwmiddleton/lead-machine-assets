@@ -1052,17 +1052,34 @@ def _collect_search_candidates_from_html_v2(html: str) -> Tuple[str, int, int, L
     return chosen_selector, anchors_in_scope, candidates_pre_url_gate, chosen_entry.get("hrefs", []) or []
 
 
-def _find_fb_home_search_input(driver, timeout: float = 12.0):
+def _find_fb_home_search_input(driver, timeout: float = 12.0, poll_seconds: float = 0.25):
     if driver is None:
         return None
-    for by, selector in _FB_HOME_SEARCH_INPUT_SELECTORS:
-        try:
-            return WebDriverWait(driver, timeout).until(EC.element_to_be_clickable((by, selector)))
-        except TimeoutException:
-            continue
-        except Exception:
-            continue
-    return None
+    deadline = time.time() + max(float(timeout or 0.0), 0.0)
+    while True:
+        for by, selector in _FB_HOME_SEARCH_INPUT_SELECTORS:
+            try:
+                elements = driver.find_elements(by, selector)
+            except Exception:
+                continue
+            for element in elements or []:
+                if element is None:
+                    continue
+                try:
+                    if hasattr(element, "is_displayed") and not element.is_displayed():
+                        continue
+                except Exception:
+                    pass
+                try:
+                    if hasattr(element, "is_enabled") and not element.is_enabled():
+                        continue
+                except Exception:
+                    pass
+                return element
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            return None
+        time.sleep(min(max(float(poll_seconds or 0.0), 0.05), remaining))
 
 
 def _run_fb_homepage_search(
