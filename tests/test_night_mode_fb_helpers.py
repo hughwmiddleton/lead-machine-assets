@@ -1945,6 +1945,64 @@ def test_load_fb_page_with_timeout_unblocks_on_ready_surface(monkeypatch) -> Non
     assert driver.timeout_seconds == 5.0
 
 
+def test_load_fb_page_with_timeout_does_not_fallback_on_falsey_kickoff_return(monkeypatch) -> None:
+    class _Clock:
+        def __init__(self) -> None:
+            self.now = 100.0
+
+        def time(self) -> float:
+            return self.now
+
+        def sleep(self, seconds: float) -> None:
+            self.now += seconds
+
+    class _Driver:
+        def __init__(self) -> None:
+            self.current_url = "about:blank"
+            self.page_source = ""
+            self.get_calls = 0
+            self.nav_target = ""
+            self.ready_checks = 0
+
+        def set_page_load_timeout(self, seconds):  # noqa: ANN001
+            self.timeout_seconds = seconds
+
+        def get(self, url):  # noqa: ANN001
+            self.get_calls += 1
+            raise AssertionError("driver.get should not be used when kickoff scheduling succeeds")
+
+        def execute_script(self, script, *args):  # noqa: ANN001
+            if "window.setTimeout" in script:
+                self.nav_target = args[0]
+                self.ready_checks = 0
+                return None
+            if script == "return document.readyState":
+                self.ready_checks += 1
+                if self.ready_checks >= 2:
+                    self.current_url = self.nav_target
+                    self.page_source = "<html><body>Artist page</body></html>"
+                    return "interactive"
+                return "loading"
+            raise AssertionError(f"unexpected script: {script}")
+
+    clock = _Clock()
+    driver = _Driver()
+    monkeypatch.setattr(night_mode_fb.time, "time", clock.time)
+    monkeypatch.setattr(night_mode_fb.time, "sleep", clock.sleep)
+
+    html, current_url, timed_out = night_mode_fb._load_fb_page_with_timeout(
+        driver,
+        "https://www.facebook.com/example",
+        timeout_s=5.0,
+        unblock_on_ready=True,
+    )
+
+    assert timed_out is False
+    assert current_url == "https://www.facebook.com/example"
+    assert html == "<html><body>Artist page</body></html>"
+    assert driver.get_calls == 0
+
+
 def test_load_fb_page_with_timeout_falls_back_to_blocking_get_when_unblocked_start_fails() -> None:
     class _Driver:
         def __init__(self) -> None:

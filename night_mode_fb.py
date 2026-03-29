@@ -432,17 +432,22 @@ def _load_fb_page_with_timeout(
         if unblock_on_ready:
             nav_started = False
             try:
-                nav_started = bool(
-                    driver.execute_script(
-                        """
-                        window.setTimeout(function(targetUrl) {
+                driver.execute_script(
+                    """
+                    window.setTimeout(function(targetUrl) {
+                        try {
                             window.location.assign(targetUrl);
-                        }, 0, arguments[0]);
-                        return true;
-                        """,
-                        url,
-                    )
+                        } catch (navError) {
+                            window.location.href = targetUrl;
+                        }
+                    }, 0, arguments[0]);
+                    return true;
+                    """,
+                    url,
                 )
+                # Treat a non-exception kickoff as started even if the return
+                # value is lost during the async navigation handoff.
+                nav_started = True
             except Exception:
                 nav_started = False
 
