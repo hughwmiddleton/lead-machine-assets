@@ -452,7 +452,7 @@ def test_main_page_live_anchor_mailto_allows_secondary_fetch(monkeypatch) -> Non
     assert not any("[FB Email] Skipping contact/about fetch because main page email already found" in msg for msg in logs)
 
 
-def test_discovery_main_page_html_email_uses_light_fetch_and_keeps_about_fetch(monkeypatch) -> None:
+def test_discovery_main_page_html_email_uses_first_pass_surfaces_and_skips_recollect(monkeypatch) -> None:
     logs = []
     enricher = _build_enricher(logs)
     calls = []
@@ -519,13 +519,13 @@ def test_discovery_main_page_html_email_uses_light_fetch_and_keeps_about_fetch(m
     assert night_result.email == "bookings@artist.com"
     assert night_result.about_attempted == "no"
     assert night_result.about_result == ""
-    assert calls == [(main_url, False)]
+    assert calls == [(main_url, True)]
     assert surface_calls == []
     assert driver_kind == "session"
     assert outcome == "found_email"
 
 
-def test_discovery_main_page_rendered_text_email_escalates_after_light_fetch(monkeypatch) -> None:
+def test_discovery_main_page_rendered_text_email_uses_first_pass_surfaces(monkeypatch) -> None:
     logs = []
     enricher = _build_enricher(logs)
     calls = []
@@ -560,10 +560,9 @@ def test_discovery_main_page_rendered_text_email_escalates_after_light_fetch(mon
     def fake_fetch(url, goto_about=False, collect_surfaces=True):  # noqa: ANN001
         calls.append((url, collect_surfaces))
         html, resolved = pages[url]
-        if not collect_surfaces:
-            enricher._last_fb_visible_text = ""
-            enricher._last_fb_live_anchor_values = []
-            enricher._last_fb_reveal_actions = []
+        enricher._last_fb_visible_text = "Intro Contact brighteyedbookings@gmail.com"
+        enricher._last_fb_live_anchor_values = []
+        enricher._last_fb_reveal_actions = []
         return html, resolved
 
     def fake_collect(driver_kind="session"):  # noqa: ANN001
@@ -590,13 +589,13 @@ def test_discovery_main_page_rendered_text_email_escalates_after_light_fetch(mon
     assert night_result.email == "brighteyedbookings@gmail.com"
     assert night_result.about_attempted == "no"
     assert night_result.about_result == ""
-    assert calls == [(main_url, False)]
-    assert surface_calls == ["session"]
+    assert calls == [(main_url, True)]
+    assert surface_calls == []
     assert driver_kind == "session"
     assert outcome == "found_email"
 
 
-def test_discovery_main_page_live_anchor_mailto_escalates_after_light_fetch(monkeypatch) -> None:
+def test_discovery_main_page_live_anchor_mailto_uses_first_pass_surfaces(monkeypatch) -> None:
     logs = []
     enricher = _build_enricher(logs)
     calls = []
@@ -631,10 +630,9 @@ def test_discovery_main_page_live_anchor_mailto_escalates_after_light_fetch(monk
     def fake_fetch(url, goto_about=False, collect_surfaces=True):  # noqa: ANN001
         calls.append((url, collect_surfaces))
         html, resolved = pages[url]
-        if not collect_surfaces:
-            enricher._last_fb_visible_text = ""
-            enricher._last_fb_live_anchor_values = []
-            enricher._last_fb_reveal_actions = []
+        enricher._last_fb_visible_text = ""
+        enricher._last_fb_live_anchor_values = ["mailto:info@artist.com"]
+        enricher._last_fb_reveal_actions = []
         return html, resolved
 
     def fake_collect(driver_kind="session"):  # noqa: ANN001
@@ -661,8 +659,8 @@ def test_discovery_main_page_live_anchor_mailto_escalates_after_light_fetch(monk
     assert night_result.email == "info@artist.com"
     assert night_result.about_attempted == "no"
     assert night_result.about_result == ""
-    assert calls == [(main_url, False)]
-    assert surface_calls == ["session"]
+    assert calls == [(main_url, True)]
+    assert surface_calls == []
     assert driver_kind == "session"
     assert outcome == "found_email"
 
@@ -713,8 +711,8 @@ def test_discovery_candidate_uses_shared_accepted_page_sweep(monkeypatch) -> Non
     assert observed["fb_url"] == main_url
     assert observed["continue_after_main_email"] is False
     assert observed["stop_after_first_filtered"] is False
-    assert callable(observed["refresh_main_surface"])
-    assert calls == [(main_url, False)]
+    assert observed["refresh_main_surface"] is None
+    assert calls == [(main_url, True)]
     assert emails == ["info@artist.com"]
     assert night_result is not None
     assert night_result.email == "info@artist.com"
@@ -722,6 +720,76 @@ def test_discovery_candidate_uses_shared_accepted_page_sweep(monkeypatch) -> Non
     assert night_result.about_result == ""
     assert driver_kind == "session"
     assert outcome == "found_email"
+
+
+def test_discovery_candidate_about_fetch_remains_reachable_without_main_refresh(monkeypatch) -> None:
+    logs = []
+    enricher = _build_enricher(logs)
+    calls = []
+    surface_calls = []
+    main_url = "https://www.facebook.com/artist"
+    about_url = "https://www.facebook.com/artist/about"
+
+    pages = {
+        main_url: (
+            """
+            <html>
+              <body>
+                <div>No email on the main page.</div>
+                <a href="/artist/about">About</a>
+              </body>
+            </html>
+            """,
+            main_url,
+        ),
+        about_url: (
+            """
+            <html>
+              <body>
+                <div>Bookings: about@artist.com</div>
+              </body>
+            </html>
+            """,
+            about_url,
+        ),
+    }
+
+    def fake_fetch(url, goto_about=False, collect_surfaces=True):  # noqa: ANN001
+        calls.append((url, collect_surfaces))
+        enricher._last_fb_visible_text = ""
+        enricher._last_fb_live_anchor_values = []
+        enricher._last_fb_reveal_actions = []
+        return pages[url]
+
+    def fake_collect(driver_kind="session"):  # noqa: ANN001
+        surface_calls.append(driver_kind)
+        raise AssertionError("discovery accepted pages should not recollect the main surface before about/contact fallback")
+
+    monkeypatch.setattr(enricher, "_fetch_html_with_url", fake_fetch)
+    monkeypatch.setattr(enricher, "_collect_current_fb_email_surface_state", fake_collect)
+    monkeypatch.setattr(nmfb, "_night_fb_has_music_signals", lambda soup, context: False)
+    monkeypatch.setattr(nmfb, "should_accept_email_override", lambda *args, **kwargs: (True, "test_override"))
+
+    result = enricher._scrape_single_fb_candidate(
+        main_url,
+        {"Artist Name": "Artist", "Email_All": ""},
+        "Artist",
+        allow_anon=False,
+        candidate_context={"url": main_url, "base_score": 1.2, "match_level": "near", "search_discovery_accepted": True},
+    )
+
+    assert result is not None
+    night_result, emails, driver_kind, outcome = result
+    assert emails == ["about@artist.com"]
+    assert night_result is not None
+    assert night_result.email == "about@artist.com"
+    assert night_result.about_attempted == "yes"
+    assert night_result.about_result == "emails_found"
+    assert calls == [(main_url, True), (about_url, True)]
+    assert surface_calls == []
+    assert driver_kind == "session"
+    assert outcome == "found_email"
+    assert any(f"[FB Email] Visiting {about_url}" in msg for msg in logs)
 
 
 def test_explicit_pass_a_main_page_email_skips_secondary_fetch(monkeypatch) -> None:

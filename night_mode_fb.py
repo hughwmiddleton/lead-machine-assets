@@ -8084,10 +8084,12 @@ class NightModeFacebookEnricher:
         staged_main_page_surfaces = bool(candidate_context and candidate_context.get("search_discovery_accepted"))
 
         if staged_main_page_surfaces:
+            # Discovery-accepted pages should keep the first useful main-page visit and
+            # avoid a second current-page recollection before about/contact fallback.
             html, resolved_url = self._fetch_html_with_url(
                 candidate_url,
                 goto_about=False,
-                collect_surfaces=False,
+                collect_surfaces=True,
             )
         else:
             html, resolved_url = self._fetch_html_with_url(candidate_url, goto_about=False)
@@ -8099,7 +8101,7 @@ class NightModeFacebookEnricher:
                 html, resolved_url = self._fetch_html_with_url_anon(
                     candidate_url,
                     goto_about=False,
-                    collect_surfaces=False,
+                    collect_surfaces=True,
                 )
             else:
                 html, resolved_url = self._fetch_html_with_url_anon(candidate_url, goto_about=False)
@@ -8372,7 +8374,7 @@ class NightModeFacebookEnricher:
             _fetch_shared_surface,
             select_secondary_url=_select_shared_secondary_url,
             fallback_secondary_urls=_fetch_fb_about_variants,
-            refresh_main_surface=_refresh_shared_main_surface,
+            refresh_main_surface=None if staged_main_page_surfaces else _refresh_shared_main_surface,
             continue_after_main_email=continue_after_main_email,
             stop_after_first_filtered=explicit_pass_a,
             on_secondary_selected=lambda target: _log(self.logger, f"[FB Email] Visiting {target}"),
