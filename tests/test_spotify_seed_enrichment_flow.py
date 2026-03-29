@@ -1503,6 +1503,24 @@ def test_bc_slug_fallback_accepts_outbound_confirmation(tmp_path, monkeypatch):
     assert fetch_calls == ["https://nightlight.bandcamp.com/"]
 
 
+def test_bc_slug_fallback_accepts_sparse_suffix_slug_when_display_name_confirms_artist(tmp_path, monkeypatch):
+    worker = _build_worker(tmp_path)
+    html = _bandcamp_slug_html(title="Nightlight", og_title="Nightlight Archive")
+    fetch_calls = []
+
+    monkeypatch.setattr(worker, "_bc_http_get", lambda *args, **kwargs: (html, 200))
+    monkeypatch.setattr(
+        worker,
+        "_fetch_profile_and_build",
+        lambda url, source_dir, confidence=None: fetch_calls.append(url) or _build_bandcamp_slug_payload(url),
+    )
+
+    payload = worker._bc_slug_fallback("Nightlight", "", slug_candidates=["nightlight-music"])
+
+    assert payload is not None
+    assert fetch_calls == ["https://nightlight-music.bandcamp.com/"]
+
+
 def test_bc_slug_fallback_rejects_records_variant_without_outbound_confirmation(tmp_path, monkeypatch):
     worker = _build_worker(tmp_path)
     html = _bandcamp_slug_html(title="Nightlight", by_artist="Nightlight Records")
@@ -1521,9 +1539,63 @@ def test_bc_slug_fallback_rejects_records_variant_without_outbound_confirmation(
     assert fetch_calls == []
 
 
+def test_bc_slug_fallback_rejects_sparse_suffix_records_variant_without_outbound_confirmation(tmp_path, monkeypatch):
+    worker = _build_worker(tmp_path)
+    html = _bandcamp_slug_html(title="Nightlight", og_title="Nightlight Records")
+    fetch_calls = []
+
+    monkeypatch.setattr(worker, "_bc_http_get", lambda *args, **kwargs: (html, 200))
+    monkeypatch.setattr(
+        worker,
+        "_fetch_profile_and_build",
+        lambda url, source_dir, confidence=None: fetch_calls.append(url) or _build_bandcamp_slug_payload(url),
+    )
+
+    payload = worker._bc_slug_fallback("Nightlight", "", slug_candidates=["nightlight-music"])
+
+    assert payload is None
+    assert fetch_calls == []
+
+
 def test_bc_slug_fallback_rejects_dj_variant_without_outbound_confirmation(tmp_path, monkeypatch):
     worker = _build_worker(tmp_path)
     html = _bandcamp_slug_html(title="Nightlight", og_title="DJ Nightlight")
+    fetch_calls = []
+
+    monkeypatch.setattr(worker, "_bc_http_get", lambda *args, **kwargs: (html, 200))
+    monkeypatch.setattr(
+        worker,
+        "_fetch_profile_and_build",
+        lambda url, source_dir, confidence=None: fetch_calls.append(url) or _build_bandcamp_slug_payload(url),
+    )
+
+    payload = worker._bc_slug_fallback("Nightlight", "", slug_candidates=["nightlight"])
+
+    assert payload is None
+    assert fetch_calls == []
+
+
+def test_bc_slug_fallback_rejects_sparse_suffix_collective_variant_without_outbound_confirmation(tmp_path, monkeypatch):
+    worker = _build_worker(tmp_path)
+    html = _bandcamp_slug_html(title="Nightlight", og_title="Nightlight Collective")
+    fetch_calls = []
+
+    monkeypatch.setattr(worker, "_bc_http_get", lambda *args, **kwargs: (html, 200))
+    monkeypatch.setattr(
+        worker,
+        "_fetch_profile_and_build",
+        lambda url, source_dir, confidence=None: fetch_calls.append(url) or _build_bandcamp_slug_payload(url),
+    )
+
+    payload = worker._bc_slug_fallback("Nightlight", "", slug_candidates=["nightlight-music"])
+
+    assert payload is None
+    assert fetch_calls == []
+
+
+def test_bc_slug_fallback_rejects_weak_sparse_slug_without_supplemental_confirmation(tmp_path, monkeypatch):
+    worker = _build_worker(tmp_path)
+    html = _bandcamp_slug_html(title="Nightlight", og_title="Nightlight Archive")
     fetch_calls = []
 
     monkeypatch.setattr(worker, "_bc_http_get", lambda *args, **kwargs: (html, 200))

@@ -221,3 +221,38 @@ def test_live_search_bandcamp_does_not_use_discover_without_spotify_guard(tmp_pa
     assert result is None
     assert worker._last_bc_row_stats["status"] == "no_match"
     assert worker._last_bc_row_stats["mode"] == "directory_discover"
+
+
+def test_live_search_bandcamp_does_not_use_sparse_slug_supplemental_fallback(tmp_path, monkeypatch):
+    worker = _build_worker(tmp_path)
+    worker._row_enrichment_state = {"bandcamp": "pending"}
+    fetch_calls = []
+
+    monkeypatch.setattr(cde, "BC_ENABLE_SEARCH_ENDPOINT", False)
+    monkeypatch.setattr(worker, "_bc_should_skip_search", lambda: False)
+    monkeypatch.setattr(worker, "_bc_directory_fallback", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        worker,
+        "_bc_http_get",
+        lambda *args, **kwargs: (
+            "<html><head><title>Nightlight</title><meta property='og:title' content='Nightlight Archive'></head></html>",
+            200,
+        ),
+    )
+    monkeypatch.setattr(
+        worker,
+        "_fetch_profile_and_build",
+        lambda url, source_dir, confidence=None: fetch_calls.append(url) or cde.EnrichmentPayload(
+            socials=set(),
+            websites=set(),
+            emails=set(),
+            link_hubs=set(),
+            source_dir=source_dir,
+            source_url=url,
+        ),
+    )
+
+    result = worker._live_search_bandcamp("Nightlight")
+
+    assert result is None
+    assert fetch_calls == []

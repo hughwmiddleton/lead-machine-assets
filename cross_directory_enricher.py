@@ -12056,6 +12056,7 @@ class CrossDirectoryEnricherWorker(QThread):
                 slugs.append(cleaned)
         if not slugs:
             return None
+        sparse_slug_lookup = slug_candidates is not None
         debug_attempts = bool(os.getenv("BC_DEBUG_ATTEMPTS"))
         for slug in slugs:
             if self._bc_fallback_used >= BC_FALLBACK_MAX_PER_RUN:
@@ -12086,9 +12087,30 @@ class CrossDirectoryEnricherWorker(QThread):
                 page_artist = _bc_slug_extract_page_artist_text(html or "", fallback_text=title_text)
                 artist_confirmed = _bc_slug_has_strong_artist_name_confirmation(artist_name, page_artist)
                 outbound_confirmed = False
+                sparse_slug_confirmed = False
                 if not artist_confirmed and html:
                     outbound_confirmed = _bc_slug_has_strong_outbound_confirmation(artist_name, html, url)
-                if not (artist_confirmed or outbound_confirmed):
+                if not (artist_confirmed or outbound_confirmed) and sparse_slug_lookup:
+                    artist_compact = re.sub(r"[^a-z0-9]+", "", normalize_name(artist_name))
+                    slug_compact = re.sub(r"[^a-z0-9]+", "", normalize_name(slug))
+                    page_artist_tokens = set(normalize_name(page_artist).split())
+                    sparse_negative_tokens = _BC_SLUG_CONFIRM_DISQUALIFY_TOKENS | {
+                        "collective",
+                        "collectives",
+                        "radio",
+                        "station",
+                        "venue",
+                    }
+                    sparse_slug_confirmed = (
+                        slug_compact != artist_compact
+                        and (
+                            _bc_slug_identity_matches_artist(artist_name, slug)
+                            or _bc_slug_identity_matches_artist(artist_name, slug_compact)
+                        )
+                        and _bc_slug_has_strong_artist_name_confirmation(artist_name, display_name)
+                        and not bool(page_artist_tokens & sparse_negative_tokens)
+                    )
+                if not (artist_confirmed or outbound_confirmed or sparse_slug_confirmed):
                     if debug_attempts:
                         try:
                             self.log_message.emit(
@@ -12105,6 +12127,8 @@ class CrossDirectoryEnricherWorker(QThread):
                             reasons.append("artist_name")
                         if outbound_confirmed:
                             reasons.append("outbound")
+                        if sparse_slug_confirmed:
+                            reasons.append("sparse_slug")
                         self.log_message.emit(
                             "[BC Debug] slug_fallback: supplemental_pass slug='%s' confidence=%.2f reasons=%s page_artist='%s' url=%s"
                             % (slug, confidence, ",".join(reasons) or "unknown", page_artist or "", url)
