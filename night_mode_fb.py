@@ -8168,35 +8168,86 @@ class NightModeFacebookEnricher:
         outcome_hint = "fetch_error"
         reject_reason = ""
         timed_out_flag = False
+        is_discovery = bool(candidate_context and candidate_context.get("search_discovery_accepted"))
+        explicit_pass_a = bool(candidate_context and candidate_context.get("explicit_accepted_url"))
+        prefer_fast_accepted_loader = bool(
+            explicit_pass_a
+            and candidate_context
+            and candidate_context.get("accepted_page_fast_loader_safe")
+        )
         staged_main_page_surfaces = bool(candidate_context and candidate_context.get("search_discovery_accepted"))
 
-        if staged_main_page_surfaces:
-            # Discovery-accepted pages should keep the first useful main-page visit and
-            # avoid a second current-page recollection before about/contact fallback.
-            html, resolved_url = self._fetch_html_with_url(
-                candidate_url,
-                goto_about=False,
-                collect_surfaces=True,
-            )
-        else:
-            html, resolved_url = self._fetch_html_with_url(candidate_url, goto_about=False)
-        timed_out_flag = timed_out_flag or bool(getattr(self, "_last_fb_timeout", False))
-        if html:
-            outcome_hint = "fetched"
-        if (not html) and allow_anon:
-            if staged_main_page_surfaces:
-                html, resolved_url = self._fetch_html_with_url_anon(
-                    candidate_url,
+        def _fetch_candidate_surface(
+            requested_url: str,
+            *,
+            collect_surfaces: bool,
+        ) -> Tuple[Optional[str], Optional[str]]:
+            nonlocal used_driver_kind, timed_out_flag, outcome_hint
+            requested_url = str(requested_url or "").strip()
+
+            def _fetch_with_session() -> Tuple[Optional[str], Optional[str]]:
+                if collect_surfaces:
+                    return self._fetch_html_with_url(requested_url, goto_about=False)
+                return self._fetch_html_with_url(
+                    requested_url,
                     goto_about=False,
-                    collect_surfaces=True,
+                    collect_surfaces=False,
                 )
-            else:
-                html, resolved_url = self._fetch_html_with_url_anon(candidate_url, goto_about=False)
-            used_driver_kind = "anon_fallback"
-            self._last_fb_surface_driver_kind = used_driver_kind
-            if html and outcome_hint != "fetched":
-                outcome_hint = "fetched"
+
+            def _fetch_with_anon() -> Tuple[Optional[str], Optional[str]]:
+                if collect_surfaces:
+                    return self._fetch_html_with_url_anon(requested_url, goto_about=False)
+                return self._fetch_html_with_url_anon(
+                    requested_url,
+                    goto_about=False,
+                    collect_surfaces=False,
+                )
+
+            if prefer_fast_accepted_loader:
+                budget_before = getattr(self, "_page_budget_remaining", 0)
+                pages_visited_before = self.fb_email_pages_visited
+                timeout_before = bool(getattr(self, "_last_fb_timeout", False))
+                timeout_url_before = str(getattr(self, "_last_fb_timeout_url", "") or "")
+                fast_html, fast_resolved = _fetch_with_anon()
+                timed_out_flag = timed_out_flag or bool(getattr(self, "_last_fb_timeout", False))
+                if fast_html:
+                    used_driver_kind = "anon_fast"
+                    self._last_fb_surface_driver_kind = used_driver_kind
+                    outcome_hint = "fetched"
+                    _log(self.logger, f"[Night FB][AcceptedPage] using fast loader url='{requested_url}'")
+                    return fast_html, fast_resolved
+                self._page_budget_remaining = budget_before
+                self.fb_email_pages_visited = pages_visited_before
+                self._last_fb_timeout = timeout_before
+                self._last_fb_timeout_url = timeout_url_before
+                _log(
+                    self.logger,
+                    f"[Night FB][AcceptedPage] fast loader fallback -> session url='{requested_url}'",
+                )
+
+            session_html, session_resolved = _fetch_with_session()
             timed_out_flag = timed_out_flag or bool(getattr(self, "_last_fb_timeout", False))
+            if session_html:
+                used_driver_kind = "session"
+                self._last_fb_surface_driver_kind = used_driver_kind
+                outcome_hint = "fetched"
+                return session_html, session_resolved
+
+            if allow_anon and not prefer_fast_accepted_loader:
+                anon_html, anon_resolved = _fetch_with_anon()
+                timed_out_flag = timed_out_flag or bool(getattr(self, "_last_fb_timeout", False))
+                if anon_html:
+                    used_driver_kind = "anon_fallback"
+                    self._last_fb_surface_driver_kind = used_driver_kind
+                    outcome_hint = "fetched"
+                return anon_html, anon_resolved
+
+            return session_html, session_resolved
+
+        html, resolved_url = _fetch_candidate_surface(
+            candidate_url,
+            collect_surfaces=True,
+        )
         if (not html) and timed_out_flag:
             return None, [], used_driver_kind, "timeout"
         if not html:
@@ -8207,8 +8258,6 @@ class NightModeFacebookEnricher:
             self.fb_rows_skipped["challenge"] += 1
             return None, [], used_driver_kind, "login_wall"
 
-        is_discovery = bool(candidate_context and candidate_context.get("search_discovery_accepted"))
-        explicit_pass_a = bool(candidate_context and candidate_context.get("explicit_accepted_url"))
         if explicit_pass_a:
             targeted_restabilization_attempted = False
             main_render_reason = _explicit_fb_render_state_invalid_reason(
@@ -8284,21 +8333,11 @@ class NightModeFacebookEnricher:
                                 self.logger,
                                 "[FB Night][RenderGate] content_unavailable -> about fallback",
                             )
-                            about_html: Optional[str] = None
-                            about_resolved: Optional[str] = about_fallback_url
                             try:
-                                about_html, about_resolved = self._fetch_html_with_url(
+                                about_html, about_resolved = _fetch_candidate_surface(
                                     about_fallback_url,
-                                    goto_about=False,
+                                    collect_surfaces=True,
                                 )
-                                if (not about_html) and allow_anon:
-                                    about_html, about_resolved = self._fetch_html_with_url_anon(
-                                        about_fallback_url,
-                                        goto_about=False,
-                                    )
-                                    if about_html:
-                                        used_driver_kind = "anon_fallback"
-                                        self._last_fb_surface_driver_kind = used_driver_kind
                             except Exception:
                                 about_html, about_resolved = None, about_fallback_url
 
@@ -8397,12 +8436,10 @@ class NightModeFacebookEnricher:
             fetched_html = ""
             fetched_resolved = requested_url
             try:
-                fetched_html, fetched_resolved = self._fetch_html_with_url(requested_url, goto_about=False)
-                if (not fetched_html) and allow_anon:
-                    fetched_html, fetched_resolved = self._fetch_html_with_url_anon(requested_url, goto_about=False)
-                    if fetched_html:
-                        used_driver_kind = "anon_fallback"
-                        self._last_fb_surface_driver_kind = used_driver_kind
+                fetched_html, fetched_resolved = _fetch_candidate_surface(
+                    requested_url,
+                    collect_surfaces=True,
+                )
             except Exception:
                 fetched_html, fetched_resolved = "", requested_url
 
@@ -9400,12 +9437,19 @@ class NightModeFacebookEnricher:
                         direct_url,
                         authed_session_available=authed_session_available,
                     )
+                    normalized_scrape_target_url = _normalise_fb_url(scrape_target_url)
                     driver_kind = "session"
                     outcome_for_log = "fetch_error"
                     reason_for_log = ""
                     explicit_candidate_context = {
-                        "url": _normalise_fb_url(scrape_target_url),
+                        "url": normalized_scrape_target_url,
                         "explicit_accepted_url": True,
+                        "accepted_page_fast_loader_safe": bool(
+                            allow_anon
+                            and normalized_scrape_target_url
+                            and normalized_scrape_target_url == scrape_target_url
+                            and not _is_allowed_fb_share_entrypoint_url(scrape_target_url)
+                        ),
                     }
                     self._pass_a_bump("attempted")
                     self._last_explicit_guard_reason = ""
