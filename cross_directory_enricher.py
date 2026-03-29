@@ -11367,6 +11367,7 @@ class CrossDirectoryEnricherWorker(QThread):
             live_ctx = getattr(self, "_live_context", {}) or {}
             live_row = df.loc[row_idx] if df is not None and row_idx in getattr(df, "index", ()) else None
             source_key = _clean_cell(getattr(payload, "source_dir", "")).lower()
+            source_url = _clean_cell(getattr(payload, "source_url", ""))
             seed_artist = _clean_cell(artist_name) or _clean_cell(live_ctx.get("artist", ""))
             candidate_name = _clean_cell(getattr(payload, "candidate_name", ""))
             conservative_name_match = False
@@ -11377,18 +11378,58 @@ class CrossDirectoryEnricherWorker(QThread):
                         seed_artist,
                         candidate_name,
                     )
-            bypass_strict_guard = bool(
+            seed_artist_compact = re.sub(r"[^a-z0-9]+", "", normalize_name(seed_artist))
+            source_identity = ""
+            if source_url:
+                try:
+                    parsed_source_url = urllib.parse.urlparse(source_url)
+                except Exception:
+                    parsed_source_url = None
+                host = ((parsed_source_url.netloc if parsed_source_url else "") or "").lower()
+                host = host[4:] if host.startswith("www.") else host
+                path_segments = [
+                    urllib.parse.unquote(segment).replace("+", " ")
+                    for segment in ((parsed_source_url.path if parsed_source_url else "") or "").split("/")
+                    if segment
+                ]
+                if source_key.startswith("bandcamp") and host.endswith(".bandcamp.com"):
+                    source_identity = host[: -len(".bandcamp.com")]
+                elif source_key.startswith("soundcloud") and path_segments:
+                    source_identity = path_segments[0]
+                elif source_key.startswith("lastfm") and len(path_segments) >= 2 and path_segments[0].lower() == "music":
+                    source_identity = path_segments[1]
+            spotify_identity_pass_context = bool(
                 guard_ctx.get("active")
                 and guard_ctx.get("row_idx") == row_idx
                 and self._row_is_spotify_origin(live_row, live_ctx)
                 and int(live_ctx.get("spotify_identity_tier") or 0) == 3
+            )
+            borderline_score = score >= max(0.0, MATCH_THRESHOLD - 0.10)
+            source_identity_compact = re.sub(r"[^a-z0-9]+", "", normalize_name(source_identity))
+            source_identity_support = bool(
+                seed_artist_compact
+                and source_identity_compact
+                and (
+                    source_identity_compact == seed_artist_compact
+                    or (
+                        len(seed_artist_compact) >= 6
+                        and (
+                            source_identity_compact.startswith(seed_artist_compact)
+                            or seed_artist_compact.startswith(source_identity_compact)
+                        )
+                    )
+                )
+            )
+            bypass_strict_guard = bool(
+                spotify_identity_pass_context
                 and source_key.startswith(("bandcamp", "soundcloud", "lastfm"))
-                and conservative_name_match
-                and (_payload_actionable(payload) or _clean_cell(getattr(payload, "source_url", "")))
+                and borderline_score
+                and (conservative_name_match or source_identity_support)
+                and (_payload_actionable(payload) or source_url)
             )
             if bypass_strict_guard:
                 self.log_message.emit(
-                    f"[Enricher] allowing spotify identity-pass conservative recovery for '{artist_name}' "
+                    f"[Enricher] allowing spotify identity-pass scoped recovery for '{artist_name}' "
                     f"(Spotify ID {spotify_id or '<unknown>'}) – score={score:.2f}, candidate={payload.summary() or '<none>'}"
                 )
             else:
