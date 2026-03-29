@@ -6007,6 +6007,8 @@ def _spotify_sparse_bandcamp_slug_candidates(artist_name: str) -> List[str]:
         for suffix in SPOTIFY_BC_RECOVERY_SUFFIXES:
             if _push(f"{root}{suffix}"):
                 return candidates
+            if _push(f"{root}-{suffix}"):
+                return candidates
     return candidates
 
 

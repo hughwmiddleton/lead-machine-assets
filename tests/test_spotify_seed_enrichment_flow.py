@@ -1385,6 +1385,63 @@ def test_spotify_sparse_bandcamp_recovery_skips_non_spotify_rows(tmp_path, monke
     assert df.at[0, "Bandcamp_URL"] == ""
 
 
+def test_spotify_sparse_bandcamp_slug_candidates_preserve_compact_and_add_hyphenated_suffixes():
+    candidates = cde._spotify_sparse_bandcamp_slug_candidates("Nightlight")
+
+    assert "nightlightmusic" in candidates
+    assert "nightlightband" in candidates
+    assert "nightlight-music" in candidates
+    assert "nightlight-band" in candidates
+
+
+def test_spotify_sparse_bandcamp_slug_candidates_remain_bounded_and_deduped():
+    candidates = cde._spotify_sparse_bandcamp_slug_candidates("Nightlight")
+
+    assert len(candidates) <= cde.SPOTIFY_BC_RECOVERY_MAX_SLUGS
+    assert len(candidates) == len(set(candidates))
+
+
+def test_spotify_sparse_bandcamp_recovery_hands_hyphenated_suffix_candidates_to_lookup(tmp_path, monkeypatch):
+    worker = _build_worker(tmp_path)
+    worker.enable_live_search = True
+    worker.max_live_searches = 5
+    df = pd.DataFrame(
+        [
+            _base_row(
+                **{
+                    "Artist Name": "Nightlight",
+                    "Spotify_Website_URL": "https://artist.test",
+                    "Location": "Melbourne",
+                }
+            )
+        ]
+    )
+    ctx = worker._build_row_context(df, 0, 1, 1)
+    seen = {}
+
+    def fake_bc_slug(artist, song_title, slug_candidates=None):
+        seen["artist"] = artist
+        seen["song_title"] = song_title
+        seen["slug_candidates"] = list(slug_candidates or [])
+        return cde.EnrichmentPayload(
+            source_dir="bandcamp_directory",
+            source_url="https://nightlight-music.bandcamp.com/",
+            source_detail="Bandcamp Directory",
+            match_score=0.95,
+            candidate_name=artist,
+        )
+
+    monkeypatch.setattr(worker, "_bc_slug_fallback", fake_bc_slug)
+
+    recovered = worker._run_spotify_sparse_bandcamp_recovery(df, 0, ctx)
+
+    assert recovered is True
+    assert seen["artist"] == "Nightlight"
+    assert seen["song_title"] == ""
+    assert "nightlight-music" in seen["slug_candidates"]
+    assert len(seen["slug_candidates"]) <= cde.SPOTIFY_BC_RECOVERY_MAX_SLUGS
+
+
 def test_bc_slug_fallback_accepts_artist_style_name_variant(tmp_path, monkeypatch):
     worker = _build_worker(tmp_path)
     html = _bandcamp_slug_html(title="Nightlight", by_artist="Nightlight Music")
