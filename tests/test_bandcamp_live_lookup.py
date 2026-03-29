@@ -110,3 +110,114 @@ def test_live_search_bandcamp_uses_metadata_context_without_extra_queries(tmp_pa
     assert payload.candidate_name == "Nightlight Band"
     assert len(search_urls) == 1
     assert _query_value(search_urls[0]) == '"Nightlight" "Midnight Run" "melbourne"'
+
+
+def test_live_search_bandcamp_uses_guarded_discover_lookup_when_search_disabled(tmp_path, monkeypatch):
+    worker = _build_worker(tmp_path)
+    worker._row_enrichment_state = {"bandcamp": "pending"}
+    worker._spotify_identity_guard_ctx = {"active": True, "artist": "Nightlight"}
+    worker._live_context = {
+        "artist": "Nightlight",
+        "song_title": "Midnight Run",
+        "track": "Midnight Run",
+        "location": "Melbourne, Australia",
+        "genre": "Dream Pop",
+        "spotify_domain": "",
+    }
+    payload = cde.EnrichmentPayload(
+        socials=set(),
+        websites={"https://nightlight.example"},
+        emails=set(),
+        link_hubs=set(),
+        source_dir="bandcamp",
+        source_url="https://nightlight.bandcamp.com/",
+    )
+    discover_calls = []
+
+    monkeypatch.setattr(cde, "BC_ENABLE_SEARCH_ENDPOINT", False)
+    monkeypatch.setattr(worker, "_bc_should_skip_search", lambda: False)
+    monkeypatch.setattr(worker, "_bc_directory_fallback", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        worker,
+        "_bc_discover_enrich",
+        lambda artist, song_title, location, genre: discover_calls.append((artist, song_title, location, genre)) or (payload, False),
+    )
+    monkeypatch.setattr(
+        worker,
+        "_bc_slug_fallback",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("guarded discover success should not fall through to slug fallback")),
+    )
+
+    result = worker._live_search_bandcamp("Nightlight")
+
+    assert result is payload
+    assert discover_calls == [("Nightlight", "Midnight Run", "Melbourne, Australia", "Dream Pop")]
+    assert worker._last_bc_row_stats["status"] == "fallback_ok"
+    assert worker._last_bc_row_stats["mode"] == "directory_discover"
+
+
+def test_live_search_bandcamp_keeps_no_match_when_guarded_discover_returns_nothing(tmp_path, monkeypatch):
+    worker = _build_worker(tmp_path)
+    worker._row_enrichment_state = {"bandcamp": "pending"}
+    worker._spotify_identity_guard_ctx = {"active": True, "artist": "Nightlight"}
+    worker._live_context = {
+        "artist": "Nightlight",
+        "song_title": "Midnight Run",
+        "track": "Midnight Run",
+        "location": "Melbourne, Australia",
+        "genre": "Dream Pop",
+        "spotify_domain": "",
+    }
+    discover_calls = []
+    slug_calls = []
+
+    monkeypatch.setattr(cde, "BC_ENABLE_SEARCH_ENDPOINT", False)
+    monkeypatch.setattr(worker, "_bc_should_skip_search", lambda: False)
+    monkeypatch.setattr(worker, "_bc_directory_fallback", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        worker,
+        "_bc_discover_enrich",
+        lambda *args, **kwargs: discover_calls.append(args) or (None, False),
+    )
+    monkeypatch.setattr(
+        worker,
+        "_bc_slug_fallback",
+        lambda *args, **kwargs: slug_calls.append(args) or None,
+    )
+
+    result = worker._live_search_bandcamp("Nightlight")
+
+    assert result is None
+    assert len(discover_calls) == 1
+    assert len(slug_calls) == 1
+    assert worker._last_bc_row_stats["status"] == "no_match"
+    assert worker._last_bc_row_stats["mode"] == "directory_discover"
+
+
+def test_live_search_bandcamp_does_not_use_discover_without_spotify_guard(tmp_path, monkeypatch):
+    worker = _build_worker(tmp_path)
+    worker._row_enrichment_state = {"bandcamp": "pending"}
+    worker._live_context = {
+        "artist": "Nightlight",
+        "song_title": "Midnight Run",
+        "track": "Midnight Run",
+        "location": "Melbourne, Australia",
+        "genre": "Dream Pop",
+        "spotify_domain": "",
+    }
+
+    monkeypatch.setattr(cde, "BC_ENABLE_SEARCH_ENDPOINT", False)
+    monkeypatch.setattr(worker, "_bc_should_skip_search", lambda: False)
+    monkeypatch.setattr(worker, "_bc_directory_fallback", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        worker,
+        "_bc_discover_enrich",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("non-spotify live lookup should not use guarded discover recovery")),
+    )
+    monkeypatch.setattr(worker, "_bc_slug_fallback", lambda *args, **kwargs: None)
+
+    result = worker._live_search_bandcamp("Nightlight")
+
+    assert result is None
+    assert worker._last_bc_row_stats["status"] == "no_match"
+    assert worker._last_bc_row_stats["mode"] == "directory_discover"

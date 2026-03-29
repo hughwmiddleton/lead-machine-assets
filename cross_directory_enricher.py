@@ -11940,6 +11940,32 @@ class CrossDirectoryEnricherWorker(QThread):
             )
             return best_payload
 
+        spotify_guard_ctx = getattr(self, "_spotify_identity_guard_ctx", {}) or {}
+        spotify_guard_active = bool(spotify_guard_ctx.get("active"))
+        discover_attempted = False
+        if spotify_guard_active and not search_allowed:
+            discover_attempted = True
+            discover_payload, _ = self._bc_discover_enrich(
+                artist_name,
+                song_title,
+                location_hint,
+                primary_genre_hint,
+            )
+            if discover_payload:
+                self._set_platform_state("bandcamp", "matched")
+                self._last_bc_row_stats.update(
+                    {
+                        "status": "fallback_ok",
+                        "mode": "directory_discover",
+                        "attempts": self._last_bc_row_stats.get("attempts", 0),
+                    }
+                )
+                self._bc_matches += 1
+                self.log_message.emit(
+                    f"[Enricher] Bandcamp: status=fallback_ok mode=directory_discover attempts={self._last_bc_row_stats.get('attempts', 0)} 403={self._last_bc_row_stats.get('http_403', 0)} artist='{artist_name}'"
+                )
+                return discover_payload
+
         # If discover/search failed, try slug fallback (bounded).
         fallback_payload = None
         if self._bc_fallback_used < BC_FALLBACK_MAX_PER_RUN:
@@ -11956,6 +11982,28 @@ class CrossDirectoryEnricherWorker(QThread):
                 f"[Enricher] Bandcamp: status=fallback_ok mode=fallback_guess attempts={self._last_bc_row_stats.get('attempts', 0)} 403={self._last_bc_row_stats.get('http_403', 0)} artist='{artist_name}'"
             )
             return fallback_payload
+
+        if spotify_guard_active and not discover_attempted:
+            discover_payload, _ = self._bc_discover_enrich(
+                artist_name,
+                song_title,
+                location_hint,
+                primary_genre_hint,
+            )
+            if discover_payload:
+                self._set_platform_state("bandcamp", "matched")
+                self._last_bc_row_stats.update(
+                    {
+                        "status": "fallback_ok",
+                        "mode": "directory_discover",
+                        "attempts": self._last_bc_row_stats.get("attempts", 0),
+                    }
+                )
+                self._bc_matches += 1
+                self.log_message.emit(
+                    f"[Enricher] Bandcamp: status=fallback_ok mode=directory_discover attempts={self._last_bc_row_stats.get('attempts', 0)} 403={self._last_bc_row_stats.get('http_403', 0)} artist='{artist_name}'"
+                )
+                return discover_payload
 
         # Record breaker log once if tripped during this row.
         if self._bc_search_breaker_tripped and self._bc_search_breaker_reason:
