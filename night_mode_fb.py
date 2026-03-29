@@ -399,6 +399,7 @@ def _load_fb_page_with_timeout(
     url: str,
     timeout_s: float = 20.0,
     logger: LoggerFn = None,
+    unblock_on_ready: bool = False,
 ) -> Tuple[str, str, bool]:
     """Navigate with a hard timeout; recover via window.stop().
 
@@ -409,14 +410,71 @@ def _load_fb_page_with_timeout(
         return "", url or "", False
 
     timed_out = False
+    baseline_url = ""
+    baseline_html = ""
 
     try:
         driver.set_page_load_timeout(timeout_s)
     except Exception:
         pass
 
+    if unblock_on_ready:
+        try:
+            baseline_url = getattr(driver, "current_url", "") or ""
+        except Exception:
+            baseline_url = ""
+        try:
+            baseline_html = getattr(driver, "page_source", "") or ""
+        except Exception:
+            baseline_html = ""
+
     try:
-        driver.get(url)
+        if unblock_on_ready:
+            nav_started = False
+            try:
+                nav_started = bool(
+                    driver.execute_script(
+                        """
+                        window.location.assign(arguments[0]);
+                        return true;
+                        """,
+                        url,
+                    )
+                )
+            except Exception:
+                nav_started = False
+
+            if nav_started:
+                deadline = time.time() + max(float(timeout_s or 0.0), 0.1)
+                while time.time() < deadline:
+                    try:
+                        current_url = getattr(driver, "current_url", "") or ""
+                    except Exception:
+                        current_url = ""
+                    try:
+                        current_html = getattr(driver, "page_source", "") or ""
+                    except Exception:
+                        current_html = ""
+                    try:
+                        ready_state = str(driver.execute_script("return document.readyState") or "").strip().lower()
+                    except Exception:
+                        ready_state = ""
+
+                    surface_changed = bool(
+                        (current_url and current_url != baseline_url)
+                        or (current_html and current_html != baseline_html)
+                    )
+                    url_ready = bool(current_url and current_url != "about:blank")
+                    html_ready = bool(current_html and (current_html != baseline_html or not baseline_html))
+                    if surface_changed and ((ready_state in {"interactive", "complete"} and url_ready) or html_ready):
+                        break
+                    time.sleep(0.1)
+                else:
+                    timed_out = True
+            else:
+                driver.get(url)
+        else:
+            driver.get(url)
     except TimeoutException:
         timed_out = True
     except WebDriverException:
@@ -442,6 +500,10 @@ def _load_fb_page_with_timeout(
     try:
         html = getattr(driver, "page_source", "") or ""
     except Exception:
+        html = ""
+
+    if unblock_on_ready and timed_out and current_url == baseline_url and html == baseline_html:
+        current_url = url
         html = ""
 
     return html, current_url, timed_out
@@ -3888,11 +3950,17 @@ class NightPersistentFacebookSession:
         self.last_health_reason = ""
         return self.driver
 
-    def navigate(self, url: str, logger: LoggerFn = None):
+    def navigate(self, url: str, logger: LoggerFn = None, unblock_on_ready: bool = False):
         log_target = logger if logger is not None else self.logger
         driver = self.ensure_logged_in()
         try:
-            html, current_url, timed_out = _load_fb_page_with_timeout(driver, url, timeout_s=20.0, logger=log_target)
+            html, current_url, timed_out = _load_fb_page_with_timeout(
+                driver,
+                url,
+                timeout_s=20.0,
+                logger=log_target,
+                unblock_on_ready=unblock_on_ready,
+            )
             self.last_nav_timed_out = timed_out
             self.last_nav_page_source = html
             self.last_nav_current_url = current_url
@@ -3902,7 +3970,13 @@ class NightPersistentFacebookSession:
                 _log(log_target, f"[Night FB] Driver session died during navigate; refreshing and retrying url={url!r} error={exc}")
                 try:
                     driver = self.refresh_session()
-                    html, current_url, timed_out = _load_fb_page_with_timeout(driver, url, timeout_s=20.0, logger=log_target)
+                    html, current_url, timed_out = _load_fb_page_with_timeout(
+                        driver,
+                        url,
+                        timeout_s=20.0,
+                        logger=log_target,
+                        unblock_on_ready=unblock_on_ready,
+                    )
                     self.last_nav_timed_out = timed_out
                     self.last_nav_page_source = html
                     self.last_nav_current_url = current_url
@@ -7359,7 +7433,13 @@ class NightModeFacebookEnricher:
             return None, None
         self._ensure_driver_alive(session)
         def _navigate_once() -> Tuple[Optional[str], Optional[str]]:
-            driver = session.navigate(url)
+            try:
+                driver = session.navigate(url, logger=self.logger, unblock_on_ready=True)
+            except TypeError:
+                try:
+                    driver = session.navigate(url, logger=self.logger)
+                except TypeError:
+                    driver = session.navigate(url)
             timed_out = bool(getattr(session, "last_nav_timed_out", False))
             if timed_out:
                 self._last_fb_timeout = True

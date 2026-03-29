@@ -1878,3 +1878,123 @@ def test_fetch_html_with_url_logs_login_wall_health(monkeypatch) -> None:
         and "login_wall=1" in msg
         for msg in logs
     )
+
+
+def test_load_fb_page_with_timeout_unblocks_on_ready_surface(monkeypatch) -> None:
+    class _Clock:
+        def __init__(self) -> None:
+            self.now = 100.0
+
+        def time(self) -> float:
+            return self.now
+
+        def sleep(self, seconds: float) -> None:
+            self.now += seconds
+
+    class _Driver:
+        def __init__(self) -> None:
+            self.current_url = "about:blank"
+            self.page_source = ""
+            self.get_calls = 0
+            self.nav_target = ""
+            self.ready_checks = 0
+            self.stop_called = False
+            self.timeout_seconds = None
+
+        def set_page_load_timeout(self, seconds):  # noqa: ANN001
+            self.timeout_seconds = seconds
+
+        def get(self, url):  # noqa: ANN001
+            self.get_calls += 1
+            raise AssertionError("driver.get should not be used when unblock_on_ready succeeds")
+
+        def execute_script(self, script, *args):  # noqa: ANN001
+            if "window.location.assign" in script:
+                self.nav_target = args[0]
+                self.ready_checks = 0
+                return True
+            if script == "return document.readyState":
+                self.ready_checks += 1
+                if self.ready_checks >= 2:
+                    self.current_url = self.nav_target
+                    self.page_source = "<html><body>Artist page</body></html>"
+                    return "interactive"
+                return "loading"
+            if script == "window.stop();":
+                self.stop_called = True
+                return None
+            raise AssertionError(f"unexpected script: {script}")
+
+    clock = _Clock()
+    driver = _Driver()
+    monkeypatch.setattr(night_mode_fb.time, "time", clock.time)
+    monkeypatch.setattr(night_mode_fb.time, "sleep", clock.sleep)
+
+    html, current_url, timed_out = night_mode_fb._load_fb_page_with_timeout(
+        driver,
+        "https://www.facebook.com/example",
+        timeout_s=5.0,
+        unblock_on_ready=True,
+    )
+
+    assert timed_out is False
+    assert current_url == "https://www.facebook.com/example"
+    assert html == "<html><body>Artist page</body></html>"
+    assert driver.get_calls == 0
+    assert driver.stop_called is False
+    assert driver.timeout_seconds == 5.0
+
+
+def test_fetch_html_with_url_uses_unblocked_navigation_and_preserves_about_continuation(monkeypatch) -> None:
+    about_calls = []
+    observed = {}
+    enricher = night_mode_fb.NightModeFacebookEnricher(
+        legacy_module=type(
+            "_Legacy",
+            (),
+            {
+                "_goto_facebook_about": staticmethod(
+                    lambda driver, url, timeout=5.0: about_calls.append((driver.current_url, url, timeout))
+                )
+            },
+        )(),
+        username="",
+        password="",
+        logger=None,
+        use_shared_session=False,
+    )
+
+    class _Session:
+        last_nav_timed_out = False
+
+        def __init__(self) -> None:
+            self.driver = type(
+                "_Driver",
+                (),
+                {
+                    "page_source": "<html><body>Artist page</body></html>",
+                    "current_url": "https://www.facebook.com/example",
+                },
+            )()
+
+        def navigate(self, url, logger=None, unblock_on_ready=False):  # noqa: ANN001
+            observed["url"] = url
+            observed["logger"] = logger
+            observed["unblock_on_ready"] = unblock_on_ready
+            return self.driver
+
+    monkeypatch.setattr(enricher, "_ensure_session", lambda: _Session())
+    monkeypatch.setattr(enricher, "_ensure_driver_alive", lambda session: session)
+
+    html, current_url = enricher._fetch_html_with_url("https://www.facebook.com/example", goto_about=True, collect_surfaces=False)
+
+    assert html == "<html><body>Artist page</body></html>"
+    assert current_url == "https://www.facebook.com/example"
+    assert observed == {
+        "url": "https://www.facebook.com/example",
+        "logger": None,
+        "unblock_on_ready": True,
+    }
+    assert about_calls == [
+        ("https://www.facebook.com/example", "https://www.facebook.com/example", 5.0)
+    ]
