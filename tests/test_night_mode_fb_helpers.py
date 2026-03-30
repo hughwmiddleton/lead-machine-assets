@@ -2280,13 +2280,13 @@ def test_load_fb_page_with_timeout_unblocks_on_ready_surface(monkeypatch) -> Non
                 self.nav_target = args[0]
                 self.ready_checks = 0
                 return True
-            if script == "return document.readyState":
+            if "fb_nav_surface_probe" in script:
                 self.ready_checks += 1
                 if self.ready_checks >= 2:
                     self.current_url = self.nav_target
                     self.page_source = "<html><body>Artist page</body></html>"
-                    return "interactive"
-                return "loading"
+                    return ["interactive", "Artist page", 1, 1200]
+                return ["loading", "", 0, 0]
             if script == "window.stop();":
                 self.stop_called = True
                 return None
@@ -2310,6 +2310,74 @@ def test_load_fb_page_with_timeout_unblocks_on_ready_surface(monkeypatch) -> Non
     assert driver.get_calls == 0
     assert driver.stop_called is False
     assert driver.timeout_seconds == 5.0
+
+
+def test_load_fb_page_with_timeout_polling_loop_does_not_repeatedly_read_page_source(monkeypatch) -> None:
+    class _Clock:
+        def __init__(self) -> None:
+            self.now = 100.0
+
+        def time(self) -> float:
+            return self.now
+
+        def sleep(self, seconds: float) -> None:
+            self.now += seconds
+
+    class _Driver:
+        def __init__(self) -> None:
+            self.current_url = "about:blank"
+            self._page_source = ""
+            self.page_source_reads = 0
+            self.nav_target = ""
+            self.ready_checks = 0
+
+        @property
+        def page_source(self) -> str:
+            self.page_source_reads += 1
+            if self.page_source_reads > 2:
+                raise AssertionError("polling loop should not repeatedly read page_source")
+            return self._page_source
+
+        @page_source.setter
+        def page_source(self, value: str) -> None:
+            self._page_source = value
+
+        def set_page_load_timeout(self, seconds):  # noqa: ANN001
+            self.timeout_seconds = seconds
+
+        def get(self, url):  # noqa: ANN001
+            raise AssertionError("driver.get should not be used when unblock_on_ready succeeds")
+
+        def execute_script(self, script, *args):  # noqa: ANN001
+            if "window.setTimeout" in script:
+                self.nav_target = args[0]
+                self.ready_checks = 0
+                return True
+            if "fb_nav_surface_probe" in script:
+                self.ready_checks += 1
+                if self.ready_checks >= 2:
+                    self.current_url = self.nav_target
+                    self.page_source = "<html><body>Artist page</body></html>"
+                    return ["interactive", "Artist page", 1, 1200]
+                return ["loading", "", 0, 0]
+            raise AssertionError(f"unexpected script: {script}")
+
+    clock = _Clock()
+    driver = _Driver()
+    monkeypatch.setattr(night_mode_fb.time, "time", clock.time)
+    monkeypatch.setattr(night_mode_fb.time, "sleep", clock.sleep)
+
+    html, current_url, timed_out = night_mode_fb._load_fb_page_with_timeout(
+        driver,
+        "https://www.facebook.com/example",
+        timeout_s=5.0,
+        unblock_on_ready=True,
+    )
+
+    assert timed_out is False
+    assert current_url == "https://www.facebook.com/example"
+    assert html == "<html><body>Artist page</body></html>"
+    assert driver.page_source_reads == 2
 
 
 def test_load_fb_page_with_timeout_does_not_fallback_on_falsey_kickoff_return(monkeypatch) -> None:
@@ -2343,13 +2411,13 @@ def test_load_fb_page_with_timeout_does_not_fallback_on_falsey_kickoff_return(mo
                 self.nav_target = args[0]
                 self.ready_checks = 0
                 return None
-            if script == "return document.readyState":
+            if "fb_nav_surface_probe" in script:
                 self.ready_checks += 1
                 if self.ready_checks >= 2:
                     self.current_url = self.nav_target
                     self.page_source = "<html><body>Artist page</body></html>"
-                    return "interactive"
-                return "loading"
+                    return ["interactive", "Artist page", 1, 1200]
+                return ["loading", "", 0, 0]
             raise AssertionError(f"unexpected script: {script}")
 
     clock = _Clock()
@@ -2389,6 +2457,8 @@ def test_load_fb_page_with_timeout_falls_back_to_blocking_get_when_unblocked_sta
         def execute_script(self, script, *args):  # noqa: ANN001
             if "window.setTimeout" in script:
                 raise RuntimeError("cannot start unblocked navigation")
+            if "fb_nav_surface_probe" in script:
+                return ["complete", "", 0, 0]
             raise AssertionError(f"unexpected script: {script}")
 
     driver = _Driver()

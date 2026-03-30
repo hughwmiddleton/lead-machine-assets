@@ -436,6 +436,27 @@ def _load_fb_page_with_timeout(
     timed_out = False
     baseline_url = ""
     baseline_html = ""
+    baseline_surface_signature: Tuple[Any, ...] = tuple()
+
+    def _read_nav_surface_probe() -> Tuple[str, Tuple[Any, ...]]:
+        try:
+            probe = driver.execute_script(
+                """
+                /* fb_nav_surface_probe */
+                return [
+                    document.readyState || "",
+                    document.title || "",
+                    document.body ? (document.body.childElementCount || 0) : 0,
+                    document.documentElement ? (document.documentElement.scrollHeight || 0) : 0
+                ];
+                """
+            )
+        except Exception:
+            return "", tuple()
+        if isinstance(probe, (list, tuple)):
+            ready_state = str(probe[0] or "").strip().lower() if len(probe) >= 1 else ""
+            return ready_state, tuple(probe[1:4])
+        return "", tuple()
 
     try:
         driver.set_page_load_timeout(timeout_s)
@@ -451,6 +472,7 @@ def _load_fb_page_with_timeout(
             baseline_html = getattr(driver, "page_source", "") or ""
         except Exception:
             baseline_html = ""
+        _, baseline_surface_signature = _read_nav_surface_probe()
 
     try:
         if unblock_on_ready:
@@ -482,22 +504,24 @@ def _load_fb_page_with_timeout(
                         current_url = getattr(driver, "current_url", "") or ""
                     except Exception:
                         current_url = ""
-                    try:
-                        current_html = getattr(driver, "page_source", "") or ""
-                    except Exception:
-                        current_html = ""
-                    try:
-                        ready_state = str(driver.execute_script("return document.readyState") or "").strip().lower()
-                    except Exception:
-                        ready_state = ""
+                    ready_state, current_surface_signature = _read_nav_surface_probe()
 
                     surface_changed = bool(
                         (current_url and current_url != baseline_url)
-                        or (current_html and current_html != baseline_html)
+                        or (current_surface_signature and current_surface_signature != baseline_surface_signature)
                     )
                     url_ready = bool(current_url and current_url != "about:blank")
-                    html_ready = bool(current_html and (current_html != baseline_html or not baseline_html))
-                    if surface_changed and ((ready_state in {"interactive", "complete"} and url_ready) or html_ready):
+                    surface_ready = bool(
+                        current_surface_signature
+                        and any(
+                            (
+                                str(current_surface_signature[0] or "").strip(),
+                                current_surface_signature[1],
+                                current_surface_signature[2],
+                            )
+                        )
+                    )
+                    if surface_changed and ((ready_state in {"interactive", "complete"} and url_ready) or surface_ready):
                         break
                     time.sleep(0.1)
                 else:
