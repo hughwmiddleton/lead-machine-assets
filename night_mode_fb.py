@@ -340,6 +340,25 @@ class FacebookDriverError(RuntimeError):
     """Raised when the Facebook driver/session is unavailable or dead."""
 
 
+def _stalltrace(log_fn, row_label: str, stage: str, t0: float, cumulative_t0: float) -> None:
+    """Emit a [FB StallTrace] diagnostic line. Additive instrumentation only."""
+    elapsed_ms = int((time.perf_counter() - t0) * 1000)
+    cumulative_ms = int((time.perf_counter() - cumulative_t0) * 1000)
+    msg = f"[FB StallTrace] row={row_label!r} stage={stage!r} elapsed_ms={elapsed_ms} cumulative_ms={cumulative_ms}"
+    try:
+        if log_fn and callable(log_fn):
+            log_fn(msg)
+        elif log_fn and hasattr(log_fn, "info"):
+            log_fn.info(msg)
+        else:
+            print(msg)
+    except Exception:
+        try:
+            print(msg)
+        except Exception:
+            pass
+
+
 def _log(logger: LoggerFn, message: str) -> None:
     """Emit message once via callable/logger.info or fallback to print."""
     if not message:
@@ -4824,11 +4843,18 @@ def _extract_emails_from_html(
     stop_after_first_filtered: bool = False,
     expensive_fallback_budget_s: Optional[float] = None,
     expensive_soup_char_limit: int = 262144,
+    _stalltrace_log_fn=None,
+    _stalltrace_row_label: str = "",
+    _stalltrace_cumulative_t0: float = 0.0,
 ) -> Tuple[List[str], bool]:
     mailto_used = False
     raw_html = html if isinstance(html, str) else str(html or "")
     if not raw_html and not rendered_text and not anchor_values:
         return [], mailto_used
+
+    _st_fn = _stalltrace_log_fn
+    _st_row = _stalltrace_row_label
+    _st_t0 = _stalltrace_cumulative_t0
 
     soup_input_char_limit = 262144
     try:
@@ -4901,6 +4927,9 @@ def _extract_emails_from_html(
 
     cheap_candidates: List[str] = []
     anchor_samples = [str(value or "").strip() for value in (anchor_values or []) if str(value or "").strip()]
+
+    # --- StallTrace: anchor/mailto stage ---
+    _st_anchor_t = time.perf_counter() if _st_fn else 0.0
     if raw_html:
         anchor_samples.extend(_href_samples_from_html(raw_html))
     if anchor_samples:
@@ -4916,39 +4945,67 @@ def _extract_emails_from_html(
                 mailto_used = mailto_used or anchor_mailto
                 filtered_emails = _finalize_emails(cheap_candidates)
                 if filtered_emails:
+                    if _st_fn:
+                        _stalltrace(_st_fn, _st_row, "extract_html_anchor:early_return", _st_anchor_t, _st_t0)
                     return filtered_emails, mailto_used
         else:
             anchor_candidates, anchor_mailto = _extract_anchor_candidates(anchor_samples)
             cheap_candidates.extend(anchor_candidates)
             mailto_used = mailto_used or anchor_mailto
+    if _st_fn:
+        _stalltrace(_st_fn, _st_row, "extract_html_anchor:done", _st_anchor_t, _st_t0)
 
+    # --- StallTrace: raw HTML regex scan ---
+    _st_raw_t = time.perf_counter() if _st_fn else 0.0
     if raw_html:
         cheap_candidates.extend(_extract_fb_emails_from_text_sample(raw_html))
         filtered_emails = _finalize_emails(cheap_candidates)
         if filtered_emails:
+            if _st_fn:
+                _stalltrace(_st_fn, _st_row, "extract_html_raw_scan:early_return", _st_raw_t, _st_t0)
             return filtered_emails, mailto_used
+    if _st_fn:
+        _stalltrace(_st_fn, _st_row, "extract_html_raw_scan:done", _st_raw_t, _st_t0)
 
+    # --- StallTrace: BeautifulSoup parse ---
+    _st_soup_t = time.perf_counter() if _st_fn else 0.0
     if raw_html and soup_char_limit > 0:
         if _expensive_budget_exhausted():
+            if _st_fn:
+                _stalltrace(_st_fn, _st_row, "extract_html_soup:budget_exhausted", _st_soup_t, _st_t0)
             return [], mailto_used
         bounded_html = raw_html[:soup_char_limit]
         if soup is not None and (not raw_html or len(raw_html) <= soup_char_limit):
             parsed_soup = soup
         else:
             parsed_soup = BeautifulSoup(bounded_html, "html.parser")
+        if _st_fn:
+            _stalltrace(_st_fn, _st_row, "extract_html_soup:parsed", _st_soup_t, _st_t0)
         text_blob = parsed_soup.get_text(" ", strip=True) if parsed_soup else ""
         if text_blob:
             filtered_emails = _finalize_emails(_extract_fb_emails_from_text_sample(text_blob))
             if filtered_emails:
+                if _st_fn:
+                    _stalltrace(_st_fn, _st_row, "extract_html_soup:early_return", _st_soup_t, _st_t0)
                 return filtered_emails, mailto_used
+    if _st_fn:
+        _stalltrace(_st_fn, _st_row, "extract_html_soup:done", _st_soup_t, _st_t0)
 
+    # --- StallTrace: rendered text fallback ---
+    _st_vis_t = time.perf_counter() if _st_fn else 0.0
     visible_text = str(rendered_text or "")
     if visible_text:
         if _expensive_budget_exhausted():
+            if _st_fn:
+                _stalltrace(_st_fn, _st_row, "extract_html_rendered:budget_exhausted", _st_vis_t, _st_t0)
             return [], mailto_used
         filtered_emails = _finalize_emails(_extract_fb_emails_from_text_sample(visible_text))
         if filtered_emails:
+            if _st_fn:
+                _stalltrace(_st_fn, _st_row, "extract_html_rendered:early_return", _st_vis_t, _st_t0)
             return filtered_emails, mailto_used
+    if _st_fn:
+        _stalltrace(_st_fn, _st_row, "extract_html_rendered:done", _st_vis_t, _st_t0)
 
     return [], mailto_used
 
@@ -5115,6 +5172,8 @@ def _run_bounded_fb_accepted_page_sweep(
     on_secondary_selected=None,
     on_secondary_fallback=None,
     on_no_secondary=None,
+    _stalltrace_log_fn=None,
+    _stalltrace_row_label: str = "",
 ) -> FacebookAcceptedPageSweepResult:
     """
     Neutral accepted-page sweep shared by daytime and Night wrappers.
@@ -5130,6 +5189,13 @@ def _run_bounded_fb_accepted_page_sweep(
         result.status_reason = "no_fb_url"
         return result
 
+    # --- StallTrace: sweep clock start ---
+    _st_fn = _stalltrace_log_fn
+    _st_row = _stalltrace_row_label
+    _st_t0 = time.perf_counter() if _st_fn else 0.0
+    if _st_fn:
+        _stalltrace(_st_fn, _st_row, "sweep:entry", _st_t0, _st_t0)
+
     visited: Set[str] = set()
 
     def _visit_key(url: str) -> str:
@@ -5139,6 +5205,7 @@ def _run_bounded_fb_accepted_page_sweep(
         surface: Optional[FacebookAcceptedPageFetchResult],
         *,
         cap_expensive_fallback: bool = False,
+        _stage_label: str = "main",
     ) -> Tuple[List[str], bool]:
         if surface is None:
             return [], False
@@ -5153,6 +5220,9 @@ def _run_bounded_fb_accepted_page_sweep(
             expensive_soup_char_limit=(
                 _FB_ACCEPTED_PAGE_MAIN_SURFACE_SOUP_CHAR_LIMIT if cap_expensive_fallback else 262144
             ),
+            _stalltrace_log_fn=_st_fn,
+            _stalltrace_row_label=_st_row,
+            _stalltrace_cumulative_t0=_st_t0,
         )
 
     def _dedupe(values: Sequence[str]) -> List[str]:
@@ -5166,7 +5236,11 @@ def _run_bounded_fb_accepted_page_sweep(
             deduped.append(normalized)
         return deduped
 
+    # --- StallTrace: main surface fetch ---
+    _st_fetch_main_t = time.perf_counter() if _st_fn else 0.0
     main_surface = fetch_surface(target_url)
+    if _st_fn:
+        _stalltrace(_st_fn, _st_row, "sweep:fetch_main:done", _st_fetch_main_t, _st_t0)
     result.main_surface = main_surface
     if main_surface is None:
         result.status_reason = "fetch_error"
@@ -5181,11 +5255,20 @@ def _run_bounded_fb_accepted_page_sweep(
     if result.status_reason and not (main_surface.html or main_surface.rendered_text or main_surface.anchor_values):
         return result
 
-    main_emails, main_mailto = _extract_surface_emails(main_surface, cap_expensive_fallback=True)
+    # --- StallTrace: main surface email extraction ---
+    _st_extract_main_t = time.perf_counter() if _st_fn else 0.0
+    if _st_fn:
+        _stalltrace(_st_fn, _st_row, "sweep:extract_main:start", _st_extract_main_t, _st_t0)
+    main_emails, main_mailto = _extract_surface_emails(main_surface, cap_expensive_fallback=True, _stage_label="main")
+    if _st_fn:
+        _stalltrace(_st_fn, _st_row, "sweep:extract_main:done", _st_extract_main_t, _st_t0)
     result.main_emails = list(main_emails or [])
     result.main_mailto = bool(main_mailto)
 
     if refresh_main_surface and not result.main_emails and not result.status_reason:
+        _st_refresh_t = time.perf_counter() if _st_fn else 0.0
+        if _st_fn:
+            _stalltrace(_st_fn, _st_row, "sweep:refresh_main:start", _st_refresh_t, _st_t0)
         refreshed_surface = refresh_main_surface(main_surface, list(result.main_emails))
         if refreshed_surface is not None:
             result.main_surface = main_surface = refreshed_surface
@@ -5196,14 +5279,22 @@ def _run_bounded_fb_accepted_page_sweep(
             result.final_resolved_url = main_surface.resolved_url or result.final_resolved_url or target_url
             if result.status_reason and not (main_surface.html or main_surface.rendered_text or main_surface.anchor_values):
                 return result
-            main_emails, main_mailto = _extract_surface_emails(main_surface, cap_expensive_fallback=True)
+            main_emails, main_mailto = _extract_surface_emails(main_surface, cap_expensive_fallback=True, _stage_label="main_refreshed")
             result.main_emails = list(main_emails or [])
             result.main_mailto = bool(main_mailto)
+        if _st_fn:
+            _stalltrace(_st_fn, _st_row, "sweep:refresh_main:done", _st_refresh_t, _st_t0)
 
     result.combined_emails = _dedupe(result.main_emails)
     if result.main_emails and not continue_after_main_email:
+        if _st_fn:
+            _stalltrace(_st_fn, _st_row, "sweep:early_return_main_emails", _st_t0, _st_t0)
         return result
 
+    # --- StallTrace: secondary URL selection ---
+    _st_secondary_sel_t = time.perf_counter() if _st_fn else 0.0
+    if _st_fn:
+        _stalltrace(_st_fn, _st_row, "sweep:secondary_select:start", _st_secondary_sel_t, _st_t0)
     main_html = main_surface.html or ""
     base_url = main_surface.resolved_url or target_url
     secondary_url = ""
@@ -5229,6 +5320,8 @@ def _run_bounded_fb_accepted_page_sweep(
             secondary_url = candidate_url
             fallback_used = True
             break
+    if _st_fn:
+        _stalltrace(_st_fn, _st_row, f"sweep:secondary_select:done url={secondary_url!r} fallback={fallback_used}", _st_secondary_sel_t, _st_t0)
 
     if not secondary_url:
         if callable(on_no_secondary):
@@ -5241,7 +5334,13 @@ def _run_bounded_fb_accepted_page_sweep(
     elif callable(on_secondary_selected):
         on_secondary_selected(secondary_url)
 
+    # --- StallTrace: secondary surface fetch ---
+    _st_fetch_sec_t = time.perf_counter() if _st_fn else 0.0
+    if _st_fn:
+        _stalltrace(_st_fn, _st_row, "sweep:fetch_secondary:start", _st_fetch_sec_t, _st_t0)
     secondary_surface = fetch_surface(secondary_url)
+    if _st_fn:
+        _stalltrace(_st_fn, _st_row, "sweep:fetch_secondary:done", _st_fetch_sec_t, _st_t0)
     result.secondary_attempted = True
     result.secondary_surface = secondary_surface
     if secondary_surface is None:
@@ -5255,10 +5354,18 @@ def _run_bounded_fb_accepted_page_sweep(
     ):
         return result
 
-    secondary_emails, secondary_mailto = _extract_surface_emails(secondary_surface)
+    # --- StallTrace: secondary email extraction ---
+    _st_extract_sec_t = time.perf_counter() if _st_fn else 0.0
+    if _st_fn:
+        _stalltrace(_st_fn, _st_row, "sweep:extract_secondary:start", _st_extract_sec_t, _st_t0)
+    secondary_emails, secondary_mailto = _extract_surface_emails(secondary_surface, _stage_label="secondary")
+    if _st_fn:
+        _stalltrace(_st_fn, _st_row, "sweep:extract_secondary:done", _st_extract_sec_t, _st_t0)
     result.secondary_emails = list(secondary_emails or [])
     result.secondary_mailto = bool(secondary_mailto)
     result.combined_emails = _dedupe([*result.main_emails, *result.secondary_emails])
+    if _st_fn:
+        _stalltrace(_st_fn, _st_row, "sweep:return", _st_t0, _st_t0)
     return result
 
 

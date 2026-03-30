@@ -3191,11 +3191,15 @@ def _select_fb_contact_surface_url(base_url: str, html: str) -> Optional[str]:
     return candidates[0][3]
 
 
-def _extract_fb_emails_bounded(fb_driver, fb_url: str, log_fn=None, fb_session=None) -> tuple[list[str], str, str]:
+def _extract_fb_emails_bounded(fb_driver, fb_url: str, log_fn=None, fb_session=None, _stalltrace_row_label: str = "") -> tuple[list[str], str, str]:
     """
     Visit at most two Facebook pages (main + about/info/contact) to extract emails.
     Returns (emails, resolved_url, status_reason).
     """
+    import time as _time_mod
+    _st_bounded_t0 = _time_mod.perf_counter()
+    _st_row = _stalltrace_row_label
+
     def _log(msg: str) -> None:
         if log_fn:
             try:
@@ -3294,6 +3298,8 @@ def _extract_fb_emails_bounded(fb_driver, fb_url: str, log_fn=None, fb_session=N
         fast_path_fetcher = _FBEnrichAcceptedPageFastPathBridge(fb_session, log_fn)
 
     def _fetch_surface(target: str) -> FacebookAcceptedPageFetchResult:
+        from night_mode_fb import _stalltrace
+        _st_fetch_t = _time_mod.perf_counter()
         target_fetch = _normalise_fb_surface_url(target) or _normalise_fb_url(normalize_external_url(target))
         if not target_fetch:
             return FacebookAcceptedPageFetchResult(
@@ -3308,6 +3314,7 @@ def _extract_fb_emails_bounded(fb_driver, fb_url: str, log_fn=None, fb_session=N
             anchor_values: List[str] = []
             rendered_text = ""
             if fast_path_fetcher is not None:
+                _st_fp_t = _time_mod.perf_counter()
                 try:
                     nav_html, nav_current_url = fast_path_fetcher._fetch_html_with_url(
                         target_fetch,
@@ -3315,6 +3322,8 @@ def _extract_fb_emails_bounded(fb_driver, fb_url: str, log_fn=None, fb_session=N
                         collect_surfaces=True,
                         skip_pre_nav_session_validation=True,
                     )
+                    if log_fn:
+                        _stalltrace(log_fn, _st_row, f"fetch_surface:fast_path:done url={target_fetch!r}", _st_fp_t, _st_bounded_t0)
                 except FacebookDriverError as exc:
                     if _fb_exception_is_fatal_session(exc):
                         raise
@@ -3376,7 +3385,12 @@ def _extract_fb_emails_bounded(fb_driver, fb_url: str, log_fn=None, fb_session=N
                     status_reason=warning,
                 )
             if not rendered_text:
+                _st_vis_t = _time_mod.perf_counter()
                 rendered_text = _extract_fb_visible_text_with_container_fallback(active_driver)
+                if log_fn:
+                    _stalltrace(log_fn, _st_row, "fetch_surface:visible_text_fallback:done", _st_vis_t, _st_bounded_t0)
+            if log_fn:
+                _stalltrace(log_fn, _st_row, f"fetch_surface:complete url={target_fetch!r}", _st_fetch_t, _st_bounded_t0)
             _log_fb_email_surface_debug(log_fn, f"page:{resolved_url}", html, rendered_text)
             return FacebookAcceptedPageFetchResult(
                 requested_url=target_fetch,
@@ -3399,6 +3413,10 @@ def _extract_fb_emails_bounded(fb_driver, fb_url: str, log_fn=None, fb_session=N
     if main_target:
         _log(f"[FB Enrich] Visiting {main_target}")
 
+    from night_mode_fb import _stalltrace
+    if log_fn:
+        _stalltrace(log_fn, _st_row, "bounded:entry", _st_bounded_t0, _st_bounded_t0)
+
     def _fallback_about_urls(base_url: str) -> List[str]:
         parsed = urllib.parse.urlparse(base_url or fb_url)
         base_path = (parsed.path or "").rstrip("/") or "/"
@@ -3415,7 +3433,12 @@ def _extract_fb_emails_bounded(fb_driver, fb_url: str, log_fn=None, fb_session=N
         on_secondary_selected=lambda target: _log(f"[FB Enrich] Visiting contact/about page: {target}"),
         on_secondary_fallback=lambda target: _log(f"[FB Enrich] Visiting contact/about page: {target}"),
         on_no_secondary=lambda: _log("[FB Enrich] No contact/about link found"),
+        _stalltrace_log_fn=log_fn,
+        _stalltrace_row_label=_st_row,
     )
+
+    if log_fn:
+        _stalltrace(log_fn, _st_row, "bounded:return", _st_bounded_t0, _st_bounded_t0)
 
     status_reason = sweep_result.secondary_status_reason or sweep_result.status_reason or ""
     resolved = sweep_result.final_resolved_url or fb_url
@@ -9591,6 +9614,7 @@ class CrossDirectoryEnricherWorker(QThread):
                     if getattr(self, "night_mode", False) and self.night_fb_run_state is not None:
                         fb_session = getattr(self.night_fb_run_state, "session", None)
 
+                    _st_row_label = str(artist or "")[:60]
                     try:
                         for candidate in existing_fb_links:
                             if fb_session is not None:
@@ -9599,12 +9623,14 @@ class CrossDirectoryEnricherWorker(QThread):
                                     candidate,
                                     log_fn=self.log_message.emit,
                                     fb_session=fb_session,
+                                    _stalltrace_row_label=_st_row_label,
                                 )
                             else:
                                 fb_emails, resolved_url, fb_status_reason = _extract_fb_emails_bounded(
                                     fb_driver,
                                     candidate,
                                     log_fn=self.log_message.emit,
+                                    _stalltrace_row_label=_st_row_label,
                                 )
                             fb_emails = filter_system_telemetry_emails(fb_emails)
                             page_url_used = resolved_url or candidate

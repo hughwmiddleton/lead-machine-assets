@@ -2403,3 +2403,117 @@ def test_fetch_html_with_url_keeps_pre_nav_session_validation_for_default_flow(m
         "unblock_on_ready": True,
         "validate_session": True,
     }
+
+
+# ---------------------------------------------------------------------------
+# StallTrace instrumentation tests (NM-S89)
+# ---------------------------------------------------------------------------
+
+
+def test_stalltrace_emits_sweep_stage_logs() -> None:
+    """Verify [FB StallTrace] logs are emitted for each sweep stage."""
+    main_url = "https://www.facebook.com/artist"
+    about_url = "https://www.facebook.com/artist/about"
+    logs: list[str] = []
+
+    def fake_fetch_surface(url):  # noqa: ANN001
+        if url == main_url:
+            return night_mode_fb.FacebookAcceptedPageFetchResult(
+                requested_url=url,
+                resolved_url=url,
+                html="<html><body>No email</body></html>",
+                rendered_text="",
+                anchor_values=[],
+            )
+        if url == about_url:
+            return night_mode_fb.FacebookAcceptedPageFetchResult(
+                requested_url=url,
+                resolved_url=url,
+                html="<html><body>bookings@artist.com</body></html>",
+                rendered_text="",
+                anchor_values=[],
+            )
+        return None
+
+    result = night_mode_fb._run_bounded_fb_accepted_page_sweep(
+        main_url,
+        fake_fetch_surface,
+        select_secondary_url=lambda base_url, html: about_url,
+        _stalltrace_log_fn=logs.append,
+        _stalltrace_row_label="TEST_ARTIST",
+    )
+
+    stalltrace_logs = [l for l in logs if "[FB StallTrace]" in l]
+    assert len(stalltrace_logs) >= 5, f"Expected >=5 stalltrace logs, got {len(stalltrace_logs)}"
+
+    # All logs should contain the row label
+    for log_line in stalltrace_logs:
+        assert "TEST_ARTIST" in log_line
+
+    # Check key stages are present
+    stages_found = " ".join(stalltrace_logs)
+    assert "sweep:entry" in stages_found
+    assert "sweep:fetch_main:done" in stages_found
+    assert "sweep:extract_main" in stages_found
+    assert "sweep:secondary_select" in stages_found
+    assert "sweep:fetch_secondary" in stages_found
+    assert "sweep:extract_secondary" in stages_found
+    assert "sweep:return" in stages_found
+
+    # Verify return contract unchanged
+    assert result.combined_emails == ["bookings@artist.com"]
+    assert result.secondary_attempted is True
+
+
+def test_stalltrace_extract_emails_stage_logs() -> None:
+    """Verify _extract_emails_from_html emits stalltrace for each extraction stage."""
+    logs: list[str] = []
+    html = "<html><body>bookings@artist.com</body></html>"
+
+    emails, mailto_used = night_mode_fb._extract_emails_from_html(
+        html,
+        rendered_text="rendered text",
+        _stalltrace_log_fn=logs.append,
+        _stalltrace_row_label="STAGE_TEST",
+        _stalltrace_cumulative_t0=0.0,
+    )
+
+    stalltrace_logs = [l for l in logs if "[FB StallTrace]" in l]
+    assert len(stalltrace_logs) >= 1
+    for log_line in stalltrace_logs:
+        assert "STAGE_TEST" in log_line
+        assert "elapsed_ms=" in log_line
+        assert "cumulative_ms=" in log_line
+
+    # Return contract unchanged
+    assert "bookings@artist.com" in emails
+    assert mailto_used is False
+
+
+def test_stalltrace_disabled_by_default_no_extra_perf_counter_calls() -> None:
+    """When stalltrace is not enabled, no extra perf_counter calls are made."""
+    import time
+    call_count = [0]
+    original_perf = time.perf_counter
+
+    def counting_perf():
+        call_count[0] += 1
+        return original_perf()
+
+    time.perf_counter = counting_perf
+    try:
+        result = night_mode_fb._run_bounded_fb_accepted_page_sweep(
+            "https://www.facebook.com/artist",
+            lambda url: night_mode_fb.FacebookAcceptedPageFetchResult(
+                requested_url=url,
+                resolved_url=url,
+                html="<html><body>test@artist.com</body></html>",
+            ),
+        )
+    finally:
+        time.perf_counter = original_perf
+
+    # Without stalltrace, sweep-level timer vars should NOT call perf_counter
+    # Only _extract_emails_from_html's extraction_started_at should call it
+    assert call_count[0] <= 2, f"Expected <=2 perf_counter calls without stalltrace, got {call_count[0]}"
+    assert result.main_emails == ["test@artist.com"]
