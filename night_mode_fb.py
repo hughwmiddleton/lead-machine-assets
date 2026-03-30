@@ -104,6 +104,7 @@ _FB_ROLE_EMAIL_PREFIXES: Tuple[str, ...] = ("info", "contact", "admin", "hello")
 _FB_BOOKING_EMAIL_TOKENS: Tuple[str, ...] = ("booking", "bookings", "mgmt", "management")
 _FB_ACCEPTED_PAGE_MAIN_SURFACE_SOUP_CHAR_LIMIT = 65536
 _FB_ACCEPTED_PAGE_MAIN_SURFACE_EXTRACTION_BUDGET_S = 0.15
+_FB_RAW_HTML_SCAN_CHAR_LIMIT = 524288  # 512 KB – bound raw regex scan on Facebook HTML
 _FB_REVEAL_CONTROL_TERMS: Tuple[str, ...] = (
     "contact info",
     "see more",
@@ -4958,7 +4959,8 @@ def _extract_emails_from_html(
     # --- StallTrace: raw HTML regex scan ---
     _st_raw_t = time.perf_counter() if _st_fn else 0.0
     if raw_html:
-        cheap_candidates.extend(_extract_fb_emails_from_text_sample(raw_html))
+        raw_scan_sample = raw_html[:_FB_RAW_HTML_SCAN_CHAR_LIMIT]
+        cheap_candidates.extend(_extract_fb_emails_from_text_sample(raw_scan_sample))
         filtered_emails = _finalize_emails(cheap_candidates)
         if filtered_emails:
             if _st_fn:

@@ -2517,3 +2517,76 @@ def test_stalltrace_disabled_by_default_no_extra_perf_counter_calls() -> None:
     # Only _extract_emails_from_html's extraction_started_at should call it
     assert call_count[0] <= 2, f"Expected <=2 perf_counter calls without stalltrace, got {call_count[0]}"
     assert result.main_emails == ["test@artist.com"]
+
+
+# ── NM-S90: raw HTML scan char-limit tests ──────────────────────────
+
+
+def test_raw_html_scan_bounded_on_oversized_blob(monkeypatch) -> None:
+    """Oversized raw HTML must be truncated before the raw regex scan."""
+    # Use a small cap for speed; the real constant is 524288.
+    test_limit = 200
+    monkeypatch.setattr(night_mode_fb, "_FB_RAW_HTML_SCAN_CHAR_LIMIT", test_limit)
+    # Place a valid email well beyond the cap so it is never reached.
+    padding = "x" * (test_limit + 500)
+    oversized_html = padding + "hidden@artist.com"
+    captured_samples: list[str] = []
+
+    def spy(sample: str) -> list[str]:
+        captured_samples.append(sample)
+        return []  # return no results to avoid downstream processing
+
+    monkeypatch.setattr(night_mode_fb, "_extract_fb_emails_from_text_sample", spy)
+    emails, _ = night_mode_fb._extract_emails_from_html(oversized_html)
+
+    # The raw-scan call should have received a bounded sample, not the full blob.
+    raw_scan_call = captured_samples[0] if captured_samples else ""
+    assert len(raw_scan_call) <= test_limit
+    # The email beyond the cap must NOT appear in results (raw scan was bounded).
+    assert "hidden@artist.com" not in emails
+
+
+def test_raw_html_scan_still_finds_email_within_cap() -> None:
+    """An email inside the bounded prefix is still extracted by the raw scan."""
+    html = "<html><body>contact@band.com</body></html>"
+    emails, _ = night_mode_fb._extract_emails_from_html(html)
+    assert "contact@band.com" in emails
+
+
+def test_anchor_mailto_still_wins_normally() -> None:
+    """Anchor/mailto extraction short-circuits before the raw scan."""
+    html = '<html><body><a href="mailto:bookings@band.com">Email</a></body></html>'
+    emails, used_mailto = night_mode_fb._extract_emails_from_html(
+        html, stop_after_first_filtered=True,
+    )
+    assert "bookings@band.com" in emails
+    assert used_mailto is True
+
+
+def test_soup_fallback_still_works_after_bounded_raw_scan(monkeypatch) -> None:
+    """When the bounded raw scan finds nothing, soup fallback still extracts."""
+    # Use small cap for test speed.
+    monkeypatch.setattr(night_mode_fb, "_FB_RAW_HTML_SCAN_CHAR_LIMIT", 100)
+    # Email only appears in parseable text beyond the raw cap.
+    padding_tag = f"<div>{'x' * 200}</div>"
+    html = f"<html><body>{padding_tag}<p>bookings@deep.com</p></body></html>"
+    emails, _ = night_mode_fb._extract_emails_from_html(html)
+    # Soup fallback parses the full HTML (within soup_char_limit) and finds the email.
+    assert "bookings@deep.com" in emails
+
+
+def test_rendered_text_fallback_still_works() -> None:
+    """Rendered-text fallback is independent of raw HTML scan bounding."""
+    emails, _ = night_mode_fb._extract_emails_from_html(
+        "", rendered_text="Contact us at info@venue.com for bookings",
+    )
+    assert "info@venue.com" in emails
+
+
+def test_return_contract_unchanged() -> None:
+    """Return shape is always (list, bool) regardless of input."""
+    result = night_mode_fb._extract_emails_from_html("")
+    assert isinstance(result, tuple)
+    assert len(result) == 2
+    assert isinstance(result[0], list)
+    assert isinstance(result[1], bool)
