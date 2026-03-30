@@ -789,6 +789,45 @@ def test_night_fb_logs_debug_summary_in_fixed_order():
     ]
 
 
+def test_night_fb_logs_refine_summary_in_fixed_order():
+    logs = []
+    df = pd.DataFrame(
+        {
+            "FB_Refine_Decision": [
+                "skipped_overlay",
+                "allowed",
+                "skipped_not_allowed",
+                "skipped_junk_gate",
+                "allowed",
+                "skipped_suppressed",
+                "",
+                None,
+                "unexpected_value",
+            ]
+        }
+    )
+
+    pipeline_runner._log_fb_refine_summary(df, logger=logs.append)
+
+    assert logs == [
+        "[FB Refine Summary]",
+        "allowed=2",
+        "skipped_junk_gate=1",
+        "skipped_suppressed=1",
+        "skipped_overlay=1",
+        "skipped_not_allowed=1",
+    ]
+
+
+def test_night_fb_refine_summary_missing_column_is_noop():
+    logs = []
+    df = pd.DataFrame({FB_DEBUG_REASON_COL: ["email_written"]})
+
+    pipeline_runner._log_fb_refine_summary(df, logger=logs.append)
+
+    assert logs == []
+
+
 def test_night_mode_outputs_preserve_fb_attribution(monkeypatch, tmp_path):
     config = {
         "export_mode": "both",

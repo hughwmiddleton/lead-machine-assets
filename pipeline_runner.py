@@ -686,6 +686,14 @@ FB_DEBUG_SUMMARY_ORDER: Sequence[str] = (
     "no_fb_candidate",
 )
 FB_DEBUG_SUMMARY_VALID: Set[str] = set(FB_DEBUG_SUMMARY_ORDER)
+FB_REFINE_SUMMARY_ORDER: Sequence[str] = (
+    "allowed",
+    "skipped_junk_gate",
+    "skipped_suppressed",
+    "skipped_overlay",
+    "skipped_not_allowed",
+)
+FB_REFINE_SUMMARY_VALID: Set[str] = set(FB_REFINE_SUMMARY_ORDER)
 
 
 def _log_fb_debug_summary(df: Optional[pd.DataFrame], logger: LoggerFn = None) -> None:
@@ -699,6 +707,28 @@ def _log_fb_debug_summary(df: Optional[pd.DataFrame], logger: LoggerFn = None) -
     _safe_log_console(logger, "[FB Debug Summary]")
     for reason in FB_DEBUG_SUMMARY_ORDER:
         _safe_log_console(logger, f"{reason}={counts[reason]}")
+
+
+def _log_fb_refine_summary(df: Optional[pd.DataFrame], logger: LoggerFn = None) -> None:
+    if not isinstance(df, pd.DataFrame) or "FB_Refine_Decision" not in df.columns:
+        return
+
+    counts = {decision: 0 for decision in FB_REFINE_SUMMARY_ORDER}
+    saw_valid_decision = False
+    for raw_value in df["FB_Refine_Decision"].tolist():
+        decision = _cell_str(raw_value)
+        if decision in FB_REFINE_SUMMARY_VALID:
+            counts[decision] += 1
+            saw_valid_decision = True
+
+    if not saw_valid_decision:
+        return
+
+    _safe_log_console(logger, "[FB Refine Summary]")
+    for decision in FB_REFINE_SUMMARY_ORDER:
+        count = counts[decision]
+        if count:
+            _safe_log_console(logger, f"{decision}={count}")
 
 
 def _row_has_valid_email(row: pd.Series) -> Tuple[bool, List[str]]:
@@ -3865,6 +3895,7 @@ def run_facebook_global_pass_nightmode(
 
     df.drop(columns=["__row_id"], inplace=True, errors="ignore")
     df.to_csv(output_csv, index=False)
+    _log_fb_refine_summary(df, logger)
     _log_fb_debug_summary(df, logger)
     if local_night_fb_run_state:
         close_night_fb_run_state(night_fb_run_state)
