@@ -94,8 +94,6 @@ def test_extract_emails_fast_path_finds_rendered_email_without_raw_html(monkeypa
         samples.append(sample)
         if sample == "Rendered bookings@artist.com":
             return ["bookings@artist.com"]
-        if sample == html:
-            raise AssertionError("raw_html should be skipped on the fast path")
         return []
 
     monkeypatch.setattr(night_mode_fb, "_extract_fb_emails_from_text_sample", fake_extract)
@@ -108,17 +106,15 @@ def test_extract_emails_fast_path_finds_rendered_email_without_raw_html(monkeypa
 
     assert emails == ["bookings@artist.com"]
     assert used_mailto is False
-    assert html not in samples
+    assert samples == [html, "Rendered bookings@artist.com"]
 
 
-def test_extract_emails_fast_path_skips_raw_html_branch(monkeypatch) -> None:
+def test_extract_emails_fast_path_checks_raw_html_before_rendered_text(monkeypatch) -> None:
     html = "<html><body></body></html>"
     samples = []
 
     def fake_extract(sample: str):  # noqa: ANN001
         samples.append(sample)
-        if sample == html:
-            raise AssertionError("raw_html should not be scanned when stop_after_first_filtered=True")
         return []
 
     monkeypatch.setattr(night_mode_fb, "_extract_fb_emails_from_text_sample", fake_extract)
@@ -131,7 +127,7 @@ def test_extract_emails_fast_path_skips_raw_html_branch(monkeypatch) -> None:
 
     assert emails == []
     assert used_mailto is False
-    assert samples == ["No email here"]
+    assert samples == [html, "No email here"]
 
 
 def test_extract_emails_non_fast_path_still_scans_raw_html(monkeypatch) -> None:
@@ -156,6 +152,35 @@ def test_extract_emails_non_fast_path_still_scans_raw_html(monkeypatch) -> None:
     assert html in samples
 
 
+def test_extract_emails_non_fast_path_skips_expensive_fallback_after_raw_html_hit(monkeypatch) -> None:
+    html = "<html><body><script>bookings@artist.com</script></body></html>"
+    samples = []
+
+    def fake_extract(sample: str):  # noqa: ANN001
+        samples.append(sample)
+        if sample == html:
+            return ["bookings@artist.com"]
+        if sample == "Rendered press@artist.com":
+            raise AssertionError("rendered_text should not be scanned after a raw_html hit")
+        return []
+
+    def fail_beautiful_soup(*args, **kwargs):  # noqa: ANN001
+        raise AssertionError("BeautifulSoup fallback should be skipped after a raw_html hit")
+
+    monkeypatch.setattr(night_mode_fb, "_extract_fb_emails_from_text_sample", fake_extract)
+    monkeypatch.setattr(night_mode_fb, "BeautifulSoup", fail_beautiful_soup)
+
+    emails, used_mailto = night_mode_fb._extract_emails_from_html(
+        html,
+        rendered_text="Rendered press@artist.com",
+        stop_after_first_filtered=False,
+    )
+
+    assert emails == ["bookings@artist.com"]
+    assert used_mailto is False
+    assert samples == [html]
+
+
 def test_extract_emails_fast_path_still_short_circuits_on_mailto(monkeypatch) -> None:
     html = '<html><body><a href="mailto:bookings@artist.com">Email</a></body></html>'
 
@@ -173,6 +198,36 @@ def test_extract_emails_fast_path_still_short_circuits_on_mailto(monkeypatch) ->
 
     assert emails == ["bookings@artist.com"]
     assert used_mailto is True
+
+
+def test_extract_emails_bounds_beautifulsoup_fallback_input(monkeypatch) -> None:
+    html = "<html><body>" + ("x" * 300000) + "</body></html>"
+    observed = {}
+
+    def fake_extract(sample: str):  # noqa: ANN001
+        if sample == html:
+            return []
+        if sample == "Soup fallback bookings@artist.com":
+            return ["bookings@artist.com"]
+        return []
+
+    class _FakeSoup:
+        def get_text(self, separator=" ", strip=True):  # noqa: ANN001
+            return "Soup fallback bookings@artist.com"
+
+    def fake_beautiful_soup(source_html, parser):  # noqa: ANN001
+        observed["length"] = len(source_html)
+        observed["parser"] = parser
+        return _FakeSoup()
+
+    monkeypatch.setattr(night_mode_fb, "_extract_fb_emails_from_text_sample", fake_extract)
+    monkeypatch.setattr(night_mode_fb, "BeautifulSoup", fake_beautiful_soup)
+
+    emails, used_mailto = night_mode_fb._extract_emails_from_html(html)
+
+    assert emails == ["bookings@artist.com"]
+    assert used_mailto is False
+    assert observed == {"length": 262144, "parser": "html.parser"}
 
 
 def test_filter_low_quality_fb_emails_rejects_file_like_and_artifact_candidates() -> None:
@@ -1532,6 +1587,44 @@ def test_valid_facebook_url_starts_scrape_even_when_email_column_is_stale(monkey
     assert "artist@test.com" in (result.get("Email_All") or "")
     assert any('[Night FB] Starting FB scrape for artist="Example Band"' in msg for msg in logs)
     assert any('[Night FB][PASS A]' in msg and 'outcome="found_email"' in msg for msg in logs)
+
+
+def test_bounded_fb_accepted_page_sweep_continues_to_about_when_main_surface_has_no_email() -> None:
+    main_url = "https://www.facebook.com/artist"
+    about_url = "https://www.facebook.com/artist/about"
+    calls = []
+
+    def fake_fetch_surface(url):  # noqa: ANN001
+        calls.append(url)
+        if url == main_url:
+            return night_mode_fb.FacebookAcceptedPageFetchResult(
+                requested_url=url,
+                resolved_url=url,
+                html='<html><body><a href="/artist/about">About</a></body></html>',
+                rendered_text="No email here",
+                anchor_values=[],
+            )
+        if url == about_url:
+            return night_mode_fb.FacebookAcceptedPageFetchResult(
+                requested_url=url,
+                resolved_url=url,
+                html="<html><body><div>About bookings@artist.com</div></body></html>",
+                rendered_text="About bookings@artist.com",
+                anchor_values=[],
+            )
+        raise AssertionError(f"unexpected fetch url: {url}")
+
+    result = night_mode_fb._run_bounded_fb_accepted_page_sweep(
+        main_url,
+        fake_fetch_surface,
+        select_secondary_url=lambda base_url, page_html: about_url,
+    )
+
+    assert calls == [main_url, about_url]
+    assert result.main_emails == []
+    assert result.secondary_attempted is True
+    assert result.secondary_emails == ["bookings@artist.com"]
+    assert result.combined_emails == ["bookings@artist.com"]
 
 
 @pytest.mark.parametrize(

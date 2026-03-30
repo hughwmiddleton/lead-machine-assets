@@ -4821,78 +4821,112 @@ def _extract_emails_from_html(
     anchor_values: Optional[Sequence[str]] = None,
     stop_after_first_filtered: bool = False,
 ) -> Tuple[List[str], bool]:
-    emails: List[str] = []
     mailto_used = False
     raw_html = html if isinstance(html, str) else str(html or "")
     if not raw_html and not rendered_text and not anchor_values:
-        return emails, mailto_used
-    soup = soup or BeautifulSoup(raw_html, "html.parser")
-    for anchor in soup.select('a[href^="mailto:"]'):
-        href = anchor.get("href") or ""
-        addr = href.split("mailto:", 1)[-1].split("?", 1)[0]
-        if addr:
-            emails.append(addr)
-            mailto_used = True
-    if stop_after_first_filtered:
-        filtered_emails = _filter_low_quality_fb_emails(emails)
-        if filtered_emails:
-            return filtered_emails, mailto_used
-    text_blob = soup.get_text(" ", strip=True) if soup else ""
-    if text_blob:
-        emails.extend(_extract_fb_emails_from_text_sample(text_blob))
+        return [], mailto_used
+
+    soup_input_char_limit = 262144
+
+    def _href_samples_from_html(source_html: str) -> List[str]:
+        if not source_html:
+            return []
+        href_samples: List[str] = []
+        href_pattern = re.compile(
+            r"""href\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'<>]+))""",
+            re.IGNORECASE,
+        )
+        for match in href_pattern.finditer(source_html):
+            href = next((group for group in match.groups() if group), "")
+            href = str(href or "").strip()
+            if href:
+                href_samples.append(href)
+        return href_samples
+
+    def _extract_anchor_candidates(values: Sequence[str]) -> Tuple[List[str], bool]:
+        candidates: List[str] = []
+        used_mailto = False
+        for raw_value in values or ():
+            raw_value = str(raw_value or "").strip()
+            if not raw_value:
+                continue
+            samples = [raw_value]
+            try:
+                decoded = urllib.parse.unquote(raw_value)
+            except Exception:
+                decoded = raw_value
+            if decoded and decoded not in samples:
+                samples.append(decoded)
+            for sample in samples:
+                lowered = sample.lower()
+                if lowered.startswith("mailto:"):
+                    addr = sample.split("mailto:", 1)[-1].split("?", 1)[0]
+                    if addr:
+                        candidates.append(addr)
+                        used_mailto = True
+                    continue
+                candidates.extend(_extract_fb_emails_from_text_sample(sample))
+        return candidates, used_mailto
+
+    def _finalize_emails(candidates: Sequence[str]) -> List[str]:
+        filtered_emails = _filter_low_quality_fb_emails(list(candidates or []))
+        unique: List[str] = []
+        seen: Set[str] = set()
+        for email in filtered_emails:
+            normalized = normalize_email_value(str(email or "").strip())
+            if normalized and _is_contact_quality_email(normalized) and normalized not in seen:
+                seen.add(normalized)
+                unique.append(normalized)
+        return unique
+
+    cheap_candidates: List[str] = []
+    anchor_samples = [str(value or "").strip() for value in (anchor_values or []) if str(value or "").strip()]
+    if raw_html:
+        anchor_samples.extend(_href_samples_from_html(raw_html))
+    if anchor_samples:
+        mailto_anchor_samples = [sample for sample in anchor_samples if sample.lower().startswith("mailto:")]
+        non_mailto_anchor_samples = [sample for sample in anchor_samples if not sample.lower().startswith("mailto:")]
+        anchor_samples = [*mailto_anchor_samples, *non_mailto_anchor_samples]
+
+    if anchor_samples:
         if stop_after_first_filtered:
-            filtered_emails = _filter_low_quality_fb_emails(emails)
-            if filtered_emails:
-                return filtered_emails, mailto_used
-    if raw_html and not stop_after_first_filtered:
-        emails.extend(_extract_fb_emails_from_text_sample(raw_html))
-        if stop_after_first_filtered:
-            filtered_emails = _filter_low_quality_fb_emails(emails)
-            if filtered_emails:
-                return filtered_emails, mailto_used
-    for raw_value in anchor_values or ():
-        raw_value = str(raw_value or "").strip()
-        if not raw_value:
-            continue
-        lowered = raw_value.lower()
-        if lowered.startswith("mailto:"):
-            addr = raw_value.split("mailto:", 1)[-1].split("?", 1)[0]
-            if addr:
-                emails.append(addr)
-                mailto_used = True
-        samples = [raw_value]
-        try:
-            decoded = urllib.parse.unquote(raw_value)
-        except Exception:
-            decoded = raw_value
-        if decoded and decoded not in samples:
-            samples.append(decoded)
-        for sample in samples:
-            emails.extend(_extract_fb_emails_from_text_sample(sample))
-            if stop_after_first_filtered:
-                filtered_emails = _filter_low_quality_fb_emails(emails)
+            for anchor_sample in anchor_samples:
+                anchor_candidates, anchor_mailto = _extract_anchor_candidates([anchor_sample])
+                cheap_candidates.extend(anchor_candidates)
+                mailto_used = mailto_used or anchor_mailto
+                filtered_emails = _finalize_emails(cheap_candidates)
                 if filtered_emails:
                     return filtered_emails, mailto_used
-    if rendered_text:
-        visible_text = str(rendered_text or "")
-        emails.extend(_extract_fb_emails_from_text_sample(visible_text))
-        if stop_after_first_filtered:
-            filtered_emails = _filter_low_quality_fb_emails(emails)
+        else:
+            anchor_candidates, anchor_mailto = _extract_anchor_candidates(anchor_samples)
+            cheap_candidates.extend(anchor_candidates)
+            mailto_used = mailto_used or anchor_mailto
+
+    if raw_html:
+        cheap_candidates.extend(_extract_fb_emails_from_text_sample(raw_html))
+        filtered_emails = _finalize_emails(cheap_candidates)
+        if filtered_emails:
+            return filtered_emails, mailto_used
+
+    if raw_html:
+        bounded_html = raw_html[:soup_input_char_limit]
+        if soup is not None and (not raw_html or len(raw_html) <= soup_input_char_limit):
+            parsed_soup = soup
+        else:
+            parsed_soup = BeautifulSoup(bounded_html, "html.parser")
+        text_blob = parsed_soup.get_text(" ", strip=True) if parsed_soup else ""
+        if text_blob:
+            filtered_emails = _finalize_emails(_extract_fb_emails_from_text_sample(text_blob))
             if filtered_emails:
                 return filtered_emails, mailto_used
-    seen = set()
-    unique: List[str] = []
-    for email in emails:
-        cleaned = email.strip()
-        try:
-            from email_normalizer import normalize_email_value
-        except Exception:
-            normalize_email_value = lambda v: (v or "").strip().lower()
-        normalized = normalize_email_value(cleaned)
-        if normalized and _is_contact_quality_email(normalized) and normalized not in seen:
-            seen.add(normalized)
-            unique.append(normalized)
-    return unique, mailto_used
+
+    visible_text = str(rendered_text or "")
+    if visible_text:
+        filtered_emails = _finalize_emails(_extract_fb_emails_from_text_sample(visible_text))
+        if filtered_emails:
+            return filtered_emails, mailto_used
+
+    return [], mailto_used
 
 
 def _is_contact_quality_email(email: str) -> bool:
