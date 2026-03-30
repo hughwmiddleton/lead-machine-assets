@@ -166,7 +166,9 @@ def test_fb_global_pass_preserves_rows_and_emails(monkeypatch, tmp_path):
     assert status.total_rows == len(rows)
 
 
-def test_nightmode_fb_pass_skips_duplicate_discovery_fallback(monkeypatch, tmp_path):
+def test_nightmode_fb_pass_allows_discovery_fallback_without_canonical_fb_url_even_if_attempted(
+    monkeypatch, tmp_path
+):
     input_csv = tmp_path / "master_pre_fb.csv"
     output_csv = tmp_path / "master_post_fb.csv"
     state_path = tmp_path / "fb_state.json"
@@ -202,10 +204,11 @@ def test_nightmode_fb_pass_skips_duplicate_discovery_fallback(monkeypatch, tmp_p
 
     df_out = pd.read_csv(output_csv, dtype=str, keep_default_na=False).fillna("")
 
-    assert helper.calls == 0
-    assert df_out.loc[0, "Email"] == ""
-    assert df_out.loc[0, "FB_Status"] == ""
-    assert df_out.loc[0, FB_GATE_STATE_COL] == "skipped_duplicate_fb_discovery"
+    assert helper.calls == 1
+    assert helper.rows[0]["row"]["Facebook_URL"] == ""
+    assert df_out.loc[0, "Email"] == "fb@example.com"
+    assert df_out.loc[0, "FB_Status"] == "ok"
+    assert df_out.loc[0, FB_GATE_STATE_COL] != "skipped_duplicate_fb_discovery"
     assert status.total_rows == 1
 
 

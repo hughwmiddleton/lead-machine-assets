@@ -3573,7 +3573,6 @@ def run_facebook_global_pass_nightmode(
                     f"[Unearthed Path] forcing FB extraction despite existing email row={idx} artist={artist_label!r}",
                 )
             effective_skip_due_to_email = bool(should_skip_due_to_email and not unearthed_fb_first_active)
-            shared_discovery_attempted = _fb_discovery_attempt_already_recorded(row)
             final_fb_statuses = {"login_redirect", "no_candidates", "ok", "found"} | terminal_statuses
             has_upstream_identity_anchor = _night_fb_has_upstream_identity_anchor(row)
             should_run_night_fb = (
@@ -3655,28 +3654,7 @@ def run_facebook_global_pass_nightmode(
                 )
                 skip_row = True
 
-            allow_unearthed_night_no_url_path = bool(
-                unearthed_no_url_discovery_eligible
-                and not has_canonical_facebook_url
-                and not has_explicit_fb_entrypoint
-            )
-
-            if not skip_row and (
-                discovery_fallback_eligible
-                and not has_canonical_facebook_url
-                and shared_discovery_attempted
-                and not allow_unearthed_night_no_url_path
-            ):
-                df.at[idx, FB_GATE_STATE_COL] = "skipped_duplicate_fb_discovery"
-                if not _cell_str(df.at[idx, FB_WRITE_STATE_COL]):
-                    df.at[idx, FB_WRITE_STATE_COL] = "fb_no_email_written"
-                _safe_log_console(
-                    logger,
-                    f"[Night FB] Skipping discovery fallback for row {idx} ('{artist_label}') - discovery already attempted earlier this run.",
-                )
-                skip_row = True
-
-            elif not skip_row and (fb_status_val in final_fb_statuses or not should_run_night_fb):
+            if not skip_row and (fb_status_val in final_fb_statuses or not should_run_night_fb):
                 if not has_canonical_facebook_url and not discovery_fallback_eligible:
                     if _cell_str(df.at[idx, FB_OPPORTUNITY_STATE_COL]) != "no_fb_opportunity":
                         df.at[idx, FB_GATE_STATE_COL] = "skipped_no_canonical_facebook_url"
