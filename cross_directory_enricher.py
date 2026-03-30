@@ -87,7 +87,9 @@ from facebook_enrich import (
 )
 from night_mode_fb import (
     FacebookAcceptedPageFetchResult,
+    FacebookDriverError,
     NightFBRunState,
+    NightModeFacebookEnricher,
     _build_fb_discovery_query,
     classify_explicit_fb_intake,
     explicit_fb_entrypoint_urls_for_row,
@@ -3204,6 +3206,93 @@ def _extract_fb_emails_bounded(fb_driver, fb_url: str, log_fn=None, fb_session=N
     if not fb_driver or not fb_url:
         return ([], fb_url or "", "no_fb_url")
 
+    class _FBEnrichFastPathSessionAdapter:
+        def __init__(self, session) -> None:
+            self._session = session
+
+        def __getattr__(self, name: str):
+            return getattr(self._session, name)
+
+        def navigate(
+            self,
+            url: str,
+            logger=None,
+            unblock_on_ready: bool = False,
+            validate_session: bool = True,
+        ):
+            try:
+                return self._session.navigate(
+                    url,
+                    logger=logger,
+                    unblock_on_ready=unblock_on_ready,
+                    validate_session=validate_session,
+                )
+            except TypeError as exc:
+                message = cell_to_str(exc)
+                if "validate_session" not in message and "unblock_on_ready" not in message:
+                    raise
+            try:
+                return self._session.navigate(
+                    url,
+                    logger=logger,
+                    unblock_on_ready=unblock_on_ready,
+                )
+            except TypeError as exc:
+                if "unblock_on_ready" not in cell_to_str(exc):
+                    raise
+            try:
+                return self._session.navigate(url, logger=logger)
+            except TypeError:
+                return self._session.navigate(url)
+
+    class _FBEnrichAcceptedPageFastPathBridge:
+        _clear_last_fb_email_surface_state = NightModeFacebookEnricher._clear_last_fb_email_surface_state
+        _apply_trust_budget_health = NightModeFacebookEnricher._apply_trust_budget_health
+        _log_page_health = NightModeFacebookEnricher._log_page_health
+        _refresh_driver = NightModeFacebookEnricher._refresh_driver
+        _fetch_html_with_url = NightModeFacebookEnricher._fetch_html_with_url
+
+        def __init__(self, session, logger) -> None:
+            self.session = _FBEnrichFastPathSessionAdapter(session)
+            self.logger = logger
+            self.legacy = None
+            self._run_state = None
+            self._page_budget_remaining = 2
+            self.fb_email_pages_visited = 0
+            self._session_failed = False
+            self._session_failed_reason = ""
+            self._skip_fb_due_to_warning = False
+            self._skip_fb_due_to_warning_reason = ""
+            self._last_fb_timeout = False
+            self._last_fb_timeout_url = ""
+            self._last_fb_visible_text = ""
+            self._last_fb_live_anchor_values = []
+            self._last_fb_reveal_actions = []
+            self._last_fb_surface_html = None
+            self._last_fb_surface_url = ""
+            self._last_fb_surface_driver_kind = ""
+            self._last_fb_render_invalid_reason = ""
+            self._last_fb_surface_html_available = False
+            self._last_fb_visible_text_available = False
+            self._last_fb_anchor_values_available = False
+            self._last_fb_reveal_actions_available = False
+
+        def _ensure_session(self, prewarm_session: bool = True):
+            return self.session
+
+        def _ensure_driver_alive(self, session):
+            return session
+
+        def _current_trust_score(self) -> int:
+            return 0
+
+        def _set_trust_score(self, score: int) -> int:
+            return score
+
+    fast_path_fetcher = None
+    if fb_session is not None and hasattr(fb_session, "navigate"):
+        fast_path_fetcher = _FBEnrichAcceptedPageFastPathBridge(fb_session, log_fn)
+
     def _fetch_surface(target: str) -> FacebookAcceptedPageFetchResult:
         target_fetch = _normalise_fb_surface_url(target) or _normalise_fb_url(normalize_external_url(target))
         if not target_fetch:
@@ -3216,7 +3305,49 @@ def _extract_fb_emails_bounded(fb_driver, fb_url: str, log_fn=None, fb_session=N
             active_driver = fb_driver
             nav_current_url = ""
             nav_html = ""
-            if fb_session is not None and hasattr(fb_session, "navigate"):
+            anchor_values: List[str] = []
+            rendered_text = ""
+            if fast_path_fetcher is not None:
+                try:
+                    nav_html, nav_current_url = fast_path_fetcher._fetch_html_with_url(
+                        target_fetch,
+                        goto_about=False,
+                        collect_surfaces=True,
+                        skip_pre_nav_session_validation=True,
+                    )
+                except FacebookDriverError as exc:
+                    if _fb_exception_is_fatal_session(exc):
+                        raise
+                    reason = ""
+                    exc_message = cell_to_str(exc)
+                    if exc_message.startswith("fb_circuit_breaker:"):
+                        reason = exc_message.split("fb_circuit_breaker:", 1)[-1] or "warning_interstitial"
+                    if reason:
+                        resolved_url = (
+                            _normalise_fb_surface_url(fast_path_fetcher._last_fb_surface_url)
+                            or _normalise_fb_url(
+                                normalize_external_url(fast_path_fetcher._last_fb_surface_url) or fast_path_fetcher._last_fb_surface_url
+                            )
+                            or target_fetch
+                        )
+                        _log(f"[FB Enrich] Warning/block page detected ({reason}); skipping row.")
+                        return FacebookAcceptedPageFetchResult(
+                            requested_url=target_fetch,
+                            resolved_url=resolved_url,
+                            status_reason=reason,
+                        )
+                    _log(f"[FB Enrich] Error fetching FB page '{target_fetch}': {exc}")
+                    return FacebookAcceptedPageFetchResult(
+                        requested_url=target_fetch,
+                        resolved_url=target_fetch,
+                        status_reason="fetch_error",
+                    )
+                active_driver = getattr(fb_session, "driver", None) or fb_driver
+                nav_current_url = str(nav_current_url or fast_path_fetcher._last_fb_surface_url or "").strip()
+                nav_html = nav_html or (fast_path_fetcher._last_fb_surface_html or "")
+                rendered_text = fast_path_fetcher._last_fb_visible_text or ""
+                anchor_values = list(fast_path_fetcher._last_fb_live_anchor_values or [])
+            elif fb_session is not None and hasattr(fb_session, "navigate"):
                 try:
                     active_driver = fb_session.navigate(target_fetch, logger=log_fn)
                 except TypeError:
@@ -3244,13 +3375,15 @@ def _extract_fb_emails_bounded(fb_driver, fb_url: str, log_fn=None, fb_session=N
                     resolved_url=resolved_url,
                     status_reason=warning,
                 )
-            rendered_text = _extract_fb_visible_text_with_container_fallback(active_driver)
+            if not rendered_text:
+                rendered_text = _extract_fb_visible_text_with_container_fallback(active_driver)
             _log_fb_email_surface_debug(log_fn, f"page:{resolved_url}", html, rendered_text)
             return FacebookAcceptedPageFetchResult(
                 requested_url=target_fetch,
                 resolved_url=resolved_url,
                 html=html,
                 rendered_text=rendered_text,
+                anchor_values=anchor_values,
             )
         except Exception as exc:  # pragma: no cover - defensive
             if _fb_exception_is_fatal_session(exc):

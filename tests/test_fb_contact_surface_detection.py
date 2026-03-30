@@ -335,6 +335,28 @@ class _FakeBoundedFacebookSession:
         return self.driver
 
 
+class _FastPathFacebookSession:
+    def __init__(self, driver, pages):
+        self.driver = driver
+        self.pages = pages
+        self.calls = []
+        self.last_nav_timed_out = False
+
+    def navigate(self, url, logger=None, unblock_on_ready=False, validate_session=True):  # noqa: ANN001
+        self.calls.append(
+            {
+                "url": url,
+                "logger": logger,
+                "unblock_on_ready": unblock_on_ready,
+                "validate_session": validate_session,
+            }
+        )
+        page = self.pages.get(url, {})
+        self.driver.current_url = page.get("resolved_url", url)
+        self.driver.page_source = page.get("html", "")
+        return self.driver
+
+
 def test_extract_fb_emails_bounded_caps_fetches_at_two_with_detected_surface() -> None:
     driver = _FakeFacebookDriver(
         {
@@ -401,6 +423,36 @@ def test_extract_fb_emails_bounded_uses_shared_session_navigation_for_main_and_s
     assert session.calls == [
         "https://www.facebook.com/artist",
         "https://www.facebook.com/artist/about",
+    ]
+
+
+def test_extract_fb_emails_bounded_routes_main_fetch_through_nm_s83_fast_path() -> None:
+    driver = _NoRawGetFacebookDriver()
+    session = _FastPathFacebookSession(
+        driver,
+        {
+            "https://www.facebook.com/artist": {
+                "html": '<html><body><a href="mailto:test@artist.com">Email</a></body></html>',
+            },
+        },
+    )
+
+    emails, resolved, reason = cde._extract_fb_emails_bounded(
+        driver,
+        "https://www.facebook.com/artist",
+        fb_session=session,
+    )
+
+    assert emails == ["test@artist.com"]
+    assert resolved == "https://www.facebook.com/artist"
+    assert reason == ""
+    assert session.calls == [
+        {
+            "url": "https://www.facebook.com/artist",
+            "logger": None,
+            "unblock_on_ready": True,
+            "validate_session": False,
+        }
     ]
 
 
