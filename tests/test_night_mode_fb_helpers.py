@@ -200,6 +200,25 @@ def test_extract_emails_fast_path_still_short_circuits_on_mailto(monkeypatch) ->
     assert used_mailto is True
 
 
+def test_extract_emails_worst_case_cap_preserves_mailto_short_circuit(monkeypatch) -> None:
+    html = '<html><body><a href="mailto:bookings@artist.com">Email</a></body></html>'
+
+    def fail_beautiful_soup(*args, **kwargs):  # noqa: ANN001
+        raise AssertionError("BeautifulSoup fallback should not run after a cheap mailto hit")
+
+    monkeypatch.setattr(night_mode_fb, "BeautifulSoup", fail_beautiful_soup)
+
+    emails, used_mailto = night_mode_fb._extract_emails_from_html(
+        html,
+        rendered_text="Rendered press@artist.com",
+        expensive_fallback_budget_s=0.001,
+        expensive_soup_char_limit=64,
+    )
+
+    assert emails == ["bookings@artist.com"]
+    assert used_mailto is True
+
+
 def test_extract_emails_bounds_beautifulsoup_fallback_input(monkeypatch) -> None:
     html = "<html><body>" + ("x" * 300000) + "</body></html>"
     observed = {}
@@ -228,6 +247,35 @@ def test_extract_emails_bounds_beautifulsoup_fallback_input(monkeypatch) -> None
     assert emails == ["bookings@artist.com"]
     assert used_mailto is False
     assert observed == {"length": 262144, "parser": "html.parser"}
+
+
+def test_extract_emails_worst_case_cap_abandons_rendered_text_after_budgeted_soup_fallback(monkeypatch) -> None:
+    html = "<html><body>No email on page</body></html>"
+    samples = []
+    perf_counter_values = iter([0.0, 0.01, 0.06])
+
+    def fake_extract(sample: str):  # noqa: ANN001
+        samples.append(sample)
+        return []
+
+    class _FakeSoup:
+        def get_text(self, separator=" ", strip=True):  # noqa: ANN001
+            return "Soup fallback without email"
+
+    monkeypatch.setattr(night_mode_fb, "_extract_fb_emails_from_text_sample", fake_extract)
+    monkeypatch.setattr(night_mode_fb, "BeautifulSoup", lambda source_html, parser: _FakeSoup())
+    monkeypatch.setattr(night_mode_fb.time, "perf_counter", lambda: next(perf_counter_values))
+
+    emails, used_mailto = night_mode_fb._extract_emails_from_html(
+        html,
+        rendered_text="Rendered bookings@artist.com",
+        expensive_fallback_budget_s=0.05,
+        expensive_soup_char_limit=64,
+    )
+
+    assert emails == []
+    assert used_mailto is False
+    assert samples == [html, "Soup fallback without email"]
 
 
 def test_filter_low_quality_fb_emails_rejects_file_like_and_artifact_candidates() -> None:
@@ -1613,6 +1661,52 @@ def test_bounded_fb_accepted_page_sweep_continues_to_about_when_main_surface_has
                 anchor_values=[],
             )
         raise AssertionError(f"unexpected fetch url: {url}")
+
+    result = night_mode_fb._run_bounded_fb_accepted_page_sweep(
+        main_url,
+        fake_fetch_surface,
+        select_secondary_url=lambda base_url, page_html: about_url,
+    )
+
+    assert calls == [main_url, about_url]
+    assert result.main_emails == []
+    assert result.secondary_attempted is True
+    assert result.secondary_emails == ["bookings@artist.com"]
+    assert result.combined_emails == ["bookings@artist.com"]
+
+
+def test_bounded_fb_accepted_page_sweep_main_surface_cap_still_continues_to_about(monkeypatch) -> None:
+    main_url = "https://www.facebook.com/artist"
+    about_url = "https://www.facebook.com/artist/about"
+    calls = []
+    perf_counter_values = iter([0.0, 0.01, 0.2, 1.0])
+
+    class _FakeSoup:
+        def get_text(self, separator=" ", strip=True):  # noqa: ANN001
+            return "Soup fallback without email"
+
+    def fake_fetch_surface(url):  # noqa: ANN001
+        calls.append(url)
+        if url == main_url:
+            return night_mode_fb.FacebookAcceptedPageFetchResult(
+                requested_url=url,
+                resolved_url=url,
+                html='<html><body><a href="/artist/about">About</a></body></html>',
+                rendered_text="Rendered bookings@artist.com",
+                anchor_values=[],
+            )
+        if url == about_url:
+            return night_mode_fb.FacebookAcceptedPageFetchResult(
+                requested_url=url,
+                resolved_url=url,
+                html="<html><body><div>About bookings@artist.com</div></body></html>",
+                rendered_text="About bookings@artist.com",
+                anchor_values=[],
+            )
+        raise AssertionError(f"unexpected fetch url: {url}")
+
+    monkeypatch.setattr(night_mode_fb, "BeautifulSoup", lambda source_html, parser: _FakeSoup())
+    monkeypatch.setattr(night_mode_fb.time, "perf_counter", lambda: next(perf_counter_values))
 
     result = night_mode_fb._run_bounded_fb_accepted_page_sweep(
         main_url,

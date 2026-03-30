@@ -102,6 +102,8 @@ _FB_GENERIC_EMAIL_PROVIDER_DOMAINS = frozenset(
 )
 _FB_ROLE_EMAIL_PREFIXES: Tuple[str, ...] = ("info", "contact", "admin", "hello")
 _FB_BOOKING_EMAIL_TOKENS: Tuple[str, ...] = ("booking", "bookings", "mgmt", "management")
+_FB_ACCEPTED_PAGE_MAIN_SURFACE_SOUP_CHAR_LIMIT = 65536
+_FB_ACCEPTED_PAGE_MAIN_SURFACE_EXTRACTION_BUDGET_S = 0.15
 _FB_REVEAL_CONTROL_TERMS: Tuple[str, ...] = (
     "contact info",
     "see more",
@@ -4820,6 +4822,8 @@ def _extract_emails_from_html(
     rendered_text: str = "",
     anchor_values: Optional[Sequence[str]] = None,
     stop_after_first_filtered: bool = False,
+    expensive_fallback_budget_s: Optional[float] = None,
+    expensive_soup_char_limit: int = 262144,
 ) -> Tuple[List[str], bool]:
     mailto_used = False
     raw_html = html if isinstance(html, str) else str(html or "")
@@ -4827,6 +4831,22 @@ def _extract_emails_from_html(
         return [], mailto_used
 
     soup_input_char_limit = 262144
+    try:
+        soup_char_limit = int(expensive_soup_char_limit)
+    except Exception:
+        soup_char_limit = soup_input_char_limit
+    soup_char_limit = max(0, min(soup_input_char_limit, soup_char_limit))
+
+    try:
+        extraction_budget_s = float(expensive_fallback_budget_s)
+    except (TypeError, ValueError):
+        extraction_budget_s = 0.0
+    extraction_started_at = time.perf_counter()
+
+    def _expensive_budget_exhausted() -> bool:
+        if extraction_budget_s <= 0.0:
+            return False
+        return (time.perf_counter() - extraction_started_at) >= extraction_budget_s
 
     def _href_samples_from_html(source_html: str) -> List[str]:
         if not source_html:
@@ -4908,9 +4928,11 @@ def _extract_emails_from_html(
         if filtered_emails:
             return filtered_emails, mailto_used
 
-    if raw_html:
-        bounded_html = raw_html[:soup_input_char_limit]
-        if soup is not None and (not raw_html or len(raw_html) <= soup_input_char_limit):
+    if raw_html and soup_char_limit > 0:
+        if _expensive_budget_exhausted():
+            return [], mailto_used
+        bounded_html = raw_html[:soup_char_limit]
+        if soup is not None and (not raw_html or len(raw_html) <= soup_char_limit):
             parsed_soup = soup
         else:
             parsed_soup = BeautifulSoup(bounded_html, "html.parser")
@@ -4922,6 +4944,8 @@ def _extract_emails_from_html(
 
     visible_text = str(rendered_text or "")
     if visible_text:
+        if _expensive_budget_exhausted():
+            return [], mailto_used
         filtered_emails = _finalize_emails(_extract_fb_emails_from_text_sample(visible_text))
         if filtered_emails:
             return filtered_emails, mailto_used
@@ -5111,7 +5135,11 @@ def _run_bounded_fb_accepted_page_sweep(
     def _visit_key(url: str) -> str:
         return str(url or "").split("#", 1)[0].strip()
 
-    def _extract_surface_emails(surface: Optional[FacebookAcceptedPageFetchResult]) -> Tuple[List[str], bool]:
+    def _extract_surface_emails(
+        surface: Optional[FacebookAcceptedPageFetchResult],
+        *,
+        cap_expensive_fallback: bool = False,
+    ) -> Tuple[List[str], bool]:
         if surface is None:
             return [], False
         return _extract_emails_from_html(
@@ -5119,6 +5147,12 @@ def _run_bounded_fb_accepted_page_sweep(
             rendered_text=surface.rendered_text or "",
             anchor_values=surface.anchor_values or [],
             stop_after_first_filtered=stop_after_first_filtered,
+            expensive_fallback_budget_s=(
+                _FB_ACCEPTED_PAGE_MAIN_SURFACE_EXTRACTION_BUDGET_S if cap_expensive_fallback else None
+            ),
+            expensive_soup_char_limit=(
+                _FB_ACCEPTED_PAGE_MAIN_SURFACE_SOUP_CHAR_LIMIT if cap_expensive_fallback else 262144
+            ),
         )
 
     def _dedupe(values: Sequence[str]) -> List[str]:
@@ -5147,7 +5181,7 @@ def _run_bounded_fb_accepted_page_sweep(
     if result.status_reason and not (main_surface.html or main_surface.rendered_text or main_surface.anchor_values):
         return result
 
-    main_emails, main_mailto = _extract_surface_emails(main_surface)
+    main_emails, main_mailto = _extract_surface_emails(main_surface, cap_expensive_fallback=True)
     result.main_emails = list(main_emails or [])
     result.main_mailto = bool(main_mailto)
 
@@ -5162,7 +5196,7 @@ def _run_bounded_fb_accepted_page_sweep(
             result.final_resolved_url = main_surface.resolved_url or result.final_resolved_url or target_url
             if result.status_reason and not (main_surface.html or main_surface.rendered_text or main_surface.anchor_values):
                 return result
-            main_emails, main_mailto = _extract_surface_emails(main_surface)
+            main_emails, main_mailto = _extract_surface_emails(main_surface, cap_expensive_fallback=True)
             result.main_emails = list(main_emails or [])
             result.main_mailto = bool(main_mailto)
 
