@@ -4491,6 +4491,10 @@ def _extract_rendered_visible_text_from_driver(driver) -> str:
             return text
         if grew_materially and state["stable_hits"] >= 1:
             return text
+        # Preserve a short late-render window, but stop burning the full
+        # timeout when a non-empty initial snapshot stays unchanged.
+        if initial_text and (not state["saw_change"]) and state["stable_hits"] >= 2:
+            return text
         return False
 
     try:

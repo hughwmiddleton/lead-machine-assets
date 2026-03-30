@@ -491,6 +491,38 @@ class _BoundedRenderedTextDriver:
         return self.rendered_text
 
 
+class _SequencedRenderedTextDriver:
+    def __init__(self, snapshots):  # noqa: ANN001
+        self.snapshots = list(snapshots or [""])
+        self.execute_calls = 0
+        self.wait_configs = []
+
+    def execute_script(self, script, *args):  # noqa: ANN001
+        script_text = str(script or "")
+        if "fb_rendered_visible_text_bounded" not in script_text:
+            raise AssertionError(f"unexpected execute_script call: {script_text[:80]}")
+        assert args == (6000, 180)
+        index = min(self.execute_calls, len(self.snapshots) - 1)
+        self.execute_calls += 1
+        return self.snapshots[index]
+
+
+class _StubWebDriverWait:
+    def __init__(self, driver, timeout, poll_frequency=0.5):  # noqa: ANN001
+        self.driver = driver
+        self.timeout = timeout
+        self.poll_frequency = poll_frequency
+        driver.wait_configs.append((timeout, poll_frequency))
+
+    def until(self, condition):  # noqa: ANN001
+        max_polls = max(1, int(self.timeout / self.poll_frequency) + 1)
+        for _ in range(max_polls):
+            result = condition(self.driver)
+            if result:
+                return result
+        raise night_mode_fb.TimeoutException()
+
+
 def test_extract_rendered_visible_text_from_driver_uses_bounded_script_before_any_body_read() -> None:
     driver = _BoundedRenderedTextDriver("Intro Contact bookings@artist.com")
 
@@ -499,6 +531,65 @@ def test_extract_rendered_visible_text_from_driver_uses_bounded_script_before_an
     assert rendered_text == "Intro Contact bookings@artist.com"
     assert driver.execute_calls == 1
     assert driver.find_calls == 0
+
+
+def test_extract_rendered_visible_text_from_driver_exits_early_for_stable_non_email_text(monkeypatch) -> None:
+    driver = _SequencedRenderedTextDriver(["Artist bio", "Artist bio", "Artist bio", "Artist bio"])
+    monkeypatch.setattr(night_mode_fb, "WebDriverWait", _StubWebDriverWait)
+
+    rendered_text = night_mode_fb._extract_rendered_visible_text_from_driver(driver)
+
+    assert rendered_text == "Artist bio"
+    assert driver.execute_calls == 3
+    assert driver.wait_configs == [(1.5, 0.2)]
+
+
+def test_extract_rendered_visible_text_from_driver_recovers_when_initial_text_is_empty(monkeypatch) -> None:
+    driver = _SequencedRenderedTextDriver(["", "Late text", "Late text"])
+    monkeypatch.setattr(night_mode_fb, "WebDriverWait", _StubWebDriverWait)
+
+    rendered_text = night_mode_fb._extract_rendered_visible_text_from_driver(driver)
+
+    assert rendered_text == "Late text"
+    assert driver.execute_calls == 3
+
+
+def test_extract_rendered_visible_text_from_driver_exits_when_email_appears_during_wait(monkeypatch) -> None:
+    driver = _SequencedRenderedTextDriver(["Artist bio", "Contact bookings@artist.com"])
+    monkeypatch.setattr(night_mode_fb, "WebDriverWait", _StubWebDriverWait)
+
+    rendered_text = night_mode_fb._extract_rendered_visible_text_from_driver(driver)
+
+    assert rendered_text == "Contact bookings@artist.com"
+    assert driver.execute_calls == 2
+
+
+def test_extract_rendered_visible_text_from_driver_keeps_change_stabilization_for_non_material_growth(monkeypatch) -> None:
+    driver = _SequencedRenderedTextDriver(
+        [
+            "Artist bio",
+            "Artist bio extended",
+            "Artist bio extended",
+            "Artist bio extended",
+        ]
+    )
+    monkeypatch.setattr(night_mode_fb, "WebDriverWait", _StubWebDriverWait)
+
+    rendered_text = night_mode_fb._extract_rendered_visible_text_from_driver(driver)
+
+    assert rendered_text == "Artist bio extended"
+    assert driver.execute_calls == 4
+
+
+def test_extract_rendered_visible_text_from_driver_keeps_material_growth_exit(monkeypatch) -> None:
+    grown_text = "Artist contact " + ("details " * 30)
+    driver = _SequencedRenderedTextDriver(["Short intro", grown_text, grown_text])
+    monkeypatch.setattr(night_mode_fb, "WebDriverWait", _StubWebDriverWait)
+
+    rendered_text = night_mode_fb._extract_rendered_visible_text_from_driver(driver)
+
+    assert rendered_text == grown_text.strip()
+    assert driver.execute_calls == 3
 
 
 def test_extract_fb_visible_text_with_container_fallback_includes_visible_sidebar_blocks(monkeypatch) -> None:
