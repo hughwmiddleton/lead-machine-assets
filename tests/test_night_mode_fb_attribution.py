@@ -136,6 +136,36 @@ def test_spotify_identity_anchor_enters_discovery_fallback_path(monkeypatch, tmp
     assert df_out.loc[0, FB_WRITE_STATE_COL] == "fb_no_email_written"
 
 
+def test_fb_refine_fields_survive_to_dataframe(monkeypatch, tmp_path):
+    helper = StaticFBHelper(
+        {
+            "FB_Status": "ok",
+            "Facebook_URL": "https://www.facebook.com/refined-artist",
+            "FB_Refine_Decision": "refine_query_used",
+            "FB_Refine_Executed": "1",
+        }
+    )
+    df_out, _ = _run_night_fb_pass(
+        monkeypatch,
+        tmp_path,
+        [
+            {
+                "Artist Name": "Refined Artist",
+                "Email": "",
+                "Email_All": "",
+                "Social Link": "",
+                "Facebook_URL": "https://www.facebook.com/refined-artist",
+            }
+        ],
+        helper,
+    )
+
+    assert "FB_Refine_Decision" in df_out.columns
+    assert "FB_Refine_Executed" in df_out.columns
+    assert df_out.loc[0, "FB_Refine_Decision"] == "refine_query_used"
+    assert df_out.loc[0, "FB_Refine_Executed"] == "1"
+
+
 def test_no_facebook_url_without_identity_anchor_skips_night_discovery(monkeypatch, tmp_path):
     helper = StaticFBHelper(
         {

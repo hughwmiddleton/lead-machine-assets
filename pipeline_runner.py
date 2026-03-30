@@ -3762,7 +3762,16 @@ def run_facebook_global_pass_nightmode(
                                 method=method,
                                 surface=_facebook_email_surface_hint(enriched),
                             )
-                    cols_to_copy = ["Facebook_URL", "__fb_emails_applied", "FB_Match_Level", "FB_Selected_By", "FB_Name_Consistency_Flag", "FB_Review_Reason"]
+                    cols_to_copy = [
+                        "Facebook_URL",
+                        "__fb_emails_applied",
+                        "FB_Match_Level",
+                        "FB_Selected_By",
+                        "FB_Name_Consistency_Flag",
+                        "FB_Review_Reason",
+                        "FB_Refine_Decision",
+                        "FB_Refine_Executed",
+                    ]
                     if not fb_rejected:
                         cols_to_copy.append("Email_Type")
                     for col in cols_to_copy:
