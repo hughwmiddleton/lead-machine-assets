@@ -8051,6 +8051,12 @@ class NightModeFacebookEnricher:
             quality_threshold = 25
         v2_enabled = _bool_env("FB_SEARCH_HARVEST_V2", default=False)
 
+        def _record_refine_telemetry(decision: str, executed: bool) -> None:
+            if not isinstance(row, dict):
+                return
+            row["FB_Refine_Decision"] = decision
+            row["FB_Refine_Executed"] = executed
+
         def _build_slug_fallback_context() -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
             slug = _slugify(artist)
             fallback_url = f"https://www.facebook.com/{slug}" if slug else ""
@@ -8234,6 +8240,11 @@ class NightModeFacebookEnricher:
             self._enter_slow_mode("overlay_zero_anchors", max(self.slow_mode_multiplier, 1.5))
             # Skip refine cascade when soft-blocked; rely on slug/candidate fallback.
             need_refine = False
+            _record_refine_telemetry("skipped_overlay", False)
+        elif not refine_allowed:
+            _record_refine_telemetry("skipped_not_allowed", False)
+        elif suppress_refine_queries:
+            _record_refine_telemetry("skipped_suppressed", False)
         elif refine_allowed and not suppress_refine_queries:
             top_score = ranked_for_preview[0]["score"] if ranked_for_preview else 0
             music_present = any(item["features"].get("music_any") for item in ranked_for_preview)
@@ -8244,8 +8255,12 @@ class NightModeFacebookEnricher:
             )
             if (not music_present) and top_score <= 0 and has_worthy_candidate:
                 need_refine = True
+                _record_refine_telemetry("allowed", False)
+            else:
+                _record_refine_telemetry("skipped_junk_gate", False)
 
         if need_refine:
+            _record_refine_telemetry("allowed", True)
             refine_candidates = _run_refine_queries(diagnostics=diagnostics)
             if refine_candidates:
                 candidates = _dedupe_candidates(list(candidates) + refine_candidates)

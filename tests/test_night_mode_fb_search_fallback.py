@@ -179,15 +179,19 @@ def test_pass_b_secondary_signal_skips_refine_queries(monkeypatch) -> None:
 
     monkeypatch.setattr(enricher, "_fetch_search_surface", _fake_fetch)
 
+    row = {}
     page = enricher._search_for_page(
         "Signal Artist",
         location="Melbourne, VIC",
         allow_anon=True,
         song_title="Night Drive",
+        row=row,
     )
 
     assert page is None
     assert queries == [("Signal Artist Night Drive", "direct_route")]
+    assert row["FB_Refine_Decision"] == "skipped_not_allowed"
+    assert row["FB_Refine_Executed"] is False
 
 
 def test_pass_b_artist_only_still_uses_existing_refine_queries(monkeypatch) -> None:
@@ -465,10 +469,13 @@ def test_initial_refine_fires_when_worthy_candidate_present(monkeypatch) -> None
 
     monkeypatch.setattr(enricher, "_fetch_search_surface", _fake_fetch)
 
-    enricher._search_for_page("Test Artist", location="", allow_anon=True)
+    row = {}
+    enricher._search_for_page("Test Artist", location="", allow_anon=True, row=row)
 
     # Refine queries should have fired (primary + "musician" + "band")
     assert any("musician" in q for q in queries), f"Expected refine query with 'musician', got {queries}"
+    assert row["FB_Refine_Decision"] == "allowed"
+    assert row["FB_Refine_Executed"] is True
 
 
 def test_initial_refine_skipped_for_junk_candidate_set(monkeypatch) -> None:
@@ -500,29 +507,27 @@ def test_initial_refine_skipped_for_junk_candidate_set(monkeypatch) -> None:
 
     monkeypatch.setattr(enricher, "_fetch_search_surface", _fake_fetch)
 
-    enricher._search_for_page("Test Artist", location="", allow_anon=True)
+    row = {}
+    enricher._search_for_page("Test Artist", location="", allow_anon=True, row=row)
 
     # Only the primary query should fire — no refine queries
     assert not any("musician" in q for q in queries), f"Refine should NOT fire for junk set, got {queries}"
     assert not any("band" in q for q in queries), f"Refine should NOT fire for junk set, got {queries}"
+    assert row["FB_Refine_Decision"] == "skipped_junk_gate"
+    assert row["FB_Refine_Executed"] is False
 
 
-def test_initial_refine_respects_suppress_refine_queries(monkeypatch) -> None:
-    """suppress_refine_queries still prevents refine even with worthy candidates."""
+def test_initial_refine_skipped_when_suppress_refine_queries_is_set(monkeypatch) -> None:
+    """Direct-route miss suppression records a skipped refine decision."""
     monkeypatch.setenv("FB_REFINE_QUERY", "1")
     enricher = _make_enricher()
     session = _DummySession()
     monkeypatch.setattr(enricher, "_ensure_session", lambda: session)
     monkeypatch.setattr(enricher, "_ensure_driver_alive", lambda current_session: current_session)
     monkeypatch.setattr(enricher, "_choose_ranked_candidate", lambda *args, **kwargs: (None, "no_safe_match"))
-    monkeypatch.setattr(night_mode_fb, "_fb_search_surface_miss_reason", lambda *args, **kwargs: None)
-
-    worthy_ranked = [
-        {"candidate": SimpleNamespace(name="Test Artist", url="https://www.facebook.com/testartist", category=""),
-         "score": 0, "features": {"music_any": False, "match_level": "near", "is_page_style_url": False}, "breakdown": []},
-    ]
-    monkeypatch.setattr(night_mode_fb, "_harvest_candidates", lambda *args, **kwargs: [worthy_ranked[0]["candidate"]])
-    monkeypatch.setattr(night_mode_fb, "_rank_candidates_for_preview", lambda *args, **kwargs: worthy_ranked)
+    monkeypatch.setattr(night_mode_fb, "_fb_search_surface_miss_reason", lambda *args, **kwargs: "direct_route_miss")
+    monkeypatch.setattr(night_mode_fb, "_harvest_candidates", lambda *args, **kwargs: [])
+    monkeypatch.setattr(night_mode_fb, "_rank_candidates_for_preview", lambda *args, **kwargs: [])
 
     queries = []
 
@@ -534,14 +539,76 @@ def test_initial_refine_respects_suppress_refine_queries(monkeypatch) -> None:
 
     monkeypatch.setattr(enricher, "_fetch_search_surface", _fake_fetch)
 
-    # Use a secondary signal (song_title) to trigger has_secondary_signal → refine_allowed=False
-    page = enricher._search_for_page(
-        "Test Artist", location="Melbourne, VIC", allow_anon=True, song_title="Night Drive",
-    )
+    row = {}
+    page = enricher._search_for_page("Test Artist", location="", allow_anon=True, row=row)
 
     assert page is None
-    # Only the primary query with the secondary signal — no refine queries
+    assert row["FB_Refine_Decision"] == "skipped_suppressed"
+    assert row["FB_Refine_Executed"] is False
     assert not any("musician" in q for q in queries), f"Refine should be suppressed, got {queries}"
+
+
+def test_initial_refine_skipped_for_overlay_soft_block(monkeypatch) -> None:
+    monkeypatch.setenv("FB_REFINE_QUERY", "1")
+    enricher = _make_enricher()
+    session = _DummySession()
+    monkeypatch.setattr(enricher, "_ensure_session", lambda: session)
+    monkeypatch.setattr(enricher, "_ensure_driver_alive", lambda current_session: current_session)
+    monkeypatch.setattr(enricher, "_choose_ranked_candidate", lambda *args, **kwargs: (None, "no_safe_match"))
+    monkeypatch.setattr(night_mode_fb, "_fb_search_surface_miss_reason", lambda *args, **kwargs: None)
+    monkeypatch.setattr(night_mode_fb, "_rank_candidates_for_preview", lambda *args, **kwargs: [])
+
+    def _fake_harvest(_html, *_args, diagnostics=None, **_kwargs):
+        if diagnostics is not None:
+            diagnostics["overlay_soft_block"] = True
+        return []
+
+    monkeypatch.setattr(night_mode_fb, "_harvest_candidates", _fake_harvest)
+
+    def _fake_fetch(query_str, *, search_method, session=None):
+        html = "<div role='main'><div aria-label='Search results'></div></div>"
+        driver = SimpleNamespace(page_source=html, current_url="https://www.facebook.com/search/pages/?q=test")
+        return html, driver, False, driver.current_url
+
+    monkeypatch.setattr(enricher, "_fetch_search_surface", _fake_fetch)
+
+    row = {}
+    page = enricher._search_for_page("Test Artist", location="", allow_anon=True, row=row)
+
+    assert page is None
+    assert row["FB_Refine_Decision"] == "skipped_overlay"
+    assert row["FB_Refine_Executed"] is False
+
+
+def test_pass_b_terminal_result_preserves_refine_telemetry(monkeypatch) -> None:
+    monkeypatch.setenv("FB_REFINE_QUERY", "1")
+    enricher = _make_enricher()
+    session = _DummySession()
+    monkeypatch.setattr(enricher, "_ensure_session", lambda: session)
+    monkeypatch.setattr(enricher, "_ensure_driver_alive", lambda current_session: current_session)
+    monkeypatch.setattr(enricher, "_should_allow_anonymous", lambda row: True)
+    monkeypatch.setattr(enricher, "_choose_ranked_candidate", lambda *args, **kwargs: (None, "no_safe_match"))
+    monkeypatch.setattr(night_mode_fb, "_fb_search_surface_miss_reason", lambda *args, **kwargs: None)
+
+    worthy_ranked = [
+        {"candidate": SimpleNamespace(name="Test Artist", url="https://www.facebook.com/testartist", category=""),
+         "score": 0, "features": {"music_any": False, "match_level": "weak", "is_page_style_url": False}, "breakdown": []},
+    ]
+    monkeypatch.setattr(night_mode_fb, "_harvest_candidates", lambda *args, **kwargs: [worthy_ranked[0]["candidate"]])
+    monkeypatch.setattr(night_mode_fb, "_rank_candidates_for_preview", lambda *args, **kwargs: worthy_ranked)
+
+    def _fake_fetch(query_str, *, search_method, session=None):
+        html = "<div role='main'><div aria-label='Search results'></div></div>"
+        driver = SimpleNamespace(page_source=html, current_url="https://www.facebook.com/search/pages/?q=test")
+        return html, driver, False, driver.current_url
+
+    monkeypatch.setattr(enricher, "_fetch_search_surface", _fake_fetch)
+
+    result = enricher.enrich_row_with_facebook_night({"Artist Name": "Test Artist", "Email": "", "Email_All": ""})
+
+    assert result["FB_Status"] == "pass_a_skipped_no_fb_url"
+    assert result["FB_Refine_Decision"] == "allowed"
+    assert result["FB_Refine_Executed"] is True
 
 
 def test_pass_b_homepage_fallback_harvests_role_link_card_candidate(monkeypatch) -> None:
