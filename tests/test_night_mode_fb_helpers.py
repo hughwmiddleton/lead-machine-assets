@@ -1396,6 +1396,95 @@ def test_explicit_pass_a_valid_render_state_passes_without_recovery(monkeypatch)
     assert outcome == "found_email"
 
 
+def test_targeted_content_unavailable_restabilization_skips_wait_when_surface_state_unchanged(monkeypatch) -> None:
+    enricher = night_mode_fb.NightModeFacebookEnricher(
+        legacy_module=None,
+        username="",
+        password="",
+        logger=None,
+        use_shared_session=False,
+    )
+
+    class _Driver:
+        def __init__(self) -> None:
+            self.scroll_calls = 0
+
+        def execute_script(self, script: str):  # noqa: ANN001
+            if "fb_content_unavailable_targeted_restabilization" in script:
+                self.scroll_calls += 1
+                return 400
+            return ["complete", 0, 120, 4, 900]
+
+    driver = _Driver()
+    enricher.session = type("Session", (), {"driver": driver})()
+    sleep_calls = []
+
+    monkeypatch.setattr(night_mode_fb, "_reveal_fb_contact_controls", lambda *args, **kwargs: None)
+    monkeypatch.setattr(night_mode_fb.time, "sleep", lambda seconds: sleep_calls.append(seconds))
+    monkeypatch.setattr(
+        enricher,
+        "_collect_current_fb_email_surface_state",
+        lambda *args, **kwargs: ("<html></html>", "", [], []),
+    )
+
+    result = enricher._targeted_explicit_content_unavailable_restabilization()
+
+    assert driver.scroll_calls == 1
+    assert sleep_calls == []
+    assert result == ("<html></html>", "", [], [])
+
+
+def test_targeted_content_unavailable_restabilization_uses_short_bounded_wait_on_surface_change(monkeypatch) -> None:
+    enricher = night_mode_fb.NightModeFacebookEnricher(
+        legacy_module=None,
+        username="",
+        password="",
+        logger=None,
+        use_shared_session=False,
+    )
+
+    class _Driver:
+        def __init__(self) -> None:
+            self.scroll_calls = 0
+            self.signatures = [
+                ["complete", 0, 120, 4, 900],
+                ["complete", 0, 160, 5, 940],
+                ["complete", 0, 160, 5, 940],
+            ]
+
+        def execute_script(self, script: str):  # noqa: ANN001
+            if "fb_content_unavailable_targeted_restabilization" in script:
+                self.scroll_calls += 1
+                return 400
+            return self.signatures.pop(0)
+
+    driver = _Driver()
+    enricher.session = type("Session", (), {"driver": driver})()
+    clock = {"now": 100.0}
+    sleep_calls = []
+
+    monkeypatch.setattr(night_mode_fb, "_reveal_fb_contact_controls", lambda *args, **kwargs: None)
+    monkeypatch.setattr(night_mode_fb.time, "perf_counter", lambda: clock["now"])
+
+    def fake_sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+        clock["now"] += seconds
+
+    monkeypatch.setattr(night_mode_fb.time, "sleep", fake_sleep)
+    monkeypatch.setattr(
+        enricher,
+        "_collect_current_fb_email_surface_state",
+        lambda *args, **kwargs: ("<html>recovered</html>", "Recovered", [], []),
+    )
+
+    result = enricher._targeted_explicit_content_unavailable_restabilization()
+
+    assert driver.scroll_calls == 1
+    assert sleep_calls == [0.1]
+    assert sum(sleep_calls) < 0.5
+    assert result == ("<html>recovered</html>", "Recovered", [], [])
+
+
 def test_explicit_pass_a_invalid_render_state_recollects_once_and_recovers(monkeypatch) -> None:
     enricher = night_mode_fb.NightModeFacebookEnricher(
         legacy_module=None,

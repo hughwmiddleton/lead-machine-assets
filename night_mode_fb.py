@@ -7629,6 +7629,28 @@ class NightModeFacebookEnricher:
             session = getattr(self, "session", None)
             driver = getattr(session, "driver", None)
         if driver is not None:
+            def _surface_signature() -> Optional[Tuple[Any, ...]]:
+                try:
+                    signature = driver.execute_script(
+                        """
+                        return [
+                            document.readyState || "",
+                            window.scrollY || 0,
+                            document.body ? (document.body.innerText || "").length : 0,
+                            document.body ? document.body.childElementCount || 0 : 0,
+                            document.documentElement ? document.documentElement.scrollHeight || 0 : 0
+                        ];
+                        """
+                    )
+                except Exception:
+                    return None
+                if isinstance(signature, list):
+                    return tuple(signature)
+                if isinstance(signature, tuple):
+                    return signature
+                return None
+
+            pre_scroll_signature = _surface_signature()
             try:
                 _reveal_fb_contact_controls(driver, logger=self.logger)
             except Exception:
@@ -7645,7 +7667,21 @@ class NightModeFacebookEnricher:
                 )
             except Exception:
                 pass
-            time.sleep(1.2)
+            post_scroll_signature = _surface_signature()
+            if pre_scroll_signature is None or post_scroll_signature is None:
+                time.sleep(0.2)
+            elif pre_scroll_signature != post_scroll_signature:
+                settle_deadline = time.perf_counter() + 0.4
+                last_signature = post_scroll_signature
+                while True:
+                    remaining = settle_deadline - time.perf_counter()
+                    if remaining <= 0:
+                        break
+                    time.sleep(min(0.1, remaining))
+                    current_signature = _surface_signature()
+                    if current_signature is None or current_signature == last_signature:
+                        break
+                    last_signature = current_signature
         return self._collect_current_fb_email_surface_state(driver_kind=driver_kind)
 
     def _fetch_html_with_url(
