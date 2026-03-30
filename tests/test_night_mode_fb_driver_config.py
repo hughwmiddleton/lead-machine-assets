@@ -398,6 +398,51 @@ def test_persistent_session_headless_fails_fast_when_auth_missing():
     assert any("[Night FB][auth_probe]" in msg and "reason=redirect_login" in msg for msg in logs)
 
 
+def test_persistent_session_navigate_can_skip_pre_nav_validation(monkeypatch):
+    observed = {}
+    driver = type(
+        "_Driver",
+        (),
+        {
+            "current_url": "about:blank",
+            "page_source": "<html><body>Artist page</body></html>",
+        },
+    )()
+    session = nmfb.NightPersistentFacebookSession(
+        driver_factory=lambda: driver,
+        headless=False,
+        logger=None,
+    )
+
+    monkeypatch.setattr(
+        session,
+        "ensure_logged_in",
+        lambda: (_ for _ in ()).throw(AssertionError("accepted-page direct navigation should not pre-validate the session")),
+    )
+
+    def fake_load(driver_arg, url, timeout_s=20.0, logger=None, unblock_on_ready=False):  # noqa: ANN001
+        observed["driver"] = driver_arg
+        observed["url"] = url
+        observed["timeout_s"] = timeout_s
+        observed["logger"] = logger
+        observed["unblock_on_ready"] = unblock_on_ready
+        return driver_arg.page_source, url, False
+
+    monkeypatch.setattr(nmfb, "_load_fb_page_with_timeout", fake_load)
+
+    returned = session.navigate("https://www.facebook.com/example", validate_session=False)
+
+    assert returned is driver
+    assert session.driver is driver
+    assert observed == {
+        "driver": driver,
+        "url": "https://www.facebook.com/example",
+        "timeout_s": 20.0,
+        "logger": None,
+        "unblock_on_ready": False,
+    }
+
+
 def test_start_chromedriver_blocks_temp_profile_fallback_for_persistent_profile(monkeypatch):
     logs = []
     options = nmfb.ChromeOptions()

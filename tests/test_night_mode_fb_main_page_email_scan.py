@@ -1154,6 +1154,40 @@ def test_explicit_pass_a_meaningful_empty_main_page_skips_recollect_and_uses_fal
     assert any(f"[FB Email] Visiting {fallback_url}" in msg for msg in logs)
 
 
+def test_explicit_pass_a_session_fetch_skips_pre_nav_session_validation(monkeypatch) -> None:
+    logs = []
+    enricher = _build_enricher(logs)
+    calls = []
+    main_url = "https://www.facebook.com/artist"
+
+    def fake_fetch(url, goto_about=False, collect_surfaces=True, skip_pre_nav_session_validation=False):  # noqa: ANN001
+        calls.append((url, collect_surfaces, skip_pre_nav_session_validation))
+        enricher._last_fb_visible_text = "Bookings: accepted@artist.com"
+        enricher._last_fb_live_anchor_values = []
+        return "<html><body>Bookings: accepted@artist.com</body></html>", url
+
+    monkeypatch.setattr(enricher, "_fetch_html_with_url", fake_fetch)
+    monkeypatch.setattr(nmfb, "_night_fb_has_music_signals", lambda soup, context: False)
+    monkeypatch.setattr(nmfb, "should_accept_email_override", lambda *args, **kwargs: (True, "test_override"))
+
+    result = enricher._scrape_single_fb_candidate(
+        main_url,
+        {"Artist Name": "Artist", "Email_All": ""},
+        "Artist",
+        allow_anon=False,
+        candidate_context={"explicit_accepted_url": True},
+    )
+
+    assert result is not None
+    night_result, emails, driver_kind, outcome = result
+    assert emails == ["accepted@artist.com"]
+    assert night_result is not None
+    assert night_result.email == "accepted@artist.com"
+    assert calls == [(main_url, True, True)]
+    assert driver_kind == "session"
+    assert outcome == "found_email"
+
+
 def test_explicit_pass_a_good_visible_text_skips_recollect(monkeypatch) -> None:
     logs = []
     enricher = _build_enricher(logs)

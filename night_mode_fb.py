@@ -3833,6 +3833,16 @@ class NightPersistentFacebookSession:
             time.sleep(3.0)
         raise FacebookDriverError("Manual login timed out; no c_user cookie detected.")
 
+    def _ensure_driver_for_direct_navigation(self):
+        if self.driver:
+            try:
+                _ = self.driver.current_url
+                return self.driver
+            except Exception:
+                self.driver = None
+        self.driver = self.driver_factory()
+        return self.driver
+
     def ensure_logged_in(self):
         if self.driver:
             try:
@@ -3957,9 +3967,9 @@ class NightPersistentFacebookSession:
         self.last_health_reason = ""
         return self.driver
 
-    def navigate(self, url: str, logger: LoggerFn = None, unblock_on_ready: bool = False):
+    def navigate(self, url: str, logger: LoggerFn = None, unblock_on_ready: bool = False, validate_session: bool = True):
         log_target = logger if logger is not None else self.logger
-        driver = self.ensure_logged_in()
+        driver = self.ensure_logged_in() if validate_session else self._ensure_driver_for_direct_navigation()
         try:
             html, current_url, timed_out = _load_fb_page_with_timeout(
                 driver,
@@ -4009,6 +4019,7 @@ def ensure_night_fb_run_session(
     headless: bool,
     logger: LoggerFn = None,
     owner: str = "",
+    prewarm_session: bool = True,
 ) -> Optional[NightPersistentFacebookSession]:
     if run_state is None:
         return None
@@ -4019,6 +4030,10 @@ def ensure_night_fb_run_session(
 
     session = run_state.session
     if isinstance(session, NightPersistentFacebookSession):
+        if not prewarm_session:
+            if owner:
+                run_state.session_owner = owner
+            return session
         try:
             driver = session.ensure_logged_in()
             decision = update_night_fb_run_state(
@@ -4074,6 +4089,11 @@ def ensure_night_fb_run_session(
 
     driver_factory = lambda: _create_fb_driver_night_mode(headless, logger=logger)
     session = NightPersistentFacebookSession(driver_factory, headless=headless, logger=logger)
+    if not prewarm_session:
+        run_state.session = session
+        if owner:
+            run_state.session_owner = owner
+        return session
     try:
         driver = session.ensure_logged_in()
     except FacebookDriverError as exc:
@@ -7054,7 +7074,7 @@ class NightModeFacebookEnricher:
             )
             _log(self.logger, "[Night FB] Protective shutdown triggered by login wall; skipping FB for remainder of run.")
 
-    def _ensure_session(self):
+    def _ensure_session(self, prewarm_session: bool = True):
         self._sync_search_disable_from_run_state()
         if self._session_failed:
             raise FacebookDriverError(self._session_failed_reason or "Facebook session previously failed.")
@@ -7074,12 +7094,14 @@ class NightModeFacebookEnricher:
                 headless=self.headless,
                 logger=self.logger,
                 owner="night_mode_fb",
+                prewarm_session=prewarm_session,
             )
             self.session = session
             self._owns_session = False
             self._session_state_logged = False
             if session is not None:
-                self._log_session_state_once(session)
+                if prewarm_session:
+                    self._log_session_state_once(session)
                 return session
             if self._run_state.disabled_for_run or self._run_state.session_invalid:
                 raise FacebookDriverError(self._run_state.disable_reason or "Facebook disabled for this Night run.")
@@ -7125,8 +7147,9 @@ class NightModeFacebookEnricher:
             driver_factory = lambda: _create_fb_driver_night_mode(self.headless, logger=self.logger)
             self.session = NightPersistentFacebookSession(driver_factory, headless=self.headless, logger=self.logger)
             self._owns_session = True
-            self.session.ensure_logged_in()
-            self._log_session_state_once(self.session)
+            if prewarm_session:
+                self.session.ensure_logged_in()
+                self._log_session_state_once(self.session)
             return self.session
         except FacebookDriverError as exc:
             self._session_failed = True
@@ -7425,7 +7448,13 @@ class NightModeFacebookEnricher:
             time.sleep(1.2)
         return self._collect_current_fb_email_surface_state(driver_kind=driver_kind)
 
-    def _fetch_html_with_url(self, url: str, goto_about: bool = True, collect_surfaces: bool = True) -> Tuple[Optional[str], Optional[str]]:
+    def _fetch_html_with_url(
+        self,
+        url: str,
+        goto_about: bool = True,
+        collect_surfaces: bool = True,
+        skip_pre_nav_session_validation: bool = False,
+    ) -> Tuple[Optional[str], Optional[str]]:
         budget = getattr(self, "_page_budget_remaining", 2)
         self._clear_last_fb_email_surface_state()
         if budget <= 0:
@@ -7435,18 +7464,46 @@ class NightModeFacebookEnricher:
         self.fb_email_pages_visited += 1
         self._last_fb_timeout = False
         self._last_fb_timeout_url = ""
-        session = self._ensure_session()
+        if skip_pre_nav_session_validation:
+            try:
+                session = self._ensure_session(prewarm_session=False)
+            except TypeError as exc:
+                if "prewarm_session" not in str(exc):
+                    raise
+                session = self._ensure_session()
+        else:
+            session = self._ensure_session()
         if not session:
             return None, None
-        self._ensure_driver_alive(session)
+        if not skip_pre_nav_session_validation:
+            self._ensure_driver_alive(session)
         def _navigate_once() -> Tuple[Optional[str], Optional[str]]:
-            try:
-                driver = session.navigate(url, logger=self.logger, unblock_on_ready=True)
-            except TypeError:
+            if skip_pre_nav_session_validation:
                 try:
-                    driver = session.navigate(url, logger=self.logger)
+                    driver = session.navigate(
+                        url,
+                        logger=self.logger,
+                        unblock_on_ready=True,
+                        validate_session=False,
+                    )
+                except TypeError as exc:
+                    if "validate_session" not in str(exc):
+                        raise
+                    try:
+                        driver = session.navigate(url, logger=self.logger, unblock_on_ready=True)
+                    except TypeError:
+                        try:
+                            driver = session.navigate(url, logger=self.logger)
+                        except TypeError:
+                            driver = session.navigate(url)
+            else:
+                try:
+                    driver = session.navigate(url, logger=self.logger, unblock_on_ready=True)
                 except TypeError:
-                    driver = session.navigate(url)
+                    try:
+                        driver = session.navigate(url, logger=self.logger)
+                    except TypeError:
+                        driver = session.navigate(url)
             timed_out = bool(getattr(session, "last_nav_timed_out", False))
             if timed_out:
                 self._last_fb_timeout = True
@@ -8170,6 +8227,7 @@ class NightModeFacebookEnricher:
         timed_out_flag = False
         is_discovery = bool(candidate_context and candidate_context.get("search_discovery_accepted"))
         explicit_pass_a = bool(candidate_context and candidate_context.get("explicit_accepted_url"))
+        accepted_page_visit = bool(is_discovery or explicit_pass_a)
         prefer_fast_accepted_loader = bool(
             explicit_pass_a
             and candidate_context
@@ -8186,13 +8244,22 @@ class NightModeFacebookEnricher:
             requested_url = str(requested_url or "").strip()
 
             def _fetch_with_session() -> Tuple[Optional[str], Optional[str]]:
+                fetch_kwargs: Dict[str, Any] = {"goto_about": False}
                 if collect_surfaces:
-                    return self._fetch_html_with_url(requested_url, goto_about=False)
-                return self._fetch_html_with_url(
-                    requested_url,
-                    goto_about=False,
-                    collect_surfaces=False,
-                )
+                    pass
+                else:
+                    fetch_kwargs["collect_surfaces"] = False
+                if accepted_page_visit:
+                    try:
+                        return self._fetch_html_with_url(
+                            requested_url,
+                            skip_pre_nav_session_validation=True,
+                            **fetch_kwargs,
+                        )
+                    except TypeError as exc:
+                        if "skip_pre_nav_session_validation" not in str(exc):
+                            raise
+                return self._fetch_html_with_url(requested_url, **fetch_kwargs)
 
             def _fetch_with_anon() -> Tuple[Optional[str], Optional[str]]:
                 if collect_surfaces:

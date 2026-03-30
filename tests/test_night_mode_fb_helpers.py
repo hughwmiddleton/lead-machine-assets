@@ -2093,3 +2093,126 @@ def test_fetch_html_with_url_uses_unblocked_navigation_and_preserves_about_conti
     assert about_calls == [
         ("https://www.facebook.com/example", "https://www.facebook.com/example", 5.0)
     ]
+
+
+def test_fetch_html_with_url_skips_pre_nav_session_validation_for_accepted_pages(monkeypatch) -> None:
+    about_calls = []
+    observed = {}
+    prewarm_calls = []
+    enricher = night_mode_fb.NightModeFacebookEnricher(
+        legacy_module=type(
+            "_Legacy",
+            (),
+            {
+                "_goto_facebook_about": staticmethod(
+                    lambda driver, url, timeout=5.0: about_calls.append((driver.current_url, url, timeout))
+                )
+            },
+        )(),
+        username="",
+        password="",
+        logger=None,
+        use_shared_session=False,
+    )
+    session = night_mode_fb.NightPersistentFacebookSession(
+        driver_factory=lambda: object(),
+        headless=False,
+        logger=None,
+    )
+    driver = type(
+        "_Driver",
+        (),
+        {
+            "page_source": "<html><body>Artist page</body></html>",
+            "current_url": "https://www.facebook.com/example",
+        },
+    )()
+
+    monkeypatch.setattr(
+        session,
+        "ensure_logged_in",
+        lambda: (_ for _ in ()).throw(AssertionError("accepted-page fetch should not call ensure_logged_in before navigation")),
+    )
+
+    def fake_navigate(url, logger=None, unblock_on_ready=False, validate_session=True):  # noqa: ANN001
+        observed["url"] = url
+        observed["logger"] = logger
+        observed["unblock_on_ready"] = unblock_on_ready
+        observed["validate_session"] = validate_session
+        return driver
+
+    monkeypatch.setattr(session, "navigate", fake_navigate)
+    monkeypatch.setattr(
+        enricher,
+        "_ensure_session",
+        lambda prewarm_session=True: prewarm_calls.append(prewarm_session) or session,
+    )
+    monkeypatch.setattr(
+        enricher,
+        "_ensure_driver_alive",
+        lambda _session: (_ for _ in ()).throw(AssertionError("accepted-page fetch should not preflight driver health before navigation")),
+    )
+
+    html, current_url = enricher._fetch_html_with_url(
+        "https://www.facebook.com/example",
+        goto_about=True,
+        collect_surfaces=False,
+        skip_pre_nav_session_validation=True,
+    )
+
+    assert html == "<html><body>Artist page</body></html>"
+    assert current_url == "https://www.facebook.com/example"
+    assert prewarm_calls == [False]
+    assert observed == {
+        "url": "https://www.facebook.com/example",
+        "logger": None,
+        "unblock_on_ready": True,
+        "validate_session": False,
+    }
+    assert about_calls == [
+        ("https://www.facebook.com/example", "https://www.facebook.com/example", 5.0)
+    ]
+
+
+def test_fetch_html_with_url_keeps_pre_nav_session_validation_for_default_flow(monkeypatch) -> None:
+    observed = {}
+    ensured = []
+    enricher = night_mode_fb.NightModeFacebookEnricher(
+        legacy_module=None,
+        username="",
+        password="",
+        logger=None,
+        use_shared_session=False,
+    )
+
+    class _Session:
+        last_nav_timed_out = False
+
+        def navigate(self, url, logger=None, unblock_on_ready=False, validate_session=True):  # noqa: ANN001
+            observed["url"] = url
+            observed["logger"] = logger
+            observed["unblock_on_ready"] = unblock_on_ready
+            observed["validate_session"] = validate_session
+            return type(
+                "_Driver",
+                (),
+                {
+                    "page_source": "<html><body>Artist page</body></html>",
+                    "current_url": url,
+                },
+            )()
+
+    monkeypatch.setattr(enricher, "_ensure_session", lambda: _Session())
+    monkeypatch.setattr(enricher, "_ensure_driver_alive", lambda session: ensured.append(session))
+
+    html, current_url = enricher._fetch_html_with_url("https://www.facebook.com/example", goto_about=False)
+
+    assert html == "<html><body>Artist page</body></html>"
+    assert current_url == "https://www.facebook.com/example"
+    assert len(ensured) == 1
+    assert observed == {
+        "url": "https://www.facebook.com/example",
+        "logger": None,
+        "unblock_on_ready": True,
+        "validate_session": True,
+    }
