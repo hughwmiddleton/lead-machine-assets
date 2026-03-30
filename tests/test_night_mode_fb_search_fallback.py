@@ -438,6 +438,112 @@ def test_pass_b_homepage_fallback_filters_junk_but_keeps_real_candidate(monkeypa
     assert any("search_method=homepage_ui junk_candidates_filtered=1" in message for message in logs)
 
 
+def test_initial_refine_fires_when_worthy_candidate_present(monkeypatch) -> None:
+    """Refine runs when first-pass has no music, top_score<=0, but a weak+ name match exists."""
+    monkeypatch.setenv("FB_REFINE_QUERY", "1")
+    enricher = _make_enricher()
+    session = _DummySession()
+    monkeypatch.setattr(enricher, "_ensure_session", lambda: session)
+    monkeypatch.setattr(enricher, "_ensure_driver_alive", lambda current_session: current_session)
+    monkeypatch.setattr(enricher, "_choose_ranked_candidate", lambda *args, **kwargs: (None, "no_safe_match"))
+    monkeypatch.setattr(night_mode_fb, "_fb_search_surface_miss_reason", lambda *args, **kwargs: None)
+
+    worthy_ranked = [
+        {"candidate": SimpleNamespace(name="Test Artist", url="https://www.facebook.com/testartist", category=""),
+         "score": 0, "features": {"music_any": False, "match_level": "weak", "is_page_style_url": False}, "breakdown": []},
+    ]
+    monkeypatch.setattr(night_mode_fb, "_harvest_candidates", lambda *args, **kwargs: [worthy_ranked[0]["candidate"]])
+    monkeypatch.setattr(night_mode_fb, "_rank_candidates_for_preview", lambda *args, **kwargs: worthy_ranked)
+
+    queries = []
+
+    def _fake_fetch(query_str, *, search_method, session=None):
+        queries.append(query_str)
+        html = "<div role='main'><div aria-label='Search results'></div></div>"
+        driver = SimpleNamespace(page_source=html, current_url="https://www.facebook.com/search/pages/?q=test")
+        return html, driver, False, driver.current_url
+
+    monkeypatch.setattr(enricher, "_fetch_search_surface", _fake_fetch)
+
+    enricher._search_for_page("Test Artist", location="", allow_anon=True)
+
+    # Refine queries should have fired (primary + "musician" + "band")
+    assert any("musician" in q for q in queries), f"Expected refine query with 'musician', got {queries}"
+
+
+def test_initial_refine_skipped_for_junk_candidate_set(monkeypatch) -> None:
+    """Refine does NOT run when first-pass candidates are all junk (mismatch, no page signal)."""
+    monkeypatch.setenv("FB_REFINE_QUERY", "1")
+    enricher = _make_enricher()
+    session = _DummySession()
+    monkeypatch.setattr(enricher, "_ensure_session", lambda: session)
+    monkeypatch.setattr(enricher, "_ensure_driver_alive", lambda current_session: current_session)
+    monkeypatch.setattr(enricher, "_choose_ranked_candidate", lambda *args, **kwargs: (None, "no_safe_match"))
+    monkeypatch.setattr(night_mode_fb, "_fb_search_surface_miss_reason", lambda *args, **kwargs: None)
+
+    junk_ranked = [
+        {"candidate": SimpleNamespace(name="Random Page", url="https://www.facebook.com/randompage", category=""),
+         "score": -5, "features": {"music_any": False, "match_level": "mismatch", "is_page_style_url": False}, "breakdown": []},
+        {"candidate": SimpleNamespace(name="Service Only", url="https://www.facebook.com/serviceonly", category=""),
+         "score": 0, "features": {"music_any": False, "match_level": "none", "is_page_style_url": False}, "breakdown": []},
+    ]
+    monkeypatch.setattr(night_mode_fb, "_harvest_candidates", lambda *args, **kwargs: [r["candidate"] for r in junk_ranked])
+    monkeypatch.setattr(night_mode_fb, "_rank_candidates_for_preview", lambda *args, **kwargs: junk_ranked)
+
+    queries = []
+
+    def _fake_fetch(query_str, *, search_method, session=None):
+        queries.append(query_str)
+        html = "<div role='main'><div aria-label='Search results'></div></div>"
+        driver = SimpleNamespace(page_source=html, current_url="https://www.facebook.com/search/pages/?q=test")
+        return html, driver, False, driver.current_url
+
+    monkeypatch.setattr(enricher, "_fetch_search_surface", _fake_fetch)
+
+    enricher._search_for_page("Test Artist", location="", allow_anon=True)
+
+    # Only the primary query should fire — no refine queries
+    assert not any("musician" in q for q in queries), f"Refine should NOT fire for junk set, got {queries}"
+    assert not any("band" in q for q in queries), f"Refine should NOT fire for junk set, got {queries}"
+
+
+def test_initial_refine_respects_suppress_refine_queries(monkeypatch) -> None:
+    """suppress_refine_queries still prevents refine even with worthy candidates."""
+    monkeypatch.setenv("FB_REFINE_QUERY", "1")
+    enricher = _make_enricher()
+    session = _DummySession()
+    monkeypatch.setattr(enricher, "_ensure_session", lambda: session)
+    monkeypatch.setattr(enricher, "_ensure_driver_alive", lambda current_session: current_session)
+    monkeypatch.setattr(enricher, "_choose_ranked_candidate", lambda *args, **kwargs: (None, "no_safe_match"))
+    monkeypatch.setattr(night_mode_fb, "_fb_search_surface_miss_reason", lambda *args, **kwargs: None)
+
+    worthy_ranked = [
+        {"candidate": SimpleNamespace(name="Test Artist", url="https://www.facebook.com/testartist", category=""),
+         "score": 0, "features": {"music_any": False, "match_level": "near", "is_page_style_url": False}, "breakdown": []},
+    ]
+    monkeypatch.setattr(night_mode_fb, "_harvest_candidates", lambda *args, **kwargs: [worthy_ranked[0]["candidate"]])
+    monkeypatch.setattr(night_mode_fb, "_rank_candidates_for_preview", lambda *args, **kwargs: worthy_ranked)
+
+    queries = []
+
+    def _fake_fetch(query_str, *, search_method, session=None):
+        queries.append(query_str)
+        html = "<div role='main'><div aria-label='Search results'></div></div>"
+        driver = SimpleNamespace(page_source=html, current_url="https://www.facebook.com/search/pages/?q=test")
+        return html, driver, False, driver.current_url
+
+    monkeypatch.setattr(enricher, "_fetch_search_surface", _fake_fetch)
+
+    # Use a secondary signal (song_title) to trigger has_secondary_signal → refine_allowed=False
+    page = enricher._search_for_page(
+        "Test Artist", location="Melbourne, VIC", allow_anon=True, song_title="Night Drive",
+    )
+
+    assert page is None
+    # Only the primary query with the secondary signal — no refine queries
+    assert not any("musician" in q for q in queries), f"Refine should be suppressed, got {queries}"
+
+
 def test_pass_b_homepage_fallback_harvests_role_link_card_candidate(monkeypatch) -> None:
     monkeypatch.setenv("FB_SEARCH_HARVEST_V2", "0")
     logs = []

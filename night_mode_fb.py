@@ -8237,7 +8237,12 @@ class NightModeFacebookEnricher:
         elif refine_allowed and not suppress_refine_queries:
             top_score = ranked_for_preview[0]["score"] if ranked_for_preview else 0
             music_present = any(item["features"].get("music_any") for item in ranked_for_preview)
-            if (not music_present) and top_score <= 0:
+            has_worthy_candidate = not ranked_for_preview or any(
+                item["features"].get("match_level") in ("exact", "near", "weak")
+                or item["features"].get("is_page_style_url")
+                for item in ranked_for_preview
+            )
+            if (not music_present) and top_score <= 0 and has_worthy_candidate:
                 need_refine = True
 
         if need_refine:
