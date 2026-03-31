@@ -20,6 +20,19 @@ def _seed_df(row):
     return pd.DataFrame([row], dtype=str).fillna("")
 
 
+def _assert_log_contains(logs, expected):
+    assert expected in logs
+
+
+def _assert_no_log_startswith(logs, prefix):
+    assert all(not line.startswith(prefix) for line in logs)
+
+
+def _assert_ig_visit_and_outcome(logs, visit_url, outcome):
+    assert logs[0] == f"[IG Email] Visiting {visit_url}"
+    assert logs[-1] == outcome
+
+
 @pytest.fixture(autouse=True)
 def _disable_real_instagram_live_bridge(monkeypatch):
     monkeypatch.setattr(cde, "_open_instagram_live_page_bridge", lambda *args, **kwargs: None)
@@ -380,10 +393,11 @@ def test_instagram_email_no_email_visible_after_requests_and_fallback_are_exhaus
     assert matched is False
     assert len(fetch_html_calls) == 1
     assert seed_df.equals(before)
-    assert logs == [
-        "[IG Email] Visiting https://www.instagram.com/noemailhere/",
+    _assert_ig_visit_and_outcome(
+        logs,
+        "https://www.instagram.com/noemailhere/",
         "[IG Email] no_email_visible",
-    ]
+    )
 
 
 def test_instagram_email_meta_description_writes_email_and_provenance(monkeypatch):
@@ -537,10 +551,11 @@ def test_instagram_email_filters_telemetry_only_result(monkeypatch):
     assert matched is False
     assert seed_df.at[0, "Email"] == ""
     assert seed_df.at[0, "Email_All"] == ""
-    assert logs == [
-        "[IG Email] Visiting https://www.instagram.com/igartist/",
+    _assert_ig_visit_and_outcome(
+        logs,
+        "https://www.instagram.com/igartist/",
         "[IG Email] no_email_visible",
-    ]
+    )
 
 
 @pytest.mark.parametrize(
@@ -643,10 +658,11 @@ def test_instagram_email_no_visible_or_meta_email_keeps_one_hop_bounded_and_no_e
     assert ig_fetch_calls == ["https://www.instagram.com/noemailhere/"]
     assert bio_fetch_calls == ["https://linktr.ee/noemailhere"]
     assert seed_df.equals(before)
-    assert logs == [
-        "[IG Email] Visiting https://www.instagram.com/noemailhere/",
+    _assert_ig_visit_and_outcome(
+        logs,
+        "https://www.instagram.com/noemailhere/",
         "[IG Email] no_email_visible",
-    ]
+    )
 
 
 def test_instagram_email_fetch_failed_is_logged_distinctly(monkeypatch):
@@ -889,6 +905,58 @@ def test_collect_instagram_bio_link_fetch_urls_filters_instagram_self_urls_from_
     assert urls == []
 
 
+def test_collect_instagram_bio_link_fetch_urls_logs_empty_helper_summary():
+    logs = []
+
+    urls = cde._collect_instagram_bio_link_fetch_urls(
+        "",
+        profile_url="https://www.instagram.com/emptyartist/",
+        log=logs.append,
+    )
+
+    assert urls == []
+    assert logs == [
+        "[IG OneHop] helper_summary anchors(raw=0 kept=0 dropped=0 drop_reasons=- sample=-) "
+        "attributes(raw=0 kept=0 dropped=0 drop_reasons=- sample=-) "
+        "meta(raw=0 kept=0 dropped=0 drop_reasons=- sample=-) "
+        "structured_scripts(raw=0 kept=0 dropped=0 drop_reasons=- sample=-) "
+        "total_unique=0 final_sample=-"
+    ]
+
+
+def test_collect_instagram_bio_link_fetch_urls_logs_survivors_and_drop_reasons():
+    logs = []
+    html = (
+        "<html><head>"
+        "<meta name='website' content='https://www.instagram.com/logartist/'>"
+        "</head><body>"
+        "<a href='javascript:void(0)'>Bad</a>"
+        "<a href='https://artist.com/contact'>Contact</a>"
+        "<script type='application/json'>"
+        '{"profile":{"bio_links":[{"url":"https://artist.com/contact"},{"url":"https://beacons.ai/logartist"}]}}'
+        "</script>"
+        "</body></html>"
+    )
+
+    urls = cde._collect_instagram_bio_link_fetch_urls(
+        html,
+        profile_url="https://www.instagram.com/logartist/",
+        log=logs.append,
+    )
+
+    assert urls == [
+        "https://artist.com/contact",
+        "https://beacons.ai/logartist",
+    ]
+    assert logs == [
+        "[IG OneHop] helper_summary anchors(raw=2 kept=1 dropped=1 drop_reasons=non_http:1 sample=https://artist.com/contact) "
+        "attributes(raw=1 kept=0 dropped=1 drop_reasons=self_instagram:1 sample=https://www.instagram.com/logartist/) "
+        "meta(raw=1 kept=0 dropped=1 drop_reasons=self_instagram:1 sample=https://www.instagram.com/logartist/) "
+        "structured_scripts(raw=2 kept=1 dropped=1 drop_reasons=duplicate:1 sample=https://beacons.ai/logartist) "
+        "total_unique=2 final_sample=https://artist.com/contact,https://beacons.ai/logartist"
+    ]
+
+
 def test_instagram_email_one_hop_bio_link_recovers_direct_email_from_structured_script(monkeypatch):
     logs = []
     worker = _make_worker(logs)
@@ -941,10 +1009,14 @@ def test_instagram_email_one_hop_bio_link_recovers_direct_email_from_structured_
     assert seed_df.at[0, "Email_All"] == "structured@artist.com"
     assert seed_df.at[0, "Email_Source_URL"] == "https://beacons.ai/structuredscriptartist"
     assert "instagram_bio_link_one_hop" in seed_df.at[0, EMAIL_PROVENANCE_JSON_COL]
-    assert logs == [
-        "[IG Email] Visiting https://www.instagram.com/structuredscriptartist/",
+    _assert_ig_visit_and_outcome(
+        logs,
+        "https://www.instagram.com/structuredscriptartist/",
         "[IG Email] Found email: structured@artist.com",
-    ]
+    )
+    _assert_log_contains(logs, "[IG OneHop] bio_link_urls state=non_empty count=1 sample=https://beacons.ai/structuredscriptartist")
+    _assert_log_contains(logs, "[IG OneHop] onehop_selected_target=https://beacons.ai/structuredscriptartist")
+    _assert_log_contains(logs, "[IG OneHop] onehop_fetch_attempted=https://beacons.ai/structuredscriptartist")
 
 
 def test_instagram_email_one_hop_bio_link_recovers_direct_email(monkeypatch):
@@ -998,10 +1070,14 @@ def test_instagram_email_one_hop_bio_link_recovers_direct_email(monkeypatch):
     assert seed_df.at[0, "Email_Extract_Method"] == "regex"
     assert seed_df.at[0, "Email_Type"] == "ig_enrich"
     assert "instagram_bio_link_one_hop" in seed_df.at[0, EMAIL_PROVENANCE_JSON_COL]
-    assert logs == [
-        "[IG Email] Visiting https://www.instagram.com/onehopartist/",
+    _assert_ig_visit_and_outcome(
+        logs,
+        "https://www.instagram.com/onehopartist/",
         "[IG Email] Found email: bookings@artist.com",
-    ]
+    )
+    _assert_log_contains(logs, "[IG OneHop] bio_link_urls state=non_empty count=1 sample=https://linktr.ee/onehopartist")
+    _assert_log_contains(logs, "[IG OneHop] onehop_selected_target=https://linktr.ee/onehopartist")
+    _assert_log_contains(logs, "[IG OneHop] onehop_fetch_attempted=https://linktr.ee/onehopartist")
 
 
 def test_instagram_email_one_hop_bio_link_recovers_mailto(monkeypatch):
@@ -1049,10 +1125,11 @@ def test_instagram_email_one_hop_bio_link_recovers_mailto(monkeypatch):
     assert seed_df.at[0, "Email_All"] == "hello@artist.com"
     assert seed_df.at[0, "Email_Source_URL"] == "https://beacons.ai/biomailtoartist"
     assert seed_df.at[0, "Email_Extract_Method"] == "mailto"
-    assert logs == [
-        "[IG Email] Visiting https://www.instagram.com/biomailtoartist/",
+    _assert_ig_visit_and_outcome(
+        logs,
+        "https://www.instagram.com/biomailtoartist/",
         "[IG Email] Found email: hello@artist.com",
-    ]
+    )
 
 
 def test_instagram_email_invalid_bio_link_skips_one_hop_fetch(monkeypatch):
@@ -1088,10 +1165,14 @@ def test_instagram_email_invalid_bio_link_skips_one_hop_fetch(monkeypatch):
     assert matched is False
     assert seed_df.at[0, "Email"] == ""
     assert seed_df.at[0, "Email_All"] == ""
-    assert logs == [
-        "[IG Email] Visiting https://www.instagram.com/invalidbiolink/",
+    _assert_ig_visit_and_outcome(
+        logs,
+        "https://www.instagram.com/invalidbiolink/",
         "[IG Email] no_email_visible",
-    ]
+    )
+    _assert_log_contains(logs, "[IG OneHop] bio_link_urls state=empty count=0 sample=-")
+    _assert_log_contains(logs, "[IG OneHop] bio_link_urls_empty")
+    _assert_no_log_startswith(logs, "[IG OneHop] onehop_fetch_attempted=")
 
 
 def test_instagram_email_without_outbound_target_skips_one_hop_fetch(monkeypatch):
@@ -1127,10 +1208,14 @@ def test_instagram_email_without_outbound_target_skips_one_hop_fetch(monkeypatch
     assert matched is False
     assert seed_df.at[0, "Email"] == ""
     assert seed_df.at[0, "Email_All"] == ""
-    assert logs == [
-        "[IG Email] Visiting https://www.instagram.com/nooutboundartist/",
+    _assert_ig_visit_and_outcome(
+        logs,
+        "https://www.instagram.com/nooutboundartist/",
         "[IG Email] no_email_visible",
-    ]
+    )
+    _assert_log_contains(logs, "[IG OneHop] bio_link_urls state=empty count=0 sample=-")
+    _assert_log_contains(logs, "[IG OneHop] bio_link_urls_empty")
+    _assert_no_log_startswith(logs, "[IG OneHop] onehop_fetch_attempted=")
 
 
 def test_instagram_email_one_hop_preserves_multiple_emails_in_aggregate_output(monkeypatch):
@@ -1177,10 +1262,11 @@ def test_instagram_email_one_hop_preserves_multiple_emails_in_aggregate_output(m
     assert seed_df.at[0, "Email"] == "first@artist.com"
     assert seed_df.at[0, "Email_All"] == "first@artist.com;second@artist.com"
     assert seed_df.at[0, "Email_Source_URL"] == "https://solo.to/biomultiartist"
-    assert logs == [
-        "[IG Email] Visiting https://www.instagram.com/biomultiartist/",
+    _assert_ig_visit_and_outcome(
+        logs,
+        "https://www.instagram.com/biomultiartist/",
         "[IG Email] Found email: first@artist.com",
-    ]
+    )
 
 
 def test_instagram_email_existing_row_email_skips_one_hop_stage(monkeypatch):
@@ -1313,10 +1399,11 @@ def test_instagram_email_one_hop_does_not_follow_links_found_on_fetched_page(mon
     assert bio_fetch_calls == ["https://campsite.bio/nosecondhop"]
     assert seed_df.at[0, "Email"] == ""
     assert seed_df.at[0, "Email_All"] == ""
-    assert logs == [
-        "[IG Email] Visiting https://www.instagram.com/nosecondhop/",
+    _assert_ig_visit_and_outcome(
+        logs,
+        "https://www.instagram.com/nosecondhop/",
         "[IG Email] no_email_visible",
-    ]
+    )
 
 
 def test_instagram_email_extracts_spaced_email(monkeypatch):
@@ -1467,10 +1554,11 @@ def test_instagram_hidden_contact_one_action_recovers_visible_email(monkeypatch)
     assert seed_df.at[0, "Email_Extract_Method"] == "regex"
     assert seed_df.at[0, "Email_Type"] == "ig_enrich"
     assert "instagram_hidden_contact_one_action" in seed_df.at[0, "Email_Provenance_JSON"]
-    assert logs == [
-        "[IG Email] Visiting https://www.instagram.com/hiddencontactartist/",
+    _assert_ig_visit_and_outcome(
+        logs,
+        "https://www.instagram.com/hiddencontactartist/",
         "[IG Email] Found email: bookings@artist.com",
-    ]
+    )
 
 
 def test_instagram_hidden_contact_one_action_recovers_mailto(monkeypatch):
@@ -1547,10 +1635,11 @@ def test_instagram_hidden_contact_one_action_skips_when_no_eligible_cta(monkeypa
     assert live_pages[0].click_calls == []
     assert seed_df.at[0, "Email"] == ""
     assert seed_df.at[0, "Email_All"] == ""
-    assert logs == [
-        "[IG Email] Visiting https://www.instagram.com/noctaartist/",
+    _assert_ig_visit_and_outcome(
+        logs,
+        "https://www.instagram.com/noctaartist/",
         "[IG Email] no_email_visible",
-    ]
+    )
 
 
 def test_instagram_hidden_contact_one_action_clicks_only_clear_contact_cta(monkeypatch):
@@ -1666,10 +1755,11 @@ def test_instagram_hidden_contact_one_action_stops_after_empty_reveal(monkeypatc
     assert live_pages[0].click_calls == ['[data-ig-hidden-contact="ig-hidden-contact-0"]']
     assert seed_df.at[0, "Email"] == ""
     assert seed_df.at[0, "Email_All"] == ""
-    assert logs == [
-        "[IG Email] Visiting https://www.instagram.com/norevealartist/",
+    _assert_ig_visit_and_outcome(
+        logs,
+        "https://www.instagram.com/norevealartist/",
         "[IG Email] no_email_visible",
-    ]
+    )
 
 
 def test_instagram_hidden_contact_one_action_budget_is_one_attempt_per_row(monkeypatch):

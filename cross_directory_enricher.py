@@ -2740,6 +2740,62 @@ def _normalise_instagram_bio_link_fetch_url(raw: str, *, base_url: str = "") -> 
     return normalised
 
 
+_INSTAGRAM_BIO_LINK_LOG_SAMPLE_MAX = 2
+_INSTAGRAM_BIO_LINK_LOG_SAMPLE_CHARS = 96
+
+
+def _classify_instagram_bio_link_fetch_url_drop(raw: Any, *, base_url: str = "") -> str:
+    candidate = cell_to_str(raw)
+    if not candidate or not candidate.strip():
+        return "empty_or_invalid"
+    lowered = candidate.strip().lower()
+    if lowered.startswith(("#", "javascript:", "data:", "mailto:", "tel:")):
+        return "non_http"
+    resolved = normalize_external_url(candidate) or candidate
+    try:
+        if base_url:
+            resolved = urllib.parse.urljoin(base_url, resolved)
+    except Exception:
+        return "malformed"
+    normalised = _normalise_url(resolved)
+    if not normalised or _is_noise_url(normalised):
+        return "empty_or_invalid"
+    try:
+        parsed = urllib.parse.urlparse(normalised)
+    except Exception:
+        return "malformed"
+    if (parsed.scheme or "").lower() not in {"http", "https"}:
+        return "non_http"
+    host = (parsed.netloc or "").lower()
+    if host.startswith("www."):
+        host = host[4:]
+    if not host:
+        return "empty_or_invalid"
+    if host in {"instagram.com", "instagr.am"}:
+        return "self_instagram"
+    return "empty_or_invalid"
+
+
+def _instagram_bio_link_log_sample(values: Iterable[Any], *, limit: int = _INSTAGRAM_BIO_LINK_LOG_SAMPLE_MAX) -> str:
+    sample: List[str] = []
+    for raw_value in values:
+        value = cell_to_str(raw_value).strip()
+        if not value:
+            continue
+        if len(value) > _INSTAGRAM_BIO_LINK_LOG_SAMPLE_CHARS:
+            value = value[: _INSTAGRAM_BIO_LINK_LOG_SAMPLE_CHARS - 3] + "..."
+        sample.append(value)
+        if len(sample) >= limit:
+            break
+    return ",".join(sample) if sample else "-"
+
+
+def _format_instagram_bio_link_drop_reasons(counts: Counter) -> str:
+    if not counts:
+        return "-"
+    return ",".join(f"{reason}:{count}" for reason, count in counts.most_common(3))
+
+
 _INSTAGRAM_BIO_LINK_META_KEY_ATTRS = ("property", "name", "itemprop")
 _INSTAGRAM_BIO_LINK_META_ALLOW_TOKENS = ("url", "link", "website", "external", "sameas", "same_as")
 _INSTAGRAM_BIO_LINK_META_SKIP_TOKENS = ("image", "video", "audio", "icon", "thumbnail", "player")
@@ -2874,9 +2930,49 @@ def _collect_instagram_bio_link_fetch_urls(
     *,
     soup: Optional[BeautifulSoup] = None,
     profile_url: str = "",
+    log: Optional[Any] = None,
 ) -> List[str]:
     html_text = html if isinstance(html, str) else str(html or "")
+    source_group_names = {
+        "anchor": "anchors",
+        "attr": "attributes",
+        "meta": "meta",
+        "script": "structured_scripts",
+    }
+    group_stats: Dict[str, Dict[str, Any]] = {
+        group_name: {
+            "raw": 0,
+            "kept": 0,
+            "dropped": 0,
+            "raw_sample": [],
+            "kept_sample": [],
+            "drop_reasons": Counter(),
+        }
+        for group_name in source_group_names.values()
+    }
+
+    def _emit_summary(final_urls: List[str]) -> None:
+        if log is None:
+            return
+        parts: List[str] = []
+        for group_name in ("anchors", "attributes", "meta", "structured_scripts"):
+            stats = group_stats[group_name]
+            sample = _instagram_bio_link_log_sample(
+                stats["kept_sample"] or stats["raw_sample"],
+                limit=1,
+            )
+            parts.append(
+                f"{group_name}(raw={stats['raw']} kept={stats['kept']} dropped={stats['dropped']} "
+                f"drop_reasons={_format_instagram_bio_link_drop_reasons(stats['drop_reasons'])} sample={sample})"
+            )
+        log(
+            "[IG OneHop] helper_summary "
+            + " ".join(parts)
+            + f" total_unique={len(final_urls)} final_sample={_instagram_bio_link_log_sample(final_urls)}"
+        )
+
     if not html_text.strip():
+        _emit_summary([])
         return []
     soup_obj = soup or BeautifulSoup(html_text, "html.parser")
     candidate_groups: Dict[str, List[str]] = {
@@ -2892,10 +2988,24 @@ def _collect_instagram_bio_link_fetch_urls(
     seen: Set[str] = set()
 
     def _add_candidate(raw_value: Any, *, source_key: str) -> None:
+        group_name = source_group_names[source_key]
+        stats = group_stats[group_name]
+        stats["raw"] += 1
+        if len(stats["raw_sample"]) < _INSTAGRAM_BIO_LINK_LOG_SAMPLE_MAX:
+            stats["raw_sample"].append(raw_value)
         normalised = _normalise_instagram_bio_link_fetch_url(raw_value, base_url=profile_url)
-        if not normalised or normalised in seen:
+        if not normalised:
+            stats["dropped"] += 1
+            stats["drop_reasons"][_classify_instagram_bio_link_fetch_url_drop(raw_value, base_url=profile_url)] += 1
+            return
+        if normalised in seen:
+            stats["dropped"] += 1
+            stats["drop_reasons"]["duplicate"] += 1
             return
         seen.add(normalised)
+        stats["kept"] += 1
+        if len(stats["kept_sample"]) < _INSTAGRAM_BIO_LINK_LOG_SAMPLE_MAX:
+            stats["kept_sample"].append(normalised)
         host = _host(normalised)
         if host.startswith("www."):
             host = host[4:]
@@ -2926,7 +3036,9 @@ def _collect_instagram_bio_link_fetch_urls(
         "script_hub",
         "script_direct",
     )
-    return [candidate for key in ordered_keys for candidate in candidate_groups[key]]
+    final_urls = [candidate for key in ordered_keys for candidate in candidate_groups[key]]
+    _emit_summary(final_urls)
+    return final_urls
 
 
 _INSTAGRAM_HIDDEN_CONTACT_LABEL_PRIORITY = {
@@ -9504,11 +9616,19 @@ class CrossDirectoryEnricherWorker(QThread):
                     html,
                     soup=soup,
                     profile_url=ig_url,
+                    log=self.log_message.emit,
+                )
+                self.log_message.emit(
+                    f"[IG OneHop] bio_link_urls state={'non_empty' if bio_link_urls else 'empty'} "
+                    f"count={len(bio_link_urls)} sample={_instagram_bio_link_log_sample(bio_link_urls)}"
                 )
                 if bio_link_urls:
+                    onehop_target = bio_link_urls[0]
+                    self.log_message.emit(f"[IG OneHop] onehop_selected_target={onehop_target}")
+                    self.log_message.emit(f"[IG OneHop] onehop_fetch_attempted={onehop_target}")
                     bio_link_result = _fetch_website_html_bounded(
                         self.session,
-                        bio_link_urls[0],
+                        onehop_target,
                         timeout_s=WEBSITE_EMAIL_TIMEOUT,
                         max_bytes=WEBSITE_EMAIL_MAX_BYTES,
                     )
@@ -9517,9 +9637,11 @@ class CrossDirectoryEnricherWorker(QThread):
                             bio_link_result.html
                         )
                         if all_ig_emails:
-                            selected_source_url = bio_link_result.final_url or bio_link_urls[0]
+                            selected_source_url = bio_link_result.final_url or onehop_target
                             selected_extract_method = "mailto" if used_mailto else "regex"
                             selected_surface = "instagram_bio_link_one_hop"
+                else:
+                    self.log_message.emit("[IG OneHop] bio_link_urls_empty")
             if (
                 not all_ig_emails
                 and not _row_has_email(seed_df.loc[row_idx])
