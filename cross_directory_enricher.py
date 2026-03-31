@@ -2740,6 +2740,135 @@ def _normalise_instagram_bio_link_fetch_url(raw: str, *, base_url: str = "") -> 
     return normalised
 
 
+_INSTAGRAM_BIO_LINK_META_KEY_ATTRS = ("property", "name", "itemprop")
+_INSTAGRAM_BIO_LINK_META_ALLOW_TOKENS = ("url", "link", "website", "external", "sameas", "same_as")
+_INSTAGRAM_BIO_LINK_META_SKIP_TOKENS = ("image", "video", "audio", "icon", "thumbnail", "player")
+_INSTAGRAM_BIO_LINK_STRUCTURED_SCRIPT_TYPES = {"application/json", "application/ld+json"}
+_INSTAGRAM_BIO_LINK_STRUCTURED_SCRIPT_PREFIXES = ("window._sharedData =",)
+_INSTAGRAM_BIO_LINK_STRUCTURED_CONTEXT_KEYS = {
+    "bio_links",
+    "bio_link",
+    "external_links",
+    "external_urls",
+    "links",
+    "sameas",
+    "same_as",
+    "website_links",
+}
+_INSTAGRAM_BIO_LINK_STRUCTURED_DIRECT_KEYS = {
+    "external_url",
+    "external_url_linkshimmed",
+    "href",
+    "link_url",
+    "outbound_url",
+    "outgoing_url",
+    "web_uri",
+    "web_url",
+    "website",
+    "website_url",
+}
+_INSTAGRAM_BIO_LINK_STRUCTURED_CONTEXTUAL_KEYS = {"link", "links", "uri", "url"}
+_INSTAGRAM_BIO_LINK_STRUCTURED_SKIP_KEY_TOKENS = {
+    "avatar",
+    "image",
+    "img",
+    "logo",
+    "media",
+    "photo",
+    "pic",
+    "player",
+    "profile_pic",
+    "thumbnail",
+    "video",
+}
+_INSTAGRAM_BIO_LINK_STRUCTURED_MAX_SCRIPT_CHARS = 250000
+_INSTAGRAM_BIO_LINK_STRUCTURED_MAX_NODES = 2048
+
+
+def _iter_instagram_bio_link_meta_values(soup_obj: BeautifulSoup) -> Iterable[str]:
+    for meta_tag in soup_obj.find_all("meta"):
+        key_parts = []
+        for attr_name in _INSTAGRAM_BIO_LINK_META_KEY_ATTRS:
+            attr_value = cell_to_str(meta_tag.get(attr_name)).strip().lower()
+            if attr_value:
+                key_parts.append(attr_value)
+        if not key_parts:
+            continue
+        meta_key = " ".join(key_parts)
+        if any(token in meta_key for token in _INSTAGRAM_BIO_LINK_META_SKIP_TOKENS):
+            continue
+        if not any(token in meta_key for token in _INSTAGRAM_BIO_LINK_META_ALLOW_TOKENS):
+            continue
+        content = cell_to_str(meta_tag.get("content")).strip()
+        if content.startswith(("http://", "https://")):
+            yield content
+
+
+def _load_instagram_bio_link_structured_script_payload(script_tag: Any) -> Optional[Any]:
+    raw_text = cell_to_str(script_tag.string or script_tag.get_text(" ", strip=False)).strip()
+    if not raw_text or len(raw_text) > _INSTAGRAM_BIO_LINK_STRUCTURED_MAX_SCRIPT_CHARS:
+        return None
+
+    payload_text = ""
+    script_type = cell_to_str(script_tag.get("type")).strip().lower()
+    if script_type in _INSTAGRAM_BIO_LINK_STRUCTURED_SCRIPT_TYPES or raw_text[:1] in "{[":
+        payload_text = raw_text
+    else:
+        for prefix in _INSTAGRAM_BIO_LINK_STRUCTURED_SCRIPT_PREFIXES:
+            if raw_text.startswith(prefix):
+                payload_text = raw_text[len(prefix):].strip()
+                break
+    payload_text = payload_text.rstrip(";").strip()
+    if payload_text[:1] not in "{[":
+        return None
+    try:
+        return json.loads(payload_text)
+    except Exception:
+        return None
+
+
+def _instagram_bio_link_structured_key_allows_url(key: str, *, parent_context: bool = False) -> bool:
+    if not key:
+        return False
+    if any(token in key for token in _INSTAGRAM_BIO_LINK_STRUCTURED_SKIP_KEY_TOKENS):
+        return False
+    if key in _INSTAGRAM_BIO_LINK_STRUCTURED_DIRECT_KEYS:
+        return True
+    if key in _INSTAGRAM_BIO_LINK_STRUCTURED_CONTEXT_KEYS or "bio_link" in key:
+        return True
+    if parent_context and key in _INSTAGRAM_BIO_LINK_STRUCTURED_CONTEXTUAL_KEYS:
+        return True
+    return False
+
+
+def _iter_instagram_bio_link_structured_values(payload: Any) -> Iterable[str]:
+    stack: List[Tuple[Any, bool]] = [(payload, False)]
+    nodes_seen = 0
+    while stack and nodes_seen < _INSTAGRAM_BIO_LINK_STRUCTURED_MAX_NODES:
+        current, url_context = stack.pop()
+        nodes_seen += 1
+        if isinstance(current, dict):
+            for raw_key, value in current.items():
+                key = cell_to_str(raw_key).strip().lower()
+                child_context = _instagram_bio_link_structured_key_allows_url(
+                    key,
+                    parent_context=url_context,
+                ) or url_context
+                if isinstance(value, str):
+                    candidate = value.strip()
+                    if child_context and candidate.startswith(("http://", "https://")):
+                        yield candidate
+                elif isinstance(value, (dict, list, tuple)):
+                    stack.append((value, child_context))
+        elif isinstance(current, (list, tuple)):
+            for item in reversed(current):
+                stack.append((item, url_context))
+        elif isinstance(current, str):
+            candidate = current.strip()
+            if url_context and candidate.startswith(("http://", "https://")):
+                yield candidate
+
+
 def _collect_instagram_bio_link_fetch_urls(
     html: str,
     *,
@@ -2750,11 +2879,19 @@ def _collect_instagram_bio_link_fetch_urls(
     if not html_text.strip():
         return []
     soup_obj = soup or BeautifulSoup(html_text, "html.parser")
-    hub_candidates: List[str] = []
-    direct_candidates: List[str] = []
+    candidate_groups: Dict[str, List[str]] = {
+        "anchor_hub": [],
+        "anchor_direct": [],
+        "attr_hub": [],
+        "attr_direct": [],
+        "meta_hub": [],
+        "meta_direct": [],
+        "script_hub": [],
+        "script_direct": [],
+    }
     seen: Set[str] = set()
 
-    def _add_candidate(raw_value: Any) -> None:
+    def _add_candidate(raw_value: Any, *, source_key: str) -> None:
         normalised = _normalise_instagram_bio_link_fetch_url(raw_value, base_url=profile_url)
         if not normalised or normalised in seen:
             return
@@ -2763,18 +2900,33 @@ def _collect_instagram_bio_link_fetch_urls(
         if host.startswith("www."):
             host = host[4:]
         if host in LINK_HUB_HOSTS:
-            hub_candidates.append(normalised)
+            candidate_groups[f"{source_key}_hub"].append(normalised)
         else:
-            direct_candidates.append(normalised)
+            candidate_groups[f"{source_key}_direct"].append(normalised)
 
     for anchor in soup_obj.select("a[href]"):
-        _add_candidate(anchor.get("href"))
-    if hub_candidates or direct_candidates:
-        return [*hub_candidates, *direct_candidates]
-
+        _add_candidate(anchor.get("href"), source_key="anchor")
     for raw_value in _collect_contact_surface_attribute_values(soup_obj):
-        _add_candidate(raw_value)
-    return [*hub_candidates, *direct_candidates]
+        _add_candidate(raw_value, source_key="attr")
+    for raw_value in _iter_instagram_bio_link_meta_values(soup_obj):
+        _add_candidate(raw_value, source_key="meta")
+    for script_tag in soup_obj.find_all("script"):
+        payload = _load_instagram_bio_link_structured_script_payload(script_tag)
+        if payload is None:
+            continue
+        for raw_value in _iter_instagram_bio_link_structured_values(payload):
+            _add_candidate(raw_value, source_key="script")
+    ordered_keys = (
+        "anchor_hub",
+        "anchor_direct",
+        "attr_hub",
+        "attr_direct",
+        "meta_hub",
+        "meta_direct",
+        "script_hub",
+        "script_direct",
+    )
+    return [candidate for key in ordered_keys for candidate in candidate_groups[key]]
 
 
 _INSTAGRAM_HIDDEN_CONTACT_LABEL_PRIORITY = {

@@ -790,6 +790,163 @@ def test_instagram_email_extracts_obfuscated_email_from_existing_dom_attribute(m
     ]
 
 
+def test_collect_instagram_bio_link_fetch_urls_preserves_anchor_priority_before_structured_surfaces():
+    html = (
+        "<html><head>"
+        "<meta name='website' content='https://metaartist.com'>"
+        "</head><body>"
+        "<a href='https://artist.com/contact'>Contact</a>"
+        "<script type='application/json'>"
+        '{"profile":{"bio_links":[{"url":"https://linktr.ee/artist"}]}}'
+        "</script>"
+        "</body></html>"
+    )
+
+    urls = cde._collect_instagram_bio_link_fetch_urls(
+        html,
+        profile_url="https://www.instagram.com/artist/",
+    )
+
+    assert urls == [
+        "https://artist.com/contact",
+        "https://metaartist.com",
+        "https://linktr.ee/artist",
+    ]
+
+
+def test_collect_instagram_bio_link_fetch_urls_extracts_structured_script_url_without_anchor():
+    html = (
+        "<html><body>"
+        "<script type='application/json'>"
+        '{"profile":{"bio_links":[{"url":"https://beacons.ai/scriptartist"}],'
+        '"profile_pic_url":"https://cdn.instagram.com/avatar.jpg"}}'
+        "</script>"
+        "</body></html>"
+    )
+
+    urls = cde._collect_instagram_bio_link_fetch_urls(
+        html,
+        profile_url="https://www.instagram.com/scriptartist/",
+    )
+
+    assert urls == ["https://beacons.ai/scriptartist"]
+
+
+def test_collect_instagram_bio_link_fetch_urls_extracts_meta_url_surface():
+    html = (
+        "<html><head>"
+        "<meta property='og:url' content='https://www.instagram.com/metaartist/'>"
+        "<meta name='website' content='https://metaartist.com'>"
+        "<meta property='og:image' content='https://cdn.instagram.com/metaartist.jpg'>"
+        "</head><body><div>Profile</div></body></html>"
+    )
+
+    urls = cde._collect_instagram_bio_link_fetch_urls(
+        html,
+        profile_url="https://www.instagram.com/metaartist/",
+    )
+
+    assert urls == ["https://metaartist.com"]
+
+
+def test_collect_instagram_bio_link_fetch_urls_rejects_partial_and_non_http_structured_values():
+    html = (
+        "<html><head>"
+        "<meta name='website' content='example.com'>"
+        "</head><body>"
+        "<script type='application/json'>"
+        '{"profile":{"bio_links":[{"url":"/contact"},{"url":"instagram://user?username=artist"}],'
+        '"website":"Visit https://artist.com"}}'
+        "</script>"
+        "</body></html>"
+    )
+
+    urls = cde._collect_instagram_bio_link_fetch_urls(
+        html,
+        profile_url="https://www.instagram.com/artist/",
+    )
+
+    assert urls == []
+
+
+def test_collect_instagram_bio_link_fetch_urls_filters_instagram_self_urls_from_structured_surfaces():
+    html = (
+        "<html><head>"
+        "<meta property='og:url' content='https://www.instagram.com/selfartist/'>"
+        "</head><body>"
+        "<script type='application/json'>"
+        '{"profile":{"bio_links":[{"url":"https://instagr.am/selfartist/"}],'
+        '"website":"https://instagram.com/selfartist"}}'
+        "</script>"
+        "</body></html>"
+    )
+
+    urls = cde._collect_instagram_bio_link_fetch_urls(
+        html,
+        profile_url="https://www.instagram.com/selfartist/",
+    )
+
+    assert urls == []
+
+
+def test_instagram_email_one_hop_bio_link_recovers_direct_email_from_structured_script(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Structured Script Artist",
+            "Email": "",
+            "Email_All": "",
+            "Instagram_URL": "https://instagram.com/structuredscriptartist/?hl=en#bio",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+            "Email_Type": "",
+            EMAIL_PROVENANCE_JSON_COL: "",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    bio_fetch_calls = []
+
+    monkeypatch.setattr(
+        cde,
+        "_fetch_instagram_profile_html",
+        lambda session, url: (
+            "<html><body>"
+            "<script type='application/json'>"
+            '{"profile":{"bio_links":[{"url":"https://beacons.ai/structuredscriptartist"}]}}'
+            "</script>"
+            "</body></html>",
+            200,
+        ),
+    )
+    monkeypatch.setattr(
+        cde,
+        "_fetch_website_html_bounded",
+        lambda session, url, **kwargs: bio_fetch_calls.append(url) or cde.WebsiteFetchResult(
+            url=url,
+            final_url="https://beacons.ai/structuredscriptartist",
+            status=200,
+            content_type="text/html",
+            html="<html><body>Bookings: structured@artist.com</body></html>",
+            is_html=True,
+        ),
+    )
+
+    matched = worker._enrich_row_instagram_email(seed_df, 0, ctx)
+
+    assert matched is True
+    assert bio_fetch_calls == ["https://beacons.ai/structuredscriptartist"]
+    assert seed_df.at[0, "Email"] == "structured@artist.com"
+    assert seed_df.at[0, "Email_All"] == "structured@artist.com"
+    assert seed_df.at[0, "Email_Source_URL"] == "https://beacons.ai/structuredscriptartist"
+    assert "instagram_bio_link_one_hop" in seed_df.at[0, EMAIL_PROVENANCE_JSON_COL]
+    assert logs == [
+        "[IG Email] Visiting https://www.instagram.com/structuredscriptartist/",
+        "[IG Email] Found email: structured@artist.com",
+    ]
+
+
 def test_instagram_email_one_hop_bio_link_recovers_direct_email(monkeypatch):
     logs = []
     worker = _make_worker(logs)
