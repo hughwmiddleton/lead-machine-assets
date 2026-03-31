@@ -4483,12 +4483,40 @@ def _extract_rendered_visible_text_from_driver(driver) -> str:
     if timeout_s <= 0:
         return initial_text
 
+    poll_s = min(0.2, timeout_s)
+
+    def _has_meaningful_growth(previous_text: str, current_text: str) -> bool:
+        previous = str(previous_text or "").strip()
+        current = str(current_text or "").strip()
+        if not current or current == previous:
+            return False
+
+        previous_len = len(previous)
+        current_len = len(current)
+        growth = current_len - previous_len
+        if growth <= 0:
+            return False
+
+        if not previous:
+            return current_len >= 80
+        return growth >= max(40, previous_len // 4)
+
+    # Keep one short follow-up check even when the initial snapshot is usable,
+    # but stop there unless the page is still clearly filling in meaningful text.
+    if poll_s > 0:
+        time.sleep(poll_s)
+
+    follow_up_text = _read_snapshot(driver)
+    if EMAIL_REGEX.search(follow_up_text):
+        return follow_up_text
+    if follow_up_text and follow_up_text == initial_text:
+        return follow_up_text
+    if follow_up_text and not _has_meaningful_growth(initial_text, follow_up_text):
+        return follow_up_text
+
     state = {
-        "last_text": initial_text,
-        "stable_hits": 0,
-        "saw_change": False,
+        "last_text": follow_up_text,
     }
-    baseline_len = len(initial_text)
 
     def _rendered_text_ready(drv):
         text = _read_snapshot(drv)
@@ -4497,34 +4525,21 @@ def _extract_rendered_visible_text_from_driver(driver) -> str:
             return text
 
         previous = state["last_text"] or ""
-        if text != previous:
-            state["saw_change"] = True
-            state["stable_hits"] = 0
-            state["last_text"] = text
-            return False
-
-        state["last_text"] = text or previous
-        if not text:
-            return False
-
-        state["stable_hits"] += 1
-        grew_materially = len(text) >= max(160, baseline_len + 40)
-        if (not initial_text) and state["stable_hits"] >= 1:
+        state["last_text"] = text
+        if text and text == previous:
             return text
-        if state["saw_change"] and state["stable_hits"] >= 2:
-            return text
-        if grew_materially and state["stable_hits"] >= 1:
-            return text
-        # Preserve a short late-render window, but stop burning the full
-        # timeout when a non-empty initial snapshot stays unchanged.
-        if initial_text and (not state["saw_change"]) and state["stable_hits"] >= 2:
+        if text and not _has_meaningful_growth(previous, text):
             return text
         return False
 
+    remaining_timeout_s = max(0.0, timeout_s - poll_s)
+    if remaining_timeout_s <= 0:
+        return str(follow_up_text or initial_text or "").strip()
+
     try:
-        return WebDriverWait(driver, timeout_s, poll_frequency=0.2).until(_rendered_text_ready)
+        return WebDriverWait(driver, remaining_timeout_s, poll_frequency=poll_s).until(_rendered_text_ready)
     except TimeoutException:
-        return str(state.get("last_text") or initial_text or "").strip()
+        return str(state.get("last_text") or follow_up_text or initial_text or "").strip()
 
 
 def _extract_fb_visible_text_with_container_fallback(driver) -> str:
