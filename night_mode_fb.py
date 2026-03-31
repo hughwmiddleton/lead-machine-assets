@@ -438,6 +438,58 @@ def _load_fb_page_with_timeout(
     baseline_html = ""
     baseline_surface_signature: Tuple[Any, ...] = tuple()
 
+    def _is_valid_fb_handoff_url(candidate_url: str, baseline_candidate: str) -> bool:
+        try:
+            current = str(candidate_url or "").strip()
+        except Exception:
+            return False
+        try:
+            baseline = str(baseline_candidate or "").strip()
+        except Exception:
+            baseline = ""
+        if not current or current == baseline or current == "about:blank":
+            return False
+        try:
+            parsed = urllib.parse.urlparse(current)
+        except Exception:
+            return False
+        scheme = (parsed.scheme or "").strip().lower()
+        host = (parsed.netloc or "").strip().lower()
+        if scheme not in {"http", "https"} or not host or "facebook.com" not in host:
+            return False
+        path = (parsed.path or "").strip()
+        if path in {"", "/"}:
+            return False
+        lowered_path = path.lower()
+        redirect_wrappers = (
+            "/l.php",
+            "/flx/warn",
+            "/share.php",
+            "/share/",
+            "/si/ajax/l/redirect/",
+            "/ajax/sharer/",
+        )
+        return not any(lowered_path == wrapper or lowered_path.startswith(f"{wrapper}/") for wrapper in redirect_wrappers)
+
+    def _read_min_nav_ready_probe() -> Tuple[str, bool]:
+        try:
+            probe = driver.execute_script(
+                """
+                /* fb_nav_min_ready_probe */
+                return [
+                    document.readyState || "",
+                    !!document.body
+                ];
+                """
+            )
+        except Exception:
+            return "", False
+        if isinstance(probe, (list, tuple)):
+            ready_state = str(probe[0] or "").strip().lower() if len(probe) >= 1 else ""
+            has_body = bool(probe[1]) if len(probe) >= 2 else False
+            return ready_state, has_body
+        return "", False
+
     def _read_nav_surface_probe() -> Tuple[str, Tuple[Any, ...]]:
         try:
             probe = driver.execute_script(
@@ -504,24 +556,26 @@ def _load_fb_page_with_timeout(
                         current_url = getattr(driver, "current_url", "") or ""
                     except Exception:
                         current_url = ""
-                    ready_state, current_surface_signature = _read_nav_surface_probe()
+                    ready_state, has_body = _read_min_nav_ready_probe()
+                    surface_ready = False
 
-                    surface_changed = bool(
-                        (current_url and current_url != baseline_url)
-                        or (current_surface_signature and current_surface_signature != baseline_surface_signature)
-                    )
-                    url_ready = bool(current_url and current_url != "about:blank")
-                    surface_ready = bool(
-                        current_surface_signature
-                        and any(
-                            (
-                                str(current_surface_signature[0] or "").strip(),
-                                current_surface_signature[1],
-                                current_surface_signature[2],
+                    if ready_state not in {"interactive", "complete"} and not has_body:
+                        ready_state, current_surface_signature = _read_nav_surface_probe()
+                        surface_ready = bool(
+                            current_surface_signature
+                            and any(
+                                (
+                                    str(current_surface_signature[0] or "").strip(),
+                                    current_surface_signature[1],
+                                    current_surface_signature[2],
+                                )
                             )
                         )
-                    )
-                    if surface_changed and ((ready_state in {"interactive", "complete"} and url_ready) or surface_ready):
+
+                    url_changed = bool(current_url and current_url != baseline_url)
+                    url_valid = _is_valid_fb_handoff_url(current_url, baseline_url)
+                    minimal_ready = bool(ready_state in {"interactive", "complete"} or has_body or surface_ready)
+                    if url_changed and url_valid and minimal_ready:
                         break
                     time.sleep(0.1)
                 else:
