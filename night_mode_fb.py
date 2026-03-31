@@ -510,6 +510,19 @@ def _load_fb_page_with_timeout(
             return ready_state, tuple(probe[1:4])
         return "", tuple()
 
+    def _has_nontrivial_html_snapshot(candidate_html: str, baseline_candidate_html: str) -> bool:
+        try:
+            snapshot = str(candidate_html or "").strip()
+        except Exception:
+            return False
+        if len(snapshot) <= 32:
+            return False
+        try:
+            baseline_snapshot = str(baseline_candidate_html or "").strip()
+        except Exception:
+            baseline_snapshot = ""
+        return snapshot != baseline_snapshot
+
     try:
         driver.set_page_load_timeout(timeout_s)
     except Exception:
@@ -552,11 +565,8 @@ def _load_fb_page_with_timeout(
             if nav_started:
                 deadline = time.time() + max(float(timeout_s or 0.0), 0.1)
                 while time.time() < deadline:
-                    try:
-                        current_url = getattr(driver, "current_url", "") or ""
-                    except Exception:
-                        current_url = ""
                     ready_state, has_body = _read_min_nav_ready_probe()
+                    current_surface_signature: Tuple[Any, ...] = tuple()
                     surface_ready = False
 
                     if ready_state not in {"interactive", "complete"} and not has_body:
@@ -572,12 +582,25 @@ def _load_fb_page_with_timeout(
                             )
                         )
 
+                    try:
+                        current_url = getattr(driver, "current_url", "") or ""
+                    except Exception:
+                        current_url = ""
+
                     url_valid = _is_valid_fb_handoff_url(current_url, baseline_url)
+                    usable_handoff_url = _is_valid_fb_handoff_url(current_url, "")
                     minimal_ready = bool(ready_state in {"interactive", "complete"} or has_body or surface_ready)
+                    content_ready = False
+                    if minimal_ready and usable_handoff_url:
+                        try:
+                            current_html_snapshot = getattr(driver, "page_source", "") or ""
+                        except Exception:
+                            current_html_snapshot = ""
+                        content_ready = _has_nontrivial_html_snapshot(current_html_snapshot, baseline_html)
                     # A non-baseline, non-wrapper Facebook URL is enough for the
                     # accepted-page handoff. Waiting for DOM probes to align here
                     # can strand successful SPA navigations in the timeout path.
-                    if url_valid:
+                    if url_valid or content_ready:
                         break
                     time.sleep(0.1)
                 else:

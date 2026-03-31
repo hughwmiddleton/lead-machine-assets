@@ -2609,7 +2609,7 @@ def test_load_fb_page_with_timeout_waits_on_wrapper_handoff_url(monkeypatch) -> 
     assert driver.stop_called is True
 
 
-def test_load_fb_page_with_timeout_waits_when_url_is_unchanged(monkeypatch) -> None:
+def test_load_fb_page_with_timeout_unblocks_on_ready_html_before_url_changes(monkeypatch) -> None:
     class _Clock:
         def __init__(self) -> None:
             self.now = 100.0
@@ -2625,6 +2625,7 @@ def test_load_fb_page_with_timeout_waits_when_url_is_unchanged(monkeypatch) -> N
             self.current_url = "https://www.facebook.com/original"
             self.page_source = "<html><body>Original</body></html>"
             self.nav_target = ""
+            self.min_ready_checks = 0
             self.stop_called = False
 
         def set_page_load_timeout(self, seconds):  # noqa: ANN001
@@ -2638,10 +2639,74 @@ def test_load_fb_page_with_timeout_waits_when_url_is_unchanged(monkeypatch) -> N
                 self.nav_target = args[0]
                 return True
             if "fb_nav_min_ready_probe" in script:
+                self.min_ready_checks += 1
+                if self.min_ready_checks >= 2:
+                    self.page_source = "<html><body>Artist page with contact details</body></html>"
+                    return ["interactive", True]
                 return ["loading", False]
             if "fb_nav_surface_probe" in script:
-                self.page_source = "<html><body>Original with extra DOM</body></html>"
-                return ["interactive", "Artist page", 1, 1200]
+                return ["loading", "", 0, 0]
+            if script == "window.stop();":
+                self.stop_called = True
+                return None
+            raise AssertionError(f"unexpected script: {script}")
+
+    clock = _Clock()
+    driver = _Driver()
+    monkeypatch.setattr(night_mode_fb.time, "time", clock.time)
+    monkeypatch.setattr(night_mode_fb.time, "sleep", clock.sleep)
+
+    html, current_url, timed_out = night_mode_fb._load_fb_page_with_timeout(
+        driver,
+        "https://www.facebook.com/example",
+        timeout_s=5.0,
+        unblock_on_ready=True,
+    )
+
+    assert timed_out is False
+    assert current_url == "https://www.facebook.com/original"
+    assert html == "<html><body>Artist page with contact details</body></html>"
+    assert driver.stop_called is False
+    assert clock.now < 101.0
+
+
+def test_load_fb_page_with_timeout_waits_when_ready_html_is_still_trivial(monkeypatch) -> None:
+    class _Clock:
+        def __init__(self) -> None:
+            self.now = 100.0
+
+        def time(self) -> float:
+            return self.now
+
+        def sleep(self, seconds: float) -> None:
+            self.now += seconds
+
+    class _Driver:
+        def __init__(self) -> None:
+            self.current_url = "https://www.facebook.com/original"
+            self.page_source = "<html><body>Original</body></html>"
+            self.nav_target = ""
+            self.min_ready_checks = 0
+            self.stop_called = False
+
+        def set_page_load_timeout(self, seconds):  # noqa: ANN001
+            self.timeout_seconds = seconds
+
+        def get(self, url):  # noqa: ANN001
+            raise AssertionError("driver.get should not be used when kickoff scheduling succeeds")
+
+        def execute_script(self, script, *args):  # noqa: ANN001
+            if "window.setTimeout" in script:
+                self.nav_target = args[0]
+                return True
+            if "fb_nav_min_ready_probe" in script:
+                self.min_ready_checks += 1
+                if self.min_ready_checks >= 2:
+                    self.page_source = "<html><body></body></html>"
+                    return ["interactive", True]
+                return ["loading", False]
+            if "fb_nav_surface_probe" in script:
+                return ["loading", "", 0, 0]
             if script == "window.stop();":
                 self.stop_called = True
                 return None
@@ -2661,7 +2726,7 @@ def test_load_fb_page_with_timeout_waits_when_url_is_unchanged(monkeypatch) -> N
 
     assert timed_out is True
     assert current_url == "https://www.facebook.com/original"
-    assert html == "<html><body>Original with extra DOM</body></html>"
+    assert html == "<html><body></body></html>"
     assert driver.stop_called is True
 
 
@@ -2687,7 +2752,7 @@ def test_load_fb_page_with_timeout_polling_loop_does_not_repeatedly_read_page_so
         @property
         def page_source(self) -> str:
             self.page_source_reads += 1
-            if self.page_source_reads > 2:
+            if self.page_source_reads > 3:
                 raise AssertionError("polling loop should not repeatedly read page_source")
             return self._page_source
 
@@ -2730,7 +2795,7 @@ def test_load_fb_page_with_timeout_polling_loop_does_not_repeatedly_read_page_so
     assert timed_out is False
     assert current_url == "https://www.facebook.com/example"
     assert html == "<html><body>Artist page</body></html>"
-    assert driver.page_source_reads == 2
+    assert driver.page_source_reads == 3
 
 
 def test_load_fb_page_with_timeout_preserves_timeout_salvage_when_no_valid_handoff(monkeypatch) -> None:
