@@ -2502,6 +2502,19 @@ _INSTAGRAM_REJECT_SEGMENTS = {
     "stories",
 }
 _INSTAGRAM_HANDLE_RE = re.compile(r"^[A-Za-z0-9._]{1,30}$")
+_SPOTIFY_IG_SEED_MIN_HANDLE_LEN = 5
+_SPOTIFY_IG_SEED_REJECT_HANDLES = frozenset(
+    {
+        "artist",
+        "artists",
+        "band",
+        "bands",
+        "dj",
+        "music",
+        "musician",
+        "official",
+    }
+)
 
 
 def _canonicalize_instagram_profile_url(raw: str) -> str:
@@ -2550,6 +2563,56 @@ def _get_canonical_instagram_url(row) -> str:
             if normalised:
                 return normalised
     return ""
+
+
+def _spotify_instagram_identity_website_candidate(row: Any) -> str:
+    if row is None:
+        return ""
+    spotify_website_url = _normalise_url(
+        _clean_cell(row.get("Spotify_Website_URL", "")) if hasattr(row, "get") else ""
+    )
+    if spotify_website_url:
+        return spotify_website_url
+    if hasattr(row, "get"):
+        for token in _split_multi_value(row.get("External Links", "")):
+            normalised = _normalise_url(token)
+            if not normalised or _host(normalised) not in LINK_HUB_HOSTS:
+                continue
+            return normalised
+    return ""
+
+
+def _spotify_seed_instagram_candidate_urls(
+    row: Any,
+    artist_name: str,
+    spotify_id: str = "",
+) -> List[str]:
+    if row is None or _spotify_instagram_identity_website_candidate(row):
+        return []
+
+    artist_compact = re.sub(r"[^a-z0-9]+", "", normalize_name(artist_name))
+    if (
+        len(artist_compact) < _SPOTIFY_IG_SEED_MIN_HANDLE_LEN
+        or artist_compact in _SPOTIFY_IG_SEED_REJECT_HANDLES
+        or artist_compact.isdigit()
+    ):
+        return []
+
+    candidates: List[str] = []
+    seen: Set[str] = set()
+
+    def _push(raw_value: str) -> None:
+        compact = re.sub(r"[^a-z0-9]+", "", normalize_name(raw_value))
+        if compact != artist_compact:
+            return
+        canonical = _canonicalize_instagram_profile_url(f"https://www.instagram.com/{compact}/")
+        if canonical and canonical not in seen:
+            seen.add(canonical)
+            candidates.append(canonical)
+
+    _push(artist_name)
+    _push(spotify_id)
+    return candidates
 
 
 _INSTAGRAM_MIN_PROFILE_HTML_CHARS = 48
@@ -8446,17 +8509,7 @@ class CrossDirectoryEnricherWorker(QThread):
         if _get_canonical_instagram_url(row):
             return False
 
-        spotify_website_url = _normalise_url(
-            _clean_cell(row.get("Spotify_Website_URL", "")) if hasattr(row, "get") else ""
-        )
-        website_candidate = spotify_website_url
-        if not website_candidate and hasattr(row, "get"):
-            for token in _split_multi_value(row.get("External Links", "")):
-                normalised = _normalise_url(token)
-                if not normalised or _host(normalised) not in LINK_HUB_HOSTS:
-                    continue
-                website_candidate = normalised
-                break
+        website_candidate = _spotify_instagram_identity_website_candidate(row)
         if not website_candidate:
             return False
 
@@ -8503,6 +8556,42 @@ class CrossDirectoryEnricherWorker(QThread):
         after_social = cell_to_str(seed_df.at[row_idx, "Social Link"]) if "Social Link" in seed_df.columns else ""
         return before_social != after_social
 
+    def _run_spotify_seed_instagram_identity_recovery(
+        self,
+        seed_df: pd.DataFrame,
+        row_idx,
+        artist: str,
+        spotify_id: str = "",
+    ) -> bool:
+        row = seed_df.loc[row_idx]
+        if _get_canonical_instagram_url(row):
+            return False
+
+        instagram_candidates = _spotify_seed_instagram_candidate_urls(
+            row,
+            artist,
+            spotify_id=spotify_id,
+        )
+        if not instagram_candidates:
+            return False
+
+        before_social = cell_to_str(seed_df.at[row_idx, "Social Link"]) if "Social Link" in seed_df.columns else ""
+        for spotify_instagram_url in instagram_candidates[:1]:
+            self._apply_payload(
+                seed_df,
+                row_idx,
+                EnrichmentPayload(
+                    socials={spotify_instagram_url},
+                    source_dir="spotify_instagram_seed",
+                    source_url=spotify_instagram_url,
+                    source_detail="Spotify Instagram Seed",
+                ),
+            )
+            after_social = cell_to_str(seed_df.at[row_idx, "Social Link"]) if "Social Link" in seed_df.columns else ""
+            if before_social != after_social:
+                return True
+        return False
+
     def _run_spotify_live_identity_recovery(
         self,
         seed_df: pd.DataFrame,
@@ -8534,6 +8623,17 @@ class CrossDirectoryEnricherWorker(QThread):
 
             sc_applied = self._night_sc_attempt_row(seed_df, row_idx, artist, spotify_id=spotify_id)
             enriched |= sc_applied
+            updated_snapshot = self._spotify_identity_surface_snapshot(seed_df.loc[row_idx])
+            if self._spotify_snapshot_gained_identity_surface(recovery_snapshot, updated_snapshot):
+                return enriched
+
+            seed_ig_applied = self._run_spotify_seed_instagram_identity_recovery(
+                seed_df,
+                row_idx,
+                artist,
+                spotify_id=spotify_id,
+            )
+            enriched |= seed_ig_applied
             updated_snapshot = self._spotify_identity_surface_snapshot(seed_df.loc[row_idx])
             if self._spotify_snapshot_gained_identity_surface(recovery_snapshot, updated_snapshot):
                 return enriched
