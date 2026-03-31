@@ -9,7 +9,11 @@ class _DummySession:
 
     def navigate(self, _url):
         class _Driver:
+            current_url = "https://www.facebook.com/"
             page_source = "<html></html>"
+
+            def get(self, url):  # noqa: ANN001
+                self.current_url = url
         return _Driver()
 
 
@@ -42,8 +46,18 @@ def test_min_quality_gate_rejects_bad_candidate(monkeypatch):
     monkeypatch.setattr(enricher, "_ensure_session", lambda: _DummySession())
     monkeypatch.setattr(enricher, "_ensure_driver_alive", lambda session: session)
     monkeypatch.setattr(enricher, "_scrape_single_fb_candidate", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        enricher,
+        "_fetch_search_surface",
+        lambda *args, **kwargs: (
+            "<div role='main'><div aria-label='Search results'><a href='https://www.facebook.com/runwaycollection'>Runway Collection</a></div></div>",
+            _DummySession().navigate("https://www.facebook.com/search/top/?q=runway"),
+            False,
+            "https://www.facebook.com/search/top/?q=runway",
+        ),
+    )
 
     page = enricher._search_for_page("Runway", location="", allow_anon=True)
 
     assert page is None
-    assert calls["count"] >= 2  # initial + forced refine queries
+    assert calls["count"] == 1

@@ -66,10 +66,10 @@ def test_find_best_page_url_builds_expected_query(monkeypatch, extra_signal, exp
     result = client.find_best_page_url("Test Artist", extra_signal, require_strong_candidate=True)
 
     assert result == artist_url
-    assert fetch_calls == [(expected_query, "direct_route")]
+    assert fetch_calls == [(expected_query, "homepage_ui")]
 
 
-def test_find_best_page_url_falls_back_to_homepage_after_direct_surface_miss(monkeypatch) -> None:
+def test_find_best_page_url_uses_homepage_ui_as_single_entry(monkeypatch) -> None:
     artist_url = "https://www.facebook.com/testartist"
     driver = _FakeDriver(
         {
@@ -83,8 +83,6 @@ def test_find_best_page_url_falls_back_to_homepage_after_direct_surface_miss(mon
 
     def _fake_fetch(query, *, search_method):  # noqa: ANN001
         search_methods.append(search_method)
-        if search_method == "direct_route":
-            return "<html><body>direct-miss</body></html>", "https://www.facebook.com/search/pages/?q=test", False
         return (
             "<div role='main'><div aria-label='Search results'><a href='https://www.facebook.com/testartist'>Test Artist</a></div></div>",
             "https://www.facebook.com/search/top/?q=test",
@@ -100,10 +98,10 @@ def test_find_best_page_url_falls_back_to_homepage_after_direct_surface_miss(mon
     result = client.find_best_page_url("Test Artist", require_strong_candidate=True)
 
     assert result == artist_url
-    assert search_methods == ["direct_route", "homepage_ui"]
+    assert search_methods == ["homepage_ui"]
 
 
-def test_find_best_page_url_does_not_fallback_when_direct_candidates_later_reject(monkeypatch) -> None:
+def test_find_best_page_url_does_not_rerun_homepage_when_candidates_later_reject(monkeypatch) -> None:
     artist_url = "https://www.facebook.com/rejectedartist"
     driver = _FakeDriver(
         {
@@ -117,11 +115,9 @@ def test_find_best_page_url_does_not_fallback_when_direct_candidates_later_rejec
 
     def _fake_fetch(query, *, search_method):  # noqa: ANN001
         search_methods.append(search_method)
-        if search_method != "direct_route":
-            raise AssertionError("homepage fallback should not run when direct-route produced candidates")
         return (
             "<div role='main'><div aria-label='Search results'><a href='https://www.facebook.com/rejectedartist'>Rejected Artist</a></div></div>",
-            "https://www.facebook.com/search/pages/?q=test",
+            "https://www.facebook.com/search/top/?q=test",
             False,
         )
 
@@ -134,7 +130,7 @@ def test_find_best_page_url_does_not_fallback_when_direct_candidates_later_rejec
     result = client.find_best_page_url("Rejected Artist", require_strong_candidate=True)
 
     assert result is None
-    assert search_methods == ["direct_route"]
+    assert search_methods == ["homepage_ui"]
 
 
 def test_find_best_page_url_rejects_zero_identity_music_candidate(monkeypatch) -> None:
@@ -166,7 +162,7 @@ def test_find_best_page_url_rejects_zero_identity_music_candidate(monkeypatch) -
 
     assert result is None
     assert driver.visited_urls == []
-    assert search_methods == ["direct_route"]
+    assert search_methods == ["homepage_ui"]
 
 
 def test_find_best_page_url_tries_next_ranked_candidate_after_prescrape_identity_reject(monkeypatch) -> None:
@@ -392,7 +388,6 @@ def test_find_best_page_url_rejects_generic_homepage_auth_surface(monkeypatch) -
     monkeypatch.setattr(client, "ensure_facebook_logged_in", lambda: True)
 
     search_methods = []
-    direct_html = "<html><body>direct-miss</body></html>"
     homepage_html = (
         "<div role='main'>"
         "<a href='https://www.facebook.com/reg/'>Sign up</a>"
@@ -403,8 +398,6 @@ def test_find_best_page_url_rejects_generic_homepage_auth_surface(monkeypatch) -
 
     def _fake_fetch(query, *, search_method):  # noqa: ANN001
         search_methods.append(search_method)
-        if search_method == "direct_route":
-            return direct_html, "https://www.facebook.com/search/pages/?q=qux", False
         return homepage_html, "https://www.facebook.com/", False
 
     monkeypatch.setattr(client, "_fetch_search_surface", _fake_fetch)
@@ -413,7 +406,7 @@ def test_find_best_page_url_rejects_generic_homepage_auth_surface(monkeypatch) -
 
     assert result is None
     assert driver.visited_urls == []
-    assert search_methods == ["direct_route", "homepage_ui"]
+    assert search_methods == ["homepage_ui"]
     assert any("search_method=homepage_ui junk_candidates_filtered=3" in message for message in logs)
     assert any("search_method=homepage_ui failure_mode=generic_auth_surface" in message for message in logs)
 

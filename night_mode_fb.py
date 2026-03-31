@@ -8146,10 +8146,17 @@ class NightModeFacebookEnricher:
             return html, driver, timed_out, current_url
 
         if search_method == "homepage_ui":
-            if session is None:
-                return "", None, False, ""
             _log(self.logger, f"[Night FB] search_method=homepage_ui query='{query_str}'")
-            driver = session.ensure_logged_in() if hasattr(session, "ensure_logged_in") else getattr(session, "driver", None)
+            driver = None
+            if session is not None:
+                driver = session.ensure_logged_in() if hasattr(session, "ensure_logged_in") else getattr(session, "driver", None)
+                if driver is None and hasattr(session, "navigate"):
+                    try:
+                        driver = session.navigate("https://www.facebook.com/")
+                    except Exception:
+                        driver = None
+            if driver is None:
+                driver = self._get_anon_driver()
             if driver is None:
                 return "", None, False, ""
             html, current_url, timed_out = _run_fb_homepage_search(
@@ -8273,7 +8280,7 @@ class NightModeFacebookEnricher:
             return None
         html, nav_driver, search_timed_out, current_search_url = self._fetch_search_surface(
             primary_query,
-            search_method="direct_route",
+            search_method="homepage_ui",
             session=session,
         )
         self._sync_search_disable_from_run_state()
@@ -8298,7 +8305,7 @@ class NightModeFacebookEnricher:
             for refine_query in refine_query_list:
                 html_refined, drv_refined, _timed_out_refined, _current_refined_url = self._fetch_search_surface(
                     refine_query,
-                    search_method="direct_route",
+                    search_method="homepage_ui",
                     session=session,
                 )
                 refine_candidates.extend(
@@ -8327,65 +8334,33 @@ class NightModeFacebookEnricher:
             diagnostics=diagnostics,
         )
         suppress_refine_queries = False
-        if session and not candidates:
-            miss_reason = _fb_search_surface_miss_reason(
+        candidates, homepage_failure_mode = _guard_homepage_fb_search_candidates(
+            candidates,
+            page_html=getattr(nav_driver, "page_source", "") or html or "",
+            current_url=current_search_url,
+            logger=self.logger,
+            log_prefix="[Night FB]",
+            query=primary_query,
+        )
+        if homepage_failure_mode:
+            _log(
+                self.logger,
+                f"[Night FB] search_method=homepage_ui failure_mode={homepage_failure_mode} query='{primary_query}'",
+            )
+            suppress_refine_queries = True
+        elif not candidates:
+            homepage_miss_reason = _fb_search_surface_miss_reason(
                 getattr(nav_driver, "page_source", "") or html or "",
                 driver=nav_driver,
                 current_url=current_search_url,
                 timed_out=search_timed_out,
             )
-            if miss_reason:
+            if homepage_miss_reason:
                 _log(
                     self.logger,
-                    f"[Night FB] search_method=direct_route failure_mode={miss_reason} query='{primary_query}'",
+                    f"[Night FB] search_method=homepage_ui failure_mode={homepage_miss_reason} query='{primary_query}'",
                 )
                 suppress_refine_queries = True
-                diagnostics = {}
-                html, nav_driver, search_timed_out, current_search_url = self._fetch_search_surface(
-                    primary_query,
-                    search_method="homepage_ui",
-                    session=session,
-                )
-                self._sync_search_disable_from_run_state()
-                if self._search_disabled_due_to_checkpoint:
-                    _log(self.logger, "[Night FB] search disabled due to checkpoint; skipping FB search.")
-                    return None
-                candidates = _harvest_candidates(
-                    html,
-                    nav_driver,
-                    artist,
-                    logger=self.logger,
-                    v2_enabled=v2_enabled,
-                    session_unhealthy=session_unhealthy,
-                    session_reason=session_reason,
-                    diagnostics=diagnostics,
-                )
-                candidates, homepage_failure_mode = _guard_homepage_fb_search_candidates(
-                    candidates,
-                    page_html=getattr(nav_driver, "page_source", "") or html or "",
-                    current_url=current_search_url,
-                    logger=self.logger,
-                    log_prefix="[Night FB]",
-                    query=primary_query,
-                )
-                if homepage_failure_mode:
-                    _log(
-                        self.logger,
-                        f"[Night FB] search_method=homepage_ui failure_mode={homepage_failure_mode} query='{primary_query}'",
-                    )
-                if not candidates:
-                    if not homepage_failure_mode:
-                        homepage_miss_reason = _fb_search_surface_miss_reason(
-                            getattr(nav_driver, "page_source", "") or html or "",
-                            driver=nav_driver,
-                            current_url=current_search_url,
-                            timed_out=search_timed_out,
-                        )
-                        if homepage_miss_reason:
-                            _log(
-                                self.logger,
-                                f"[Night FB] search_method=homepage_ui failure_mode={homepage_miss_reason} query='{primary_query}'",
-                            )
         soft_blocked = bool(diagnostics.get("overlay_soft_block"))
         ranked_for_preview = _rank_candidates_for_preview(artist, candidates)
 
