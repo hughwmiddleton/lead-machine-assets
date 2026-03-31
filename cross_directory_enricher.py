@@ -9361,12 +9361,9 @@ class CrossDirectoryEnricherWorker(QThread):
                         max_bytes=WEBSITE_EMAIL_MAX_BYTES,
                     )
                     if bio_link_result.is_html and bio_link_result.html:
-                        bio_link_soup = BeautifulSoup(bio_link_result.html, "html.parser")
-                        all_ig_emails = _extract_static_page_candidate_emails(
-                            bio_link_result.html,
-                            soup=bio_link_soup,
+                        all_ig_emails, used_mailto = _extract_website_emails_from_html(
+                            bio_link_result.html
                         )
-                        _, used_mailto = _mailto_emails_from_soup(bio_link_soup)
                         if all_ig_emails:
                             selected_source_url = bio_link_result.final_url or bio_link_urls[0]
                             selected_extract_method = "mailto" if used_mailto else "regex"

@@ -6,6 +6,7 @@ from types import SimpleNamespace
 pytest.importorskip("PyQt5")
 
 import cross_directory_enricher as cde
+from email_provenance import EMAIL_PROVENANCE_JSON_COL
 
 
 def _make_worker(logs):
@@ -802,6 +803,7 @@ def test_instagram_email_one_hop_bio_link_recovers_direct_email(monkeypatch):
             "Email_Source_Type": "",
             "Email_Extract_Method": "",
             "Email_Type": "",
+            EMAIL_PROVENANCE_JSON_COL: "",
         }
     )
     ctx = worker._build_row_context(seed_df, 0, 1, 1)
@@ -838,6 +840,7 @@ def test_instagram_email_one_hop_bio_link_recovers_direct_email(monkeypatch):
     assert seed_df.at[0, "Email_Source_Type"] == "instagram_enrich"
     assert seed_df.at[0, "Email_Extract_Method"] == "regex"
     assert seed_df.at[0, "Email_Type"] == "ig_enrich"
+    assert "instagram_bio_link_one_hop" in seed_df.at[0, EMAIL_PROVENANCE_JSON_COL]
     assert logs == [
         "[IG Email] Visiting https://www.instagram.com/onehopartist/",
         "[IG Email] Found email: bookings@artist.com",
@@ -930,6 +933,45 @@ def test_instagram_email_invalid_bio_link_skips_one_hop_fetch(monkeypatch):
     assert seed_df.at[0, "Email_All"] == ""
     assert logs == [
         "[IG Email] Visiting https://www.instagram.com/invalidbiolink/",
+        "[IG Email] no_email_visible",
+    ]
+
+
+def test_instagram_email_without_outbound_target_skips_one_hop_fetch(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "No Outbound Artist",
+            "Email": "",
+            "Email_All": "",
+            "Instagram_URL": "https://instagram.com/nooutboundartist/",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+            "Email_Type": "",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+
+    monkeypatch.setattr(
+        cde,
+        "_fetch_instagram_profile_html",
+        lambda session, url: ("<html><body><div>No outbound bio link here</div></body></html>", 200),
+    )
+    monkeypatch.setattr(
+        cde,
+        "_fetch_website_html_bounded",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("one-hop fetch should not run")),
+    )
+
+    matched = worker._enrich_row_instagram_email(seed_df, 0, ctx)
+
+    assert matched is False
+    assert seed_df.at[0, "Email"] == ""
+    assert seed_df.at[0, "Email_All"] == ""
+    assert logs == [
+        "[IG Email] Visiting https://www.instagram.com/nooutboundartist/",
         "[IG Email] no_email_visible",
     ]
 
