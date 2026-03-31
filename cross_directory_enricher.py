@@ -8436,6 +8436,36 @@ class CrossDirectoryEnricherWorker(QThread):
             live_ctx.update(refreshed)
         return spotify_identity
 
+    def _run_spotify_instagram_identity_recovery(
+        self,
+        seed_df: pd.DataFrame,
+        row_idx,
+        artist: str,
+    ) -> bool:
+        row = seed_df.loc[row_idx]
+        if _get_canonical_instagram_url(row):
+            return False
+
+        spotify_instagram_url = _canonicalize_instagram_profile_url(
+            _clean_cell(row.get("Spotify_Website_URL", "")) if hasattr(row, "get") else ""
+        )
+        if not spotify_instagram_url:
+            return False
+
+        before_social = cell_to_str(seed_df.at[row_idx, "Social Link"]) if "Social Link" in seed_df.columns else ""
+        self._apply_payload(
+            seed_df,
+            row_idx,
+            EnrichmentPayload(
+                socials={spotify_instagram_url},
+                source_dir="spotify_instagram_recovery",
+                source_url=spotify_instagram_url,
+                source_detail="Spotify Instagram Recovery",
+            ),
+        )
+        after_social = cell_to_str(seed_df.at[row_idx, "Social Link"]) if "Social Link" in seed_df.columns else ""
+        return before_social != after_social
+
     def _run_spotify_live_identity_recovery(
         self,
         seed_df: pd.DataFrame,
@@ -8467,6 +8497,12 @@ class CrossDirectoryEnricherWorker(QThread):
 
             sc_applied = self._night_sc_attempt_row(seed_df, row_idx, artist, spotify_id=spotify_id)
             enriched |= sc_applied
+            updated_snapshot = self._spotify_identity_surface_snapshot(seed_df.loc[row_idx])
+            if self._spotify_snapshot_gained_identity_surface(recovery_snapshot, updated_snapshot):
+                return enriched
+
+            ig_applied = self._run_spotify_instagram_identity_recovery(seed_df, row_idx, artist)
+            enriched |= ig_applied
             updated_snapshot = self._spotify_identity_surface_snapshot(seed_df.loc[row_idx])
             if self._spotify_snapshot_gained_identity_surface(recovery_snapshot, updated_snapshot):
                 return enriched
