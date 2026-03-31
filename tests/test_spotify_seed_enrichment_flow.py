@@ -873,9 +873,9 @@ def test_spotify_identity_pass_attempts_instagram_recovery_before_no_signal(tmp_
     worker = _build_worker(tmp_path)
     worker.enable_live_search = True
     worker.max_live_searches = 5
-    df = pd.DataFrame([_base_row(Spotify_Website_URL="https://www.instagram.com/artista/")])
+    df = pd.DataFrame([_base_row(**{"External Links": "https://linktr.ee/artista"})])
     ctx = worker._build_row_context(df, 0, 1, 1)
-    calls = {"bandcamp": 0, "soundcloud": 0, "lastfm": 0}
+    calls = {"bandcamp": 0, "soundcloud": 0, "lastfm": 0, "website_fetch": 0}
 
     def fake_bandcamp(_artist):
         calls["bandcamp"] += 1
@@ -889,10 +889,23 @@ def test_spotify_identity_pass_attempts_instagram_recovery_before_no_signal(tmp_
         calls["lastfm"] += 1
         return None
 
+    def fake_fetch(_session, url, *, timeout_s, max_bytes):
+        calls["website_fetch"] += 1
+        assert url == "https://linktr.ee/artista"
+        return cde.WebsiteFetchResult(
+            url=url,
+            final_url=url,
+            status=200,
+            content_type="text/html",
+            html='<html><body><a href="https://www.instagram.com/artista/">Instagram</a></body></html>',
+            is_html=True,
+        )
+
     monkeypatch.setattr(worker, "_live_search_bandcamp", fake_bandcamp)
     monkeypatch.setattr(worker, "_night_sc_attempt_row", fake_soundcloud)
     monkeypatch.setattr(worker, "_live_search_lastfm", fake_lastfm)
     monkeypatch.setattr(worker, "_bc_slug_fallback", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cde, "_fetch_website_html_bounded", fake_fetch)
 
     enriched = worker._run_spotify_discovery_pass(df, 0, ctx, fb_driver=None)
 
@@ -902,16 +915,16 @@ def test_spotify_identity_pass_attempts_instagram_recovery_before_no_signal(tmp_
     assert worker._spotify_identity_pass_enriched == 1
     assert worker._spotify_identity_pass_no_signal == 0
     assert worker._spotify_identity_pass_promotions["instagram"] == 1
-    assert calls == {"bandcamp": 1, "soundcloud": 1, "lastfm": 0}
+    assert calls == {"bandcamp": 1, "soundcloud": 1, "lastfm": 0, "website_fetch": 1}
 
 
 def test_spotify_identity_pass_ig_miss_preserves_no_signal_and_lastfm_fallback(tmp_path, monkeypatch):
     worker = _build_worker(tmp_path)
     worker.enable_live_search = True
     worker.max_live_searches = 5
-    df = pd.DataFrame([_base_row()])
+    df = pd.DataFrame([_base_row(**{"External Links": "https://linktr.ee/artista"})])
     ctx = worker._build_row_context(df, 0, 1, 1)
-    calls = {"bandcamp": 0, "soundcloud": 0, "lastfm": 0}
+    calls = {"bandcamp": 0, "soundcloud": 0, "lastfm": 0, "website_fetch": 0}
 
     def fake_bandcamp(_artist):
         calls["bandcamp"] += 1
@@ -925,10 +938,23 @@ def test_spotify_identity_pass_ig_miss_preserves_no_signal_and_lastfm_fallback(t
         calls["lastfm"] += 1
         return None
 
+    def fake_fetch(_session, url, *, timeout_s, max_bytes):
+        calls["website_fetch"] += 1
+        assert url == "https://linktr.ee/artista"
+        return cde.WebsiteFetchResult(
+            url=url,
+            final_url=url,
+            status=200,
+            content_type="text/html",
+            html='<html><body><a href="https://twitter.com/artista">Twitter</a></body></html>',
+            is_html=True,
+        )
+
     monkeypatch.setattr(worker, "_live_search_bandcamp", fake_bandcamp)
     monkeypatch.setattr(worker, "_night_sc_attempt_row", fake_soundcloud)
     monkeypatch.setattr(worker, "_live_search_lastfm", fake_lastfm)
     monkeypatch.setattr(worker, "_bc_slug_fallback", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cde, "_fetch_website_html_bounded", fake_fetch)
 
     enriched = worker._run_spotify_discovery_pass(df, 0, ctx, fb_driver=None)
 
@@ -938,7 +964,48 @@ def test_spotify_identity_pass_ig_miss_preserves_no_signal_and_lastfm_fallback(t
     assert worker._spotify_identity_pass_enriched == 0
     assert worker._spotify_identity_pass_no_signal == 1
     assert worker._spotify_identity_pass_promotions["instagram"] == 0
-    assert calls == {"bandcamp": 1, "soundcloud": 1, "lastfm": 1}
+    assert calls == {"bandcamp": 1, "soundcloud": 1, "lastfm": 1, "website_fetch": 1}
+
+
+def test_spotify_identity_pass_ig_no_website_noops_without_fetch(tmp_path, monkeypatch):
+    worker = _build_worker(tmp_path)
+    worker.enable_live_search = True
+    worker.max_live_searches = 5
+    df = pd.DataFrame([_base_row()])
+    ctx = worker._build_row_context(df, 0, 1, 1)
+    calls = {"bandcamp": 0, "soundcloud": 0, "lastfm": 0, "website_fetch": 0}
+
+    def fake_bandcamp(_artist):
+        calls["bandcamp"] += 1
+        return None
+
+    def fake_soundcloud(*args, **kwargs):
+        calls["soundcloud"] += 1
+        return False
+
+    def fake_lastfm(_artist):
+        calls["lastfm"] += 1
+        return None
+
+    def fake_fetch(*args, **kwargs):
+        calls["website_fetch"] += 1
+        raise AssertionError("website fetch should not run without a deterministic candidate")
+
+    monkeypatch.setattr(worker, "_live_search_bandcamp", fake_bandcamp)
+    monkeypatch.setattr(worker, "_night_sc_attempt_row", fake_soundcloud)
+    monkeypatch.setattr(worker, "_live_search_lastfm", fake_lastfm)
+    monkeypatch.setattr(worker, "_bc_slug_fallback", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cde, "_fetch_website_html_bounded", fake_fetch)
+
+    enriched = worker._run_spotify_discovery_pass(df, 0, ctx, fb_driver=None)
+
+    assert enriched is False
+    assert df.at[0, "Social Link"] == ""
+    assert worker._spotify_identity_pass_attempted == 1
+    assert worker._spotify_identity_pass_enriched == 0
+    assert worker._spotify_identity_pass_no_signal == 1
+    assert worker._spotify_identity_pass_promotions["instagram"] == 0
+    assert calls == {"bandcamp": 1, "soundcloud": 1, "lastfm": 1, "website_fetch": 0}
 
 
 def test_spotify_identity_pass_allows_conservative_low_score_bandcamp_promotion(tmp_path, monkeypatch):

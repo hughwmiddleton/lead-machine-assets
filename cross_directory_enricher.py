@@ -8446,11 +8446,48 @@ class CrossDirectoryEnricherWorker(QThread):
         if _get_canonical_instagram_url(row):
             return False
 
-        spotify_instagram_url = _canonicalize_instagram_profile_url(
+        spotify_website_url = _normalise_url(
             _clean_cell(row.get("Spotify_Website_URL", "")) if hasattr(row, "get") else ""
         )
-        if not spotify_instagram_url:
+        website_candidate = spotify_website_url
+        if not website_candidate and hasattr(row, "get"):
+            for token in _split_multi_value(row.get("External Links", "")):
+                normalised = _normalise_url(token)
+                if not normalised or _host(normalised) not in LINK_HUB_HOSTS:
+                    continue
+                website_candidate = normalised
+                break
+        if not website_candidate:
             return False
+
+        spotify_instagram_url = _canonicalize_instagram_profile_url(website_candidate)
+        if not spotify_instagram_url:
+            result = _fetch_website_html_bounded(
+                self.session,
+                website_candidate,
+                timeout_s=WEBSITE_EMAIL_TIMEOUT,
+                max_bytes=WEBSITE_EMAIL_MAX_BYTES,
+            )
+            if not (result.is_html and result.html):
+                return False
+            socials, _, _, _ = _extract_links_from_profile(
+                result.html,
+                "website",
+                result.final_url or website_candidate,
+            )
+            instagram_candidates = sorted(
+                {
+                    candidate
+                    for candidate in (
+                        _canonicalize_instagram_profile_url(url)
+                        for url in socials
+                    )
+                    if candidate
+                }
+            )
+            if not instagram_candidates:
+                return False
+            spotify_instagram_url = instagram_candidates[0]
 
         before_social = cell_to_str(seed_df.at[row_idx, "Social Link"]) if "Social Link" in seed_df.columns else ""
         self._apply_payload(
