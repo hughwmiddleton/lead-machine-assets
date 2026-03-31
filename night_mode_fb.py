@@ -600,7 +600,7 @@ def _load_fb_page_with_timeout(
                     # A non-baseline, non-wrapper Facebook URL is enough for the
                     # accepted-page handoff. Waiting for DOM probes to align here
                     # can strand successful SPA navigations in the timeout path.
-                    if url_valid or content_ready:
+                    if url_valid or content_ready or (minimal_ready and usable_handoff_url):
                         break
                     time.sleep(0.1)
                 else:
