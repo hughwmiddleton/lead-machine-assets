@@ -572,10 +572,12 @@ def _load_fb_page_with_timeout(
                             )
                         )
 
-                    url_changed = bool(current_url and current_url != baseline_url)
                     url_valid = _is_valid_fb_handoff_url(current_url, baseline_url)
                     minimal_ready = bool(ready_state in {"interactive", "complete"} or has_body or surface_ready)
-                    if url_changed and url_valid and minimal_ready:
+                    # A non-baseline, non-wrapper Facebook URL is enough for the
+                    # accepted-page handoff. Waiting for DOM probes to align here
+                    # can strand successful SPA navigations in the timeout path.
+                    if url_valid:
                         break
                     time.sleep(0.1)
                 else:
