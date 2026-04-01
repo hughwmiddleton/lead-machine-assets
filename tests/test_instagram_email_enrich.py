@@ -50,12 +50,21 @@ class _DummyClosable:
 
 
 class _DummyInstagramHiddenContactPage(_DummyClosable):
-    def __init__(self, html, *, candidates=None, click_effects=None, runtime_structured_payloads=None):
+    def __init__(
+        self,
+        html,
+        *,
+        candidates=None,
+        click_effects=None,
+        runtime_structured_payloads=None,
+        runtime_window_payloads=None,
+    ):
         super().__init__()
         self._html = html
         self._candidates = list(candidates or [])
         self._click_effects = dict(click_effects or {})
         self._runtime_structured_payloads = list(runtime_structured_payloads or [])
+        self._runtime_window_payloads = list(runtime_window_payloads or [])
         self.click_calls = []
         self.wait_calls = []
 
@@ -67,7 +76,10 @@ class _DummyInstagramHiddenContactPage(_DummyClosable):
         if "ig-hidden-contact" not in script_text and (
             "web_profile_info" in script_text or "bio_links" in script_text
         ):
-            return list(self._runtime_structured_payloads)
+            payloads = list(self._runtime_structured_payloads)
+            if any(token in script_text for token in ('_sharedData', '__additionalData', '__initialData')):
+                payloads.extend(self._runtime_window_payloads)
+            return payloads
         return [
             {
                 "selector": candidate.get(
@@ -1061,6 +1073,44 @@ def test_collect_instagram_bio_link_fetch_urls_preserves_html_priority_with_runt
     ]
 
 
+def test_collect_instagram_runtime_bio_link_structured_payloads_preserves_script_surface():
+    page = _DummyInstagramHiddenContactPage(
+        "<html><body></body></html>",
+        runtime_structured_payloads=[
+            {"bio_links": [{"url": "https://beacons.ai/script-runtime-artist"}]}
+        ],
+    )
+
+    payloads = cde._collect_instagram_runtime_bio_link_structured_payloads(page)
+
+    assert payloads == [
+        {"bio_links": [{"url": "https://beacons.ai/script-runtime-artist"}]}
+    ]
+
+
+def test_collect_instagram_runtime_bio_link_structured_payloads_reads_window_runtime_surface():
+    page = _DummyInstagramHiddenContactPage(
+        "<html><body></body></html>",
+        runtime_window_payloads=[
+            {
+                "web_profile_info": {
+                    "bio_links": [{"url": "https://linktr.ee/runtimewindowartist"}]
+                }
+            }
+        ],
+    )
+
+    payloads = cde._collect_instagram_runtime_bio_link_structured_payloads(page)
+
+    assert payloads == [
+        {
+            "web_profile_info": {
+                "bio_links": [{"url": "https://linktr.ee/runtimewindowartist"}]
+            }
+        }
+    ]
+
+
 def test_collect_instagram_bio_link_fetch_urls_extracts_structured_script_url_without_anchor():
     html = (
         "<html><body>"
@@ -1559,7 +1609,7 @@ def test_instagram_email_one_hop_bio_link_recovers_direct_email_from_runtime_liv
         static_html="<html><body><div>Requests HTML without outbound bio link</div></body></html>",
         live_page_factory=lambda: _DummyInstagramHiddenContactPage(
             "<html><body><button>Email</button></body></html>",
-            runtime_structured_payloads=[
+            runtime_window_payloads=[
                 {
                     "web_profile_info": {
                         "bio_links": [{"url": "https://linktr.ee/runtimelinkartist"}]
@@ -1683,7 +1733,7 @@ def test_instagram_hidden_contact_one_action_runs_after_live_runtime_onehop_fall
                     "<html><body><div role='dialog'>Bookings: runtime-shared@artist.com</div></body></html>"
                 )
             },
-            runtime_structured_payloads=[
+            runtime_window_payloads=[
                 {"web_profile_info": {"website": "https://about.meta.com/"}}
             ],
         ),

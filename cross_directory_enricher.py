@@ -3480,6 +3480,16 @@ def _collect_instagram_runtime_bio_link_structured_payloads(page: Any) -> List[A
       continue;
     }}
   }}
+  for (const key of ['_sharedData', '__additionalData', '__initialData']) {{
+    try {{
+      const runtimeValue = window[key];
+      if (runtimeValue && typeof runtimeValue === 'object') {{
+        collectAllowedStructures(runtimeValue);
+      }}
+    }} catch (_error) {{
+      continue;
+    }}
+  }}
   return payloads;
 }}
 """
