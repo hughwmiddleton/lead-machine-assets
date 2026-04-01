@@ -2503,6 +2503,7 @@ _INSTAGRAM_REJECT_SEGMENTS = {
 }
 _INSTAGRAM_HANDLE_RE = re.compile(r"^[A-Za-z0-9._]{1,30}$")
 _SPOTIFY_IG_SEED_MIN_HANDLE_LEN = 5
+_SPOTIFY_IG_SEED_MAX_CANDIDATES = 2
 _SPOTIFY_IG_SEED_REJECT_HANDLES = frozenset(
     {
         "artist",
@@ -2708,7 +2709,7 @@ def _spotify_seed_instagram_candidate_urls(
 
     trusted_external_urls = _spotify_seed_instagram_external_source_urls(row)
     if trusted_external_urls:
-        return trusted_external_urls
+        return trusted_external_urls[:_SPOTIFY_IG_SEED_MAX_CANDIDATES]
     if _spotify_instagram_identity_website_candidate(row):
         return []
 
@@ -2723,18 +2724,52 @@ def _spotify_seed_instagram_candidate_urls(
     candidates: List[str] = []
     seen: Set[str] = set()
 
-    def _push(raw_value: str) -> None:
-        compact = re.sub(r"[^a-z0-9]+", "", normalize_name(raw_value))
+    def _push_candidate_url(candidate_url: str) -> None:
+        canonical = _canonicalize_instagram_profile_url(candidate_url)
+        if (
+            not canonical
+            or canonical in seen
+            or len(candidates) >= _SPOTIFY_IG_SEED_MAX_CANDIDATES
+        ):
+            return
+        seen.add(canonical)
+        candidates.append(canonical)
+
+    def _push_handle_variant(raw_value: str) -> None:
+        token = _spotify_seed_instagram_identity_handle_token(raw_value)
+        if not token:
+            return
+        compact = re.sub(r"[^a-z0-9]+", "", normalize_name(token))
         if compact != artist_compact:
             return
-        canonical = _canonicalize_instagram_profile_url(f"https://www.instagram.com/{compact}/")
-        if canonical and canonical not in seen:
-            seen.add(canonical)
-            candidates.append(canonical)
+        if (
+            len(compact) < _SPOTIFY_IG_SEED_MIN_HANDLE_LEN
+            or compact in _SPOTIFY_IG_SEED_REJECT_HANDLES
+            or compact.isdigit()
+        ):
+            return
+        _push_candidate_url(f"https://www.instagram.com/{token}/")
 
-    _push(artist_name)
-    _push(spotify_id)
+    _push_candidate_url(f"https://www.instagram.com/{artist_compact}/")
+    _push_handle_variant(artist_name)
+    _push_handle_variant(spotify_id)
     return candidates
+
+
+def _spotify_seed_instagram_probe_direct_emails(
+    session: requests.Session,
+    candidate_url: str,
+) -> List[str]:
+    canonical = _canonicalize_instagram_profile_url(candidate_url)
+    if not canonical:
+        return []
+    with _instagram_profile_fetch_scope(session, canonical, retain_live_page=False) as profile_fetch:
+        html = profile_fetch.html
+        status = profile_fetch.status
+        if not _instagram_profile_fetch_usable(status, html):
+            return []
+        soup = BeautifulSoup(html, "html.parser")
+        return _extract_instagram_profile_candidate_emails(html, soup=soup)
 
 
 def _spotify_seed_instagram_identity_tokens(
@@ -9058,7 +9093,16 @@ class CrossDirectoryEnricherWorker(QThread):
             return False
 
         before_social = cell_to_str(seed_df.at[row_idx, "Social Link"]) if "Social Link" in seed_df.columns else ""
-        for spotify_instagram_url in instagram_candidates[:1]:
+        accepted_reason_priority = {
+            "external_source": 0,
+            "external_corroboration": 1,
+            "identity_validated": 2,
+        }
+        accepted_candidate_url = ""
+        accepted_candidate_reason = ""
+        accepted_candidate_rank = None
+
+        for spotify_instagram_url in instagram_candidates:
             reason = _spotify_seed_instagram_identity_acceptance_reason(
                 row,
                 spotify_instagram_url,
@@ -9066,10 +9110,16 @@ class CrossDirectoryEnricherWorker(QThread):
                 spotify_id=spotify_id,
             )
             if not reason:
-                self.log_message.emit(
-                    f"[Spotify IG Seed] candidate_rejected reason=identity_unverified url={spotify_instagram_url}"
-                )
                 continue
+            rank = accepted_reason_priority.get(reason, 999)
+            if accepted_candidate_rank is None or rank < accepted_candidate_rank:
+                accepted_candidate_url = spotify_instagram_url
+                accepted_candidate_reason = reason
+                accepted_candidate_rank = rank
+
+        if accepted_candidate_reason:
+            spotify_instagram_url = accepted_candidate_url
+            reason = accepted_candidate_reason
             if reason == "external_source":
                 self.log_message.emit(
                     f"[Spotify IG Seed] candidate_upgraded reason=external_source url={spotify_instagram_url}"
@@ -9089,9 +9139,70 @@ class CrossDirectoryEnricherWorker(QThread):
                 ),
             )
             after_social = cell_to_str(seed_df.at[row_idx, "Social Link"]) if "Social Link" in seed_df.columns else ""
-            if before_social != after_social:
-                return True
-        return False
+            return before_social != after_social
+
+        if _row_has_email(row):
+            return False
+
+        spotify_instagram_url = instagram_candidates[0]
+        self.log_message.emit(f"[Spotify IG Seed] candidate_selected url={spotify_instagram_url}")
+        direct_emails = _spotify_seed_instagram_probe_direct_emails(self.session, spotify_instagram_url)
+        if not direct_emails:
+            self.log_message.emit(
+                f"[Spotify IG Seed] candidate_failed reason=no_direct_proof url={spotify_instagram_url}"
+            )
+            return False
+
+        email_before = _row_email_summary_snapshot(seed_df, row_idx)
+        self._apply_payload(
+            seed_df,
+            row_idx,
+            EnrichmentPayload(
+                socials={spotify_instagram_url},
+                source_dir="spotify_instagram_seed",
+                source_url=spotify_instagram_url,
+                source_detail="Spotify Instagram Seed",
+            ),
+        )
+        found_email = direct_emails[0]
+        if not cell_to_str(seed_df.at[row_idx, "Email"]):
+            seed_df.at[row_idx, "Email"] = found_email
+        seed_df.at[row_idx, "Email_All"] = _merge_email_all(seed_df.at[row_idx, "Email_All"], direct_emails)
+        merge_email_provenance_into_target(
+            (seed_df, row_idx),
+            direct_emails,
+            source_url=spotify_instagram_url,
+            source_type="instagram_enrich",
+            method="regex",
+            surface="instagram_profile",
+        )
+        seed_df.at[row_idx, "Email_Type"] = "ig_enrich"
+        if not cell_to_str(seed_df.at[row_idx, "Email_Source_URL"]):
+            seed_df.at[row_idx, "Email_Source_URL"] = spotify_instagram_url
+        if not cell_to_str(seed_df.at[row_idx, "Email_Source_Type"]):
+            seed_df.at[row_idx, "Email_Source_Type"] = "instagram_enrich"
+        if not cell_to_str(seed_df.at[row_idx, "Email_Extract_Method"]):
+            seed_df.at[row_idx, "Email_Extract_Method"] = "regex"
+        try:
+            from pipeline_runner import record_email_summary_row_change
+
+            record_email_summary_row_change(
+                email_before,
+                _row_email_summary_snapshot(seed_df, row_idx),
+            )
+        except Exception:
+            pass
+        self._record_enrichment_yield(
+            row_idx,
+            email_before,
+            _row_email_summary_snapshot(seed_df, row_idx),
+            "instagram",
+        )
+        self.log_message.emit(
+            f"[Spotify IG Seed] candidate_promoted reason=direct_email_found url={spotify_instagram_url}"
+        )
+        after_social = cell_to_str(seed_df.at[row_idx, "Social Link"]) if "Social Link" in seed_df.columns else ""
+        return before_social != after_social
 
     def _run_spotify_live_identity_recovery(
         self,
