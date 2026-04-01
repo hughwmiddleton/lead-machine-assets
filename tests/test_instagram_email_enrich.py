@@ -958,6 +958,58 @@ def test_collect_instagram_bio_link_fetch_urls_logs_survivors_and_drop_reasons()
     ]
 
 
+def test_select_instagram_onehop_target_prefers_link_hub_over_meta_help_and_cdn():
+    logs = []
+
+    target = cde._select_instagram_onehop_target(
+        [
+            "https://help.instagram.com/12345",
+            "https://static.cdninstagram.com/rsrc.php/v4/abc.css",
+            "https://linktr.ee/artist",
+        ],
+        log=logs.append,
+    )
+
+    assert target == "https://linktr.ee/artist"
+    _assert_log_contains(logs, "[IG OneHop] target_blocked reason=internal_meta url=https://help.instagram.com/12345")
+    _assert_log_contains(logs, "[IG OneHop] target_blocked reason=static_asset url=https://static.cdninstagram.com/rsrc.php/v4/abc.css")
+    _assert_log_contains(logs, "[IG OneHop] ranked_target_selected tier=linkhub url=https://linktr.ee/artist")
+
+
+def test_select_instagram_onehop_target_prefers_external_domain_over_internal_meta_links():
+    logs = []
+
+    target = cde._select_instagram_onehop_target(
+        [
+            "https://about.meta.com/",
+            "https://www.facebook.com/privacy/policy",
+            "https://artist-example.com/contact",
+        ],
+        log=logs.append,
+    )
+
+    assert target == "https://artist-example.com/contact"
+    _assert_log_contains(logs, "[IG OneHop] target_blocked reason=internal_meta url=https://about.meta.com/")
+    _assert_log_contains(logs, "[IG OneHop] target_blocked reason=internal_meta url=https://www.facebook.com/privacy/policy")
+    _assert_log_contains(logs, "[IG OneHop] ranked_target_selected tier=external_domain url=https://artist-example.com/contact")
+
+
+def test_select_instagram_onehop_target_returns_empty_when_only_blocked_candidates():
+    logs = []
+
+    target = cde._select_instagram_onehop_target(
+        [
+            "https://help.instagram.com/999",
+            "https://about.meta.com/",
+            "https://cdninstagram.com/assets/app.js",
+        ],
+        log=logs.append,
+    )
+
+    assert target == ""
+    _assert_log_contains(logs, "[IG OneHop] no_useful_target_after_ranking")
+
+
 def test_instagram_email_one_hop_bio_link_recovers_direct_email_from_structured_script(monkeypatch):
     logs = []
     worker = _make_worker(logs)
@@ -1306,7 +1358,7 @@ def test_instagram_email_existing_row_email_skips_one_hop_stage(monkeypatch):
     assert logs == []
 
 
-def test_instagram_email_one_hop_fetches_only_first_eligible_bio_link(monkeypatch):
+def test_instagram_email_one_hop_ranks_targets_but_still_fetches_only_one_url(monkeypatch):
     logs = []
     worker = _make_worker(logs)
     seed_df = _seed_df(
@@ -1329,8 +1381,9 @@ def test_instagram_email_one_hop_fetches_only_first_eligible_bio_link(monkeypatc
         "_fetch_instagram_profile_html",
         lambda session, url: (
             "<html><body>"
+            "<a href='https://help.instagram.com/111'>Meta Help</a>"
+            "<a href='https://beacons.ai/secondtarget?utm_source=ig'>Second</a>"
             "<a href='https://linktr.ee/firsttarget'>First</a>"
-            "<a href='https://beacons.ai/secondtarget'>Second</a>"
             "</body></html>",
             200,
         ),
@@ -1353,6 +1406,104 @@ def test_instagram_email_one_hop_fetches_only_first_eligible_bio_link(monkeypatc
     assert matched is True
     assert bio_fetch_calls == ["https://linktr.ee/firsttarget"]
     assert seed_df.at[0, "Email"] == "bookings@artist.com"
+    _assert_log_contains(logs, "[IG OneHop] ranked_target_selected tier=linkhub url=https://linktr.ee/firsttarget")
+    _assert_log_contains(logs, "[IG OneHop] target_blocked reason=internal_meta url=https://help.instagram.com/111")
+    _assert_no_log_startswith(logs, "[IG OneHop] onehop_fetch_attempted=https://beacons.ai/")
+
+
+def test_instagram_email_one_hop_prefers_external_domain_over_internal_meta(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "External Domain First",
+            "Email": "",
+            "Email_All": "",
+            "Instagram_URL": "https://instagram.com/externaldomainfirst/",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+            "Email_Type": "",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    bio_fetch_calls = []
+
+    monkeypatch.setattr(
+        cde,
+        "_fetch_instagram_profile_html",
+        lambda session, url: (
+            "<html><body>"
+            "<a href='https://about.meta.com/'>Meta</a>"
+            "<a href='https://artist-example.com/contact'>Artist Site</a>"
+            "<a href='https://www.facebook.com/privacy/policy'>Privacy</a>"
+            "</body></html>",
+            200,
+        ),
+    )
+    monkeypatch.setattr(
+        cde,
+        "_fetch_website_html_bounded",
+        lambda session, url, **kwargs: bio_fetch_calls.append(url) or cde.WebsiteFetchResult(
+            url=url,
+            final_url=url,
+            status=200,
+            content_type="text/html",
+            html="<html><body>team@artist-example.com</body></html>",
+            is_html=True,
+        ),
+    )
+
+    matched = worker._enrich_row_instagram_email(seed_df, 0, ctx)
+
+    assert matched is True
+    assert bio_fetch_calls == ["https://artist-example.com/contact"]
+    assert seed_df.at[0, "Email"] == "team@artist-example.com"
+    _assert_log_contains(logs, "[IG OneHop] ranked_target_selected tier=external_domain url=https://artist-example.com/contact")
+    _assert_log_contains(logs, "[IG OneHop] target_blocked reason=internal_meta url=https://about.meta.com")
+
+
+def test_instagram_email_one_hop_blocked_only_targets_skip_fetch(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Blocked Targets Only",
+            "Email": "",
+            "Email_All": "",
+            "Instagram_URL": "https://instagram.com/blockedtargets/",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+            "Email_Type": "",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+
+    monkeypatch.setattr(
+        cde,
+        "_fetch_instagram_profile_html",
+        lambda session, url: (
+            "<html><body>"
+            "<a href='https://help.instagram.com/111'>Help</a>"
+            "<a href='https://about.meta.com/'>Meta</a>"
+            "<a href='https://static.cdninstagram.com/rsrc.php/v4/abc.css'>CSS</a>"
+            "</body></html>",
+            200,
+        ),
+    )
+    monkeypatch.setattr(
+        cde,
+        "_fetch_website_html_bounded",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("one-hop fetch should not run")),
+    )
+
+    matched = worker._enrich_row_instagram_email(seed_df, 0, ctx)
+
+    assert matched is False
+    assert seed_df.at[0, "Email"] == ""
+    _assert_log_contains(logs, "[IG OneHop] no_useful_target_after_ranking")
+    _assert_no_log_startswith(logs, "[IG OneHop] onehop_fetch_attempted=")
 
 
 def test_instagram_email_one_hop_does_not_follow_links_found_on_fetched_page(monkeypatch):

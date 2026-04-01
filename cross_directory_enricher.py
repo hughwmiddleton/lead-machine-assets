@@ -3045,6 +3045,220 @@ def _format_instagram_bio_link_drop_reasons(counts: Counter) -> str:
     return ",".join(f"{reason}:{count}" for reason, count in counts.most_common(3))
 
 
+_INSTAGRAM_ONEHOP_LINK_HUB_HOSTS = frozenset(
+    set(LINK_HUB_HOSTS)
+    | {
+        "direct.me",
+        "hype.co",
+        "stan.store",
+    }
+)
+_INSTAGRAM_ONEHOP_MUSIC_SERVICE_HOSTS = frozenset(
+    {
+        "bandcamp.com",
+        "ffm.to",
+        "lnk.to",
+        "music.apple.com",
+        "open.spotify.com",
+        "push.fm",
+        "songwhip.com",
+        "soundcloud.com",
+        "spotify.com",
+        "youtu.be",
+        "youtube.com",
+    }
+)
+_INSTAGRAM_ONEHOP_LOW_VALUE_SOCIAL_HOSTS = frozenset(
+    {
+        "facebook.com",
+        "fb.me",
+        "linkedin.com",
+        "m.facebook.com",
+        "pinterest.com",
+        "threads.net",
+        "tiktok.com",
+        "twitter.com",
+        "x.com",
+    }
+)
+_INSTAGRAM_ONEHOP_BLOCKED_HOSTS = frozenset(
+    {
+        "about.instagram.com",
+        "about.meta.com",
+        "cdninstagram.com",
+        "help.instagram.com",
+        "instagram.com",
+        "instagr.am",
+        "meta.com",
+        "privacycenter.instagram.com",
+        "static.cdninstagram.com",
+    }
+)
+_INSTAGRAM_ONEHOP_BLOCKED_HOST_SUFFIXES = (
+    "cdninstagram.com",
+    "meta.com",
+)
+_INSTAGRAM_ONEHOP_BLOCKED_FACEBOOK_PATH_SEGMENTS = frozenset(
+    {
+        "about",
+        "business",
+        "help",
+        "legal",
+        "meta",
+        "policies",
+        "policy",
+        "privacy",
+        "safety",
+        "security",
+        "settings",
+        "terms",
+    }
+)
+_INSTAGRAM_ONEHOP_STATIC_EXTENSIONS = frozenset(
+    NOISE_FILE_EXTENSIONS
+    | {
+        ".css",
+        ".eot",
+        ".ico",
+        ".js",
+        ".json",
+        ".map",
+        ".mjs",
+        ".otf",
+        ".ttf",
+        ".webmanifest",
+        ".woff",
+        ".woff2",
+    }
+)
+_INSTAGRAM_ONEHOP_TRACKING_QUERY_KEYS = frozenset(
+    {
+        "fbclid",
+        "gclid",
+        "igsh",
+        "si",
+        "utm_campaign",
+        "utm_content",
+        "utm_medium",
+        "utm_source",
+        "utm_term",
+    }
+)
+
+
+def _instagram_onehop_host_matches(host: str, domain: str) -> bool:
+    host_value = cell_to_str(host).strip().lower()
+    domain_value = cell_to_str(domain).strip().lower()
+    if not host_value or not domain_value:
+        return False
+    return host_value == domain_value or host_value.endswith("." + domain_value)
+
+
+def _instagram_onehop_host(url: str) -> str:
+    host = _host(url)
+    if host.startswith("www."):
+        host = host[4:]
+    return host.split(":", 1)[0]
+
+
+def _instagram_onehop_is_static_asset_url(url: str) -> bool:
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except Exception:
+        return False
+    path = (parsed.path or "").lower()
+    _, ext = os.path.splitext(path)
+    if ext and ext in _INSTAGRAM_ONEHOP_STATIC_EXTENSIONS:
+        return True
+    return any(token in path for token in ("/assets/", "/static/", "/images/", "/fonts/"))
+
+
+def _instagram_onehop_block_reason(url: str) -> str:
+    host = _instagram_onehop_host(url)
+    if not host:
+        return "invalid"
+    if _instagram_onehop_is_static_asset_url(url):
+        return "static_asset"
+    if host in _INSTAGRAM_ONEHOP_BLOCKED_HOSTS:
+        return "internal_meta"
+    if any(_instagram_onehop_host_matches(host, suffix) for suffix in _INSTAGRAM_ONEHOP_BLOCKED_HOST_SUFFIXES):
+        return "internal_meta"
+    if _instagram_onehop_host_matches(host, "facebook.com"):
+        try:
+            segments = [segment.lower() for segment in urllib.parse.urlparse(url).path.split("/") if segment]
+        except Exception:
+            segments = []
+        if not segments:
+            return "internal_meta"
+        if segments[0] in _INSTAGRAM_ONEHOP_BLOCKED_FACEBOOK_PATH_SEGMENTS:
+            return "internal_meta"
+    return ""
+
+
+def _instagram_onehop_target_tier(url: str) -> Tuple[int, str]:
+    host = _instagram_onehop_host(url)
+    if any(_instagram_onehop_host_matches(host, domain) for domain in _INSTAGRAM_ONEHOP_LINK_HUB_HOSTS):
+        return (0, "linkhub")
+    if any(_instagram_onehop_host_matches(host, domain) for domain in _INSTAGRAM_ONEHOP_MUSIC_SERVICE_HOSTS):
+        return (2, "music_service")
+    if any(_instagram_onehop_host_matches(host, domain) for domain in _INSTAGRAM_ONEHOP_LOW_VALUE_SOCIAL_HOSTS):
+        return (3, "external_info")
+    return (1, "external_domain")
+
+
+def _instagram_onehop_target_sort_key(url: str) -> Tuple[int, int, int, int, int, int, str]:
+    tier_rank, _ = _instagram_onehop_target_tier(url)
+    try:
+        parsed = urllib.parse.urlparse(url)
+        query_keys = {key.lower() for key in urllib.parse.parse_qs(parsed.query or "", keep_blank_values=True)}
+    except Exception:
+        parsed = urllib.parse.urlparse("")
+        query_keys = set()
+    path = parsed.path or ""
+    segments = [segment for segment in path.split("/") if segment]
+    tracking_penalty = 1 if any(key.startswith("utm_") or key in _INSTAGRAM_ONEHOP_TRACKING_QUERY_KEYS for key in query_keys) else 0
+    query_penalty = 1 if parsed.query else 0
+    fragment_penalty = 1 if parsed.fragment else 0
+    path_depth_penalty = max(len(segments) - 1, 0)
+    path_length_penalty = len(path.rstrip("/")) if path.rstrip("/") else 0
+    return (
+        tier_rank,
+        tracking_penalty,
+        query_penalty,
+        fragment_penalty,
+        path_depth_penalty,
+        path_length_penalty,
+        url,
+    )
+
+
+def _select_instagram_onehop_target(
+    candidate_urls: Iterable[str],
+    *,
+    log: Optional[Any] = None,
+) -> str:
+    ranked_candidates: List[Tuple[Tuple[int, int, int, int, int, int, str], str, str]] = []
+    for url in candidate_urls:
+        blocked_reason = _instagram_onehop_block_reason(url)
+        if blocked_reason:
+            if callable(log):
+                log(f"[IG OneHop] target_blocked reason={blocked_reason} url={url}")
+            continue
+        _, tier_name = _instagram_onehop_target_tier(url)
+        ranked_candidates.append((_instagram_onehop_target_sort_key(url), tier_name, url))
+
+    if not ranked_candidates:
+        if callable(log):
+            log("[IG OneHop] no_useful_target_after_ranking")
+        return ""
+
+    ranked_candidates.sort(key=lambda item: item[0])
+    _, tier_name, selected_url = ranked_candidates[0]
+    if callable(log):
+        log(f"[IG OneHop] ranked_target_selected tier={tier_name} url={selected_url}")
+    return selected_url
+
+
 _INSTAGRAM_BIO_LINK_META_KEY_ATTRS = ("property", "name", "itemprop")
 _INSTAGRAM_BIO_LINK_META_ALLOW_TOKENS = ("url", "link", "website", "external", "sameas", "same_as")
 _INSTAGRAM_BIO_LINK_META_SKIP_TOKENS = ("image", "video", "audio", "icon", "thumbnail", "player")
@@ -9971,23 +10185,27 @@ class CrossDirectoryEnricherWorker(QThread):
                     f"count={len(bio_link_urls)} sample={_instagram_bio_link_log_sample(bio_link_urls)}"
                 )
                 if bio_link_urls:
-                    onehop_target = bio_link_urls[0]
-                    self.log_message.emit(f"[IG OneHop] onehop_selected_target={onehop_target}")
-                    self.log_message.emit(f"[IG OneHop] onehop_fetch_attempted={onehop_target}")
-                    bio_link_result = _fetch_website_html_bounded(
-                        self.session,
-                        onehop_target,
-                        timeout_s=WEBSITE_EMAIL_TIMEOUT,
-                        max_bytes=WEBSITE_EMAIL_MAX_BYTES,
+                    onehop_target = _select_instagram_onehop_target(
+                        bio_link_urls,
+                        log=self.log_message.emit,
                     )
-                    if bio_link_result.is_html and bio_link_result.html:
-                        all_ig_emails, used_mailto = _extract_website_emails_from_html(
-                            bio_link_result.html
+                    if onehop_target:
+                        self.log_message.emit(f"[IG OneHop] onehop_selected_target={onehop_target}")
+                        self.log_message.emit(f"[IG OneHop] onehop_fetch_attempted={onehop_target}")
+                        bio_link_result = _fetch_website_html_bounded(
+                            self.session,
+                            onehop_target,
+                            timeout_s=WEBSITE_EMAIL_TIMEOUT,
+                            max_bytes=WEBSITE_EMAIL_MAX_BYTES,
                         )
-                        if all_ig_emails:
-                            selected_source_url = bio_link_result.final_url or onehop_target
-                            selected_extract_method = "mailto" if used_mailto else "regex"
-                            selected_surface = "instagram_bio_link_one_hop"
+                        if bio_link_result.is_html and bio_link_result.html:
+                            all_ig_emails, used_mailto = _extract_website_emails_from_html(
+                                bio_link_result.html
+                            )
+                            if all_ig_emails:
+                                selected_source_url = bio_link_result.final_url or onehop_target
+                                selected_extract_method = "mailto" if used_mailto else "regex"
+                                selected_surface = "instagram_bio_link_one_hop"
                 else:
                     self.log_message.emit("[IG OneHop] bio_link_urls_empty")
             if (
