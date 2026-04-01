@@ -10431,6 +10431,8 @@ class CrossDirectoryEnricherWorker(QThread):
                     and not _row_has_email(seed_df.loc[row_idx])
                 ):
                     print("DEBUG IG: running live HTML direct extraction")
+                    print("DEBUG IG: contains exact email =", "lacedupmgmt@gmail.com" in (shared_live_html or "").lower())
+                    print("DEBUG IG: contains @gmail.com =", "@gmail.com" in (shared_live_html or "").lower())
                     live_soup = BeautifulSoup(shared_live_html, "html.parser")
                     all_ig_emails = _extract_instagram_profile_candidate_emails(
                         shared_live_html,
