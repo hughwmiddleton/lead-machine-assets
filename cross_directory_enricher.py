@@ -3902,7 +3902,8 @@ def _open_instagram_live_page_bridge(
             context=context,
             page=page,
         )
-    except Exception:
+    except Exception as e:
+        print("DEBUG IG: live page bridge failed:", repr(e))
         if page is not None:
             try:
                 page.close()
