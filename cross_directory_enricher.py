@@ -3388,12 +3388,105 @@ def _iter_instagram_bio_link_structured_values(payload: Any) -> Iterable[str]:
                 yield candidate
 
 
+def _collect_instagram_runtime_bio_link_structured_payloads(page: Any) -> List[Any]:
+    if page is None or not hasattr(page, "evaluate"):
+        return []
+    try:
+        raw_payloads = page.evaluate(
+            f"""
+() => {{
+  const maxScriptChars = {_INSTAGRAM_BIO_LINK_STRUCTURED_MAX_SCRIPT_CHARS};
+  const maxNodes = {_INSTAGRAM_BIO_LINK_STRUCTURED_MAX_NODES};
+  const payloads = [];
+  const seen = new Set();
+  const addPayload = (value) => {{
+    if (!value || typeof value !== 'object') return;
+    try {{
+      const key = JSON.stringify(value);
+      if (!key || seen.has(key)) return;
+      seen.add(key);
+      payloads.push(value);
+    }} catch (_error) {{
+      // Skip non-serializable values.
+    }}
+  }};
+  const collectAllowedStructures = (root) => {{
+    const stack = [root];
+    let nodesSeen = 0;
+    while (stack.length && nodesSeen < maxNodes) {{
+      const current = stack.pop();
+      nodesSeen += 1;
+      if (Array.isArray(current)) {{
+        for (let idx = current.length - 1; idx >= 0; idx -= 1) {{
+          stack.push(current[idx]);
+        }}
+        continue;
+      }}
+      if (!current || typeof current !== 'object') {{
+        continue;
+      }}
+      const user = current.user;
+      if (user && typeof user === 'object' && Array.isArray(user.bio_links)) {{
+        addPayload({{ bio_links: user.bio_links }});
+      }}
+      const webProfileInfo = current.web_profile_info;
+      if (webProfileInfo && typeof webProfileInfo === 'object') {{
+        addPayload(webProfileInfo);
+      }}
+      for (const value of Object.values(current)) {{
+        if (value && typeof value === 'object') {{
+          stack.push(value);
+        }}
+      }}
+    }}
+  }};
+
+  for (const script of Array.from(document.querySelectorAll('script'))) {{
+    const text = (script.textContent || '').trim();
+    if (!text || text.length > maxScriptChars) {{
+      continue;
+    }}
+    if (!text.includes('bio_links') && !text.includes('web_profile_info')) {{
+      continue;
+    }}
+    const type = (script.getAttribute('type') || '').toLowerCase();
+    let payloadText = '';
+    if (type === 'application/json' || type === 'application/ld+json' || text.startsWith('window._sharedData =')) {{
+      payloadText = text;
+    }} else {{
+      continue;
+    }}
+    if (payloadText.startsWith('window._sharedData =')) {{
+      payloadText = payloadText.slice('window._sharedData ='.length).trim();
+    }}
+    payloadText = payloadText.replace(/;\\s*$/, '').trim();
+    if (!payloadText.startsWith('{{') && !payloadText.startsWith('[')) {{
+      continue;
+    }}
+    try {{
+      collectAllowedStructures(JSON.parse(payloadText));
+    }} catch (_error) {{
+      continue;
+    }}
+  }}
+  return payloads;
+}}
+"""
+        )
+    except Exception:
+        return []
+    if not isinstance(raw_payloads, list):
+        return []
+    return [payload for payload in raw_payloads if isinstance(payload, (dict, list, tuple))]
+
+
 def _collect_instagram_bio_link_fetch_urls(
     html: str,
     *,
     soup: Optional[BeautifulSoup] = None,
     profile_url: str = "",
     log: Optional[Any] = None,
+    runtime_structured_payloads: Optional[Iterable[Any]] = None,
 ) -> List[str]:
     html_text = html if isinstance(html, str) else str(html or "")
     source_group_names = {
@@ -3489,6 +3582,9 @@ def _collect_instagram_bio_link_fetch_urls(
             continue
         for raw_value in _iter_instagram_bio_link_structured_values(payload):
             _add_candidate(raw_value, source_key="script")
+    for payload in runtime_structured_payloads or ():
+        for raw_value in _iter_instagram_bio_link_structured_values(payload):
+            _add_candidate(raw_value, source_key="script")
     ordered_keys = (
         "anchor_hub",
         "anchor_direct",
@@ -3511,6 +3607,7 @@ def _instagram_onehop_emails_from_surface(
     profile_url: str = "",
     log: Optional[Any] = None,
     state_label: str = "bio_link_urls",
+    runtime_structured_payloads: Optional[Iterable[Any]] = None,
 ) -> Tuple[List[str], str, str, str]:
     html_text = html if isinstance(html, str) else str(html or "")
     soup = BeautifulSoup(html_text, "html.parser") if html_text.strip() else None
@@ -3519,6 +3616,7 @@ def _instagram_onehop_emails_from_surface(
         soup=soup,
         profile_url=profile_url,
         log=log,
+        runtime_structured_payloads=runtime_structured_payloads,
     )
     if callable(log):
         log(
@@ -10267,6 +10365,9 @@ class CrossDirectoryEnricherWorker(QThread):
                     if live_page is not None:
                         live_html = live_page.snapshot_html()
                         if _instagram_profile_fetch_usable(200, live_html):
+                            runtime_structured_payloads = _collect_instagram_runtime_bio_link_structured_payloads(
+                                live_page.page
+                            )
                             (
                                 all_ig_emails,
                                 selected_source_url,
@@ -10278,6 +10379,7 @@ class CrossDirectoryEnricherWorker(QThread):
                                 profile_url=ig_url,
                                 log=self.log_message.emit,
                                 state_label="live_surface_bio_link_urls",
+                                runtime_structured_payloads=runtime_structured_payloads,
                             )
                             if all_ig_emails:
                                 selected_surface = "instagram_bio_link_one_hop"
