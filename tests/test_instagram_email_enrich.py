@@ -84,6 +84,14 @@ class _DummyInstagramHiddenContactPage(_DummyClosable):
         script_text = str(script or "")
         if "document.body" in script_text and "innerText" in script_text:
             return self._rendered_text
+        if "document.body" in script_text and "textContent" in script_text:
+            return self._rendered_text
+        if "document.querySelector('main')" in script_text:
+            return self._rendered_text
+        if "document.documentElement" in script_text and "textContent" in script_text:
+            return self._rendered_text
+        if "querySelectorAll('h1, span, div')" in script_text:
+            return self._rendered_text
         if "ig-hidden-contact" not in script_text and (
             "web_profile_info" in script_text or "bio_links" in script_text
         ):
@@ -127,43 +135,54 @@ def _make_instagram_live_bridge(page):
     )
 
 
-def _instagram_render_ready_marker_from_html(script, html):
+def _instagram_render_ready_marker_from_html(
+    script,
+    html,
+    *,
+    rendered_body_text="",
+    rendered_main_text="",
+):
     script_text = str(script or "")
     assert "return 'meta[property=\"og:description\"]';" not in script_text
     assert "profile_surface" in script_text
+    assert "structured_script" not in script_text
 
     soup = BeautifulSoup(html, "html.parser")
-    for script_tag in soup.select("script"):
-        text = (script_tag.get_text() or "").strip()
-        if not text:
-            continue
-        script_type = (script_tag.get("type") or "").lower()
-        if script_type in {"application/json", "application/ld+json"} or text.startswith("window._sharedData ="):
-            if "bio_links" in text or "web_profile_info" in text:
-                return "structured_script"
-
     main = soup.select_one("main")
     if main is None:
         return False
 
     profile_structure = main.select_one("header, section, article")
     profile_content = main.select_one("a[href], button, img, h1, h2, ul li")
-    text = " ".join(main.stripped_strings)
-    if profile_structure is not None and profile_content is not None and len(text) >= 16:
+    body_text = " ".join(str(rendered_body_text or "").split())
+    main_text = " ".join(str(rendered_main_text or "").split())
+    if (
+        profile_structure is not None
+        and profile_content is not None
+        and len(main_text) >= 16
+        and len(body_text) >= len(main_text)
+    ):
         return "profile_surface"
     return False
 
 
 class _DummyInstagramRenderWaitPage:
-    def __init__(self, html, *, clock=None):
+    def __init__(self, html, *, clock=None, rendered_body_text="", rendered_main_text=""):
         self._html = html
         self._clock = clock
+        self._rendered_body_text = rendered_body_text
+        self._rendered_main_text = rendered_main_text
         self.evaluate_calls = []
         self.wait_calls = []
 
     def evaluate(self, script):  # noqa: ANN001
         self.evaluate_calls.append(str(script or ""))
-        return _instagram_render_ready_marker_from_html(script, self._html)
+        return _instagram_render_ready_marker_from_html(
+            script,
+            self._html,
+            rendered_body_text=self._rendered_body_text,
+            rendered_main_text=self._rendered_main_text,
+        )
 
     def wait_for_timeout(self, timeout_ms):  # noqa: ANN001
         self.wait_calls.append(timeout_ms)
@@ -491,6 +510,25 @@ def test_wait_for_instagram_profile_render_meta_only_shell_is_not_ready(monkeypa
     assert page.wait_calls == [100]
 
 
+def test_wait_for_instagram_profile_render_structured_script_only_is_not_ready(monkeypatch):
+    clock = _FakeMonotonicClock()
+    monkeypatch.setattr(cde.time, "monotonic", clock)
+    page = _DummyInstagramRenderWaitPage(
+        "<html><body>"
+        "<script type='application/json'>"
+        '{"profile":{"bio_links":[{"url":"https://linktr.ee/render-gate-artist"}]}}'
+        "</script>"
+        "<main><header><h1>Render Gate Artist</h1><button>Email</button></header></main>"
+        "</body></html>",
+        clock=clock,
+    )
+
+    cde._wait_for_instagram_profile_render(page, timeout_s=0.1)
+
+    assert len(page.evaluate_calls) == 1
+    assert page.wait_calls == [100]
+
+
 def test_wait_for_instagram_profile_render_accepts_rendered_profile_surface(monkeypatch):
     clock = _FakeMonotonicClock()
     monkeypatch.setattr(cde.time, "monotonic", clock)
@@ -499,6 +537,8 @@ def test_wait_for_instagram_profile_render_accepts_rendered_profile_surface(monk
         "<body><main><header><h1>Rendered Link Artist</h1><button>Email</button></header>"
         "<section><a href='https://linktr.ee/renderedlinkartist'>Bio</a></section></main></body></html>",
         clock=clock,
+        rendered_body_text="Rendered Link Artist Bio and booking details",
+        rendered_main_text="Rendered Link Artist Bio and booking details",
     )
 
     cde._wait_for_instagram_profile_render(page, timeout_s=0.25)

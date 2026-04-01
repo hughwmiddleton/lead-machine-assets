@@ -2818,24 +2818,11 @@ _INSTAGRAM_REQUIRED_SELECTOR = 'meta[property="og:description"]'
 _INSTAGRAM_RENDER_READY_TIMEOUT_MS = 2500
 _INSTAGRAM_RENDER_READY_JS = """
 () => {
-  const scripts = Array.from(document.querySelectorAll('script'));
-  for (const script of scripts) {
-    const text = (script.textContent || '').trim();
-    if (!text) {
-      continue;
-    }
-    const type = (script.getAttribute('type') || '').toLowerCase();
-    if (type === 'application/json' || type === 'application/ld+json' || text.startsWith('window._sharedData =')) {
-      if (text.includes('bio_links') || text.includes('web_profile_info')) {
-        return 'structured_script';
-      }
-    }
-  }
   const main = document.querySelector('main');
   if (main) {
     const profileStructure = main.querySelector('header, section, article');
     const profileContent = main.querySelector('a[href], button, img, h1, h2, ul li');
-    const text = (main.innerText || main.textContent || '').replace(/\\s+/g, ' ').trim();
+    const text = (main.innerText || '').replace(/\\s+/g, ' ').trim();
     if (profileStructure && profileContent && text.length >= 16) {
       return 'profile_surface';
     }
@@ -2882,7 +2869,7 @@ def _wait_for_instagram_profile_render(page: Any, timeout_s: float) -> None:
             marker = cell_to_str(marker_value).strip()
         else:
             marker = ""
-        if marker:
+        if marker == "profile_surface":
             return
         remaining_ms = int(max((deadline - time.monotonic()) * 1000, 0))
         if remaining_ms <= 0:
