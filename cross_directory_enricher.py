@@ -2615,6 +2615,59 @@ def _spotify_seed_instagram_candidate_urls(
     return candidates
 
 
+def _spotify_seed_instagram_identity_tokens(
+    artist_name: str,
+    spotify_id: str = "",
+) -> Set[str]:
+    tokens: Set[str] = set()
+
+    def _push(raw_value: str) -> None:
+        value = cell_to_str(raw_value)
+        if not value:
+            return
+        token = value.strip().strip("/")
+        if token.startswith("@"):
+            token = token[1:]
+        if (
+            not token
+            or "/" in token
+            or any(ch.isspace() for ch in token)
+        ):
+            return
+        token = unicodedata.normalize("NFKD", token)
+        token = "".join(ch for ch in token if not unicodedata.combining(ch)).lower()
+        if _INSTAGRAM_HANDLE_RE.fullmatch(token):
+            tokens.add(token)
+
+    _push(artist_name)
+    _push(spotify_id)
+    return tokens
+
+
+def _spotify_seed_instagram_identity_validated(
+    candidate_url: str,
+    artist_name: str,
+    spotify_id: str = "",
+) -> bool:
+    canonical = _canonicalize_instagram_profile_url(candidate_url)
+    if not canonical:
+        return False
+    try:
+        parsed = urllib.parse.urlparse(canonical)
+    except Exception:
+        return False
+    handle = next((segment for segment in (parsed.path or "").split("/") if segment), "")
+    if not handle:
+        return False
+    handle_norm = normalize_name(handle)
+    if not handle_norm:
+        return False
+    return any(
+        normalize_name(token) == handle_norm
+        for token in _spotify_seed_instagram_identity_tokens(artist_name, spotify_id=spotify_id)
+    )
+
+
 _INSTAGRAM_MIN_PROFILE_HTML_CHARS = 48
 _INSTAGRAM_REQUIRED_SELECTOR = 'meta[property="og:description"]'
 _INSTAGRAM_RENDER_READY_TIMEOUT_MS = 2500
@@ -8894,6 +8947,18 @@ class CrossDirectoryEnricherWorker(QThread):
 
         before_social = cell_to_str(seed_df.at[row_idx, "Social Link"]) if "Social Link" in seed_df.columns else ""
         for spotify_instagram_url in instagram_candidates[:1]:
+            if not _spotify_seed_instagram_identity_validated(
+                spotify_instagram_url,
+                artist,
+                spotify_id=spotify_id,
+            ):
+                self.log_message.emit(
+                    f"[Spotify IG Seed] candidate_rejected reason=identity_unverified url={spotify_instagram_url}"
+                )
+                continue
+            self.log_message.emit(
+                f"[Spotify IG Seed] candidate_accepted reason=identity_validated url={spotify_instagram_url}"
+            )
             self._apply_payload(
                 seed_df,
                 row_idx,
