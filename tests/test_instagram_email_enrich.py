@@ -8,6 +8,8 @@ pytest.importorskip("PyQt5")
 import cross_directory_enricher as cde
 from email_provenance import EMAIL_PROVENANCE_JSON_COL
 
+_REAL_OPEN_INSTAGRAM_LIVE_PAGE_BRIDGE = cde._open_instagram_live_page_bridge
+
 
 def _make_worker(logs):
     worker = cde.CrossDirectoryEnricherWorker("seed.csv", "output.csv", enable_live_search=False)
@@ -195,6 +197,102 @@ def test_instagram_profile_fetch_scope_static_mode_does_not_open_live_page(monke
         assert result.status == 200
         assert "bookings@artist.com" in result.html
         assert result.live_page is None
+
+
+def test_open_instagram_live_page_bridge_waits_for_render_before_return(monkeypatch):
+    events = []
+
+    class DummyPage(_DummyClosable):
+        def goto(self, url, wait_until=None, timeout=None):  # noqa: ANN001
+            events.append(("goto", url, wait_until, timeout))
+
+        def content(self):
+            return "<html><body><main>Rendered profile</main></body></html>"
+
+    class DummyContext(_DummyClosable):
+        def __init__(self, page):
+            super().__init__()
+            self._page = page
+
+        def new_page(self):
+            events.append(("new_page",))
+            return self._page
+
+    class DummyBrowser(_DummyClosable):
+        def __init__(self, context):
+            super().__init__()
+            self._context = context
+
+        def new_context(self):
+            events.append(("new_context",))
+            return self._context
+
+    class DummyChromium:
+        def __init__(self, browser):
+            self._browser = browser
+
+        def launch(self, headless=True):  # noqa: ANN001
+            events.append(("launch", headless))
+            return self._browser
+
+    class DummyPlaywright(_DummyClosable):
+        def __init__(self, browser):
+            super().__init__()
+            self.chromium = DummyChromium(browser)
+
+        def stop(self):
+            self.closed = True
+            events.append(("stop",))
+
+    class DummySyncPlaywrightRunner:
+        def __init__(self, playwright):
+            self._playwright = playwright
+
+        def start(self):
+            events.append(("start",))
+            return self._playwright
+
+    page = DummyPage()
+    context = DummyContext(page)
+    browser = DummyBrowser(context)
+    playwright = DummyPlaywright(browser)
+
+    monkeypatch.setattr(
+        cde,
+        "_load_instagram_playwright",
+        lambda: (lambda: DummySyncPlaywrightRunner(playwright)),
+    )
+
+    def fake_wait_for_instagram_profile_render(page_arg, timeout_s):  # noqa: ANN001
+        events.append(("wait", page_arg, timeout_s))
+
+    monkeypatch.setattr(cde, "_wait_for_instagram_profile_render", fake_wait_for_instagram_profile_render)
+
+    bridge = _REAL_OPEN_INSTAGRAM_LIVE_PAGE_BRIDGE(
+        "https://www.instagram.com/igartist/",
+        timeout_s=12.5,
+    )
+
+    assert bridge is not None
+    assert bridge.page is page
+    assert bridge.snapshot_html() == "<html><body><main>Rendered profile</main></body></html>"
+    assert events == [
+        ("start",),
+        ("launch", True),
+        ("new_context",),
+        ("new_page",),
+        ("goto", "https://www.instagram.com/igartist/", "domcontentloaded", 12500.0),
+        ("wait", page, 12.5),
+    ]
+
+    bridge.close()
+
+    assert bridge.closed is True
+    assert bridge.page.closed is True
+    assert bridge.context.closed is True
+    assert bridge.browser.closed is True
+    assert bridge.playwright.closed is True
+    assert events[-1] == ("stop",)
 
 
 def test_instagram_profile_fetch_scope_bridge_returns_live_page_and_closes_it(monkeypatch):

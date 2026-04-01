@@ -3776,6 +3776,7 @@ def _open_instagram_live_page_bridge(
         context = browser.new_context()
         page = context.new_page()
         page.goto(url, wait_until="domcontentloaded", timeout=timeout_s * 1000)
+        _wait_for_instagram_profile_render(page, timeout_s)
         return InstagramLivePageBridge(
             playwright=playwright,
             browser=browser,
