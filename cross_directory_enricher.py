@@ -10438,6 +10438,17 @@ class CrossDirectoryEnricherWorker(QThread):
                         shared_live_html,
                         soup=live_soup,
                     )
+                    if not all_ig_emails and shared_live_page is not None:
+                        try:
+                            rendered_live_text = cell_to_str(
+                                shared_live_page.page.evaluate(
+                                    "() => document.body ? (document.body.innerText || '') : ''"
+                                )
+                            )
+                        except Exception:
+                            rendered_live_text = ""
+                        if rendered_live_text:
+                            all_ig_emails = _extract_instagram_profile_candidate_emails(rendered_live_text)
                 if (
                     not all_ig_emails
                     and not _row_has_email(seed_df.loc[row_idx])
