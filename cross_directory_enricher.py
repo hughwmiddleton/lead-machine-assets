@@ -2582,12 +2582,134 @@ def _spotify_instagram_identity_website_candidate(row: Any) -> str:
     return ""
 
 
+_SPOTIFY_IG_EXTERNAL_SOURCE_BRANCH_KEYS = frozenset({"spotifyinstagramrecovery"})
+
+
+def _spotify_seed_instagram_identity_handle_token(raw_value: Any) -> str:
+    value = cell_to_str(raw_value)
+    if not value:
+        return ""
+    token = value.strip().strip("/")
+    if token.startswith("@"):
+        token = token[1:]
+    if (
+        not token
+        or "/" in token
+        or any(ch.isspace() for ch in token)
+    ):
+        return ""
+    token = unicodedata.normalize("NFKD", token)
+    token = "".join(ch for ch in token if not unicodedata.combining(ch)).lower()
+    if not _INSTAGRAM_HANDLE_RE.fullmatch(token):
+        return ""
+    return token
+
+
+def _spotify_seed_instagram_external_source_urls(row: Any) -> List[str]:
+    candidates: List[str] = []
+    seen: Set[str] = set()
+
+    def _push(raw_value: Any) -> None:
+        canonical = _canonicalize_instagram_profile_url(cell_to_str(raw_value))
+        if canonical and canonical not in seen:
+            seen.add(canonical)
+            candidates.append(canonical)
+
+    if row is None or not hasattr(row, "get"):
+        return candidates
+
+    # Spotify website links are a direct non-Instagram upstream input.
+    _push(row.get("Spotify_Website_URL", ""))
+
+    source_dir_key = re.sub(r"[^a-z0-9]+", "", _clean_cell(row.get("Source Directory", "")).lower())
+    if source_dir_key in _SPOTIFY_IG_EXTERNAL_SOURCE_BRANCH_KEYS:
+        # Only trust already-present row IG URLs when the writing branch is a known
+        # external-source recovery path.
+        _push(row.get("Source URL", ""))
+
+    return candidates
+
+
+def _spotify_seed_instagram_external_corroboration_tokens(row: Any) -> Set[str]:
+    tokens: Set[str] = set()
+    if row is None or not hasattr(row, "get"):
+        return tokens
+
+    def _push(raw_value: Any) -> None:
+        token = _spotify_seed_instagram_identity_handle_token(raw_value)
+        if token:
+            tokens.add(token)
+
+    def _push_bandcamp_url(raw_url: Any) -> None:
+        canonical = _canonicalise_bandcamp_url(cell_to_str(raw_url))
+        host = _host(canonical)
+        if not host or not host.endswith(".bandcamp.com"):
+            return
+        subdomain = host[: -len(".bandcamp.com")]
+        if subdomain and "." not in subdomain:
+            _push(subdomain)
+
+    def _push_soundcloud_url(raw_url: Any) -> None:
+        url = _normalise_url(cell_to_str(raw_url)) or cell_to_str(raw_url)
+        if not url:
+            return
+        handle = _sc_handle_from_profile_url(url) or _sc_handle_from_url(url)
+        _push(handle)
+
+    _push_bandcamp_url(row.get("Bandcamp_URL", ""))
+    _push_soundcloud_url(row.get("SoundCloud Link", ""))
+    _push_soundcloud_url(row.get("SoundCloud URL", ""))
+
+    source_url = _normalise_url(_clean_cell(row.get("Source URL", ""))) or ""
+    source_url_source = _source_for_url(source_url) or ""
+    if source_url_source == "bandcamp":
+        _push_bandcamp_url(source_url)
+    elif source_url_source == "soundcloud":
+        _push_soundcloud_url(source_url)
+
+    return tokens
+
+
+def _spotify_seed_instagram_identity_acceptance_reason(
+    row: Any,
+    candidate_url: str,
+    artist_name: str,
+    spotify_id: str = "",
+) -> str:
+    canonical = _canonicalize_instagram_profile_url(candidate_url)
+    if not canonical:
+        return ""
+    if canonical in set(_spotify_seed_instagram_external_source_urls(row)):
+        return "external_source"
+    try:
+        parsed = urllib.parse.urlparse(canonical)
+    except Exception:
+        parsed = None
+    handle = next((segment for segment in (parsed.path or "").split("/") if segment), "") if parsed else ""
+    handle_token = _spotify_seed_instagram_identity_handle_token(handle)
+    if handle_token and handle_token in _spotify_seed_instagram_external_corroboration_tokens(row):
+        return "external_corroboration"
+    if _spotify_seed_instagram_identity_validated(
+        canonical,
+        artist_name,
+        spotify_id=spotify_id,
+    ):
+        return "identity_validated"
+    return ""
+
+
 def _spotify_seed_instagram_candidate_urls(
     row: Any,
     artist_name: str,
     spotify_id: str = "",
 ) -> List[str]:
-    if row is None or _spotify_instagram_identity_website_candidate(row):
+    if row is None:
+        return []
+
+    trusted_external_urls = _spotify_seed_instagram_external_source_urls(row)
+    if trusted_external_urls:
+        return trusted_external_urls
+    if _spotify_instagram_identity_website_candidate(row):
         return []
 
     artist_compact = re.sub(r"[^a-z0-9]+", "", normalize_name(artist_name))
@@ -2622,21 +2744,8 @@ def _spotify_seed_instagram_identity_tokens(
     tokens: Set[str] = set()
 
     def _push(raw_value: str) -> None:
-        value = cell_to_str(raw_value)
-        if not value:
-            return
-        token = value.strip().strip("/")
-        if token.startswith("@"):
-            token = token[1:]
-        if (
-            not token
-            or "/" in token
-            or any(ch.isspace() for ch in token)
-        ):
-            return
-        token = unicodedata.normalize("NFKD", token)
-        token = "".join(ch for ch in token if not unicodedata.combining(ch)).lower()
-        if _INSTAGRAM_HANDLE_RE.fullmatch(token):
+        token = _spotify_seed_instagram_identity_handle_token(raw_value)
+        if token:
             tokens.add(token)
 
     _push(artist_name)
@@ -8911,6 +9020,9 @@ class CrossDirectoryEnricherWorker(QThread):
             if not instagram_candidates:
                 return False
             spotify_instagram_url = instagram_candidates[0]
+        self.log_message.emit(
+            f"[Spotify IG Seed] candidate_upgraded reason=external_source url={spotify_instagram_url}"
+        )
 
         before_social = cell_to_str(seed_df.at[row_idx, "Social Link"]) if "Social Link" in seed_df.columns else ""
         self._apply_payload(
@@ -8947,18 +9059,25 @@ class CrossDirectoryEnricherWorker(QThread):
 
         before_social = cell_to_str(seed_df.at[row_idx, "Social Link"]) if "Social Link" in seed_df.columns else ""
         for spotify_instagram_url in instagram_candidates[:1]:
-            if not _spotify_seed_instagram_identity_validated(
+            reason = _spotify_seed_instagram_identity_acceptance_reason(
+                row,
                 spotify_instagram_url,
                 artist,
                 spotify_id=spotify_id,
-            ):
+            )
+            if not reason:
                 self.log_message.emit(
                     f"[Spotify IG Seed] candidate_rejected reason=identity_unverified url={spotify_instagram_url}"
                 )
                 continue
-            self.log_message.emit(
-                f"[Spotify IG Seed] candidate_accepted reason=identity_validated url={spotify_instagram_url}"
-            )
+            if reason == "external_source":
+                self.log_message.emit(
+                    f"[Spotify IG Seed] candidate_upgraded reason=external_source url={spotify_instagram_url}"
+                )
+            else:
+                self.log_message.emit(
+                    f"[Spotify IG Seed] candidate_accepted reason={reason} url={spotify_instagram_url}"
+                )
             self._apply_payload(
                 seed_df,
                 row_idx,

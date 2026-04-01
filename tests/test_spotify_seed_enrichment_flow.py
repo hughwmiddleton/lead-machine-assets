@@ -1032,6 +1032,136 @@ def test_spotify_seed_instagram_identity_recovery_rejects_unvalidated_compact_gu
     ]
 
 
+def test_spotify_seed_instagram_identity_recovery_accepts_trusted_external_source_url(tmp_path):
+    logs = []
+    worker = _build_worker(tmp_path)
+    worker.log_message = SimpleNamespace(emit=lambda msg: logs.append(msg))
+    df = pd.DataFrame(
+        [
+            _base_row(
+                **{
+                    "Artist Name": "Artist A",
+                    "Spotify_Artist_ID": "spotify-opaque-id",
+                    "Spotify_Website_URL": "https://www.instagram.com/officialartist/",
+                }
+            )
+        ]
+    )
+
+    candidates = cde._spotify_seed_instagram_candidate_urls(df.loc[0], "Artist A", spotify_id="spotify-opaque-id")
+    applied = worker._run_spotify_seed_instagram_identity_recovery(
+        df,
+        0,
+        "Artist A",
+        spotify_id="spotify-opaque-id",
+    )
+
+    assert candidates == ["https://www.instagram.com/officialartist/"]
+    assert applied is True
+    assert df.at[0, "Social Link"] == "https://www.instagram.com/officialartist/"
+    assert logs == [
+        "[Spotify IG Seed] candidate_upgraded reason=external_source url=https://www.instagram.com/officialartist/"
+    ]
+
+
+def test_spotify_seed_instagram_identity_recovery_prefers_external_source_over_constructed_guess(tmp_path):
+    logs = []
+    worker = _build_worker(tmp_path)
+    worker.log_message = SimpleNamespace(emit=lambda msg: logs.append(msg))
+    df = pd.DataFrame(
+        [
+            _base_row(
+                **{
+                    "Artist Name": "artista",
+                    "Spotify_Artist_ID": "spotify-opaque-id",
+                    "Spotify_Website_URL": "https://www.instagram.com/officialartist/",
+                }
+            )
+        ]
+    )
+
+    candidates = cde._spotify_seed_instagram_candidate_urls(df.loc[0], "artista", spotify_id="spotify-opaque-id")
+    applied = worker._run_spotify_seed_instagram_identity_recovery(
+        df,
+        0,
+        "artista",
+        spotify_id="spotify-opaque-id",
+    )
+
+    assert candidates == ["https://www.instagram.com/officialartist/"]
+    assert applied is True
+    assert df.at[0, "Social Link"] == "https://www.instagram.com/officialartist/"
+    assert logs == [
+        "[Spotify IG Seed] candidate_upgraded reason=external_source url=https://www.instagram.com/officialartist/"
+    ]
+
+
+def test_spotify_seed_instagram_identity_recovery_accepts_exact_external_corroboration(tmp_path):
+    logs = []
+    worker = _build_worker(tmp_path)
+    worker.log_message = SimpleNamespace(emit=lambda msg: logs.append(msg))
+    df = pd.DataFrame(
+        [
+            _base_row(
+                **{
+                    "Artist Name": "Artist A",
+                    "Spotify_Artist_ID": "spotify-opaque-id",
+                    "Bandcamp_URL": "https://artista.bandcamp.com/",
+                }
+            )
+        ]
+    )
+
+    candidates = cde._spotify_seed_instagram_candidate_urls(df.loc[0], "Artist A", spotify_id="spotify-opaque-id")
+    applied = worker._run_spotify_seed_instagram_identity_recovery(
+        df,
+        0,
+        "Artist A",
+        spotify_id="spotify-opaque-id",
+    )
+
+    assert candidates == ["https://www.instagram.com/artista/"]
+    assert applied is True
+    assert df.at[0, "Social Link"] == "https://www.instagram.com/artista/"
+    assert logs == [
+        "[Spotify IG Seed] candidate_accepted reason=external_corroboration url=https://www.instagram.com/artista/"
+    ]
+
+
+def test_spotify_seed_instagram_identity_recovery_does_not_trust_ambiguous_row_instagram_origin(tmp_path):
+    logs = []
+    worker = _build_worker(tmp_path)
+    worker.log_message = SimpleNamespace(emit=lambda msg: logs.append(msg))
+    spotify_id = "2PIlRxTYueV3iVxYMjSu9U"
+    df = pd.DataFrame(
+        [
+            _base_row(
+                **{
+                    "Artist Name": "Artist A",
+                    "Spotify_Artist_ID": spotify_id,
+                    "Source URL": "https://www.instagram.com/officialartist/",
+                    "Source Directory": "spotify",
+                }
+            )
+        ]
+    )
+
+    candidates = cde._spotify_seed_instagram_candidate_urls(df.loc[0], "Artist A", spotify_id=spotify_id)
+    applied = worker._run_spotify_seed_instagram_identity_recovery(
+        df,
+        0,
+        "Artist A",
+        spotify_id=spotify_id,
+    )
+
+    assert candidates == ["https://www.instagram.com/artista/"]
+    assert applied is False
+    assert df.at[0, "Social Link"] == ""
+    assert logs == [
+        "[Spotify IG Seed] candidate_rejected reason=identity_unverified url=https://www.instagram.com/artista/"
+    ]
+
+
 def test_spotify_identity_pass_generates_seed_instagram_before_no_signal_without_website(tmp_path, monkeypatch):
     worker = _build_worker(tmp_path)
     worker.enable_live_search = True
@@ -1114,6 +1244,8 @@ def test_spotify_seed_instagram_validated_candidate_still_runs_shared_extractor(
 
 def test_spotify_identity_pass_website_instagram_recovery_still_runs_after_seed_candidate_miss(tmp_path, monkeypatch):
     worker = _build_worker(tmp_path)
+    logs = []
+    worker.log_message = SimpleNamespace(emit=lambda msg: logs.append(msg))
     worker.enable_live_search = True
     worker.max_live_searches = 5
     df = pd.DataFrame(
@@ -1161,6 +1293,7 @@ def test_spotify_identity_pass_website_instagram_recovery_still_runs_after_seed_
     assert worker._spotify_identity_pass_no_signal == 0
     assert worker._spotify_identity_pass_promotions["instagram"] == 1
     assert calls == {"bandcamp": 1, "soundcloud": 1, "lastfm": 0, "website_fetch": 1}
+    assert "[Spotify IG Seed] candidate_upgraded reason=external_source url=https://www.instagram.com/artista/" in logs
 
 
 def test_spotify_identity_pass_allows_conservative_low_score_bandcamp_promotion(tmp_path, monkeypatch):
