@@ -10358,7 +10358,6 @@ class CrossDirectoryEnricherWorker(QThread):
                 if (
                     not all_ig_emails
                     and not _row_has_email(seed_df.loc[row_idx])
-                    and not onehop_target_attempted
                     and hidden_surface_attempt_key not in hidden_surface_attempt_keys
                 ):
                     live_page = _get_shared_live_page()

@@ -1331,11 +1331,81 @@ def test_instagram_email_one_hop_bio_link_recovers_direct_email_from_rendered_li
     )
     ctx = worker._build_row_context(seed_df, 0, 1, 1)
     bio_fetch_calls = []
+    static_target = "https://beacons.ai/renderedlinkartist"
+    live_target = "https://linktr.ee/renderedlinkartist"
     live_pages = _install_instagram_profile_fetch_scope(
         monkeypatch,
-        static_html="<html><body><div>Requests HTML without outbound bio link</div></body></html>",
+        static_html=f"<html><body><a href='{static_target}'>Bio</a></body></html>",
         live_page_factory=lambda: _DummyInstagramHiddenContactPage(
-            "<html><body><a href='https://linktr.ee/renderedlinkartist'>Bio</a><button>Email</button></body></html>",
+            f"<html><body><a href='{live_target}'>Bio</a><button>Email</button></body></html>",
+            candidates=[{"text": "Email"}],
+        ),
+    )
+
+    def fake_fetch_website_html_bounded(session, url, **kwargs):  # noqa: ANN001
+        bio_fetch_calls.append(url)
+        if url == static_target:
+            return cde.WebsiteFetchResult(
+                url=url,
+                final_url=url,
+                status=200,
+                content_type="text/html",
+                html="<html><body>No email here</body></html>",
+                is_html=True,
+            )
+        assert url == live_target
+        return cde.WebsiteFetchResult(
+            url=url,
+            final_url=live_target,
+            status=200,
+            content_type="text/html",
+            html="<html><body>Bookings: rendered@artist.com</body></html>",
+            is_html=True,
+        )
+
+    monkeypatch.setattr(cde, "_fetch_website_html_bounded", fake_fetch_website_html_bounded)
+
+    matched = worker._enrich_row_instagram_email(seed_df, 0, ctx)
+
+    assert matched is True
+    assert len(live_pages) == 1
+    assert live_pages[0].click_calls == []
+    assert bio_fetch_calls == [static_target, live_target]
+    assert seed_df.at[0, "Email"] == "rendered@artist.com"
+    assert seed_df.at[0, "Email_All"] == "rendered@artist.com"
+    assert seed_df.at[0, "Email_Source_URL"] == live_target
+    assert "instagram_bio_link_one_hop" in seed_df.at[0, EMAIL_PROVENANCE_JSON_COL]
+    _assert_log_contains(logs, f"[IG OneHop] bio_link_urls state=non_empty count=1 sample={static_target}")
+    _assert_log_contains(
+        logs,
+        f"[IG OneHop] live_surface_bio_link_urls state=non_empty count=1 sample={live_target}",
+    )
+
+
+def test_instagram_email_static_one_hop_success_skips_live_retry(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Static Success Artist",
+            "Email": "",
+            "Email_All": "",
+            "Instagram_URL": "https://instagram.com/staticsuccessartist/",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+            "Email_Type": "",
+            EMAIL_PROVENANCE_JSON_COL: "",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    static_target = "https://linktr.ee/staticsuccessartist"
+    bio_fetch_calls = []
+    live_pages = _install_instagram_profile_fetch_scope(
+        monkeypatch,
+        static_html=f"<html><body><a href='{static_target}'>Bio</a></body></html>",
+        live_page_factory=lambda: _DummyInstagramHiddenContactPage(
+            "<html><body><a href='https://linktr.ee/should-not-open'>Bio</a><button>Email</button></body></html>",
             candidates=[{"text": "Email"}],
         ),
     )
@@ -1344,10 +1414,10 @@ def test_instagram_email_one_hop_bio_link_recovers_direct_email_from_rendered_li
         "_fetch_website_html_bounded",
         lambda session, url, **kwargs: bio_fetch_calls.append(url) or cde.WebsiteFetchResult(
             url=url,
-            final_url="https://linktr.ee/renderedlinkartist",
+            final_url=static_target,
             status=200,
             content_type="text/html",
-            html="<html><body>Bookings: rendered@artist.com</body></html>",
+            html="<html><body>Bookings: static-success@artist.com</body></html>",
             is_html=True,
         ),
     )
@@ -1355,18 +1425,13 @@ def test_instagram_email_one_hop_bio_link_recovers_direct_email_from_rendered_li
     matched = worker._enrich_row_instagram_email(seed_df, 0, ctx)
 
     assert matched is True
-    assert len(live_pages) == 1
-    assert live_pages[0].click_calls == []
-    assert bio_fetch_calls == ["https://linktr.ee/renderedlinkartist"]
-    assert seed_df.at[0, "Email"] == "rendered@artist.com"
-    assert seed_df.at[0, "Email_All"] == "rendered@artist.com"
-    assert seed_df.at[0, "Email_Source_URL"] == "https://linktr.ee/renderedlinkartist"
-    assert "instagram_bio_link_one_hop" in seed_df.at[0, EMAIL_PROVENANCE_JSON_COL]
-    _assert_log_contains(logs, "[IG OneHop] bio_link_urls state=empty count=0 sample=-")
-    _assert_log_contains(
-        logs,
-        "[IG OneHop] live_surface_bio_link_urls state=non_empty count=1 sample=https://linktr.ee/renderedlinkartist",
-    )
+    assert bio_fetch_calls == [static_target]
+    assert live_pages == []
+    assert seed_df.at[0, "Email"] == "static-success@artist.com"
+    assert seed_df.at[0, "Email_All"] == "static-success@artist.com"
+    assert seed_df.at[0, "Email_Source_URL"] == static_target
+    _assert_log_contains(logs, f"[IG OneHop] bio_link_urls state=non_empty count=1 sample={static_target}")
+    _assert_no_log_startswith(logs, "[IG OneHop] live_surface_bio_link_urls")
 
 
 def test_instagram_email_one_hop_bio_link_recovers_direct_email_from_runtime_live_surface(monkeypatch):
@@ -1448,9 +1513,11 @@ def test_instagram_hidden_contact_one_action_runs_after_live_surface_onehop_fall
         }
     )
     ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    static_target = "https://beacons.ai/sharedsurfaceartist"
+    bio_fetch_calls = []
     live_pages = _install_instagram_profile_fetch_scope(
         monkeypatch,
-        static_html="<html><body><div>No outbound bio link in requests HTML</div></body></html>",
+        static_html=f"<html><body><a href='{static_target}'>Bio</a></body></html>",
         live_page_factory=lambda: _DummyInstagramHiddenContactPage(
             "<html><body><button>Email</button></body></html>",
             candidates=[{"text": "Email"}],
@@ -1461,15 +1528,28 @@ def test_instagram_hidden_contact_one_action_runs_after_live_surface_onehop_fall
             },
         ),
     )
+    monkeypatch.setattr(
+        cde,
+        "_fetch_website_html_bounded",
+        lambda session, url, **kwargs: bio_fetch_calls.append(url) or cde.WebsiteFetchResult(
+            url=url,
+            final_url=static_target,
+            status=200,
+            content_type="text/html",
+            html="<html><body>No email on static one-hop target</body></html>",
+            is_html=True,
+        ),
+    )
 
     matched = worker._enrich_row_instagram_email(seed_df, 0, ctx)
 
     assert matched is True
+    assert bio_fetch_calls == [static_target]
     assert len(live_pages) == 1
     assert live_pages[0].click_calls == ['[data-ig-hidden-contact="ig-hidden-contact-0"]']
     assert seed_df.at[0, "Email"] == "shared@artist.com"
     assert "instagram_hidden_contact_one_action" in seed_df.at[0, "Email_Provenance_JSON"]
-    _assert_log_contains(logs, "[IG OneHop] bio_link_urls state=empty count=0 sample=-")
+    _assert_log_contains(logs, f"[IG OneHop] bio_link_urls state=non_empty count=1 sample={static_target}")
     _assert_log_contains(logs, "[IG OneHop] live_surface_bio_link_urls state=empty count=0 sample=-")
 
 
