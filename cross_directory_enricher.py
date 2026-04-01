@@ -10439,15 +10439,28 @@ class CrossDirectoryEnricherWorker(QThread):
                         soup=live_soup,
                     )
                     if not all_ig_emails and shared_live_page is not None:
+                        print("DEBUG IG: entering rendered text fallback")
+                        print("DEBUG IG: shared_live_page is None =", shared_live_page is None)
                         try:
                             rendered_live_text = cell_to_str(
                                 shared_live_page.page.evaluate(
                                     "() => document.body ? (document.body.innerText || '') : ''"
                                 )
                             )
-                        except Exception:
+                            print("DEBUG IG: rendered_live_text length =", len(rendered_live_text or ""))
+                            print(
+                                "DEBUG IG: rendered contains exact email =",
+                                "LacedupMGMT@gmail.com" in (rendered_live_text or ""),
+                            )
+                            print(
+                                "DEBUG IG: rendered contains @gmail.com =",
+                                "@gmail.com" in (rendered_live_text or "").lower(),
+                            )
+                        except Exception as exc:
+                            print(f"DEBUG IG: rendered text evaluate failed: {repr(exc)}")
                             rendered_live_text = ""
                         if rendered_live_text:
+                            print("DEBUG IG: running rendered text direct extraction")
                             all_ig_emails = _extract_instagram_profile_candidate_emails(rendered_live_text)
                 if (
                     not all_ig_emails
