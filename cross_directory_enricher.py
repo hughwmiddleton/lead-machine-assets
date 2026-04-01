@@ -39,6 +39,7 @@ from source_scheduler import (
     promote_facebook_url,
     soundcloud_handle_from_profile_url as _shared_soundcloud_handle_from_profile_url,
 )
+import html_fetcher
 from html_fetcher import fetch_html, _detect_soft_block
 from selenium import webdriver
 from selenium.common.exceptions import InvalidSessionIdException
@@ -3827,6 +3828,7 @@ class InstagramLivePageBridge:
     browser: Any
     context: Any
     page: Any
+    owns_browser_stack: bool = True
     closed: bool = False
 
     def snapshot_html(self) -> str:
@@ -3845,6 +3847,8 @@ class InstagramLivePageBridge:
             self.page.close()
         except Exception:
             pass
+        if not self.owns_browser_stack:
+            return
         try:
             self.context.close()
         except Exception:
@@ -3887,12 +3891,24 @@ def _open_instagram_live_page_bridge(
     browser = None
     context = None
     page = None
+    owns_browser_stack = True
     try:
-        sync_playwright = _load_instagram_playwright()
-        playwright = sync_playwright().start()
-        headless = str(os.getenv("PLAYWRIGHT_HEADLESS", "1")).lower() not in {"0", "false", "off"}
-        browser = playwright.chromium.launch(headless=headless)
-        context = browser.new_context()
+        shared_job_browser = getattr(html_fetcher, "_JOB_BROWSERS", {}).get("global")
+        if shared_job_browser is not None:
+            shared_playwright = getattr(shared_job_browser, "playwright", None)
+            shared_browser = getattr(shared_job_browser, "browser", None)
+            shared_context = getattr(shared_job_browser, "context", None)
+            if shared_playwright is not None and shared_browser is not None and shared_context is not None:
+                playwright = shared_playwright
+                browser = shared_browser
+                context = shared_context
+                owns_browser_stack = False
+        if context is None:
+            sync_playwright = _load_instagram_playwright()
+            playwright = sync_playwright().start()
+            headless = str(os.getenv("PLAYWRIGHT_HEADLESS", "1")).lower() not in {"0", "false", "off"}
+            browser = playwright.chromium.launch(headless=headless)
+            context = browser.new_context()
         page = context.new_page()
         page.goto(url, wait_until="domcontentloaded", timeout=timeout_s * 1000)
         _wait_for_instagram_profile_render(page, timeout_s)
@@ -3901,6 +3917,7 @@ def _open_instagram_live_page_bridge(
             browser=browser,
             context=context,
             page=page,
+            owns_browser_stack=owns_browser_stack,
         )
     except Exception as e:
         print("DEBUG IG: live page bridge failed:", repr(e))
@@ -3909,21 +3926,22 @@ def _open_instagram_live_page_bridge(
                 page.close()
             except Exception:
                 pass
-        if context is not None:
-            try:
-                context.close()
-            except Exception:
-                pass
-        if browser is not None:
-            try:
-                browser.close()
-            except Exception:
-                pass
-        if playwright is not None:
-            try:
-                playwright.stop()
-            except Exception:
-                pass
+        if owns_browser_stack:
+            if context is not None:
+                try:
+                    context.close()
+                except Exception:
+                    pass
+            if browser is not None:
+                try:
+                    browser.close()
+                except Exception:
+                    pass
+            if playwright is not None:
+                try:
+                    playwright.stop()
+                except Exception:
+                    pass
         return None
 
 

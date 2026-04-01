@@ -41,6 +41,13 @@ def _disable_real_instagram_live_bridge(monkeypatch):
     monkeypatch.setattr(cde, "_open_instagram_live_page_bridge", lambda *args, **kwargs: None)
 
 
+@pytest.fixture(autouse=True)
+def _reset_html_fetcher_job_browsers():
+    cde.html_fetcher._JOB_BROWSERS.clear()
+    yield
+    cde.html_fetcher._JOB_BROWSERS.clear()
+
+
 class _DummyClosable:
     def __init__(self):
         self.closed = False
@@ -348,6 +355,7 @@ def test_open_instagram_live_page_bridge_waits_for_render_before_return(monkeypa
     )
 
     assert bridge is not None
+    assert bridge.owns_browser_stack is True
     assert bridge.page is page
     assert bridge.snapshot_html() == "<html><body><main>Rendered profile</main></body></html>"
     assert events == [
@@ -367,6 +375,101 @@ def test_open_instagram_live_page_bridge_waits_for_render_before_return(monkeypa
     assert bridge.browser.closed is True
     assert bridge.playwright.closed is True
     assert events[-1] == ("stop",)
+
+
+def test_open_instagram_live_page_bridge_reuses_cached_html_fetcher_context(monkeypatch):
+    events = []
+
+    class DummyPage(_DummyClosable):
+        def goto(self, url, wait_until=None, timeout=None):  # noqa: ANN001
+            events.append(("goto", url, wait_until, timeout))
+
+        def content(self):
+            return "<html><body><main>Rendered profile</main></body></html>"
+
+    class DummyContext(_DummyClosable):
+        def __init__(self, page):
+            super().__init__()
+            self._page = page
+
+        def new_page(self):
+            events.append(("new_page",))
+            return self._page
+
+    shared_playwright = _DummyClosable()
+    shared_browser = _DummyClosable()
+    shared_context = DummyContext(DummyPage())
+    cde.html_fetcher._JOB_BROWSERS["global"] = SimpleNamespace(
+        playwright=shared_playwright,
+        browser=shared_browser,
+        context=shared_context,
+    )
+
+    monkeypatch.setattr(
+        cde,
+        "_load_instagram_playwright",
+        lambda: (_ for _ in ()).throw(AssertionError("sync_playwright should not start")),
+    )
+
+    def fake_wait_for_instagram_profile_render(page_arg, timeout_s):  # noqa: ANN001
+        events.append(("wait", page_arg, timeout_s))
+
+    monkeypatch.setattr(cde, "_wait_for_instagram_profile_render", fake_wait_for_instagram_profile_render)
+
+    bridge = _REAL_OPEN_INSTAGRAM_LIVE_PAGE_BRIDGE(
+        "https://www.instagram.com/igartist/",
+        timeout_s=12.5,
+    )
+
+    assert bridge is not None
+    assert bridge.owns_browser_stack is False
+    assert bridge.playwright is shared_playwright
+    assert bridge.browser is shared_browser
+    assert bridge.context is shared_context
+    assert events == [
+        ("new_page",),
+        ("goto", "https://www.instagram.com/igartist/", "domcontentloaded", 12500.0),
+        ("wait", bridge.page, 12.5),
+    ]
+
+    bridge.close()
+
+    assert bridge.page.closed is True
+    assert shared_context.closed is False
+    assert shared_browser.closed is False
+    assert shared_playwright.closed is False
+
+
+def test_open_instagram_live_page_bridge_shared_context_failure_only_closes_page(monkeypatch):
+    page = _DummyClosable()
+
+    def failing_goto(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise RuntimeError("navigation failed")
+
+    page.goto = failing_goto
+    shared_context = _DummyClosable()
+    shared_context.new_page = lambda: page
+    shared_browser = _DummyClosable()
+    shared_playwright = _DummyClosable()
+    cde.html_fetcher._JOB_BROWSERS["global"] = SimpleNamespace(
+        playwright=shared_playwright,
+        browser=shared_browser,
+        context=shared_context,
+    )
+
+    monkeypatch.setattr(
+        cde,
+        "_load_instagram_playwright",
+        lambda: (_ for _ in ()).throw(AssertionError("sync_playwright should not start")),
+    )
+
+    bridge = _REAL_OPEN_INSTAGRAM_LIVE_PAGE_BRIDGE("https://www.instagram.com/igartist/")
+
+    assert bridge is None
+    assert page.closed is True
+    assert shared_context.closed is False
+    assert shared_browser.closed is False
+    assert shared_playwright.closed is False
 
 
 def test_wait_for_instagram_profile_render_meta_only_shell_is_not_ready(monkeypatch):
