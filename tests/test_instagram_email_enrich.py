@@ -166,6 +166,7 @@ def test_fetch_instagram_profile_html_uses_shared_fallback_for_unusable_initial_
     assert fallback_kwargs["directory"] == "instagram"
     assert fallback_kwargs["required_selectors"] == [cde._INSTAGRAM_REQUIRED_SELECTOR]
     assert fallback_kwargs["allow_browser_fallback"] is True
+    assert callable(fallback_kwargs["browser_ready_wait"])
     assert fallback_kwargs["timeout_s"] == cde.HTTP_TIMEOUT
 
 

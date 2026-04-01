@@ -2617,6 +2617,29 @@ def _spotify_seed_instagram_candidate_urls(
 
 _INSTAGRAM_MIN_PROFILE_HTML_CHARS = 48
 _INSTAGRAM_REQUIRED_SELECTOR = 'meta[property="og:description"]'
+_INSTAGRAM_RENDER_READY_TIMEOUT_MS = 2500
+_INSTAGRAM_RENDER_READY_JS = """
+() => {
+  const meta = document.querySelector('meta[property="og:description"]');
+  if (meta && (meta.getAttribute('content') || '').trim()) {
+    return 'meta[property="og:description"]';
+  }
+  const scripts = Array.from(document.querySelectorAll('script'));
+  for (const script of scripts) {
+    const text = (script.textContent || '').trim();
+    if (!text) {
+      continue;
+    }
+    const type = (script.getAttribute('type') || '').toLowerCase();
+    if (type === 'application/json' || type === 'application/ld+json' || text.startsWith('window._sharedData =')) {
+      if (text.includes('bio_links') || text.includes('web_profile_info')) {
+        return 'structured_script';
+      }
+    }
+  }
+  return false;
+}
+"""
 _CONTACT_SURFACE_EXTRA_ATTR_NAMES = {"content", "title", "aria-label", "alt", "value"}
 
 
@@ -2631,6 +2654,35 @@ def _instagram_profile_fetch_usable(status: Optional[int], html: str) -> bool:
     if _detect_soft_block(html_text):
         return False
     return True
+
+
+def _wait_for_instagram_profile_render(page: Any, timeout_s: float) -> None:
+    if page is None:
+        return
+    timeout_ms = min(max(int(float(timeout_s or 0) * 1000), 0), _INSTAGRAM_RENDER_READY_TIMEOUT_MS)
+    if timeout_ms <= 0:
+        return
+    wait_for_function = getattr(page, "wait_for_function", None)
+    if callable(wait_for_function):
+        wait_for_function(_INSTAGRAM_RENDER_READY_JS, timeout=timeout_ms)
+        return
+    evaluate = getattr(page, "evaluate", None)
+    if not callable(evaluate):
+        return
+    wait_for_timeout = getattr(page, "wait_for_timeout", None)
+    deadline = time.monotonic() + (timeout_ms / 1000.0)
+    while time.monotonic() < deadline:
+        marker = cell_to_str(evaluate(_INSTAGRAM_RENDER_READY_JS)).strip()
+        if marker:
+            return
+        remaining_ms = int(max((deadline - time.monotonic()) * 1000, 0))
+        if remaining_ms <= 0:
+            return
+        sleep_ms = min(100, remaining_ms)
+        if callable(wait_for_timeout):
+            wait_for_timeout(sleep_ms)
+        else:
+            time.sleep(sleep_ms / 1000.0)
 
 
 def _append_contact_surface_value(values: List[str], seen: Set[str], raw_value: Any) -> None:
@@ -3342,6 +3394,7 @@ def _fetch_instagram_profile_result(
             directory="instagram",
             required_selectors=[_INSTAGRAM_REQUIRED_SELECTOR],
             allow_browser_fallback=True,
+            browser_ready_wait=_wait_for_instagram_profile_render,
             timeout_s=HTTP_TIMEOUT,
         )
     except Exception:

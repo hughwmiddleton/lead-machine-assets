@@ -31,7 +31,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 from urllib.parse import urlparse
 
 import requests
@@ -173,7 +173,12 @@ def close_all_browsers() -> None:
 atexit.register(close_all_browsers)
 
 
-def _playwright_fetch(url: str, job_id: Optional[str], timeout_s: float) -> Dict[str, Optional[str]]:
+def _playwright_fetch(
+    url: str,
+    job_id: Optional[str],
+    timeout_s: float,
+    browser_ready_wait: Optional[Callable[[object, float], None]] = None,
+) -> Dict[str, Optional[str]]:
     jb = _ensure_context(job_id)
     if jb.pages_used >= _PW_MAX_PAGES:
         raise PlaywrightUnavailable("page_budget_exhausted")
@@ -182,6 +187,11 @@ def _playwright_fetch(url: str, job_id: Optional[str], timeout_s: float) -> Dict
     jb.pages_used += 1
     try:
         page.goto(url, wait_until="domcontentloaded", timeout=timeout_s * 1000)
+        if callable(browser_ready_wait):
+            try:
+                browser_ready_wait(page, timeout_s)
+            except Exception:
+                pass
         html = page.content()
         final_url = page.url
         return {"html": html, "final_url": final_url}
@@ -196,6 +206,7 @@ def fetch_html(
     url: str,
     *,
     allow_browser_fallback: bool = True,
+    browser_ready_wait: Optional[Callable[[object, float], None]] = None,
     directory: Optional[str] = None,
     job_id: Optional[str] = None,
     required_selectors: Optional[List[str]] = None,
@@ -259,7 +270,7 @@ def fetch_html(
     # Attempt Playwright fallback if enabled.
     if allow_browser_fallback and _PW_ENABLED:
         try:
-            pw_result = _playwright_fetch(url, job_id, timeout_s)
+            pw_result = _playwright_fetch(url, job_id, timeout_s, browser_ready_wait=browser_ready_wait)
             html = pw_result.get("html", "")
             final_url = pw_result.get("final_url", final_url)
             mode_used = "playwright"
