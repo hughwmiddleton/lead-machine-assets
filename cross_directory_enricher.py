@@ -3504,6 +3504,65 @@ def _collect_instagram_bio_link_fetch_urls(
     return final_urls
 
 
+def _instagram_onehop_emails_from_surface(
+    session: requests.Session,
+    html: str,
+    *,
+    profile_url: str = "",
+    log: Optional[Any] = None,
+    state_label: str = "bio_link_urls",
+) -> Tuple[List[str], str, str, str]:
+    html_text = html if isinstance(html, str) else str(html or "")
+    soup = BeautifulSoup(html_text, "html.parser") if html_text.strip() else None
+    bio_link_urls = _collect_instagram_bio_link_fetch_urls(
+        html_text,
+        soup=soup,
+        profile_url=profile_url,
+        log=log,
+    )
+    if callable(log):
+        log(
+            f"[IG OneHop] {state_label} state={'non_empty' if bio_link_urls else 'empty'} "
+            f"count={len(bio_link_urls)} sample={_instagram_bio_link_log_sample(bio_link_urls)}"
+        )
+    if not bio_link_urls:
+        if callable(log):
+            log(f"[IG OneHop] {state_label}_empty")
+        return ([], "", "regex", "")
+
+    onehop_target = _select_instagram_onehop_target(
+        bio_link_urls,
+        log=log,
+    )
+    if not onehop_target:
+        return ([], "", "regex", "")
+
+    if callable(log):
+        log(f"[IG OneHop] onehop_selected_target={onehop_target}")
+        log(f"[IG OneHop] onehop_fetch_attempted={onehop_target}")
+    bio_link_result = _fetch_website_html_bounded(
+        session,
+        onehop_target,
+        timeout_s=WEBSITE_EMAIL_TIMEOUT,
+        max_bytes=WEBSITE_EMAIL_MAX_BYTES,
+    )
+    if not (bio_link_result.is_html and bio_link_result.html):
+        return ([], "", "regex", onehop_target)
+
+    all_ig_emails, used_mailto = _extract_website_emails_from_html(
+        bio_link_result.html
+    )
+    if not all_ig_emails:
+        return ([], "", "regex", onehop_target)
+
+    return (
+        all_ig_emails,
+        bio_link_result.final_url or onehop_target,
+        "mailto" if used_mailto else "regex",
+        onehop_target,
+    )
+
+
 _INSTAGRAM_HIDDEN_CONTACT_LABEL_PRIORITY = {
     "show email": 0,
     "bookings email": 1,
@@ -10173,49 +10232,61 @@ class CrossDirectoryEnricherWorker(QThread):
             selected_source_url = ig_url
             selected_extract_method = "regex"
             selected_surface = "instagram_profile"
-            if not all_ig_emails and not _row_has_email(seed_df.loc[row_idx]):
-                bio_link_urls = _collect_instagram_bio_link_fetch_urls(
-                    html,
-                    soup=soup,
-                    profile_url=ig_url,
-                    log=self.log_message.emit,
-                )
-                self.log_message.emit(
-                    f"[IG OneHop] bio_link_urls state={'non_empty' if bio_link_urls else 'empty'} "
-                    f"count={len(bio_link_urls)} sample={_instagram_bio_link_log_sample(bio_link_urls)}"
-                )
-                if bio_link_urls:
-                    onehop_target = _select_instagram_onehop_target(
-                        bio_link_urls,
+            onehop_target_attempted = ""
+            shared_live_page = None
+
+            def _get_shared_live_page():
+                nonlocal shared_live_page
+                if shared_live_page is None:
+                    shared_live_page = _open_instagram_live_page_bridge(ig_url, timeout_s=HTTP_TIMEOUT)
+                return shared_live_page
+
+            try:
+                if not all_ig_emails and not _row_has_email(seed_df.loc[row_idx]):
+                    (
+                        all_ig_emails,
+                        selected_source_url,
+                        selected_extract_method,
+                        onehop_target_attempted,
+                    ) = _instagram_onehop_emails_from_surface(
+                        self.session,
+                        html,
+                        profile_url=ig_url,
                         log=self.log_message.emit,
                     )
-                    if onehop_target:
-                        self.log_message.emit(f"[IG OneHop] onehop_selected_target={onehop_target}")
-                        self.log_message.emit(f"[IG OneHop] onehop_fetch_attempted={onehop_target}")
-                        bio_link_result = _fetch_website_html_bounded(
-                            self.session,
-                            onehop_target,
-                            timeout_s=WEBSITE_EMAIL_TIMEOUT,
-                            max_bytes=WEBSITE_EMAIL_MAX_BYTES,
-                        )
-                        if bio_link_result.is_html and bio_link_result.html:
-                            all_ig_emails, used_mailto = _extract_website_emails_from_html(
-                                bio_link_result.html
+                    if all_ig_emails:
+                        selected_surface = "instagram_bio_link_one_hop"
+                if (
+                    not all_ig_emails
+                    and not _row_has_email(seed_df.loc[row_idx])
+                    and not onehop_target_attempted
+                    and hidden_surface_attempt_key not in hidden_surface_attempt_keys
+                ):
+                    live_page = _get_shared_live_page()
+                    if live_page is not None:
+                        live_html = live_page.snapshot_html()
+                        if _instagram_profile_fetch_usable(200, live_html):
+                            (
+                                all_ig_emails,
+                                selected_source_url,
+                                selected_extract_method,
+                                onehop_target_attempted,
+                            ) = _instagram_onehop_emails_from_surface(
+                                self.session,
+                                live_html,
+                                profile_url=ig_url,
+                                log=self.log_message.emit,
+                                state_label="live_surface_bio_link_urls",
                             )
                             if all_ig_emails:
-                                selected_source_url = bio_link_result.final_url or onehop_target
-                                selected_extract_method = "mailto" if used_mailto else "regex"
                                 selected_surface = "instagram_bio_link_one_hop"
-                else:
-                    self.log_message.emit("[IG OneHop] bio_link_urls_empty")
-            if (
-                not all_ig_emails
-                and not _row_has_email(seed_df.loc[row_idx])
-                and hidden_surface_attempt_key not in hidden_surface_attempt_keys
-            ):
-                live_page = _open_instagram_live_page_bridge(ig_url, timeout_s=HTTP_TIMEOUT)
-                if live_page is not None:
-                    try:
+                if (
+                    not all_ig_emails
+                    and not _row_has_email(seed_df.loc[row_idx])
+                    and hidden_surface_attempt_key not in hidden_surface_attempt_keys
+                ):
+                    live_page = _get_shared_live_page()
+                    if live_page is not None:
                         candidate = next(
                             iter(_collect_instagram_hidden_contact_candidates(live_page.page)),
                             None,
@@ -10232,8 +10303,9 @@ class CrossDirectoryEnricherWorker(QThread):
                                     selected_source_url = ig_url
                                     selected_extract_method = hidden_extract_method
                                     selected_surface = "instagram_hidden_contact_one_action"
-                    finally:
-                        live_page.close()
+            finally:
+                if shared_live_page is not None:
+                    shared_live_page.close()
         if not all_ig_emails:
             self.log_message.emit("[IG Email] no_email_visible")
             self._set_platform_state("instagram", "skipped")
