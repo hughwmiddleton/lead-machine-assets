@@ -1,4 +1,5 @@
 from contextlib import contextmanager
+from bs4 import BeautifulSoup
 import pandas as pd
 import pytest
 from types import SimpleNamespace
@@ -101,6 +102,61 @@ def _make_instagram_live_bridge(page):
         context=_DummyClosable(),
         page=page,
     )
+
+
+def _instagram_render_ready_marker_from_html(script, html):
+    script_text = str(script or "")
+    assert "return 'meta[property=\"og:description\"]';" not in script_text
+    assert "profile_surface" in script_text
+
+    soup = BeautifulSoup(html, "html.parser")
+    for script_tag in soup.select("script"):
+        text = (script_tag.get_text() or "").strip()
+        if not text:
+            continue
+        script_type = (script_tag.get("type") or "").lower()
+        if script_type in {"application/json", "application/ld+json"} or text.startswith("window._sharedData ="):
+            if "bio_links" in text or "web_profile_info" in text:
+                return "structured_script"
+
+    main = soup.select_one("main")
+    if main is None:
+        return False
+
+    profile_structure = main.select_one("header, section, article")
+    profile_content = main.select_one("a[href], button, img, h1, h2, ul li")
+    text = " ".join(main.stripped_strings)
+    if profile_structure is not None and profile_content is not None and len(text) >= 16:
+        return "profile_surface"
+    return False
+
+
+class _DummyInstagramRenderWaitPage:
+    def __init__(self, html, *, clock=None):
+        self._html = html
+        self._clock = clock
+        self.evaluate_calls = []
+        self.wait_calls = []
+
+    def evaluate(self, script):  # noqa: ANN001
+        self.evaluate_calls.append(str(script or ""))
+        return _instagram_render_ready_marker_from_html(script, self._html)
+
+    def wait_for_timeout(self, timeout_ms):  # noqa: ANN001
+        self.wait_calls.append(timeout_ms)
+        if self._clock is not None:
+            self._clock.advance(timeout_ms / 1000.0)
+
+
+class _FakeMonotonicClock:
+    def __init__(self, start=1000.0):
+        self.current = start
+
+    def __call__(self):
+        return self.current
+
+    def advance(self, delta_s):
+        self.current += delta_s
 
 
 def _install_instagram_profile_fetch_scope(
@@ -299,6 +355,52 @@ def test_open_instagram_live_page_bridge_waits_for_render_before_return(monkeypa
     assert bridge.browser.closed is True
     assert bridge.playwright.closed is True
     assert events[-1] == ("stop",)
+
+
+def test_wait_for_instagram_profile_render_meta_only_shell_is_not_ready(monkeypatch):
+    clock = _FakeMonotonicClock()
+    monkeypatch.setattr(cde.time, "monotonic", clock)
+    page = _DummyInstagramRenderWaitPage(
+        "<html><head><meta property='og:description' content='Official profile'></head>"
+        "<body><div>Shell only</div></body></html>",
+        clock=clock,
+    )
+
+    cde._wait_for_instagram_profile_render(page, timeout_s=0.1)
+
+    assert len(page.evaluate_calls) == 1
+    assert page.wait_calls == [100]
+
+
+def test_wait_for_instagram_profile_render_accepts_rendered_profile_surface(monkeypatch):
+    clock = _FakeMonotonicClock()
+    monkeypatch.setattr(cde.time, "monotonic", clock)
+    page = _DummyInstagramRenderWaitPage(
+        "<html><head><meta property='og:description' content='Official profile'></head>"
+        "<body><main><header><h1>Rendered Link Artist</h1><button>Email</button></header>"
+        "<section><a href='https://linktr.ee/renderedlinkartist'>Bio</a></section></main></body></html>",
+        clock=clock,
+    )
+
+    cde._wait_for_instagram_profile_render(page, timeout_s=0.25)
+
+    assert len(page.evaluate_calls) == 1
+    assert page.wait_calls == []
+
+
+def test_wait_for_instagram_profile_render_polling_timeout_stays_bounded(monkeypatch):
+    clock = _FakeMonotonicClock()
+    monkeypatch.setattr(cde.time, "monotonic", clock)
+    page = _DummyInstagramRenderWaitPage(
+        "<html><head><meta property='og:description' content='Official profile'></head>"
+        "<body><div>Still shell only</div></body></html>",
+        clock=clock,
+    )
+
+    cde._wait_for_instagram_profile_render(page, timeout_s=10.0)
+
+    assert cde._INSTAGRAM_RENDER_READY_TIMEOUT_MS - 1 <= sum(page.wait_calls) <= cde._INSTAGRAM_RENDER_READY_TIMEOUT_MS
+    assert max(page.wait_calls) == 100
 
 
 def test_instagram_profile_fetch_scope_bridge_returns_live_page_and_closes_it(monkeypatch):

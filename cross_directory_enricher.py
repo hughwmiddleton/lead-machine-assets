@@ -2817,10 +2817,6 @@ _INSTAGRAM_REQUIRED_SELECTOR = 'meta[property="og:description"]'
 _INSTAGRAM_RENDER_READY_TIMEOUT_MS = 2500
 _INSTAGRAM_RENDER_READY_JS = """
 () => {
-  const meta = document.querySelector('meta[property="og:description"]');
-  if (meta && (meta.getAttribute('content') || '').trim()) {
-    return 'meta[property="og:description"]';
-  }
   const scripts = Array.from(document.querySelectorAll('script'));
   for (const script of scripts) {
     const text = (script.textContent || '').trim();
@@ -2832,6 +2828,15 @@ _INSTAGRAM_RENDER_READY_JS = """
       if (text.includes('bio_links') || text.includes('web_profile_info')) {
         return 'structured_script';
       }
+    }
+  }
+  const main = document.querySelector('main');
+  if (main) {
+    const profileStructure = main.querySelector('header, section, article');
+    const profileContent = main.querySelector('a[href], button, img, h1, h2, ul li');
+    const text = (main.innerText || main.textContent || '').replace(/\\s+/g, ' ').trim();
+    if (profileStructure && profileContent && text.length >= 16) {
+      return 'profile_surface';
     }
   }
   return false;
@@ -2869,7 +2874,13 @@ def _wait_for_instagram_profile_render(page: Any, timeout_s: float) -> None:
     wait_for_timeout = getattr(page, "wait_for_timeout", None)
     deadline = time.monotonic() + (timeout_ms / 1000.0)
     while time.monotonic() < deadline:
-        marker = cell_to_str(evaluate(_INSTAGRAM_RENDER_READY_JS)).strip()
+        marker_value = evaluate(_INSTAGRAM_RENDER_READY_JS)
+        if isinstance(marker_value, str):
+            marker = marker_value.strip()
+        elif marker_value:
+            marker = cell_to_str(marker_value).strip()
+        else:
+            marker = ""
         if marker:
             return
         remaining_ms = int(max((deadline - time.monotonic()) * 1000, 0))
