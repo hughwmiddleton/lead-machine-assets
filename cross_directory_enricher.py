@@ -10354,6 +10354,7 @@ class CrossDirectoryEnricherWorker(QThread):
             selected_surface = "instagram_profile"
             onehop_target_attempted = ""
             shared_live_page = None
+            shared_live_html = ""
 
             def _get_shared_live_page():
                 nonlocal shared_live_page
@@ -10385,6 +10386,7 @@ class CrossDirectoryEnricherWorker(QThread):
                     if live_page is not None:
                         live_html = live_page.snapshot_html()
                         if _instagram_profile_fetch_usable(200, live_html):
+                            shared_live_html = live_html
                             runtime_structured_payloads = _collect_instagram_runtime_bio_link_structured_payloads(
                                 live_page.page
                             )
@@ -10403,6 +10405,18 @@ class CrossDirectoryEnricherWorker(QThread):
                             )
                             if all_ig_emails:
                                 selected_surface = "instagram_bio_link_one_hop"
+                print("DEBUG IG: shared_live_html length =", len(shared_live_html or ""))
+                if (
+                    not all_ig_emails
+                    and shared_live_html
+                    and not _row_has_email(seed_df.loc[row_idx])
+                ):
+                    print("DEBUG IG: running live HTML direct extraction")
+                    live_soup = BeautifulSoup(shared_live_html, "html.parser")
+                    all_ig_emails = _extract_instagram_profile_candidate_emails(
+                        shared_live_html,
+                        soup=live_soup,
+                    )
                 if (
                     not all_ig_emails
                     and not _row_has_email(seed_df.loc[row_idx])

@@ -1,0 +1,17 @@
+2026-04-01 21:46:19,332 [WARNING] [Master] No data available after reading raw files.
+2026-04-01 21:46:19,332 [INFO] SMOKE RESULT: PASS (DEGRADED: master_raw has zero rows)
+2026-04-01 21:46:19,332 [INFO] Smoke Summary:
+2026-04-01 21:46:19,332 [INFO]  - jobs attempted: 0
+2026-04-01 21:46:19,332 [INFO]  - jobs merged: 0
+2026-04-01 21:46:19,332 [INFO]  - jobs skipped (read errors): 0
+2026-04-01 21:46:19,332 [INFO]  - master_raw rows: 0
+2026-04-01 21:46:19,332 [INFO]  - enrichment ran: no
+2026-04-01 21:46:19,332 [INFO]  - enrichment rows: 0
+2026-04-01 21:46:19,332 [INFO]  - SC challenges: 0
+2026-04-01 21:46:19,332 [INFO]  - SC breaker tripped: False
+2026-04-01 21:46:19,332 [INFO]  - SC live disabled reason: n/a
+2026-04-01 21:46:19,332 [INFO]  - Bandcamp HTTP 403 count: 0
+2026-04-01 21:46:19,332 [INFO]  - Last.fm HTTP 406 count: 0
+2026-04-01 21:46:19,332 [INFO]  - Emails with missing provenance URL: 0
+2026-04-01 21:46:19,332 [INFO]  - Emails total (raw merged): 0
+2026-04-01 21:46:19,333 [INFO] [Run Summary] Wrote run summary: overnight_runs/2026-04-01_214619/run_summary.json
