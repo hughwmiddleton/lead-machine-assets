@@ -1579,6 +1579,7 @@ def scrape_artist_profile(driver, profile_url, fb_driver=None):
                 if (
                     not child_text
                     or child_text == artist_name
+                    or child_text.lower() == "artist"
                     or child.find(["h1", "h2", "h3", "h4", "h5", "h6"]) is not None
                     or len(child_text) > 80
                     or "\n" in child_text_raw
