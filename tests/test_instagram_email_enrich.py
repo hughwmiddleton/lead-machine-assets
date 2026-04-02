@@ -185,6 +185,22 @@ def _instagram_render_ready_marker_from_html(
     return False
 
 
+def _instagram_profile_surface_candidate_marker_from_html(script, html):
+    script_text = str(script or "")
+    assert "profile_surface_candidate" in script_text
+
+    soup = BeautifulSoup(html, "html.parser")
+    main = soup.select_one("main")
+    if main is None:
+        return False
+
+    profile_structure = main.select_one("header, section, article")
+    profile_content = main.select_one("a[href], button, img, h1, h2, ul li")
+    if profile_structure is not None or profile_content is not None:
+        return "profile_surface_candidate"
+    return False
+
+
 class _DummyInstagramRenderWaitPage:
     def __init__(self, html, *, clock=None, rendered_body_text="", rendered_main_text=""):
         self._html = html
@@ -512,6 +528,197 @@ def test_open_instagram_live_page_bridge_shared_context_failure_only_closes_page
     assert shared_context.closed is False
     assert shared_browser.closed is False
     assert shared_playwright.closed is False
+
+
+def test_open_instagram_live_page_bridge_non_profile_surface_fails_before_render_wait(monkeypatch):
+    class DummyPage(_DummyClosable):
+        def __init__(self):
+            super().__init__()
+            self.url = ""
+            self.evaluate_calls = []
+
+        def goto(self, url, wait_until=None, timeout=None):  # noqa: ANN001
+            self.url = "https://www.instagram.com/accounts/login/"
+
+        def evaluate(self, script):  # noqa: ANN001
+            self.evaluate_calls.append(str(script or ""))
+            return False
+
+    class DummyContext(_DummyClosable):
+        def __init__(self, page):
+            super().__init__()
+            self._page = page
+
+        def new_page(self):
+            return self._page
+
+    class DummyBrowser(_DummyClosable):
+        def __init__(self, context):
+            super().__init__()
+            self._context = context
+
+        def new_context(self):
+            return self._context
+
+    class DummyChromium:
+        def __init__(self, browser):
+            self._browser = browser
+
+        def launch(self, headless=True):  # noqa: ANN001
+            return self._browser
+
+    class DummyPlaywright(_DummyClosable):
+        def __init__(self, browser):
+            super().__init__()
+            self.chromium = DummyChromium(browser)
+
+        def stop(self):
+            self.closed = True
+
+    class DummySyncPlaywrightRunner:
+        def __init__(self, playwright):
+            self._playwright = playwright
+
+        def start(self):
+            return self._playwright
+
+    page = DummyPage()
+    context = DummyContext(page)
+    browser = DummyBrowser(context)
+    playwright = DummyPlaywright(browser)
+
+    monkeypatch.setattr(
+        cde,
+        "_load_instagram_playwright",
+        lambda: (lambda: DummySyncPlaywrightRunner(playwright)),
+    )
+    monkeypatch.setattr(
+        cde,
+        "_wait_for_instagram_profile_render",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("wait should not run")),
+    )
+
+    bridge = _REAL_OPEN_INSTAGRAM_LIVE_PAGE_BRIDGE(
+        "https://www.instagram.com/igartist/",
+        timeout_s=12.5,
+    )
+
+    assert bridge is None
+    assert len(page.evaluate_calls) == 1
+    assert page.closed is True
+    assert context.closed is True
+    assert browser.closed is True
+    assert playwright.closed is True
+
+
+def test_open_instagram_live_page_bridge_profile_shell_candidate_still_enters_render_wait(monkeypatch):
+    events = []
+    candidate_html = (
+        "<html><body><main><header><h1>Shell Artist</h1><button>Email</button></header></main></body></html>"
+    )
+    assert (
+        _instagram_render_ready_marker_from_html(
+            cde._INSTAGRAM_RENDER_READY_JS,
+            candidate_html,
+            rendered_body_text="Shell Artist",
+            rendered_main_text="Shell Artist",
+        )
+        is False
+    )
+
+    class DummyPage(_DummyClosable):
+        def __init__(self):
+            super().__init__()
+            self.url = ""
+
+        def goto(self, url, wait_until=None, timeout=None):  # noqa: ANN001
+            self.url = "https://www.instagram.com/accounts/login/"
+            events.append(("goto", self.url, wait_until, timeout))
+
+        def evaluate(self, script):  # noqa: ANN001
+            events.append(("evaluate", str(script or "")))
+            return _instagram_profile_surface_candidate_marker_from_html(script, candidate_html)
+
+        def content(self):
+            return candidate_html
+
+    class DummyContext(_DummyClosable):
+        def __init__(self, page):
+            super().__init__()
+            self._page = page
+
+        def new_page(self):
+            events.append(("new_page",))
+            return self._page
+
+    class DummyBrowser(_DummyClosable):
+        def __init__(self, context):
+            super().__init__()
+            self._context = context
+
+        def new_context(self):
+            events.append(("new_context",))
+            return self._context
+
+    class DummyChromium:
+        def __init__(self, browser):
+            self._browser = browser
+
+        def launch(self, headless=True):  # noqa: ANN001
+            events.append(("launch", headless))
+            return self._browser
+
+    class DummyPlaywright(_DummyClosable):
+        def __init__(self, browser):
+            super().__init__()
+            self.chromium = DummyChromium(browser)
+
+        def stop(self):
+            self.closed = True
+            events.append(("stop",))
+
+    class DummySyncPlaywrightRunner:
+        def __init__(self, playwright):
+            self._playwright = playwright
+
+        def start(self):
+            events.append(("start",))
+            return self._playwright
+
+    page = DummyPage()
+    context = DummyContext(page)
+    browser = DummyBrowser(context)
+    playwright = DummyPlaywright(browser)
+
+    monkeypatch.setattr(
+        cde,
+        "_load_instagram_playwright",
+        lambda: (lambda: DummySyncPlaywrightRunner(playwright)),
+    )
+
+    def fake_wait_for_instagram_profile_render(page_arg, timeout_s):  # noqa: ANN001
+        events.append(("wait", page_arg, timeout_s))
+
+    monkeypatch.setattr(cde, "_wait_for_instagram_profile_render", fake_wait_for_instagram_profile_render)
+
+    bridge = _REAL_OPEN_INSTAGRAM_LIVE_PAGE_BRIDGE(
+        "https://www.instagram.com/igartist/",
+        timeout_s=12.5,
+    )
+
+    assert bridge is not None
+    assert bridge.page is page
+    assert events == [
+        ("start",),
+        ("launch", True),
+        ("new_context",),
+        ("new_page",),
+        ("goto", "https://www.instagram.com/accounts/login/", "domcontentloaded", 12500.0),
+        ("evaluate", cde._INSTAGRAM_PROFILE_SURFACE_CANDIDATE_JS),
+        ("wait", page, 12.5),
+    ]
+
+    bridge.close()
 
 
 def test_wait_for_instagram_profile_render_meta_only_shell_is_not_ready(monkeypatch):

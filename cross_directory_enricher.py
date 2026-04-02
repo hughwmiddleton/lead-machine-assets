@@ -2830,6 +2830,20 @@ _INSTAGRAM_RENDER_READY_JS = """
   return false;
 }
 """
+_INSTAGRAM_PROFILE_SURFACE_CANDIDATE_JS = """
+() => {
+  const main = document.querySelector('main');
+  if (!main) {
+    return false;
+  }
+  const profileStructure = main.querySelector('header, section, article');
+  const profileContent = main.querySelector('a[href], button, img, h1, h2, ul li');
+  if (profileStructure || profileContent) {
+    return 'profile_surface_candidate';
+  }
+  return false;
+}
+"""
 _CONTACT_SURFACE_EXTRA_ATTR_NAMES = {"content", "title", "aria-label", "alt", "value"}
 
 
@@ -2879,6 +2893,28 @@ def _wait_for_instagram_profile_render(page: Any, timeout_s: float) -> None:
             wait_for_timeout(sleep_ms)
         else:
             time.sleep(sleep_ms / 1000.0)
+
+
+def _instagram_landed_page_is_plausible_profile_surface(page: Any) -> bool:
+    current_url = cell_to_str(getattr(page, "url", "")).strip()
+    if _canonicalize_instagram_profile_url(current_url):
+        return True
+    evaluate = getattr(page, "evaluate", None)
+    if not callable(evaluate):
+        return not current_url
+    try:
+        marker_value = evaluate(_INSTAGRAM_PROFILE_SURFACE_CANDIDATE_JS)
+    except Exception:
+        return not current_url
+    if isinstance(marker_value, str):
+        marker = marker_value.strip()
+    elif marker_value:
+        marker = cell_to_str(marker_value).strip()
+    else:
+        marker = ""
+    if marker == "profile_surface_candidate":
+        return True
+    return not current_url
 
 
 def _append_contact_surface_value(values: List[str], seen: Set[str], raw_value: Any) -> None:
@@ -3898,6 +3934,8 @@ def _open_instagram_live_page_bridge(
             context = browser.new_context()
         page = context.new_page()
         page.goto(url, wait_until="domcontentloaded", timeout=timeout_s * 1000)
+        if not _instagram_landed_page_is_plausible_profile_surface(page):
+            raise RuntimeError("RUNTIME_PAGE_STATE_NOT_PROFILE_SURFACE")
         _wait_for_instagram_profile_render(page, timeout_s)
         return InstagramLivePageBridge(
             playwright=playwright,
