@@ -1154,14 +1154,16 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
         listing_metadata_by_url = {}
 
         def _resolve_listing_card(link_tag):
-            if link_tag.find(True):
-                return link_tag
+            link_text = " ".join(link_tag.stripped_strings)
             for ancestor in link_tag.parents:
                 ancestor_name = getattr(ancestor, "name", "")
                 if ancestor_name in {"article", "li"}:
                     return ancestor
                 if ancestor_name in {"div", "section"}:
-                    if ancestor.select_one('a[href^="/triplejunearthed/artist/"]') == link_tag:
+                    if ancestor.select_one('a[href^="/triplejunearthed/artist/"]') != link_tag:
+                        continue
+                    ancestor_text = " ".join(ancestor.stripped_strings)
+                    if ancestor_text and ancestor_text != link_text:
                         return ancestor
             return link_tag
 
@@ -1202,11 +1204,10 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
 
         while len(profile_urls) < max_artists:
             soup = BeautifulSoup(driver.page_source, 'html.parser')
-            listing_cards = soup.select('a.HU3iy.p1_Ju.mqDRk.FQED6.O_grP[href^="/triplejunearthed/artist/"]')
-            if not listing_cards:
-                listing_cards = []
-                for artist_link in soup.select('a[href^="/triplejunearthed/artist/"]'):
-                    listing_cards.append(_resolve_listing_card(artist_link))
+            artist_links = soup.select('a.HU3iy.p1_Ju.mqDRk.FQED6.O_grP[href^="/triplejunearthed/artist/"]')
+            if not artist_links:
+                artist_links = soup.select('a[href^="/triplejunearthed/artist/"]')
+            listing_cards = [_resolve_listing_card(artist_link) for artist_link in artist_links]
             for listing_card in listing_cards:
                 link = listing_card if getattr(listing_card, "name", "") == "a" else listing_card.select_one('a[href^="/triplejunearthed/artist/"]')
                 if not link:
