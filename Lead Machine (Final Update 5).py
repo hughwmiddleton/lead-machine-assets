@@ -107,7 +107,6 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from tqdm import tqdm
 from selenium import webdriver
-from selenium.webdriver.chrome.service import Service as ChromeService
 from selenium.common.exceptions import WebDriverException
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
@@ -120,7 +119,6 @@ except Exception:
     class FeatureNotFound(Exception):
         pass
 BeautifulSoup = BS
-from webdriver_manager.chrome import ChromeDriverManager
 from urllib.parse import (
     urlparse,
     urljoin,
@@ -1033,15 +1031,12 @@ def _start_chromedriver_with_retry(chrome_options):
     """
     last_exc = None
     for _ in range(2):
-        driver_path = ChromeDriverManager().install()
         try:
-            service = ChromeService(driver_path)
-            driver = webdriver.Chrome(service=service, options=chrome_options)
+            driver = webdriver.Chrome(options=chrome_options)
             _register_driver_cleanup(driver)
             return driver
         except Exception as exc:
             last_exc = exc
-            _purge_wdm_cache(driver_path)
     if last_exc:
         raise last_exc
     raise RuntimeError("Failed to start ChromeDriver.")
@@ -1083,7 +1078,7 @@ def get_drum_status_from_source(page_source):
 # -----------------------------------------------------------------------------
 def setup_driver():
     chrome_options = Options()
-    chrome_options.add_argument("--headless=new")
+    chrome_options.add_argument("--headless")
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--window-size=1440,900")
     chrome_options.add_argument("--disable-extensions")

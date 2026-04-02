@@ -1,0 +1,4 @@
+2026-04-02 11:37:27,865 [INFO] Starting scrape for job job_unearthed_1
+2026-04-02 11:37:28,773 [INFO] [Directory] Running job for directory=unearthed slug= job_id=job_unearthed_1
+2026-04-02 11:37:28,774 [INFO] [Unearthed] Using FULL pipeline entrypoint: run_unearthed_pipeline
+2026-04-02 11:37:56,493 [INFO] Completed job job_unearthed_1 (raw only; master enrichment pending)
