@@ -575,9 +575,11 @@ def test_wait_for_instagram_profile_render_polling_timeout_stays_bounded(monkeyp
         clock=clock,
     )
 
-    cde._wait_for_instagram_profile_render(page, timeout_s=10.0)
+    timeout_s = 10.0
+    cde._wait_for_instagram_profile_render(page, timeout_s=timeout_s)
 
-    assert cde._INSTAGRAM_RENDER_READY_TIMEOUT_MS - 1 <= sum(page.wait_calls) <= cde._INSTAGRAM_RENDER_READY_TIMEOUT_MS
+    expected_timeout_ms = int(timeout_s * 1000)
+    assert expected_timeout_ms - 1 <= sum(page.wait_calls) <= expected_timeout_ms
     assert max(page.wait_calls) == 100
 
 

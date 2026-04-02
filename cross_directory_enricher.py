@@ -2849,7 +2849,7 @@ def _instagram_profile_fetch_usable(status: Optional[int], html: str) -> bool:
 def _wait_for_instagram_profile_render(page: Any, timeout_s: float) -> None:
     if page is None:
         return
-    timeout_ms = min(max(int(float(timeout_s or 0) * 1000), 0), _INSTAGRAM_RENDER_READY_TIMEOUT_MS)
+    timeout_ms = max(int(float(timeout_s or 0) * 1000), 0)
     if timeout_ms <= 0:
         return
     wait_for_function = getattr(page, "wait_for_function", None)
