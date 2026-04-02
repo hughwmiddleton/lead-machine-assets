@@ -1,0 +1,265 @@
+2026-04-02 12:32:02,887 [INFO] [Seed Summary]
+2026-04-02 12:32:02,887 [INFO] unearthed=15
+2026-04-02 12:32:02,899 [INFO] [FB Promotion] facebook_url populated for 4 rows
+2026-04-02 12:32:02,899 [INFO] [FB Promotion] canonical Facebook_URL backfilled from Social Link / External Links for 4 rows
+2026-04-02 12:32:02,908 [INFO] [Master] Wrote merged raw CSV: overnight_runs/2026-04-02_123125/master_raw.csv (rows=15)
+2026-04-02 12:32:02,908 [INFO] [Master Enrich] Starting cross-directory enrichment for overnight_runs/2026-04-02_123125/master_raw.csv
+2026-04-02 12:32:08,105 [INFO] [Master] Bandcamp directory CSV -> (none) in /Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/overnight_runs/2026-04-02_123125 (attempts=6)
+2026-04-02 12:32:13,180 [INFO] [Master] SoundCloud directory CSV -> (none) in /Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/overnight_runs/2026-04-02_123125 (attempts=6)
+2026-04-02 12:32:18,264 [INFO] [Master] Last.fm directory CSV -> (none) in /Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/overnight_runs/2026-04-02_123125 (attempts=6)
+2026-04-02 12:32:18,272 [INFO] [Master] Unearthed directory CSV -> /Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/overnight_runs/2026-04-02_123125/job_unearthed_1/raw.csv (rows=15, kind=raw)
+2026-04-02 12:32:18,273 [INFO] [Master] Passing bandcamp_csv_path=
+2026-04-02 12:32:18,273 [INFO] [Master] Passing soundcloud_csv_path=
+2026-04-02 12:32:18,273 [INFO] [Master] Passing lastfm_csv_path=
+2026-04-02 12:32:18,273 [INFO] [Master] Passing unearthed_csv_path=/Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/overnight_runs/2026-04-02_123125/job_unearthed_1/raw.csv
+2026-04-02 12:32:18,293 [INFO] [Night FB] Using Chrome profile dir: /Users/hughmiddleton/Lead Machine/Lead Machine Code/night_fb_profile
+2026-04-02 12:32:18,461 [INFO] [Night FB][preflight] chrome_binary=/Applications/Google Chrome.app/Contents/MacOS/Google Chrome chrome_version=Google Chrome 146.0.7680.165 chromedriver=<selenium_manager> chromedriver_version=<selenium_manager> profile_dir=/Users/hughmiddleton/Lead Machine/Lead Machine Code/night_fb_profile profile_exists=True profile_locks=['SingletonSocket'] image_policy=managed_allow args=['--disable-gpu', '--window-size=1920x1080', '--disable-extensions', '--disable-dev-shm-usage', '--no-sandbox', '--disable-blink-features=AutomationControlled', '--user-data-dir=/Users/hughmiddleton/Lead Machine/Lead Machine Code/night_fb_profile', '--profile-directory=Default']
+2026-04-02 12:32:20,776 [INFO] [Night FB][driver] requested_profile=/Users/hughmiddleton/Lead Machine/Lead Machine Code/night_fb_profile active_profile=/Users/hughmiddleton/Lead Machine/Lead Machine Code/night_fb_profile persistent_profile=1 temp_fallback=0 webdriver_mask=1
+2026-04-02 12:32:32,053 [INFO] [Night FB][auth_probe] mode=headed requested_profile=/Users/hughmiddleton/Lead Machine/Lead Machine Code/night_fb_profile active_profile=/Users/hughmiddleton/Lead Machine/Lead Machine Code/night_fb_profile temp_fallback=0 authed=1 reason=authenticated
+2026-04-02 12:32:59,428 [INFO] [FB Discover] Shared Facebook session authenticated; discovery enabled for this run.
+2026-04-02 12:32:59,448 [INFO] [FB Warmup] Running Facebook session warm-up
+2026-04-02 12:33:06,101 [INFO] [Enricher] Loading seed CSV: overnight_runs/2026-04-02_123125/master_raw.csv
+2026-04-02 12:33:06,218 [INFO] [Deduper] Removed 0 duplicate rows (kept 15 unique rows)
+2026-04-02 12:33:06,227 [INFO] [Schema] ensured email columns: Email, Email_All, Email_Type, Email_Source_URL, Email_Source_Type, Email_Extract_Method, Email_Provenance_JSON
+2026-04-02 12:33:06,305 [INFO] [Enricher] Starting enrichment for 15 rows...
+2026-04-02 12:33:06,306 [INFO] [Enricher] Live search enabled=True max=50
+2026-04-02 12:33:06,306 [INFO] [Enricher] mode=row_linear
+2026-04-02 12:33:06,310 [INFO] [Unearthed Path] no usable FB URL, resuming standard path artist='emjaysoul' row=0
+2026-04-02 12:33:06,311 [INFO] [Unearthed Path] no usable FB URL, resuming standard path artist='rusty-the-bucketheads' row=1
+2026-04-02 12:33:06,316 [INFO] [Unearthed Path] no usable FB URL, resuming standard path artist='young-jye' row=2
+2026-04-02 12:33:06,316 [INFO] [Unearthed Path] no usable FB URL, resuming standard path artist='wavs' row=3
+2026-04-02 12:33:06,317 [INFO] [Unearthed Path] activated artist='fan-girl' row=4
+2026-04-02 12:33:06,317 [INFO] [Unearthed Path] skipping non-essential enrichers artist='fan-girl' row=4
+2026-04-02 12:33:06,319 [INFO] [Unearthed Path] no usable FB URL, resuming standard path artist='fracturestunes' row=5
+2026-04-02 12:33:06,319 [INFO] [Unearthed Path] activated artist='blinder' row=6
+2026-04-02 12:33:06,319 [INFO] [Unearthed Path] skipping non-essential enrichers artist='blinder' row=6
+2026-04-02 12:33:06,319 [INFO] [Unearthed Path] activated artist='lazy-eyes' row=7
+2026-04-02 12:33:06,319 [INFO] [Unearthed Path] skipping non-essential enrichers artist='lazy-eyes' row=7
+2026-04-02 12:33:06,320 [INFO] [Unearthed Path] no usable FB URL, resuming standard path artist='ennaria' row=8
+2026-04-02 12:33:06,320 [INFO] [Unearthed Path] activated artist='tbish' row=9
+2026-04-02 12:33:06,320 [INFO] [Unearthed Path] skipping non-essential enrichers artist='tbish' row=9
+2026-04-02 12:33:06,321 [INFO] [Unearthed Path] no usable FB URL, resuming standard path artist='bluech-c' row=10
+2026-04-02 12:33:06,323 [INFO] [Unearthed Path] no usable FB URL, resuming standard path artist='natalie-tanabe' row=11
+2026-04-02 12:33:06,329 [INFO] [Unearthed Path] no usable FB URL, resuming standard path artist='madeleine-jayne' row=12
+2026-04-02 12:33:06,330 [INFO] [Unearthed Path] no usable FB URL, resuming standard path artist='yuni' row=13
+2026-04-02 12:33:06,330 [INFO] [Unearthed Path] no usable FB URL, resuming standard path artist='luv4her' row=14
+2026-04-02 12:33:06,349 [INFO] [Unearthed Links] promoted SoundCloud from source for 3 rows
+2026-04-02 12:33:06,356 [INFO] [Enricher] low-confidence match skipped for 'emjaysoul' (Spotify ID <unknown>) – score=0.50, candidate=emjaysoul | Triple J Unearthed
+2026-04-02 12:33:06,357 [INFO] [Enricher] skipping soundcloud heavy enrichment for 'emjaysoul' due to low row confidence (score=0.00 threshold=0.30 reasons=none)
+2026-04-02 12:33:07,463 [INFO] [Enricher] Bandcamp: status=no_match mode=directory_discover attempts=0 403=0 artist='emjaysoul'
+2026-04-02 12:33:07,583 [INFO] [Enricher] skipping lastfm heavy enrichment for 'emjaysoul' due to low row confidence (score=0.00 threshold=0.30 reasons=none)
+2026-04-02 12:33:07,621 [INFO] [IG Email] Visiting https://www.instagram.com/emjaysoul/
+2026-04-02 12:33:21,492 [INFO] [IG OneHop] helper_summary anchors(raw=16 kept=9 dropped=7 drop_reasons=self_instagram:6,empty_or_invalid:1 sample=https://about.meta.com) attributes(raw=223 kept=1 dropped=222 drop_reasons=self_instagram:217,empty_or_invalid:3,non_http:2 sample=https://static.cdninstagram.com/rsrc.php/y4/r/QaBlI0OZiks.ico) meta(raw=2 kept=0 dropped=2 drop_reasons=self_instagram:2 sample=https://www.instagram.com/emjaysoul/) structured_scripts(raw=0 kept=0 dropped=0 drop_reasons=- sample=-) total_unique=10 final_sample=https://about.meta.com,https://about.instagram.com
+2026-04-02 12:33:21,494 [INFO] [IG OneHop] bio_link_urls state=non_empty count=10 sample=https://about.meta.com,https://about.instagram.com
+2026-04-02 12:33:21,494 [INFO] [IG OneHop] target_blocked reason=internal_meta url=https://about.meta.com
+2026-04-02 12:33:21,494 [INFO] [IG OneHop] target_blocked reason=internal_meta url=https://about.instagram.com
+2026-04-02 12:33:21,494 [INFO] [IG OneHop] target_blocked reason=internal_meta url=https://about.instagram.com/blog
+2026-04-02 12:33:21,494 [INFO] [IG OneHop] target_blocked reason=internal_meta url=https://about.instagram.com/about-us/careers
+2026-04-02 12:33:21,494 [INFO] [IG OneHop] target_blocked reason=internal_meta url=https://help.instagram.com
+2026-04-02 12:33:21,495 [INFO] [IG OneHop] target_blocked reason=internal_meta url=https://www.facebook.com/help/instagram/261704639352628?next=%2Femjaysoul%2F
+2026-04-02 12:33:21,496 [INFO] [IG OneHop] target_blocked reason=static_asset url=https://static.cdninstagram.com/rsrc.php/y4/r/QaBlI0OZiks.ico
+2026-04-02 12:33:21,496 [INFO] [IG OneHop] ranked_target_selected tier=external_domain url=https://www.threads.com
+2026-04-02 12:33:21,496 [INFO] [IG OneHop] onehop_selected_target=https://www.threads.com
+2026-04-02 12:33:21,496 [INFO] [IG OneHop] onehop_fetch_attempted=https://www.threads.com
+2026-04-02 12:33:29,505 [INFO] [IG Email] no_email_visible
+2026-04-02 12:33:29,514 [INFO] [Enricher] skipping fb heavy enrichment for 'emjaysoul' due to low row confidence (score=0.00 threshold=0.30 reasons=none)
+2026-04-02 12:33:29,514 [INFO] [Enricher] Row 1/15: no enrichment for 'emjaysoul'.
+2026-04-02 12:33:29,518 [INFO] [Enricher] low-confidence match skipped for 'rusty-the-bucketheads' (Spotify ID <unknown>) – score=0.50, candidate=rusty-the-bucketheads | Triple J Unearthed
+2026-04-02 12:33:29,519 [INFO] [Enricher] skipping soundcloud heavy enrichment for 'rusty-the-bucketheads' due to low row confidence (score=0.00 threshold=0.30 reasons=none)
+2026-04-02 12:33:30,294 [INFO] [Enricher] Bandcamp: status=no_match mode=directory_discover attempts=0 403=0 artist='rusty-the-bucketheads'
+2026-04-02 12:33:30,298 [INFO] [Enricher] skipping lastfm heavy enrichment for 'rusty-the-bucketheads' due to low row confidence (score=0.00 threshold=0.30 reasons=none)
+2026-04-02 12:33:30,298 [INFO] [IG Email] Visiting https://www.instagram.com/rusty_and_the_bucketheads/
+2026-04-02 12:33:36,301 [INFO] [IG Email] Found email: rustyandthebucketheads@gmail.com
+2026-04-02 12:33:36,312 [INFO] [FB Enrich] Skipping Facebook enrichment for 'rusty-the-bucketheads' (already has email from seed or directory enrichment).
+2026-04-02 12:33:36,316 [INFO] [Enricher] low-confidence match skipped for 'young-jye' (Spotify ID <unknown>) – score=0.50, candidate=young-jye | Triple J Unearthed
+2026-04-02 12:33:36,317 [INFO] [SoundCloud] skipping discovery (Unearthed URL present)
+2026-04-02 12:33:37,820 [INFO] [Enricher] Bandcamp: status=no_match mode=directory_discover attempts=0 403=0 artist='young-jye'
+2026-04-02 12:33:37,902 [INFO] [Enricher] Last.fm Enrich: artist-only search for 'young-jye'.
+2026-04-02 12:33:39,198 [INFO] [Enricher][LF] Last.fm search (fallback): status=200 attempt=1/1 headers=lastfm_html
+2026-04-02 12:33:39,240 [INFO] [Enricher] Last.fm Enrich: candidate 'Young Jye' for 'young-jye' has confidence=0.89.
+2026-04-02 12:33:39,240 [INFO] [Enricher] Last.fm Enrich: no safe match for 'young-jye' (best_confidence=0.89), skipping.
+2026-04-02 12:33:39,242 [INFO] [IG Email] Visiting https://www.instagram.com/young__jye/
+2026-04-02 12:33:44,765 [INFO] [IG OneHop] helper_summary anchors(raw=16 kept=9 dropped=7 drop_reasons=self_instagram:6,empty_or_invalid:1 sample=https://about.meta.com) attributes(raw=223 kept=1 dropped=222 drop_reasons=self_instagram:217,empty_or_invalid:3,non_http:2 sample=https://static.cdninstagram.com/rsrc.php/y4/r/QaBlI0OZiks.ico) meta(raw=2 kept=0 dropped=2 drop_reasons=self_instagram:2 sample=https://www.instagram.com/young__jye/) structured_scripts(raw=0 kept=0 dropped=0 drop_reasons=- sample=-) total_unique=10 final_sample=https://about.meta.com,https://about.instagram.com
+2026-04-02 12:33:44,765 [INFO] [IG OneHop] bio_link_urls state=non_empty count=10 sample=https://about.meta.com,https://about.instagram.com
+2026-04-02 12:33:44,765 [INFO] [IG OneHop] target_blocked reason=internal_meta url=https://about.meta.com
+2026-04-02 12:33:44,765 [INFO] [IG OneHop] target_blocked reason=internal_meta url=https://about.instagram.com
+2026-04-02 12:33:44,765 [INFO] [IG OneHop] target_blocked reason=internal_meta url=https://about.instagram.com/blog
+2026-04-02 12:33:44,765 [INFO] [IG OneHop] target_blocked reason=internal_meta url=https://about.instagram.com/about-us/careers
+2026-04-02 12:33:44,765 [INFO] [IG OneHop] target_blocked reason=internal_meta url=https://help.instagram.com
+2026-04-02 12:33:44,766 [INFO] [IG OneHop] target_blocked reason=internal_meta url=https://www.facebook.com/help/instagram/261704639352628?next=%2Fyoung__jye%2F
+2026-04-02 12:33:44,766 [INFO] [IG OneHop] target_blocked reason=static_asset url=https://static.cdninstagram.com/rsrc.php/y4/r/QaBlI0OZiks.ico
+2026-04-02 12:33:44,766 [INFO] [IG OneHop] ranked_target_selected tier=external_domain url=https://www.threads.com
+2026-04-02 12:33:44,766 [INFO] [IG OneHop] onehop_selected_target=https://www.threads.com
+2026-04-02 12:33:44,766 [INFO] [IG OneHop] onehop_fetch_attempted=https://www.threads.com
+2026-04-02 12:33:52,797 [INFO] [IG Email] no_email_visible
+2026-04-02 12:33:52,807 [INFO] [FB Discovery][Skip] Unearthed row without seeded Facebook_URL
+2026-04-02 12:33:52,807 [INFO] [Enricher] Row 3/15: no enrichment for 'young-jye'.
+2026-04-02 12:33:52,811 [INFO] [Enricher] low-confidence match skipped for 'wavs' (Spotify ID <unknown>) – score=0.50, candidate=wavs | Triple J Unearthed
+2026-04-02 12:33:52,811 [INFO] [Enricher] skipping soundcloud heavy enrichment for 'wavs' due to low row confidence (score=0.00 threshold=0.30 reasons=none)
+2026-04-02 12:33:53,771 [INFO] [Enricher] Bandcamp: status=no_match mode=directory_discover attempts=0 403=0 artist='wavs'
+2026-04-02 12:33:53,797 [INFO] [Enricher] skipping lastfm heavy enrichment for 'wavs' due to low row confidence (score=0.00 threshold=0.30 reasons=none)
+2026-04-02 12:33:53,803 [INFO] [Enricher] skipping fb heavy enrichment for 'wavs' due to low row confidence (score=0.00 threshold=0.30 reasons=none)
+2026-04-02 12:33:53,803 [INFO] [Enricher] Row 4/15: no enrichment for 'wavs'.
+2026-04-02 12:33:53,810 [INFO] [Enricher] low-confidence match skipped for 'fracturestunes' (Spotify ID <unknown>) – score=0.50, candidate=fracturestunes | Triple J Unearthed
+2026-04-02 12:33:53,811 [INFO] [Enricher] skipping soundcloud heavy enrichment for 'fracturestunes' due to low row confidence (score=0.00 threshold=0.30 reasons=none)
+2026-04-02 12:33:55,318 [INFO] [Enricher] Bandcamp: status=no_match mode=directory_discover attempts=0 403=0 artist='fracturestunes'
+2026-04-02 12:33:55,323 [INFO] [Enricher] skipping lastfm heavy enrichment for 'fracturestunes' due to low row confidence (score=0.00 threshold=0.30 reasons=none)
+2026-04-02 12:33:55,324 [INFO] [IG Email] Visiting https://www.instagram.com/fracturestunes/
+2026-04-02 12:34:01,632 [INFO] [IG Email] Found email: azren@analoguedawn.com
+2026-04-02 12:34:01,636 [INFO] [FB Enrich] Skipping Facebook enrichment for 'fracturestunes' (already has email from seed or directory enrichment).
+2026-04-02 12:34:01,638 [INFO] [Enricher] low-confidence match skipped for 'ennaria' (Spotify ID <unknown>) – score=0.50, candidate=ennaria | Triple J Unearthed
+2026-04-02 12:34:01,638 [INFO] [SoundCloud] skipping discovery (Unearthed URL present)
+2026-04-02 12:34:02,450 [INFO] [Enricher] Bandcamp: status=no_match mode=directory_discover attempts=0 403=0 artist='ennaria'
+2026-04-02 12:34:02,453 [INFO] [Enricher] Last.fm Enrich: artist-only search for 'ennaria'.
+2026-04-02 12:34:03,865 [INFO] [Enricher][LF] Last.fm search (fallback): status=200 attempt=1/1 headers=lastfm_html
+2026-04-02 12:34:03,907 [INFO] [Enricher] Last.fm Enrich: candidate 'Ennaria' for 'ennaria' has confidence=1.00.
+2026-04-02 12:34:03,908 [INFO] [Enricher] Fetching lastfm profile: https://www.last.fm/music/Ennaria
+2026-04-02 12:34:05,138 [INFO] [Enricher][LF] lastfm profile: status=200 attempt=1/3 headers=lastfm_html
+2026-04-02 12:34:05,438 [INFO] [Enricher] Last.fm Enrich: candidate 'Ennaria' for 'ennaria' has confidence=1.00 | fetch_ok=True http=200 actionable=True
+2026-04-02 12:34:05,446 [INFO] [Enricher] low-confidence match skipped for 'ennaria' (Spotify ID <unknown>) – score=0.50, candidate=Ennaria | Last.fm (live search) | https://www.last.fm/music/Ennaria
+2026-04-02 12:34:05,447 [INFO] [IG Email] Visiting https://www.instagram.com/ennar1a/
+2026-04-02 12:34:16,933 [INFO] [IG Email] Found email: mgmt@ennaria.com
+2026-04-02 12:34:16,980 [INFO] [FB Enrich] Skipping Facebook enrichment for 'ennaria' (already has email from seed or directory enrichment).
+2026-04-02 12:34:16,993 [INFO] [Enricher] low-confidence match skipped for 'bluech-c' (Spotify ID <unknown>) – score=0.50, candidate=bluech-c | Triple J Unearthed
+2026-04-02 12:34:16,995 [INFO] [Enricher] skipping soundcloud heavy enrichment for 'bluech-c' due to low row confidence (score=0.00 threshold=0.30 reasons=none)
+2026-04-02 12:34:18,620 [INFO] [Enricher] Bandcamp: status=no_match mode=directory_discover attempts=0 403=0 artist='bluech-c'
+2026-04-02 12:34:18,667 [INFO] [Enricher] skipping lastfm heavy enrichment for 'bluech-c' due to low row confidence (score=0.00 threshold=0.30 reasons=none)
+2026-04-02 12:34:18,707 [INFO] [Enricher] skipping fb heavy enrichment for 'bluech-c' due to low row confidence (score=0.00 threshold=0.30 reasons=none)
+2026-04-02 12:34:18,707 [INFO] [Enricher] Row 11/15: no enrichment for 'bluech-c'.
+2026-04-02 12:34:18,722 [INFO] [Enricher] low-confidence match skipped for 'natalie-tanabe' (Spotify ID <unknown>) – score=0.50, candidate=natalie-tanabe | Triple J Unearthed
+2026-04-02 12:34:18,723 [INFO] [Enricher] skipping soundcloud heavy enrichment for 'natalie-tanabe' due to low row confidence (score=0.00 threshold=0.30 reasons=none)
+2026-04-02 12:34:20,048 [INFO] [Enricher] Bandcamp: status=no_match mode=directory_discover attempts=0 403=0 artist='natalie-tanabe'
+2026-04-02 12:34:20,051 [INFO] [Enricher] skipping lastfm heavy enrichment for 'natalie-tanabe' due to low row confidence (score=0.00 threshold=0.30 reasons=none)
+2026-04-02 12:34:20,052 [INFO] [IG Email] Visiting https://www.instagram.com/natalietanabemusic/
+2026-04-02 12:34:26,531 [INFO] [IG OneHop] helper_summary anchors(raw=16 kept=9 dropped=7 drop_reasons=self_instagram:6,empty_or_invalid:1 sample=https://about.meta.com) attributes(raw=223 kept=1 dropped=222 drop_reasons=self_instagram:217,empty_or_invalid:3,non_http:2 sample=https://static.cdninstagram.com/rsrc.php/y4/r/QaBlI0OZiks.ico) meta(raw=2 kept=0 dropped=2 drop_reasons=self_instagram:2 sample=https://www.instagram.com/natalietanabemusic/) structured_scripts(raw=0 kept=0 dropped=0 drop_reasons=- sample=-) total_unique=10 final_sample=https://about.meta.com,https://about.instagram.com
+2026-04-02 12:34:26,532 [INFO] [IG OneHop] bio_link_urls state=non_empty count=10 sample=https://about.meta.com,https://about.instagram.com
+2026-04-02 12:34:26,533 [INFO] [IG OneHop] target_blocked reason=internal_meta url=https://about.meta.com
+2026-04-02 12:34:26,533 [INFO] [IG OneHop] target_blocked reason=internal_meta url=https://about.instagram.com
+2026-04-02 12:34:26,534 [INFO] [IG OneHop] target_blocked reason=internal_meta url=https://about.instagram.com/blog
+2026-04-02 12:34:26,534 [INFO] [IG OneHop] target_blocked reason=internal_meta url=https://about.instagram.com/about-us/careers
+2026-04-02 12:34:26,534 [INFO] [IG OneHop] target_blocked reason=internal_meta url=https://help.instagram.com
+2026-04-02 12:34:26,534 [INFO] [IG OneHop] target_blocked reason=internal_meta url=https://www.facebook.com/help/instagram/261704639352628?next=%2Fnatalietanabemusic%2F
+2026-04-02 12:34:26,534 [INFO] [IG OneHop] target_blocked reason=static_asset url=https://static.cdninstagram.com/rsrc.php/y4/r/QaBlI0OZiks.ico
+2026-04-02 12:34:26,535 [INFO] [IG OneHop] ranked_target_selected tier=external_domain url=https://www.threads.com
+2026-04-02 12:34:26,535 [INFO] [IG OneHop] onehop_selected_target=https://www.threads.com
+2026-04-02 12:34:26,535 [INFO] [IG OneHop] onehop_fetch_attempted=https://www.threads.com
+2026-04-02 12:34:36,038 [INFO] [IG Email] no_email_visible
+2026-04-02 12:34:36,073 [INFO] [Enricher] skipping fb heavy enrichment for 'natalie-tanabe' due to low row confidence (score=0.00 threshold=0.30 reasons=none)
+2026-04-02 12:34:36,073 [INFO] [Enricher] Row 12/15: no enrichment for 'natalie-tanabe'.
+2026-04-02 12:34:36,082 [INFO] [Enricher] low-confidence match skipped for 'madeleine-jayne' (Spotify ID <unknown>) – score=0.50, candidate=madeleine-jayne | Triple J Unearthed
+2026-04-02 12:34:36,084 [INFO] [Enricher] skipping soundcloud heavy enrichment for 'madeleine-jayne' due to low row confidence (score=0.00 threshold=0.30 reasons=none)
+2026-04-02 12:34:37,476 [INFO] [Enricher] Bandcamp: status=no_match mode=directory_discover attempts=0 403=0 artist='madeleine-jayne'
+2026-04-02 12:34:37,547 [INFO] [Enricher] skipping lastfm heavy enrichment for 'madeleine-jayne' due to low row confidence (score=0.00 threshold=0.30 reasons=none)
+2026-04-02 12:34:37,564 [INFO] [IG Email] Visiting https://www.instagram.com/madeleinejaynee/
+2026-04-02 12:34:46,280 [INFO] [IG OneHop] helper_summary anchors(raw=16 kept=9 dropped=7 drop_reasons=self_instagram:6,empty_or_invalid:1 sample=https://about.meta.com) attributes(raw=223 kept=1 dropped=222 drop_reasons=self_instagram:217,empty_or_invalid:3,non_http:2 sample=https://static.cdninstagram.com/rsrc.php/y4/r/QaBlI0OZiks.ico) meta(raw=2 kept=0 dropped=2 drop_reasons=self_instagram:2 sample=https://www.instagram.com/madeleinejaynee/) structured_scripts(raw=0 kept=0 dropped=0 drop_reasons=- sample=-) total_unique=10 final_sample=https://about.meta.com,https://about.instagram.com
+2026-04-02 12:34:46,282 [INFO] [IG OneHop] bio_link_urls state=non_empty count=10 sample=https://about.meta.com,https://about.instagram.com
+2026-04-02 12:34:46,283 [INFO] [IG OneHop] target_blocked reason=internal_meta url=https://about.meta.com
+2026-04-02 12:34:46,283 [INFO] [IG OneHop] target_blocked reason=internal_meta url=https://about.instagram.com
+2026-04-02 12:34:46,283 [INFO] [IG OneHop] target_blocked reason=internal_meta url=https://about.instagram.com/blog
+2026-04-02 12:34:46,283 [INFO] [IG OneHop] target_blocked reason=internal_meta url=https://about.instagram.com/about-us/careers
+2026-04-02 12:34:46,283 [INFO] [IG OneHop] target_blocked reason=internal_meta url=https://help.instagram.com
+2026-04-02 12:34:46,284 [INFO] [IG OneHop] target_blocked reason=internal_meta url=https://www.facebook.com/help/instagram/261704639352628?next=%2Fmadeleinejaynee%2F
+2026-04-02 12:34:46,285 [INFO] [IG OneHop] target_blocked reason=static_asset url=https://static.cdninstagram.com/rsrc.php/y4/r/QaBlI0OZiks.ico
+2026-04-02 12:34:46,285 [INFO] [IG OneHop] ranked_target_selected tier=external_domain url=https://www.threads.com
+2026-04-02 12:34:46,285 [INFO] [IG OneHop] onehop_selected_target=https://www.threads.com
+2026-04-02 12:34:46,285 [INFO] [IG OneHop] onehop_fetch_attempted=https://www.threads.com
+2026-04-02 12:34:55,218 [INFO] [IG Email] no_email_visible
+2026-04-02 12:34:55,267 [INFO] [Enricher] skipping fb heavy enrichment for 'madeleine-jayne' due to low row confidence (score=0.00 threshold=0.30 reasons=none)
+2026-04-02 12:34:55,268 [INFO] [Enricher] Row 13/15: no enrichment for 'madeleine-jayne'.
+2026-04-02 12:34:55,281 [INFO] [Enricher] low-confidence match skipped for 'yuni' (Spotify ID <unknown>) – score=0.50, candidate=yuni | Triple J Unearthed
+2026-04-02 12:34:55,285 [INFO] [Enricher] skipping soundcloud heavy enrichment for 'yuni' due to low row confidence (score=0.00 threshold=0.30 reasons=none)
+2026-04-02 12:34:57,289 [INFO] [Enricher] Bandcamp: status=no_match mode=directory_discover attempts=0 403=0 artist='yuni'
+2026-04-02 12:34:57,291 [INFO] [Enricher] skipping lastfm heavy enrichment for 'yuni' due to low row confidence (score=0.00 threshold=0.30 reasons=none)
+2026-04-02 12:34:57,292 [INFO] [IG Email] Visiting https://www.instagram.com/yunivrss/
+2026-04-02 12:35:03,562 [INFO] [IG OneHop] helper_summary anchors(raw=16 kept=9 dropped=7 drop_reasons=self_instagram:6,empty_or_invalid:1 sample=https://about.meta.com) attributes(raw=223 kept=1 dropped=222 drop_reasons=self_instagram:217,empty_or_invalid:3,non_http:2 sample=https://static.cdninstagram.com/rsrc.php/y4/r/QaBlI0OZiks.ico) meta(raw=2 kept=0 dropped=2 drop_reasons=self_instagram:2 sample=https://www.instagram.com/yunivrss/) structured_scripts(raw=0 kept=0 dropped=0 drop_reasons=- sample=-) total_unique=10 final_sample=https://about.meta.com,https://about.instagram.com
+2026-04-02 12:35:03,562 [INFO] [IG OneHop] bio_link_urls state=non_empty count=10 sample=https://about.meta.com,https://about.instagram.com
+2026-04-02 12:35:03,562 [INFO] [IG OneHop] target_blocked reason=internal_meta url=https://about.meta.com
+2026-04-02 12:35:03,562 [INFO] [IG OneHop] target_blocked reason=internal_meta url=https://about.instagram.com
+2026-04-02 12:35:03,562 [INFO] [IG OneHop] target_blocked reason=internal_meta url=https://about.instagram.com/blog
+2026-04-02 12:35:03,562 [INFO] [IG OneHop] target_blocked reason=internal_meta url=https://about.instagram.com/about-us/careers
+2026-04-02 12:35:03,563 [INFO] [IG OneHop] target_blocked reason=internal_meta url=https://help.instagram.com
+2026-04-02 12:35:03,563 [INFO] [IG OneHop] target_blocked reason=internal_meta url=https://www.facebook.com/help/instagram/261704639352628?next=%2Fyunivrss%2F
+2026-04-02 12:35:03,563 [INFO] [IG OneHop] target_blocked reason=static_asset url=https://static.cdninstagram.com/rsrc.php/y4/r/QaBlI0OZiks.ico
+2026-04-02 12:35:03,563 [INFO] [IG OneHop] ranked_target_selected tier=external_domain url=https://www.threads.com
+2026-04-02 12:35:03,563 [INFO] [IG OneHop] onehop_selected_target=https://www.threads.com
+2026-04-02 12:35:03,563 [INFO] [IG OneHop] onehop_fetch_attempted=https://www.threads.com
+2026-04-02 12:35:11,506 [INFO] [IG Email] no_email_visible
+2026-04-02 12:35:11,510 [INFO] [Enricher] skipping fb heavy enrichment for 'yuni' due to low row confidence (score=0.00 threshold=0.30 reasons=none)
+2026-04-02 12:35:11,511 [INFO] [Enricher] Row 14/15: no enrichment for 'yuni'.
+2026-04-02 12:35:11,513 [INFO] [Enricher] low-confidence match skipped for 'luv4her' (Spotify ID <unknown>) – score=0.50, candidate=luv4her | Triple J Unearthed
+2026-04-02 12:35:11,513 [INFO] [Enricher] skipping soundcloud heavy enrichment for 'luv4her' due to low row confidence (score=0.00 threshold=0.30 reasons=none)
+2026-04-02 12:35:12,508 [INFO] [Enricher] Bandcamp: status=no_match mode=directory_discover attempts=0 403=0 artist='luv4her'
+2026-04-02 12:35:12,513 [INFO] [Enricher] skipping lastfm heavy enrichment for 'luv4her' due to low row confidence (score=0.00 threshold=0.30 reasons=none)
+2026-04-02 12:35:12,514 [INFO] [IG Email] Visiting https://www.instagram.com/luv4hermusic.mp3/
+2026-04-02 12:35:18,304 [INFO] [IG OneHop] helper_summary anchors(raw=16 kept=9 dropped=7 drop_reasons=self_instagram:6,empty_or_invalid:1 sample=https://about.meta.com) attributes(raw=223 kept=1 dropped=222 drop_reasons=self_instagram:217,empty_or_invalid:3,non_http:2 sample=https://static.cdninstagram.com/rsrc.php/y4/r/QaBlI0OZiks.ico) meta(raw=2 kept=0 dropped=2 drop_reasons=self_instagram:2 sample=https://www.instagram.com/luv4hermusic.mp3/) structured_scripts(raw=0 kept=0 dropped=0 drop_reasons=- sample=-) total_unique=10 final_sample=https://about.meta.com,https://about.instagram.com
+2026-04-02 12:35:18,307 [INFO] [IG OneHop] bio_link_urls state=non_empty count=10 sample=https://about.meta.com,https://about.instagram.com
+2026-04-02 12:35:18,307 [INFO] [IG OneHop] target_blocked reason=internal_meta url=https://about.meta.com
+2026-04-02 12:35:18,307 [INFO] [IG OneHop] target_blocked reason=internal_meta url=https://about.instagram.com
+2026-04-02 12:35:18,307 [INFO] [IG OneHop] target_blocked reason=internal_meta url=https://about.instagram.com/blog
+2026-04-02 12:35:18,307 [INFO] [IG OneHop] target_blocked reason=internal_meta url=https://about.instagram.com/about-us/careers
+2026-04-02 12:35:18,307 [INFO] [IG OneHop] target_blocked reason=internal_meta url=https://help.instagram.com
+2026-04-02 12:35:18,309 [INFO] [IG OneHop] target_blocked reason=internal_meta url=https://www.facebook.com/help/instagram/261704639352628?next=%2Fluv4hermusic.mp3%2F
+2026-04-02 12:35:18,309 [INFO] [IG OneHop] target_blocked reason=static_asset url=https://static.cdninstagram.com/rsrc.php/y4/r/QaBlI0OZiks.ico
+2026-04-02 12:35:18,309 [INFO] [IG OneHop] ranked_target_selected tier=external_domain url=https://www.threads.com
+2026-04-02 12:35:18,309 [INFO] [IG OneHop] onehop_selected_target=https://www.threads.com
+2026-04-02 12:35:18,309 [INFO] [IG OneHop] onehop_fetch_attempted=https://www.threads.com
+2026-04-02 12:35:26,399 [INFO] [IG Email] no_email_visible
+2026-04-02 12:35:26,435 [INFO] [Enricher] skipping fb heavy enrichment for 'luv4her' due to low row confidence (score=0.00 threshold=0.30 reasons=none)
+2026-04-02 12:35:26,436 [INFO] [Enricher] Row 15/15: no enrichment for 'luv4her'.
+2026-04-02 12:35:26,438 [INFO] [Enricher] Late domain reuse backfill: rows_scanned=0 rows_eligible=0 rows_backfilled=0 rows_skipped=0
+2026-04-02 12:35:26,438 [INFO] [Enricher] Domain email reuse summary: indexed_domains=0 rows_reused=0
+2026-04-02 12:35:26,530 [INFO] [Enricher] Enriched CSV written to overnight_runs/2026-04-02_123125/master_enriched.csv
+2026-04-02 12:35:26,533 [INFO] [DomainOrg] No exportable domain/org data; sidecar skipped.
+2026-04-02 12:35:26,534 [INFO] [Enrichment Yield]
+2026-04-02 12:35:26,534 [INFO] instagram=3
+2026-04-02 12:35:26,534 [INFO] [Master Enrich] Completed cross-directory enrichment -> overnight_runs/2026-04-02_123125/master_enriched.csv
+2026-04-02 12:35:26,541 [INFO] [Enrich] Starting enrichment for overnight_runs/2026-04-02_123125/master_enriched.csv
+2026-04-02 12:35:26,565 [INFO] [Auto-Validate] Loaded 15 deduped rows (from 15), validating 0 selected rows...
+2026-04-02 12:35:26,565 [INFO] [Auto-Validate] Selection reasons: none
+2026-04-02 12:35:26,906 [INFO] [Auto-Validate] Completed. Upgraded: 0, Blocked: 0. Output: overnight_runs/2026-04-02_123125/master_pre_fb.csv
+2026-04-02 12:35:27,123 [INFO] [Enrich] Completed enrichment -> overnight_runs/2026-04-02_123125/master_pre_fb.csv
+2026-04-02 12:35:27,272 [INFO] [Night FB][Session Gate] source=profile decision=probe_pending reason=profile_dir profile_dir=/Users/hughmiddleton/Lead Machine/Lead Machine Code/night_fb_profile
+2026-04-02 12:35:27,295 [INFO] [Night FB] Starting session mode=headed headless_env=<unset> require_display=False os=darwin
+2026-04-02 12:35:32,251 [INFO] [Night FB][session_state] state=authenticated_and_usable authed=1 unhealthy=0 reason=authenticated v2=0
+2026-04-02 12:35:32,256 [INFO] [Night FB][Row Gate] row=0 artist='emjaysoul' email_present=False fb_url_present=False fb_entrypoint_present=False eligible_for_fb=True
+2026-04-02 12:35:32,257 [INFO] [Night FB][Explicit Intake] artist="emjaysoul" outcome="no_explicit_url"
+2026-04-02 12:35:35,756 [INFO] [Night FB][session_state] state=authenticated_and_usable authed=1 unhealthy=0 reason=authenticated v2=0
+2026-04-02 12:35:35,756 [INFO] [Unearthed Path] no usable FB URL; skipping Night FB discovery
+2026-04-02 12:35:35,767 [INFO] [Night FB][Row Gate] row=1 artist='rusty-the-bucketheads' email_present=True fb_url_present=False fb_entrypoint_present=False eligible_for_fb=False
+2026-04-02 12:35:35,767 [INFO] [Night FB] Skipping row 1 ('rusty-the-bucketheads') – email already present (Email_All='rustyandthebucketheads@gmail.com;jarrapowell09@gmail.com').
+2026-04-02 12:35:35,769 [INFO] [Night FB][Row Gate] row=2 artist='young-jye' email_present=False fb_url_present=False fb_entrypoint_present=False eligible_for_fb=True
+2026-04-02 12:35:35,770 [INFO] [FB Night] Sleeping 5.61s before next row (index=2).
+2026-04-02 12:35:41,785 [INFO] [Night FB][Explicit Intake] artist="young-jye" outcome="no_explicit_url"
+2026-04-02 12:35:45,070 [INFO] [Night FB][session_state] state=authenticated_and_usable authed=1 unhealthy=0 reason=authenticated v2=0
+2026-04-02 12:35:45,083 [INFO] [Unearthed Path] no usable FB URL; skipping Night FB discovery
+2026-04-02 12:35:45,157 [INFO] [Night FB][Row Gate] row=3 artist='wavs' email_present=False fb_url_present=False fb_entrypoint_present=False eligible_for_fb=True
+2026-04-02 12:35:45,157 [INFO] [FB Night] Sleeping 5.69s before next row (index=3).
+2026-04-02 12:35:50,937 [INFO] [Night FB][Explicit Intake] artist="wavs" outcome="no_explicit_url"
+2026-04-02 12:35:54,847 [INFO] [Night FB][session_state] state=authenticated_and_usable authed=1 unhealthy=0 reason=authenticated v2=0
+2026-04-02 12:35:54,848 [INFO] [Unearthed Path] no usable FB URL; skipping Night FB discovery
+2026-04-02 12:35:54,869 [INFO] [Night FB][Row Gate] row=4 artist='fan-girl' email_present=False fb_url_present=True fb_entrypoint_present=True eligible_for_fb=True
+2026-04-02 12:35:54,870 [INFO] [FB Night] Sleeping 3.06s before next row (index=4).
+2026-04-02 12:35:58,260 [INFO] [Night FB][Explicit Intake] artist="fan-girl" outcome="attempt" source="facebook_url,Facebook URL,Social Link" urls="https://www.facebook.com/fangirlsounds" canonical_field="present"
+2026-04-02 12:36:03,625 [INFO] [Night FB][session_state] state=authenticated_and_usable authed=1 unhealthy=0 reason=authenticated v2=0
+2026-04-02 12:36:06,909 [INFO] [Night FB][session_state] state=authenticated_and_usable authed=1 unhealthy=0 reason=authenticated v2=0
+2026-04-02 12:36:06,987 [INFO] [Night FB] Using explicit FB URLs with authenticated session: ['https://www.facebook.com/fangirlsounds']
+2026-04-02 12:36:06,988 [INFO] [Night FB] Using explicit FB URLs: ['https://www.facebook.com/fangirlsounds']
+2026-04-02 12:36:06,994 [INFO] [Night FB] Starting FB scrape for artist="fan-girl" url="https://www.facebook.com/fangirlsounds"
+2026-04-02 12:36:06,997 [INFO] [FB Email] Visiting https://www.facebook.com/fangirlsounds
+2026-04-02 12:36:18,335 [INFO] [FB Email] Reveal pass clicked: ['profile settings see more options']
+2026-04-02 12:36:19,485 [INFO] [Night FB][Health] url=https://www.facebook.com/fangirlsounds captcha=0 checkpoint=0 login_wall=1 context=page
+2026-04-02 12:36:19,495 [INFO] [Night FB][Trust Budget] score=-2 delta=-2 reason=redirect_login context=page
+2026-04-02 12:36:19,519 [INFO] [Night FB][AcceptedPage] using fast loader url='https://www.facebook.com/fangirlsounds'
+2026-04-02 12:36:19,720 [INFO] [FB Email] Scanning main page HTML for emails: https://www.facebook.com/fangirlsounds
+2026-04-02 12:36:20,005 [INFO] [FB Email] Found email on main page: matt@runwayartists.com
+2026-04-02 12:36:20,006 [INFO] [FB Email] Found email on main page: hello@fangirl.com.au
+2026-04-02 12:36:20,007 [INFO] [Night FB][PASS A] Preserving extracted email(s) from explicit accepted URL despite weak post-fetch music signals: https://www.facebook.com/fangirlsounds
+2026-04-02 12:36:20,007 [INFO] [FB Email] Found email: hello@fangirl.com.au
+2026-04-02 12:36:20,007 [INFO] [FB Email] Found email: matt@runwayartists.com
+2026-04-02 12:36:20,011 [INFO] [Night FB] extracted email(s) ['matt@runwayartists.com', 'hello@fangirl.com.au'] from https://www.facebook.com/fangirlsounds
+2026-04-02 12:36:20,012 [INFO] [Night FB][PASS A] artist="fan-girl" url="https://www.facebook.com/fangirlsounds" mode="session" driver="anon_fast" outcome="found_email" reason="explicit_url"
+2026-04-02 12:36:20,067 [INFO] [Night FB][Row Gate] row=5 artist='fracturestunes' email_present=True fb_url_present=False fb_entrypoint_present=False eligible_for_fb=False
+2026-04-02 12:36:20,067 [INFO] [Night FB] Skipping row 5 ('fracturestunes') – email already present (Email_All='azren@analoguedawn.com').
+2026-04-02 12:36:20,072 [INFO] [Night FB][Row Gate] row=6 artist='blinder' email_present=False fb_url_present=True fb_entrypoint_present=True eligible_for_fb=True
+2026-04-02 12:36:20,073 [INFO] [FB Night] Sleeping 5.35s before next row (index=6).
+2026-04-02 12:36:25,509 [INFO] [Night FB][Explicit Intake] artist="blinder" outcome="attempt" source="facebook_url,Facebook URL,Social Link" urls="https://www.facebook.com/profile.php?id=61582189374902" canonical_field="present"

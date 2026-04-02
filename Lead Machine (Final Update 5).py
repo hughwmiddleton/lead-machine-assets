@@ -1144,7 +1144,7 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
     try:
         driver.get(url)
         WebDriverWait(driver, 20).until(
-            EC.presence_of_element_located((By.CLASS_NAME, 'HU3iy'))
+            EC.presence_of_element_located((By.CSS_SELECTOR, 'a[href^="/triplejunearthed/artist/"]'))
         )
         # Load existing CSV data if available
         existing_data = pd.DataFrame()
@@ -1153,7 +1153,7 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
         profile_urls = set()
         while len(profile_urls) < max_artists:
             soup = BeautifulSoup(driver.page_source, 'html.parser')
-            artist_links = soup.find_all('a', class_='HU3iy p1_Ju mqDRk FQED6 O_grP', href=True)
+            artist_links = soup.select('a[href^="/triplejunearthed/artist/"]')
             for link in artist_links:
                 href = link['href']
                 if href.startswith('/triplejunearthed/artist/'):
