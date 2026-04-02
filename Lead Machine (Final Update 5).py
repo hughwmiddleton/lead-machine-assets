@@ -1054,21 +1054,47 @@ def get_drum_status_from_source(page_source):
     the first release card only.
     """
     soup = BeautifulSoup(page_source, 'html.parser')
+
+    def _direct_child_tags(tag):
+        if not tag or not getattr(tag, "children", None):
+            return []
+        return [child for child in tag.children if getattr(child, "name", None)]
+
+    def _next_tag_sibling(tag):
+        if not tag:
+            return None
+        sibling = tag.next_sibling
+        while sibling is not None and not getattr(sibling, "name", None):
+            sibling = sibling.next_sibling
+        return sibling
+
+    def _first_direct_list(container):
+        if not container or not getattr(container, "name", None):
+            return None
+        if getattr(container, "name", "") in {"ul", "ol"} and container.find("li", recursive=False):
+            return container
+        for child in _direct_child_tags(container):
+            if child.name in {"ul", "ol"} and child.find("li", recursive=False):
+                return child
+            for grandchild in _direct_child_tags(child):
+                if grandchild.name in {"ul", "ol"} and grandchild.find("li", recursive=False):
+                    return grandchild
+        return None
+
     played_on_label = soup.find(
         lambda t: getattr(t, "name", "") in {"div", "p", "span", "strong", "h3", "h4"}
         and re.sub(r"\s+", " ", t.get_text(" ", strip=True)).strip().rstrip(":").lower() == "played on"
     )
     if played_on_label:
+        label_parent = played_on_label.parent if getattr(played_on_label, "parent", None) else None
         played_on_list = None
-        cursor = played_on_label
-        while cursor:
-            cursor = cursor.find_next()
-            if cursor is None:
-                break
-            if getattr(cursor, "name", "") in {"h2", "h3", "h4", "h5", "h6"}:
-                break
-            if getattr(cursor, "name", "") in {"ul", "ol"} and cursor.find("li"):
-                played_on_list = cursor
+        for candidate in (
+            _next_tag_sibling(played_on_label),
+            _first_direct_list(label_parent),
+            _next_tag_sibling(label_parent),
+        ):
+            played_on_list = _first_direct_list(candidate)
+            if played_on_list:
                 break
 
         if played_on_list:
@@ -1419,6 +1445,11 @@ def scrape_artist_profile(driver, profile_url, fb_driver=None):
         def _norm_text(value):
             return re.sub(r"\s+", " ", value or "").strip()
 
+        def _direct_child_tags(tag):
+            if not tag or not getattr(tag, "children", None):
+                return []
+            return [child for child in tag.children if getattr(child, "name", None)]
+
         def _label_text(tag):
             return _norm_text(tag.get_text(" ", strip=True)).rstrip(":").lower()
 
@@ -1427,6 +1458,49 @@ def scrape_artist_profile(driver, profile_url, fb_driver=None):
                 lambda t: getattr(t, "name", "") in {"h2", "h3", "h4", "h5", "h6"}
                 and _label_text(t) == text_value
             )
+
+        def _next_tag_sibling(tag):
+            if not tag:
+                return None
+            sibling = tag.next_sibling
+            while sibling is not None and not getattr(sibling, "name", None):
+                sibling = sibling.next_sibling
+            return sibling
+
+        def _first_direct_list(container):
+            if not container or not getattr(container, "name", None):
+                return None
+            if getattr(container, "name", "") in {"ul", "ol"} and container.find("li", recursive=False):
+                return container
+            for child in _direct_child_tags(container):
+                if getattr(child, "name", "") in {"h2", "h3", "h4", "h5", "h6"} and _label_text(child) == "tracks":
+                    break
+                if child.name in {"ul", "ol"} and child.find("li", recursive=False):
+                    return child
+                for grandchild in _direct_child_tags(child):
+                    if grandchild.name in {"ul", "ol"} and grandchild.find("li", recursive=False):
+                        return grandchild
+            return None
+
+        def _first_track_card_container(anchor):
+            if not anchor:
+                return None
+            anchor_parent = anchor.parent if getattr(anchor, "parent", None) else None
+            for candidate in (
+                _next_tag_sibling(anchor),
+                _next_tag_sibling(anchor_parent),
+            ):
+                if not candidate or not getattr(candidate, "name", None):
+                    continue
+                if candidate.get("data-component") == "TrackCard":
+                    return candidate
+                for child in _direct_child_tags(candidate):
+                    if child.get("data-component") == "TrackCard":
+                        return child
+                    for grandchild in _direct_child_tags(child):
+                        if grandchild.get("data-component") == "TrackCard":
+                            return grandchild
+            return None
 
         links = soup.find_all('a', href=True)
         for link in links:
@@ -1480,57 +1554,62 @@ def scrape_artist_profile(driver, profile_url, fb_driver=None):
             lambda t: getattr(t, "name", "") in {"div", "p", "span", "strong", "h2", "h3", "h4"}
             and _label_text(t) == "genres"
         )
+        artist_heading = soup.find("h1")
+        artist_meta_container = artist_heading.parent if artist_heading and getattr(artist_heading, "parent", None) else None
         genre_container = None
         if genre_label:
-            cursor = genre_label
-            while cursor:
-                cursor = cursor.find_next()
-                if cursor is None or cursor is tracks_heading:
+            label_parent = genre_label.parent if getattr(genre_label, "parent", None) else None
+            for candidate in (
+                _next_tag_sibling(genre_label),
+                _first_direct_list(label_parent),
+                _next_tag_sibling(label_parent),
+            ):
+                genre_container = _first_direct_list(candidate)
+                if genre_container:
                     break
-                if getattr(cursor, "name", "") in {"h2", "h3", "h4", "h5", "h6"}:
+
+        if not genre_container and artist_meta_container:
+            for child in _direct_child_tags(artist_meta_container):
+                if child is artist_heading:
                     break
-                if getattr(cursor, "name", "") in {"ul", "ol"} and cursor.find("li"):
-                    genre_container = cursor
+                genre_container = _first_direct_list(child)
+                if genre_container:
                     break
-        location_anchor = genre_container or genre_label or soup.find("h1")
-        if location_anchor:
-            cursor = location_anchor
-            while cursor:
-                cursor = cursor.find_next()
-                if cursor is None or cursor is tracks_heading:
+
+        if artist_meta_container:
+            for child in _direct_child_tags(artist_meta_container):
+                if child is artist_heading:
                     break
-                if getattr(cursor, "name", "") in {"h2", "h3", "h4", "h5", "h6"}:
-                    break
-                if genre_container and getattr(cursor, "parent", None) is genre_container:
+                if genre_container and (child is genre_container or genre_container in child.descendants):
                     continue
-                candidate_text = _norm_text(getattr(cursor, "get_text", lambda *args, **kwargs: "")(" ", strip=True))
-                if not candidate_text:
+                attrs_text = _norm_text(" ".join(
+                    value for value in (
+                        child.get("aria-label"),
+                        child.get("title"),
+                        child.get("data-testid"),
+                    )
+                    if isinstance(value, str)
+                ))
+                candidate_text = _norm_text(child.get_text(" ", strip=True))
+                source_text = attrs_text or candidate_text
+                if not source_text:
                     continue
-                if candidate_text == artist_name:
-                    continue
-                if any(token in candidate_text.lower() for token in ("genres", "track:", "played on", "uploaded", "artist:", "review", "sounds like")):
-                    continue
-                if ":" in candidate_text:
-                    continue
-                if re.match(r"^[^,]{1,80},\s*[^,]{1,40}$", candidate_text):
-                    location = candidate_text
-                    break
-        if tracks_heading:
-            cursor = tracks_heading
-            while cursor:
-                cursor = cursor.find_next()
-                if cursor is None:
-                    break
-                if getattr(cursor, "name", "") in {"h2", "h3", "h4", "h5", "h6"} and _label_text(cursor) in {"about", "sounds like", "connect"}:
-                    break
-                candidate_text = _norm_text(getattr(cursor, "get_text", lambda *args, **kwargs: "")(" ", strip=True))
-                if not candidate_text or not candidate_text.lower().startswith("track:"):
-                    continue
-                raw_track = candidate_text.split("Genres:", 1)[0].split("Played on:", 1)[0].split("Uploaded", 1)[0]
-                match = re.search(r"Track:\s*(.+?)(?:\s+by\s+.+)?$", raw_track, flags=re.IGNORECASE)
+                match = re.match(r"location\s*:?\s*(.+)$", source_text, flags=re.IGNORECASE)
                 if match:
-                    song_title = match.group(1).strip(" -")
+                    location = match.group(1).strip(" -")
                     break
+
+        if tracks_heading:
+            first_track_card = _first_track_card_container(tracks_heading)
+            if first_track_card:
+                title_node = (
+                    first_track_card.select_one("[data-component='CardTitle']")
+                    or first_track_card.select_one("h2 a[href], h3 a[href], h4 a[href]")
+                    or first_track_card.select_one("h2, h3, h4")
+                    or first_track_card.select_one("a[href]")
+                )
+                if title_node:
+                    song_title = _norm_text(title_node.get_text(" ", strip=True))
         sounds_like_element = soup.find('h2', string="Sounds Like")
         if sounds_like_element:
             sounds_like_list = sounds_like_element.find_next('p')
