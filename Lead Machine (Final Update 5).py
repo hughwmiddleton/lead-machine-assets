@@ -1574,8 +1574,15 @@ def scrape_artist_profile(driver, profile_url, fb_driver=None):
                     continue
                 if child.name in {"h1", "h2", "h3", "h4", "h5", "h6", "section"}:
                     continue
-                class_tokens = " ".join(child.get("class", []))
-                if "location" not in class_tokens.lower():
+                child_text_raw = child.get_text(" ", strip=True)
+                child_text = _norm_text(child_text_raw)
+                if (
+                    not child_text
+                    or child_text == artist_name
+                    or child.find(["h1", "h2", "h3", "h4", "h5", "h6"]) is not None
+                    or len(child_text) > 80
+                    or "\n" in child_text_raw
+                ):
                     continue
                 location_node = child
                 break
