@@ -1482,24 +1482,12 @@ def scrape_artist_profile(driver, profile_url, fb_driver=None):
                         return grandchild
             return None
 
-        def _first_track_card_container(anchor):
-            if not anchor:
-                return None
-            anchor_parent = anchor.parent if getattr(anchor, "parent", None) else None
-            for candidate in (
-                _next_tag_sibling(anchor),
-                _next_tag_sibling(anchor_parent),
-            ):
-                if not candidate or not getattr(candidate, "name", None):
-                    continue
-                if candidate.get("data-component") == "TrackCard":
-                    return candidate
-                for child in _direct_child_tags(candidate):
-                    if child.get("data-component") == "TrackCard":
-                        return child
-                    for grandchild in _direct_child_tags(child):
-                        if grandchild.get("data-component") == "TrackCard":
-                            return grandchild
+        def _tracks_section_container(anchor):
+            current = anchor if getattr(anchor, "name", None) else None
+            while current and getattr(current, "name", None):
+                if current.find("div", attrs={"data-component": "TrackItem"}):
+                    return current
+                current = current.parent if getattr(current, "parent", None) else None
             return None
 
         links = soup.find_all('a', href=True)
@@ -1576,37 +1564,34 @@ def scrape_artist_profile(driver, profile_url, fb_driver=None):
                 if genre_container:
                     break
 
-        if artist_meta_container:
-            for child in _direct_child_tags(artist_meta_container):
+        if artist_meta_container and artist_heading:
+            direct_children = _direct_child_tags(artist_meta_container)
+            location_node = None
+            for child in direct_children:
                 if child is artist_heading:
-                    break
+                    continue
                 if genre_container and (child is genre_container or genre_container in child.descendants):
                     continue
-                attrs_text = _norm_text(" ".join(
-                    value for value in (
-                        child.get("aria-label"),
-                        child.get("title"),
-                        child.get("data-testid"),
-                    )
-                    if isinstance(value, str)
-                ))
-                candidate_text = _norm_text(child.get_text(" ", strip=True))
-                source_text = attrs_text or candidate_text
-                if not source_text:
+                if child.name in {"h1", "h2", "h3", "h4", "h5", "h6", "section"}:
                     continue
-                match = re.match(r"location\s*:?\s*(.+)$", source_text, flags=re.IGNORECASE)
-                if match:
-                    location = match.group(1).strip(" -")
-                    break
+                class_tokens = " ".join(child.get("class", []))
+                if "location" not in class_tokens.lower():
+                    continue
+                location_node = child
+                break
+            if location_node:
+                location = _norm_text(location_node.get_text(" ", strip=True))
 
         if tracks_heading:
-            first_track_card = _first_track_card_container(tracks_heading)
-            if first_track_card:
+            tracks_section = _tracks_section_container(tracks_heading)
+            if tracks_section:
+                first_track_item = tracks_section.find("div", attrs={"data-component": "TrackItem"})
                 title_node = (
-                    first_track_card.select_one("[data-component='CardTitle']")
-                    or first_track_card.select_one("h2 a[href], h3 a[href], h4 a[href]")
-                    or first_track_card.select_one("h2, h3, h4")
-                    or first_track_card.select_one("a[href]")
+                    first_track_item.find(
+                        "span",
+                        class_=lambda value: value and "TrackItem_trackTitleText" in value,
+                    )
+                    if first_track_item else None
                 )
                 if title_node:
                     song_title = _norm_text(title_node.get_text(" ", strip=True))
