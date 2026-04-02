@@ -1151,13 +1151,71 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
         if os.path.exists(existing_csv):
             existing_data = pd.read_csv(existing_csv)
         profile_urls = set()
+        listing_metadata_by_url = {}
+
+        def _resolve_listing_card(link_tag):
+            if link_tag.find(True):
+                return link_tag
+            for ancestor in link_tag.parents:
+                ancestor_name = getattr(ancestor, "name", "")
+                if ancestor_name in {"article", "li"}:
+                    return ancestor
+                if ancestor_name in {"div", "section"}:
+                    if ancestor.select_one('a[href^="/triplejunearthed/artist/"]') == link_tag:
+                        return ancestor
+            return link_tag
+
+        def _extract_listing_metadata(listing_card):
+            text_fragments = list(listing_card.stripped_strings)
+            attr_fragments = []
+            for tag in listing_card.find_all(True):
+                for attr_name in ("aria-label", "title", "alt"):
+                    attr_value = (tag.get(attr_name) or "").strip()
+                    if attr_value:
+                        attr_fragments.append(attr_value)
+            listing_text = " ".join(text_fragments + attr_fragments)
+            listing_text_lower = listing_text.lower()
+            location_value = ""
+
+            for text_fragment in text_fragments:
+                location_match = re.match(r"Location\s*:?\s*(.+)", text_fragment, flags=re.IGNORECASE)
+                if location_match:
+                    location_value = location_match.group(1).strip(" :-")
+                    break
+
+            if not location_value:
+                location_match = re.search(
+                    r"Location\s*:?\s*(.+?)(?=\s*(?:Played on triple J|Played on Unearthed|$))",
+                    listing_text,
+                    flags=re.IGNORECASE,
+                )
+                if location_match:
+                    location_value = location_match.group(1).strip(" :-")
+
+            return {
+                "location": location_value,
+                "played_on_triplej": "yes" if "played on triple j" in listing_text_lower else "",
+                "played_on_unearthed": "yes"
+                if ("played on unearthed" in listing_text_lower or "played on triple j unearthed" in listing_text_lower)
+                else "",
+            }
+
         while len(profile_urls) < max_artists:
             soup = BeautifulSoup(driver.page_source, 'html.parser')
-            artist_links = soup.select('a[href^="/triplejunearthed/artist/"]')
-            for link in artist_links:
-                href = link['href']
+            listing_cards = soup.select('a.HU3iy.p1_Ju.mqDRk.FQED6.O_grP[href^="/triplejunearthed/artist/"]')
+            if not listing_cards:
+                listing_cards = []
+                for artist_link in soup.select('a[href^="/triplejunearthed/artist/"]'):
+                    listing_cards.append(_resolve_listing_card(artist_link))
+            for listing_card in listing_cards:
+                link = listing_card if getattr(listing_card, "name", "") == "a" else listing_card.select_one('a[href^="/triplejunearthed/artist/"]')
+                if not link:
+                    continue
+                href = link.get('href', '')
                 if href.startswith('/triplejunearthed/artist/'):
-                    profile_urls.add("https://www.abc.net.au" + href)
+                    profile_url = "https://www.abc.net.au" + href
+                    profile_urls.add(profile_url)
+                    listing_metadata_by_url.setdefault(profile_url, _extract_listing_metadata(listing_card))
             print(f"Found {len(profile_urls)} artist profile URLs so far...")
             try:
                 load_more_button = WebDriverWait(driver, 10).until(
@@ -1195,10 +1253,14 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
             ) = scrape_artist_profile(
                 driver, profile_url, fb_driver=fb_driver
             )
+            listing_metadata = listing_metadata_by_url.get(profile_url, {})
+            location = (listing_metadata.get("location") or location or "").strip()
             # Determine drum status from the full page source.
             drum_status_raw = get_drum_status_from_source(driver.page_source)
             played_on_triplej = "yes" if drum_status_raw == "triple j" else ""
             played_on_unearthed = "yes" if drum_status_raw == "triple j unearthed" else ""
+            played_on_triplej = listing_metadata.get("played_on_triplej") or played_on_triplej
+            played_on_unearthed = listing_metadata.get("played_on_unearthed") or played_on_unearthed
             primary_genre_value = primary_genre_value or ""
             genre_raw_value = unearthed_genre_raw or ""
             artist_data.append(
