@@ -28,44 +28,43 @@ def parse_unearthed_genre(raw: str | None) -> Tuple[Optional[str], Optional[str]
 
 def extract_unearthed_genre_text(soup: BeautifulSoup) -> str:
     """
-    Locate the genre line in the Unearthed artist hero header and return a readable string.
-    Prefers the container between the ARTIST pill and artist name; falls back to the first
-    genre list on the page. Logs at DEBUG level if no candidate is found.
+    Locate the artist-level genre list on a current Unearthed profile page and return a
+    readable string.
+
+    Current live profiles expose the artist genres via a visible "Genres:" label near the
+    top hero block. Anchor to that label and only inspect the local block before the Tracks
+    section so we do not drift into per-track genre lists further down the page.
     """
     if not soup:
         return ""
 
-    def _has_class(tag, candidates):
-        classes = tag.get("class") or []
-        return any(c in classes for c in candidates)
+    def _norm(text: str | None) -> str:
+        return re.sub(r"\s+", " ", text or "").strip()
+
+    def _label_text(tag) -> str:
+        return _norm(tag.get_text(" ", strip=True)).rstrip(":").lower()
+
+    def _is_heading(tag, label: str) -> bool:
+        return getattr(tag, "name", "") in {"h1", "h2", "h3", "h4", "h5", "h6"} and _label_text(tag) == label
+
+    stop_heading = soup.find(lambda t: _is_heading(t, "tracks"))
+    genre_label = soup.find(
+        lambda t: getattr(t, "name", "") in {"div", "p", "span", "strong", "h2", "h3", "h4"}
+        and _label_text(t) == "genres"
+    )
 
     genre_container = None
-    hero_block = soup.select_one("div.q0wzh")
-    if hero_block:
-        genre_container = hero_block.find(
-            lambda t: t.name in ("div", "ul") and _has_class(t, ("ZF6HQ", "PARBR"))
-        )
-
-    if not genre_container:
-        sr_label = soup.find(
-            lambda t: t.name in ("span", "div")
-            and _has_class(t, ("gRMNM",))
-            and "genre" in t.get_text(" ", strip=True).lower()
-        )
-        if sr_label:
-            genre_container = sr_label.find_next(
-                lambda t: t.name in ("div", "ul") and _has_class(t, ("ZF6HQ", "PARBR"))
-            )
-
-    if not genre_container:
-        genre_container = soup.find(
-            "ul",
-            class_=lambda c: (
-                isinstance(c, str)
-                and "PARBR" in c.split()
-            )
-            or (isinstance(c, (list, tuple)) and "PARBR" in c),
-        )
+    if genre_label:
+        cursor = genre_label
+        while cursor:
+            cursor = cursor.find_next()
+            if cursor is None or cursor is stop_heading:
+                break
+            if getattr(cursor, "name", "") in {"h2", "h3", "h4", "h5", "h6"}:
+                break
+            if getattr(cursor, "name", "") in {"ul", "ol"} and cursor.find("li"):
+                genre_container = cursor
+                break
 
     if not genre_container:
         logger.debug("[Unearthed] Genre container not found on profile page.")

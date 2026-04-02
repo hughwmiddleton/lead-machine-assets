@@ -1048,29 +1048,47 @@ def _start_chromedriver_with_retry(chrome_options):
 def get_drum_status_from_source(page_source):
     """
     Parses the page source to determine drum status for the most recent song release.
-    
-    It looks for the "Played on:" list (<ul> with class "oqAY3 PARBR") and then the first
-    list item (<li data-component="ListItem"). Within that <li>:
-      - If a screen-reader <span> (data-component="ScreenReaderOnly") is found and its text 
-        contains "unearthed", returns "triple j unearthed".
-      - Else if an SVG element with data-component "TripleJDrum" is found, returns "triple j".
-      - Otherwise, returns an empty string.
+
+    Current live Unearthed profiles expose the release status under a visible "Played on:"
+    label. Anchor to that local block, then inspect the adjacent list / accessible text for
+    the first release card only.
     """
     soup = BeautifulSoup(page_source, 'html.parser')
-    played_on_list = soup.find("ul", class_="oqAY3 PARBR")
-    if played_on_list:
-        li = played_on_list.find("li", attrs={"data-component": "ListItem"})
-        if li:
-            sr_span = li.find("span", attrs={"data-component": "ScreenReaderOnly"})
-            if sr_span:
-                text = sr_span.get_text().strip().lower()
-                if "unearthed" in text:
+    played_on_label = soup.find(
+        lambda t: getattr(t, "name", "") in {"div", "p", "span", "strong", "h3", "h4"}
+        and re.sub(r"\s+", " ", t.get_text(" ", strip=True)).strip().rstrip(":").lower() == "played on"
+    )
+    if played_on_label:
+        played_on_list = None
+        cursor = played_on_label
+        while cursor:
+            cursor = cursor.find_next()
+            if cursor is None:
+                break
+            if getattr(cursor, "name", "") in {"h2", "h3", "h4", "h5", "h6"}:
+                break
+            if getattr(cursor, "name", "") in {"ul", "ol"} and cursor.find("li"):
+                played_on_list = cursor
+                break
+
+        if played_on_list:
+            li = played_on_list.find("li", attrs={"data-component": "ListItem"}) or played_on_list.find("li")
+            if li:
+                sr_span = li.find("span", attrs={"data-component": "ScreenReaderOnly"})
+                if sr_span:
+                    text = sr_span.get_text().strip().lower()
+                    if "unearthed" in text:
+                        return "triple j unearthed"
+                    if "triple j" in text:
+                        return "triple j"
+                li_text = li.get_text(" ", strip=True).lower()
+                if "unearthed" in li_text:
                     return "triple j unearthed"
-                elif "triple j" in text:
+                if "triple j" in li_text:
                     return "triple j"
-            drum_svg = li.find("svg", attrs={"data-component": "TripleJDrum"})
-            if drum_svg:
-                return "triple j"
+                drum_svg = li.find("svg", attrs={"data-component": "TripleJDrum"})
+                if drum_svg:
+                    return "triple j"
     return ""
 
 # -----------------------------------------------------------------------------
@@ -1398,6 +1416,18 @@ def scrape_artist_profile(driver, profile_url, fb_driver=None):
             primary_genre_value = primary_genre_value or parsed_primary_genre
         if parsed_genre_raw:
             unearthed_genre_raw = parsed_genre_raw
+        def _norm_text(value):
+            return re.sub(r"\s+", " ", value or "").strip()
+
+        def _label_text(tag):
+            return _norm_text(tag.get_text(" ", strip=True)).rstrip(":").lower()
+
+        def _heading_with_text(text_value):
+            return soup.find(
+                lambda t: getattr(t, "name", "") in {"h2", "h3", "h4", "h5", "h6"}
+                and _label_text(t) == text_value
+            )
+
         links = soup.find_all('a', href=True)
         for link in links:
             href = link['href']
@@ -1445,12 +1475,62 @@ def scrape_artist_profile(driver, profile_url, fb_driver=None):
             seen_links.add(norm)
             clean_socials.append(href)
         social_links = clean_socials
-        location_element = soup.find('div', class_='divwU')
-        if location_element:
-            location = location_element.get_text(strip=True)
-        song_title_element = soup.find('span', class_='fRXHI')
-        if song_title_element:
-            song_title = song_title_element.get_text(strip=True)
+        tracks_heading = _heading_with_text("tracks")
+        genre_label = soup.find(
+            lambda t: getattr(t, "name", "") in {"div", "p", "span", "strong", "h2", "h3", "h4"}
+            and _label_text(t) == "genres"
+        )
+        genre_container = None
+        if genre_label:
+            cursor = genre_label
+            while cursor:
+                cursor = cursor.find_next()
+                if cursor is None or cursor is tracks_heading:
+                    break
+                if getattr(cursor, "name", "") in {"h2", "h3", "h4", "h5", "h6"}:
+                    break
+                if getattr(cursor, "name", "") in {"ul", "ol"} and cursor.find("li"):
+                    genre_container = cursor
+                    break
+        location_anchor = genre_container or genre_label or soup.find("h1")
+        if location_anchor:
+            cursor = location_anchor
+            while cursor:
+                cursor = cursor.find_next()
+                if cursor is None or cursor is tracks_heading:
+                    break
+                if getattr(cursor, "name", "") in {"h2", "h3", "h4", "h5", "h6"}:
+                    break
+                if genre_container and getattr(cursor, "parent", None) is genre_container:
+                    continue
+                candidate_text = _norm_text(getattr(cursor, "get_text", lambda *args, **kwargs: "")(" ", strip=True))
+                if not candidate_text:
+                    continue
+                if candidate_text == artist_name:
+                    continue
+                if any(token in candidate_text.lower() for token in ("genres", "track:", "played on", "uploaded", "artist:", "review", "sounds like")):
+                    continue
+                if ":" in candidate_text:
+                    continue
+                if re.match(r"^[^,]{1,80},\s*[^,]{1,40}$", candidate_text):
+                    location = candidate_text
+                    break
+        if tracks_heading:
+            cursor = tracks_heading
+            while cursor:
+                cursor = cursor.find_next()
+                if cursor is None:
+                    break
+                if getattr(cursor, "name", "") in {"h2", "h3", "h4", "h5", "h6"} and _label_text(cursor) in {"about", "sounds like", "connect"}:
+                    break
+                candidate_text = _norm_text(getattr(cursor, "get_text", lambda *args, **kwargs: "")(" ", strip=True))
+                if not candidate_text or not candidate_text.lower().startswith("track:"):
+                    continue
+                raw_track = candidate_text.split("Genres:", 1)[0].split("Played on:", 1)[0].split("Uploaded", 1)[0]
+                match = re.search(r"Track:\s*(.+?)(?:\s+by\s+.+)?$", raw_track, flags=re.IGNORECASE)
+                if match:
+                    song_title = match.group(1).strip(" -")
+                    break
         sounds_like_element = soup.find('h2', string="Sounds Like")
         if sounds_like_element:
             sounds_like_list = sounds_like_element.find_next('p')
