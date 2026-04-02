@@ -10368,6 +10368,13 @@ class CrossDirectoryEnricherWorker(QThread):
                     shared_live_page = _open_instagram_live_page_bridge(ig_url, timeout_s=HTTP_TIMEOUT)
                 return shared_live_page
 
+            def _select_rendered_live_text_surface(*surface_candidates):
+                for _surface_name, surface_text in surface_candidates:
+                    normalized_surface_text = cell_to_str(surface_text)
+                    if normalized_surface_text:
+                        return normalized_surface_text, _surface_name
+                return "", ""
+
             try:
                 if not all_ig_emails and not _row_has_email(seed_df.loc[row_idx]):
                     (
@@ -10443,24 +10450,38 @@ class CrossDirectoryEnricherWorker(QThread):
                                 "DEBUG IG: rendered contains @gmail.com =",
                                 "@gmail.com" in (rendered_live_text or "").lower(),
                             )
-                            print("DEBUG IG: body.textContent length =", len(
-                                shared_live_page.page.evaluate("document.body ? (document.body.textContent || '') : ''") or ""
-                            ))
-                            main_text = shared_live_page.page.evaluate(
-                                "(() => { const el = document.querySelector('main'); return el ? (el.innerText || el.textContent || '') : ''; })()"
+                            body_text_content = cell_to_str(
+                                shared_live_page.page.evaluate(
+                                    "document.body ? (document.body.textContent || '') : ''"
+                                )
                             )
+                            print("DEBUG IG: body.textContent length =", len(body_text_content or ""))
+                            main_text = cell_to_str(shared_live_page.page.evaluate(
+                                "(() => { const el = document.querySelector('main'); return el ? (el.innerText || el.textContent || '') : ''; })()"
+                            ))
                             print("DEBUG IG: main.innerText length =", len(main_text or ""))
                             print("DEBUG IG: main contains @gmail.com =", "@gmail.com" in (main_text or "").lower())
-                            all_text = shared_live_page.page.evaluate(
+                            all_text = cell_to_str(shared_live_page.page.evaluate(
                                 "(() => document.documentElement ? (document.documentElement.textContent || '') : '')()"
-                            )
+                            ))
                             print("DEBUG IG: document.textContent length =", len(all_text or ""))
                             print("DEBUG IG: document contains @gmail.com =", "@gmail.com" in (all_text or "").lower())
-                            bio_text = shared_live_page.page.evaluate(
+                            bio_text = cell_to_str(shared_live_page.page.evaluate(
                                 "(() => { const nodes = Array.from(document.querySelectorAll('h1, span, div')); return nodes.map(n => n.innerText || '').join(' '); })()"
-                            )
+                            ))
                             print("DEBUG IG: aggregated node text length =", len(bio_text or ""))
                             print("DEBUG IG: aggregated contains @gmail.com =", "@gmail.com" in (bio_text or "").lower())
+                            rendered_live_text, rendered_live_surface = _select_rendered_live_text_surface(
+                                ("document.body.innerText", rendered_live_text),
+                                ("main.innerText_or_textContent", main_text),
+                                ("aggregated_visible_node_text", bio_text),
+                                ("document.body.textContent", body_text_content),
+                                ("document.documentElement.textContent", all_text),
+                            )
+                            print(
+                                "DEBUG IG: chosen rendered surface =",
+                                rendered_live_surface or "none",
+                            )
                         except Exception as exc:
                             print(f"DEBUG IG: rendered text evaluate failed: {repr(exc)}")
                             rendered_live_text = ""

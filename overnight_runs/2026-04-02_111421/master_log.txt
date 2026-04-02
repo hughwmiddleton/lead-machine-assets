@@ -1,0 +1,16 @@
+2026-04-02 11:14:52,140 [INFO] [Seed Summary]
+2026-04-02 11:14:52,141 [INFO] unearthed=0
+2026-04-02 11:14:52,187 [INFO] [Master] Wrote merged raw CSV: overnight_runs/2026-04-02_111421/master_raw.csv (rows=0)
+2026-04-02 11:14:52,188 [INFO] [Master Enrich] Starting cross-directory enrichment for overnight_runs/2026-04-02_111421/master_raw.csv
+2026-04-02 11:14:57,439 [INFO] [Master] Bandcamp directory CSV -> (none) in /Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/overnight_runs/2026-04-02_111421 (attempts=6)
+2026-04-02 11:15:02,643 [INFO] [Master] SoundCloud directory CSV -> (none) in /Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/overnight_runs/2026-04-02_111421 (attempts=6)
+2026-04-02 11:15:07,806 [INFO] [Master] Last.fm directory CSV -> (none) in /Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/overnight_runs/2026-04-02_111421 (attempts=6)
+2026-04-02 11:15:07,814 [INFO] [Master] Unearthed directory CSV -> /Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/overnight_runs/2026-04-02_111421/job_unearthed_1/raw.csv (rows=0, kind=raw)
+2026-04-02 11:15:07,814 [INFO] [Master] Passing bandcamp_csv_path=
+2026-04-02 11:15:07,814 [INFO] [Master] Passing soundcloud_csv_path=
+2026-04-02 11:15:07,814 [INFO] [Master] Passing lastfm_csv_path=
+2026-04-02 11:15:07,815 [INFO] [Master] Passing unearthed_csv_path=/Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/overnight_runs/2026-04-02_111421/job_unearthed_1/raw.csv
+2026-04-02 11:15:07,957 [INFO] [Night FB] Using Chrome profile dir: /Users/hughmiddleton/Lead Machine/Lead Machine Code/night_fb_profile
+2026-04-02 11:15:08,538 [INFO] [Night FB][preflight] chrome_binary=/Applications/Google Chrome.app/Contents/MacOS/Google Chrome chrome_version=Google Chrome 146.0.7680.165 chromedriver=<selenium_manager> chromedriver_version=<selenium_manager> profile_dir=/Users/hughmiddleton/Lead Machine/Lead Machine Code/night_fb_profile profile_exists=True profile_locks=[] image_policy=managed_allow args=['--disable-gpu', '--window-size=1920x1080', '--disable-extensions', '--disable-dev-shm-usage', '--no-sandbox', '--disable-blink-features=AutomationControlled', '--user-data-dir=/Users/hughmiddleton/Lead Machine/Lead Machine Code/night_fb_profile', '--profile-directory=Default']
+2026-04-02 11:15:12,676 [INFO] [Night FB][driver] requested_profile=/Users/hughmiddleton/Lead Machine/Lead Machine Code/night_fb_profile active_profile=/Users/hughmiddleton/Lead Machine/Lead Machine Code/night_fb_profile persistent_profile=1 temp_fallback=0 webdriver_mask=1
+2026-04-02 11:15:29,630 [INFO] [Night FB][auth_probe] mode=headed requested_profile=/Users/hughmiddleton/Lead Machine/Lead Machine Code/night_fb_profile active_profile=/Users/hughmiddleton/Lead Machine/Lead Machine Code/night_fb_profile temp_fallback=0 authed=1 reason=authenticated

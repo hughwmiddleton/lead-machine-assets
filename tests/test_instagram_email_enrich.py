@@ -62,6 +62,11 @@ class _DummyInstagramHiddenContactPage(_DummyClosable):
         html,
         *,
         rendered_text="",
+        rendered_body_inner_text=None,
+        rendered_body_text_content=None,
+        rendered_main_text=None,
+        rendered_document_text_content=None,
+        rendered_aggregated_text=None,
         candidates=None,
         click_effects=None,
         runtime_structured_payloads=None,
@@ -69,7 +74,21 @@ class _DummyInstagramHiddenContactPage(_DummyClosable):
     ):
         super().__init__()
         self._html = html
-        self._rendered_text = rendered_text
+        self._rendered_body_inner_text = (
+            rendered_text if rendered_body_inner_text is None else rendered_body_inner_text
+        )
+        self._rendered_body_text_content = (
+            rendered_text if rendered_body_text_content is None else rendered_body_text_content
+        )
+        self._rendered_main_text = rendered_text if rendered_main_text is None else rendered_main_text
+        self._rendered_document_text_content = (
+            rendered_text
+            if rendered_document_text_content is None
+            else rendered_document_text_content
+        )
+        self._rendered_aggregated_text = (
+            rendered_text if rendered_aggregated_text is None else rendered_aggregated_text
+        )
         self._candidates = list(candidates or [])
         self._click_effects = dict(click_effects or {})
         self._runtime_structured_payloads = list(runtime_structured_payloads or [])
@@ -83,15 +102,15 @@ class _DummyInstagramHiddenContactPage(_DummyClosable):
     def evaluate(self, script):  # noqa: ANN001
         script_text = str(script or "")
         if "document.body" in script_text and "innerText" in script_text:
-            return self._rendered_text
+            return self._rendered_body_inner_text
         if "document.body" in script_text and "textContent" in script_text:
-            return self._rendered_text
+            return self._rendered_body_text_content
         if "document.querySelector('main')" in script_text:
-            return self._rendered_text
+            return self._rendered_main_text
         if "document.documentElement" in script_text and "textContent" in script_text:
-            return self._rendered_text
+            return self._rendered_document_text_content
         if "querySelectorAll('h1, span, div')" in script_text:
-            return self._rendered_text
+            return self._rendered_aggregated_text
         if "ig-hidden-contact" not in script_text and (
             "web_profile_info" in script_text or "bio_links" in script_text
         ):
@@ -1840,6 +1859,147 @@ def test_instagram_email_live_direct_uses_rendered_text_when_snapshot_html_misse
         logs,
         "https://www.instagram.com/renderedtextartist/",
         "[IG Email] Found email: renderedtext@artist.com",
+    )
+
+
+def test_instagram_email_rendered_text_fallback_uses_best_non_empty_runtime_surface(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Rendered Surface Priority Artist",
+            "Email": "",
+            "Email_All": "",
+            "Instagram_URL": "https://instagram.com/renderedsurfacepriority/",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+            "Email_Type": "",
+            EMAIL_PROVENANCE_JSON_COL: "",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    live_pages = _install_instagram_profile_fetch_scope(
+        monkeypatch,
+        static_html="<html><body><div>Static shell without email</div></body></html>",
+        live_page_factory=lambda: _DummyInstagramHiddenContactPage(
+            "<html><body><main><div>Rendered profile without visible email in snapshot</div></main></body></html>",
+            rendered_body_inner_text="",
+            rendered_body_text_content="Bookings: bodytext@artist.com",
+            rendered_main_text="Bookings: mainsurface@artist.com",
+            rendered_document_text_content="Bookings: document@artist.com",
+            rendered_aggregated_text="Bookings: aggregated@artist.com",
+        ),
+    )
+    monkeypatch.setattr(
+        cde,
+        "_fetch_website_html_bounded",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("one-hop should not run")),
+    )
+
+    matched = worker._enrich_row_instagram_email(seed_df, 0, ctx)
+
+    assert matched is True
+    assert len(live_pages) == 1
+    assert live_pages[0].click_calls == []
+    assert seed_df.at[0, "Email"] == "mainsurface@artist.com"
+    assert seed_df.at[0, "Email_All"] == "mainsurface@artist.com"
+    assert seed_df.at[0, "Email_Extract_Method"] == "regex"
+    assert "instagram_profile" in seed_df.at[0, EMAIL_PROVENANCE_JSON_COL]
+
+
+def test_instagram_email_rendered_text_fallback_preserves_body_priority(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Rendered Body Winner Artist",
+            "Email": "",
+            "Email_All": "",
+            "Instagram_URL": "https://instagram.com/renderedbodywinner/",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+            "Email_Type": "",
+            EMAIL_PROVENANCE_JSON_COL: "",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    live_pages = _install_instagram_profile_fetch_scope(
+        monkeypatch,
+        static_html="<html><body><div>Static shell without email</div></body></html>",
+        live_page_factory=lambda: _DummyInstagramHiddenContactPage(
+            "<html><body><main><div>Rendered profile without visible email in snapshot</div></main></body></html>",
+            rendered_body_inner_text="Bookings: bodywinner@artist.com",
+            rendered_body_text_content="Bookings: bodytext@artist.com",
+            rendered_main_text="Bookings: mainsurface@artist.com",
+            rendered_document_text_content="Bookings: document@artist.com",
+            rendered_aggregated_text="Bookings: aggregated@artist.com",
+        ),
+    )
+    monkeypatch.setattr(
+        cde,
+        "_fetch_website_html_bounded",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("one-hop should not run")),
+    )
+
+    matched = worker._enrich_row_instagram_email(seed_df, 0, ctx)
+
+    assert matched is True
+    assert len(live_pages) == 1
+    assert live_pages[0].click_calls == []
+    assert seed_df.at[0, "Email"] == "bodywinner@artist.com"
+    assert seed_df.at[0, "Email_All"] == "bodywinner@artist.com"
+    assert seed_df.at[0, "Email_Extract_Method"] == "regex"
+    assert "instagram_profile" in seed_df.at[0, EMAIL_PROVENANCE_JSON_COL]
+
+
+def test_instagram_email_rendered_text_fallback_skips_when_all_runtime_surfaces_are_empty(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Rendered Empty Artist",
+            "Email": "",
+            "Email_All": "",
+            "Instagram_URL": "https://instagram.com/renderedemptyartist/",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+            "Email_Type": "",
+            EMAIL_PROVENANCE_JSON_COL: "",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    live_pages = _install_instagram_profile_fetch_scope(
+        monkeypatch,
+        static_html="<html><body><div>Static shell without email</div></body></html>",
+        live_page_factory=lambda: _DummyInstagramHiddenContactPage(
+            "<html><body><main><div>Rendered profile without visible email in snapshot</div></main></body></html>",
+            rendered_body_inner_text="",
+            rendered_body_text_content="",
+            rendered_main_text="",
+            rendered_document_text_content="",
+            rendered_aggregated_text="",
+        ),
+    )
+    monkeypatch.setattr(
+        cde,
+        "_fetch_website_html_bounded",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("one-hop should not run")),
+    )
+
+    matched = worker._enrich_row_instagram_email(seed_df, 0, ctx)
+
+    assert matched is False
+    assert len(live_pages) == 1
+    assert live_pages[0].click_calls == []
+    assert seed_df.at[0, "Email"] == ""
+    assert seed_df.at[0, "Email_All"] == ""
+    _assert_ig_visit_and_outcome(
+        logs,
+        "https://www.instagram.com/renderedemptyartist/",
+        "[IG Email] no_email_visible",
     )
 
 
