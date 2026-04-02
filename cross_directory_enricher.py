@@ -2897,8 +2897,6 @@ def _wait_for_instagram_profile_render(page: Any, timeout_s: float) -> None:
 
 def _instagram_landed_page_is_plausible_profile_surface(page: Any) -> bool:
     current_url = cell_to_str(getattr(page, "url", "")).strip()
-    if _canonicalize_instagram_profile_url(current_url):
-        return True
     evaluate = getattr(page, "evaluate", None)
     if not callable(evaluate):
         return not current_url

@@ -530,7 +530,9 @@ def test_open_instagram_live_page_bridge_shared_context_failure_only_closes_page
     assert shared_playwright.closed is False
 
 
-def test_open_instagram_live_page_bridge_non_profile_surface_fails_before_render_wait(monkeypatch):
+def test_open_instagram_live_page_bridge_profile_shaped_url_non_profile_surface_fails_before_render_wait(
+    monkeypatch,
+):
     class DummyPage(_DummyClosable):
         def __init__(self):
             super().__init__()
@@ -538,7 +540,7 @@ def test_open_instagram_live_page_bridge_non_profile_surface_fails_before_render
             self.evaluate_calls = []
 
         def goto(self, url, wait_until=None, timeout=None):  # noqa: ANN001
-            self.url = "https://www.instagram.com/accounts/login/"
+            self.url = "https://www.instagram.com/villyszn/"
 
         def evaluate(self, script):  # noqa: ANN001
             self.evaluate_calls.append(str(script or ""))
