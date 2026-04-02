@@ -2915,6 +2915,18 @@ def _instagram_landed_page_is_plausible_profile_surface(page: Any) -> bool:
     return not current_url
 
 
+def _instagram_landed_page_is_html_handoff_usable(
+    target_url: str,
+    landed_url: str,
+    html: str,
+) -> bool:
+    target_canonical = _canonicalize_instagram_profile_url(target_url)
+    landed_canonical = _canonicalize_instagram_profile_url(landed_url)
+    if not target_canonical or landed_canonical != target_canonical:
+        return False
+    return _instagram_profile_requests_html_usable(200, html)
+
+
 def _append_contact_surface_value(values: List[str], seen: Set[str], raw_value: Any) -> None:
     value = cell_to_str(raw_value)
     if not value or value in seen:
@@ -3984,9 +3996,15 @@ def _open_instagram_live_page_bridge(
             print(f"DEBUG IG: landed_body_text_head = {_debug_probe_preview(landed_body_text)}")
         except Exception as probe_error:
             print(f"DEBUG IG: landed page probe failed: {probe_error!r}")
-        if not _instagram_landed_page_is_plausible_profile_surface(page):
+        should_wait_for_render = _instagram_landed_page_is_plausible_profile_surface(page)
+        if should_wait_for_render:
+            _wait_for_instagram_profile_render(page, timeout_s)
+        elif not _instagram_landed_page_is_html_handoff_usable(
+            url,
+            cell_to_str(landed_url),
+            cell_to_str(landed_html),
+        ):
             raise RuntimeError("RUNTIME_PAGE_STATE_NOT_PROFILE_SURFACE")
-        _wait_for_instagram_profile_render(page, timeout_s)
         return InstagramLivePageBridge(
             playwright=playwright,
             browser=browser,

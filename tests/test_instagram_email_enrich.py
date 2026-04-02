@@ -613,6 +613,134 @@ def test_open_instagram_live_page_bridge_profile_shaped_url_non_profile_surface_
     assert playwright.closed is True
 
 
+def test_open_instagram_live_page_bridge_logged_out_html_handoff_skips_render_wait(monkeypatch):
+    events = []
+    logged_out_html = """
+    <html>
+      <head>
+        <title>shellartist (@shellartist) • Instagram photos and videos</title>
+        <meta property="og:description" content="1,234 Followers, 56 Following, 12 Posts - See Instagram photos and videos from shellartist (@shellartist)" />
+      </head>
+      <body>
+        <script type="application/ld+json">{"@type":"ProfilePage"}</script>
+        <div id="mount">shellartist logged-out profile payload</div>
+      </body>
+    </html>
+    """
+    assert _instagram_profile_surface_candidate_marker_from_html(
+        cde._INSTAGRAM_PROFILE_SURFACE_CANDIDATE_JS,
+        logged_out_html,
+    ) is False
+
+    class DummyPage(_DummyClosable):
+        def __init__(self):
+            super().__init__()
+            self.url = ""
+            self.evaluate_calls = []
+
+        def goto(self, url, wait_until=None, timeout=None):  # noqa: ANN001
+            self.url = "https://www.instagram.com/shellartist/"
+            events.append(("goto", self.url, wait_until, timeout))
+
+        def title(self):
+            return "shellartist (@shellartist) • Instagram photos and videos"
+
+        def evaluate(self, script):  # noqa: ANN001
+            script_text = str(script or "")
+            self.evaluate_calls.append(script_text)
+            if "document.body" in script_text and "innerText" in script_text:
+                return "shellartist logged-out profile payload"
+            return False
+
+        def content(self):
+            return logged_out_html
+
+    class DummyContext(_DummyClosable):
+        def __init__(self, page):
+            super().__init__()
+            self._page = page
+
+        def new_page(self):
+            events.append(("new_page",))
+            return self._page
+
+    class DummyBrowser(_DummyClosable):
+        def __init__(self, context):
+            super().__init__()
+            self._context = context
+
+        def new_context(self):
+            events.append(("new_context",))
+            return self._context
+
+    class DummyChromium:
+        def __init__(self, browser):
+            self._browser = browser
+
+        def launch(self, headless=True):  # noqa: ANN001
+            events.append(("launch", headless))
+            return self._browser
+
+    class DummyPlaywright(_DummyClosable):
+        def __init__(self, browser):
+            super().__init__()
+            self.chromium = DummyChromium(browser)
+
+        def stop(self):
+            self.closed = True
+            events.append(("stop",))
+
+    class DummySyncPlaywrightRunner:
+        def __init__(self, playwright):
+            self._playwright = playwright
+
+        def start(self):
+            events.append(("start",))
+            return self._playwright
+
+    page = DummyPage()
+    context = DummyContext(page)
+    browser = DummyBrowser(context)
+    playwright = DummyPlaywright(browser)
+
+    monkeypatch.setattr(
+        cde,
+        "_load_instagram_playwright",
+        lambda: (lambda: DummySyncPlaywrightRunner(playwright)),
+    )
+    monkeypatch.setattr(
+        cde,
+        "_wait_for_instagram_profile_render",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("wait should not run")),
+    )
+
+    bridge = _REAL_OPEN_INSTAGRAM_LIVE_PAGE_BRIDGE(
+        "https://www.instagram.com/shellartist/",
+        timeout_s=12.5,
+    )
+
+    assert bridge is not None
+    assert bridge.page is page
+    assert bridge.snapshot_html() == logged_out_html.strip()
+    assert events == [
+        ("start",),
+        ("launch", True),
+        ("new_context",),
+        ("new_page",),
+        ("goto", "https://www.instagram.com/shellartist/", "domcontentloaded", 12500.0),
+    ]
+    assert cde._INSTAGRAM_PROFILE_SURFACE_CANDIDATE_JS in page.evaluate_calls
+
+    bridge.close()
+
+    assert bridge.closed is True
+    assert bridge.page.closed is True
+    assert bridge.context.closed is True
+    assert bridge.browser.closed is True
+    assert bridge.playwright.closed is True
+    assert events[-1] == ("stop",)
+
+
 def test_open_instagram_live_page_bridge_profile_shell_candidate_still_enters_render_wait(monkeypatch):
     events = []
     candidate_html = (
