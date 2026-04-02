@@ -1,0 +1,5 @@
+2026-04-02 11:45:29,517 [INFO] [Seed Summary]
+2026-04-02 11:45:29,517 [INFO] unearthed=0
+2026-04-02 11:45:29,535 [INFO] [Master] Wrote merged raw CSV: overnight_runs/2026-04-02_114501/master_raw.csv (rows=0)
+2026-04-02 11:45:29,536 [INFO] [Master Enrich] Starting cross-directory enrichment for overnight_runs/2026-04-02_114501/master_raw.csv
+2026-04-02 11:45:34,687 [INFO] [Master] Bandcamp directory CSV -> (none) in /Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/overnight_runs/2026-04-02_114501 (attempts=6)
