@@ -3908,6 +3908,12 @@ def _open_instagram_live_page_bridge(
     *,
     timeout_s: float = HTTP_TIMEOUT,
 ) -> Optional[InstagramLivePageBridge]:
+    def _debug_probe_preview(value: Any, limit: int = 1200) -> str:
+        text = cell_to_str(value).replace("\r", " ").replace("\n", " ").strip()
+        if len(text) <= limit:
+            return text
+        return text[:limit]
+
     playwright = None
     browser = None
     context = None
@@ -3932,6 +3938,52 @@ def _open_instagram_live_page_bridge(
             context = browser.new_context()
         page = context.new_page()
         page.goto(url, wait_until="domcontentloaded", timeout=timeout_s * 1000)
+        try:
+            landed_url: Any = ""
+            landed_title: Any = ""
+            landed_html: Any = ""
+            landed_body_text: Any = ""
+
+            try:
+                landed_url = getattr(page, "url", "")
+            except Exception as probe_error:
+                landed_url = f"<error: {probe_error!r}>"
+
+            try:
+                landed_title = page.title()
+            except Exception as probe_error:
+                landed_title = f"<error: {probe_error!r}>"
+
+            try:
+                landed_html = page.content()
+            except Exception as probe_error:
+                landed_html = f"<error: {probe_error!r}>"
+
+            try:
+                landed_body_text = page.evaluate(
+                    "(document.body && (document.body.innerText || document.body.textContent)) || ''"
+                )
+            except Exception as probe_error:
+                landed_body_text = f"<error: {probe_error!r}>"
+
+            try:
+                landed_html_len: Any = len(cell_to_str(landed_html))
+            except Exception as probe_error:
+                landed_html_len = f"<error: {probe_error!r}>"
+
+            try:
+                landed_body_text_len: Any = len(cell_to_str(landed_body_text))
+            except Exception as probe_error:
+                landed_body_text_len = f"<error: {probe_error!r}>"
+
+            print(f"DEBUG IG: landed_url = {_debug_probe_preview(landed_url)}")
+            print(f"DEBUG IG: landed_title = {_debug_probe_preview(landed_title)}")
+            print(f"DEBUG IG: landed_html_len = {landed_html_len}")
+            print(f"DEBUG IG: landed_body_text_len = {landed_body_text_len}")
+            print(f"DEBUG IG: landed_html_head = {_debug_probe_preview(landed_html)}")
+            print(f"DEBUG IG: landed_body_text_head = {_debug_probe_preview(landed_body_text)}")
+        except Exception as probe_error:
+            print(f"DEBUG IG: landed page probe failed: {probe_error!r}")
         if not _instagram_landed_page_is_plausible_profile_surface(page):
             raise RuntimeError("RUNTIME_PAGE_STATE_NOT_PROFILE_SURFACE")
         _wait_for_instagram_profile_render(page, timeout_s)
