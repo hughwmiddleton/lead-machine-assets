@@ -2860,39 +2860,46 @@ def _instagram_profile_fetch_usable(status: Optional[int], html: str) -> bool:
     return True
 
 
-def _wait_for_instagram_profile_render(page: Any, timeout_s: float) -> None:
+def _instagram_profile_render_ready_marker(page: Any) -> str:
+    evaluate = getattr(page, "evaluate", None)
+    if not callable(evaluate):
+        return ""
+    marker_value = evaluate(_INSTAGRAM_RENDER_READY_JS)
+    if isinstance(marker_value, str):
+        return marker_value.strip()
+    if marker_value:
+        return cell_to_str(marker_value).strip()
+    return ""
+
+
+def _wait_for_instagram_profile_render(page: Any, timeout_s: float) -> bool:
     if page is None:
-        return
+        return False
     timeout_ms = max(int(float(timeout_s or 0) * 1000), 0)
     if timeout_ms <= 0:
-        return
+        return False
     wait_for_function = getattr(page, "wait_for_function", None)
     if callable(wait_for_function):
         wait_for_function(_INSTAGRAM_RENDER_READY_JS, timeout=timeout_ms)
-        return
+        return _instagram_profile_render_ready_marker(page) == "profile_surface"
     evaluate = getattr(page, "evaluate", None)
     if not callable(evaluate):
-        return
+        return False
     wait_for_timeout = getattr(page, "wait_for_timeout", None)
     deadline = time.monotonic() + (timeout_ms / 1000.0)
     while time.monotonic() < deadline:
-        marker_value = evaluate(_INSTAGRAM_RENDER_READY_JS)
-        if isinstance(marker_value, str):
-            marker = marker_value.strip()
-        elif marker_value:
-            marker = cell_to_str(marker_value).strip()
-        else:
-            marker = ""
+        marker = _instagram_profile_render_ready_marker(page)
         if marker == "profile_surface":
-            return
+            return True
         remaining_ms = int(max((deadline - time.monotonic()) * 1000, 0))
         if remaining_ms <= 0:
-            return
+            return False
         sleep_ms = min(100, remaining_ms)
         if callable(wait_for_timeout):
             wait_for_timeout(sleep_ms)
         else:
             time.sleep(sleep_ms / 1000.0)
+    return False
 
 
 def _instagram_landed_page_is_plausible_profile_surface(page: Any) -> bool:
@@ -4053,7 +4060,9 @@ def _open_instagram_live_page_bridge(
             print(f"DEBUG IG: landed page probe failed: {probe_error!r}")
         should_wait_for_render = _instagram_landed_page_is_plausible_profile_surface(page)
         if should_wait_for_render:
-            _wait_for_instagram_profile_render(page, timeout_s)
+            render_ready = _wait_for_instagram_profile_render(page, timeout_s)
+            if not render_ready:
+                raise RuntimeError("RUNTIME_PAGE_STATE_NOT_RENDER_READY")
         elif not _instagram_landed_page_is_html_handoff_usable(
             url,
             cell_to_str(landed_url),
@@ -10648,7 +10657,8 @@ class CrossDirectoryEnricherWorker(QThread):
                             rendered_live_text = ""
                         if rendered_live_text:
                             print("DEBUG IG: running rendered text direct extraction")
-                            all_ig_emails = _extract_instagram_profile_candidate_emails(rendered_live_text)
+                            normalized_rendered_live_text = unicodedata.normalize("NFKC", rendered_live_text)
+                            all_ig_emails = _extract_instagram_profile_candidate_emails(normalized_rendered_live_text)
                 if (
                     not all_ig_emails
                     and not _row_has_email(seed_df.loc[row_idx])

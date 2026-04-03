@@ -3,6 +3,7 @@ from bs4 import BeautifulSoup
 import pandas as pd
 import pytest
 from types import SimpleNamespace
+import unicodedata
 
 pytest.importorskip("PyQt5")
 
@@ -404,6 +405,7 @@ def test_open_instagram_live_page_bridge_waits_for_render_before_return(monkeypa
 
     def fake_wait_for_instagram_profile_render(page_arg, timeout_s):  # noqa: ANN001
         events.append(("wait", page_arg, timeout_s))
+        return True
 
     monkeypatch.setattr(cde, "_wait_for_instagram_profile_render", fake_wait_for_instagram_profile_render)
 
@@ -471,6 +473,7 @@ def test_open_instagram_live_page_bridge_reuses_cached_html_fetcher_context(monk
 
     def fake_wait_for_instagram_profile_render(page_arg, timeout_s):  # noqa: ANN001
         events.append(("wait", page_arg, timeout_s))
+        return True
 
     monkeypatch.setattr(cde, "_wait_for_instagram_profile_render", fake_wait_for_instagram_profile_render)
 
@@ -828,6 +831,7 @@ def test_open_instagram_live_page_bridge_profile_shell_candidate_still_enters_re
 
     def fake_wait_for_instagram_profile_render(page_arg, timeout_s):  # noqa: ANN001
         events.append(("wait", page_arg, timeout_s))
+        return True
 
     monkeypatch.setattr(cde, "_wait_for_instagram_profile_render", fake_wait_for_instagram_profile_render)
 
@@ -851,6 +855,111 @@ def test_open_instagram_live_page_bridge_profile_shell_candidate_still_enters_re
     bridge.close()
 
 
+def test_open_instagram_live_page_bridge_profile_shell_candidate_that_never_renders_is_rejected(
+    monkeypatch,
+):
+    events = []
+    candidate_html = (
+        "<html><body><main><header><h1>Shell Artist</h1><button>Email</button></header></main></body></html>"
+    )
+
+    class DummyPage(_DummyClosable):
+        def __init__(self):
+            super().__init__()
+            self.url = ""
+
+        def goto(self, url, wait_until=None, timeout=None):  # noqa: ANN001
+            self.url = "https://www.instagram.com/accounts/login/"
+            events.append(("goto", self.url, wait_until, timeout))
+
+        def evaluate(self, script):  # noqa: ANN001
+            events.append(("evaluate", str(script or "")))
+            return _instagram_profile_surface_candidate_marker_from_html(script, candidate_html)
+
+        def content(self):
+            return candidate_html
+
+    class DummyContext(_DummyClosable):
+        def __init__(self, page):
+            super().__init__()
+            self._page = page
+
+        def new_page(self):
+            events.append(("new_page",))
+            return self._page
+
+    class DummyBrowser(_DummyClosable):
+        def __init__(self, context):
+            super().__init__()
+            self._context = context
+
+        def new_context(self):
+            events.append(("new_context",))
+            return self._context
+
+    class DummyChromium:
+        def __init__(self, browser):
+            self._browser = browser
+
+        def launch(self, headless=True):  # noqa: ANN001
+            events.append(("launch", headless))
+            return self._browser
+
+    class DummyPlaywright(_DummyClosable):
+        def __init__(self, browser):
+            super().__init__()
+            self.chromium = DummyChromium(browser)
+
+        def stop(self):
+            self.closed = True
+            events.append(("stop",))
+
+    class DummySyncPlaywrightRunner:
+        def __init__(self, playwright):
+            self._playwright = playwright
+
+        def start(self):
+            events.append(("start",))
+            return self._playwright
+
+    page = DummyPage()
+    context = DummyContext(page)
+    browser = DummyBrowser(context)
+    playwright = DummyPlaywright(browser)
+
+    monkeypatch.setattr(
+        cde,
+        "_load_instagram_playwright",
+        lambda: (lambda: DummySyncPlaywrightRunner(playwright)),
+    )
+
+    def fake_wait_for_instagram_profile_render(page_arg, timeout_s):  # noqa: ANN001
+        events.append(("wait", page_arg, timeout_s))
+        return False
+
+    monkeypatch.setattr(cde, "_wait_for_instagram_profile_render", fake_wait_for_instagram_profile_render)
+
+    bridge = _REAL_OPEN_INSTAGRAM_LIVE_PAGE_BRIDGE(
+        "https://www.instagram.com/igartist/",
+        timeout_s=12.5,
+    )
+
+    assert bridge is None
+    assert events[:5] == [
+        ("start",),
+        ("launch", True),
+        ("new_context",),
+        ("new_page",),
+        ("goto", "https://www.instagram.com/accounts/login/", "domcontentloaded", 12500.0),
+    ]
+    assert ("evaluate", cde._INSTAGRAM_PROFILE_SURFACE_CANDIDATE_JS) in events
+    assert events[-2:] == [("wait", page, 12.5), ("stop",)]
+    assert page.closed is True
+    assert context.closed is True
+    assert browser.closed is True
+    assert playwright.closed is True
+
+
 def test_wait_for_instagram_profile_render_meta_only_shell_is_not_ready(monkeypatch):
     clock = _FakeMonotonicClock()
     monkeypatch.setattr(cde.time, "monotonic", clock)
@@ -860,8 +969,9 @@ def test_wait_for_instagram_profile_render_meta_only_shell_is_not_ready(monkeypa
         clock=clock,
     )
 
-    cde._wait_for_instagram_profile_render(page, timeout_s=0.1)
+    render_ready = cde._wait_for_instagram_profile_render(page, timeout_s=0.1)
 
+    assert render_ready is False
     assert len(page.evaluate_calls) == 1
     assert page.wait_calls == [100]
 
@@ -879,8 +989,9 @@ def test_wait_for_instagram_profile_render_structured_script_only_is_not_ready(m
         clock=clock,
     )
 
-    cde._wait_for_instagram_profile_render(page, timeout_s=0.1)
+    render_ready = cde._wait_for_instagram_profile_render(page, timeout_s=0.1)
 
+    assert render_ready is False
     assert len(page.evaluate_calls) == 1
     assert page.wait_calls == [100]
 
@@ -897,8 +1008,9 @@ def test_wait_for_instagram_profile_render_accepts_rendered_profile_surface(monk
         rendered_main_text="Rendered Link Artist Bio and booking details",
     )
 
-    cde._wait_for_instagram_profile_render(page, timeout_s=0.25)
+    render_ready = cde._wait_for_instagram_profile_render(page, timeout_s=0.25)
 
+    assert render_ready is True
     assert len(page.evaluate_calls) == 1
     assert page.wait_calls == []
 
@@ -913,8 +1025,9 @@ def test_wait_for_instagram_profile_render_polling_timeout_stays_bounded(monkeyp
     )
 
     timeout_s = 10.0
-    cde._wait_for_instagram_profile_render(page, timeout_s=timeout_s)
+    render_ready = cde._wait_for_instagram_profile_render(page, timeout_s=timeout_s)
 
+    assert render_ready is False
     expected_timeout_ms = int(timeout_s * 1000)
     assert expected_timeout_ms - 1 <= sum(page.wait_calls) <= expected_timeout_ms
     assert max(page.wait_calls) == 100
@@ -2348,6 +2461,61 @@ def test_instagram_email_rendered_text_fallback_preserves_body_priority(monkeypa
     assert "instagram_profile" in seed_df.at[0, EMAIL_PROVENANCE_JSON_COL]
 
 
+def test_instagram_email_rendered_text_fallback_normalizes_stylized_unicode_email(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    stylized_email = "𝙇𝙖𝙘𝙚𝙙𝙪𝙥𝙈𝙂𝙈𝙏@𝙜𝙢𝙖𝙞𝙡.𝙘𝙤𝙢"
+    normalized_rendered_email = "LacedupMGMT@gmail.com"
+    extracted_email = "lacedupmgmt@gmail.com"
+    assert unicodedata.normalize("NFKC", stylized_email) == normalized_rendered_email
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Rendered Stylized Artist",
+            "Email": "",
+            "Email_All": "",
+            "Instagram_URL": "https://instagram.com/renderedstylizedartist/",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+            "Email_Type": "",
+            EMAIL_PROVENANCE_JSON_COL: "",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    live_pages = _install_instagram_profile_fetch_scope(
+        monkeypatch,
+        static_html="<html><body><div>Static shell without email</div></body></html>",
+        live_page_factory=lambda: _DummyInstagramHiddenContactPage(
+            "<html><body><main><div>Rendered profile without visible email in snapshot</div></main></body></html>",
+            rendered_body_inner_text=f"Bookings: {stylized_email}",
+            rendered_body_text_content="",
+            rendered_main_text="",
+            rendered_document_text_content="",
+            rendered_aggregated_text="",
+        ),
+    )
+    monkeypatch.setattr(
+        cde,
+        "_fetch_website_html_bounded",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("one-hop should not run")),
+    )
+
+    matched = worker._enrich_row_instagram_email(seed_df, 0, ctx)
+
+    assert matched is True
+    assert len(live_pages) == 1
+    assert live_pages[0].click_calls == []
+    assert seed_df.at[0, "Email"] == extracted_email
+    assert seed_df.at[0, "Email_All"] == extracted_email
+    assert seed_df.at[0, "Email_Extract_Method"] == "regex"
+    assert "instagram_profile" in seed_df.at[0, EMAIL_PROVENANCE_JSON_COL]
+    _assert_ig_visit_and_outcome(
+        logs,
+        "https://www.instagram.com/renderedstylizedartist/",
+        f"[IG Email] Found email: {extracted_email}",
+    )
+
+
 def test_instagram_email_rendered_text_fallback_skips_when_all_runtime_surfaces_are_empty(monkeypatch):
     logs = []
     worker = _make_worker(logs)
@@ -2395,6 +2563,52 @@ def test_instagram_email_rendered_text_fallback_skips_when_all_runtime_surfaces_
         "https://www.instagram.com/renderedemptyartist/",
         "[IG Email] no_email_visible",
     )
+
+
+def test_instagram_email_no_live_bridge_handoff_preserves_empty_surface_fallback(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Blocked Bridge Artist",
+            "Email": "",
+            "Email_All": "",
+            "Instagram_URL": "https://instagram.com/blockedbridgeartist/",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+            "Email_Type": "",
+            EMAIL_PROVENANCE_JSON_COL: "",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    profile_shell_html = (
+        "<html><body><main><header><h1>Blocked Bridge Artist</h1><button>Email</button></header></main></body></html>"
+    )
+
+    monkeypatch.setattr(
+        cde,
+        "_fetch_instagram_profile_html",
+        lambda session, url: (profile_shell_html, 200),
+    )
+    monkeypatch.setattr(cde, "_open_instagram_live_page_bridge", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        cde,
+        "_fetch_website_html_bounded",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("one-hop should not run")),
+    )
+
+    matched = worker._enrich_row_instagram_email(seed_df, 0, ctx)
+
+    assert matched is False
+    assert seed_df.at[0, "Email"] == ""
+    assert seed_df.at[0, "Email_All"] == ""
+    _assert_ig_visit_and_outcome(
+        logs,
+        "https://www.instagram.com/blockedbridgeartist/",
+        "[IG Email] no_email_visible",
+    )
+    _assert_log_contains(logs, "[IG OneHop] bio_link_urls state=empty count=0 sample=-")
 
 
 def test_instagram_hidden_contact_one_action_runs_after_live_surface_onehop_falls_through(monkeypatch):
