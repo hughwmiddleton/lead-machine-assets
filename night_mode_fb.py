@@ -84,6 +84,7 @@ EMAIL_REGEX = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE
 _FB_SPLIT_PATTERN = re.compile(r"[,\s;|]+")
 _FB_LOW_QUALITY_FILE_EXTENSIONS: Tuple[str, ...] = ("jpg", "jpeg", "png", "gif", "wav", "mp3", "mp4", "pdf", "zip")
 _FB_LOW_QUALITY_SHORT_LOCAL_PARTS = frozenset({"to", "by", "at"})
+_FB_MIDDLE_PSEUDO_TLD_LABELS = frozenset({"com", "net", "org", "edu", "gov", "mil"})
 _CONTACT_QUALITY_REJECT_LOCAL_PARTS = frozenset({"and", "with", "by", "in", "at", "tagging"})
 _CONTACT_QUALITY_REJECT_DOMAIN_SUFFIXES = (".jpg", ".png", ".mp3", ".wav", ".pdf")
 _FB_GENERIC_EMAIL_PROVIDER_DOMAINS = frozenset(
@@ -4957,7 +4958,65 @@ def _extract_fb_emails_from_text_sample(sample: str) -> List[str]:
             increment_pattern_emails(replacements)
         except Exception:
             pass
-    return [match.group(0) for match in EMAIL_REGEX.finditer(normalized)]
+    candidates: List[str] = []
+    for match in EMAIL_REGEX.finditer(normalized):
+        candidate = match.group(0)
+        if _fb_raw_email_candidate_is_valid(candidate, sample):
+            candidates.append(candidate)
+    return candidates
+
+
+def _fb_raw_email_candidate_is_valid(candidate: str, source_sample: str) -> bool:
+    normalized = normalize_email_value(candidate)
+    if not normalized:
+        return False
+
+    _, domain = normalized.split("@", 1)
+    labels = [label for label in domain.rstrip(".").split(".") if label]
+    if not labels:
+        return False
+    if labels[0] == "www":
+        return False
+    if len(labels) >= 3 and labels[-2] in _FB_MIDDLE_PSEUDO_TLD_LABELS and len(labels[-1]) > 2:
+        return False
+    if _fb_email_candidate_looks_sentence_joined(normalized, source_sample):
+        return False
+    return True
+
+
+def _fb_email_candidate_looks_sentence_joined(candidate: str, source_sample: str) -> bool:
+    source_text = unicodedata.normalize("NFKC", str(source_sample or ""))
+    if not source_text:
+        return False
+    if candidate.lower() in source_text.lower():
+        return False
+
+    local, domain = candidate.split("@", 1)
+    domain_labels = [label for label in domain.split(".") if label]
+    if len(domain_labels) < 2:
+        return False
+
+    pattern_parts = [re.escape(local), r"\s*(?:@|\[\s*at\s*\]|\(\s*at\s*\)|\bat\b)\s*", re.escape(domain_labels[0])]
+    for label in domain_labels[1:]:
+        pattern_parts.append(r"(\s*(?:\[\s*dot\s*\]|\(\s*dot\s*\)|\bdot\b|\.)\s*)")
+        pattern_parts.append(re.escape(label))
+
+    match = re.search("".join(pattern_parts), source_text, re.IGNORECASE)
+    if not match:
+        return False
+
+    for separator in match.groups():
+        sep = separator or ""
+        dot_idx = sep.find(".")
+        if dot_idx < 0:
+            continue
+        before = sep[:dot_idx]
+        after = sep[dot_idx + 1:]
+        if before:
+            continue
+        if after and not after.strip():
+            return True
+    return False
 
 
 def _extract_emails_from_html(

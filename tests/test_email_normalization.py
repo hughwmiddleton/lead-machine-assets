@@ -100,6 +100,54 @@ def test_night_fb_text_sample_plain_non_email_skips_normalization(monkeypatch: p
 
 
 @pytest.mark.parametrize(
+    ("sample", "junk_candidate"),
+    [
+        ("Members only @ savagex.com. Select your region", "only@savagex.com.select"),
+        ("Book online @ www.aaa.com today", "online@www.aaa.com"),
+        ("While away @ school. Associate programs are open", "away@school.associate"),
+        ("Fresh meals @ home. With delivery available", "meals@home.with"),
+        ("Subscribers only @ www.gobble.com now", "only@www.gobble.com"),
+    ],
+)
+def test_night_fb_raw_admission_rejects_obvious_junk_email_like_fragments(sample: str, junk_candidate: str) -> None:
+    emails = night_mode_fb._extract_fb_emails_from_text_sample(sample)
+
+    assert junk_candidate not in emails
+    assert emails == []
+
+
+@pytest.mark.parametrize(
+    ("sample", "expected"),
+    [
+        ("Bookings: bookings@artist.com", "bookings@artist.com"),
+        ("Bookings: name @ artist . com", "name@artist.com"),
+        ("Press: info@artist.co.uk", "info@artist.co.uk"),
+        ("Direct: hello@sub.artist.com", "hello@sub.artist.com"),
+    ],
+)
+def test_night_fb_raw_admission_still_keeps_valid_contact_emails(sample: str, expected: str) -> None:
+    assert night_mode_fb._extract_fb_emails_from_text_sample(sample) == [expected]
+
+
+def test_night_fb_extract_html_keeps_valid_contacts_while_dropping_junk_fragments() -> None:
+    html = """
+    <html>
+      <body>
+        Members only @ savagex.com. Select your region.
+        Book online @ www.aaa.com today.
+        Contact bookings@artist.com for management.
+        Press: press @ label . co . uk
+      </body>
+    </html>
+    """
+
+    emails, used_mailto = night_mode_fb._extract_emails_from_html(html)
+
+    assert emails == ["bookings@artist.com", "press@label.co.uk"]
+    assert used_mailto is False
+
+
+@pytest.mark.parametrize(
     ("sample", "expected"),
     [
         ("Bookings: bookings@artist.com", False),
