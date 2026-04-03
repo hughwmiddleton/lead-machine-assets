@@ -3405,32 +3405,75 @@ def _instagram_bio_link_structured_key_allows_url(key: str, *, parent_context: b
     return False
 
 
+def _instagram_bio_link_structured_key_allows_email(key: str) -> bool:
+    if not key:
+        return False
+    if any(token in key for token in _INSTAGRAM_BIO_LINK_STRUCTURED_SKIP_KEY_TOKENS):
+        return False
+    return key == "email" or key.endswith("_email")
+
+
+def _normalise_instagram_bio_link_structured_email(value: Any) -> str:
+    candidate = cell_to_str(value).strip()
+    if not candidate:
+        return ""
+    normalized = normalize_email_value(candidate)
+    if normalized:
+        return normalized
+    normalized_candidate, _ = normalize_obfuscated_email_patterns(candidate)
+    if normalized_candidate == candidate:
+        return ""
+    return normalize_email_value(normalized_candidate)
+
+
 def _iter_instagram_bio_link_structured_values(payload: Any) -> Iterable[str]:
-    stack: List[Tuple[Any, bool]] = [(payload, False)]
+    stack: List[Tuple[Any, bool, bool]] = [(payload, False, False)]
     nodes_seen = 0
     while stack and nodes_seen < _INSTAGRAM_BIO_LINK_STRUCTURED_MAX_NODES:
-        current, url_context = stack.pop()
+        current, url_context, email_context = stack.pop()
         nodes_seen += 1
         if isinstance(current, dict):
             for raw_key, value in current.items():
                 key = cell_to_str(raw_key).strip().lower()
-                child_context = _instagram_bio_link_structured_key_allows_url(
+                child_url_context = _instagram_bio_link_structured_key_allows_url(
                     key,
                     parent_context=url_context,
                 ) or url_context
+                child_email_context = _instagram_bio_link_structured_key_allows_email(key) or email_context
                 if isinstance(value, str):
                     candidate = value.strip()
-                    if child_context and candidate.startswith(("http://", "https://")):
+                    if child_url_context and candidate.startswith(("http://", "https://")):
                         yield candidate
+                    elif child_email_context:
+                        normalized_email = _normalise_instagram_bio_link_structured_email(candidate)
+                        if normalized_email:
+                            yield normalized_email
                 elif isinstance(value, (dict, list, tuple)):
-                    stack.append((value, child_context))
+                    stack.append((value, child_url_context, child_email_context))
         elif isinstance(current, (list, tuple)):
             for item in reversed(current):
-                stack.append((item, url_context))
+                stack.append((item, url_context, email_context))
         elif isinstance(current, str):
             candidate = current.strip()
             if url_context and candidate.startswith(("http://", "https://")):
                 yield candidate
+            elif email_context:
+                normalized_email = _normalise_instagram_bio_link_structured_email(candidate)
+                if normalized_email:
+                    yield normalized_email
+
+
+def _collect_instagram_bio_link_structured_emails(payloads: Iterable[Any]) -> List[str]:
+    emails: List[str] = []
+    seen: Set[str] = set()
+    for payload in payloads:
+        for raw_value in _iter_instagram_bio_link_structured_values(payload):
+            normalized = normalize_email_value(raw_value)
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            emails.append(normalized)
+    return emails
 
 
 def _collect_instagram_runtime_bio_link_structured_payloads(page: Any) -> List[Any]:
@@ -3666,6 +3709,15 @@ def _instagram_onehop_emails_from_surface(
 ) -> Tuple[List[str], str, str, str]:
     html_text = html if isinstance(html, str) else str(html or "")
     soup = BeautifulSoup(html_text, "html.parser") if html_text.strip() else None
+    structured_payloads: List[Any] = []
+    if soup is not None:
+        for script_tag in soup.find_all("script"):
+            payload = _load_instagram_bio_link_structured_script_payload(script_tag)
+            if payload is not None:
+                structured_payloads.append(payload)
+    structured_payloads.extend(
+        payload for payload in (runtime_structured_payloads or ()) if isinstance(payload, (dict, list, tuple))
+    )
     bio_link_urls = _collect_instagram_bio_link_fetch_urls(
         html_text,
         soup=soup,
@@ -3678,6 +3730,9 @@ def _instagram_onehop_emails_from_surface(
             f"[IG OneHop] {state_label} state={'non_empty' if bio_link_urls else 'empty'} "
             f"count={len(bio_link_urls)} sample={_instagram_bio_link_log_sample(bio_link_urls)}"
         )
+    structured_emails = _collect_instagram_bio_link_structured_emails(structured_payloads)
+    if structured_emails:
+        return (structured_emails, profile_url, "regex", "")
     if not bio_link_urls:
         if callable(log):
             log(f"[IG OneHop] {state_label}_empty")

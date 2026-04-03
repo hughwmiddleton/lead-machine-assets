@@ -1578,6 +1578,30 @@ def test_collect_instagram_bio_link_fetch_urls_preserves_html_priority_with_runt
     ]
 
 
+def test_iter_instagram_bio_link_structured_values_preserves_urls_and_admits_direct_emails_only():
+    payload = {
+        "bio_links": [
+            {
+                "url": "https://beacons.ai/artist",
+                "title": "Contact the team",
+            }
+        ],
+        "website": "https://artist.com/contact",
+        "business_email": "Bookings@Artist.com",
+        "public_email": "press@artist.com",
+        "bio": "hello@artist.com",
+    }
+
+    values = list(cde._iter_instagram_bio_link_structured_values(payload))
+
+    assert "https://beacons.ai/artist" in values
+    assert "https://artist.com/contact" in values
+    assert "bookings@artist.com" in values
+    assert "press@artist.com" in values
+    assert "Contact the team" not in values
+    assert "hello@artist.com" not in values
+
+
 def test_collect_instagram_runtime_bio_link_structured_payloads_preserves_script_surface():
     page = _DummyInstagramHiddenContactPage(
         "<html><body></body></html>",
@@ -2151,6 +2175,37 @@ def test_instagram_email_one_hop_bio_link_recovers_direct_email_from_runtime_liv
         logs,
         "[IG OneHop] live_surface_bio_link_urls state=non_empty count=1 sample=https://linktr.ee/runtimelinkartist",
     )
+
+
+def test_instagram_onehop_emails_from_surface_recovers_direct_email_from_runtime_structured_payloads(monkeypatch):
+    fetch_calls = []
+
+    def fake_fetch_website_html_bounded(session, url, **kwargs):  # noqa: ANN001
+        fetch_calls.append(url)
+        pytest.fail("structured payload email should bypass one-hop URL fetch")
+
+    monkeypatch.setattr(cde, "_fetch_website_html_bounded", fake_fetch_website_html_bounded)
+
+    emails, source_url, extract_method, onehop_target = cde._instagram_onehop_emails_from_surface(
+        None,
+        "<html><body><div>No visible email</div></body></html>",
+        profile_url="https://www.instagram.com/runtimeemailartist/",
+        runtime_structured_payloads=[
+            {
+                "web_profile_info": {
+                    "website": "https://linktr.ee/runtimeemailartist",
+                    "business_email": "Bookings@Artist.com",
+                    "headline": "booking enquiries welcome",
+                }
+            }
+        ],
+    )
+
+    assert emails == ["bookings@artist.com"]
+    assert source_url == "https://www.instagram.com/runtimeemailartist/"
+    assert extract_method == "regex"
+    assert onehop_target == ""
+    assert fetch_calls == []
 
 
 def test_instagram_email_live_direct_uses_rendered_text_when_snapshot_html_misses_email(monkeypatch):
