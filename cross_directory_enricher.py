@@ -3354,6 +3354,9 @@ _INSTAGRAM_BIO_LINK_STRUCTURED_SKIP_KEY_TOKENS = {
 }
 _INSTAGRAM_BIO_LINK_STRUCTURED_MAX_SCRIPT_CHARS = 250000
 _INSTAGRAM_BIO_LINK_STRUCTURED_MAX_NODES = 2048
+_INSTAGRAM_DIRECT_BIO_TEXT_KEYS = {"bio", "biography"}
+_INSTAGRAM_DIRECT_BIO_TEXT_ENTITY_CONTAINER_KEYS = {"biography_with_entities"}
+_INSTAGRAM_DIRECT_BIO_TEXT_ENTITY_VALUE_KEYS = {"raw_text", "text"}
 
 
 def _iter_instagram_bio_link_meta_values(soup_obj: BeautifulSoup) -> Iterable[str]:
@@ -3481,6 +3484,41 @@ def _collect_instagram_bio_link_structured_emails(payloads: Iterable[Any]) -> Li
             seen.add(normalized)
             emails.append(normalized)
     return emails
+
+
+def _collect_instagram_bio_equivalent_structured_texts(payloads: Iterable[Any]) -> List[str]:
+    texts: List[str] = []
+    seen: Set[str] = set()
+    stack: List[Tuple[Any, bool]] = [(payload, False) for payload in payloads]
+    nodes_seen = 0
+    while stack and nodes_seen < _INSTAGRAM_BIO_LINK_STRUCTURED_MAX_NODES:
+        current, bio_text_context = stack.pop()
+        nodes_seen += 1
+        if isinstance(current, dict):
+            for raw_key, value in current.items():
+                key = cell_to_str(raw_key).strip().lower()
+                child_bio_text_context = (
+                    bio_text_context or key in _INSTAGRAM_DIRECT_BIO_TEXT_ENTITY_CONTAINER_KEYS
+                )
+                if isinstance(value, str):
+                    if key in _INSTAGRAM_DIRECT_BIO_TEXT_KEYS or (
+                        bio_text_context and key in _INSTAGRAM_DIRECT_BIO_TEXT_ENTITY_VALUE_KEYS
+                    ):
+                        normalized = unicodedata.normalize("NFKC", value).strip()
+                        if normalized and normalized not in seen:
+                            seen.add(normalized)
+                            texts.append(normalized)
+                elif isinstance(value, (dict, list, tuple)):
+                    stack.append((value, child_bio_text_context))
+        elif isinstance(current, (list, tuple)):
+            for item in reversed(current):
+                stack.append((item, bio_text_context))
+        elif isinstance(current, str) and bio_text_context:
+            normalized = unicodedata.normalize("NFKC", current).strip()
+            if normalized and normalized not in seen:
+                seen.add(normalized)
+                texts.append(normalized)
+    return texts
 
 
 def _collect_instagram_runtime_bio_link_structured_payloads(page: Any) -> List[Any]:
@@ -10531,6 +10569,7 @@ class CrossDirectoryEnricherWorker(QThread):
             onehop_target_attempted = ""
             shared_live_page = None
             shared_live_html = ""
+            runtime_structured_payloads: List[Any] = []
 
             def _get_shared_live_page():
                 nonlocal shared_live_page
@@ -10641,12 +10680,24 @@ class CrossDirectoryEnricherWorker(QThread):
                             ))
                             print("DEBUG IG: aggregated node text length =", len(bio_text or ""))
                             print("DEBUG IG: aggregated contains @gmail.com =", "@gmail.com" in (bio_text or "").lower())
+                            structured_bio_text = " ".join(
+                                _collect_instagram_bio_equivalent_structured_texts(runtime_structured_payloads)
+                            )
+                            print(
+                                "DEBUG IG: structured bio text length =",
+                                len(structured_bio_text or ""),
+                            )
+                            print(
+                                "DEBUG IG: structured bio contains @gmail.com =",
+                                "@gmail.com" in (structured_bio_text or "").lower(),
+                            )
                             rendered_live_text, rendered_live_surface = _select_rendered_live_text_surface(
                                 ("document.body.innerText", rendered_live_text),
                                 ("main.innerText_or_textContent", main_text),
                                 ("aggregated_visible_node_text", bio_text),
                                 ("document.body.textContent", body_text_content),
                                 ("document.documentElement.textContent", all_text),
+                                ("runtime_structured_bio_text", structured_bio_text),
                             )
                             print(
                                 "DEBUG IG: chosen rendered surface =",

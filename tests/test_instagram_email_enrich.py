@@ -2321,6 +2321,100 @@ def test_instagram_onehop_emails_from_surface_recovers_direct_email_from_runtime
     assert fetch_calls == []
 
 
+def test_collect_instagram_bio_equivalent_structured_texts_limits_to_bio_equivalent_fields():
+    payloads = [
+        {
+            "web_profile_info": {
+                "biography": "Bookings: bioonly@artist.com",
+                "headline": "headline@artist.com",
+                "bio_links": [{"url": "https://linktr.ee/bioonlyartist"}],
+                "biography_with_entities": {
+                    "raw_text": "Press: press@artist.com",
+                    "entities": [{"url": "https://artist.com/contact"}],
+                },
+            }
+        }
+    ]
+
+    texts = cde._collect_instagram_bio_equivalent_structured_texts(payloads)
+
+    assert texts == [
+        "Bookings: bioonly@artist.com",
+        "Press: press@artist.com",
+    ]
+
+
+def test_instagram_email_live_direct_uses_runtime_structured_bio_text_when_rendered_surfaces_are_empty(
+    monkeypatch,
+):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Structured Bio Artist",
+            "Email": "",
+            "Email_All": "",
+            "Instagram_URL": "https://instagram.com/structuredbioartist/",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+            "Email_Type": "",
+            EMAIL_PROVENANCE_JSON_COL: "",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    bio_fetch_calls = []
+    live_pages = _install_instagram_profile_fetch_scope(
+        monkeypatch,
+        static_html="<html><body><div>Static shell without email</div></body></html>",
+        live_page_factory=lambda: _DummyInstagramHiddenContactPage(
+            "<html><body><main><div>Rendered profile without visible email in snapshot</div></main></body></html>",
+            rendered_body_inner_text="",
+            rendered_body_text_content="",
+            rendered_main_text="",
+            rendered_document_text_content="",
+            rendered_aggregated_text="",
+            runtime_structured_payloads=[
+                {
+                    "web_profile_info": {
+                        "bio_links": [{"url": "https://linktr.ee/structuredbioartist"}],
+                        "biography": "Bookings: structuredbio@artist.com",
+                    }
+                }
+            ],
+        ),
+    )
+    monkeypatch.setattr(
+        cde,
+        "_fetch_website_html_bounded",
+        lambda session, url, **kwargs: bio_fetch_calls.append(url) or cde.WebsiteFetchResult(
+            url=url,
+            final_url=url,
+            status=200,
+            content_type="text/html",
+            html="<html><body><div>No email on linked page</div></body></html>",
+            is_html=True,
+        ),
+    )
+
+    matched = worker._enrich_row_instagram_email(seed_df, 0, ctx)
+
+    assert matched is True
+    assert len(live_pages) == 1
+    assert live_pages[0].click_calls == []
+    assert bio_fetch_calls == ["https://linktr.ee/structuredbioartist"]
+    assert seed_df.at[0, "Email"] == "structuredbio@artist.com"
+    assert seed_df.at[0, "Email_All"] == "structuredbio@artist.com"
+    assert seed_df.at[0, "Email_Extract_Method"] == "regex"
+    assert "instagram_profile" in seed_df.at[0, EMAIL_PROVENANCE_JSON_COL]
+    assert "instagram_bio_link_one_hop" not in seed_df.at[0, EMAIL_PROVENANCE_JSON_COL]
+    _assert_ig_visit_and_outcome(
+        logs,
+        "https://www.instagram.com/structuredbioartist/",
+        "[IG Email] Found email: structuredbio@artist.com",
+    )
+
+
 def test_instagram_email_live_direct_uses_rendered_text_when_snapshot_html_misses_email(monkeypatch):
     logs = []
     worker = _make_worker(logs)
@@ -2369,6 +2463,58 @@ def test_instagram_email_live_direct_uses_rendered_text_when_snapshot_html_misse
     )
 
 
+def test_instagram_email_rendered_text_fallback_still_beats_runtime_structured_bio_text(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Rendered Beats Structured Artist",
+            "Email": "",
+            "Email_All": "",
+            "Instagram_URL": "https://instagram.com/renderedbeatsstructured/",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+            "Email_Type": "",
+            EMAIL_PROVENANCE_JSON_COL: "",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    live_pages = _install_instagram_profile_fetch_scope(
+        monkeypatch,
+        static_html="<html><body><div>Static shell without email</div></body></html>",
+        live_page_factory=lambda: _DummyInstagramHiddenContactPage(
+            "<html><body><main><div>Rendered profile without visible email in snapshot</div></main></body></html>",
+            rendered_body_inner_text="Bookings: renderedwins@artist.com",
+            rendered_body_text_content="",
+            rendered_main_text="",
+            rendered_document_text_content="",
+            rendered_aggregated_text="",
+            runtime_structured_payloads=[
+                {
+                    "web_profile_info": {
+                        "biography": "Bookings: structuredbutloses@artist.com",
+                    }
+                }
+            ],
+        ),
+    )
+    monkeypatch.setattr(
+        cde,
+        "_fetch_website_html_bounded",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("one-hop should not run")),
+    )
+
+    matched = worker._enrich_row_instagram_email(seed_df, 0, ctx)
+
+    assert matched is True
+    assert len(live_pages) == 1
+    assert live_pages[0].click_calls == []
+    assert seed_df.at[0, "Email"] == "renderedwins@artist.com"
+    assert seed_df.at[0, "Email_All"] == "renderedwins@artist.com"
+    assert "instagram_profile" in seed_df.at[0, EMAIL_PROVENANCE_JSON_COL]
+
+
 def test_instagram_email_rendered_text_fallback_uses_best_non_empty_runtime_surface(monkeypatch):
     logs = []
     worker = _make_worker(logs)
@@ -2413,6 +2559,64 @@ def test_instagram_email_rendered_text_fallback_uses_best_non_empty_runtime_surf
     assert seed_df.at[0, "Email_All"] == "mainsurface@artist.com"
     assert seed_df.at[0, "Email_Extract_Method"] == "regex"
     assert "instagram_profile" in seed_df.at[0, EMAIL_PROVENANCE_JSON_COL]
+
+
+def test_instagram_email_runtime_structured_bio_text_empty_still_falls_through_to_no_email_visible(
+    monkeypatch,
+):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Structured Empty Artist",
+            "Email": "",
+            "Email_All": "",
+            "Instagram_URL": "https://instagram.com/structuredemptyartist/",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+            "Email_Type": "",
+            EMAIL_PROVENANCE_JSON_COL: "",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    live_pages = _install_instagram_profile_fetch_scope(
+        monkeypatch,
+        static_html="<html><body><div>Static shell without email</div></body></html>",
+        live_page_factory=lambda: _DummyInstagramHiddenContactPage(
+            "<html><body><main><div>Rendered profile without visible email in snapshot</div></main></body></html>",
+            rendered_body_inner_text="",
+            rendered_body_text_content="",
+            rendered_main_text="",
+            rendered_document_text_content="",
+            rendered_aggregated_text="",
+            runtime_structured_payloads=[
+                {
+                    "web_profile_info": {
+                        "bio_links": [{"url": "https://about.meta.com/"}],
+                    }
+                }
+            ],
+        ),
+    )
+    monkeypatch.setattr(
+        cde,
+        "_fetch_website_html_bounded",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("internal meta target should not fetch")),
+    )
+
+    matched = worker._enrich_row_instagram_email(seed_df, 0, ctx)
+
+    assert matched is False
+    assert len(live_pages) == 1
+    assert live_pages[0].click_calls == []
+    assert seed_df.at[0, "Email"] == ""
+    assert seed_df.at[0, "Email_All"] == ""
+    _assert_ig_visit_and_outcome(
+        logs,
+        "https://www.instagram.com/structuredemptyartist/",
+        "[IG Email] no_email_visible",
+    )
 
 
 def test_instagram_email_rendered_text_fallback_preserves_body_priority(monkeypatch):
