@@ -1,7 +1,3 @@
-2026-04-05 20:26:40,857 [INFO] Starting scrape for job job_spotify_1
-2026-04-05 20:26:41,135 [INFO] [Directory] Running job for directory=spotify slug= job_id=job_spotify_1
-2026-04-05 20:26:41,135 [INFO] [Spotify] Spotify credentials not configured. Set SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET.
-2026-04-05 20:26:41,153 [INFO] Completed job job_spotify_1 (raw only; master enrichment pending)
 2026-04-05 20:26:41,153 [INFO] [Spotify][Seed] 0 artists discovered from playlist.
 2026-04-05 20:26:41,153 [INFO] Reason: playlist empty / inaccessible / extraction returned no artists.
 2026-04-05 20:26:41,153 [INFO] Continuing pipeline.
@@ -19,7 +15,6 @@
 2026-04-05 20:27:01,299 [INFO] [Master] Passing unearthed_csv_path=
 2026-04-05 20:27:01,301 [INFO] [FB Discover] Shared Facebook session is unavailable for discovery (reason=missing_session_source); disabling FB discovery for the remainder of the run.
 2026-04-05 20:27:01,301 [INFO] [Enricher] Loading seed CSV: overnight_runs/2026-04-05_202640/master_raw.csv
-[Deduper] Removed 0 duplicate rows (kept 0 unique rows)
 2026-04-05 20:27:01,304 [INFO] [Deduper] Removed 0 duplicate rows (kept 0 unique rows)
 2026-04-05 20:27:01,306 [INFO] [Schema] ensured email columns: Email, Email_All, Email_Type, Email_Source_URL, Email_Source_Type, Email_Extract_Method, Email_Provenance_JSON
 2026-04-05 20:27:01,313 [INFO] [Enricher] Seed CSV has no rows; wrote empty output with headers -> overnight_runs/2026-04-05_202640/master_enriched.csv
@@ -63,46 +58,3 @@
 2026-04-05 20:27:01,394 [INFO]  - Emails with missing provenance URL: 0
 2026-04-05 20:27:01,394 [INFO]  - Emails total (raw merged): 0
 2026-04-05 20:27:01,441 [INFO] [Run Summary] Wrote run summary: overnight_runs/2026-04-05_202640/run_summary.json
-{
-  "run_dir": "overnight_runs/2026-04-05_202640",
-  "jobs": [
-    {
-      "job_id": "job_spotify_1",
-      "raw_csv": "overnight_runs/2026-04-05_202640/job_spotify_1/raw.csv",
-      "enriched_csv": "overnight_runs/2026-04-05_202640/job_spotify_1/raw.csv",
-      "input_seed_csv": "https://open.spotify.com/playlist/37i9dQZF1DWVxStm5ni6tl?si=868025fc12ef4a7d",
-      "status": "completed",
-      "error_count": 0,
-      "last_update": "2026-04-05T10:26:41.153289+00:00",
-      "row_count": 0,
-      "current_row_index": 0,
-      "valid_leads_so_far": 0
-    }
-  ],
-  "master_raw": "overnight_runs/2026-04-05_202640/master_raw.csv",
-  "master_enriched": "overnight_runs/2026-04-05_202640/master_enriched.csv",
-  "master_pre_fb": "overnight_runs/2026-04-05_202640/master_pre_fb.csv",
-  "master_post_fb": "overnight_runs/2026-04-05_202640/master_post_fb.csv",
-  "master_csv": "overnight_runs/2026-04-05_202640/master_enriched_deduped.csv",
-  "export_mode": "both",
-  "smoke_stats": {
-    "jobs_attempted": 1,
-    "jobs_merged": 0,
-    "jobs_skipped": [],
-    "raw_rows": 0,
-    "enrichment_ran": true,
-    "enrichment_rows": 1,
-    "sc_challenge_detected": 0,
-    "sc_breaker_tripped": false,
-    "sc_live_disabled_reason": "",
-    "bandcamp_http_403_count": 0,
-    "lastfm_http_406_count": 0,
-    "emails_missing_source_url": 0,
-    "emails_total": 0
-  }
-}
-Source config : /Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/tests/Canada_Spotify_Small_Run1.json
-Smoke config  : /var/folders/wx/4_twj5kx0vd_k0084xbzg2k80000gn/T/ue_nm_smoke_7cn0qcbh/Canada_Spotify_Small_Run1.smoke.json
-Clamped fields:
- - config.facebook.max_rows_per_run: 100 -> 20
-Executing    : /usr/local/bin/python3 /Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/night_mode_runner.py --config /var/folders/wx/4_twj5kx0vd_k0084xbzg2k80000gn/T/ue_nm_smoke_7cn0qcbh/Canada_Spotify_Small_Run1.smoke.json

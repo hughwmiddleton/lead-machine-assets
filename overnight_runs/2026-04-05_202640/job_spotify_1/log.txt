@@ -1,0 +1,4 @@
+2026-04-05 20:26:40,857 [INFO] Starting scrape for job job_spotify_1
+2026-04-05 20:26:41,135 [INFO] [Directory] Running job for directory=spotify slug= job_id=job_spotify_1
+2026-04-05 20:26:41,135 [INFO] [Spotify] Spotify credentials not configured. Set SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET.
+2026-04-05 20:26:41,153 [INFO] Completed job job_spotify_1 (raw only; master enrichment pending)
