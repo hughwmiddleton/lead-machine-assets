@@ -2967,6 +2967,7 @@ def _extract_static_page_candidate_emails(
     html: str,
     *,
     soup: Optional[BeautifulSoup] = None,
+    normalize_surface_text: bool = False,
 ) -> List[str]:
     html_text = html if isinstance(html, str) else str(html or "")
     if not html_text.strip():
@@ -2983,20 +2984,26 @@ def _extract_static_page_candidate_emails(
         _append_contact_surface_value(surface_texts, meta_seen, meta_tag.get("content"))
     for title_tag in soup_obj.select("title"):
         _append_contact_surface_value(surface_texts, meta_seen, title_tag.get_text(" ", strip=True))
+    rendered_surface_text = " ".join(surface_texts)
+    if normalize_surface_text:
+        rendered_surface_text = unicodedata.normalize("NFKC", rendered_surface_text)
 
     ig_emails, _ = _extract_emails_from_html(
         html_text,
         soup=soup_obj,
-        rendered_text=" ".join(surface_texts),
+        rendered_text=rendered_surface_text,
         anchor_values=anchor_values,
     )
 
     attribute_values = _collect_contact_surface_attribute_values(soup_obj)
     attribute_emails: List[str] = []
     if attribute_values:
+        rendered_attribute_text = " ".join(attribute_values)
+        if normalize_surface_text:
+            rendered_attribute_text = unicodedata.normalize("NFKC", rendered_attribute_text)
         attribute_emails, _ = _extract_emails_from_html(
             "",
-            rendered_text=" ".join(attribute_values),
+            rendered_text=rendered_attribute_text,
             anchor_values=attribute_values,
         )
 
@@ -3009,6 +3016,18 @@ def _extract_instagram_profile_candidate_emails(
     soup: Optional[BeautifulSoup] = None,
 ) -> List[str]:
     return _extract_static_page_candidate_emails(html, soup=soup)
+
+
+def _extract_instagram_direct_profile_candidate_emails(
+    html: str,
+    *,
+    soup: Optional[BeautifulSoup] = None,
+) -> List[str]:
+    return _extract_static_page_candidate_emails(
+        html,
+        soup=soup,
+        normalize_surface_text=True,
+    )
 
 
 def _normalise_instagram_bio_link_fetch_url(raw: str, *, base_url: str = "") -> str:
@@ -10562,7 +10581,7 @@ class CrossDirectoryEnricherWorker(QThread):
                 return False
 
             soup = BeautifulSoup(html, "html.parser")
-            all_ig_emails = _extract_instagram_profile_candidate_emails(html, soup=soup)
+            all_ig_emails = _extract_instagram_direct_profile_candidate_emails(html, soup=soup)
             selected_source_url = ig_url
             selected_extract_method = "regex"
             selected_surface = "instagram_profile"
@@ -10637,7 +10656,7 @@ class CrossDirectoryEnricherWorker(QThread):
                     print("DEBUG IG: contains exact email =", "lacedupmgmt@gmail.com" in (shared_live_html or "").lower())
                     print("DEBUG IG: contains @gmail.com =", "@gmail.com" in (shared_live_html or "").lower())
                     live_soup = BeautifulSoup(shared_live_html, "html.parser")
-                    all_ig_emails = _extract_instagram_profile_candidate_emails(
+                    all_ig_emails = _extract_instagram_direct_profile_candidate_emails(
                         shared_live_html,
                         soup=live_soup,
                     )

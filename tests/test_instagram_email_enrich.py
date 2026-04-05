@@ -1282,6 +1282,59 @@ def test_instagram_email_meta_description_writes_email_and_provenance(monkeypatc
     ]
 
 
+def test_instagram_email_stylized_meta_description_writes_email_without_fallback(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    stylized_email = "𝙇𝙖𝙘𝙚𝙙𝙪𝙥𝙈𝙂𝙈𝙏@𝙜𝙢𝙖𝙞𝙡.𝙘𝙤𝙢"
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Stylized Meta Artist",
+            "Email": "",
+            "Email_All": "",
+            "Instagram_URL": "https://instagram.com/stylizedmetaartist/?hl=en#bio",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+            "Email_Type": "",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+
+    def fake_fetch(session, url):
+        return (
+            "<html><head>"
+            f"<meta name='description' content='Bookings: {stylized_email}'>"
+            "</head><body><div>Official profile</div></body></html>",
+            200,
+        )
+
+    monkeypatch.setattr(cde, "_fetch_instagram_profile_html", fake_fetch)
+    monkeypatch.setattr(
+        cde,
+        "_instagram_onehop_emails_from_surface",
+        lambda *args, **kwargs: pytest.fail("one-hop should not run"),
+    )
+    monkeypatch.setattr(
+        cde,
+        "_open_instagram_live_page_bridge",
+        lambda *args, **kwargs: pytest.fail("live bridge should not run"),
+    )
+
+    matched = worker._enrich_row_instagram_email(seed_df, 0, ctx)
+
+    assert matched is True
+    assert seed_df.at[0, "Email"] == "lacedupmgmt@gmail.com"
+    assert seed_df.at[0, "Email_All"] == "lacedupmgmt@gmail.com"
+    assert seed_df.at[0, "Email_Source_URL"] == "https://www.instagram.com/stylizedmetaartist/"
+    assert seed_df.at[0, "Email_Source_Type"] == "instagram_enrich"
+    assert seed_df.at[0, "Email_Extract_Method"] == "regex"
+    assert seed_df.at[0, "Email_Type"] == "ig_enrich"
+    assert logs == [
+        "[IG Email] Visiting https://www.instagram.com/stylizedmetaartist/",
+        "[IG Email] Found email: lacedupmgmt@gmail.com",
+    ]
+
+
 def test_instagram_email_filters_malformed_candidates_before_write(monkeypatch):
     logs = []
     worker = _make_worker(logs)
@@ -1665,6 +1718,30 @@ def test_collect_instagram_bio_link_fetch_urls_preserves_anchor_priority_before_
         "https://metaartist.com",
         "https://linktr.ee/artist",
     ]
+
+
+def test_extract_instagram_direct_profile_candidate_emails_preserves_plain_ascii_meta_email():
+    html = (
+        "<html><head>"
+        "<meta property='og:description' content='Bookings: bookings@artist.com'>"
+        "</head><body><div>Official profile</div></body></html>"
+    )
+
+    emails = cde._extract_instagram_direct_profile_candidate_emails(html)
+
+    assert emails == ["bookings@artist.com"]
+
+
+def test_extract_instagram_direct_profile_candidate_emails_ignores_stylized_non_email_text():
+    html = (
+        "<html><head>"
+        "<meta name='description' content='𝘽𝙤𝙤𝙠𝙞𝙣𝙜𝙨 𝙫𝙞𝙖 𝙜𝙢𝙖𝙞𝙡 𝙙𝙤𝙩 𝙘𝙤𝙢'>"
+        "</head><body><div>Official profile</div></body></html>"
+    )
+
+    emails = cde._extract_instagram_direct_profile_candidate_emails(html)
+
+    assert emails == []
 
 
 def test_collect_instagram_bio_link_fetch_urls_preserves_html_priority_with_runtime_structured_payloads():
