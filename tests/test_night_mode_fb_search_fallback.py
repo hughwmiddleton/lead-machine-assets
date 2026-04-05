@@ -99,11 +99,23 @@ def test_build_fb_discovery_query_prefers_song_title_over_location() -> None:
     assert query == "Signal Artist TAKE OVER"
 
 
-def test_build_fb_discovery_query_prefers_upstream_identity_hint() -> None:
+def test_build_fb_discovery_query_prefers_song_title_over_handle_like_upstream_hint() -> None:
+    query, secondary = night_mode_fb._build_fb_discovery_query(
+        "Julia Wallace",
+        location="Melbourne, VIC",
+        song_title="Pick Up The Pace",
+        row={"SoundCloud Link": "https://soundcloud.com/jwallacce/tracks"},
+    )
+
+    assert secondary == "Pick Up The Pace"
+    assert query == "Julia Wallace Pick Up The Pace"
+
+
+def test_build_fb_discovery_query_prefers_upstream_identity_hint_when_title_absent() -> None:
     query, secondary = night_mode_fb._build_fb_discovery_query(
         "Signal Artist",
         location="Melbourne, VIC",
-        song_title="Night Drive",
+        song_title="",
         row={"SoundCloud Link": "https://soundcloud.com/signalhandle/tracks"},
     )
 

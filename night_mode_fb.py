@@ -2076,9 +2076,22 @@ def _build_fb_discovery_query(
     song_title: str = "",
     row: Any = None,
 ) -> Tuple[str, str]:
+    title_signal = _sanitize_fb_song_title(song_title)
     secondary_signal = preferred_upstream_identity_hint(row)
+    if secondary_signal and title_signal:
+        compact_hint = secondary_signal.strip()
+        hint_looks_handle_like = (
+            " " not in compact_hint
+            and bool(re.fullmatch(r"[A-Za-z0-9._-]{3,}", compact_hint))
+            and (
+                compact_hint == compact_hint.lower()
+                or any(ch.isdigit() or ch in "._-" for ch in compact_hint)
+            )
+        )
+        if hint_looks_handle_like:
+            secondary_signal = title_signal
     if not secondary_signal:
-        secondary_signal = _sanitize_fb_song_title(song_title)
+        secondary_signal = title_signal
     if not secondary_signal:
         secondary_signal = _normalize_fb_location_query(location)
     query = " ".join(part for part in ((artist or "").strip(), secondary_signal) if part).strip()
