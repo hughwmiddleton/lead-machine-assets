@@ -111,6 +111,19 @@ def test_build_fb_discovery_query_prefers_song_title_over_handle_like_upstream_h
     assert query == "Julia Wallace Pick Up The Pace"
 
 
+def test_build_fb_discovery_query_prefers_song_title_over_synthetic_handle_like_upstream_hint() -> None:
+    query, secondary = night_mode_fb._build_fb_discovery_query(
+        "Signal Artist",
+        location="Melbourne, VIC",
+        song_title="Midnight Echo",
+        row={"SoundCloud Link": "https://soundcloud.com/signalhandle123/tracks"},
+    )
+
+    assert secondary == "Midnight Echo"
+    assert query == "Signal Artist Midnight Echo"
+    assert "signalhandle123" not in query
+
+
 def test_build_fb_discovery_query_prefers_upstream_identity_hint_when_title_absent() -> None:
     query, secondary = night_mode_fb._build_fb_discovery_query(
         "Signal Artist",
