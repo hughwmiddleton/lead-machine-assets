@@ -2504,7 +2504,7 @@ _INSTAGRAM_REJECT_SEGMENTS = {
 }
 _INSTAGRAM_HANDLE_RE = re.compile(r"^[A-Za-z0-9._]{1,30}$")
 _SPOTIFY_IG_SEED_MIN_HANDLE_LEN = 5
-_SPOTIFY_IG_SEED_MAX_CANDIDATES = 2
+_SPOTIFY_IG_SEED_MAX_CANDIDATES = 6
 _SPOTIFY_IG_SEED_REJECT_HANDLES = frozenset(
     {
         "artist",
@@ -2715,7 +2715,8 @@ def _spotify_seed_instagram_candidate_urls(
     if _spotify_instagram_identity_website_candidate(row):
         return []
 
-    artist_compact = re.sub(r"[^a-z0-9]+", "", normalize_name(artist_name))
+    artist_parts = [token for token in normalize_name(artist_name).split() if token]
+    artist_compact = "".join(artist_parts)
     if (
         len(artist_compact) < _SPOTIFY_IG_SEED_MIN_HANDLE_LEN
         or artist_compact in _SPOTIFY_IG_SEED_REJECT_HANDLES
@@ -2737,6 +2738,19 @@ def _spotify_seed_instagram_candidate_urls(
         seen.add(canonical)
         candidates.append(canonical)
 
+    def _push_candidate_handle(raw_handle: str) -> None:
+        token = _spotify_seed_instagram_identity_handle_token(raw_handle)
+        if not token:
+            return
+        compact = re.sub(r"[^a-z0-9]+", "", normalize_name(token))
+        if (
+            len(compact) < _SPOTIFY_IG_SEED_MIN_HANDLE_LEN
+            or compact in _SPOTIFY_IG_SEED_REJECT_HANDLES
+            or compact.isdigit()
+        ):
+            return
+        _push_candidate_url(f"https://www.instagram.com/{token}/")
+
     def _push_handle_variant(raw_value: str) -> None:
         token = _spotify_seed_instagram_identity_handle_token(raw_value)
         if not token:
@@ -2752,9 +2766,79 @@ def _spotify_seed_instagram_candidate_urls(
             return
         _push_candidate_url(f"https://www.instagram.com/{token}/")
 
-    _push_candidate_url(f"https://www.instagram.com/{artist_compact}/")
+    def _variant_parts(raw_value: Any) -> List[str]:
+        value = cell_to_str(raw_value)
+        if not value:
+            return []
+        value = value.strip().strip("/")
+        if value.startswith("@"):
+            value = value[1:]
+        value = unicodedata.normalize("NFKD", value)
+        value = "".join(ch for ch in value if not unicodedata.combining(ch)).lower()
+        return [token for token in re.split(r"[^a-z0-9]+", value) if token]
+
+    def _push_external_token_variants(raw_value: Any) -> None:
+        parts = _variant_parts(raw_value)
+        if not parts:
+            return
+        raw_token = cell_to_str(raw_value).strip().strip("/")
+        if raw_token.startswith("@"):
+            raw_token = raw_token[1:]
+        raw_token = unicodedata.normalize("NFKD", raw_token)
+        raw_token = "".join(ch for ch in raw_token if not unicodedata.combining(ch)).lower()
+        compact = "".join(parts)
+        underscore = "_".join(parts) if len(parts) > 1 else ""
+        dotted = ".".join(parts) if len(parts) > 1 else ""
+        for handle in (raw_token, compact, underscore, dotted):
+            _push_candidate_handle(handle)
+
+    external_seed_tokens: List[str] = []
+    external_seen: Set[str] = set()
+
+    def _push_external_seed(raw_value: Any) -> None:
+        value = cell_to_str(raw_value).strip().strip("/")
+        if not value:
+            return
+        key = value.lower()
+        if key in external_seen:
+            return
+        external_seen.add(key)
+        external_seed_tokens.append(value)
+
+    bandcamp_url = _canonicalise_bandcamp_url(cell_to_str(row.get("Bandcamp_URL", "")))
+    bandcamp_host = _host(bandcamp_url)
+    if bandcamp_host.endswith(".bandcamp.com"):
+        bandcamp_token = bandcamp_host[: -len(".bandcamp.com")]
+        if bandcamp_token and "." not in bandcamp_token:
+            _push_external_seed(bandcamp_token)
+
+    for key in ("SoundCloud Link", "SoundCloud URL"):
+        soundcloud_url = _normalise_url(cell_to_str(row.get(key, ""))) or cell_to_str(row.get(key, ""))
+        soundcloud_token = _sc_handle_from_profile_url(soundcloud_url) or _sc_handle_from_url(soundcloud_url)
+        _push_external_seed(soundcloud_token)
+
+    artist_underscore = "_".join(artist_parts) if len(artist_parts) > 1 else ""
+    artist_dot = ".".join(artist_parts) if len(artist_parts) > 1 else ""
+
+    _push_candidate_handle(artist_compact)
     _push_handle_variant(artist_name)
     _push_handle_variant(spotify_id)
+    for token in external_seed_tokens:
+        _push_external_token_variants(token)
+    for handle in (
+        artist_underscore,
+        artist_dot,
+        f"{artist_underscore}_official" if artist_underscore else "",
+        f"{artist_dot}.official" if artist_dot else "",
+        f"{artist_underscore}_music" if artist_underscore else "",
+        f"{artist_dot}.music" if artist_dot else "",
+        f"{artist_underscore}_band" if artist_underscore else "",
+        f"{artist_dot}.band" if artist_dot else "",
+        f"{artist_compact}official",
+        f"{artist_compact}music",
+        f"{artist_compact}band",
+    ):
+        _push_candidate_handle(handle)
     return candidates
 
 

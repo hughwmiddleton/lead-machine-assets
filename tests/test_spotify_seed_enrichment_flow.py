@@ -1010,14 +1010,45 @@ def test_spotify_identity_pass_ig_no_website_noops_without_fetch(tmp_path, monke
 
 
 def test_spotify_seed_instagram_candidate_urls_stays_bounded_and_deterministic(tmp_path):
-    df = pd.DataFrame([_base_row(**{"Artist Name": "Artist A", "Spotify_Artist_ID": "artist.a"})])
+    df = pd.DataFrame(
+        [
+            _base_row(
+                **{
+                    "Artist Name": "Artist A",
+                    "Spotify_Artist_ID": "spotify-opaque-id",
+                    "Bandcamp_URL": "https://artist-a.bandcamp.com/",
+                    "SoundCloud URL": "https://soundcloud.com/artist_a",
+                }
+            )
+        ]
+    )
 
-    candidates = cde._spotify_seed_instagram_candidate_urls(df.loc[0], "Artist A", spotify_id="artist.a")
+    candidates = cde._spotify_seed_instagram_candidate_urls(df.loc[0], "Artist A", spotify_id="spotify-opaque-id")
 
     assert candidates == [
         "https://www.instagram.com/artista/",
+        "https://www.instagram.com/artist_a/",
         "https://www.instagram.com/artist.a/",
+        "https://www.instagram.com/artist_a_official/",
+        "https://www.instagram.com/artist.a.official/",
+        "https://www.instagram.com/artist_a_music/",
     ]
+    assert len(candidates) == cde._SPOTIFY_IG_SEED_MAX_CANDIDATES
+
+
+def test_spotify_seed_instagram_candidate_urls_suffixes_stay_compact_only(tmp_path):
+    df = pd.DataFrame([_base_row(**{"Artist Name": "Nightlight", "Spotify_Artist_ID": "spotify-opaque-id"})])
+
+    candidates = cde._spotify_seed_instagram_candidate_urls(df.loc[0], "Nightlight", spotify_id="spotify-opaque-id")
+
+    assert candidates == [
+        "https://www.instagram.com/nightlight/",
+        "https://www.instagram.com/nightlightofficial/",
+        "https://www.instagram.com/nightlightmusic/",
+        "https://www.instagram.com/nightlightband/",
+    ]
+    assert "https://www.instagram.com/nightlight_official/" not in candidates
+    assert "https://www.instagram.com/nightlight.official/" not in candidates
 
 
 def test_spotify_seed_instagram_identity_recovery_fails_closed_without_direct_email_proof(tmp_path, monkeypatch):
@@ -1047,7 +1078,12 @@ def test_spotify_seed_instagram_identity_recovery_fails_closed_without_direct_em
         spotify_id=spotify_id,
     )
 
-    assert candidates == ["https://www.instagram.com/nightlight/"]
+    assert candidates == [
+        "https://www.instagram.com/nightlight/",
+        "https://www.instagram.com/nightlightofficial/",
+        "https://www.instagram.com/nightlightmusic/",
+        "https://www.instagram.com/nightlightband/",
+    ]
     assert applied is False
     assert df.at[0, "Social Link"] == ""
     assert df.at[0, "Email"] == ""
@@ -1185,7 +1221,12 @@ def test_spotify_seed_instagram_identity_recovery_accepts_exact_external_corrobo
         spotify_id="spotify-opaque-id",
     )
 
-    assert candidates == ["https://www.instagram.com/nightlight/"]
+    assert candidates == [
+        "https://www.instagram.com/nightlight/",
+        "https://www.instagram.com/nightlightofficial/",
+        "https://www.instagram.com/nightlightmusic/",
+        "https://www.instagram.com/nightlightband/",
+    ]
     assert applied is True
     assert df.at[0, "Social Link"] == "https://www.instagram.com/nightlight/"
     assert logs == [
@@ -1234,7 +1275,14 @@ def test_spotify_seed_instagram_identity_recovery_does_not_trust_ambiguous_row_i
         spotify_id=spotify_id,
     )
 
-    assert candidates == ["https://www.instagram.com/artista/"]
+    assert candidates == [
+        "https://www.instagram.com/artista/",
+        "https://www.instagram.com/artist_a/",
+        "https://www.instagram.com/artist.a/",
+        "https://www.instagram.com/artist_a_official/",
+        "https://www.instagram.com/artist.a.official/",
+        "https://www.instagram.com/artist_a_music/",
+    ]
     assert applied is False
     assert df.at[0, "Social Link"] == ""
     assert logs == [
