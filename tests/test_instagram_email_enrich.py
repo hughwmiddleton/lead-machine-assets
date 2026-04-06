@@ -1818,6 +1818,29 @@ def test_collect_instagram_bio_link_fetch_urls_preserves_html_priority_with_runt
     ]
 
 
+def test_extract_instagram_onehop_profile_surface_html_excludes_head_and_footer_chrome():
+    html = (
+        "<html><head>"
+        "<meta name='website' content='https://about.meta.com/'>"
+        "</head><body>"
+        "<nav><a href='https://help.instagram.com/12345'>Help</a></nav>"
+        "<main><a href='https://linktr.ee/scopedartist'>Bio</a></main>"
+        "<footer><a href='https://www.threads.com/@scopedartist'>Threads</a></footer>"
+        "<script type='application/json'>"
+        '{"profile":{"bio_links":[{"url":"https://beacons.ai/chrome-should-not-pass-through-html"}]}}'
+        "</script>"
+        "</body></html>"
+    )
+
+    scoped_html = cde._extract_instagram_onehop_profile_surface_html(html)
+
+    assert "https://linktr.ee/scopedartist" in scoped_html
+    assert "https://about.meta.com/" not in scoped_html
+    assert "https://help.instagram.com/12345" not in scoped_html
+    assert "https://www.threads.com/@scopedartist" not in scoped_html
+    assert "https://beacons.ai/chrome-should-not-pass-through-html" not in scoped_html
+
+
 def test_iter_instagram_bio_link_structured_values_preserves_urls_and_admits_direct_emails_only():
     payload = {
         "bio_links": [
@@ -2301,6 +2324,72 @@ def test_instagram_email_one_hop_bio_link_recovers_direct_email_from_rendered_li
         logs,
         f"[IG OneHop] live_surface_bio_link_urls state=non_empty count=1 sample={live_target}",
     )
+
+
+def test_instagram_email_one_hop_live_surface_scopes_collection_away_from_document_chrome(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Scoped Live Surface Artist",
+            "Email": "",
+            "Email_All": "",
+            "Instagram_URL": "https://instagram.com/scopedlivesurfaceartist/",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+            "Email_Type": "",
+            EMAIL_PROVENANCE_JSON_COL: "",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    bio_fetch_calls = []
+    live_target = "https://linktr.ee/scopedlivesurfaceartist"
+    live_pages = _install_instagram_profile_fetch_scope(
+        monkeypatch,
+        static_html="<html><body><div>Requests HTML without outbound bio link</div></body></html>",
+        live_page_factory=lambda: _DummyInstagramHiddenContactPage(
+            "<html><head>"
+            "<meta name='website' content='https://about.meta.com/'>"
+            "</head><body>"
+            "<nav><a href='https://help.instagram.com/12345'>Help</a></nav>"
+            f"<main><a href='{live_target}'>Bio</a><button>Email</button></main>"
+            "<footer><a href='https://www.threads.com/@scopedlivesurfaceartist'>Threads</a></footer>"
+            "<script type='application/json'>"
+            '{"profile":{"bio_links":[{"url":"https://beacons.ai/scopedlivesurfaceartist"}]}}'
+            "</script>"
+            "</body></html>"
+        ),
+    )
+
+    def fake_fetch_website_html_bounded(session, url, **kwargs):  # noqa: ANN001
+        bio_fetch_calls.append(url)
+        assert url == live_target
+        return cde.WebsiteFetchResult(
+            url=url,
+            final_url=live_target,
+            status=200,
+            content_type="text/html",
+            html="<html><body>Bookings: scoped-live@artist.com</body></html>",
+            is_html=True,
+        )
+
+    monkeypatch.setattr(cde, "_fetch_website_html_bounded", fake_fetch_website_html_bounded)
+
+    matched = worker._enrich_row_instagram_email(seed_df, 0, ctx)
+
+    assert matched is True
+    assert len(live_pages) == 1
+    assert bio_fetch_calls == [live_target]
+    assert seed_df.at[0, "Email"] == "scoped-live@artist.com"
+    assert seed_df.at[0, "Email_All"] == "scoped-live@artist.com"
+    assert seed_df.at[0, "Email_Source_URL"] == live_target
+    _assert_log_contains(logs, "[IG OneHop] bio_link_urls state=empty count=0 sample=-")
+    _assert_log_contains(
+        logs,
+        f"[IG OneHop] live_surface_bio_link_urls state=non_empty count=1 sample={live_target}",
+    )
+    _assert_no_log_startswith(logs, "[IG OneHop] target_blocked reason=internal_meta")
 
 
 def test_instagram_email_static_one_hop_success_skips_live_retry(monkeypatch):

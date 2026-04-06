@@ -3540,6 +3540,23 @@ def _collect_instagram_bio_equivalent_structured_texts(payloads: Iterable[Any]) 
     return texts
 
 
+def _extract_instagram_onehop_profile_surface_html(html: str) -> str:
+    html_text = html if isinstance(html, str) else str(html or "")
+    if not html_text.strip():
+        return ""
+    soup = BeautifulSoup(html_text, "html.parser")
+    scoped_root = soup.find("main") or soup.find("body")
+    if scoped_root is None:
+        return ""
+    scoped_soup = BeautifulSoup(str(scoped_root), "html.parser")
+    scoped_root_copy = scoped_soup.find(scoped_root.name)
+    if scoped_root_copy is None:
+        return ""
+    for noise_node in scoped_root_copy.select("footer, nav, aside, script, style, noscript"):
+        noise_node.decompose()
+    return str(scoped_root_copy)
+
+
 def _collect_instagram_runtime_bio_link_structured_payloads(page: Any) -> List[Any]:
     if page is None or not hasattr(page, "evaluate"):
         return []
@@ -10659,6 +10676,7 @@ class CrossDirectoryEnricherWorker(QThread):
                         live_html = live_page.snapshot_html()
                         if _instagram_profile_fetch_usable(200, live_html):
                             shared_live_html = live_html
+                            live_onehop_html = _extract_instagram_onehop_profile_surface_html(live_html)
                             (
                                 all_ig_emails,
                                 selected_source_url,
@@ -10666,7 +10684,7 @@ class CrossDirectoryEnricherWorker(QThread):
                                 onehop_target_attempted,
                             ) = _instagram_onehop_emails_from_surface(
                                 self.session,
-                                live_html,
+                                live_onehop_html,
                                 profile_url=ig_url,
                                 log=self.log_message.emit,
                                 state_label="live_surface_bio_link_urls",
