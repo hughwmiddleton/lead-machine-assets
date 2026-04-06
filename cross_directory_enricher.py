@@ -13743,6 +13743,30 @@ class CrossDirectoryEnricherWorker(QThread):
         self._set_platform_state("bandcamp", "skipped")
         return None
 
+    def _bc_current_live_row(self) -> Optional[Any]:
+        live_df = getattr(self, "_live_seed_df", None)
+        live_row_idx = getattr(self, "_live_row_idx", None)
+        if live_df is None or live_row_idx is None:
+            return None
+        try:
+            if hasattr(live_df, "index") and live_row_idx in live_df.index:
+                return live_df.loc[live_row_idx]
+        except Exception:
+            return None
+        return None
+
+    def _bc_should_expand_sparse_slug_fallback(self) -> bool:
+        if bool((getattr(self, "_spotify_identity_guard_ctx", {}) or {}).get("active")):
+            return True
+        row = self._bc_current_live_row()
+        if row is None or _row_is_unearthed_source(row):
+            return False
+        snapshot = self._spotify_identity_surface_snapshot(row)
+        return (
+            not snapshot.get("has_bandcamp")
+            and int(snapshot.get("identity_link_count", 0) or 0) < 2
+        )
+
     def _bc_slug_fallback(
         self,
         artist_name: str,
@@ -13752,22 +13776,21 @@ class CrossDirectoryEnricherWorker(QThread):
         """
         Conservative fallback: test a few band subdomain guesses and verify with confidence gate.
         """
-        spotify_guard_active = bool((getattr(self, "_spotify_identity_guard_ctx", {}) or {}).get("active"))
         if slug_candidates is None:
             slugs = _bc_slug_candidates(artist_name)
-            if spotify_guard_active:
-                spotify_slugs: List[str] = []
+            if self._bc_should_expand_sparse_slug_fallback():
+                recovery_slugs: List[str] = []
                 seen_slugs: Set[str] = set()
                 for slug in _spotify_sparse_bandcamp_slug_candidates(artist_name):
                     cleaned = _clean_cell(slug).strip().lower()
                     if not cleaned or cleaned in seen_slugs:
                         continue
                     seen_slugs.add(cleaned)
-                    spotify_slugs.append(cleaned)
-                    if len(spotify_slugs) >= BC_FALLBACK_MAX_SLUGS:
+                    recovery_slugs.append(cleaned)
+                    if len(recovery_slugs) >= BC_FALLBACK_MAX_SLUGS:
                         break
-                if spotify_slugs:
-                    slugs = spotify_slugs
+                if recovery_slugs:
+                    slugs = recovery_slugs
         else:
             slugs = []
             seen_slugs: Set[str] = set()
