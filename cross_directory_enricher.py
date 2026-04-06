@@ -13752,8 +13752,22 @@ class CrossDirectoryEnricherWorker(QThread):
         """
         Conservative fallback: test a few band subdomain guesses and verify with confidence gate.
         """
+        spotify_guard_active = bool((getattr(self, "_spotify_identity_guard_ctx", {}) or {}).get("active"))
         if slug_candidates is None:
             slugs = _bc_slug_candidates(artist_name)
+            if spotify_guard_active:
+                spotify_slugs: List[str] = []
+                seen_slugs: Set[str] = set()
+                for slug in _spotify_sparse_bandcamp_slug_candidates(artist_name):
+                    cleaned = _clean_cell(slug).strip().lower()
+                    if not cleaned or cleaned in seen_slugs:
+                        continue
+                    seen_slugs.add(cleaned)
+                    spotify_slugs.append(cleaned)
+                    if len(spotify_slugs) >= BC_FALLBACK_MAX_SLUGS:
+                        break
+                if spotify_slugs:
+                    slugs = spotify_slugs
         else:
             slugs = []
             seen_slugs: Set[str] = set()

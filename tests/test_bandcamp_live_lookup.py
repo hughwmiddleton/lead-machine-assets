@@ -256,3 +256,74 @@ def test_live_search_bandcamp_does_not_use_sparse_slug_supplemental_fallback(tmp
 
     assert result is None
     assert fetch_calls == []
+
+
+def test_live_search_bandcamp_guarded_slug_fallback_tries_spotify_suffix_candidates(tmp_path, monkeypatch):
+    worker = _build_worker(tmp_path)
+    worker._row_enrichment_state = {"bandcamp": "pending"}
+    worker._spotify_identity_guard_ctx = {"active": True, "artist": "Nightlight"}
+    worker._live_context = {
+        "artist": "Nightlight",
+        "song_title": "Midnight Run",
+        "track": "Midnight Run",
+        "location": "Melbourne, Australia",
+        "genre": "Dream Pop",
+        "spotify_domain": "",
+    }
+    slug_urls = []
+    html = (
+        "<html><head><title>Nightlight</title></head>"
+        "<body><div itemprop='byArtist'>Nightlight Music</div></body></html>"
+    )
+
+    def fake_http_get(url, label="", count_breaker=False):
+        slug_urls.append(url)
+        if url == "https://nightlight-music.bandcamp.com/":
+            return (html, 200)
+        return ("", 404)
+
+    monkeypatch.setattr(cde, "BC_ENABLE_SEARCH_ENDPOINT", False)
+    monkeypatch.setattr(worker, "_bc_should_skip_search", lambda: False)
+    monkeypatch.setattr(worker, "_bc_directory_fallback", lambda *args, **kwargs: None)
+    monkeypatch.setattr(worker, "_bc_discover_enrich", lambda *args, **kwargs: (None, False))
+    monkeypatch.setattr(worker, "_bc_http_get", fake_http_get)
+    monkeypatch.setattr(
+        worker,
+        "_fetch_profile_and_build",
+        lambda url, source_dir, confidence=None: cde.EnrichmentPayload(
+            socials=set(),
+            websites={"https://nightlight.example"},
+            emails=set(),
+            link_hubs=set(),
+            source_dir=source_dir,
+            source_url=url,
+        ),
+    )
+
+    result = worker._live_search_bandcamp("Nightlight")
+
+    assert result is not None
+    assert result.source_url == "https://nightlight-music.bandcamp.com/"
+    assert slug_urls == [
+        "https://nightlight.bandcamp.com/",
+        "https://nightlightmusic.bandcamp.com/",
+        "https://nightlight-music.bandcamp.com/",
+    ]
+    assert worker._last_bc_row_stats["status"] == "fallback_ok"
+    assert worker._last_bc_row_stats["mode"] == "fallback_guess"
+
+
+def test_bc_slug_fallback_without_spotify_guard_keeps_base_slug_only(tmp_path, monkeypatch):
+    worker = _build_worker(tmp_path)
+    slug_urls = []
+
+    monkeypatch.setattr(
+        worker,
+        "_bc_http_get",
+        lambda url, label="", count_breaker=False: slug_urls.append(url) or ("", 404),
+    )
+
+    result = worker._bc_slug_fallback("Nightlight", "")
+
+    assert result is None
+    assert slug_urls == ["https://nightlight.bandcamp.com/"]
