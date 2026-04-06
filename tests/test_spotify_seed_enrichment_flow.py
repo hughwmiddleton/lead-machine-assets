@@ -1025,39 +1025,40 @@ def test_spotify_seed_instagram_identity_recovery_fails_closed_without_direct_em
     worker = _build_worker(tmp_path)
     worker.log_message = SimpleNamespace(emit=lambda msg: logs.append(msg))
     spotify_id = "2PIlRxTYueV3iVxYMjSu9U"
-    df = pd.DataFrame([_base_row(**{"Artist Name": "Artist A", "Spotify_Artist_ID": spotify_id})])
+    df = pd.DataFrame([_base_row(**{"Artist Name": "Nightlight", "Spotify_Artist_ID": spotify_id})])
 
     @contextmanager
     def fake_profile_fetch_scope(session, url, retain_live_page=False):  # noqa: ANN001
         assert session is worker.session
-        assert url == "https://www.instagram.com/artista/"
+        assert url == "https://www.instagram.com/nightlight/"
         assert retain_live_page is False
         yield cde.InstagramProfileFetchResult(
-            html='<html><head><meta property="og:description" content="Artist A"></head></html>',
+            html='<html><head><meta property="og:description" content="music producer bookings open"></head></html>',
             status=200,
         )
 
     monkeypatch.setattr(cde, "_instagram_profile_fetch_scope", fake_profile_fetch_scope)
 
-    candidates = cde._spotify_seed_instagram_candidate_urls(df.loc[0], "Artist A", spotify_id=spotify_id)
+    candidates = cde._spotify_seed_instagram_candidate_urls(df.loc[0], "Nightlight", spotify_id=spotify_id)
     applied = worker._run_spotify_seed_instagram_identity_recovery(
         df,
         0,
-        "Artist A",
+        "Nightlight",
         spotify_id=spotify_id,
     )
 
-    assert candidates == ["https://www.instagram.com/artista/"]
+    assert candidates == ["https://www.instagram.com/nightlight/"]
     assert applied is False
     assert df.at[0, "Social Link"] == ""
     assert df.at[0, "Email"] == ""
     assert logs == [
-        "[Spotify IG Seed] candidate_selected url=https://www.instagram.com/artista/",
-        "[Spotify IG Seed] candidate_failed reason=no_direct_proof url=https://www.instagram.com/artista/",
+        "[Spotify IG Seed] candidate_blocked reason=identity_validated validation=blocked:insufficient_identity url=https://www.instagram.com/nightlight/",
+        "[Spotify IG Seed] candidate_selected url=https://www.instagram.com/nightlight/",
+        "[Spotify IG Seed] candidate_failed reason=no_direct_proof url=https://www.instagram.com/nightlight/",
     ]
 
 
-def test_spotify_seed_instagram_identity_recovery_accepts_trusted_external_source_url_without_candidate_testing(
+def test_spotify_seed_instagram_identity_recovery_accepts_trusted_external_source_url_after_profile_validation(
     tmp_path,
     monkeypatch,
 ):
@@ -1068,7 +1069,7 @@ def test_spotify_seed_instagram_identity_recovery_accepts_trusted_external_sourc
         [
             _base_row(
                 **{
-                    "Artist Name": "Artist A",
+                    "Artist Name": "Official Artist",
                     "Spotify_Artist_ID": "spotify-opaque-id",
                     "Spotify_Website_URL": "https://www.instagram.com/officialartist/",
                 }
@@ -1077,17 +1078,22 @@ def test_spotify_seed_instagram_identity_recovery_accepts_trusted_external_sourc
     )
 
     @contextmanager
-    def fail_profile_fetch_scope(*args, **kwargs):  # noqa: ANN001
-        raise AssertionError("candidate testing should not run when external_source exists")
-        yield
+    def fake_profile_fetch_scope(session, url, retain_live_page=False):  # noqa: ANN001
+        assert session is worker.session
+        assert url == "https://www.instagram.com/officialartist/"
+        assert retain_live_page is False
+        yield cde.InstagramProfileFetchResult(
+            html="<html><head><title>Official Artist (@officialartist)</title></head></html>",
+            status=200,
+        )
 
-    monkeypatch.setattr(cde, "_instagram_profile_fetch_scope", fail_profile_fetch_scope)
+    monkeypatch.setattr(cde, "_instagram_profile_fetch_scope", fake_profile_fetch_scope)
 
-    candidates = cde._spotify_seed_instagram_candidate_urls(df.loc[0], "Artist A", spotify_id="spotify-opaque-id")
+    candidates = cde._spotify_seed_instagram_candidate_urls(df.loc[0], "Official Artist", spotify_id="spotify-opaque-id")
     applied = worker._run_spotify_seed_instagram_identity_recovery(
         df,
         0,
-        "Artist A",
+        "Official Artist",
         spotify_id="spotify-opaque-id",
     )
 
@@ -1095,11 +1101,11 @@ def test_spotify_seed_instagram_identity_recovery_accepts_trusted_external_sourc
     assert applied is True
     assert df.at[0, "Social Link"] == "https://www.instagram.com/officialartist/"
     assert logs == [
-        "[Spotify IG Seed] candidate_upgraded reason=external_source url=https://www.instagram.com/officialartist/"
+        "[Spotify IG Seed] candidate_accepted reason=external_source validation=strong:profile_name_match url=https://www.instagram.com/officialartist/"
     ]
 
 
-def test_spotify_seed_instagram_identity_recovery_prefers_external_source_over_constructed_guess(tmp_path):
+def test_spotify_seed_instagram_identity_recovery_prefers_external_source_over_constructed_guess(tmp_path, monkeypatch):
     logs = []
     worker = _build_worker(tmp_path)
     worker.log_message = SimpleNamespace(emit=lambda msg: logs.append(msg))
@@ -1115,6 +1121,18 @@ def test_spotify_seed_instagram_identity_recovery_prefers_external_source_over_c
         ]
     )
 
+    @contextmanager
+    def fake_profile_fetch_scope(session, url, retain_live_page=False):  # noqa: ANN001
+        assert session is worker.session
+        assert url == "https://www.instagram.com/officialartist/"
+        assert retain_live_page is False
+        yield cde.InstagramProfileFetchResult(
+            html="<html><head><title>artista official</title></head></html>",
+            status=200,
+        )
+
+    monkeypatch.setattr(cde, "_instagram_profile_fetch_scope", fake_profile_fetch_scope)
+
     candidates = cde._spotify_seed_instagram_candidate_urls(df.loc[0], "artista", spotify_id="spotify-opaque-id")
     applied = worker._run_spotify_seed_instagram_identity_recovery(
         df,
@@ -1127,11 +1145,11 @@ def test_spotify_seed_instagram_identity_recovery_prefers_external_source_over_c
     assert applied is True
     assert df.at[0, "Social Link"] == "https://www.instagram.com/officialartist/"
     assert logs == [
-        "[Spotify IG Seed] candidate_upgraded reason=external_source url=https://www.instagram.com/officialartist/"
+        "[Spotify IG Seed] candidate_accepted reason=external_source validation=strong:profile_name_match url=https://www.instagram.com/officialartist/"
     ]
 
 
-def test_spotify_seed_instagram_identity_recovery_accepts_exact_external_corroboration(tmp_path):
+def test_spotify_seed_instagram_identity_recovery_accepts_exact_external_corroboration(tmp_path, monkeypatch):
     logs = []
     worker = _build_worker(tmp_path)
     worker.log_message = SimpleNamespace(emit=lambda msg: logs.append(msg))
@@ -1139,27 +1157,39 @@ def test_spotify_seed_instagram_identity_recovery_accepts_exact_external_corrobo
         [
             _base_row(
                 **{
-                    "Artist Name": "Artist A",
+                    "Artist Name": "Nightlight",
                     "Spotify_Artist_ID": "spotify-opaque-id",
-                    "Bandcamp_URL": "https://artista.bandcamp.com/",
+                    "Bandcamp_URL": "https://nightlight.bandcamp.com/",
                 }
             )
         ]
     )
 
-    candidates = cde._spotify_seed_instagram_candidate_urls(df.loc[0], "Artist A", spotify_id="spotify-opaque-id")
+    @contextmanager
+    def fake_profile_fetch_scope(session, url, retain_live_page=False):  # noqa: ANN001
+        assert session is worker.session
+        assert url == "https://www.instagram.com/nightlight/"
+        assert retain_live_page is False
+        yield cde.InstagramProfileFetchResult(
+            html='<html><body><a href="https://nightlight.bandcamp.com/">Bandcamp</a></body></html>',
+            status=200,
+        )
+
+    monkeypatch.setattr(cde, "_instagram_profile_fetch_scope", fake_profile_fetch_scope)
+
+    candidates = cde._spotify_seed_instagram_candidate_urls(df.loc[0], "Nightlight", spotify_id="spotify-opaque-id")
     applied = worker._run_spotify_seed_instagram_identity_recovery(
         df,
         0,
-        "Artist A",
+        "Nightlight",
         spotify_id="spotify-opaque-id",
     )
 
-    assert candidates == ["https://www.instagram.com/artista/"]
+    assert candidates == ["https://www.instagram.com/nightlight/"]
     assert applied is True
-    assert df.at[0, "Social Link"] == "https://www.instagram.com/artista/"
+    assert df.at[0, "Social Link"] == "https://www.instagram.com/nightlight/"
     assert logs == [
-        "[Spotify IG Seed] candidate_accepted reason=external_corroboration url=https://www.instagram.com/artista/"
+        "[Spotify IG Seed] candidate_accepted reason=external_corroboration validation=strong:trusted_external_link url=https://www.instagram.com/nightlight/"
     ]
 
 
@@ -1330,6 +1360,18 @@ def test_spotify_identity_pass_generates_seed_instagram_before_no_signal_without
     monkeypatch.setattr(worker, "_bc_slug_fallback", lambda *args, **kwargs: None)
     monkeypatch.setattr(cde, "_fetch_website_html_bounded", fake_fetch)
 
+    @contextmanager
+    def fake_profile_fetch_scope(session, url, retain_live_page=False):  # noqa: ANN001
+        assert session is worker.session
+        assert url == "https://www.instagram.com/artista/"
+        assert retain_live_page is False
+        yield cde.InstagramProfileFetchResult(
+            html="<html><head><title>artista (@artista)</title></head></html>",
+            status=200,
+        )
+
+    monkeypatch.setattr(cde, "_instagram_profile_fetch_scope", fake_profile_fetch_scope)
+
     enriched = worker._run_spotify_discovery_pass(df, 0, ctx, fb_driver=None)
 
     assert enriched is True
@@ -1348,6 +1390,18 @@ def test_spotify_seed_instagram_validated_candidate_still_runs_shared_extractor(
     df = pd.DataFrame([_base_row(**{"Artist Name": "artista", "Spotify_Artist_ID": "spotify-opaque-id"})])
     ctx = worker._build_row_context(df, 0, 1, 1)
 
+    @contextmanager
+    def fake_profile_fetch_scope(session, url, retain_live_page=False):  # noqa: ANN001
+        assert url == "https://www.instagram.com/artista/"
+        assert retain_live_page is False
+        yield cde.InstagramProfileFetchResult(
+            html='<html><head><title>artista (@artista)</title><meta property="og:description" content="artista bookings@artist.com"></head></html>',
+            status=200,
+        )
+
+    monkeypatch.setattr(cde, "_instagram_profile_fetch_scope", fake_profile_fetch_scope)
+    monkeypatch.setattr(cde, "_open_instagram_live_page_bridge", lambda *args, **kwargs: None)
+
     applied = worker._run_spotify_seed_instagram_identity_recovery(
         df,
         0,
@@ -1358,24 +1412,12 @@ def test_spotify_seed_instagram_validated_candidate_still_runs_shared_extractor(
     assert applied is True
     assert df.at[0, "Social Link"] == "https://www.instagram.com/artista/"
 
-    @contextmanager
-    def fake_profile_fetch_scope(session, url, retain_live_page=False):  # noqa: ANN001
-        assert url == "https://www.instagram.com/artista/"
-        assert retain_live_page is False
-        yield cde.InstagramProfileFetchResult(
-            html='<html><head><meta property="og:description" content="bookings@artist.com"></head></html>',
-            status=200,
-        )
-
-    monkeypatch.setattr(cde, "_instagram_profile_fetch_scope", fake_profile_fetch_scope)
-    monkeypatch.setattr(cde, "_open_instagram_live_page_bridge", lambda *args, **kwargs: None)
-
     matched = worker._enrich_row_instagram_email(df, 0, ctx)
 
     assert matched is True
     assert df.at[0, "Email"] == "bookings@artist.com"
     assert df.at[0, "Email_Source_Type"] == "instagram_enrich"
-    assert logs[0] == "[Spotify IG Seed] candidate_accepted reason=identity_validated url=https://www.instagram.com/artista/"
+    assert logs[0] == "[Spotify IG Seed] candidate_accepted reason=identity_validated validation=strong:profile_name_match url=https://www.instagram.com/artista/"
     assert "[IG Email] Visiting https://www.instagram.com/artista/" in logs
     assert "[IG Email] Found email: bookings@artist.com" in logs
 

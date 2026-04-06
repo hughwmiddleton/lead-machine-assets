@@ -2585,6 +2585,7 @@ def _spotify_instagram_identity_website_candidate(row: Any) -> str:
 
 
 _SPOTIFY_IG_EXTERNAL_SOURCE_BRANCH_KEYS = frozenset({"spotifyinstagramrecovery"})
+_SPOTIFY_IG_IDENTITY_GENERIC_TOKENS = frozenset({"artist", "band", "dj", "music", "producer"})
 
 
 def _spotify_seed_instagram_identity_handle_token(raw_value: Any) -> str:
@@ -2811,6 +2812,122 @@ def _spotify_seed_instagram_identity_validated(
         normalize_name(token) == handle_norm
         for token in _spotify_seed_instagram_identity_tokens(artist_name, spotify_id=spotify_id)
     )
+
+
+def _spotify_seed_instagram_admission_profile_validation(
+    session: requests.Session,
+    row: Any,
+    candidate_url: str,
+    artist_name: str,
+) -> Tuple[bool, str]:
+    canonical = _canonicalize_instagram_profile_url(candidate_url)
+    if not canonical:
+        return (False, "blocked:invalid_candidate")
+
+    with _instagram_profile_fetch_scope(session, canonical, retain_live_page=False) as profile_fetch:
+        html = profile_fetch.html
+        status = profile_fetch.status
+    if not _instagram_profile_fetch_usable(status, html):
+        return (False, "blocked:profile_unavailable")
+
+    soup = BeautifulSoup(html, "html.parser")
+    seen_texts: Set[str] = set()
+    title_texts: List[str] = []
+    profile_texts: List[str] = []
+
+    def _append_text(target: List[str], raw_value: Any) -> None:
+        text = _clean_cell(raw_value)
+        norm = normalize_name(text)
+        if not norm or norm in seen_texts:
+            return
+        seen_texts.add(norm)
+        target.append(text)
+
+    for meta_tag in soup.select('meta[property="og:title"], meta[name="og:title"], meta[name="title"]'):
+        _append_text(title_texts, meta_tag.get("content"))
+    for title_tag in soup.select("title"):
+        _append_text(title_texts, title_tag.get_text(" ", strip=True))
+    for meta_tag in soup.select('meta[property="og:description"], meta[name="description"]'):
+        _append_text(profile_texts, meta_tag.get("content"))
+    for node in soup.select("h1, h2"):
+        _append_text(profile_texts, node.get_text(" ", strip=True))
+
+    artist_tokens = [
+        token
+        for token in normalize_name(artist_name).split()
+        if token and token not in _SPOTIFY_IG_IDENTITY_GENERIC_TOKENS
+    ]
+    artist_norm = " ".join(artist_tokens)
+    artist_compact = re.sub(r"\s+", "", artist_norm)
+
+    def _strong_artist_match(text: str) -> bool:
+        text_norm = normalize_name(text)
+        if not artist_norm or not text_norm:
+            return False
+        if artist_norm in text_norm:
+            return True
+        text_compact = re.sub(r"\s+", "", text_norm)
+        return bool(artist_compact and len(artist_compact) >= 4 and artist_compact in text_compact)
+
+    if any(_strong_artist_match(text) for text in title_texts):
+        return (True, "strong:profile_name_match")
+    if any(_strong_artist_match(text) for text in profile_texts):
+        return (True, "strong:profile_text_match")
+
+    trusted_urls: Set[str] = set()
+    trusted_host_keys: Set[str] = set()
+
+    def _append_trusted_url(raw_value: Any, *, source_hint: str = "") -> None:
+        value = _clean_cell(raw_value)
+        if not value:
+            return
+        if source_hint == "bandcamp":
+            normalised = _canonicalise_bandcamp_url(value)
+        else:
+            normalised = _normalise_url(value) or value
+        host = _host(normalised)
+        if not normalised or not host or host in {"instagram.com", "www.instagram.com", "instagr.am"}:
+            return
+        trusted_urls.add(normalised)
+        cache_key = _website_cache_key(normalised) or host
+        if cache_key:
+            trusted_host_keys.add(cache_key)
+
+    if row is not None and hasattr(row, "get"):
+        _append_trusted_url(row.get("Spotify_Website_URL", ""))
+        _append_trusted_url(row.get("Bandcamp_URL", ""), source_hint="bandcamp")
+        _append_trusted_url(row.get("SoundCloud Link", ""))
+        _append_trusted_url(row.get("SoundCloud URL", ""))
+        source_url = _clean_cell(row.get("Source URL", ""))
+        if (_source_for_url(source_url) or "") != "instagram":
+            _append_trusted_url(source_url)
+
+    outbound_links = _collect_instagram_bio_link_fetch_urls(
+        html,
+        soup=soup,
+        profile_url=canonical,
+    )
+    if any(link in trusted_urls for link in outbound_links):
+        return (True, "strong:trusted_external_link")
+
+    weak_signals: List[str] = []
+    combined_text_norm = normalize_name(" ".join([*title_texts, *profile_texts]))
+    combined_tokens = set(combined_text_norm.split())
+    if artist_tokens:
+        shared_tokens = {token for token in artist_tokens if len(token) >= 3 and token in combined_tokens}
+        if shared_tokens:
+            weak_signals.append("partial_name_overlap")
+    if outbound_links:
+        weak_signals.append("outbound_link_present")
+    if trusted_host_keys and any(
+        (_website_cache_key(link) or _host(link)) in trusted_host_keys and link not in trusted_urls
+        for link in outbound_links
+    ):
+        weak_signals.append("trusted_host_overlap")
+
+    if len(set(weak_signals)) >= 2:
+        return (True, "weak:" + "+".join(sorted(set(weak_signals))[:2]))
+    return (False, "blocked:insufficient_identity")
 
 
 _INSTAGRAM_MIN_PROFILE_HTML_CHARS = 48
@@ -9790,26 +9907,31 @@ class CrossDirectoryEnricherWorker(QThread):
         if accepted_candidate_reason:
             spotify_instagram_url = accepted_candidate_url
             reason = accepted_candidate_reason
-            if reason == "external_source":
-                self.log_message.emit(
-                    f"[Spotify IG Seed] candidate_upgraded reason=external_source url={spotify_instagram_url}"
-                )
-            else:
-                self.log_message.emit(
-                    f"[Spotify IG Seed] candidate_accepted reason={reason} url={spotify_instagram_url}"
-                )
-            self._apply_payload(
-                seed_df,
-                row_idx,
-                EnrichmentPayload(
-                    socials={spotify_instagram_url},
-                    source_dir="spotify_instagram_seed",
-                    source_url=spotify_instagram_url,
-                    source_detail="Spotify Instagram Seed",
-                ),
+            admitted, validation_result = _spotify_seed_instagram_admission_profile_validation(
+                self.session,
+                row,
+                spotify_instagram_url,
+                artist,
             )
-            after_social = cell_to_str(seed_df.at[row_idx, "Social Link"]) if "Social Link" in seed_df.columns else ""
-            return before_social != after_social
+            if admitted:
+                self.log_message.emit(
+                    f"[Spotify IG Seed] candidate_accepted reason={reason} validation={validation_result} url={spotify_instagram_url}"
+                )
+                self._apply_payload(
+                    seed_df,
+                    row_idx,
+                    EnrichmentPayload(
+                        socials={spotify_instagram_url},
+                        source_dir="spotify_instagram_seed",
+                        source_url=spotify_instagram_url,
+                        source_detail="Spotify Instagram Seed",
+                    ),
+                )
+                after_social = cell_to_str(seed_df.at[row_idx, "Social Link"]) if "Social Link" in seed_df.columns else ""
+                return before_social != after_social
+            self.log_message.emit(
+                f"[Spotify IG Seed] candidate_blocked reason={reason} validation={validation_result} url={spotify_instagram_url}"
+            )
 
         if _row_has_email(row):
             return False
