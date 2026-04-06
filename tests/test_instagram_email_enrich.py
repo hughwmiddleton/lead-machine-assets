@@ -72,6 +72,7 @@ class _DummyInstagramHiddenContactPage(_DummyClosable):
         click_effects=None,
         runtime_structured_payloads=None,
         runtime_window_payloads=None,
+        live_bio_link_control_values=None,
     ):
         super().__init__()
         self._html = html
@@ -94,6 +95,9 @@ class _DummyInstagramHiddenContactPage(_DummyClosable):
         self._click_effects = dict(click_effects or {})
         self._runtime_structured_payloads = list(runtime_structured_payloads or [])
         self._runtime_window_payloads = list(runtime_window_payloads or [])
+        self._live_bio_link_control_values = (
+            None if live_bio_link_control_values is None else list(live_bio_link_control_values)
+        )
         self.click_calls = []
         self.wait_calls = []
 
@@ -102,6 +106,47 @@ class _DummyInstagramHiddenContactPage(_DummyClosable):
 
     def evaluate(self, script):  # noqa: ANN001
         script_text = str(script or "")
+        if "ig-live-bio-link-control-surface" in script_text:
+            if self._live_bio_link_control_values is not None:
+                return list(self._live_bio_link_control_values)
+            soup = BeautifulSoup(self._html, "html.parser")
+            main = soup.select_one("main")
+            if main is None:
+                return []
+            scope_roots = []
+            header = main.select_one("header")
+            if header is not None:
+                scope_roots.append(header)
+            for child in main.find_all(recursive=False):
+                if len(scope_roots) >= cde._INSTAGRAM_LIVE_ONEHOP_MAX_SCOPE_ROOTS:
+                    break
+                tag_name = getattr(child, "name", "") or ""
+                if child is header or tag_name in {"aside", "footer", "nav", "noscript", "script", "style"}:
+                    continue
+                scope_roots.append(child)
+            if not scope_roots:
+                scope_roots = [main]
+            values = []
+            seen = set()
+            for root in scope_roots:
+                for node in root.select(cde._INSTAGRAM_LIVE_ONEHOP_CLICKABLE_SELECTOR):
+                    attrs = getattr(node, "attrs", {}) or {}
+                    for attr_name, raw_value in attrs.items():
+                        key = str(attr_name or "").strip().lower()
+                        if not key or key == "style":
+                            continue
+                        if key == "href" or key == "title" or key == "aria-label" or key == "onclick" or key.startswith("data-"):
+                            if isinstance(raw_value, (list, tuple, set)):
+                                iterable = raw_value
+                            else:
+                                iterable = [raw_value]
+                            for item in iterable:
+                                value = str(item or "").strip()
+                                if not value or value in seen:
+                                    continue
+                                seen.add(value)
+                                values.append(value)
+            return values
         if "document.body" in script_text and "innerText" in script_text:
             return self._rendered_body_inner_text
         if "document.body" in script_text and "textContent" in script_text:
@@ -1903,6 +1948,25 @@ def test_collect_instagram_runtime_bio_link_structured_payloads_reads_window_run
     ]
 
 
+def test_collect_instagram_live_profile_clickable_bio_link_urls_scopes_to_main_profile_controls():
+    page = _DummyInstagramHiddenContactPage(
+        "<html><body>"
+        "<nav><button data-url='https://help.instagram.com/12345'>Help</button></nav>"
+        "<main><header>"
+        "<div role='link' data-url='https://linktr.ee/controlsurfaceartist'>Bio</div>"
+        "</header></main>"
+        "<footer><button data-url='https://www.threads.com/@controlsurfaceartist'>Threads</button></footer>"
+        "</body></html>"
+    )
+
+    urls = cde._collect_instagram_live_profile_clickable_bio_link_urls(
+        page,
+        profile_url="https://www.instagram.com/controlsurfaceartist/",
+    )
+
+    assert urls == ["https://linktr.ee/controlsurfaceartist"]
+
+
 def test_collect_instagram_bio_link_fetch_urls_extracts_structured_script_url_without_anchor():
     html = (
         "<html><body>"
@@ -2390,6 +2454,67 @@ def test_instagram_email_one_hop_live_surface_scopes_collection_away_from_docume
         f"[IG OneHop] live_surface_bio_link_urls state=non_empty count=1 sample={live_target}",
     )
     _assert_no_log_startswith(logs, "[IG OneHop] target_blocked reason=internal_meta")
+
+
+def test_instagram_email_one_hop_live_surface_recovers_rendered_clickable_bio_link_control(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Rendered Control Artist",
+            "Email": "",
+            "Email_All": "",
+            "Instagram_URL": "https://instagram.com/renderedcontrolartist/",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+            "Email_Type": "",
+            EMAIL_PROVENANCE_JSON_COL: "",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    bio_fetch_calls = []
+    target_url = "https://linktr.ee/renderedcontrolartist"
+    live_pages = _install_instagram_profile_fetch_scope(
+        monkeypatch,
+        static_html="<html><body><div>Requests HTML without outbound bio link</div></body></html>",
+        live_page_factory=lambda: _DummyInstagramHiddenContactPage(
+            "<html><body><main><header><button>Email</button></header></main></body></html>",
+            live_bio_link_control_values=[
+                "https://l.instagram.com/?u=https%3A%2F%2Flinktr.ee%2Frenderedcontrolartist&fbclid=abc123"
+            ],
+        ),
+    )
+    monkeypatch.setattr(
+        cde,
+        "_fetch_website_html_bounded",
+        lambda session, url, **kwargs: bio_fetch_calls.append(url) or cde.WebsiteFetchResult(
+            url=url,
+            final_url=target_url,
+            status=200,
+            content_type="text/html",
+            html="<html><body>Bookings: rendered-control@artist.com</body></html>",
+            is_html=True,
+        ),
+    )
+
+    matched = worker._enrich_row_instagram_email(seed_df, 0, ctx)
+
+    assert matched is True
+    assert len(live_pages) == 1
+    assert live_pages[0].click_calls == []
+    assert bio_fetch_calls == [target_url]
+    assert seed_df.at[0, "Email"] == "rendered-control@artist.com"
+    assert seed_df.at[0, "Email_All"] == "rendered-control@artist.com"
+    assert seed_df.at[0, "Email_Source_URL"] == target_url
+    assert "instagram_bio_link_one_hop" in seed_df.at[0, EMAIL_PROVENANCE_JSON_COL]
+    _assert_log_contains(logs, "[IG OneHop] bio_link_urls state=empty count=0 sample=-")
+    _assert_log_contains(logs, "[IG OneHop] live_clickable_candidates count=1")
+    _assert_log_contains(
+        logs,
+        "[IG OneHop] live_surface_bio_link_urls state=non_empty count=1 sample=https://linktr.ee/renderedcontrolartist",
+    )
+    _assert_log_contains(logs, "[IG OneHop] onehop_selected_target=https://linktr.ee/renderedcontrolartist")
 
 
 def test_instagram_email_static_one_hop_success_skips_live_retry(monkeypatch):

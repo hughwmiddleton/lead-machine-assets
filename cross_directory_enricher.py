@@ -3758,6 +3758,180 @@ def _extract_instagram_onehop_profile_surface_html(html: str) -> str:
     return str(scoped_root_copy)
 
 
+_INSTAGRAM_LIVE_ONEHOP_CLICKABLE_SELECTOR = "a[href], button, [role='button'], [role='link']"
+_INSTAGRAM_LIVE_ONEHOP_MAX_SCOPE_ROOTS = 3
+_INSTAGRAM_LIVE_ONEHOP_MAX_CLICKABLE_NODES = 24
+_INSTAGRAM_LIVE_ONEHOP_MAX_ATTRS_PER_NODE = 24
+_INSTAGRAM_LIVE_ONEHOP_REDIRECT_QUERY_KEYS = frozenset(
+    {
+        "dest",
+        "destination",
+        "q",
+        "redirect",
+        "redirect_uri",
+        "redirect_url",
+        "target",
+        "u",
+        "url",
+    }
+)
+
+
+def _collect_instagram_live_profile_clickable_control_values(page: Any) -> List[str]:
+    if page is None or not hasattr(page, "evaluate"):
+        return []
+    try:
+        raw_values = page.evaluate(
+            f"""
+() => {{
+  const marker = 'ig-live-bio-link-control-surface';
+  const selector = "{_INSTAGRAM_LIVE_ONEHOP_CLICKABLE_SELECTOR}";
+  const maxScopeRoots = {_INSTAGRAM_LIVE_ONEHOP_MAX_SCOPE_ROOTS};
+  const maxNodes = {_INSTAGRAM_LIVE_ONEHOP_MAX_CLICKABLE_NODES};
+  const maxAttrsPerNode = {_INSTAGRAM_LIVE_ONEHOP_MAX_ATTRS_PER_NODE};
+  const main = document.querySelector('main');
+  if (!main) {{
+    return [];
+  }}
+  const scopeRoots = [];
+  const seenRoots = new Set();
+  const addRoot = (node) => {{
+    if (!node || seenRoots.has(node)) {{
+      return;
+    }}
+    seenRoots.add(node);
+    scopeRoots.push(node);
+  }};
+  addRoot(main.querySelector('header'));
+  for (const child of Array.from(main.children || [])) {{
+    if (scopeRoots.length >= maxScopeRoots) {{
+      break;
+    }}
+    if (!child) {{
+      continue;
+    }}
+    const tagName = (child.tagName || '').toLowerCase();
+    if (['aside', 'footer', 'nav', 'script', 'style', 'noscript'].includes(tagName)) {{
+      continue;
+    }}
+    addRoot(child);
+  }}
+  if (!scopeRoots.length) {{
+    addRoot(main);
+  }}
+  const seenNodes = new Set();
+  const seenValues = new Set();
+  const values = [];
+  const isVisible = (el) => {{
+    if (!el) return false;
+    if (el.closest('[hidden], [aria-hidden="true"]')) return false;
+    const style = window.getComputedStyle(el);
+    if (!style || style.display === 'none' || style.visibility === 'hidden') return false;
+    const rect = el.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  }};
+  const addValue = (value) => {{
+    if (typeof value !== 'string') {{
+      return;
+    }}
+    const trimmed = value.trim();
+    if (!trimmed || seenValues.has(trimmed)) {{
+      return;
+    }}
+    seenValues.add(trimmed);
+    values.push(trimmed);
+  }};
+  for (const root of scopeRoots) {{
+    const nodes = [];
+    if (root.matches && root.matches(selector)) {{
+      nodes.push(root);
+    }}
+    for (const node of Array.from(root.querySelectorAll(selector))) {{
+      nodes.push(node);
+    }}
+    for (const node of nodes) {{
+      if (!node || seenNodes.has(node) || !isVisible(node)) {{
+        continue;
+      }}
+      seenNodes.add(node);
+      const attrNames = typeof node.getAttributeNames === 'function' ? node.getAttributeNames() : [];
+      for (const attrName of attrNames.slice(0, maxAttrsPerNode)) {{
+        const key = (attrName || '').trim().toLowerCase();
+        if (!key || key === 'style') {{
+          continue;
+        }}
+        if (key === 'href' || key === 'title' || key === 'aria-label' || key === 'onclick' || key.startsWith('data-')) {{
+          addValue(node.getAttribute(attrName) || '');
+        }}
+      }}
+      if (seenNodes.size >= maxNodes) {{
+        return values;
+      }}
+    }}
+  }}
+  return values;
+}}
+"""
+        )
+    except Exception:
+        return []
+    values: List[str] = []
+    seen: Set[str] = set()
+    for raw_value in raw_values or []:
+        value = cell_to_str(raw_value).strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        values.append(value)
+    return values
+
+
+def _collect_instagram_live_profile_clickable_bio_link_urls(
+    page: Any,
+    *,
+    profile_url: str = "",
+) -> List[str]:
+    candidate_urls: List[str] = []
+    seen: Set[str] = set()
+
+    def _add_candidate(raw_value: Any) -> None:
+        normalised = _normalise_instagram_bio_link_fetch_url(raw_value, base_url=profile_url)
+        if not normalised or normalised in seen:
+            return
+        seen.add(normalised)
+        candidate_urls.append(normalised)
+
+    for raw_value in _collect_instagram_live_profile_clickable_control_values(page):
+        raw_text = cell_to_str(raw_value).strip()
+        if not raw_text:
+            continue
+        extracted_redirect_target = False
+        try:
+            parsed = urllib.parse.urlparse(raw_text)
+        except Exception:
+            parsed = urllib.parse.urlparse("")
+        query_values = urllib.parse.parse_qs(parsed.query or "", keep_blank_values=True)
+        for key, values in query_values.items():
+            if key.lower() not in _INSTAGRAM_LIVE_ONEHOP_REDIRECT_QUERY_KEYS:
+                continue
+            for value in values:
+                decoded_value = urllib.parse.unquote(cell_to_str(value)).strip()
+                if decoded_value.startswith("//"):
+                    decoded_value = "https:" + decoded_value
+                if not decoded_value:
+                    continue
+                extracted_redirect_target = True
+                _add_candidate(decoded_value)
+                for match in re.findall(r"https?://[^\s'\"<>()]+", decoded_value):
+                    _add_candidate(match.rstrip(".,;:!?)]}"))
+        decoded_text = urllib.parse.unquote(raw_text)
+        if not extracted_redirect_target:
+            _add_candidate(raw_text)
+            for match in re.findall(r"https?://[^\s'\"<>()]+", decoded_text):
+                _add_candidate(match.rstrip(".,;:!?)]}"))
+    return candidate_urls
+
+
 def _collect_instagram_runtime_bio_link_structured_payloads(page: Any) -> List[Any]:
     if page is None or not hasattr(page, "evaluate"):
         return []
@@ -4015,6 +4189,7 @@ def _instagram_onehop_emails_from_surface(
     log: Optional[Any] = None,
     state_label: str = "bio_link_urls",
     runtime_structured_payloads: Optional[Iterable[Any]] = None,
+    live_rendered_bio_link_urls: Optional[Iterable[str]] = None,
 ) -> Tuple[List[str], str, str, str]:
     html_text = html if isinstance(html, str) else str(html or "")
     soup = BeautifulSoup(html_text, "html.parser") if html_text.strip() else None
@@ -4034,6 +4209,18 @@ def _instagram_onehop_emails_from_surface(
         log=log,
         runtime_structured_payloads=runtime_structured_payloads,
     )
+    live_clickable_candidates: List[str] = []
+    live_seen = set(bio_link_urls)
+    for raw_value in live_rendered_bio_link_urls or ():
+        normalised = _normalise_instagram_bio_link_fetch_url(raw_value, base_url=profile_url)
+        if not normalised or normalised in live_seen:
+            continue
+        live_seen.add(normalised)
+        live_clickable_candidates.append(normalised)
+    if callable(log) and live_rendered_bio_link_urls is not None:
+        log(f"[IG OneHop] live_clickable_candidates count={len(live_clickable_candidates)}")
+    if live_clickable_candidates:
+        bio_link_urls.extend(live_clickable_candidates)
     if callable(log):
         log(
             f"[IG OneHop] {state_label} state={'non_empty' if bio_link_urls else 'empty'} "
@@ -10883,6 +11070,10 @@ class CrossDirectoryEnricherWorker(QThread):
                         if _instagram_profile_fetch_usable(200, live_html):
                             shared_live_html = live_html
                             live_onehop_html = _extract_instagram_onehop_profile_surface_html(live_html)
+                            live_clickable_bio_link_urls = _collect_instagram_live_profile_clickable_bio_link_urls(
+                                live_page.page,
+                                profile_url=ig_url,
+                            )
                             (
                                 all_ig_emails,
                                 selected_source_url,
@@ -10895,6 +11086,7 @@ class CrossDirectoryEnricherWorker(QThread):
                                 log=self.log_message.emit,
                                 state_label="live_surface_bio_link_urls",
                                 runtime_structured_payloads=runtime_structured_payloads,
+                                live_rendered_bio_link_urls=live_clickable_bio_link_urls,
                             )
                             if all_ig_emails:
                                 selected_surface = "instagram_bio_link_one_hop"
