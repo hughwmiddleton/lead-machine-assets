@@ -226,6 +226,27 @@ class _DummyInstagramRenderWaitPage:
             self._clock.advance(timeout_ms / 1000.0)
 
 
+class _DummyInstagramRuntimePayloadWaitPage:
+    def __init__(self, payload_states, *, clock=None):
+        self._payload_states = list(payload_states)
+        self._clock = clock
+        self.evaluate_calls = []
+        self.wait_calls = []
+
+    def evaluate(self, script):  # noqa: ANN001
+        self.evaluate_calls.append(str(script or ""))
+        if self._payload_states:
+            return self._payload_states[0]
+        return []
+
+    def wait_for_timeout(self, timeout_ms):  # noqa: ANN001
+        self.wait_calls.append(timeout_ms)
+        if len(self._payload_states) > 1:
+            self._payload_states.pop(0)
+        if self._clock is not None:
+            self._clock.advance(timeout_ms / 1000.0)
+
+
 class _FakeMonotonicClock:
     def __init__(self, start=1000.0):
         self.current = start
@@ -1031,6 +1052,35 @@ def test_wait_for_instagram_profile_render_polling_timeout_stays_bounded(monkeyp
     expected_timeout_ms = int(timeout_s * 1000)
     assert expected_timeout_ms - 1 <= sum(page.wait_calls) <= expected_timeout_ms
     assert max(page.wait_calls) == 100
+
+
+def test_wait_for_instagram_runtime_bio_link_structured_payloads_thin_shell_times_out_cleanly(
+    monkeypatch,
+):
+    clock = _FakeMonotonicClock()
+    monkeypatch.setattr(cde.time, "monotonic", clock)
+    page = _DummyInstagramRuntimePayloadWaitPage([[]], clock=clock)
+
+    payloads = cde._wait_for_instagram_runtime_bio_link_structured_payloads(page, timeout_s=0.1)
+
+    assert payloads == []
+    assert len(page.evaluate_calls) == 2
+    assert page.wait_calls == [100]
+
+
+def test_wait_for_instagram_runtime_bio_link_structured_payloads_accepts_hydrated_payload_state(
+    monkeypatch,
+):
+    clock = _FakeMonotonicClock()
+    monkeypatch.setattr(cde.time, "monotonic", clock)
+    payload = {"web_profile_info": {"bio_links": [{"url": "https://linktr.ee/runtimewaitartist"}]}}
+    page = _DummyInstagramRuntimePayloadWaitPage([[], [payload]], clock=clock)
+
+    payloads = cde._wait_for_instagram_runtime_bio_link_structured_payloads(page, timeout_s=0.25)
+
+    assert payloads == [payload]
+    assert len(page.evaluate_calls) == 2
+    assert page.wait_calls == [100]
 
 
 def test_instagram_profile_fetch_scope_bridge_returns_live_page_and_closes_it(monkeypatch):
@@ -2364,6 +2414,83 @@ def test_instagram_email_one_hop_bio_link_recovers_direct_email_from_runtime_liv
     _assert_log_contains(
         logs,
         "[IG OneHop] live_surface_bio_link_urls state=non_empty count=1 sample=https://linktr.ee/runtimelinkartist",
+    )
+
+
+def test_instagram_email_one_hop_live_runtime_waits_for_hydrated_payload_before_fetch(monkeypatch):
+    clock = _FakeMonotonicClock()
+    monkeypatch.setattr(cde.time, "monotonic", clock)
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Deferred Runtime Link Artist",
+            "Email": "",
+            "Email_All": "",
+            "Instagram_URL": "https://instagram.com/deferredruntimelinkartist/",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+            "Email_Type": "",
+            EMAIL_PROVENANCE_JSON_COL: "",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    bio_fetch_calls = []
+    target_url = "https://linktr.ee/deferredruntimelinkartist"
+
+    def make_live_page():
+        page = _DummyInstagramHiddenContactPage(
+            "<html><body><main><div>Thin shell</div></main></body></html>",
+            runtime_window_payloads=[],
+        )
+        page._clock = clock
+        original_wait_for_timeout = page.wait_for_timeout
+
+        def _hydrate_after_wait(timeout_ms):  # noqa: ANN001
+            original_wait_for_timeout(timeout_ms)
+            clock.advance(timeout_ms / 1000.0)
+            page._runtime_window_payloads = [
+                {"web_profile_info": {"bio_links": [{"url": target_url}]}}
+            ]
+            page._html = (
+                "<html><body><main><a href='https://linktr.ee/deferredruntimelinkartist'>Bio</a></main></body></html>"
+            )
+
+        page.wait_for_timeout = _hydrate_after_wait
+        return page
+
+    live_pages = _install_instagram_profile_fetch_scope(
+        monkeypatch,
+        static_html="<html><body><div>Requests HTML without outbound bio link</div></body></html>",
+        live_page_factory=make_live_page,
+    )
+    monkeypatch.setattr(
+        cde,
+        "_fetch_website_html_bounded",
+        lambda session, url, **kwargs: bio_fetch_calls.append(url) or cde.WebsiteFetchResult(
+            url=url,
+            final_url=target_url,
+            status=200,
+            content_type="text/html",
+            html="<html><body>Bookings: deferred-runtime@artist.com</body></html>",
+            is_html=True,
+        ),
+    )
+
+    matched = worker._enrich_row_instagram_email(seed_df, 0, ctx)
+
+    assert matched is True
+    assert len(live_pages) == 1
+    assert live_pages[0].wait_calls == [100]
+    assert bio_fetch_calls == [target_url]
+    assert seed_df.at[0, "Email"] == "deferred-runtime@artist.com"
+    assert seed_df.at[0, "Email_All"] == "deferred-runtime@artist.com"
+    assert seed_df.at[0, "Email_Source_URL"] == target_url
+    _assert_log_contains(logs, "[IG OneHop] bio_link_urls state=empty count=0 sample=-")
+    _assert_log_contains(
+        logs,
+        "[IG OneHop] live_surface_bio_link_urls state=non_empty count=1 sample=https://linktr.ee/deferredruntimelinkartist",
     )
 
 

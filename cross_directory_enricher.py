@@ -3642,6 +3642,33 @@ def _collect_instagram_runtime_bio_link_structured_payloads(page: Any) -> List[A
     return [payload for payload in raw_payloads if isinstance(payload, (dict, list, tuple))]
 
 
+def _wait_for_instagram_runtime_bio_link_structured_payloads(
+    page: Any,
+    timeout_s: float,
+) -> List[Any]:
+    if page is None:
+        return []
+    timeout_ms = max(int(float(timeout_s or 0) * 1000), 0)
+    payloads = _collect_instagram_runtime_bio_link_structured_payloads(page)
+    if payloads or timeout_ms <= 0:
+        return payloads
+    wait_for_timeout = getattr(page, "wait_for_timeout", None)
+    deadline = time.monotonic() + (timeout_ms / 1000.0)
+    while time.monotonic() < deadline:
+        remaining_ms = int(max((deadline - time.monotonic()) * 1000, 0))
+        if remaining_ms <= 0:
+            break
+        sleep_ms = min(100, remaining_ms)
+        if callable(wait_for_timeout):
+            wait_for_timeout(sleep_ms)
+        else:
+            time.sleep(sleep_ms / 1000.0)
+        payloads = _collect_instagram_runtime_bio_link_structured_payloads(page)
+        if payloads:
+            return payloads
+    return payloads
+
+
 def _collect_instagram_bio_link_fetch_urls(
     html: str,
     *,
@@ -10625,12 +10652,13 @@ class CrossDirectoryEnricherWorker(QThread):
                 ):
                     live_page = _get_shared_live_page()
                     if live_page is not None:
+                        runtime_structured_payloads = _wait_for_instagram_runtime_bio_link_structured_payloads(
+                            live_page.page,
+                            timeout_s=min(HTTP_TIMEOUT, _INSTAGRAM_RENDER_READY_TIMEOUT_MS / 1000.0),
+                        )
                         live_html = live_page.snapshot_html()
                         if _instagram_profile_fetch_usable(200, live_html):
                             shared_live_html = live_html
-                            runtime_structured_payloads = _collect_instagram_runtime_bio_link_structured_payloads(
-                                live_page.page
-                            )
                             (
                                 all_ig_emails,
                                 selected_source_url,
