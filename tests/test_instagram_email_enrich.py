@@ -2,6 +2,7 @@ from contextlib import contextmanager
 from bs4 import BeautifulSoup
 import pandas as pd
 import pytest
+import re
 from types import SimpleNamespace
 import unicodedata
 
@@ -128,24 +129,114 @@ class _DummyInstagramHiddenContactPage(_DummyClosable):
                 scope_roots = [main]
             values = []
             seen = set()
+            url_pattern = re.compile(r"https?://[^\s'\"<>()]+")
+
+            def add_value(raw_value):
+                value = str(raw_value or "").strip()
+                if not value or value in seen:
+                    return
+                seen.add(value)
+                values.append(value)
+
+            def add_value_with_matches(raw_value):
+                value = str(raw_value or "").strip()
+                if not value:
+                    return
+                add_value(value)
+                for match in url_pattern.findall(value):
+                    add_value(match.rstrip(".,;:!?)]}"))
+
+            def is_clickable(node):
+                tag_name = getattr(node, "name", "") or ""
+                role = str((node.attrs or {}).get("role", "")).strip().lower()
+                return tag_name == "button" or (tag_name == "a" and node.get("href")) or role in {"button", "link"}
+
+            def add_attr_values(node):
+                attrs = getattr(node, "attrs", {}) or {}
+                for attr_name, raw_value in attrs.items():
+                    key = str(attr_name or "").strip().lower()
+                    if not key or key == "style":
+                        continue
+                    if (
+                        key == "href"
+                        or key == "title"
+                        or key == "aria-label"
+                        or key == "onclick"
+                        or key.startswith("data-")
+                    ):
+                        if isinstance(raw_value, (list, tuple, set)):
+                            iterable = raw_value
+                        else:
+                            iterable = [raw_value]
+                        for item in iterable:
+                            add_value_with_matches(item)
+
+            def add_anchor_values(node):
+                if node is None or getattr(node, "name", "") != "a" or not node.get("href"):
+                    return
+                add_attr_values(node)
+                add_value_with_matches(node.get("href"))
+
+            def is_within_scope(candidate, scope_root):
+                current = candidate
+                while current is not None:
+                    if current is scope_root:
+                        return True
+                    current = getattr(current, "parent", None)
+                return False
+
+            def collect_nearby_nodes(node, scope_root):
+                nearby_nodes = []
+                nearby_seen = set()
+
+                def enqueue(candidate):
+                    if candidate is None:
+                        return
+                    candidate_id = id(candidate)
+                    if candidate_id in nearby_seen or len(nearby_nodes) >= 10:
+                        return
+                    if not is_within_scope(candidate, scope_root):
+                        return
+                    nearby_seen.add(candidate_id)
+                    nearby_nodes.append(candidate)
+
+                enqueue(node)
+                cursor = node
+                for _ in range(3):
+                    parent = getattr(cursor, "parent", None) if cursor is not None else None
+                    enqueue(parent)
+                    enqueue(cursor.find_previous_sibling() if cursor is not None else None)
+                    enqueue(cursor.find_next_sibling() if cursor is not None else None)
+                    if parent is not None:
+                        enqueue(parent.find_previous_sibling())
+                        enqueue(parent.find_next_sibling())
+                    if cursor is scope_root:
+                        break
+                    cursor = parent
+                    if cursor is None:
+                        break
+
+                return nearby_nodes
+
             for root in scope_roots:
-                for node in root.select(cde._INSTAGRAM_LIVE_ONEHOP_CLICKABLE_SELECTOR):
-                    attrs = getattr(node, "attrs", {}) or {}
-                    for attr_name, raw_value in attrs.items():
-                        key = str(attr_name or "").strip().lower()
-                        if not key or key == "style":
-                            continue
-                        if key == "href" or key == "title" or key == "aria-label" or key == "onclick" or key.startswith("data-"):
-                            if isinstance(raw_value, (list, tuple, set)):
-                                iterable = raw_value
-                            else:
-                                iterable = [raw_value]
-                            for item in iterable:
-                                value = str(item or "").strip()
-                                if not value or value in seen:
-                                    continue
-                                seen.add(value)
-                                values.append(value)
+                nodes = []
+                if is_clickable(root):
+                    nodes.append(root)
+                nodes.extend(root.select(cde._INSTAGRAM_LIVE_ONEHOP_CLICKABLE_SELECTOR))
+                for node in nodes:
+                    if not is_clickable(node):
+                        continue
+                    add_attr_values(node)
+                    current = node
+                    while current is not None and is_within_scope(current, root):
+                        if current is not node and getattr(current, "name", "") == "a" and current.get("href"):
+                            add_anchor_values(current)
+                            break
+                        current = getattr(current, "parent", None)
+                    for nearby in collect_nearby_nodes(node, root):
+                        add_anchor_values(nearby)
+                        for anchor in nearby.select("a[href]")[:4]:
+                            add_anchor_values(anchor)
             return values
         if "document.body" in script_text and "innerText" in script_text:
             return self._rendered_body_inner_text
@@ -1967,6 +2058,71 @@ def test_collect_instagram_live_profile_clickable_bio_link_urls_scopes_to_main_p
     assert urls == ["https://linktr.ee/controlsurfaceartist"]
 
 
+@pytest.mark.parametrize(
+    ("html", "expected"),
+    [
+        (
+            "<html><body>"
+            "<nav><a href='https://help.instagram.com/12345'>Help</a></nav>"
+            "<main><header>"
+            "<div role='button'><a href='https://linktr.ee/descendantcontrolartist'>Bio</a></div>"
+            "</header></main>"
+            "<footer><a href='https://www.threads.com/@descendantcontrolartist'>Threads</a></footer>"
+            "</body></html>",
+            "https://linktr.ee/descendantcontrolartist",
+        ),
+        (
+            "<html><body>"
+            "<nav><a href='https://help.instagram.com/12345'>Help</a></nav>"
+            "<main><header>"
+            "<a href='https://beacons.ai/ancestorcontrolartist'><div role='button'>Bio</div></a>"
+            "</header></main>"
+            "<footer><a href='https://www.threads.com/@ancestorcontrolartist'>Threads</a></footer>"
+            "</body></html>",
+            "https://beacons.ai/ancestorcontrolartist",
+        ),
+        (
+            "<html><body>"
+            "<nav><a href='https://help.instagram.com/12345'>Help</a></nav>"
+            "<main><header>"
+            "<div><button>Email</button><span><a href='https://linktr.ee/nearbycontrolartist'>Bio</a></span></div>"
+            "</header></main>"
+            "<footer><a href='https://www.threads.com/@nearbycontrolartist'>Threads</a></footer>"
+            "</body></html>",
+            "https://linktr.ee/nearbycontrolartist",
+        ),
+    ],
+)
+def test_collect_instagram_live_profile_clickable_bio_link_urls_recovers_dom_relative_anchor_surfaces(
+    html,
+    expected,
+):
+    page = _DummyInstagramHiddenContactPage(html)
+
+    urls = cde._collect_instagram_live_profile_clickable_bio_link_urls(
+        page,
+        profile_url="https://www.instagram.com/domrelativeartist/",
+    )
+
+    assert urls == [expected]
+
+
+def test_collect_instagram_live_profile_clickable_bio_link_urls_recovers_runtime_adjoining_value_when_clickable_attrs_are_empty():
+    page = _DummyInstagramHiddenContactPage(
+        "<html><body><main><header><button>Email</button></header></main></body></html>",
+        live_bio_link_control_values=[
+            '{"navigation":{"target":"https://beacons.ai/runtimeadjacentcontrolartist"}}'
+        ],
+    )
+
+    urls = cde._collect_instagram_live_profile_clickable_bio_link_urls(
+        page,
+        profile_url="https://www.instagram.com/runtimeadjacentcontrolartist/",
+    )
+
+    assert urls == ["https://beacons.ai/runtimeadjacentcontrolartist"]
+
+
 def test_collect_instagram_bio_link_fetch_urls_extracts_structured_script_url_without_anchor():
     html = (
         "<html><body>"
@@ -2515,6 +2671,65 @@ def test_instagram_email_one_hop_live_surface_recovers_rendered_clickable_bio_li
         "[IG OneHop] live_surface_bio_link_urls state=non_empty count=1 sample=https://linktr.ee/renderedcontrolartist",
     )
     _assert_log_contains(logs, "[IG OneHop] onehop_selected_target=https://linktr.ee/renderedcontrolartist")
+
+
+def test_instagram_email_one_hop_live_surface_runtime_adjoining_recovery_flows_through_existing_selection_and_fetch(
+    monkeypatch,
+):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Runtime Adjacent Control Artist",
+            "Email": "",
+            "Email_All": "",
+            "Instagram_URL": "https://instagram.com/runtimeadjacentcontrolartist/",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+            "Email_Type": "",
+            EMAIL_PROVENANCE_JSON_COL: "",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    target_url = "https://linktr.ee/runtimeadjacentcontrolartist"
+    bio_fetch_calls = []
+    live_pages = _install_instagram_profile_fetch_scope(
+        monkeypatch,
+        static_html="<html><body><div>Requests HTML without outbound bio link</div></body></html>",
+        live_page_factory=lambda: _DummyInstagramHiddenContactPage(
+            "<html><body><main><header><button>Email</button></header></main></body></html>",
+            live_bio_link_control_values=[
+                '{"runtime":{"target":"https://about.meta.com"}}',
+                '{"runtime":{"target":"https://linktr.ee/runtimeadjacentcontrolartist"}}',
+            ],
+        ),
+    )
+    monkeypatch.setattr(
+        cde,
+        "_fetch_website_html_bounded",
+        lambda session, url, **kwargs: bio_fetch_calls.append(url) or cde.WebsiteFetchResult(
+            url=url,
+            final_url=target_url,
+            status=200,
+            content_type="text/html",
+            html="<html><body>Bookings: runtime-adjacent@artist.com</body></html>",
+            is_html=True,
+        ),
+    )
+
+    matched = worker._enrich_row_instagram_email(seed_df, 0, ctx)
+
+    assert matched is True
+    assert len(live_pages) == 1
+    assert live_pages[0].click_calls == []
+    assert bio_fetch_calls == [target_url]
+    assert seed_df.at[0, "Email"] == "runtime-adjacent@artist.com"
+    assert seed_df.at[0, "Email_All"] == "runtime-adjacent@artist.com"
+    assert seed_df.at[0, "Email_Source_URL"] == target_url
+    _assert_log_contains(logs, "[IG OneHop] live_clickable_candidates count=2")
+    _assert_log_contains(logs, "[IG OneHop] onehop_selected_target=https://linktr.ee/runtimeadjacentcontrolartist")
+    _assert_log_contains(logs, "[IG OneHop] onehop_fetch_attempted=https://linktr.ee/runtimeadjacentcontrolartist")
 
 
 def test_instagram_email_static_one_hop_success_skips_live_retry(monkeypatch):

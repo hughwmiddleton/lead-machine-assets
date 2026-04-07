@@ -3789,6 +3789,15 @@ def _collect_instagram_live_profile_clickable_control_values(page: Any) -> List[
   const maxScopeRoots = {_INSTAGRAM_LIVE_ONEHOP_MAX_SCOPE_ROOTS};
   const maxNodes = {_INSTAGRAM_LIVE_ONEHOP_MAX_CLICKABLE_NODES};
   const maxAttrsPerNode = {_INSTAGRAM_LIVE_ONEHOP_MAX_ATTRS_PER_NODE};
+  const maxNearbyNodesPerClickable = 10;
+  const maxNearbyAnchorsPerNode = 4;
+  const maxRuntimeOwnProps = 16;
+  const maxRuntimeObjectDepth = 2;
+  const maxRuntimeObjectEntries = 16;
+  const maxRuntimeArrayItems = 8;
+  const runtimeValueKeyPattern = /(href|url|uri|link|path|pathname|target|dest|destination|redirect|website|external|outbound|web)/i;
+  const runtimeNodePropPattern = /^(__reactProps\\$|__reactEventHandlers\\$|__reactFiber\\$|__reactInternalInstance\\$|__reactContainer\\$)/;
+  const urlPattern = /https?:\\/\\/[^\\s'"<>()]+/g;
   const main = document.querySelector('main');
   if (!main) {{
     return [];
@@ -3841,6 +3850,182 @@ def _collect_instagram_live_profile_clickable_control_values(page: Any) -> List[
     seenValues.add(trimmed);
     values.push(trimmed);
   }};
+  const addValueWithUrlMatches = (value) => {{
+    if (typeof value !== 'string') {{
+      return;
+    }}
+    addValue(value);
+    const matches = value.match(urlPattern) || [];
+    for (const match of matches.slice(0, maxRuntimeArrayItems)) {{
+      addValue(match);
+    }}
+  }};
+  const addAttributeValues = (node) => {{
+    if (!node) {{
+      return;
+    }}
+    const attrNames = typeof node.getAttributeNames === 'function' ? node.getAttributeNames() : [];
+    for (const attrName of attrNames.slice(0, maxAttrsPerNode)) {{
+      const key = (attrName || '').trim().toLowerCase();
+      if (!key || key === 'style') {{
+        continue;
+      }}
+      if (key === 'href' || key === 'title' || key === 'aria-label' || key === 'onclick' || key.startsWith('data-')) {{
+        addValueWithUrlMatches(node.getAttribute(attrName) || '');
+      }}
+    }}
+  }};
+  const addStringProperty = (node, propName) => {{
+    if (!node || !propName) {{
+      return;
+    }}
+    try {{
+      const value = node[propName];
+      if (typeof value === 'string') {{
+        addValueWithUrlMatches(value);
+      }}
+    }} catch (error) {{
+    }}
+  }};
+  const scanRuntimeObject = (value, depth, seenObjects) => {{
+    if (!value || depth > maxRuntimeObjectDepth) {{
+      return;
+    }}
+    if (typeof value === 'string') {{
+      addValueWithUrlMatches(value);
+      return;
+    }}
+    if ((typeof value !== 'object' && typeof value !== 'function') || value === window || value === document || value.nodeType) {{
+      return;
+    }}
+    if (seenObjects.has(value)) {{
+      return;
+    }}
+    seenObjects.add(value);
+    if (Array.isArray(value)) {{
+      for (const item of value.slice(0, maxRuntimeArrayItems)) {{
+        scanRuntimeObject(item, depth + 1, seenObjects);
+      }}
+      return;
+    }}
+    let entries = [];
+    try {{
+      entries = Object.entries(value);
+    }} catch (error) {{
+      return;
+    }}
+    let processed = 0;
+    for (const [key, entryValue] of entries) {{
+      if (processed >= maxRuntimeObjectEntries) {{
+        break;
+      }}
+      processed += 1;
+      if (typeof entryValue === 'string') {{
+        if (
+          runtimeValueKeyPattern.test(key || '')
+          || /^https?:\\/\\//i.test(entryValue)
+          || entryValue.startsWith('//')
+          || entryValue.startsWith('/')
+        ) {{
+          addValueWithUrlMatches(entryValue);
+        }}
+        continue;
+      }}
+      if (!entryValue || (typeof entryValue !== 'object' && typeof entryValue !== 'function')) {{
+        continue;
+      }}
+      if (runtimeValueKeyPattern.test(key || '') || depth < 1) {{
+        scanRuntimeObject(entryValue, depth + 1, seenObjects);
+      }}
+    }}
+  }};
+  const addRuntimeValues = (node) => {{
+    if (!node) {{
+      return;
+    }}
+    for (const propName of ['href', 'url', 'uri', 'to', 'path', 'pathname', 'target', 'destination', 'redirectUrl', 'redirectUri', 'website', 'externalUrl', 'action', 'formAction']) {{
+      addStringProperty(node, propName);
+    }}
+    let ownProps = [];
+    try {{
+      ownProps = Object.getOwnPropertyNames(node) || [];
+    }} catch (error) {{
+      ownProps = [];
+    }}
+    const candidateProps = ownProps.filter((propName) => runtimeNodePropPattern.test(propName || '') || runtimeValueKeyPattern.test(propName || ''));
+    for (const propName of candidateProps.slice(0, maxRuntimeOwnProps)) {{
+      try {{
+        const propValue = node[propName];
+        if (typeof propValue === 'string') {{
+          addValueWithUrlMatches(propValue);
+          continue;
+        }}
+        if (propValue && (typeof propValue === 'object' || typeof propValue === 'function')) {{
+          scanRuntimeObject(propValue, 0, new Set());
+        }}
+      }} catch (error) {{
+      }}
+    }}
+  }};
+  const addAnchorValues = (anchor) => {{
+    if (!anchor || !isVisible(anchor)) {{
+      return;
+    }}
+    addAttributeValues(anchor);
+    addStringProperty(anchor, 'href');
+  }};
+  const addNearbySubtreeValues = (scopeRoot, node) => {{
+    if (!scopeRoot || !node) {{
+      return;
+    }}
+    const nearbyNodes = [];
+    const seenNearbyNodes = new Set();
+    const enqueue = (candidate) => {{
+      if (!candidate || seenNearbyNodes.has(candidate) || nearbyNodes.length >= maxNearbyNodesPerClickable) {{
+        return;
+      }}
+      if (candidate !== scopeRoot && !(scopeRoot.contains && scopeRoot.contains(candidate))) {{
+        return;
+      }}
+      seenNearbyNodes.add(candidate);
+      nearbyNodes.push(candidate);
+    }};
+    enqueue(node);
+    let cursor = node;
+    for (let depth = 0; depth < 3 && cursor; depth += 1) {{
+      enqueue(cursor.parentElement);
+      enqueue(cursor.previousElementSibling);
+      enqueue(cursor.nextElementSibling);
+      if (cursor.parentElement) {{
+        enqueue(cursor.parentElement.previousElementSibling);
+        enqueue(cursor.parentElement.nextElementSibling);
+      }}
+      if (cursor === scopeRoot) {{
+        break;
+      }}
+      cursor = cursor.parentElement;
+    }}
+    const ancestorAnchor = node.closest ? node.closest('a[href]') : null;
+    if (ancestorAnchor && (ancestorAnchor === scopeRoot || (scopeRoot.contains && scopeRoot.contains(ancestorAnchor)))) {{
+      addAnchorValues(ancestorAnchor);
+    }}
+    for (const nearbyNode of nearbyNodes) {{
+      if (!nearbyNode) {{
+        continue;
+      }}
+      addRuntimeValues(nearbyNode);
+      if (nearbyNode.matches && nearbyNode.matches('a[href]')) {{
+        addAnchorValues(nearbyNode);
+      }}
+      if (typeof nearbyNode.querySelectorAll !== 'function') {{
+        continue;
+      }}
+      const descendantAnchors = Array.from(nearbyNode.querySelectorAll('a[href]')).slice(0, maxNearbyAnchorsPerNode);
+      for (const anchor of descendantAnchors) {{
+        addAnchorValues(anchor);
+      }}
+    }}
+  }};
   for (const root of scopeRoots) {{
     const nodes = [];
     if (root.matches && root.matches(selector)) {{
@@ -3854,16 +4039,8 @@ def _collect_instagram_live_profile_clickable_control_values(page: Any) -> List[
         continue;
       }}
       seenNodes.add(node);
-      const attrNames = typeof node.getAttributeNames === 'function' ? node.getAttributeNames() : [];
-      for (const attrName of attrNames.slice(0, maxAttrsPerNode)) {{
-        const key = (attrName || '').trim().toLowerCase();
-        if (!key || key === 'style') {{
-          continue;
-        }}
-        if (key === 'href' || key === 'title' || key === 'aria-label' || key === 'onclick' || key.startsWith('data-')) {{
-          addValue(node.getAttribute(attrName) || '');
-        }}
-      }}
+      addAttributeValues(node);
+      addNearbySubtreeValues(root, node);
       if (seenNodes.size >= maxNodes) {{
         return values;
       }}
