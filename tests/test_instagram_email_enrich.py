@@ -430,6 +430,93 @@ def _install_instagram_profile_fetch_scope(
     return live_pages
 
 
+def _install_real_instagram_live_bridge(
+    monkeypatch,
+    *,
+    landed_url,
+    html,
+    landed_title="",
+    rendered_body_text="",
+):
+    class DummyPage(_DummyClosable):
+        def __init__(self):
+            super().__init__()
+            self.url = ""
+            self.evaluate_calls = []
+
+        def goto(self, url, wait_until=None, timeout=None):  # noqa: ANN001
+            self.url = landed_url
+
+        def title(self):
+            return landed_title
+
+        def evaluate(self, script):  # noqa: ANN001
+            script_text = str(script or "")
+            self.evaluate_calls.append(script_text)
+            if "document.body" in script_text and "innerText" in script_text:
+                return rendered_body_text
+            return False
+
+        def content(self):
+            return html
+
+    class DummyContext(_DummyClosable):
+        def __init__(self, page):
+            super().__init__()
+            self._page = page
+
+        def new_page(self):
+            return self._page
+
+    class DummyBrowser(_DummyClosable):
+        def __init__(self, context):
+            super().__init__()
+            self._context = context
+
+        def new_context(self):
+            return self._context
+
+    class DummyChromium:
+        def __init__(self, browser):
+            self._browser = browser
+
+        def launch(self, headless=True):  # noqa: ANN001
+            return self._browser
+
+    class DummyPlaywright(_DummyClosable):
+        def __init__(self, browser):
+            super().__init__()
+            self.chromium = DummyChromium(browser)
+
+        def stop(self):
+            self.closed = True
+
+    class DummySyncPlaywrightRunner:
+        def __init__(self, playwright):
+            self._playwright = playwright
+
+        def start(self):
+            return self._playwright
+
+    page = DummyPage()
+    context = DummyContext(page)
+    browser = DummyBrowser(context)
+    playwright = DummyPlaywright(browser)
+
+    monkeypatch.setattr(
+        cde,
+        "_load_instagram_playwright",
+        lambda: (lambda: DummySyncPlaywrightRunner(playwright)),
+    )
+    monkeypatch.setattr(
+        cde,
+        "_wait_for_instagram_profile_render",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("wait should not run")),
+    )
+    monkeypatch.setattr(cde, "_open_instagram_live_page_bridge", _REAL_OPEN_INSTAGRAM_LIVE_PAGE_BRIDGE)
+    return page
+
+
 def test_fetch_instagram_profile_html_uses_shared_fallback_for_unusable_initial_response(monkeypatch):
     session_calls = []
     fetch_html_calls = []
@@ -773,7 +860,7 @@ def test_open_instagram_live_page_bridge_profile_shaped_url_non_profile_surface_
     assert playwright.closed is True
 
 
-def test_open_instagram_live_page_bridge_logged_out_html_handoff_skips_render_wait(monkeypatch):
+def test_open_instagram_live_page_bridge_logged_out_html_handoff_is_rejected(monkeypatch):
     events = []
     logged_out_html = """
     <html>
@@ -879,10 +966,8 @@ def test_open_instagram_live_page_bridge_logged_out_html_handoff_skips_render_wa
         timeout_s=12.5,
     )
 
-    assert bridge is not None
-    assert bridge.page is page
-    assert bridge.snapshot_html() == logged_out_html.strip()
-    assert events == [
+    assert bridge is None
+    assert events[:5] == [
         ("start",),
         ("launch", True),
         ("new_context",),
@@ -890,15 +975,16 @@ def test_open_instagram_live_page_bridge_logged_out_html_handoff_skips_render_wa
         ("goto", "https://www.instagram.com/shellartist/", "domcontentloaded", 12500.0),
     ]
     assert cde._INSTAGRAM_PROFILE_SURFACE_CANDIDATE_JS in page.evaluate_calls
-
-    bridge.close()
-
-    assert bridge.closed is True
-    assert bridge.page.closed is True
-    assert bridge.context.closed is True
-    assert bridge.browser.closed is True
-    assert bridge.playwright.closed is True
     assert events[-1] == ("stop",)
+    assert page.closed is True
+    assert context.closed is True
+    assert browser.closed is True
+    assert playwright.closed is True
+    assert cde._instagram_landed_page_is_html_handoff_usable(
+        "https://www.instagram.com/shellartist/",
+        "https://www.instagram.com/shellartist/",
+        logged_out_html,
+    ) is False
 
 
 def test_open_instagram_live_page_bridge_profile_shell_candidate_still_enters_render_wait(monkeypatch):
@@ -2730,6 +2816,124 @@ def test_instagram_email_one_hop_live_surface_runtime_adjoining_recovery_flows_t
     _assert_log_contains(logs, "[IG OneHop] live_clickable_candidates count=2")
     _assert_log_contains(logs, "[IG OneHop] onehop_selected_target=https://linktr.ee/runtimeadjacentcontrolartist")
     _assert_log_contains(logs, "[IG OneHop] onehop_fetch_attempted=https://linktr.ee/runtimeadjacentcontrolartist")
+
+
+def test_instagram_email_live_bridge_html_handoff_still_runs_one_hop_with_scoped_bio_link(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Handoff Bridge Artist",
+            "Email": "",
+            "Email_All": "",
+            "Instagram_URL": "https://instagram.com/handoffbridgeartist/",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+            "Email_Type": "",
+            EMAIL_PROVENANCE_JSON_COL: "",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    target_url = "https://linktr.ee/handoffbridgeartist"
+    static_html = (
+        "<html><head><meta property='og:description' content='Official profile'></head>"
+        "<body><div>Requests HTML without outbound bio link</div></body></html>"
+    )
+    live_html = (
+        "<html><head><meta property='og:description' content='Official profile'></head>"
+        "<body><main><header><h1>Handoff Bridge Artist</h1><button>Message</button></header>"
+        f"<section><a href='{target_url}'>Bio</a></section></main></body></html>"
+    )
+
+    monkeypatch.setattr(cde, "_fetch_instagram_profile_html", lambda session, url: (static_html, 200))
+    _install_real_instagram_live_bridge(
+        monkeypatch,
+        landed_url="https://www.instagram.com/handoffbridgeartist/",
+        html=live_html,
+        landed_title="handoffbridgeartist (@handoffbridgeartist) • Instagram photos and videos",
+        rendered_body_text="Handoff Bridge Artist Bio and booking details",
+    )
+
+    bio_fetch_calls = []
+    monkeypatch.setattr(
+        cde,
+        "_fetch_website_html_bounded",
+        lambda session, url, **kwargs: bio_fetch_calls.append(url) or cde.WebsiteFetchResult(
+            url=url,
+            final_url=target_url,
+            status=200,
+            content_type="text/html",
+            html="<html><body>Bookings: handoff-bridge@artist.com</body></html>",
+            is_html=True,
+        ),
+    )
+
+    matched = worker._enrich_row_instagram_email(seed_df, 0, ctx)
+
+    assert matched is True
+    assert bio_fetch_calls == [target_url]
+    assert seed_df.at[0, "Email"] == "handoff-bridge@artist.com"
+    assert seed_df.at[0, "Email_All"] == "handoff-bridge@artist.com"
+    assert seed_df.at[0, "Email_Source_URL"] == target_url
+    assert "instagram_bio_link_one_hop" in seed_df.at[0, EMAIL_PROVENANCE_JSON_COL]
+    _assert_log_contains(logs, "[IG OneHop] bio_link_urls state=empty count=0 sample=-")
+    _assert_log_contains(
+        logs,
+        f"[IG OneHop] live_surface_bio_link_urls state=non_empty count=1 sample={target_url}",
+    )
+    _assert_log_contains(logs, f"[IG OneHop] onehop_selected_target={target_url}")
+    _assert_log_contains(logs, f"[IG OneHop] onehop_fetch_attempted={target_url}")
+
+
+def test_instagram_email_live_bridge_html_handoff_preserves_direct_live_extraction_fallback(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Bridge Direct Artist",
+            "Email": "",
+            "Email_All": "",
+            "Instagram_URL": "https://instagram.com/bridgedirectartist/",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+            "Email_Type": "",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    static_html = (
+        "<html><head><meta property='og:description' content='Official profile'></head>"
+        "<body><div>Requests HTML without contact details</div></body></html>"
+    )
+    live_html = (
+        "<html><head>"
+        "<meta property='og:description' content='Bookings: bridge-direct@artist.com'>"
+        "</head><body><div>Logged-out profile payload</div></body></html>"
+    )
+
+    monkeypatch.setattr(cde, "_fetch_instagram_profile_html", lambda session, url: (static_html, 200))
+    _install_real_instagram_live_bridge(
+        monkeypatch,
+        landed_url="https://www.instagram.com/bridgedirectartist/",
+        html=live_html,
+        landed_title="bridgedirectartist (@bridgedirectartist) • Instagram photos and videos",
+        rendered_body_text="Logged-out profile payload",
+    )
+    monkeypatch.setattr(
+        cde,
+        "_fetch_website_html_bounded",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("one-hop fetch should not run")),
+    )
+
+    matched = worker._enrich_row_instagram_email(seed_df, 0, ctx)
+
+    assert matched is True
+    assert seed_df.at[0, "Email"] == "bridge-direct@artist.com"
+    assert seed_df.at[0, "Email_All"] == "bridge-direct@artist.com"
+    _assert_log_contains(logs, "[IG OneHop] bio_link_urls state=empty count=0 sample=-")
+    _assert_log_contains(logs, "[IG OneHop] live_surface_bio_link_urls state=empty count=0 sample=-")
+    _assert_no_log_startswith(logs, "[IG OneHop] onehop_fetch_attempted=")
 
 
 def test_instagram_email_static_one_hop_success_skips_live_retry(monkeypatch):

@@ -3132,7 +3132,32 @@ def _instagram_landed_page_is_html_handoff_usable(
     landed_canonical = _canonicalize_instagram_profile_url(landed_url)
     if not target_canonical or landed_canonical != target_canonical:
         return False
-    return _instagram_profile_requests_html_usable(200, html)
+    html_text = html if isinstance(html, str) else str(html or "")
+    if not _instagram_profile_requests_html_usable(200, html_text):
+        return False
+    soup = BeautifulSoup(html_text, "html.parser")
+    if _extract_instagram_direct_profile_candidate_emails(html_text, soup=soup):
+        return True
+
+    scoped_html = _extract_instagram_onehop_profile_surface_html(html_text)
+    if not scoped_html.strip():
+        return False
+    scoped_soup = BeautifulSoup(scoped_html, "html.parser")
+    scoped_main = scoped_soup.find("main")
+    if scoped_main is None:
+        return False
+    profile_structure = scoped_main.select_one("header, section, article")
+    profile_content = scoped_main.select_one("a[href], button, img, h1, h2, ul li")
+    scoped_text = re.sub(r"\s+", " ", scoped_main.get_text(" ", strip=True)).strip()
+    if profile_structure is None or profile_content is None or len(scoped_text) < 16:
+        return False
+    return bool(
+        _collect_instagram_bio_link_fetch_urls(
+            scoped_html,
+            soup=scoped_soup,
+            profile_url=target_url,
+        )
+    )
 
 
 def _append_contact_surface_value(values: List[str], seen: Set[str], raw_value: Any) -> None:
