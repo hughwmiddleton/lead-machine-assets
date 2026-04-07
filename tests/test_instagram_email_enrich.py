@@ -3606,6 +3606,74 @@ def test_instagram_email_rendered_text_fallback_skips_when_all_runtime_surfaces_
     )
 
 
+def test_instagram_email_bridge_failure_direct_fallback_recovers_from_static_structured_bio_text(
+    monkeypatch,
+):
+    logs = []
+    worker = _make_worker(logs)
+    stylized_email = "𝙇𝙖𝙘𝙚𝙙𝙪𝙥𝙈𝙂𝙈𝙏@𝙜𝙢𝙖𝙞𝙡.𝙘𝙤𝙢"
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Bridge Structured Text Artist",
+            "Email": "",
+            "Email_All": "",
+            "Instagram_URL": "https://instagram.com/bridgestructuredtextartist/",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+            "Email_Type": "",
+            EMAIL_PROVENANCE_JSON_COL: "",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    static_html = (
+        "<html><body><div>Logged-out SSR shell without clickable bio link</div>"
+        "<script type='application/json'>"
+        '{"web_profile_info":{"biography":"Bookings: '
+        + stylized_email
+        + '"}}'
+        "</script></body></html>"
+    )
+    bridge_calls = []
+    onehop_state_labels = []
+    real_onehop = cde._instagram_onehop_emails_from_surface
+
+    monkeypatch.setattr(cde, "_fetch_instagram_profile_html", lambda session, url: (static_html, 200))
+    monkeypatch.setattr(
+        cde,
+        "_open_instagram_live_page_bridge",
+        lambda *args, **kwargs: bridge_calls.append(args[0]) or None,
+    )
+    monkeypatch.setattr(
+        cde,
+        "_instagram_onehop_emails_from_surface",
+        lambda *args, **kwargs: onehop_state_labels.append(
+            kwargs.get("state_label", "bio_link_urls")
+        ) or real_onehop(*args, **kwargs),
+    )
+    monkeypatch.setattr(
+        cde,
+        "_fetch_website_html_bounded",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("one-hop fetch should not run")),
+    )
+
+    matched = worker._enrich_row_instagram_email(seed_df, 0, ctx)
+
+    assert matched is True
+    assert bridge_calls == ["https://www.instagram.com/bridgestructuredtextartist/"]
+    assert onehop_state_labels == ["bio_link_urls"]
+    assert seed_df.at[0, "Email"] == "lacedupmgmt@gmail.com"
+    assert seed_df.at[0, "Email_All"] == "lacedupmgmt@gmail.com"
+    assert seed_df.at[0, "Email_Source_URL"] == "https://www.instagram.com/bridgestructuredtextartist/"
+    assert seed_df.at[0, "Email_Source_Type"] == "instagram_enrich"
+    assert seed_df.at[0, "Email_Extract_Method"] == "regex"
+    assert seed_df.at[0, "Email_Type"] == "ig_enrich"
+    assert "instagram_profile" in seed_df.at[0, EMAIL_PROVENANCE_JSON_COL]
+    _assert_log_contains(logs, "[IG OneHop] bio_link_urls state=empty count=0 sample=-")
+    _assert_no_log_startswith(logs, "[IG OneHop] live_surface_bio_link_urls")
+    _assert_no_log_startswith(logs, "[IG OneHop] onehop_fetch_attempted=")
+
+
 def test_instagram_email_no_live_bridge_handoff_preserves_empty_surface_fallback(monkeypatch):
     logs = []
     worker = _make_worker(logs)
@@ -3626,13 +3694,27 @@ def test_instagram_email_no_live_bridge_handoff_preserves_empty_surface_fallback
     profile_shell_html = (
         "<html><body><main><header><h1>Blocked Bridge Artist</h1><button>Email</button></header></main></body></html>"
     )
+    bridge_calls = []
+    onehop_state_labels = []
+    real_onehop = cde._instagram_onehop_emails_from_surface
 
     monkeypatch.setattr(
         cde,
         "_fetch_instagram_profile_html",
         lambda session, url: (profile_shell_html, 200),
     )
-    monkeypatch.setattr(cde, "_open_instagram_live_page_bridge", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        cde,
+        "_open_instagram_live_page_bridge",
+        lambda *args, **kwargs: bridge_calls.append(args[0]) or None,
+    )
+    monkeypatch.setattr(
+        cde,
+        "_instagram_onehop_emails_from_surface",
+        lambda *args, **kwargs: onehop_state_labels.append(
+            kwargs.get("state_label", "bio_link_urls")
+        ) or real_onehop(*args, **kwargs),
+    )
     monkeypatch.setattr(
         cde,
         "_fetch_website_html_bounded",
@@ -3642,6 +3724,8 @@ def test_instagram_email_no_live_bridge_handoff_preserves_empty_surface_fallback
     matched = worker._enrich_row_instagram_email(seed_df, 0, ctx)
 
     assert matched is False
+    assert bridge_calls == ["https://www.instagram.com/blockedbridgeartist/"]
+    assert onehop_state_labels == ["bio_link_urls"]
     assert seed_df.at[0, "Email"] == ""
     assert seed_df.at[0, "Email_All"] == ""
     _assert_ig_visit_and_outcome(

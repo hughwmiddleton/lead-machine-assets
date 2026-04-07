@@ -11226,12 +11226,19 @@ class CrossDirectoryEnricherWorker(QThread):
             selected_surface = "instagram_profile"
             onehop_target_attempted = ""
             shared_live_page = None
+            shared_live_page_attempted = False
             shared_live_html = ""
             runtime_structured_payloads: List[Any] = []
+            static_structured_payloads: List[Any] = []
+            for script_tag in soup.find_all("script"):
+                payload = _load_instagram_bio_link_structured_script_payload(script_tag)
+                if payload is not None:
+                    static_structured_payloads.append(payload)
 
             def _get_shared_live_page():
-                nonlocal shared_live_page
-                if shared_live_page is None:
+                nonlocal shared_live_page, shared_live_page_attempted
+                if not shared_live_page_attempted:
+                    shared_live_page_attempted = True
                     shared_live_page = _open_instagram_live_page_bridge(ig_url, timeout_s=HTTP_TIMEOUT)
                 return shared_live_page
 
@@ -11241,6 +11248,21 @@ class CrossDirectoryEnricherWorker(QThread):
                     if normalized_surface_text:
                         return normalized_surface_text, _surface_name
                 return "", ""
+
+            def _extract_direct_emails_from_text_surfaces(*surface_candidates):
+                for _surface_name, surface_text in surface_candidates:
+                    normalized_surface_text = unicodedata.normalize(
+                        "NFKC",
+                        cell_to_str(surface_text),
+                    )
+                    if not normalized_surface_text:
+                        continue
+                    surface_emails = _extract_instagram_profile_candidate_emails(
+                        normalized_surface_text
+                    )
+                    if surface_emails:
+                        return surface_emails, _surface_name
+                return [], ""
 
             try:
                 if not all_ig_emails and not _row_has_email(seed_df.loc[row_idx]):
@@ -11292,6 +11314,34 @@ class CrossDirectoryEnricherWorker(QThread):
                             )
                             if all_ig_emails:
                                 selected_surface = "instagram_bio_link_one_hop"
+                bridge_failed = shared_live_page_attempted and shared_live_page is None
+                if (
+                    not all_ig_emails
+                    and bridge_failed
+                    and not _row_has_email(seed_df.loc[row_idx])
+                ):
+                    static_main_text = ""
+                    static_body_text = ""
+                    static_document_text = ""
+                    main_node = soup.find("main")
+                    if main_node is not None:
+                        static_main_text = main_node.get_text(" ", strip=True)
+                    body_node = soup.find("body")
+                    if body_node is not None:
+                        static_body_text = body_node.get_text(" ", strip=True)
+                    static_document_text = soup.get_text(" ", strip=True)
+                    static_structured_bio_text = " ".join(
+                        _collect_instagram_bio_equivalent_structured_texts(static_structured_payloads)
+                    )
+                    all_ig_emails, _ = _extract_direct_emails_from_text_surfaces(
+                        ("static_main_text", static_main_text),
+                        ("static_body_text", static_body_text),
+                        ("static_document_text", static_document_text),
+                        ("static_structured_bio_text", static_structured_bio_text),
+                    )
+                    if all_ig_emails:
+                        selected_source_url = ig_url
+                        selected_extract_method = "regex"
                 print("DEBUG IG: shared_live_html length =", len(shared_live_html or ""))
                 if (
                     not all_ig_emails
