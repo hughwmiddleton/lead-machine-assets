@@ -5462,7 +5462,13 @@ def _extract_daytime_fb_search_results_surface_html(page_html: str) -> Tuple[str
                 container_html = ""
             if not container_html.strip():
                 continue
-            return f'<div role="main">{container_html}</div>', selector
+            # Hard-lock daytime bounded discovery to the verified search-results
+            # subtree so downstream DOM gating cannot re-select generic feed/main
+            # containers after NM-S162 has already proven the surface.
+            return (
+                f'<div aria-label="Search results" data-fb-daytime-lock="1">{container_html}</div>',
+                selector,
+            )
 
     return "", ""
 

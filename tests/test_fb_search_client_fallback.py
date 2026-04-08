@@ -222,6 +222,54 @@ def test_find_best_page_url_prefers_explicit_search_results_surface_over_feed(mo
     assert driver.visited_urls == [result_url]
 
 
+def test_find_best_page_url_locks_verified_search_surface_against_feed_reselection(monkeypatch) -> None:
+    logs = []
+    feed_url = "https://www.facebook.com/wrongfeedartist"
+    result_url = "https://www.facebook.com/testartistofficial"
+    driver = _FakeDriver(
+        {
+            result_url: (
+                "<html><body><div>Musician/Band</div>"
+                "<a href='https://open.spotify.com/artist/result'>Spotify</a></body></html>"
+            ),
+        }
+    )
+    client = cde.FacebookSearchClient(driver=driver, logger=logs.append)
+    monkeypatch.setattr(client, "ensure_facebook_logged_in", lambda: True)
+    monkeypatch.setattr(cde, "score_fb_candidate", lambda *args, **kwargs: (2.0, 1.0, 1.0))
+    monkeypatch.setattr(cde, "is_music_page", lambda *args, **kwargs: True)
+    monkeypatch.setattr(cde, "classify_corporate_signals", lambda *args, **kwargs: SimpleNamespace(has_hard=False, has_artist=True))
+    monkeypatch.setattr(cde, "_facebook_candidate_is_strong", lambda *args, **kwargs: (True, "music_category"))
+
+    def _fake_fetch(query, *, search_method):  # noqa: ANN001
+        return (
+            (
+                "<div role='main'>"
+                "<div aria-label='Search results'>"
+                "<div role='feed'>"
+                f"<div class='card'><a href='{result_url}'>Test Artist Official</a><div class='subtitle'>Musician/Band</div></div>"
+                "</div>"
+                "</div>"
+                "<div role='feed'>"
+                f"<div class='card'><a href='{feed_url}'>Wrong Feed Artist</a><div class='subtitle'>Musician/Band</div></div>"
+                "</div>"
+                "</div>"
+            ),
+            "https://www.facebook.com/search/top/?q=test+artist",
+            False,
+        )
+
+    monkeypatch.setattr(client, "_fetch_search_surface", _fake_fetch)
+
+    result = client.find_best_page_url("Test Artist", require_strong_candidate=True)
+
+    assert result == result_url
+    assert driver.visited_urls == [result_url]
+    assert any('search_surface_selector=' in message for message in logs)
+    assert any('chosen_container_selector=div[aria-label="Search results"]' in message for message in logs)
+    assert not any('chosen_container_selector=div[role="main"] div[role="feed"]' in message for message in logs)
+
+
 def test_find_best_page_url_rejects_zero_identity_music_candidate(monkeypatch) -> None:
     artist_url = "https://www.facebook.com/fergie"
     driver = _FakeDriver(
