@@ -7413,7 +7413,18 @@ class NightModeFacebookEnricher:
         if collected_contexts:
             first_ctx, first_cand = collected_contexts[0]
             selected_ctx = selected_ctx or first_ctx
+            selected_raw_url = ""
+            for ctx, cand in collected_contexts:
+                if ctx is selected_ctx:
+                    selected_raw_url = _candidate_url(cand)
+                    break
             selected_ctx["selected_by"] = selected_by
+            selected_ctx["explicit_accepted_url"] = True
+            selected_ctx["accepted_page_fast_loader_safe"] = bool(
+                selected_ctx.get("url")
+                and selected_ctx.get("url") == selected_raw_url
+                and not _is_allowed_fb_share_entrypoint_url(selected_raw_url)
+            )
             self._last_selected_candidate_context = selected_ctx
             self._last_search_candidates = [ctx for ctx, _ in collected_contexts]
             _maybe_log_rank_preview(artist, candidates, first_cand, logger=self.logger, selected_by=selected_by)

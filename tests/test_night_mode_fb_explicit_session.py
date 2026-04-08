@@ -161,6 +161,9 @@ def test_unearthed_explicit_canonical_url_uses_normal_pass_a(monkeypatch, enrich
         observed["fb_url"] = fb_url
         observed["allow_anon"] = allow_anon
         observed["explicit_accepted_url"] = bool(candidate_context and candidate_context.get("explicit_accepted_url"))
+        observed["accepted_page_fast_loader_safe"] = bool(
+            candidate_context and candidate_context.get("accepted_page_fast_loader_safe")
+        )
         return (
             nmfb.NightModeFacebookResult(
                 email="unearthed@example.com",
@@ -189,8 +192,56 @@ def test_unearthed_explicit_canonical_url_uses_normal_pass_a(monkeypatch, enrich
     assert observed["fb_url"] == "https://www.facebook.com/unearthed.explicit"
     assert observed["allow_anon"] is False
     assert observed["explicit_accepted_url"] is True
+    assert observed["accepted_page_fast_loader_safe"] is True
     assert result.get("FB_Status") == "pass_a_found_email"
     assert result.get("Email") == "unearthed@example.com"
+
+
+def test_pass_b_selected_candidate_is_promoted_without_changing_selection(enricher):
+    primary_candidate = {
+        "name": "Discovery Artist",
+        "url": "https://www.facebook.com/discovery.artist",
+        "category": "Musician/band",
+    }
+    fallback_candidate = {
+        "name": "Discovery Artist Backup",
+        "url": "https://www.facebook.com/discovery.artist.backup",
+        "category": "Musician/band",
+    }
+    ranked_for_preview = [
+        {
+            "candidate": primary_candidate,
+            "score": 40,
+            "features": {"name": "Discovery Artist", "match_level": "near"},
+        },
+        {
+            "candidate": fallback_candidate,
+            "score": 39,
+            "features": {"name": "Discovery Artist Backup", "match_level": "near"},
+        },
+    ]
+
+    selected_url = enricher._select_candidate_url(
+        "Discovery Artist",
+        primary_candidate,
+        [primary_candidate, fallback_candidate],
+        [primary_candidate, fallback_candidate],
+        ranked_for_preview,
+        "ranked_sort",
+        25,
+    )
+
+    assert selected_url == "https://www.facebook.com/discovery.artist"
+    assert [ctx["url"] for ctx in enricher._last_search_candidates] == [
+        "https://www.facebook.com/discovery.artist",
+        "https://www.facebook.com/discovery.artist.backup",
+    ]
+    assert enricher._last_selected_candidate_context == enricher._last_search_candidates[0]
+    assert enricher._last_selected_candidate_context["search_discovery_accepted"] is True
+    assert enricher._last_selected_candidate_context["explicit_accepted_url"] is True
+    assert enricher._last_selected_candidate_context["accepted_page_fast_loader_safe"] is True
+    assert "explicit_accepted_url" not in enricher._last_search_candidates[1]
+    assert "accepted_page_fast_loader_safe" not in enricher._last_search_candidates[1]
 
 
 def test_unearthed_promotable_social_link_uses_normal_pass_a(monkeypatch, enricher):

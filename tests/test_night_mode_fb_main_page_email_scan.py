@@ -792,6 +792,77 @@ def test_discovery_candidate_about_fetch_remains_reachable_without_main_refresh(
     assert any(f"[FB Email] Visiting {about_url}" in msg for msg in logs)
 
 
+def test_discovery_promoted_candidate_uses_fast_loader(monkeypatch) -> None:
+    logs = []
+    enricher = _build_enricher(logs)
+    main_url = "https://www.facebook.com/artist"
+    calls = []
+    observed = {}
+
+    def fake_fetch_anon(url, goto_about=False, collect_surfaces=True):  # noqa: ANN001
+        calls.append(("anon", url, collect_surfaces))
+        enricher._last_fb_visible_text = "Bookings: fast@artist.com"
+        enricher._last_fb_live_anchor_values = []
+        enricher._last_fb_reveal_actions = []
+        return "<html><body>Bookings: fast@artist.com</body></html>", url
+
+    def fail_session(*args, **kwargs):  # noqa: ANN001
+        raise AssertionError("promoted PASS B candidates should stay on the fast accepted-page loader")
+
+    def fake_shared_sweep(fb_url, fetch_surface, **kwargs):  # noqa: ANN001
+        observed["fb_url"] = fb_url
+        observed["continue_after_main_email"] = kwargs.get("continue_after_main_email")
+        observed["stop_after_first_filtered"] = kwargs.get("stop_after_first_filtered")
+        fetch_result = fetch_surface(fb_url)
+        return nmfb.FacebookAcceptedPageSweepResult(
+            main_surface=nmfb.FacebookAcceptedPageFetchResult(
+                requested_url=fb_url,
+                resolved_url=fetch_result.resolved_url,
+                html=fetch_result.html,
+                rendered_text="Bookings: fast@artist.com",
+            ),
+            main_emails=["fast@artist.com"],
+            combined_emails=["fast@artist.com"],
+            final_resolved_url=fetch_result.resolved_url,
+        )
+
+    monkeypatch.setattr(enricher, "_fetch_html_with_url_anon", fake_fetch_anon)
+    monkeypatch.setattr(enricher, "_fetch_html_with_url", fail_session)
+    monkeypatch.setattr(nmfb, "_run_bounded_fb_accepted_page_sweep", fake_shared_sweep)
+    monkeypatch.setattr(nmfb, "_night_fb_has_music_signals", lambda soup, context: False)
+    monkeypatch.setattr(nmfb, "should_accept_email_override", lambda *args, **kwargs: (True, "test_override"))
+
+    result = enricher._scrape_single_fb_candidate(
+        main_url,
+        {"Artist Name": "Artist", "Email_All": ""},
+        "Artist",
+        allow_anon=True,
+        candidate_context={
+            "url": main_url,
+            "base_score": 1.2,
+            "match_level": "near",
+            "search_discovery_accepted": True,
+            "explicit_accepted_url": True,
+            "accepted_page_fast_loader_safe": True,
+        },
+    )
+
+    assert result is not None
+    night_result, emails, driver_kind, outcome = result
+    assert emails == ["fast@artist.com"]
+    assert night_result is not None
+    assert night_result.email == "fast@artist.com"
+    assert night_result.about_attempted == "no"
+    assert night_result.about_result == ""
+    assert observed["fb_url"] == main_url
+    assert observed["continue_after_main_email"] is False
+    assert observed["stop_after_first_filtered"] is True
+    assert calls == [("anon", main_url, True)]
+    assert driver_kind == "anon_fast"
+    assert outcome == "found_email"
+    assert any("[Night FB][AcceptedPage] using fast loader" in msg for msg in logs)
+
+
 def test_explicit_pass_a_main_page_email_skips_secondary_fetch(monkeypatch) -> None:
     logs = []
     enricher = _build_enricher(logs)
