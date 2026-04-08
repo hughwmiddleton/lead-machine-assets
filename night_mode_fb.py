@@ -8754,6 +8754,68 @@ class NightModeFacebookEnricher:
             nonlocal used_driver_kind, timed_out_flag, outcome_hint
             requested_url = str(requested_url or "").strip()
 
+            def _session_failure_is_auth_or_session_unusable(
+                session_html: Optional[str],
+                session_resolved: Optional[str],
+            ) -> bool:
+                auth_reason_tokens = (
+                    "checkpoint",
+                    "captcha",
+                    "login_wall",
+                    "login_redirect",
+                    "redirect_login",
+                    "recover",
+                    "two_factor",
+                    "consent",
+                    "session_invalid",
+                    "not_authenticated",
+                    "unauthenticated",
+                    "missing c_user",
+                    "session unauthenticated",
+                )
+                resolved_url = str(session_resolved or requested_url or "").strip()
+                surface_html = str(
+                    session_html
+                    if session_html is not None
+                    else (getattr(self, "_last_fb_surface_html", "") or "")
+                )
+                if is_fb_login_redirect(resolved_url) or _is_fb_login_or_security_url(resolved_url):
+                    return True
+
+                warning_reason = _looks_like_fb_warning_or_block(surface_html, resolved_url) or ""
+                health = _night_fb_page_health_snapshot(
+                    resolved_url,
+                    surface_html,
+                    warning_reason=warning_reason,
+                )
+                auth_surface = str(health.get("auth_surface") or "").strip().lower()
+                if health.get("captcha") or health.get("checkpoint") or health.get("login_wall"):
+                    return True
+                if auth_surface in {"checkpoint", "captcha", "redirect_login", "recover", "two_factor", "consent"}:
+                    return True
+
+                session = getattr(self, "session", None)
+                session_unhealthy = False
+                session_reason = ""
+                if session is not None:
+                    try:
+                        session_unhealthy = not bool(getattr(session, "last_health_ok", True))
+                    except Exception:
+                        session_unhealthy = False
+                    try:
+                        session_reason = str(getattr(session, "last_health_reason", "") or "").strip().lower()
+                    except Exception:
+                        session_reason = ""
+                if session_unhealthy and any(token in session_reason for token in auth_reason_tokens):
+                    return True
+
+                session_failed, session_failed_reason = self.get_session_failure()
+                session_failed_reason = str(session_failed_reason or "").strip().lower()
+                if session_failed and any(token in session_failed_reason for token in auth_reason_tokens):
+                    return True
+
+                return False
+
             def _fetch_with_session() -> Tuple[Optional[str], Optional[str]]:
                 fetch_kwargs: Dict[str, Any] = {"goto_about": False}
                 if collect_surfaces:
@@ -8821,7 +8883,14 @@ class NightModeFacebookEnricher:
                 outcome_hint = "fetched"
                 return session_html, session_resolved
 
-            if allow_anon and not prefer_fast_accepted_loader:
+            session_failed = not bool((session_html or "").strip())
+            allow_anon_after_session_fail = (
+                session_failed
+                and allow_anon
+                and not prefer_fast_accepted_loader
+                and _session_failure_is_auth_or_session_unusable(session_html, session_resolved)
+            )
+            if allow_anon_after_session_fail:
                 self._log_fb_driver_selection("anon", "anon_after_session_fail", row_id)
                 anon_html, anon_resolved = _fetch_with_anon()
                 timed_out_flag = timed_out_flag or bool(getattr(self, "_last_fb_timeout", False))

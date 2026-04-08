@@ -983,6 +983,12 @@ def test_explicit_pass_a_session_failure_still_allows_anon_fallback(monkeypatch)
     main_url = "https://www.facebook.com/artist"
     calls = []
 
+    class _SessionUnusable:
+        last_health_ok = False
+        last_health_reason = "checkpoint"
+
+    enricher.session = _SessionUnusable()
+
     def fake_fetch_anon(url, goto_about=False, collect_surfaces=True):  # noqa: ANN001
         calls.append(("anon", url, collect_surfaces))
         enricher._last_fb_visible_text = "Bookings: anon@example.com"
@@ -993,7 +999,7 @@ def test_explicit_pass_a_session_failure_still_allows_anon_fallback(monkeypatch)
         calls.append(("session", url, collect_surfaces))
         enricher._last_fb_visible_text = ""
         enricher._last_fb_live_anchor_values = []
-        return None, url
+        return None, "https://www.facebook.com/checkpoint/"
 
     monkeypatch.setattr(enricher, "_fetch_html_with_url_anon", fake_fetch_anon)
     monkeypatch.setattr(enricher, "_fetch_html_with_url", fake_fetch_session)
@@ -1024,6 +1030,78 @@ def test_explicit_pass_a_session_failure_still_allows_anon_fallback(monkeypatch)
     assert driver_kind == "anon_fallback"
     assert outcome == "found_email"
     assert any("anon_after_session_fail" in msg for msg in logs)
+
+
+def test_explicit_pass_a_budget_exhaustion_does_not_escalate_to_anon(monkeypatch) -> None:
+    logs = []
+    enricher = _build_enricher(logs)
+    main_url = "https://www.facebook.com/artist"
+    calls = []
+
+    def fail_anon(*args, **kwargs):  # noqa: ANN001
+        raise AssertionError("anon fallback should not run for budget exhaustion")
+
+    def fake_fetch_session(url, goto_about=False, collect_surfaces=True):  # noqa: ANN001
+        calls.append(("session", url, collect_surfaces))
+        enricher._last_fb_visible_text = ""
+        enricher._last_fb_live_anchor_values = []
+        return None, None
+
+    monkeypatch.setattr(enricher, "_fetch_html_with_url_anon", fail_anon)
+    monkeypatch.setattr(enricher, "_fetch_html_with_url", fake_fetch_session)
+    monkeypatch.setattr(nmfb, "_night_fb_has_music_signals", lambda soup, context: False)
+
+    result = enricher._scrape_single_fb_candidate(
+        main_url,
+        {"Artist Name": "Artist", "Email_All": ""},
+        "Artist",
+        allow_anon=True,
+        candidate_context={
+            "explicit_accepted_url": True,
+            "accepted_page_fast_loader_safe": False,
+        },
+    )
+
+    assert result is None
+    assert calls == [("session", main_url, True)]
+    assert not any("anon_after_session_fail" in msg for msg in logs)
+
+
+def test_explicit_pass_a_empty_session_fetch_does_not_escalate_to_anon(monkeypatch) -> None:
+    logs = []
+    enricher = _build_enricher(logs)
+    main_url = "https://www.facebook.com/artist"
+    calls = []
+
+    def fail_anon(*args, **kwargs):  # noqa: ANN001
+        raise AssertionError("anon fallback should not run for non-auth empty fetches")
+
+    def fake_fetch_session(url, goto_about=False, collect_surfaces=True):  # noqa: ANN001
+        calls.append(("session", url, collect_surfaces))
+        enricher._last_fb_timeout = True
+        enricher._last_fb_timeout_url = url
+        enricher._last_fb_visible_text = ""
+        enricher._last_fb_live_anchor_values = []
+        return None, url
+
+    monkeypatch.setattr(enricher, "_fetch_html_with_url_anon", fail_anon)
+    monkeypatch.setattr(enricher, "_fetch_html_with_url", fake_fetch_session)
+    monkeypatch.setattr(nmfb, "_night_fb_has_music_signals", lambda soup, context: False)
+
+    result = enricher._scrape_single_fb_candidate(
+        main_url,
+        {"Artist Name": "Artist", "Email_All": ""},
+        "Artist",
+        allow_anon=True,
+        candidate_context={
+            "explicit_accepted_url": True,
+            "accepted_page_fast_loader_safe": False,
+        },
+    )
+
+    assert result == (None, [], "session", "timeout")
+    assert calls == [("session", main_url, True)]
+    assert not any("anon_after_session_fail" in msg for msg in logs)
 
 
 def test_explicit_pass_a_weak_main_capture_recollects_once_and_skips_about(monkeypatch) -> None:

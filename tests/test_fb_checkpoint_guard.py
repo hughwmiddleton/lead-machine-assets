@@ -37,9 +37,12 @@ def test_checkpoint_guard_allows_explicit_url(monkeypatch):
     monkeypatch.setattr(enricher, "_ensure_session", lambda: _CheckpointSession())
 
     called = {"count": 0}
+    observed = {}
 
     def _fake_scrape(*args, **kwargs):  # noqa: ANN001
         called["count"] += 1
+        observed["allow_anon"] = kwargs.get("allow_anon")
+        observed["candidate_context"] = kwargs.get("candidate_context") or {}
         night_result = night_mode_fb.NightModeFacebookResult(
             email="artist@test.com",
             email_all="artist@test.com",
@@ -54,6 +57,8 @@ def test_checkpoint_guard_allows_explicit_url(monkeypatch):
     result = enricher.enrich_row_with_facebook_night(row)
 
     assert called["count"] == 1
+    assert observed["allow_anon"] is False
+    assert observed["candidate_context"].get("explicit_accepted_url") is True
     assert result.get("FB_Status") in ("pass_a_found_email", "pass_a_no_email_on_page", "ok", "explicit_url", "ok_explicit") or result.get("Email")
 
 

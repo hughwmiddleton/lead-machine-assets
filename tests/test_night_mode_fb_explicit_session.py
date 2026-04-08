@@ -61,6 +61,7 @@ def test_explicit_fb_url_prefers_authenticated_session(monkeypatch, enricher):
     assert any('[Night FB][Explicit Intake]' in msg and 'outcome="attempt"' in msg for msg in logs)
     assert "Using explicit FB URLs with authenticated session" in " ".join(logs)
     assert any('mode="session"' in msg for msg in logs), "PASS A log should report session mode"
+    assert not any("anon_after_session_fail" in msg for msg in logs)
     assert result.get("FB_Status", "").startswith("pass_a")
     assert "fb@example.com" in result.get("Email_All", "")
 
