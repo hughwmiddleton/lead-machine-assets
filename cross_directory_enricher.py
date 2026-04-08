@@ -5426,6 +5426,47 @@ def _fb_scoring_sanity_tests():
     print("[FB Enrich] Sanity tests passed.")
 
 
+_FB_DAYTIME_SEARCH_RESULT_SURFACE_SELECTORS: Tuple[str, ...] = (
+    'div[role="main"] div[aria-label="Search results"]',
+    'div[aria-label="Search results"]',
+    'div[role="main"] section[aria-label*="Search results"]',
+    'div[role="main"] [data-pagelet^="SearchResults"]',
+    'div[role="main"] div[aria-label*="Search results"]',
+)
+
+
+def _extract_daytime_fb_search_results_surface_html(page_html: str) -> Tuple[str, str]:
+    """
+    Restrict daytime bounded discovery harvesting to explicit search-results surfaces.
+    Generic feed/main/article containers remain available to shared/night helpers, but
+    daytime discovery only passes through repo-grounded search-result indicators.
+    """
+    html = cell_to_str(page_html)
+    if not html:
+        return "", ""
+
+    try:
+        soup = BeautifulSoup(html, "html.parser")
+    except Exception:
+        return "", ""
+
+    for selector in _FB_DAYTIME_SEARCH_RESULT_SURFACE_SELECTORS:
+        try:
+            containers = soup.select(selector)
+        except Exception:
+            containers = []
+        for container in containers:
+            try:
+                container_html = str(container)
+            except Exception:
+                container_html = ""
+            if not container_html.strip():
+                continue
+            return f'<div role="main">{container_html}</div>', selector
+
+    return "", ""
+
+
 @dataclass
 class FacebookSearchClient:
     driver: Any
@@ -5605,8 +5646,22 @@ class FacebookSearchClient:
         if not query:
             return None
         page_html, current_url, search_timed_out = self._fetch_search_surface(query, search_method="homepage_ui")
+        search_surface_html, search_surface_selector = _extract_daytime_fb_search_results_surface_html(page_html)
+        if search_surface_selector:
+            _safe_log(
+                self.logger,
+                "[FB Enrich] search_method=homepage_ui search_surface_selector=%s query='%s'",
+                search_surface_selector,
+                query,
+            )
+        elif page_html:
+            _safe_log(
+                self.logger,
+                "[FB Enrich] search_method=homepage_ui search_surface_selector=NONE query='%s'",
+                query,
+            )
         candidates = _fb_extract_candidates_from_search_dom(
-            page_html,
+            search_surface_html,
             logger=self.logger,
             debug=os.getenv("FB_DEBUG_DOM_GATE") == "1",
             search_name=artist_name,
