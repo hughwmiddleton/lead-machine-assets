@@ -6101,6 +6101,48 @@ class FacebookSearchClient:
                             )
                         continue
 
+            if best_name_score == 0.0 and best_cat_boost == 0.0:
+                best_name_lc = (best_candidate.name or "").lower()
+                best_url_lc = (best_candidate.url or "").lower()
+                best_category_lc = (best_candidate.category or "").lower()
+                zero_signal_music_flag = any(tok in best_category_lc for tok in strong_cat_tokens) or is_music_page(
+                    best_name_lc,
+                    best_url_lc,
+                    best_category_lc,
+                )
+                if not zero_signal_music_flag:
+                    best_candidate_name_norm = normalize_fb_name(best_candidate.name or "")
+                    best_artist_norm = normalize_fb_name(artist_name)
+                    try:
+                        best_candidate_username_norm = normalize_fb_name(
+                            urllib.parse.urlparse(best_candidate.url or "").path.strip("/").split("/")[0]
+                        )
+                    except Exception:
+                        best_candidate_username_norm = ""
+                    zero_signal_music_flag = (
+                        best_candidate_name_norm
+                        and best_artist_norm
+                        and best_candidate_name_norm == best_artist_norm
+                    ) or (
+                        best_candidate_username_norm
+                        and best_artist_norm
+                        and best_candidate_username_norm == best_artist_norm
+                    )
+                if not zero_signal_music_flag:
+                    _safe_log(
+                        self.logger,
+                        "[FB Discover] Skipping zero-signal candidate for '%s' before scrape: %s",
+                        artist_name,
+                        best_candidate.url,
+                    )
+                    if ranked_index < min(len(ranked_entries), MAX_PRE_SCRAPE_RANKED_CANDIDATES):
+                        _safe_log(
+                            self.logger,
+                            "[FB Discover] Considering next plausible ranked candidate for '%s'.",
+                            artist_name,
+                        )
+                    continue
+
             if bucket_name == "fallback":
                 _safe_log(
                     self.logger,
