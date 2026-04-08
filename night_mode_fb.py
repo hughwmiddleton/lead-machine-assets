@@ -7564,6 +7564,7 @@ class NightModeFacebookEnricher:
         self.session = None
         try:
             if self._anon_driver:
+                _log(self.logger, f"[FB Driver] anon_driver_closed id={id(self._anon_driver)}")
                 self._anon_driver.quit()
         except Exception:
             pass
@@ -7580,11 +7581,16 @@ class NightModeFacebookEnricher:
 
     def _get_anon_driver(self):
         if self._anon_driver:
+            _log(self.logger, f"[FB Driver] anon_driver_reused id={id(self._anon_driver)}")
             return self._anon_driver
         driver_factory = getattr(self.legacy, "setup_facebook_driver", None)
         if not callable(driver_factory):
             raise FacebookDriverError("Anonymous FB driver not available.")
         self._anon_driver = driver_factory()
+        _log(
+            self.logger,
+            f"[FB Driver] anon_driver_created id={id(self._anon_driver)} headless={str(bool(getattr(self._anon_driver, 'headless', False))).lower()}",
+        )
         return self._anon_driver
 
     def _get_unearthed_driver(self):
@@ -7592,6 +7598,61 @@ class NightModeFacebookEnricher:
             return self._unearthed_driver
         self._unearthed_driver = _create_fb_driver_public(headless=True)
         return self._unearthed_driver
+
+    def _fb_driver_row_id(
+        self,
+        row: Optional[Dict[str, Any]] = None,
+        *,
+        artist_name: str = "",
+        row_index: Optional[int] = None,
+    ) -> str:
+        artist = str(artist_name or "").strip()
+        if (not artist) and isinstance(row, dict):
+            artist = str(row.get("Artist Name", "") or row.get("Artist", "") or "").strip()
+        if artist:
+            return artist
+        if isinstance(row_index, int):
+            return str(row_index)
+        if isinstance(row, dict):
+            for key in ("row_index", "Row_Index", "__row_index", "Row"):
+                value = str(row.get(key, "") or "").strip()
+                if value:
+                    return value
+        return "<unknown>"
+
+    def _log_fb_driver_selection(self, using: str, reason: str, row_id: str) -> None:
+        _log(self.logger, f"[FB Driver] using={using} reason={reason} row={row_id}")
+
+    def _log_fb_anon_result(self, result: str, row_id: str) -> None:
+        _log(self.logger, f"[FB Driver] anon_result={result} row={row_id}")
+
+    def _map_fb_anon_result(
+        self,
+        *,
+        result_hint: str = "",
+        detail: str = "",
+        current_url: str = "",
+        timed_out: bool = False,
+        html_present: Optional[bool] = None,
+    ) -> str:
+        result_norm = str(result_hint or "").strip().lower()
+        detail_norm = str(detail or "").strip().lower()
+        current_url = str(current_url or "").strip()
+        joined = " ".join(part for part in (result_norm, detail_norm) if part)
+
+        if "checkpoint" in joined:
+            return "checkpoint"
+        if _is_fb_login_or_security_url(current_url) or any(
+            token in joined for token in ("login_wall", "login_redirect", "redirect_login", "captcha", "consent")
+        ):
+            return "login_wall"
+        if result_norm in {"success", "found_email"}:
+            return "success"
+        if timed_out or result_norm in {"timeout", "fetch_error", "fetch_failed"}:
+            return "fetch_failed"
+        if html_present is False and result_norm not in {"no_candidates", "checkpoint"}:
+            return "fetch_failed"
+        return "no_candidates"
 
     def _pass_a_bump(self, key: str) -> None:
         if key in self._pass_a_counts:
@@ -8186,6 +8247,7 @@ class NightModeFacebookEnricher:
         *,
         search_method: str,
         session=None,
+        row_label: str = "",
     ) -> Tuple[str, Optional[Any], bool, str]:
         if search_method == "direct_route":
             encoded_q = urllib.parse.quote_plus(query_str)
@@ -8193,6 +8255,7 @@ class NightModeFacebookEnricher:
             _log(self.logger, f"[Night FB] search_method=direct_route query='{query_str}' url='{search_url}'")
 
             def _nav_with_session() -> Tuple[str, Any, bool, str]:
+                self._log_fb_driver_selection("session", "session_primary", row_label or "<unknown>")
                 drv = session.navigate(search_url)
                 time.sleep(1.5)
                 return (
@@ -8203,6 +8266,7 @@ class NightModeFacebookEnricher:
                 )
 
             def _nav_anon() -> Tuple[str, Any, bool, str]:
+                self._log_fb_driver_selection("anon", "anon_fallback_search", row_label or "<unknown>")
                 driver = self._get_anon_driver()
                 driver.get(search_url)
                 time.sleep(1.5)
@@ -8251,7 +8315,10 @@ class NightModeFacebookEnricher:
                     except Exception:
                         driver = None
             if driver is None:
+                self._log_fb_driver_selection("anon", "anon_fallback_search", row_label or "<unknown>")
                 driver = self._get_anon_driver()
+            else:
+                self._log_fb_driver_selection("session", "session_primary", row_label or "<unknown>")
             if driver is None:
                 return "", None, False, ""
             html, current_url, timed_out = _run_fb_homepage_search(
@@ -8290,6 +8357,7 @@ class NightModeFacebookEnricher:
         self._last_search_reject_reason = ""
         self._last_search_reject_score = None
         self._checkpoint_limited_active = False
+        row_label = self._fb_driver_row_id(row=row, artist_name=artist)
         if self._search_disabled_due_to_checkpoint:
             _log(self.logger, "[Night FB] search disabled due to checkpoint; skipping FB search.")
             return None
@@ -8377,7 +8445,9 @@ class NightModeFacebookEnricher:
             primary_query,
             search_method="homepage_ui",
             session=session,
+            row_label=row_label,
         )
+        primary_used_anon = bool(nav_driver is not None and nav_driver is self._anon_driver)
         self._sync_search_disable_from_run_state()
         if self._search_disabled_due_to_checkpoint:
             _log(self.logger, "[Night FB] search disabled due to checkpoint; skipping FB search.")
@@ -8402,6 +8472,7 @@ class NightModeFacebookEnricher:
                     refine_query,
                     search_method="homepage_ui",
                     session=session,
+                    row_label=row_label,
                 )
                 refine_candidates.extend(
                     _harvest_candidates(
@@ -8498,6 +8569,16 @@ class NightModeFacebookEnricher:
         ranked_candidates: List["facebook_enrich.FbCandidate"] = [item["candidate"] for item in ranked_for_preview]
         candidate, selected_by = self._choose_ranked_candidate(artist, ranked_for_preview, min_accept_score=min_accept_score)
         if not candidate:
+            if primary_used_anon:
+                self._log_fb_anon_result(
+                    self._map_fb_anon_result(
+                        result_hint="no_candidates",
+                        current_url=current_search_url,
+                        timed_out=search_timed_out,
+                        html_present=bool((html or "").strip()),
+                    ),
+                    row_label,
+                )
             _log(self.logger, f"[Night FB] No viable FB candidates for '{artist}' after reject-cache and mismatch guard.")
             _maybe_log_rank_preview(artist, candidates, None, logger=self.logger, selected_by=selected_by)
             return None
@@ -8559,14 +8640,18 @@ class NightModeFacebookEnricher:
                         ranked_candidates = [fallback_candidate]
                         break
                 _log(self.logger, "[Night FB][QualityGate] No acceptable FB candidates after quality gate; skipping FB search.")
+                if primary_used_anon:
+                    self._log_fb_anon_result("no_candidates", row_label)
                 return None
 
         if not candidate:
+            if primary_used_anon:
+                self._log_fb_anon_result("no_candidates", row_label)
             _log(self.logger, f"[Night FB] No non-junk FB candidates for '{artist}', skipping Facebook.")
             _maybe_log_rank_preview(artist, candidates, None, logger=self.logger, selected_by=selected_by)
             return None
 
-        return self._select_candidate_url(
+        selected_url = self._select_candidate_url(
             artist,
             candidate,
             candidates,
@@ -8575,6 +8660,9 @@ class NightModeFacebookEnricher:
             selected_by,
             min_accept_score,
         )
+        if primary_used_anon:
+            self._log_fb_anon_result("success" if selected_url else "no_candidates", row_label)
+        return selected_url
 
     def _can_identity_soft_pass(self, artist_name: str, page_name: str, resolved_url: str, base_score: float) -> bool:
         """
@@ -8641,6 +8729,7 @@ class NightModeFacebookEnricher:
         )
         _log(self.logger, f"[FB Email] Visiting {candidate_url}")
 
+        row_id = self._fb_driver_row_id(row=row, artist_name=artist_name)
         used_driver_kind = "session"
         self._last_fb_surface_driver_kind = used_driver_kind
         outcome_hint = "fetch_error"
@@ -8696,6 +8785,7 @@ class NightModeFacebookEnricher:
                 pages_visited_before = self.fb_email_pages_visited
                 timeout_before = bool(getattr(self, "_last_fb_timeout", False))
                 timeout_url_before = str(getattr(self, "_last_fb_timeout_url", "") or "")
+                self._log_fb_driver_selection("anon", "anon_fast_path", row_id)
                 fast_html, fast_resolved = _fetch_with_anon()
                 timed_out_flag = timed_out_flag or bool(getattr(self, "_last_fb_timeout", False))
                 if fast_html:
@@ -8704,6 +8794,14 @@ class NightModeFacebookEnricher:
                     outcome_hint = "fetched"
                     _log(self.logger, f"[Night FB][AcceptedPage] using fast loader url='{requested_url}'")
                     return fast_html, fast_resolved
+                self._log_fb_anon_result(
+                    self._map_fb_anon_result(
+                        current_url=fast_resolved or requested_url,
+                        timed_out=bool(getattr(self, "_last_fb_timeout", False)),
+                        html_present=bool((fast_html or "").strip()),
+                    ),
+                    row_id,
+                )
                 self._page_budget_remaining = budget_before
                 self.fb_email_pages_visited = pages_visited_before
                 self._last_fb_timeout = timeout_before
@@ -8713,6 +8811,7 @@ class NightModeFacebookEnricher:
                     f"[Night FB][AcceptedPage] fast loader fallback -> session url='{requested_url}'",
                 )
 
+            self._log_fb_driver_selection("session", "session_primary", row_id)
             session_html, session_resolved = _fetch_with_session()
             timed_out_flag = timed_out_flag or bool(getattr(self, "_last_fb_timeout", False))
             if session_html:
@@ -8722,12 +8821,22 @@ class NightModeFacebookEnricher:
                 return session_html, session_resolved
 
             if allow_anon and not prefer_fast_accepted_loader:
+                self._log_fb_driver_selection("anon", "anon_after_session_fail", row_id)
                 anon_html, anon_resolved = _fetch_with_anon()
                 timed_out_flag = timed_out_flag or bool(getattr(self, "_last_fb_timeout", False))
                 if anon_html:
                     used_driver_kind = "anon_fallback"
                     self._last_fb_surface_driver_kind = used_driver_kind
                     outcome_hint = "fetched"
+                else:
+                    self._log_fb_anon_result(
+                        self._map_fb_anon_result(
+                            current_url=anon_resolved or requested_url,
+                            timed_out=bool(getattr(self, "_last_fb_timeout", False)),
+                            html_present=bool((anon_html or "").strip()),
+                        ),
+                        row_id,
+                    )
                 return anon_html, anon_resolved
 
             return session_html, session_resolved
@@ -8737,6 +8846,8 @@ class NightModeFacebookEnricher:
             collect_surfaces=True,
         )
         if (not html) and timed_out_flag:
+            if used_driver_kind.startswith("anon"):
+                self._log_fb_anon_result("fetch_failed", row_id)
             return None, [], used_driver_kind, "timeout"
         if not html:
             return None
@@ -8744,6 +8855,8 @@ class NightModeFacebookEnricher:
         if _is_fb_login_or_security_url(resolved_url):
             _log(self.logger, f"[Night FB] Ignoring login/redirect page: {resolved_url}")
             self.fb_rows_skipped["challenge"] += 1
+            if used_driver_kind.startswith("anon"):
+                self._log_fb_anon_result("login_wall", row_id)
             return None, [], used_driver_kind, "login_wall"
 
         if explicit_pass_a:
@@ -8862,11 +8975,15 @@ class NightModeFacebookEnricher:
                             self.logger,
                             f"[Night FB][PageUnavailable] {resolved_url} (render_state={main_render_reason})",
                         )
+                        if used_driver_kind.startswith("anon"):
+                            self._log_fb_anon_result("no_candidates", row_id)
                         return None, [], used_driver_kind, "content_unavailable"
 
         if _is_fb_content_unavailable_page(html):
             self._last_fb_render_invalid_reason = "content_unavailable"
             _log(self.logger, f"[Night FB][PageUnavailable] {resolved_url}")
+            if used_driver_kind.startswith("anon"):
+                self._log_fb_anon_result("no_candidates", row_id)
             return None, [], used_driver_kind, "content_unavailable"
 
         soup = BeautifulSoup(html, "html.parser")
@@ -9211,6 +9328,17 @@ class NightModeFacebookEnricher:
             email_extract_method=email_method or "regex",
         )
         if not night_result:
+            if used_driver_kind.startswith("anon"):
+                self._log_fb_anon_result(
+                    self._map_fb_anon_result(
+                        result_hint=outcome_hint,
+                        detail=" ".join(part for part in (reject_reason, about_result) if part),
+                        current_url=resolved_url,
+                        timed_out=timed_out_flag,
+                        html_present=bool((html or "").strip()),
+                    ),
+                    row_id,
+                )
             return None
         night_result.source_context = source_context
         night_result.accepted = accepted
@@ -9278,6 +9406,17 @@ class NightModeFacebookEnricher:
                 night_result.email_extract_method = "mailto" if main_mailto else "regex"
         else:
             night_result.email_source = email_source
+        if used_driver_kind.startswith("anon"):
+            self._log_fb_anon_result(
+                self._map_fb_anon_result(
+                    result_hint=outcome_hint,
+                    detail=" ".join(part for part in (reject_reason, about_result) if part),
+                    current_url=resolved_url,
+                    timed_out=timed_out_flag,
+                    html_present=bool((html or "").strip()),
+                ),
+                row_id,
+            )
         return night_result, combined_emails, used_driver_kind, outcome_hint
 
     def _build_result(
@@ -9492,7 +9631,12 @@ class NightModeFacebookEnricher:
         _log(self.logger, f"[Night FB] extracted email(s) {emails} from {page_url}")
         return target_row
 
-    def _diagnose_explicit_fb_failure(self, url: str, allow_anon: bool) -> Tuple[List[str], Optional[str], str]:
+    def _diagnose_explicit_fb_failure(
+        self,
+        url: str,
+        allow_anon: bool,
+        row_id: str = "",
+    ) -> Tuple[List[str], Optional[str], str]:
         driver = None
         try:
             session = self._ensure_session()
@@ -9519,12 +9663,15 @@ class NightModeFacebookEnricher:
                     or getattr(session, "_driver", None)
                     or (session if hasattr(session, "get") else None)
                 )
+                if driver is not None:
+                    self._log_fb_driver_selection("session", "session_primary", row_id or "<unknown>")
             except Exception:
                 driver = None
 
         if (not driver) and allow_anon:
             try:
                 driver = self._get_anon_driver()
+                self._log_fb_driver_selection("anon", "anon_after_session_fail", row_id or "<unknown>")
             except Exception:
                 driver = None
 
@@ -9532,8 +9679,20 @@ class NightModeFacebookEnricher:
             return [], "no_email_found", ""
 
         try:
-            return _try_explicit_fb(driver, url, logger=self.logger)
+            emails, reason, method = _try_explicit_fb(driver, url, logger=self.logger)
+            if driver is self._anon_driver:
+                self._log_fb_anon_result(
+                    self._map_fb_anon_result(
+                        result_hint="success" if emails else "",
+                        detail=reason or "",
+                        current_url=url,
+                    ),
+                    row_id or "<unknown>",
+                )
+            return emails, reason, method
         except Exception:
+            if driver is self._anon_driver:
+                self._log_fb_anon_result("fetch_failed", row_id or "<unknown>")
             return [], "no_email_found", ""
 
     def _enrich_row_unearthed_legacy(
@@ -9542,6 +9701,8 @@ class NightModeFacebookEnricher:
         artist_name: str,
         fb_urls: List[str],
     ) -> Dict[str, str]:
+        row_id = self._fb_driver_row_id(row=result, artist_name=artist_name)
+
         def _night_classify_unearthed_final_page(
             driver,
             fallback_url: str,
@@ -9613,6 +9774,7 @@ class NightModeFacebookEnricher:
         # Always prefer explicit URLs first.
         if fb_urls:
             try:
+                self._log_fb_driver_selection("unearthed", "unearthed_path", row_id)
                 driver = self._get_unearthed_driver()
             except Exception as exc:
                 result["FB_Status"] = "unearthed_driver_error"
@@ -9667,6 +9829,7 @@ class NightModeFacebookEnricher:
                 return result
             _log(self.logger, f"[Unearthed Path] discovery yielded candidate url='{page_url}'")
             try:
+                self._log_fb_driver_selection("unearthed", "unearthed_path", row_id)
                 driver = self._get_unearthed_driver()
             except Exception as exc:
                 result["FB_Status"] = "unearthed_driver_error"
@@ -9794,6 +9957,7 @@ class NightModeFacebookEnricher:
             return _finish(self._mark_row_checkpoint(result))
 
         artist_name = _clean_val(result.get("Artist Name", ""))
+        row_id = self._fb_driver_row_id(row=result, artist_name=artist_name, row_index=row_index)
         is_unearthed = self._is_unearthed_source(result)
         explicit_fb_entrypoints = explicit_fb_entrypoint_urls_for_row(result)
         promoted_fb_url, _ = ensure_canonical_facebook_url(result, set_row=False)
@@ -10069,7 +10233,11 @@ class NightModeFacebookEnricher:
                     diag_emails: List[str] = []
                     probe_url = fb_urls[0] if fb_urls else ""
                     if probe_url:
-                        diag_emails, reason_code, diag_method = self._diagnose_explicit_fb_failure(probe_url, allow_anon=allow_anon)
+                        diag_emails, reason_code, diag_method = self._diagnose_explicit_fb_failure(
+                            probe_url,
+                            allow_anon=allow_anon,
+                            row_id=row_id,
+                        )
                     if diag_emails:
                         page_url = _normalise_fb_url(probe_url)
                         night_result = self._build_result(
