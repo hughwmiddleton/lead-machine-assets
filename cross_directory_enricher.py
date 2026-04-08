@@ -5584,6 +5584,7 @@ class FacebookSearchClient:
         extra_signal: Optional[str] = None,
         *,
         require_strong_candidate: bool = False,
+        defer_identity_floor_to_postscrape: bool = False,
         skip_login_check: bool = False,
     ) -> Optional[str]:
         try:
@@ -6068,6 +6069,7 @@ class FacebookSearchClient:
             start=1,
         ):
             best_score, best_name_score, best_cat_boost, best_is_music, best_is_corp, best_candidate = best_entry
+            deferred_identity_floor = False
 
             if require_strong_candidate:
                 has_identity_evidence, identity_reason = _facebook_candidate_has_min_identity_evidence(
@@ -6076,19 +6078,28 @@ class FacebookSearchClient:
                     name_score=best_name_score,
                 )
                 if not has_identity_evidence:
-                    _safe_log(
-                        self.logger,
-                        "[FB Discover] Rejected candidate for '%s' before scrape - weak identity evidence: %s",
-                        artist_name,
-                        identity_reason,
-                    )
-                    if ranked_index < min(len(ranked_entries), MAX_PRE_SCRAPE_RANKED_CANDIDATES):
+                    if defer_identity_floor_to_postscrape and identity_reason == "identity_floor":
+                        deferred_identity_floor = True
                         _safe_log(
                             self.logger,
-                            "[FB Discover] Considering next plausible ranked candidate for '%s'.",
+                            "[FB Discover] Deferring candidate for '%s' to post-scrape validation after weak identity evidence: %s",
                             artist_name,
+                            identity_reason,
                         )
-                    continue
+                    else:
+                        _safe_log(
+                            self.logger,
+                            "[FB Discover] Rejected candidate for '%s' before scrape - weak identity evidence: %s",
+                            artist_name,
+                            identity_reason,
+                        )
+                        if ranked_index < min(len(ranked_entries), MAX_PRE_SCRAPE_RANKED_CANDIDATES):
+                            _safe_log(
+                                self.logger,
+                                "[FB Discover] Considering next plausible ranked candidate for '%s'.",
+                                artist_name,
+                            )
+                        continue
 
             if bucket_name == "fallback":
                 _safe_log(
@@ -6270,6 +6281,7 @@ class FacebookSearchClient:
                     page_category_text,
                     page_text_blocks,
                     outbound_links,
+                    allow_identity_floor_page_signal_override=deferred_identity_floor,
                     logger=self.logger,
                 )
                 if not is_strong:
@@ -6444,6 +6456,7 @@ def _facebook_candidate_is_strong(
     page_category_text,
     page_text_blocks,
     outbound_links,
+    allow_identity_floor_page_signal_override: bool = False,
     logger=None,
 ) -> Tuple[bool, str]:
     candidate_name = cell_to_str(getattr(candidate, "name", ""))
@@ -6466,10 +6479,13 @@ def _facebook_candidate_is_strong(
         candidate_url,
         cell_to_str(getattr(candidate, "category", "")),
     )
+    zero_name_score_identity_floor = False
     if scored is not None:
         _, name_score, _ = scored
         if name_score <= 0.0:
-            return False, "identity_floor"
+            if not allow_identity_floor_page_signal_override:
+                return False, "identity_floor"
+            zero_name_score_identity_floor = True
 
     category_values: List[str] = []
     for raw_value in (
@@ -6514,6 +6530,8 @@ def _facebook_candidate_is_strong(
     artist_norm = normalize_fb_name(artist_name).replace(" ", "")
     if artist_norm and len(artist_norm) < 4:
         return False, "short_name_without_strong_signal"
+    if zero_name_score_identity_floor:
+        return False, "identity_floor"
 
     return False, "slug_or_name_only_match"
 
@@ -6525,6 +6543,7 @@ def facebook_find_best_page(
     logger,
     *,
     require_strong_candidate: bool = False,
+    defer_identity_floor_to_postscrape: bool = False,
     skip_login_check: bool = False,
 ) -> Optional[str]:
     artist_name = cell_to_str(artist_name)
@@ -6537,6 +6556,7 @@ def facebook_find_best_page(
             artist_name,
             extra_signal,
             require_strong_candidate=require_strong_candidate,
+            defer_identity_floor_to_postscrape=defer_identity_floor_to_postscrape,
             skip_login_check=skip_login_check,
         )
     except Exception as exc:
@@ -6564,6 +6584,7 @@ def _discover_facebook_url_bounded(fb_driver, artist_name: str, extra_signal: st
         fb_client,
         logger,
         require_strong_candidate=True,
+        defer_identity_floor_to_postscrape=True,
         skip_login_check=True,
     )
     canonical_fb_url = canonicalize_facebook_url(fb_url)

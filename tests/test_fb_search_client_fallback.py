@@ -165,6 +165,45 @@ def test_find_best_page_url_rejects_zero_identity_music_candidate(monkeypatch) -
     assert search_methods == ["homepage_ui"]
 
 
+def test_find_best_page_url_defers_identity_floor_to_postscrape_for_bounded_discovery(monkeypatch) -> None:
+    artist_url = "https://www.facebook.com/fergie"
+    driver = _FakeDriver(
+        {
+            artist_url: (
+                "<html><body><div>Musician/Band</div>"
+                "<a href='https://open.spotify.com/artist/test'>Spotify</a></body></html>"
+            ),
+        }
+    )
+    client = cde.FacebookSearchClient(driver=driver, logger=None)
+    monkeypatch.setattr(client, "ensure_facebook_logged_in", lambda: True)
+    monkeypatch.setattr(cde, "score_fb_candidate", lambda *args, **kwargs: (2.0, 0.0, 1.0))
+    monkeypatch.setattr(cde, "is_music_page", lambda *args, **kwargs: True)
+    monkeypatch.setattr(cde, "classify_corporate_signals", lambda *args, **kwargs: SimpleNamespace(has_hard=False, has_artist=True))
+
+    def _fake_fetch(query, *, search_method):  # noqa: ANN001
+        return (
+            (
+                "<div role='main'><div aria-label='Search results'>"
+                f"<div class='card'><a href='{artist_url}'>Fergie</a><div class='subtitle'>Musician/Band</div></div>"
+                "</div></div>"
+            ),
+            "https://www.facebook.com/search/pages/?q=tallulah+argue",
+            False,
+        )
+
+    monkeypatch.setattr(client, "_fetch_search_surface", _fake_fetch)
+
+    result = client.find_best_page_url(
+        "Tallulah Argue",
+        require_strong_candidate=True,
+        defer_identity_floor_to_postscrape=True,
+    )
+
+    assert result == artist_url
+    assert driver.visited_urls == [artist_url]
+
+
 def test_find_best_page_url_tries_next_ranked_candidate_after_prescrape_identity_reject(monkeypatch) -> None:
     logs = []
     rejected_url = "https://www.facebook.com/fergie"
@@ -484,7 +523,16 @@ def test_find_best_page_url_does_not_try_next_candidate_after_postscrape_reject(
             return (2.0, 1.0, 1.0)
         raise AssertionError(f"unexpected candidate: {candidate_url}")
 
-    def _fake_strong(artist_name, candidate, page_html, page_category_text, page_text_blocks, outbound_links, logger=None):  # noqa: ANN001
+    def _fake_strong(
+        artist_name,
+        candidate,
+        page_html,
+        page_category_text,
+        page_text_blocks,
+        outbound_links,
+        allow_identity_floor_page_signal_override=False,
+        logger=None,
+    ):  # noqa: ANN001
         if candidate.url == rejected_url:
             return (False, "slug_or_name_only_match")
         return (True, "music_category")
