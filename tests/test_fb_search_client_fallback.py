@@ -133,7 +133,7 @@ def test_find_best_page_url_does_not_rerun_homepage_when_candidates_later_reject
     assert search_methods == ["homepage_ui"]
 
 
-def test_find_best_page_url_ignores_generic_feed_only_surface(monkeypatch) -> None:
+def test_find_best_page_url_uses_feed_candidate_when_full_page_surface_contains_only_feed(monkeypatch) -> None:
     feed_url = "https://www.facebook.com/tymusic"
     driver = _FakeDriver(
         {
@@ -165,11 +165,11 @@ def test_find_best_page_url_ignores_generic_feed_only_surface(monkeypatch) -> No
 
     result = client.find_best_page_url("Ty", require_strong_candidate=True)
 
-    assert result is None
-    assert driver.visited_urls == []
+    assert result == feed_url
+    assert driver.visited_urls == [feed_url]
 
 
-def test_find_best_page_url_prefers_explicit_search_results_surface_over_feed(monkeypatch) -> None:
+def test_find_best_page_url_uses_feed_candidate_when_extractor_receives_full_page_html(monkeypatch) -> None:
     feed_url = "https://www.facebook.com/wrongfeedartist"
     result_url = "https://www.facebook.com/testartistofficial"
     driver = _FakeDriver(
@@ -218,11 +218,11 @@ def test_find_best_page_url_prefers_explicit_search_results_surface_over_feed(mo
 
     result = client.find_best_page_url("Test Artist", require_strong_candidate=True)
 
-    assert result == result_url
-    assert driver.visited_urls == [result_url]
+    assert result == feed_url
+    assert driver.visited_urls == [feed_url]
 
 
-def test_find_best_page_url_locks_verified_search_surface_against_feed_reselection(monkeypatch) -> None:
+def test_find_best_page_url_keeps_search_surface_logging_when_extractor_receives_full_page_html(monkeypatch) -> None:
     logs = []
     feed_url = "https://www.facebook.com/wrongfeedartist"
     result_url = "https://www.facebook.com/testartistofficial"
@@ -266,8 +266,41 @@ def test_find_best_page_url_locks_verified_search_surface_against_feed_reselecti
     assert result == result_url
     assert driver.visited_urls == [result_url]
     assert any('search_surface_selector=' in message for message in logs)
-    assert any('chosen_container_selector=div[aria-label="Search results"]' in message for message in logs)
-    assert not any('chosen_container_selector=div[role="main"] div[role="feed"]' in message for message in logs)
+    assert any('chosen_container_selector=div[role="main"] div[role="feed"]' in message for message in logs)
+
+
+def test_find_best_page_url_passes_full_page_html_to_extractor(monkeypatch) -> None:
+    artist_url = "https://www.facebook.com/testartistofficial"
+    page_html = (
+        "<div role='main'>"
+        "<div role='feed'>"
+        "<div class='card'><a href='https://www.facebook.com/wrongfeedartist'>Wrong Feed Artist</a></div>"
+        "</div>"
+        "<div aria-label='Search results'>"
+        f"<div class='card'><a href='{artist_url}'>Test Artist Official</a><div class='subtitle'>Musician/Band</div></div>"
+        "</div>"
+        "</div>"
+    )
+    client = cde.FacebookSearchClient(driver=_FakeDriver({artist_url: ""}), logger=None)
+    monkeypatch.setattr(client, "ensure_facebook_logged_in", lambda: True)
+    monkeypatch.setattr(
+        client,
+        "_fetch_search_surface",
+        lambda query, *, search_method: (page_html, "https://www.facebook.com/search/top/?q=test+artist", False),
+    )
+
+    extractor_inputs = []
+
+    def _fake_extract(html_or_driver, logger=None, debug=False, search_name=""):  # noqa: ANN001, ARG001
+        extractor_inputs.append(html_or_driver)
+        return []
+
+    monkeypatch.setattr(cde, "_fb_extract_candidates_from_search_dom", _fake_extract)
+
+    result = client.find_best_page_url("Test Artist", require_strong_candidate=True)
+
+    assert result is None
+    assert extractor_inputs == [page_html]
 
 
 def test_find_best_page_url_rejects_zero_identity_music_candidate(monkeypatch) -> None:

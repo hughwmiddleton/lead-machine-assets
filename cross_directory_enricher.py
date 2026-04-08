@@ -5667,7 +5667,7 @@ class FacebookSearchClient:
                 query,
             )
         candidates = _fb_extract_candidates_from_search_dom(
-            search_surface_html,
+            page_html,
             logger=self.logger,
             debug=os.getenv("FB_DEBUG_DOM_GATE") == "1",
             search_name=artist_name,
