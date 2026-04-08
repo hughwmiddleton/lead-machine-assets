@@ -901,7 +901,7 @@ def test_explicit_pass_a_uses_shared_accepted_page_sweep(monkeypatch) -> None:
     assert outcome == "found_email"
 
 
-def test_explicit_pass_a_safe_fast_loader_preserves_about_continuation(monkeypatch) -> None:
+def test_explicit_pass_a_safe_fast_loader_respects_allow_anon_gate(monkeypatch) -> None:
     logs = []
     enricher = _build_enricher(logs)
     main_url = "https://www.facebook.com/artist"
@@ -934,18 +934,18 @@ def test_explicit_pass_a_safe_fast_loader_preserves_about_continuation(monkeypat
         ),
     }
 
-    def fake_fetch_anon(url, goto_about=False, collect_surfaces=True):  # noqa: ANN001
-        calls.append(("anon", url, collect_surfaces))
+    def fail_anon(*args, **kwargs):  # noqa: ANN001
+        raise AssertionError("anon fast path should not run when allow_anon is false")
+
+    def fake_fetch_session(url, goto_about=False, collect_surfaces=True):  # noqa: ANN001
+        calls.append(("session", url, collect_surfaces))
         html, resolved, visible_text = pages[url]
         enricher._last_fb_visible_text = visible_text
         enricher._last_fb_live_anchor_values = []
         return html, resolved
 
-    def fail_session(*args, **kwargs):  # noqa: ANN001
-        raise AssertionError("session loader should not run for safe fast-path accepted pages")
-
-    monkeypatch.setattr(enricher, "_fetch_html_with_url_anon", fake_fetch_anon)
-    monkeypatch.setattr(enricher, "_fetch_html_with_url", fail_session)
+    monkeypatch.setattr(enricher, "_fetch_html_with_url_anon", fail_anon)
+    monkeypatch.setattr(enricher, "_fetch_html_with_url", fake_fetch_session)
     monkeypatch.setattr(nmfb, "_night_fb_has_music_signals", lambda soup, context: False)
     monkeypatch.setattr(nmfb, "should_accept_email_override", lambda *args, **kwargs: (True, "test_override"))
 
@@ -968,15 +968,16 @@ def test_explicit_pass_a_safe_fast_loader_preserves_about_continuation(monkeypat
     assert night_result.about_attempted == "yes"
     assert night_result.about_result == "emails_found"
     assert calls == [
-        ("anon", main_url, True),
-        ("anon", about_url, True),
+        ("session", main_url, True),
+        ("session", about_url, True),
     ]
-    assert driver_kind == "anon_fast"
+    assert driver_kind == "session"
     assert outcome == "found_email"
     assert any(f"[FB Email] Visiting {about_url}" in msg for msg in logs)
+    assert not any("anon_fast_path" in msg for msg in logs)
 
 
-def test_explicit_pass_a_fast_loader_falls_back_to_session(monkeypatch) -> None:
+def test_explicit_pass_a_session_failure_still_allows_anon_fallback(monkeypatch) -> None:
     logs = []
     enricher = _build_enricher(logs)
     main_url = "https://www.facebook.com/artist"
@@ -984,13 +985,15 @@ def test_explicit_pass_a_fast_loader_falls_back_to_session(monkeypatch) -> None:
 
     def fake_fetch_anon(url, goto_about=False, collect_surfaces=True):  # noqa: ANN001
         calls.append(("anon", url, collect_surfaces))
-        return None, url
+        enricher._last_fb_visible_text = "Bookings: anon@example.com"
+        enricher._last_fb_live_anchor_values = []
+        return "<html><body>Bookings: anon@example.com</body></html>", url
 
     def fake_fetch_session(url, goto_about=False, collect_surfaces=True):  # noqa: ANN001
         calls.append(("session", url, collect_surfaces))
-        enricher._last_fb_visible_text = "Bookings: session@example.com"
+        enricher._last_fb_visible_text = ""
         enricher._last_fb_live_anchor_values = []
-        return "<html><body>Bookings: session@example.com</body></html>", url
+        return None, url
 
     monkeypatch.setattr(enricher, "_fetch_html_with_url_anon", fake_fetch_anon)
     monkeypatch.setattr(enricher, "_fetch_html_with_url", fake_fetch_session)
@@ -1001,26 +1004,26 @@ def test_explicit_pass_a_fast_loader_falls_back_to_session(monkeypatch) -> None:
         main_url,
         {"Artist Name": "Artist", "Email_All": ""},
         "Artist",
-        allow_anon=False,
+        allow_anon=True,
         candidate_context={
             "explicit_accepted_url": True,
-            "accepted_page_fast_loader_safe": True,
+            "accepted_page_fast_loader_safe": False,
         },
     )
 
     assert result is not None
     night_result, emails, driver_kind, outcome = result
-    assert emails == ["session@example.com"]
+    assert emails == ["anon@example.com"]
     assert night_result is not None
-    assert night_result.email == "session@example.com"
+    assert night_result.email == "anon@example.com"
     assert night_result.about_attempted == "no"
     assert calls == [
-        ("anon", main_url, True),
         ("session", main_url, True),
+        ("anon", main_url, True),
     ]
-    assert driver_kind == "session"
+    assert driver_kind == "anon_fallback"
     assert outcome == "found_email"
-    assert any("fast loader fallback -> session" in msg for msg in logs)
+    assert any("anon_after_session_fail" in msg for msg in logs)
 
 
 def test_explicit_pass_a_weak_main_capture_recollects_once_and_skips_about(monkeypatch) -> None:

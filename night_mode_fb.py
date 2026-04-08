@@ -8739,7 +8739,8 @@ class NightModeFacebookEnricher:
         explicit_pass_a = bool(candidate_context and candidate_context.get("explicit_accepted_url"))
         accepted_page_visit = bool(is_discovery or explicit_pass_a)
         prefer_fast_accepted_loader = bool(
-            explicit_pass_a
+            allow_anon
+            and explicit_pass_a
             and candidate_context
             and candidate_context.get("accepted_page_fast_loader_safe")
         )
