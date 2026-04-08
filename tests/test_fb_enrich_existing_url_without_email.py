@@ -83,6 +83,7 @@ def test_discover_facebook_url_bounded_requires_strong_candidate(monkeypatch):
         fb_client,
         logger,
         require_strong_candidate=False,
+        defer_identity_floor_to_postscrape=False,
         skip_login_check=False,
     ):
         calls.append(
@@ -90,6 +91,7 @@ def test_discover_facebook_url_bounded_requires_strong_candidate(monkeypatch):
                 "artist_name": artist_name,
                 "extra_signal": extra_signal,
                 "require_strong_candidate": require_strong_candidate,
+                "defer_identity_floor_to_postscrape": defer_identity_floor_to_postscrape,
                 "skip_login_check": skip_login_check,
             }
         )
@@ -105,6 +107,7 @@ def test_discover_facebook_url_bounded_requires_strong_candidate(monkeypatch):
             "artist_name": "The Midnight Echo",
             "extra_signal": "",
             "require_strong_candidate": True,
+            "defer_identity_floor_to_postscrape": False,
             "skip_login_check": True,
         }
     ]

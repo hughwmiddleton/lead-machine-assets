@@ -6687,7 +6687,6 @@ def _discover_facebook_url_bounded(fb_driver, artist_name: str, extra_signal: st
         fb_client,
         logger,
         require_strong_candidate=True,
-        defer_identity_floor_to_postscrape=True,
         skip_login_check=True,
     )
     canonical_fb_url = canonicalize_facebook_url(fb_url)
