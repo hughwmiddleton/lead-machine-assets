@@ -2932,7 +2932,7 @@ def test_instagram_email_live_bridge_html_handoff_preserves_direct_live_extracti
     assert seed_df.at[0, "Email"] == "bridge-direct@artist.com"
     assert seed_df.at[0, "Email_All"] == "bridge-direct@artist.com"
     _assert_log_contains(logs, "[IG OneHop] bio_link_urls state=empty count=0 sample=-")
-    _assert_log_contains(logs, "[IG OneHop] live_surface_bio_link_urls state=empty count=0 sample=-")
+    _assert_no_log_startswith(logs, "[IG OneHop] live_surface_bio_link_urls")
     _assert_no_log_startswith(logs, "[IG OneHop] onehop_fetch_attempted=")
 
 
@@ -3200,7 +3200,6 @@ def test_instagram_email_live_direct_uses_runtime_structured_bio_text_when_rende
         }
     )
     ctx = worker._build_row_context(seed_df, 0, 1, 1)
-    bio_fetch_calls = []
     live_pages = _install_instagram_profile_fetch_scope(
         monkeypatch,
         static_html="<html><body><div>Static shell without email</div></body></html>",
@@ -3224,14 +3223,7 @@ def test_instagram_email_live_direct_uses_runtime_structured_bio_text_when_rende
     monkeypatch.setattr(
         cde,
         "_fetch_website_html_bounded",
-        lambda session, url, **kwargs: bio_fetch_calls.append(url) or cde.WebsiteFetchResult(
-            url=url,
-            final_url=url,
-            status=200,
-            content_type="text/html",
-            html="<html><body><div>No email on linked page</div></body></html>",
-            is_html=True,
-        ),
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("one-hop should not run")),
     )
 
     matched = worker._enrich_row_instagram_email(seed_df, 0, ctx)
@@ -3239,7 +3231,6 @@ def test_instagram_email_live_direct_uses_runtime_structured_bio_text_when_rende
     assert matched is True
     assert len(live_pages) == 1
     assert live_pages[0].click_calls == []
-    assert bio_fetch_calls == ["https://linktr.ee/structuredbioartist"]
     assert seed_df.at[0, "Email"] == "structuredbio@artist.com"
     assert seed_df.at[0, "Email_All"] == "structuredbio@artist.com"
     assert seed_df.at[0, "Email_Extract_Method"] == "regex"
@@ -3249,6 +3240,60 @@ def test_instagram_email_live_direct_uses_runtime_structured_bio_text_when_rende
         logs,
         "https://www.instagram.com/structuredbioartist/",
         "[IG Email] Found email: structuredbio@artist.com",
+    )
+
+
+def test_instagram_email_live_direct_uses_shared_live_html_before_live_surface_onehop(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Shared Live Html Artist",
+            "Email": "",
+            "Email_All": "",
+            "Instagram_URL": "https://instagram.com/sharedlivehtmlartist/",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+            "Email_Type": "",
+            EMAIL_PROVENANCE_JSON_COL: "",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    live_pages = _install_instagram_profile_fetch_scope(
+        monkeypatch,
+        static_html="<html><body><div>Static shell without email or outbound bio link</div></body></html>",
+        live_page_factory=lambda: _DummyInstagramHiddenContactPage(
+            "<html><body><main><div>Bookings: sharedlivehtml@artist.com</div></main></body></html>",
+            runtime_structured_payloads=[
+                {
+                    "web_profile_info": {
+                        "bio_links": [{"url": "https://linktr.ee/sharedlivehtmlartist"}],
+                    }
+                }
+            ],
+        ),
+    )
+    monkeypatch.setattr(
+        cde,
+        "_fetch_website_html_bounded",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("one-hop should not run")),
+    )
+
+    matched = worker._enrich_row_instagram_email(seed_df, 0, ctx)
+
+    assert matched is True
+    assert len(live_pages) == 1
+    assert live_pages[0].click_calls == []
+    assert seed_df.at[0, "Email"] == "sharedlivehtml@artist.com"
+    assert seed_df.at[0, "Email_All"] == "sharedlivehtml@artist.com"
+    assert seed_df.at[0, "Email_Extract_Method"] == "regex"
+    assert "instagram_profile" in seed_df.at[0, EMAIL_PROVENANCE_JSON_COL]
+    assert "instagram_bio_link_one_hop" not in seed_df.at[0, EMAIL_PROVENANCE_JSON_COL]
+    _assert_ig_visit_and_outcome(
+        logs,
+        "https://www.instagram.com/sharedlivehtmlartist/",
+        "[IG Email] Found email: sharedlivehtml@artist.com",
     )
 
 

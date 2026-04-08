@@ -11293,27 +11293,106 @@ class CrossDirectoryEnricherWorker(QThread):
                         live_html = live_page.snapshot_html()
                         if _instagram_profile_fetch_usable(200, live_html):
                             shared_live_html = live_html
-                            live_onehop_html = _extract_instagram_onehop_profile_surface_html(live_html)
-                            live_clickable_bio_link_urls = _collect_instagram_live_profile_clickable_bio_link_urls(
-                                live_page.page,
-                                profile_url=ig_url,
+                            print("DEBUG IG: shared_live_html length =", len(shared_live_html or ""))
+                            print("DEBUG IG: running live HTML direct extraction")
+                            print("DEBUG IG: contains exact email =", "lacedupmgmt@gmail.com" in (shared_live_html or "").lower())
+                            print("DEBUG IG: contains @gmail.com =", "@gmail.com" in (shared_live_html or "").lower())
+                            live_soup = BeautifulSoup(shared_live_html, "html.parser")
+                            all_ig_emails = _extract_instagram_direct_profile_candidate_emails(
+                                shared_live_html,
+                                soup=live_soup,
                             )
-                            (
-                                all_ig_emails,
-                                selected_source_url,
-                                selected_extract_method,
-                                onehop_target_attempted,
-                            ) = _instagram_onehop_emails_from_surface(
-                                self.session,
-                                live_onehop_html,
-                                profile_url=ig_url,
-                                log=self.log_message.emit,
-                                state_label="live_surface_bio_link_urls",
-                                runtime_structured_payloads=runtime_structured_payloads,
-                                live_rendered_bio_link_urls=live_clickable_bio_link_urls,
-                            )
-                            if all_ig_emails:
-                                selected_surface = "instagram_bio_link_one_hop"
+                            if not all_ig_emails:
+                                print("DEBUG IG: entering rendered text fallback")
+                                print("DEBUG IG: shared_live_page is None =", shared_live_page is None)
+                                try:
+                                    rendered_live_text = cell_to_str(
+                                        shared_live_page.page.evaluate(
+                                            "() => document.body ? (document.body.innerText || '') : ''"
+                                        )
+                                    )
+                                    print("DEBUG IG: rendered_live_text length =", len(rendered_live_text or ""))
+                                    print(
+                                        "DEBUG IG: rendered contains exact email =",
+                                        "LacedupMGMT@gmail.com" in (rendered_live_text or ""),
+                                    )
+                                    print(
+                                        "DEBUG IG: rendered contains @gmail.com =",
+                                        "@gmail.com" in (rendered_live_text or "").lower(),
+                                    )
+                                    body_text_content = cell_to_str(
+                                        shared_live_page.page.evaluate(
+                                            "document.body ? (document.body.textContent || '') : ''"
+                                        )
+                                    )
+                                    print("DEBUG IG: body.textContent length =", len(body_text_content or ""))
+                                    main_text = cell_to_str(shared_live_page.page.evaluate(
+                                        "(() => { const el = document.querySelector('main'); return el ? (el.innerText || el.textContent || '') : ''; })()"
+                                    ))
+                                    print("DEBUG IG: main.innerText length =", len(main_text or ""))
+                                    print("DEBUG IG: main contains @gmail.com =", "@gmail.com" in (main_text or "").lower())
+                                    all_text = cell_to_str(shared_live_page.page.evaluate(
+                                        "(() => document.documentElement ? (document.documentElement.textContent || '') : '')()"
+                                    ))
+                                    print("DEBUG IG: document.textContent length =", len(all_text or ""))
+                                    print("DEBUG IG: document contains @gmail.com =", "@gmail.com" in (all_text or "").lower())
+                                    bio_text = cell_to_str(shared_live_page.page.evaluate(
+                                        "(() => { const nodes = Array.from(document.querySelectorAll('h1, span, div')); return nodes.map(n => n.innerText || '').join(' '); })()"
+                                    ))
+                                    print("DEBUG IG: aggregated node text length =", len(bio_text or ""))
+                                    print("DEBUG IG: aggregated contains @gmail.com =", "@gmail.com" in (bio_text or "").lower())
+                                    structured_bio_text = " ".join(
+                                        _collect_instagram_bio_equivalent_structured_texts(runtime_structured_payloads)
+                                    )
+                                    print(
+                                        "DEBUG IG: structured bio text length =",
+                                        len(structured_bio_text or ""),
+                                    )
+                                    print(
+                                        "DEBUG IG: structured bio contains @gmail.com =",
+                                        "@gmail.com" in (structured_bio_text or "").lower(),
+                                    )
+                                    rendered_live_text, rendered_live_surface = _select_rendered_live_text_surface(
+                                        ("document.body.innerText", rendered_live_text),
+                                        ("main.innerText_or_textContent", main_text),
+                                        ("aggregated_visible_node_text", bio_text),
+                                        ("document.body.textContent", body_text_content),
+                                        ("document.documentElement.textContent", all_text),
+                                        ("runtime_structured_bio_text", structured_bio_text),
+                                    )
+                                    print(
+                                        "DEBUG IG: chosen rendered surface =",
+                                        rendered_live_surface or "none",
+                                    )
+                                except Exception as exc:
+                                    print(f"DEBUG IG: rendered text evaluate failed: {repr(exc)}")
+                                    rendered_live_text = ""
+                                if rendered_live_text:
+                                    print("DEBUG IG: running rendered text direct extraction")
+                                    normalized_rendered_live_text = unicodedata.normalize("NFKC", rendered_live_text)
+                                    all_ig_emails = _extract_instagram_profile_candidate_emails(normalized_rendered_live_text)
+                            if not all_ig_emails:
+                                live_onehop_html = _extract_instagram_onehop_profile_surface_html(live_html)
+                                live_clickable_bio_link_urls = _collect_instagram_live_profile_clickable_bio_link_urls(
+                                    live_page.page,
+                                    profile_url=ig_url,
+                                )
+                                (
+                                    all_ig_emails,
+                                    selected_source_url,
+                                    selected_extract_method,
+                                    onehop_target_attempted,
+                                ) = _instagram_onehop_emails_from_surface(
+                                    self.session,
+                                    live_onehop_html,
+                                    profile_url=ig_url,
+                                    log=self.log_message.emit,
+                                    state_label="live_surface_bio_link_urls",
+                                    runtime_structured_payloads=runtime_structured_payloads,
+                                    live_rendered_bio_link_urls=live_clickable_bio_link_urls,
+                                )
+                                if all_ig_emails:
+                                    selected_surface = "instagram_bio_link_one_hop"
                 bridge_failed = shared_live_page_attempted and shared_live_page is None
                 if (
                     not all_ig_emails
@@ -11342,89 +11421,6 @@ class CrossDirectoryEnricherWorker(QThread):
                     if all_ig_emails:
                         selected_source_url = ig_url
                         selected_extract_method = "regex"
-                print("DEBUG IG: shared_live_html length =", len(shared_live_html or ""))
-                if (
-                    not all_ig_emails
-                    and shared_live_html
-                    and not _row_has_email(seed_df.loc[row_idx])
-                ):
-                    print("DEBUG IG: running live HTML direct extraction")
-                    print("DEBUG IG: contains exact email =", "lacedupmgmt@gmail.com" in (shared_live_html or "").lower())
-                    print("DEBUG IG: contains @gmail.com =", "@gmail.com" in (shared_live_html or "").lower())
-                    live_soup = BeautifulSoup(shared_live_html, "html.parser")
-                    all_ig_emails = _extract_instagram_direct_profile_candidate_emails(
-                        shared_live_html,
-                        soup=live_soup,
-                    )
-                    if not all_ig_emails and shared_live_page is not None:
-                        print("DEBUG IG: entering rendered text fallback")
-                        print("DEBUG IG: shared_live_page is None =", shared_live_page is None)
-                        try:
-                            rendered_live_text = cell_to_str(
-                                shared_live_page.page.evaluate(
-                                    "() => document.body ? (document.body.innerText || '') : ''"
-                                )
-                            )
-                            print("DEBUG IG: rendered_live_text length =", len(rendered_live_text or ""))
-                            print(
-                                "DEBUG IG: rendered contains exact email =",
-                                "LacedupMGMT@gmail.com" in (rendered_live_text or ""),
-                            )
-                            print(
-                                "DEBUG IG: rendered contains @gmail.com =",
-                                "@gmail.com" in (rendered_live_text or "").lower(),
-                            )
-                            body_text_content = cell_to_str(
-                                shared_live_page.page.evaluate(
-                                    "document.body ? (document.body.textContent || '') : ''"
-                                )
-                            )
-                            print("DEBUG IG: body.textContent length =", len(body_text_content or ""))
-                            main_text = cell_to_str(shared_live_page.page.evaluate(
-                                "(() => { const el = document.querySelector('main'); return el ? (el.innerText || el.textContent || '') : ''; })()"
-                            ))
-                            print("DEBUG IG: main.innerText length =", len(main_text or ""))
-                            print("DEBUG IG: main contains @gmail.com =", "@gmail.com" in (main_text or "").lower())
-                            all_text = cell_to_str(shared_live_page.page.evaluate(
-                                "(() => document.documentElement ? (document.documentElement.textContent || '') : '')()"
-                            ))
-                            print("DEBUG IG: document.textContent length =", len(all_text or ""))
-                            print("DEBUG IG: document contains @gmail.com =", "@gmail.com" in (all_text or "").lower())
-                            bio_text = cell_to_str(shared_live_page.page.evaluate(
-                                "(() => { const nodes = Array.from(document.querySelectorAll('h1, span, div')); return nodes.map(n => n.innerText || '').join(' '); })()"
-                            ))
-                            print("DEBUG IG: aggregated node text length =", len(bio_text or ""))
-                            print("DEBUG IG: aggregated contains @gmail.com =", "@gmail.com" in (bio_text or "").lower())
-                            structured_bio_text = " ".join(
-                                _collect_instagram_bio_equivalent_structured_texts(runtime_structured_payloads)
-                            )
-                            print(
-                                "DEBUG IG: structured bio text length =",
-                                len(structured_bio_text or ""),
-                            )
-                            print(
-                                "DEBUG IG: structured bio contains @gmail.com =",
-                                "@gmail.com" in (structured_bio_text or "").lower(),
-                            )
-                            rendered_live_text, rendered_live_surface = _select_rendered_live_text_surface(
-                                ("document.body.innerText", rendered_live_text),
-                                ("main.innerText_or_textContent", main_text),
-                                ("aggregated_visible_node_text", bio_text),
-                                ("document.body.textContent", body_text_content),
-                                ("document.documentElement.textContent", all_text),
-                                ("runtime_structured_bio_text", structured_bio_text),
-                            )
-                            print(
-                                "DEBUG IG: chosen rendered surface =",
-                                rendered_live_surface or "none",
-                            )
-                        except Exception as exc:
-                            print(f"DEBUG IG: rendered text evaluate failed: {repr(exc)}")
-                            rendered_live_text = ""
-                        if rendered_live_text:
-                            print("DEBUG IG: running rendered text direct extraction")
-                            normalized_rendered_live_text = unicodedata.normalize("NFKC", rendered_live_text)
-                            all_ig_emails = _extract_instagram_profile_candidate_emails(normalized_rendered_live_text)
                 if (
                     not all_ig_emails
                     and not _row_has_email(seed_df.loc[row_idx])
