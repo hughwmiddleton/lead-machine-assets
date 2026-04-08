@@ -5666,8 +5666,9 @@ class FacebookSearchClient:
                 "[FB Enrich] search_method=homepage_ui search_surface_selector=NONE query='%s'",
                 query,
             )
+        extraction_html = search_surface_html if search_surface_selector and search_surface_html else page_html
         candidates = _fb_extract_candidates_from_search_dom(
-            page_html,
+            extraction_html,
             logger=self.logger,
             debug=os.getenv("FB_DEBUG_DOM_GATE") == "1",
             search_name=artist_name,
