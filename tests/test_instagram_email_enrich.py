@@ -2388,6 +2388,82 @@ def test_select_instagram_onehop_target_returns_empty_when_only_blocked_candidat
     _assert_log_contains(logs, "[IG OneHop] no_useful_target_after_ranking")
 
 
+def test_select_instagram_onehop_target_prefers_specific_target_over_generic_threads_root():
+    logs = []
+
+    target = cde._select_instagram_onehop_target(
+        [
+            "https://www.threads.com",
+            "https://artist-example.com/contact",
+        ],
+        log=logs.append,
+    )
+
+    assert target == "https://artist-example.com/contact"
+    _assert_log_contains(logs, "[IG OneHop] ranked_target_selected tier=external_domain url=https://artist-example.com/contact")
+    _assert_log_contains(
+        logs,
+        "[IG OneHop] ranked_target_decision specificity=specific_path generic_root_demotion=1 low_value_platform_demotion=1 fallback_weak=0 url=https://artist-example.com/contact",
+    )
+
+
+def test_select_instagram_onehop_target_prefers_specific_page_over_generic_root():
+    logs = []
+
+    target = cde._select_instagram_onehop_target(
+        [
+            "https://artist-example.com/",
+            "https://press.artist-example.com/contact",
+        ],
+        log=logs.append,
+    )
+
+    assert target == "https://press.artist-example.com/contact"
+    _assert_log_contains(logs, "[IG OneHop] ranked_target_selected tier=external_domain url=https://press.artist-example.com/contact")
+    _assert_log_contains(
+        logs,
+        "[IG OneHop] ranked_target_decision specificity=specific_path generic_root_demotion=1 low_value_platform_demotion=0 fallback_weak=0 url=https://press.artist-example.com/contact",
+    )
+
+
+def test_select_instagram_onehop_target_retains_fallback_when_only_weak_candidates_exist():
+    logs = []
+
+    target = cde._select_instagram_onehop_target(
+        [
+            "https://artist-example.com/",
+            "https://www.threads.com",
+        ],
+        log=logs.append,
+    )
+
+    assert target == "https://artist-example.com/"
+    _assert_log_contains(logs, "[IG OneHop] ranked_target_selected tier=external_domain url=https://artist-example.com/")
+    _assert_log_contains(
+        logs,
+        "[IG OneHop] ranked_target_decision specificity=generic_root generic_root_demotion=0 low_value_platform_demotion=0 fallback_weak=1 url=https://artist-example.com/",
+    )
+
+
+def test_select_instagram_onehop_target_keeps_user_specific_threads_page_eligible():
+    logs = []
+
+    target = cde._select_instagram_onehop_target(
+        [
+            "https://artist-example.com/",
+            "https://www.threads.com/@artistname",
+        ],
+        log=logs.append,
+    )
+
+    assert target == "https://www.threads.com/@artistname"
+    _assert_log_contains(logs, "[IG OneHop] ranked_target_selected tier=external_info url=https://www.threads.com/@artistname")
+    _assert_log_contains(
+        logs,
+        "[IG OneHop] ranked_target_decision specificity=specific_path generic_root_demotion=1 low_value_platform_demotion=0 fallback_weak=0 url=https://www.threads.com/@artistname",
+    )
+
+
 def test_instagram_email_one_hop_bio_link_recovers_direct_email_from_structured_script(monkeypatch):
     logs = []
     worker = _make_worker(logs)
