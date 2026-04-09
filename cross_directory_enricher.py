@@ -3707,6 +3707,18 @@ def _select_instagram_onehop_target(
     return selected_url
 
 
+def _instagram_onehop_target_is_meaningful_fetch_target(url: str) -> bool:
+    if not url or _instagram_onehop_block_reason(url):
+        return False
+
+    _, tier_name = _instagram_onehop_target_tier(url)
+    if tier_name in {"linkhub", "music_service", "external_domain"}:
+        return True
+
+    _, _, _, specificity_label = _instagram_onehop_target_specificity(url)
+    return specificity_label == "specific_path" and not _instagram_onehop_is_utility_info_target(url)
+
+
 _INSTAGRAM_BIO_LINK_META_KEY_ATTRS = ("property", "name", "itemprop")
 _INSTAGRAM_BIO_LINK_META_ALLOW_TOKENS = ("url", "link", "website", "external", "sameas", "same_as")
 _INSTAGRAM_BIO_LINK_META_SKIP_TOKENS = ("image", "video", "audio", "icon", "thumbnail", "player")
@@ -4596,6 +4608,12 @@ def _instagram_onehop_emails_from_surface(
 
     if callable(log):
         log(f"[IG OneHop] onehop_selected_target={onehop_target}")
+    if not _instagram_onehop_target_is_meaningful_fetch_target(onehop_target):
+        if callable(log):
+            log(f"[IG OneHop] onehop_fetch_skipped reason=no_meaningful_target url={onehop_target}")
+        return ([], "", "regex", "")
+
+    if callable(log):
         log(f"[IG OneHop] onehop_fetch_attempted={onehop_target}")
     bio_link_result = _fetch_website_html_bounded(
         session,

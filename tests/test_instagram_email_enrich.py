@@ -2574,6 +2574,80 @@ def test_select_instagram_onehop_target_keeps_user_specific_platform_page_above_
     _assert_log_contains(logs, "[IG OneHop] ranked_target_selected tier=external_info url=https://www.threads.com/@artistname")
 
 
+def test_instagram_onehop_emails_from_surface_skips_fetch_for_selected_weak_utility_target(monkeypatch):
+    logs = []
+    fetch_calls = []
+
+    def fake_fetch_website_html_bounded(session, url, **kwargs):  # noqa: ANN001
+        fetch_calls.append(url)
+        pytest.fail("weak utility-only winner should not trigger one-hop fetch")
+
+    monkeypatch.setattr(cde, "_fetch_website_html_bounded", fake_fetch_website_html_bounded)
+
+    emails, source_url, extract_method, onehop_target = cde._instagram_onehop_emails_from_surface(
+        None,
+        "<html><body>"
+        "<a href='https://developers.facebook.com/docs/instagram'>Docs</a>"
+        "<a href='https://www.meta.ai/?utm_source=foa_web_footer'>Meta AI</a>"
+        "<a href='https://www.threads.com'>Threads</a>"
+        "</body></html>",
+        profile_url="https://www.instagram.com/weakutilityartist/",
+        log=logs.append,
+    )
+
+    assert emails == []
+    assert source_url == ""
+    assert extract_method == "regex"
+    assert onehop_target == ""
+    assert fetch_calls == []
+    _assert_log_contains(logs, "[IG OneHop] ranked_target_selected tier=external_info url=https://developers.facebook.com/docs/instagram")
+    _assert_log_contains(logs, "[IG OneHop] onehop_selected_target=https://developers.facebook.com/docs/instagram")
+    _assert_log_contains(
+        logs,
+        "[IG OneHop] onehop_fetch_skipped reason=no_meaningful_target url=https://developers.facebook.com/docs/instagram",
+    )
+    _assert_no_log_startswith(logs, "[IG OneHop] onehop_fetch_attempted=")
+
+
+def test_instagram_onehop_emails_from_surface_still_fetches_meaningful_target(monkeypatch):
+    logs = []
+    fetch_calls = []
+    target_url = "https://linktr.ee/meaningfulartist"
+
+    def fake_fetch_website_html_bounded(session, url, **kwargs):  # noqa: ANN001
+        fetch_calls.append(url)
+        return cde.WebsiteFetchResult(
+            url=url,
+            final_url=url,
+            status=200,
+            content_type="text/html",
+            html="<html><body>Bookings: meaningful@artist.com</body></html>",
+            is_html=True,
+        )
+
+    monkeypatch.setattr(cde, "_fetch_website_html_bounded", fake_fetch_website_html_bounded)
+
+    emails, source_url, extract_method, onehop_target = cde._instagram_onehop_emails_from_surface(
+        None,
+        "<html><body>"
+        "<a href='https://developers.facebook.com/docs/instagram'>Docs</a>"
+        f"<a href='{target_url}'>Linktree</a>"
+        "</body></html>",
+        profile_url="https://www.instagram.com/meaningfulartist/",
+        log=logs.append,
+    )
+
+    assert emails == ["meaningful@artist.com"]
+    assert source_url == target_url
+    assert extract_method == "regex"
+    assert onehop_target == target_url
+    assert fetch_calls == [target_url]
+    _assert_log_contains(logs, f"[IG OneHop] ranked_target_selected tier=linkhub url={target_url}")
+    _assert_log_contains(logs, f"[IG OneHop] onehop_selected_target={target_url}")
+    _assert_log_contains(logs, f"[IG OneHop] onehop_fetch_attempted={target_url}")
+    _assert_no_log_startswith(logs, "[IG OneHop] onehop_fetch_skipped reason=no_meaningful_target")
+
+
 def test_instagram_email_one_hop_bio_link_recovers_direct_email_from_structured_script(monkeypatch):
     logs = []
     worker = _make_worker(logs)
@@ -4502,6 +4576,56 @@ def test_instagram_email_one_hop_blocked_only_targets_skip_fetch(monkeypatch):
     assert seed_df.at[0, "Email"] == ""
     _assert_log_contains(logs, "[IG OneHop] no_useful_target_after_ranking")
     _assert_no_log_startswith(logs, "[IG OneHop] onehop_fetch_attempted=")
+
+
+def test_instagram_email_one_hop_weak_utility_only_target_resolves_to_clean_no_email(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Weak Utility Only",
+            "Email": "",
+            "Email_All": "",
+            "Instagram_URL": "https://instagram.com/weakutilityonly/",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+            "Email_Type": "",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+
+    monkeypatch.setattr(
+        cde,
+        "_fetch_instagram_profile_html",
+        lambda session, url: (
+            "<html><body>"
+            "<a href='https://developers.facebook.com/docs/instagram'>Docs</a>"
+            "<a href='https://www.meta.ai/?utm_source=foa_web_footer'>Meta AI</a>"
+            "<a href='https://www.threads.com'>Threads</a>"
+            "</body></html>",
+            200,
+        ),
+    )
+    monkeypatch.setattr(
+        cde,
+        "_fetch_website_html_bounded",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("weak utility-only winner should not fetch")),
+    )
+
+    matched = worker._enrich_row_instagram_email(seed_df, 0, ctx)
+
+    assert matched is False
+    assert seed_df.at[0, "Email"] == ""
+    assert seed_df.at[0, "Email_All"] == ""
+    _assert_log_contains(logs, "[IG OneHop] ranked_target_selected tier=external_info url=https://developers.facebook.com/docs/instagram")
+    _assert_log_contains(logs, "[IG OneHop] onehop_selected_target=https://developers.facebook.com/docs/instagram")
+    _assert_log_contains(
+        logs,
+        "[IG OneHop] onehop_fetch_skipped reason=no_meaningful_target url=https://developers.facebook.com/docs/instagram",
+    )
+    _assert_no_log_startswith(logs, "[IG OneHop] onehop_fetch_attempted=")
+    _assert_log_contains(logs, "[IG Email] no_email_visible")
 
 
 def test_instagram_email_one_hop_does_not_follow_links_found_on_fetched_page(monkeypatch):
