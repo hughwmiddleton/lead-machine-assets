@@ -3256,6 +3256,38 @@ def _extract_instagram_direct_profile_candidate_emails(
     )
 
 
+_INSTAGRAM_EMAIL_ARTIFACT_FILE_EXTENSIONS = frozenset({"js", "css", "map"})
+
+
+def _instagram_email_candidate_rejection_reason(email: str) -> str:
+    normalized = normalize_email_value(email)
+    if not normalized:
+        return "invalid"
+    if is_obvious_placeholder_email(normalized):
+        return "placeholder"
+    _, domain = normalized.split("@", 1)
+    domain_labels = [label for label in domain.strip(".").split(".") if label]
+    if domain_labels and domain_labels[-1] in _INSTAGRAM_EMAIL_ARTIFACT_FILE_EXTENSIONS:
+        return "asset_artifact"
+    return ""
+
+
+def _filter_instagram_email_candidates_for_acceptance(
+    emails: Iterable[str],
+    *,
+    log: Optional[Any] = None,
+) -> List[str]:
+    filtered: List[str] = []
+    for email in filter_system_telemetry_emails(emails):
+        reason = _instagram_email_candidate_rejection_reason(email)
+        if reason:
+            if callable(log):
+                log(f"[IG Email] rejected_email_candidate reason={reason} value={email}")
+            continue
+        filtered.append(email)
+    return filtered
+
+
 def _normalise_instagram_bio_link_fetch_url(raw: str, *, base_url: str = "") -> str:
     candidate = cell_to_str(raw)
     if not candidate:
@@ -11690,6 +11722,10 @@ class CrossDirectoryEnricherWorker(QThread):
             finally:
                 if shared_live_page is not None:
                     shared_live_page.close()
+        all_ig_emails = _filter_instagram_email_candidates_for_acceptance(
+            all_ig_emails,
+            log=self.log_message.emit,
+        )
         if not all_ig_emails:
             self.log_message.emit("[IG Email] no_email_visible")
             self._set_platform_state("instagram", "skipped")

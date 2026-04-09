@@ -2692,9 +2692,118 @@ def test_instagram_email_one_hop_bio_link_recovers_direct_email(monkeypatch):
         "https://www.instagram.com/onehopartist/",
         "[IG Email] Found email: bookings@artist.com",
     )
+    _assert_no_log_startswith(logs, "[IG Email] rejected_email_candidate")
     _assert_log_contains(logs, "[IG OneHop] bio_link_urls state=non_empty count=1 sample=https://linktr.ee/onehopartist")
     _assert_log_contains(logs, "[IG OneHop] onehop_selected_target=https://linktr.ee/onehopartist")
     _assert_log_contains(logs, "[IG OneHop] onehop_fetch_attempted=https://linktr.ee/onehopartist")
+
+
+def test_instagram_email_one_hop_rejects_asset_artifact_pseudo_email(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Artifact Artist",
+            "Email": "",
+            "Email_All": "",
+            "Instagram_URL": "https://instagram.com/artifactartist/",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+            "Email_Type": "",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+
+    monkeypatch.setattr(
+        cde,
+        "_fetch_instagram_profile_html",
+        lambda session, url: (
+            "<html><body><a href='https://distrokid.com/hyperfollow/artifactartist'>Bio</a></body></html>",
+            200,
+        ),
+    )
+    monkeypatch.setattr(
+        cde,
+        "_fetch_website_html_bounded",
+        lambda session, url, **kwargs: cde.WebsiteFetchResult(
+            url=url,
+            final_url=url,
+            status=200,
+            content_type="text/html",
+            html="<html><body>sweetalert2@8.min.js</body></html>",
+            is_html=True,
+        ),
+    )
+
+    matched = worker._enrich_row_instagram_email(seed_df, 0, ctx)
+
+    assert matched is False
+    assert seed_df.at[0, "Email"] == ""
+    assert seed_df.at[0, "Email_All"] == ""
+    _assert_log_contains(
+        logs,
+        "[IG Email] rejected_email_candidate reason=asset_artifact value=sweetalert2@8.min.js",
+    )
+    _assert_ig_visit_and_outcome(
+        logs,
+        "https://www.instagram.com/artifactartist/",
+        "[IG Email] no_email_visible",
+    )
+
+
+def test_instagram_email_one_hop_mixed_candidates_keep_real_email_and_reject_artifact(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Mixed Candidate Artist",
+            "Email": "",
+            "Email_All": "",
+            "Instagram_URL": "https://instagram.com/mixedcandidateartist/",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+            "Email_Type": "",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+
+    monkeypatch.setattr(
+        cde,
+        "_fetch_instagram_profile_html",
+        lambda session, url: (
+            "<html><body><a href='https://solo.to/mixedcandidateartist'>Bio</a></body></html>",
+            200,
+        ),
+    )
+    monkeypatch.setattr(
+        cde,
+        "_fetch_website_html_bounded",
+        lambda session, url, **kwargs: cde.WebsiteFetchResult(
+            url=url,
+            final_url=url,
+            status=200,
+            content_type="text/html",
+            html="<html><body>sweetalert2@8.min.js bookings@artist.com</body></html>",
+            is_html=True,
+        ),
+    )
+
+    matched = worker._enrich_row_instagram_email(seed_df, 0, ctx)
+
+    assert matched is True
+    assert seed_df.at[0, "Email"] == "bookings@artist.com"
+    assert seed_df.at[0, "Email_All"] == "bookings@artist.com"
+    _assert_log_contains(
+        logs,
+        "[IG Email] rejected_email_candidate reason=asset_artifact value=sweetalert2@8.min.js",
+    )
+    _assert_ig_visit_and_outcome(
+        logs,
+        "https://www.instagram.com/mixedcandidateartist/",
+        "[IG Email] Found email: bookings@artist.com",
+    )
 
 
 def test_instagram_email_one_hop_bio_link_recovers_mailto(monkeypatch):
