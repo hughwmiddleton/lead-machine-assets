@@ -2241,6 +2241,7 @@ def test_collect_instagram_live_profile_clickable_bio_link_urls_recovers_interac
     urls = cde._collect_instagram_live_profile_clickable_bio_link_urls(
         page,
         profile_url="https://www.instagram.com/interactionartist/",
+        raw_control_values=[],
     )
 
     assert urls == ["https://linktr.ee/interactionartist"]
@@ -2258,6 +2259,7 @@ def test_collect_instagram_live_profile_clickable_bio_link_urls_does_not_run_int
     urls = cde._collect_instagram_live_profile_clickable_bio_link_urls(
         page,
         profile_url="https://www.instagram.com/preclickartist/",
+        raw_control_values=["https://linktr.ee/preclickartist"],
     )
 
     assert urls == ["https://linktr.ee/preclickartist"]
@@ -3338,6 +3340,15 @@ def test_instagram_email_one_hop_live_surface_interaction_recovery_flows_through
     assert seed_df.at[0, "Email"] == "interaction-ranking@artist.com"
     assert seed_df.at[0, "Email_All"] == "interaction-ranking@artist.com"
     assert seed_df.at[0, "Email_Source_URL"] == target_url
+    _assert_log_contains(logs, "[IG Probe] raw_control_values count=0 sample=-")
+    _assert_log_contains(
+        logs,
+        "[IG Probe] normalised_urls count=1 sample=https://linktr.ee/interactionrankingartist",
+    )
+    _assert_log_contains(
+        logs,
+        "[IG Probe] live_admission admitted=1 sample=https://linktr.ee/interactionrankingartist",
+    )
     _assert_log_contains(
         logs,
         "[IG OneHop] primary_candidate_merge static_count=1 live_admitted=1 merged_count=2 "

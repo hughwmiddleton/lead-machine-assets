@@ -4680,10 +4680,12 @@ def _collect_instagram_live_profile_clickable_bio_link_urls(
     )
     for raw_value in collected_raw_control_values:
         _ingest_raw_value(raw_value)
-    has_usable_raw_values = any(cell_to_str(raw_value).strip() for raw_value in collected_raw_control_values)
-    if candidate_urls or has_usable_raw_values:
-        return candidate_urls
-    _ingest_raw_value(_recover_instagram_live_profile_clickable_bio_link_url_via_interaction(page))
+    usable_raw_values = [cell_to_str(raw_value).strip() for raw_value in collected_raw_control_values if cell_to_str(raw_value).strip()]
+    has_usable_raw_values = bool(usable_raw_values)
+    has_candidate_urls = bool(candidate_urls)
+    should_run_interaction_fallback = not has_candidate_urls and not has_usable_raw_values
+    if should_run_interaction_fallback:
+        _ingest_raw_value(_recover_instagram_live_profile_clickable_bio_link_url_via_interaction(page))
     return candidate_urls
 
 
