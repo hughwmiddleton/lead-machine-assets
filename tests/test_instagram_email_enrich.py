@@ -74,6 +74,9 @@ class _DummyInstagramHiddenContactPage(_DummyClosable):
         runtime_structured_payloads=None,
         runtime_window_payloads=None,
         live_bio_link_control_values=None,
+        interaction_bio_link_selector=None,
+        interaction_bio_link_resolved_url="",
+        interaction_bio_link_page_url="",
     ):
         super().__init__()
         self._html = html
@@ -99,8 +102,12 @@ class _DummyInstagramHiddenContactPage(_DummyClosable):
         self._live_bio_link_control_values = (
             None if live_bio_link_control_values is None else list(live_bio_link_control_values)
         )
+        self._interaction_bio_link_selector = str(interaction_bio_link_selector or "").strip()
+        self._interaction_bio_link_resolved_url = str(interaction_bio_link_resolved_url or "").strip()
+        self._interaction_bio_link_page_url = str(interaction_bio_link_page_url or "").strip()
         self.click_calls = []
         self.wait_calls = []
+        self.url = ""
 
     def content(self):
         return self._html
@@ -238,6 +245,17 @@ class _DummyInstagramHiddenContactPage(_DummyClosable):
                         for anchor in nearby.select("a[href]")[:4]:
                             add_anchor_values(anchor)
             return values
+        if "ig-live-bio-link-interaction-recovery" in script_text:
+            if 'const state = window["' in script_text:
+                if self._interaction_bio_link_page_url:
+                    return self._interaction_bio_link_page_url
+                if (
+                    self._interaction_bio_link_selector
+                    and self._interaction_bio_link_selector in self.click_calls
+                ):
+                    return self._interaction_bio_link_resolved_url
+                return ""
+            return self._interaction_bio_link_selector
         if "document.body" in script_text and "innerText" in script_text:
             return self._rendered_body_inner_text
         if "document.body" in script_text and "textContent" in script_text:
@@ -277,6 +295,8 @@ class _DummyInstagramHiddenContactPage(_DummyClosable):
             effect(self)
         elif isinstance(effect, str):
             self._html = effect
+        if selector == self._interaction_bio_link_selector and self._interaction_bio_link_page_url:
+            self.url = self._interaction_bio_link_page_url
 
     def wait_for_timeout(self, timeout_ms):  # noqa: ANN001
         self.wait_calls.append(timeout_ms)
@@ -2209,6 +2229,55 @@ def test_collect_instagram_live_profile_clickable_bio_link_urls_recovers_runtime
     assert urls == ["https://beacons.ai/runtimeadjacentcontrolartist"]
 
 
+def test_collect_instagram_live_profile_clickable_bio_link_urls_recovers_interaction_target_when_preclick_capture_is_empty():
+    page = _DummyInstagramHiddenContactPage(
+        "<html><body><main><header><div role='button'>link in bio</div><button>Email</button></header></main></body></html>",
+        interaction_bio_link_selector=f'[{cde._INSTAGRAM_LIVE_ONEHOP_INTERACTION_MARKER_ATTR}="1"]',
+        interaction_bio_link_resolved_url=(
+            "https://l.instagram.com/?u=https%3A%2F%2Flinktr.ee%2Finteractionartist&fbclid=abc123"
+        ),
+    )
+
+    urls = cde._collect_instagram_live_profile_clickable_bio_link_urls(
+        page,
+        profile_url="https://www.instagram.com/interactionartist/",
+    )
+
+    assert urls == ["https://linktr.ee/interactionartist"]
+    assert page.click_calls == [f'[{cde._INSTAGRAM_LIVE_ONEHOP_INTERACTION_MARKER_ATTR}="1"]']
+    assert page.wait_calls == [250]
+
+
+def test_collect_instagram_live_profile_clickable_bio_link_urls_does_not_run_interaction_fallback_when_preclick_capture_already_works():
+    page = _DummyInstagramHiddenContactPage(
+        "<html><body><main><header><div role='link' data-url='https://linktr.ee/preclickartist'>Bio</div></header></main></body></html>",
+        interaction_bio_link_selector=f'[{cde._INSTAGRAM_LIVE_ONEHOP_INTERACTION_MARKER_ATTR}="1"]',
+        interaction_bio_link_resolved_url="https://linktr.ee/should-not-click",
+    )
+
+    urls = cde._collect_instagram_live_profile_clickable_bio_link_urls(
+        page,
+        profile_url="https://www.instagram.com/preclickartist/",
+    )
+
+    assert urls == ["https://linktr.ee/preclickartist"]
+    assert page.click_calls == []
+
+
+def test_collect_instagram_live_profile_clickable_bio_link_urls_does_not_click_when_no_bio_link_control_is_identified():
+    page = _DummyInstagramHiddenContactPage(
+        "<html><body><main><header><button>Email</button><button>Message</button></header></main></body></html>",
+    )
+
+    urls = cde._collect_instagram_live_profile_clickable_bio_link_urls(
+        page,
+        profile_url="https://www.instagram.com/nobiointeractionartist/",
+    )
+
+    assert urls == []
+    assert page.click_calls == []
+
+
 def test_collect_instagram_bio_link_fetch_urls_extracts_structured_script_url_without_anchor():
     html = (
         "<html><body>"
@@ -3211,6 +3280,121 @@ def test_instagram_email_one_hop_live_surface_recovers_rendered_clickable_bio_li
     )
     _assert_no_log_startswith(logs, "[IG OneHop] live_surface_bio_link_urls")
     _assert_log_contains(logs, "[IG OneHop] onehop_selected_target=https://linktr.ee/renderedcontrolartist")
+
+
+def test_instagram_email_one_hop_live_surface_interaction_recovery_flows_through_existing_ranking(
+    monkeypatch,
+):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Interaction Ranking Artist",
+            "Email": "",
+            "Email_All": "",
+            "Instagram_URL": "https://instagram.com/interactionrankingartist/",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+            "Email_Type": "",
+            EMAIL_PROVENANCE_JSON_COL: "",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    target_url = "https://linktr.ee/interactionrankingartist"
+    bio_fetch_calls = []
+    live_pages = _install_instagram_profile_fetch_scope(
+        monkeypatch,
+        static_html=(
+            "<html><body>"
+            "<a href='https://developers.facebook.com/docs/instagram'>Docs</a>"
+            "</body></html>"
+        ),
+        live_page_factory=lambda: _DummyInstagramHiddenContactPage(
+            "<html><body><main><header><div role='button'>link in bio</div><button>Email</button></header></main></body></html>",
+            interaction_bio_link_selector=f'[{cde._INSTAGRAM_LIVE_ONEHOP_INTERACTION_MARKER_ATTR}="1"]',
+            interaction_bio_link_resolved_url=target_url,
+        ),
+    )
+    monkeypatch.setattr(
+        cde,
+        "_fetch_website_html_bounded",
+        lambda session, url, **kwargs: bio_fetch_calls.append(url) or cde.WebsiteFetchResult(
+            url=url,
+            final_url=target_url,
+            status=200,
+            content_type="text/html",
+            html="<html><body>Bookings: interaction-ranking@artist.com</body></html>",
+            is_html=True,
+        ),
+    )
+
+    matched = worker._enrich_row_instagram_email(seed_df, 0, ctx)
+
+    assert matched is True
+    assert len(live_pages) == 1
+    assert live_pages[0].click_calls == [f'[{cde._INSTAGRAM_LIVE_ONEHOP_INTERACTION_MARKER_ATTR}="1"]']
+    assert bio_fetch_calls == [target_url]
+    assert seed_df.at[0, "Email"] == "interaction-ranking@artist.com"
+    assert seed_df.at[0, "Email_All"] == "interaction-ranking@artist.com"
+    assert seed_df.at[0, "Email_Source_URL"] == target_url
+    _assert_log_contains(
+        logs,
+        "[IG OneHop] primary_candidate_merge static_count=1 live_admitted=1 merged_count=2 "
+        "live_sample=https://linktr.ee/interactionrankingartist",
+    )
+    _assert_log_contains(
+        logs,
+        "[IG OneHop] bio_link_urls state=non_empty count=2 sample=https://developers.facebook.com/docs/instagram,"
+        "https://linktr.ee/interactionrankingartist",
+    )
+    _assert_log_contains(logs, "[IG OneHop] onehop_selected_target=https://linktr.ee/interactionrankingartist")
+
+
+def test_instagram_email_one_hop_live_surface_interaction_recovery_does_not_fetch_internal_meta_target(
+    monkeypatch,
+):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Interaction Meta Artist",
+            "Email": "",
+            "Email_All": "",
+            "Instagram_URL": "https://instagram.com/interactionmetaartist/",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+            "Email_Type": "",
+            EMAIL_PROVENANCE_JSON_COL: "",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    live_pages = _install_instagram_profile_fetch_scope(
+        monkeypatch,
+        static_html="<html><body><div>Requests HTML without outbound bio link</div></body></html>",
+        live_page_factory=lambda: _DummyInstagramHiddenContactPage(
+            "<html><body><main><header><div role='button'>link in bio</div><button>Email</button></header></main></body></html>",
+            interaction_bio_link_selector=f'[{cde._INSTAGRAM_LIVE_ONEHOP_INTERACTION_MARKER_ATTR}="1"]',
+            interaction_bio_link_resolved_url="https://about.meta.com/",
+        ),
+    )
+    monkeypatch.setattr(
+        cde,
+        "_fetch_website_html_bounded",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("one-hop fetch should not run")),
+    )
+
+    matched = worker._enrich_row_instagram_email(seed_df, 0, ctx)
+
+    assert matched is False
+    assert len(live_pages) == 1
+    assert live_pages[0].click_calls == [f'[{cde._INSTAGRAM_LIVE_ONEHOP_INTERACTION_MARKER_ATTR}="1"]']
+    assert seed_df.at[0, "Email"] == ""
+    assert seed_df.at[0, "Email_All"] == ""
+    _assert_log_contains(logs, "[IG OneHop] bio_link_urls state=non_empty count=1 sample=https://about.meta.com")
+    _assert_log_contains(logs, "[IG OneHop] target_blocked reason=internal_meta url=https://about.meta.com")
+    _assert_no_log_startswith(logs, "[IG OneHop] onehop_fetch_attempted=")
 
 
 def test_instagram_email_direct_visible_profile_email_still_short_circuits_onehop(monkeypatch):

@@ -4001,6 +4001,8 @@ _INSTAGRAM_LIVE_ONEHOP_CLICKABLE_SELECTOR = "a[href], button, [role='button'], [
 _INSTAGRAM_LIVE_ONEHOP_MAX_SCOPE_ROOTS = 3
 _INSTAGRAM_LIVE_ONEHOP_MAX_CLICKABLE_NODES = 24
 _INSTAGRAM_LIVE_ONEHOP_MAX_ATTRS_PER_NODE = 24
+_INSTAGRAM_LIVE_ONEHOP_INTERACTION_MARKER_ATTR = "data-ig-live-bio-link-recovery"
+_INSTAGRAM_LIVE_ONEHOP_INTERACTION_STATE_KEY = "__igLiveBioLinkInteractionRecovery"
 _INSTAGRAM_LIVE_ONEHOP_REDIRECT_QUERY_KEYS = frozenset(
     {
         "dest",
@@ -4302,6 +4304,330 @@ def _collect_instagram_live_profile_clickable_control_values(page: Any) -> List[
     return values
 
 
+def _recover_instagram_live_profile_clickable_bio_link_url_via_interaction(page: Any) -> str:
+    if page is None or not hasattr(page, "evaluate") or not hasattr(page, "click"):
+        return ""
+    try:
+        selector = cell_to_str(
+            page.evaluate(
+                f"""
+() => {{
+  const marker = 'ig-live-bio-link-interaction-recovery';
+  const markerAttr = "{_INSTAGRAM_LIVE_ONEHOP_INTERACTION_MARKER_ATTR}";
+  const stateKey = "{_INSTAGRAM_LIVE_ONEHOP_INTERACTION_STATE_KEY}";
+  const selector = "{_INSTAGRAM_LIVE_ONEHOP_CLICKABLE_SELECTOR}";
+  const maxScopeRoots = {_INSTAGRAM_LIVE_ONEHOP_MAX_SCOPE_ROOTS};
+  const maxNodes = {_INSTAGRAM_LIVE_ONEHOP_MAX_CLICKABLE_NODES};
+  const main = document.querySelector('main');
+  if (!main) {{
+    return '';
+  }}
+  const cleanText = (value, limit = 280) => {{
+    if (value == null) return '';
+    return String(value).replace(/\\s+/g, ' ').trim().slice(0, limit);
+  }};
+  const isVisible = (el) => {{
+    if (!el) return false;
+    if (el.closest('[hidden], [aria-hidden="true"]')) return false;
+    const style = window.getComputedStyle(el);
+    if (!style || style.display === 'none' || style.visibility === 'hidden') return false;
+    const rect = el.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  }};
+  const scopeRoots = [];
+  const seenRoots = new Set();
+  const addRoot = (node) => {{
+    if (!node || seenRoots.has(node)) {{
+      return;
+    }}
+    const tagName = (node.tagName || '').toLowerCase();
+    if (['aside', 'footer', 'nav', 'noscript', 'script', 'style'].includes(tagName)) {{
+      return;
+    }}
+    seenRoots.add(node);
+    scopeRoots.push(node);
+  }};
+  const header = main.querySelector('header');
+  addRoot(header);
+  for (const child of Array.from(main.children || [])) {{
+    if (scopeRoots.length >= maxScopeRoots) {{
+      break;
+    }}
+    if (!child || child === header) {{
+      continue;
+    }}
+    addRoot(child);
+  }}
+  if (!scopeRoots.length) {{
+    addRoot(main);
+  }}
+  const clickableNodes = [];
+  const seenNodes = new Set();
+  const positivePattern = /(https?:\\/\\/|www\\.|(?:[a-z0-9-]+\\.)+(?:com|co|net|org|fm|tv|io|gg|ly|me|bio|to|live|page|link|music|band|store|art|studio|agency)\\b|\\b(link(?:\\s+in\\s+bio)?|bio\\s+link|website|external)\\b)/i;
+  const negativePattern = /\\b(posts?|reels?|tagged|followers?|following|follow|message|email|call|text|menu|settings|options|more|share)\\b/i;
+  const contextPattern = /(bio|website|external|link)/i;
+  const collectNodeAttrs = (node) => {{
+    if (!node || typeof node.getAttributeNames !== 'function') {{
+      return '';
+    }}
+    const parts = [];
+    for (const attrName of node.getAttributeNames().slice(0, 16)) {{
+      if (!attrName) {{
+        continue;
+      }}
+      const key = String(attrName).trim().toLowerCase();
+      if (!key || key === 'style') {{
+        continue;
+      }}
+      if (
+        key === 'aria-label'
+        || key === 'title'
+        || key === 'href'
+        || key === 'data-testid'
+        || key.startsWith('data-')
+        || key === 'class'
+      ) {{
+        parts.push(cleanText(node.getAttribute(attrName) || '', 180));
+      }}
+    }}
+    return cleanText(parts.join(' '), 280);
+  }};
+  const scoreNode = (node) => {{
+    if (!node || seenNodes.has(node) || !isVisible(node)) {{
+      return null;
+    }}
+    seenNodes.add(node);
+    const tagName = (node.tagName || '').toLowerCase();
+    const role = cleanText(node.getAttribute('role') || '').toLowerCase();
+    if (!(tagName === 'button' || tagName === 'a' || role === 'button' || role === 'link')) {{
+      return null;
+    }}
+    if (node.closest('nav, footer, aside, [role="tablist"]')) {{
+      return null;
+    }}
+    const labelText = cleanText(
+      [
+        node.getAttribute('aria-label') || '',
+        node.getAttribute('title') || '',
+        node.innerText || node.textContent || '',
+      ].join(' '),
+      280,
+    );
+    const contextText = cleanText(
+      [
+        node.parentElement ? (node.parentElement.innerText || node.parentElement.textContent || '') : '',
+        node.closest('header, section, article, div') ? (
+          node.closest('header, section, article, div').getAttribute('class') || ''
+        ) : '',
+      ].join(' '),
+      280,
+    );
+    const attrText = collectNodeAttrs(node);
+    const combined = cleanText([labelText, contextText, attrText].join(' '), 280);
+    if (!combined || negativePattern.test(combined)) {{
+      return null;
+    }}
+    let score = 0;
+    if (positivePattern.test(labelText)) {{
+      score += 8;
+    }}
+    if (positivePattern.test(attrText)) {{
+      score += 8;
+    }}
+    if (positivePattern.test(contextText)) {{
+      score += 4;
+    }}
+    if (contextPattern.test(attrText) || contextPattern.test(contextText)) {{
+      score += 2;
+    }}
+    if (header && header.contains(node)) {{
+      score += 1;
+    }}
+    if (score < 6) {{
+      return null;
+    }}
+    return {{
+      node,
+      score,
+      labelLength: labelText.length,
+    }};
+  }};
+  for (const existing of Array.from(document.querySelectorAll(`[${{markerAttr}}]`))) {{
+    existing.removeAttribute(markerAttr);
+  }}
+  for (const root of scopeRoots) {{
+    const nodes = [];
+    if (root.matches && root.matches(selector)) {{
+      nodes.push(root);
+    }}
+    for (const node of Array.from(root.querySelectorAll(selector))) {{
+      nodes.push(node);
+    }}
+    for (const node of nodes) {{
+      const scored = scoreNode(node);
+      if (!scored) {{
+        continue;
+      }}
+      clickableNodes.push(scored);
+      if (clickableNodes.length >= maxNodes) {{
+        break;
+      }}
+    }}
+    if (clickableNodes.length >= maxNodes) {{
+      break;
+    }}
+  }}
+  clickableNodes.sort((left, right) => {{
+    if (right.score !== left.score) {{
+      return right.score - left.score;
+    }}
+    return right.labelLength - left.labelLength;
+  }});
+  const selected = clickableNodes.length ? clickableNodes[0].node : null;
+  if (!selected) {{
+    return '';
+  }}
+  const state = window[stateKey] || (window[stateKey] = {{}});
+  state.beforeUrl = cleanText(window.location && window.location.href ? window.location.href : '', 512);
+  state.resolvedUrl = '';
+  state.marker = marker;
+  const rememberUrl = (value) => {{
+    if (state.resolvedUrl || value == null) {{
+      return;
+    }}
+    let candidate = cleanText(value, 512);
+    if (!candidate) {{
+      return;
+    }}
+    if (candidate.startsWith('//')) {{
+      candidate = window.location.protocol + candidate;
+    }}
+    try {{
+      candidate = new URL(candidate, window.location.href).toString();
+    }} catch (error) {{
+    }}
+    state.resolvedUrl = candidate;
+  }};
+  state.rememberUrl = rememberUrl;
+  if (!state.installed) {{
+    state.installed = true;
+    const wrapMethod = (owner, key) => {{
+      if (!owner) {{
+        return;
+      }}
+      let original = null;
+      try {{
+        original = owner[key];
+      }} catch (error) {{
+        return;
+      }}
+      if (typeof original !== 'function') {{
+        return;
+      }}
+      owner[key] = function(...args) {{
+        try {{
+          rememberUrl(args[0]);
+        }} catch (error) {{
+        }}
+        return original.apply(this, args);
+      }};
+    }};
+    wrapMethod(window, 'open');
+    wrapMethod(window.history, 'pushState');
+    wrapMethod(window.history, 'replaceState');
+    try {{
+      wrapMethod(window.location, 'assign');
+      wrapMethod(window.location, 'replace');
+    }} catch (error) {{
+    }}
+  }}
+  selected.setAttribute(markerAttr, '1');
+  selected.addEventListener(
+    'click',
+    (event) => {{
+      const seenEventNodes = new Set();
+      const inspectNode = (entry) => {{
+        if (!entry || seenEventNodes.has(entry)) {{
+          return;
+        }}
+        seenEventNodes.add(entry);
+        try {{
+          if (typeof entry.href === 'string' && entry.href) {{
+            rememberUrl(entry.href);
+          }}
+        }} catch (error) {{
+        }}
+        if (typeof entry.getAttribute === 'function') {{
+          for (const attrName of ['href', 'data-url', 'data-href', 'data-link', 'data-target', 'title', 'aria-label', 'onclick']) {{
+            try {{
+              rememberUrl(entry.getAttribute(attrName) || '');
+            }} catch (error) {{
+            }}
+          }}
+        }}
+      }};
+      inspectNode(event && event.target ? event.target : null);
+      if (event && typeof event.composedPath === 'function') {{
+        for (const entry of event.composedPath()) {{
+          inspectNode(entry);
+        }}
+      }}
+    }},
+    {{ capture: true, once: true }},
+  );
+  return `[${{markerAttr}}="1"]`;
+}}
+"""
+            )
+        ).strip()
+    except Exception:
+        return ""
+    if not selector:
+        return ""
+    before_url = cell_to_str(getattr(page, "url", "")).strip()
+    try:
+        page.click(selector, timeout=750)
+    except TypeError:
+        try:
+            page.click(selector)
+        except Exception:
+            return ""
+    except Exception:
+        return ""
+    wait_for_timeout = getattr(page, "wait_for_timeout", None)
+    if callable(wait_for_timeout):
+        try:
+            wait_for_timeout(250)
+        except Exception:
+            pass
+    after_url = cell_to_str(getattr(page, "url", "")).strip()
+    if after_url and after_url != before_url:
+        return after_url
+    try:
+        return cell_to_str(
+            page.evaluate(
+                f"""
+() => {{
+  const state = window["{_INSTAGRAM_LIVE_ONEHOP_INTERACTION_STATE_KEY}"];
+  if (!state || state.marker !== 'ig-live-bio-link-interaction-recovery') {{
+    return '';
+  }}
+  const resolvedUrl = typeof state.resolvedUrl === 'string' ? state.resolvedUrl.trim() : '';
+  if (resolvedUrl) {{
+    return resolvedUrl;
+  }}
+  const currentUrl = window.location && typeof window.location.href === 'string'
+    ? window.location.href.trim()
+    : '';
+  return currentUrl && currentUrl !== (state.beforeUrl || '') ? currentUrl : '';
+}}
+"""
+            )
+        ).strip()
+    except Exception:
+        return ""
+
+
 def _collect_instagram_live_profile_clickable_bio_link_urls(
     page: Any,
     *,
@@ -4318,15 +4644,10 @@ def _collect_instagram_live_profile_clickable_bio_link_urls(
         seen.add(normalised)
         candidate_urls.append(normalised)
 
-    collected_raw_control_values = (
-        list(raw_control_values)
-        if raw_control_values is not None
-        else _collect_instagram_live_profile_clickable_control_values(page)
-    )
-    for raw_value in collected_raw_control_values:
+    def _ingest_raw_value(raw_value: Any) -> None:
         raw_text = cell_to_str(raw_value).strip()
         if not raw_text:
-            continue
+            return
         extracted_redirect_target = False
         try:
             parsed = urllib.parse.urlparse(raw_text)
@@ -4351,6 +4672,18 @@ def _collect_instagram_live_profile_clickable_bio_link_urls(
             _add_candidate(raw_text)
             for match in re.findall(r"https?://[^\s'\"<>()]+", decoded_text):
                 _add_candidate(match.rstrip(".,;:!?)]}"))
+
+    collected_raw_control_values = (
+        list(raw_control_values)
+        if raw_control_values is not None
+        else _collect_instagram_live_profile_clickable_control_values(page)
+    )
+    for raw_value in collected_raw_control_values:
+        _ingest_raw_value(raw_value)
+    has_usable_raw_values = any(cell_to_str(raw_value).strip() for raw_value in collected_raw_control_values)
+    if candidate_urls or has_usable_raw_values:
+        return candidate_urls
+    _ingest_raw_value(_recover_instagram_live_profile_clickable_bio_link_url_via_interaction(page))
     return candidate_urls
 
 
