@@ -3612,6 +3612,200 @@ def test_instagram_email_live_direct_uses_runtime_structured_bio_text_when_rende
     )
 
 
+def test_instagram_email_live_direct_promotes_runtime_payload_direct_email_field(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Runtime Direct Email Artist",
+            "Email": "",
+            "Email_All": "",
+            "Instagram_URL": "https://instagram.com/runtimedirectemailartist/",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+            "Email_Type": "",
+            EMAIL_PROVENANCE_JSON_COL: "",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    live_pages = _install_instagram_profile_fetch_scope(
+        monkeypatch,
+        static_html="<html><body><div>Static shell without email</div></body></html>",
+        live_page_factory=lambda: _DummyInstagramHiddenContactPage(
+            "<html><body><main><div>Rendered profile without visible email in snapshot</div></main></body></html>",
+            rendered_body_inner_text="",
+            rendered_body_text_content="",
+            rendered_main_text="",
+            rendered_document_text_content="",
+            rendered_aggregated_text="",
+            runtime_structured_payloads=[
+                {
+                    "user": {
+                        "public_email": "DirectRuntime@Artist.com",
+                    }
+                }
+            ],
+        ),
+    )
+    monkeypatch.setattr(
+        cde,
+        "_fetch_website_html_bounded",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("one-hop should not run")),
+    )
+
+    matched = worker._enrich_row_instagram_email(seed_df, 0, ctx)
+
+    assert matched is True
+    assert len(live_pages) == 1
+    assert live_pages[0].click_calls == []
+    assert seed_df.at[0, "Email"] == "directruntime@artist.com"
+    assert seed_df.at[0, "Email_All"] == "directruntime@artist.com"
+    assert seed_df.at[0, "Email_Extract_Method"] == "regex"
+    assert "instagram_profile" in seed_df.at[0, EMAIL_PROVENANCE_JSON_COL]
+    assert "instagram_bio_link_one_hop" not in seed_df.at[0, EMAIL_PROVENANCE_JSON_COL]
+    _assert_log_contains(logs, "[IG Email] runtime_payload_surface state=non_empty count=1")
+    _assert_ig_visit_and_outcome(
+        logs,
+        "https://www.instagram.com/runtimedirectemailartist/",
+        "[IG Email] Found email: directruntime@artist.com",
+    )
+
+
+def test_instagram_email_live_direct_promotes_runtime_payload_text_into_existing_parser(
+    monkeypatch,
+):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Runtime Text Artist",
+            "Email": "",
+            "Email_All": "",
+            "Instagram_URL": "https://instagram.com/runtimetextartist/",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+            "Email_Type": "",
+            EMAIL_PROVENANCE_JSON_COL: "",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    live_pages = _install_instagram_profile_fetch_scope(
+        monkeypatch,
+        static_html="<html><body><div>Static shell without email</div></body></html>",
+        live_page_factory=lambda: _DummyInstagramHiddenContactPage(
+            "<html><body><main><div>Rendered profile without visible email in snapshot</div></main></body></html>",
+            rendered_body_inner_text="",
+            rendered_body_text_content="",
+            rendered_main_text="",
+            rendered_document_text_content="",
+            rendered_aggregated_text="",
+            runtime_structured_payloads=[
+                {
+                    "user": {
+                        "headline": "Bookings: runtimetext@artist.com",
+                    }
+                }
+            ],
+        ),
+    )
+    monkeypatch.setattr(
+        cde,
+        "_fetch_website_html_bounded",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("one-hop should not run")),
+    )
+
+    matched = worker._enrich_row_instagram_email(seed_df, 0, ctx)
+
+    assert matched is True
+    assert len(live_pages) == 1
+    assert live_pages[0].click_calls == []
+    assert seed_df.at[0, "Email"] == "runtimetext@artist.com"
+    assert seed_df.at[0, "Email_All"] == "runtimetext@artist.com"
+    assert seed_df.at[0, "Email_Extract_Method"] == "regex"
+    assert "instagram_profile" in seed_df.at[0, EMAIL_PROVENANCE_JSON_COL]
+    assert "instagram_bio_link_one_hop" not in seed_df.at[0, EMAIL_PROVENANCE_JSON_COL]
+    _assert_log_contains(logs, "[IG Email] runtime_payload_surface state=non_empty count=1")
+    _assert_ig_visit_and_outcome(
+        logs,
+        "https://www.instagram.com/runtimetextartist/",
+        "[IG Email] Found email: runtimetext@artist.com",
+    )
+
+
+def test_instagram_email_runtime_payload_direct_hit_skips_live_surface_onehop(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Runtime OneHop Short Circuit Artist",
+            "Email": "",
+            "Email_All": "",
+            "Instagram_URL": "https://instagram.com/runtimeonehopshortcircuit/",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+            "Email_Type": "",
+            EMAIL_PROVENANCE_JSON_COL: "",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    live_pages = _install_instagram_profile_fetch_scope(
+        monkeypatch,
+        static_html="<html><body><div>Static shell without email or bio link</div></body></html>",
+        live_page_factory=lambda: _DummyInstagramHiddenContactPage(
+            "<html><body><main><div>Rendered profile without visible email in snapshot</div></main></body></html>",
+            rendered_body_inner_text="",
+            rendered_body_text_content="",
+            rendered_main_text="",
+            rendered_document_text_content="",
+            rendered_aggregated_text="",
+            runtime_structured_payloads=[
+                {
+                    "user": {
+                        "public_email": "shortcircuit@artist.com",
+                        "bio_links": [{"url": "https://linktr.ee/runtimeonehopshortcircuit"}],
+                    }
+                }
+            ],
+        ),
+    )
+    onehop_state_labels = []
+    real_onehop = cde._instagram_onehop_emails_from_surface
+
+    monkeypatch.setattr(
+        cde,
+        "_instagram_onehop_emails_from_surface",
+        lambda *args, **kwargs: onehop_state_labels.append(
+            kwargs.get("state_label", "bio_link_urls")
+        ) or real_onehop(*args, **kwargs),
+    )
+    monkeypatch.setattr(
+        cde,
+        "_fetch_website_html_bounded",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("live one-hop fetch should not run")),
+    )
+
+    matched = worker._enrich_row_instagram_email(seed_df, 0, ctx)
+
+    assert matched is True
+    assert len(live_pages) == 1
+    assert live_pages[0].click_calls == []
+    assert onehop_state_labels == ["bio_link_urls"]
+    assert seed_df.at[0, "Email"] == "shortcircuit@artist.com"
+    assert seed_df.at[0, "Email_All"] == "shortcircuit@artist.com"
+    assert "instagram_profile" in seed_df.at[0, EMAIL_PROVENANCE_JSON_COL]
+    assert "instagram_bio_link_one_hop" not in seed_df.at[0, EMAIL_PROVENANCE_JSON_COL]
+    _assert_no_log_startswith(logs, "[IG OneHop] live_surface_bio_link_urls")
+    _assert_no_log_startswith(logs, "[IG OneHop] onehop_fetch_attempted=")
+    _assert_ig_visit_and_outcome(
+        logs,
+        "https://www.instagram.com/runtimeonehopshortcircuit/",
+        "[IG Email] Found email: shortcircuit@artist.com",
+    )
+
+
 def test_instagram_email_live_direct_uses_shared_live_html_before_live_surface_onehop(monkeypatch):
     logs = []
     worker = _make_worker(logs)

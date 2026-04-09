@@ -3765,6 +3765,18 @@ _INSTAGRAM_BIO_LINK_STRUCTURED_MAX_NODES = 2048
 _INSTAGRAM_DIRECT_BIO_TEXT_KEYS = {"bio", "biography"}
 _INSTAGRAM_DIRECT_BIO_TEXT_ENTITY_CONTAINER_KEYS = {"biography_with_entities"}
 _INSTAGRAM_DIRECT_BIO_TEXT_ENTITY_VALUE_KEYS = {"raw_text", "text"}
+_INSTAGRAM_DIRECT_RUNTIME_TEXT_KEYS = {
+    "about",
+    "about_text",
+    "bio",
+    "biography",
+    "headline",
+}
+_INSTAGRAM_DIRECT_RUNTIME_TEXT_ENTITY_CONTAINER_KEYS = {
+    "about_with_entities",
+    "biography_with_entities",
+    "headline_with_entities",
+}
 
 
 def _iter_instagram_bio_link_meta_values(soup_obj: BeautifulSoup) -> Iterable[str]:
@@ -3922,6 +3934,45 @@ def _collect_instagram_bio_equivalent_structured_texts(payloads: Iterable[Any]) 
             for item in reversed(current):
                 stack.append((item, bio_text_context))
         elif isinstance(current, str) and bio_text_context:
+            normalized = unicodedata.normalize("NFKC", current).strip()
+            if normalized and normalized not in seen:
+                seen.add(normalized)
+                texts.append(normalized)
+    return texts
+
+
+def _collect_instagram_direct_runtime_candidate_strings(payloads: Iterable[Any]) -> List[str]:
+    texts: List[str] = []
+    seen: Set[str] = set()
+    stack: List[Tuple[Any, bool]] = [(payload, False) for payload in payloads]
+    nodes_seen = 0
+    while stack and nodes_seen < _INSTAGRAM_BIO_LINK_STRUCTURED_MAX_NODES:
+        current, text_context = stack.pop()
+        nodes_seen += 1
+        if isinstance(current, dict):
+            for raw_key, value in current.items():
+                key = cell_to_str(raw_key).strip().lower()
+                child_text_context = (
+                    text_context or key in _INSTAGRAM_DIRECT_RUNTIME_TEXT_ENTITY_CONTAINER_KEYS
+                )
+                if isinstance(value, str):
+                    normalized = unicodedata.normalize("NFKC", value).strip()
+                    if not normalized:
+                        continue
+                    if _instagram_bio_link_structured_key_allows_email(key) or (
+                        key in _INSTAGRAM_DIRECT_RUNTIME_TEXT_KEYS
+                    ) or (
+                        text_context and key in _INSTAGRAM_DIRECT_BIO_TEXT_ENTITY_VALUE_KEYS
+                    ):
+                        if normalized not in seen:
+                            seen.add(normalized)
+                            texts.append(normalized)
+                elif isinstance(value, (dict, list, tuple)):
+                    stack.append((value, child_text_context))
+        elif isinstance(current, (list, tuple)):
+            for item in reversed(current):
+                stack.append((item, text_context))
+        elif isinstance(current, str) and text_context:
             normalized = unicodedata.normalize("NFKC", current).strip()
             if normalized and normalized not in seen:
                 seen.add(normalized)
@@ -4306,6 +4357,11 @@ def _collect_instagram_runtime_bio_link_structured_payloads(page: Any) -> List[A
 () => {{
   const maxScriptChars = {_INSTAGRAM_BIO_LINK_STRUCTURED_MAX_SCRIPT_CHARS};
   const maxNodes = {_INSTAGRAM_BIO_LINK_STRUCTURED_MAX_NODES};
+  const directTextKeys = new Set({json.dumps(sorted(_INSTAGRAM_DIRECT_RUNTIME_TEXT_KEYS))});
+  const directEntityContainerKeys = new Set(
+    {json.dumps(sorted(_INSTAGRAM_DIRECT_RUNTIME_TEXT_ENTITY_CONTAINER_KEYS))}
+  );
+  const directEmailKeyPattern = /(^email$|_email$)/i;
   const payloads = [];
   const seen = new Set();
   const addPayload = (value) => {{
@@ -4317,6 +4373,34 @@ def _collect_instagram_runtime_bio_link_structured_payloads(page: Any) -> List[A
       payloads.push(value);
     }} catch (_error) {{
       // Skip non-serializable values.
+    }}
+  }};
+  const addDirectProfilePayload = (source) => {{
+    if (!source || typeof source !== 'object' || Array.isArray(source)) return;
+    const extracted = {{}};
+    for (const [rawKey, value] of Object.entries(source)) {{
+      const key = String(rawKey || '').trim().toLowerCase();
+      if (!key || value == null) {{
+        continue;
+      }}
+      if (key === 'bio_links' && Array.isArray(value)) {{
+        extracted.bio_links = value;
+        continue;
+      }}
+      if (directEmailKeyPattern.test(key) && typeof value === 'string') {{
+        extracted[key] = value;
+        continue;
+      }}
+      if (directTextKeys.has(key) && typeof value === 'string') {{
+        extracted[key] = value;
+        continue;
+      }}
+      if (directEntityContainerKeys.has(key) && value && typeof value === 'object') {{
+        extracted[key] = value;
+      }}
+    }}
+    if (Object.keys(extracted).length) {{
+      addPayload(extracted);
     }}
   }};
   const collectAllowedStructures = (root) => {{
@@ -4335,13 +4419,18 @@ def _collect_instagram_runtime_bio_link_structured_payloads(page: Any) -> List[A
         continue;
       }}
       const user = current.user;
-      if (user && typeof user === 'object' && Array.isArray(user.bio_links)) {{
-        addPayload({{ bio_links: user.bio_links }});
+      if (user && typeof user === 'object') {{
+        if (Array.isArray(user.bio_links)) {{
+          addPayload({{ bio_links: user.bio_links }});
+        }}
+        addDirectProfilePayload(user);
       }}
       const webProfileInfo = current.web_profile_info;
       if (webProfileInfo && typeof webProfileInfo === 'object') {{
         addPayload(webProfileInfo);
+        addDirectProfilePayload(webProfileInfo);
       }}
+      addDirectProfilePayload(current);
       for (const value of Object.values(current)) {{
         if (value && typeof value === 'object') {{
           stack.push(value);
@@ -11664,6 +11753,25 @@ class CrossDirectoryEnricherWorker(QThread):
                                     print("DEBUG IG: running rendered text direct extraction")
                                     normalized_rendered_live_text = unicodedata.normalize("NFKC", rendered_live_text)
                                     all_ig_emails = _extract_instagram_profile_candidate_emails(normalized_rendered_live_text)
+                            if not all_ig_emails:
+                                runtime_payload_candidate_strings = (
+                                    _collect_instagram_direct_runtime_candidate_strings(
+                                        runtime_structured_payloads
+                                    )
+                                )
+                                if runtime_payload_candidate_strings:
+                                    self.log_message.emit(
+                                        "[IG Email] runtime_payload_surface "
+                                        f"state=non_empty count={len(runtime_payload_candidate_strings)}"
+                                    )
+                                    all_ig_emails, _ = _extract_direct_emails_from_text_surfaces(
+                                        *[
+                                            (f"runtime_payload_candidate_{idx}", candidate_text)
+                                            for idx, candidate_text in enumerate(
+                                                runtime_payload_candidate_strings
+                                            )
+                                        ]
+                                    )
                             if not all_ig_emails:
                                 live_onehop_html = _extract_instagram_onehop_profile_surface_html(live_html)
                                 live_clickable_bio_link_urls = _collect_instagram_live_profile_clickable_bio_link_urls(
