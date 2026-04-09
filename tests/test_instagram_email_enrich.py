@@ -2400,6 +2400,18 @@ def test_select_instagram_onehop_target_prefers_specific_target_over_generic_thr
     )
 
     assert target == "https://artist-example.com/contact"
+    _assert_log_contains(logs, "[IG OneHop] ranked_candidates count=2")
+    winner_trace = (
+        "[IG OneHop] ranked_candidate rank=1 tier=external_domain specificity=specific_path "
+        "generic_root=0 low_value_platform=0 url=https://artist-example.com/contact"
+    )
+    loser_trace = (
+        "[IG OneHop] ranked_candidate rank=2 tier=external_info specificity=generic_root "
+        "generic_root=1 low_value_platform=1 url=https://www.threads.com"
+    )
+    _assert_log_contains(logs, winner_trace)
+    _assert_log_contains(logs, loser_trace)
+    assert logs.index(winner_trace) < logs.index(loser_trace)
     _assert_log_contains(logs, "[IG OneHop] ranked_target_selected tier=external_domain url=https://artist-example.com/contact")
     _assert_log_contains(
         logs,
@@ -2438,6 +2450,18 @@ def test_select_instagram_onehop_target_retains_fallback_when_only_weak_candidat
     )
 
     assert target == "https://artist-example.com/"
+    _assert_log_contains(logs, "[IG OneHop] ranked_candidates count=2")
+    winner_trace = (
+        "[IG OneHop] ranked_candidate rank=1 tier=external_domain specificity=generic_root "
+        "generic_root=1 low_value_platform=0 url=https://artist-example.com/"
+    )
+    loser_trace = (
+        "[IG OneHop] ranked_candidate rank=2 tier=external_info specificity=generic_root "
+        "generic_root=1 low_value_platform=1 url=https://www.threads.com"
+    )
+    _assert_log_contains(logs, winner_trace)
+    _assert_log_contains(logs, loser_trace)
+    assert logs.index(winner_trace) < logs.index(loser_trace)
     _assert_log_contains(logs, "[IG OneHop] ranked_target_selected tier=external_domain url=https://artist-example.com/")
     _assert_log_contains(
         logs,
@@ -2457,6 +2481,18 @@ def test_select_instagram_onehop_target_keeps_user_specific_threads_page_eligibl
     )
 
     assert target == "https://www.threads.com/@artistname"
+    _assert_log_contains(logs, "[IG OneHop] ranked_candidates count=2")
+    winner_trace = (
+        "[IG OneHop] ranked_candidate rank=1 tier=external_info specificity=specific_path "
+        "generic_root=0 low_value_platform=1 url=https://www.threads.com/@artistname"
+    )
+    loser_trace = (
+        "[IG OneHop] ranked_candidate rank=2 tier=external_domain specificity=generic_root "
+        "generic_root=1 low_value_platform=0 url=https://artist-example.com/"
+    )
+    _assert_log_contains(logs, winner_trace)
+    _assert_log_contains(logs, loser_trace)
+    assert logs.index(winner_trace) < logs.index(loser_trace)
     _assert_log_contains(logs, "[IG OneHop] ranked_target_selected tier=external_info url=https://www.threads.com/@artistname")
     _assert_log_contains(
         logs,

@@ -3588,6 +3588,19 @@ def _select_instagram_onehop_target(
     ranked_candidates.sort(key=lambda item: item[0])
     _, tier_name, selected_url, selected_specificity = ranked_candidates[0]
     if callable(log):
+        log(f"[IG OneHop] ranked_candidates count={len(ranked_candidates)}")
+        for rank, (_, candidate_tier, candidate_url, candidate_specificity) in enumerate(ranked_candidates, start=1):
+            generic_root = int(candidate_specificity != "specific_path")
+            low_value_platform = int(candidate_tier == "external_info")
+            log(
+                "[IG OneHop] ranked_candidate "
+                f"rank={rank} "
+                f"tier={candidate_tier} "
+                f"specificity={candidate_specificity} "
+                f"generic_root={generic_root} "
+                f"low_value_platform={low_value_platform} "
+                f"url={candidate_url}"
+            )
         log(f"[IG OneHop] ranked_target_selected tier={tier_name} url={selected_url}")
         competing_candidates = ranked_candidates[1:]
         generic_root_demotion = int(
