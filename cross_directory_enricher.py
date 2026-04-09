@@ -4306,6 +4306,7 @@ def _collect_instagram_live_profile_clickable_bio_link_urls(
     page: Any,
     *,
     profile_url: str = "",
+    raw_control_values: Optional[Iterable[Any]] = None,
 ) -> List[str]:
     candidate_urls: List[str] = []
     seen: Set[str] = set()
@@ -4317,7 +4318,12 @@ def _collect_instagram_live_profile_clickable_bio_link_urls(
         seen.add(normalised)
         candidate_urls.append(normalised)
 
-    for raw_value in _collect_instagram_live_profile_clickable_control_values(page):
+    collected_raw_control_values = (
+        list(raw_control_values)
+        if raw_control_values is not None
+        else _collect_instagram_live_profile_clickable_control_values(page)
+    )
+    for raw_value in collected_raw_control_values:
         raw_text = cell_to_str(raw_value).strip()
         if not raw_text:
             continue
@@ -4643,6 +4649,7 @@ def _instagram_onehop_emails_from_surface(
     log: Optional[Any] = None,
     state_label: str = "bio_link_urls",
     runtime_structured_payloads: Optional[Iterable[Any]] = None,
+    live_raw_control_values: Optional[Iterable[str]] = None,
     live_rendered_bio_link_urls: Optional[Iterable[str]] = None,
 ) -> Tuple[List[str], str, str, str]:
     html_text = html if isinstance(html, str) else str(html or "")
@@ -4664,15 +4671,29 @@ def _instagram_onehop_emails_from_surface(
         runtime_structured_payloads=runtime_structured_payloads,
     )
     static_bio_link_url_count = len(bio_link_urls)
+    live_raw_values = [cell_to_str(raw_value).strip() for raw_value in (live_raw_control_values or ()) if cell_to_str(raw_value).strip()]
+    live_normalised_urls = [cell_to_str(raw_value).strip() for raw_value in (live_rendered_bio_link_urls or ()) if cell_to_str(raw_value).strip()]
     live_clickable_candidates: List[str] = []
     live_seen = set(bio_link_urls)
-    for raw_value in live_rendered_bio_link_urls or ():
+    for raw_value in live_normalised_urls:
         normalised = _normalise_instagram_bio_link_fetch_url(raw_value, base_url=profile_url)
         if not normalised or normalised in live_seen:
             continue
         live_seen.add(normalised)
         live_clickable_candidates.append(normalised)
     if callable(log) and live_rendered_bio_link_urls is not None:
+        log(
+            "[IG Probe] raw_control_values "
+            f"count={len(live_raw_values)} sample={_instagram_bio_link_log_sample(live_raw_values)}"
+        )
+        log(
+            "[IG Probe] normalised_urls "
+            f"count={len(live_normalised_urls)} sample={_instagram_bio_link_log_sample(live_normalised_urls)}"
+        )
+        log(
+            "[IG Probe] live_admission "
+            f"admitted={len(live_clickable_candidates)} sample={_instagram_bio_link_log_sample(live_clickable_candidates)}"
+        )
         merged_bio_link_url_count = static_bio_link_url_count + len(live_clickable_candidates)
         log(
             "[IG OneHop] primary_candidate_merge "
@@ -11621,6 +11642,8 @@ class CrossDirectoryEnricherWorker(QThread):
             runtime_structured_payloads: List[Any] = []
             static_structured_payloads: List[Any] = []
             shared_runtime_structured_payloads_attempted = False
+            shared_live_clickable_bio_link_raw_values: List[str] = []
+            shared_live_clickable_bio_link_raw_values_attempted = False
             shared_live_clickable_bio_link_urls: List[str] = []
             shared_live_clickable_bio_link_urls_attempted = False
             for script_tag in soup.find_all("script"):
@@ -11656,11 +11679,26 @@ class CrossDirectoryEnricherWorker(QThread):
                 _get_shared_runtime_structured_payloads()
                 if not shared_live_clickable_bio_link_urls_attempted:
                     shared_live_clickable_bio_link_urls_attempted = True
+                    shared_live_clickable_bio_link_raw_values = _get_shared_live_clickable_bio_link_raw_values()
                     shared_live_clickable_bio_link_urls = _collect_instagram_live_profile_clickable_bio_link_urls(
                         live_page.page,
                         profile_url=ig_url,
+                        raw_control_values=shared_live_clickable_bio_link_raw_values,
                     )
                 return shared_live_clickable_bio_link_urls
+
+            def _get_shared_live_clickable_bio_link_raw_values():
+                nonlocal shared_live_clickable_bio_link_raw_values, shared_live_clickable_bio_link_raw_values_attempted
+                live_page = _get_shared_live_page()
+                if live_page is None:
+                    return []
+                _get_shared_runtime_structured_payloads()
+                if not shared_live_clickable_bio_link_raw_values_attempted:
+                    shared_live_clickable_bio_link_raw_values_attempted = True
+                    shared_live_clickable_bio_link_raw_values = _collect_instagram_live_profile_clickable_control_values(
+                        live_page.page
+                    )
+                return shared_live_clickable_bio_link_raw_values
 
             def _select_rendered_live_text_surface(*surface_candidates):
                 for _surface_name, surface_text in surface_candidates:
@@ -11696,6 +11734,7 @@ class CrossDirectoryEnricherWorker(QThread):
                         html,
                         profile_url=ig_url,
                         log=self.log_message.emit,
+                        live_raw_control_values=_get_shared_live_clickable_bio_link_raw_values(),
                         live_rendered_bio_link_urls=_get_shared_live_clickable_bio_link_urls(),
                     )
                     if all_ig_emails:
@@ -11822,6 +11861,7 @@ class CrossDirectoryEnricherWorker(QThread):
                                     log=self.log_message.emit,
                                     state_label="live_surface_bio_link_urls",
                                     runtime_structured_payloads=runtime_structured_payloads,
+                                    live_raw_control_values=_get_shared_live_clickable_bio_link_raw_values(),
                                     live_rendered_bio_link_urls=_get_shared_live_clickable_bio_link_urls(),
                                 )
                                 if all_ig_emails:
