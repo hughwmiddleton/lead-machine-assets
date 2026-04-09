@@ -10125,19 +10125,12 @@ class NightModeFacebookEnricher:
                 _log(self.logger, "[Night FB] search disabled due to checkpoint; skipping FB search.")
                 self.fb_rows_skipped["checkpoint"] += 1
                 return _finish(result)
-            # Unearthed rows with an explicit accepted FB URL should use the
-            # same PASS A path as other explicit rows. Keep legacy fallback
-            # only for true no-URL Unearthed rows.
-            rejected_seeded_fb = bool(
-                explicit_intake.outcome == "reject_invalid" and explicit_intake.rejected_invalid
-            )
-            if is_unearthed and not has_seeded_fb and not rejected_seeded_fb:
+            # Unearthed admission is based on the final accepted/canonical
+            # explicit FB URL state. Missing and rejected-invalid seeds should
+            # behave the same here.
+            if is_unearthed and not fb_urls:
                 _log(self.logger, "[Unearthed Path] no usable FB URL; skipping Night FB discovery")
                 return _finish(result, attempted=False)
-            if is_unearthed and not fb_urls:
-                _log(self.logger, "[Unearthed Path] no usable FB URL; allowing bounded FB discovery")
-                _log(self.logger, "[Night FB] Detected Unearthed row -> using legacy no-login FB scrape.")
-                return _finish(self._enrich_row_unearthed_legacy(result, artist_name, fb_urls))
 
             allow_anon = self._should_allow_anonymous(result)
             # PASS A: explicit URL attempts (instrumentation only)

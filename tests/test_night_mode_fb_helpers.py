@@ -1822,6 +1822,132 @@ def test_explicit_fb_url_placeholders_rejected(monkeypatch) -> None:
     assert [night_mode_fb._normalise_fb_url(calls[0])] == ["https://www.facebook.com/artistpage"]
 
 
+def test_unearthed_invalid_seeded_fb_url_skips_discovery(monkeypatch) -> None:
+    logs = []
+    enricher = night_mode_fb.NightModeFacebookEnricher(
+        legacy_module=None,
+        username="",
+        password="",
+        logger=logs.append,
+        use_shared_session=False,
+    )
+    monkeypatch.setattr(enricher, "_ensure_session", lambda: None)
+    monkeypatch.setattr(
+        enricher,
+        "_search_for_page",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Unearthed invalid seed should skip before discovery")),
+    )
+    monkeypatch.setattr(
+        enricher,
+        "_enrich_row_unearthed_legacy",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Unearthed invalid seed should not enter legacy discovery")),
+    )
+
+    row = {
+        "Artist Name": "Kaviita",
+        "Email": "",
+        "Email_All": "",
+        "Source Directory": "unearthed",
+        "Social Link": "https://www.facebook.com/share/19BActwuev?mibextid=wwXIfr",
+    }
+
+    enricher.enrich_row_with_facebook_night(row)
+
+    assert any('[Night FB][Explicit Intake]' in msg and 'outcome="reject_invalid"' in msg for msg in logs)
+    assert any("[Unearthed Path] no usable FB URL; skipping Night FB discovery" in msg for msg in logs)
+    assert not any("allowing bounded FB discovery" in msg for msg in logs)
+    assert not any("entering Unearthed no-URL FB discovery" in msg for msg in logs)
+
+
+def test_unearthed_missing_seeded_fb_url_still_skips_discovery(monkeypatch) -> None:
+    logs = []
+    enricher = night_mode_fb.NightModeFacebookEnricher(
+        legacy_module=None,
+        username="",
+        password="",
+        logger=logs.append,
+        use_shared_session=False,
+    )
+    monkeypatch.setattr(enricher, "_ensure_session", lambda: None)
+    monkeypatch.setattr(
+        enricher,
+        "_search_for_page",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Unearthed missing seed should skip before discovery")),
+    )
+    monkeypatch.setattr(
+        enricher,
+        "_enrich_row_unearthed_legacy",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Unearthed missing seed should not enter legacy discovery")),
+    )
+
+    row = {
+        "Artist Name": "Local The Neighbour",
+        "Email": "",
+        "Email_All": "",
+        "Source Directory": "unearthed",
+    }
+
+    enricher.enrich_row_with_facebook_night(row)
+
+    assert any('[Night FB][Explicit Intake]' in msg and 'outcome="no_explicit_url"' in msg for msg in logs)
+    assert any("[Unearthed Path] no usable FB URL; skipping Night FB discovery" in msg for msg in logs)
+    assert not any("allowing bounded FB discovery" in msg for msg in logs)
+    assert not any("entering Unearthed no-URL FB discovery" in msg for msg in logs)
+
+
+def test_unearthed_valid_explicit_fb_url_still_uses_pass_a(monkeypatch) -> None:
+    logs = []
+    enricher = night_mode_fb.NightModeFacebookEnricher(
+        legacy_module=None,
+        username="",
+        password="",
+        logger=logs.append,
+        use_shared_session=False,
+    )
+    monkeypatch.setattr(enricher, "_ensure_session", lambda: None)
+    monkeypatch.setattr(enricher, "_has_authenticated_session", lambda: False)
+    monkeypatch.setattr(
+        enricher,
+        "_search_for_page",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Unearthed valid explicit URL should stay on PASS A")),
+    )
+    monkeypatch.setattr(
+        enricher,
+        "_enrich_row_unearthed_legacy",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Unearthed valid explicit URL should not enter legacy discovery")),
+    )
+
+    calls = []
+
+    def _fake_scrape(self, fb_url, *args, **kwargs):  # noqa: ANN001
+        calls.append(fb_url)
+        night_result = night_mode_fb.NightModeFacebookResult(
+            email="artist@test.com",
+            email_all="artist@test.com",
+            facebook_url=night_mode_fb._normalise_fb_url(fb_url),
+            email_extract_method="regex",
+        )
+        return night_result, ["artist@test.com"], "session", "found_email"
+
+    monkeypatch.setattr(night_mode_fb.NightModeFacebookEnricher, "_scrape_single_fb_candidate", _fake_scrape)
+
+    row = {
+        "Artist Name": "Deepfaith",
+        "Email": "",
+        "Email_All": "",
+        "Source Directory": "unearthed",
+        "Facebook_URL": "https://www.facebook.com/thedeepfaith",
+    }
+
+    result = enricher.enrich_row_with_facebook_night(row)
+
+    assert calls == ["https://www.facebook.com/thedeepfaith"]
+    assert result.get("FB_Status") == "pass_a_found_email"
+    assert result.get("FB_Reason") == "explicit_url"
+    assert any('[Night FB][Explicit Intake]' in msg and 'outcome="attempt"' in msg for msg in logs)
+    assert not any("skipping Night FB discovery" in msg for msg in logs)
+
+
 def test_valid_facebook_url_starts_scrape_even_when_email_column_is_stale(monkeypatch) -> None:
     logs = []
     enricher = night_mode_fb.NightModeFacebookEnricher(
