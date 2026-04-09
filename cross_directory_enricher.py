@@ -3525,12 +3525,60 @@ def _instagram_onehop_target_specificity(url: str) -> Tuple[int, int, int, str]:
     )
 
 
+def _instagram_onehop_is_utility_info_target(url: str) -> bool:
+    host = _instagram_onehop_host(url)
+    if not host:
+        return False
+    if any(_instagram_onehop_host_matches(host, domain) for domain in _INSTAGRAM_ONEHOP_LINK_HUB_HOSTS):
+        return False
+    if any(_instagram_onehop_host_matches(host, domain) for domain in _INSTAGRAM_ONEHOP_MUSIC_SERVICE_HOSTS):
+        return False
+
+    platform_owned_host = (
+        _instagram_onehop_host_matches(host, "facebook.com")
+        or _instagram_onehop_host_matches(host, "meta.com")
+        or _instagram_onehop_host_matches(host, "threads.com")
+        or any(_instagram_onehop_host_matches(host, domain) for domain in _INSTAGRAM_ONEHOP_LOW_VALUE_SOCIAL_HOSTS)
+    )
+    if not platform_owned_host:
+        return False
+
+    utility_tokens = {
+        "developer",
+        "developers",
+        "docs",
+        "help",
+        "legal",
+        "policies",
+        "policy",
+        "privacy",
+        "support",
+        "terms",
+    }
+    host_labels = {label for label in host.split(".") if label}
+    if host_labels & utility_tokens:
+        return True
+
+    try:
+        parsed = urllib.parse.urlparse(url)
+        path_segments = {
+            urllib.parse.unquote(segment).strip().lower()
+            for segment in (parsed.path or "").split("/")
+            if segment and urllib.parse.unquote(segment).strip()
+        }
+    except Exception:
+        path_segments = set()
+    return bool(path_segments & utility_tokens)
+
+
 def _instagram_onehop_target_tier(url: str) -> Tuple[int, str]:
     host = _instagram_onehop_host(url)
     if any(_instagram_onehop_host_matches(host, domain) for domain in _INSTAGRAM_ONEHOP_LINK_HUB_HOSTS):
         return (0, "linkhub")
     if any(_instagram_onehop_host_matches(host, domain) for domain in _INSTAGRAM_ONEHOP_MUSIC_SERVICE_HOSTS):
         return (2, "music_service")
+    if _instagram_onehop_is_utility_info_target(url):
+        return (3, "external_info")
     if _instagram_onehop_host_matches(host, "threads.com"):
         return (3, "external_info")
     if any(_instagram_onehop_host_matches(host, domain) for domain in _INSTAGRAM_ONEHOP_LOW_VALUE_SOCIAL_HOSTS):
@@ -3538,11 +3586,12 @@ def _instagram_onehop_target_tier(url: str) -> Tuple[int, str]:
     return (1, "external_domain")
 
 
-def _instagram_onehop_target_sort_key(url: str) -> Tuple[int, int, int, int, int, int, int, str]:
+def _instagram_onehop_target_sort_key(url: str) -> Tuple[int, int, int, int, int, int, int, int, str]:
     tier_rank, _ = _instagram_onehop_target_tier(url)
     generic_surface_penalty, specificity_depth_rank, specificity_length_rank, _ = (
         _instagram_onehop_target_specificity(url)
     )
+    utility_info_penalty = int(_instagram_onehop_is_utility_info_target(url))
     try:
         parsed = urllib.parse.urlparse(url)
         query_keys = {key.lower() for key in urllib.parse.parse_qs(parsed.query or "", keep_blank_values=True)}
@@ -3554,6 +3603,7 @@ def _instagram_onehop_target_sort_key(url: str) -> Tuple[int, int, int, int, int
     fragment_penalty = 1 if parsed.fragment else 0
     return (
         generic_surface_penalty,
+        utility_info_penalty,
         tier_rank,
         tracking_penalty,
         query_penalty,
@@ -3569,7 +3619,7 @@ def _select_instagram_onehop_target(
     *,
     log: Optional[Any] = None,
 ) -> str:
-    ranked_candidates: List[Tuple[Tuple[int, int, int, int, int, int, int, str], str, str, str]] = []
+    ranked_candidates: List[Tuple[Tuple[int, int, int, int, int, int, int, int, str], str, str, str]] = []
     for url in candidate_urls:
         blocked_reason = _instagram_onehop_block_reason(url)
         if blocked_reason:
@@ -3592,6 +3642,7 @@ def _select_instagram_onehop_target(
         for rank, (_, candidate_tier, candidate_url, candidate_specificity) in enumerate(ranked_candidates, start=1):
             generic_root = int(candidate_specificity != "specific_path")
             low_value_platform = int(candidate_tier == "external_info")
+            utility_info = int(_instagram_onehop_is_utility_info_target(candidate_url))
             log(
                 "[IG OneHop] ranked_candidate "
                 f"rank={rank} "
@@ -3599,6 +3650,7 @@ def _select_instagram_onehop_target(
                 f"specificity={candidate_specificity} "
                 f"generic_root={generic_root} "
                 f"low_value_platform={low_value_platform} "
+                f"utility_info={utility_info} "
                 f"url={candidate_url}"
             )
         log(f"[IG OneHop] ranked_target_selected tier={tier_name} url={selected_url}")

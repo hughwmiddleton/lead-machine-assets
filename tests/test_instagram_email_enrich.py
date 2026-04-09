@@ -2372,6 +2372,32 @@ def test_select_instagram_onehop_target_prefers_external_domain_over_internal_me
     _assert_log_contains(logs, "[IG OneHop] ranked_target_selected tier=external_domain url=https://artist-example.com/contact")
 
 
+def test_select_instagram_onehop_target_demotes_utility_doc_page_below_real_outbound_link():
+    logs = []
+
+    target = cde._select_instagram_onehop_target(
+        [
+            "https://developers.facebook.com/docs/instagram",
+            "https://linktr.ee/artist",
+        ],
+        log=logs.append,
+    )
+
+    assert target == "https://linktr.ee/artist"
+    winner_trace = (
+        "[IG OneHop] ranked_candidate rank=1 tier=linkhub specificity=specific_path "
+        "generic_root=0 low_value_platform=0 utility_info=0 url=https://linktr.ee/artist"
+    )
+    loser_trace = (
+        "[IG OneHop] ranked_candidate rank=2 tier=external_info specificity=specific_path "
+        "generic_root=0 low_value_platform=1 utility_info=1 url=https://developers.facebook.com/docs/instagram"
+    )
+    _assert_log_contains(logs, winner_trace)
+    _assert_log_contains(logs, loser_trace)
+    assert logs.index(winner_trace) < logs.index(loser_trace)
+    _assert_log_contains(logs, "[IG OneHop] ranked_target_selected tier=linkhub url=https://linktr.ee/artist")
+
+
 def test_select_instagram_onehop_target_returns_empty_when_only_blocked_candidates():
     logs = []
 
@@ -2403,11 +2429,11 @@ def test_select_instagram_onehop_target_prefers_specific_target_over_generic_thr
     _assert_log_contains(logs, "[IG OneHop] ranked_candidates count=2")
     winner_trace = (
         "[IG OneHop] ranked_candidate rank=1 tier=external_domain specificity=specific_path "
-        "generic_root=0 low_value_platform=0 url=https://artist-example.com/contact"
+        "generic_root=0 low_value_platform=0 utility_info=0 url=https://artist-example.com/contact"
     )
     loser_trace = (
         "[IG OneHop] ranked_candidate rank=2 tier=external_info specificity=generic_root "
-        "generic_root=1 low_value_platform=1 url=https://www.threads.com"
+        "generic_root=1 low_value_platform=1 utility_info=0 url=https://www.threads.com"
     )
     _assert_log_contains(logs, winner_trace)
     _assert_log_contains(logs, loser_trace)
@@ -2438,6 +2464,28 @@ def test_select_instagram_onehop_target_prefers_specific_page_over_generic_root(
     )
 
 
+def test_select_instagram_onehop_target_retains_best_weak_fallback_when_doc_page_beats_generic_junk():
+    logs = []
+
+    target = cde._select_instagram_onehop_target(
+        [
+            "https://developers.facebook.com/docs/instagram",
+            "https://www.meta.ai/?utm_source=foa_web_footer",
+            "https://www.threads.com",
+        ],
+        log=logs.append,
+    )
+
+    assert target == "https://developers.facebook.com/docs/instagram"
+    _assert_log_contains(logs, "[IG OneHop] ranked_candidates count=3")
+    winner_trace = (
+        "[IG OneHop] ranked_candidate rank=1 tier=external_info specificity=specific_path "
+        "generic_root=0 low_value_platform=1 utility_info=1 url=https://developers.facebook.com/docs/instagram"
+    )
+    _assert_log_contains(logs, winner_trace)
+    _assert_log_contains(logs, "[IG OneHop] ranked_target_selected tier=external_info url=https://developers.facebook.com/docs/instagram")
+
+
 def test_select_instagram_onehop_target_retains_fallback_when_only_weak_candidates_exist():
     logs = []
 
@@ -2453,11 +2501,11 @@ def test_select_instagram_onehop_target_retains_fallback_when_only_weak_candidat
     _assert_log_contains(logs, "[IG OneHop] ranked_candidates count=2")
     winner_trace = (
         "[IG OneHop] ranked_candidate rank=1 tier=external_domain specificity=generic_root "
-        "generic_root=1 low_value_platform=0 url=https://artist-example.com/"
+        "generic_root=1 low_value_platform=0 utility_info=0 url=https://artist-example.com/"
     )
     loser_trace = (
         "[IG OneHop] ranked_candidate rank=2 tier=external_info specificity=generic_root "
-        "generic_root=1 low_value_platform=1 url=https://www.threads.com"
+        "generic_root=1 low_value_platform=1 utility_info=0 url=https://www.threads.com"
     )
     _assert_log_contains(logs, winner_trace)
     _assert_log_contains(logs, loser_trace)
@@ -2484,11 +2532,11 @@ def test_select_instagram_onehop_target_keeps_user_specific_threads_page_eligibl
     _assert_log_contains(logs, "[IG OneHop] ranked_candidates count=2")
     winner_trace = (
         "[IG OneHop] ranked_candidate rank=1 tier=external_info specificity=specific_path "
-        "generic_root=0 low_value_platform=1 url=https://www.threads.com/@artistname"
+        "generic_root=0 low_value_platform=1 utility_info=0 url=https://www.threads.com/@artistname"
     )
     loser_trace = (
         "[IG OneHop] ranked_candidate rank=2 tier=external_domain specificity=generic_root "
-        "generic_root=1 low_value_platform=0 url=https://artist-example.com/"
+        "generic_root=1 low_value_platform=0 utility_info=0 url=https://artist-example.com/"
     )
     _assert_log_contains(logs, winner_trace)
     _assert_log_contains(logs, loser_trace)
@@ -2498,6 +2546,32 @@ def test_select_instagram_onehop_target_keeps_user_specific_threads_page_eligibl
         logs,
         "[IG OneHop] ranked_target_decision specificity=specific_path generic_root_demotion=1 low_value_platform_demotion=0 fallback_weak=0 url=https://www.threads.com/@artistname",
     )
+
+
+def test_select_instagram_onehop_target_keeps_user_specific_platform_page_above_utility_doc_page():
+    logs = []
+
+    target = cde._select_instagram_onehop_target(
+        [
+            "https://developers.facebook.com/docs/instagram",
+            "https://www.threads.com/@artistname",
+        ],
+        log=logs.append,
+    )
+
+    assert target == "https://www.threads.com/@artistname"
+    winner_trace = (
+        "[IG OneHop] ranked_candidate rank=1 tier=external_info specificity=specific_path "
+        "generic_root=0 low_value_platform=1 utility_info=0 url=https://www.threads.com/@artistname"
+    )
+    loser_trace = (
+        "[IG OneHop] ranked_candidate rank=2 tier=external_info specificity=specific_path "
+        "generic_root=0 low_value_platform=1 utility_info=1 url=https://developers.facebook.com/docs/instagram"
+    )
+    _assert_log_contains(logs, winner_trace)
+    _assert_log_contains(logs, loser_trace)
+    assert logs.index(winner_trace) < logs.index(loser_trace)
+    _assert_log_contains(logs, "[IG OneHop] ranked_target_selected tier=external_info url=https://www.threads.com/@artistname")
 
 
 def test_instagram_email_one_hop_bio_link_recovers_direct_email_from_structured_script(monkeypatch):
