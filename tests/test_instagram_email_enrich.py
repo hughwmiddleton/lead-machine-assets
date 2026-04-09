@@ -2648,6 +2648,82 @@ def test_instagram_onehop_emails_from_surface_still_fetches_meaningful_target(mo
     _assert_no_log_startswith(logs, "[IG OneHop] onehop_fetch_skipped reason=no_meaningful_target")
 
 
+def test_instagram_onehop_emails_from_surface_primary_candidate_pool_includes_live_clickable_target(monkeypatch):
+    logs = []
+    selector_candidates = []
+
+    def fake_select_instagram_onehop_target(candidates, log=None):  # noqa: ANN001
+        selector_candidates.extend(candidates)
+        return ""
+
+    monkeypatch.setattr(cde, "_select_instagram_onehop_target", fake_select_instagram_onehop_target)
+
+    emails, source_url, extract_method, onehop_target = cde._instagram_onehop_emails_from_surface(
+        None,
+        "<html><body>"
+        "<a href='https://about.meta.com/'>About Meta</a>"
+        "<a href='https://developers.facebook.com/docs/instagram'>Docs</a>"
+        "</body></html>",
+        profile_url="https://www.instagram.com/primarymergeartist/",
+        log=logs.append,
+        live_rendered_bio_link_urls=["https://linktr.ee/primarymergeartist"],
+    )
+
+    assert emails == []
+    assert source_url == ""
+    assert extract_method == "regex"
+    assert onehop_target == ""
+    assert "https://linktr.ee/primarymergeartist" in selector_candidates
+    assert "https://about.meta.com" in selector_candidates
+    assert "https://developers.facebook.com/docs/instagram" in selector_candidates
+    _assert_log_contains(
+        logs,
+        "[IG OneHop] primary_candidate_merge static_count=2 live_admitted=1 merged_count=3 "
+        "live_sample=https://linktr.ee/primarymergeartist",
+    )
+    _assert_log_contains(
+        logs,
+        "[IG OneHop] bio_link_urls state=non_empty count=3 "
+        "sample=https://about.meta.com,https://developers.facebook.com/docs/instagram",
+    )
+
+
+def test_instagram_onehop_emails_from_surface_static_only_behavior_remains_clean_without_live_target(monkeypatch):
+    logs = []
+    selector_candidates = []
+
+    def fake_select_instagram_onehop_target(candidates, log=None):  # noqa: ANN001
+        selector_candidates.extend(candidates)
+        return ""
+
+    monkeypatch.setattr(cde, "_select_instagram_onehop_target", fake_select_instagram_onehop_target)
+
+    emails, source_url, extract_method, onehop_target = cde._instagram_onehop_emails_from_surface(
+        None,
+        "<html><body>"
+        "<a href='https://about.meta.com/'>About Meta</a>"
+        "<a href='https://www.threads.com'>Threads</a>"
+        "</body></html>",
+        profile_url="https://www.instagram.com/staticonlyartist/",
+        log=logs.append,
+        live_rendered_bio_link_urls=[],
+    )
+
+    assert emails == []
+    assert source_url == ""
+    assert extract_method == "regex"
+    assert onehop_target == ""
+    assert selector_candidates == ["https://about.meta.com", "https://www.threads.com"]
+    _assert_log_contains(
+        logs,
+        "[IG OneHop] primary_candidate_merge static_count=2 live_admitted=0 merged_count=2 live_sample=-",
+    )
+    _assert_log_contains(
+        logs,
+        "[IG OneHop] bio_link_urls state=non_empty count=2 sample=https://about.meta.com,https://www.threads.com",
+    )
+
+
 def test_instagram_email_one_hop_bio_link_recovers_direct_email_from_structured_script(monkeypatch):
     logs = []
     worker = _make_worker(logs)
@@ -3059,11 +3135,16 @@ def test_instagram_email_one_hop_live_surface_scopes_collection_away_from_docume
     assert seed_df.at[0, "Email"] == "scoped-live@artist.com"
     assert seed_df.at[0, "Email_All"] == "scoped-live@artist.com"
     assert seed_df.at[0, "Email_Source_URL"] == live_target
-    _assert_log_contains(logs, "[IG OneHop] bio_link_urls state=empty count=0 sample=-")
     _assert_log_contains(
         logs,
-        f"[IG OneHop] live_surface_bio_link_urls state=non_empty count=1 sample={live_target}",
+        "[IG OneHop] primary_candidate_merge static_count=0 live_admitted=1 merged_count=1 "
+        f"live_sample={live_target}",
     )
+    _assert_log_contains(
+        logs,
+        f"[IG OneHop] bio_link_urls state=non_empty count=1 sample={live_target}",
+    )
+    _assert_no_log_startswith(logs, "[IG OneHop] live_surface_bio_link_urls")
     _assert_no_log_startswith(logs, "[IG OneHop] target_blocked reason=internal_meta")
 
 
@@ -3119,13 +3200,63 @@ def test_instagram_email_one_hop_live_surface_recovers_rendered_clickable_bio_li
     assert seed_df.at[0, "Email_All"] == "rendered-control@artist.com"
     assert seed_df.at[0, "Email_Source_URL"] == target_url
     assert "instagram_bio_link_one_hop" in seed_df.at[0, EMAIL_PROVENANCE_JSON_COL]
-    _assert_log_contains(logs, "[IG OneHop] bio_link_urls state=empty count=0 sample=-")
-    _assert_log_contains(logs, "[IG OneHop] live_clickable_candidates count=1")
     _assert_log_contains(
         logs,
-        "[IG OneHop] live_surface_bio_link_urls state=non_empty count=1 sample=https://linktr.ee/renderedcontrolartist",
+        "[IG OneHop] primary_candidate_merge static_count=0 live_admitted=1 merged_count=1 "
+        "live_sample=https://linktr.ee/renderedcontrolartist",
     )
+    _assert_log_contains(
+        logs,
+        "[IG OneHop] bio_link_urls state=non_empty count=1 sample=https://linktr.ee/renderedcontrolartist",
+    )
+    _assert_no_log_startswith(logs, "[IG OneHop] live_surface_bio_link_urls")
     _assert_log_contains(logs, "[IG OneHop] onehop_selected_target=https://linktr.ee/renderedcontrolartist")
+
+
+def test_instagram_email_direct_visible_profile_email_still_short_circuits_onehop(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Direct Visible Profile Artist",
+            "Email": "",
+            "Email_All": "",
+            "Instagram_URL": "https://instagram.com/directvisibleprofileartist/",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+            "Email_Type": "",
+            EMAIL_PROVENANCE_JSON_COL: "",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+
+    @contextmanager
+    def fake_scope(session, url, retain_live_page=False):  # noqa: ANN001
+        yield cde.InstagramProfileFetchResult(
+            html="<html><body><main>Bookings: directvisible@artist.com</main></body></html>",
+            status=200,
+        )
+
+    monkeypatch.setattr(cde, "_instagram_profile_fetch_scope", fake_scope)
+    monkeypatch.setattr(
+        cde,
+        "_instagram_onehop_emails_from_surface",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("one-hop should not run")),
+    )
+
+    matched = worker._enrich_row_instagram_email(seed_df, 0, ctx)
+
+    assert matched is True
+    assert seed_df.at[0, "Email"] == "directvisible@artist.com"
+    assert seed_df.at[0, "Email_All"] == "directvisible@artist.com"
+    assert seed_df.at[0, "Email_Source_URL"] == "https://www.instagram.com/directvisibleprofileartist/"
+    assert "instagram_profile" in seed_df.at[0, EMAIL_PROVENANCE_JSON_COL]
+    _assert_ig_visit_and_outcome(
+        logs,
+        "https://www.instagram.com/directvisibleprofileartist/",
+        "[IG Email] Found email: directvisible@artist.com",
+    )
 
 
 def test_instagram_email_one_hop_live_surface_runtime_adjoining_recovery_flows_through_existing_selection_and_fetch(
@@ -3182,7 +3313,17 @@ def test_instagram_email_one_hop_live_surface_runtime_adjoining_recovery_flows_t
     assert seed_df.at[0, "Email"] == "runtime-adjacent@artist.com"
     assert seed_df.at[0, "Email_All"] == "runtime-adjacent@artist.com"
     assert seed_df.at[0, "Email_Source_URL"] == target_url
-    _assert_log_contains(logs, "[IG OneHop] live_clickable_candidates count=2")
+    _assert_log_contains(
+        logs,
+        "[IG OneHop] primary_candidate_merge static_count=0 live_admitted=2 merged_count=2 "
+        "live_sample=https://about.meta.com,https://linktr.ee/runtimeadjacentcontrolartist",
+    )
+    _assert_log_contains(
+        logs,
+        "[IG OneHop] bio_link_urls state=non_empty count=2 "
+        "sample=https://about.meta.com,https://linktr.ee/runtimeadjacentcontrolartist",
+    )
+    _assert_no_log_startswith(logs, "[IG OneHop] live_surface_bio_link_urls")
     _assert_log_contains(logs, "[IG OneHop] onehop_selected_target=https://linktr.ee/runtimeadjacentcontrolartist")
     _assert_log_contains(logs, "[IG OneHop] onehop_fetch_attempted=https://linktr.ee/runtimeadjacentcontrolartist")
 
@@ -3349,7 +3490,8 @@ def test_instagram_email_static_one_hop_success_skips_live_retry(monkeypatch):
 
     assert matched is True
     assert bio_fetch_calls == [static_target]
-    assert live_pages == []
+    assert len(live_pages) == 1
+    assert live_pages[0].click_calls == []
     assert seed_df.at[0, "Email"] == "static-success@artist.com"
     assert seed_df.at[0, "Email_All"] == "static-success@artist.com"
     assert seed_df.at[0, "Email_Source_URL"] == static_target
@@ -3489,11 +3631,16 @@ def test_instagram_email_one_hop_live_runtime_waits_for_hydrated_payload_before_
     assert seed_df.at[0, "Email"] == "deferred-runtime@artist.com"
     assert seed_df.at[0, "Email_All"] == "deferred-runtime@artist.com"
     assert seed_df.at[0, "Email_Source_URL"] == target_url
-    _assert_log_contains(logs, "[IG OneHop] bio_link_urls state=empty count=0 sample=-")
     _assert_log_contains(
         logs,
-        "[IG OneHop] live_surface_bio_link_urls state=non_empty count=1 sample=https://linktr.ee/deferredruntimelinkartist",
+        "[IG OneHop] primary_candidate_merge static_count=0 live_admitted=1 merged_count=1 "
+        "live_sample=https://linktr.ee/deferredruntimelinkartist",
     )
+    _assert_log_contains(
+        logs,
+        "[IG OneHop] bio_link_urls state=non_empty count=1 sample=https://linktr.ee/deferredruntimelinkartist",
+    )
+    _assert_no_log_startswith(logs, "[IG OneHop] live_surface_bio_link_urls")
 
 
 def test_instagram_onehop_emails_from_surface_recovers_direct_email_from_runtime_structured_payloads(monkeypatch):
@@ -5265,8 +5412,10 @@ def test_instagram_hidden_contact_one_action_budget_is_one_attempt_per_row(monke
 
     assert first_matched is False
     assert second_matched is False
-    assert len(live_pages) == 1
+    assert len(live_pages) == 2
+    assert sum(len(page.click_calls) for page in live_pages) == 1
     assert live_pages[0].click_calls == ['[data-ig-hidden-contact="ig-hidden-contact-0"]']
+    assert live_pages[1].click_calls == []
 
 
 def test_instagram_hidden_contact_one_action_skips_ambiguous_cta(monkeypatch):
