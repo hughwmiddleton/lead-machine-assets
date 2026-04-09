@@ -1119,21 +1119,20 @@ def test_classify_explicit_fb_intake_rejects_link_shim_wrapper() -> None:
 
 
 def test_pass_a_resolves_share_url_before_scrape(monkeypatch) -> None:
+    logs = []
     enricher = night_mode_fb.NightModeFacebookEnricher(
         legacy_module=None,
         username="",
         password="",
-        logger=None,
+        logger=logs.append,
         use_shared_session=False,
     )
     monkeypatch.setattr(enricher, "_has_authenticated_session", lambda: True)
-    search_calls = []
-
-    def _fake_search(*args, **kwargs):  # noqa: ANN001
-        search_calls.append((args, kwargs))
-        return "https://www.facebook.com/artistsharepage"
-
-    monkeypatch.setattr(enricher, "_search_for_page", _fake_search)
+    monkeypatch.setattr(
+        enricher,
+        "_search_for_page",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("resolved explicit share should not enter discovery")),
+    )
 
     navigate_calls = []
 
@@ -1171,13 +1170,15 @@ def test_pass_a_resolves_share_url_before_scrape(monkeypatch) -> None:
 
     result = enricher.enrich_row_with_facebook_night(row)
 
-    assert search_calls
-    assert navigate_calls == []
+    assert navigate_calls == ["https://www.facebook.com/share/19bactwuev?mibextid=wwXIfr"]
     assert calls["urls"] == ["https://www.facebook.com/artistsharepage"]
     assert result.get("Email") == "shareartist@test.com"
-    assert result.get("FB_Status") == "pass_a_skipped_no_fb_url"
-    assert result.get("FB_Reason") == "skipped_no_fb_url"
+    assert result.get("FB_Status") == "pass_a_found_email"
+    assert result.get("FB_Reason") == "explicit_url"
     assert result.get("Facebook_URL") == "https://www.facebook.com/artistsharepage"
+    assert any("share_resolved" in msg for msg in logs)
+    assert any('[Night FB][Explicit Intake]' in msg and 'outcome="attempt"' in msg for msg in logs)
+    assert not any('outcome="reject_invalid"' in msg for msg in logs)
 
 
 def test_pass_a_leaves_canonical_url_unchanged_without_resolution(monkeypatch) -> None:
@@ -1240,11 +1241,11 @@ def test_pass_a_strips_tracking_params_from_resolved_share_url(monkeypatch) -> N
         use_shared_session=False,
     )
     monkeypatch.setattr(enricher, "_has_authenticated_session", lambda: True)
-    search_calls = []
-
-    def _fake_search(*args, **kwargs):  # noqa: ANN001
-        search_calls.append((args, kwargs))
-        return "https://www.facebook.com/artistsharepage"
+    monkeypatch.setattr(
+        enricher,
+        "_search_for_page",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("resolved explicit share should not enter discovery")),
+    )
 
     navigate_calls = []
 
@@ -1271,7 +1272,6 @@ def test_pass_a_strips_tracking_params_from_resolved_share_url(monkeypatch) -> N
         return night_result, ["artist@test.com"], "session", "found_email"
 
     monkeypatch.setattr(enricher, "_scrape_single_fb_candidate", _fake_scrape)
-    monkeypatch.setattr(enricher, "_search_for_page", _fake_search)
 
     row = {
         "Artist Name": "Tracked Share Artist",
@@ -1283,11 +1283,10 @@ def test_pass_a_strips_tracking_params_from_resolved_share_url(monkeypatch) -> N
 
     result = enricher.enrich_row_with_facebook_night(row)
 
-    assert search_calls
-    assert navigate_calls == []
+    assert navigate_calls == ["https://www.facebook.com/share/19bactwuev?mibextid=wwXIfr"]
     assert calls["urls"] == ["https://www.facebook.com/artistsharepage"]
-    assert result.get("FB_Status") == "pass_a_skipped_no_fb_url"
-    assert result.get("FB_Reason") == "skipped_no_fb_url"
+    assert result.get("FB_Status") == "pass_a_found_email"
+    assert result.get("FB_Reason") == "explicit_url"
     assert result.get("Facebook_URL") == "https://www.facebook.com/artistsharepage"
 
 
@@ -1822,7 +1821,7 @@ def test_explicit_fb_url_placeholders_rejected(monkeypatch) -> None:
     assert [night_mode_fb._normalise_fb_url(calls[0])] == ["https://www.facebook.com/artistpage"]
 
 
-def test_unearthed_invalid_seeded_fb_url_skips_discovery(monkeypatch) -> None:
+def test_unearthed_unresolved_share_url_skips_discovery(monkeypatch) -> None:
     logs = []
     enricher = night_mode_fb.NightModeFacebookEnricher(
         legacy_module=None,
@@ -1831,16 +1830,32 @@ def test_unearthed_invalid_seeded_fb_url_skips_discovery(monkeypatch) -> None:
         logger=logs.append,
         use_shared_session=False,
     )
-    monkeypatch.setattr(enricher, "_ensure_session", lambda: None)
+    monkeypatch.setattr(enricher, "_has_authenticated_session", lambda: True)
+    search_calls = []
+    legacy_calls = []
+
+    class _FakeSession:
+        last_nav_current_url = ""
+
+        def navigate(self, url, logger=None):  # noqa: ANN001
+            self.last_nav_current_url = "https://www.facebook.com/share/19BActwuev?mibextid=wwXIfr"
+            return object()
+
+    monkeypatch.setattr(enricher, "_ensure_session", lambda: _FakeSession())
     monkeypatch.setattr(
         enricher,
         "_search_for_page",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Unearthed invalid seed should skip before discovery")),
+        lambda *args, **kwargs: search_calls.append((args, kwargs)) or "",
     )
     monkeypatch.setattr(
         enricher,
         "_enrich_row_unearthed_legacy",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Unearthed invalid seed should not enter legacy discovery")),
+        lambda *args, **kwargs: legacy_calls.append((args, kwargs)),
+    )
+    monkeypatch.setattr(
+        enricher,
+        "_scrape_single_fb_candidate",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("unusable resolved share must not reach PASS A scrape")),
     )
 
     row = {
@@ -1853,7 +1868,10 @@ def test_unearthed_invalid_seeded_fb_url_skips_discovery(monkeypatch) -> None:
 
     enricher.enrich_row_with_facebook_night(row)
 
-    assert any('[Night FB][Explicit Intake]' in msg and 'outcome="reject_invalid"' in msg for msg in logs)
+    assert search_calls == []
+    assert legacy_calls == []
+    assert any("share_resolution_failed" in msg for msg in logs)
+    assert any('[Night FB][Explicit Intake]' in msg and 'outcome="no_explicit_url"' in msg for msg in logs)
     assert any("[Unearthed Path] no usable FB URL; skipping Night FB discovery" in msg for msg in logs)
     assert not any("allowing bounded FB discovery" in msg for msg in logs)
     assert not any("entering Unearthed no-URL FB discovery" in msg for msg in logs)
@@ -1946,6 +1964,53 @@ def test_unearthed_valid_explicit_fb_url_still_uses_pass_a(monkeypatch) -> None:
     assert result.get("FB_Reason") == "explicit_url"
     assert any('[Night FB][Explicit Intake]' in msg and 'outcome="attempt"' in msg for msg in logs)
     assert not any("skipping Night FB discovery" in msg for msg in logs)
+
+
+@pytest.mark.parametrize(
+    "resolved_url",
+    [
+        "https://www.facebook.com/artist/posts/123",
+        "https://www.facebook.com/photo.php?fbid=123",
+        "https://www.facebook.com/permalink.php?story_fbid=123&id=456",
+        "https://www.facebook.com/watch/?v=123",
+        "https://www.facebook.com/reel/123",
+        "https://www.facebook.com/checkpoint/123",
+        "https://www.facebook.com/login.php?next=%2Fartist",
+    ],
+)
+def test_prepare_explicit_fb_row_for_intake_rejects_invalid_share_resolution_targets(monkeypatch, resolved_url: str) -> None:
+    enricher = night_mode_fb.NightModeFacebookEnricher(
+        legacy_module=None,
+        username="",
+        password="",
+        logger=None,
+        use_shared_session=False,
+    )
+    monkeypatch.setattr(enricher, "_has_authenticated_session", lambda: True)
+
+    class _FakeSession:
+        last_nav_current_url = ""
+
+        def navigate(self, url, logger=None):  # noqa: ANN001
+            self.last_nav_current_url = resolved_url
+            return object()
+
+    monkeypatch.setattr(enricher, "_ensure_session", lambda: _FakeSession())
+
+    row = {
+        "Artist Name": "Bad Share Target",
+        "Social Link": "https://www.facebook.com/share/19bactwuev?mibextid=wwXIfr",
+    }
+
+    prepared_row, authed_session_available = enricher._prepare_explicit_fb_row_for_intake(row)
+    prepared_urls = night_mode_fb._canonicalize_and_dedupe_explicit_fb_urls(
+        night_mode_fb._extract_fb_urls_for_night_mode(prepared_row)
+    )
+    decision = night_mode_fb.classify_explicit_fb_intake(prepared_row, accepted_urls=prepared_urls)
+
+    assert authed_session_available is True
+    assert prepared_urls == []
+    assert decision.outcome == "no_explicit_url"
 
 
 def test_valid_facebook_url_starts_scrape_even_when_email_column_is_stale(monkeypatch) -> None:

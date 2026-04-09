@@ -7745,6 +7745,75 @@ class NightModeFacebookEnricher:
             )
         return canonical_resolved
 
+    def _prepare_explicit_fb_row_for_intake(
+        self,
+        row: Dict[str, str],
+        *,
+        authed_session_available: Optional[bool] = None,
+    ) -> Tuple[Dict[str, str], Optional[bool]]:
+        prepared_row = dict(row or {})
+        scanned_actual_fields: Set[str] = set()
+
+        def _resolve_share_candidate(candidate: str) -> Optional[str]:
+            nonlocal authed_session_available
+            raw_candidate = str(candidate or "").strip()
+            if not raw_candidate:
+                return None
+            if authed_session_available is None:
+                authed_session_available = self._has_authenticated_session()
+            resolved_candidate = self._resolve_pass_a_explicit_scrape_url(
+                raw_candidate,
+                authed_session_available=bool(authed_session_available),
+            )
+            canonical_candidate = _canonicalize_explicit_fb_entrypoint_url(resolved_candidate or "")
+            guard_reason = ""
+            if canonical_candidate:
+                guard_reason, _ = _explicit_fb_pre_scrape_guard_reason(canonical_candidate)
+            if canonical_candidate and not guard_reason and not _is_allowed_fb_share_entrypoint_url(canonical_candidate):
+                if canonical_candidate != raw_candidate:
+                    _log(
+                        self.logger,
+                        f'[Night FB][Explicit Intake] share_resolved raw="{raw_candidate}" resolved="{canonical_candidate}"',
+                    )
+                return canonical_candidate
+            failure_reason = guard_reason or "session_unavailable"
+            if authed_session_available:
+                failure_reason = guard_reason or "canonicalization_dropped"
+                normalized_resolved = _normalise_fb_url(resolved_candidate)
+                if normalized_resolved and _is_allowed_fb_share_entrypoint_url(normalized_resolved):
+                    failure_reason = "remained_share_wrapper"
+            _log(
+                self.logger,
+                f'[Night FB][Explicit Intake] share_resolution_failed raw="{raw_candidate}" reason="{failure_reason}"',
+            )
+            return None
+
+        for field in _EXPLICIT_FB_INTAKE_FIELDS:
+            actual_field, raw = _explicit_fb_row_lookup(row, field)
+            actual_field_key = (actual_field or field).lower()
+            if actual_field and actual_field_key in scanned_actual_fields:
+                continue
+            if actual_field:
+                scanned_actual_fields.add(actual_field_key)
+            if not raw:
+                continue
+            parts = _FB_SPLIT_PATTERN.split(raw)
+            is_direct_fb_field = actual_field_key in {"facebook_url", "facebook url"}
+            prepared_values: List[str] = []
+            for part in parts:
+                candidate = str(part or "").strip()
+                if not candidate or (not is_direct_fb_field and not _looks_like_explicit_fb_candidate(candidate)):
+                    continue
+                if _is_allowed_fb_share_entrypoint_url(candidate):
+                    resolved_share_candidate = _resolve_share_candidate(candidate)
+                    if resolved_share_candidate:
+                        prepared_values.append(resolved_share_candidate)
+                    continue
+                prepared_values.append(candidate)
+            prepared_row[actual_field or field] = " | ".join(prepared_values)
+
+        return prepared_row, authed_session_available
+
     def get_pass_a_counts(self) -> Dict[str, int]:
         return dict(self._pass_a_counts)
 
@@ -10068,17 +10137,18 @@ class NightModeFacebookEnricher:
             or result.get("Track Title", "")
             or result.get("track_title", "")
         )
-        raw_fb_url = _clean_val(result.get("Facebook_URL", ""))
+        prepared_explicit_row, authed_session_available = self._prepare_explicit_fb_row_for_intake(result)
+        raw_fb_url = _clean_val(prepared_explicit_row.get("Facebook_URL", ""))
         if raw_fb_url and _is_invalid_fb_value(raw_fb_url) and self._debug_fb_url_flow:
             _log(self.logger, f"[Night FB] Skipping invalid facebook_url value: {raw_fb_url}")
         facebook_url = _normalise_fb_url(raw_fb_url) if _is_valid_fb_url_value(raw_fb_url) else ""
-        fb_urls = _extract_fb_urls_for_night_mode(result)
+        fb_urls = _extract_fb_urls_for_night_mode(prepared_explicit_row)
         if facebook_url and facebook_url not in fb_urls:
             fb_urls.insert(0, facebook_url)
         fb_urls = _canonicalize_and_dedupe_explicit_fb_urls(
             fb_urls, logger=self.logger, debug=self._debug_fb_url_flow
         )
-        explicit_intake = classify_explicit_fb_intake(result, accepted_urls=fb_urls)
+        explicit_intake = classify_explicit_fb_intake(prepared_explicit_row, accepted_urls=fb_urls)
         _log_explicit_fb_intake(self.logger, artist_name, explicit_intake)
         if not fb_urls:
             invalid_field, invalid_value = _find_invalid_direct_fb_row_value(result)
@@ -10150,7 +10220,8 @@ class NightModeFacebookEnricher:
                     self._debug_fb_url_flow_skipped += 1
                 _log(self.logger, "[Night FB][PASS A] skipped (no explicit FB URL); proceeding to v2 search")
             else:
-                authed_session_available = self._has_authenticated_session()
+                if authed_session_available is None:
+                    authed_session_available = self._has_authenticated_session()
                 pass_a_mode = "session" if authed_session_available else "legacy_anon_probe"
                 if authed_session_available:
                     _log(self.logger, f"[Night FB] Using explicit FB URLs with authenticated session: {fb_urls}")
