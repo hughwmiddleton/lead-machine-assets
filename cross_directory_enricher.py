@@ -3374,6 +3374,45 @@ def _format_instagram_bio_link_drop_reasons(counts: Counter) -> str:
     return ",".join(f"{reason}:{count}" for reason, count in counts.most_common(3))
 
 
+def _instagram_truth_profile_key(raw_url: Any) -> str:
+    url = cell_to_str(raw_url).strip()
+    if not url:
+        return ""
+    try:
+        parsed = urllib.parse.urlsplit(url)
+    except Exception:
+        return url.rstrip("/").lower()
+    scheme = (parsed.scheme or "").lower()
+    netloc = (parsed.netloc or "").lower()
+    path = re.sub(r"/+", "/", parsed.path or "").rstrip("/").lower()
+    return urllib.parse.urlunsplit((scheme, netloc, path, "", ""))
+
+
+def _instagram_truth_logging_enabled(profile_url: str = "") -> bool:
+    enabled = cell_to_str(os.getenv("IG_TRUTH_CAPTURE", "")).strip().lower() in {"1", "true", "yes", "on"}
+    if not enabled:
+        return False
+    target_url = cell_to_str(os.getenv("IG_TRUTH_TARGET_URL", "")).strip()
+    if not target_url:
+        return True
+    return _instagram_truth_profile_key(profile_url) == _instagram_truth_profile_key(target_url)
+
+
+def _emit_instagram_truth(message: str, *, emit: Optional[Any] = None) -> None:
+    if not message:
+        return
+    if callable(emit):
+        try:
+            emit(message)
+            return
+        except Exception:
+            pass
+    try:
+        print(message)
+    except Exception:
+        pass
+
+
 _INSTAGRAM_ONEHOP_LINK_HUB_HOSTS = frozenset(
     set(LINK_HUB_HOSTS)
     | {
@@ -4004,6 +4043,9 @@ _INSTAGRAM_LIVE_ONEHOP_MAX_ATTRS_PER_NODE = 24
 _INSTAGRAM_LIVE_ONEHOP_INTERACTION_MARKER_ATTR = "data-ig-live-bio-link-recovery"
 _INSTAGRAM_LIVE_ONEHOP_INTERACTION_STATE_KEY = "__igLiveBioLinkInteractionRecovery"
 _INSTAGRAM_LIVE_ONEHOP_INTERACTION_ONLY_SENTINEL_PREFIX = "__ig_interaction_candidate__:"
+_INSTAGRAM_TRUTH_SAMPLE_LIMIT = 10
+_INSTAGRAM_TRUTH_RETRY_SNAPSHOTS = 3
+_INSTAGRAM_TRUTH_RETRY_WAIT_MS = 200
 _INSTAGRAM_LIVE_ONEHOP_REDIRECT_QUERY_KEYS = frozenset(
     {
         "dest",
@@ -4026,25 +4068,48 @@ def _collect_instagram_live_profile_clickable_control_values(page: Any) -> List[
         except Exception:
             pass
 
+    profile_url = cell_to_str(getattr(page, "url", "")).strip() if page is not None else ""
+    truth_enabled = _instagram_truth_logging_enabled(profile_url)
+
+    def _log_truth(message: str) -> None:
+        if truth_enabled:
+            _emit_instagram_truth(message)
+
+    page_present = 1 if page is not None else 0
+    evaluate_present = 1 if page is not None and hasattr(page, "evaluate") else 0
+    if truth_enabled:
+        _log_truth(
+            f"[IG Truth] detector_enter profile_url={profile_url or '-'} "
+            f"page_present={page_present} evaluate_present={evaluate_present}"
+        )
+
     if page is None or not hasattr(page, "evaluate"):
         _log_detect("[IG Detect] candidates raw=0 kept=0 interaction=0 dropped=0 sample=-")
         _log_detect("[IG Detect] drop_reasons=-")
         _log_detect("[IG Detect] control_values count=0 interaction_only=0 sample=-")
+        if truth_enabled:
+            _log_truth("[IG Truth] output raw_control_values count=0 sample=-")
         return []
 
     marker_name_json = json.dumps("ig-live-bio-link-control-surface")
     selector_json = json.dumps(_INSTAGRAM_LIVE_ONEHOP_CLICKABLE_SELECTOR)
     interaction_only_prefix_json = json.dumps(_INSTAGRAM_LIVE_ONEHOP_INTERACTION_ONLY_SENTINEL_PREFIX)
+    capture_truth_json = "true" if truth_enabled else "false"
     raw_payload: Any = {}
-    try:
-        raw_payload = page.evaluate(
+    truth_sample_limit_json = int(_INSTAGRAM_TRUTH_SAMPLE_LIMIT)
+
+    def _evaluate_payload(*, retry_snapshot_index: int = 0) -> Any:
+        return page.evaluate(
             f"""
 () => {{
   const marker = {marker_name_json};
   const selector = {selector_json};
+  const captureTruth = {capture_truth_json};
   const maxScopeRoots = {_INSTAGRAM_LIVE_ONEHOP_MAX_SCOPE_ROOTS};
   const maxNodes = {_INSTAGRAM_LIVE_ONEHOP_MAX_CLICKABLE_NODES};
   const maxAttrsPerNode = {_INSTAGRAM_LIVE_ONEHOP_MAX_ATTRS_PER_NODE};
+  const truthLimit = {truth_sample_limit_json};
+  const retrySnapshotIndex = {int(retry_snapshot_index)};
   const maxProbeNodesPerRoot = 80;
   const maxNearbyNodesPerCandidate = 10;
   const maxNearbyAnchorsPerNode = 4;
@@ -4080,6 +4145,14 @@ def _collect_instagram_live_profile_clickable_control_values(page: Any) -> List[
       interactionOnlyValueCount: 0,
       keptLabels: [],
       dropReasons: {{}},
+      mainPresent: 0,
+      headerPresent: 0,
+      scopeRoots: [],
+      rootSnapshots: [],
+      rawProbeNodeCount: 0,
+      dropSamples: [],
+      keepSamples: [],
+      retrySnapshotIndex,
     }};
   }}
   const cleanText = (value, limit = 280) => {{
@@ -4146,6 +4219,57 @@ def _collect_instagram_live_profile_clickable_control_values(page: Any) -> List[
     }}
     return false;
   }};
+  const linkishAttrNames = ['data-link', 'data-url', 'data-href', 'data-target', 'data-uri', 'data-web-uri', 'data-web-destination'];
+  const summarizeNode = (node) => {{
+    if (!node) {{
+      return null;
+    }}
+    const tag = cleanText(node.tagName || '', 32).toLowerCase() || '-';
+    const role = cleanText(node.getAttribute && node.getAttribute('role') || '', 48) || '-';
+    const tabindex = cleanText(node.getAttribute && node.getAttribute('tabindex') || '', 16) || '-';
+    const href = cleanText(node.getAttribute && node.getAttribute('href') || '', 160) || '-';
+    const aria = cleanText(node.getAttribute && node.getAttribute('aria-label') || '', 120) || '-';
+    const title = cleanText(node.getAttribute && node.getAttribute('title') || '', 120) || '-';
+    const text = cleanText(node.innerText || node.textContent || '', 120) || '-';
+    return {{
+      tag,
+      role,
+      tabindex,
+      href,
+      aria,
+      title,
+      text,
+      relaxedClickable: isRelaxedClickable(node) ? 1 : 0,
+    }};
+  }};
+  const summarizeRoot = (node) => {{
+    if (!node) {{
+      return '-';
+    }}
+    const tag = cleanText(node.tagName || '', 32).toLowerCase() || 'node';
+    if (tag === 'header' || tag === 'main') {{
+      return tag;
+    }}
+    const role = cleanText(node.getAttribute && node.getAttribute('role') || '', 32).toLowerCase();
+    if (role) {{
+      return `${{tag}}:${{role}}`;
+    }}
+    const testId = cleanText(node.getAttribute && node.getAttribute('data-testid') || '', 48).toLowerCase();
+    if (testId) {{
+      return `${{tag}}:${{testId}}`;
+    }}
+    const text = cleanText(node.innerText || node.textContent || '', 40).toLowerCase();
+    if (text) {{
+      return `${{tag}}:${{text}}`;
+    }}
+    return tag;
+  }};
+  const countLinkishDataNodes = (nodes) => nodes.filter((node) => {{
+    if (!node || typeof node.getAttribute !== 'function') {{
+      return false;
+    }}
+    return linkishAttrNames.some((attrName) => cleanText(node.getAttribute(attrName) || '', 120));
+  }}).length;
   const scopeRoots = [];
   const seenRoots = new Set();
   const addRoot = (node) => {{
@@ -4172,6 +4296,47 @@ def _collect_instagram_live_profile_clickable_control_values(page: Any) -> List[
   }}
   if (!scopeRoots.length) {{
     addRoot(main);
+  }}
+  const truth = captureTruth ? {{
+    mainPresent: 1,
+    headerPresent: header ? 1 : 0,
+    scopeRoots: scopeRoots.slice(0, truthLimit).map((root) => summarizeRoot(root)),
+    rootSnapshots: [],
+    rawProbeNodeCount: 0,
+    candidateSamples: [],
+    dropSamples: [],
+    keepSamples: [],
+  }} : null;
+  if (truth) {{
+    for (const root of scopeRoots.slice(0, truthLimit)) {{
+      const descendants = Array.from(root.querySelectorAll ? root.querySelectorAll('*') : []);
+      const descendantSamples = descendants.slice(0, truthLimit).map((node) => summarizeNode(node)).filter(Boolean);
+      truth.rootSnapshots.push({{
+        root: summarizeRoot(root),
+        descendants: descendants.length,
+        anchors: descendants.filter((node) => node && node.matches && node.matches('a[href]')).length,
+        buttons: descendants.filter((node) => cleanText(node && node.tagName || '', 32).toLowerCase() === 'button').length,
+        roleNodes: descendants.filter((node) => cleanText(node && node.getAttribute && node.getAttribute('role') || '', 32)).length,
+        tabindexNodes: descendants.filter((node) => {{
+          const tabindex = cleanText(node && node.getAttribute && node.getAttribute('tabindex') || '', 16);
+          return !!tabindex && tabindex !== '-1';
+        }}).length,
+        onclickNodes: descendants.filter((node) => {{
+          if (!node) {{
+            return false;
+          }}
+          try {{
+            if (typeof node.onclick === 'function') {{
+              return true;
+            }}
+          }} catch (error) {{
+          }}
+          return !!cleanText(node.getAttribute && node.getAttribute('onclick') || '', 120);
+        }}).length,
+        dataLinkish: countLinkishDataNodes(descendants),
+        nodes: descendantSamples,
+      }});
+    }}
   }}
   const values = [];
   const seenValues = new Set();
@@ -4639,18 +4804,38 @@ def _collect_instagram_live_profile_clickable_control_values(page: Any) -> List[
         }}
       }}
     }}
+    if (truth) {{
+      truth.rawProbeNodeCount += probeNodes.length;
+    }}
     for (const node of probeNodes) {{
       const scored = scoreSeed(node, root);
       if (!scored.countable) {{
         continue;
       }}
       rawCandidateCount += 1;
+      if (truth && truth.candidateSamples.length < truthLimit) {{
+        truth.candidateSamples.push(summarizeNode(node));
+      }}
       if (!scored.keep) {{
         addDropReason(scored.dropReason || 'weak_signal', scored.dropKind || 'hard');
+        if (truth && truth.dropSamples.length < truthLimit) {{
+          truth.dropSamples.push({{
+            stage: 'hard_exclusion',
+            reason: scored.dropReason || 'weak_signal',
+            summary: summarizeNode(node),
+          }});
+        }}
         continue;
       }}
       if (seenCandidateNodes.has(scored.node)) {{
         addDropReason('duplicate', 'hard');
+        if (truth && truth.dropSamples.length < truthLimit) {{
+          truth.dropSamples.push({{
+            stage: 'dedupe',
+            reason: 'duplicate',
+            summary: summarizeNode(scored.node),
+          }});
+        }}
         continue;
       }}
       seenCandidateNodes.add(scored.node);
@@ -4704,6 +4889,23 @@ def _collect_instagram_live_profile_clickable_control_values(page: Any) -> List[
       addValue(`${{interactionOnlyPrefix}}${{candidate.label}}:${{index}}`);
       interactionOnlyValueCount += 1;
     }}
+    if (truth && truth.keepSamples.length < truthLimit) {{
+      const producedValue = values.length > valueCountBefore ? 1 : 0;
+      truth.keepSamples.push({{
+        candidateClass: candidate.candidateClass,
+        score: candidate.score,
+        softReasons: Array.isArray(candidate.softDropReasons) ? candidate.softDropReasons.slice(0, truthLimit) : [],
+        producedValue,
+        summary: summarizeNode(candidate.node),
+      }});
+      if (!producedValue && truth.dropSamples.length < truthLimit) {{
+        truth.dropSamples.push({{
+          stage: 'value_extraction_empty',
+          reason: 'no_extracted_value',
+          summary: summarizeNode(candidate.node),
+        }});
+      }}
+    }}
   }}
   const keptLabels = selectedCandidates.map((candidate) => candidate.label).filter(Boolean);
   return {{
@@ -4715,10 +4917,21 @@ def _collect_instagram_live_profile_clickable_control_values(page: Any) -> List[
     interactionOnlyValueCount,
     keptLabels: keptLabels.slice(0, maxSampleLabels),
     dropReasons,
+    mainPresent: 1,
+    headerPresent: header ? 1 : 0,
+    scopeRoots: truth ? truth.scopeRoots : [],
+    rootSnapshots: truth ? truth.rootSnapshots : [],
+    rawProbeNodeCount: truth ? truth.rawProbeNodeCount : 0,
+    candidateSamples: truth ? truth.candidateSamples : [],
+    dropSamples: truth ? truth.dropSamples : [],
+    keepSamples: truth ? truth.keepSamples : [],
+    retrySnapshotIndex,
   }};
 }}
 """
         )
+    try:
+        raw_payload = _evaluate_payload()
     except Exception:
         raw_payload = {}
 
@@ -4731,6 +4944,30 @@ def _collect_instagram_live_profile_clickable_control_values(page: Any) -> List[
             continue
         seen.add(value)
         values.append(value)
+
+    def _truth_clean(raw_value: Any, *, limit: int = 120) -> str:
+        text = re.sub(r"\s+", " ", cell_to_str(raw_value).strip())
+        if len(text) > limit:
+            text = text[: limit - 3] + "..."
+        return text or "-"
+
+    def _truth_quote(raw_value: Any, *, limit: int = 120) -> str:
+        text = _truth_clean(raw_value, limit=limit).replace("'", '"')
+        return f"'{text}'"
+
+    def _truth_node_summary(node_payload: Any) -> str:
+        if not isinstance(node_payload, dict):
+            return "tag=- role=- tabindex=- href=- aria='-' title='-' text='-' relaxed_clickable=0"
+        return (
+            f"tag={_truth_clean(node_payload.get('tag'), limit=32)} "
+            f"role={_truth_clean(node_payload.get('role'), limit=48)} "
+            f"tabindex={_truth_clean(node_payload.get('tabindex'), limit=16)} "
+            f"href={_truth_clean(node_payload.get('href'), limit=160)} "
+            f"aria={_truth_quote(node_payload.get('aria'), limit=96)} "
+            f"title={_truth_quote(node_payload.get('title'), limit=96)} "
+            f"text={_truth_quote(node_payload.get('text'), limit=96)} "
+            f"relaxed_clickable={1 if int(node_payload.get('relaxedClickable') or 0) else 0}"
+        )
 
     raw_candidate_count = 0
     kept_candidate_count = 0
@@ -4774,6 +5011,99 @@ def _collect_instagram_live_profile_clickable_control_values(page: Any) -> List[
     else:
         kept_candidate_count = len(values)
         raw_candidate_count = kept_candidate_count
+
+    if truth_enabled and isinstance(raw_payload, dict):
+        scope_roots = [
+            _truth_clean(root, limit=48)
+            for root in (raw_payload.get("scopeRoots") or [])
+            if _truth_clean(root, limit=48) != "-"
+        ]
+        main_present = 1 if int(raw_payload.get("mainPresent") or 0) else 0
+        header_present = 1 if int(raw_payload.get("headerPresent") or 0) else 0
+        _log_truth(
+            f"[IG Truth] scope roots count={len(scope_roots)} main={main_present} "
+            f"header={header_present} sample={','.join(scope_roots[:_INSTAGRAM_TRUTH_SAMPLE_LIMIT]) or '-'}"
+        )
+        for idx, snapshot in enumerate((raw_payload.get("rootSnapshots") or [])[:_INSTAGRAM_TRUTH_SAMPLE_LIMIT]):
+            if not isinstance(snapshot, dict):
+                continue
+            _log_truth(
+                f"[IG Truth] root_snapshot idx={idx} root={_truth_clean(snapshot.get('root'), limit=48)} "
+                f"descendants={max(int(snapshot.get('descendants') or 0), 0)} "
+                f"anchors={max(int(snapshot.get('anchors') or 0), 0)} "
+                f"buttons={max(int(snapshot.get('buttons') or 0), 0)} "
+                f"role_nodes={max(int(snapshot.get('roleNodes') or 0), 0)} "
+                f"tabindex_nodes={max(int(snapshot.get('tabindexNodes') or 0), 0)} "
+                f"onclick_nodes={max(int(snapshot.get('onclickNodes') or 0), 0)} "
+                f"data_linkish={max(int(snapshot.get('dataLinkish') or 0), 0)}"
+            )
+            for node_idx, node_payload in enumerate((snapshot.get("nodes") or [])[:_INSTAGRAM_TRUTH_SAMPLE_LIMIT]):
+                _log_truth(f"[IG Truth] node idx={node_idx} {_truth_node_summary(node_payload)}")
+
+        candidate_sample = " | ".join(
+            _truth_node_summary(node_payload)
+            for node_payload in (raw_payload.get("candidateSamples") or [])[:_INSTAGRAM_TRUTH_SAMPLE_LIMIT]
+        ) or "-"
+        _log_truth(
+            f"[IG Truth] candidates raw_probe={max(int(raw_payload.get('rawProbeNodeCount') or 0), 0)} "
+            f"countable={raw_candidate_count} sample={candidate_sample}"
+        )
+        for drop_payload in (raw_payload.get("dropSamples") or [])[:_INSTAGRAM_TRUTH_SAMPLE_LIMIT]:
+            if not isinstance(drop_payload, dict):
+                continue
+            _log_truth(
+                f"[IG Truth] drop stage={_truth_clean(drop_payload.get('stage'), limit=32)} "
+                f"reason={_truth_clean(drop_payload.get('reason'), limit=64)} "
+                f"{_truth_node_summary(drop_payload.get('summary'))}"
+            )
+        for keep_payload in (raw_payload.get("keepSamples") or [])[:_INSTAGRAM_TRUTH_SAMPLE_LIMIT]:
+            if not isinstance(keep_payload, dict):
+                continue
+            soft_reasons = [
+                _truth_clean(reason, limit=32)
+                for reason in (keep_payload.get("softReasons") or [])
+                if _truth_clean(reason, limit=32) != "-"
+            ]
+            _log_truth(
+                f"[IG Truth] keep class={_truth_clean(keep_payload.get('candidateClass'), limit=32)} "
+                f"score={max(int(keep_payload.get('score') or 0), 0)} "
+                f"soft={','.join(soft_reasons) if soft_reasons else '-'} "
+                f"produced_value={1 if int(keep_payload.get('producedValue') or 0) else 0} "
+                f"{_truth_node_summary(keep_payload.get('summary'))}"
+            )
+        _log_truth(
+            f"[IG Truth] output raw_control_values count={len(values)} "
+            f"sample={_instagram_bio_link_log_sample(values)}"
+        )
+        if not values:
+            wait_for_timeout = getattr(page, "wait_for_timeout", None)
+            for retry_snapshot in range(1, _INSTAGRAM_TRUTH_RETRY_SNAPSHOTS + 1):
+                if callable(wait_for_timeout):
+                    try:
+                        wait_for_timeout(_INSTAGRAM_TRUTH_RETRY_WAIT_MS)
+                    except Exception:
+                        pass
+                else:
+                    time.sleep(_INSTAGRAM_TRUTH_RETRY_WAIT_MS / 1000.0)
+                try:
+                    retry_payload = _evaluate_payload(retry_snapshot_index=retry_snapshot)
+                except Exception:
+                    retry_payload = {}
+                if not isinstance(retry_payload, dict):
+                    retry_payload = {}
+                descendant_count = 0
+                for snapshot in retry_payload.get("rootSnapshots") or []:
+                    if not isinstance(snapshot, dict):
+                        continue
+                    try:
+                        descendant_count += max(int(snapshot.get("descendants") or 0), 0)
+                    except Exception:
+                        continue
+                _log_truth(
+                    f"[IG Truth] zero_first_pass retry_snapshot={retry_snapshot} "
+                    f"descendants={descendant_count} "
+                    f"countable={max(int(retry_payload.get('rawCandidateCount') or 0), 0)}"
+                )
 
     dropped_candidate_count = max(raw_candidate_count - kept_candidate_count - interaction_candidate_count, 0)
     candidate_sample = ",".join(kept_labels[:3]) if kept_labels else "-"
@@ -5576,6 +5906,7 @@ def _collect_instagram_live_profile_clickable_bio_link_urls(
     profile_url: str = "",
     raw_control_values: Optional[Iterable[Any]] = None,
 ) -> List[str]:
+    truth_enabled = _instagram_truth_logging_enabled(profile_url)
     candidate_urls: List[str] = []
     seen: Set[str] = set()
 
@@ -5620,6 +5951,12 @@ def _collect_instagram_live_profile_clickable_bio_link_urls(
         if raw_control_values is not None
         else _collect_instagram_live_profile_clickable_control_values(page)
     )
+    if truth_enabled:
+        _emit_instagram_truth(
+            f"[IG Truth] bio_link_urls_enter profile_url={profile_url or '-'} "
+            f"raw_control_values count={len(collected_raw_control_values)} "
+            f"sample={_instagram_bio_link_log_sample(collected_raw_control_values)}"
+        )
     for raw_value in collected_raw_control_values:
         _ingest_raw_value(raw_value)
     usable_raw_values = [
@@ -5633,6 +5970,13 @@ def _collect_instagram_live_profile_clickable_bio_link_urls(
     should_run_interaction_fallback = not has_candidate_urls and not has_usable_raw_values
     if should_run_interaction_fallback:
         _ingest_raw_value(_recover_instagram_live_profile_clickable_bio_link_url_via_interaction(page))
+    if truth_enabled:
+        _emit_instagram_truth(
+            f"[IG Truth] bio_link_urls_output candidate_urls count={len(candidate_urls)} "
+            f"sample={_instagram_bio_link_log_sample(candidate_urls)} "
+            f"usable_raw_values={1 if has_usable_raw_values else 0} "
+            f"interaction_fallback={1 if should_run_interaction_fallback else 0}"
+        )
     return candidate_urls
 
 
@@ -12891,6 +13235,7 @@ class CrossDirectoryEnricherWorker(QThread):
         if not ig_url:
             self._set_platform_state("instagram", "skipped")
             return False
+        ig_truth_enabled = _instagram_truth_logging_enabled(ig_url)
 
         email_before = _row_email_summary_snapshot(seed_df, row_idx)
         hidden_surface_attempt_keys = getattr(self, "_instagram_hidden_contact_attempt_keys", None)
@@ -12962,6 +13307,13 @@ class CrossDirectoryEnricherWorker(QThread):
                 if not shared_live_clickable_bio_link_urls_attempted:
                     shared_live_clickable_bio_link_urls_attempted = True
                     shared_live_clickable_bio_link_raw_values = _get_shared_live_clickable_bio_link_raw_values()
+                    if ig_truth_enabled:
+                        _emit_instagram_truth(
+                            f"[IG Truth] callsite bio_link_urls profile_url={ig_url} "
+                            f"raw_control_values count={len(shared_live_clickable_bio_link_raw_values)} "
+                            f"sample={_instagram_bio_link_log_sample(shared_live_clickable_bio_link_raw_values)}",
+                            emit=self.log_message.emit,
+                        )
                     shared_live_clickable_bio_link_urls = _collect_instagram_live_profile_clickable_bio_link_urls(
                         live_page.page,
                         profile_url=ig_url,
@@ -12977,6 +13329,11 @@ class CrossDirectoryEnricherWorker(QThread):
                 _get_shared_runtime_structured_payloads()
                 if not shared_live_clickable_bio_link_raw_values_attempted:
                     shared_live_clickable_bio_link_raw_values_attempted = True
+                    if ig_truth_enabled:
+                        _emit_instagram_truth(
+                            f"[IG Truth] callsite detector profile_url={ig_url} live_page=1",
+                            emit=self.log_message.emit,
+                        )
                     shared_live_clickable_bio_link_raw_values = _collect_instagram_live_profile_clickable_control_values(
                         live_page.page
                     )
