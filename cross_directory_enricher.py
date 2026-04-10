@@ -3017,6 +3017,7 @@ def _spotify_seed_instagram_admission_profile_validation(
 _INSTAGRAM_MIN_PROFILE_HTML_CHARS = 48
 _INSTAGRAM_REQUIRED_SELECTOR = 'meta[property="og:description"]'
 _INSTAGRAM_RENDER_READY_TIMEOUT_MS = 2500
+_INSTAGRAM_PROFILE_SURFACE_READY_ATTEMPTS = 3
 _INSTAGRAM_RENDER_READY_JS = """
 () => {
   const main = document.querySelector('main');
@@ -3029,6 +3030,25 @@ _INSTAGRAM_RENDER_READY_JS = """
     }
   }
   return false;
+}
+"""
+_INSTAGRAM_PROFILE_SURFACE_READY_PROBE_JS = """
+() => {
+  const main = document.querySelector('main');
+  const header = main ? main.querySelector('header') : null;
+  const profileMarkers = main
+    ? main.querySelectorAll('header, section, article, a[href], button, img, h1, h2, ul li').length
+    : 0;
+  const descendants = main ? main.querySelectorAll('*').length : 0;
+  const text = main ? (main.innerText || '').replace(/\\s+/g, ' ').trim() : '';
+  return {
+    main: main ? 1 : 0,
+    header: header ? 1 : 0,
+    profile_markers: profileMarkers,
+    descendants: descendants,
+    text_length: text.length,
+    ready: main && header && profileMarkers > 0 && descendants > 0 && text.length >= 16 ? 1 : 0,
+  };
 }
 """
 _INSTAGRAM_PROFILE_SURFACE_CANDIDATE_JS = """
@@ -3121,6 +3141,92 @@ def _instagram_landed_page_is_plausible_profile_surface(page: Any) -> bool:
     if marker == "profile_surface_candidate":
         return True
     return not current_url
+
+
+def _probe_instagram_profile_surface_state(page: Any) -> Dict[str, int]:
+    state = {
+        "main": 0,
+        "header": 0,
+        "profile_markers": 0,
+        "descendants": 0,
+        "text_length": 0,
+        "ready": 0,
+    }
+    evaluate = getattr(page, "evaluate", None)
+    if not callable(evaluate):
+        return state
+    try:
+        raw_state = evaluate(_INSTAGRAM_PROFILE_SURFACE_READY_PROBE_JS)
+    except Exception:
+        return state
+    if not isinstance(raw_state, dict):
+        return state
+    for key in state:
+        try:
+            state[key] = int(raw_state.get(key, 0) or 0)
+        except Exception:
+            state[key] = 0
+    return state
+
+
+def _wait_for_instagram_live_profile_surface(
+    page: Any,
+    profile_url: str,
+    *,
+    timeout_s: float,
+) -> Tuple[bool, str]:
+    page_url = cell_to_str(getattr(page, "url", "")).strip()
+    print(f"[IG Surface] enter profile_url={profile_url} page_url={page_url}")
+    max_attempts = max(int(_INSTAGRAM_PROFILE_SURFACE_READY_ATTEMPTS), 1)
+    attempt_timeout_s = min(max(float(timeout_s or 0), 0.0), _INSTAGRAM_RENDER_READY_TIMEOUT_MS / 1000.0)
+    saw_profile_surface_candidate = False
+
+    for attempt in range(1, max_attempts + 1):
+        state = _probe_instagram_profile_surface_state(page)
+        print(
+            f"[IG Surface] readiness attempt={attempt} main={state['main']} "
+            f"header={state['header']} profile_markers={state['profile_markers']} "
+            f"descendants={state['descendants']}"
+        )
+        if state["ready"]:
+            print(
+                f"[IG Surface] ready attempt={attempt} main={state['main']} "
+                f"header={state['header']} profile_markers={state['profile_markers']}"
+            )
+            return (True, "profile_surface")
+
+        current_url = cell_to_str(getattr(page, "url", "")).strip()
+        current_html = ""
+        try:
+            current_html = cell_to_str(page.content())
+        except Exception:
+            current_html = ""
+        if _instagram_landed_page_is_plausible_profile_surface(page) or _instagram_landed_page_is_html_handoff_usable(
+            profile_url,
+            current_url,
+            current_html,
+        ):
+            saw_profile_surface_candidate = True
+        try:
+            render_ready = _wait_for_instagram_profile_render(page, attempt_timeout_s)
+        except Exception:
+            render_ready = False
+        if render_ready:
+            state = _probe_instagram_profile_surface_state(page)
+            print(
+                f"[IG Surface] ready attempt={attempt} main={state['main']} "
+                f"header={state['header']} profile_markers={state['profile_markers']}"
+            )
+            return (True, "profile_surface")
+
+        if attempt >= max_attempts:
+            break
+        print(f"[IG Surface] recovery action=reload_same_profile attempt={attempt}")
+        page.goto(profile_url, wait_until="domcontentloaded", timeout=timeout_s * 1000)
+
+    failure_reason = "not_render_ready" if saw_profile_surface_candidate else "not_profile_surface"
+    print(f"[IG Surface] failed reason={failure_reason} attempts={max_attempts}")
+    return (False, failure_reason)
 
 
 def _instagram_landed_page_is_html_handoff_usable(
@@ -6662,16 +6768,14 @@ def _open_instagram_live_page_bridge(
             print(f"DEBUG IG: landed_body_text_head = {_debug_probe_preview(landed_body_text)}")
         except Exception as probe_error:
             print(f"DEBUG IG: landed page probe failed: {probe_error!r}")
-        should_wait_for_render = _instagram_landed_page_is_plausible_profile_surface(page)
-        if should_wait_for_render:
-            render_ready = _wait_for_instagram_profile_render(page, timeout_s)
-            if not render_ready:
-                raise RuntimeError("RUNTIME_PAGE_STATE_NOT_RENDER_READY")
-        elif not _instagram_landed_page_is_html_handoff_usable(
+        surface_ready, failure_reason = _wait_for_instagram_live_profile_surface(
+            page,
             url,
-            cell_to_str(landed_url),
-            cell_to_str(landed_html),
-        ):
+            timeout_s=timeout_s,
+        )
+        if not surface_ready:
+            if failure_reason == "not_render_ready":
+                raise RuntimeError("RUNTIME_PAGE_STATE_NOT_RENDER_READY")
             raise RuntimeError("RUNTIME_PAGE_STATE_NOT_PROFILE_SURFACE")
         return InstagramLivePageBridge(
             playwright=playwright,
