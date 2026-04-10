@@ -13467,19 +13467,42 @@ class CrossDirectoryEnricherWorker(QThread):
 
             try:
                 if not all_ig_emails and not _row_has_email(seed_df.loc[row_idx]):
-                    (
-                        all_ig_emails,
-                        selected_source_url,
-                        selected_extract_method,
-                        onehop_target_attempted,
-                    ) = _instagram_onehop_emails_from_surface(
-                        self.session,
-                        html,
-                        profile_url=ig_url,
-                        log=self.log_message.emit,
-                        live_raw_control_values=_get_shared_live_clickable_bio_link_raw_values(),
-                        live_rendered_bio_link_urls=_get_shared_live_clickable_bio_link_urls(),
-                    )
+                    live_page = _get_shared_live_page()
+                    if live_page is None:
+                        self.log_message.emit(
+                            "[IG Bridge Gate] live_bridge=0 action=skip_live_onehop reason=bridge_failed"
+                        )
+                        self.log_message.emit(
+                            "[IG Bridge Gate] live_bridge=0 action=static_only_path"
+                        )
+                        (
+                            all_ig_emails,
+                            selected_source_url,
+                            selected_extract_method,
+                            onehop_target_attempted,
+                        ) = _instagram_onehop_emails_from_surface(
+                            self.session,
+                            html,
+                            profile_url=ig_url,
+                            log=self.log_message.emit,
+                        )
+                    else:
+                        self.log_message.emit(
+                            "[IG Bridge Gate] live_bridge=1 action=proceed_live_onehop"
+                        )
+                        (
+                            all_ig_emails,
+                            selected_source_url,
+                            selected_extract_method,
+                            onehop_target_attempted,
+                        ) = _instagram_onehop_emails_from_surface(
+                            self.session,
+                            html,
+                            profile_url=ig_url,
+                            log=self.log_message.emit,
+                            live_raw_control_values=_get_shared_live_clickable_bio_link_raw_values(),
+                            live_rendered_bio_link_urls=_get_shared_live_clickable_bio_link_urls(),
+                        )
                     if all_ig_emails:
                         selected_surface = "instagram_bio_link_one_hop"
                 if (
