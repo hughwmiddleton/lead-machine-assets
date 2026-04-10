@@ -120,7 +120,13 @@ class _DummyInstagramHiddenContactPage(_DummyClosable):
             soup = BeautifulSoup(self._html, "html.parser")
             main = soup.select_one("main")
             if main is None:
-                return []
+                return {
+                    "values": [],
+                    "rawCandidateCount": 0,
+                    "keptCandidateCount": 0,
+                    "keptLabels": [],
+                    "dropReasons": {},
+                }
             scope_roots = []
             header = main.select_one("header")
             if header is not None:
@@ -136,27 +142,117 @@ class _DummyInstagramHiddenContactPage(_DummyClosable):
                 scope_roots = [main]
             values = []
             seen = set()
-            url_pattern = re.compile(r"https?://[^\s'\"<>()]+")
+            kept_labels = []
+            seen_candidate_nodes = set()
+            raw_candidate_count = 0
+            drop_reasons = {}
+            url_pattern = re.compile(r"https?://[^\s'\"<>()]+", re.IGNORECASE)
+            bare_domain_pattern = re.compile(
+                r"\b(?:www\.)?(?:[a-z0-9-]+\.)+(?:com|co|net|org|fm|tv|io|gg|ly|me|bio|to|live|page|link|music|band|store|art|studio|agency|ai|ee)(?:/[^\s'\"<>()]*)?",
+                re.IGNORECASE,
+            )
+            positive_pattern = re.compile(
+                r"(https?://|www\.|(?:[a-z0-9-]+\.)+(?:com|co|net|org|fm|tv|io|gg|ly|me|bio|to|live|page|link|music|band|store|art|studio|agency|ai|ee)\b|\b(link(?:\s+in\s+bio)?|bio\s+link|website|external|official\s+site)\b)",
+                re.IGNORECASE,
+            )
+            weak_context_pattern = re.compile(r"\b(bio|website|external|link)\b", re.IGNORECASE)
+            blocked_value_pattern = re.compile(
+                r"(developers\.facebook\.com|about\.instagram\.com|about\.meta\.com|meta\.ai|threads\.com|threads\.net)",
+                re.IGNORECASE,
+            )
+            tab_pattern = re.compile(r"\b(posts?|reels?|tagged)\b", re.IGNORECASE)
+            follower_pattern = re.compile(r"\bfollowers?\b|\bfollowing\b", re.IGNORECASE)
+            menu_pattern = re.compile(r"\b(menu|settings|options|more)\b", re.IGNORECASE)
+            share_pattern = re.compile(r"\bshare\b", re.IGNORECASE)
+            profile_action_pattern = re.compile(r"\b(message|email|call|text|follow)\b", re.IGNORECASE)
 
             def add_value(raw_value):
                 value = str(raw_value or "").strip()
-                if not value or value in seen:
+                if not value or value in seen or blocked_value_pattern.search(value):
                     return
                 seen.add(value)
                 values.append(value)
 
-            def add_value_with_matches(raw_value):
+            def add_text_matches(raw_value):
                 value = str(raw_value or "").strip()
                 if not value:
                     return
-                add_value(value)
                 for match in url_pattern.findall(value):
                     add_value(match.rstrip(".,;:!?)]}"))
+                for match in bare_domain_pattern.finditer(value):
+                    cleaned = str(match.group(0) or "").strip().rstrip(".,;:!?)]}")
+                    if match.start() > 0 and value[match.start() - 1] == "@":
+                        continue
+                    if not cleaned or blocked_value_pattern.search(cleaned):
+                        continue
+                    if cleaned.lower().startswith(("http://", "https://")):
+                        add_value(cleaned)
+                    else:
+                        add_value(f"https://{cleaned}")
 
-            def is_clickable(node):
+            def add_value_with_matches(raw_value, include_full=False):
+                value = str(raw_value or "").strip()
+                if not value:
+                    return
+                add_text_matches(value)
+                if include_full and (
+                    value.lower().startswith(("http://", "https://"))
+                    or value.startswith(("//", "/", "{", "["))
+                    or re.search(r"(href|url|uri|link|target|redirect|website|external)", value, re.IGNORECASE)
+                ):
+                    add_value(value)
+
+            def is_relaxed_clickable(node):
                 tag_name = getattr(node, "name", "") or ""
                 role = str((node.attrs or {}).get("role", "")).strip().lower()
-                return tag_name == "button" or (tag_name == "a" and node.get("href")) or role in {"button", "link"}
+                tabindex = str((node.attrs or {}).get("tabindex", "")).strip()
+                if tag_name == "a":
+                    return bool(node.get("href"))
+                if tag_name == "button" or role in {"button", "link"}:
+                    return True
+                if tabindex and tabindex != "-1":
+                    return True
+                for attr_name in (
+                    "onclick",
+                    "data-link",
+                    "data-url",
+                    "data-href",
+                    "data-target",
+                    "data-uri",
+                    "data-web-uri",
+                    "data-web-destination",
+                ):
+                    if node.get(attr_name):
+                        return True
+                return False
+
+            def is_within_scope(candidate, scope_root):
+                current = candidate
+                while current is not None:
+                    if current is scope_root:
+                        return True
+                    current = getattr(current, "parent", None)
+                return False
+
+            def collect_attr_text(node):
+                attrs = getattr(node, "attrs", {}) or {}
+                parts = []
+                for attr_name, raw_value in attrs.items():
+                    key = str(attr_name or "").strip().lower()
+                    if not key or key == "style":
+                        continue
+                    if (
+                        key == "href"
+                        or key == "title"
+                        or key == "aria-label"
+                        or key == "class"
+                        or key == "data-testid"
+                        or key.startswith("data-")
+                        or re.search(r"(href|url|uri|link|target|redirect|website|external)", key, re.IGNORECASE)
+                    ):
+                        iterable = raw_value if isinstance(raw_value, (list, tuple, set)) else [raw_value]
+                        parts.extend(str(item or "").strip() for item in iterable if str(item or "").strip())
+                return " ".join(parts).strip()[:280]
 
             def add_attr_values(node):
                 attrs = getattr(node, "attrs", {}) or {}
@@ -169,28 +265,28 @@ class _DummyInstagramHiddenContactPage(_DummyClosable):
                         or key == "title"
                         or key == "aria-label"
                         or key == "onclick"
+                        or key == "class"
                         or key.startswith("data-")
+                        or re.search(r"(href|url|uri|link|target|redirect|website|external)", key, re.IGNORECASE)
                     ):
                         if isinstance(raw_value, (list, tuple, set)):
                             iterable = raw_value
                         else:
                             iterable = [raw_value]
                         for item in iterable:
-                            add_value_with_matches(item)
+                            add_value_with_matches(item, include_full=True)
+
+            def add_text_values(node):
+                add_text_matches(node.get_text(" ", strip=True))
+                add_text_matches(node.get("aria-label", ""))
+                add_text_matches(node.get("title", ""))
 
             def add_anchor_values(node):
                 if node is None or getattr(node, "name", "") != "a" or not node.get("href"):
                     return
                 add_attr_values(node)
-                add_value_with_matches(node.get("href"))
-
-            def is_within_scope(candidate, scope_root):
-                current = candidate
-                while current is not None:
-                    if current is scope_root:
-                        return True
-                    current = getattr(current, "parent", None)
-                return False
+                add_text_values(node)
+                add_value_with_matches(node.get("href"), include_full=True)
 
             def collect_nearby_nodes(node, scope_root):
                 nearby_nodes = []
@@ -225,15 +321,135 @@ class _DummyInstagramHiddenContactPage(_DummyClosable):
 
                 return nearby_nodes
 
+            def classify_drop_reason(node, scope_root, combined_text):
+                own_text = " ".join(
+                    part
+                    for part in [
+                        node.get("aria-label", ""),
+                        node.get("title", ""),
+                        node.get_text(" ", strip=True),
+                        collect_attr_text(node),
+                    ]
+                    if str(part or "").strip()
+                )[:280]
+                if not is_within_scope(node, scope_root):
+                    return "out_of_scope"
+                if node.find_parent(["nav", "footer", "aside"]) is not None:
+                    return "global_nav"
+                if node.find_parent(attrs={"role": "tablist"}) is not None or tab_pattern.search(own_text):
+                    return "tab"
+                if menu_pattern.search(own_text):
+                    return "menu"
+                if follower_pattern.search(own_text):
+                    return "follower_control"
+                if share_pattern.search(own_text):
+                    return "share"
+                if profile_action_pattern.search(own_text) and not positive_pattern.search(combined_text):
+                    return "profile_action"
+                return ""
+
+            def score_seed(node, scope_root):
+                relaxed_clickable = is_relaxed_clickable(node)
+                label_text = " ".join(
+                    part
+                    for part in [
+                        node.get("aria-label", ""),
+                        node.get("title", ""),
+                        node.get_text(" ", strip=True),
+                    ]
+                    if str(part or "").strip()
+                )[:280]
+                context_text = " ".join(
+                    part
+                    for part in [
+                        node.parent.get_text(" ", strip=True) if getattr(node, "parent", None) is not None else "",
+                        node.find_previous_sibling().get_text(" ", strip=True)
+                        if node.find_previous_sibling() is not None
+                        else "",
+                        node.find_next_sibling().get_text(" ", strip=True)
+                        if node.find_next_sibling() is not None
+                        else "",
+                    ]
+                    if str(part or "").strip()
+                )[:280]
+                attr_text = collect_attr_text(node)
+                combined_text = " ".join(
+                    part for part in [label_text, context_text, attr_text] if str(part or "").strip()
+                )[:320]
+                countable = bool(
+                    relaxed_clickable
+                    or positive_pattern.search(combined_text)
+                    or weak_context_pattern.search(combined_text)
+                )
+                if not countable:
+                    return False, "", ""
+                hard_drop_reason = classify_drop_reason(node, scope_root, combined_text)
+                if hard_drop_reason:
+                    return False, hard_drop_reason, ""
+                score = 0
+                if url_pattern.search(label_text) or bare_domain_pattern.search(label_text):
+                    score += 10
+                if url_pattern.search(attr_text) or bare_domain_pattern.search(attr_text):
+                    score += 10
+                if positive_pattern.search(label_text):
+                    score += 6
+                if positive_pattern.search(attr_text):
+                    score += 6
+                if positive_pattern.search(context_text):
+                    score += 3
+                if weak_context_pattern.search(context_text) or weak_context_pattern.search(attr_text):
+                    score += 2
+                if relaxed_clickable:
+                    score += 2
+                if header is not None and is_within_scope(node, header):
+                    score += 1
+                if score < (4 if relaxed_clickable else 6):
+                    return False, "weak_signal", ""
+                if getattr(node, "name", "") == "a" and node.get("href"):
+                    label = "direct_anchor"
+                elif relaxed_clickable:
+                    label = "nested_clickable"
+                else:
+                    label = "bio_surface_wrapper"
+                return True, "", label
+
             for root in scope_roots:
                 nodes = []
-                if is_clickable(root):
-                    nodes.append(root)
-                nodes.extend(root.select(cde._INSTAGRAM_LIVE_ONEHOP_CLICKABLE_SELECTOR))
+                seen_probe_ids = set()
+
+                def enqueue_probe(node):
+                    if node is None:
+                        return
+                    node_id = id(node)
+                    if node_id in seen_probe_ids or len(nodes) >= 80:
+                        return
+                    if not is_within_scope(node, root):
+                        return
+                    seen_probe_ids.add(node_id)
+                    nodes.append(node)
+
+                enqueue_probe(root)
+                for node in root.find_all(["a", "button", "div", "span", "section", "article", "li", "p"]):
+                    enqueue_probe(node)
+                    if len(nodes) >= 80:
+                        break
                 for node in nodes:
-                    if not is_clickable(node):
+                    keep, drop_reason, label = score_seed(node, root)
+                    if not keep and not drop_reason:
                         continue
+                    raw_candidate_count += 1
+                    if not keep:
+                        drop_reasons[drop_reason] = drop_reasons.get(drop_reason, 0) + 1
+                        continue
+                    node_id = id(node)
+                    if node_id in seen_candidate_nodes:
+                        drop_reasons["duplicate"] = drop_reasons.get("duplicate", 0) + 1
+                        continue
+                    seen_candidate_nodes.add(node_id)
+                    if label and label not in kept_labels:
+                        kept_labels.append(label)
                     add_attr_values(node)
+                    add_text_values(node)
                     current = node
                     while current is not None and is_within_scope(current, root):
                         if current is not node and getattr(current, "name", "") == "a" and current.get("href"):
@@ -241,10 +457,18 @@ class _DummyInstagramHiddenContactPage(_DummyClosable):
                             break
                         current = getattr(current, "parent", None)
                     for nearby in collect_nearby_nodes(node, root):
+                        add_attr_values(nearby)
+                        add_text_values(nearby)
                         add_anchor_values(nearby)
                         for anchor in nearby.select("a[href]")[:4]:
                             add_anchor_values(anchor)
-            return values
+            return {
+                "values": values,
+                "rawCandidateCount": raw_candidate_count,
+                "keptCandidateCount": len(seen_candidate_nodes),
+                "keptLabels": kept_labels[:3],
+                "dropReasons": drop_reasons,
+            }
         if "ig-live-bio-link-interaction-recovery" in script_text:
             if 'const state = window["' in script_text:
                 if self._interaction_bio_link_page_url:
@@ -2284,6 +2508,86 @@ def test_collect_instagram_live_profile_clickable_bio_link_urls_recovers_dom_rel
     )
 
     assert urls == [expected]
+
+
+def test_collect_instagram_live_profile_clickable_control_values_recovers_non_role_bio_surface(
+    capsys,
+):
+    page = _DummyInstagramHiddenContactPage(
+        "<html><body><main><header>"
+        "<div class='bio-copy'>new single out now</div>"
+        "<div data-link='https://beacons.ai/nonroleartist'><span>Website</span></div>"
+        "</header></main></body></html>"
+    )
+
+    values = cde._collect_instagram_live_profile_clickable_control_values(page)
+
+    assert "https://beacons.ai/nonroleartist" in values
+    captured = capsys.readouterr()
+    assert "[IG Detect] candidates raw=" in captured.out
+    assert "nested_clickable" in captured.out
+    assert "[IG Detect] control_values count=" in captured.out
+
+
+def test_collect_instagram_live_profile_clickable_control_values_recovers_nested_wrapper_surface(
+    capsys,
+):
+    page = _DummyInstagramHiddenContactPage(
+        "<html><body><main><header>"
+        "<div class='bio-stack'>"
+        "<span>linktr.ee/nestedwrapperartist</span>"
+        "<div><span>Official links</span></div>"
+        "</div>"
+        "</header></main></body></html>"
+    )
+
+    values = cde._collect_instagram_live_profile_clickable_control_values(page)
+
+    assert "https://linktr.ee/nestedwrapperartist" in values
+    captured = capsys.readouterr()
+    assert "sample=bio_surface_wrapper" in captured.out
+    assert "[IG Detect] control_values count=" in captured.out
+
+
+def test_collect_instagram_live_profile_clickable_control_values_excludes_tabs_followers_and_menu_controls(
+    capsys,
+):
+    page = _DummyInstagramHiddenContactPage(
+        "<html><body><main>"
+        "<header>"
+        "<button>2,034 followers</button>"
+        "<div tabindex='0' aria-label='Menu'>Open menu</div>"
+        "</header>"
+        "<section role='tablist'>"
+        "<div role='button'>Posts</div>"
+        "<div role='button'>Reels</div>"
+        "</section>"
+        "</main></body></html>"
+    )
+
+    values = cde._collect_instagram_live_profile_clickable_control_values(page)
+
+    assert values == []
+    captured = capsys.readouterr()
+    assert "[IG Detect] drop_reasons=" in captured.out
+    assert "follower_control:" in captured.out
+    assert "menu:" in captured.out
+    assert "tab:" in captured.out
+
+
+def test_collect_instagram_live_profile_clickable_control_values_returns_empty_when_no_bio_surface_exists(
+    capsys,
+):
+    page = _DummyInstagramHiddenContactPage(
+        "<html><body><main><header><button>Email</button><button>Message</button></header></main></body></html>"
+    )
+
+    values = cde._collect_instagram_live_profile_clickable_control_values(page)
+
+    assert values == []
+    captured = capsys.readouterr()
+    assert "[IG Detect] candidates raw=" in captured.out
+    assert "[IG Detect] control_values count=0 sample=-" in captured.out
 
 
 def test_collect_instagram_live_profile_clickable_bio_link_urls_recovers_runtime_adjoining_value_when_clickable_attrs_are_empty():

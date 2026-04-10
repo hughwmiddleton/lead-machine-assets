@@ -4019,59 +4019,68 @@ _INSTAGRAM_LIVE_ONEHOP_REDIRECT_QUERY_KEYS = frozenset(
 
 
 def _collect_instagram_live_profile_clickable_control_values(page: Any) -> List[str]:
+    def _log_detect(message: str) -> None:
+        try:
+            print(message)
+        except Exception:
+            pass
+
     if page is None or not hasattr(page, "evaluate"):
+        _log_detect("[IG Detect] candidates raw=0 kept=0 dropped=0 sample=-")
+        _log_detect("[IG Detect] drop_reasons=-")
+        _log_detect("[IG Detect] control_values count=0 sample=-")
         return []
+
+    marker_name_json = json.dumps("ig-live-bio-link-control-surface")
+    selector_json = json.dumps(_INSTAGRAM_LIVE_ONEHOP_CLICKABLE_SELECTOR)
+    raw_payload: Any = {}
     try:
-        raw_values = page.evaluate(
+        raw_payload = page.evaluate(
             f"""
 () => {{
-  const marker = 'ig-live-bio-link-control-surface';
-  const selector = "{_INSTAGRAM_LIVE_ONEHOP_CLICKABLE_SELECTOR}";
+  const marker = {marker_name_json};
+  const selector = {selector_json};
   const maxScopeRoots = {_INSTAGRAM_LIVE_ONEHOP_MAX_SCOPE_ROOTS};
   const maxNodes = {_INSTAGRAM_LIVE_ONEHOP_MAX_CLICKABLE_NODES};
   const maxAttrsPerNode = {_INSTAGRAM_LIVE_ONEHOP_MAX_ATTRS_PER_NODE};
-  const maxNearbyNodesPerClickable = 10;
+  const maxProbeNodesPerRoot = 80;
+  const maxNearbyNodesPerCandidate = 10;
   const maxNearbyAnchorsPerNode = 4;
+  const maxNearbyClickablesPerNode = 4;
   const maxRuntimeOwnProps = 16;
   const maxRuntimeObjectDepth = 2;
   const maxRuntimeObjectEntries = 16;
   const maxRuntimeArrayItems = 8;
+  const maxSampleLabels = 3;
   const runtimeValueKeyPattern = /(href|url|uri|link|path|pathname|target|dest|destination|redirect|website|external|outbound|web)/i;
   const runtimeNodePropPattern = /^(__reactProps\\$|__reactEventHandlers\\$|__reactFiber\\$|__reactInternalInstance\\$|__reactContainer\\$)/;
-  const urlPattern = /https?:\\/\\/[^\\s'"<>()]+/g;
+  const urlPattern = /https?:\\/\\/[^\\s'"<>()]+/gi;
+  const bareDomainPattern = /\\b(?:www\\.)?(?:[a-z0-9-]+\\.)+(?:com|co|net|org|fm|tv|io|gg|ly|me|bio|to|live|page|link|music|band|store|art|studio|agency|ai|ee)(?:\\/[^\\s'"<>()]*)?/gi;
+  const positivePattern = /(https?:\\/\\/|www\\.|(?:[a-z0-9-]+\\.)+(?:com|co|net|org|fm|tv|io|gg|ly|me|bio|to|live|page|link|music|band|store|art|studio|agency|ai|ee)\\b|\\b(link(?:\\s+in\\s+bio)?|bio\\s+link|website|external|official\\s+site)\\b)/i;
+  const weakContextPattern = /\\b(bio|website|external|link)\\b/i;
+  const tabPattern = /\\b(posts?|reels?|tagged)\\b/i;
+  const followerPattern = /\\bfollowers?\\b|\\bfollowing\\b/i;
+  const menuPattern = /\\b(menu|settings|options|more)\\b/i;
+  const sharePattern = /\\bshare\\b/i;
+  const profileActionPattern = /\\b(message|email|call|text|follow)\\b/i;
+  const blockedValuePattern = /(?:developers\\.facebook\\.com|about\\.instagram\\.com|about\\.meta\\.com|meta\\.ai|threads\\.com|threads\\.net)/i;
+  const relaxedSelector = selector + ", [tabindex], [onclick], [data-link], [data-url], [data-href], [data-target], [data-uri], [data-web-uri], [data-web-destination]";
+  const probeSelector = relaxedSelector + ", div, span, section, article, li, p";
   const main = document.querySelector('main');
   if (!main) {{
-    return [];
+    return {{
+      marker,
+      values: [],
+      rawCandidateCount: 0,
+      keptCandidateCount: 0,
+      keptLabels: [],
+      dropReasons: {{}},
+    }};
   }}
-  const scopeRoots = [];
-  const seenRoots = new Set();
-  const addRoot = (node) => {{
-    if (!node || seenRoots.has(node)) {{
-      return;
-    }}
-    seenRoots.add(node);
-    scopeRoots.push(node);
+  const cleanText = (value, limit = 280) => {{
+    if (value == null) return '';
+    return String(value).replace(/\\s+/g, ' ').trim().slice(0, limit);
   }};
-  addRoot(main.querySelector('header'));
-  for (const child of Array.from(main.children || [])) {{
-    if (scopeRoots.length >= maxScopeRoots) {{
-      break;
-    }}
-    if (!child) {{
-      continue;
-    }}
-    const tagName = (child.tagName || '').toLowerCase();
-    if (['aside', 'footer', 'nav', 'script', 'style', 'noscript'].includes(tagName)) {{
-      continue;
-    }}
-    addRoot(child);
-  }}
-  if (!scopeRoots.length) {{
-    addRoot(main);
-  }}
-  const seenNodes = new Set();
-  const seenValues = new Set();
-  const values = [];
   const isVisible = (el) => {{
     if (!el) return false;
     if (el.closest('[hidden], [aria-hidden="true"]')) return false;
@@ -4080,25 +4089,155 @@ def _collect_instagram_live_profile_clickable_control_values(page: Any) -> List[
     const rect = el.getBoundingClientRect();
     return rect.width > 0 && rect.height > 0;
   }};
+  const isWithinRoot = (candidate, scopeRoot) => {{
+    if (!candidate || !scopeRoot) {{
+      return false;
+    }}
+    return candidate === scopeRoot || !!(scopeRoot.contains && scopeRoot.contains(candidate));
+  }};
+  const isRelaxedClickable = (node) => {{
+    if (!node) {{
+      return false;
+    }}
+    const tagName = (node.tagName || '').toLowerCase();
+    const role = cleanText(node.getAttribute && node.getAttribute('role') || '').toLowerCase();
+    if (tagName === 'a') {{
+      return !!(node.getAttribute && node.getAttribute('href'));
+    }}
+    if (tagName === 'button' || role === 'button' || role === 'link') {{
+      return true;
+    }}
+    const tabindex = cleanText(node.getAttribute && node.getAttribute('tabindex') || '');
+    if (tabindex && tabindex !== '-1') {{
+      return true;
+    }}
+    for (const attrName of ['onclick', 'data-link', 'data-url', 'data-href', 'data-target', 'data-uri', 'data-web-uri', 'data-web-destination']) {{
+      if (cleanText(node.getAttribute && node.getAttribute(attrName) || '')) {{
+        return true;
+      }}
+    }}
+    try {{
+      if (typeof node.onclick === 'function') {{
+        return true;
+      }}
+    }} catch (error) {{
+    }}
+    try {{
+      const style = window.getComputedStyle(node);
+      if (style && style.cursor === 'pointer') {{
+        return true;
+      }}
+    }} catch (error) {{
+    }}
+    return false;
+  }};
+  const scopeRoots = [];
+  const seenRoots = new Set();
+  const addRoot = (node) => {{
+    if (!node || seenRoots.has(node)) {{
+      return;
+    }}
+    const tagName = (node.tagName || '').toLowerCase();
+    if (['aside', 'footer', 'nav', 'script', 'style', 'noscript'].includes(tagName)) {{
+      return;
+    }}
+    seenRoots.add(node);
+    scopeRoots.push(node);
+  }};
+  const header = main.querySelector('header');
+  addRoot(header);
+  for (const child of Array.from(main.children || [])) {{
+    if (scopeRoots.length >= maxScopeRoots) {{
+      break;
+    }}
+    if (!child || child === header) {{
+      continue;
+    }}
+    addRoot(child);
+  }}
+  if (!scopeRoots.length) {{
+    addRoot(main);
+  }}
+  const values = [];
+  const seenValues = new Set();
+  const dropReasons = {{}};
+  const keptCandidates = [];
+  const keptLabels = [];
+  const seenCandidateNodes = new Set();
+  let rawCandidateCount = 0;
+  const addDropReason = (reason) => {{
+    const key = cleanText(reason || '', 64) || 'other';
+    dropReasons[key] = (dropReasons[key] || 0) + 1;
+  }};
   const addValue = (value) => {{
     if (typeof value !== 'string') {{
       return;
     }}
     const trimmed = value.trim();
-    if (!trimmed || seenValues.has(trimmed)) {{
+    if (!trimmed || blockedValuePattern.test(trimmed) || seenValues.has(trimmed)) {{
       return;
     }}
     seenValues.add(trimmed);
     values.push(trimmed);
   }};
-  const addValueWithUrlMatches = (value) => {{
+  const addTextMatches = (value) => {{
+    const text = cleanText(value, 512);
+    if (!text) {{
+      return;
+    }}
+    const urlMatches = text.match(urlPattern) || [];
+    for (const match of urlMatches.slice(0, maxRuntimeArrayItems)) {{
+      addValue(match.replace(/[.,;:!?)]}}]+$/g, ''));
+    }}
+    const bareMatches = Array.from(text.matchAll(bareDomainPattern)).slice(0, maxRuntimeArrayItems);
+    for (const match of bareMatches) {{
+      const rawMatch = cleanText(match && match[0] ? match[0] : '', 256);
+      const matchIndex = match && typeof match.index === 'number' ? match.index : -1;
+      if (matchIndex > 0 && text[matchIndex - 1] === '@') {{
+        continue;
+      }}
+      const cleaned = rawMatch.replace(/[.,;:!?)]}}]+$/g, '');
+      if (!cleaned || blockedValuePattern.test(cleaned)) {{
+        continue;
+      }}
+      if (/^https?:\\/\\//i.test(cleaned)) {{
+        addValue(cleaned);
+      }} else {{
+        addValue(`https://${{cleaned}}`);
+      }}
+    }}
+  }};
+  const addValueWithMatches = (value, includeFull = false) => {{
     if (typeof value !== 'string') {{
       return;
     }}
-    addValue(value);
-    const matches = value.match(urlPattern) || [];
-    for (const match of matches.slice(0, maxRuntimeArrayItems)) {{
-      addValue(match);
+    const cleaned = cleanText(value, 512);
+    if (!cleaned) {{
+      return;
+    }}
+    addTextMatches(cleaned);
+    if (
+      includeFull
+      && (
+        /^https?:\\/\\//i.test(cleaned)
+        || cleaned.startsWith('//')
+        || cleaned.startsWith('/')
+        || cleaned.startsWith('{{')
+        || cleaned.startsWith('[')
+        || runtimeValueKeyPattern.test(cleaned)
+      )
+    ) {{
+      addValue(cleaned);
+    }}
+  }};
+  const addTextValues = (node) => {{
+    if (!node) {{
+      return;
+    }}
+    addTextMatches(node.innerText || node.textContent || '');
+    if (typeof node.getAttribute === 'function') {{
+      addTextMatches(node.getAttribute('aria-label') || '');
+      addTextMatches(node.getAttribute('title') || '');
     }}
   }};
   const addAttributeValues = (node) => {{
@@ -4107,12 +4246,20 @@ def _collect_instagram_live_profile_clickable_control_values(page: Any) -> List[
     }}
     const attrNames = typeof node.getAttributeNames === 'function' ? node.getAttributeNames() : [];
     for (const attrName of attrNames.slice(0, maxAttrsPerNode)) {{
-      const key = (attrName || '').trim().toLowerCase();
+      const key = cleanText(attrName || '', 64).toLowerCase();
       if (!key || key === 'style') {{
         continue;
       }}
-      if (key === 'href' || key === 'title' || key === 'aria-label' || key === 'onclick' || key.startsWith('data-')) {{
-        addValueWithUrlMatches(node.getAttribute(attrName) || '');
+      if (
+        key === 'href'
+        || key === 'title'
+        || key === 'aria-label'
+        || key === 'onclick'
+        || key === 'class'
+        || runtimeValueKeyPattern.test(key)
+        || key.startsWith('data-')
+      ) {{
+        addValueWithMatches(node.getAttribute(attrName) || '', true);
       }}
     }}
   }};
@@ -4123,7 +4270,7 @@ def _collect_instagram_live_profile_clickable_control_values(page: Any) -> List[
     try {{
       const value = node[propName];
       if (typeof value === 'string') {{
-        addValueWithUrlMatches(value);
+        addValueWithMatches(value, true);
       }}
     }} catch (error) {{
     }}
@@ -4133,7 +4280,7 @@ def _collect_instagram_live_profile_clickable_control_values(page: Any) -> List[
       return;
     }}
     if (typeof value === 'string') {{
-      addValueWithUrlMatches(value);
+      addValueWithMatches(value, true);
       return;
     }}
     if ((typeof value !== 'object' && typeof value !== 'function') || value === window || value === document || value.nodeType) {{
@@ -4168,7 +4315,7 @@ def _collect_instagram_live_profile_clickable_control_values(page: Any) -> List[
           || entryValue.startsWith('//')
           || entryValue.startsWith('/')
         ) {{
-          addValueWithUrlMatches(entryValue);
+          addValueWithMatches(entryValue, true);
         }}
         continue;
       }}
@@ -4193,12 +4340,14 @@ def _collect_instagram_live_profile_clickable_control_values(page: Any) -> List[
     }} catch (error) {{
       ownProps = [];
     }}
-    const candidateProps = ownProps.filter((propName) => runtimeNodePropPattern.test(propName || '') || runtimeValueKeyPattern.test(propName || ''));
+    const candidateProps = ownProps.filter(
+      (propName) => runtimeNodePropPattern.test(propName || '') || runtimeValueKeyPattern.test(propName || '')
+    );
     for (const propName of candidateProps.slice(0, maxRuntimeOwnProps)) {{
       try {{
         const propValue = node[propName];
         if (typeof propValue === 'string') {{
-          addValueWithUrlMatches(propValue);
+          addValueWithMatches(propValue, true);
           continue;
         }}
         if (propValue && (typeof propValue === 'object' || typeof propValue === 'function')) {{
@@ -4213,19 +4362,17 @@ def _collect_instagram_live_profile_clickable_control_values(page: Any) -> List[
       return;
     }}
     addAttributeValues(anchor);
+    addTextValues(anchor);
     addStringProperty(anchor, 'href');
   }};
-  const addNearbySubtreeValues = (scopeRoot, node) => {{
-    if (!scopeRoot || !node) {{
-      return;
-    }}
+  const collectRelatedNodes = (scopeRoot, node) => {{
     const nearbyNodes = [];
     const seenNearbyNodes = new Set();
     const enqueue = (candidate) => {{
-      if (!candidate || seenNearbyNodes.has(candidate) || nearbyNodes.length >= maxNearbyNodesPerClickable) {{
+      if (!candidate || seenNearbyNodes.has(candidate) || nearbyNodes.length >= maxNearbyNodesPerCandidate) {{
         return;
       }}
-      if (candidate !== scopeRoot && !(scopeRoot.contains && scopeRoot.contains(candidate))) {{
+      if (candidate !== scopeRoot && !isWithinRoot(candidate, scopeRoot)) {{
         return;
       }}
       seenNearbyNodes.add(candidate);
@@ -4246,14 +4393,22 @@ def _collect_instagram_live_profile_clickable_control_values(page: Any) -> List[
       }}
       cursor = cursor.parentElement;
     }}
+    return nearbyNodes;
+  }};
+  const addNearbySubtreeValues = (scopeRoot, node) => {{
+    if (!scopeRoot || !node) {{
+      return;
+    }}
     const ancestorAnchor = node.closest ? node.closest('a[href]') : null;
-    if (ancestorAnchor && (ancestorAnchor === scopeRoot || (scopeRoot.contains && scopeRoot.contains(ancestorAnchor)))) {{
+    if (ancestorAnchor && isWithinRoot(ancestorAnchor, scopeRoot)) {{
       addAnchorValues(ancestorAnchor);
     }}
-    for (const nearbyNode of nearbyNodes) {{
+    for (const nearbyNode of collectRelatedNodes(scopeRoot, node)) {{
       if (!nearbyNode) {{
         continue;
       }}
+      addAttributeValues(nearbyNode);
+      addTextValues(nearbyNode);
       addRuntimeValues(nearbyNode);
       if (nearbyNode.matches && nearbyNode.matches('a[href]')) {{
         addAnchorValues(nearbyNode);
@@ -4265,42 +4420,283 @@ def _collect_instagram_live_profile_clickable_control_values(page: Any) -> List[
       for (const anchor of descendantAnchors) {{
         addAnchorValues(anchor);
       }}
+      const nearbyClickables = Array.from(nearbyNode.querySelectorAll(relaxedSelector)).slice(0, maxNearbyClickablesPerNode);
+      for (const clickable of nearbyClickables) {{
+        addAttributeValues(clickable);
+        addTextValues(clickable);
+        addRuntimeValues(clickable);
+      }}
     }}
   }};
-  for (const root of scopeRoots) {{
-    const nodes = [];
-    if (root.matches && root.matches(selector)) {{
-      nodes.push(root);
+  const collectAttrText = (node) => {{
+    if (!node || typeof node.getAttributeNames !== 'function') {{
+      return '';
     }}
-    for (const node of Array.from(root.querySelectorAll(selector))) {{
-      nodes.push(node);
-    }}
-    for (const node of nodes) {{
-      if (!node || seenNodes.has(node) || !isVisible(node)) {{
+    const parts = [];
+    for (const attrName of node.getAttributeNames().slice(0, maxAttrsPerNode)) {{
+      const key = cleanText(attrName || '', 64).toLowerCase();
+      if (!key || key === 'style') {{
         continue;
       }}
-      seenNodes.add(node);
-      addAttributeValues(node);
-      addNearbySubtreeValues(root, node);
-      if (seenNodes.size >= maxNodes) {{
-        return values;
+      if (
+        key === 'aria-label'
+        || key === 'title'
+        || key === 'href'
+        || key === 'class'
+        || key === 'data-testid'
+        || runtimeValueKeyPattern.test(key)
+        || key.startsWith('data-')
+      ) {{
+        parts.push(cleanText(node.getAttribute(attrName) || '', 180));
       }}
     }}
+    return cleanText(parts.join(' '), 280);
+  }};
+  const classifyDropReason = (node, scopeRoot, combinedText) => {{
+    if (!node || !isVisible(node)) {{
+      return 'not_visible';
+    }}
+    if (!isWithinRoot(node, scopeRoot)) {{
+      return 'out_of_scope';
+    }}
+    const ownText = cleanText(
+      [
+        node.getAttribute && node.getAttribute('aria-label') || '',
+        node.getAttribute && node.getAttribute('title') || '',
+        node.innerText || node.textContent || '',
+        collectAttrText(node),
+      ].join(' '),
+      280,
+    );
+    if (node.closest('nav, footer, aside')) {{
+      return 'global_nav';
+    }}
+    if (node.closest('[role="tablist"]') || tabPattern.test(ownText)) {{
+      return 'tab';
+    }}
+    if (menuPattern.test(ownText)) {{
+      return 'menu';
+    }}
+    if (followerPattern.test(ownText)) {{
+      return 'follower_control';
+    }}
+    if (sharePattern.test(ownText)) {{
+      return 'share';
+    }}
+    if (profileActionPattern.test(ownText) && !positivePattern.test(combinedText)) {{
+      return 'profile_action';
+    }}
+    return '';
+  }};
+  const scoreSeed = (node, scopeRoot) => {{
+    if (!node) {{
+      return {{ countable: false, keep: false, dropReason: '' }};
+    }}
+    const relaxedClickable = isRelaxedClickable(node);
+    const labelText = cleanText(
+      [
+        node.getAttribute && node.getAttribute('aria-label') || '',
+        node.getAttribute && node.getAttribute('title') || '',
+        node.innerText || node.textContent || '',
+      ].join(' '),
+      280,
+    );
+    const contextText = cleanText(
+      [
+        node.parentElement ? (node.parentElement.innerText || node.parentElement.textContent || '') : '',
+        node.previousElementSibling ? (node.previousElementSibling.innerText || node.previousElementSibling.textContent || '') : '',
+        node.nextElementSibling ? (node.nextElementSibling.innerText || node.nextElementSibling.textContent || '') : '',
+      ].join(' '),
+      280,
+    );
+    const attrText = collectAttrText(node);
+    const combined = cleanText([labelText, contextText, attrText].join(' '), 320);
+    const countable = relaxedClickable || positivePattern.test(combined) || weakContextPattern.test(combined);
+    if (!countable) {{
+      return {{ countable: false, keep: false, dropReason: '' }};
+    }}
+    const hardDropReason = classifyDropReason(node, scopeRoot, combined);
+    if (hardDropReason) {{
+      return {{ countable: true, keep: false, dropReason: hardDropReason }};
+    }}
+    let score = 0;
+    if (urlPattern.test(labelText) || bareDomainPattern.test(labelText)) {{
+      score += 10;
+    }}
+    if (urlPattern.test(attrText) || bareDomainPattern.test(attrText)) {{
+      score += 10;
+    }}
+    if (positivePattern.test(labelText)) {{
+      score += 6;
+    }}
+    if (positivePattern.test(attrText)) {{
+      score += 6;
+    }}
+    if (positivePattern.test(contextText)) {{
+      score += 3;
+    }}
+    if (weakContextPattern.test(contextText) || weakContextPattern.test(attrText)) {{
+      score += 2;
+    }}
+    if (relaxedClickable) {{
+      score += 2;
+    }}
+    if (header && header.contains(node)) {{
+      score += 1;
+    }}
+    const minimumScore = relaxedClickable ? 4 : 6;
+    if (score < minimumScore) {{
+      return {{ countable: true, keep: false, dropReason: 'weak_signal' }};
+    }}
+    let label = 'bio_surface_wrapper';
+    if (node.matches && node.matches('a[href]')) {{
+      label = 'direct_anchor';
+    }} else if (relaxedClickable) {{
+      label = 'nested_clickable';
+    }}
+    return {{
+      countable: true,
+      keep: true,
+      dropReason: '',
+      label,
+      node,
+      scopeRoot,
+      score,
+    }};
+  }};
+  for (const root of scopeRoots) {{
+    const probeNodes = [];
+    const seenProbeNodes = new Set();
+    const enqueueProbe = (node) => {{
+      if (!node || seenProbeNodes.has(node) || probeNodes.length >= maxProbeNodesPerRoot) {{
+        return;
+      }}
+      if (!isWithinRoot(node, root)) {{
+        return;
+      }}
+      seenProbeNodes.add(node);
+      probeNodes.push(node);
+    }};
+    enqueueProbe(root);
+    if (typeof root.querySelectorAll === 'function') {{
+      for (const node of Array.from(root.querySelectorAll(probeSelector))) {{
+        enqueueProbe(node);
+        if (probeNodes.length >= maxProbeNodesPerRoot) {{
+          break;
+        }}
+      }}
+    }}
+    for (const node of probeNodes) {{
+      const scored = scoreSeed(node, root);
+      if (!scored.countable) {{
+        continue;
+      }}
+      rawCandidateCount += 1;
+      if (!scored.keep) {{
+        addDropReason(scored.dropReason || 'weak_signal');
+        continue;
+      }}
+      if (seenCandidateNodes.has(scored.node)) {{
+        addDropReason('duplicate');
+        continue;
+      }}
+      seenCandidateNodes.add(scored.node);
+      keptCandidates.push(scored);
+      keptLabels.push(scored.label);
+      if (keptCandidates.length >= maxNodes) {{
+        break;
+      }}
+    }}
+    if (keptCandidates.length >= maxNodes) {{
+      break;
+    }}
   }}
-  return values;
+  keptCandidates.sort((left, right) => {{
+    if (right.score !== left.score) {{
+      return right.score - left.score;
+    }}
+    return left.label.localeCompare(right.label);
+  }});
+  for (const candidate of keptCandidates.slice(0, maxNodes)) {{
+    addAttributeValues(candidate.node);
+    addTextValues(candidate.node);
+    addRuntimeValues(candidate.node);
+    addNearbySubtreeValues(candidate.scopeRoot, candidate.node);
+  }}
+  return {{
+    marker,
+    values,
+    rawCandidateCount,
+    keptCandidateCount: Math.min(keptCandidates.length, maxNodes),
+    keptLabels: keptLabels.slice(0, maxSampleLabels),
+    dropReasons,
+  }};
 }}
 """
         )
     except Exception:
-        return []
+        raw_payload = {}
+
+    extracted_values = raw_payload.get("values") if isinstance(raw_payload, dict) else raw_payload
     values: List[str] = []
     seen: Set[str] = set()
-    for raw_value in raw_values or []:
+    for raw_value in extracted_values or []:
         value = cell_to_str(raw_value).strip()
         if not value or value in seen:
             continue
         seen.add(value)
         values.append(value)
+
+    raw_candidate_count = 0
+    kept_candidate_count = 0
+    kept_labels: List[str] = []
+    drop_reasons: Dict[str, int] = {}
+    if isinstance(raw_payload, dict):
+        try:
+            raw_candidate_count = max(int(raw_payload.get("rawCandidateCount") or 0), 0)
+        except Exception:
+            raw_candidate_count = 0
+        try:
+            kept_candidate_count = max(int(raw_payload.get("keptCandidateCount") or 0), 0)
+        except Exception:
+            kept_candidate_count = 0
+        for raw_label in raw_payload.get("keptLabels") or []:
+            label = cell_to_str(raw_label).strip()
+            if label and label not in kept_labels:
+                kept_labels.append(label)
+        raw_drop_reasons = raw_payload.get("dropReasons") or {}
+        if isinstance(raw_drop_reasons, dict):
+            for reason, count in raw_drop_reasons.items():
+                reason_key = cell_to_str(reason).strip()
+                if not reason_key:
+                    continue
+                try:
+                    numeric_count = int(count)
+                except Exception:
+                    continue
+                if numeric_count > 0:
+                    drop_reasons[reason_key] = numeric_count
+    else:
+        kept_candidate_count = len(values)
+        raw_candidate_count = kept_candidate_count
+
+    dropped_candidate_count = max(raw_candidate_count - kept_candidate_count, 0)
+    candidate_sample = ",".join(kept_labels[:3]) if kept_labels else "-"
+    control_sample = candidate_sample
+    if control_sample == "-" and values:
+        control_sample = _instagram_bio_link_log_sample(values)
+    if drop_reasons:
+        sorted_reasons = sorted(drop_reasons.items(), key=lambda item: (-item[1], item[0]))[:3]
+        drop_reason_text = ",".join(f"{reason}:{count}" for reason, count in sorted_reasons)
+    else:
+        drop_reason_text = "-"
+
+    _log_detect(
+        f"[IG Detect] candidates raw={raw_candidate_count} kept={kept_candidate_count} "
+        f"dropped={dropped_candidate_count} sample={candidate_sample}"
+    )
+    _log_detect(f"[IG Detect] drop_reasons={drop_reason_text}")
+    _log_detect(f"[IG Detect] control_values count={len(values)} sample={control_sample}")
     return values
 
 
