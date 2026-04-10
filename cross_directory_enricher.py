@@ -4307,20 +4307,47 @@ def _collect_instagram_live_profile_clickable_control_values(page: Any) -> List[
 def _recover_instagram_live_profile_clickable_bio_link_url_via_interaction(page: Any) -> str:
     if page is None or not hasattr(page, "evaluate") or not hasattr(page, "click"):
         return ""
-    try:
-        selector = cell_to_str(
-            page.evaluate(
+    marker_name = "ig-live-bio-link-interaction-recovery"
+    marker_attr_json = json.dumps(_INSTAGRAM_LIVE_ONEHOP_INTERACTION_MARKER_ATTR)
+    state_key_json = json.dumps(_INSTAGRAM_LIVE_ONEHOP_INTERACTION_STATE_KEY)
+    selector_json = json.dumps(_INSTAGRAM_LIVE_ONEHOP_CLICKABLE_SELECTOR)
+    marker_name_json = json.dumps(marker_name)
+
+    def _log_recover(message: str) -> None:
+        try:
+            print(message)
+        except Exception:
+            pass
+
+    def _coerce_candidate_entry(raw_entry: Any, fallback_label: str) -> Optional[Dict[str, str]]:
+        if isinstance(raw_entry, dict):
+            selector_value = cell_to_str(raw_entry.get("selector", "")).strip()
+            label_value = cell_to_str(raw_entry.get("label", fallback_label)).strip() or fallback_label
+            if selector_value:
+                return {"selector": selector_value, "label": label_value}
+            return None
+        selector_value = cell_to_str(raw_entry).strip()
+        if not selector_value:
+            return None
+        return {"selector": selector_value, "label": fallback_label}
+
+    def _load_candidates() -> List[Dict[str, str]]:
+        try:
+            raw_payload = page.evaluate(
                 f"""
 () => {{
-  const marker = 'ig-live-bio-link-interaction-recovery';
-  const markerAttr = "{_INSTAGRAM_LIVE_ONEHOP_INTERACTION_MARKER_ATTR}";
-  const stateKey = "{_INSTAGRAM_LIVE_ONEHOP_INTERACTION_STATE_KEY}";
-  const selector = "{_INSTAGRAM_LIVE_ONEHOP_CLICKABLE_SELECTOR}";
+  const marker = {marker_name_json};
+  const markerAttr = {marker_attr_json};
+  const stateKey = {state_key_json};
+  const selector = {selector_json};
   const maxScopeRoots = {_INSTAGRAM_LIVE_ONEHOP_MAX_SCOPE_ROOTS};
   const maxNodes = {_INSTAGRAM_LIVE_ONEHOP_MAX_CLICKABLE_NODES};
+  const maxNestedCandidates = 4;
+  const maxNearbyNodes = 10;
+  const maxNearbyClickables = 4;
   const main = document.querySelector('main');
   if (!main) {{
-    return '';
+    return {{ candidates: [], sample: '-' }};
   }}
   const cleanText = (value, limit = 280) => {{
     if (value == null) return '';
@@ -4333,6 +4360,21 @@ def _recover_instagram_live_profile_clickable_bio_link_url_via_interaction(page:
     if (!style || style.display === 'none' || style.visibility === 'hidden') return false;
     const rect = el.getBoundingClientRect();
     return rect.width > 0 && rect.height > 0;
+  }};
+  const isClickable = (node) => {{
+    if (!node) return false;
+    const tagName = (node.tagName || '').toLowerCase();
+    const role = cleanText(node.getAttribute && node.getAttribute('role') || '').toLowerCase();
+    if (tagName === 'a') {{
+      return !!(node.getAttribute && node.getAttribute('href'));
+    }}
+    return tagName === 'button' || role === 'button' || role === 'link';
+  }};
+  const isWithinRoot = (candidate, scopeRoot) => {{
+    if (!candidate || !scopeRoot) {{
+      return false;
+    }}
+    return candidate === scopeRoot || !!(scopeRoot.contains && scopeRoot.contains(candidate));
   }};
   const scopeRoots = [];
   const seenRoots = new Set();
@@ -4361,8 +4403,6 @@ def _recover_instagram_live_profile_clickable_bio_link_url_via_interaction(page:
   if (!scopeRoots.length) {{
     addRoot(main);
   }}
-  const clickableNodes = [];
-  const seenNodes = new Set();
   const positivePattern = /(https?:\\/\\/|www\\.|(?:[a-z0-9-]+\\.)+(?:com|co|net|org|fm|tv|io|gg|ly|me|bio|to|live|page|link|music|band|store|art|studio|agency)\\b|\\b(link(?:\\s+in\\s+bio)?|bio\\s+link|website|external)\\b)/i;
   const negativePattern = /\\b(posts?|reels?|tagged|followers?|following|follow|message|email|call|text|menu|settings|options|more|share)\\b/i;
   const contextPattern = /(bio|website|external|link)/i;
@@ -4392,23 +4432,17 @@ def _recover_instagram_live_profile_clickable_bio_link_url_via_interaction(page:
     }}
     return cleanText(parts.join(' '), 280);
   }};
-  const scoreNode = (node) => {{
-    if (!node || seenNodes.has(node) || !isVisible(node)) {{
+  const scoreSeed = (node, scopeRoot) => {{
+    if (!node || !isClickable(node) || !isVisible(node)) {{
       return null;
     }}
-    seenNodes.add(node);
-    const tagName = (node.tagName || '').toLowerCase();
-    const role = cleanText(node.getAttribute('role') || '').toLowerCase();
-    if (!(tagName === 'button' || tagName === 'a' || role === 'button' || role === 'link')) {{
-      return null;
-    }}
-    if (node.closest('nav, footer, aside, [role="tablist"]')) {{
+    if (!isWithinRoot(node, scopeRoot) || node.closest('nav, footer, aside, [role="tablist"]')) {{
       return null;
     }}
     const labelText = cleanText(
       [
-        node.getAttribute('aria-label') || '',
-        node.getAttribute('title') || '',
+        node.getAttribute && node.getAttribute('aria-label') || '',
+        node.getAttribute && node.getAttribute('title') || '',
         node.innerText || node.textContent || '',
       ].join(' '),
       280,
@@ -4448,56 +4482,57 @@ def _recover_instagram_live_profile_clickable_bio_link_url_via_interaction(page:
     }}
     return {{
       node,
+      scopeRoot,
       score,
       labelLength: labelText.length,
     }};
   }};
-  for (const existing of Array.from(document.querySelectorAll(`[${{markerAttr}}]`))) {{
-    existing.removeAttribute(markerAttr);
-  }}
-  for (const root of scopeRoots) {{
-    const nodes = [];
-    if (root.matches && root.matches(selector)) {{
-      nodes.push(root);
-    }}
-    for (const node of Array.from(root.querySelectorAll(selector))) {{
-      nodes.push(node);
-    }}
-    for (const node of nodes) {{
-      const scored = scoreNode(node);
-      if (!scored) {{
-        continue;
+  const collectNearbyNodes = (node, scopeRoot) => {{
+    const nearbyNodes = [];
+    const seenNearbyNodes = new Set();
+    const enqueue = (candidate) => {{
+      if (!candidate || seenNearbyNodes.has(candidate) || nearbyNodes.length >= maxNearbyNodes) {{
+        return;
       }}
-      clickableNodes.push(scored);
-      if (clickableNodes.length >= maxNodes) {{
+      if (!isWithinRoot(candidate, scopeRoot)) {{
+        return;
+      }}
+      seenNearbyNodes.add(candidate);
+      nearbyNodes.push(candidate);
+    }};
+    enqueue(node);
+    let cursor = node;
+    for (let depth = 0; depth < 3 && cursor; depth += 1) {{
+      enqueue(cursor.parentElement);
+      enqueue(cursor.previousElementSibling);
+      enqueue(cursor.nextElementSibling);
+      if (cursor.parentElement) {{
+        enqueue(cursor.parentElement.previousElementSibling);
+        enqueue(cursor.parentElement.nextElementSibling);
+      }}
+      if (cursor === scopeRoot) {{
         break;
       }}
+      cursor = cursor.parentElement;
     }}
-    if (clickableNodes.length >= maxNodes) {{
-      break;
-    }}
-  }}
-  clickableNodes.sort((left, right) => {{
-    if (right.score !== left.score) {{
-      return right.score - left.score;
-    }}
-    return right.labelLength - left.labelLength;
-  }});
-  const selected = clickableNodes.length ? clickableNodes[0].node : null;
-  if (!selected) {{
-    return '';
-  }}
+    return nearbyNodes;
+  }};
   const state = window[stateKey] || (window[stateKey] = {{}});
+  state.marker = marker;
+  state.markerAttr = markerAttr;
   state.beforeUrl = cleanText(window.location && window.location.href ? window.location.href : '', 512);
   state.resolvedUrl = '';
-  state.marker = marker;
+  state.popupUrl = '';
+  state.dialogUrl = '';
+  state.clickedMarker = '';
+  state.clickedKind = '';
   const rememberUrl = (value) => {{
-    if (state.resolvedUrl || value == null) {{
-      return;
+    if (value == null) {{
+      return '';
     }}
     let candidate = cleanText(value, 512);
     if (!candidate) {{
-      return;
+      return '';
     }}
     if (candidate.startsWith('//')) {{
       candidate = window.location.protocol + candidate;
@@ -4506,12 +4541,34 @@ def _recover_instagram_live_profile_clickable_bio_link_url_via_interaction(page:
       candidate = new URL(candidate, window.location.href).toString();
     }} catch (error) {{
     }}
-    state.resolvedUrl = candidate;
+    if (!state.resolvedUrl) {{
+      state.resolvedUrl = candidate;
+    }}
+    return candidate;
   }};
   state.rememberUrl = rememberUrl;
+  const inspectNode = (entry) => {{
+    if (!entry) {{
+      return;
+    }}
+    try {{
+      if (typeof entry.href === 'string' && entry.href) {{
+        rememberUrl(entry.href);
+      }}
+    }} catch (error) {{
+    }}
+    if (typeof entry.getAttribute === 'function') {{
+      for (const attrName of ['href', 'data-url', 'data-href', 'data-link', 'data-target', 'title', 'aria-label', 'onclick']) {{
+        try {{
+          rememberUrl(entry.getAttribute(attrName) || '');
+        }} catch (error) {{
+        }}
+      }}
+    }}
+  }};
   if (!state.installed) {{
     state.installed = true;
-    const wrapMethod = (owner, key) => {{
+    const wrapMethod = (owner, key, assignPopup = false) => {{
       if (!owner) {{
         return;
       }}
@@ -4525,14 +4582,18 @@ def _recover_instagram_live_profile_clickable_bio_link_url_via_interaction(page:
         return;
       }}
       owner[key] = function(...args) {{
+        let recovered = '';
         try {{
-          rememberUrl(args[0]);
+          recovered = rememberUrl(args[0]);
         }} catch (error) {{
+        }}
+        if (assignPopup && recovered) {{
+          state.popupUrl = recovered;
         }}
         return original.apply(this, args);
       }};
     }};
-    wrapMethod(window, 'open');
+    wrapMethod(window, 'open', true);
     wrapMethod(window.history, 'pushState');
     wrapMethod(window.history, 'replaceState');
     try {{
@@ -4540,92 +4601,480 @@ def _recover_instagram_live_profile_clickable_bio_link_url_via_interaction(page:
       wrapMethod(window.location, 'replace');
     }} catch (error) {{
     }}
-  }}
-  selected.setAttribute(markerAttr, '1');
-  selected.addEventListener(
-    'click',
-    (event) => {{
-      const seenEventNodes = new Set();
-      const inspectNode = (entry) => {{
-        if (!entry || seenEventNodes.has(entry)) {{
+    document.addEventListener(
+      'click',
+      (event) => {{
+        const path = event && typeof event.composedPath === 'function' ? event.composedPath() : [];
+        let markedNode = null;
+        for (const entry of path) {{
+          if (entry && typeof entry.getAttribute === 'function' && entry.getAttribute(markerAttr)) {{
+            markedNode = entry;
+            break;
+          }}
+        }}
+        if (!markedNode && event && event.target && typeof event.target.closest === 'function') {{
+          markedNode = event.target.closest(`[${{markerAttr}}]`);
+        }}
+        if (!markedNode) {{
           return;
         }}
-        seenEventNodes.add(entry);
-        try {{
-          if (typeof entry.href === 'string' && entry.href) {{
-            rememberUrl(entry.href);
-          }}
-        }} catch (error) {{
-        }}
-        if (typeof entry.getAttribute === 'function') {{
-          for (const attrName of ['href', 'data-url', 'data-href', 'data-link', 'data-target', 'title', 'aria-label', 'onclick']) {{
-            try {{
-              rememberUrl(entry.getAttribute(attrName) || '');
-            }} catch (error) {{
-            }}
-          }}
-        }}
-      }};
-      inspectNode(event && event.target ? event.target : null);
-      if (event && typeof event.composedPath === 'function') {{
-        for (const entry of event.composedPath()) {{
+        state.clickedMarker = cleanText(markedNode.getAttribute(markerAttr) || '', 80);
+        state.clickedKind = cleanText(markedNode.getAttribute('data-ig-live-bio-link-recovery-kind') || '', 80);
+        inspectNode(markedNode);
+        inspectNode(event && event.target ? event.target : null);
+        for (const entry of path) {{
           inspectNode(entry);
         }}
+      }},
+      true,
+    );
+  }}
+  for (const existing of Array.from(main.querySelectorAll(`[${{markerAttr}}]`)).slice(0, maxNodes)) {{
+    existing.removeAttribute(markerAttr);
+    existing.removeAttribute('data-ig-live-bio-link-recovery-kind');
+  }}
+  const seeds = [];
+  const seenSeedNodes = new Set();
+  for (const root of scopeRoots) {{
+    const nodes = [];
+    if (root.matches && root.matches(selector)) {{
+      nodes.push(root);
+    }}
+    for (const node of Array.from(root.querySelectorAll(selector))) {{
+      nodes.push(node);
+    }}
+    for (const node of nodes) {{
+      if (!node || seenSeedNodes.has(node)) {{
+        continue;
       }}
-    }},
-    {{ capture: true, once: true }},
-  );
-  return `[${{markerAttr}}="1"]`;
+      seenSeedNodes.add(node);
+      const scored = scoreSeed(node, root);
+      if (!scored) {{
+        continue;
+      }}
+      seeds.push(scored);
+      if (seeds.length >= maxNodes) {{
+        break;
+      }}
+    }}
+    if (seeds.length >= maxNodes) {{
+      break;
+    }}
+  }}
+  seeds.sort((left, right) => {{
+    if (right.score !== left.score) {{
+      return right.score - left.score;
+    }}
+    return right.labelLength - left.labelLength;
+  }});
+  const candidateGroups = {{
+    direct_anchor: [],
+    nested_clickable_child: [],
+    parent_anchor: [],
+    adjacent_bio_surface: [],
+  }};
+  const seenCandidateNodes = new Set();
+  const registerCandidate = (kind, node, seed) => {{
+    if (!node || seenCandidateNodes.has(node) || !isVisible(node)) {{
+      return;
+    }}
+    if (!isWithinRoot(node, seed.scopeRoot) || node.closest('nav, footer, aside, [role="tablist"]')) {{
+      return;
+    }}
+    if (kind === 'direct_anchor' && !(node.matches && node.matches('a[href]'))) {{
+      return;
+    }}
+    if (kind !== 'direct_anchor' && !isClickable(node)) {{
+      return;
+    }}
+    seenCandidateNodes.add(node);
+    candidateGroups[kind].push({{
+      node,
+      score: seed.score,
+      labelLength: cleanText(node.innerText || node.textContent || '', 280).length,
+    }});
+  }};
+  for (const seed of seeds) {{
+    const node = seed.node;
+    if (node.matches && node.matches('a[href]')) {{
+      registerCandidate('direct_anchor', node, seed);
+    }}
+    if (typeof node.querySelectorAll === 'function') {{
+      const nestedClickables = Array.from(node.querySelectorAll(selector)).slice(0, maxNestedCandidates);
+      for (const nested of nestedClickables) {{
+        if (nested === node) {{
+          continue;
+        }}
+        registerCandidate('nested_clickable_child', nested, seed);
+      }}
+    }}
+    let ancestor = node.parentElement;
+    while (ancestor && ancestor !== seed.scopeRoot.parentElement) {{
+      if (isWithinRoot(ancestor, seed.scopeRoot) && isClickable(ancestor)) {{
+        registerCandidate('parent_anchor', ancestor, seed);
+        break;
+      }}
+      if (ancestor === seed.scopeRoot) {{
+        break;
+      }}
+      ancestor = ancestor.parentElement;
+    }}
+    const nearbyNodes = collectNearbyNodes(node, seed.scopeRoot);
+    for (const nearbyNode of nearbyNodes) {{
+      if (nearbyNode && nearbyNode !== node && isClickable(nearbyNode)) {{
+        registerCandidate('adjacent_bio_surface', nearbyNode, seed);
+      }}
+      if (!nearbyNode || typeof nearbyNode.querySelectorAll !== 'function') {{
+        continue;
+      }}
+      const nearbyClickables = Array.from(nearbyNode.querySelectorAll(selector)).slice(0, maxNearbyClickables);
+      for (const nearbyClickable of nearbyClickables) {{
+        if (nearbyClickable === node) {{
+          continue;
+        }}
+        registerCandidate('adjacent_bio_surface', nearbyClickable, seed);
+      }}
+    }}
+  }}
+  const orderedKinds = ['direct_anchor', 'nested_clickable_child', 'parent_anchor', 'adjacent_bio_surface'];
+  const orderedCandidates = [];
+  for (const kind of orderedKinds) {{
+    candidateGroups[kind].sort((left, right) => {{
+      if (right.score !== left.score) {{
+        return right.score - left.score;
+      }}
+      return right.labelLength - left.labelLength;
+    }});
+    for (const candidate of candidateGroups[kind]) {{
+      if (orderedCandidates.length >= maxNodes) {{
+        break;
+      }}
+      const markerValue = `ig-live-bio-link-recovery-${{orderedCandidates.length}}`;
+      candidate.node.setAttribute(markerAttr, markerValue);
+      candidate.node.setAttribute('data-ig-live-bio-link-recovery-kind', kind);
+      orderedCandidates.push({{
+        selector: `[${{markerAttr}}="${{markerValue}}"]`,
+        label: kind,
+      }});
+    }}
+    if (orderedCandidates.length >= maxNodes) {{
+      break;
+    }}
+  }}
+  const sample = orderedCandidates.length
+    ? orderedCandidates.slice(0, 3).map((entry) => entry.label || '').filter(Boolean).join(',')
+    : '-';
+  return {{
+    candidates: orderedCandidates,
+    sample,
+  }};
 }}
 """
             )
-        ).strip()
-    except Exception:
-        return ""
-    if not selector:
-        return ""
-    before_url = cell_to_str(getattr(page, "url", "")).strip()
-    try:
-        page.click(selector, timeout=750)
-    except TypeError:
-        try:
-            page.click(selector)
         except Exception:
-            return ""
-    except Exception:
-        return ""
-    wait_for_timeout = getattr(page, "wait_for_timeout", None)
-    if callable(wait_for_timeout):
+            return []
+        candidates: List[Dict[str, str]] = []
+        fallback_label = "selected_candidate"
+        if isinstance(raw_payload, dict):
+            raw_candidates = raw_payload.get("candidates") or []
+        elif isinstance(raw_payload, (list, tuple)):
+            raw_candidates = raw_payload
+        else:
+            raw_candidates = [raw_payload]
+        for raw_entry in raw_candidates:
+            candidate_entry = _coerce_candidate_entry(raw_entry, fallback_label)
+            if candidate_entry:
+                candidates.append(candidate_entry)
+        return candidates
+
+    def _snapshot_context_pages() -> List[Any]:
+        context = getattr(page, "context", None)
+        if context is None:
+            return []
+        pages = getattr(context, "pages", None)
         try:
-            wait_for_timeout(250)
+            if callable(pages):
+                pages = pages()
         except Exception:
-            pass
-    after_url = cell_to_str(getattr(page, "url", "")).strip()
-    if after_url and after_url != before_url:
-        return after_url
-    try:
-        return cell_to_str(
+            return []
+        return list(pages or [])
+
+    def _reset_recovery_state() -> None:
+        try:
             page.evaluate(
                 f"""
 () => {{
-  const state = window["{_INSTAGRAM_LIVE_ONEHOP_INTERACTION_STATE_KEY}"];
-  if (!state || state.marker !== 'ig-live-bio-link-interaction-recovery') {{
-    return '';
-  }}
-  const resolvedUrl = typeof state.resolvedUrl === 'string' ? state.resolvedUrl.trim() : '';
-  if (resolvedUrl) {{
-    return resolvedUrl;
-  }}
-  const currentUrl = window.location && typeof window.location.href === 'string'
+  const marker = {marker_name_json};
+  const state = window["{_INSTAGRAM_LIVE_ONEHOP_INTERACTION_STATE_KEY}"]
+    || (window["{_INSTAGRAM_LIVE_ONEHOP_INTERACTION_STATE_KEY}"] = {{}});
+  state.marker = marker;
+  state.beforeUrl = window.location && typeof window.location.href === 'string'
     ? window.location.href.trim()
     : '';
-  return currentUrl && currentUrl !== (state.beforeUrl || '') ? currentUrl : '';
+  state.resolvedUrl = '';
+  state.popupUrl = '';
+  state.dialogUrl = '';
+  state.clickedMarker = '';
+  state.clickedKind = '';
+  return true;
 }}
 """
             )
-        ).strip()
-    except Exception:
+        except Exception:
+            pass
+
+    def _read_post_click_state() -> Dict[str, Any]:
+        try:
+            raw_state = page.evaluate(
+                f"""
+() => {{
+  const marker = {marker_name_json};
+  const markerAttr = {marker_attr_json};
+  const state = window["{_INSTAGRAM_LIVE_ONEHOP_INTERACTION_STATE_KEY}"];
+  if (!state || state.marker !== marker) {{
+    return '';
+  }}
+  const cleanText = (value, limit = 512) => {{
+    if (value == null) return '';
+    return String(value).replace(/\\s+/g, ' ').trim().slice(0, limit);
+  }};
+  const isVisible = (el) => {{
+    if (!el) return false;
+    if (el.closest('[hidden], [aria-hidden="true"]')) return false;
+    const style = window.getComputedStyle(el);
+    if (!style || style.display === 'none' || style.visibility === 'hidden') return false;
+    const rect = el.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  }};
+  const rememberUrl = typeof state.rememberUrl === 'function'
+    ? state.rememberUrl
+    : (value) => {{
+        if (value == null) {{
+          return '';
+        }}
+        let candidate = cleanText(value, 512);
+        if (!candidate) {{
+          return '';
+        }}
+        if (candidate.startsWith('//')) {{
+          candidate = window.location.protocol + candidate;
+        }}
+        try {{
+          candidate = new URL(candidate, window.location.href).toString();
+        }} catch (error) {{
+        }}
+        if (!state.resolvedUrl) {{
+          state.resolvedUrl = candidate;
+        }}
+        return candidate;
+      }};
+  const inspectNode = (entry) => {{
+    if (!entry) {{
+      return;
+    }}
+    try {{
+      if (typeof entry.href === 'string' && entry.href) {{
+        rememberUrl(entry.href);
+      }}
+    }} catch (error) {{
+    }}
+    if (typeof entry.getAttribute === 'function') {{
+      for (const attrName of ['href', 'data-url', 'data-href', 'data-link', 'data-target', 'title', 'aria-label', 'onclick']) {{
+        try {{
+          rememberUrl(entry.getAttribute(attrName) || '');
+        }} catch (error) {{
+        }}
+      }}
+    }}
+  }};
+  const inspectDialog = (dialog) => {{
+    if (!dialog || !isVisible(dialog)) {{
+      return '';
+    }}
+    inspectNode(dialog);
+    if (typeof dialog.querySelectorAll !== 'function') {{
+      return '';
+    }}
+    const dialogNodes = Array.from(dialog.querySelectorAll('a[href], button, [role="button"], [role="link"]')).slice(0, 8);
+    for (const entry of dialogNodes) {{
+      inspectNode(entry);
+      if (state.resolvedUrl) {{
+        return state.resolvedUrl;
+      }}
+    }}
+    return '';
+  }};
+  const inspectNearby = (node, scopeRoot) => {{
+    if (!node || !scopeRoot) {{
+      return;
+    }}
+    const nearbyNodes = [];
+    const seenNearbyNodes = new Set();
+    const enqueue = (candidate) => {{
+      if (!candidate || seenNearbyNodes.has(candidate) || nearbyNodes.length >= 10) {{
+        return;
+      }}
+      if (candidate !== scopeRoot && !(scopeRoot.contains && scopeRoot.contains(candidate))) {{
+        return;
+      }}
+      seenNearbyNodes.add(candidate);
+      nearbyNodes.push(candidate);
+    }};
+    enqueue(node);
+    let cursor = node;
+    for (let depth = 0; depth < 3 && cursor; depth += 1) {{
+      enqueue(cursor.parentElement);
+      enqueue(cursor.previousElementSibling);
+      enqueue(cursor.nextElementSibling);
+      if (cursor.parentElement) {{
+        enqueue(cursor.parentElement.previousElementSibling);
+        enqueue(cursor.parentElement.nextElementSibling);
+      }}
+      if (cursor === scopeRoot) {{
+        break;
+      }}
+      cursor = cursor.parentElement;
+    }}
+    for (const nearbyNode of nearbyNodes) {{
+      inspectNode(nearbyNode);
+      if (state.resolvedUrl) {{
+        return;
+      }}
+      if (!nearbyNode || typeof nearbyNode.querySelectorAll !== 'function') {{
+        continue;
+      }}
+      const nearbyAnchors = Array.from(nearbyNode.querySelectorAll('a[href], [data-url], [data-href], [data-link], [data-target]')).slice(0, 6);
+      for (const entry of nearbyAnchors) {{
+        inspectNode(entry);
+        if (state.resolvedUrl) {{
+          return;
+        }}
+      }}
+    }}
+  }};
+  const activeNode = state.clickedMarker
+    ? document.querySelector(`[${{markerAttr}}="${{state.clickedMarker}}"]`)
+    : document.querySelector(`[${{markerAttr}}]`);
+  if (activeNode) {{
+    inspectNode(activeNode);
+    const scopeRoot = activeNode.closest('header, section, article') || activeNode.closest('main') || activeNode.parentElement;
+    inspectNearby(activeNode, scopeRoot);
+  }}
+  let dialogUrl = '';
+  for (const dialog of Array.from(document.querySelectorAll('[role="dialog"], [aria-modal="true"], [data-testid*="dialog"]')).slice(0, 3)) {{
+    dialogUrl = inspectDialog(dialog);
+    if (dialogUrl) {{
+      state.dialogUrl = dialogUrl;
+      break;
+    }}
+  }}
+  const resolvedUrl = cleanText(state.resolvedUrl || '', 512);
+  const popupUrl = cleanText(state.popupUrl || '', 512);
+  const currentUrl = window.location && typeof window.location.href === 'string'
+    ? window.location.href.trim()
+    : '';
+  const navChange = currentUrl && currentUrl !== (state.beforeUrl || '') ? 1 : 0;
+  return {{
+    resolved_url: resolvedUrl || (navChange ? currentUrl : ''),
+    nav_change: navChange,
+    popup_url: popupUrl,
+    dialog_url: cleanText(state.dialogUrl || dialogUrl || '', 512),
+  }};
+}}
+"""
+            )
+        except Exception:
+            return {"url": "", "nav_change": 0, "popup": 0, "dialog": 0}
+        if isinstance(raw_state, dict):
+            resolved_url = cell_to_str(raw_state.get("resolved_url", "")).strip()
+            popup_url = cell_to_str(raw_state.get("popup_url", "")).strip()
+            dialog_url = cell_to_str(raw_state.get("dialog_url", "")).strip()
+            nav_change = 1 if raw_state.get("nav_change") else 0
+            return {
+                "url": resolved_url,
+                "nav_change": nav_change,
+                "popup": 1 if popup_url else 0,
+                "dialog": 1 if dialog_url else 0,
+                "popup_url": popup_url,
+                "dialog_url": dialog_url,
+            }
+        return {
+            "url": cell_to_str(raw_state).strip(),
+            "nav_change": 0,
+            "popup": 0,
+            "dialog": 0,
+            "popup_url": "",
+            "dialog_url": "",
+        }
+
+    candidates = _load_candidates()
+    sample = ",".join(
+        [candidate["label"] for candidate in candidates[:3] if cell_to_str(candidate.get("label", "")).strip()]
+    ) or "-"
+    _log_recover(f"[IG Recover] candidates count={len(candidates)} sample={sample}")
+    if not candidates:
+        _log_recover("[IG Recover] no_post_click_url")
         return ""
+
+    wait_for_timeout = getattr(page, "wait_for_timeout", None)
+    for candidate in candidates:
+        selector = cell_to_str(candidate.get("selector", "")).strip()
+        label = cell_to_str(candidate.get("label", "")).strip() or "selected_candidate"
+        if not selector:
+            continue
+        _reset_recovery_state()
+        before_pages = _snapshot_context_pages()
+        before_page_ids = {id(entry) for entry in before_pages}
+        before_url = cell_to_str(getattr(page, "url", "")).strip()
+        clicked = 0
+        try:
+            page.click(selector, timeout=750, force=True)
+            clicked = 1
+        except TypeError:
+            try:
+                page.click(selector)
+                clicked = 1
+            except Exception:
+                clicked = 0
+        except Exception:
+            clicked = 0
+        if callable(wait_for_timeout):
+            try:
+                wait_for_timeout(250)
+            except Exception:
+                pass
+        popup_url = ""
+        popup_flag = 0
+        for popup_page in _snapshot_context_pages():
+            if id(popup_page) in before_page_ids or popup_page is page:
+                continue
+            popup_url = cell_to_str(getattr(popup_page, "url", "")).strip()
+            if popup_url:
+                popup_flag = 1
+                break
+        after_url = cell_to_str(getattr(page, "url", "")).strip()
+        post_click_state = _read_post_click_state()
+        nav_change = 1 if after_url and after_url != before_url else int(post_click_state.get("nav_change") or 0)
+        recovered_url = (
+            popup_url
+            or cell_to_str(post_click_state.get("popup_url", "")).strip()
+            or cell_to_str(post_click_state.get("url", "")).strip()
+            or cell_to_str(post_click_state.get("dialog_url", "")).strip()
+            or (after_url if nav_change else "")
+        )
+        dialog_flag = 1 if cell_to_str(post_click_state.get("dialog_url", "")).strip() else int(
+            post_click_state.get("dialog") or 0
+        )
+        popup_flag = popup_flag or int(post_click_state.get("popup") or 0)
+        _log_recover(
+            f"[IG Recover] click_attempt candidate={label} clicked={clicked} "
+            f"popup={popup_flag} nav_change={nav_change} dialog={dialog_flag}"
+        )
+        if recovered_url:
+            _log_recover(f"[IG Recover] recovered url={recovered_url}")
+            return recovered_url
+    _log_recover("[IG Recover] no_post_click_url")
+    return ""
 
 
 def _collect_instagram_live_profile_clickable_bio_link_urls(

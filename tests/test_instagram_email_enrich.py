@@ -302,6 +302,79 @@ class _DummyInstagramHiddenContactPage(_DummyClosable):
         self.wait_calls.append(timeout_ms)
 
 
+class _DummyInstagramInteractionRecoveryPage(_DummyClosable):
+    def __init__(self, *, candidates=None, outcomes=None, url="https://www.instagram.com/recoveryartist/"):
+        super().__init__()
+        self._candidates = list(candidates or [])
+        self._outcomes = dict(outcomes or {})
+        self._post_click_state = {
+            "resolved_url": "",
+            "nav_change": 0,
+            "popup_url": "",
+            "dialog_url": "",
+        }
+        self.click_calls = []
+        self.wait_calls = []
+        self.url = url
+        self.context = SimpleNamespace(pages=[self])
+
+    def evaluate(self, script):  # noqa: ANN001
+        script_text = str(script or "")
+        if "ig-live-bio-link-interaction-recovery" not in script_text:
+            return ""
+        if "resolved_url:" in script_text and "dialog_url:" in script_text:
+            return dict(self._post_click_state)
+        if "return true;" in script_text and "state.popupUrl = ''" in script_text:
+            self._post_click_state = {
+                "resolved_url": "",
+                "nav_change": 0,
+                "popup_url": "",
+                "dialog_url": "",
+            }
+            self.context.pages = [self]
+            return True
+        if "candidates:" in script_text and "orderedCandidates" in script_text:
+            return {
+                "candidates": list(self._candidates),
+                "sample": ",".join(
+                    [
+                        str(entry.get("label", "")).strip()
+                        for entry in self._candidates[:3]
+                        if str(entry.get("label", "")).strip()
+                    ]
+                )
+                or "-",
+            }
+        return ""
+
+    def click(self, selector, *args, **kwargs):  # noqa: ANN002, ANN003
+        self.click_calls.append(selector)
+        outcome = dict(self._outcomes.get(selector, {}) or {})
+        if outcome.get("raise_click"):
+            raise RuntimeError("click failed")
+        page_url = str(outcome.get("page_url", "") or "").strip()
+        popup_url = str(outcome.get("popup_url", "") or "").strip()
+        resolved_url = str(outcome.get("resolved_url", "") or "").strip()
+        dialog_url = str(outcome.get("dialog_url", "") or "").strip()
+        if page_url:
+            self.url = page_url
+        elif outcome.get("nav_change") and resolved_url:
+            self.url = resolved_url
+        self._post_click_state = {
+            "resolved_url": resolved_url,
+            "nav_change": 1 if outcome.get("nav_change") else 0,
+            "popup_url": popup_url,
+            "dialog_url": dialog_url,
+        }
+        if popup_url:
+            self.context.pages = [self, SimpleNamespace(url=popup_url)]
+        else:
+            self.context.pages = [self]
+
+    def wait_for_timeout(self, timeout_ms):  # noqa: ANN001
+        self.wait_calls.append(timeout_ms)
+
+
 def _make_instagram_live_bridge(page):
     return cde.InstagramLivePageBridge(
         playwright=_DummyClosable(),
@@ -2278,6 +2351,87 @@ def test_collect_instagram_live_profile_clickable_bio_link_urls_does_not_click_w
 
     assert urls == []
     assert page.click_calls == []
+
+
+def test_recover_instagram_live_profile_clickable_bio_link_url_via_interaction_continues_until_candidate_recovers(
+    capsys,
+):
+    candidates = [
+        {"selector": '[data-ig-live-bio-link-recovery="0"]', "label": "direct_anchor"},
+        {"selector": '[data-ig-live-bio-link-recovery="1"]', "label": "nested_clickable_child"},
+        {"selector": '[data-ig-live-bio-link-recovery="2"]', "label": "parent_anchor"},
+    ]
+    page = _DummyInstagramInteractionRecoveryPage(
+        candidates=candidates,
+        outcomes={
+            '[data-ig-live-bio-link-recovery="0"]': {},
+            '[data-ig-live-bio-link-recovery="1"]': {"raise_click": True},
+            '[data-ig-live-bio-link-recovery="2"]': {
+                "resolved_url": "https://linktr.ee/runtimeinteractionartist",
+            },
+        },
+    )
+
+    recovered = cde._recover_instagram_live_profile_clickable_bio_link_url_via_interaction(page)
+
+    assert recovered == "https://linktr.ee/runtimeinteractionartist"
+    assert page.click_calls == [entry["selector"] for entry in candidates]
+    assert page.wait_calls == [250, 250, 250]
+    captured = capsys.readouterr()
+    assert "[IG Recover] candidates count=3 sample=direct_anchor,nested_clickable_child,parent_anchor" in captured.out
+    assert "[IG Recover] click_attempt candidate=direct_anchor clicked=1 popup=0 nav_change=0 dialog=0" in captured.out
+    assert "[IG Recover] click_attempt candidate=nested_clickable_child clicked=0 popup=0 nav_change=0 dialog=0" in captured.out
+    assert "[IG Recover] click_attempt candidate=parent_anchor clicked=1 popup=0 nav_change=0 dialog=0" in captured.out
+    assert "[IG Recover] recovered url=https://linktr.ee/runtimeinteractionartist" in captured.out
+
+
+def test_recover_instagram_live_profile_clickable_bio_link_url_via_interaction_recovers_wrapper_click_target():
+    page = _DummyInstagramInteractionRecoveryPage(
+        candidates=[{"selector": '[data-ig-live-bio-link-recovery="0"]', "label": "parent_anchor"}],
+        outcomes={
+            '[data-ig-live-bio-link-recovery="0"]': {
+                "resolved_url": "https://beacons.ai/wrapperartist",
+            }
+        },
+    )
+
+    recovered = cde._recover_instagram_live_profile_clickable_bio_link_url_via_interaction(page)
+
+    assert recovered == "https://beacons.ai/wrapperartist"
+    assert page.click_calls == ['[data-ig-live-bio-link-recovery="0"]']
+    assert page.wait_calls == [250]
+
+
+def test_recover_instagram_live_profile_clickable_bio_link_url_via_interaction_returns_empty_when_no_post_click_url(
+    capsys,
+):
+    candidates = [
+        {"selector": '[data-ig-live-bio-link-recovery="0"]', "label": "direct_anchor"},
+        {"selector": '[data-ig-live-bio-link-recovery="1"]', "label": "adjacent_bio_surface"},
+    ]
+    page = _DummyInstagramInteractionRecoveryPage(candidates=candidates, outcomes={})
+
+    recovered = cde._recover_instagram_live_profile_clickable_bio_link_url_via_interaction(page)
+
+    assert recovered == ""
+    assert page.click_calls == [entry["selector"] for entry in candidates]
+    assert page.wait_calls == [250, 250]
+    captured = capsys.readouterr()
+    assert "[IG Recover] no_post_click_url" in captured.out
+
+
+def test_recover_instagram_live_profile_clickable_bio_link_url_via_interaction_does_not_recover_when_bio_candidates_absent(
+    capsys,
+):
+    page = _DummyInstagramInteractionRecoveryPage(candidates=[], outcomes={})
+
+    recovered = cde._recover_instagram_live_profile_clickable_bio_link_url_via_interaction(page)
+
+    assert recovered == ""
+    assert page.click_calls == []
+    captured = capsys.readouterr()
+    assert "[IG Recover] candidates count=0 sample=-" in captured.out
+    assert "[IG Recover] no_post_click_url" in captured.out
 
 
 def test_collect_instagram_bio_link_fetch_urls_extracts_structured_script_url_without_anchor():
