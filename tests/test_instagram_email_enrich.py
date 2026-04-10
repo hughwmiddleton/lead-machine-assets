@@ -74,6 +74,7 @@ class _DummyInstagramHiddenContactPage(_DummyClosable):
         runtime_structured_payloads=None,
         runtime_window_payloads=None,
         live_bio_link_control_values=None,
+        strict_hidden_selectors=None,
         interaction_bio_link_selector=None,
         interaction_bio_link_resolved_url="",
         interaction_bio_link_page_url="",
@@ -102,6 +103,7 @@ class _DummyInstagramHiddenContactPage(_DummyClosable):
         self._live_bio_link_control_values = (
             None if live_bio_link_control_values is None else list(live_bio_link_control_values)
         )
+        self._strict_hidden_selectors = list(strict_hidden_selectors or [])
         self._interaction_bio_link_selector = str(interaction_bio_link_selector or "").strip()
         self._interaction_bio_link_resolved_url = str(interaction_bio_link_resolved_url or "").strip()
         self._interaction_bio_link_page_url = str(interaction_bio_link_page_url or "").strip()
@@ -142,12 +144,19 @@ class _DummyInstagramHiddenContactPage(_DummyClosable):
                 scope_roots.append(child)
             if not scope_roots:
                 scope_roots = [main]
+            strict_hidden_node_ids = set()
+            for selector in self._strict_hidden_selectors:
+                try:
+                    strict_hidden_node_ids.update(id(node) for node in soup.select(selector))
+                except Exception:
+                    continue
             values = []
             seen = set()
             seen_candidate_nodes = set()
             raw_candidate_count = 0
             drop_reasons = {}
             kept_candidates = []
+            relaxed_keep_samples = []
             strong_candidate_count = 0
             weak_candidate_count = 0
             interaction_candidate_count = 0
@@ -247,6 +256,26 @@ class _DummyInstagramHiddenContactPage(_DummyClosable):
                     current = getattr(current, "parent", None)
                 return False
 
+            def is_explicitly_hidden(node):
+                current = node
+                while current is not None:
+                    attrs = getattr(current, "attrs", {}) or {}
+                    if "hidden" in attrs:
+                        return True
+                    if str(attrs.get("aria-hidden", "")).strip().lower() == "true":
+                        return True
+                    style_value = str(attrs.get("style", "") or "").strip().lower()
+                    if "display:none" in style_value or "visibility:hidden" in style_value:
+                        return True
+                    current = getattr(current, "parent", None)
+                return False
+
+            def has_visible_box(node):
+                return id(node) not in strict_hidden_node_ids
+
+            def is_visible(node):
+                return node is not None and not is_explicitly_hidden(node) and has_visible_box(node)
+
             def collect_attr_text(node):
                 attrs = getattr(node, "attrs", {}) or {}
                 parts = []
@@ -334,7 +363,55 @@ class _DummyInstagramHiddenContactPage(_DummyClosable):
 
                 return nearby_nodes
 
-            def classify_hard_drop_reason(node, scope_root, combined_text):
+            def should_relax_profile_surface_visibility(
+                node,
+                scope_root,
+                combined_text,
+                own_text,
+                relaxed_clickable,
+            ):
+                if node is None or scope_root is None or is_visible(node) or is_explicitly_hidden(node):
+                    return False
+                if not is_within_scope(node, scope_root):
+                    return False
+                if node.find_parent(["nav", "footer", "aside"]) is not None or node.find_parent(
+                    attrs={"role": "tablist"}
+                ) is not None:
+                    return False
+                if (
+                    tab_pattern.search(own_text)
+                    or menu_pattern.search(own_text)
+                    or follower_pattern.search(own_text)
+                    or share_pattern.search(own_text)
+                ):
+                    return False
+                within_header = header is not None and (
+                    node is header or is_within_scope(node, header) or scope_root is header or is_within_scope(scope_root, header)
+                )
+                bounded_interactive = False
+                current = node.parent
+                while current is not None and is_within_scope(current, scope_root):
+                    if is_relaxed_clickable(current):
+                        bounded_interactive = True
+                        break
+                    current = current.parent
+                has_strong_profile_signal = bool(
+                    positive_pattern.search(own_text) or positive_pattern.search(combined_text)
+                )
+                has_weak_profile_signal = bool(
+                    weak_context_pattern.search(own_text) or weak_context_pattern.search(combined_text)
+                )
+                if (within_header or bounded_interactive) and relaxed_clickable and (
+                    has_strong_profile_signal or has_weak_profile_signal
+                ):
+                    return True
+                if within_header and has_strong_profile_signal:
+                    return True
+                return False
+
+            def classify_hard_drop_reason(node, scope_root, own_text, visibility_relaxed):
+                if node is None:
+                    return "not_visible"
                 own_text = " ".join(
                     part
                     for part in [
@@ -357,6 +434,8 @@ class _DummyInstagramHiddenContactPage(_DummyClosable):
                     return "follower_control"
                 if share_pattern.search(own_text):
                     return "share"
+                if not visibility_relaxed and not is_visible(node):
+                    return "not_visible"
                 return ""
 
             def score_seed(node, scope_root):
@@ -394,7 +473,22 @@ class _DummyInstagramHiddenContactPage(_DummyClosable):
                 )
                 if not countable:
                     return None
-                hard_drop_reason = classify_hard_drop_reason(node, scope_root, combined_text)
+                own_text = " ".join(
+                    part for part in [label_text, attr_text] if str(part or "").strip()
+                )[:280]
+                visibility_relaxed = should_relax_profile_surface_visibility(
+                    node,
+                    scope_root,
+                    combined_text,
+                    own_text,
+                    relaxed_clickable,
+                )
+                hard_drop_reason = classify_hard_drop_reason(
+                    node,
+                    scope_root,
+                    own_text,
+                    visibility_relaxed,
+                )
                 if hard_drop_reason:
                     return {"keep": False, "drop_reason": hard_drop_reason, "drop_kind": "hard"}
                 score = 0
@@ -423,10 +517,9 @@ class _DummyInstagramHiddenContactPage(_DummyClosable):
                 if header is not None and is_within_scope(node, header):
                     score += 1
                 minimum_score = 4 if relaxed_clickable else 6
-                own_text = " ".join(
-                    part for part in [label_text, attr_text] if str(part or "").strip()
-                )[:280]
                 soft_drop_reasons = []
+                if visibility_relaxed:
+                    soft_drop_reasons.append("profile_surface_visibility_relaxed")
                 if profile_action_pattern.search(own_text):
                     soft_drop_reasons.append("profile_action")
                 if score < minimum_score:
@@ -462,6 +555,7 @@ class _DummyInstagramHiddenContactPage(_DummyClosable):
                     "candidate_class": candidate_class,
                     "interaction_eligible": relaxed_clickable,
                     "soft_drop_reasons": soft_drop_reasons,
+                    "log_text": own_text or combined_text or label_text or attr_text,
                 }
 
             for root in scope_roots:
@@ -527,6 +621,17 @@ class _DummyInstagramHiddenContactPage(_DummyClosable):
                             f"{scored.get('label', 'interaction_candidate')}:{len(seen_candidate_nodes) - 1}"
                         )
                         interaction_only_value_count += 1
+                    if (
+                        "profile_surface_visibility_relaxed"
+                        in (scored.get("soft_drop_reasons") or [])
+                    ):
+                        relaxed_keep_samples.append(
+                            {
+                                "candidateClass": str(scored.get("candidate_class") or ""),
+                                "signal": "profile_surface_visibility_relaxed",
+                                "text": str(scored.get("log_text") or "")[:120],
+                            }
+                        )
                     kept_candidates.append(
                         (
                             {"strong_candidate": 0, "weak_candidate": 1, "interaction_candidate": 2}.get(
@@ -546,6 +651,7 @@ class _DummyInstagramHiddenContactPage(_DummyClosable):
                 "interactionOnlyValueCount": interaction_only_value_count,
                 "keptLabels": kept_labels,
                 "dropReasons": drop_reasons,
+                "relaxedKeepSamples": relaxed_keep_samples,
             }
         if "ig-live-bio-link-interaction-recovery" in script_text:
             if 'const state = window["' in script_text:
@@ -2990,6 +3096,61 @@ def test_collect_instagram_live_profile_clickable_control_values_preserves_link_
     assert "[IG Detect] candidates raw=" in captured.out
     assert "interaction=" in captured.out
     assert "[IG Detect] control_values count=" in captured.out
+
+
+def test_collect_instagram_live_profile_clickable_control_values_relaxes_false_visibility_for_profile_surface_control(
+    capsys,
+):
+    page = _DummyInstagramHiddenContactPage(
+        "<html><body><main><header>"
+        "<div role='button' id='bio-link'>link in bio</div>"
+        "<button>Email</button>"
+        "</header></main></body></html>",
+        strict_hidden_selectors=["#bio-link"],
+    )
+
+    values = cde._collect_instagram_live_profile_clickable_control_values(page)
+
+    assert values
+    assert values[0].startswith(cde._INSTAGRAM_LIVE_ONEHOP_INTERACTION_ONLY_SENTINEL_PREFIX)
+    captured = capsys.readouterr()
+    assert "[IG Detect] keep class=interaction_candidate signal=profile_surface_visibility_relaxed" in captured.out
+    assert "soft:profile_surface_visibility_relaxed:" in captured.out
+    assert "[IG Detect] control_values count=" in captured.out
+
+
+def test_collect_instagram_live_profile_clickable_control_values_visibility_relaxation_preserves_hard_exclusions(
+    capsys,
+):
+    page = _DummyInstagramHiddenContactPage(
+        "<html><body><main>"
+        "<header>"
+        "<div role='button' id='bio-link'>Official website</div>"
+        "<button id='followers'>2,034 followers</button>"
+        "<div tabindex='0' aria-label='Menu' id='menu'>Open menu</div>"
+        "<nav><div role='button' id='nav-site'>Website</div></nav>"
+        "</header>"
+        "<section role='tablist'><div role='button' id='tab-site'>Website</div></section>"
+        "</main></body></html>",
+        strict_hidden_selectors=[
+            "#bio-link",
+            "#followers",
+            "#menu",
+            "#nav-site",
+            "#tab-site",
+        ],
+    )
+
+    values = cde._collect_instagram_live_profile_clickable_control_values(page)
+
+    assert values
+    assert values[0].startswith(cde._INSTAGRAM_LIVE_ONEHOP_INTERACTION_ONLY_SENTINEL_PREFIX)
+    captured = capsys.readouterr()
+    assert "soft:profile_surface_visibility_relaxed:" in captured.out
+    assert "hard:follower_control:" in captured.out
+    assert "hard:menu:" in captured.out
+    assert "hard:tab:" in captured.out
+    assert "hard:global_nav:" in captured.out
 
 
 def test_collect_instagram_live_profile_clickable_bio_link_urls_recovers_runtime_adjoining_value_when_clickable_attrs_are_empty():

@@ -4205,7 +4205,7 @@ def _collect_instagram_live_profile_clickable_control_values(page: Any) -> List[
     truth_sample_limit_json = int(_INSTAGRAM_TRUTH_SAMPLE_LIMIT)
 
     def _evaluate_payload(*, retry_snapshot_index: int = 0) -> Any:
-        return page.evaluate(
+      return page.evaluate(
             f"""
 () => {{
   const marker = {marker_name_json};
@@ -4242,20 +4242,21 @@ def _collect_instagram_live_profile_clickable_control_values(page: Any) -> List[
   const probeSelector = relaxedSelector + ", div, span, section, article, li, p";
   const main = document.querySelector('main');
   if (!main) {{
-    return {{
-      marker,
-      values: [],
-      rawCandidateCount: 0,
-      keptCandidateCount: 0,
-      interactionCandidateCount: 0,
-      interactionOnlyValueCount: 0,
-      keptLabels: [],
-      dropReasons: {{}},
-      mainPresent: 0,
-      headerPresent: 0,
-      scopeRoots: [],
-      rootSnapshots: [],
-      rawProbeNodeCount: 0,
+      return {{
+        marker,
+        values: [],
+        rawCandidateCount: 0,
+        keptCandidateCount: 0,
+        interactionCandidateCount: 0,
+        interactionOnlyValueCount: 0,
+        keptLabels: [],
+        dropReasons: {{}},
+        relaxedKeepSamples: [],
+        mainPresent: 0,
+        headerPresent: 0,
+        scopeRoots: [],
+        rootSnapshots: [],
+        rawProbeNodeCount: 0,
       dropSamples: [],
       keepSamples: [],
       retrySnapshotIndex,
@@ -4264,6 +4265,17 @@ def _collect_instagram_live_profile_clickable_control_values(page: Any) -> List[
   const cleanText = (value, limit = 280) => {{
     if (value == null) return '';
     return String(value).replace(/\\s+/g, ' ').trim().slice(0, limit);
+  }};
+  const isExplicitlyHidden = (el) => {{
+    if (!el) return true;
+    if (el.closest('[hidden], [aria-hidden="true"]')) return true;
+    const style = window.getComputedStyle(el);
+    return !!(style && (style.display === 'none' || style.visibility === 'hidden'));
+  }};
+  const hasVisibleBox = (el) => {{
+    if (!el) return false;
+    const rect = el.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
   }};
   const patternTest = (pattern, value) => {{
     if (!pattern) {{
@@ -4277,11 +4289,7 @@ def _collect_instagram_live_profile_clickable_control_values(page: Any) -> List[
   }};
   const isVisible = (el) => {{
     if (!el) return false;
-    if (el.closest('[hidden], [aria-hidden="true"]')) return false;
-    const style = window.getComputedStyle(el);
-    if (!style || style.display === 'none' || style.visibility === 'hidden') return false;
-    const rect = el.getBoundingClientRect();
-    return rect.width > 0 && rect.height > 0;
+    return !isExplicitlyHidden(el) && hasVisibleBox(el);
   }};
   const isWithinRoot = (candidate, scopeRoot) => {{
     if (!candidate || !scopeRoot) {{
@@ -4447,6 +4455,7 @@ def _collect_instagram_live_profile_clickable_control_values(page: Any) -> List[
   const values = [];
   const seenValues = new Set();
   const dropReasons = {{}};
+  const relaxedKeepSamples = [];
   const keptCandidates = [];
   const seenCandidateNodes = new Set();
   let rawCandidateCount = 0;
@@ -4750,22 +4759,48 @@ def _collect_instagram_live_profile_clickable_control_values(page: Any) -> List[
     }}
     return cleanText(parts.join(' '), 280);
   }};
-  const classifyHardDropReason = (node, scopeRoot, combinedText) => {{
-    if (!node || !isVisible(node)) {{
+  const shouldRelaxProfileSurfaceVisibility = (node, scopeRoot, combinedText, ownText, relaxedClickable) => {{
+    if (!node || !scopeRoot || isVisible(node) || isExplicitlyHidden(node)) {{
+      return false;
+    }}
+    if (!isWithinRoot(node, scopeRoot)) {{
+      return false;
+    }}
+    if (node.closest('nav, footer, aside, [role="tablist"]')) {{
+      return false;
+    }}
+    if (
+      tabPattern.test(ownText)
+      || menuPattern.test(ownText)
+      || followerPattern.test(ownText)
+      || sharePattern.test(ownText)
+    ) {{
+      return false;
+    }}
+    const withinHeader = !!(header && (header === scopeRoot || header.contains(scopeRoot) || header.contains(node)));
+    const interactiveAncestor = node.closest ? node.closest(relaxedSelector) : null;
+    const boundedInteractive = !!(
+      interactiveAncestor
+      && interactiveAncestor !== node
+      && isWithinRoot(interactiveAncestor, scopeRoot)
+    );
+    const hasStrongProfileSignal = patternTest(positivePattern, ownText) || patternTest(positivePattern, combinedText);
+    const hasWeakProfileSignal = patternTest(weakContextPattern, ownText) || patternTest(weakContextPattern, combinedText);
+    if ((withinHeader || boundedInteractive) && relaxedClickable && (hasStrongProfileSignal || hasWeakProfileSignal)) {{
+      return true;
+    }}
+    if (withinHeader && hasStrongProfileSignal) {{
+      return true;
+    }}
+    return false;
+  }};
+  const classifyHardDropReason = (node, scopeRoot, ownText, visibilityRelaxed) => {{
+    if (!node) {{
       return 'not_visible';
     }}
     if (!isWithinRoot(node, scopeRoot)) {{
       return 'out_of_scope';
     }}
-    const ownText = cleanText(
-      [
-        node.getAttribute && node.getAttribute('aria-label') || '',
-        node.getAttribute && node.getAttribute('title') || '',
-        node.innerText || node.textContent || '',
-        collectAttrText(node),
-      ].join(' '),
-      280,
-    );
     if (node.closest('nav, footer, aside')) {{
       return 'global_nav';
     }}
@@ -4780,6 +4815,9 @@ def _collect_instagram_live_profile_clickable_control_values(page: Any) -> List[
     }}
     if (sharePattern.test(ownText)) {{
       return 'share';
+    }}
+    if (!visibilityRelaxed && !isVisible(node)) {{
+      return 'not_visible';
     }}
     return '';
   }};
@@ -4811,7 +4849,14 @@ def _collect_instagram_live_profile_clickable_control_values(page: Any) -> List[
     if (!countable) {{
       return {{ countable: false, keep: false, dropReason: '', dropKind: 'hard', softDropReasons: [] }};
     }}
-    const hardDropReason = classifyHardDropReason(node, scopeRoot, combined);
+    const visibilityRelaxed = shouldRelaxProfileSurfaceVisibility(
+      node,
+      scopeRoot,
+      combined,
+      ownText,
+      relaxedClickable,
+    );
+    const hardDropReason = classifyHardDropReason(node, scopeRoot, ownText, visibilityRelaxed);
     if (hardDropReason) {{
       return {{ countable: true, keep: false, dropReason: hardDropReason, dropKind: 'hard', softDropReasons: [] }};
     }}
@@ -4849,6 +4894,9 @@ def _collect_instagram_live_profile_clickable_control_values(page: Any) -> List[
     const minimumScore = relaxedClickable ? 4 : 6;
     const hasStrongSignal = hasLabelUrl || hasAttrUrl || hasPositiveLabel || hasPositiveAttr || hasPositiveContext;
     const softDropReasons = [];
+    if (visibilityRelaxed) {{
+      softDropReasons.push('profile_surface_visibility_relaxed');
+    }}
     if (patternTest(profileActionPattern, ownText)) {{
       softDropReasons.push('profile_action');
     }}
@@ -4886,6 +4934,7 @@ def _collect_instagram_live_profile_clickable_control_values(page: Any) -> List[
       interactionEligible: relaxedClickable,
       softDropReasons,
       softPenaltyCount: softDropReasons.length,
+      logText: ownText || combined || labelText || attrText,
     }};
   }};
   for (const root of scopeRoots) {{
@@ -4995,6 +5044,17 @@ def _collect_instagram_live_profile_clickable_control_values(page: Any) -> List[
       addValue(`${{interactionOnlyPrefix}}${{candidate.label}}:${{index}}`);
       interactionOnlyValueCount += 1;
     }}
+    if (
+      Array.isArray(candidate.softDropReasons)
+      && candidate.softDropReasons.includes('profile_surface_visibility_relaxed')
+      && relaxedKeepSamples.length < truthLimit
+    ) {{
+      relaxedKeepSamples.push({{
+        candidateClass: candidate.candidateClass,
+        signal: 'profile_surface_visibility_relaxed',
+        text: cleanText(candidate.logText || '', 120),
+      }});
+    }}
     if (truth && truth.keepSamples.length < truthLimit) {{
       const producedValue = values.length > valueCountBefore ? 1 : 0;
       truth.keepSamples.push({{
@@ -5023,6 +5083,7 @@ def _collect_instagram_live_profile_clickable_control_values(page: Any) -> List[
     interactionOnlyValueCount,
     keptLabels: keptLabels.slice(0, maxSampleLabels),
     dropReasons,
+    relaxedKeepSamples,
     mainPresent: 1,
     headerPresent: header ? 1 : 0,
     scopeRoots: truth ? truth.scopeRoots : [],
@@ -5081,6 +5142,7 @@ def _collect_instagram_live_profile_clickable_control_values(page: Any) -> List[
     interaction_only_value_count = 0
     kept_labels: List[str] = []
     drop_reasons: Dict[str, int] = {}
+    relaxed_keep_samples: List[Dict[str, str]] = []
     if isinstance(raw_payload, dict):
         try:
             raw_candidate_count = max(int(raw_payload.get("rawCandidateCount") or 0), 0)
@@ -5114,6 +5176,21 @@ def _collect_instagram_live_profile_clickable_control_values(page: Any) -> List[
                     continue
                 if numeric_count > 0:
                     drop_reasons[reason_key] = numeric_count
+        for raw_sample in raw_payload.get("relaxedKeepSamples") or []:
+            if not isinstance(raw_sample, dict):
+                continue
+            sample_class = cell_to_str(raw_sample.get("candidateClass")).strip()
+            sample_signal = cell_to_str(raw_sample.get("signal")).strip()
+            sample_text = cell_to_str(raw_sample.get("text")).strip()
+            if not sample_class or not sample_signal:
+                continue
+            relaxed_keep_samples.append(
+                {
+                    "candidate_class": sample_class,
+                    "signal": sample_signal,
+                    "text": sample_text,
+                }
+            )
     else:
         kept_candidate_count = len(values)
         raw_candidate_count = kept_candidate_count
@@ -5214,9 +5291,28 @@ def _collect_instagram_live_profile_clickable_control_values(page: Any) -> List[
     dropped_candidate_count = max(raw_candidate_count - kept_candidate_count - interaction_candidate_count, 0)
     candidate_sample = ",".join(kept_labels[:3]) if kept_labels else "-"
     control_sample = _instagram_bio_link_log_sample(values) if values else candidate_sample
+    for sample in relaxed_keep_samples[:_INSTAGRAM_TRUTH_SAMPLE_LIMIT]:
+        _log_detect(
+            f"[IG Detect] keep class={sample['candidate_class']} "
+            f"signal={sample['signal']} text={_truth_quote(sample.get('text'))}"
+        )
     if drop_reasons:
-        sorted_reasons = sorted(drop_reasons.items(), key=lambda item: (-item[1], item[0]))[:3]
-        drop_reason_text = ",".join(f"{reason}:{count}" for reason, count in sorted_reasons)
+        prioritized_reasons: List[Tuple[str, int]] = []
+        prioritized_keys = (
+            "hard:not_visible",
+            "soft:profile_surface_visibility_relaxed",
+        )
+        for key in prioritized_keys:
+            count = drop_reasons.get(key)
+            if count:
+                prioritized_reasons.append((key, count))
+        for reason, count in sorted(drop_reasons.items(), key=lambda item: (-item[1], item[0])):
+            if any(reason == existing_reason for existing_reason, _ in prioritized_reasons):
+                continue
+            prioritized_reasons.append((reason, count))
+            if len(prioritized_reasons) >= 5:
+                break
+        drop_reason_text = ",".join(f"{reason}:{count}" for reason, count in prioritized_reasons)
     else:
         drop_reason_text = "-"
 
