@@ -2548,6 +2548,36 @@ def _canonicalize_instagram_profile_url(raw: str) -> str:
     return f"https://www.instagram.com/{handle}/"
 
 
+def _instagram_profile_handle_token_from_url(
+    raw: Any,
+    *,
+    allow_routed_subpaths: bool = False,
+) -> str:
+    if not raw:
+        return ""
+    candidate = cell_to_str(raw)
+    if not candidate:
+        return ""
+    if candidate.startswith("//"):
+        candidate = "https:" + candidate
+    elif "://" not in candidate:
+        candidate = "https://" + candidate.lstrip("/")
+    try:
+        parsed = urllib.parse.urlparse(candidate)
+    except Exception:
+        return ""
+    host = (parsed.netloc or "").lower()
+    if host not in _INSTAGRAM_ALLOWED_HOSTS:
+        return ""
+    segments = [segment for segment in (parsed.path or "").split("/") if segment]
+    if not segments or (not allow_routed_subpaths and len(segments) != 1):
+        return ""
+    handle = _spotify_seed_instagram_identity_handle_token(segments[0])
+    if not handle or handle in _INSTAGRAM_REJECT_SEGMENTS:
+        return ""
+    return handle
+
+
 def _get_canonical_instagram_url(row) -> str:
     """Return the first canonical Instagram profile URL found on the row."""
     if row is None:
@@ -3426,8 +3456,18 @@ def _instagram_bridge_surface_assessment(
 
     target_canonical = _canonicalize_instagram_profile_url(profile_url)
     current_canonical = _canonicalize_instagram_profile_url(current_url)
+    target_handle = _instagram_profile_handle_token_from_url(target_canonical or profile_url)
+    current_profile_handle = _instagram_profile_handle_token_from_url(
+        current_url,
+        allow_routed_subpaths=True,
+    )
     same_profile = bool(target_canonical and current_canonical and target_canonical == current_canonical)
     unknown_profile_url = not current_url
+    same_profile_routed = bool(
+        target_handle
+        and current_profile_handle
+        and target_handle == current_profile_handle
+    )
 
     url_lower = current_url.lower()
     text_lower = " ".join([current_title, current_body_text, current_html]).lower()
@@ -3481,7 +3521,7 @@ def _instagram_bridge_surface_assessment(
         and state["descendants"] >= 2
         and state["text_length"] >= 12
         and has_header_or_bio
-        and (same_profile or (unknown_profile_url and plausible_surface))
+        and (same_profile or same_profile_routed or (unknown_profile_url and plausible_surface))
     )
 
     reason = "not_profile_surface"
