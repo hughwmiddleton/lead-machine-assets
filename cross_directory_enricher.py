@@ -3471,17 +3471,14 @@ def _instagram_bridge_surface_assessment(
 
     url_lower = current_url.lower()
     text_lower = " ".join([current_title, current_body_text, current_html]).lower()
-
-    blocked = False
+    hard_blocked = False
     if any(token in url_lower for token in ("/accounts/login", "/challenge", "/checkpoint", "/consent")):
-        blocked = True
+        hard_blocked = True
     elif _detect_soft_block(current_html):
-        blocked = True
+        hard_blocked = True
     elif any(
         token in text_lower
         for token in (
-            "log in to instagram",
-            "login • instagram",
             "security check",
             "challenge_required",
             "checkpoint",
@@ -3490,7 +3487,42 @@ def _instagram_bridge_surface_assessment(
             "sorry, this page isn't available",
         )
     ):
-        blocked = True
+        hard_blocked = True
+
+    login_text_shell = any(
+        token in text_lower
+        for token in (
+            "log in to instagram",
+            "login • instagram",
+            "sign up to see photos and videos",
+            "see instagram photos and videos from",
+        )
+    )
+    recoverable_logged_out_shell = False
+    if not hard_blocked and login_text_shell and target_handle and (same_profile or same_profile_routed):
+        empty_live_probe = (
+            state["main"] <= 0
+            and state["header"] <= 0
+            and state["descendants"] <= 0
+            and state["text_length"] <= 0
+            and state["profile_markers"] <= 0
+        )
+        profile_identity_markers = 0
+        if f"@{target_handle}" in text_lower or f"(@{target_handle})" in text_lower:
+            profile_identity_markers += 1
+        if "instagram photos and videos" in text_lower:
+            profile_identity_markers += 1
+        if "\"@type\":\"profilepage\"" in text_lower or "\"@type\": \"profilepage\"" in text_lower:
+            profile_identity_markers += 1
+        if (
+            re.search(r"\b\d[\d,]*\s+followers?\b", text_lower)
+            and re.search(r"\b\d[\d,]*\s+following\b", text_lower)
+            and re.search(r"\b\d[\d,]*\s+posts?\b", text_lower)
+        ):
+            profile_identity_markers += 1
+        recoverable_logged_out_shell = empty_live_probe and profile_identity_markers >= 2
+
+    blocked = hard_blocked or (login_text_shell and not recoverable_logged_out_shell)
 
     has_header_or_bio = state["header"] > 0 or state["profile_markers"] >= 2
     has_meaningful_descendants = state["descendants"] >= 4 or state["profile_markers"] >= 3
@@ -3531,6 +3563,8 @@ def _instagram_bridge_surface_assessment(
         reason = "profile_surface"
     elif promoted_shell:
         reason = "profile_shell"
+    elif recoverable_logged_out_shell:
+        reason = "recoverable_logged_out_shell"
     elif profile_shell:
         reason = "profile_shell"
     elif plausible_surface:
@@ -3544,15 +3578,26 @@ def _instagram_bridge_surface_assessment(
         "current_html": current_html,
         "current_body_text": current_body_text,
         "same_profile": same_profile,
+        "same_profile_routed": same_profile_routed,
         "unknown_profile_url": unknown_profile_url,
         "blocked": blocked,
         "plausible_surface": plausible_surface,
         "profile_shell": profile_shell,
         "promoted_shell": promoted_shell,
+        "recoverable_logged_out_shell": recoverable_logged_out_shell,
         "ready": relaxed_ready,
         "reason": reason,
-        "allow_retry": not blocked and reason in {"profile_shell", "profile_surface_candidate"},
-        "allow_reload": not blocked and reason == "profile_shell" and (same_profile or unknown_profile_url),
+        "allow_retry": not blocked and reason in {"profile_shell", "profile_surface_candidate", "recoverable_logged_out_shell"},
+        "allow_reload": not blocked and (
+            (
+                reason == "profile_shell"
+                and (same_profile or same_profile_routed or unknown_profile_url)
+            )
+            or (
+                recoverable_logged_out_shell
+                and (same_profile or same_profile_routed or unknown_profile_url)
+            )
+        ),
         "state": state,
         "main": state["main"],
         "header": state["header"],
@@ -3568,6 +3613,7 @@ def _wait_for_instagram_live_profile_surface(
     timeout_s: float,
 ) -> Tuple[bool, str]:
     attempt_timeout_s = min(max(float(timeout_s or 0), 0.0), _INSTAGRAM_RENDER_READY_TIMEOUT_MS / 1000.0)
+    recovery_active = False
 
     def _log_surface_check(assessment: Dict[str, Any]) -> None:
         print(f"[IG Bridge] attempt={_log_surface_check.attempt} url={assessment['current_url'] or profile_url}")
@@ -3579,8 +3625,24 @@ def _wait_for_instagram_live_profile_surface(
 
     _log_surface_check.attempt = 1  # type: ignore[attr-defined]
 
+    def _log_recoverable_shell(assessment: Dict[str, Any]) -> None:
+        nonlocal recovery_active
+        if not assessment.get("recoverable_logged_out_shell"):
+            return
+        recovery_active = True
+        recovery_scope = "same_profile"
+        if assessment.get("same_profile_routed"):
+            recovery_scope = "same_profile_routed"
+        elif assessment.get("unknown_profile_url"):
+            recovery_scope = "unknown_profile"
+        print(
+            f"[IG Bridge] recoverable_shell kind=logged_out_ssr "
+            f"scope={recovery_scope} url={assessment['current_url'] or profile_url}"
+        )
+
     assessment = _instagram_bridge_surface_assessment(page, profile_url, allow_html_fallback=False)
     _log_surface_check(assessment)
+    _log_recoverable_shell(assessment)
     if assessment["ready"] or assessment.get("promoted_shell"):
         if assessment.get("promoted_shell") and not assessment["ready"]:
             print("[IG Bridge] action=promote_profile_shell")
@@ -3592,6 +3654,8 @@ def _wait_for_instagram_live_profile_surface(
 
     if assessment["allow_retry"]:
         print("[IG Bridge] action=retry_surface_check")
+        if assessment.get("recoverable_logged_out_shell"):
+            print("[IG Bridge] recovery_attempt attempt=1 kind=logged_out_ssr action=extra_wait")
         try:
             _wait_for_instagram_profile_render(page, attempt_timeout_s)
         except Exception:
@@ -3599,27 +3663,39 @@ def _wait_for_instagram_live_profile_surface(
         _log_surface_check.attempt = 2  # type: ignore[attr-defined]
         assessment = _instagram_bridge_surface_assessment(page, profile_url, allow_html_fallback=True)
         _log_surface_check(assessment)
+        _log_recoverable_shell(assessment)
         if assessment["ready"] or assessment.get("promoted_shell"):
             if assessment.get("promoted_shell") and not assessment["ready"]:
                 print("[IG Bridge] action=promote_profile_shell")
+            if recovery_active:
+                print("[IG Bridge] recovery_success attempt=2 kind=logged_out_ssr")
             print(f"[IG Bridge] success attempt=2 final_url={assessment['current_url'] or profile_url}")
             return (True, "profile_surface")
         if assessment["blocked"]:
+            if recovery_active:
+                print("[IG Bridge] recovery_exhausted kind=logged_out_ssr final_reason=not_profile_surface")
             print("[IG Bridge] failure reason=not_profile_surface")
             return (False, "not_profile_surface")
 
     if assessment["allow_reload"]:
         print("[IG Bridge] action=reload_same_profile reason=profile_shell")
+        if recovery_active:
+            print("[IG Bridge] recovery_attempt attempt=2 kind=logged_out_ssr action=reload_same_profile")
         page.goto(profile_url, wait_until="domcontentloaded", timeout=timeout_s * 1000)
         _log_surface_check.attempt = 3  # type: ignore[attr-defined]
         assessment = _instagram_bridge_surface_assessment(page, profile_url, allow_html_fallback=True)
         _log_surface_check(assessment)
+        _log_recoverable_shell(assessment)
         if assessment["ready"] or assessment.get("promoted_shell"):
             if assessment.get("promoted_shell") and not assessment["ready"]:
                 print("[IG Bridge] action=promote_profile_shell")
+            if recovery_active:
+                print("[IG Bridge] recovery_success attempt=3 kind=logged_out_ssr")
             print(f"[IG Bridge] success attempt=3 final_url={assessment['current_url'] or profile_url}")
             return (True, "profile_surface")
 
+    if recovery_active:
+        print("[IG Bridge] recovery_exhausted kind=logged_out_ssr final_reason=not_profile_surface")
     print("[IG Bridge] failure reason=not_profile_surface")
     return (False, "not_profile_surface")
 

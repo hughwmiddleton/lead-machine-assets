@@ -1224,6 +1224,101 @@ def test_instagram_bridge_surface_assessment_rejects_generic_plausible_same_hand
     assert assessment["reason"] == "profile_surface_candidate"
 
 
+def test_instagram_bridge_surface_assessment_marks_same_profile_logged_out_shell_recoverable():
+    html = """
+    <html>
+      <head>
+        <title>recoverartist (@recoverartist) • Instagram photos and videos</title>
+        <meta property="og:description" content="1,234 Followers, 56 Following, 12 Posts - See Instagram photos and videos from recoverartist (@recoverartist)" />
+      </head>
+      <body>
+        <script type="application/ld+json">{"@type":"ProfilePage"}</script>
+        <div>Log in to Instagram</div>
+      </body>
+    </html>
+    """
+    page = _DummyInstagramProfileSurfaceProbePage(
+        html,
+        url="https://www.instagram.com/recoverartist/",
+        title="recoverartist (@recoverartist) • Instagram photos and videos",
+    )
+
+    assessment = cde._instagram_bridge_surface_assessment(
+        page,
+        "https://www.instagram.com/recoverartist/",
+        allow_html_fallback=True,
+    )
+
+    assert assessment["blocked"] is False
+    assert assessment["ready"] is False
+    assert assessment["recoverable_logged_out_shell"] is True
+    assert assessment["reason"] == "recoverable_logged_out_shell"
+    assert assessment["allow_retry"] is True
+    assert assessment["allow_reload"] is True
+    assert assessment["main"] == 0
+    assert assessment["header"] == 0
+    assert assessment["descendants"] == 0
+    assert assessment["text_length"] == 0
+
+
+def test_instagram_bridge_surface_assessment_keeps_wrong_profile_logged_out_shell_blocked():
+    html = """
+    <html>
+      <head>
+        <title>otherartist (@otherartist) • Instagram photos and videos</title>
+        <meta property="og:description" content="1,234 Followers, 56 Following, 12 Posts - See Instagram photos and videos from otherartist (@otherartist)" />
+      </head>
+      <body>
+        <script type="application/ld+json">{"@type":"ProfilePage"}</script>
+        <div>Log in to Instagram</div>
+      </body>
+    </html>
+    """
+    page = _DummyInstagramProfileSurfaceProbePage(
+        html,
+        url="https://www.instagram.com/otherartist/",
+        title="otherartist (@otherartist) • Instagram photos and videos",
+    )
+
+    assessment = cde._instagram_bridge_surface_assessment(
+        page,
+        "https://www.instagram.com/recoverartist/",
+        allow_html_fallback=True,
+    )
+
+    assert assessment["blocked"] is True
+    assert assessment["recoverable_logged_out_shell"] is False
+    assert assessment["reason"] == "blocked_page"
+
+
+def test_instagram_bridge_surface_assessment_keeps_generic_same_url_logged_out_shell_blocked():
+    html = """
+    <html>
+      <head>
+        <title>Instagram</title>
+      </head>
+      <body>
+        <div>Log in to Instagram to see creator tools, settings and help center articles.</div>
+      </body>
+    </html>
+    """
+    page = _DummyInstagramProfileSurfaceProbePage(
+        html,
+        url="https://www.instagram.com/recoverartist/",
+        title="Instagram",
+    )
+
+    assessment = cde._instagram_bridge_surface_assessment(
+        page,
+        "https://www.instagram.com/recoverartist/",
+        allow_html_fallback=True,
+    )
+
+    assert assessment["blocked"] is True
+    assert assessment["recoverable_logged_out_shell"] is False
+    assert assessment["reason"] == "blocked_page"
+
+
 def test_instagram_profile_surface_state_from_html_recovers_profile_surface_without_main():
     html = """
     <html>
@@ -2289,6 +2384,272 @@ def test_open_instagram_live_page_bridge_non_profile_shell_recovers_after_same_p
     assert bridge.snapshot_html() == ready_html
 
     bridge.close()
+
+
+def test_open_instagram_live_page_bridge_recovers_same_profile_logged_out_shell_after_wait(
+    monkeypatch,
+    capsys,
+):
+    events = []
+    logged_out_html = """
+    <html>
+      <head>
+        <title>recoverartist (@recoverartist) • Instagram photos and videos</title>
+        <meta property="og:description" content="1,234 Followers, 56 Following, 12 Posts - See Instagram photos and videos from recoverartist (@recoverartist)" />
+      </head>
+      <body>
+        <script type="application/ld+json">{"@type":"ProfilePage"}</script>
+        <div>Log in to Instagram</div>
+      </body>
+    </html>
+    """
+    ready_html = (
+        "<html><body><main><header><h1>Recover Artist</h1><button>Email</button></header>"
+        "<section><a href='https://linktr.ee/recoverartist'>Bio</a></section></main></body></html>"
+    )
+
+    class DummyPage(_DummyClosable):
+        def __init__(self):
+            super().__init__()
+            self.url = ""
+            self._html = logged_out_html
+            self.goto_calls = 0
+
+        def goto(self, url, wait_until=None, timeout=None):  # noqa: ANN001
+            self.goto_calls += 1
+            self.url = "https://www.instagram.com/recoverartist/"
+            events.append(("goto", self.goto_calls, self.url, wait_until, timeout))
+
+        def title(self):
+            return (
+                "recoverartist (@recoverartist) • Instagram photos and videos"
+                if self._html == logged_out_html
+                else "Recover Artist (@recoverartist) • Instagram photos and videos"
+            )
+
+        def evaluate(self, script):  # noqa: ANN001
+            script_text = str(script or "")
+            if "profile_markers" in script_text:
+                return _instagram_profile_surface_state_from_html(
+                    script,
+                    self._html,
+                    rendered_main_text=(
+                        ""
+                        if self._html == logged_out_html
+                        else "Recover Artist Bio and booking details"
+                    ),
+                )
+            if "document.body" in script_text and "innerText" in script_text:
+                return (
+                    "Log in to Instagram"
+                    if self._html == logged_out_html
+                    else "Recover Artist Bio and booking details"
+                )
+            return _instagram_profile_surface_candidate_marker_from_html(script, self._html)
+
+        def content(self):
+            return self._html
+
+    class DummyContext(_DummyClosable):
+        def __init__(self, page):
+            super().__init__()
+            self._page = page
+
+        def new_page(self):
+            events.append(("new_page",))
+            return self._page
+
+    class DummyBrowser(_DummyClosable):
+        def __init__(self, context):
+            super().__init__()
+            self._context = context
+
+        def new_context(self):
+            events.append(("new_context",))
+            return self._context
+
+    class DummyChromium:
+        def __init__(self, browser):
+            self._browser = browser
+
+        def launch(self, headless=True):  # noqa: ANN001
+            events.append(("launch", headless))
+            return self._browser
+
+    class DummyPlaywright(_DummyClosable):
+        def __init__(self, browser):
+            super().__init__()
+            self.chromium = DummyChromium(browser)
+
+        def stop(self):
+            self.closed = True
+            events.append(("stop",))
+
+    class DummySyncPlaywrightRunner:
+        def __init__(self, playwright):
+            self._playwright = playwright
+
+        def start(self):
+            events.append(("start",))
+            return self._playwright
+
+    page = DummyPage()
+    context = DummyContext(page)
+    browser = DummyBrowser(context)
+    playwright = DummyPlaywright(browser)
+
+    monkeypatch.setattr(
+        cde,
+        "_load_instagram_playwright",
+        lambda: (lambda: DummySyncPlaywrightRunner(playwright)),
+    )
+    wait_calls = []
+
+    def fake_wait_for_instagram_profile_render(page_arg, timeout_s):  # noqa: ANN001
+        wait_calls.append((page_arg, timeout_s))
+        events.append(("wait", page_arg, timeout_s))
+        page_arg._html = ready_html
+        return False
+
+    monkeypatch.setattr(cde, "_wait_for_instagram_profile_render", fake_wait_for_instagram_profile_render)
+
+    bridge = _REAL_OPEN_INSTAGRAM_LIVE_PAGE_BRIDGE(
+        "https://www.instagram.com/recoverartist/",
+        timeout_s=12.5,
+    )
+
+    assert bridge is not None
+    assert bridge.page is page
+    assert page.goto_calls == 1
+    assert len(wait_calls) == 1
+    assert bridge.snapshot_html() == ready_html
+    captured = capsys.readouterr()
+    assert "[IG Bridge] recoverable_shell kind=logged_out_ssr scope=same_profile" in captured.out
+    assert "[IG Bridge] recovery_attempt attempt=1 kind=logged_out_ssr action=extra_wait" in captured.out
+    assert "[IG Bridge] recovery_success attempt=2 kind=logged_out_ssr" in captured.out
+    assert "[IG Bridge] success attempt=2 final_url=https://www.instagram.com/recoverartist/" in captured.out
+
+    bridge.close()
+
+
+def test_open_instagram_live_page_bridge_logged_out_shell_fails_after_bounded_recovery(
+    monkeypatch,
+    capsys,
+):
+    logged_out_html = """
+    <html>
+      <head>
+        <title>recoverartist (@recoverartist) • Instagram photos and videos</title>
+        <meta property="og:description" content="1,234 Followers, 56 Following, 12 Posts - See Instagram photos and videos from recoverartist (@recoverartist)" />
+      </head>
+      <body>
+        <script type="application/ld+json">{"@type":"ProfilePage"}</script>
+        <div>Log in to Instagram</div>
+      </body>
+    </html>
+    """
+
+    class DummyPage(_DummyClosable):
+        def __init__(self):
+            super().__init__()
+            self.url = ""
+            self._html = logged_out_html
+            self.goto_calls = 0
+
+        def goto(self, url, wait_until=None, timeout=None):  # noqa: ANN001
+            self.goto_calls += 1
+            self.url = "https://www.instagram.com/recoverartist/"
+
+        def title(self):
+            return "recoverartist (@recoverartist) • Instagram photos and videos"
+
+        def evaluate(self, script):  # noqa: ANN001
+            script_text = str(script or "")
+            if "profile_markers" in script_text:
+                return _instagram_profile_surface_state_from_html(
+                    script,
+                    self._html,
+                    rendered_main_text="",
+                )
+            if "document.body" in script_text and "innerText" in script_text:
+                return "Log in to Instagram"
+            return _instagram_profile_surface_candidate_marker_from_html(script, self._html)
+
+        def content(self):
+            return self._html
+
+    class DummyContext(_DummyClosable):
+        def __init__(self, page):
+            super().__init__()
+            self._page = page
+
+        def new_page(self):
+            return self._page
+
+    class DummyBrowser(_DummyClosable):
+        def __init__(self, context):
+            super().__init__()
+            self._context = context
+
+        def new_context(self):
+            return self._context
+
+    class DummyChromium:
+        def __init__(self, browser):
+            self._browser = browser
+
+        def launch(self, headless=True):  # noqa: ANN001
+            return self._browser
+
+    class DummyPlaywright(_DummyClosable):
+        def __init__(self, browser):
+            super().__init__()
+            self.chromium = DummyChromium(browser)
+
+        def stop(self):
+            self.closed = True
+
+    class DummySyncPlaywrightRunner:
+        def __init__(self, playwright):
+            self._playwright = playwright
+
+        def start(self):
+            return self._playwright
+
+    page = DummyPage()
+    context = DummyContext(page)
+    browser = DummyBrowser(context)
+    playwright = DummyPlaywright(browser)
+
+    monkeypatch.setattr(
+        cde,
+        "_load_instagram_playwright",
+        lambda: (lambda: DummySyncPlaywrightRunner(playwright)),
+    )
+    wait_calls = []
+
+    def fake_wait_for_instagram_profile_render(page_arg, timeout_s):  # noqa: ANN001
+        wait_calls.append((page_arg, timeout_s))
+        return False
+
+    monkeypatch.setattr(cde, "_wait_for_instagram_profile_render", fake_wait_for_instagram_profile_render)
+
+    bridge = _REAL_OPEN_INSTAGRAM_LIVE_PAGE_BRIDGE(
+        "https://www.instagram.com/recoverartist/",
+        timeout_s=12.5,
+    )
+
+    assert bridge is None
+    assert page.goto_calls == 2
+    assert len(wait_calls) == 1
+    captured = capsys.readouterr()
+    assert "[IG Bridge] recoverable_shell kind=logged_out_ssr scope=same_profile" in captured.out
+    assert "[IG Bridge] recovery_attempt attempt=2 kind=logged_out_ssr action=reload_same_profile" in captured.out
+    assert "[IG Bridge] recovery_exhausted kind=logged_out_ssr final_reason=not_profile_surface" in captured.out
+    assert page.closed is True
+    assert context.closed is True
+    assert browser.closed is True
+    assert playwright.closed is True
 
 
 def test_open_instagram_live_page_bridge_valid_profile_surface_skips_wait_and_recovery(monkeypatch):
