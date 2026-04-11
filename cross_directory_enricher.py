@@ -7288,17 +7288,84 @@ def _open_instagram_live_page_bridge(
     context = None
     page = None
     owns_browser_stack = True
+    persistent_profile_dir = str(os.getenv("IG_PERSISTENT_PROFILE_DIR") or "").strip()
+    if persistent_profile_dir:
+        persistent_profile_dir = os.path.abspath(os.path.expanduser(persistent_profile_dir))
+
+    def _env_flag(name: str) -> bool:
+        return str(os.getenv(name, "")).strip().lower() in {"1", "true", "yes", "on"}
+
+    def _profile_has_saved_state(profile_dir: str) -> bool:
+        if not profile_dir or not os.path.isdir(profile_dir):
+            return False
+        try:
+            with os.scandir(profile_dir) as entries:
+                for entry in entries:
+                    if entry.name.startswith("."):
+                        continue
+                    return True
+        except Exception:
+            return False
+        return False
+
+    def _page_url(current_page: Any) -> str:
+        try:
+            return cell_to_str(getattr(current_page, "url", "")).strip()
+        except Exception:
+            return ""
+
+    def _is_login_redirect(current_page: Any) -> bool:
+        return "/accounts/login" in _page_url(current_page).lower()
+
+    persistent_profile_exists = bool(persistent_profile_dir and os.path.isdir(persistent_profile_dir))
+    persistent_profile_reused = _profile_has_saved_state(persistent_profile_dir)
+    persistent_headed = bool(persistent_profile_dir) and _env_flag("IG_BRIDGE_HEADED")
+    print(
+        f"[IG Session] persistent_context={1 if persistent_profile_dir else 0} "
+        f"path={persistent_profile_dir or '<unset>'} "
+        f"exists={1 if persistent_profile_exists else 0} "
+        f"headed={1 if persistent_headed else 0} "
+        f"reused={1 if persistent_profile_reused else 0}"
+    )
     try:
-        shared_job_browser = getattr(html_fetcher, "_JOB_BROWSERS", {}).get("global")
-        if shared_job_browser is not None:
-            shared_playwright = getattr(shared_job_browser, "playwright", None)
-            shared_browser = getattr(shared_job_browser, "browser", None)
-            shared_context = getattr(shared_job_browser, "context", None)
-            if shared_playwright is not None and shared_browser is not None and shared_context is not None:
-                playwright = shared_playwright
-                browser = shared_browser
-                context = shared_context
-                owns_browser_stack = False
+        if persistent_profile_dir:
+            try:
+                sync_playwright = _load_instagram_playwright()
+                playwright = sync_playwright().start()
+                context = playwright.chromium.launch_persistent_context(
+                    user_data_dir=persistent_profile_dir,
+                    headless=not persistent_headed,
+                )
+                browser = None
+            except Exception as persistent_error:
+                print(
+                    "[IG Session] persistent_context_launch_failed "
+                    f"path={persistent_profile_dir} error={persistent_error!r} fallback=1"
+                )
+                if context is not None:
+                    try:
+                        context.close()
+                    except Exception:
+                        pass
+                if playwright is not None:
+                    try:
+                        playwright.stop()
+                    except Exception:
+                        pass
+                playwright = None
+                browser = None
+                context = None
+        if context is None:
+            shared_job_browser = getattr(html_fetcher, "_JOB_BROWSERS", {}).get("global")
+            if shared_job_browser is not None:
+                shared_playwright = getattr(shared_job_browser, "playwright", None)
+                shared_browser = getattr(shared_job_browser, "browser", None)
+                shared_context = getattr(shared_job_browser, "context", None)
+                if shared_playwright is not None and shared_browser is not None and shared_context is not None:
+                    playwright = shared_playwright
+                    browser = shared_browser
+                    context = shared_context
+                    owns_browser_stack = False
         if context is None:
             sync_playwright = _load_instagram_playwright()
             playwright = sync_playwright().start()
@@ -7307,6 +7374,29 @@ def _open_instagram_live_page_bridge(
             context = browser.new_context()
         page = context.new_page()
         page.goto(url, wait_until="domcontentloaded", timeout=timeout_s * 1000)
+        if persistent_profile_dir and persistent_headed and _is_login_redirect(page):
+            manual_login_timeout_s = max(float(timeout_s or 0), 300.0)
+            print(
+                f"[IG Session] awaiting_manual_login=1 path={persistent_profile_dir} "
+                f"timeout_s={manual_login_timeout_s:g}"
+            )
+            wait_for_function = getattr(page, "wait_for_function", None)
+            if callable(wait_for_function):
+                try:
+                    wait_for_function(
+                        "() => !(window.location.pathname || '').includes('/accounts/login')",
+                        timeout=manual_login_timeout_s * 1000,
+                    )
+                except Exception:
+                    pass
+            else:
+                deadline = time.time() + manual_login_timeout_s
+                while time.time() < deadline:
+                    if not _is_login_redirect(page):
+                        break
+                    time.sleep(1.0)
+            if not _is_login_redirect(page):
+                page.goto(url, wait_until="domcontentloaded", timeout=timeout_s * 1000)
         try:
             landed_url: Any = ""
             landed_title: Any = ""

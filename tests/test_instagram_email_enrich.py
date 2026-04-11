@@ -1835,6 +1835,433 @@ def test_open_instagram_live_page_bridge_shared_context_failure_only_closes_page
     assert shared_playwright.closed is False
 
 
+def test_open_instagram_live_page_bridge_uses_persistent_context_when_configured(monkeypatch, tmp_path):
+    events = []
+    profile_dir = tmp_path / "ig-profile"
+    profile_dir.mkdir()
+    (profile_dir / "Default").mkdir()
+
+    class DummyPage(_DummyClosable):
+        def __init__(self):
+            super().__init__()
+            self.url = ""
+
+        def goto(self, url, wait_until=None, timeout=None):  # noqa: ANN001
+            self.url = url
+            events.append(("goto", url, wait_until, timeout))
+
+        def content(self):
+            return "<html><body><main><header><h1>Rendered Profile</h1></header></main></body></html>"
+
+    class DummyContext(_DummyClosable):
+        def __init__(self, page):
+            super().__init__()
+            self._page = page
+
+        def new_page(self):
+            events.append(("new_page",))
+            return self._page
+
+    class DummyChromium:
+        def __init__(self, context):
+            self._context = context
+
+        def launch_persistent_context(self, user_data_dir=None, headless=True):  # noqa: ANN001
+            events.append(("launch_persistent_context", user_data_dir, headless))
+            return self._context
+
+        def launch(self, headless=True):  # noqa: ANN001
+            raise AssertionError("fresh launch should not run when persistent profile is configured")
+
+    class DummyPlaywright(_DummyClosable):
+        def __init__(self, context):
+            super().__init__()
+            self.chromium = DummyChromium(context)
+
+        def stop(self):
+            self.closed = True
+            events.append(("stop",))
+
+    class DummySyncPlaywrightRunner:
+        def __init__(self, playwright):
+            self._playwright = playwright
+
+        def start(self):
+            events.append(("start",))
+            return self._playwright
+
+    page = DummyPage()
+    context = DummyContext(page)
+    playwright = DummyPlaywright(context)
+
+    monkeypatch.setenv("IG_PERSISTENT_PROFILE_DIR", str(profile_dir))
+    monkeypatch.delenv("IG_BRIDGE_HEADED", raising=False)
+    monkeypatch.setattr(
+        cde,
+        "_load_instagram_playwright",
+        lambda: (lambda: DummySyncPlaywrightRunner(playwright)),
+    )
+    monkeypatch.setattr(
+        cde,
+        "_wait_for_instagram_live_profile_surface",
+        lambda page_arg, profile_url, timeout_s: events.append(("wait_surface", page_arg, profile_url, timeout_s))
+        or (True, "profile_surface"),
+    )
+
+    bridge = _REAL_OPEN_INSTAGRAM_LIVE_PAGE_BRIDGE(
+        "https://www.instagram.com/igartist/",
+        timeout_s=12.5,
+    )
+
+    assert isinstance(bridge, cde.InstagramLivePageBridge)
+    assert bridge.owns_browser_stack is True
+    assert bridge.context is context
+    assert events == [
+        ("start",),
+        ("launch_persistent_context", str(profile_dir), True),
+        ("new_page",),
+        ("goto", "https://www.instagram.com/igartist/", "domcontentloaded", 12500.0),
+        ("wait_surface", page, "https://www.instagram.com/igartist/", 12.5),
+    ]
+
+    bridge.close()
+
+    assert bridge.page.closed is True
+    assert bridge.context.closed is True
+    assert bridge.playwright.closed is True
+    assert events[-1] == ("stop",)
+
+
+def test_open_instagram_live_page_bridge_without_persistent_profile_keeps_fresh_context_launch(monkeypatch):
+    events = []
+
+    class DummyPage(_DummyClosable):
+        def __init__(self):
+            super().__init__()
+            self.url = ""
+
+        def goto(self, url, wait_until=None, timeout=None):  # noqa: ANN001
+            self.url = url
+            events.append(("goto", url, wait_until, timeout))
+
+        def content(self):
+            return "<html><body><main><header><h1>Rendered Profile</h1></header></main></body></html>"
+
+    class DummyContext(_DummyClosable):
+        def __init__(self, page):
+            super().__init__()
+            self._page = page
+
+        def new_page(self):
+            events.append(("new_page",))
+            return self._page
+
+    class DummyBrowser(_DummyClosable):
+        def __init__(self, context):
+            super().__init__()
+            self._context = context
+
+        def new_context(self):
+            events.append(("new_context",))
+            return self._context
+
+    class DummyChromium:
+        def __init__(self, browser):
+            self._browser = browser
+
+        def launch_persistent_context(self, user_data_dir=None, headless=True):  # noqa: ANN001
+            raise AssertionError("persistent launch should not run when no profile is configured")
+
+        def launch(self, headless=True):  # noqa: ANN001
+            events.append(("launch", headless))
+            return self._browser
+
+    class DummyPlaywright(_DummyClosable):
+        def __init__(self, browser):
+            super().__init__()
+            self.chromium = DummyChromium(browser)
+
+        def stop(self):
+            self.closed = True
+            events.append(("stop",))
+
+    class DummySyncPlaywrightRunner:
+        def __init__(self, playwright):
+            self._playwright = playwright
+
+        def start(self):
+            events.append(("start",))
+            return self._playwright
+
+    page = DummyPage()
+    context = DummyContext(page)
+    browser = DummyBrowser(context)
+    playwright = DummyPlaywright(browser)
+
+    monkeypatch.delenv("IG_PERSISTENT_PROFILE_DIR", raising=False)
+    monkeypatch.delenv("IG_BRIDGE_HEADED", raising=False)
+    monkeypatch.setattr(
+        cde,
+        "_load_instagram_playwright",
+        lambda: (lambda: DummySyncPlaywrightRunner(playwright)),
+    )
+    monkeypatch.setattr(
+        cde,
+        "_wait_for_instagram_live_profile_surface",
+        lambda page_arg, profile_url, timeout_s: events.append(("wait_surface", page_arg, profile_url, timeout_s))
+        or (True, "profile_surface"),
+    )
+
+    bridge = _REAL_OPEN_INSTAGRAM_LIVE_PAGE_BRIDGE(
+        "https://www.instagram.com/igartist/",
+        timeout_s=12.5,
+    )
+
+    assert isinstance(bridge, cde.InstagramLivePageBridge)
+    assert bridge.owns_browser_stack is True
+    assert events == [
+        ("start",),
+        ("launch", True),
+        ("new_context",),
+        ("new_page",),
+        ("goto", "https://www.instagram.com/igartist/", "domcontentloaded", 12500.0),
+        ("wait_surface", page, "https://www.instagram.com/igartist/", 12.5),
+    ]
+
+    bridge.close()
+
+    assert bridge.page.closed is True
+    assert bridge.context.closed is True
+    assert bridge.browser.closed is True
+    assert bridge.playwright.closed is True
+    assert events[-1] == ("stop",)
+
+
+def test_open_instagram_live_page_bridge_persistent_launch_failure_falls_back_safely(monkeypatch, tmp_path):
+    events = []
+    profile_dir = tmp_path / "bad-profile"
+
+    class DummyPage(_DummyClosable):
+        def __init__(self):
+            super().__init__()
+            self.url = ""
+
+        def goto(self, url, wait_until=None, timeout=None):  # noqa: ANN001
+            self.url = url
+            events.append(("goto", url, wait_until, timeout))
+
+        def content(self):
+            return "<html><body><main><header><h1>Rendered Profile</h1></header></main></body></html>"
+
+    class DummyContext(_DummyClosable):
+        def __init__(self, page):
+            super().__init__()
+            self._page = page
+
+        def new_page(self):
+            events.append(("new_page",))
+            return self._page
+
+    class DummyBrowser(_DummyClosable):
+        def __init__(self, context):
+            super().__init__()
+            self._context = context
+
+        def new_context(self):
+            events.append(("new_context",))
+            return self._context
+
+    class DummyChromium:
+        def __init__(self, browser):
+            self._browser = browser
+
+        def launch_persistent_context(self, user_data_dir=None, headless=True):  # noqa: ANN001
+            events.append(("launch_persistent_context", user_data_dir, headless))
+            raise RuntimeError("persistent profile unavailable")
+
+        def launch(self, headless=True):  # noqa: ANN001
+            events.append(("launch", headless))
+            return self._browser
+
+    class DummyPlaywright(_DummyClosable):
+        def __init__(self, browser):
+            super().__init__()
+            self.chromium = DummyChromium(browser)
+
+        def stop(self):
+            self.closed = True
+            events.append(("stop",))
+
+    class DummySyncPlaywrightRunner:
+        def __init__(self, playwright):
+            self._playwright = playwright
+
+        def start(self):
+            events.append(("start",))
+            return self._playwright
+
+    page = DummyPage()
+    context = DummyContext(page)
+    browser = DummyBrowser(context)
+    playwright = DummyPlaywright(browser)
+
+    monkeypatch.setenv("IG_PERSISTENT_PROFILE_DIR", str(profile_dir))
+    monkeypatch.delenv("IG_BRIDGE_HEADED", raising=False)
+    monkeypatch.setattr(
+        cde,
+        "_load_instagram_playwright",
+        lambda: (lambda: DummySyncPlaywrightRunner(playwright)),
+    )
+    monkeypatch.setattr(
+        cde,
+        "_wait_for_instagram_live_profile_surface",
+        lambda page_arg, profile_url, timeout_s: events.append(("wait_surface", page_arg, profile_url, timeout_s))
+        or (True, "profile_surface"),
+    )
+
+    bridge = _REAL_OPEN_INSTAGRAM_LIVE_PAGE_BRIDGE(
+        "https://www.instagram.com/igartist/",
+        timeout_s=12.5,
+    )
+
+    assert isinstance(bridge, cde.InstagramLivePageBridge)
+    assert bridge.owns_browser_stack is True
+    assert events == [
+        ("start",),
+        ("launch_persistent_context", str(profile_dir), True),
+        ("stop",),
+        ("start",),
+        ("launch", True),
+        ("new_context",),
+        ("new_page",),
+        ("goto", "https://www.instagram.com/igartist/", "domcontentloaded", 12500.0),
+        ("wait_surface", page, "https://www.instagram.com/igartist/", 12.5),
+    ]
+
+    bridge.close()
+
+    assert bridge.page.closed is True
+    assert bridge.context.closed is True
+    assert bridge.browser.closed is True
+    assert bridge.playwright.closed is True
+    assert events[-1] == ("stop",)
+
+
+def test_open_instagram_live_page_bridge_headed_persistent_context_waits_for_manual_login(
+    monkeypatch,
+    tmp_path,
+):
+    events = []
+    profile_dir = tmp_path / "headed-ig-profile"
+    profile_dir.mkdir()
+
+    class DummyPage(_DummyClosable):
+        def __init__(self):
+            super().__init__()
+            self.url = ""
+            self.goto_calls = 0
+
+        def goto(self, url, wait_until=None, timeout=None):  # noqa: ANN001
+            self.goto_calls += 1
+            if self.goto_calls == 1:
+                self.url = "https://www.instagram.com/accounts/login/?next=%2Figartist%2F"
+            else:
+                self.url = url
+            events.append(("goto", self.goto_calls, self.url, wait_until, timeout))
+
+        def wait_for_function(self, script, timeout=None):  # noqa: ANN001
+            events.append(("wait_for_function", timeout))
+            self.url = "https://www.instagram.com/igartist/"
+
+        def content(self):
+            return "<html><body><main><header><h1>Rendered Profile</h1></header></main></body></html>"
+
+    class DummyContext(_DummyClosable):
+        def __init__(self, page):
+            super().__init__()
+            self._page = page
+
+        def new_page(self):
+            events.append(("new_page",))
+            return self._page
+
+    class DummyChromium:
+        def __init__(self, context):
+            self._context = context
+
+        def launch_persistent_context(self, user_data_dir=None, headless=True):  # noqa: ANN001
+            events.append(("launch_persistent_context", user_data_dir, headless))
+            return self._context
+
+        def launch(self, headless=True):  # noqa: ANN001
+            raise AssertionError("fresh launch should not run in headed persistent mode")
+
+    class DummyPlaywright(_DummyClosable):
+        def __init__(self, context):
+            super().__init__()
+            self.chromium = DummyChromium(context)
+
+        def stop(self):
+            self.closed = True
+            events.append(("stop",))
+
+    class DummySyncPlaywrightRunner:
+        def __init__(self, playwright):
+            self._playwright = playwright
+
+        def start(self):
+            events.append(("start",))
+            return self._playwright
+
+    page = DummyPage()
+    context = DummyContext(page)
+    playwright = DummyPlaywright(context)
+
+    monkeypatch.setenv("IG_PERSISTENT_PROFILE_DIR", str(profile_dir))
+    monkeypatch.setenv("IG_BRIDGE_HEADED", "1")
+    monkeypatch.setattr(
+        cde,
+        "_load_instagram_playwright",
+        lambda: (lambda: DummySyncPlaywrightRunner(playwright)),
+    )
+    monkeypatch.setattr(
+        cde,
+        "_wait_for_instagram_live_profile_surface",
+        lambda page_arg, profile_url, timeout_s: events.append(("wait_surface", page_arg, profile_url, timeout_s))
+        or (True, "profile_surface"),
+    )
+
+    bridge = _REAL_OPEN_INSTAGRAM_LIVE_PAGE_BRIDGE(
+        "https://www.instagram.com/igartist/",
+        timeout_s=12.5,
+    )
+
+    assert isinstance(bridge, cde.InstagramLivePageBridge)
+    assert bridge.owns_browser_stack is True
+    assert events == [
+        ("start",),
+        ("launch_persistent_context", str(profile_dir), False),
+        ("new_page",),
+        (
+            "goto",
+            1,
+            "https://www.instagram.com/accounts/login/?next=%2Figartist%2F",
+            "domcontentloaded",
+            12500.0,
+        ),
+        ("wait_for_function", 300000.0),
+        ("goto", 2, "https://www.instagram.com/igartist/", "domcontentloaded", 12500.0),
+        ("wait_surface", page, "https://www.instagram.com/igartist/", 12.5),
+    ]
+
+    bridge.close()
+
+    assert bridge.page.closed is True
+    assert bridge.context.closed is True
+    assert bridge.playwright.closed is True
+    assert events[-1] == ("stop",)
+
+
 def test_open_instagram_live_page_bridge_non_profile_shell_fails_after_bounded_recovery(
     monkeypatch,
 ):
