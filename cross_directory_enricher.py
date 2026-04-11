@@ -3473,12 +3473,24 @@ def _instagram_bridge_surface_assessment(
         and (same_profile or unknown_profile_url)
         and (state["main"] > 0 or plausible_surface or current_canonical == target_canonical)
     )
+    promoted_shell = (
+        not blocked
+        and not relaxed_ready
+        and state["main"] > 0
+        and state["profile_markers"] >= 2
+        and state["descendants"] >= 2
+        and state["text_length"] >= 12
+        and has_header_or_bio
+        and (same_profile or (unknown_profile_url and plausible_surface))
+    )
 
     reason = "not_profile_surface"
     if blocked:
         reason = "blocked_page"
     elif relaxed_ready:
         reason = "profile_surface"
+    elif promoted_shell:
+        reason = "profile_shell"
     elif profile_shell:
         reason = "profile_shell"
     elif plausible_surface:
@@ -3496,6 +3508,7 @@ def _instagram_bridge_surface_assessment(
         "blocked": blocked,
         "plausible_surface": plausible_surface,
         "profile_shell": profile_shell,
+        "promoted_shell": promoted_shell,
         "ready": relaxed_ready,
         "reason": reason,
         "allow_retry": not blocked and reason in {"profile_shell", "profile_surface_candidate"},
@@ -3528,7 +3541,9 @@ def _wait_for_instagram_live_profile_surface(
 
     assessment = _instagram_bridge_surface_assessment(page, profile_url, allow_html_fallback=False)
     _log_surface_check(assessment)
-    if assessment["ready"]:
+    if assessment["ready"] or assessment.get("promoted_shell"):
+        if assessment.get("promoted_shell") and not assessment["ready"]:
+            print("[IG Bridge] action=promote_profile_shell")
         print(f"[IG Bridge] success attempt=1 final_url={assessment['current_url'] or profile_url}")
         return (True, "profile_surface")
     if assessment["blocked"]:
@@ -3544,7 +3559,9 @@ def _wait_for_instagram_live_profile_surface(
         _log_surface_check.attempt = 2  # type: ignore[attr-defined]
         assessment = _instagram_bridge_surface_assessment(page, profile_url, allow_html_fallback=True)
         _log_surface_check(assessment)
-        if assessment["ready"]:
+        if assessment["ready"] or assessment.get("promoted_shell"):
+            if assessment.get("promoted_shell") and not assessment["ready"]:
+                print("[IG Bridge] action=promote_profile_shell")
             print(f"[IG Bridge] success attempt=2 final_url={assessment['current_url'] or profile_url}")
             return (True, "profile_surface")
         if assessment["blocked"]:
@@ -3557,7 +3574,9 @@ def _wait_for_instagram_live_profile_surface(
         _log_surface_check.attempt = 3  # type: ignore[attr-defined]
         assessment = _instagram_bridge_surface_assessment(page, profile_url, allow_html_fallback=True)
         _log_surface_check(assessment)
-        if assessment["ready"]:
+        if assessment["ready"] or assessment.get("promoted_shell"):
+            if assessment.get("promoted_shell") and not assessment["ready"]:
+                print("[IG Bridge] action=promote_profile_shell")
             print(f"[IG Bridge] success attempt=3 final_url={assessment['current_url'] or profile_url}")
             return (True, "profile_surface")
 

@@ -1083,8 +1083,75 @@ def test_instagram_bridge_surface_assessment_keeps_login_wall_blocked_without_ma
     )
 
     assert assessment["blocked"] is True
+    assert assessment["promoted_shell"] is False
     assert assessment["ready"] is False
     assert assessment["reason"] == "blocked_page"
+
+
+def test_instagram_bridge_surface_assessment_promotes_same_profile_under_rendered_shell():
+    html = """
+    <html>
+      <body>
+        <main>
+          <section>
+            <h1>Shell Artist</h1>
+          </section>
+        </main>
+      </body>
+    </html>
+    """
+    page = _DummyInstagramProfileSurfaceProbePage(
+        html,
+        url="https://www.instagram.com/shellartist/",
+        title="shellartist (@shellartist) • Instagram photos and videos",
+    )
+
+    assessment = cde._instagram_bridge_surface_assessment(
+        page,
+        "https://www.instagram.com/shellartist/",
+        allow_html_fallback=True,
+    )
+
+    assert assessment["blocked"] is False
+    assert assessment["ready"] is False
+    assert assessment["promoted_shell"] is True
+    assert assessment["reason"] == "profile_shell"
+    assert assessment["same_profile"] is True
+    assert assessment["main"] == 1
+    assert assessment["header"] == 0
+    assert assessment["descendants"] == 2
+    assert assessment["text_length"] == 12
+
+
+def test_instagram_bridge_surface_assessment_rejects_wrong_profile_under_rendered_shell():
+    html = """
+    <html>
+      <body>
+        <main>
+          <section>
+            <h1>Shell Artist</h1>
+          </section>
+        </main>
+      </body>
+    </html>
+    """
+    page = _DummyInstagramProfileSurfaceProbePage(
+        html,
+        url="https://www.instagram.com/otherartist/",
+        title="otherartist (@otherartist) • Instagram photos and videos",
+    )
+
+    assessment = cde._instagram_bridge_surface_assessment(
+        page,
+        "https://www.instagram.com/shellartist/",
+        allow_html_fallback=True,
+    )
+
+    assert assessment["blocked"] is False
+    assert assessment["ready"] is False
+    assert assessment["promoted_shell"] is False
+    assert assessment["same_profile"] is False
+    assert assessment["reason"] == "not_profile_surface"
 
 
 def test_instagram_profile_surface_state_from_html_recovers_profile_surface_without_main():
@@ -2261,6 +2328,124 @@ def test_open_instagram_live_page_bridge_valid_profile_surface_skips_wait_and_re
         ("new_page",),
         ("goto", "https://www.instagram.com/readyartist/", "domcontentloaded", 12500.0),
     ]
+
+    bridge.close()
+
+
+def test_open_instagram_live_page_bridge_promotes_same_profile_under_rendered_shell(
+    monkeypatch,
+    capsys,
+):
+    events = []
+    shell_html = "<html><body><main><section><h1>Shell Artist</h1></section></main></body></html>"
+
+    class DummyPage(_DummyClosable):
+        def __init__(self):
+            super().__init__()
+            self.url = ""
+            self.goto_calls = 0
+
+        def goto(self, url, wait_until=None, timeout=None):  # noqa: ANN001
+            self.goto_calls += 1
+            self.url = "https://www.instagram.com/shellartist/"
+            events.append(("goto", self.url, wait_until, timeout))
+
+        def title(self):
+            return "shellartist (@shellartist) • Instagram photos and videos"
+
+        def evaluate(self, script):  # noqa: ANN001
+            script_text = str(script or "")
+            events.append(("evaluate", script_text))
+            if "profile_markers" in script_text:
+                return _instagram_profile_surface_state_from_html(
+                    script,
+                    shell_html,
+                    rendered_main_text="Shell Artist",
+                )
+            if "document.body" in script_text and "innerText" in script_text:
+                return "Shell Artist"
+            return _instagram_profile_surface_candidate_marker_from_html(script, shell_html)
+
+        def content(self):
+            return shell_html
+
+    class DummyContext(_DummyClosable):
+        def __init__(self, page):
+            super().__init__()
+            self._page = page
+
+        def new_page(self):
+            events.append(("new_page",))
+            return self._page
+
+    class DummyBrowser(_DummyClosable):
+        def __init__(self, context):
+            super().__init__()
+            self._context = context
+
+        def new_context(self):
+            events.append(("new_context",))
+            return self._context
+
+    class DummyChromium:
+        def __init__(self, browser):
+            self._browser = browser
+
+        def launch(self, headless=True):  # noqa: ANN001
+            events.append(("launch", headless))
+            return self._browser
+
+    class DummyPlaywright(_DummyClosable):
+        def __init__(self, browser):
+            super().__init__()
+            self.chromium = DummyChromium(browser)
+
+        def stop(self):
+            self.closed = True
+            events.append(("stop",))
+
+    class DummySyncPlaywrightRunner:
+        def __init__(self, playwright):
+            self._playwright = playwright
+
+        def start(self):
+            events.append(("start",))
+            return self._playwright
+
+    page = DummyPage()
+    context = DummyContext(page)
+    browser = DummyBrowser(context)
+    playwright = DummyPlaywright(browser)
+
+    monkeypatch.setattr(
+        cde,
+        "_load_instagram_playwright",
+        lambda: (lambda: DummySyncPlaywrightRunner(playwright)),
+    )
+    monkeypatch.setattr(
+        cde,
+        "_wait_for_instagram_profile_render",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("wait should not run")),
+    )
+
+    bridge = _REAL_OPEN_INSTAGRAM_LIVE_PAGE_BRIDGE(
+        "https://www.instagram.com/shellartist/",
+        timeout_s=12.5,
+    )
+
+    assert bridge is not None
+    assert bridge.page is page
+    assert page.goto_calls == 1
+    assert events[:5] == [
+        ("start",),
+        ("launch", True),
+        ("new_context",),
+        ("new_page",),
+        ("goto", "https://www.instagram.com/shellartist/", "domcontentloaded", 12500.0),
+    ]
+    captured = capsys.readouterr()
+    assert "[IG Bridge] action=promote_profile_shell" in captured.out
+    assert "[IG Bridge] success attempt=1 final_url=https://www.instagram.com/shellartist/" in captured.out
 
     bridge.close()
 
