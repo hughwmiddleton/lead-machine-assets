@@ -3483,8 +3483,6 @@ def _instagram_bridge_surface_assessment(
             "challenge_required",
             "checkpoint",
             "account suspended",
-            "page isn't available",
-            "sorry, this page isn't available",
         )
     ):
         hard_blocked = True
@@ -3498,10 +3496,18 @@ def _instagram_bridge_surface_assessment(
             "see instagram photos and videos from",
         )
     )
+    unavailable_text_shell = any(
+        token in text_lower
+        for token in (
+            "page isn't available",
+            "sorry, this page isn't available",
+        )
+    )
+    recoverable_shell_indicators = login_text_shell or unavailable_text_shell
     recoverable_logged_out_shell = False
     empty_live_probe = None
     profile_identity_markers = None
-    if not hard_blocked and login_text_shell and target_handle and (same_profile or same_profile_routed):
+    if not hard_blocked and recoverable_shell_indicators and target_handle and (same_profile or same_profile_routed):
         empty_live_probe = (
             state["main"] <= 0
             and state["header"] <= 0
@@ -3524,7 +3530,7 @@ def _instagram_bridge_surface_assessment(
             profile_identity_markers += 1
         recoverable_logged_out_shell = empty_live_probe and profile_identity_markers >= 2
 
-    blocked = hard_blocked or (login_text_shell and not recoverable_logged_out_shell)
+    blocked = hard_blocked or (recoverable_shell_indicators and not recoverable_logged_out_shell)
     print("[IG DEBUG FINAL]", {
         "recoverable_logged_out_shell": recoverable_logged_out_shell,
         "blocked": blocked,
@@ -3595,6 +3601,8 @@ def _instagram_bridge_surface_assessment(
         "profile_shell": profile_shell,
         "promoted_shell": promoted_shell,
         "recoverable_logged_out_shell": recoverable_logged_out_shell,
+        "empty_live_probe": empty_live_probe,
+        "profile_identity_markers": profile_identity_markers,
         "ready": relaxed_ready,
         "reason": reason,
         "allow_retry": not blocked and reason in {"profile_shell", "profile_surface_candidate", "recoverable_logged_out_shell"},

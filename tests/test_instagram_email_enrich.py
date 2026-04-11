@@ -1234,6 +1234,7 @@ def test_instagram_bridge_surface_assessment_marks_same_profile_logged_out_shell
       <body>
         <script type="application/ld+json">{"@type":"ProfilePage"}</script>
         <div>Log in to Instagram</div>
+        <div>Sorry, this page isn't available.</div>
       </body>
     </html>
     """
@@ -1252,6 +1253,9 @@ def test_instagram_bridge_surface_assessment_marks_same_profile_logged_out_shell
     assert assessment["blocked"] is False
     assert assessment["ready"] is False
     assert assessment["recoverable_logged_out_shell"] is True
+    assert assessment["empty_live_probe"] is True
+    assert assessment["profile_identity_markers"] is not None
+    assert assessment["profile_identity_markers"] >= 2
     assert assessment["reason"] == "recoverable_logged_out_shell"
     assert assessment["allow_retry"] is True
     assert assessment["allow_reload"] is True
@@ -1259,6 +1263,39 @@ def test_instagram_bridge_surface_assessment_marks_same_profile_logged_out_shell
     assert assessment["header"] == 0
     assert assessment["descendants"] == 0
     assert assessment["text_length"] == 0
+
+
+def test_instagram_bridge_surface_assessment_keeps_soft_block_terminal_for_same_profile_shell():
+    html = """
+    <html>
+      <head>
+        <title>recoverartist (@recoverartist) • Instagram photos and videos</title>
+        <meta property="og:description" content="1,234 Followers, 56 Following, 12 Posts - See Instagram photos and videos from recoverartist (@recoverartist)" />
+      </head>
+      <body>
+        <script type="application/ld+json">{"@type":"ProfilePage"}</script>
+        <div>Log in to Instagram</div>
+        <div>Verify you are human</div>
+      </body>
+    </html>
+    """
+    page = _DummyInstagramProfileSurfaceProbePage(
+        html,
+        url="https://www.instagram.com/recoverartist/",
+        title="recoverartist (@recoverartist) • Instagram photos and videos",
+    )
+
+    assessment = cde._instagram_bridge_surface_assessment(
+        page,
+        "https://www.instagram.com/recoverartist/",
+        allow_html_fallback=True,
+    )
+
+    assert assessment["blocked"] is True
+    assert assessment["recoverable_logged_out_shell"] is False
+    assert assessment["empty_live_probe"] is None
+    assert assessment["profile_identity_markers"] is None
+    assert assessment["reason"] == "blocked_page"
 
 
 def test_instagram_bridge_surface_assessment_keeps_wrong_profile_logged_out_shell_blocked():
@@ -1271,6 +1308,7 @@ def test_instagram_bridge_surface_assessment_keeps_wrong_profile_logged_out_shel
       <body>
         <script type="application/ld+json">{"@type":"ProfilePage"}</script>
         <div>Log in to Instagram</div>
+        <div>Sorry, this page isn't available.</div>
       </body>
     </html>
     """
@@ -1299,6 +1337,7 @@ def test_instagram_bridge_surface_assessment_keeps_generic_same_url_logged_out_s
       </head>
       <body>
         <div>Log in to Instagram to see creator tools, settings and help center articles.</div>
+        <div>Sorry, this page isn't available.</div>
       </body>
     </html>
     """
@@ -2400,6 +2439,7 @@ def test_open_instagram_live_page_bridge_recovers_same_profile_logged_out_shell_
       <body>
         <script type="application/ld+json">{"@type":"ProfilePage"}</script>
         <div>Log in to Instagram</div>
+        <div>Sorry, this page isn't available.</div>
       </body>
     </html>
     """
@@ -2545,6 +2585,7 @@ def test_open_instagram_live_page_bridge_logged_out_shell_fails_after_bounded_re
       <body>
         <script type="application/ld+json">{"@type":"ProfilePage"}</script>
         <div>Log in to Instagram</div>
+        <div>Sorry, this page isn't available.</div>
       </body>
     </html>
     """
