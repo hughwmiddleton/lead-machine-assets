@@ -3499,6 +3499,8 @@ def _instagram_bridge_surface_assessment(
         )
     )
     recoverable_logged_out_shell = False
+    empty_live_probe = None
+    profile_identity_markers = None
     if not hard_blocked and login_text_shell and target_handle and (same_profile or same_profile_routed):
         empty_live_probe = (
             state["main"] <= 0
@@ -3523,6 +3525,14 @@ def _instagram_bridge_surface_assessment(
         recoverable_logged_out_shell = empty_live_probe and profile_identity_markers >= 2
 
     blocked = hard_blocked or (login_text_shell and not recoverable_logged_out_shell)
+    print("[IG DEBUG FINAL]", {
+        "recoverable_logged_out_shell": recoverable_logged_out_shell,
+        "blocked": blocked,
+        "empty_live_probe": empty_live_probe,
+        "profile_identity_markers": profile_identity_markers,
+        "same_profile": same_profile,
+        "same_profile_routed": same_profile_routed,
+    })
 
     has_header_or_bio = state["header"] > 0 or state["profile_markers"] >= 2
     has_meaningful_descendants = state["descendants"] >= 4 or state["profile_markers"] >= 3
