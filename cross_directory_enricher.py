@@ -3018,6 +3018,14 @@ _INSTAGRAM_MIN_PROFILE_HTML_CHARS = 48
 _INSTAGRAM_REQUIRED_SELECTOR = 'meta[property="og:description"]'
 _INSTAGRAM_RENDER_READY_TIMEOUT_MS = 2500
 _INSTAGRAM_PROFILE_SURFACE_READY_ATTEMPTS = 3
+_INSTAGRAM_PROFILE_SURFACE_MARKER_SELECTOR = "header, section, article, a[href], button, img, h1, h2, ul li"
+_INSTAGRAM_PROFILE_SURFACE_CONTENT_SELECTOR = "a[href], button, img, h1, h2, ul li"
+_INSTAGRAM_PROFILE_SURFACE_STRUCTURE_SELECTOR = "header, section, article"
+_INSTAGRAM_PROFILE_SURFACE_FALLBACK_ROOT_TAGS = frozenset({"section", "article", "div"})
+_INSTAGRAM_PROFILE_SURFACE_EXCLUDED_ANCESTOR_TAGS = frozenset({"nav", "footer", "aside", "form", "dialog"})
+_INSTAGRAM_PROFILE_SURFACE_MIN_TEXT_LENGTH = 16
+_INSTAGRAM_PROFILE_SURFACE_MIN_DESCENDANTS = 4
+_INSTAGRAM_PROFILE_SURFACE_MAX_HEADER_ANCESTOR_HOPS = 5
 _INSTAGRAM_RENDER_READY_JS = """
 () => {
   const main = document.querySelector('main');
@@ -3034,20 +3042,118 @@ _INSTAGRAM_RENDER_READY_JS = """
 """
 _INSTAGRAM_PROFILE_SURFACE_READY_PROBE_JS = """
 () => {
-  const main = document.querySelector('main');
-  const header = main ? main.querySelector('header') : null;
-  const profileMarkers = main
-    ? main.querySelectorAll('header, section, article, a[href], button, img, h1, h2, ul li').length
-    : 0;
-  const descendants = main ? main.querySelectorAll('*').length : 0;
-  const text = main ? (main.innerText || '').replace(/\\s+/g, ' ').trim() : '';
+  const PROFILE_MARKER_SELECTOR = 'header, section, article, a[href], button, img, h1, h2, ul li';
+  const PROFILE_CONTENT_SELECTOR = 'a[href], button, img, h1, h2, ul li';
+  const PROFILE_STRUCTURE_SELECTOR = 'header, section, article';
+  const EXCLUDED_ANCESTOR_SELECTOR = 'nav, footer, aside, form, dialog';
+  const ROOT_TAGS = new Set(['section', 'article', 'div']);
+  const MIN_TEXT_LENGTH = 16;
+  const MIN_DESCENDANTS = 4;
+  const MAX_HEADER_ANCESTOR_HOPS = 5;
+
+  const normalizeText = (node) =>
+    ((node && (node.innerText || node.textContent)) || '').replace(/\\s+/g, ' ').trim();
+
+  const measureRoot = (root) => {
+    const header = root ? root.querySelector('header') : null;
+    const profileMarkers = root ? root.querySelectorAll(PROFILE_MARKER_SELECTOR).length : 0;
+    const descendants = root ? root.querySelectorAll('*').length : 0;
+    const text = normalizeText(root);
+    return {
+      header: header ? 1 : 0,
+      profile_markers: profileMarkers,
+      descendants,
+      text_length: text.length,
+    };
+  };
+
+  const isExcluded = (node) =>
+    !!(node && typeof node.closest === 'function' && node.closest(EXCLUDED_ANCESTOR_SELECTOR));
+
+  const isEligibleFallbackRoot = (root) => {
+    if (!root || isExcluded(root)) {
+      return false;
+    }
+    const tagName = (root.tagName || '').toLowerCase();
+    if (!ROOT_TAGS.has(tagName)) {
+      return false;
+    }
+    const metrics = measureRoot(root);
+    if (metrics.descendants < MIN_DESCENDANTS || metrics.text_length < MIN_TEXT_LENGTH) {
+      return false;
+    }
+    const hasStructure = !!root.querySelector(PROFILE_STRUCTURE_SELECTOR);
+    const hasContent = !!root.querySelector(PROFILE_CONTENT_SELECTOR);
+    return hasStructure && hasContent && (metrics.header > 0 || metrics.profile_markers >= 4);
+  };
+
+  const resolveProfileRoot = () => {
+    const main = document.querySelector('main');
+    if (main) {
+      return main;
+    }
+
+    const candidates = [];
+    const seen = new Set();
+    for (const header of Array.from(document.querySelectorAll('header'))) {
+      if (isExcluded(header)) {
+        continue;
+      }
+      let current = header.parentElement;
+      let hops = 0;
+      while (current && hops < MAX_HEADER_ANCESTOR_HOPS) {
+        if (isEligibleFallbackRoot(current)) {
+          if (!seen.has(current)) {
+            seen.add(current);
+            candidates.push(current);
+          }
+          break;
+        }
+        current = current.parentElement;
+        hops += 1;
+      }
+    }
+
+    if (!candidates.length) {
+      for (const node of Array.from(document.querySelectorAll(PROFILE_STRUCTURE_SELECTOR))) {
+        const current = node;
+        if (!isEligibleFallbackRoot(current)) {
+          continue;
+        }
+        if (!seen.has(current)) {
+          seen.add(current);
+          candidates.push(current);
+        }
+      }
+    }
+
+    if (!candidates.length) {
+      return null;
+    }
+
+    candidates.sort((left, right) => {
+      const leftMetrics = measureRoot(left);
+      const rightMetrics = measureRoot(right);
+      if (leftMetrics.descendants !== rightMetrics.descendants) {
+        return leftMetrics.descendants - rightMetrics.descendants;
+      }
+      if (leftMetrics.profile_markers !== rightMetrics.profile_markers) {
+        return rightMetrics.profile_markers - leftMetrics.profile_markers;
+      }
+      return rightMetrics.text_length - leftMetrics.text_length;
+    });
+    return candidates[0];
+  };
+
+  const main = resolveProfileRoot();
+  const metrics = measureRoot(main);
   return {
     main: main ? 1 : 0,
-    header: header ? 1 : 0,
-    profile_markers: profileMarkers,
-    descendants: descendants,
-    text_length: text.length,
-    ready: main && header && profileMarkers > 0 && descendants > 0 && text.length >= 16 ? 1 : 0,
+    header: metrics.header,
+    profile_markers: metrics.profile_markers,
+    descendants: metrics.descendants,
+    text_length: metrics.text_length,
+    ready: main && metrics.header > 0 && metrics.profile_markers > 0 && metrics.descendants > 0 && metrics.text_length >= 16 ? 1 : 0,
   };
 }
 """
@@ -3169,6 +3275,102 @@ def _probe_instagram_profile_surface_state(page: Any) -> Dict[str, int]:
     return state
 
 
+def _instagram_profile_surface_root_metrics(root: Any) -> Dict[str, int]:
+    header = root.select_one("header") if root is not None else None
+    profile_markers = len(root.select(_INSTAGRAM_PROFILE_SURFACE_MARKER_SELECTOR)) if root is not None else 0
+    descendants = len(root.select("*")) if root is not None else 0
+    text = (
+        re.sub(r"\s+", " ", root.get_text(" ", strip=True)).strip()
+        if root is not None
+        else ""
+    )
+    return {
+        "main": 1 if root is not None else 0,
+        "header": 1 if header is not None else 0,
+        "profile_markers": profile_markers,
+        "descendants": descendants,
+        "text_length": len(text),
+        "ready": (
+            1
+            if root is not None
+            and header is not None
+            and profile_markers > 0
+            and descendants > 0
+            and len(text) >= _INSTAGRAM_PROFILE_SURFACE_MIN_TEXT_LENGTH
+            else 0
+        ),
+    }
+
+
+def _instagram_profile_surface_node_is_excluded(node: Any) -> bool:
+    current = node
+    while current is not None:
+        name = cell_to_str(getattr(current, "name", "")).strip().lower()
+        if name in _INSTAGRAM_PROFILE_SURFACE_EXCLUDED_ANCESTOR_TAGS:
+            return True
+        current = getattr(current, "parent", None)
+    return False
+
+
+def _instagram_profile_surface_root_is_eligible(root: Any) -> bool:
+    if root is None or _instagram_profile_surface_node_is_excluded(root):
+        return False
+    if cell_to_str(getattr(root, "name", "")).strip().lower() not in _INSTAGRAM_PROFILE_SURFACE_FALLBACK_ROOT_TAGS:
+        return False
+    metrics = _instagram_profile_surface_root_metrics(root)
+    if (
+        metrics["descendants"] < _INSTAGRAM_PROFILE_SURFACE_MIN_DESCENDANTS
+        or metrics["text_length"] < _INSTAGRAM_PROFILE_SURFACE_MIN_TEXT_LENGTH
+    ):
+        return False
+    has_structure = root.select_one(_INSTAGRAM_PROFILE_SURFACE_STRUCTURE_SELECTOR) is not None
+    has_content = root.select_one(_INSTAGRAM_PROFILE_SURFACE_CONTENT_SELECTOR) is not None
+    return has_structure and has_content and (metrics["header"] > 0 or metrics["profile_markers"] >= 4)
+
+
+def _resolve_instagram_profile_surface_root(soup: BeautifulSoup) -> Any:
+    main = soup.select_one("main")
+    if main is not None:
+        return main
+
+    candidates: List[Any] = []
+    seen: Set[int] = set()
+
+    for header in soup.select("header"):
+        if _instagram_profile_surface_node_is_excluded(header):
+            continue
+        current = getattr(header, "parent", None)
+        hops = 0
+        while current is not None and hops < _INSTAGRAM_PROFILE_SURFACE_MAX_HEADER_ANCESTOR_HOPS:
+            candidate_id = id(current)
+            if candidate_id not in seen and _instagram_profile_surface_root_is_eligible(current):
+                candidates.append(current)
+                seen.add(candidate_id)
+                break
+            current = getattr(current, "parent", None)
+            hops += 1
+
+    if not candidates:
+        for candidate in soup.select(_INSTAGRAM_PROFILE_SURFACE_STRUCTURE_SELECTOR):
+            candidate_id = id(candidate)
+            if candidate_id in seen or not _instagram_profile_surface_root_is_eligible(candidate):
+                continue
+            candidates.append(candidate)
+            seen.add(candidate_id)
+
+    if not candidates:
+        return None
+
+    return min(
+        candidates,
+        key=lambda candidate: (
+            _instagram_profile_surface_root_metrics(candidate)["descendants"],
+            -_instagram_profile_surface_root_metrics(candidate)["profile_markers"],
+            -_instagram_profile_surface_root_metrics(candidate)["text_length"],
+        ),
+    )
+
+
 def _instagram_profile_surface_state_from_html(html: str) -> Dict[str, int]:
     state = {
         "main": 0,
@@ -3185,27 +3387,8 @@ def _instagram_profile_surface_state_from_html(html: str) -> Dict[str, int]:
         soup = BeautifulSoup(html_text, "html.parser")
     except Exception:
         return state
-    main = soup.select_one("main")
-    if main is None:
-        return state
-    header = main.select_one("header")
-    profile_markers = len(main.select("header, section, article, a[href], button, img, h1, h2, ul li"))
-    descendants = len(main.select("*"))
-    text = re.sub(r"\s+", " ", main.get_text(" ", strip=True)).strip()
-    state.update(
-        {
-            "main": 1,
-            "header": 1 if header is not None else 0,
-            "profile_markers": profile_markers,
-            "descendants": descendants,
-            "text_length": len(text),
-            "ready": (
-                1
-                if header is not None and profile_markers > 0 and descendants > 0 and len(text) >= 16
-                else 0
-            ),
-        }
-    )
+    root = _resolve_instagram_profile_surface_root(soup)
+    state.update(_instagram_profile_surface_root_metrics(root))
     return state
 
 

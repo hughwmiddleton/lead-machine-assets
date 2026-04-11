@@ -850,13 +850,9 @@ def _instagram_profile_surface_state_from_html(
     assert "descendants" in script_text
 
     soup = BeautifulSoup(html, "html.parser")
-    main = soup.select_one("main")
+    main = _resolve_instagram_profile_surface_root_from_html(soup)
     header = main.select_one("header") if main is not None else None
-    profile_markers = (
-        len(main.select("header, section, article, a[href], button, img, h1, h2, ul li"))
-        if main is not None
-        else 0
-    )
+    profile_markers = len(main.select(cde._INSTAGRAM_PROFILE_SURFACE_MARKER_SELECTOR)) if main is not None else 0
     descendants = len(main.select("*")) if main is not None else 0
     main_text_source = rendered_main_text
     if not main_text_source and main is not None:
@@ -874,6 +870,251 @@ def _instagram_profile_surface_state_from_html(
             else 0
         ),
     }
+
+
+def _instagram_profile_surface_node_is_excluded_from_html(node):
+    current = node
+    while current is not None:
+        if str(getattr(current, "name", "") or "").strip().lower() in cde._INSTAGRAM_PROFILE_SURFACE_EXCLUDED_ANCESTOR_TAGS:
+            return True
+        current = getattr(current, "parent", None)
+    return False
+
+
+def _resolve_instagram_profile_surface_root_from_html(soup):
+    main = soup.select_one("main")
+    if main is not None:
+        return main
+
+    def candidate_metrics(candidate):
+        profile_markers = len(candidate.select(cde._INSTAGRAM_PROFILE_SURFACE_MARKER_SELECTOR))
+        descendants = len(candidate.select("*"))
+        text = " ".join(candidate.get_text(" ", strip=True).split())
+        return {
+            "header": 1 if candidate.select_one("header") is not None else 0,
+            "profile_markers": profile_markers,
+            "descendants": descendants,
+            "text_length": len(text),
+        }
+
+    def is_eligible(candidate):
+        if candidate is None or _instagram_profile_surface_node_is_excluded_from_html(candidate):
+            return False
+        if str(getattr(candidate, "name", "") or "").strip().lower() not in cde._INSTAGRAM_PROFILE_SURFACE_FALLBACK_ROOT_TAGS:
+            return False
+        metrics = candidate_metrics(candidate)
+        if (
+            metrics["descendants"] < cde._INSTAGRAM_PROFILE_SURFACE_MIN_DESCENDANTS
+            or metrics["text_length"] < cde._INSTAGRAM_PROFILE_SURFACE_MIN_TEXT_LENGTH
+        ):
+            return False
+        has_structure = candidate.select_one(cde._INSTAGRAM_PROFILE_SURFACE_STRUCTURE_SELECTOR) is not None
+        has_content = candidate.select_one(cde._INSTAGRAM_PROFILE_SURFACE_CONTENT_SELECTOR) is not None
+        return has_structure and has_content and (metrics["header"] > 0 or metrics["profile_markers"] >= 4)
+
+    candidates = []
+    seen = set()
+
+    for header in soup.select("header"):
+        if _instagram_profile_surface_node_is_excluded_from_html(header):
+            continue
+        current = getattr(header, "parent", None)
+        hops = 0
+        while current is not None and hops < cde._INSTAGRAM_PROFILE_SURFACE_MAX_HEADER_ANCESTOR_HOPS:
+            current_id = id(current)
+            if current_id not in seen and is_eligible(current):
+                candidates.append(current)
+                seen.add(current_id)
+                break
+            current = getattr(current, "parent", None)
+            hops += 1
+
+    if not candidates:
+        for candidate in soup.select(cde._INSTAGRAM_PROFILE_SURFACE_STRUCTURE_SELECTOR):
+            candidate_id = id(candidate)
+            if candidate_id in seen or not is_eligible(candidate):
+                continue
+            candidates.append(candidate)
+            seen.add(candidate_id)
+
+    if not candidates:
+        return None
+
+    return min(
+        candidates,
+        key=lambda candidate: (
+            candidate_metrics(candidate)["descendants"],
+            -candidate_metrics(candidate)["profile_markers"],
+            -candidate_metrics(candidate)["text_length"],
+        ),
+    )
+
+
+class _DummyInstagramProfileSurfaceProbePage:
+    def __init__(self, html, *, url="https://www.instagram.com/probeartist/", title="Instagram"):
+        self._html = html
+        self.url = url
+        self._title = title
+
+    def evaluate(self, script):  # noqa: ANN001
+        script_text = str(script or "")
+        if "profile_markers" in script_text:
+            return _instagram_profile_surface_state_from_html(script, self._html)
+        if "document.body" in script_text and "innerText" in script_text:
+            return " ".join(BeautifulSoup(self._html, "html.parser").get_text(" ", strip=True).split())
+        return False
+
+    def content(self):
+        return self._html
+
+    def title(self):
+        return self._title
+
+
+def test_probe_instagram_profile_surface_state_recovers_profile_surface_without_main():
+    html = """
+    <html>
+      <body>
+        <div class="ig-shell">
+          <div class="profile-surface">
+            <header>
+              <h1>Surface Artist</h1>
+              <button>Email</button>
+            </header>
+            <section>
+              <a href="https://linktr.ee/surfaceartist">Booking</a>
+              <img alt="Surface Artist" src="surface.jpg" />
+            </section>
+          </div>
+        </div>
+      </body>
+    </html>
+    """
+    page = _DummyInstagramProfileSurfaceProbePage(html)
+
+    state = cde._probe_instagram_profile_surface_state(page)
+
+    assert state["main"] == 1
+    assert state["header"] == 1
+    assert state["profile_markers"] >= 5
+    assert state["descendants"] >= 4
+    assert state["text_length"] >= 16
+    assert state["ready"] == 1
+
+
+def test_probe_instagram_profile_surface_state_preserves_main_root_surface():
+    html = """
+    <html>
+      <body>
+        <main>
+          <header>
+            <h1>Main Artist</h1>
+            <button>Email</button>
+          </header>
+          <section>
+            <a href="https://linktr.ee/mainartist">Bio</a>
+          </section>
+        </main>
+      </body>
+    </html>
+    """
+    page = _DummyInstagramProfileSurfaceProbePage(html)
+
+    state = cde._probe_instagram_profile_surface_state(page)
+
+    assert state["main"] == 1
+    assert state["header"] == 1
+    assert state["profile_markers"] >= 4
+    assert state["descendants"] >= 4
+    assert state["text_length"] >= 16
+    assert state["ready"] == 1
+
+
+def test_probe_instagram_profile_surface_state_rejects_non_profile_shell_without_main():
+    html = """
+    <html>
+      <body>
+        <div class="utility-shell">
+          <div>Explore trending creators and recent posts</div>
+        </div>
+      </body>
+    </html>
+    """
+    page = _DummyInstagramProfileSurfaceProbePage(html)
+
+    state = cde._probe_instagram_profile_surface_state(page)
+
+    assert state == {
+        "main": 0,
+        "header": 0,
+        "profile_markers": 0,
+        "descendants": 0,
+        "text_length": 0,
+        "ready": 0,
+    }
+
+
+def test_instagram_bridge_surface_assessment_keeps_login_wall_blocked_without_main():
+    html = """
+    <html>
+      <body>
+        <div class="profile-surface">
+          <header>
+            <h1>Login Artist</h1>
+            <button>Email</button>
+          </header>
+          <section>
+            <a href="https://linktr.ee/loginartist">Booking</a>
+          </section>
+        </div>
+      </body>
+    </html>
+    """
+    page = _DummyInstagramProfileSurfaceProbePage(
+        html,
+        url="https://www.instagram.com/accounts/login/",
+        title="Login • Instagram",
+    )
+
+    assessment = cde._instagram_bridge_surface_assessment(
+        page,
+        "https://www.instagram.com/loginartist/",
+        allow_html_fallback=True,
+    )
+
+    assert assessment["blocked"] is True
+    assert assessment["ready"] is False
+    assert assessment["reason"] == "blocked_page"
+
+
+def test_instagram_profile_surface_state_from_html_recovers_profile_surface_without_main():
+    html = """
+    <html>
+      <body>
+        <div class="ig-shell">
+          <div class="profile-surface">
+            <header>
+              <h1>Fallback Artist</h1>
+              <button>Email</button>
+            </header>
+            <section>
+              <a href="https://linktr.ee/fallbackartist">Booking</a>
+              <img alt="Fallback Artist" src="fallback.jpg" />
+            </section>
+          </div>
+        </div>
+      </body>
+    </html>
+    """
+
+    state = cde._instagram_profile_surface_state_from_html(html)
+
+    assert state["main"] == 1
+    assert state["header"] == 1
+    assert state["profile_markers"] >= 5
+    assert state["descendants"] >= 4
+    assert state["text_length"] >= 16
+    assert state["ready"] == 1
 
 
 class _DummyInstagramRenderWaitPage:
