@@ -3169,64 +3169,217 @@ def _probe_instagram_profile_surface_state(page: Any) -> Dict[str, int]:
     return state
 
 
+def _instagram_profile_surface_state_from_html(html: str) -> Dict[str, int]:
+    state = {
+        "main": 0,
+        "header": 0,
+        "profile_markers": 0,
+        "descendants": 0,
+        "text_length": 0,
+        "ready": 0,
+    }
+    html_text = html if isinstance(html, str) else str(html or "")
+    if not html_text.strip():
+        return state
+    try:
+        soup = BeautifulSoup(html_text, "html.parser")
+    except Exception:
+        return state
+    main = soup.select_one("main")
+    if main is None:
+        return state
+    header = main.select_one("header")
+    profile_markers = len(main.select("header, section, article, a[href], button, img, h1, h2, ul li"))
+    descendants = len(main.select("*"))
+    text = re.sub(r"\s+", " ", main.get_text(" ", strip=True)).strip()
+    state.update(
+        {
+            "main": 1,
+            "header": 1 if header is not None else 0,
+            "profile_markers": profile_markers,
+            "descendants": descendants,
+            "text_length": len(text),
+            "ready": (
+                1
+                if header is not None and profile_markers > 0 and descendants > 0 and len(text) >= 16
+                else 0
+            ),
+        }
+    )
+    return state
+
+
+def _instagram_bridge_surface_assessment(
+    page: Any,
+    profile_url: str,
+    *,
+    allow_html_fallback: bool = False,
+) -> Dict[str, Any]:
+    current_url = cell_to_str(getattr(page, "url", "")).strip()
+    current_title = ""
+    current_html = ""
+    current_body_text = ""
+
+    try:
+        current_title = cell_to_str(page.title())
+    except Exception:
+        current_title = ""
+    try:
+        current_html = cell_to_str(page.content())
+    except Exception:
+        current_html = ""
+    try:
+        current_body_text = cell_to_str(
+            page.evaluate("(document.body && (document.body.innerText || document.body.textContent)) || ''")
+        )
+    except Exception:
+        current_body_text = ""
+
+    state = _probe_instagram_profile_surface_state(page)
+    if allow_html_fallback:
+        html_state = _instagram_profile_surface_state_from_html(current_html)
+        for key in state:
+            state[key] = max(int(state.get(key, 0) or 0), int(html_state.get(key, 0) or 0))
+
+    target_canonical = _canonicalize_instagram_profile_url(profile_url)
+    current_canonical = _canonicalize_instagram_profile_url(current_url)
+    same_profile = bool(target_canonical and current_canonical and target_canonical == current_canonical)
+    unknown_profile_url = not current_url
+
+    url_lower = current_url.lower()
+    text_lower = " ".join([current_title, current_body_text, current_html]).lower()
+
+    blocked = False
+    if any(token in url_lower for token in ("/accounts/login", "/challenge", "/checkpoint", "/consent")):
+        blocked = True
+    elif _detect_soft_block(current_html):
+        blocked = True
+    elif any(
+        token in text_lower
+        for token in (
+            "log in to instagram",
+            "login • instagram",
+            "security check",
+            "challenge_required",
+            "checkpoint",
+            "account suspended",
+            "page isn't available",
+            "sorry, this page isn't available",
+        )
+    ):
+        blocked = True
+
+    has_header_or_bio = state["header"] > 0 or state["profile_markers"] >= 2
+    has_meaningful_descendants = state["descendants"] >= 4 or state["profile_markers"] >= 3
+    has_non_trivial_text = state["text_length"] >= 16
+    plausible_surface = _instagram_landed_page_is_plausible_profile_surface(page) or _instagram_landed_page_is_html_handoff_usable(
+        profile_url,
+        current_url,
+        current_html,
+    )
+    relaxed_ready = (
+        not blocked
+        and state["main"] > 0
+        and has_non_trivial_text
+        and has_header_or_bio
+        and has_meaningful_descendants
+    )
+    profile_shell = (
+        not blocked
+        and not relaxed_ready
+        and (same_profile or unknown_profile_url)
+        and (state["main"] > 0 or plausible_surface or current_canonical == target_canonical)
+    )
+
+    reason = "not_profile_surface"
+    if blocked:
+        reason = "blocked_page"
+    elif relaxed_ready:
+        reason = "profile_surface"
+    elif profile_shell:
+        reason = "profile_shell"
+    elif plausible_surface:
+        reason = "profile_surface_candidate"
+    elif same_profile or unknown_profile_url:
+        reason = "profile_shell"
+
+    return {
+        "current_url": current_url,
+        "current_title": current_title,
+        "current_html": current_html,
+        "current_body_text": current_body_text,
+        "same_profile": same_profile,
+        "unknown_profile_url": unknown_profile_url,
+        "blocked": blocked,
+        "plausible_surface": plausible_surface,
+        "profile_shell": profile_shell,
+        "ready": relaxed_ready,
+        "reason": reason,
+        "allow_retry": not blocked and reason in {"profile_shell", "profile_surface_candidate"},
+        "allow_reload": not blocked and reason == "profile_shell" and (same_profile or unknown_profile_url),
+        "state": state,
+        "main": state["main"],
+        "header": state["header"],
+        "descendants": state["descendants"],
+        "text_length": state["text_length"],
+    }
+
+
 def _wait_for_instagram_live_profile_surface(
     page: Any,
     profile_url: str,
     *,
     timeout_s: float,
 ) -> Tuple[bool, str]:
-    page_url = cell_to_str(getattr(page, "url", "")).strip()
-    print(f"[IG Surface] enter profile_url={profile_url} page_url={page_url}")
-    max_attempts = max(int(_INSTAGRAM_PROFILE_SURFACE_READY_ATTEMPTS), 1)
     attempt_timeout_s = min(max(float(timeout_s or 0), 0.0), _INSTAGRAM_RENDER_READY_TIMEOUT_MS / 1000.0)
-    saw_profile_surface_candidate = False
 
-    for attempt in range(1, max_attempts + 1):
-        state = _probe_instagram_profile_surface_state(page)
+    def _log_surface_check(assessment: Dict[str, Any]) -> None:
+        print(f"[IG Bridge] attempt={_log_surface_check.attempt} url={assessment['current_url'] or profile_url}")
         print(
-            f"[IG Surface] readiness attempt={attempt} main={state['main']} "
-            f"header={state['header']} profile_markers={state['profile_markers']} "
-            f"descendants={state['descendants']}"
+            f"[IG Bridge] surface_check ready={1 if assessment['ready'] else 0} "
+            f"reason={assessment['reason']} main={assessment['main']} header={assessment['header']} "
+            f"descendants={assessment['descendants']} text={assessment['text_length']}"
         )
-        if state["ready"]:
-            print(
-                f"[IG Surface] ready attempt={attempt} main={state['main']} "
-                f"header={state['header']} profile_markers={state['profile_markers']}"
-            )
-            return (True, "profile_surface")
 
-        current_url = cell_to_str(getattr(page, "url", "")).strip()
-        current_html = ""
-        try:
-            current_html = cell_to_str(page.content())
-        except Exception:
-            current_html = ""
-        if _instagram_landed_page_is_plausible_profile_surface(page) or _instagram_landed_page_is_html_handoff_usable(
-            profile_url,
-            current_url,
-            current_html,
-        ):
-            saw_profile_surface_candidate = True
-        try:
-            render_ready = _wait_for_instagram_profile_render(page, attempt_timeout_s)
-        except Exception:
-            render_ready = False
-        if render_ready:
-            state = _probe_instagram_profile_surface_state(page)
-            print(
-                f"[IG Surface] ready attempt={attempt} main={state['main']} "
-                f"header={state['header']} profile_markers={state['profile_markers']}"
-            )
-            return (True, "profile_surface")
+    _log_surface_check.attempt = 1  # type: ignore[attr-defined]
 
-        if attempt >= max_attempts:
-            break
-        print(f"[IG Surface] recovery action=reload_same_profile attempt={attempt}")
+    assessment = _instagram_bridge_surface_assessment(page, profile_url, allow_html_fallback=False)
+    _log_surface_check(assessment)
+    if assessment["ready"]:
+        print(f"[IG Bridge] success attempt=1 final_url={assessment['current_url'] or profile_url}")
+        return (True, "profile_surface")
+    if assessment["blocked"]:
+        print("[IG Bridge] failure reason=not_profile_surface")
+        return (False, "not_profile_surface")
+
+    if assessment["allow_retry"]:
+        print("[IG Bridge] action=retry_surface_check")
+        try:
+            _wait_for_instagram_profile_render(page, attempt_timeout_s)
+        except Exception:
+            pass
+        _log_surface_check.attempt = 2  # type: ignore[attr-defined]
+        assessment = _instagram_bridge_surface_assessment(page, profile_url, allow_html_fallback=True)
+        _log_surface_check(assessment)
+        if assessment["ready"]:
+            print(f"[IG Bridge] success attempt=2 final_url={assessment['current_url'] or profile_url}")
+            return (True, "profile_surface")
+        if assessment["blocked"]:
+            print("[IG Bridge] failure reason=not_profile_surface")
+            return (False, "not_profile_surface")
+
+    if assessment["allow_reload"]:
+        print("[IG Bridge] action=reload_same_profile reason=profile_shell")
         page.goto(profile_url, wait_until="domcontentloaded", timeout=timeout_s * 1000)
+        _log_surface_check.attempt = 3  # type: ignore[attr-defined]
+        assessment = _instagram_bridge_surface_assessment(page, profile_url, allow_html_fallback=True)
+        _log_surface_check(assessment)
+        if assessment["ready"]:
+            print(f"[IG Bridge] success attempt=3 final_url={assessment['current_url'] or profile_url}")
+            return (True, "profile_surface")
 
-    failure_reason = "not_render_ready" if saw_profile_surface_candidate else "not_profile_surface"
-    print(f"[IG Surface] failed reason={failure_reason} attempts={max_attempts}")
-    return (False, failure_reason)
+    print("[IG Bridge] failure reason=not_profile_surface")
+    return (False, "not_profile_surface")
 
 
 def _instagram_landed_page_is_html_handoff_usable(

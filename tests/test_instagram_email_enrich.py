@@ -1123,13 +1123,17 @@ def test_instagram_profile_fetch_scope_static_mode_does_not_open_live_page(monke
 
 def test_open_instagram_live_page_bridge_waits_for_render_before_return(monkeypatch):
     events = []
+    ready_html = (
+        "<html><body><main><header><h1>Rendered Profile</h1><button>Email</button></header>"
+        "<section><a href='https://linktr.ee/renderedprofile'>Bio</a></section></main></body></html>"
+    )
 
     class DummyPage(_DummyClosable):
         def goto(self, url, wait_until=None, timeout=None):  # noqa: ANN001
             events.append(("goto", url, wait_until, timeout))
 
         def content(self):
-            return "<html><body><main>Rendered profile</main></body></html>"
+            return ready_html
 
     class DummyContext(_DummyClosable):
         def __init__(self, page):
@@ -1199,7 +1203,7 @@ def test_open_instagram_live_page_bridge_waits_for_render_before_return(monkeypa
     assert bridge is not None
     assert bridge.owns_browser_stack is True
     assert bridge.page is page
-    assert bridge.snapshot_html() == "<html><body><main>Rendered profile</main></body></html>"
+    assert bridge.snapshot_html() == ready_html
     assert events == [
         ("start",),
         ("launch", True),
@@ -1221,13 +1225,17 @@ def test_open_instagram_live_page_bridge_waits_for_render_before_return(monkeypa
 
 def test_open_instagram_live_page_bridge_reuses_cached_html_fetcher_context(monkeypatch):
     events = []
+    ready_html = (
+        "<html><body><main><header><h1>Rendered Profile</h1><button>Email</button></header>"
+        "<section><a href='https://linktr.ee/renderedprofile'>Bio</a></section></main></body></html>"
+    )
 
     class DummyPage(_DummyClosable):
         def goto(self, url, wait_until=None, timeout=None):  # noqa: ANN001
             events.append(("goto", url, wait_until, timeout))
 
         def content(self):
-            return "<html><body><main>Rendered profile</main></body></html>"
+            return ready_html
 
     class DummyContext(_DummyClosable):
         def __init__(self, page):
@@ -1323,13 +1331,13 @@ def test_open_instagram_live_page_bridge_non_profile_shell_fails_after_bounded_r
     class DummyPage(_DummyClosable):
         def __init__(self):
             super().__init__()
-            self.url = "https://www.instagram.com/villyszn/"
+            self.url = "https://www.instagram.com/igartist/"
             self.evaluate_calls = []
             self.goto_calls = 0
 
         def goto(self, url, wait_until=None, timeout=None):  # noqa: ANN001
             self.goto_calls += 1
-            self.url = "https://www.instagram.com/villyszn/"
+            self.url = "https://www.instagram.com/igartist/"
             events.append(("goto", url, wait_until, timeout))
 
         def evaluate(self, script):  # noqa: ANN001
@@ -1401,8 +1409,8 @@ def test_open_instagram_live_page_bridge_non_profile_shell_fails_after_bounded_r
     )
 
     assert bridge is None
-    assert page.goto_calls == cde._INSTAGRAM_PROFILE_SURFACE_READY_ATTEMPTS
-    assert len(wait_calls) == cde._INSTAGRAM_PROFILE_SURFACE_READY_ATTEMPTS
+    assert page.goto_calls == 2
+    assert len(wait_calls) == 1
     assert cde._INSTAGRAM_PROFILE_SURFACE_CANDIDATE_JS in page.evaluate_calls
     assert page.closed is True
     assert context.closed is True
@@ -1528,7 +1536,8 @@ def test_open_instagram_live_page_bridge_logged_out_html_handoff_is_rejected(mon
         ("new_page",),
         ("goto", "https://www.instagram.com/shellartist/", "domcontentloaded", 12500.0),
     ]
-    assert len(wait_calls) == cde._INSTAGRAM_PROFILE_SURFACE_READY_ATTEMPTS
+    assert events.count(("goto", "https://www.instagram.com/shellartist/", "domcontentloaded", 12500.0)) == 2
+    assert len(wait_calls) == 1
     assert cde._INSTAGRAM_PROFILE_SURFACE_CANDIDATE_JS in page.evaluate_calls
     assert events[-1] == ("stop",)
     assert page.closed is True
@@ -1542,10 +1551,15 @@ def test_open_instagram_live_page_bridge_logged_out_html_handoff_is_rejected(mon
     ) is False
 
 
-def test_open_instagram_live_page_bridge_profile_shell_candidate_still_enters_render_wait(monkeypatch):
+def test_open_instagram_live_page_bridge_profile_shell_candidate_still_enters_render_wait(
+    monkeypatch,
+    capsys,
+):
     events = []
-    candidate_html = (
-        "<html><body><main><header><h1>Shell Artist</h1><button>Email</button></header></main></body></html>"
+    candidate_html = "<html><body><main><section><h1>Shell Artist</h1></section></main></body></html>"
+    ready_html = (
+        "<html><body><main><header><h1>Shell Artist</h1><button>Email</button></header>"
+        "<section><a href='https://linktr.ee/shellartist'>Bio</a></section></main></body></html>"
     )
     assert (
         _instagram_render_ready_marker_from_html(
@@ -1561,9 +1575,10 @@ def test_open_instagram_live_page_bridge_profile_shell_candidate_still_enters_re
         def __init__(self):
             super().__init__()
             self.url = ""
+            self._html = candidate_html
 
         def goto(self, url, wait_until=None, timeout=None):  # noqa: ANN001
-            self.url = "https://www.instagram.com/accounts/login/"
+            self.url = "https://www.instagram.com/shellartist/"
             events.append(("goto", self.url, wait_until, timeout))
 
         def evaluate(self, script):  # noqa: ANN001
@@ -1572,15 +1587,19 @@ def test_open_instagram_live_page_bridge_profile_shell_candidate_still_enters_re
             if "profile_markers" in script_text:
                 return _instagram_profile_surface_state_from_html(
                     script,
-                    candidate_html,
-                    rendered_main_text="Shell Artist",
+                    self._html,
+                    rendered_main_text=(
+                        "Shell Artist"
+                        if self._html == candidate_html
+                        else "Shell Artist Bio and booking details"
+                    ),
                 )
             if "document.body" in script_text and "innerText" in script_text:
-                return "Shell Artist"
-            return _instagram_profile_surface_candidate_marker_from_html(script, candidate_html)
+                return "Shell Artist" if self._html == candidate_html else "Shell Artist Bio and booking details"
+            return _instagram_profile_surface_candidate_marker_from_html(script, self._html)
 
         def content(self):
-            return candidate_html
+            return self._html
 
     class DummyContext(_DummyClosable):
         def __init__(self, page):
@@ -1638,7 +1657,8 @@ def test_open_instagram_live_page_bridge_profile_shell_candidate_still_enters_re
 
     def fake_wait_for_instagram_profile_render(page_arg, timeout_s):  # noqa: ANN001
         events.append(("wait", page_arg, timeout_s))
-        return True
+        page_arg._html = ready_html
+        return False
 
     monkeypatch.setattr(cde, "_wait_for_instagram_profile_render", fake_wait_for_instagram_profile_render)
 
@@ -1654,15 +1674,18 @@ def test_open_instagram_live_page_bridge_profile_shell_candidate_still_enters_re
         ("launch", True),
         ("new_context",),
         ("new_page",),
-        ("goto", "https://www.instagram.com/accounts/login/", "domcontentloaded", 12500.0),
+        ("goto", "https://www.instagram.com/shellartist/", "domcontentloaded", 12500.0),
     ]
     assert ("evaluate", cde._INSTAGRAM_PROFILE_SURFACE_CANDIDATE_JS) in events
     assert ("wait", page, 2.5) in events
+    captured = capsys.readouterr()
+    assert "[IG Bridge] action=retry_surface_check" in captured.out
+    assert "[IG Bridge] success attempt=2 final_url=https://www.instagram.com/shellartist/" in captured.out
 
     bridge.close()
 
 
-def test_open_instagram_live_page_bridge_profile_shell_candidate_that_never_renders_is_rejected(
+def test_open_instagram_live_page_bridge_login_wall_is_rejected_without_retry(
     monkeypatch,
 ):
     events = []
@@ -1674,10 +1697,8 @@ def test_open_instagram_live_page_bridge_profile_shell_candidate_that_never_rend
         def __init__(self):
             super().__init__()
             self.url = ""
-            self.goto_calls = 0
 
         def goto(self, url, wait_until=None, timeout=None):  # noqa: ANN001
-            self.goto_calls += 1
             self.url = "https://www.instagram.com/accounts/login/"
             events.append(("goto", self.url, wait_until, timeout))
 
@@ -1770,10 +1791,8 @@ def test_open_instagram_live_page_bridge_profile_shell_candidate_that_never_rend
         ("new_page",),
         ("goto", "https://www.instagram.com/accounts/login/", "domcontentloaded", 12500.0),
     ]
-    assert ("evaluate", cde._INSTAGRAM_PROFILE_SURFACE_CANDIDATE_JS) in events
-    assert page.goto_calls == cde._INSTAGRAM_PROFILE_SURFACE_READY_ATTEMPTS
-    wait_events = [event for event in events if event[:2] == ("wait", page)]
-    assert len(wait_events) == cde._INSTAGRAM_PROFILE_SURFACE_READY_ATTEMPTS
+    assert ("wait", page, 2.5) not in events
+    assert events.count(("goto", "https://www.instagram.com/accounts/login/", "domcontentloaded", 12500.0)) == 1
     assert events[-1] == ("stop",)
     assert page.closed is True
     assert context.closed is True
