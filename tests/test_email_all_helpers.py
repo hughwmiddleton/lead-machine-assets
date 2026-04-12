@@ -495,6 +495,119 @@ def test_select_primary_email_preserves_existing_behaviour_with_same_trust_candi
     assert ranked == ["bookings@artistname.test", "info@artistname.test"]
 
 
+def test_select_primary_email_prefers_visible_facebook_email_over_mailto_candidate():
+    row = {
+        "Artist Name": "Artistname",
+        "Spotify_Website_URL": "https://artistname.test",
+        EMAIL_PROVENANCE_JSON_COL: json.dumps(
+            {
+                "team@artistname.test": {
+                    "source_type": "facebook_enrich",
+                    "surface": "facebook_main",
+                    "source_url": "https://www.facebook.com/artistname",
+                    "extract_method": "mailto",
+                },
+                "crew@artistname.test": {
+                    "source_type": "facebook_enrich",
+                    "surface": "facebook_main",
+                    "source_url": "https://www.facebook.com/artistname",
+                    "extract_method": "regex",
+                },
+            }
+        ),
+    }
+
+    primary, ranked = pipeline_runner._select_primary_email_for_row(
+        row,
+        "",
+        "team@artistname.test;crew@artistname.test",
+    )
+
+    assert primary == "crew@artistname.test"
+    assert ranked == ["crew@artistname.test", "team@artistname.test"]
+
+
+def test_select_primary_email_keeps_mailto_when_it_is_the_only_candidate():
+    row = {
+        "Artist Name": "Artistname",
+        EMAIL_PROVENANCE_JSON_COL: json.dumps(
+            {
+                "hello@artistname.test": {
+                    "source_type": "facebook_enrich",
+                    "surface": "facebook_main",
+                    "source_url": "https://www.facebook.com/artistname",
+                    "extract_method": "mailto",
+                },
+            }
+        ),
+    }
+
+    primary, ranked = pipeline_runner._select_primary_email_for_row(
+        row,
+        "",
+        "hello@artistname.test",
+    )
+
+    assert primary == "hello@artistname.test"
+    assert ranked == ["hello@artistname.test"]
+
+
+def test_select_primary_email_keeps_one_hop_candidate_when_it_is_the_only_option():
+    row = {
+        "Artist Name": "Artistname",
+        EMAIL_PROVENANCE_JSON_COL: json.dumps(
+            {
+                "booking@label.test": {
+                    "source_type": "live_search",
+                    "surface": "live_search",
+                    "source_url": "https://labels.example.com/artistname",
+                    "extract_method": "regex",
+                },
+            }
+        ),
+    }
+
+    primary, ranked = pipeline_runner._select_primary_email_for_row(
+        row,
+        "",
+        "booking@label.test",
+    )
+
+    assert primary == "booking@label.test"
+    assert ranked == ["booking@label.test"]
+
+
+def test_select_primary_email_keeps_direct_profile_email_ahead_of_weaker_external_fallback():
+    row = {
+        "Artist Name": "Artistname",
+        EMAIL_PROVENANCE_JSON_COL: json.dumps(
+            {
+                "artistname@gmail.com": {
+                    "source_type": "instagram_enrich",
+                    "surface": "instagram_profile",
+                    "source_url": "https://www.instagram.com/artistname/",
+                    "extract_method": "regex",
+                },
+                "booking@label.test": {
+                    "source_type": "live_search",
+                    "surface": "live_search",
+                    "source_url": "https://labels.example.com/artistname",
+                    "extract_method": "regex",
+                },
+            }
+        ),
+    }
+
+    primary, ranked = pipeline_runner._select_primary_email_for_row(
+        row,
+        "",
+        "booking@label.test;artistname@gmail.com",
+    )
+
+    assert primary == "artistname@gmail.com"
+    assert ranked == ["artistname@gmail.com", "booking@label.test"]
+
+
 def test_consolidate_email_all_prefers_facebook_over_placeholder_website_email():
     df = pd.DataFrame(
         [

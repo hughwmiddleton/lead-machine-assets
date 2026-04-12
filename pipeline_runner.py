@@ -1133,7 +1133,7 @@ def _rank_contact_emails_for_row(row_like: Any, values: Union[str, Sequence[str]
         )
     indexed = list(enumerate(normalized))
 
-    def _sort_key(item: Tuple[int, str]) -> Tuple[int, int, int, int, int, int, int, str]:
+    def _sort_key(item: Tuple[int, str]) -> Tuple[int, int, int, int, int, int, int, int, str]:
         index, email = item
         meta = get_email_provenance_entry(row_like, email)
         bucket = _email_surface_bucket(row_like, email, meta, artist_domain)
@@ -1141,6 +1141,15 @@ def _rank_contact_emails_for_row(row_like: Any, values: Union[str, Sequence[str]
         if source_trust == 2 and bucket >= 2:
             # Keep weak/external website finds from outranking profile evidence just because they were website-sourced.
             source_trust = 1
+        extract_method = _cell_str(meta.get("extract_method", "")).lower()
+        if extract_method == "regex":
+            extract_method_penalty = 0
+        elif extract_method == "mailto":
+            extract_method_penalty = 1
+        elif extract_method:
+            extract_method_penalty = 2
+        else:
+            extract_method_penalty = 3
         artist_domain_penalty = 0 if artist_domain and _email_domain(email) == artist_domain else 1
         identity_penalty = 0 if _email_identity_score(email, identity_tokens) > 0 else 1
         legacy_current_penalty = 0 if (not explicit_provenance and preserve_legacy_current and email == current_selected) else 1
@@ -1153,6 +1162,7 @@ def _rank_contact_emails_for_row(row_like: Any, values: Union[str, Sequence[str]
             legacy_current_penalty,
             _email_role_priority(email),
             has_provenance_penalty,
+            extract_method_penalty,
             index,
             email,
         )
