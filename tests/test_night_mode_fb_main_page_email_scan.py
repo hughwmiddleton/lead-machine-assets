@@ -972,6 +972,80 @@ def test_explicit_pass_a_uses_shared_accepted_page_sweep(monkeypatch) -> None:
     assert outcome == "found_email"
 
 
+def test_explicit_pass_a_accepted_page_sweep_keeps_mailto_and_visible_main_emails() -> None:
+    main_url = "https://www.facebook.com/artist"
+    calls = []
+
+    def fake_fetch_surface(url):  # noqa: ANN001
+        calls.append(url)
+        return nmfb.FacebookAcceptedPageFetchResult(
+            requested_url=url,
+            resolved_url=url,
+            html='<html><body><a href="mailto:hidden@artist.com">Email</a></body></html>',
+            rendered_text="Intro visible@artist.com",
+            anchor_values=["mailto:hidden@artist.com"],
+        )
+
+    result = nmfb._run_bounded_fb_accepted_page_sweep(
+        main_url,
+        fake_fetch_surface,
+        continue_after_main_email=False,
+        stop_after_first_filtered=True,
+    )
+
+    assert calls == [main_url]
+    assert result.main_emails == ["hidden@artist.com", "visible@artist.com"]
+    assert result.combined_emails == ["hidden@artist.com", "visible@artist.com"]
+    assert result.main_mailto is True
+    assert result.secondary_attempted is False
+    assert result.secondary_surface is None
+
+
+def test_explicit_pass_a_shared_sweep_preserves_all_main_candidates_downstream(monkeypatch) -> None:
+    logs = []
+    enricher = _build_enricher(logs)
+    main_url = "https://www.facebook.com/artist"
+
+    def fake_fetch(url, goto_about=False, collect_surfaces=True):  # noqa: ANN001
+        return "<html><body><div>No visible email in raw HTML.</div></body></html>", main_url
+
+    def fake_shared_sweep(fb_url, fetch_surface, **kwargs):  # noqa: ANN001
+        return nmfb.FacebookAcceptedPageSweepResult(
+            main_surface=nmfb.FacebookAcceptedPageFetchResult(
+                requested_url=fb_url,
+                resolved_url=main_url,
+                html='<html><body><a href="mailto:hidden@artist.com">Email</a></body></html>',
+                rendered_text="Intro visible@artist.com",
+                anchor_values=["mailto:hidden@artist.com"],
+            ),
+            main_emails=["hidden@artist.com", "visible@artist.com"],
+            combined_emails=["hidden@artist.com", "visible@artist.com"],
+            main_mailto=True,
+            final_resolved_url=main_url,
+        )
+
+    monkeypatch.setattr(enricher, "_fetch_html_with_url", fake_fetch)
+    monkeypatch.setattr(nmfb, "_run_bounded_fb_accepted_page_sweep", fake_shared_sweep)
+
+    result = enricher._scrape_single_fb_candidate(
+        main_url,
+        {"Artist Name": "Artist", "Email_All": ""},
+        "Artist",
+        allow_anon=False,
+        candidate_context={"explicit_accepted_url": True},
+    )
+
+    assert result is not None
+    night_result, emails, driver_kind, outcome = result
+    assert set(emails) == {"hidden@artist.com", "visible@artist.com"}
+    assert night_result is not None
+    assert set((night_result.email_all or "").split(";")) == {"hidden@artist.com", "visible@artist.com"}
+    assert night_result.about_attempted == "no"
+    assert night_result.about_result == ""
+    assert driver_kind == "session"
+    assert outcome == "found_email"
+
+
 def test_explicit_pass_a_safe_fast_loader_respects_allow_anon_gate(monkeypatch) -> None:
     logs = []
     enricher = _build_enricher(logs)

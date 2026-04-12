@@ -181,26 +181,30 @@ def test_extract_emails_non_fast_path_skips_expensive_fallback_after_raw_html_hi
     assert samples == [html]
 
 
-def test_extract_emails_fast_path_still_short_circuits_on_mailto(monkeypatch) -> None:
+def test_extract_emails_fast_path_keeps_mailto_and_runs_rendered_text(monkeypatch) -> None:
     html = '<html><body><a href="mailto:bookings@artist.com">Email</a></body></html>'
+    samples = []
 
-    def fail_extract(sample: str):  # noqa: ANN001
-        raise AssertionError(f"unexpected extractor call for sample: {sample}")
+    def fake_extract(sample: str):  # noqa: ANN001
+        samples.append(sample)
+        if sample == "Rendered press@artist.com":
+            return ["press@artist.com"]
+        return []
 
-    monkeypatch.setattr(night_mode_fb, "_extract_fb_emails_from_text_sample", fail_extract)
+    monkeypatch.setattr(night_mode_fb, "_extract_fb_emails_from_text_sample", fake_extract)
 
     emails, used_mailto = night_mode_fb._extract_emails_from_html(
         html,
         rendered_text="Rendered press@artist.com",
-        anchor_values=["https://example.com/contact?email=press%40artist.com"],
         stop_after_first_filtered=True,
     )
 
-    assert emails == ["bookings@artist.com"]
+    assert emails == ["bookings@artist.com", "press@artist.com"]
     assert used_mailto is True
+    assert samples == ["Rendered press@artist.com"]
 
 
-def test_extract_emails_worst_case_cap_preserves_mailto_short_circuit(monkeypatch) -> None:
+def test_extract_emails_worst_case_cap_keeps_mailto_when_rendered_scan_is_bounded(monkeypatch) -> None:
     html = '<html><body><a href="mailto:bookings@artist.com">Email</a></body></html>'
 
     def fail_beautiful_soup(*args, **kwargs):  # noqa: ANN001
@@ -3591,7 +3595,7 @@ def test_raw_html_scan_still_finds_email_within_cap() -> None:
 
 
 def test_anchor_mailto_still_wins_normally() -> None:
-    """Anchor/mailto extraction short-circuits before the raw scan."""
+    """Anchor/mailto extraction still succeeds on the bounded fast path."""
     html = '<html><body><a href="mailto:bookings@band.com">Email</a></body></html>'
     emails, used_mailto = night_mode_fb._extract_emails_from_html(
         html, stop_after_first_filtered=True,

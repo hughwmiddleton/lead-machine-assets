@@ -5045,6 +5045,7 @@ def _extract_emails_from_html(
     _stalltrace_cumulative_t0: float = 0.0,
 ) -> Tuple[List[str], bool]:
     mailto_used = False
+    pending_anchor_emails: List[str] = []
     raw_html = html if isinstance(html, str) else str(html or "")
     if not raw_html and not rendered_text and not anchor_values:
         return [], mailto_used
@@ -5142,9 +5143,8 @@ def _extract_emails_from_html(
                 mailto_used = mailto_used or anchor_mailto
                 filtered_emails = _finalize_emails(cheap_candidates)
                 if filtered_emails:
-                    if _st_fn:
-                        _stalltrace(_st_fn, _st_row, "extract_html_anchor:early_return", _st_anchor_t, _st_t0)
-                    return filtered_emails, mailto_used
+                    pending_anchor_emails = list(filtered_emails)
+                    break
         else:
             anchor_candidates, anchor_mailto = _extract_anchor_candidates(anchor_samples)
             cheap_candidates.extend(anchor_candidates)
@@ -5154,7 +5154,7 @@ def _extract_emails_from_html(
 
     # --- StallTrace: raw HTML regex scan (chunked + time-budgeted) ---
     _st_raw_t = time.perf_counter() if _st_fn else 0.0
-    if raw_html:
+    if raw_html and not pending_anchor_emails:
         raw_scan_limit = min(len(raw_html), _FB_RAW_HTML_SCAN_CHAR_LIMIT)
         input_was_truncated = len(raw_html) > _FB_RAW_HTML_SCAN_CHAR_LIMIT
         chunk_size = _FB_RAW_HTML_SCAN_CHUNK
@@ -5184,7 +5184,7 @@ def _extract_emails_from_html(
 
     # --- StallTrace: BeautifulSoup parse ---
     _st_soup_t = time.perf_counter() if _st_fn else 0.0
-    if raw_html and soup_char_limit > 0:
+    if raw_html and soup_char_limit > 0 and not pending_anchor_emails:
         if _expensive_budget_exhausted():
             if _st_fn:
                 _stalltrace(_st_fn, _st_row, "extract_html_soup:budget_exhausted", _st_soup_t, _st_t0)
@@ -5213,14 +5213,19 @@ def _extract_emails_from_html(
         if _expensive_budget_exhausted():
             if _st_fn:
                 _stalltrace(_st_fn, _st_row, "extract_html_rendered:budget_exhausted", _st_vis_t, _st_t0)
-            return [], mailto_used
-        filtered_emails = _finalize_emails(_extract_fb_emails_from_text_sample(visible_text))
+            return list(pending_anchor_emails), mailto_used
+        rendered_candidates = list(pending_anchor_emails)
+        rendered_candidates.extend(_extract_fb_emails_from_text_sample(visible_text))
+        filtered_emails = _finalize_emails(rendered_candidates)
         if filtered_emails:
             if _st_fn:
                 _stalltrace(_st_fn, _st_row, "extract_html_rendered:early_return", _st_vis_t, _st_t0)
             return filtered_emails, mailto_used
     if _st_fn:
         _stalltrace(_st_fn, _st_row, "extract_html_rendered:done", _st_vis_t, _st_t0)
+
+    if pending_anchor_emails:
+        return list(pending_anchor_emails), mailto_used
 
     return [], mailto_used
 
