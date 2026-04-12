@@ -6119,7 +6119,8 @@ def test_instagram_email_live_bridge_html_handoff_preserves_direct_live_extracti
     live_html = (
         "<html><head>"
         "<meta property='og:description' content='Bookings: bridge-direct@artist.com'>"
-        "</head><body><div>Logged-out profile payload</div></body></html>"
+        "</head><body><main><header><h1>Bridge Direct Artist</h1><button>Message</button></header>"
+        "<section><div>Bookings: bridge-direct@artist.com</div></section></main></body></html>"
     )
 
     monkeypatch.setattr(cde, "_fetch_instagram_profile_html", lambda session, url: (static_html, 200))
@@ -6141,6 +6142,7 @@ def test_instagram_email_live_bridge_html_handoff_preserves_direct_live_extracti
     assert matched is True
     assert seed_df.at[0, "Email"] == "bridge-direct@artist.com"
     assert seed_df.at[0, "Email_All"] == "bridge-direct@artist.com"
+    _assert_log_contains(logs, "[IG Bridge Gate] live_bridge=1 action=proceed_live_onehop")
     _assert_log_contains(logs, "[IG OneHop] bio_link_urls state=empty count=0 sample=-")
     _assert_no_log_startswith(logs, "[IG OneHop] live_surface_bio_link_urls")
     _assert_no_log_startswith(logs, "[IG OneHop] onehop_fetch_attempted=")
@@ -7090,9 +7092,6 @@ def test_instagram_email_bridge_failure_direct_fallback_recovers_from_static_str
         "</script></body></html>"
     )
     bridge_calls = []
-    onehop_state_labels = []
-    onehop_live_inputs = []
-    real_onehop = cde._instagram_onehop_emails_from_surface
 
     monkeypatch.setattr(cde, "_fetch_instagram_profile_html", lambda session, url: (static_html, 200))
     monkeypatch.setattr(
@@ -7103,14 +7102,7 @@ def test_instagram_email_bridge_failure_direct_fallback_recovers_from_static_str
     monkeypatch.setattr(
         cde,
         "_instagram_onehop_emails_from_surface",
-        lambda *args, **kwargs: onehop_state_labels.append(
-            kwargs.get("state_label", "bio_link_urls")
-        ) or onehop_live_inputs.append(
-            (
-                kwargs.get("live_raw_control_values"),
-                kwargs.get("live_rendered_bio_link_urls"),
-            )
-        ) or real_onehop(*args, **kwargs),
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("one-hop should be suppressed")),
     )
     monkeypatch.setattr(
         cde,
@@ -7122,8 +7114,6 @@ def test_instagram_email_bridge_failure_direct_fallback_recovers_from_static_str
 
     assert matched is True
     assert bridge_calls == ["https://www.instagram.com/bridgestructuredtextartist/"]
-    assert onehop_state_labels == ["bio_link_urls"]
-    assert onehop_live_inputs == [(None, None)]
     assert seed_df.at[0, "Email"] == "lacedupmgmt@gmail.com"
     assert seed_df.at[0, "Email_All"] == "lacedupmgmt@gmail.com"
     assert seed_df.at[0, "Email_Source_URL"] == "https://www.instagram.com/bridgestructuredtextartist/"
@@ -7133,7 +7123,7 @@ def test_instagram_email_bridge_failure_direct_fallback_recovers_from_static_str
     assert "instagram_profile" in seed_df.at[0, EMAIL_PROVENANCE_JSON_COL]
     _assert_log_contains(logs, "[IG Bridge Gate] live_bridge=0 action=skip_live_onehop reason=bridge_failed")
     _assert_log_contains(logs, "[IG Bridge Gate] live_bridge=0 action=static_only_path")
-    _assert_log_contains(logs, "[IG OneHop] bio_link_urls state=empty count=0 sample=-")
+    _assert_no_log_startswith(logs, "[IG OneHop] bio_link_urls")
     _assert_no_log_startswith(logs, "[IG OneHop] live_surface_bio_link_urls")
     _assert_no_log_startswith(logs, "[IG OneHop] onehop_fetch_attempted=")
     _assert_no_log_startswith(logs, "[IG Probe] raw_control_values")
@@ -7161,9 +7151,6 @@ def test_instagram_email_no_live_bridge_handoff_preserves_empty_surface_fallback
         "<html><body><main><header><h1>Blocked Bridge Artist</h1><button>Email</button></header></main></body></html>"
     )
     bridge_calls = []
-    onehop_state_labels = []
-    onehop_live_inputs = []
-    real_onehop = cde._instagram_onehop_emails_from_surface
 
     monkeypatch.setattr(
         cde,
@@ -7178,14 +7165,7 @@ def test_instagram_email_no_live_bridge_handoff_preserves_empty_surface_fallback
     monkeypatch.setattr(
         cde,
         "_instagram_onehop_emails_from_surface",
-        lambda *args, **kwargs: onehop_state_labels.append(
-            kwargs.get("state_label", "bio_link_urls")
-        ) or onehop_live_inputs.append(
-            (
-                kwargs.get("live_raw_control_values"),
-                kwargs.get("live_rendered_bio_link_urls"),
-            )
-        ) or real_onehop(*args, **kwargs),
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("one-hop should be suppressed")),
     )
     monkeypatch.setattr(
         cde,
@@ -7197,8 +7177,6 @@ def test_instagram_email_no_live_bridge_handoff_preserves_empty_surface_fallback
 
     assert matched is False
     assert bridge_calls == ["https://www.instagram.com/blockedbridgeartist/"]
-    assert onehop_state_labels == ["bio_link_urls"]
-    assert onehop_live_inputs == [(None, None)]
     assert seed_df.at[0, "Email"] == ""
     assert seed_df.at[0, "Email_All"] == ""
     _assert_log_contains(logs, "[IG Bridge Gate] live_bridge=0 action=skip_live_onehop reason=bridge_failed")
@@ -7208,7 +7186,7 @@ def test_instagram_email_no_live_bridge_handoff_preserves_empty_surface_fallback
         "https://www.instagram.com/blockedbridgeartist/",
         "[IG Email] no_email_visible",
     )
-    _assert_log_contains(logs, "[IG OneHop] bio_link_urls state=empty count=0 sample=-")
+    _assert_no_log_startswith(logs, "[IG OneHop] bio_link_urls")
     _assert_no_log_startswith(logs, "[IG Probe] raw_control_values")
     _assert_no_log_startswith(logs, "[IG Probe] normalised_urls")
 

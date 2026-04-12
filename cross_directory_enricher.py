@@ -14150,17 +14150,6 @@ class CrossDirectoryEnricherWorker(QThread):
                         self.log_message.emit(
                             "[IG Bridge Gate] live_bridge=0 action=static_only_path"
                         )
-                        (
-                            all_ig_emails,
-                            selected_source_url,
-                            selected_extract_method,
-                            onehop_target_attempted,
-                        ) = _instagram_onehop_emails_from_surface(
-                            self.session,
-                            html,
-                            profile_url=ig_url,
-                            log=self.log_message.emit,
-                        )
                     else:
                         self.log_message.emit(
                             "[IG Bridge Gate] live_bridge=1 action=proceed_live_onehop"
