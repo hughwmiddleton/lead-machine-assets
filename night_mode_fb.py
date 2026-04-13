@@ -9542,6 +9542,54 @@ class NightModeFacebookEnricher:
         elif need_about_fetch and not sweep_result.secondary_attempted:
             about_result = "no_contact_link"
 
+        if explicit_pass_a and not emails and not about_emails:
+            visible_contact_surfaces: List[Tuple[FacebookAcceptedPageFetchResult, str]] = []
+            if sweep_result.secondary_surface:
+                visible_contact_surfaces.append(
+                    (
+                        sweep_result.secondary_surface,
+                        _fb_contact_surface_label(contact_url or sweep_result.secondary_surface.requested_url or ""),
+                    )
+                )
+            if sweep_result.main_surface:
+                visible_contact_surfaces.append((sweep_result.main_surface, "about"))
+
+            logged_visible_contact_scan = False
+            for visible_surface, visible_surface_label in visible_contact_surfaces:
+                visible_text = str(visible_surface.rendered_text or "").strip()
+                visible_anchor_values = list(visible_surface.anchor_values or [])
+                if not visible_text and not visible_anchor_values:
+                    continue
+                if not logged_visible_contact_scan:
+                    _log(self.logger, "[FB About Extract] scanning visible contact surface")
+                    logged_visible_contact_scan = True
+                rescued_emails, rescued_mailto = _extract_emails_from_html(
+                    "",
+                    rendered_text=visible_text,
+                    anchor_values=visible_anchor_values,
+                )
+                rescued_emails = _filter_low_quality_fb_emails(rescued_emails)
+                if not rescued_emails:
+                    continue
+                about_emails = rescued_emails
+                about_mailto = bool(rescued_mailto)
+                about_surface = _fb_email_surface_label(
+                    visible_surface_label or "about",
+                    used_mailto=about_mailto,
+                )
+                about_surface_map = {
+                    email: {
+                        "surface": about_surface,
+                        "extract_method": "mailto" if about_mailto else "regex",
+                    }
+                    for email in about_emails
+                }
+                email_method = "mailto" if about_mailto else "regex"
+                email_source = visible_surface_label or "about"
+                about_result = "emails_found" if about_attempted == "yes" else about_result
+                _log(self.logger, f"[FB About Extract] email_found={';'.join(about_emails)}")
+                break
+
         if about_result == "not_found" and not emails and not has_music_signals:
             _log(self.logger, f"[Night FB][PageUnavailable] {resolved_url} (about tab)")
             outcome_hint = "content_unavailable"

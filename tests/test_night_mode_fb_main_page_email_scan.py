@@ -2100,3 +2100,70 @@ def test_search_candidate_still_rejects_extracted_email_without_music_signals(mo
     assert night_result.email_all == ""
     assert driver_kind == "session"
     assert outcome == "no_email_on_page"
+
+
+def test_explicit_visible_contact_surface_final_pass_recovers_email_before_no_email(monkeypatch) -> None:
+    logs = []
+    enricher = _build_enricher(logs)
+    main_url = "https://www.facebook.com/iamgodlands"
+    visible_email = "mikeadams@littleempiremusic.com"
+    fetch_calls = []
+
+    def fake_fetch(url, goto_about=False, collect_surfaces=True):  # noqa: ANN001
+        fetch_calls.append((url, collect_surfaces))
+        return (
+            """
+            <html>
+              <head>
+                <title>GODLANDS</title>
+              </head>
+              <body>
+                <div>Loaded Facebook page.</div>
+              </body>
+            </html>
+            """,
+            main_url,
+        )
+
+    def fake_shared_sweep(fb_url, fetch_surface, **kwargs):  # noqa: ANN001
+        return nmfb.FacebookAcceptedPageSweepResult(
+            main_surface=nmfb.FacebookAcceptedPageFetchResult(
+                requested_url=fb_url,
+                resolved_url=main_url,
+                html="<html><body><div>Loaded Facebook page.</div></body></html>",
+                rendered_text=f"About Contact and basic info {visible_email}",
+                anchor_values=[],
+            ),
+            main_emails=[],
+            combined_emails=[],
+            final_resolved_url=main_url,
+        )
+
+    monkeypatch.setattr(enricher, "_fetch_html_with_url", fake_fetch)
+    monkeypatch.setattr(nmfb, "_run_bounded_fb_accepted_page_sweep", fake_shared_sweep)
+    monkeypatch.setattr(nmfb, "_night_fb_has_music_signals", lambda soup, context: False)
+
+    result = enricher._scrape_single_fb_candidate(
+        main_url,
+        {
+            "Artist Name": "GODLANDS",
+            "Email_All": "",
+            "Facebook_URL": main_url,
+        },
+        "GODLANDS",
+        allow_anon=False,
+        candidate_context={"explicit_accepted_url": True, "url": main_url},
+    )
+
+    assert result is not None
+    night_result, emails, driver_kind, outcome = result
+    assert fetch_calls == [(main_url, True)]
+    assert emails == [visible_email]
+    assert night_result is not None
+    assert night_result.email == visible_email
+    assert night_result.email_source == "about"
+    assert visible_email in (night_result.email_all or "")
+    assert driver_kind == "session"
+    assert outcome == "found_email"
+    assert any("[FB About Extract] scanning visible contact surface" in msg for msg in logs)
+    assert any(f"[FB About Extract] email_found={visible_email}" in msg for msg in logs)
