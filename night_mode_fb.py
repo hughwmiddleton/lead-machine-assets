@@ -9542,7 +9542,9 @@ class NightModeFacebookEnricher:
         elif need_about_fetch and not sweep_result.secondary_attempted:
             about_result = "no_contact_link"
 
-        if explicit_pass_a and not emails and not about_emails:
+        usable_combined_emails_before_visible_rescue = filter_system_telemetry_emails([*emails, *about_emails])
+
+        if explicit_pass_a and not usable_combined_emails_before_visible_rescue:
             visible_contact_surfaces: List[Tuple[FacebookAcceptedPageFetchResult, str]] = []
             if sweep_result.secondary_surface:
                 visible_contact_surfaces.append(

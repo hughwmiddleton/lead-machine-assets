@@ -12,3 +12,5 @@ __pycache__/
 # FB DOM gate debug dumps
 fb_dom_gate_debug_*.json
 fb_dom_gate_debug_*.json
+fb_dom_gate_debug_*.json
+fb_dom_gate_debug_*.json

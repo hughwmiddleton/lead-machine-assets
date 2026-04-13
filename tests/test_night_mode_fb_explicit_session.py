@@ -777,3 +777,85 @@ def test_mixed_explicit_outcomes_do_not_broaden_into_discovery(monkeypatch, enri
     assert search_calls == []
     assert result.get("FB_Status") == "pass_a_no_email_on_page"
     assert result.get("FB_Reason") == "session_fetch_ok_no_email"
+
+
+def test_explicit_visible_contact_surface_rescue_runs_on_live_pass_a_seam(monkeypatch, enricher):
+    logs = []
+    enricher.logger = lambda msg: logs.append(msg)
+    main_url = "https://www.facebook.com/iamgodlands"
+    about_url = "https://www.facebook.com/iamgodlands/about"
+    visible_email = "mikeadams@littleempiremusic.com"
+    telemetry_email = "trace@o363271.ingest.us.sentry.io"
+    fetch_calls = []
+    search_calls = []
+
+    monkeypatch.setattr(enricher, "_has_authenticated_session", lambda: True)
+    monkeypatch.setattr(enricher, "_ensure_session", lambda: object())
+    monkeypatch.setattr(
+        enricher,
+        "_search_for_page",
+        lambda *args, **kwargs: search_calls.append((args, kwargs)) or "",
+    )
+    monkeypatch.setattr(nmfb, "_night_fb_has_music_signals", lambda soup, context: False)
+
+    def fake_fetch(url, goto_about=False, collect_surfaces=True):  # noqa: ANN001
+        fetch_calls.append((url, collect_surfaces))
+        return (
+            """
+            <html>
+              <head>
+                <title>GODLANDS</title>
+              </head>
+              <body>
+                <div>Loaded Facebook page.</div>
+              </body>
+            </html>
+            """,
+            main_url,
+        )
+
+    def fake_shared_sweep(fb_url, fetch_surface, **kwargs):  # noqa: ANN001
+        return nmfb.FacebookAcceptedPageSweepResult(
+            main_surface=nmfb.FacebookAcceptedPageFetchResult(
+                requested_url=fb_url,
+                resolved_url=main_url,
+                html="<html><body><div>Loaded Facebook page.</div></body></html>",
+                rendered_text="Loaded Facebook page.",
+                anchor_values=[],
+            ),
+            secondary_surface=nmfb.FacebookAcceptedPageFetchResult(
+                requested_url=about_url,
+                resolved_url=about_url,
+                html="<html><body><div>About loaded.</div></body></html>",
+                rendered_text=f"About Contact and basic info {visible_email}",
+                anchor_values=[],
+            ),
+            main_emails=[],
+            secondary_emails=[telemetry_email],
+            secondary_attempted=True,
+            combined_emails=[telemetry_email],
+            final_resolved_url=about_url,
+        )
+
+    monkeypatch.setattr(enricher, "_fetch_html_with_url", fake_fetch)
+    monkeypatch.setattr(nmfb, "_run_bounded_fb_accepted_page_sweep", fake_shared_sweep)
+
+    row = {
+        "Artist Name": "GODLANDS",
+        "Email": "",
+        "Email_All": "",
+        "Facebook_URL": main_url,
+    }
+
+    result = enricher.enrich_row_with_facebook_night(row)
+
+    assert fetch_calls == [(main_url, True)]
+    assert search_calls == []
+    assert result.get("Email") == visible_email
+    assert visible_email in (result.get("Email_All") or "")
+    assert telemetry_email not in (result.get("Email_All") or "")
+    assert result.get("FB_Status") == "pass_a_found_email"
+    assert result.get("FB_Reason") == "explicit_url"
+    assert result.get("FB_Email_Source") == "about"
+    assert any("[FB About Extract] scanning visible contact surface" in msg for msg in logs)
+    assert any(f"[FB About Extract] email_found={visible_email}" in msg for msg in logs)
