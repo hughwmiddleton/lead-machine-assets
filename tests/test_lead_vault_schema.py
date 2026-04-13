@@ -16,8 +16,11 @@ EXPECTED_CANONICAL_MASTER_SCHEMA = [
     "City",
     "State",
     "Country",
+    "Sounds Like",
+    "Social Link",
     "Primary_Genre",
     "Secondary_Genre",
+    "Unearthed_Genre_Raw",
     "Song_Title",
     "Release_Date",
     "Career_Stage",
@@ -58,6 +61,7 @@ EXPECTED_CANONICAL_MASTER_SCHEMA = [
     "Enrichment_Status",
     "Email_Source",
     "Email_Source_URL",
+    "Email_Type",
     "Email_Source_Type",
     "Email_Extract_Method",
     "Contact_Mode",
@@ -111,3 +115,13 @@ def test_master_csv_creation_is_idempotent(tmp_path) -> None:
     after = master_path.read_text(encoding="utf-8-sig")
 
     assert before == after
+
+
+def test_schema_contains_only_requested_outreach_additions() -> None:
+    schema = get_canonical_master_schema()
+
+    for header in ("Sounds Like", "Social Link", "Unearthed_Genre_Raw", "Email_Type"):
+        assert header in schema
+
+    for header in ("FB_Debug_Reason", "FB_Opportunity_State", "Email_Provenance_JSON"):
+        assert header not in schema

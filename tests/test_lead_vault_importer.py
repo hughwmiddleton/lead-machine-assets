@@ -28,6 +28,12 @@ def test_alias_examples_map_correctly() -> None:
             "Email",
             "E-mail",
             "All Emails",
+            "Sounds Like",
+            "Social Link",
+            "Genre",
+            "Unearthed_Genre_Raw",
+            "Source URL",
+            "Email Type",
             "facebook_url",
             "Facebook URL",
             "SoundCloud Link",
@@ -44,6 +50,12 @@ def test_alias_examples_map_correctly() -> None:
     assert mapped["Email"] == "Primary_Email"
     assert mapped["E-mail"] == "Primary_Email"
     assert mapped["All Emails"] == "All_Emails"
+    assert mapped["Sounds Like"] == "Sounds Like"
+    assert mapped["Social Link"] == "Social Link"
+    assert mapped["Genre"] == "Primary_Genre"
+    assert mapped["Unearthed_Genre_Raw"] == "Unearthed_Genre_Raw"
+    assert mapped["Source URL"] == "Source_URL"
+    assert mapped["Email Type"] == "Email_Type"
     assert mapped["facebook_url"] == "Facebook_URL"
     assert mapped["Facebook URL"] == "Facebook_URL"
     assert mapped["SoundCloud Link"] == "SoundCloud_URL"
@@ -113,6 +125,25 @@ def test_extra_columns_do_not_break_import_and_missing_values_become_empty_strin
     assert second_row["Primary_Email"] == ""
     assert second_row["Source_URL"] == ""
     assert second_row["All_Emails"] == ""
+
+
+def test_import_preserves_new_outreach_columns_in_canonical_rows(tmp_path) -> None:
+    input_csv = tmp_path / "outreach_fields.csv"
+    input_csv.write_text(
+        "Artist Name,Sounds Like,Social Link,Unearthed_Genre_Raw,Email Type\n"
+        "Act One,Flume; Rufus,https://instagram.com/actone,Electronic,email_list\n",
+        encoding="utf-8",
+    )
+
+    result = import_csv_to_canonical_rows(input_csv)
+
+    row = result["canonical_rows"][0]
+    assert row["Artist"] == "Act One"
+    assert row["Sounds Like"] == "Flume; Rufus"
+    assert row["Social Link"] == "https://instagram.com/actone"
+    assert row["Unearthed_Genre_Raw"] == "Electronic"
+    assert row["Email_Type"] == "email_list"
+    assert row["Email_Source_Type"] == ""
 
 
 def test_utf8_sig_input_reads_correctly(tmp_path) -> None:

@@ -220,7 +220,6 @@ _ALIAS_GROUPS = {
     ],
     "Email_Source_Type": [
         "Email Source Type",
-        "Email Type",
     ],
     "Email_Extract_Method": [
         "Email Extract Method",

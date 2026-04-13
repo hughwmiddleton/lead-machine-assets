@@ -385,6 +385,21 @@ def test_create_master_csv_initializes_schema_and_selects_new_file(qapp, monkeyp
     assert not info_calls
 
 
+def test_unmapped_dropdown_exposes_new_canonical_outreach_headers(qapp):
+    module = _load_legacy_module()
+    tab = module.LeadVaultTab()
+    tab._populate_unmapped_table(["Mystery Header"])
+
+    combo = tab.unmapped_table.cellWidget(0, 1)
+    options = [combo.itemText(index) for index in range(combo.count())]
+
+    assert "Sounds Like" in options
+    assert "Social Link" in options
+    assert "Unearthed_Genre_Raw" in options
+    assert "Email_Type" in options
+    assert "FB_Debug_Reason" not in options
+
+
 def test_master_selector_persists_selected_master_csv(qapp, monkeypatch, tmp_path):
     module = _load_legacy_module()
     master_path = tmp_path / "master.csv"
