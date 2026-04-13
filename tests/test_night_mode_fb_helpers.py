@@ -464,15 +464,20 @@ class _CollectSurfaceDriver:
 
 
 class _ContainerFallbackDriver:
-    def __init__(self, blocks):  # noqa: ANN001
+    def __init__(self, blocks, fragments=None):  # noqa: ANN001
         self.blocks = list(blocks or [])
+        self.fragments = list(fragments or [])
         self.execute_calls = 0
+        self.fragment_calls = 0
 
     def execute_script(self, script, *args):  # noqa: ANN001
         script_text = str(script or "")
-        if "role=\"main\"" in script_text or "role=\"complementary\"" in script_text or "aside" in script_text:
+        if "fb_visible_text_container_blocks" in script_text:
             self.execute_calls += 1
             return list(self.blocks)
+        if "fb_visible_text_region_fragment_fallback" in script_text:
+            self.fragment_calls += 1
+            return list(self.fragments)
         raise AssertionError(f"unexpected execute_script call: {script_text[:80]}")
 
 
@@ -662,6 +667,7 @@ def test_extract_fb_visible_text_with_container_fallback_includes_visible_sideba
         ]
     )
     assert driver.execute_calls == 1
+    assert driver.fragment_calls == 0
     assert emails == ["elliot@rustmgmt.com"]
     assert used_mailto is False
 
@@ -689,7 +695,39 @@ def test_extract_fb_visible_text_with_container_fallback_includes_sidebar_even_w
         ]
     )
     assert driver.execute_calls == 1
+    assert driver.fragment_calls == 0
     assert emails == ["bookings@artist.com", "elliot@rustmgmt.com"]
+    assert used_mailto is False
+
+
+def test_extract_fb_visible_text_with_container_fallback_uses_bounded_region_fragments_for_visible_intro(monkeypatch) -> None:
+    driver = _ContainerFallbackDriver(
+        [],
+        fragments=["Intro Contact brighteyedbookings@gmail.com"],
+    )
+
+    monkeypatch.setattr(
+        night_mode_fb,
+        "_extract_rendered_visible_text_from_driver",
+        lambda driver: "Late 90s Upcoming shows",
+    )
+
+    rendered_text = night_mode_fb._extract_fb_visible_text_with_container_fallback(driver)
+    emails, used_mailto = night_mode_fb._extract_emails_from_html(
+        "<html><body>No email in source</body></html>",
+        rendered_text=rendered_text,
+        stop_after_first_filtered=True,
+    )
+
+    assert rendered_text == "\n".join(
+        [
+            "Late 90s Upcoming shows",
+            "Intro Contact brighteyedbookings@gmail.com",
+        ]
+    )
+    assert driver.execute_calls == 1
+    assert driver.fragment_calls == 1
+    assert emails == ["brighteyedbookings@gmail.com"]
     assert used_mailto is False
 
 
@@ -767,6 +805,36 @@ def test_collect_fb_email_surface_state_keeps_single_capture_without_navigation_
     assert capture_calls == {"rendered": 1, "anchors": 1}
     assert driver.navigation_attempts == 0
     assert sleep_calls == []
+
+
+def test_bounded_fb_accepted_page_sweep_stops_before_about_when_main_rendered_text_has_intro_email() -> None:
+    main_url = "https://www.facebook.com/artist"
+    about_url = "https://www.facebook.com/artist/about"
+    calls = []
+
+    def fake_fetch_surface(url):  # noqa: ANN001
+        calls.append(url)
+        if url != main_url:
+            raise AssertionError(f"unexpected fetch url: {url}")
+        return night_mode_fb.FacebookAcceptedPageFetchResult(
+            requested_url=url,
+            resolved_url=url,
+            html='<html><body><a href="/artist/about">About</a></body></html>',
+            rendered_text="Late 90s Upcoming shows\nIntro Contact brighteyedbookings@gmail.com",
+            anchor_values=[],
+        )
+
+    result = night_mode_fb._run_bounded_fb_accepted_page_sweep(
+        main_url,
+        fake_fetch_surface,
+        select_secondary_url=lambda base_url, page_html: about_url,
+        stop_after_first_filtered=True,
+    )
+
+    assert calls == [main_url]
+    assert result.main_emails == ["brighteyedbookings@gmail.com"]
+    assert result.combined_emails == ["brighteyedbookings@gmail.com"]
+    assert result.secondary_attempted is False
 
 
 def test_build_result_filters_telemetry_only_email() -> None:

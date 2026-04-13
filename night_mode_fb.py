@@ -4563,7 +4563,10 @@ def _extract_rendered_visible_text_from_driver(driver) -> str:
             text = ""
         if isinstance(text, list):
             text = "\n".join(str(part or "").strip() for part in text if str(part or "").strip())
-        return str(text).strip()
+        text = str(text).strip()
+        if len(text) > max_chars:
+            text = text[:max_chars].rstrip()
+        return text
 
     initial_text = _read_snapshot(driver)
     if EMAIL_REGEX.search(initial_text):
@@ -4646,8 +4649,153 @@ def _extract_fb_visible_text_with_container_fallback(driver) -> str:
         return base_text
 
     try:
+        max_chars = int(os.getenv("FB_RENDERED_TEXT_MAX_CHARS", "6000") or "6000")
+    except Exception:
+        max_chars = 6000
+    max_chars = max(512, min(max_chars, 24000))
+
+    try:
+        max_nodes = int(os.getenv("FB_RENDERED_TEXT_MAX_NODES", "180") or "180")
+    except Exception:
+        max_nodes = 180
+    max_nodes = max(24, min(max_nodes, 600))
+
+    def _coerce_lines(raw_value: Any) -> List[str]:
+        if isinstance(raw_value, str):
+            values = [raw_value]
+        elif isinstance(raw_value, (list, tuple)):
+            values = list(raw_value)
+        else:
+            values = []
+        return [str(value or "").strip() for value in values if str(value or "").strip()]
+
+    def _merge_visible_text(base_value: str, blocks: Sequence[str]) -> str:
+        base_value = str(base_value or "").strip()
+        merged_parts: List[str] = []
+        seen_normalized: Set[str] = set()
+        total_chars = 0
+
+        def _push(value: str) -> bool:
+            nonlocal total_chars
+            normalized = " ".join(str(value or "").split())
+            if not normalized or normalized in seen_normalized:
+                return False
+            remaining = max_chars - total_chars
+            if remaining <= 0:
+                return True
+            clipped = normalized if len(normalized) <= remaining else normalized[:remaining].rstrip()
+            if not clipped:
+                return total_chars >= max_chars
+            seen_normalized.add(normalized)
+            merged_parts.append(clipped)
+            total_chars += len(clipped)
+            return total_chars >= max_chars
+
+        base_normalized = " ".join(base_value.split())
+        if base_normalized:
+            _push(base_normalized)
+
+        for block in blocks or ():
+            normalized = " ".join(str(block or "").split())
+            if not normalized or normalized in seen_normalized:
+                continue
+            if base_normalized and normalized in base_normalized:
+                continue
+            if _push(normalized):
+                break
+
+        return "\n".join(merged_parts)
+
+    try:
         blocks = driver.execute_script(
             """
+            /* fb_visible_text_container_blocks */
+            const maxChars = Math.max(512, Number(arguments[0] || 6000));
+            const maxBlocks = Math.max(3, Number(arguments[1] || 12));
+            const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+            const isVisible = (el) => {
+              if (!el || !el.isConnected) return false;
+              const style = window.getComputedStyle ? window.getComputedStyle(el) : null;
+              if (style && (style.display === 'none' || style.visibility === 'hidden')) return false;
+              const rects = typeof el.getClientRects === 'function' ? el.getClientRects() : null;
+              return !!(rects && rects.length);
+            };
+            const regionSelectors = ['div[role="main"]', 'div[role="complementary"]', 'aside'];
+            const panelSelectors = [
+              'section[aria-label]',
+              'div[role="region"][aria-label]',
+              'section[role="region"][aria-label]',
+              'div[aria-label]',
+            ];
+            const panelPattern = /intro|about|details|contact|summary|bio|info|overview/i;
+            const seenElements = new Set();
+            const seenTexts = new Set();
+            const results = [];
+            let totalChars = 0;
+
+            const pushText = (value) => {
+              const text = normalize(value);
+              if (!text || seenTexts.has(text)) return false;
+              const remaining = maxChars - totalChars;
+              if (remaining <= 0) return true;
+              const clipped = remaining >= text.length ? text : text.slice(0, remaining);
+              if (!clipped) return totalChars >= maxChars;
+              seenTexts.add(text);
+              results.push(clipped);
+              totalChars += clipped.length;
+              return totalChars >= maxChars || results.length >= maxBlocks;
+            };
+
+            const roots = [];
+            for (const selector of regionSelectors) {
+              for (const el of document.querySelectorAll(selector)) {
+                if (!isVisible(el) || seenElements.has(el)) continue;
+                seenElements.add(el);
+                roots.push(el);
+                if (pushText(el.innerText || el.textContent || '')) return results;
+              }
+            }
+
+            for (const root of roots) {
+              for (const selector of panelSelectors) {
+                for (const el of root.querySelectorAll(selector)) {
+                  if (!isVisible(el) || seenElements.has(el)) continue;
+                  const label = normalize(el.getAttribute('aria-label') || '');
+                  if (!panelPattern.test(label)) continue;
+                  seenElements.add(el);
+                  if (pushText(el.innerText || el.textContent || '')) return results;
+                }
+              }
+            }
+
+            return results;
+            """,
+            int(max_chars),
+            max(4, min(18, max_nodes // 12)),
+        ) or []
+    except Exception:
+        blocks = []
+
+    merged_text = _merge_visible_text(base_text, _coerce_lines(blocks))
+    if merged_text and EMAIL_REGEX.search(merged_text):
+        return merged_text
+
+    try:
+        region_fragments = driver.execute_script(
+            """
+            /* fb_visible_text_region_fragment_fallback */
+            const maxChars = Math.max(512, Number(arguments[0] || 6000));
+            const maxNodes = Math.max(24, Number(arguments[1] || 180));
+            const rootSelectors = [
+              'div[role="main"]',
+              'div[role="complementary"]',
+              'aside',
+              'div[role="region"]',
+              'section[role="region"]',
+            ];
+            const leafTags = new Set(['A', 'BUTTON', 'DIV', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'LI', 'P', 'SECTION', 'SPAN']);
+            const semanticTags = new Set(['A', 'BUTTON', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'LI', 'P', 'SECTION']);
+            const interestingPattern = /@|contact|email|book|booking|mgmt|management|business|about|intro|bio|summary|info|detail/i;
             const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
             const isVisible = (el) => {
               if (!el || !el.isConnected) return false;
@@ -4657,49 +4805,75 @@ def _extract_fb_visible_text_with_container_fallback(driver) -> str:
               return !!(rects && rects.length);
             };
 
-            const selectors = ['div[role="main"]', 'div[role="complementary"]', 'aside'];
-            const seen = new Set();
-            const results = [];
-
-            for (const selector of selectors) {
+            const roots = [];
+            const seenRoots = new Set();
+            for (const selector of rootSelectors) {
               for (const el of document.querySelectorAll(selector)) {
-                if (!isVisible(el)) continue;
-                const text = normalize(el.innerText || el.textContent || '');
-                if (!text || seen.has(text)) continue;
-                seen.add(text);
-                results.push(text);
+                if (!isVisible(el) || seenRoots.has(el)) continue;
+                seenRoots.add(el);
+                roots.push(el);
               }
             }
 
+            const results = [];
+            const seenTexts = new Set();
+            let totalChars = 0;
+            let visitedNodes = 0;
+
+            const pushText = (value) => {
+              const text = normalize(value);
+              if (!text || seenTexts.has(text)) return false;
+              const remaining = maxChars - totalChars;
+              if (remaining <= 0) return true;
+              const clipped = remaining >= text.length ? text : text.slice(0, remaining);
+              if (!clipped) return totalChars >= maxChars;
+              seenTexts.add(text);
+              results.push(clipped);
+              totalChars += clipped.length;
+              return totalChars >= maxChars;
+            };
+
+            const collectRoot = (root) => {
+              if (!root || totalChars >= maxChars || visitedNodes >= maxNodes) return;
+              const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT, {
+                acceptNode(node) {
+                  if (!node || node === root) return NodeFilter.FILTER_SKIP;
+                  if (!leafTags.has(node.tagName) || !isVisible(node)) return NodeFilter.FILTER_SKIP;
+                  const label = normalize(node.getAttribute('aria-label') || '');
+                  if (node.children && node.children.length && !semanticTags.has(node.tagName) && !interestingPattern.test(label)) {
+                    return NodeFilter.FILTER_SKIP;
+                  }
+                  return NodeFilter.FILTER_ACCEPT;
+                },
+              });
+
+              let node = walker.nextNode();
+              while (node && totalChars < maxChars && visitedNodes < maxNodes) {
+                visitedNodes += 1;
+                const text = normalize(node.innerText || node.textContent || '');
+                const label = normalize(node.getAttribute('aria-label') || '');
+                if (text && (interestingPattern.test(text) || interestingPattern.test(label) || results.length < 6)) {
+                  if (pushText(text)) return;
+                }
+                node = walker.nextNode();
+              }
+            };
+
+            for (const root of roots) {
+              collectRoot(root);
+              if (totalChars >= maxChars || visitedNodes >= maxNodes) break;
+            }
+
             return results;
-            """
+            """,
+            int(max_chars),
+            int(max_nodes),
         ) or []
     except Exception:
-        blocks = []
+        region_fragments = []
 
-    if isinstance(blocks, str):
-        blocks = [blocks]
-
-    seen_blocks = set()
-    normalized_base = " ".join(str(base_text or "").split())
-    if normalized_base:
-        seen_blocks.add(normalized_base)
-
-    extra_blocks: List[str] = []
-    for block in blocks:
-        normalized = " ".join(str(block or "").split())
-        if not normalized or normalized in seen_blocks:
-            continue
-        if normalized_base and normalized in normalized_base:
-            continue
-        seen_blocks.add(normalized)
-        extra_blocks.append(normalized)
-
-    if not extra_blocks:
-        return base_text
-    if not base_text:
-        return "\n".join(extra_blocks)
-    return "\n".join([str(base_text).strip()] + extra_blocks)
+    final_text = _merge_visible_text(merged_text, _coerce_lines(region_fragments))
+    return final_text or str(base_text or "").strip()
 
 
 def _reveal_fb_contact_controls(driver, logger: LoggerFn = None, max_clicks: int = 2) -> List[str]:

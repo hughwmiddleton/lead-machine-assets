@@ -59,13 +59,15 @@ class _RenderedTextDriver:
             return _FakeBodyElement(self._rendered_text)
         raise LookupError(value)
 
-    def execute_script(self, script):  # noqa: ANN001
+    def execute_script(self, script, *args):  # noqa: ANN001
         page = self.pages.get(self.current_url, {})
         script_text = str(script or "")
         if "document.body" in script_text:
             return self._rendered_text
-        if "role=\"main\"" in script_text or "role=\"complementary\"" in script_text:
+        if "fb_visible_text_container_blocks" in script_text:
             return list(page.get("fb_container_texts", []))
+        if "fb_visible_text_region_fragment_fallback" in script_text:
+            return list(page.get("fb_region_fragments", []))
         return []
 
 
