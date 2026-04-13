@@ -141,13 +141,14 @@ from origin_validator import _derive_origin_output_path, run_auto_validate
 from soundcloud_metadata_enricher import enrich_soundcloud_metadata
 import pipeline_runner
 from source_scheduler import canonicalize_facebook_url
-from lead_vault import EXPORT_PRESETS, WOODPECKER_EXPORT_PRESET, export_with_preset
+from lead_vault import EXPORT_PRESETS, WOODPECKER_EXPORT_PRESET, ensure_master_csv_exists, export_with_preset
 from lead_vault.merge import merge_csv_into_master, preview_csv_import
 from lead_vault.schema import get_canonical_master_schema, get_default_master_csv_path
 from lead_vault.stats import summarize_master_dataset
 
 NIGHT_MODE_RUN_SUMMARY_FILENAME = "run_summary.json"
 NIGHT_MODE_RUN_SUMMARY_PLACEHOLDER = "No runs detected yet.\nRun Lead Machine to generate results."
+LEAD_VAULT_UI_STATE_FILENAME = "lead_vault_ui_state.json"
 
 
 def _discover_latest_night_mode_run_dir(root: str) -> Optional[Path]:
@@ -10147,6 +10148,7 @@ class LeadVaultTab(QtWidgets.QWidget):
         self.worker: Optional[LeadVaultWorker] = None
         self.preview_result: Optional[dict] = None
         self._build_ui()
+        self._restore_master_selection()
 
     def _build_ui(self):
         outer_layout = QtWidgets.QVBoxLayout()
@@ -10182,11 +10184,17 @@ class LeadVaultTab(QtWidgets.QWidget):
         files_layout.addWidget(self.preview_button, 0, 3)
 
         master_label = QtWidgets.QLabel("Master CSV:")
+        self.master_selector = QtWidgets.QComboBox()
+        self.master_selector.currentIndexChanged.connect(self._handle_master_selector_changed)
+        self.create_master_button = QtWidgets.QPushButton("Create New")
+        self.create_master_button.clicked.connect(self._create_master_csv)
         self.master_path_label = QtWidgets.QLineEdit()
         self.master_path_label.setReadOnly(True)
         self._set_line_edit_path(self.master_path_label, str(get_default_master_csv_path()))
         files_layout.addWidget(master_label, 1, 0)
-        files_layout.addWidget(self.master_path_label, 1, 1, 1, 3)
+        files_layout.addWidget(self.master_selector, 1, 1)
+        files_layout.addWidget(self.create_master_button, 1, 2)
+        files_layout.addWidget(self.master_path_label, 2, 1, 1, 3)
         files_group.setLayout(files_layout)
         layout.addWidget(files_group)
 
@@ -10351,6 +10359,180 @@ class LeadVaultTab(QtWidgets.QWidget):
         if file_path:
             self._set_line_edit_path(self.source_edit, file_path)
 
+    def _master_csv_directory(self) -> Path:
+        return get_default_master_csv_path().parent
+
+    def _lead_vault_state_path(self) -> Path:
+        return self._master_csv_directory() / LEAD_VAULT_UI_STATE_FILENAME
+
+    def _available_master_csv_paths(self) -> List[Path]:
+        master_dir = self._master_csv_directory()
+        available_paths = sorted(
+            [path for path in master_dir.glob("*.csv") if path.is_file()],
+            key=lambda path: path.name.lower(),
+        )
+        default_path = get_default_master_csv_path()
+        if default_path not in available_paths:
+            available_paths.insert(0, default_path)
+        return available_paths
+
+    def _display_name_for_master_path(self, path: Path) -> str:
+        if path == get_default_master_csv_path():
+            return f"{path.name} (default)"
+        return path.name
+
+    @staticmethod
+    def _validate_master_filename(filename: str) -> str:
+        candidate = str(filename or "").strip()
+        if not candidate:
+            raise ValueError("Enter a CSV filename.")
+        if candidate in {".", ".."} or Path(candidate).name != candidate:
+            raise ValueError("Enter a filename only, not a folder path.")
+        if not candidate.lower().endswith(".csv"):
+            raise ValueError("Master CSV filenames must end with .csv.")
+        return candidate
+
+    @classmethod
+    def _normalize_new_master_filename(cls, raw_name: str) -> str:
+        candidate = str(raw_name or "").strip()
+        if not candidate:
+            raise ValueError("Enter a CSV filename.")
+        if candidate in {".", ".."} or Path(candidate).name != candidate:
+            raise ValueError("Enter a filename only, not a folder path.")
+        stem = candidate[:-4] if candidate.lower().endswith(".csv") else candidate
+        stem = re.sub(r"\s+", "_", stem.strip())
+        stem = re.sub(r"[^A-Za-z0-9._-]", "_", stem)
+        stem = stem.strip("._-")
+        if not stem:
+            raise ValueError("Enter a valid CSV filename.")
+        return cls._validate_master_filename(f"{stem}.csv")
+
+    def _resolve_master_csv_path(self, filename: Optional[str] = None) -> Path:
+        default_path = get_default_master_csv_path()
+        candidate_name = filename if filename is not None else self.master_selector.currentData()
+        try:
+            safe_name = self._validate_master_filename(str(candidate_name or default_path.name))
+        except ValueError:
+            return default_path
+
+        master_dir = self._master_csv_directory().resolve()
+        resolved_path = (master_dir / safe_name).resolve()
+        if resolved_path.parent != master_dir:
+            return default_path
+        return resolved_path
+
+    def _refresh_master_selector(self, selected_filename: Optional[str] = None):
+        available_paths = self._available_master_csv_paths()
+        if not available_paths:
+            available_paths = [get_default_master_csv_path()]
+        target_path = self._resolve_master_csv_path(selected_filename)
+        target_filename = target_path.name
+        available_filenames = {path.name for path in available_paths}
+        if target_filename not in available_filenames:
+            target_path = get_default_master_csv_path()
+            target_filename = target_path.name
+
+        self.master_selector.blockSignals(True)
+        self.master_selector.clear()
+        selected_index = 0
+        for index, path in enumerate(available_paths):
+            self.master_selector.addItem(self._display_name_for_master_path(path), path.name)
+            if path.name == target_filename:
+                selected_index = index
+        self.master_selector.setCurrentIndex(selected_index)
+        self.master_selector.blockSignals(False)
+
+    def _load_persisted_master_filename(self) -> str:
+        state_path = self._lead_vault_state_path()
+        default_filename = get_default_master_csv_path().name
+        try:
+            with open(state_path, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except Exception:
+            return default_filename
+
+        try:
+            return self._validate_master_filename(str(payload.get("selected_master_csv") or default_filename))
+        except ValueError:
+            return default_filename
+
+    def _persist_selected_master_filename(self, filename: str):
+        state_path = self._lead_vault_state_path()
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = state_path.with_suffix(f"{state_path.suffix}.tmp")
+        payload = {"selected_master_csv": self._validate_master_filename(filename)}
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2)
+        os.replace(tmp_path, state_path)
+
+    def _apply_master_selection(
+        self,
+        filename: Optional[str] = None,
+        *,
+        persist: bool = True,
+        clear_views: bool = True,
+    ):
+        resolved_path = self._resolve_master_csv_path(filename)
+        selected_filename = resolved_path.name
+        if self.master_selector.findData(selected_filename) < 0:
+            self._refresh_master_selector(selected_filename)
+        index = self.master_selector.findData(selected_filename)
+        if index >= 0 and self.master_selector.currentIndex() != index:
+            self.master_selector.blockSignals(True)
+            self.master_selector.setCurrentIndex(index)
+            self.master_selector.blockSignals(False)
+
+        previous_path = self.master_path_label.text().strip()
+        resolved_text = str(resolved_path)
+        self._set_line_edit_path(self.master_path_label, resolved_text)
+        if persist:
+            self._persist_selected_master_filename(selected_filename)
+        if clear_views and previous_path != resolved_text:
+            self._reset_preview_state()
+            self.master_summary_view.clear()
+
+    def _restore_master_selection(self):
+        selected_filename = self._load_persisted_master_filename()
+        self._refresh_master_selector(selected_filename)
+        self._apply_master_selection(selected_filename, persist=False, clear_views=False)
+
+    def _handle_master_selector_changed(self):
+        self._apply_master_selection(self.master_selector.currentData())
+
+    def _create_master_csv(self):
+        raw_name, ok = QtWidgets.QInputDialog.getText(
+            self,
+            "Create Lead Vault Master CSV",
+            "New master CSV filename:",
+            QtWidgets.QLineEdit.Normal,
+            "",
+        )
+        if not ok:
+            return
+
+        try:
+            filename = self._normalize_new_master_filename(raw_name)
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(self, "Lead Vault", str(exc))
+            return
+
+        target_path = self._resolve_master_csv_path(filename)
+        try:
+            if target_path.exists():
+                QtWidgets.QMessageBox.information(
+                    self,
+                    "Lead Vault",
+                    f"Master CSV already exists:\n{target_path}",
+                )
+            else:
+                ensure_master_csv_exists(target_path)
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, "Lead Vault", f"Could not create master CSV:\n{exc}")
+            return
+
+        self._refresh_master_selector(target_path.name)
+        self._apply_master_selection(target_path.name)
+
     def _available_export_presets(self) -> List[dict]:
         presets = list(EXPORT_PRESETS.values())
         return presets or [WOODPECKER_EXPORT_PRESET]
@@ -10391,7 +10573,7 @@ class LeadVaultTab(QtWidgets.QWidget):
         return self.preset_selector.currentData() or WOODPECKER_EXPORT_PRESET
 
     def _refresh_master_summary(self):
-        master_csv_path = self.master_path_label.text().strip()
+        master_csv_path = str(self._resolve_master_csv_path())
         try:
             result = summarize_master_dataset(master_csv_path)
         except Exception as exc:
@@ -10450,7 +10632,7 @@ class LeadVaultTab(QtWidgets.QWidget):
             source_path=source_path,
             header_overrides=header_overrides,
             ignored_headers=ignored_headers,
-            master_path=self.master_path_label.text().strip(),
+            master_path=str(self._resolve_master_csv_path()),
         )
         self.worker.finished_signal.connect(
             self._handle_preview_finished if mode == "preview" else self._handle_import_finished
@@ -10572,7 +10754,7 @@ class LeadVaultTab(QtWidgets.QWidget):
         return "\n".join(lines)
 
     def _generate_export(self):
-        master_csv_path = get_default_master_csv_path()
+        master_csv_path = self._resolve_master_csv_path()
         if not master_csv_path.exists():
             QtWidgets.QMessageBox.warning(
                 self,

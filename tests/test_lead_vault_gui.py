@@ -1,3 +1,4 @@
+import csv
 import importlib.util
 import json
 import os
@@ -106,6 +107,7 @@ def test_lead_vault_layout_sets_minimum_heights_and_path_tooltips(qapp, monkeypa
     assert tab.master_path_label.toolTip() == str(master_path)
     assert tab.export_output_path.toolTip() == str(export_path)
     assert tab.master_path_label.cursorPosition() == 0
+    assert tab.master_selector.currentData() == master_path.name
 
 
 def test_manual_mapping_table_uses_conservative_column_sizing(qapp):
@@ -349,6 +351,125 @@ def test_generate_export_uses_selected_preset(qapp, monkeypatch, tmp_path):
     assert calls[0][0]["name"] == "final_export"
     assert calls[0][1] == master_path
     assert calls[0][2].name == "final_export.csv"
+
+
+def test_create_master_csv_initializes_schema_and_selects_new_file(qapp, monkeypatch, tmp_path):
+    module = _load_legacy_module()
+    master_path = tmp_path / "master.csv"
+    info_calls = []
+
+    monkeypatch.setattr(module, "get_default_master_csv_path", lambda: master_path)
+    monkeypatch.setattr(
+        module.QtWidgets.QInputDialog,
+        "getText",
+        lambda *args, **kwargs: ("unearthed master", True),
+    )
+    monkeypatch.setattr(module.QtWidgets.QMessageBox, "warning", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        module.QtWidgets.QMessageBox,
+        "information",
+        lambda *args, **kwargs: info_calls.append(args[2] if len(args) > 2 else ""),
+    )
+
+    tab = module.LeadVaultTab()
+    tab.create_master_button.click()
+
+    new_master_path = tmp_path / "unearthed_master.csv"
+
+    assert new_master_path.exists()
+    with open(new_master_path, "r", newline="", encoding="utf-8-sig") as handle:
+        reader = csv.reader(handle)
+        assert next(reader) == module.get_canonical_master_schema()
+    assert tab.master_selector.currentData() == "unearthed_master.csv"
+    assert tab.master_path_label.text() == str(new_master_path)
+    assert not info_calls
+
+
+def test_master_selector_persists_selected_master_csv(qapp, monkeypatch, tmp_path):
+    module = _load_legacy_module()
+    master_path = tmp_path / "master.csv"
+    alt_master_path = tmp_path / "unearthed_master.csv"
+    alt_master_path.write_text("Artist\n", encoding="utf-8-sig")
+
+    monkeypatch.setattr(module, "get_default_master_csv_path", lambda: master_path)
+
+    first_tab = module.LeadVaultTab()
+    first_tab.master_selector.setCurrentIndex(first_tab.master_selector.findData(alt_master_path.name))
+
+    second_tab = module.LeadVaultTab()
+
+    assert second_tab.master_selector.currentData() == alt_master_path.name
+    assert second_tab.master_path_label.text() == str(alt_master_path)
+
+
+def test_start_worker_uses_selected_master_csv(qapp, monkeypatch, tmp_path):
+    module = _load_legacy_module()
+    source_path = tmp_path / "input.csv"
+    source_path.write_text("Artist Name\nAct\n", encoding="utf-8")
+    master_path = tmp_path / "master.csv"
+    alt_master_path = tmp_path / "unearthed_master.csv"
+    alt_master_path.write_text("Artist\n", encoding="utf-8-sig")
+    calls = []
+
+    class FakeWorker:
+        def __init__(self, mode, source_path, header_overrides=None, ignored_headers=None, master_path=None, parent=None):
+            self.mode = mode
+            self.source_path = source_path
+            self.header_overrides = dict(header_overrides or {})
+            self.ignored_headers = list(ignored_headers or [])
+            self.master_path = master_path
+            self.finished_signal = type("Signal", (), {"connect": staticmethod(lambda slot: None)})()
+            self.error_signal = type("Signal", (), {"connect": staticmethod(lambda slot: None)})()
+            calls.append(self)
+
+        def start(self):
+            return None
+
+        def isRunning(self):
+            return False
+
+        def wait(self, timeout=None):
+            return True
+
+        def terminate(self):
+            return None
+
+    monkeypatch.setattr(module, "get_default_master_csv_path", lambda: master_path)
+    monkeypatch.setattr(module, "LeadVaultWorker", FakeWorker)
+
+    tab = module.LeadVaultTab()
+    tab.source_edit.setText(str(source_path))
+    tab.master_selector.setCurrentIndex(tab.master_selector.findData(alt_master_path.name))
+    tab._start_worker("preview", str(source_path), {}, [])
+
+    assert calls
+    assert calls[0].master_path == str(alt_master_path)
+    assert tab.master_path_label.text() == str(alt_master_path)
+
+
+def test_create_master_csv_rejects_folder_paths(qapp, monkeypatch, tmp_path):
+    module = _load_legacy_module()
+    master_path = tmp_path / "master.csv"
+    warning_calls = []
+
+    monkeypatch.setattr(module, "get_default_master_csv_path", lambda: master_path)
+    monkeypatch.setattr(
+        module.QtWidgets.QInputDialog,
+        "getText",
+        lambda *args, **kwargs: ("../escape", True),
+    )
+    monkeypatch.setattr(
+        module.QtWidgets.QMessageBox,
+        "warning",
+        lambda *args, **kwargs: warning_calls.append(args[2] if len(args) > 2 else ""),
+    )
+
+    tab = module.LeadVaultTab()
+    tab.create_master_button.click()
+
+    assert warning_calls == ["Enter a filename only, not a folder path."]
+    assert tab.master_selector.currentData() == master_path.name
+    assert tab.master_path_label.text() == str(master_path)
 
 
 def test_night_mode_run_summary_panel_shows_placeholder_when_summary_is_missing(qapp, tmp_path):
