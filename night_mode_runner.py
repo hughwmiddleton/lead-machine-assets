@@ -1353,32 +1353,23 @@ def _process_job(
             state["enriched_csv"] = final_enriched
             state["row_count"] = _count_data_rows(state["raw_csv"])
             state["valid_leads_so_far"] = _count_rows(final_enriched)
-            state["status"] = "completed"
-            if directory == "unearthed":
-                cursor_value = state.get("unearthed_last_profile_url")
-                if cursor_value:
-                    cursor_path = os.path.join(os.path.dirname(os.path.abspath(run_dir)), "unearthed_cursor.json")
-                    os.makedirs(os.path.dirname(cursor_path), exist_ok=True)
-                    with open(cursor_path, "w", encoding="utf-8") as handle:
-                        json.dump({"unearthed_persistent_cursor": cursor_value}, handle, indent=2)
-                state["unearthed_last_profile_url"] = None
-            _write_json(state_path, state)
-            logger.info("Completed job %s", job_id)
+            completion_log_message = "Completed job %s"
         else:
             # Skip per-job validation; leave enrichment for master stage.
             state["enriched_csv"] = state["raw_csv"]
             state["row_count"] = _count_data_rows(state["raw_csv"])
-            state["status"] = "completed"
-            if directory == "unearthed":
-                cursor_value = state.get("unearthed_last_profile_url")
-                if cursor_value:
-                    cursor_path = os.path.join(os.path.dirname(os.path.abspath(run_dir)), "unearthed_cursor.json")
-                    os.makedirs(os.path.dirname(cursor_path), exist_ok=True)
-                    with open(cursor_path, "w", encoding="utf-8") as handle:
-                        json.dump({"unearthed_persistent_cursor": cursor_value}, handle, indent=2)
-                state["unearthed_last_profile_url"] = None
-            _write_json(state_path, state)
-            logger.info("Completed job %s (raw only; master enrichment pending)", job_id)
+            completion_log_message = "Completed job %s (raw only; master enrichment pending)"
+        state["status"] = "completed"
+        if directory == "unearthed":
+            cursor_value = state.get("unearthed_last_profile_url")
+            if cursor_value:
+                cursor_path = os.path.join(os.path.dirname(os.path.abspath(run_dir)), "unearthed_cursor.json")
+                os.makedirs(os.path.dirname(cursor_path), exist_ok=True)
+                with open(cursor_path, "w", encoding="utf-8") as handle:
+                    json.dump({"unearthed_persistent_cursor": cursor_value}, handle, indent=2)
+            state["unearthed_last_profile_url"] = None
+        _write_json(state_path, state)
+        logger.info(completion_log_message, job_id)
         return state
     except Exception as exc:
         state["error_count"] = state.get("error_count", 0) + 1
