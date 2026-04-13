@@ -7031,6 +7031,7 @@ class NightModeFacebookResult:
     name_consistency_flag: Optional[int] = None
     review_reason: str = ""
     source_context: Optional[Dict] = None
+    visible_contact_surfaces: List[Tuple[FacebookAcceptedPageFetchResult, str]] = field(default_factory=list)
 
 
 class NightModeFacebookEnricher:
@@ -8100,8 +8101,11 @@ class NightModeFacebookEnricher:
         artist_name: str,
         *,
         fallback_page_url: str = "",
+        visible_contact_surfaces: Optional[List[Tuple[FacebookAcceptedPageFetchResult, str]]] = None,
     ) -> Optional[Tuple[NightModeFacebookResult, List[str], str]]:
-        visible_contact_surfaces = list(getattr(self, "_last_pass_a_visible_contact_surfaces", []) or [])
+        visible_contact_surfaces = list(visible_contact_surfaces or [])
+        if not visible_contact_surfaces:
+            visible_contact_surfaces = list(getattr(self, "_last_pass_a_visible_contact_surfaces", []) or [])
         if not visible_contact_surfaces:
             fallback_html = str(getattr(self, "_last_fb_surface_html", "") or "")
             fallback_visible_text = str(getattr(self, "_last_fb_visible_text", "") or "")
@@ -9529,10 +9533,11 @@ class NightModeFacebookEnricher:
             ),
             on_no_secondary=lambda: _log(self.logger, "[FB Email] No valid contact surface found"),
         )
+        explicit_visible_contact_surfaces: List[Tuple[FacebookAcceptedPageFetchResult, str]] = []
         if explicit_pass_a:
             self._last_pass_a_visible_contact_surfaces = []
             if sweep_result.secondary_surface:
-                self._last_pass_a_visible_contact_surfaces.append(
+                explicit_visible_contact_surfaces.append(
                     (
                         sweep_result.secondary_surface,
                         _fb_contact_surface_label(
@@ -9541,7 +9546,8 @@ class NightModeFacebookEnricher:
                     )
                 )
             if sweep_result.main_surface:
-                self._last_pass_a_visible_contact_surfaces.append((sweep_result.main_surface, "about"))
+                explicit_visible_contact_surfaces.append((sweep_result.main_surface, "about"))
+            self._last_pass_a_visible_contact_surfaces = list(explicit_visible_contact_surfaces)
 
         emails_raw = list(sweep_result.main_emails or [])
         main_mailto = bool(sweep_result.main_mailto)
@@ -9820,6 +9826,7 @@ class NightModeFacebookEnricher:
                 )
             return None
         night_result.source_context = source_context
+        night_result.visible_contact_surfaces = list(explicit_visible_contact_surfaces)
         night_result.accepted = accepted
         night_result.reject_reason = reject_reason or ""
         night_result.candidate_url = resolved_url
@@ -10539,6 +10546,7 @@ class NightModeFacebookEnricher:
             best_reason = ""
             best_driver = ""
             best_page_url = ""
+            best_visible_contact_surfaces: List[Tuple[FacebookAcceptedPageFetchResult, str]] = []
             explicit_content_unavailable_unrecovered = False
 
             if not fb_urls:
@@ -10664,6 +10672,9 @@ class NightModeFacebookEnricher:
                                     best_reason = reason_for_log
                                     best_driver = driver_kind
                                     best_page_url = page_url
+                                    best_visible_contact_surfaces = list(
+                                        getattr(night_result, "visible_contact_surfaces", []) or []
+                                    )
                     else:
                         if self._last_explicit_guard_reason:
                             driver_kind = "pre_scrape_guard"
@@ -10700,6 +10711,7 @@ class NightModeFacebookEnricher:
                             result,
                             artist_name,
                             fallback_page_url=best_page_url or page_url,
+                            visible_contact_surfaces=best_visible_contact_surfaces,
                         )
                         if rescued_pass_a_email:
                             rescued_result, rescued_emails, rescued_page_url = rescued_pass_a_email
