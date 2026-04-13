@@ -1212,11 +1212,41 @@ def _write_unearthed_persistent_cursor(profile_url: str | None) -> None:
         cursor_value = None
     try:
         cursor_path = _unearthed_cursor_path()
+    except Exception as exc:
+        print(
+            "Persistent cursor write failed "
+            "[seam=helper internal write step=_unearthed_cursor_path] "
+            f"{exc.__class__.__name__}: {exc}; cursor_value={cursor_value!r}"
+        )
+        return
+    try:
         os.makedirs(os.path.dirname(cursor_path), exist_ok=True)
+    except Exception as exc:
+        print(
+            "Persistent cursor write failed "
+            "[seam=helper internal write step=os.makedirs] "
+            f"{exc.__class__.__name__}: {exc}; target_path={cursor_path!r}; "
+            f"cursor_value={cursor_value!r}"
+        )
+        return
+    try:
         with open(cursor_path, "w", encoding="utf-8") as handle:
-            json.dump({"unearthed_persistent_cursor": cursor_value}, handle, indent=2)
-    except Exception:
-        pass
+            try:
+                json.dump({"unearthed_persistent_cursor": cursor_value}, handle, indent=2)
+            except Exception as exc:
+                print(
+                    "Persistent cursor write failed "
+                    "[seam=helper internal write step=json.dump] "
+                    f"{exc.__class__.__name__}: {exc}; target_path={cursor_path!r}; "
+                    f"cursor_value={cursor_value!r}"
+                )
+    except Exception as exc:
+        print(
+            "Persistent cursor write failed "
+            "[seam=helper internal write step=file open] "
+            f"{exc.__class__.__name__}: {exc}; target_path={cursor_path!r}; "
+            f"cursor_value={cursor_value!r}"
+        )
 
 
 def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200, fb_session=None, job_config=None):
