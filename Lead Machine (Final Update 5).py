@@ -1265,6 +1265,32 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
             existing_data = pd.read_csv(existing_csv)
         profile_urls = set()
         listing_metadata_by_url = {}
+        state = job_config.get("_night_mode_state") if isinstance(job_config, dict) else None
+        persist_state = job_config.get("_night_mode_state_persist") if isinstance(job_config, dict) else None
+        resume_enabled = isinstance(job_config, dict) and (
+            "_night_mode_state" in job_config or "unearthed_resume_mode" in job_config
+        )
+        target_profile_url = None
+        if resume_enabled:
+            resume_mode = str(job_config.get("unearthed_resume_mode", "auto") or "auto").strip().lower()
+            if resume_mode not in {"auto", "cursor", "fresh"}:
+                resume_mode = "auto"
+            checkpoint = (state.get("unearthed_last_profile_url") or "").strip() if isinstance(state, dict) else ""
+            persistent_cursor = _load_unearthed_persistent_cursor()
+            if resume_mode == "auto":
+                target_profile_url = checkpoint or persistent_cursor
+            elif resume_mode == "cursor":
+                target_profile_url = persistent_cursor
+
+        def _usable_profile_url_count(collected_urls):
+            if not target_profile_url:
+                return len(collected_urls)
+            ordered_urls = list(collected_urls)
+            try:
+                resume_index = ordered_urls.index(target_profile_url) + 1
+            except ValueError:
+                return 0
+            return len(ordered_urls[resume_index:])
 
         def _resolve_listing_card(link_tag):
             link_text = " ".join(link_tag.stripped_strings)
@@ -1315,7 +1341,7 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
                 else "",
             }
 
-        while len(profile_urls) < max_artists:
+        while _usable_profile_url_count(profile_urls) < max_artists:
             soup = BeautifulSoup(driver.page_source, 'html.parser')
             artist_links = soup.select('a.HU3iy.p1_Ju.mqDRk.FQED6.O_grP[href^="/triplejunearthed/artist/"]')
             if not artist_links:
@@ -1340,35 +1366,15 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
             except Exception as e:
                 print("No more 'Load More' button found or error:", e)
                 break
-        profile_urls = list(profile_urls)[:max_artists]
-        state = job_config.get("_night_mode_state") if isinstance(job_config, dict) else None
-        persist_state = job_config.get("_night_mode_state_persist") if isinstance(job_config, dict) else None
-        resume_enabled = isinstance(job_config, dict) and (
-            "_night_mode_state" in job_config or "unearthed_resume_mode" in job_config
-        )
+        ordered_profile_urls = list(profile_urls)
         resume_index = 0
-        if resume_enabled:
-            resume_mode = str(job_config.get("unearthed_resume_mode", "auto") or "auto").strip().lower()
-            if resume_mode not in {"auto", "cursor", "fresh"}:
-                resume_mode = "auto"
-            checkpoint = (state.get("unearthed_last_profile_url") or "").strip() if isinstance(state, dict) else ""
-            persistent_cursor = _load_unearthed_persistent_cursor()
+        if target_profile_url:
+            try:
+                resume_index = ordered_profile_urls.index(target_profile_url) + 1
+            except ValueError:
+                resume_index = 0
 
-            target_profile_url = None
-            if resume_mode == "auto":
-                target_profile_url = checkpoint or persistent_cursor
-            elif resume_mode == "cursor":
-                target_profile_url = persistent_cursor
-            elif resume_mode == "fresh":
-                target_profile_url = None
-
-            if target_profile_url:
-                try:
-                    resume_index = profile_urls.index(target_profile_url) + 1
-                except ValueError:
-                    resume_index = 0
-
-        profile_urls = profile_urls[resume_index:]
+        profile_urls = ordered_profile_urls[resume_index:resume_index + max_artists]
         print(f"Total artist profile URLs to scrape: {len(profile_urls)}")
         if not profile_urls:
             print("No artist profile URLs found. Please check the website structure or selectors.")
