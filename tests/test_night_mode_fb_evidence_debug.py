@@ -3,12 +3,12 @@ import json
 import night_mode_fb
 
 
-def _build_enricher() -> night_mode_fb.NightModeFacebookEnricher:
+def _build_enricher(logs=None) -> night_mode_fb.NightModeFacebookEnricher:
     return night_mode_fb.NightModeFacebookEnricher(
         legacy_module=None,
         username="",
         password="",
-        logger=None,
+        logger=logs.append if logs is not None else None,
         use_shared_session=False,
     )
 
@@ -42,14 +42,15 @@ def test_night_fb_evidence_debug_off_writes_no_files(monkeypatch, tmp_path) -> N
     monkeypatch.delenv("NIGHT_FB_EVIDENCE_DEBUG", raising=False)
 
     enricher = _build_enricher()
+    telemetry_email = "trace@o363271.ingest.us.sentry.io"
 
     def fake_scrape(*args, **kwargs):  # noqa: ANN001
         _set_surface_state(
             enricher,
             url="https://www.facebook.com/debugartist",
-            html="<html><body>bookings@debugartist.com</body></html>",
-            visible_text="bookings@debugartist.com",
-            anchor_values=["mailto:bookings@debugartist.com"],
+            html=f"<html><body>{telemetry_email}</body></html>",
+            visible_text=telemetry_email,
+            anchor_values=[f"mailto:{telemetry_email}"],
             reveal_actions=["contact_info_button"],
         )
         return (
@@ -79,14 +80,15 @@ def test_night_fb_evidence_debug_on_fail_row_writes_compact_json(monkeypatch, tm
     monkeypatch.setenv("NIGHT_FB_EVIDENCE_DEBUG", "1")
 
     enricher = _build_enricher()
+    telemetry_email = "trace@o363271.ingest.us.sentry.io"
 
     def fake_scrape(*args, **kwargs):  # noqa: ANN001
         _set_surface_state(
             enricher,
             url="https://www.facebook.com/debugartist",
-            html="<html><body>Email bookings@debugartist.com</body></html>",
-            visible_text="Email bookings@debugartist.com",
-            anchor_values=["mailto:bookings@debugartist.com"],
+            html=f"<html><body>Email {telemetry_email}</body></html>",
+            visible_text=f"Email {telemetry_email}",
+            anchor_values=[f"mailto:{telemetry_email}"],
             reveal_actions=["contact_info_button"],
         )
         return (
@@ -122,10 +124,10 @@ def test_night_fb_evidence_debug_on_fail_row_writes_compact_json(monkeypatch, tm
     assert payload["collector"]["anchor_count"] == 1
     assert payload["collector"]["anchor_has_mailto"] is True
     assert payload["collector"]["reveal_actions"] == ["contact_info_button"]
-    assert payload["extraction"]["emails_from_html"] == ["bookings@debugartist.com"]
-    assert payload["extraction"]["emails_from_text"] == ["bookings@debugartist.com"]
-    assert payload["extraction"]["emails_from_anchors"] == ["bookings@debugartist.com"]
-    assert payload["extraction"]["raw_merged_candidates"] == ["bookings@debugartist.com"]
+    assert payload["extraction"]["emails_from_html"] == [telemetry_email]
+    assert payload["extraction"]["emails_from_text"] == [telemetry_email]
+    assert payload["extraction"]["emails_from_anchors"] == []
+    assert payload["extraction"]["raw_merged_candidates"] == [telemetry_email]
     assert payload["writeback"]["final_email"] is None
     assert payload["writeback"]["final_email_all"] is None
     assert payload["writeback"]["had_upstream_email_candidate"] is True
@@ -158,6 +160,64 @@ def test_night_fb_evidence_debug_skips_success_rows(monkeypatch, tmp_path) -> No
 
     assert result["FB_Status"] == "pass_a_found_email"
     assert not (tmp_path / "fb_evidence_debug").exists()
+
+
+def test_explicit_pass_a_exit_seam_rescues_visible_contact_email(monkeypatch) -> None:
+    logs = []
+    enricher = _build_enricher(logs)
+    visible_email = "bookings@debugartist.com"
+    about_url = "https://www.facebook.com/debugartist/about_contact_and_basic_info"
+
+    def fake_scrape(*args, **kwargs):  # noqa: ANN001
+        _set_surface_state(
+            enricher,
+            url=about_url,
+            html="<html><body><div>Contact</div></body></html>",
+            visible_text=f"Contact {visible_email}",
+            anchor_values=[],
+        )
+        enricher._last_pass_a_visible_contact_surfaces = [
+            (
+                night_mode_fb.FacebookAcceptedPageFetchResult(
+                    requested_url=about_url,
+                    resolved_url=about_url,
+                    html="<html><body><div>Contact</div></body></html>",
+                    rendered_text=f"Contact {visible_email}",
+                    anchor_values=[],
+                ),
+                "about",
+            )
+        ]
+        return (
+            night_mode_fb.NightModeFacebookResult(
+                email="",
+                email_all="",
+                facebook_url="https://www.facebook.com/debugartist",
+            ),
+            [],
+            "session",
+            "no_email_on_page",
+        )
+
+    monkeypatch.setattr(enricher, "_scrape_single_fb_candidate", fake_scrape)
+    monkeypatch.setattr(
+        enricher,
+        "_search_for_page",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("PASS A exit-seam rescue should return before PASS B")),
+    )
+
+    result = enricher.enrich_row_with_facebook_night(
+        {"Artist Name": "Debug Artist", "Facebook_URL": "https://www.facebook.com/debugartist"},
+        row_index=10,
+    )
+
+    assert result["FB_Status"] == "pass_a_found_email"
+    assert result["FB_Reason"] == "explicit_url"
+    assert result["Email"] == visible_email
+    assert visible_email in (result["Email_All"] or "")
+    assert result["FB_Email_Source"] == "about"
+    assert any("[FB About Extract] scanning visible contact surface" in msg for msg in logs)
+    assert any(f"[FB About Extract] email_found={visible_email}" in msg for msg in logs)
 
 
 def test_night_fb_content_unavailable_evidence_includes_render_state(monkeypatch, tmp_path) -> None:

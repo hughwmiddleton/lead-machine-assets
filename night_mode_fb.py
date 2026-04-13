@@ -7125,6 +7125,7 @@ class NightModeFacebookEnricher:
         self._last_fb_reveal_actions: List[str] = []
         self._last_fb_surface_html: Optional[str] = None
         self._last_fb_surface_url: str = ""
+        self._last_pass_a_visible_contact_surfaces: List[Tuple[FacebookAcceptedPageFetchResult, str]] = []
         self._last_fb_surface_driver_kind: str = ""
         self._last_fb_render_invalid_reason: str = ""
         self._last_fb_surface_html_available: bool = False
@@ -8092,6 +8093,92 @@ class NightModeFacebookEnricher:
         self._last_fb_live_anchor_values = list(anchor_values or [])
         self._last_fb_reveal_actions = list(reveal_actions or [])
         return page_source, rendered_text, list(anchor_values or []), list(reveal_actions or [])
+
+    def _rescue_explicit_pass_a_visible_contact_email(
+        self,
+        row: Dict[str, str],
+        artist_name: str,
+        *,
+        fallback_page_url: str = "",
+    ) -> Optional[Tuple[NightModeFacebookResult, List[str], str]]:
+        visible_contact_surfaces = list(getattr(self, "_last_pass_a_visible_contact_surfaces", []) or [])
+        if not visible_contact_surfaces:
+            fallback_html = str(getattr(self, "_last_fb_surface_html", "") or "")
+            fallback_visible_text = str(getattr(self, "_last_fb_visible_text", "") or "")
+            fallback_anchor_values = list(getattr(self, "_last_fb_live_anchor_values", []) or [])
+            fallback_surface_url = str(getattr(self, "_last_fb_surface_url", "") or "").strip()
+            if fallback_html or fallback_visible_text or fallback_anchor_values:
+                visible_contact_surfaces.append(
+                    (
+                        FacebookAcceptedPageFetchResult(
+                            requested_url=fallback_surface_url or fallback_page_url,
+                            resolved_url=fallback_surface_url or fallback_page_url,
+                            html=fallback_html,
+                            rendered_text=fallback_visible_text,
+                            anchor_values=fallback_anchor_values,
+                        ),
+                        _fb_contact_surface_label(fallback_surface_url or fallback_page_url),
+                    )
+                )
+        if not visible_contact_surfaces:
+            return None
+
+        logged_visible_contact_scan = False
+        for visible_surface, visible_surface_label in visible_contact_surfaces:
+            visible_html = str(visible_surface.html or "")
+            visible_text = str(visible_surface.rendered_text or "").strip()
+            visible_anchor_values = list(visible_surface.anchor_values or [])
+            if not visible_html and not visible_text and not visible_anchor_values:
+                continue
+            if not logged_visible_contact_scan:
+                _log(self.logger, "[FB About Extract] scanning visible contact surface")
+                logged_visible_contact_scan = True
+            rescued_emails, rescued_mailto = _extract_emails_from_html(
+                visible_html,
+                rendered_text=visible_text,
+                anchor_values=visible_anchor_values,
+            )
+            rescued_emails = _filter_low_quality_fb_emails(rescued_emails)
+            if not rescued_emails:
+                continue
+            email_method = "mailto" if rescued_mailto else "regex"
+            surface_label = _fb_email_surface_label(
+                visible_surface_label or "about",
+                used_mailto=bool(rescued_mailto),
+            )
+            source_context = {
+                "surfaces": {
+                    email: {
+                        "surface": surface_label,
+                        "extract_method": email_method,
+                    }
+                    for email in rescued_emails
+                }
+            }
+            rescue_page_url = canonicalize_facebook_url(
+                visible_surface.resolved_url or visible_surface.requested_url or fallback_page_url
+            )
+            if rescue_page_url:
+                rescue_page_url = _normalise_fb_url(rescue_page_url) or rescue_page_url
+            email_source = "about" if ("about" in surface_label or "contact" in surface_label) else "main"
+            night_result = self._build_result(
+                rescued_emails,
+                str(row.get("Email_All", "") or ""),
+                rescue_page_url,
+                artist_name,
+                source_context=source_context,
+                email_source=email_source,
+                email_extract_method=email_method,
+            )
+            if not night_result:
+                continue
+            night_result.source_context = source_context
+            night_result.email_source = email_source
+            night_result.email_extract_method = email_method
+            _log(self.logger, f"[FB About Extract] email_found={';'.join(rescued_emails)}")
+            return night_result, rescued_emails, rescue_page_url
+
+        return None
 
     @staticmethod
     def _explicit_main_page_surface_capture_is_weak(
@@ -9442,6 +9529,19 @@ class NightModeFacebookEnricher:
             ),
             on_no_secondary=lambda: _log(self.logger, "[FB Email] No valid contact surface found"),
         )
+        if explicit_pass_a:
+            self._last_pass_a_visible_contact_surfaces = []
+            if sweep_result.secondary_surface:
+                self._last_pass_a_visible_contact_surfaces.append(
+                    (
+                        sweep_result.secondary_surface,
+                        _fb_contact_surface_label(
+                            sweep_result.secondary_surface.requested_url or sweep_result.secondary_surface.resolved_url or ""
+                        ),
+                    )
+                )
+            if sweep_result.main_surface:
+                self._last_pass_a_visible_contact_surfaces.append((sweep_result.main_surface, "about"))
 
         emails_raw = list(sweep_result.main_emails or [])
         main_mailto = bool(sweep_result.main_mailto)
@@ -10259,6 +10359,7 @@ class NightModeFacebookEnricher:
         self._checkpoint_warned_this_row = False
         self._page_budget_remaining = 2
         self._clear_last_fb_email_surface_state()
+        self._last_pass_a_visible_contact_surfaces = []
 
         def _clean_val(value: str) -> str:
             try:
@@ -10595,6 +10696,34 @@ class NightModeFacebookEnricher:
                     elif best_outcome == "content_unavailable":
                         explicit_content_unavailable_unrecovered = True
                     else:
+                        rescued_pass_a_email = self._rescue_explicit_pass_a_visible_contact_email(
+                            result,
+                            artist_name,
+                            fallback_page_url=best_page_url or page_url,
+                        )
+                        if rescued_pass_a_email:
+                            rescued_result, rescued_emails, rescued_page_url = rescued_pass_a_email
+                            page_url = rescued_page_url or best_page_url or page_url
+                            result = self._apply_night_fb_result(
+                                result,
+                                rescued_result,
+                                rescued_emails,
+                                page_url,
+                                fb_status_hint=result.get("FB_Status", ""),
+                                fb_reason_hint=result.get("FB_Reason", ""),
+                            )
+                            result["FB_Status"] = "pass_a_found_email"
+                            result["FB_Reason"] = "explicit_url"
+                            self._pass_a_bump("found_email")
+                            self._pass_a_log_row(
+                                artist_name,
+                                page_url or best_page_url,
+                                best_driver or "session",
+                                "found_email",
+                                "explicit_url",
+                                mode=pass_a_mode,
+                            )
+                            return _finish(result)
                         result["FB_Status"] = "pass_a_no_email_on_page"
                         result["FB_Reason"] = best_reason or ("anon_fetch_ok_no_email" if best_driver.startswith("anon") else "session_fetch_ok_no_email")
                         self._pass_a_bump("no_email_on_page")
