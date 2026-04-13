@@ -1,0 +1,10 @@
+{
+  "job_id": "job_unearthed_1",
+  "raw_csv": "overnight_runs/2026-04-13_194844/job_unearthed_1/raw.csv",
+  "enriched_csv": "overnight_runs/2026-04-13_194844/job_unearthed_1/enriched.csv",
+  "input_seed_csv": "",
+  "status": "partial_error",
+  "error_count": 1,
+  "last_update": "2026-04-13T09:48:44.782822+00:00",
+  "last_error": "RuntimeError: Can't find free port (Unable to bind to IPv4 or IPv6)"
+}

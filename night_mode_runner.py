@@ -1361,46 +1361,6 @@ def _process_job(
             completion_log_message = "Completed job %s (raw only; master enrichment pending)"
         state["status"] = "completed"
         if directory == "unearthed":
-            cursor_value = state.get("unearthed_last_profile_url")
-            if not isinstance(cursor_value, str):
-                cursor_value = None
-            else:
-                cursor_value = cursor_value.strip() or None
-            try:
-                legacy_module = pipeline_runner._load_legacy_module()
-            except Exception as exc:
-                logger.error(
-                    "Persistent cursor write failed [seam=helper resolution step=_load_legacy_module] %s: %s; cursor_value=%r",
-                    exc.__class__.__name__,
-                    exc,
-                    cursor_value,
-                )
-            else:
-                try:
-                    write_persistent_cursor = getattr(legacy_module, "_write_unearthed_persistent_cursor")
-                except Exception as exc:
-                    logger.error(
-                        "Persistent cursor write failed [seam=helper resolution step=getattr(_write_unearthed_persistent_cursor)] %s: %s; cursor_value=%r",
-                        exc.__class__.__name__,
-                        exc,
-                        cursor_value,
-                    )
-                else:
-                    if not callable(write_persistent_cursor):
-                        logger.error(
-                            "Persistent cursor write failed [seam=helper resolution step=getattr(_write_unearthed_persistent_cursor)] TypeError: resolved helper is not callable; cursor_value=%r",
-                            cursor_value,
-                        )
-                    else:
-                        try:
-                            write_persistent_cursor(cursor_value)
-                        except Exception as exc:
-                            logger.error(
-                                "Persistent cursor write failed [seam=helper invocation] %s: %s; cursor_value=%r",
-                                exc.__class__.__name__,
-                                exc,
-                                cursor_value,
-                            )
             state["unearthed_last_profile_url"] = None
         _write_json(state_path, state)
         logger.info(completion_log_message, job_id)

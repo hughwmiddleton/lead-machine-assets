@@ -1,0 +1,114 @@
+2026-04-13 19:55:16,749 [INFO] [Seed Summary]
+2026-04-13 19:55:16,749 [INFO] unearthed=7
+2026-04-13 19:55:16,764 [INFO] [FB Promotion] facebook_url populated for 2 rows
+2026-04-13 19:55:16,764 [INFO] [FB Promotion] canonical Facebook_URL backfilled from Social Link / External Links for 2 rows
+2026-04-13 19:55:16,775 [INFO] [Master] Wrote merged raw CSV: overnight_runs/2026-04-13_195456/master_raw.csv (rows=7)
+2026-04-13 19:55:16,776 [INFO] [Master Enrich] Starting cross-directory enrichment for overnight_runs/2026-04-13_195456/master_raw.csv
+2026-04-13 19:55:21,809 [INFO] [Master] Bandcamp directory CSV -> (none) in /Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/overnight_runs/2026-04-13_195456 (attempts=6)
+2026-04-13 19:55:26,834 [INFO] [Master] SoundCloud directory CSV -> (none) in /Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/overnight_runs/2026-04-13_195456 (attempts=6)
+2026-04-13 19:55:31,899 [INFO] [Master] Last.fm directory CSV -> (none) in /Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/overnight_runs/2026-04-13_195456 (attempts=6)
+2026-04-13 19:55:31,901 [INFO] [Master] Unearthed directory CSV -> /Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/overnight_runs/2026-04-13_195456/job_unearthed_1/raw.csv (rows=7, kind=raw)
+2026-04-13 19:55:31,901 [INFO] [Master] Passing bandcamp_csv_path=
+2026-04-13 19:55:31,901 [INFO] [Master] Passing soundcloud_csv_path=
+2026-04-13 19:55:31,901 [INFO] [Master] Passing lastfm_csv_path=
+2026-04-13 19:55:31,901 [INFO] [Master] Passing unearthed_csv_path=/Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/overnight_runs/2026-04-13_195456/job_unearthed_1/raw.csv
+2026-04-13 19:55:31,906 [INFO] [FB Discover] Shared Facebook session is unavailable for discovery (reason=missing_session_source); disabling FB discovery for the remainder of the run.
+2026-04-13 19:55:31,907 [INFO] [Enricher] Loading seed CSV: overnight_runs/2026-04-13_195456/master_raw.csv
+2026-04-13 19:55:31,918 [INFO] [Deduper] Removed 0 duplicate rows (kept 7 unique rows)
+2026-04-13 19:55:31,921 [INFO] [Schema] ensured email columns: Email, Email_All, Email_Type, Email_Source_URL, Email_Source_Type, Email_Extract_Method, Email_Provenance_JSON
+2026-04-13 19:55:31,938 [INFO] [Enricher] Starting enrichment for 7 rows...
+2026-04-13 19:55:31,938 [INFO] [Enricher] Live search enabled=True max=50
+2026-04-13 19:55:31,938 [INFO] [Enricher] mode=row_linear
+2026-04-13 19:55:31,939 [INFO] [Unearthed Path] no usable FB URL, resuming standard path artist='robin-adelaide' row=0
+2026-04-13 19:55:31,940 [INFO] [Unearthed Path] no usable FB URL, resuming standard path artist='goosewya' row=1
+2026-04-13 19:55:31,940 [INFO] [Unearthed Path] activated artist='godlands' row=2
+2026-04-13 19:55:31,940 [INFO] [Unearthed Path] skipping non-essential enrichers artist='godlands' row=2
+2026-04-13 19:55:31,941 [INFO] [Unearthed Path] no usable FB URL, resuming standard path artist='janie-kogan' row=3
+2026-04-13 19:55:31,941 [INFO] [Unearthed Path] activated artist='ms-thandi' row=4
+2026-04-13 19:55:31,941 [INFO] [Unearthed Path] skipping non-essential enrichers artist='ms-thandi' row=4
+2026-04-13 19:55:31,942 [INFO] [Unearthed Path] no usable FB URL, resuming standard path artist='genezes' row=5
+2026-04-13 19:55:31,942 [INFO] [Unearthed Path] no usable FB URL, resuming standard path artist='buggy' row=6
+2026-04-13 19:55:31,945 [INFO] [Unearthed Links] promoted SoundCloud from source for 2 rows
+2026-04-13 19:55:31,962 [INFO] [Enricher] Row 1/7: matched 'robin-adelaide' via Triple J Unearthed.
+2026-04-13 19:55:31,962 [INFO] [SoundCloud] skipping discovery (Unearthed URL present)
+2026-04-13 19:55:32,067 [INFO] [Enricher] Bandcamp: status=no_match mode=directory_discover attempts=0 403=0 artist='robin-adelaide'
+2026-04-13 19:55:32,069 [INFO] [Enricher] Last.fm live search: https://www.last.fm/search?q=%22robin-adelaide%22+%22so+you+wanna+be+a+superhero%3F%22&type=artist
+2026-04-13 19:55:33,260 [INFO] [Enricher][LF] Last.fm search: status=200 attempt=1/1 headers=lastfm_html
+2026-04-13 19:55:33,302 [INFO] [Enricher] Last.fm Enrich: candidate 'So You Wanna Be A Superhero' for 'robin-adelaide' has confidence=0.10.
+2026-04-13 19:55:33,302 [INFO] [Enricher] Last.fm Enrich: no safe match for 'robin-adelaide' (best_confidence=0.10), skipping.
+2026-04-13 19:55:33,306 [INFO] [Enricher] Row 2/7: matched 'goosewya' via Triple J Unearthed.
+2026-04-13 19:55:33,307 [INFO] [Enricher] skipping soundcloud heavy enrichment for 'goosewya' due to low row confidence (score=0.00 threshold=0.30 reasons=none)
+2026-04-13 19:55:33,406 [INFO] [Enricher] Bandcamp: status=no_match mode=directory_discover attempts=0 403=0 artist='goosewya'
+2026-04-13 19:55:33,407 [INFO] [Enricher] skipping lastfm heavy enrichment for 'goosewya' due to low row confidence (score=0.00 threshold=0.30 reasons=none)
+2026-04-13 19:55:33,409 [INFO] [IG Email] Visiting https://www.instagram.com/goosewya/
+2026-04-13 19:55:56,879 [INFO] [IG Bridge Gate] live_bridge=0 action=skip_live_onehop reason=bridge_failed
+2026-04-13 19:55:56,880 [INFO] [IG Bridge Gate] live_bridge=0 action=static_only_path
+2026-04-13 19:55:56,887 [INFO] [IG Email] no_email_visible
+2026-04-13 19:55:56,899 [INFO] [Enricher] Row 4/7: matched 'janie-kogan' via Triple J Unearthed.
+2026-04-13 19:55:56,900 [INFO] [Enricher] skipping soundcloud heavy enrichment for 'janie-kogan' due to low row confidence (score=0.00 threshold=0.30 reasons=none)
+2026-04-13 19:55:57,040 [INFO] [Enricher] Bandcamp: status=no_match mode=directory_discover attempts=0 403=0 artist='janie-kogan'
+2026-04-13 19:55:57,042 [INFO] [Enricher] skipping lastfm heavy enrichment for 'janie-kogan' due to low row confidence (score=0.00 threshold=0.30 reasons=none)
+2026-04-13 19:55:57,045 [INFO] [IG Email] Visiting https://www.instagram.com/janie.kogan/
+2026-04-13 19:56:15,748 [INFO] [IG Email] Found email: anna.kogan2@gmail.com
+2026-04-13 19:56:15,759 [INFO] [Enricher] Row 6/7: matched 'genezes' via Triple J Unearthed.
+2026-04-13 19:56:15,759 [INFO] [Enricher] skipping soundcloud heavy enrichment for 'genezes' due to low row confidence (score=0.00 threshold=0.30 reasons=none)
+2026-04-13 19:56:15,878 [INFO] [Enricher] Bandcamp: status=no_match mode=directory_discover attempts=0 403=0 artist='genezes'
+2026-04-13 19:56:15,878 [INFO] [Enricher] skipping lastfm heavy enrichment for 'genezes' due to low row confidence (score=0.00 threshold=0.30 reasons=none)
+2026-04-13 19:56:15,879 [INFO] [IG Email] Visiting https://www.instagram.com/genezes_/
+2026-04-13 19:56:25,124 [INFO] [IG Bridge Gate] live_bridge=0 action=skip_live_onehop reason=bridge_failed
+2026-04-13 19:56:25,124 [INFO] [IG Bridge Gate] live_bridge=0 action=static_only_path
+2026-04-13 19:56:25,134 [INFO] [IG Email] no_email_visible
+2026-04-13 19:56:25,140 [INFO] [Enricher] Row 7/7: matched 'buggy' via Triple J Unearthed.
+2026-04-13 19:56:25,141 [INFO] [Enricher] skipping soundcloud heavy enrichment for 'buggy' due to low row confidence (score=0.00 threshold=0.30 reasons=none)
+2026-04-13 19:56:25,229 [INFO] [Enricher] Bandcamp: status=no_match mode=directory_discover attempts=0 403=0 artist='buggy'
+2026-04-13 19:56:25,229 [INFO] [Enricher] skipping lastfm heavy enrichment for 'buggy' due to low row confidence (score=0.00 threshold=0.30 reasons=none)
+2026-04-13 19:56:25,230 [INFO] [Enricher] Late domain reuse backfill: rows_scanned=0 rows_eligible=0 rows_backfilled=0 rows_skipped=0
+2026-04-13 19:56:25,230 [INFO] [Enricher] Domain email reuse summary: indexed_domains=0 rows_reused=0
+2026-04-13 19:56:25,234 [INFO] [Enricher] Enriched CSV written to overnight_runs/2026-04-13_195456/master_enriched.csv
+2026-04-13 19:56:25,234 [INFO] [DomainOrg] No exportable domain/org data; sidecar skipped.
+2026-04-13 19:56:25,234 [INFO] [Enrichment Yield]
+2026-04-13 19:56:25,234 [INFO] instagram=1
+2026-04-13 19:56:25,234 [INFO] [Master Enrich] Completed cross-directory enrichment -> overnight_runs/2026-04-13_195456/master_enriched.csv
+2026-04-13 19:56:25,236 [INFO] [Enrich] Starting enrichment for overnight_runs/2026-04-13_195456/master_enriched.csv
+2026-04-13 19:56:25,246 [INFO] [Auto-Validate] Loaded 7 deduped rows (from 7), validating 0 selected rows...
+2026-04-13 19:56:25,246 [INFO] [Auto-Validate] Selection reasons: none
+2026-04-13 19:56:25,267 [INFO] [Auto-Validate] Completed. Upgraded: 0, Blocked: 0. Output: overnight_runs/2026-04-13_195456/master_pre_fb.csv
+2026-04-13 19:56:25,303 [INFO] [Enrich] Completed enrichment -> overnight_runs/2026-04-13_195456/master_pre_fb.csv
+2026-04-13 19:56:25,314 [INFO] [Night FB][Session Gate] source=none decision=disabled_for_run reason=missing_session_source
+2026-04-13 19:56:25,367 [INFO] [FB Night] Night FB already disabled for this run; passing through without enrichment (reason=missing_session_source).
+2026-04-13 19:56:25,371 [INFO] [FB Debug Summary]
+2026-04-13 19:56:25,371 [INFO] email_written=0
+2026-04-13 19:56:25,372 [INFO] email_found_not_applied=0
+2026-04-13 19:56:25,372 [INFO] no_email_visible=0
+2026-04-13 19:56:25,372 [INFO] login_required_or_blocked=0
+2026-04-13 19:56:25,372 [INFO] content_unavailable=0
+2026-04-13 19:56:25,372 [INFO] timeout_or_fetch_error=0
+2026-04-13 19:56:25,373 [INFO] no_fb_candidate=0
+2026-04-13 19:56:25,376 [INFO] [Master] Facebook global pass completed: overnight_runs/2026-04-13_195456/master_post_fb.csv
+2026-04-13 19:56:25,376 [INFO] [Enrich] Starting enrichment for overnight_runs/2026-04-13_195456/master_post_fb.csv
+2026-04-13 19:56:25,386 [INFO] [Auto-Validate] Loaded 7 deduped rows (from 7), validating 2 selected rows...
+2026-04-13 19:56:25,386 [INFO] [Auto-Validate] Selection reasons: uncertain_score=2
+2026-04-13 19:56:27,750 [INFO] [Auto-Validate] soundcloud: checked 1 URL(s)
+2026-04-13 19:56:27,750 [INFO] [Auto-Validate] Completed. Upgraded: 0, Blocked: 0. Output: overnight_runs/2026-04-13_195456/master_enriched_deduped.csv
+2026-04-13 19:56:27,814 [INFO] [Enrich] Completed enrichment -> overnight_runs/2026-04-13_195456/master_enriched_deduped.csv
+2026-04-13 19:56:27,814 [INFO] [Master] Validation completed: overnight_runs/2026-04-13_195456/master_enriched_deduped.csv
+2026-04-13 19:56:27,815 [INFO] [Master] Exporting client-facing CSV: overnight_runs/2026-04-13_195456/master_enriched_deduped.csv -> overnight_runs/2026-04-13_195456/master_export_leads.csv
+2026-04-13 19:56:27,902 [INFO] [Exporter] Export profile=full_dump: input rows=7, exported rows=7
+2026-04-13 19:56:27,903 [INFO] [Master] Export wrote 7 rows to overnight_runs/2026-04-13_195456/master_export_leads.csv
+2026-04-13 19:56:27,903 [INFO] [Master] Exported client-facing leads CSV: overnight_runs/2026-04-13_195456/master_export_leads.csv
+2026-04-13 19:56:27,917 [INFO] SMOKE RESULT: PASS (DEGRADED: bandcamp 403s)
+2026-04-13 19:56:27,917 [INFO] Smoke Summary:
+2026-04-13 19:56:27,917 [INFO]  - jobs attempted: 1
+2026-04-13 19:56:27,918 [INFO]  - jobs merged: 1
+2026-04-13 19:56:27,918 [INFO]  - jobs skipped (read errors): 0
+2026-04-13 19:56:27,918 [INFO]  - master_raw rows: 7
+2026-04-13 19:56:27,918 [INFO]  - enrichment ran: yes
+2026-04-13 19:56:27,918 [INFO]  - enrichment rows: 8
+2026-04-13 19:56:27,918 [INFO]  - SC challenges: 0
+2026-04-13 19:56:27,919 [INFO]  - SC breaker tripped: False
+2026-04-13 19:56:27,919 [INFO]  - SC live disabled reason: n/a
+2026-04-13 19:56:27,919 [INFO]  - Bandcamp HTTP 403 count: 5
+2026-04-13 19:56:27,919 [INFO]  - Last.fm HTTP 406 count: 0
+2026-04-13 19:56:27,919 [INFO]  - Emails with missing provenance URL: 0
+2026-04-13 19:56:27,919 [INFO]  - Emails total (raw merged): 1
+2026-04-13 19:56:27,943 [INFO] [Run Summary] Wrote run summary: overnight_runs/2026-04-13_195456/run_summary.json

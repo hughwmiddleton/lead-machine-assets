@@ -1,0 +1,51 @@
+2026-04-13 19:48:44,241 [INFO] Starting scrape for job job_unearthed_1
+2026-04-13 19:48:44,772 [INFO] [Directory] Running job for directory=unearthed slug= job_id=job_unearthed_1
+2026-04-13 19:48:44,773 [INFO] [Unearthed] Using FULL pipeline entrypoint: run_unearthed_pipeline
+2026-04-13 19:48:44,774 [INFO] [Unearthed] FULL pipeline entry failed; falling back to listing-only scrape_website.
+2026-04-13 19:48:44,775 [INFO] [Unearthed] Falling back to listing-only scrape_website for job: {'directory': 'unearthed', 'mode': '', 'input_seed_csv': '', 'target_valid_leads': 15, 'max_hours': 0, 'job_id': 'job_unearthed_1', '_night_mode_state': {'job_id': 'job_unearthed_1', 'raw_csv': 'overnight_runs/2026-04-13_194844/job_unearthed_1/raw.csv', 'enriched_csv': 'overnight_runs/2026-04-13_194844/job_unearthed_1/enriched.csv', 'input_seed_csv': '', 'status': 'running', 'error_count': 0, 'last_update': '2026-04-13T09:48:44.241529+00:00'}, '_night_mode_state_persist': <function _process_job.<locals>._persist_runtime_state at 0x109a47f60>}
+2026-04-13 19:48:44,776 [INFO] [Directory] Job failed for directory=unearthed: RuntimeError: Can't find free port (Unable to bind to IPv4 or IPv6)
+2026-04-13 19:48:44,783 [ERROR] Job job_unearthed_1 failed: Can't find free port (Unable to bind to IPv4 or IPv6)
+2026-04-13 19:48:44,784 [ERROR] Traceback (most recent call last):
+  File "/Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/site-packages/selenium/webdriver/common/utils.py", line 39, in free_port
+    free_socket.bind(("127.0.0.1", 0))
+PermissionError: [Errno 1] Operation not permitted
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/site-packages/selenium/webdriver/common/utils.py", line 46, in free_port
+    free_socket.bind(("::1", 0))
+PermissionError: [Errno 1] Operation not permitted
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/night_mode_runner.py", line 1312, in _process_job
+    run_directory_job(runtime_job, state["raw_csv"], logger=logger.info)
+  File "/Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/pipeline_runner.py", line 2756, in run_directory_job
+    module.scrape_website(
+  File "/Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/Lead Machine (Final Update 5).py", line 1253, in scrape_website
+    driver = setup_driver()
+             ^^^^^^^^^^^^^^
+  File "/Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/Lead Machine (Final Update 5).py", line 1138, in setup_driver
+    driver = _start_chromedriver_with_retry(chrome_options)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/Lead Machine (Final Update 5).py", line 1041, in _start_chromedriver_with_retry
+    raise last_exc
+  File "/Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/Lead Machine (Final Update 5).py", line 1035, in _start_chromedriver_with_retry
+    driver = webdriver.Chrome(options=chrome_options)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/site-packages/selenium/webdriver/chrome/webdriver.py", line 42, in __init__
+    service = service if service else Service()
+                                      ^^^^^^^^^
+  File "/Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/site-packages/selenium/webdriver/chrome/service.py", line 51, in __init__
+    super().__init__(
+  File "/Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/site-packages/selenium/webdriver/chromium/service.py", line 64, in __init__
+    super().__init__(
+  File "/Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/site-packages/selenium/webdriver/common/service.py", line 71, in __init__
+    self.port = port or utils.free_port()
+                        ^^^^^^^^^^^^^^^^^
+  File "/Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/site-packages/selenium/webdriver/common/utils.py", line 50, in free_port
+    raise RuntimeError("Can't find free port (Unable to bind to IPv4 or IPv6)")
+RuntimeError: Can't find free port (Unable to bind to IPv4 or IPv6)
+

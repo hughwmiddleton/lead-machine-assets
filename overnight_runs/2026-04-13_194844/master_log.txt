@@ -1,0 +1,18 @@
+2026-04-13 19:48:44,785 [WARNING] [Master] Skipping overnight_runs/2026-04-13_194844/job_unearthed_1/raw.csv (job=job_unearthed_1) bytes=0 reason=missing file
+2026-04-13 19:48:44,786 [WARNING] [Master] No data available after reading raw files.
+2026-04-13 19:48:44,786 [INFO] SMOKE RESULT: PASS (DEGRADED: job raw CSV read errors, master_raw has zero rows)
+2026-04-13 19:48:44,787 [INFO] Smoke Summary:
+2026-04-13 19:48:44,788 [INFO]  - jobs attempted: 1
+2026-04-13 19:48:44,788 [INFO]  - jobs merged: 0
+2026-04-13 19:48:44,789 [INFO]  - jobs skipped (read errors): 1
+2026-04-13 19:48:44,790 [INFO]  - master_raw rows: 0
+2026-04-13 19:48:44,791 [INFO]  - enrichment ran: no
+2026-04-13 19:48:44,791 [INFO]  - enrichment rows: 0
+2026-04-13 19:48:44,792 [INFO]  - SC challenges: 0
+2026-04-13 19:48:44,793 [INFO]  - SC breaker tripped: False
+2026-04-13 19:48:44,793 [INFO]  - SC live disabled reason: n/a
+2026-04-13 19:48:44,794 [INFO]  - Bandcamp HTTP 403 count: 0
+2026-04-13 19:48:44,794 [INFO]  - Last.fm HTTP 406 count: 0
+2026-04-13 19:48:44,795 [INFO]  - Emails with missing provenance URL: 0
+2026-04-13 19:48:44,796 [INFO]  - Emails total (raw merged): 0
+2026-04-13 19:48:44,797 [INFO] [Run Summary] Wrote run summary: overnight_runs/2026-04-13_194844/run_summary.json

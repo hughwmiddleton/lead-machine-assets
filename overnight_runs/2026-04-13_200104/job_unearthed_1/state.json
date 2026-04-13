@@ -1,0 +1,13 @@
+{
+  "job_id": "job_unearthed_1",
+  "raw_csv": "overnight_runs/2026-04-13_200104/job_unearthed_1/raw.csv",
+  "enriched_csv": "overnight_runs/2026-04-13_200104/job_unearthed_1/raw.csv",
+  "input_seed_csv": "",
+  "status": "completed",
+  "error_count": 0,
+  "last_update": "2026-04-13T10:01:17.441805+00:00",
+  "unearthed_last_profile_url": null,
+  "row_count": 1,
+  "current_row_index": 1,
+  "valid_leads_so_far": 1
+}
