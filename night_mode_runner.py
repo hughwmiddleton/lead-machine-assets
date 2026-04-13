@@ -1367,10 +1367,10 @@ def _process_job(
             else:
                 cursor_value = cursor_value.strip() or None
             try:
-                cursor_path = os.path.join(os.path.dirname(os.path.abspath(run_dir)), "unearthed_cursor.json")
-                os.makedirs(os.path.dirname(cursor_path), exist_ok=True)
-                with open(cursor_path, "w", encoding="utf-8") as handle:
-                    json.dump({"unearthed_persistent_cursor": cursor_value}, handle, indent=2)
+                legacy_module = pipeline_runner._load_legacy_module()
+                write_persistent_cursor = getattr(legacy_module, "_write_unearthed_persistent_cursor", None)
+                if callable(write_persistent_cursor):
+                    write_persistent_cursor(cursor_value)
             except Exception:
                 pass
             state["unearthed_last_profile_url"] = None
