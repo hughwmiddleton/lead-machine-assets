@@ -58,7 +58,13 @@ from email_normalizer import (
     normalize_obfuscated_email_patterns,
 )
 from email_provenance import EMAIL_PROVENANCE_JSON_COL, _set_email_with_provenance, merge_email_provenance_into_target
-from fb_attribution import apply_fb_opportunity_state_df, ensure_fb_attribution_columns
+from fb_attribution import (
+    FB_ATTEMPT_STATE_COL,
+    FB_DEBUG_REASON_COL,
+    FB_WRITE_STATE_COL,
+    apply_fb_opportunity_state_df,
+    ensure_fb_attribution_columns,
+)
 
 from facebook_enrich import (
     FbCandidate,
@@ -14764,6 +14770,20 @@ class CrossDirectoryEnricherWorker(QThread):
                                 f"[FB Guard] Discarding emails from rejected FB page '{page_label}' for '{artist_label}' (reason={fb_status_val})"
                             )
                         else:
+                            seed_df = ensure_fb_attribution_columns(seed_df)
+                            try:
+                                from pipeline_runner import (
+                                    _classify_fb_debug_reason,
+                                    _classify_fb_write_state,
+                                    _fb_write_surface_snapshot,
+                                )
+
+                                fb_write_before = _fb_write_surface_snapshot(seed_df.loc[row_idx])
+                            except Exception:
+                                _classify_fb_debug_reason = None
+                                _classify_fb_write_state = None
+                                _fb_write_surface_snapshot = None
+                                fb_write_before = None
                             current_email = cell_to_str(seed_df.at[row_idx, "Email"])
                             if not current_email:
                                 seed_df.at[row_idx, "Email"] = fb_emails[0]
@@ -14795,7 +14815,30 @@ class CrossDirectoryEnricherWorker(QThread):
                             seed_df.at[row_idx, "__fb_emails_applied"] = ";".join(
                                 sorted({e.strip().lower() for e in fb_emails if e})
                             )
-                            seed_df.at[row_idx, "FB_Status"] = seed_df.at[row_idx, "FB_Status"] or "found_email"
+                            existing_fb_status = cell_to_str(seed_df.at[row_idx, "FB_Status"])
+                            if existing_fb_status in {"pass_a_no_email_on_page", "pass_a_skipped_no_fb_url"}:
+                                normalized_fb_status = "pass_a_found_email"
+                            elif existing_fb_status in {"", "no_email_on_page", "no_fb_url"}:
+                                normalized_fb_status = "found_email"
+                            else:
+                                normalized_fb_status = existing_fb_status
+                            seed_df.at[row_idx, "FB_Status"] = normalized_fb_status
+                            seed_df.at[row_idx, FB_ATTEMPT_STATE_COL] = "attempted_fb_found_email"
+                            if (
+                                _classify_fb_write_state is not None
+                                and _classify_fb_debug_reason is not None
+                                and _fb_write_surface_snapshot is not None
+                                and fb_write_before is not None
+                            ):
+                                fb_write_after = _fb_write_surface_snapshot(seed_df.loc[row_idx])
+                                seed_df.at[row_idx, FB_WRITE_STATE_COL] = _classify_fb_write_state(
+                                    fb_write_before,
+                                    fb_write_after,
+                                    seed_df.at[row_idx, FB_ATTEMPT_STATE_COL],
+                                )
+                                seed_df.at[row_idx, FB_DEBUG_REASON_COL] = _classify_fb_debug_reason(
+                                    seed_df.loc[row_idx]
+                                )
                             try:
                                 from pipeline_runner import record_email_summary_row_change
 

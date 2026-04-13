@@ -1,3 +1,5 @@
+import json
+
 import pandas as pd
 import pytest
 from types import SimpleNamespace
@@ -706,6 +708,63 @@ def test_fb_explicit_email_discovery_increments_summary(monkeypatch):
     assert pipeline_runner.get_email_summary_counts()["emails_found"] == 1
 
 
+def test_fb_enrich_success_normalizes_stale_pass_a_status_fields(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    worker._row_is_spotify_origin = lambda *args, **kwargs: True
+    seed_df = _seed_df(
+        {
+            "Artist Name": "godlands",
+            "Email": "alex@fatcatmusicgroup.com",
+            "Email_All": "alex@fatcatmusicgroup.com",
+            "facebook_url": "https://www.facebook.com/iamgodlands",
+            "Facebook_URL": "https://www.facebook.com/iamgodlands",
+            "Social Link": "",
+            "External Links": "",
+            "Email_Source_URL": "https://www.instagram.com/iamgodlands/",
+            "Email_Source_Type": "instagram_enrich",
+            "Email_Extract_Method": "regex",
+            "Email_Provenance_JSON": json.dumps(
+                {
+                    "alex@fatcatmusicgroup.com": {
+                        "extract_method": "regex",
+                        "source_type": "instagram_enrich",
+                        "source_url": "https://www.instagram.com/iamgodlands/",
+                        "surface": "instagram_profile",
+                    }
+                }
+            ),
+            "FB_Status": "pass_a_no_email_on_page",
+            "FB_Attempt_State": "attempted_fb_no_email_on_page",
+            "FB_Write_State": "fb_no_email_written",
+            "FB_Debug_Reason": "no_email_visible",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+
+    def fake_extract(driver, url, log_fn=None, **kwargs):
+        return (["mikeadams@littleempiremusic.com"], url, "")
+
+    monkeypatch.setattr(cde, "_extract_fb_emails_bounded", fake_extract)
+
+    matched = worker._enrich_row_facebook(seed_df, 0, object(), ctx)
+
+    assert matched is True
+    assert seed_df.at[0, "Email"] == "alex@fatcatmusicgroup.com"
+    assert pipeline_runner.normalize_emails(seed_df.at[0, "Email_All"]) == [
+        "alex@fatcatmusicgroup.com",
+        "mikeadams@littleempiremusic.com",
+    ]
+    assert seed_df.at[0, "__fb_emails_applied"] == "mikeadams@littleempiremusic.com"
+    assert seed_df.at[0, "FB_Status"] == "pass_a_found_email"
+    assert seed_df.at[0, "FB_Attempt_State"] == "attempted_fb_found_email"
+    assert seed_df.at[0, "FB_Write_State"] == "fb_wrote_email_all_only"
+    assert seed_df.at[0, "FB_Debug_Reason"] == "email_written"
+    provenance = json.loads(seed_df.at[0, "Email_Provenance_JSON"])
+    assert provenance["mikeadams@littleempiremusic.com"]["source_type"] == "facebook_enrich"
+    assert provenance["mikeadams@littleempiremusic.com"]["source_url"] == "https://www.facebook.com/iamgodlands"
+
+
 def test_fb_enrich_skips_when_email_present(monkeypatch):
     logs = []
     worker = _make_worker(logs)
@@ -737,6 +796,41 @@ def test_fb_enrich_skips_when_email_present(monkeypatch):
     assert called is False
     assert seed_df.at[0, "Email"] == "existing@example.com"
     assert "skip" in " ".join(logs).lower()
+
+
+def test_fb_enrich_skip_with_non_fb_email_does_not_flip_fb_status(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "IG Only",
+            "Email": "existing@example.com",
+            "Email_All": "existing@example.com",
+            "facebook_url": "https://www.facebook.com/igonly",
+            "Facebook_URL": "https://www.facebook.com/igonly",
+            "Social Link": "",
+            "External Links": "",
+            "FB_Status": "pass_a_no_email_on_page",
+            "FB_Attempt_State": "attempted_fb_no_email_on_page",
+            "FB_Write_State": "fb_no_email_written",
+            "FB_Debug_Reason": "no_email_visible",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+
+    monkeypatch.setattr(
+        cde,
+        "_extract_fb_emails_bounded",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("facebook extraction should be skipped")),
+    )
+
+    matched = worker._enrich_row_facebook(seed_df, 0, object(), ctx)
+
+    assert matched is False
+    assert seed_df.at[0, "FB_Status"] == "pass_a_no_email_on_page"
+    assert seed_df.at[0, "FB_Attempt_State"] == "attempted_fb_no_email_on_page"
+    assert seed_df.at[0, "FB_Write_State"] == "fb_no_email_written"
+    assert seed_df.at[0, "FB_Debug_Reason"] == "no_email_visible"
 
 
 def test_row_has_usable_email_for_fb_skip_ignores_placeholder_only_values():
