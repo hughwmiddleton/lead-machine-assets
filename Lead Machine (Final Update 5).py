@@ -1181,10 +1181,11 @@ SCRAPE_FB_EMAILS_ON_UNEARTHED_PAGE1 = False
 # =============================================================================
 # Scraping Functions for Artist Data (Page 1)
 # =============================================================================
-def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200, fb_session=None):
+def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200, fb_session=None, job_config=None):
     driver = setup_driver()
     fb_driver = None
     artist_data = []
+    job_config = job_config or {}
     try:
         driver.get(url)
         WebDriverWait(driver, 20).until(
@@ -1272,6 +1273,47 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
                 print("No more 'Load More' button found or error:", e)
                 break
         profile_urls = list(profile_urls)[:max_artists]
+        state = job_config.get("_night_mode_state") if isinstance(job_config, dict) else None
+        persist_state = job_config.get("_night_mode_state_persist") if isinstance(job_config, dict) else None
+        resume_enabled = isinstance(job_config, dict) and (
+            "_night_mode_state" in job_config or "unearthed_resume_mode" in job_config
+        )
+        resume_index = 0
+        if resume_enabled:
+            resume_mode = str(job_config.get("unearthed_resume_mode", "auto") or "auto").strip().lower()
+            if resume_mode not in {"auto", "cursor", "fresh"}:
+                resume_mode = "auto"
+            checkpoint = (state.get("unearthed_last_profile_url") or "").strip() if isinstance(state, dict) else ""
+            persistent_cursor = None
+            cursor_path = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)),
+                "overnight_runs",
+                "unearthed_cursor.json",
+            )
+            try:
+                with open(cursor_path, "r", encoding="utf-8") as handle:
+                    cursor_payload = json.load(handle)
+                if isinstance(cursor_payload, dict):
+                    cursor_value = (cursor_payload.get("unearthed_persistent_cursor") or "").strip()
+                    persistent_cursor = cursor_value or None
+            except Exception:
+                persistent_cursor = None
+
+            target_profile_url = None
+            if resume_mode == "auto":
+                target_profile_url = checkpoint or persistent_cursor
+            elif resume_mode == "cursor":
+                target_profile_url = persistent_cursor
+            elif resume_mode == "fresh":
+                target_profile_url = None
+
+            if target_profile_url:
+                try:
+                    resume_index = profile_urls.index(target_profile_url) + 1
+                except ValueError:
+                    resume_index = 0
+
+        profile_urls = profile_urls[resume_index:]
         print(f"Total artist profile URLs to scrape: {len(profile_urls)}")
         if not profile_urls:
             print("No artist profile URLs found. Please check the website structure or selectors.")
@@ -1326,6 +1368,13 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
                     email_value,
                 )
             )
+            if isinstance(state, dict):
+                state["unearthed_last_profile_url"] = profile_url
+                if callable(persist_state):
+                    try:
+                        persist_state()
+                    except Exception:
+                        pass
     except Exception as e:
         print(f"Error during website scraping: {e}")
     finally:
@@ -12177,6 +12226,7 @@ def run_unearthed_pipeline(
         existing_csv=out_path,
         max_artists=target_max or 200,
         fb_session=fb_session,
+        job_config=job_config,
     )
     return out_path
 

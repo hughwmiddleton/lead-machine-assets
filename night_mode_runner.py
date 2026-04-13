@@ -1294,12 +1294,22 @@ def _process_job(
     _write_json(state_path, state)
 
     try:
+        runtime_job = job
+        if directory == "unearthed":
+            runtime_job = dict(job)
+
+            def _persist_runtime_state() -> None:
+                _write_json(state_path, state)
+
+            runtime_job["_night_mode_state"] = state
+            runtime_job["_night_mode_state_persist"] = _persist_runtime_state
+
         if resume and os.path.exists(state["raw_csv"]):
             logger.info("Resume: raw CSV already exists at %s; skipping scrape step.", state["raw_csv"])
             pipeline_runner.ensure_final_raw_csv(state["raw_csv"], job_id, logger=logger.info)
         else:
             logger.info("Starting scrape for job %s", job_id)
-            run_directory_job(job, state["raw_csv"], logger=logger.info)
+            run_directory_job(runtime_job, state["raw_csv"], logger=logger.info)
             pipeline_runner.ensure_final_raw_csv(state["raw_csv"], job_id, logger=logger.info)
         raw_row_count = _count_data_rows(state["raw_csv"])
         state["row_count"] = raw_row_count
@@ -1344,6 +1354,14 @@ def _process_job(
             state["row_count"] = _count_data_rows(state["raw_csv"])
             state["valid_leads_so_far"] = _count_rows(final_enriched)
             state["status"] = "completed"
+            if directory == "unearthed":
+                cursor_value = state.get("unearthed_last_profile_url")
+                if cursor_value:
+                    cursor_path = os.path.join(os.path.dirname(os.path.abspath(run_dir)), "unearthed_cursor.json")
+                    os.makedirs(os.path.dirname(cursor_path), exist_ok=True)
+                    with open(cursor_path, "w", encoding="utf-8") as handle:
+                        json.dump({"unearthed_persistent_cursor": cursor_value}, handle, indent=2)
+                state["unearthed_last_profile_url"] = None
             _write_json(state_path, state)
             logger.info("Completed job %s", job_id)
         else:
@@ -1351,6 +1369,14 @@ def _process_job(
             state["enriched_csv"] = state["raw_csv"]
             state["row_count"] = _count_data_rows(state["raw_csv"])
             state["status"] = "completed"
+            if directory == "unearthed":
+                cursor_value = state.get("unearthed_last_profile_url")
+                if cursor_value:
+                    cursor_path = os.path.join(os.path.dirname(os.path.abspath(run_dir)), "unearthed_cursor.json")
+                    os.makedirs(os.path.dirname(cursor_path), exist_ok=True)
+                    with open(cursor_path, "w", encoding="utf-8") as handle:
+                        json.dump({"unearthed_persistent_cursor": cursor_value}, handle, indent=2)
+                state["unearthed_last_profile_url"] = None
             _write_json(state_path, state)
             logger.info("Completed job %s (raw only; master enrichment pending)", job_id)
         return state

@@ -2680,13 +2680,20 @@ def _run_unearthed_full_pipeline(job_config: Dict[str, Any], raw_output_path: st
                 max_results=max_results or None,
                 headless=True,
                 output_csv=raw_output_path,
+                job_config=job_config,
                 fb_session=fb_session,
             )
             if isinstance(result, str) and result:
                 return result
         except TypeError:
             try:
-                result = pipeline_entry(search_term, region=job_config.get("region"), max_results=max_results or None, fb_session=fb_session)
+                result = pipeline_entry(
+                    search_term,
+                    region=job_config.get("region"),
+                    max_results=max_results or None,
+                    job_config=job_config,
+                    fb_session=fb_session,
+                )
                 if isinstance(result, str) and result:
                     return result
             except Exception:
@@ -2700,6 +2707,7 @@ def _run_unearthed_full_pipeline(job_config: Dict[str, Any], raw_output_path: st
         search_term,
         existing_csv=raw_output_path,
         max_artists=max_results or 200,
+        job_config=job_config,
     )
     return raw_output_path
 
@@ -2749,6 +2757,7 @@ def run_directory_job(job_config: Dict[str, Any], raw_output_path: str, logger: 
                     url,
                     existing_csv=output_path,
                     max_artists=target_count or 200,
+                    job_config=job_config,
                 )
                 _dedupe_unearthed_csv(output_path, logger=logger)
                 finalize_result = _finalize_tmp_csv(tmp_path, final_path)
