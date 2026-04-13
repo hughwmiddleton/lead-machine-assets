@@ -1181,6 +1181,44 @@ SCRAPE_FB_EMAILS_ON_UNEARTHED_PAGE1 = False
 # =============================================================================
 # Scraping Functions for Artist Data (Page 1)
 # =============================================================================
+def _unearthed_cursor_path() -> str:
+    return os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "overnight_runs",
+        "unearthed_cursor.json",
+    )
+
+
+def _load_unearthed_persistent_cursor() -> str | None:
+    try:
+        with open(_unearthed_cursor_path(), "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    cursor_value = payload.get("unearthed_persistent_cursor")
+    if cursor_value is None:
+        return None
+    if not isinstance(cursor_value, str):
+        return None
+    cursor_value = cursor_value.strip()
+    return cursor_value or None
+
+
+def _write_unearthed_persistent_cursor(profile_url: str | None) -> None:
+    cursor_value = profile_url.strip() if isinstance(profile_url, str) else None
+    if not cursor_value:
+        cursor_value = None
+    try:
+        cursor_path = _unearthed_cursor_path()
+        os.makedirs(os.path.dirname(cursor_path), exist_ok=True)
+        with open(cursor_path, "w", encoding="utf-8") as handle:
+            json.dump({"unearthed_persistent_cursor": cursor_value}, handle, indent=2)
+    except Exception:
+        pass
+
+
 def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200, fb_session=None, job_config=None):
     driver = setup_driver()
     fb_driver = None
@@ -1284,20 +1322,7 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
             if resume_mode not in {"auto", "cursor", "fresh"}:
                 resume_mode = "auto"
             checkpoint = (state.get("unearthed_last_profile_url") or "").strip() if isinstance(state, dict) else ""
-            persistent_cursor = None
-            cursor_path = os.path.join(
-                os.path.dirname(os.path.abspath(__file__)),
-                "overnight_runs",
-                "unearthed_cursor.json",
-            )
-            try:
-                with open(cursor_path, "r", encoding="utf-8") as handle:
-                    cursor_payload = json.load(handle)
-                if isinstance(cursor_payload, dict):
-                    cursor_value = (cursor_payload.get("unearthed_persistent_cursor") or "").strip()
-                    persistent_cursor = cursor_value or None
-            except Exception:
-                persistent_cursor = None
+            persistent_cursor = _load_unearthed_persistent_cursor()
 
             target_profile_url = None
             if resume_mode == "auto":
@@ -1370,6 +1395,7 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
             )
             if isinstance(state, dict):
                 state["unearthed_last_profile_url"] = profile_url
+                _write_unearthed_persistent_cursor(profile_url)
                 if callable(persist_state):
                     try:
                         persist_state()

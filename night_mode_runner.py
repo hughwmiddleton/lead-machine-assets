@@ -1362,11 +1362,17 @@ def _process_job(
         state["status"] = "completed"
         if directory == "unearthed":
             cursor_value = state.get("unearthed_last_profile_url")
-            if cursor_value:
+            if not isinstance(cursor_value, str):
+                cursor_value = None
+            else:
+                cursor_value = cursor_value.strip() or None
+            try:
                 cursor_path = os.path.join(os.path.dirname(os.path.abspath(run_dir)), "unearthed_cursor.json")
                 os.makedirs(os.path.dirname(cursor_path), exist_ok=True)
                 with open(cursor_path, "w", encoding="utf-8") as handle:
                     json.dump({"unearthed_persistent_cursor": cursor_value}, handle, indent=2)
+            except Exception:
+                pass
             state["unearthed_last_profile_url"] = None
         _write_json(state_path, state)
         logger.info(completion_log_message, job_id)
