@@ -11006,6 +11006,12 @@ class NightModeWorker(QtCore.QThread):
 
 
 class NightModeTab(QtWidgets.QWidget):
+    UNEARTHED_RESUME_MODE_OPTIONS = [
+        ("Auto (resume from checkpoint or cursor)", "auto"),
+        ("Continue from last position (cursor only)", "cursor"),
+        ("Start fresh (ignore previous progress)", "fresh"),
+    ]
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.worker = None
@@ -11073,6 +11079,13 @@ class NightModeTab(QtWidgets.QWidget):
         self.export_mode_combo.addItems(["both", "per_directory", "combined"])
         options_layout.addWidget(export_label)
         options_layout.addWidget(self.export_mode_combo)
+        unearthed_resume_label = QtWidgets.QLabel("Unearthed Resume Mode:")
+        self.unearthed_resume_mode_combo = QtWidgets.QComboBox()
+        for label, value in self.UNEARTHED_RESUME_MODE_OPTIONS:
+            self.unearthed_resume_mode_combo.addItem(label, value)
+        self._set_unearthed_resume_mode("auto")
+        options_layout.addWidget(unearthed_resume_label)
+        options_layout.addWidget(self.unearthed_resume_mode_combo)
         self.resume_checkbox = QtWidgets.QCheckBox("Resume unfinished jobs")
         self.stop_on_failure_checkbox = QtWidgets.QCheckBox("Stop on first failure")
         self.phased_checkbox = QtWidgets.QCheckBox("Use phased runner (v2)")
@@ -11269,6 +11282,31 @@ class NightModeTab(QtWidgets.QWidget):
                 item = QtWidgets.QTableWidgetItem(value)
                 self.jobs_table.setItem(idx, col, item)
 
+    def _current_unearthed_resume_mode(self) -> str:
+        value = str(self.unearthed_resume_mode_combo.currentData() or "auto").strip().lower()
+        if value not in {"auto", "cursor", "fresh"}:
+            return "auto"
+        return value
+
+    def _set_unearthed_resume_mode(self, value) -> None:
+        normalized = str(value or "auto").strip().lower()
+        if normalized not in {"auto", "cursor", "fresh"}:
+            normalized = "auto"
+        idx = self.unearthed_resume_mode_combo.findData(normalized)
+        if idx < 0:
+            idx = 0
+        self.unearthed_resume_mode_combo.setCurrentIndex(idx)
+
+    def _night_mode_jobs_for_config(self):
+        resume_mode = self._current_unearthed_resume_mode()
+        config_jobs = []
+        for job in self.jobs:
+            job_copy = dict(job)
+            if str(job_copy.get("directory") or "").strip().lower() == "unearthed":
+                job_copy["unearthed_resume_mode"] = resume_mode
+            config_jobs.append(job_copy)
+        return config_jobs
+
     def _open_job_dialog(self, existing_job=None, index=None):
         dialog = NightModeJobDialog(existing_job, parent=self)
         if dialog.exec_() == QtWidgets.QDialog.Accepted:
@@ -11315,7 +11353,8 @@ class NightModeTab(QtWidgets.QWidget):
             return
         config = {
             "export_mode": self.export_mode_combo.currentText().strip(),
-            "jobs": self.jobs,
+            "jobs": self._night_mode_jobs_for_config(),
+            "unearthed_resume_mode": self._current_unearthed_resume_mode(),
         }
         config["phased"] = self.phased_checkbox.isChecked()
         config["facebook"] = {
@@ -11366,6 +11405,7 @@ class NightModeTab(QtWidgets.QWidget):
             QtWidgets.QMessageBox.warning(self, "Invalid config", f"Could not read config:\n{exc}")
             self.jobs_summary.setPlainText("Config could not be parsed.")
             return
+        self._set_unearthed_resume_mode(config.get("unearthed_resume_mode", "auto"))
         export_mode = (config.get("export_mode") or "both").strip().lower()
         if export_mode in {"both", "per_directory", "combined"}:
             idx = self.export_mode_combo.findText(export_mode)
@@ -11420,7 +11460,8 @@ class NightModeTab(QtWidgets.QWidget):
         if self.jobs:
             config = {
                 "export_mode": self.export_mode_combo.currentText().strip(),
-                "jobs": self.jobs,
+                "jobs": self._night_mode_jobs_for_config(),
+                "unearthed_resume_mode": self._current_unearthed_resume_mode(),
             }
             config["phased"] = self._phased_enabled
             config["facebook"] = {
