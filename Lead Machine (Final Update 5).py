@@ -1278,15 +1278,15 @@ def _resolve_unearthed_resume_index(
 ) -> int | None:
     if not target_profile_url:
         return None
-    try:
-        return ordered_profile_urls.index(target_profile_url) + 1
-    except ValueError:
-        pass
     normalized_target_profile_url = _normalize_unearthed_profile_url_for_match(target_profile_url)
     if not normalized_target_profile_url:
         return None
-    for profile_index, profile_url in enumerate(ordered_profile_urls):
-        if _normalize_unearthed_profile_url_for_match(profile_url) == normalized_target_profile_url:
+    for profile_index in range(len(ordered_profile_urls) - 1, -1, -1):
+        profile_url = ordered_profile_urls[profile_index]
+        if (
+            profile_url == target_profile_url
+            or _normalize_unearthed_profile_url_for_match(profile_url) == normalized_target_profile_url
+        ):
             return profile_index + 1
     return None
 

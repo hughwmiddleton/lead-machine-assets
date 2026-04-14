@@ -160,6 +160,29 @@ def test_unearthed_remaining_count_uses_latest_cursor_position() -> None:
     ) == 0
 
 
+def test_unearthed_resume_resolution_prefers_last_logical_occurrence() -> None:
+    module = pipeline_runner._load_legacy_module()
+
+    target_profile_url = "https://www.abc.net.au/triplejunearthed/artist/artist-2"
+    ordered_profile_urls = [
+        "https://www.abc.net.au/triplejunearthed/artist/artist-1",
+        target_profile_url,
+        "https://www.abc.net.au/triplejunearthed/artist/artist-3",
+        f"{target_profile_url}/",
+        "https://www.abc.net.au/triplejunearthed/artist/artist-4",
+        target_profile_url,
+        "https://www.abc.net.au/triplejunearthed/artist/artist-5",
+    ]
+
+    assert module._resolve_unearthed_resume_index(ordered_profile_urls, target_profile_url) == 6
+    assert module._count_unearthed_remaining_profile_urls(ordered_profile_urls, target_profile_url) == 1
+    assert module._slice_unearthed_profile_urls(
+        ordered_profile_urls,
+        f"{target_profile_url}/",
+        2,
+    ) == ordered_profile_urls[6:7]
+
+
 def test_unearthed_resume_matching_ignores_trailing_slash_differences() -> None:
     module = pipeline_runner._load_legacy_module()
 
@@ -274,6 +297,25 @@ def test_scrape_website_waits_for_full_post_cursor_window_before_slicing(monkeyp
         "https://www.abc.net.au/triplejunearthed/artist/artist-6",
     ]
     assert load_more_requests == 2
+
+
+def test_scrape_website_resumes_from_terminal_logical_cursor_occurrence(monkeypatch, tmp_path) -> None:
+    visited_profile_urls, load_more_requests = _run_fake_unearthed_scrape(
+        monkeypatch,
+        tmp_path,
+        [
+            ["artist-1", "artist-2/", "artist-3"],
+            ["artist-1", "artist-2/", "artist-3", "artist-4", "artist-2", "artist-5", "artist-6"],
+        ],
+        max_artists=2,
+        target_profile_url="https://www.abc.net.au/triplejunearthed/artist/artist-2",
+    )
+
+    assert visited_profile_urls == [
+        "https://www.abc.net.au/triplejunearthed/artist/artist-5",
+        "https://www.abc.net.au/triplejunearthed/artist/artist-6",
+    ]
+    assert load_more_requests == 1
 
 
 def test_scrape_website_preserves_fresh_start_fallback_when_cursor_is_never_found(monkeypatch, tmp_path) -> None:
