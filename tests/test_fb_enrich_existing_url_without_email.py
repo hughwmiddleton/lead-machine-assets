@@ -930,7 +930,8 @@ def test_fb_enrich_skips_discovery_for_unearthed_row_without_seeded_fb(monkeypat
     logs = []
     worker = _make_worker(logs)
     worker._row_allows_heavy_enricher = lambda *args, **kwargs: SimpleNamespace(allowed=True)
-    worker._ensure_fb_discovery_session = lambda driver: (True, "authenticated")
+    session_gate_calls = []
+    worker._ensure_fb_discovery_session = lambda driver: session_gate_calls.append(driver) or (True, "authenticated")
     seed_df = _seed_df(
         {
             "Artist Name": "Unearthed No Seed",
@@ -962,11 +963,12 @@ def test_fb_enrich_skips_discovery_for_unearthed_row_without_seeded_fb(monkeypat
     matched = worker._enrich_row_facebook(seed_df, 0, object(), ctx)
 
     assert matched is False
+    assert session_gate_calls == []
     assert discover_calls == []
     assert seed_df.at[0, "facebook_url"] == ""
     assert seed_df.at[0, "Facebook_URL"] == ""
     assert seed_df.at[0, "Facebook URL"] == ""
-    assert any("[FB Discovery][Skip] Unearthed row without seeded Facebook_URL" in msg for msg in logs)
+    assert any("[Unearthed Path] strict explicit-only FB mode; skipping Night FB discovery" in msg for msg in logs)
 
 
 def test_fb_enrich_preserves_seeded_unearthed_fb_scrape(monkeypatch):
@@ -1001,7 +1003,7 @@ def test_fb_enrich_preserves_seeded_unearthed_fb_scrape(monkeypatch):
         lambda *args, **kwargs: discover_calls.append(args) or False,
     )
 
-    def fake_extract(driver_obj, url, log_fn=None):
+    def fake_extract(driver_obj, url, log_fn=None, **kwargs):
         extract_calls.append(url)
         return (["seeded@example.com"], url, "")
 

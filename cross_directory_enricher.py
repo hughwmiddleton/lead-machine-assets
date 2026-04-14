@@ -14688,6 +14688,14 @@ class CrossDirectoryEnricherWorker(QThread):
                             _add_existing_fb_link(part)
                 for explicit_fb_url in explicit_fb_entrypoints:
                     _add_existing_fb_link(explicit_fb_url)
+                is_unearthed = _row_is_unearthed_source(seed_df.loc[row_idx])
+                if is_unearthed and not existing_fb_links:
+                    self.log_message.emit(
+                        "[Unearthed Path] strict explicit-only FB mode; skipping Night FB discovery"
+                    )
+                    self._set_platform_state("facebook", "skipped")
+                    return False
+
                 decision = self._row_allows_heavy_enricher(seed_df.loc[row_idx], ctx, "facebook")
                 if not decision.allowed:
                     self._log_low_confidence_skip("fb", artist, decision)
@@ -14709,7 +14717,6 @@ class CrossDirectoryEnricherWorker(QThread):
 
                 if not existing_fb_links:
                     discovery_row = seed_df.loc[row_idx]
-                    is_unearthed = _row_is_unearthed_source(discovery_row)
                     seeded_fb_url, _ = ensure_canonical_facebook_url(discovery_row, set_row=False)
                     has_seeded_fb = bool(seeded_fb_url)
                     if is_unearthed and not has_seeded_fb:
