@@ -166,6 +166,173 @@ def test_manual_override_still_works_after_bulk_action(qapp, tmp_path):
     assert tab.import_button.isEnabled()
 
 
+def test_save_mapping_preset_persists_current_table_state_locally(qapp, monkeypatch, tmp_path):
+    module = _load_legacy_module()
+    master_path = tmp_path / "master.csv"
+    info_calls = []
+
+    monkeypatch.setattr(module, "get_default_master_csv_path", lambda: master_path)
+    monkeypatch.setattr(
+        module.QtWidgets.QInputDialog,
+        "getText",
+        lambda *args, **kwargs: ("unearthed_reviewed", True),
+    )
+    monkeypatch.setattr(module.QtWidgets.QMessageBox, "warning", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        module.QtWidgets.QMessageBox,
+        "information",
+        lambda *args, **kwargs: info_calls.append(args[2] if len(args) > 2 else ""),
+    )
+
+    tab = module.LeadVaultTab()
+    tab._handle_preview_finished(
+        {
+            "source_path": str(tmp_path / "input.csv"),
+            "master_path": str(master_path),
+            "row_count": 1,
+            "detected_headers": ["Booking Email", "Debug Flag", "Leave Blank"],
+            "mapped_headers": {},
+            "unmapped_headers": ["Booking Email", "Debug Flag", "Leave Blank"],
+            "ignored_headers": [],
+            "warnings": [],
+        }
+    )
+
+    tab.unmapped_table.cellWidget(0, 1).setCurrentText("Primary_Email")
+    tab.unmapped_table.cellWidget(1, 1).setCurrentText(tab.IGNORE_OPTION)
+    tab.save_mapping_preset_button.click()
+
+    state_path = tmp_path / module.LEAD_VAULT_UI_STATE_FILENAME
+    payload = json.loads(state_path.read_text(encoding="utf-8"))
+
+    assert payload["mapping_presets"]["unearthed_reviewed"] == {
+        "Booking Email": "Primary_Email",
+        "Debug Flag": tab.IGNORE_OPTION,
+    }
+    assert "Leave Blank" not in payload["mapping_presets"]["unearthed_reviewed"]
+    assert info_calls
+    assert "Saved preset 'unearthed_reviewed'" in info_calls[0]
+
+
+def test_load_mapping_preset_updates_matching_rows_only_and_manual_override_still_works(qapp, monkeypatch, tmp_path):
+    module = _load_legacy_module()
+    master_path = tmp_path / "master.csv"
+
+    monkeypatch.setattr(module, "get_default_master_csv_path", lambda: master_path)
+    state_path = tmp_path / module.LEAD_VAULT_UI_STATE_FILENAME
+    state_path.write_text(
+        json.dumps(
+            {
+                "mapping_presets": {
+                    "unearthed_reviewed": {
+                        "Email": "Primary_Email",
+                        "Debug Flag": "Ignore column",
+                        "Legacy ID": "Artist",
+                    }
+                }
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        module.QtWidgets.QInputDialog,
+        "getItem",
+        lambda *args, **kwargs: ("unearthed_reviewed", True),
+    )
+    monkeypatch.setattr(module.QtWidgets.QMessageBox, "information", lambda *args, **kwargs: None)
+
+    tab = module.LeadVaultTab()
+    tab._handle_preview_finished(
+        {
+            "source_path": str(tmp_path / "input.csv"),
+            "master_path": str(master_path),
+            "row_count": 1,
+            "detected_headers": ["Email", "Debug Flag", "Fresh Debug"],
+            "mapped_headers": {},
+            "unmapped_headers": ["Email", "Debug Flag", "Fresh Debug"],
+            "ignored_headers": [],
+            "warnings": [],
+        }
+    )
+
+    fresh_combo = tab.unmapped_table.cellWidget(2, 1)
+    fresh_combo.setCurrentText("Artist")
+
+    tab.load_mapping_preset_button.click()
+
+    assert tab.unmapped_table.cellWidget(0, 1).currentData() == "Primary_Email"
+    assert tab.unmapped_table.cellWidget(1, 1).currentData() == tab.IGNORE_OPTION
+    assert fresh_combo.currentData() == "Artist"
+
+    tab.unmapped_table.cellWidget(0, 1).setCurrentText("Contact_Name")
+    overrides, ignored_headers, unresolved_headers = tab._collect_manual_mapping_state()
+
+    assert overrides == {
+        "Email": "Contact_Name",
+        "Fresh Debug": "Artist",
+    }
+    assert ignored_headers == ["Debug Flag"]
+    assert unresolved_headers == []
+
+
+def test_bulk_actions_still_work_after_mapping_preset_load(qapp, monkeypatch, tmp_path):
+    module = _load_legacy_module()
+    master_path = tmp_path / "master.csv"
+
+    monkeypatch.setattr(module, "get_default_master_csv_path", lambda: master_path)
+    (tmp_path / module.LEAD_VAULT_UI_STATE_FILENAME).write_text(
+        json.dumps(
+            {
+                "mapping_presets": {
+                    "repeat_source": {
+                        "Email": "Contact_Name",
+                    }
+                }
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        module.QtWidgets.QInputDialog,
+        "getItem",
+        lambda *args, **kwargs: ("repeat_source", True),
+    )
+    monkeypatch.setattr(module.QtWidgets.QMessageBox, "information", lambda *args, **kwargs: None)
+
+    tab = module.LeadVaultTab()
+    tab._handle_preview_finished(
+        {
+            "source_path": str(tmp_path / "input.csv"),
+            "master_path": str(master_path),
+            "row_count": 1,
+            "detected_headers": ["Email", "Artist Name", "Mystery Header"],
+            "mapped_headers": {},
+            "unmapped_headers": ["Email", "Artist Name", "Mystery Header"],
+            "ignored_headers": [],
+            "warnings": [],
+        }
+    )
+
+    tab.load_mapping_preset_button.click()
+    assert tab.unmapped_table.cellWidget(0, 1).currentData() == "Contact_Name"
+
+    tab.ignore_all_button.click()
+    assert [tab.unmapped_table.cellWidget(index, 1).currentData() for index in range(tab.unmapped_table.rowCount())] == [
+        tab.IGNORE_OPTION,
+        tab.IGNORE_OPTION,
+        tab.IGNORE_OPTION,
+    ]
+
+    tab.auto_map_known_button.click()
+    assert [tab.unmapped_table.cellWidget(index, 1).currentData() for index in range(tab.unmapped_table.rowCount())] == [
+        "Primary_Email",
+        "Artist",
+        tab.IGNORE_OPTION,
+    ]
+
+
 def test_lead_vault_layout_sets_minimum_heights_and_path_tooltips(qapp, monkeypatch, tmp_path):
     module = _load_legacy_module()
     master_path = tmp_path / "master.csv"

@@ -10143,6 +10143,8 @@ class LeadVaultWorker(QtCore.QThread):
 
 class LeadVaultTab(QtWidgets.QWidget):
     IGNORE_OPTION = "Ignore column"
+    _MAPPING_PRESETS_STATE_KEY = "mapping_presets"
+    _SELECTED_MASTER_STATE_KEY = "selected_master_csv"
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -10269,6 +10271,14 @@ class LeadVaultTab(QtWidgets.QWidget):
         self.ignore_all_button.setEnabled(False)
         self.ignore_all_button.clicked.connect(self._ignore_all_headers)
         controls.addWidget(self.ignore_all_button)
+        self.save_mapping_preset_button = QtWidgets.QPushButton("Save Preset")
+        self.save_mapping_preset_button.setEnabled(False)
+        self.save_mapping_preset_button.clicked.connect(self._save_mapping_preset)
+        controls.addWidget(self.save_mapping_preset_button)
+        self.load_mapping_preset_button = QtWidgets.QPushButton("Load Preset")
+        self.load_mapping_preset_button.setEnabled(False)
+        self.load_mapping_preset_button.clicked.connect(self._load_mapping_preset)
+        controls.addWidget(self.load_mapping_preset_button)
         controls.addStretch()
         self.import_button = QtWidgets.QPushButton("Run Lead Vault Import")
         self.import_button.setEnabled(False)
@@ -10374,6 +10384,23 @@ class LeadVaultTab(QtWidgets.QWidget):
     def _lead_vault_state_path(self) -> Path:
         return self._master_csv_directory() / LEAD_VAULT_UI_STATE_FILENAME
 
+    def _load_lead_vault_ui_state(self) -> Dict[str, object]:
+        state_path = self._lead_vault_state_path()
+        try:
+            with open(state_path, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except Exception:
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def _persist_lead_vault_ui_state(self, payload: Dict[str, object]):
+        state_path = self._lead_vault_state_path()
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = state_path.with_suffix(f"{state_path.suffix}.tmp")
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2, sort_keys=True)
+        os.replace(tmp_path, state_path)
+
     def _available_master_csv_paths(self) -> List[Path]:
         master_dir = self._master_csv_directory()
         available_paths = sorted(
@@ -10452,27 +10479,46 @@ class LeadVaultTab(QtWidgets.QWidget):
         self.master_selector.blockSignals(False)
 
     def _load_persisted_master_filename(self) -> str:
-        state_path = self._lead_vault_state_path()
         default_filename = get_default_master_csv_path().name
+        payload = self._load_lead_vault_ui_state()
         try:
-            with open(state_path, "r", encoding="utf-8") as handle:
-                payload = json.load(handle)
-        except Exception:
-            return default_filename
-
-        try:
-            return self._validate_master_filename(str(payload.get("selected_master_csv") or default_filename))
+            return self._validate_master_filename(str(payload.get(self._SELECTED_MASTER_STATE_KEY) or default_filename))
         except ValueError:
             return default_filename
 
     def _persist_selected_master_filename(self, filename: str):
-        state_path = self._lead_vault_state_path()
-        state_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = state_path.with_suffix(f"{state_path.suffix}.tmp")
-        payload = {"selected_master_csv": self._validate_master_filename(filename)}
-        with open(tmp_path, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, indent=2)
-        os.replace(tmp_path, state_path)
+        payload = self._load_lead_vault_ui_state()
+        payload[self._SELECTED_MASTER_STATE_KEY] = self._validate_master_filename(filename)
+        self._persist_lead_vault_ui_state(payload)
+
+    def _load_mapping_presets_state(self) -> Dict[str, Dict[str, str]]:
+        payload = self._load_lead_vault_ui_state()
+        raw_presets = payload.get(self._MAPPING_PRESETS_STATE_KEY)
+        if not isinstance(raw_presets, dict):
+            return {}
+
+        cleaned_presets: Dict[str, Dict[str, str]] = {}
+        canonical_fields = set(get_canonical_master_schema())
+        valid_targets = canonical_fields | {self.IGNORE_OPTION}
+        for preset_name, raw_mapping in raw_presets.items():
+            name = str(preset_name or "").strip()
+            if not name or not isinstance(raw_mapping, dict):
+                continue
+
+            cleaned_mapping: Dict[str, str] = {}
+            for raw_header, raw_target in raw_mapping.items():
+                header_name = str(raw_header or "").strip()
+                target_name = str(raw_target or "").strip()
+                if not header_name or target_name not in valid_targets:
+                    continue
+                cleaned_mapping[header_name] = target_name
+            cleaned_presets[name] = cleaned_mapping
+        return cleaned_presets
+
+    def _persist_mapping_presets_state(self, presets: Dict[str, Dict[str, str]]):
+        payload = self._load_lead_vault_ui_state()
+        payload[self._MAPPING_PRESETS_STATE_KEY] = dict(sorted(presets.items(), key=lambda item: item[0].lower()))
+        self._persist_lead_vault_ui_state(payload)
 
     def _apply_master_selection(
         self,
@@ -10579,6 +10625,8 @@ class LeadVaultTab(QtWidgets.QWidget):
         self.import_button.setEnabled(False)
         self.auto_map_known_button.setEnabled(False)
         self.ignore_all_button.setEnabled(False)
+        self.save_mapping_preset_button.setEnabled(False)
+        self.load_mapping_preset_button.setEnabled(False)
 
     def _selected_export_preset(self) -> dict:
         return self.preset_selector.currentData() or WOODPECKER_EXPORT_PRESET
@@ -10714,6 +10762,101 @@ class LeadVaultTab(QtWidgets.QWidget):
         if index >= 0 and combo.currentIndex() != index:
             combo.setCurrentIndex(index)
 
+    def _current_mapping_preset_payload(self) -> Dict[str, str]:
+        mapping: Dict[str, str] = {}
+        for header_name, combo in self._iter_unmapped_mapping_rows():
+            selected_value = str(combo.currentData() or "").strip()
+            if selected_value:
+                mapping[header_name] = selected_value
+        return mapping
+
+    def _apply_mapping_preset_payload(self, preset_mapping: Dict[str, str]) -> int:
+        applied_count = 0
+        for header_name, combo in self._iter_unmapped_mapping_rows():
+            target_value = str(preset_mapping.get(header_name) or "").strip()
+            if not target_value:
+                continue
+            previous_value = str(combo.currentData() or "")
+            self._set_mapping_combo_value(combo, target_value)
+            if str(combo.currentData() or "") == target_value and previous_value != target_value:
+                applied_count += 1
+        self._refresh_import_button()
+        return applied_count
+
+    def _save_mapping_preset(self):
+        if self.unmapped_table.rowCount() <= 0:
+            QtWidgets.QMessageBox.information(self, "Lead Vault", "Preview a CSV with mapping rows before saving a preset.")
+            return
+
+        preset_name, ok = QtWidgets.QInputDialog.getText(
+            self,
+            "Save Mapping Preset",
+            "Preset name:",
+            QtWidgets.QLineEdit.Normal,
+            "",
+        )
+        if not ok:
+            return
+
+        safe_name = str(preset_name or "").strip()
+        if not safe_name:
+            QtWidgets.QMessageBox.warning(self, "Lead Vault", "Enter a preset name.")
+            return
+
+        presets = self._load_mapping_presets_state()
+        if safe_name in presets:
+            overwrite = QtWidgets.QMessageBox.question(
+                self,
+                "Lead Vault",
+                f"Replace existing preset '{safe_name}'?",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                QtWidgets.QMessageBox.No,
+            )
+            if overwrite != QtWidgets.QMessageBox.Yes:
+                return
+
+        presets[safe_name] = self._current_mapping_preset_payload()
+        self._persist_mapping_presets_state(presets)
+        QtWidgets.QMessageBox.information(
+            self,
+            "Lead Vault",
+            f"Saved preset '{safe_name}' with {len(presets[safe_name])} mapped header(s).",
+        )
+        self._refresh_import_button()
+
+    def _load_mapping_preset(self):
+        if self.unmapped_table.rowCount() <= 0:
+            QtWidgets.QMessageBox.information(self, "Lead Vault", "Preview a CSV with mapping rows before loading a preset.")
+            return
+
+        presets = self._load_mapping_presets_state()
+        if not presets:
+            QtWidgets.QMessageBox.information(self, "Lead Vault", "No mapping presets saved yet.")
+            return
+
+        preset_names = sorted(presets.keys(), key=str.lower)
+        preset_name, ok = QtWidgets.QInputDialog.getItem(
+            self,
+            "Load Mapping Preset",
+            "Preset:",
+            preset_names,
+            0,
+            False,
+        )
+        if not ok:
+            return
+
+        safe_name = str(preset_name or "").strip()
+        if not safe_name:
+            return
+
+        applied_count = self._apply_mapping_preset_payload(presets.get(safe_name, {}))
+        QtWidgets.QMessageBox.information(
+            self,
+            "Lead Vault",
+            f"Loaded preset '{safe_name}'. Applied {applied_count} header mapping(s) to the current table.",
+        )
+
     def _ignore_all_headers(self):
         for _, combo in self._iter_unmapped_mapping_rows():
             self._set_mapping_combo_value(combo, self.IGNORE_OPTION)
@@ -10742,12 +10885,17 @@ class LeadVaultTab(QtWidgets.QWidget):
 
     def _refresh_import_button(self):
         has_mapping_rows = self.unmapped_table.rowCount() > 0
+        controls_enabled = bool(self.preview_result) and has_mapping_rows and not bool(
+            getattr(self.worker, "isRunning", lambda: False)()
+        )
         self.auto_map_known_button.setEnabled(
-            bool(self.preview_result) and has_mapping_rows and not bool(getattr(self.worker, "isRunning", lambda: False)())
+            controls_enabled
         )
         self.ignore_all_button.setEnabled(
-            bool(self.preview_result) and has_mapping_rows and not bool(getattr(self.worker, "isRunning", lambda: False)())
+            controls_enabled
         )
+        self.save_mapping_preset_button.setEnabled(controls_enabled)
+        self.load_mapping_preset_button.setEnabled(controls_enabled)
         if not self.preview_result or bool(getattr(self.worker, "isRunning", lambda: False)()):
             self.import_button.setEnabled(False)
             return
