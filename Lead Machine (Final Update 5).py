@@ -1272,23 +1272,66 @@ def _normalize_unearthed_profile_url_for_match(profile_url: str | None) -> str:
     return urlunparse(parsed._replace(path=normalized_path))
 
 
+def _build_unearthed_resume_debug_details(
+    ordered_profile_urls: list[str],
+    target_profile_url: str | None,
+) -> dict:
+    normalized_target_profile_url = _normalize_unearthed_profile_url_for_match(target_profile_url)
+    exact_match_indices = []
+    normalized_match_indices = []
+    if target_profile_url:
+        exact_match_indices = [
+            profile_index
+            for profile_index, profile_url in enumerate(ordered_profile_urls)
+            if profile_url == target_profile_url
+        ]
+    if normalized_target_profile_url:
+        normalized_match_indices = [
+            profile_index
+            for profile_index, profile_url in enumerate(ordered_profile_urls)
+            if _normalize_unearthed_profile_url_for_match(profile_url) == normalized_target_profile_url
+        ]
+    resolved_resume_index = None
+    if normalized_target_profile_url:
+        for profile_index in range(len(ordered_profile_urls) - 1, -1, -1):
+            profile_url = ordered_profile_urls[profile_index]
+            if (
+                profile_url == target_profile_url
+                or _normalize_unearthed_profile_url_for_match(profile_url) == normalized_target_profile_url
+            ):
+                resolved_resume_index = profile_index + 1
+                break
+    return {
+        "target_profile_url": target_profile_url,
+        "normalized_target_profile_url": normalized_target_profile_url,
+        "ordered_profile_urls_count": len(ordered_profile_urls),
+        "exact_match_indices": exact_match_indices,
+        "normalized_match_indices": normalized_match_indices,
+        "resolved_resume_index": resolved_resume_index,
+    }
+
+
+def _log_unearthed_resume_debug(message: str) -> None:
+    print(f"[UE Resume Debug] {message}")
+
+
 def _resolve_unearthed_resume_index(
     ordered_profile_urls: list[str],
     target_profile_url: str | None,
 ) -> int | None:
     if not target_profile_url:
         return None
-    normalized_target_profile_url = _normalize_unearthed_profile_url_for_match(target_profile_url)
-    if not normalized_target_profile_url:
-        return None
-    for profile_index in range(len(ordered_profile_urls) - 1, -1, -1):
-        profile_url = ordered_profile_urls[profile_index]
-        if (
-            profile_url == target_profile_url
-            or _normalize_unearthed_profile_url_for_match(profile_url) == normalized_target_profile_url
-        ):
-            return profile_index + 1
-    return None
+    debug_details = _build_unearthed_resume_debug_details(ordered_profile_urls, target_profile_url)
+    _log_unearthed_resume_debug(
+        "resolver "
+        f"target_profile_url={debug_details['target_profile_url']!r} "
+        f"normalized_target_profile_url={debug_details['normalized_target_profile_url']!r} "
+        f"ordered_profile_urls_count={debug_details['ordered_profile_urls_count']} "
+        f"exact_match_indices={debug_details['exact_match_indices']} "
+        f"normalized_match_indices={debug_details['normalized_match_indices']} "
+        f"resolved_resume_index={debug_details['resolved_resume_index']}"
+    )
+    return debug_details["resolved_resume_index"]
 
 
 def _count_unearthed_remaining_profile_urls(
@@ -1466,6 +1509,40 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
                 except Exception as e:
                     print("No more 'Load More' button found or error:", e)
                     break
+        if target_profile_url:
+            debug_details = _build_unearthed_resume_debug_details(ordered_profile_urls, target_profile_url)
+            resolved_resume_index = debug_details["resolved_resume_index"]
+            remaining_after_resume_index = 0
+            if resolved_resume_index is not None:
+                remaining_after_resume_index = len(ordered_profile_urls[resolved_resume_index:])
+            slice_ready = _is_unearthed_slice_ready(ordered_profile_urls, target_profile_url, max_artists)
+            fallback_to_zero = resolved_resume_index is None
+            fallback_reason = ""
+            if fallback_to_zero:
+                if not debug_details["normalized_target_profile_url"]:
+                    fallback_reason = "empty_normalized_target"
+                elif debug_details["normalized_match_indices"]:
+                    fallback_reason = "matched_but_unresolved"
+                else:
+                    fallback_reason = "no_matches"
+            elif remaining_after_resume_index < max_artists:
+                fallback_reason = "insufficient_post_cursor_rows"
+            else:
+                fallback_reason = "resume_window_ready"
+            _log_unearthed_resume_debug(
+                "discovery_sample "
+                f"first10={ordered_profile_urls[:10]} "
+                f"last10={ordered_profile_urls[-10:]}"
+            )
+            _log_unearthed_resume_debug(
+                "slice_decision "
+                f"resolved_resume_index={resolved_resume_index} "
+                f"remaining_after_resume_index={remaining_after_resume_index} "
+                f"max_artists={max_artists} "
+                f"slice_ready={slice_ready} "
+                f"fallback_to_zero={fallback_to_zero} "
+                f"fallback_reason={fallback_reason}"
+            )
         profile_urls = _slice_unearthed_profile_urls(ordered_profile_urls, target_profile_url, max_artists)
         print(f"Total artist profile URLs to scrape: {len(profile_urls)}")
         if not profile_urls:

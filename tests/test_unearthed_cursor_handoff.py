@@ -318,6 +318,35 @@ def test_scrape_website_resumes_from_terminal_logical_cursor_occurrence(monkeypa
     assert load_more_requests == 1
 
 
+def test_scrape_website_emits_resume_debug_summary_without_changing_slice_flow(monkeypatch, tmp_path, capsys) -> None:
+    visited_profile_urls, load_more_requests = _run_fake_unearthed_scrape(
+        monkeypatch,
+        tmp_path,
+        [["artist-1", "artist-2", "artist-3", "artist-4"]],
+        max_artists=2,
+        target_profile_url="https://www.abc.net.au/triplejunearthed/artist/artist-2",
+    )
+
+    captured = capsys.readouterr()
+
+    assert visited_profile_urls == [
+        "https://www.abc.net.au/triplejunearthed/artist/artist-3",
+        "https://www.abc.net.au/triplejunearthed/artist/artist-4",
+    ]
+    assert load_more_requests == 0
+    assert "[UE Resume Debug] resolver" in captured.out
+    assert "target_profile_url='https://www.abc.net.au/triplejunearthed/artist/artist-2'" in captured.out
+    assert "normalized_target_profile_url='https://www.abc.net.au/triplejunearthed/artist/artist-2'" in captured.out
+    assert "exact_match_indices=[1]" in captured.out
+    assert "normalized_match_indices=[1]" in captured.out
+    assert "resolved_resume_index=2" in captured.out
+    assert "[UE Resume Debug] discovery_sample" in captured.out
+    assert "[UE Resume Debug] slice_decision" in captured.out
+    assert "remaining_after_resume_index=2" in captured.out
+    assert "slice_ready=True" in captured.out
+    assert "fallback_to_zero=False" in captured.out
+
+
 def test_scrape_website_preserves_fresh_start_fallback_when_cursor_is_never_found(monkeypatch, tmp_path) -> None:
     visited_profile_urls, load_more_requests = _run_fake_unearthed_scrape(
         monkeypatch,
