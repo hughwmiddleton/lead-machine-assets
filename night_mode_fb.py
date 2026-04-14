@@ -4455,10 +4455,18 @@ _FB_BOUNDED_RENDERED_TEXT_SCRIPT = """
     /* fb_rendered_visible_text_bounded */
     const maxChars = Math.max(512, Number(arguments[0] || 6000));
     const maxNodes = Math.max(24, Number(arguments[1] || 180));
-    const rootSelectors = ['div[role="main"]', 'div[role="complementary"]', 'aside'];
+    const primaryRootSelectors = ['div[role="main"]', 'div[role="complementary"]', 'aside'];
+    const expandedRootSelectors = [
+      'div[role="dialog"]',
+      '[aria-modal="true"]',
+      'div[role="region"][aria-label]',
+      'section[role="region"][aria-label]',
+      'section[aria-label]',
+    ];
     const leafTags = new Set(['A', 'BUTTON', 'DIV', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'LI', 'P', 'SPAN']);
     const semanticTags = new Set(['A', 'BUTTON', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'LI', 'P']);
     const interestingPattern = /@|contact|email|book|booking|mgmt|management|business|about|intro/i;
+    const emailPattern = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}/i;
     const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
     const isVisible = (el) => {
       if (!el || !el.isConnected) return false;
@@ -4468,23 +4476,13 @@ _FB_BOUNDED_RENDERED_TEXT_SCRIPT = """
       return !!(rects && rects.length);
     };
 
-    const roots = [];
     const seenRoots = new Set();
-    for (const selector of rootSelectors) {
-      for (const el of document.querySelectorAll(selector)) {
-        if (!isVisible(el) || seenRoots.has(el)) continue;
-        seenRoots.add(el);
-        roots.push(el);
-      }
-    }
-    if (!roots.length && document.body) {
-      roots.push(document.body);
-    }
 
     const seenTexts = new Set();
     const results = [];
     let totalChars = 0;
     let visitedNodes = 0;
+    const weakSignalChars = Math.min(maxChars, 320);
 
     const pushText = (value) => {
       const text = normalize(value);
@@ -4499,14 +4497,22 @@ _FB_BOUNDED_RENDERED_TEXT_SCRIPT = """
       return totalChars >= maxChars;
     };
 
-    const collectRoot = (root) => {
-      if (!root || totalChars >= maxChars || visitedNodes >= maxNodes) return;
+    const hasUsefulSignal = () => {
+      const combined = results.join('\\n');
+      if (!combined) return false;
+      if (emailPattern.test(combined) || interestingPattern.test(combined)) return true;
+      return combined.length >= weakSignalChars;
+    };
+
+    const collectRoot = (root, nodeLimit) => {
+      if (!root || totalChars >= maxChars || visitedNodes >= nodeLimit) return;
       const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT, {
         acceptNode(node) {
           if (!node || node === root) return NodeFilter.FILTER_SKIP;
           if (!leafTags.has(node.tagName)) return NodeFilter.FILTER_SKIP;
           if (!isVisible(node)) return NodeFilter.FILTER_SKIP;
-          if (node.children && node.children.length && !semanticTags.has(node.tagName)) {
+          const label = normalize((typeof node.getAttribute === 'function' && node.getAttribute('aria-label')) || '');
+          if (node.children && node.children.length && !semanticTags.has(node.tagName) && !interestingPattern.test(label)) {
             return NodeFilter.FILTER_SKIP;
           }
           return NodeFilter.FILTER_ACCEPT;
@@ -4514,19 +4520,45 @@ _FB_BOUNDED_RENDERED_TEXT_SCRIPT = """
       });
 
       let node = walker.nextNode();
-      while (node && totalChars < maxChars && visitedNodes < maxNodes) {
+      while (node && totalChars < maxChars && visitedNodes < nodeLimit) {
         visitedNodes += 1;
         const text = normalize(node.innerText || node.textContent || '');
-        if (text && (interestingPattern.test(text) || results.length < 8)) {
+        const label = normalize((typeof node.getAttribute === 'function' && node.getAttribute('aria-label')) || '');
+        if (text && (interestingPattern.test(text) || interestingPattern.test(label) || results.length < 8)) {
           if (pushText(text)) return;
         }
         node = walker.nextNode();
       }
     };
 
-    for (const root of roots) {
-      collectRoot(root);
-      if (totalChars >= maxChars || visitedNodes >= maxNodes) break;
+    const collectSelectors = (selectors, nodeLimit) => {
+      const roots = [];
+      for (const selector of selectors) {
+        for (const el of document.querySelectorAll(selector)) {
+          if (!isVisible(el) || seenRoots.has(el)) continue;
+          seenRoots.add(el);
+          roots.push(el);
+        }
+      }
+
+      for (const root of roots) {
+        collectRoot(root, nodeLimit);
+        if (totalChars >= maxChars || visitedNodes >= nodeLimit) break;
+      }
+    };
+
+    const reservedFallbackNodes = Math.max(24, Math.min(72, Math.floor(maxNodes / 3)));
+    const primaryNodeLimit = Math.max(24, maxNodes - reservedFallbackNodes);
+
+    collectSelectors(primaryRootSelectors, primaryNodeLimit);
+
+    if (!hasUsefulSignal()) {
+      collectSelectors(expandedRootSelectors, maxNodes);
+    }
+
+    if (!hasUsefulSignal() && document.body && !seenRoots.has(document.body) && isVisible(document.body)) {
+      seenRoots.add(document.body);
+      collectRoot(document.body, maxNodes);
     }
 
     return results.join('\\n');
