@@ -1303,6 +1303,29 @@ def _count_unearthed_remaining_profile_urls(
     return len(ordered_profile_urls[resume_index:])
 
 
+def _has_unearthed_reached_target_profile_url(
+    ordered_profile_urls: list[str],
+    target_profile_url: str | None,
+) -> bool:
+    if not target_profile_url:
+        return False
+    return _resolve_unearthed_resume_index(ordered_profile_urls, target_profile_url) is not None
+
+
+def _is_unearthed_slice_ready(
+    ordered_profile_urls: list[str],
+    target_profile_url: str | None,
+    max_artists: int,
+) -> bool:
+    if max_artists <= 0:
+        return True
+    if not target_profile_url:
+        return len(ordered_profile_urls) >= max_artists
+    if not _has_unearthed_reached_target_profile_url(ordered_profile_urls, target_profile_url):
+        return False
+    return _count_unearthed_remaining_profile_urls(ordered_profile_urls, target_profile_url) >= max_artists
+
+
 def _slice_unearthed_profile_urls(
     ordered_profile_urls: list[str],
     target_profile_url: str | None,
@@ -1399,7 +1422,7 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
                 else "",
             }
 
-        while _count_unearthed_remaining_profile_urls(ordered_profile_urls, target_profile_url) < max_artists:
+        def _discover_current_listing_page() -> None:
             soup = BeautifulSoup(driver.page_source, 'html.parser')
             artist_links = soup.select('a.HU3iy.p1_Ju.mqDRk.FQED6.O_grP[href^="/triplejunearthed/artist/"]')
             if not artist_links:
@@ -1414,16 +1437,35 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
                     profile_url = "https://www.abc.net.au" + href
                     _append_unearthed_profile_url(ordered_profile_urls, seen_profile_urls, profile_url)
                     listing_metadata_by_url.setdefault(profile_url, _extract_listing_metadata(listing_card))
-            print(f"Found {len(ordered_profile_urls)} artist profile URLs so far...")
-            try:
-                load_more_button = WebDriverWait(driver, 10).until(
-                    EC.element_to_be_clickable((By.XPATH, '//button[contains(text(), "Load more")]'))
-                )
-                load_more_button.click()
-                time.sleep(random.uniform(3, 5))
-            except Exception as e:
-                print("No more 'Load More' button found or error:", e)
-                break
+
+        if target_profile_url:
+            while True:
+                _discover_current_listing_page()
+                print(f"Found {len(ordered_profile_urls)} artist profile URLs so far...")
+                if _is_unearthed_slice_ready(ordered_profile_urls, target_profile_url, max_artists):
+                    break
+                try:
+                    load_more_button = WebDriverWait(driver, 10).until(
+                        EC.element_to_be_clickable((By.XPATH, '//button[contains(text(), "Load more")]'))
+                    )
+                    load_more_button.click()
+                    time.sleep(random.uniform(3, 5))
+                except Exception as e:
+                    print("No more 'Load More' button found or error:", e)
+                    break
+        else:
+            while _count_unearthed_remaining_profile_urls(ordered_profile_urls, target_profile_url) < max_artists:
+                _discover_current_listing_page()
+                print(f"Found {len(ordered_profile_urls)} artist profile URLs so far...")
+                try:
+                    load_more_button = WebDriverWait(driver, 10).until(
+                        EC.element_to_be_clickable((By.XPATH, '//button[contains(text(), "Load more")]'))
+                    )
+                    load_more_button.click()
+                    time.sleep(random.uniform(3, 5))
+                except Exception as e:
+                    print("No more 'Load More' button found or error:", e)
+                    break
         profile_urls = _slice_unearthed_profile_urls(ordered_profile_urls, target_profile_url, max_artists)
         print(f"Total artist profile URLs to scrape: {len(profile_urls)}")
         if not profile_urls:
