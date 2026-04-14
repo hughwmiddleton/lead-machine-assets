@@ -16,7 +16,21 @@ from .schema import get_canonical_master_schema, get_default_master_csv_path
 
 PathLike = Union[str, Path]
 
-_LIST_LIKE_FIELDS = {"All_Emails"}
+_LIST_LIKE_FIELDS = {"All_Emails", "Social Link", "External_Links", "Review_Urls"}
+_DUPLICATE_STRATEGIES = {"update", "skip", "keep_both"}
+_SOCIAL_LINK_FIELDS = {
+    "Website",
+    "Contact_Page_URL",
+    "Facebook_URL",
+    "Instagram_URL",
+    "Twitter_URL",
+    "SoundCloud_URL",
+    "Bandcamp_URL",
+    "Spotify_URL",
+    "LastFM_URL",
+    "YouTube_URL",
+    "TikTok_URL",
+}
 _IGNORE_HEADER_SENTINEL = "__IGNORE__"
 
 
@@ -58,6 +72,7 @@ def merge_csv_into_master(
     ignored_headers: Optional[Iterable[str]] = None,
     master_path: Optional[PathLike] = None,
     now: Optional[dt.datetime] = None,
+    duplicate_strategy: str = "update",
 ) -> Dict[str, object]:
     return _run_csv_merge(
         source_path,
@@ -65,6 +80,7 @@ def merge_csv_into_master(
         ignored_headers=ignored_headers,
         master_path=master_path,
         now=now,
+        duplicate_strategy=duplicate_strategy,
         write_changes=True,
     )
 
@@ -75,6 +91,7 @@ def preview_csv_merge_counts(
     ignored_headers: Optional[Iterable[str]] = None,
     master_path: Optional[PathLike] = None,
     now: Optional[dt.datetime] = None,
+    duplicate_strategy: str = "update",
 ) -> Dict[str, object]:
     return _run_csv_merge(
         source_path,
@@ -82,6 +99,7 @@ def preview_csv_merge_counts(
         ignored_headers=ignored_headers,
         master_path=master_path,
         now=now,
+        duplicate_strategy=duplicate_strategy,
         write_changes=False,
     )
 
@@ -92,8 +110,14 @@ def _run_csv_merge(
     ignored_headers: Optional[Iterable[str]] = None,
     master_path: Optional[PathLike] = None,
     now: Optional[dt.datetime] = None,
+    duplicate_strategy: str = "update",
     write_changes: bool = True,
 ) -> Dict[str, object]:
+    if duplicate_strategy not in _DUPLICATE_STRATEGIES:
+        raise ValueError(
+            f"Unsupported duplicate strategy '{duplicate_strategy}'. "
+            f"Expected one of: {', '.join(sorted(_DUPLICATE_STRATEGIES))}"
+        )
     preview = preview_csv_import(
         source_path,
         header_overrides=header_overrides,
@@ -111,6 +135,7 @@ def _run_csv_merge(
         resolved_master_path = ensure_master_csv_exists(resolved_master_path)
     master_rows = _load_master_rows(resolved_master_path) if resolved_master_path.exists() else []
     indexes, row_key_cache = _build_indexes(master_rows)
+    preview["duplicate_strategy"] = duplicate_strategy
 
     run_dt = _coerce_run_datetime(now)
     batch_id = _make_import_batch(run_dt)
@@ -140,6 +165,24 @@ def _run_csv_merge(
                 continue
 
             if match_state == "matched" and matched_index is not None:
+                preview["rows_duplicates_detected"] += 1
+                if duplicate_strategy == "skip":
+                    preview["rows_skipped_duplicates"] += 1
+                    continue
+                if duplicate_strategy == "keep_both":
+                    new_row = _prepare_new_row(
+                        incoming_row,
+                        source_basename=source_basename,
+                        batch_id=batch_id,
+                        timestamp=timestamp,
+                    )
+                    master_rows.append(new_row)
+                    _append_index_entry(indexes, row_key_cache, len(master_rows) - 1, new_row)
+                    preview["rows_added"] += 1
+                    preview["rows_kept_duplicates"] += 1
+                    changed = True
+                    continue
+
                 merged_row, row_changed = _merge_existing_row(
                     master_rows[matched_index],
                     incoming_row,
@@ -206,7 +249,9 @@ def _make_result(
         "row_count": row_count,
         "rows_added": 0,
         "rows_updated": 0,
+        "rows_duplicates_detected": 0,
         "rows_skipped_duplicates": 0,
+        "rows_kept_duplicates": 0,
         "rows_unresolved_mapping": 0,
         "rows_ambiguous": 0,
         "rows_errors": 0,
@@ -262,13 +307,8 @@ def _build_indexes(
     rows: Sequence[Dict[str, str]],
 ) -> Tuple[Dict[str, Dict[str, Set[int]]], List[Dict[str, object]]]:
     indexes: Dict[str, Dict[str, Set[int]]] = {
-        "primary_email": defaultdict(set),
-        "any_email": defaultdict(set),
-        "domain_root": defaultdict(set),
-        "website": defaultdict(set),
-        "soundcloud": defaultdict(set),
-        "bandcamp": defaultdict(set),
-        "artist": defaultdict(set),
+        "profile_url": defaultdict(set),
+        "artist_location": defaultdict(set),
     }
     row_key_cache: List[Dict[str, object]] = []
     for index, row in enumerate(rows):
@@ -306,9 +346,7 @@ def _add_keys_to_indexes(
     row_index: int,
     keys: Dict[str, object],
 ) -> None:
-    for email in keys["any_emails"]:
-        indexes["any_email"][email].add(row_index)
-    for field_name in ("primary_email", "domain_root", "website", "soundcloud", "bandcamp", "artist"):
+    for field_name in ("profile_url", "artist_location"):
         value = keys.get(field_name)
         if isinstance(value, str) and value:
             indexes[field_name][value].add(row_index)
@@ -319,9 +357,7 @@ def _remove_keys_from_indexes(
     row_index: int,
     keys: Dict[str, object],
 ) -> None:
-    for email in keys["any_emails"]:
-        _discard_index_value(indexes["any_email"], email, row_index)
-    for field_name in ("primary_email", "domain_root", "website", "soundcloud", "bandcamp", "artist"):
+    for field_name in ("profile_url", "artist_location"):
         value = keys.get(field_name)
         if isinstance(value, str) and value:
             _discard_index_value(indexes[field_name], value, row_index)
@@ -337,16 +373,15 @@ def _discard_index_value(index: Dict[str, Set[int]], value: str, row_index: int)
 
 
 def _row_keys(row: Dict[str, str]) -> Dict[str, object]:
-    primary_email = _normalize_email(row.get("Primary_Email", ""))
-    any_emails = tuple(_collect_row_emails(row))
+    profile_url = _normalize_profile_url(row.get("Source_URL", ""))
+    artist_location = _normalize_artist_location_key(
+        row.get("Artist", ""),
+        row.get("Location", ""),
+        profile_url=profile_url,
+    )
     return {
-        "primary_email": primary_email,
-        "any_emails": any_emails,
-        "domain_root": _normalize_domain_root(row.get("Domain_Root", "")),
-        "website": _normalize_url(row.get("Website", "")),
-        "soundcloud": _normalize_soundcloud_url(row.get("SoundCloud_URL", "")),
-        "bandcamp": _normalize_bandcamp_url(row.get("Bandcamp_URL", "")),
-        "artist": _normalize_artist(row.get("Artist", "")),
+        "profile_url": profile_url,
+        "artist_location": artist_location,
     }
 
 
@@ -355,68 +390,36 @@ def _select_match(
     indexes: Dict[str, Dict[str, Set[int]]],
 ) -> Tuple[str, Optional[int], str]:
     matched_index: Optional[int] = None
-    stronger_values_present = False
-
-    primary_email = _normalize_email(incoming_row.get("Primary_Email", ""))
-    if primary_email:
-        stronger_values_present = True
+    profile_url = _normalize_profile_url(incoming_row.get("Source_URL", ""))
+    if profile_url:
         state, matched_index, reason = _fold_hits(
-            indexes["primary_email"].get(primary_email, set()),
+            indexes["profile_url"].get(profile_url, set()),
             matched_index,
-            "primary_email",
-            primary_email,
+            "profile_url",
+            profile_url,
         )
         if state != "continue":
             return state, matched_index, reason
-
-    for email in _collect_row_emails(incoming_row):
-        stronger_values_present = True
-        state, matched_index, reason = _fold_hits(
-            indexes["any_email"].get(email, set()),
-            matched_index,
-            "all_emails",
-            email,
-        )
-        if state != "continue":
-            return state, matched_index, reason
-
-    for field_name, index_name, value in (
-        ("Domain_Root", "domain_root", _normalize_domain_root(incoming_row.get("Domain_Root", ""))),
-        ("Website", "website", _normalize_url(incoming_row.get("Website", ""))),
-        ("SoundCloud_URL", "soundcloud", _normalize_soundcloud_url(incoming_row.get("SoundCloud_URL", ""))),
-        ("Bandcamp_URL", "bandcamp", _normalize_bandcamp_url(incoming_row.get("Bandcamp_URL", ""))),
-    ):
-        if not value:
-            continue
-        stronger_values_present = True
-        state, matched_index, reason = _fold_hits(
-            indexes[index_name].get(value, set()),
-            matched_index,
-            field_name,
-            value,
-        )
-        if state != "continue":
-            return state, matched_index, reason
-
-    if matched_index is not None:
-        return "matched", matched_index, "matched_existing"
-
-    if stronger_values_present:
-        return "new", None, "no_strong_match"
-
-    artist = _normalize_artist(incoming_row.get("Artist", ""))
-    if not artist:
+        if matched_index is not None:
+            return "matched", matched_index, "matched_existing"
+        return "new", None, "profile_url_no_match"
+    artist_location = _normalize_artist_location_key(
+        incoming_row.get("Artist", ""),
+        incoming_row.get("Location", ""),
+        profile_url=profile_url,
+    )
+    if not artist_location:
         return "new", None, "no_match_keys"
     state, matched_index, reason = _fold_hits(
-        indexes["artist"].get(artist, set()),
+        indexes["artist_location"].get(artist_location, set()),
         matched_index,
-        "Artist",
-        artist,
+        "artist_location",
+        artist_location,
     )
     if state == "continue" and matched_index is not None:
-        return "matched", matched_index, "artist_fallback"
+        return "matched", matched_index, "artist_location_fallback"
     if state == "continue":
-        return "new", None, "artist_no_match"
+        return "new", None, "artist_location_no_match"
     return state, matched_index, reason
 
 
@@ -441,6 +444,7 @@ def _prepare_incoming_row(row: Dict[str, str]) -> Dict[str, str]:
     prepared = {field: _clean_cell(row.get(field, "")) for field in get_canonical_master_schema()}
     prepared["Primary_Email"] = _normalize_email(prepared.get("Primary_Email", ""))
     prepared["All_Emails"] = _merge_email_lists("", prepared.get("All_Emails", ""))
+    prepared["Source_URL"] = _clean_cell(prepared.get("Source_URL", ""))
     return prepared
 
 
@@ -479,9 +483,43 @@ def _merge_existing_row(
             continue
 
         if field_name in _LIST_LIKE_FIELDS:
-            merged_value = _merge_all_emails_field(existing_row, incoming_row)
+            merged_value = (
+                _merge_all_emails_field(merged, incoming_row)
+                if field_name == "All_Emails"
+                else _merge_tokenized_values(existing_value, incoming_value, normalizer=_normalize_link_token)
+            )
             if merged_value != existing_value:
                 merged[field_name] = merged_value
+                changed = True
+            continue
+
+        if field_name == "Primary_Email":
+            merged_primary, merged_all = _merge_primary_email_field(merged, incoming_row)
+            if merged_primary != existing_value:
+                merged[field_name] = merged_primary
+                changed = True
+            if merged_all != merged["All_Emails"]:
+                merged["All_Emails"] = merged_all
+                changed = True
+            continue
+
+        if field_name == "Facebook_URL":
+            merged_value, external_links = _merge_facebook_field(merged, incoming_row)
+            if merged_value != existing_value:
+                merged[field_name] = merged_value
+                changed = True
+            if external_links != merged["External_Links"]:
+                merged["External_Links"] = external_links
+                changed = True
+            continue
+
+        if field_name in _SOCIAL_LINK_FIELDS:
+            merged_value, external_links = _merge_social_field(field_name, merged, incoming_row)
+            if merged_value != existing_value:
+                merged[field_name] = merged_value
+                changed = True
+            if external_links != merged["External_Links"]:
+                merged["External_Links"] = external_links
                 changed = True
             continue
 
@@ -515,6 +553,104 @@ def _merge_all_emails_field(existing_row: Dict[str, str], incoming_row: Dict[str
         extras.append(incoming_primary)
 
     return _merge_email_lists(existing_all, incoming_all, extras)
+
+
+def _merge_primary_email_field(existing_row: Dict[str, str], incoming_row: Dict[str, str]) -> Tuple[str, str]:
+    existing_primary = _normalize_email(existing_row.get("Primary_Email", ""))
+    incoming_primary = _normalize_email(incoming_row.get("Primary_Email", ""))
+    merged_primary = existing_primary or incoming_primary
+    merged_all = _merge_all_emails_field(
+        {
+            **existing_row,
+            "Primary_Email": existing_primary,
+        },
+        {
+            **incoming_row,
+            "Primary_Email": incoming_primary,
+        },
+    )
+    return merged_primary, merged_all
+
+
+def _merge_facebook_field(existing_row: Dict[str, str], incoming_row: Dict[str, str]) -> Tuple[str, str]:
+    existing_value = _clean_cell(existing_row.get("Facebook_URL", ""))
+    incoming_value = _clean_cell(incoming_row.get("Facebook_URL", ""))
+    external_links = _merge_external_links(existing_row, incoming_row)
+
+    if not incoming_value:
+        return existing_value, external_links
+    if existing_value and not _values_equivalent("Facebook_URL", existing_value, incoming_value):
+        external_links = _merge_tokenized_values(
+            external_links,
+            existing_value,
+            extras=[incoming_value],
+            normalizer=_normalize_link_token,
+        )
+    return incoming_value, external_links
+
+
+def _merge_social_field(
+    field_name: str,
+    existing_row: Dict[str, str],
+    incoming_row: Dict[str, str],
+) -> Tuple[str, str]:
+    existing_value = _clean_cell(existing_row.get(field_name, ""))
+    incoming_value = _clean_cell(incoming_row.get(field_name, ""))
+    external_links = _merge_external_links(existing_row, incoming_row)
+    if not incoming_value:
+        return existing_value, external_links
+    if not existing_value or _values_equivalent(field_name, existing_value, incoming_value):
+        return existing_value or incoming_value, external_links
+    external_links = _merge_tokenized_values(
+        external_links,
+        incoming_value,
+        normalizer=_normalize_link_token,
+    )
+    return existing_value, external_links
+
+
+def _merge_external_links(existing_row: Dict[str, str], incoming_row: Dict[str, str]) -> str:
+    return _merge_tokenized_values(
+        existing_row.get("External_Links", ""),
+        incoming_row.get("External_Links", ""),
+        normalizer=_normalize_link_token,
+    )
+
+
+def _merge_tokenized_values(
+    existing_value: object,
+    incoming_value: object,
+    extras: Optional[Sequence[object]] = None,
+    *,
+    normalizer=None,
+) -> str:
+    normalize = normalizer or (lambda value: _clean_cell(value).lower())
+    merged: List[str] = []
+    seen: Set[str] = set()
+
+    def _ingest(raw: object) -> None:
+        for token in _split_merged_tokens(raw):
+            cleaned = _clean_cell(token)
+            if not cleaned:
+                continue
+            dedupe_key = normalize(cleaned)
+            if not dedupe_key or dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            merged.append(cleaned)
+
+    _ingest(existing_value)
+    _ingest(incoming_value)
+    for extra in extras or []:
+        _ingest(extra)
+    return ";".join(merged)
+
+
+def _split_merged_tokens(raw: object) -> List[str]:
+    text = _clean_cell(raw)
+    if not text:
+        return []
+    return [token for token in re.split(r"[;\n]+", text) if _clean_cell(token)]
 
 
 def _merge_email_lists(existing_value: str, incoming_value: str, extras: Optional[Sequence[str]] = None) -> str:
@@ -565,6 +701,11 @@ def _normalize_email_list(raw: object) -> List[str]:
 
 def _normalize_email(value: object) -> str:
     normalized = normalize_email_value("" if value is None else str(value))
+    return normalized.lower() if normalized else ""
+
+
+def _normalize_profile_url(value: object) -> str:
+    normalized = _normalize_url(value)
     return normalized.lower() if normalized else ""
 
 
@@ -636,17 +777,48 @@ def _normalize_artist(value: object) -> str:
     return cleaned
 
 
+def _normalize_location(value: object) -> str:
+    location = _clean_cell(value)
+    if not location:
+        return ""
+    location = unicodedata.normalize("NFKD", location)
+    location = "".join(ch for ch in location if not unicodedata.combining(ch))
+    location = location.casefold()
+    location = re.sub(r"\s+", " ", location).strip()
+    return location
+
+
+def _normalize_artist_location_key(artist: object, location: object, *, profile_url: str = "") -> str:
+    if profile_url:
+        return ""
+    normalized_artist = _normalize_artist(artist)
+    normalized_location = _normalize_location(location)
+    if not normalized_artist or not normalized_location:
+        return ""
+    return f"{normalized_artist}|||{normalized_location}"
+
+
+def _normalize_link_token(value: object) -> str:
+    text = _clean_cell(value)
+    if not text:
+        return ""
+    normalized_url = _normalize_profile_url(text)
+    return normalized_url or text.casefold()
+
+
 def _values_equivalent(field_name: str, existing_value: str, incoming_value: str) -> bool:
     if field_name == "Primary_Email":
         return _normalize_email(existing_value) == _normalize_email(incoming_value)
     if field_name == "Domain_Root":
         return _normalize_domain_root(existing_value) == _normalize_domain_root(incoming_value)
-    if field_name in {"Website", "SoundCloud_URL"}:
+    if field_name in {"Website", "SoundCloud_URL", "Contact_Page_URL", "Facebook_URL", "Instagram_URL", "Twitter_URL", "Spotify_URL", "LastFM_URL", "YouTube_URL", "TikTok_URL", "Source_URL"}:
         return _normalize_url(existing_value) == _normalize_url(incoming_value)
     if field_name == "Bandcamp_URL":
         return _normalize_bandcamp_url(existing_value) == _normalize_bandcamp_url(incoming_value)
     if field_name == "Artist":
         return _normalize_artist(existing_value) == _normalize_artist(incoming_value)
+    if field_name == "Location":
+        return _normalize_location(existing_value) == _normalize_location(incoming_value)
     return _clean_cell(existing_value) == _clean_cell(incoming_value)
 
 

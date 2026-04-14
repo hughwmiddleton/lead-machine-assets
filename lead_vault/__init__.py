@@ -18,7 +18,7 @@ from .importer import (
     import_csv_to_canonical_rows,
     read_csv_rows,
 )
-from .merge import merge_csv_into_master, preview_csv_import
+from .merge import merge_csv_into_master, preview_csv_import, preview_csv_merge_counts
 from .schema import CANONICAL_MASTER_SCHEMA, get_canonical_master_schema, get_default_master_csv_path
 
 __all__ = [
@@ -38,5 +38,6 @@ __all__ = [
     "merge_csv_into_master",
     "normalize_header",
     "preview_csv_import",
+    "preview_csv_merge_counts",
     "read_csv_rows",
 ]

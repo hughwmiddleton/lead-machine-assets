@@ -143,7 +143,7 @@ import pipeline_runner
 from source_scheduler import canonicalize_facebook_url
 from lead_vault import EXPORT_PRESETS, WOODPECKER_EXPORT_PRESET, ensure_master_csv_exists, export_with_preset
 from lead_vault.alias_map import map_headers_to_canonical
-from lead_vault.merge import merge_csv_into_master, preview_csv_import
+from lead_vault.merge import merge_csv_into_master, preview_csv_import, preview_csv_merge_counts
 from lead_vault.schema import get_canonical_master_schema, get_default_master_csv_path
 from lead_vault.stats import summarize_master_dataset
 
@@ -10276,6 +10276,7 @@ class LeadVaultWorker(QtCore.QThread):
         header_overrides: Optional[Dict[str, str]] = None,
         ignored_headers: Optional[List[str]] = None,
         master_path: Optional[str] = None,
+        duplicate_strategy: str = "update",
         parent=None,
     ):
         super().__init__(parent)
@@ -10284,6 +10285,7 @@ class LeadVaultWorker(QtCore.QThread):
         self.header_overrides = dict(header_overrides or {})
         self.ignored_headers = list(ignored_headers or [])
         self.master_path = master_path or str(get_default_master_csv_path())
+        self.duplicate_strategy = duplicate_strategy
 
     def run(self):
         try:
@@ -10300,6 +10302,7 @@ class LeadVaultWorker(QtCore.QThread):
                     header_overrides=self.header_overrides,
                     ignored_headers=self.ignored_headers,
                     master_path=self.master_path,
+                    duplicate_strategy=self.duplicate_strategy,
                 )
             else:
                 raise ValueError(f"Unknown Lead Vault worker mode: {self.mode}")
@@ -10842,12 +10845,16 @@ class LeadVaultTab(QtWidgets.QWidget):
             )
             self._refresh_import_button()
             return
+        duplicate_strategy = self._choose_duplicate_strategy(source_path, header_overrides, ignored_headers)
+        if duplicate_strategy is None:
+            self._refresh_import_button()
+            return
         self.preview_button.setEnabled(False)
         self.import_button.setEnabled(False)
         self.auto_map_known_button.setEnabled(False)
         self.ignore_all_button.setEnabled(False)
         self.summary_view.setPlainText("Running Lead Vault import...")
-        self._start_worker("import", source_path, header_overrides, ignored_headers)
+        self._start_worker("import", source_path, header_overrides, ignored_headers, duplicate_strategy=duplicate_strategy)
 
     def _start_worker(
         self,
@@ -10855,6 +10862,7 @@ class LeadVaultTab(QtWidgets.QWidget):
         source_path: str,
         header_overrides: Dict[str, str],
         ignored_headers: List[str],
+        duplicate_strategy: str = "update",
     ):
         self._stop_worker()
         self.worker = LeadVaultWorker(
@@ -10863,12 +10871,75 @@ class LeadVaultTab(QtWidgets.QWidget):
             header_overrides=header_overrides,
             ignored_headers=ignored_headers,
             master_path=str(self._resolve_master_csv_path()),
+            duplicate_strategy=duplicate_strategy,
         )
         self.worker.finished_signal.connect(
             self._handle_preview_finished if mode == "preview" else self._handle_import_finished
         )
         self.worker.error_signal.connect(self._handle_worker_error)
         self.worker.start()
+
+    def _choose_duplicate_strategy(
+        self,
+        source_path: str,
+        header_overrides: Dict[str, str],
+        ignored_headers: List[str],
+    ) -> Optional[str]:
+        try:
+            preview = preview_csv_merge_counts(
+                source_path,
+                header_overrides=header_overrides,
+                ignored_headers=ignored_headers,
+                master_path=str(self._resolve_master_csv_path()),
+            )
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Lead Vault",
+                f"Could not evaluate duplicate contacts before import:\n{exc}",
+            )
+            return None
+
+        duplicate_count = int(preview.get("rows_duplicates_detected", 0) or 0)
+        if duplicate_count <= 0:
+            return "update"
+
+        message_box = QtWidgets.QMessageBox(self)
+        message_box.setIcon(QtWidgets.QMessageBox.Question)
+        message_box.setWindowTitle("Lead Vault")
+        message_box.setText(f"Duplicates detected: {duplicate_count} existing contacts found.")
+        message_box.setInformativeText(
+            "How would you like to proceed?"
+            "\n\n1. Update existing contacts (recommended)"
+            "\n2. Skip duplicates (keep existing data unchanged)"
+            "\n3. Keep both (allow duplicates)"
+        )
+        update_button = message_box.addButton(
+            "Update existing contacts",
+            QtWidgets.QMessageBox.AcceptRole,
+        )
+        skip_button = message_box.addButton(
+            "Skip duplicates",
+            QtWidgets.QMessageBox.ActionRole,
+        )
+        keep_both_button = message_box.addButton(
+            "Keep both",
+            QtWidgets.QMessageBox.ActionRole,
+        )
+        cancel_button = message_box.addButton(QtWidgets.QMessageBox.Cancel)
+        message_box.setDefaultButton(update_button)
+        message_box.exec_()
+
+        clicked_button = message_box.clickedButton()
+        if clicked_button == update_button:
+            return "update"
+        if clicked_button == skip_button:
+            return "skip"
+        if clicked_button == keep_both_button:
+            return "keep_both"
+        if clicked_button == cancel_button:
+            self.summary_view.setPlainText("Import cancelled.")
+        return None
 
     def _handle_preview_finished(self, result: dict):
         self.preview_result = result
@@ -11082,9 +11153,14 @@ class LeadVaultTab(QtWidgets.QWidget):
         else:
             lines.extend(
                 [
-                    f"Rows added: {result.get('rows_added', 0)}",
-                    f"Rows updated: {result.get('rows_updated', 0)}",
-                    f"Rows skipped as duplicates: {result.get('rows_skipped_duplicates', 0)}",
+                    "",
+                    "Import Summary:",
+                    f"Total rows processed: {result.get('row_count', 0)}",
+                    f"New contacts added: {result.get('rows_added', 0)}",
+                    f"Existing contacts updated: {result.get('rows_updated', 0)}",
+                    f"Duplicates skipped: {result.get('rows_skipped_duplicates', 0)}",
+                    f"Duplicates kept: {result.get('rows_kept_duplicates', 0)}",
+                    f"Duplicates detected: {result.get('rows_duplicates_detected', 0)}",
                     f"Rows unresolved mapping: {result.get('rows_unresolved_mapping', 0)}",
                     f"Rows ambiguous: {result.get('rows_ambiguous', 0)}",
                     f"Rows errors: {result.get('rows_errors', 0)}",

@@ -392,12 +392,22 @@ def test_manual_mapping_is_passed_to_backend_worker_and_summary_updates(qapp, mo
     calls = []
 
     class FakeWorker:
-        def __init__(self, mode, source_path, header_overrides=None, ignored_headers=None, master_path=None, parent=None):
+        def __init__(
+            self,
+            mode,
+            source_path,
+            header_overrides=None,
+            ignored_headers=None,
+            master_path=None,
+            duplicate_strategy="update",
+            parent=None,
+        ):
             self.mode = mode
             self.source_path = source_path
             self.header_overrides = dict(header_overrides or {})
             self.ignored_headers = list(ignored_headers or [])
             self.master_path = master_path
+            self.duplicate_strategy = duplicate_strategy
             self.finished_signal = _Signal()
             self.error_signal = _Signal()
             calls.append(self)
@@ -432,6 +442,7 @@ def test_manual_mapping_is_passed_to_backend_worker_and_summary_updates(qapp, mo
             return None
 
     monkeypatch.setattr(module, "LeadVaultWorker", FakeWorker)
+    monkeypatch.setattr(module, "preview_csv_merge_counts", lambda *args, **kwargs: {"rows_duplicates_detected": 0})
     monkeypatch.setattr(module.QtWidgets.QMessageBox, "warning", lambda *args, **kwargs: None)
 
     tab = module.LeadVaultTab()
@@ -459,7 +470,210 @@ def test_manual_mapping_is_passed_to_backend_worker_and_summary_updates(qapp, mo
     assert calls[-1].mode == "import"
     assert calls[-1].header_overrides == {"Booking Email": "Primary_Email"}
     assert calls[-1].ignored_headers == ["Throwaway"]
-    assert "Rows added: 1" in tab.summary_view.toPlainText()
+    assert calls[-1].duplicate_strategy == "update"
+    assert "New contacts added: 1" in tab.summary_view.toPlainText()
+
+
+def test_duplicate_prompt_passes_skip_strategy_to_import_worker(qapp, monkeypatch, tmp_path):
+    module = _load_legacy_module()
+    source_path = tmp_path / "input.csv"
+    source_path.write_text("Artist Name,Profile URL\nAct,https://example.com/act\n", encoding="utf-8")
+
+    class _Signal:
+        def __init__(self):
+            self._slots = []
+
+        def connect(self, slot):
+            self._slots.append(slot)
+
+        def emit(self, payload):
+            for slot in list(self._slots):
+                slot(payload)
+
+    calls = []
+
+    class FakeWorker:
+        def __init__(
+            self,
+            mode,
+            source_path,
+            header_overrides=None,
+            ignored_headers=None,
+            master_path=None,
+            duplicate_strategy="update",
+            parent=None,
+        ):
+            self.mode = mode
+            self.source_path = source_path
+            self.header_overrides = dict(header_overrides or {})
+            self.ignored_headers = list(ignored_headers or [])
+            self.master_path = master_path
+            self.duplicate_strategy = duplicate_strategy
+            self.finished_signal = _Signal()
+            self.error_signal = _Signal()
+            calls.append(self)
+
+        def start(self):
+            self.finished_signal.emit(
+                {
+                    "source_path": self.source_path,
+                    "master_path": self.master_path,
+                    "row_count": 1,
+                    "rows_added": 0,
+                    "rows_updated": 0,
+                    "rows_duplicates_detected": 1,
+                    "rows_skipped_duplicates": 1,
+                    "rows_kept_duplicates": 0,
+                    "rows_unresolved_mapping": 0,
+                    "rows_ambiguous": 0,
+                    "rows_errors": 0,
+                    "detected_headers": ["Artist Name", "Profile URL"],
+                    "mapped_headers": {"Artist Name": "Artist", "Profile URL": "Source_URL"},
+                    "ignored_headers": [],
+                    "unmapped_headers": [],
+                    "warnings": [],
+                }
+            )
+
+        def isRunning(self):
+            return False
+
+        def wait(self, timeout=None):
+            return True
+
+        def terminate(self):
+            return None
+
+    class FakeMessageBox:
+        Question = object()
+        AcceptRole = object()
+        ActionRole = object()
+        Cancel = object()
+
+        def __init__(self, *args, **kwargs):
+            self._buttons = []
+            self._clicked = None
+
+        def setIcon(self, *_args, **_kwargs):
+            return None
+
+        def setWindowTitle(self, *_args, **_kwargs):
+            return None
+
+        def setText(self, *_args, **_kwargs):
+            return None
+
+        def setInformativeText(self, *_args, **_kwargs):
+            return None
+
+        def addButton(self, label_or_button, *_args, **_kwargs):
+            button = object()
+            self._buttons.append((label_or_button, button))
+            return button
+
+        def setDefaultButton(self, *_args, **_kwargs):
+            return None
+
+        def exec_(self):
+            for label, button in self._buttons:
+                if label == "Skip duplicates":
+                    self._clicked = button
+                    return
+
+        def clickedButton(self):
+            return self._clicked
+
+    monkeypatch.setattr(module, "LeadVaultWorker", FakeWorker)
+    monkeypatch.setattr(module, "preview_csv_merge_counts", lambda *args, **kwargs: {"rows_duplicates_detected": 1})
+    monkeypatch.setattr(module.QtWidgets, "QMessageBox", FakeMessageBox)
+
+    tab = module.LeadVaultTab()
+    tab.source_edit.setText(str(source_path))
+    tab._handle_preview_finished(
+        {
+            "source_path": str(source_path),
+            "master_path": str(tmp_path / "master.csv"),
+            "row_count": 1,
+            "detected_headers": ["Artist Name", "Profile URL"],
+            "mapped_headers": {"Artist Name": "Artist", "Profile URL": "Source_URL"},
+            "unmapped_headers": [],
+            "ignored_headers": [],
+            "warnings": [],
+        }
+    )
+
+    tab._start_import()
+
+    assert calls
+    assert calls[-1].duplicate_strategy == "skip"
+    assert "Duplicates skipped: 1" in tab.summary_view.toPlainText()
+
+
+def test_no_duplicate_import_does_not_show_prompt(qapp, monkeypatch, tmp_path):
+    module = _load_legacy_module()
+    source_path = tmp_path / "input.csv"
+    source_path.write_text("Artist Name,Profile URL\nAct,https://example.com/act\n", encoding="utf-8")
+    calls = []
+
+    class FakeWorker:
+        def __init__(
+            self,
+            mode,
+            source_path,
+            header_overrides=None,
+            ignored_headers=None,
+            master_path=None,
+            duplicate_strategy="update",
+            parent=None,
+        ):
+            self.mode = mode
+            self.source_path = source_path
+            self.header_overrides = dict(header_overrides or {})
+            self.ignored_headers = list(ignored_headers or [])
+            self.master_path = master_path
+            self.duplicate_strategy = duplicate_strategy
+            self.finished_signal = type("Signal", (), {"connect": staticmethod(lambda slot: None)})()
+            self.error_signal = type("Signal", (), {"connect": staticmethod(lambda slot: None)})()
+            calls.append(self)
+
+        def start(self):
+            return None
+
+        def isRunning(self):
+            return False
+
+        def wait(self, timeout=None):
+            return True
+
+        def terminate(self):
+            return None
+
+    def _unexpected_message_box(*_args, **_kwargs):
+        raise AssertionError("Duplicate prompt should not be shown when there are no duplicates.")
+
+    monkeypatch.setattr(module, "LeadVaultWorker", FakeWorker)
+    monkeypatch.setattr(module, "preview_csv_merge_counts", lambda *args, **kwargs: {"rows_duplicates_detected": 0})
+    monkeypatch.setattr(module.QtWidgets, "QMessageBox", _unexpected_message_box)
+
+    tab = module.LeadVaultTab()
+    tab.source_edit.setText(str(source_path))
+    tab._handle_preview_finished(
+        {
+            "source_path": str(source_path),
+            "master_path": str(tmp_path / "master.csv"),
+            "row_count": 1,
+            "detected_headers": ["Artist Name", "Profile URL"],
+            "mapped_headers": {"Artist Name": "Artist", "Profile URL": "Source_URL"},
+            "unmapped_headers": [],
+            "ignored_headers": [],
+            "warnings": [],
+        }
+    )
+
+    tab._start_import()
+
+    assert calls
+    assert calls[-1].duplicate_strategy == "update"
 
 
 def test_generate_export_uses_master_csv_and_shows_summary(qapp, monkeypatch, tmp_path):
@@ -680,12 +894,22 @@ def test_start_worker_uses_selected_master_csv(qapp, monkeypatch, tmp_path):
     calls = []
 
     class FakeWorker:
-        def __init__(self, mode, source_path, header_overrides=None, ignored_headers=None, master_path=None, parent=None):
+        def __init__(
+            self,
+            mode,
+            source_path,
+            header_overrides=None,
+            ignored_headers=None,
+            master_path=None,
+            duplicate_strategy="update",
+            parent=None,
+        ):
             self.mode = mode
             self.source_path = source_path
             self.header_overrides = dict(header_overrides or {})
             self.ignored_headers = list(ignored_headers or [])
             self.master_path = master_path
+            self.duplicate_strategy = duplicate_strategy
             self.finished_signal = type("Signal", (), {"connect": staticmethod(lambda slot: None)})()
             self.error_signal = type("Signal", (), {"connect": staticmethod(lambda slot: None)})()
             calls.append(self)

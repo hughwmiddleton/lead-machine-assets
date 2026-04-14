@@ -28,7 +28,7 @@ def _master_row(**overrides):
     return row
 
 
-def test_primary_email_match_updates_existing_row(tmp_path):
+def test_profile_url_match_updates_existing_row(tmp_path):
     master_path = tmp_path / "master.csv"
     source_path = tmp_path / "import.csv"
     _write_csv(
@@ -37,7 +37,7 @@ def test_primary_email_match_updates_existing_row(tmp_path):
         [
             _master_row(
                 Artist="The Echo",
-                Primary_Email="artist@example.com",
+                Source_URL="https://example.com/the-echo/",
                 Date_Added="2026-01-01T00:00:00Z",
                 Import_Source_File="existing.csv",
             )
@@ -45,11 +45,11 @@ def test_primary_email_match_updates_existing_row(tmp_path):
     )
     _write_csv(
         source_path,
-        ["Artist Name", "Primary Email", "Bandcamp URL"],
+        ["Artist Name", "Profile URL", "Bandcamp URL"],
         [
             {
                 "Artist Name": "The Echo",
-                "Primary Email": "artist@example.com",
+                "Profile URL": "HTTPS://EXAMPLE.COM/the-echo",
                 "Bandcamp URL": "https://theecho.bandcamp.com",
             }
         ],
@@ -66,7 +66,7 @@ def test_primary_email_match_updates_existing_row(tmp_path):
     assert rows[0]["Last_Updated"] == "2026-03-10T12:00:00Z"
 
 
-def test_all_emails_membership_match_updates_missing_primary_email(tmp_path):
+def test_artist_location_fallback_updates_when_both_profile_urls_are_blank(tmp_path):
     master_path = tmp_path / "master.csv"
     source_path = tmp_path / "import.csv"
     _write_csv(
@@ -75,15 +75,15 @@ def test_all_emails_membership_match_updates_missing_primary_email(tmp_path):
         [
             _master_row(
                 Artist="Night Tides",
-                Website="https://nighttides.example.com",
-                All_Emails="manager@example.com;alt@example.com",
+                Location=" Melbourne ",
+                Source_URL="",
             )
         ],
     )
     _write_csv(
         source_path,
-        ["Artist Name", "Email"],
-        [{"Artist Name": "Night Tides", "Email": "alt@example.com"}],
+        ["Artist Name", "Location", "Email"],
+        [{"Artist Name": "Night Tides", "Location": "melbourne", "Email": "alt@example.com"}],
     )
 
     result = merge_csv_into_master(source_path, master_path=master_path, now=RUN_AT)
@@ -93,22 +93,22 @@ def test_all_emails_membership_match_updates_missing_primary_email(tmp_path):
     assert rows[0]["Primary_Email"] == "alt@example.com"
 
 
-def test_website_match_uses_normalized_url(tmp_path):
+def test_artist_location_fallback_does_not_match_rows_with_existing_profile_url(tmp_path):
     master_path = tmp_path / "master.csv"
     source_path = tmp_path / "import.csv"
     _write_csv(
         master_path,
         get_canonical_master_schema(),
-        [_master_row(Artist="City Lines", Website="https://www.citylines.com/")],
+        [_master_row(Artist="City Lines", Location="Sydney", Source_URL="https://example.com/city-lines")],
     )
     _write_csv(
         source_path,
-        ["Artist Name", "Website", "Bandcamp URL"],
+        ["Artist Name", "Location", "Email"],
         [
             {
                 "Artist Name": "City Lines",
-                "Website": "citylines.com",
-                "Bandcamp URL": "https://citylines.bandcamp.com",
+                "Location": "sydney",
+                "Email": "hello@citylines.example.com",
             }
         ],
     )
@@ -116,65 +116,12 @@ def test_website_match_uses_normalized_url(tmp_path):
     result = merge_csv_into_master(source_path, master_path=master_path, now=RUN_AT)
     rows = _read_master_rows(master_path)
 
-    assert result["rows_updated"] == 1
-    assert rows[0]["Bandcamp_URL"] == "https://citylines.bandcamp.com"
+    assert result["rows_updated"] == 0
+    assert result["rows_added"] == 1
+    assert len(rows) == 2
 
 
-def test_soundcloud_url_match_uses_normalized_url(tmp_path):
-    master_path = tmp_path / "master.csv"
-    source_path = tmp_path / "import.csv"
-    _write_csv(
-        master_path,
-        get_canonical_master_schema(),
-        [_master_row(Artist="Signals", SoundCloud_URL="https://soundcloud.com/signals/")],
-    )
-    _write_csv(
-        source_path,
-        ["Artist Name", "SoundCloud URL", "Website"],
-        [
-            {
-                "Artist Name": "Signals",
-                "SoundCloud URL": "soundcloud.com/signals?utm_source=test",
-                "Website": "https://signals.example.com",
-            }
-        ],
-    )
-
-    result = merge_csv_into_master(source_path, master_path=master_path, now=RUN_AT)
-    rows = _read_master_rows(master_path)
-
-    assert result["rows_updated"] == 1
-    assert rows[0]["Website"] == "https://signals.example.com"
-
-
-def test_bandcamp_url_match_uses_normalized_url(tmp_path):
-    master_path = tmp_path / "master.csv"
-    source_path = tmp_path / "import.csv"
-    _write_csv(
-        master_path,
-        get_canonical_master_schema(),
-        [_master_row(Artist="Harbor", Bandcamp_URL="https://harbor.bandcamp.com/album/demo")],
-    )
-    _write_csv(
-        source_path,
-        ["Artist Name", "Bandcamp URL", "Primary Genre"],
-        [
-            {
-                "Artist Name": "Harbor",
-                "Bandcamp URL": "harbor.bandcamp.com/album/demo?from=discover",
-                "Primary Genre": "indie",
-            }
-        ],
-    )
-
-    result = merge_csv_into_master(source_path, master_path=master_path, now=RUN_AT)
-    rows = _read_master_rows(master_path)
-
-    assert result["rows_updated"] == 1
-    assert rows[0]["Primary_Genre"] == "indie"
-
-
-def test_all_emails_merge_is_additive_and_keeps_existing_primary(tmp_path):
+def test_update_strategy_merges_duplicate_fields_without_data_loss(tmp_path):
     master_path = tmp_path / "master.csv"
     source_path = tmp_path / "import.csv"
     _write_csv(
@@ -182,22 +129,45 @@ def test_all_emails_merge_is_additive_and_keeps_existing_primary(tmp_path):
         get_canonical_master_schema(),
         [
             _master_row(
-                Artist="Cascade",
-                Website="https://cascade.example.com",
+                Artist="Signals",
+                Location="Melbourne",
+                Source_URL="https://example.com/signals/",
                 Primary_Email="artist@example.com",
-                All_Emails="manager@example.com",
+                All_Emails="manager@example.com;artist@example.com",
+                Facebook_URL="https://facebook.com/oldsignals",
+                Instagram_URL="https://instagram.com/oldsignals",
+                Website="https://signals.example.com",
+                Contact_Name="Existing Contact",
+                Contact_Role="",
+                External_Links="https://signals.example.com/links",
+                Notes="Keep this note",
             )
         ],
     )
     _write_csv(
         source_path,
-        ["Artist Name", "Website", "Primary Email", "All Emails"],
+        [
+            "Artist Name",
+            "Profile URL",
+            "Email",
+            "All Emails",
+            "Facebook URL",
+            "Instagram URL",
+            "Website",
+            "Contact Role",
+            "Notes",
+        ],
         [
             {
-                "Artist Name": "Cascade",
-                "Website": "cascade.example.com",
-                "Primary Email": "booking@example.com",
-                "All Emails": "press@example.com",
+                "Artist Name": "Signals",
+                "Profile URL": "https://example.com/signals",
+                "Email": "booking@example.com",
+                "All Emails": "manager@example.com;press@example.com",
+                "Facebook URL": "https://facebook.com/newsignals",
+                "Instagram URL": "https://instagram.com/newsignals",
+                "Website": "https://new-signals.example.com",
+                "Contact Role": "Manager",
+                "Notes": "",
             }
         ],
     )
@@ -206,8 +176,84 @@ def test_all_emails_merge_is_additive_and_keeps_existing_primary(tmp_path):
     rows = _read_master_rows(master_path)
 
     assert result["rows_updated"] == 1
+    assert result["rows_duplicates_detected"] == 1
     assert rows[0]["Primary_Email"] == "artist@example.com"
-    assert rows[0]["All_Emails"] == "manager@example.com;press@example.com;booking@example.com"
+    assert set(rows[0]["All_Emails"].split(";")) == {
+        "artist@example.com",
+        "manager@example.com",
+        "press@example.com",
+        "booking@example.com",
+    }
+    assert len(rows[0]["All_Emails"].split(";")) == 4
+    assert rows[0]["Facebook_URL"] == "https://facebook.com/newsignals"
+    assert rows[0]["Instagram_URL"] == "https://instagram.com/oldsignals"
+    assert rows[0]["Website"] == "https://signals.example.com"
+    assert rows[0]["Contact_Name"] == "Existing Contact"
+    assert rows[0]["Contact_Role"] == "Manager"
+    assert rows[0]["Notes"] == "Keep this note"
+    assert set(rows[0]["External_Links"].split(";")) == {
+        "https://signals.example.com/links",
+        "https://facebook.com/oldsignals",
+        "https://facebook.com/newsignals",
+        "https://instagram.com/newsignals",
+        "https://new-signals.example.com",
+    }
+    assert len(rows[0]["External_Links"].split(";")) == 5
+
+
+def test_skip_strategy_leaves_existing_duplicate_unchanged_and_adds_new_rows(tmp_path):
+    master_path = tmp_path / "master.csv"
+    source_path = tmp_path / "import.csv"
+    _write_csv(
+        master_path,
+        get_canonical_master_schema(),
+        [_master_row(Artist="Static Bloom", Source_URL="https://example.com/static-bloom", Primary_Email="hi@staticbloom.com")],
+    )
+    _write_csv(
+        source_path,
+        ["Artist Name", "Profile URL", "Email"],
+        [
+            {"Artist Name": "Static Bloom", "Profile URL": "https://example.com/static-bloom/", "Email": "new@staticbloom.com"},
+            {"Artist Name": "Fresh Act", "Profile URL": "https://example.com/fresh-act", "Email": "hello@fresh.example.com"},
+        ],
+    )
+
+    result = merge_csv_into_master(source_path, master_path=master_path, now=RUN_AT, duplicate_strategy="skip")
+    rows = _read_master_rows(master_path)
+
+    assert result["rows_duplicates_detected"] == 1
+    assert result["rows_skipped_duplicates"] == 1
+    assert result["rows_updated"] == 0
+    assert result["rows_added"] == 1
+    assert len(rows) == 2
+    assert rows[0]["Primary_Email"] == "hi@staticbloom.com"
+    assert rows[1]["Artist"] == "Fresh Act"
+
+
+def test_keep_both_strategy_inserts_duplicate_rows(tmp_path):
+    master_path = tmp_path / "master.csv"
+    source_path = tmp_path / "import.csv"
+    _write_csv(
+        master_path,
+        get_canonical_master_schema(),
+        [_master_row(Artist="Echoes", Source_URL="https://example.com/echoes")],
+    )
+    _write_csv(
+        source_path,
+        ["Artist Name", "Profile URL", "Email"],
+        [{"Artist Name": "Echoes", "Profile URL": "https://example.com/echoes/", "Email": "echoes@example.com"}],
+    )
+
+    result = merge_csv_into_master(source_path, master_path=master_path, now=RUN_AT, duplicate_strategy="keep_both")
+    rows = _read_master_rows(master_path)
+
+    assert result["rows_duplicates_detected"] == 1
+    assert result["rows_kept_duplicates"] == 1
+    assert result["rows_added"] == 1
+    assert result["rows_updated"] == 0
+    assert len(rows) == 2
+    assert rows[0]["Artist"] == "Echoes"
+    assert rows[1]["Artist"] == "Echoes"
 
 
 def test_matched_row_with_no_safe_changes_counts_as_skipped_duplicate(tmp_path):
@@ -216,65 +262,19 @@ def test_matched_row_with_no_safe_changes_counts_as_skipped_duplicate(tmp_path):
     _write_csv(
         master_path,
         get_canonical_master_schema(),
-        [_master_row(Artist="Static Bloom", Website="https://staticbloom.com", Primary_Email="hi@staticbloom.com")],
+        [_master_row(Artist="Static Bloom", Source_URL="https://example.com/static-bloom", Primary_Email="hi@staticbloom.com")],
     )
     _write_csv(
         source_path,
-        ["Artist Name", "Website", "Email"],
-        [{"Artist Name": "Static Bloom", "Website": "staticbloom.com", "Email": "hi@staticbloom.com"}],
+        ["Artist Name", "Profile URL", "Email"],
+        [{"Artist Name": "Static Bloom", "Profile URL": "https://example.com/static-bloom", "Email": "hi@staticbloom.com"}],
     )
 
     result = merge_csv_into_master(source_path, master_path=master_path, now=RUN_AT)
 
+    assert result["rows_duplicates_detected"] == 1
     assert result["rows_skipped_duplicates"] == 1
     assert result["rows_updated"] == 0
-
-
-def test_ambiguous_multi_hit_rows_are_skipped(tmp_path):
-    master_path = tmp_path / "master.csv"
-    source_path = tmp_path / "import.csv"
-    _write_csv(
-        master_path,
-        get_canonical_master_schema(),
-        [
-            _master_row(Artist="Act One", Domain_Root="example.com"),
-            _master_row(Artist="Act Two", Domain_Root="example.com"),
-        ],
-    )
-    _write_csv(
-        source_path,
-        ["Artist Name", "Domain Root"],
-        [{"Artist Name": "Example Artist", "Domain Root": "example.com"}],
-    )
-
-    result = merge_csv_into_master(source_path, master_path=master_path, now=RUN_AT)
-    rows = _read_master_rows(master_path)
-
-    assert result["rows_ambiguous"] == 1
-    assert result["rows_added"] == 0
-    assert len(rows) == 2
-
-
-def test_artist_fallback_only_runs_when_stronger_incoming_keys_are_absent(tmp_path):
-    master_path = tmp_path / "master.csv"
-    source_path = tmp_path / "import.csv"
-    _write_csv(
-        master_path,
-        get_canonical_master_schema(),
-        [_master_row(Artist="The Lanterns")],
-    )
-    _write_csv(
-        source_path,
-        ["Artist Name", "Website"],
-        [{"Artist Name": "Lanterns", "Website": "https://new-lanterns.example.com"}],
-    )
-
-    result = merge_csv_into_master(source_path, master_path=master_path, now=RUN_AT)
-    rows = _read_master_rows(master_path)
-
-    assert result["rows_added"] == 1
-    assert result["rows_updated"] == 0
-    assert len(rows) == 2
 
 
 def test_master_auto_create_persists_canonical_header_order(tmp_path):
@@ -337,23 +337,22 @@ def test_preview_csv_merge_counts_returns_expected_added_and_updated_rows(tmp_pa
         [
             _master_row(
                 Artist="Existing Act",
-                Primary_Email="existing@example.com",
-                Website="https://existing.example.com",
+                Source_URL="https://example.com/existing-act",
             )
         ],
     )
     _write_csv(
         source_path,
-        ["Artist Name", "Email", "Bandcamp URL"],
+        ["Artist Name", "Profile URL", "Bandcamp URL"],
         [
             {
                 "Artist Name": "Existing Act",
-                "Email": "existing@example.com",
+                "Profile URL": "https://example.com/existing-act/",
                 "Bandcamp URL": "https://existingact.bandcamp.com",
             },
             {
                 "Artist Name": "New Act",
-                "Email": "new@example.com",
+                "Profile URL": "https://example.com/new-act",
                 "Bandcamp URL": "https://newact.bandcamp.com",
             },
         ],
@@ -361,6 +360,7 @@ def test_preview_csv_merge_counts_returns_expected_added_and_updated_rows(tmp_pa
 
     result = preview_csv_merge_counts(source_path, master_path=master_path, now=RUN_AT)
 
+    assert result["rows_duplicates_detected"] == 1
     assert result["rows_updated"] == 1
     assert result["rows_added"] == 1
     assert result["rows_skipped_duplicates"] == 0
@@ -372,15 +372,15 @@ def test_preview_csv_merge_counts_does_not_modify_master_csv(tmp_path):
     _write_csv(
         master_path,
         get_canonical_master_schema(),
-        [_master_row(Artist="Static Bloom", Primary_Email="hello@staticbloom.com")],
+        [_master_row(Artist="Static Bloom", Source_URL="https://example.com/static-bloom")],
     )
     _write_csv(
         source_path,
-        ["Artist Name", "Email", "Bandcamp URL"],
+        ["Artist Name", "Profile URL", "Bandcamp URL"],
         [
             {
                 "Artist Name": "Static Bloom",
-                "Email": "hello@staticbloom.com",
+                "Profile URL": "https://example.com/static-bloom",
                 "Bandcamp URL": "https://staticbloom.bandcamp.com",
             }
         ],
