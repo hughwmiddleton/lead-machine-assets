@@ -1263,15 +1263,42 @@ def _append_unearthed_profile_url(
     ordered_profile_urls.append(normalized_profile_url)
 
 
+def _normalize_unearthed_profile_url_for_match(profile_url: str | None) -> str:
+    normalized_profile_url = profile_url.strip() if isinstance(profile_url, str) else ""
+    if not normalized_profile_url:
+        return ""
+    parsed = urlparse(normalized_profile_url)
+    normalized_path = parsed.path.rstrip("/") or parsed.path
+    return urlunparse(parsed._replace(path=normalized_path))
+
+
+def _resolve_unearthed_resume_index(
+    ordered_profile_urls: list[str],
+    target_profile_url: str | None,
+) -> int | None:
+    if not target_profile_url:
+        return None
+    try:
+        return ordered_profile_urls.index(target_profile_url) + 1
+    except ValueError:
+        pass
+    normalized_target_profile_url = _normalize_unearthed_profile_url_for_match(target_profile_url)
+    if not normalized_target_profile_url:
+        return None
+    for profile_index, profile_url in enumerate(ordered_profile_urls):
+        if _normalize_unearthed_profile_url_for_match(profile_url) == normalized_target_profile_url:
+            return profile_index + 1
+    return None
+
+
 def _count_unearthed_remaining_profile_urls(
     ordered_profile_urls: list[str],
     target_profile_url: str | None,
 ) -> int:
     if not target_profile_url:
         return len(ordered_profile_urls)
-    try:
-        resume_index = ordered_profile_urls.index(target_profile_url) + 1
-    except ValueError:
+    resume_index = _resolve_unearthed_resume_index(ordered_profile_urls, target_profile_url)
+    if resume_index is None:
         return 0
     return len(ordered_profile_urls[resume_index:])
 
@@ -1283,10 +1310,9 @@ def _slice_unearthed_profile_urls(
 ) -> list[str]:
     resume_index = 0
     if target_profile_url:
-        try:
-            resume_index = ordered_profile_urls.index(target_profile_url) + 1
-        except ValueError:
-            resume_index = 0
+        resolved_resume_index = _resolve_unearthed_resume_index(ordered_profile_urls, target_profile_url)
+        if resolved_resume_index is not None:
+            resume_index = resolved_resume_index
     return ordered_profile_urls[resume_index:resume_index + max_artists]
 
 
