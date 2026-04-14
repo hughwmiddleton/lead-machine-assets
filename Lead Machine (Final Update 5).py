@@ -142,6 +142,7 @@ from soundcloud_metadata_enricher import enrich_soundcloud_metadata
 import pipeline_runner
 from source_scheduler import canonicalize_facebook_url
 from lead_vault import EXPORT_PRESETS, WOODPECKER_EXPORT_PRESET, ensure_master_csv_exists, export_with_preset
+from lead_vault.alias_map import map_headers_to_canonical
 from lead_vault.merge import merge_csv_into_master, preview_csv_import
 from lead_vault.schema import get_canonical_master_schema, get_default_master_csv_path
 from lead_vault.stats import summarize_master_dataset
@@ -10260,6 +10261,14 @@ class LeadVaultTab(QtWidgets.QWidget):
         mapping_layout = QtWidgets.QVBoxLayout()
         mapping_layout.setSpacing(8)
         controls = QtWidgets.QHBoxLayout()
+        self.auto_map_known_button = QtWidgets.QPushButton("Auto Map Known")
+        self.auto_map_known_button.setEnabled(False)
+        self.auto_map_known_button.clicked.connect(self._auto_map_known_headers)
+        controls.addWidget(self.auto_map_known_button)
+        self.ignore_all_button = QtWidgets.QPushButton("Ignore All")
+        self.ignore_all_button.setEnabled(False)
+        self.ignore_all_button.clicked.connect(self._ignore_all_headers)
+        controls.addWidget(self.ignore_all_button)
         controls.addStretch()
         self.import_button = QtWidgets.QPushButton("Run Lead Vault Import")
         self.import_button.setEnabled(False)
@@ -10568,6 +10577,8 @@ class LeadVaultTab(QtWidgets.QWidget):
         self.summary_view.clear()
         self.unmapped_table.setRowCount(0)
         self.import_button.setEnabled(False)
+        self.auto_map_known_button.setEnabled(False)
+        self.ignore_all_button.setEnabled(False)
 
     def _selected_export_preset(self) -> dict:
         return self.preset_selector.currentData() or WOODPECKER_EXPORT_PRESET
@@ -10591,6 +10602,8 @@ class LeadVaultTab(QtWidgets.QWidget):
             return
         self.preview_button.setEnabled(False)
         self.import_button.setEnabled(False)
+        self.auto_map_known_button.setEnabled(False)
+        self.ignore_all_button.setEnabled(False)
         self.summary_view.setPlainText("Previewing import...")
         self._start_worker("preview", source_path, {}, [])
 
@@ -10616,6 +10629,8 @@ class LeadVaultTab(QtWidgets.QWidget):
             return
         self.preview_button.setEnabled(False)
         self.import_button.setEnabled(False)
+        self.auto_map_known_button.setEnabled(False)
+        self.ignore_all_button.setEnabled(False)
         self.summary_view.setPlainText("Running Lead Vault import...")
         self._start_worker("import", source_path, header_overrides, ignored_headers)
 
@@ -10683,16 +10698,38 @@ class LeadVaultTab(QtWidgets.QWidget):
             combo.currentIndexChanged.connect(self._refresh_import_button)
             self.unmapped_table.setCellWidget(row_index, 1, combo)
 
-    def _collect_manual_mapping_state(self) -> Tuple[Dict[str, str], List[str], List[str]]:
-        overrides: Dict[str, str] = {}
-        ignored_headers: List[str] = []
-        unresolved_headers: List[str] = []
+    def _iter_unmapped_mapping_rows(self):
         for row_index in range(self.unmapped_table.rowCount()):
             header_item = self.unmapped_table.item(row_index, 0)
             combo = self.unmapped_table.cellWidget(row_index, 1)
             header_name = header_item.text() if header_item else ""
             if not header_name or combo is None:
                 continue
+            yield header_name, combo
+
+    def _set_mapping_combo_value(self, combo: QtWidgets.QComboBox, value: str):
+        index = combo.findData(value)
+        if index < 0:
+            index = combo.findText(value)
+        if index >= 0 and combo.currentIndex() != index:
+            combo.setCurrentIndex(index)
+
+    def _ignore_all_headers(self):
+        for _, combo in self._iter_unmapped_mapping_rows():
+            self._set_mapping_combo_value(combo, self.IGNORE_OPTION)
+        self._refresh_import_button()
+
+    def _auto_map_known_headers(self):
+        for header_name, combo in self._iter_unmapped_mapping_rows():
+            resolved_target = map_headers_to_canonical([header_name]).get(header_name) or self.IGNORE_OPTION
+            self._set_mapping_combo_value(combo, resolved_target)
+        self._refresh_import_button()
+
+    def _collect_manual_mapping_state(self) -> Tuple[Dict[str, str], List[str], List[str]]:
+        overrides: Dict[str, str] = {}
+        ignored_headers: List[str] = []
+        unresolved_headers: List[str] = []
+        for header_name, combo in self._iter_unmapped_mapping_rows():
             selected_value = combo.currentData() or ""
             if not selected_value:
                 unresolved_headers.append(header_name)
@@ -10704,6 +10741,13 @@ class LeadVaultTab(QtWidgets.QWidget):
         return overrides, ignored_headers, unresolved_headers
 
     def _refresh_import_button(self):
+        has_mapping_rows = self.unmapped_table.rowCount() > 0
+        self.auto_map_known_button.setEnabled(
+            bool(self.preview_result) and has_mapping_rows and not bool(getattr(self.worker, "isRunning", lambda: False)())
+        )
+        self.ignore_all_button.setEnabled(
+            bool(self.preview_result) and has_mapping_rows and not bool(getattr(self.worker, "isRunning", lambda: False)())
+        )
         if not self.preview_result or bool(getattr(self.worker, "isRunning", lambda: False)()):
             self.import_button.setEnabled(False)
             return

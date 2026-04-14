@@ -80,6 +80,92 @@ def test_preview_populates_unmapped_controls_and_blocks_import_until_resolved(qa
     assert tab.import_button.isEnabled()
 
 
+def test_ignore_all_sets_every_mapping_dropdown_to_ignore(qapp, tmp_path):
+    module = _load_legacy_module()
+    tab = module.LeadVaultTab()
+    source_path = tmp_path / "input.csv"
+
+    tab._handle_preview_finished(
+        {
+            "source_path": str(source_path),
+            "master_path": str(tmp_path / "master.csv"),
+            "row_count": 1,
+            "detected_headers": ["FB_Status", "Throwaway"],
+            "mapped_headers": {},
+            "unmapped_headers": ["FB_Status", "Throwaway"],
+            "ignored_headers": [],
+            "warnings": [],
+        }
+    )
+
+    tab.ignore_all_button.click()
+
+    assert tab.import_button.isEnabled()
+    assert [tab.unmapped_table.cellWidget(index, 1).currentData() for index in range(tab.unmapped_table.rowCount())] == [
+        tab.IGNORE_OPTION,
+        tab.IGNORE_OPTION,
+    ]
+
+
+def test_auto_map_known_reuses_alias_mapping_and_ignores_unknown_headers(qapp, tmp_path):
+    module = _load_legacy_module()
+    tab = module.LeadVaultTab()
+    source_path = tmp_path / "input.csv"
+
+    tab._handle_preview_finished(
+        {
+            "source_path": str(source_path),
+            "master_path": str(tmp_path / "master.csv"),
+            "row_count": 1,
+            "detected_headers": ["Email", "Artist Name", "FB_Status"],
+            "mapped_headers": {},
+            "unmapped_headers": ["Email", "Artist Name", "FB_Status"],
+            "ignored_headers": [],
+            "warnings": [],
+        }
+    )
+
+    tab.auto_map_known_button.click()
+
+    assert tab.import_button.isEnabled()
+    assert [tab.unmapped_table.cellWidget(index, 1).currentData() for index in range(tab.unmapped_table.rowCount())] == [
+        "Primary_Email",
+        "Artist",
+        tab.IGNORE_OPTION,
+    ]
+
+
+def test_manual_override_still_works_after_bulk_action(qapp, tmp_path):
+    module = _load_legacy_module()
+    tab = module.LeadVaultTab()
+    source_path = tmp_path / "input.csv"
+
+    tab._handle_preview_finished(
+        {
+            "source_path": str(source_path),
+            "master_path": str(tmp_path / "master.csv"),
+            "row_count": 1,
+            "detected_headers": ["Booking Email", "FB_Status"],
+            "mapped_headers": {},
+            "unmapped_headers": ["Booking Email", "FB_Status"],
+            "ignored_headers": [],
+            "warnings": [],
+        }
+    )
+
+    tab.ignore_all_button.click()
+    booking_combo = tab.unmapped_table.cellWidget(0, 1)
+    booking_combo.setCurrentText("Primary_Email")
+    tab._refresh_import_button()
+
+    overrides, ignored_headers, unresolved_headers = tab._collect_manual_mapping_state()
+
+    assert overrides == {"Booking Email": "Primary_Email"}
+    assert ignored_headers == ["FB_Status"]
+    assert unresolved_headers == []
+    assert tab.import_button.isEnabled()
+
+
 def test_lead_vault_layout_sets_minimum_heights_and_path_tooltips(qapp, monkeypatch, tmp_path):
     module = _load_legacy_module()
     master_path = tmp_path / "master.csv"
