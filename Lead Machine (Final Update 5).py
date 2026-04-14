@@ -1251,6 +1251,45 @@ def _write_unearthed_persistent_cursor(profile_url: str | None) -> None:
         )
 
 
+def _append_unearthed_profile_url(
+    ordered_profile_urls: list[str],
+    seen_profile_urls: set[str],
+    profile_url: str,
+) -> None:
+    normalized_profile_url = profile_url.strip() if isinstance(profile_url, str) else ""
+    if not normalized_profile_url or normalized_profile_url in seen_profile_urls:
+        return
+    seen_profile_urls.add(normalized_profile_url)
+    ordered_profile_urls.append(normalized_profile_url)
+
+
+def _count_unearthed_remaining_profile_urls(
+    ordered_profile_urls: list[str],
+    target_profile_url: str | None,
+) -> int:
+    if not target_profile_url:
+        return len(ordered_profile_urls)
+    try:
+        resume_index = ordered_profile_urls.index(target_profile_url) + 1
+    except ValueError:
+        return 0
+    return len(ordered_profile_urls[resume_index:])
+
+
+def _slice_unearthed_profile_urls(
+    ordered_profile_urls: list[str],
+    target_profile_url: str | None,
+    max_artists: int,
+) -> list[str]:
+    resume_index = 0
+    if target_profile_url:
+        try:
+            resume_index = ordered_profile_urls.index(target_profile_url) + 1
+        except ValueError:
+            resume_index = 0
+    return ordered_profile_urls[resume_index:resume_index + max_artists]
+
+
 def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200, fb_session=None, job_config=None):
     driver = setup_driver()
     fb_driver = None
@@ -1265,7 +1304,8 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
         existing_data = pd.DataFrame()
         if os.path.exists(existing_csv):
             existing_data = pd.read_csv(existing_csv)
-        profile_urls = set()
+        ordered_profile_urls = []
+        seen_profile_urls = set()
         listing_metadata_by_url = {}
         state = job_config.get("_night_mode_state") if isinstance(job_config, dict) else None
         persist_state = job_config.get("_night_mode_state_persist") if isinstance(job_config, dict) else None
@@ -1283,16 +1323,6 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
                 target_profile_url = checkpoint or persistent_cursor
             elif resume_mode == "cursor":
                 target_profile_url = persistent_cursor
-
-        def _usable_profile_url_count(collected_urls):
-            if not target_profile_url:
-                return len(collected_urls)
-            ordered_urls = list(collected_urls)
-            try:
-                resume_index = ordered_urls.index(target_profile_url) + 1
-            except ValueError:
-                return 0
-            return len(ordered_urls[resume_index:])
 
         def _resolve_listing_card(link_tag):
             link_text = " ".join(link_tag.stripped_strings)
@@ -1343,7 +1373,7 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
                 else "",
             }
 
-        while _usable_profile_url_count(profile_urls) < max_artists:
+        while _count_unearthed_remaining_profile_urls(ordered_profile_urls, target_profile_url) < max_artists:
             soup = BeautifulSoup(driver.page_source, 'html.parser')
             artist_links = soup.select('a.HU3iy.p1_Ju.mqDRk.FQED6.O_grP[href^="/triplejunearthed/artist/"]')
             if not artist_links:
@@ -1356,9 +1386,9 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
                 href = link.get('href', '')
                 if href.startswith('/triplejunearthed/artist/'):
                     profile_url = "https://www.abc.net.au" + href
-                    profile_urls.add(profile_url)
+                    _append_unearthed_profile_url(ordered_profile_urls, seen_profile_urls, profile_url)
                     listing_metadata_by_url.setdefault(profile_url, _extract_listing_metadata(listing_card))
-            print(f"Found {len(profile_urls)} artist profile URLs so far...")
+            print(f"Found {len(ordered_profile_urls)} artist profile URLs so far...")
             try:
                 load_more_button = WebDriverWait(driver, 10).until(
                     EC.element_to_be_clickable((By.XPATH, '//button[contains(text(), "Load more")]'))
@@ -1368,15 +1398,7 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
             except Exception as e:
                 print("No more 'Load More' button found or error:", e)
                 break
-        ordered_profile_urls = list(profile_urls)
-        resume_index = 0
-        if target_profile_url:
-            try:
-                resume_index = ordered_profile_urls.index(target_profile_url) + 1
-            except ValueError:
-                resume_index = 0
-
-        profile_urls = ordered_profile_urls[resume_index:resume_index + max_artists]
+        profile_urls = _slice_unearthed_profile_urls(ordered_profile_urls, target_profile_url, max_artists)
         print(f"Total artist profile URLs to scrape: {len(profile_urls)}")
         if not profile_urls:
             print("No artist profile URLs found. Please check the website structure or selectors.")
