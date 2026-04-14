@@ -57,6 +57,24 @@ def _load_config(config_path: str) -> Dict[str, Any]:
     with open(config_path, "r", encoding="utf-8") as f:
         return json.load(f)
 
+
+def _build_seed_runtime_job(job: Dict[str, Any], *, job_id: str, raw_csv: str) -> Dict[str, Any]:
+    runtime_job = dict(job or {})
+    directory = (runtime_job.get("directory") or "").strip().lower()
+    if directory != "unearthed":
+        return runtime_job
+
+    runtime_job["_night_mode_state"] = {
+        "job_id": job_id,
+        "raw_csv": raw_csv,
+        "enriched_csv": "",
+        "input_seed_csv": runtime_job.get("input_seed_csv", ""),
+        "status": "running",
+        "error_count": 0,
+    }
+    return runtime_job
+
+
 def _job_status_path(job_dir: str) -> str:
     return os.path.join(job_dir, "job_status.json")
 
@@ -157,8 +175,9 @@ def run_seed_phase(config_path: str, run_dir: str, resume: bool = False) -> Dict
         else:
             error_msg = ""
             try:
+                runtime_job = _build_seed_runtime_job(job, job_id=job_id, raw_csv=raw_csv)
                 try:
-                    pipeline_runner.run_directory_job(job, raw_csv, logger=None)
+                    pipeline_runner.run_directory_job(runtime_job, raw_csv, logger=None)
                 except TypeError:
                     night_mode_runner._process_job(
                         job=job,

@@ -72,3 +72,75 @@ def test_seed_job_exception_marks_failed(monkeypatch, tmp_path: Path) -> None:
     assert payload["row_count"] == 0
     assert payload["raw_exists"] is False
     assert "RuntimeError" in payload.get("error", "")
+
+
+def test_seed_phase_unearthed_jobs_receive_runtime_state_for_cursor_handoff(monkeypatch, tmp_path: Path) -> None:
+    cursor_path = tmp_path / "unearthed_cursor.json"
+    cursor_path.write_text(
+        json.dumps(
+            {
+                "unearthed_persistent_cursor": "https://www.abc.net.au/triplejunearthed/artist/patrick-romeo",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    effective_cursors: list[str] = []
+    advanced_cursors: list[str] = []
+
+    def fake_run_directory_job(job_config, raw_output_path, logger=None):  # type: ignore[override]
+        payload = json.loads(cursor_path.read_text(encoding="utf-8"))
+        effective_cursors.append(payload["unearthed_persistent_cursor"])
+
+        runtime_state = job_config.get("_night_mode_state")
+        if isinstance(runtime_state, dict):
+            next_cursor = (
+                "https://www.abc.net.au/triplejunearthed/artist/artist-50"
+                if len(advanced_cursors) == 0
+                else "https://www.abc.net.au/triplejunearthed/artist/artist-100"
+            )
+            runtime_state["unearthed_last_profile_url"] = next_cursor
+            advanced_cursors.append(next_cursor)
+            cursor_path.write_text(
+                json.dumps({"unearthed_persistent_cursor": next_cursor}),
+                encoding="utf-8",
+            )
+
+        Path(raw_output_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(raw_output_path).write_text("Artist Name,Email\n", encoding="utf-8")
+        return raw_output_path
+
+    monkeypatch.setattr(pipeline_runner, "run_directory_job", fake_run_directory_job)
+
+    config = {
+        "jobs": [
+            {
+                "job_id": "job_unearthed_1",
+                "directory": "unearthed",
+                "unearthed_resume_mode": "cursor",
+            },
+            {
+                "job_id": "job_unearthed_2",
+                "directory": "unearthed",
+                "unearthed_resume_mode": "cursor",
+            },
+        ]
+    }
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    run_dir = tmp_path / "run"
+    run_seed_phase(config_path.as_posix(), run_dir.as_posix())
+
+    assert effective_cursors == [
+        "https://www.abc.net.au/triplejunearthed/artist/patrick-romeo",
+        "https://www.abc.net.au/triplejunearthed/artist/artist-50",
+    ]
+    assert advanced_cursors == [
+        "https://www.abc.net.au/triplejunearthed/artist/artist-50",
+        "https://www.abc.net.au/triplejunearthed/artist/artist-100",
+    ]
+
+    final_payload = json.loads(cursor_path.read_text(encoding="utf-8"))
+    assert final_payload["unearthed_persistent_cursor"] == "https://www.abc.net.au/triplejunearthed/artist/artist-100"
