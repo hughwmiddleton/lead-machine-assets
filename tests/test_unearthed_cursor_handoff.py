@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 import pipeline_runner
 
 
@@ -66,6 +68,9 @@ def _run_fake_unearthed_scrape(
     *,
     max_artists: int,
     target_profile_url: str | None = None,
+    resume_mode: str | None = None,
+    selected_cursor: str | None = None,
+    persistent_cursor: str | None = None,
 ):
     module = pipeline_runner._load_legacy_module()
     driver = _FakeUnearthedDriver([
@@ -95,9 +100,18 @@ def _run_fake_unearthed_scrape(
     monkeypatch.setattr(module, "SCRAPE_FB_EMAILS_ON_UNEARTHED_PAGE1", False)
     monkeypatch.setattr(module.time, "sleep", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(module.random, "uniform", lambda *_args, **_kwargs: 0.0)
-    monkeypatch.setattr(module, "_load_unearthed_persistent_cursor", lambda: target_profile_url)
+    monkeypatch.setattr(
+        module,
+        "_load_unearthed_persistent_cursor",
+        lambda: persistent_cursor if persistent_cursor is not None else target_profile_url,
+    )
 
-    job_config = {"unearthed_resume_mode": "cursor"} if target_profile_url else {}
+    job_config = {}
+    effective_resume_mode = resume_mode if resume_mode is not None else ("cursor" if target_profile_url else None)
+    if effective_resume_mode:
+        job_config["unearthed_resume_mode"] = effective_resume_mode
+    if selected_cursor is not None:
+        job_config["unearthed_selected_cursor"] = selected_cursor
     module.scrape_website(
         "https://www.abc.net.au/triplejunearthed",
         existing_csv=str(tmp_path / "unearthed.csv"),
@@ -361,6 +375,38 @@ def test_scrape_website_preserves_fresh_start_fallback_when_cursor_is_never_foun
         "https://www.abc.net.au/triplejunearthed/artist/artist-2",
     ]
     assert load_more_requests == 1
+
+
+def test_scrape_website_selected_cursor_uses_explicit_checkpoint_instead_of_persistent_cursor(monkeypatch, tmp_path) -> None:
+    visited_profile_urls, load_more_requests = _run_fake_unearthed_scrape(
+        monkeypatch,
+        tmp_path,
+        [["artist-1", "artist-2", "artist-3", "artist-4", "artist-5"]],
+        max_artists=2,
+        resume_mode="selected",
+        selected_cursor="https://www.abc.net.au/triplejunearthed/artist/artist-2",
+        persistent_cursor="https://www.abc.net.au/triplejunearthed/artist/artist-4",
+    )
+
+    assert visited_profile_urls == [
+        "https://www.abc.net.au/triplejunearthed/artist/artist-3",
+        "https://www.abc.net.au/triplejunearthed/artist/artist-4",
+    ]
+    assert load_more_requests == 0
+
+
+def test_scrape_website_selected_cursor_raises_when_checkpoint_is_missing(monkeypatch, tmp_path) -> None:
+    module = pipeline_runner._load_legacy_module()
+
+    with pytest.raises(module.UnearthedSelectedCursorError):
+        _run_fake_unearthed_scrape(
+            monkeypatch,
+            tmp_path,
+            [["artist-1", "artist-2", "artist-3"]],
+            max_artists=2,
+            resume_mode="selected",
+            selected_cursor="https://www.abc.net.au/triplejunearthed/artist/missing",
+        )
 
 
 def test_scrape_website_fresh_run_behavior_is_unchanged(monkeypatch, tmp_path) -> None:

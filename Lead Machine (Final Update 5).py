@@ -1272,6 +1272,10 @@ def _normalize_unearthed_profile_url_for_match(profile_url: str | None) -> str:
     return urlunparse(parsed._replace(path=normalized_path))
 
 
+class UnearthedSelectedCursorError(RuntimeError):
+    """Raised when an explicit Unearthed selected cursor cannot be used safely."""
+
+
 def _build_unearthed_resume_debug_details(
     ordered_profile_urls: list[str],
     target_profile_url: str | None,
@@ -1387,6 +1391,7 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
     fb_driver = None
     artist_data = []
     job_config = job_config or {}
+    selected_cursor_strict = False
     try:
         driver.get(url)
         WebDriverWait(driver, 20).until(
@@ -1407,7 +1412,7 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
         target_profile_url = None
         if resume_enabled:
             resume_mode = str(job_config.get("unearthed_resume_mode", "auto") or "auto").strip().lower()
-            if resume_mode not in {"auto", "cursor", "fresh"}:
+            if resume_mode not in {"auto", "cursor", "fresh", "selected"}:
                 resume_mode = "auto"
             checkpoint = (state.get("unearthed_last_profile_url") or "").strip() if isinstance(state, dict) else ""
             persistent_cursor = _load_unearthed_persistent_cursor()
@@ -1415,6 +1420,13 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
                 target_profile_url = checkpoint or persistent_cursor
             elif resume_mode == "cursor":
                 target_profile_url = persistent_cursor
+            elif resume_mode == "selected":
+                selected_cursor_strict = True
+                target_profile_url = str(job_config.get("unearthed_selected_cursor") or "").strip()
+                if not target_profile_url:
+                    raise UnearthedSelectedCursorError(
+                        "Selected cursor entry point mode requires a non-empty Unearthed checkpoint URL."
+                    )
 
         def _resolve_listing_card(link_tag):
             link_text = " ".join(link_tag.stripped_strings)
@@ -1543,6 +1555,11 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
                 f"fallback_to_zero={fallback_to_zero} "
                 f"fallback_reason={fallback_reason}"
             )
+            if selected_cursor_strict and resolved_resume_index is None:
+                raise UnearthedSelectedCursorError(
+                    "Selected Unearthed cursor entry point was not found in the discovered profile stream: "
+                    f"{target_profile_url}"
+                )
         profile_urls = _slice_unearthed_profile_urls(ordered_profile_urls, target_profile_url, max_artists)
         print(f"Total artist profile URLs to scrape: {len(profile_urls)}")
         if not profile_urls:
@@ -1608,6 +1625,8 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
                         pass
     except Exception as e:
         print(f"Error during website scraping: {e}")
+        if isinstance(e, UnearthedSelectedCursorError):
+            raise
     finally:
         driver.quit()
         if fb_driver:
@@ -11689,6 +11708,7 @@ class NightModeTab(QtWidgets.QWidget):
         ("Auto (resume from checkpoint or cursor)", "auto"),
         ("Continue from last position (cursor only)", "cursor"),
         ("Start fresh (ignore previous progress)", "fresh"),
+        ("Selected cursor entry point", "selected"),
     ]
 
     def __init__(self, parent=None):
@@ -11774,6 +11794,17 @@ class NightModeTab(QtWidgets.QWidget):
         options_layout.addWidget(self.phased_checkbox)
         options_layout.addStretch()
         layout.addLayout(options_layout)
+
+        selected_cursor_layout = QtWidgets.QHBoxLayout()
+        self.unearthed_selected_cursor_label = QtWidgets.QLabel("Selected cursor checkpoint URL:")
+        self.unearthed_selected_cursor_edit = QtWidgets.QLineEdit()
+        self.unearthed_selected_cursor_edit.setPlaceholderText(
+            "https://www.abc.net.au/triplejunearthed/artist/artist-slug"
+        )
+        selected_cursor_layout.addWidget(self.unearthed_selected_cursor_label)
+        selected_cursor_layout.addWidget(self.unearthed_selected_cursor_edit)
+        layout.addLayout(selected_cursor_layout)
+        self.unearthed_resume_mode_combo.currentIndexChanged.connect(self._sync_unearthed_resume_controls)
 
         fb_row = QtWidgets.QHBoxLayout()
         fb_user_label = QtWidgets.QLabel("FB Username (optional):")
@@ -11900,6 +11931,7 @@ class NightModeTab(QtWidgets.QWidget):
         layout.addWidget(self.log_console)
 
         self.setLayout(layout)
+        self._sync_unearthed_resume_controls()
         self._toggle_master_live_controls()
         self._load_config_summary()
         self._refresh_run_summary()
@@ -11963,26 +11995,40 @@ class NightModeTab(QtWidgets.QWidget):
 
     def _current_unearthed_resume_mode(self) -> str:
         value = str(self.unearthed_resume_mode_combo.currentData() or "auto").strip().lower()
-        if value not in {"auto", "cursor", "fresh"}:
+        if value not in {"auto", "cursor", "fresh", "selected"}:
             return "auto"
         return value
 
     def _set_unearthed_resume_mode(self, value) -> None:
         normalized = str(value or "auto").strip().lower()
-        if normalized not in {"auto", "cursor", "fresh"}:
+        if normalized not in {"auto", "cursor", "fresh", "selected"}:
             normalized = "auto"
         idx = self.unearthed_resume_mode_combo.findData(normalized)
         if idx < 0:
             idx = 0
         self.unearthed_resume_mode_combo.setCurrentIndex(idx)
 
+    def _current_unearthed_selected_cursor(self) -> str:
+        return str(self.unearthed_selected_cursor_edit.text() or "").strip()
+
+    def _set_unearthed_selected_cursor(self, value) -> None:
+        self.unearthed_selected_cursor_edit.setText(str(value or "").strip())
+
+    def _sync_unearthed_resume_controls(self) -> None:
+        selected_mode = self._current_unearthed_resume_mode() == "selected"
+        self.unearthed_selected_cursor_label.setEnabled(selected_mode)
+        self.unearthed_selected_cursor_edit.setEnabled(selected_mode)
+
     def _night_mode_jobs_for_config(self):
         resume_mode = self._current_unearthed_resume_mode()
+        selected_cursor = self._current_unearthed_selected_cursor()
         config_jobs = []
         for job in self.jobs:
             job_copy = dict(job)
             if str(job_copy.get("directory") or "").strip().lower() == "unearthed":
                 job_copy["unearthed_resume_mode"] = resume_mode
+                if selected_cursor:
+                    job_copy["unearthed_selected_cursor"] = selected_cursor
             config_jobs.append(job_copy)
         return config_jobs
 
@@ -12034,6 +12080,7 @@ class NightModeTab(QtWidgets.QWidget):
             "export_mode": self.export_mode_combo.currentText().strip(),
             "jobs": self._night_mode_jobs_for_config(),
             "unearthed_resume_mode": self._current_unearthed_resume_mode(),
+            "unearthed_selected_cursor": self._current_unearthed_selected_cursor(),
         }
         config["phased"] = self.phased_checkbox.isChecked()
         config["facebook"] = {
@@ -12085,6 +12132,8 @@ class NightModeTab(QtWidgets.QWidget):
             self.jobs_summary.setPlainText("Config could not be parsed.")
             return
         self._set_unearthed_resume_mode(config.get("unearthed_resume_mode", "auto"))
+        self._set_unearthed_selected_cursor(config.get("unearthed_selected_cursor", ""))
+        self._sync_unearthed_resume_controls()
         export_mode = (config.get("export_mode") or "both").strip().lower()
         if export_mode in {"both", "per_directory", "combined"}:
             idx = self.export_mode_combo.findText(export_mode)
@@ -12141,6 +12190,7 @@ class NightModeTab(QtWidgets.QWidget):
                 "export_mode": self.export_mode_combo.currentText().strip(),
                 "jobs": self._night_mode_jobs_for_config(),
                 "unearthed_resume_mode": self._current_unearthed_resume_mode(),
+                "unearthed_selected_cursor": self._current_unearthed_selected_cursor(),
             }
             config["phased"] = self._phased_enabled
             config["facebook"] = {

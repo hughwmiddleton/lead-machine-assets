@@ -1012,3 +1012,33 @@ def test_night_mode_run_summary_panel_renders_latest_summary(qapp, tmp_path):
         "Rows added: 47\n"
         "Rows updated: 11"
     )
+
+
+def test_night_mode_selected_cursor_round_trips_into_saved_config(qapp, monkeypatch, tmp_path):
+    module = _load_legacy_module()
+    tab = module.NightModeTab()
+    tab.jobs = [
+        {"job_id": "job_unearthed_1", "directory": "unearthed", "target_valid_leads": 15},
+        {"job_id": "job_spotify_1", "directory": "spotify", "target_valid_leads": 10},
+    ]
+    tab._set_unearthed_resume_mode("selected")
+    checkpoint = "https://www.abc.net.au/triplejunearthed/artist/artist-42"
+    tab._set_unearthed_selected_cursor(checkpoint)
+
+    output_path = tmp_path / "overnight_jobs.json"
+    monkeypatch.setattr(
+        module.QtWidgets.QFileDialog,
+        "getSaveFileName",
+        lambda *args, **kwargs: (str(output_path), "JSON Files (*.json)"),
+    )
+
+    tab._save_config_to_file()
+
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+
+    assert tab.unearthed_selected_cursor_edit.isEnabled()
+    assert payload["unearthed_resume_mode"] == "selected"
+    assert payload["unearthed_selected_cursor"] == checkpoint
+    assert payload["jobs"][0]["unearthed_resume_mode"] == "selected"
+    assert payload["jobs"][0]["unearthed_selected_cursor"] == checkpoint
+    assert "unearthed_selected_cursor" not in payload["jobs"][1]
