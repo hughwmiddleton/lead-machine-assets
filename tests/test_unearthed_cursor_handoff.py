@@ -72,6 +72,8 @@ def _run_fake_unearthed_scrape(
     selected_cursor: str | None = None,
     persistent_cursor: str | None = None,
     night_mode_state: dict | None = None,
+    cursor_loader=None,
+    cursor_writer=None,
 ):
     module = pipeline_runner._load_legacy_module()
     driver = _FakeUnearthedDriver([
@@ -101,12 +103,12 @@ def _run_fake_unearthed_scrape(
     monkeypatch.setattr(module, "SCRAPE_FB_EMAILS_ON_UNEARTHED_PAGE1", False)
     monkeypatch.setattr(module.time, "sleep", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(module.random, "uniform", lambda *_args, **_kwargs: 0.0)
-    monkeypatch.setattr(
-        module,
-        "_load_unearthed_persistent_cursor",
-        lambda: persistent_cursor if persistent_cursor is not None else target_profile_url,
-    )
-    monkeypatch.setattr(module, "_write_unearthed_persistent_cursor", lambda _profile_url: None)
+    if cursor_loader is None:
+        cursor_loader = lambda: persistent_cursor if persistent_cursor is not None else target_profile_url
+    if cursor_writer is None:
+        cursor_writer = lambda _profile_url: None
+    monkeypatch.setattr(module, "_load_unearthed_persistent_cursor", cursor_loader)
+    monkeypatch.setattr(module, "_write_unearthed_persistent_cursor", cursor_writer)
 
     job_config = {}
     effective_resume_mode = resume_mode if resume_mode is not None else ("cursor" if target_profile_url else None)
@@ -354,6 +356,63 @@ def test_scrape_website_auto_resume_uses_fresh_persistent_cursor_over_runtime_st
         "https://www.abc.net.au/triplejunearthed/artist/artist-4",
     ]
     assert load_more_requests == 0
+
+
+def test_scrape_website_cursor_jobs_write_terminal_cursor_for_next_job_without_runtime_state(monkeypatch, tmp_path) -> None:
+    cursor_state = {
+        "value": "https://www.abc.net.au/triplejunearthed/artist/artist-2",
+    }
+    cursor_reads: list[str] = []
+    cursor_writes: list[str] = []
+
+    def _load_cursor() -> str:
+        cursor_reads.append(cursor_state["value"])
+        return cursor_state["value"]
+
+    def _write_cursor(profile_url: str) -> None:
+        cursor_writes.append(profile_url)
+        cursor_state["value"] = profile_url
+
+    pages = [["artist-1", "artist-2", "artist-3", "artist-4", "artist-5", "artist-6"]]
+
+    first_job_urls, first_load_more_requests = _run_fake_unearthed_scrape(
+        monkeypatch,
+        tmp_path,
+        pages,
+        max_artists=2,
+        resume_mode="cursor",
+        cursor_loader=_load_cursor,
+        cursor_writer=_write_cursor,
+    )
+    second_job_urls, second_load_more_requests = _run_fake_unearthed_scrape(
+        monkeypatch,
+        tmp_path,
+        pages,
+        max_artists=2,
+        resume_mode="cursor",
+        cursor_loader=_load_cursor,
+        cursor_writer=_write_cursor,
+    )
+
+    assert first_job_urls == [
+        "https://www.abc.net.au/triplejunearthed/artist/artist-3",
+        "https://www.abc.net.au/triplejunearthed/artist/artist-4",
+    ]
+    assert second_job_urls == [
+        "https://www.abc.net.au/triplejunearthed/artist/artist-5",
+        "https://www.abc.net.au/triplejunearthed/artist/artist-6",
+    ]
+    assert first_load_more_requests == 0
+    assert second_load_more_requests == 0
+    assert cursor_reads == [
+        "https://www.abc.net.au/triplejunearthed/artist/artist-2",
+        "https://www.abc.net.au/triplejunearthed/artist/artist-4",
+    ]
+    assert cursor_writes == [
+        "https://www.abc.net.au/triplejunearthed/artist/artist-4",
+        "https://www.abc.net.au/triplejunearthed/artist/artist-6",
+    ]
+    assert cursor_state["value"] == "https://www.abc.net.au/triplejunearthed/artist/artist-6"
 
 
 def test_scrape_website_emits_resume_debug_summary_without_changing_slice_flow(monkeypatch, tmp_path, capsys) -> None:

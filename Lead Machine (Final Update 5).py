@@ -1398,6 +1398,8 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
     selected_cursor_strict = False
     resume_cursor_strict = False
     resume_mode = ""
+    terminal_profile_url = None
+    scrape_completed = False
     try:
         driver.get(url)
         WebDriverWait(driver, 20).until(
@@ -1637,12 +1639,13 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
             )
             if isinstance(state, dict):
                 state["unearthed_last_profile_url"] = profile_url
-                _write_unearthed_persistent_cursor(profile_url)
                 if callable(persist_state):
                     try:
                         persist_state()
                     except Exception:
                         pass
+            terminal_profile_url = profile_url
+        scrape_completed = True
     except Exception as e:
         print(f"Error during website scraping: {e}")
         if isinstance(e, (UnearthedSelectedCursorError, UnearthedResumeCursorError)):
@@ -1655,6 +1658,15 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
             except Exception:
                 pass
     save_to_csv(artist_data, existing_csv)
+    if scrape_completed and terminal_profile_url and resume_enabled:
+        if isinstance(state, dict):
+            state["unearthed_last_profile_url"] = terminal_profile_url
+        _write_unearthed_persistent_cursor(terminal_profile_url)
+        if callable(persist_state):
+            try:
+                persist_state()
+            except Exception:
+                pass
 
 # ---------------------------
 # Unearthed: release date extraction (robust)
