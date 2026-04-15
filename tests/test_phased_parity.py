@@ -78,7 +78,7 @@ def parity_stubs(monkeypatch, tmp_path):
         return raw_output_path
 
     # Master enrichment: pass-through with gentle canonicalization.
-    def fake_run_master_enrichment(input_csv, output_csv, logger=None, enable_live_search=True, max_live_searches=None, night_mode=False):
+    def fake_run_master_enrichment(input_csv, output_csv, logger=None, enable_live_search=True, max_live_searches=None, night_mode=False, **kwargs):
         df = _load_csv(Path(input_csv))
         if "match_score_overall" not in df.columns:
             df["match_score_overall"] = 0.72

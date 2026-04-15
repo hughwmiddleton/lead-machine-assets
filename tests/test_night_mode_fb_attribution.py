@@ -306,7 +306,7 @@ def test_canonical_detectable_explicit_facebook_link_still_runs_without_identity
             FB_ATTEMPT_STATE_COL: "attempted_fb_no_email_on_page",
         }
     )
-    monkeypatch.setattr(pipeline_runner, "_promote_fb_urls_df", lambda df, logger=None: df)
+    monkeypatch.setattr(pipeline_runner, "_promote_fb_urls_df", lambda df, logger=None, **kwargs: df)
     df_out, _ = _run_night_fb_pass(
         monkeypatch,
         tmp_path,
@@ -338,7 +338,7 @@ def test_web_host_explicit_facebook_link_still_runs_without_identity_anchor(monk
             FB_ATTEMPT_STATE_COL: "attempted_fb_no_email_on_page",
         }
     )
-    monkeypatch.setattr(pipeline_runner, "_promote_fb_urls_df", lambda df, logger=None: df)
+    monkeypatch.setattr(pipeline_runner, "_promote_fb_urls_df", lambda df, logger=None, **kwargs: df)
     df_out, _ = _run_night_fb_pass(
         monkeypatch,
         tmp_path,
@@ -369,6 +369,11 @@ def test_share_entrypoint_runs_without_identity_anchor(monkeypatch, tmp_path):
             FB_ATTEMPT_STATE_COL: "attempted_fb_no_email_on_page",
         }
     )
+    monkeypatch.setattr(
+        pipeline_runner,
+        "_build_night_fb_share_promotion_resolver",
+        lambda **kwargs: (lambda raw: "https://www.facebook.com/explicitsharefbartist"),
+    )
     df_out, _ = _run_night_fb_pass(
         monkeypatch,
         tmp_path,
@@ -385,7 +390,7 @@ def test_share_entrypoint_runs_without_identity_anchor(monkeypatch, tmp_path):
     )
 
     assert helper.calls == 1
-    assert helper.rows[0]["row"]["Facebook_URL"] == ""
+    assert helper.rows[0]["row"]["Facebook_URL"] == "https://www.facebook.com/explicitsharefbartist"
     assert helper.rows[0]["row"]["Social Link"] == "https://www.facebook.com/share/19bactwuev?mibextid=wwXIfr"
     assert df_out.loc[0, FB_OPPORTUNITY_STATE_COL] == "fb_opportunity_present"
     assert df_out.loc[0, FB_GATE_STATE_COL] == ""

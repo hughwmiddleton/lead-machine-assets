@@ -49,7 +49,6 @@ from source_scheduler import (
     ensure_canonical_facebook_url,
     is_spotify_origin_row,
     preferred_upstream_identity_hint,
-    promote_facebook_url,
 )
 
 try:  # Shared FB helper; safe fallback if unavailable.
@@ -2989,7 +2988,6 @@ def run_enrichment(raw_csv_path: str, enriched_output_path: str, logger: LoggerF
         df_final = pd.read_csv(final_path, dtype=str, keep_default_na=False)
         df_final = df_final.fillna("")
         df_final = _consolidate_email_all(df_final)
-        df_final = _promote_fb_urls_df(df_final, logger=logger)
         df_final = recompute_final_status_post_enrichment(df_final, logger)
         df_final.to_csv(final_path, index=False)
     except Exception as exc:  # pragma: no cover - defensive
@@ -3103,7 +3101,6 @@ def run_facebook_global_pass(
     df = pd.read_csv(input_csv)
     df = df.fillna("")
     df = _consolidate_email_all(df)
-    df = _promote_fb_urls_df(df, logger=_LOGGER)
     # Normalize FB_Status column (empty string default). Preserve legacy lowercase if present.
     if "FB_Status" not in df.columns and "fb_status" in df.columns:
         df.rename(columns={"fb_status": "FB_Status"}, inplace=True)
@@ -3424,15 +3421,13 @@ def run_facebook_global_pass_nightmode(
             night_fb_run_state=night_fb_run_state,
             logger=logger or _LOGGER,
         )
-    df = _promote_fb_urls_df(df, logger=logger or _LOGGER, share_resolver=share_resolver)
     if "FB_Status" not in df.columns and "fb_status" in df.columns:
         df.rename(columns={"fb_status": "FB_Status"}, inplace=True)
     if "FB_Status" not in df.columns:
         df["FB_Status"] = ""
     else:
         df["FB_Status"] = df["FB_Status"].fillna("")
-    df = ensure_fb_attribution_columns(df)
-    df = apply_fb_opportunity_state_df(df, overwrite=False)
+    ensure_fb_attribution_columns(df)
     # Clear pandas NA values in FB-relevant string columns to avoid ambiguous boolean checks.
     for col in ("Facebook_URL", "Facebook URL", "Social Link", "External Links", "Email", "Email_All"):
         if col in df.columns:
@@ -3448,6 +3443,27 @@ def run_facebook_global_pass_nightmode(
             "FB_Status",
             *FB_ATTRIBUTION_COLUMNS,
         ),
+    )
+    promoted_df_id = id(df)
+    _promote_fb_urls_df(df, logger=logger or _LOGGER, share_resolver=share_resolver)
+    if id(df) != promoted_df_id:
+        raise AssertionError("Night FB canonical promotion changed dataframe identity")
+    apply_fb_opportunity_state_df(df, overwrite=False)
+    if id(df) != promoted_df_id:
+        raise AssertionError("Night FB post-promotion preparation changed dataframe identity")
+    canonical_present = 0
+    for idx in df.index:
+        try:
+            canonical_url, _ = ensure_canonical_facebook_url(df.loc[idx], set_row=False)
+        except Exception:
+            canonical_url = ""
+        if canonical_url:
+            canonical_present += 1
+    _safe_log_console(
+        logger,
+        f"[Night FB][Promotion Handoff] dataframe_id={promoted_df_id} identity_ok=1 "
+        f"canonical_field=\"{'present' if canonical_present else 'blank'}\" "
+        f"canonical_field_present={canonical_present} rows={len(df.index)}",
     )
 
     fb_cap_raw = os.getenv("FB_PASS_CAP", "0")

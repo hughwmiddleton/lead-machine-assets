@@ -33,7 +33,15 @@ def _make_dummy_module():
 
 def test_nightmode_fb_pass_respects_cap(monkeypatch, tmp_path):
     # Prepare input CSV with 5 rows
-    rows = [{"Artist Name": f"A{i}", "Email": "", "Email_All": "", "Facebook_URL": ""} for i in range(5)]
+    rows = [
+        {
+            "Artist Name": f"A{i}",
+            "Email": "",
+            "Email_All": "",
+            "Facebook_URL": f"https://www.facebook.com/a{i}",
+        }
+        for i in range(5)
+    ]
     input_csv = tmp_path / "in.csv"
     pd.DataFrame(rows).to_csv(input_csv, index=False)
     output_csv = tmp_path / "out.csv"
