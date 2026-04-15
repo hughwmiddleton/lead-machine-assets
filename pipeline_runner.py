@@ -1754,7 +1754,12 @@ def _coalesce_emails(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def _promote_fb_urls_df(df: pd.DataFrame, logger: LoggerFn = None) -> pd.DataFrame:
+def _promote_fb_urls_df(
+    df: pd.DataFrame,
+    logger: LoggerFn = None,
+    *,
+    share_resolver: Optional[Callable[[str], Optional[str]]] = None,
+) -> pd.DataFrame:
     """Promote Facebook links from generic link fields into facebook_url/Facebook_URL."""
     if df is None or df.empty:
         return df
@@ -1768,7 +1773,7 @@ def _promote_fb_urls_df(df: pd.DataFrame, logger: LoggerFn = None) -> pd.DataFra
     canonical_from_alias = 0
     canonical_from_links = 0
     for idx in df.index:
-        new_url, source = ensure_canonical_facebook_url(df.loc[idx], set_row=False)
+        new_url, source = ensure_canonical_facebook_url(df.loc[idx], set_row=False, share_resolver=share_resolver)
         if not new_url:
             continue
         wrote = False
@@ -1798,6 +1803,44 @@ def _promote_fb_urls_df(df: pd.DataFrame, logger: LoggerFn = None) -> pd.DataFra
     if logger and canonical_from_links:
         _safe_log(logger, f"[FB Promotion] canonical Facebook_URL backfilled from Social Link / External Links for {canonical_from_links} rows")
     return df
+
+
+def _build_night_fb_share_promotion_resolver(
+    *,
+    fb_username: str,
+    fb_password: str,
+    night_fb_run_state: Optional[NightFBRunState],
+    logger: LoggerFn = None,
+) -> Callable[[str], Optional[str]]:
+    helper: Optional[NightModeFacebookEnricher] = None
+    authed_session_available: Optional[bool] = None
+
+    def _resolve(candidate: str) -> Optional[str]:
+        nonlocal helper, authed_session_available
+        raw_candidate = str(candidate or "").strip()
+        if not raw_candidate:
+            return None
+        if helper is None:
+            helper = NightModeFacebookEnricher(
+                _load_legacy_module(),
+                fb_username,
+                fb_password,
+                logger=lambda msg: _safe_log_console(logger, msg),
+                use_shared_session=True,
+                run_state=night_fb_run_state,
+            )
+        if authed_session_available is None:
+            authed_session_available = helper._has_authenticated_session()
+        if not authed_session_available:
+            return None
+        resolved_url = helper._resolve_pass_a_explicit_scrape_url(
+            raw_candidate,
+            authed_session_available=True,
+        )
+        canonical = canonicalize_facebook_url(resolved_url)
+        return canonical or None
+
+    return _resolve
 
 
 def _maybe_set_email(df: pd.DataFrame, idx: int, new_email: Optional[str]) -> None:
@@ -3373,7 +3416,15 @@ def run_facebook_global_pass_nightmode(
             pass
 
     df = _consolidate_email_all(df)
-    df = _promote_fb_urls_df(df, logger=logger or _LOGGER)
+    share_resolver = None
+    if not night_fb_run_state.disabled_for_run and night_fb_session_source.can_probe:
+        share_resolver = _build_night_fb_share_promotion_resolver(
+            fb_username=fb_username,
+            fb_password=fb_password,
+            night_fb_run_state=night_fb_run_state,
+            logger=logger or _LOGGER,
+        )
+    df = _promote_fb_urls_df(df, logger=logger or _LOGGER, share_resolver=share_resolver)
     if "FB_Status" not in df.columns and "fb_status" in df.columns:
         df.rename(columns={"fb_status": "FB_Status"}, inplace=True)
     if "FB_Status" not in df.columns:

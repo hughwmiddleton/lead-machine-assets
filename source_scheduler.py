@@ -48,6 +48,13 @@ _FB_REJECT_PATH_PREFIXES = (
     "/watch",
     "/reel",
 )
+_FB_SHARE_ALLOWED_HOSTS = {
+    "facebook.com",
+    "www.facebook.com",
+    "m.facebook.com",
+    "web.facebook.com",
+    "touch.facebook.com",
+}
 
 _SC_HINT_RESERVED_SEGMENTS_FALLBACK = frozenset(
     {
@@ -87,6 +94,57 @@ def canonicalize_facebook_url(raw: Any) -> str:
     except Exception:
         return ""
     return _normalize_fb_url(text)
+
+
+def _is_allowed_fb_share_entrypoint_url(raw: str) -> bool:
+    if not raw:
+        return False
+    candidate = raw.strip()
+    if candidate.startswith("//"):
+        candidate = "https:" + candidate
+    elif candidate.startswith("/"):
+        candidate = "https://www.facebook.com" + candidate
+    elif "://" not in candidate:
+        candidate = "https://" + candidate
+    try:
+        parsed = urllib.parse.urlparse(candidate)
+    except Exception:
+        return False
+
+    host = (parsed.netloc or "").lower()
+    if host not in _FB_SHARE_ALLOWED_HOSTS:
+        return False
+
+    path = (parsed.path or "").rstrip("/")
+    segments = [segment for segment in path.split("/") if segment]
+    if len(segments) != 2 or segments[0].lower() != "share":
+        return False
+
+    token = (segments[1] or "").strip()
+    return bool(token and not token.lower().endswith(".php"))
+
+
+def _normalize_promotable_fb_url(
+    raw: Any,
+    *,
+    share_resolver: Optional[Callable[[str], Optional[str]]] = None,
+) -> str:
+    normalised = canonicalize_facebook_url(raw)
+    if normalised:
+        return normalised
+    if share_resolver is None:
+        return ""
+    try:
+        candidate = str(raw or "").strip()
+    except Exception:
+        return ""
+    if not _is_allowed_fb_share_entrypoint_url(candidate):
+        return ""
+    try:
+        resolved = share_resolver(candidate)
+    except Exception:
+        return ""
+    return canonicalize_facebook_url(resolved)
 
 
 def _normalize_fb_url(raw: str) -> str:
@@ -137,7 +195,11 @@ def _normalize_fb_url(raw: str) -> str:
     return urllib.parse.urlunparse(("https", "www.facebook.com", clean_path, "", clean_query, ""))
 
 
-def extract_facebook_url_from_text(text: str) -> Optional[str]:
+def extract_facebook_url_from_text(
+    text: str,
+    *,
+    share_resolver: Optional[Callable[[str], Optional[str]]] = None,
+) -> Optional[str]:
     """Return the first canonical Facebook page/profile URL found in free text."""
     if not text:
         return None
@@ -145,13 +207,17 @@ def extract_facebook_url_from_text(text: str) -> Optional[str]:
     for part in parts:
         if not part:
             continue
-        url = _normalize_fb_url(part)
+        url = _normalize_promotable_fb_url(part, share_resolver=share_resolver)
         if url:
             return url
     return None
 
 
-def _canonical_fb_candidate_from_row(row: MutableMapping[str, Any]) -> Tuple[str, str]:
+def _canonical_fb_candidate_from_row(
+    row: MutableMapping[str, Any],
+    *,
+    share_resolver: Optional[Callable[[str], Optional[str]]] = None,
+) -> Tuple[str, str]:
     """Return the best canonical Facebook URL candidate plus its source field."""
     if row is None:
         return ("", "")
@@ -177,13 +243,13 @@ def _canonical_fb_candidate_from_row(row: MutableMapping[str, Any]) -> Tuple[str
 
     direct_fields = ("Facebook_URL", "facebook_url", "Facebook URL", "FB_URL", "facebook", "Facebook")
     for field in direct_fields:
-        normalised = canonicalize_facebook_url(_get((field,)))
+        normalised = _normalize_promotable_fb_url(_get((field,)), share_resolver=share_resolver)
         if normalised:
             return (normalised, field)
 
     candidate_fields = ("Social Link", "External Links", "Website", "Websites", "Website URL")
     for field in candidate_fields:
-        url = extract_facebook_url_from_text(_get((field,)))
+        url = extract_facebook_url_from_text(_get((field,)), share_resolver=share_resolver)
         if url:
             return (url, field)
 
@@ -191,7 +257,10 @@ def _canonical_fb_candidate_from_row(row: MutableMapping[str, Any]) -> Tuple[str
 
 
 def ensure_canonical_facebook_url(
-    row: MutableMapping[str, Any], *, set_row: bool = True
+    row: MutableMapping[str, Any],
+    *,
+    set_row: bool = True,
+    share_resolver: Optional[Callable[[str], Optional[str]]] = None,
 ) -> Tuple[str, str]:
     """
     Resolve the best Facebook URL candidate from supported aliases and optionally
@@ -200,7 +269,7 @@ def ensure_canonical_facebook_url(
     if row is None:
         return ("", "")
 
-    url, source = _canonical_fb_candidate_from_row(row)
+    url, source = _canonical_fb_candidate_from_row(row, share_resolver=share_resolver)
     if not url:
         return ("", "")
     if not set_row:
@@ -245,7 +314,12 @@ def ensure_canonical_facebook_url(
     return (url, source)
 
 
-def promote_facebook_url(row: MutableMapping[str, Any], *, set_row: bool = True) -> Optional[str]:
+def promote_facebook_url(
+    row: MutableMapping[str, Any],
+    *,
+    set_row: bool = True,
+    share_resolver: Optional[Callable[[str], Optional[str]]] = None,
+) -> Optional[str]:
     """
     Promote any Facebook link found in accepted aliases into canonical Facebook fields.
 
@@ -255,7 +329,7 @@ def promote_facebook_url(row: MutableMapping[str, Any], *, set_row: bool = True)
     - set_row=False avoids mutating pandas Series slices (prevents SettingWithCopyWarning);
       callers can write via df.loc instead.
     """
-    url, _ = ensure_canonical_facebook_url(row, set_row=set_row)
+    url, _ = ensure_canonical_facebook_url(row, set_row=set_row, share_resolver=share_resolver)
     return url or None
 
 

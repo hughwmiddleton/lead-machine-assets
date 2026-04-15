@@ -36,6 +36,40 @@ def test_promote_ignores_non_facebook_and_share_links():
     assert "facebook_url" not in bad or bad.get("facebook_url", "") == ""
 
 
+def test_promote_resolves_share_url_from_social_link_into_canonical_fields():
+    row = {
+        "Social Link": "https://www.facebook.com/share/19BActwuev?mibextid=wwXIfr | https://instagram.com/artist | https://youtube.com/@artist",
+        "facebook_url": "",
+        "Facebook_URL": "",
+        "Facebook URL": "",
+    }
+    calls = []
+
+    def fake_share_resolver(raw: str) -> str:
+        calls.append(raw)
+        return "https://m.facebook.com/artistpage/?mibextid=wwXIfr"
+
+    promote_facebook_url(row, share_resolver=fake_share_resolver)
+
+    assert calls == ["https://www.facebook.com/share/19BActwuev?mibextid=wwXIfr"]
+    assert row["facebook_url"] == "https://www.facebook.com/artistpage"
+    assert row["Facebook_URL"] == "https://www.facebook.com/artistpage"
+    assert row["Facebook URL"] == "https://www.facebook.com/artistpage"
+    assert "instagram.com/artist" in row["Social Link"]
+    assert "youtube.com/@artist" in row["Social Link"]
+
+
+def test_promote_does_not_emit_canonical_fb_for_unresolved_share_noise():
+    row = {
+        "Social Link": "https://www.facebook.com/share/19BActwuev?mibextid=wwXIfr | https://instagram.com/artist | https://youtube.com/@artist"
+    }
+
+    promote_facebook_url(row, share_resolver=lambda raw: "https://www.facebook.com/share/stillwrapped")
+
+    assert "facebook_url" not in row or row.get("facebook_url", "") == ""
+    assert "Facebook_URL" not in row or row.get("Facebook_URL", "") == ""
+
+
 def test_extract_accepts_numeric_profile_and_rejects_groups():
     assert extract_facebook_url_from_text("https://www.facebook.com/profile.php?id=12345") == "https://www.facebook.com/profile.php?id=12345"
     assert extract_facebook_url_from_text("https://www.facebook.com/profile.php?id=abc") is None
@@ -128,6 +162,31 @@ def test_dataframe_promotion_extracts_canonical_from_mixed_social_link():
     promoted = pipeline_runner._promote_fb_urls_df(df.copy())
 
     assert promoted.at[0, "Facebook_URL"] == "https://www.facebook.com/georgerileymusic"
+
+
+def test_dataframe_promotion_resolves_share_url_from_social_link():
+    df = pytest.importorskip("pandas").DataFrame(
+        [
+            {
+                "Artist Name": "Share Link",
+                "facebook_url": "",
+                "Facebook_URL": "",
+                "Facebook URL": "",
+                "Social Link": "https://www.facebook.com/share/19BActwuev?mibextid=wwXIfr, https://www.instagram.com/artist, https://www.youtube.com/@artist",
+                "External Links": "",
+            }
+        ],
+        dtype=str,
+    ).fillna("")
+
+    promoted = pipeline_runner._promote_fb_urls_df(
+        df.copy(),
+        share_resolver=lambda raw: "https://web.facebook.com/artistsharepage/?mibextid=wwXIfr",
+    )
+
+    assert promoted.at[0, "facebook_url"] == "https://www.facebook.com/artistsharepage"
+    assert promoted.at[0, "Facebook_URL"] == "https://www.facebook.com/artistsharepage"
+    assert promoted.at[0, "Facebook URL"] == "https://www.facebook.com/artistsharepage"
 
 
 def test_dataframe_promotion_preserves_existing_canonical_value():
