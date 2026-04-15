@@ -1276,6 +1276,10 @@ class UnearthedSelectedCursorError(RuntimeError):
     """Raised when an explicit Unearthed selected cursor cannot be used safely."""
 
 
+class UnearthedResumeCursorError(RuntimeError):
+    """Raised when an Unearthed auto/cursor resume target cannot be used safely."""
+
+
 def _build_unearthed_resume_debug_details(
     ordered_profile_urls: list[str],
     target_profile_url: str | None,
@@ -1392,6 +1396,8 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
     artist_data = []
     job_config = job_config or {}
     selected_cursor_strict = False
+    resume_cursor_strict = False
+    resume_mode = ""
     try:
         driver.get(url)
         WebDriverWait(driver, 20).until(
@@ -1414,12 +1420,13 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
             resume_mode = str(job_config.get("unearthed_resume_mode", "auto") or "auto").strip().lower()
             if resume_mode not in {"auto", "cursor", "fresh", "selected"}:
                 resume_mode = "auto"
-            checkpoint = (state.get("unearthed_last_profile_url") or "").strip() if isinstance(state, dict) else ""
             persistent_cursor = _load_unearthed_persistent_cursor()
             if resume_mode == "auto":
-                target_profile_url = checkpoint or persistent_cursor
+                target_profile_url = persistent_cursor
+                resume_cursor_strict = bool(target_profile_url)
             elif resume_mode == "cursor":
                 target_profile_url = persistent_cursor
+                resume_cursor_strict = bool(target_profile_url)
             elif resume_mode == "selected":
                 selected_cursor_strict = True
                 target_profile_url = str(job_config.get("unearthed_selected_cursor") or "").strip()
@@ -1528,9 +1535,16 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
             if resolved_resume_index is not None:
                 remaining_after_resume_index = len(ordered_profile_urls[resolved_resume_index:])
             slice_ready = _is_unearthed_slice_ready(ordered_profile_urls, target_profile_url, max_artists)
-            fallback_to_zero = resolved_resume_index is None
+            strict_unresolved_resume = (
+                resolved_resume_index is None
+                and bool(target_profile_url)
+                and (selected_cursor_strict or resume_cursor_strict)
+            )
+            fallback_to_zero = resolved_resume_index is None and not strict_unresolved_resume
             fallback_reason = ""
-            if fallback_to_zero:
+            if strict_unresolved_resume:
+                fallback_reason = f"{resume_mode or 'resume'}_cursor_unresolved"
+            elif fallback_to_zero:
                 if not debug_details["normalized_target_profile_url"]:
                     fallback_reason = "empty_normalized_target"
                 elif debug_details["normalized_match_indices"]:
@@ -1558,6 +1572,12 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
             if selected_cursor_strict and resolved_resume_index is None:
                 raise UnearthedSelectedCursorError(
                     "Selected Unearthed cursor entry point was not found in the discovered profile stream: "
+                    f"{target_profile_url}"
+                )
+            if resume_cursor_strict and resolved_resume_index is None:
+                raise UnearthedResumeCursorError(
+                    "Unearthed auto/cursor resume target was not found in the discovered profile stream; "
+                    "refusing to restart from the beginning: "
                     f"{target_profile_url}"
                 )
         profile_urls = _slice_unearthed_profile_urls(ordered_profile_urls, target_profile_url, max_artists)
@@ -1625,7 +1645,7 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
                         pass
     except Exception as e:
         print(f"Error during website scraping: {e}")
-        if isinstance(e, UnearthedSelectedCursorError):
+        if isinstance(e, (UnearthedSelectedCursorError, UnearthedResumeCursorError)):
             raise
     finally:
         driver.quit()

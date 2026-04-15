@@ -71,6 +71,7 @@ def _run_fake_unearthed_scrape(
     resume_mode: str | None = None,
     selected_cursor: str | None = None,
     persistent_cursor: str | None = None,
+    night_mode_state: dict | None = None,
 ):
     module = pipeline_runner._load_legacy_module()
     driver = _FakeUnearthedDriver([
@@ -105,6 +106,7 @@ def _run_fake_unearthed_scrape(
         "_load_unearthed_persistent_cursor",
         lambda: persistent_cursor if persistent_cursor is not None else target_profile_url,
     )
+    monkeypatch.setattr(module, "_write_unearthed_persistent_cursor", lambda _profile_url: None)
 
     job_config = {}
     effective_resume_mode = resume_mode if resume_mode is not None else ("cursor" if target_profile_url else None)
@@ -112,6 +114,8 @@ def _run_fake_unearthed_scrape(
         job_config["unearthed_resume_mode"] = effective_resume_mode
     if selected_cursor is not None:
         job_config["unearthed_selected_cursor"] = selected_cursor
+    if night_mode_state is not None:
+        job_config["_night_mode_state"] = night_mode_state
     module.scrape_website(
         "https://www.abc.net.au/triplejunearthed",
         existing_csv=str(tmp_path / "unearthed.csv"),
@@ -332,6 +336,26 @@ def test_scrape_website_resumes_from_terminal_logical_cursor_occurrence(monkeypa
     assert load_more_requests == 1
 
 
+def test_scrape_website_auto_resume_uses_fresh_persistent_cursor_over_runtime_state(monkeypatch, tmp_path) -> None:
+    visited_profile_urls, load_more_requests = _run_fake_unearthed_scrape(
+        monkeypatch,
+        tmp_path,
+        [["artist-1", "artist-2", "artist-3", "artist-4", "artist-5"]],
+        max_artists=2,
+        resume_mode="auto",
+        persistent_cursor="https://www.abc.net.au/triplejunearthed/artist/artist-2",
+        night_mode_state={
+            "unearthed_last_profile_url": "https://www.abc.net.au/triplejunearthed/artist/artist-4",
+        },
+    )
+
+    assert visited_profile_urls == [
+        "https://www.abc.net.au/triplejunearthed/artist/artist-3",
+        "https://www.abc.net.au/triplejunearthed/artist/artist-4",
+    ]
+    assert load_more_requests == 0
+
+
 def test_scrape_website_emits_resume_debug_summary_without_changing_slice_flow(monkeypatch, tmp_path, capsys) -> None:
     visited_profile_urls, load_more_requests = _run_fake_unearthed_scrape(
         monkeypatch,
@@ -361,20 +385,43 @@ def test_scrape_website_emits_resume_debug_summary_without_changing_slice_flow(m
     assert "fallback_to_zero=False" in captured.out
 
 
-def test_scrape_website_preserves_fresh_start_fallback_when_cursor_is_never_found(monkeypatch, tmp_path) -> None:
-    visited_profile_urls, load_more_requests = _run_fake_unearthed_scrape(
-        monkeypatch,
-        tmp_path,
-        [["artist-1", "artist-2", "artist-3"]],
-        max_artists=2,
-        target_profile_url="https://www.abc.net.au/triplejunearthed/artist/missing",
+def test_scrape_website_cursor_mode_raises_when_cursor_is_never_found(monkeypatch, tmp_path) -> None:
+    module = pipeline_runner._load_legacy_module()
+
+    with pytest.raises(module.UnearthedResumeCursorError):
+        _run_fake_unearthed_scrape(
+            monkeypatch,
+            tmp_path,
+            [["artist-1", "artist-2", "artist-3"]],
+            max_artists=2,
+            resume_mode="cursor",
+            persistent_cursor="https://www.abc.net.au/triplejunearthed/artist/missing",
+        )
+
+
+def test_unearthed_full_pipeline_wrapper_propagates_resume_boundary_errors(tmp_path) -> None:
+    class UnearthedResumeCursorError(RuntimeError):
+        pass
+
+    def _raise_resume_error(**_kwargs):
+        raise UnearthedResumeCursorError("missing cursor")
+
+    def _unexpected_fallback(*_args, **_kwargs):
+        raise AssertionError("listing-only fallback should not run after a resume boundary error")
+
+    module = SimpleNamespace(
+        UNEARTHED_DEFAULT_URL="https://www.abc.net.au/triplejunearthed",
+        run_unearthed_pipeline=_raise_resume_error,
+        scrape_website=_unexpected_fallback,
     )
 
-    assert visited_profile_urls == [
-        "https://www.abc.net.au/triplejunearthed/artist/artist-1",
-        "https://www.abc.net.au/triplejunearthed/artist/artist-2",
-    ]
-    assert load_more_requests == 1
+    with pytest.raises(UnearthedResumeCursorError):
+        pipeline_runner._run_unearthed_full_pipeline(
+            {"directory": "unearthed", "target_valid_leads": 2},
+            str(tmp_path / "raw.csv"),
+            module,
+            logger=None,
+        )
 
 
 def test_scrape_website_selected_cursor_uses_explicit_checkpoint_instead_of_persistent_cursor(monkeypatch, tmp_path) -> None:

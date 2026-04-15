@@ -2738,9 +2738,13 @@ def _run_unearthed_full_pipeline(job_config: Dict[str, Any], raw_output_path: st
                 )
                 if isinstance(result, str) and result:
                     return result
-            except Exception:
+            except Exception as exc:
+                if exc.__class__.__name__ in {"UnearthedResumeCursorError", "UnearthedSelectedCursorError"}:
+                    raise
                 pass
-        except Exception:
+        except Exception as exc:
+            if exc.__class__.__name__ in {"UnearthedResumeCursorError", "UnearthedSelectedCursorError"}:
+                raise
             pass
         _safe_log(logger, "[Unearthed] FULL pipeline entry failed; falling back to listing-only scrape_website.")
     else:
