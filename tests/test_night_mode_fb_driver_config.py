@@ -95,6 +95,55 @@ def test_normalize_night_fb_session_source_allows_profile_without_credentials(mo
     assert source.profile_dir == str(profile_dir.resolve())
 
 
+def test_normalize_night_fb_session_source_allows_inferred_existing_profile_without_credentials(
+    monkeypatch, tmp_path
+):
+    profile_dir = tmp_path / "night_fb_profile"
+    (profile_dir / "Default").mkdir(parents=True)
+    monkeypatch.delenv("NIGHT_FB_PROFILE_DIR", raising=False)
+    monkeypatch.setattr(nmfb, "_infer_night_fb_profile_dir", lambda: profile_dir.as_posix())
+
+    source = nmfb.normalize_night_fb_session_source("", "")
+
+    assert source.can_probe is True
+    assert source.mode == "profile"
+    assert source.reason == "profile_dir"
+    assert source.profile_dir == str(profile_dir.resolve())
+    assert source.explicit_profile is False
+    assert source.uses_profile is True
+
+
+def test_normalize_night_fb_session_source_still_disables_when_no_profile_or_credentials(
+    monkeypatch, tmp_path
+):
+    missing_profile_dir = tmp_path / "missing_night_fb_profile"
+    monkeypatch.delenv("NIGHT_FB_PROFILE_DIR", raising=False)
+    monkeypatch.setattr(nmfb, "_infer_night_fb_profile_dir", lambda: missing_profile_dir.as_posix())
+
+    source = nmfb.normalize_night_fb_session_source("", "")
+
+    assert source.can_probe is False
+    assert source.mode == "none"
+    assert source.reason == "missing_session_source"
+    assert source.profile_dir == ""
+
+
+def test_normalize_night_fb_session_source_keeps_credentials_authoritative_with_inferred_profile(
+    monkeypatch, tmp_path
+):
+    profile_dir = tmp_path / "night_fb_profile"
+    (profile_dir / "Default").mkdir(parents=True)
+    monkeypatch.delenv("NIGHT_FB_PROFILE_DIR", raising=False)
+    monkeypatch.setattr(nmfb, "_infer_night_fb_profile_dir", lambda: profile_dir.as_posix())
+
+    source = nmfb.normalize_night_fb_session_source("user", "pass")
+
+    assert source.can_probe is True
+    assert source.mode == "credentials"
+    assert source.reason == "credentials"
+    assert source.has_credentials is True
+
+
 def test_probe_night_fb_session_decision_keeps_checkpoint_distinct():
     driver = _ProbeDriver(
         current_url="https://www.facebook.com/checkpoint/",

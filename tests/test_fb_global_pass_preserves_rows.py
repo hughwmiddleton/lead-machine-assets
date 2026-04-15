@@ -386,6 +386,124 @@ def test_nightmode_fb_pass_allows_profile_backed_session_without_credentials(mon
     assert status.total_rows == 1
 
 
+def test_nightmode_fb_pass_uses_inferred_profile_source_for_explicit_unearthed_url(
+    monkeypatch, tmp_path
+):
+    input_csv = tmp_path / "master_pre_fb.csv"
+    output_csv = tmp_path / "master_post_fb.csv"
+    state_path = tmp_path / "fb_state.json"
+    profile_dir = tmp_path / "night_fb_profile"
+    (profile_dir / "Default").mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "Artist Name": "Unearthed Explicit URL",
+                "Source Directory": "Unearthed",
+                "Email": "",
+                "Email_All": "",
+                "Social Link": "",
+                "Facebook_URL": "https://facebook.com/unearthedexplicit",
+            }
+        ]
+    ).to_csv(input_csv, index=False)
+
+    helper = DummyFBHelper()
+    helper_kwargs = {}
+    logs = []
+
+    def fake_helper(*args, **kwargs):
+        helper_kwargs.update(kwargs)
+        return helper
+
+    monkeypatch.delenv("FB_USERNAME", raising=False)
+    monkeypatch.delenv("FB_PASSWORD", raising=False)
+    monkeypatch.delenv("NIGHT_FB_PROFILE_DIR", raising=False)
+    monkeypatch.setattr(nmfb, "_infer_night_fb_profile_dir", lambda: profile_dir.as_posix())
+    monkeypatch.setattr(pipeline_runner, "NightModeFacebookEnricher", fake_helper)
+    monkeypatch.setattr(pipeline_runner, "_load_legacy_module", _make_dummy_module)
+    monkeypatch.setattr(pipeline_runner, "_load_fb_state", lambda _: {})
+    monkeypatch.setattr(pipeline_runner, "_write_fb_state", lambda *args, **kwargs: None)
+
+    status = pipeline_runner.run_facebook_global_pass_nightmode(
+        input_csv=input_csv.as_posix(),
+        output_csv=output_csv.as_posix(),
+        state_path=state_path.as_posix(),
+        skip_rows_with_email=False,
+        logger=logs.append,
+    )
+
+    df_out = pd.read_csv(output_csv, dtype=str, keep_default_na=False).fillna("")
+    session_gate_logs = [msg for msg in logs if "[Night FB][Session Gate]" in msg]
+
+    assert session_gate_logs
+    assert any("source=profile" in msg and "decision=probe_pending" in msg for msg in session_gate_logs)
+    assert all("reason=missing_session_source" not in msg for msg in session_gate_logs)
+    assert helper.calls == 1
+    assert helper_kwargs["run_state"] is not None
+    assert helper.rows[0]["row"]["Facebook_URL"] == "https://www.facebook.com/unearthedexplicit"
+    assert df_out.loc[0, "FB_Status"] == "ok"
+    assert status.total_rows == 1
+
+
+def test_nightmode_fb_pass_still_disables_when_session_source_is_truly_missing(
+    monkeypatch, tmp_path
+):
+    input_csv = tmp_path / "master_pre_fb.csv"
+    output_csv = tmp_path / "master_post_fb.csv"
+    state_path = tmp_path / "fb_state.json"
+    missing_profile_dir = tmp_path / "missing_night_fb_profile"
+    pd.DataFrame(
+        [
+            {
+                "Artist Name": "Unearthed Explicit URL",
+                "Source Directory": "Unearthed",
+                "Email": "",
+                "Email_All": "",
+                "Social Link": "",
+                "Facebook_URL": "https://facebook.com/unearthedexplicit",
+            }
+        ]
+    ).to_csv(input_csv, index=False)
+
+    helper_calls = []
+    logs = []
+
+    monkeypatch.delenv("FB_USERNAME", raising=False)
+    monkeypatch.delenv("FB_PASSWORD", raising=False)
+    monkeypatch.delenv("NIGHT_FB_PROFILE_DIR", raising=False)
+    monkeypatch.setattr(nmfb, "_infer_night_fb_profile_dir", lambda: missing_profile_dir.as_posix())
+    monkeypatch.setattr(
+        pipeline_runner,
+        "NightModeFacebookEnricher",
+        lambda *args, **kwargs: helper_calls.append((args, kwargs)),
+    )
+    monkeypatch.setattr(pipeline_runner, "_load_fb_state", lambda _: {})
+    monkeypatch.setattr(pipeline_runner, "_write_fb_state", lambda *args, **kwargs: None)
+
+    status = pipeline_runner.run_facebook_global_pass_nightmode(
+        input_csv=input_csv.as_posix(),
+        output_csv=output_csv.as_posix(),
+        state_path=state_path.as_posix(),
+        skip_rows_with_email=False,
+        logger=logs.append,
+    )
+
+    df_out = pd.read_csv(output_csv, dtype=str, keep_default_na=False).fillna("")
+    session_gate_logs = [msg for msg in logs if "[Night FB][Session Gate]" in msg]
+
+    assert session_gate_logs
+    assert any(
+        "source=none" in msg
+        and "decision=disabled_for_run" in msg
+        and "reason=missing_session_source" in msg
+        for msg in session_gate_logs
+    )
+    assert helper_calls == []
+    assert df_out.loc[0, "FB_Status"] == ""
+    assert status.completed is True
+    assert status.total_rows == 1
+
+
 def test_nightmode_fb_pass_respects_prior_run_disable(monkeypatch, tmp_path):
     input_csv = tmp_path / "master_pre_fb.csv"
     output_csv = tmp_path / "master_post_fb.csv"

@@ -2944,6 +2944,15 @@ def normalize_night_fb_session_source(username: str = "", password: str = "") ->
     explicit_profile_raw = str(os.environ.get("NIGHT_FB_PROFILE_DIR", "") or "").strip()
     explicit_profile_dir = _normalize_profile_path(explicit_profile_raw) if explicit_profile_raw else ""
     explicit_profile_exists = bool(explicit_profile_dir and os.path.isdir(explicit_profile_dir))
+    inferred_profile_dir = ""
+    inferred_profile_exists = False
+    if not explicit_profile_raw:
+        try:
+            inferred_profile_dir = _normalize_profile_path(_infer_night_fb_profile_dir())
+            inferred_profile_exists = bool(inferred_profile_dir and os.path.isdir(inferred_profile_dir))
+        except Exception:
+            inferred_profile_dir = ""
+            inferred_profile_exists = False
     has_username = bool(username)
     has_password = bool(password)
     has_credentials = bool(
@@ -3012,6 +3021,17 @@ def normalize_night_fb_session_source(username: str = "", password: str = "") ->
             profile_dir=_resolve_night_fb_profile_dir(None),
             explicit_profile=bool(explicit_profile_raw),
             has_credentials=True,
+            uses_profile=True,
+        )
+
+    if inferred_profile_exists:
+        return NightFBSessionSource(
+            mode="profile",
+            reason="profile_dir",
+            can_probe=True,
+            profile_dir=inferred_profile_dir,
+            explicit_profile=False,
+            has_credentials=False,
             uses_profile=True,
         )
 
