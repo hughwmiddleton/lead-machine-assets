@@ -3410,6 +3410,23 @@ def run_facebook_global_pass_nightmode(
     if fb_cap > 0:
         _safe_log_console(logger, f"[FB Smoke Cap] Limiting FB attempts to first {fb_cap} rows (output will retain all rows)")
         iter_indices = iter_indices[:fb_cap]
+    disable_reason_code = str(
+        (night_fb_run_state.disable_reason if night_fb_run_state.disabled_for_run else "") or night_fb_session_source.reason or ""
+    ).strip().lower()
+    allow_preseeded_fb_attempt_pass = False
+    if (
+        night_fb_run_state.disabled_for_run
+        and not night_fb_run_state.session_invalid
+        and disable_reason_code == "missing_session_source"
+    ):
+        for idx in iter_indices:
+            row = df.loc[idx]
+            if _cell_str(row.get(FB_OPPORTUNITY_STATE_COL, "")).lower() != "fb_opportunity_present":
+                continue
+            canonical_fb_url, _ = ensure_canonical_facebook_url(row, set_row=False)
+            if canonical_fb_url:
+                allow_preseeded_fb_attempt_pass = True
+                break
     state = _load_fb_state(state_path)
     last_index = int(state.get("fb_last_index", -1) or -1)
     attempted_total = int(state.get("fb_attempted_total", 0) or 0)
@@ -3421,7 +3438,7 @@ def run_facebook_global_pass_nightmode(
     except Exception:
         pass
 
-    if night_fb_run_state.disabled_for_run:
+    if night_fb_run_state.disabled_for_run and not allow_preseeded_fb_attempt_pass:
         _safe_log_console(
             logger,
             f"[FB Night] Night FB already disabled for this run; passing through without enrichment (reason={night_fb_run_state.disable_reason or 'disabled'}).",
@@ -3453,7 +3470,12 @@ def run_facebook_global_pass_nightmode(
             attempted_total=attempted_total,
         )
 
-    if night_fb_session_source.can_probe:
+    if night_fb_session_source.can_probe or allow_preseeded_fb_attempt_pass:
+        if allow_preseeded_fb_attempt_pass and not night_fb_session_source.can_probe:
+            _safe_log_console(
+                logger,
+                "[FB Night] Continuing direct FB attempt pass for preseeded FB opportunity rows without a live session source.",
+            )
         module = _load_legacy_module()
         if not hasattr(module, "scrape_csv"):
             _safe_log_console(logger, "[FB Night] scrape_csv missing on legacy module; skipping.")
@@ -3524,7 +3546,7 @@ def run_facebook_global_pass_nightmode(
         fb_password,
         logger=lambda msg: _safe_log_console(logger, msg),
         use_shared_session=False,
-        run_state=night_fb_run_state,
+        run_state=None if allow_preseeded_fb_attempt_pass else night_fb_run_state,
     )
 
     def _write_state_with_pass_a(extra: Dict[str, Any]) -> None:
