@@ -1,0 +1,47 @@
+{
+  "export_mode": "both",
+  "jobs": [
+    {
+      "directory": "unearthed",
+      "mode": "",
+      "input_seed_csv": "",
+      "target_valid_leads": 60,
+      "max_hours": 0,
+      "job_id": "job_unearthed_1",
+      "unearthed_resume_mode": "cursor"
+    },
+    {
+      "directory": "unearthed",
+      "mode": "",
+      "input_seed_csv": "",
+      "target_valid_leads": 60,
+      "max_hours": 0,
+      "job_id": "job_unearthed_2",
+      "unearthed_resume_mode": "cursor"
+    },
+    {
+      "directory": "unearthed",
+      "mode": "",
+      "input_seed_csv": "",
+      "target_valid_leads": 60,
+      "max_hours": 0,
+      "job_id": "job_unearthed_3",
+      "unearthed_resume_mode": "cursor"
+    }
+  ],
+  "unearthed_resume_mode": "cursor",
+  "unearthed_selected_cursor": "",
+  "phased": true,
+  "facebook": {
+    "auto_resume_after_captcha": true,
+    "cooldown_seconds": 900,
+    "max_auto_resume_attempts": 2,
+    "max_rows_per_run": 0
+  },
+  "master_enrichment": {
+    "enabled": true
+  },
+  "soundcloud_meta_enricher": {
+    "enabled": false
+  }
+}

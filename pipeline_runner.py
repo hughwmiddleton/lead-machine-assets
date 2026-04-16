@@ -2428,6 +2428,7 @@ def run_master_enrichment(
     night_mode: bool = False,
     bandcamp_csv_path: Optional[str] = None,
     night_fb_run_state: Optional[NightFBRunState] = None,
+    night_runtime_reset_interval_rows: Optional[Any] = None,
 ) -> str:
     """
     Run the cross-directory enricher on a single combined CSV.
@@ -2582,6 +2583,7 @@ def run_master_enrichment(
             yield_tracker=yield_tracker,
             state_sink=first_pass_state,
             night_fb_run_state=night_fb_run_state,
+            night_runtime_reset_interval_rows=night_runtime_reset_interval_rows,
         )
         try:
             expansion_raw_csv_path = cross_directory_enricher._festival_expansion_raw_path(output_csv_path)
@@ -2618,6 +2620,7 @@ def run_master_enrichment(
                         state_source=first_pass_state,
                         state_sink=second_pass_state,
                         night_fb_run_state=night_fb_run_state,
+                        night_runtime_reset_interval_rows=night_runtime_reset_interval_rows,
                     )
                     _merge_festival_expansion_output(
                         output_csv_path,

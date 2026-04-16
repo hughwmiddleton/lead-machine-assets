@@ -115,8 +115,11 @@ from night_mode_fb import (
     ensure_night_fb_run_session,
     normalize_night_fb_session_source,
     probe_night_fb_session_decision,
+    reset_night_fb_run_runtime_state,
     update_night_fb_run_state,
 )
+
+NIGHT_RUNTIME_RESET_INTERVAL_ROWS_DEFAULT = 50
 
 
 ENRICHMENT_YIELD_SOURCE_ALIASES = {
@@ -11539,6 +11542,7 @@ class CrossDirectoryEnricherWorker(QThread):
         super().__init__(parent)
         # Night Mode toggle; default off so daytime behaviour is unchanged.
         self.night_mode: bool = False
+        self.night_runtime_reset_interval_rows: Optional[Any] = None
         self.seed_csv_path = seed_csv_path
         self.output_csv_path = output_csv_path
         self.bandcamp_csv_path = bandcamp_csv_path
@@ -11639,6 +11643,7 @@ class CrossDirectoryEnricherWorker(QThread):
         self._domain_email_reuse_rows: Set[Any] = set()
         self._domain_email_reuse_count: int = 0
         self._website_email_cache: Dict[str, Dict[str, Any]] = {}
+        self._instagram_hidden_contact_attempt_keys: Set[Tuple[int, int]] = set()
         self._festival_expansion_rows: List[Dict[str, Any]] = []
         self._festival_expansion_existing_keys: Set[str] = set()
         self._festival_expansion_staged_keys: Set[str] = set()
@@ -11668,6 +11673,249 @@ class CrossDirectoryEnricherWorker(QThread):
                 self.session.close()
             except Exception:
                 pass
+
+    def _emit_runtime_reset_log(self, message: str) -> None:
+        if not message:
+            return
+        try:
+            self.log_message.emit(message)
+        except Exception:
+            pass
+
+    def _selected_row_ids(self, seed_df: pd.DataFrame, row_ids: Optional[Iterable[Any]] = None) -> List[Any]:
+        if seed_df is None:
+            return []
+        if row_ids is None:
+            return list(seed_df.index)
+        selected: List[Any] = []
+        index_membership = set(seed_df.index)
+        for row_idx in row_ids:
+            if row_idx in index_membership:
+                selected.append(row_idx)
+        return selected
+
+    def _resolve_night_runtime_reset_interval_rows(self) -> int:
+        if not getattr(self, "night_mode", False):
+            return 0
+        raw_value = getattr(self, "night_runtime_reset_interval_rows", None)
+        if raw_value is None:
+            return NIGHT_RUNTIME_RESET_INTERVAL_ROWS_DEFAULT
+        if isinstance(raw_value, str) and not raw_value.strip():
+            return 0
+        try:
+            interval = int(raw_value)
+        except Exception:
+            self._emit_runtime_reset_log(
+                f"[Night Runtime Reset] interval_rows_raw={raw_value!r} normalized_interval_rows=0 reason=invalid_value"
+            )
+            return 0
+        if interval < 0:
+            self._emit_runtime_reset_log(
+                f"[Night Runtime Reset] interval_rows_raw={raw_value!r} normalized_interval_rows=0 reason=negative_value"
+            )
+            return 0
+        return interval
+
+    def _create_fb_runtime_for_current_chunk(self):
+        fb_driver = None
+        if not ENABLE_FACEBOOK_ENRICHMENT:
+            return None
+        try:
+            if getattr(self, "night_mode", False):
+                night_fb_source = (
+                    self.night_fb_run_state.session_source
+                    if self.night_fb_run_state is not None
+                    else normalize_night_fb_session_source()
+                )
+                if not night_fb_source.can_probe:
+                    self._disable_fb_discovery_for_run(night_fb_source.reason)
+                    return None
+                headless = str(os.environ.get("NIGHT_FB_HEADLESS", "") or "").strip().lower() in (
+                    "1",
+                    "true",
+                    "yes",
+                    "on",
+                )
+                if self.night_fb_run_state is not None:
+                    shared_session = ensure_night_fb_run_session(
+                        self.night_fb_run_state,
+                        headless=headless,
+                        logger=self.log_message.emit,
+                        owner="cross_directory_enricher",
+                    )
+                    fb_driver = getattr(shared_session, "driver", None) if shared_session is not None else None
+                else:
+                    fb_driver = _get_enricher_facebook_driver(
+                        profile_dir=night_fb_source.profile_dir or None
+                    )
+                if fb_driver is not None:
+                    self._ensure_fb_discovery_session(fb_driver, force=True)
+                return fb_driver
+            fb_driver = _get_enricher_facebook_driver()
+            if not enricher_fb_profile_has_cookies():
+                try:
+                    fb_driver.get("https://www.facebook.com/")
+                except Exception as exc:
+                    if _fb_exception_is_fatal_session(exc):
+                        raise
+                message = "[FB Enrich] Please manually log into Facebook in the opened window."
+                _safe_log(self.log_message.emit, message)
+                try:
+                    input("Press ENTER once logged in…")
+                except EOFError:
+                    pass
+                except Exception:
+                    pass
+                self._ensure_fb_discovery_session(fb_driver, force=True)
+            else:
+                auth_cookie_state = _fb_driver_has_auth_cookie(fb_driver)
+                if auth_cookie_state is False:
+                    self._disable_fb_discovery_for_run("not_authenticated")
+            return fb_driver
+        except Exception as exc:
+            if _fb_exception_is_fatal_session(exc):
+                self._disable_fb_discovery_for_run("session_invalid", session_invalid=True)
+            _safe_log(
+                self.log_message.emit,
+                "[FB Enrich] Failed to start Facebook driver: %s",
+                exc,
+            )
+            return None
+
+    def _reset_fb_runtime_local_state(self) -> None:
+        self._fb_discovery_attempted_rows = set()
+        self._fb_discovery_disabled = False
+        self._fb_discovery_disabled_reason = ""
+        self._fb_discovery_disable_logged = False
+        self._fb_session_auth_checked = False
+        self._fb_session_authenticated = False
+        self._fb_session_warmup_complete = False
+        self._initial_fb_session_warmup_complete = False
+        self._fb_session_auth_reason = ""
+        self._fb_session_invalid = False
+        if getattr(self, "night_mode", False) and self.night_fb_run_state is not None:
+            reset_night_fb_run_runtime_state(self.night_fb_run_state)
+
+    def _reset_ig_runtime_local_state(self) -> None:
+        self._instagram_hidden_contact_attempt_keys = set()
+        try:
+            html_fetcher.close_job_browser("global")
+        except Exception:
+            pass
+
+    def _teardown_night_runtime_for_chunk(self) -> None:
+        self._reset_ig_runtime_local_state()
+        self._reset_fb_runtime_local_state()
+        _cleanup_enricher_facebook_driver()
+
+    def _recreate_night_runtime_for_chunk(self):
+        try:
+            ensure_context = getattr(html_fetcher, "_ensure_context", None)
+            if callable(ensure_context):
+                ensure_context("global")
+        except Exception:
+            pass
+        return self._create_fb_runtime_for_current_chunk()
+
+    def _reset_night_runtime_chunk(
+        self,
+        *,
+        interval_rows: int,
+        completed_rows: int,
+        next_row_id: Any,
+        next_row_index: Any,
+    ):
+        self._emit_runtime_reset_log(
+            f"[Night Runtime Reset] interval_rows={interval_rows} completed_rows={completed_rows} "
+            f"teardown_start=1 next_row_index={next_row_index} next_row_id={next_row_id}"
+        )
+        self._teardown_night_runtime_for_chunk()
+        self._emit_runtime_reset_log(
+            f"[Night Runtime Reset] interval_rows={interval_rows} completed_rows={completed_rows} teardown_complete=1"
+        )
+        self._emit_runtime_reset_log(
+            f"[Night Runtime Reset] interval_rows={interval_rows} completed_rows={completed_rows} "
+            f"recreate_start=1 next_row_index={next_row_index} next_row_id={next_row_id}"
+        )
+        fb_driver = self._recreate_night_runtime_for_chunk()
+        self._emit_runtime_reset_log(
+            f"[Night Runtime Reset] interval_rows={interval_rows} completed_rows={completed_rows} "
+            f"recreate_complete=1 next_row_index={next_row_index} next_row_id={next_row_id} "
+            f"fb_driver_ready={1 if fb_driver is not None else 0}"
+        )
+        return fb_driver
+
+    def _run_with_night_runtime_chunks(
+        self,
+        seed_df: pd.DataFrame,
+        directory_indexes,
+        priority,
+        fb_driver,
+        total: int,
+        *,
+        enrichment_mode: str,
+    ) -> None:
+        row_ids = self._selected_row_ids(seed_df)
+
+        def _run_chunk(active_row_ids: List[Any], active_fb_driver) -> None:
+            if enrichment_mode == "source_phased":
+                self._run_source_phased(
+                    seed_df,
+                    directory_indexes,
+                    priority,
+                    active_fb_driver,
+                    total,
+                    row_ids=active_row_ids,
+                )
+            else:
+                self._run_row_linear(
+                    seed_df,
+                    directory_indexes,
+                    priority,
+                    active_fb_driver,
+                    total,
+                    row_ids=active_row_ids,
+                )
+
+        if not getattr(self, "night_mode", False):
+            _run_chunk(row_ids, fb_driver)
+            return
+
+        interval_rows = self._resolve_night_runtime_reset_interval_rows()
+        enabled = bool(interval_rows > 0 and row_ids)
+        self._emit_runtime_reset_log(
+            f"[Night Runtime Reset] interval_rows={interval_rows} completed_rows=0 boundary_reached=0 "
+            f"enabled={1 if enabled else 0} total_rows={len(row_ids)}"
+        )
+
+        if not enabled:
+            _run_chunk(row_ids, fb_driver)
+            return
+
+        position_by_row = {
+            row_idx: pos
+            for pos, row_idx in enumerate(seed_df.index, start=1)
+        }
+        current_fb_driver = fb_driver
+        completed_rows = 0
+        for chunk_start in range(0, len(row_ids), interval_rows):
+            active_row_ids = row_ids[chunk_start : chunk_start + interval_rows]
+            _run_chunk(active_row_ids, current_fb_driver)
+            completed_rows += len(active_row_ids)
+            boundary_reached = completed_rows < len(row_ids)
+            next_row_id = row_ids[completed_rows] if boundary_reached else "<none>"
+            next_row_index = position_by_row.get(next_row_id, "<none>") if boundary_reached else "<none>"
+            self._emit_runtime_reset_log(
+                f"[Night Runtime Reset] interval_rows={interval_rows} completed_rows={completed_rows} "
+                f"boundary_reached={1 if boundary_reached else 0} next_row_index={next_row_index} next_row_id={next_row_id}"
+            )
+            if boundary_reached:
+                current_fb_driver = self._reset_night_runtime_chunk(
+                    interval_rows=interval_rows,
+                    completed_rows=completed_rows,
+                    next_row_id=next_row_id,
+                    next_row_index=next_row_index,
+                )
 
     def _run_impl(self) -> None:
         fb_driver = None
@@ -11760,67 +12008,9 @@ class CrossDirectoryEnricherWorker(QThread):
         # Bandcamp discover per-run state
         self._bc_discover_cache = {}
         self._bc_discover_fetches = 0
+        self._instagram_hidden_contact_attempt_keys = set()
         try:
-            if ENABLE_FACEBOOK_ENRICHMENT:
-                try:
-                    if getattr(self, "night_mode", False):
-                        night_fb_source = (
-                            self.night_fb_run_state.session_source
-                            if self.night_fb_run_state is not None
-                            else normalize_night_fb_session_source()
-                        )
-                        if not night_fb_source.can_probe:
-                            self._disable_fb_discovery_for_run(night_fb_source.reason)
-                        else:
-                            headless = str(os.environ.get("NIGHT_FB_HEADLESS", "") or "").strip().lower() in (
-                                "1",
-                                "true",
-                                "yes",
-                                "on",
-                            )
-                            if self.night_fb_run_state is not None:
-                                shared_session = ensure_night_fb_run_session(
-                                    self.night_fb_run_state,
-                                    headless=headless,
-                                    logger=self.log_message.emit,
-                                    owner="cross_directory_enricher",
-                                )
-                                fb_driver = getattr(shared_session, "driver", None) if shared_session is not None else None
-                            else:
-                                fb_driver = _get_enricher_facebook_driver(
-                                    profile_dir=night_fb_source.profile_dir or None
-                                )
-                            self._ensure_fb_discovery_session(fb_driver, force=True)
-                    else:
-                        fb_driver = _get_enricher_facebook_driver()
-                        if not enricher_fb_profile_has_cookies():
-                            try:
-                                fb_driver.get("https://www.facebook.com/")
-                            except Exception as exc:
-                                if _fb_exception_is_fatal_session(exc):
-                                    raise
-                            message = "[FB Enrich] Please manually log into Facebook in the opened window."
-                            _safe_log(self.log_message.emit, message)
-                            try:
-                                input("Press ENTER once logged in…")
-                            except EOFError:
-                                pass
-                            except Exception:
-                                pass
-                            self._ensure_fb_discovery_session(fb_driver, force=True)
-                        else:
-                            auth_cookie_state = _fb_driver_has_auth_cookie(fb_driver)
-                            if auth_cookie_state is False:
-                                self._disable_fb_discovery_for_run("not_authenticated")
-                except Exception as exc:
-                    if _fb_exception_is_fatal_session(exc):
-                        self._disable_fb_discovery_for_run("session_invalid", session_invalid=True)
-                    _safe_log(
-                        self.log_message.emit,
-                        "[FB Enrich] Failed to start Facebook driver: %s",
-                        exc,
-                    )
-                    fb_driver = None
+            fb_driver = self._create_fb_runtime_for_current_chunk()
             if not os.path.exists(self.seed_csv_path):
                 self.log_message.emit(f"[Enricher] Seed CSV not found: {self.seed_csv_path}")
                 self.finished.emit("")
@@ -11946,10 +12136,14 @@ class CrossDirectoryEnricherWorker(QThread):
             priority = ["bandcamp", "soundcloud", "lastfm", "unearthed"]
             _enrichment_mode = os.getenv("ENRICHMENT_MODE", "row_linear")
             self.log_message.emit(f"[Enricher] mode={_enrichment_mode}")
-            if _enrichment_mode == "source_phased":
-                self._run_source_phased(seed_df, directory_indexes, priority, fb_driver, total)
-            else:
-                self._run_row_linear(seed_df, directory_indexes, priority, fb_driver, total)
+            self._run_with_night_runtime_chunks(
+                seed_df,
+                directory_indexes,
+                priority,
+                fb_driver,
+                total,
+                enrichment_mode=_enrichment_mode,
+            )
             self._run_late_domain_email_backfill(seed_df, total)
             # Bandcamp per-run summary (low noise)
             if self._bc_search_attempts:
@@ -15063,38 +15257,38 @@ class CrossDirectoryEnricherWorker(QThread):
             pass
         return remaining
 
-    def _run_source_phased(self, seed_df, directory_indexes, priority, fb_driver, total):
+    def _run_source_phased(self, seed_df, directory_indexes, priority, fb_driver, total, row_ids: Optional[Iterable[Any]] = None):
         """Run enrichment in source-phased mode: one source across all rows at a time."""
         use_scheduler = (
             os.getenv("SOURCE_DIVERSITY_SCHEDULER", "0").strip().lower() in {"1", "true", "yes", "on"}
         )
-        self._unearthed_fb_first_row_ids = self._collect_unearthed_fb_first_row_ids(seed_df)
+        self._unearthed_fb_first_row_ids = self._collect_unearthed_fb_first_row_ids(seed_df, row_ids=row_ids)
         seed_df = _apply_unearthed_platform_promotion_df(seed_df, log_fn=self.log_message.emit)
         if use_scheduler:
             self.log_message.emit("[Enricher] Source diversity scheduler=ON (round-robin)")
         try:
             # Phase 0: Directory matching (fast, no network)
-            self._phase_directory_matching(seed_df, directory_indexes, priority, total)
+            self._phase_directory_matching(seed_df, directory_indexes, priority, total, row_ids=row_ids)
             if use_scheduler:
                 # Keep IG extraction outside the scheduler as a bounded single-page pass.
-                self._phase_spotify_discovery(seed_df, total, fb_driver=fb_driver)
-                self._phase_instagram_email(seed_df, total)
-                self._phase_website_email(seed_df, total)
-                self._run_interleaved_sources(seed_df, fb_driver, total)
+                self._phase_spotify_discovery(seed_df, total, fb_driver=fb_driver, row_ids=row_ids)
+                self._phase_instagram_email(seed_df, total, row_ids=row_ids)
+                self._phase_website_email(seed_df, total, row_ids=row_ids)
+                self._run_interleaved_sources(seed_df, fb_driver, total, row_ids=row_ids)
                 return
             sc_deferred_rows: Dict[Any, Dict[str, Any]] = {}
             # Phase 1: Dedicated SoundCloud live check
             if self.enable_live_search:
-                sc_deferred_rows = self._phase_soundcloud(seed_df, total)
+                sc_deferred_rows = self._phase_soundcloud(seed_df, total, row_ids=row_ids)
             # Phase 2: General live lookup (BC + LF; SC mostly skipped since Phase 1 populated it)
             if self.enable_live_search:
-                self._phase_live_lookup(seed_df, total)
+                self._phase_live_lookup(seed_df, total, row_ids=row_ids)
             # Phase 3: Spotify seed identity fan-out before contact stages.
-            self._phase_spotify_discovery(seed_df, total, fb_driver=fb_driver)
+            self._phase_spotify_discovery(seed_df, total, fb_driver=fb_driver, row_ids=row_ids)
             # Phase 3: Instagram profile HTML email extraction (single fetch only)
-            self._phase_instagram_email(seed_df, total)
+            self._phase_instagram_email(seed_df, total, row_ids=row_ids)
             # Phase 4: bounded website contact crawl from canonical website field.
-            self._phase_website_email(seed_df, total)
+            self._phase_website_email(seed_df, total, row_ids=row_ids)
             if self.enable_live_search and sc_deferred_rows:
                 sc_deferred_rows = self._retry_deferred_soundcloud_rows(
                     seed_df,
@@ -15106,7 +15300,7 @@ class CrossDirectoryEnricherWorker(QThread):
             seed_df = _apply_fb_promotion_df(seed_df, log_fn=self.log_message.emit)
             # Phase 5: Facebook
             if ENABLE_FACEBOOK_ENRICHMENT and fb_driver:
-                self._phase_facebook(seed_df, fb_driver, total)
+                self._phase_facebook(seed_df, fb_driver, total, row_ids=row_ids)
                 if self.enable_live_search and sc_deferred_rows:
                     self._retry_deferred_soundcloud_rows(
                         seed_df,
@@ -15117,12 +15311,15 @@ class CrossDirectoryEnricherWorker(QThread):
         finally:
             self._unearthed_fb_first_row_ids = set()
 
-    def _run_row_linear(self, seed_df, directory_indexes, priority, fb_driver, total):
+    def _run_row_linear(self, seed_df, directory_indexes, priority, fb_driver, total, row_ids: Optional[Iterable[Any]] = None):
         """Run row-linear enrichment while preserving the Unearthed explicit-FB fast path."""
-        self._unearthed_fb_first_row_ids = self._collect_unearthed_fb_first_row_ids(seed_df)
+        self._unearthed_fb_first_row_ids = self._collect_unearthed_fb_first_row_ids(seed_df, row_ids=row_ids)
         seed_df = _apply_unearthed_platform_promotion_df(seed_df, log_fn=self.log_message.emit)
+        selected_row_ids = self._selected_row_ids(seed_df, row_ids)
+        position_by_row = {row_idx: pos for pos, row_idx in enumerate(seed_df.index, start=1)}
         try:
-            for position, row_idx in enumerate(seed_df.index, start=1):
+            for row_idx in selected_row_ids:
+                position = position_by_row.get(row_idx, 0)
                 ctx = self._build_row_context(seed_df, row_idx, position, total)
                 if not ctx:
                     self._update_progress(position, total)
@@ -15174,9 +15371,9 @@ class CrossDirectoryEnricherWorker(QThread):
             return 1
         return 2
 
-    def _collect_unearthed_fb_first_row_ids(self, seed_df: pd.DataFrame) -> Set[Any]:
+    def _collect_unearthed_fb_first_row_ids(self, seed_df: pd.DataFrame, row_ids: Optional[Iterable[Any]] = None) -> Set[Any]:
         streamlined_rows: Set[Any] = set()
-        for row_idx in seed_df.index:
+        for row_idx in self._selected_row_ids(seed_df, row_ids):
             row = seed_df.loc[row_idx]
             if not _row_is_unearthed_source(row):
                 continue
@@ -15203,23 +15400,23 @@ class CrossDirectoryEnricherWorker(QThread):
             return False
         return True
 
-    def _ordered_interleaved_row_ids(self, seed_df: pd.DataFrame) -> List[Any]:
-        rows = list(seed_df.index)
+    def _ordered_interleaved_row_ids(self, seed_df: pd.DataFrame, row_ids: Optional[Iterable[Any]] = None) -> List[Any]:
+        rows = self._selected_row_ids(seed_df, row_ids)
         return sorted(rows, key=lambda row_idx: self._festival_seed_priority_tier(seed_df.loc[row_idx]))
 
-    def _run_interleaved_sources(self, seed_df, fb_driver, total):
+    def _run_interleaved_sources(self, seed_df, fb_driver, total, row_ids: Optional[Iterable[Any]] = None):
         """Interleave SC, LF (live lookup), and FB across rows to avoid bursts."""
 
         seed_df = _apply_unearthed_platform_promotion_df(seed_df, log_fn=self.log_message.emit)
         seed_df = _apply_fb_promotion_df(seed_df, log_fn=self.log_message.emit)
         rows = [
             row_idx
-            for row_idx in self._ordered_interleaved_row_ids(seed_df)
+            for row_idx in self._ordered_interleaved_row_ids(seed_df, row_ids=row_ids)
             if not self._should_bypass_unearthed_shared_enrichers(row_idx)
         ]
         fb_rows = [
             row_idx
-            for row_idx in self._ordered_interleaved_row_ids(seed_df)
+            for row_idx in self._ordered_interleaved_row_ids(seed_df, row_ids=row_ids)
             if not self._should_bypass_unearthed_shared_enrichers(row_idx, platform="facebook")
         ]
         position_by_row = {row_idx: pos for pos, row_idx in enumerate(seed_df.index, start=1)}
@@ -15462,10 +15659,11 @@ class CrossDirectoryEnricherWorker(QThread):
         except Exception:
             pass
 
-    def _phase_directory_matching(self, seed_df, directory_indexes, priority, total):
+    def _phase_directory_matching(self, seed_df, directory_indexes, priority, total, row_ids: Optional[Iterable[Any]] = None):
         self.log_message.emit("[Enricher][Directory Phase] Starting...")
         enriched_count = 0
-        for position, row_idx in enumerate(seed_df.index, start=1):
+        for row_idx in self._selected_row_ids(seed_df, row_ids):
+            position = seed_df.index.get_loc(row_idx) + 1
             if self._should_bypass_unearthed_shared_enrichers(row_idx):
                 self._update_progress(position, total)
                 continue
@@ -15482,7 +15680,7 @@ class CrossDirectoryEnricherWorker(QThread):
             self._update_progress(position, total)
         self.log_message.emit(f"[Enricher][Directory Phase] Completed {total} rows (enriched={enriched_count})")
 
-    def _phase_soundcloud(self, seed_df, total):
+    def _phase_soundcloud(self, seed_df, total, row_ids: Optional[Iterable[Any]] = None):
         self.log_message.emit("[Enricher][SC Phase] Starting...")
         enriched_count = 0
         skipped_cooldown = 0
@@ -15491,7 +15689,8 @@ class CrossDirectoryEnricherWorker(QThread):
         cooldown_remaining_hint = 0
         deferred_rows: Dict[Any, Dict[str, Any]] = {}
         stopped_max_live = False
-        for position, row_idx in enumerate(seed_df.index, start=1):
+        for row_idx in self._selected_row_ids(seed_df, row_ids):
+            position = seed_df.index.get_loc(row_idx) + 1
             if self._should_bypass_unearthed_shared_enrichers(row_idx):
                 continue
             if self.max_live_searches > 0 and self.live_search_attempts >= self.max_live_searches:
@@ -15566,11 +15765,12 @@ class CrossDirectoryEnricherWorker(QThread):
         )
         return deferred_rows
 
-    def _phase_spotify_discovery(self, seed_df, total, fb_driver=None):
+    def _phase_spotify_discovery(self, seed_df, total, fb_driver=None, row_ids: Optional[Iterable[Any]] = None):
         self.log_message.emit("[Enricher][Spotify Discovery] Starting...")
         eligible_rows = 0
         enriched_count = 0
-        for position, row_idx in enumerate(seed_df.index, start=1):
+        for row_idx in self._selected_row_ids(seed_df, row_ids):
+            position = seed_df.index.get_loc(row_idx) + 1
             ctx = self._build_row_context(seed_df, row_idx, position, total)
             if not ctx:
                 continue
@@ -15586,8 +15786,9 @@ class CrossDirectoryEnricherWorker(QThread):
         )
         self._log_spotify_discovery_summary("[Enricher][Spotify Discovery]")
 
-    def _phase_instagram_email(self, seed_df, total):
-        for position, row_idx in enumerate(seed_df.index, start=1):
+    def _phase_instagram_email(self, seed_df, total, row_ids: Optional[Iterable[Any]] = None):
+        for row_idx in self._selected_row_ids(seed_df, row_ids):
+            position = seed_df.index.get_loc(row_idx) + 1
             if self._should_bypass_unearthed_shared_enrichers(row_idx, platform="instagram"):
                 continue
             ctx = self._build_row_context(seed_df, row_idx, position, total)
@@ -15600,8 +15801,9 @@ class CrossDirectoryEnricherWorker(QThread):
             self._init_row_enrichment_state()
             self._enrich_row_instagram_email(seed_df, row_idx, ctx)
 
-    def _phase_website_email(self, seed_df, total):
-        for position, row_idx in enumerate(seed_df.index, start=1):
+    def _phase_website_email(self, seed_df, total, row_ids: Optional[Iterable[Any]] = None):
+        for row_idx in self._selected_row_ids(seed_df, row_ids):
+            position = seed_df.index.get_loc(row_idx) + 1
             if self._should_bypass_unearthed_shared_enrichers(row_idx):
                 continue
             ctx = self._build_row_context(seed_df, row_idx, position, total)
@@ -15613,7 +15815,7 @@ class CrossDirectoryEnricherWorker(QThread):
             self._init_row_enrichment_state()
             self._enrich_row_website_email(seed_df, row_idx, ctx)
 
-    def _phase_live_lookup(self, seed_df, total):
+    def _phase_live_lookup(self, seed_df, total, row_ids: Optional[Iterable[Any]] = None):
         self.log_message.emit("[Enricher][LF Phase] Starting...")
         self._reset_live_lookup_bclf_stats()
         self._live_lookup_bclf_adaptive_enabled = True
@@ -15623,7 +15825,8 @@ class CrossDirectoryEnricherWorker(QThread):
             skipped_search_cooldown = 0
             skipped_profile_cooldown = 0
             stopped_max_live = False
-            for position, row_idx in enumerate(seed_df.index, start=1):
+            for row_idx in self._selected_row_ids(seed_df, row_ids):
+                position = seed_df.index.get_loc(row_idx) + 1
                 if self._should_bypass_unearthed_shared_enrichers(row_idx):
                     continue
                 ctx = self._build_row_context(seed_df, row_idx, position, total)
@@ -15688,13 +15891,14 @@ class CrossDirectoryEnricherWorker(QThread):
         finally:
             self._live_lookup_bclf_adaptive_enabled = False
 
-    def _phase_facebook(self, seed_df, fb_driver, total):
+    def _phase_facebook(self, seed_df, fb_driver, total, row_ids: Optional[Iterable[Any]] = None):
         self.log_message.emit("[Enricher][FB Phase] Starting...")
         enriched_count = 0
         skipped_count = 0
         processed_rows = 0
         stop_reason = ""
-        for position, row_idx in enumerate(seed_df.index, start=1):
+        for row_idx in self._selected_row_ids(seed_df, row_ids):
+            position = seed_df.index.get_loc(row_idx) + 1
             if self._should_bypass_unearthed_shared_enrichers(row_idx, platform="facebook"):
                 continue
             ctx = self._build_row_context(seed_df, row_idx, position, total)
@@ -20075,6 +20279,7 @@ def run_cross_directory_enrichment(
     state_source: Optional[Dict[str, Any]] = None,
     state_sink: Optional[Dict[str, Any]] = None,
     night_fb_run_state: Optional[NightFBRunState] = None,
+    night_runtime_reset_interval_rows: Optional[Any] = None,
 ) -> str:
     """
     Headless wrapper around the existing CrossDirectoryEnricherWorker for programmatic use.
@@ -20108,6 +20313,7 @@ def run_cross_directory_enrichment(
     )
     worker.night_mode = bool(night_mode)
     worker.night_fb_run_state = night_fb_run_state
+    worker.night_runtime_reset_interval_rows = night_runtime_reset_interval_rows
     if isinstance(state_source, dict):
         worker._initial_fb_session_warmup_complete = bool(state_source.get("fb_session_warmup_complete"))
     if night_fb_run_state is not None:

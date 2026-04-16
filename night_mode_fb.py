@@ -3142,6 +3142,23 @@ def close_night_fb_run_state(run_state: Optional[NightFBRunState]) -> None:
     run_state.session_owner = ""
 
 
+def reset_night_fb_run_runtime_state(run_state: Optional[NightFBRunState]) -> None:
+    """Reset per-runtime FB state while preserving durable launch configuration."""
+    if run_state is None:
+        return
+    close_night_fb_run_state(run_state)
+    run_state.latest_session_decision = None
+    run_state.disabled_for_run = False
+    run_state.disable_reason = ""
+    run_state.checkpointed = False
+    run_state.session_unhealthy = False
+    run_state.session_invalid = False
+    run_state.session_warmup_complete = False
+    run_state.trust_score = 0
+    run_state.search_disabled_for_run = False
+    run_state.search_disable_reason = ""
+
+
 def _night_fb_page_health_snapshot(
     current_url: str,
     page_html: Optional[str],

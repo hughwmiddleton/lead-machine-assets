@@ -57,6 +57,28 @@ def _call_with_optional_night_fb_run_state(fn, *args, night_fb_run_state=None, *
             kwargs["night_fb_run_state"] = night_fb_run_state
     return fn(*args, **kwargs)
 
+
+def _call_with_optional_master_enrichment_kwargs(
+    fn,
+    *args,
+    night_fb_run_state=None,
+    night_runtime_reset_interval_rows=None,
+    **kwargs,
+):
+    target = getattr(fn, "side_effect", None) or fn
+    try:
+        signature = inspect.signature(target)
+    except Exception:
+        signature = None
+    if signature is not None:
+        params = signature.parameters
+        accepts_kwargs = any(param.kind == inspect.Parameter.VAR_KEYWORD for param in params.values())
+        if "night_fb_run_state" in params or accepts_kwargs:
+            kwargs["night_fb_run_state"] = night_fb_run_state
+        if "night_runtime_reset_interval_rows" in params or accepts_kwargs:
+            kwargs["night_runtime_reset_interval_rows"] = night_runtime_reset_interval_rows
+    return fn(*args, **kwargs)
+
 def _ensure_string_columns(df: pd.DataFrame, cols: List[str]) -> None:
     for col in cols:
         if col in df.columns:
@@ -1403,6 +1425,10 @@ def run_night_mode(
     master_enrichment_enabled = master_enrich_cfg.get("enabled", True)
     master_live_search_enabled = master_enrich_cfg.get("enable_live_search", True)
     master_max_live_searches_raw = master_enrich_cfg.get("max_live_searches")
+    master_night_runtime_reset_interval_rows = master_enrich_cfg.get(
+        "night_runtime_reset_interval_rows",
+        config.get("night_runtime_reset_interval_rows"),
+    )
     try:
         master_max_live_searches = int(master_max_live_searches_raw) if master_max_live_searches_raw is not None else None
     except Exception:
@@ -1570,7 +1596,7 @@ def run_night_mode(
                 master_raw = _merge_raw_master(run_dir, job_states, logger, stats=stats)
                 if master_raw and os.path.exists(master_raw):
                     master_enriched = os.path.join(run_dir, "master_enriched.csv")
-                    master_enriched = _call_with_optional_night_fb_run_state(
+                    master_enriched = _call_with_optional_master_enrichment_kwargs(
                         run_master_enrichment,
                         master_raw,
                         master_enriched,
@@ -1579,6 +1605,7 @@ def run_night_mode(
                         max_live_searches=master_max_live_searches,
                         night_mode=True,
                         night_fb_run_state=night_fb_run_state,
+                        night_runtime_reset_interval_rows=master_night_runtime_reset_interval_rows,
                     )
                     master_pre_fb = os.path.join(run_dir, "master_pre_fb.csv")
                     master_pre_fb = run_enrichment(master_enriched, master_pre_fb, logger=stats_logger, night_mode=True)
