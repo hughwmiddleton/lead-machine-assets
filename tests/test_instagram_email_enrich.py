@@ -1,4 +1,5 @@
 from contextlib import contextmanager
+import json
 from bs4 import BeautifulSoup
 import pandas as pd
 import pytest
@@ -9,7 +10,7 @@ import unicodedata
 pytest.importorskip("PyQt5")
 
 import cross_directory_enricher as cde
-from email_provenance import EMAIL_PROVENANCE_JSON_COL
+from email_provenance import EMAIL_PROVENANCE_JSON_COL, _set_email_with_provenance
 
 _REAL_OPEN_INSTAGRAM_LIVE_PAGE_BRIDGE = cde._open_instagram_live_page_bridge
 
@@ -36,6 +37,55 @@ def _assert_no_log_startswith(logs, prefix):
 def _assert_ig_visit_and_outcome(logs, visit_url, outcome):
     assert logs[0] == f"[IG Email] Visiting {visit_url}"
     assert logs[-1] == outcome
+
+
+def test_unearthed_instagram_merge_preserves_existing_facebook_email(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Unearthed Dual Source",
+            "Source Directory": "Triple J Unearthed",
+            "Social Link": "https://www.instagram.com/uneartheddualsource/, https://www.facebook.com/uneartheddualsource",
+            "Email": "fb@example.com",
+            "Email_All": "fb@example.com",
+            "Email_Source_URL": "https://www.facebook.com/uneartheddualsource/about",
+            "Email_Source_Type": "facebook_enrich",
+            "Email_Extract_Method": "regex",
+            "Email_Type": "fb_enrich",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    _set_email_with_provenance(
+        (seed_df, 0),
+        "fb@example.com",
+        source_url="https://www.facebook.com/uneartheddualsource/about",
+        source_type="facebook_enrich",
+        method="regex",
+        surface="facebook_about",
+    )
+
+    @contextmanager
+    def fake_fetch_scope(session, ig_url, retain_live_page=False):  # noqa: ANN001
+        yield SimpleNamespace(html="<html><body>profile</body></html>", status=200)
+
+    monkeypatch.setattr(cde, "_instagram_profile_fetch_scope", fake_fetch_scope)
+    monkeypatch.setattr(cde, "_instagram_profile_fetch_usable", lambda status, html: True)
+    monkeypatch.setattr(
+        cde,
+        "_extract_instagram_direct_profile_candidate_emails",
+        lambda html, soup=None: ["ig@example.com"],
+    )
+    monkeypatch.setattr(cde, "_filter_instagram_email_candidates_for_acceptance", lambda emails, log=None: emails)
+
+    matched = worker._enrich_row_instagram_email(seed_df, 0, ctx)
+
+    assert matched is True
+    assert seed_df.at[0, "Email"] == "fb@example.com"
+    assert set(seed_df.at[0, "Email_All"].split(";")) == {"fb@example.com", "ig@example.com"}
+    provenance = json.loads(seed_df.at[0, EMAIL_PROVENANCE_JSON_COL])
+    assert provenance["fb@example.com"]["source_type"] == "facebook_enrich"
+    assert provenance["ig@example.com"]["source_type"] == "instagram_enrich"
 
 
 @pytest.fixture(autouse=True)

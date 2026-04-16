@@ -476,6 +476,7 @@ def test_scheduler_mode_excludes_unearthed_fb_first_rows(monkeypatch):
     class FakeScheduler:
         def __init__(self, sources, row_label=None, log_fn=None, short_circuit_fn=None):
             captured["rows_by_source"] = {spec.name: list(spec.rows) for spec in sources}
+            captured["row_getters"] = {spec.name: spec.row_getter for spec in sources}
 
         def run(self):
             return {}
@@ -486,11 +487,17 @@ def test_scheduler_mode_excludes_unearthed_fb_first_rows(monkeypatch):
     worker.enable_live_search = True
     worker.log_message = type("Logger", (), {"emit": lambda *args, **kwargs: None})()
     worker._unearthed_fb_first_row_ids = {0}
+    worker.__dict__["_fb_discovery_attempted_rows"] = set()
 
     seed_df = pd.DataFrame(
         [
-            {"Artist Name": "Unearthed FB First", "Source Directory": "Unearthed"},
-            {"Artist Name": "Control Artist", "Source Directory": "Spotify"},
+            {
+                "Artist Name": "Unearthed FB First",
+                "Source Directory": "Unearthed",
+                "Social Link": "https://www.facebook.com/unearthed.fb.first",
+                "Email_All": "ig@example.com",
+            },
+            {"Artist Name": "Control Artist", "Source Directory": "Spotify", "Email_All": ""},
         ],
         dtype=str,
     ).fillna("")
@@ -499,7 +506,8 @@ def test_scheduler_mode_excludes_unearthed_fb_first_rows(monkeypatch):
 
     assert captured["rows_by_source"]["SC"] == [1]
     assert captured["rows_by_source"]["LF"] == [1]
-    assert captured["rows_by_source"]["FB"] == [1]
+    assert captured["rows_by_source"]["FB"] == [0, 1]
+    assert captured["row_getters"]["FB"](0)["Email_All"] == ""
 
 
 def test_row_linear_unearthed_fb_first_bypasses_shared_enrichers(monkeypatch):
@@ -581,13 +589,69 @@ def test_row_linear_unearthed_fb_first_bypasses_shared_enrichers(monkeypatch):
 
     worker._run_row_linear(seed_df, directory_indexes={}, priority=[], fb_driver=object(), total=len(seed_df))
 
-    for phase_name in calls:
+    for phase_name in ("dir", "sc", "lf", "spotify", "website"):
         assert 0 not in calls[phase_name]
         assert 1 in calls[phase_name]
         assert 2 in calls[phase_name]
+    assert 0 in calls["ig"]
+    assert 1 in calls["ig"]
+    assert 2 in calls["ig"]
+    assert 0 in calls["fb"]
+    assert 1 in calls["fb"]
+    assert 2 in calls["fb"]
     assert any("[Unearthed Path] activated artist='Unearthed FB First' row=0" in line for line in logs)
     assert any("[Unearthed Path] skipping non-essential enrichers artist='Unearthed FB First' row=0" in line for line in logs)
     assert any("[Unearthed Path] no usable FB URL, resuming standard path artist='Unearthed Fallback' row=1" in line for line in logs)
+
+
+def test_row_linear_unearthed_fb_first_still_runs_instagram_when_fb_driver_unavailable(monkeypatch):
+    import pandas as pd
+    import cross_directory_enricher as cde
+
+    monkeypatch.setattr(cde.CrossDirectoryEnricherWorker, "__init__", lambda self, *a, **k: None)
+    monkeypatch.setattr(cde, "ENABLE_FACEBOOK_ENRICHMENT", True)
+
+    worker = cde.CrossDirectoryEnricherWorker(None, None)
+    worker.enable_live_search = True
+    worker.log_message = type("Logger", (), {"emit": lambda *args, **kwargs: None})()
+    worker._update_progress = lambda *args, **kwargs: None
+    worker._should_short_circuit_after_domain_reuse = lambda *args, **kwargs: True
+    worker._init_row_enrichment_state = lambda: None
+    worker._log_spotify_discovery_summary = lambda *args, **kwargs: None
+
+    calls = {"ig": [], "fb": []}
+
+    worker._build_row_context = lambda df, row_idx, position, total: {
+        "artist": df.at[row_idx, "Artist Name"],
+        "position": position,
+        "total": total,
+        "spotify_id": "",
+    }
+    worker._enrich_row_directories = lambda *args, **kwargs: False
+    worker._enrich_row_sc_live = lambda *args, **kwargs: (False, False)
+    worker._enrich_row_live_lookup = lambda *args, **kwargs: (False, False)
+    worker._run_spotify_discovery_pass = lambda *args, **kwargs: False
+    worker._enrich_row_instagram_email = lambda df, row_idx, ctx: calls["ig"].append(row_idx) or False
+    worker._enrich_row_website_email = lambda *args, **kwargs: False
+    worker._enrich_row_facebook = lambda df, row_idx, fb_driver, ctx: calls["fb"].append(row_idx) or False
+
+    seed_df = pd.DataFrame(
+        [
+            {
+                "Artist Name": "Unearthed FB First",
+                "Source Directory": "Unearthed",
+                "Social Link": "https://www.facebook.com/unearthed.fb.first, https://www.instagram.com/unearthed.fb.first",
+                "Email": "",
+                "Email_All": "",
+            }
+        ],
+        dtype=str,
+    ).fillna("")
+
+    worker._run_row_linear(seed_df, directory_indexes={}, priority=[], fb_driver=None, total=len(seed_df))
+
+    assert calls["ig"] == [0]
+    assert calls["fb"] == []
 
 
 def test_row_linear_unearthed_without_usable_explicit_fb_does_not_bypass(monkeypatch):

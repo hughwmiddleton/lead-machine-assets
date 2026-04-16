@@ -9,6 +9,7 @@ pytest.importorskip("PyQt5")
 import cross_directory_enricher as cde
 import night_mode_fb as nmfb
 import pipeline_runner
+from email_provenance import EMAIL_PROVENANCE_JSON_COL, _set_email_with_provenance
 
 
 def _make_worker(logs):
@@ -318,7 +319,7 @@ def test_fb_enrich_runs_when_fb_url_present_or_promotable(monkeypatch, row_overr
 
     calls = []
 
-    def fake_extract(driver, url, log_fn=None):
+    def fake_extract(driver, url, log_fn=None, **kwargs):
         calls.append(url)
         return (["fb@example.com"], "https://www.facebook.com/socialfb/about", "")
 
@@ -363,7 +364,7 @@ def test_fb_enrich_uses_explicit_share_entrypoint_without_discovery(monkeypatch)
 
     calls = []
 
-    def fake_extract(driver, url, log_fn=None):
+    def fake_extract(driver, url, log_fn=None, **kwargs):
         calls.append(url)
         return (["sharefb@example.com"], "https://www.facebook.com/artistsharepage", "")
 
@@ -416,7 +417,7 @@ def test_fb_enrich_uses_payload_promoted_facebook_url_without_discovery(monkeypa
     ctx = worker._build_row_context(seed_df, 0, 1, 1)
     calls = []
 
-    def fake_extract(driver, url, log_fn=None):
+    def fake_extract(driver, url, log_fn=None, **kwargs):
         calls.append(url)
         return (["payloadfb@example.com"], "https://www.facebook.com/payloadpromotedfb/about", "")
 
@@ -628,7 +629,7 @@ def test_fb_enrich_handles_missing_email_columns(monkeypatch):
 
     calls = []
 
-    def fake_extract(driver, url, log_fn=None):
+    def fake_extract(driver, url, log_fn=None, **kwargs):
         calls.append(url)
         return ([], url, "no_email_on_page")
 
@@ -696,7 +697,7 @@ def test_fb_explicit_email_discovery_increments_summary(monkeypatch):
     )
     ctx = worker._build_row_context(seed_df, 0, 1, 1)
 
-    def fake_extract(driver, url, log_fn=None):
+    def fake_extract(driver, url, log_fn=None, **kwargs):
         return (["fb@example.com"], "https://www.facebook.com/socialfb/about", "")
 
     monkeypatch.setattr(cde, "_extract_fb_emails_bounded", fake_extract)
@@ -906,7 +907,7 @@ def test_fb_enrich_skips_when_fb_url_missing(monkeypatch):
         discover_calls.append((fb_driver, artist_name, location))
         return "https://www.facebook.com/discoveredband"
 
-    def fake_extract(driver_obj, url, log_fn=None):
+    def fake_extract(driver_obj, url, log_fn=None, **kwargs):
         extract_calls.append((driver_obj, url))
         return (["fb@example.com"], "https://www.facebook.com/discoveredband/about", "")
 
@@ -1017,6 +1018,61 @@ def test_fb_enrich_preserves_seeded_unearthed_fb_scrape(monkeypatch):
     assert seed_df.at[0, "Email"] == "seeded@example.com"
     assert seed_df.at[0, "Facebook_URL"] == "https://www.facebook.com/unearthedseeded"
     assert not any("[FB Discovery][Skip] Unearthed row without seeded Facebook_URL" in msg for msg in logs)
+
+
+def test_fb_enrich_unearthed_explicit_url_merges_with_existing_instagram_email(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    worker._row_allows_heavy_enricher = lambda *args, **kwargs: SimpleNamespace(allowed=True)
+    worker._ensure_fb_discovery_session = lambda driver: (True, "authenticated")
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Unearthed Dual Source",
+            "Email": "ig@example.com",
+            "Email_All": "ig@example.com",
+            "Email_Source_URL": "https://www.instagram.com/uneartheddualsource/",
+            "Email_Source_Type": "instagram_enrich",
+            "Email_Extract_Method": "regex",
+            "facebook_url": "",
+            "Facebook_URL": "",
+            "Facebook URL": "",
+            "Social Link": "https://www.instagram.com/uneartheddualsource/, https://www.facebook.com/uneartheddualsource",
+            "External Links": "",
+            "Source Directory": "Triple J Unearthed",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    _set_email_with_provenance(
+        (seed_df, 0),
+        "ig@example.com",
+        source_url="https://www.instagram.com/uneartheddualsource/",
+        source_type="instagram_enrich",
+        method="regex",
+        surface="instagram_profile",
+    )
+
+    extract_calls = []
+
+    def fake_extract(driver_obj, url, log_fn=None, **kwargs):
+        extract_calls.append(url)
+        return (["fb@example.com"], "https://www.facebook.com/uneartheddualsource/about", "")
+
+    monkeypatch.setattr(cde, "_extract_fb_emails_bounded", fake_extract)
+    monkeypatch.setattr(
+        worker,
+        "_discover_facebook_identity",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("discovery should not run for explicit Unearthed FB URL")),
+    )
+
+    matched = worker._enrich_row_facebook(seed_df, 0, object(), ctx)
+
+    assert matched is True
+    assert extract_calls == ["https://www.facebook.com/uneartheddualsource"]
+    assert seed_df.at[0, "Email"] == "ig@example.com"
+    assert set(seed_df.at[0, "Email_All"].split(";")) == {"ig@example.com", "fb@example.com"}
+    provenance = json.loads(seed_df.at[0, EMAIL_PROVENANCE_JSON_COL])
+    assert provenance["ig@example.com"]["source_type"] == "instagram_enrich"
+    assert provenance["fb@example.com"]["source_type"] == "facebook_enrich"
 
 
 def test_fb_enrich_non_unearthed_row_without_seeded_fb_still_calls_discovery(monkeypatch):
@@ -1307,7 +1363,7 @@ def test_discovery_success_stores_url_and_second_pass_uses_explicit_url_not_disc
         discover_calls.append((artist_name, location))
         return "https://www.facebook.com/discoveredtwice"
 
-    def fake_extract(driver_obj, url, log_fn=None):
+    def fake_extract(driver_obj, url, log_fn=None, **kwargs):
         extract_calls.append(url)
         return ([], url, "no_email_on_page")
 
@@ -1354,7 +1410,7 @@ def test_explicit_facebook_url_bypasses_discovery_lock(monkeypatch):
         lambda *args, **kwargs: discover_calls.append(args) or "https://www.facebook.com/shouldnotrun",
     )
 
-    def fake_extract(driver_obj, url, log_fn=None):
+    def fake_extract(driver_obj, url, log_fn=None, **kwargs):
         extract_calls.append(url)
         return (["fb@example.com"], url, "")
 
@@ -1579,7 +1635,7 @@ def test_fb_enrich_explicit_url_routes_through_fb_session_gate(monkeypatch):
     monkeypatch.setattr(
         cde,
         "_extract_fb_emails_bounded",
-        lambda fb_driver, url, log_fn=None: (["fb@example.com"], url, ""),
+        lambda fb_driver, url, log_fn=None, **kwargs: (["fb@example.com"], url, ""),
     )
 
     assert worker._enrich_row_facebook(seed_df, 0, driver, ctx) is True
@@ -1613,7 +1669,7 @@ def test_night_mode_fb_enrich_threads_shared_session_into_bounded_extract(monkey
     ctx = worker._build_row_context(seed_df, 0, 1, 1)
     observed = {}
 
-    def fake_extract(fb_driver, url, log_fn=None, fb_session=None):  # noqa: ANN001
+    def fake_extract(fb_driver, url, log_fn=None, fb_session=None, **kwargs):  # noqa: ANN001
         observed["fb_driver"] = fb_driver
         observed["url"] = url
         observed["fb_session"] = fb_session
@@ -1761,7 +1817,7 @@ def test_phase_facebook_reuses_indexed_domain_email_without_second_scrape(monkey
 
     extract_calls = []
 
-    def fake_extract(driver_obj, url, log_fn=None):
+    def fake_extract(driver_obj, url, log_fn=None, **kwargs):
         extract_calls.append(url)
         if url == "https://www.facebook.com/brightone":
             return (["mgmt@brightmusic.com"], url, "")

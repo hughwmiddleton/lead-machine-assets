@@ -566,8 +566,12 @@ def test_unearthed_fb_first_source_phased_bypasses_shared_enrichers(monkeypatch)
 
     w._run_source_phased(seed_df, directory_indexes={}, priority=[], fb_driver=object(), total=len(seed_df))
 
-    for phase_name in ("dir", "ig", "website", "fb"):
+    for phase_name in ("dir", "website"):
         assert 0 not in calls[phase_name]
+        assert 1 in calls[phase_name]
+        assert 2 in calls[phase_name]
+    for phase_name in ("ig", "fb"):
+        assert 0 in calls[phase_name]
         assert 1 in calls[phase_name]
         assert 2 in calls[phase_name]
     assert 0 not in calls["sc"]

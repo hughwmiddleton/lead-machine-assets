@@ -1898,8 +1898,17 @@ def _row_is_unearthed_source(row: Any) -> bool:
     return any(("unearthed" in value) or ("triple j" in value) for value in values)
 
 
+def _row_has_usable_unearthed_instagram_entrypoint(row: Any) -> bool:
+    if not _row_is_unearthed_source(row):
+        return False
+    try:
+        return bool(_get_canonical_instagram_url(row))
+    except Exception:
+        return False
+
+
 def _row_has_usable_unearthed_fb_entrypoint(row: Any) -> bool:
-    if row is None:
+    if row is None or not _row_is_unearthed_source(row):
         return False
     try:
         canonical_url, _ = ensure_canonical_facebook_url(row, set_row=False)
@@ -1916,6 +1925,15 @@ def _row_has_usable_unearthed_fb_entrypoint(row: Any) -> bool:
     except Exception:
         explicit_urls = []
     return bool(explicit_urls)
+
+
+def _should_force_unearthed_platform_enrichment(row: Any, platform: str) -> bool:
+    platform_norm = (platform or "").strip().lower()
+    if platform_norm == "instagram":
+        return _row_has_usable_unearthed_instagram_entrypoint(row)
+    if platform_norm == "facebook":
+        return _row_has_usable_unearthed_fb_entrypoint(row)
+    return False
 
 
 def _classify_contact_role_from_email(email: str) -> Optional[str]:
@@ -14013,7 +14031,8 @@ class CrossDirectoryEnricherWorker(QThread):
     def _enrich_row_instagram_email(self, seed_df, row_idx, ctx):
         """Extract email from the canonical Instagram profile HTML in a single fetch."""
         row = seed_df.loc[row_idx]
-        if _row_has_email(row):
+        force_unearthed_ig = _should_force_unearthed_platform_enrichment(row, "instagram")
+        if _row_has_email(row) and not force_unearthed_ig:
             self._set_platform_state("instagram", "skipped")
             return False
         ig_url = _get_canonical_instagram_url(row)
@@ -14650,8 +14669,9 @@ class CrossDirectoryEnricherWorker(QThread):
             fb_attempted = False
         else:
             fb_attempted = True
+            force_unearthed_fb = _should_force_unearthed_platform_enrichment(seed_df.loc[row_idx], "facebook")
             has_usable_email_for_fb_skip = _row_has_usable_email_for_fb_skip(seed_df.loc[row_idx])
-            if has_usable_email_for_fb_skip and not spotify_origin:
+            if has_usable_email_for_fb_skip and not spotify_origin and not force_unearthed_fb:
                 self.log_message.emit(
                     f"[FB Enrich] Skipping Facebook enrichment for '{artist}' (already has email from seed or directory enrichment)."
                 )
@@ -15103,32 +15123,33 @@ class CrossDirectoryEnricherWorker(QThread):
         seed_df = _apply_unearthed_platform_promotion_df(seed_df, log_fn=self.log_message.emit)
         try:
             for position, row_idx in enumerate(seed_df.index, start=1):
-                if self._should_bypass_unearthed_shared_enrichers(row_idx):
-                    self._update_progress(position, total)
-                    continue
                 ctx = self._build_row_context(seed_df, row_idx, position, total)
                 if not ctx:
                     self._update_progress(position, total)
                     continue
-                if self._should_short_circuit_after_domain_reuse(seed_df, row_idx, ctx):
+                bypass_shared = self._should_bypass_unearthed_shared_enrichers(row_idx)
+                if (not bypass_shared) and self._should_short_circuit_after_domain_reuse(seed_df, row_idx, ctx):
                     self._update_progress(position, total)
                     continue
                 self._init_row_enrichment_state()
-                enriched = self._enrich_row_directories(seed_df, row_idx, directory_indexes, priority, ctx)
-                if self.enable_live_search:
-                    sc_enriched, skip_rest = self._enrich_row_sc_live(seed_df, row_idx, ctx)
-                    enriched |= sc_enriched
-                    if skip_rest:
-                        self._update_progress(position, total)
-                        continue
-                    ll_enriched, skip_rest = self._enrich_row_live_lookup(seed_df, row_idx, ctx)
-                    enriched |= ll_enriched
-                    if skip_rest:
-                        self._update_progress(position, total)
-                        continue
-                enriched |= self._run_spotify_discovery_pass(seed_df, row_idx, ctx, fb_driver=fb_driver)
+                enriched = False
+                if not bypass_shared:
+                    enriched = self._enrich_row_directories(seed_df, row_idx, directory_indexes, priority, ctx)
+                    if self.enable_live_search:
+                        sc_enriched, skip_rest = self._enrich_row_sc_live(seed_df, row_idx, ctx)
+                        enriched |= sc_enriched
+                        if skip_rest:
+                            self._update_progress(position, total)
+                            continue
+                        ll_enriched, skip_rest = self._enrich_row_live_lookup(seed_df, row_idx, ctx)
+                        enriched |= ll_enriched
+                        if skip_rest:
+                            self._update_progress(position, total)
+                            continue
+                    enriched |= self._run_spotify_discovery_pass(seed_df, row_idx, ctx, fb_driver=fb_driver)
                 enriched |= self._enrich_row_instagram_email(seed_df, row_idx, ctx)
-                enriched |= self._enrich_row_website_email(seed_df, row_idx, ctx)
+                if not bypass_shared:
+                    enriched |= self._enrich_row_website_email(seed_df, row_idx, ctx)
                 if ENABLE_FACEBOOK_ENRICHMENT and fb_driver:
                     enriched |= self._enrich_row_facebook(seed_df, row_idx, fb_driver, ctx)
                 if not enriched:
@@ -15174,9 +15195,13 @@ class CrossDirectoryEnricherWorker(QThread):
                 )
         return streamlined_rows
 
-    def _should_bypass_unearthed_shared_enrichers(self, row_idx: Any) -> bool:
+    def _should_bypass_unearthed_shared_enrichers(self, row_idx: Any, *, platform: str = "") -> bool:
         streamlined_rows = self.__dict__.get("_unearthed_fb_first_row_ids")
-        return bool(streamlined_rows and row_idx in streamlined_rows)
+        if not (streamlined_rows and row_idx in streamlined_rows):
+            return False
+        if (platform or "").strip().lower() in {"instagram", "facebook"}:
+            return False
+        return True
 
     def _ordered_interleaved_row_ids(self, seed_df: pd.DataFrame) -> List[Any]:
         rows = list(seed_df.index)
@@ -15191,6 +15216,11 @@ class CrossDirectoryEnricherWorker(QThread):
             row_idx
             for row_idx in self._ordered_interleaved_row_ids(seed_df)
             if not self._should_bypass_unearthed_shared_enrichers(row_idx)
+        ]
+        fb_rows = [
+            row_idx
+            for row_idx in self._ordered_interleaved_row_ids(seed_df)
+            if not self._should_bypass_unearthed_shared_enrichers(row_idx, platform="facebook")
         ]
         position_by_row = {row_idx: pos for pos, row_idx in enumerate(seed_df.index, start=1)}
         priority_summary = {"festival_high": 0, "festival": 0, "normal": 0}
@@ -15249,7 +15279,8 @@ class CrossDirectoryEnricherWorker(QThread):
 
         def row_getter(rid):
             row_data = seed_df.loc[rid]
-            if rid not in getattr(self, "_fb_discovery_attempted_rows", set()):
+            force_unearthed_fb = _should_force_unearthed_platform_enrichment(row_data, "facebook")
+            if rid not in getattr(self, "_fb_discovery_attempted_rows", set()) and not force_unearthed_fb:
                 return row_data
             try:
                 row_copy = row_data.copy()
@@ -15259,6 +15290,12 @@ class CrossDirectoryEnricherWorker(QThread):
                 row_copy["__fb_discovery_attempted_this_run"] = "1"
             except Exception:
                 pass
+            if force_unearthed_fb:
+                for email_col in ("Email", "Email_All", "Email All"):
+                    try:
+                        row_copy[email_col] = ""
+                    except Exception:
+                        pass
             return row_copy
 
         if self.enable_live_search:
@@ -15362,7 +15399,8 @@ class CrossDirectoryEnricherWorker(QThread):
                 ctx = self._build_row_context(seed_df, row_idx, position_by_row[row_idx], total)
                 if not ctx:
                     return SourceResult()
-                if self._should_short_circuit_after_domain_reuse(seed_df, row_idx, ctx):
+                force_unearthed_fb = _should_force_unearthed_platform_enrichment(seed_df.loc[row_idx], "facebook")
+                if self._should_short_circuit_after_domain_reuse(seed_df, row_idx, ctx) and not force_unearthed_fb:
                     return SourceResult()
                 self._init_row_enrichment_state()
                 fb_enriched = self._enrich_row_facebook(seed_df, row_idx, fb_driver, ctx)
@@ -15379,7 +15417,7 @@ class CrossDirectoryEnricherWorker(QThread):
             sources.append(
                 SourceSpec(
                     name="FB",
-                    rows=rows,
+                    rows=fb_rows,
                     run_row=fb_run,
                     is_available=fb_available,
                     row_getter=row_getter,
@@ -15550,12 +15588,13 @@ class CrossDirectoryEnricherWorker(QThread):
 
     def _phase_instagram_email(self, seed_df, total):
         for position, row_idx in enumerate(seed_df.index, start=1):
-            if self._should_bypass_unearthed_shared_enrichers(row_idx):
+            if self._should_bypass_unearthed_shared_enrichers(row_idx, platform="instagram"):
                 continue
             ctx = self._build_row_context(seed_df, row_idx, position, total)
             if not ctx:
                 continue
-            if self._should_short_circuit_after_domain_reuse(seed_df, row_idx, ctx):
+            force_unearthed_ig = _should_force_unearthed_platform_enrichment(seed_df.loc[row_idx], "instagram")
+            if self._should_short_circuit_after_domain_reuse(seed_df, row_idx, ctx) and not force_unearthed_ig:
                 self._set_platform_state("instagram", "skipped")
                 continue
             self._init_row_enrichment_state()
@@ -15656,13 +15695,14 @@ class CrossDirectoryEnricherWorker(QThread):
         processed_rows = 0
         stop_reason = ""
         for position, row_idx in enumerate(seed_df.index, start=1):
-            if self._should_bypass_unearthed_shared_enrichers(row_idx):
+            if self._should_bypass_unearthed_shared_enrichers(row_idx, platform="facebook"):
                 continue
             ctx = self._build_row_context(seed_df, row_idx, position, total)
             if not ctx:
                 continue
             processed_rows += 1
-            if self._should_short_circuit_after_domain_reuse(seed_df, row_idx, ctx):
+            force_unearthed_fb = _should_force_unearthed_platform_enrichment(seed_df.loc[row_idx], "facebook")
+            if self._should_short_circuit_after_domain_reuse(seed_df, row_idx, ctx) and not force_unearthed_fb:
                 self._set_platform_state("facebook", "skipped")
                 skipped_count += 1
                 self._update_progress(position, total)
