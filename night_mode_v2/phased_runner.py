@@ -430,7 +430,14 @@ def run_enrich_phase(
     return manifest
 
 
-def run_contact_phase(config: Any, run_dir: str, enrich_manifest: Dict[str, Any], resume: bool = False, **kwargs) -> Dict[str, Any]:
+def run_contact_phase(
+    config: Any,
+    run_dir: str,
+    enrich_manifest: Dict[str, Any],
+    resume: bool = False,
+    fb_max_rows_override: Optional[int] = None,
+    **kwargs,
+) -> Dict[str, Any]:
     """
     Phase 3: Facebook global pass + final validation + exports.
 
@@ -508,6 +515,9 @@ def run_contact_phase(config: Any, run_dir: str, enrich_manifest: Dict[str, Any]
     log_path = os.path.join(run_dir, "contact_log_v2.txt")
     logger = night_mode_runner._setup_logger(log_path, "contact_v2")
     night_fb_run_state = kwargs.get("night_fb_run_state")
+    fb_pass_kwargs: Dict[str, Any] = {}
+    if fb_max_rows_override is not None:
+        fb_pass_kwargs["max_rows_per_run"] = fb_max_rows_override
 
     try:
         pipeline_runner.run_facebook_global_pass_nightmode(
@@ -516,6 +526,7 @@ def run_contact_phase(config: Any, run_dir: str, enrich_manifest: Dict[str, Any]
             state_path=fb_state_path,
             logger=logger.info,
             night_fb_run_state=night_fb_run_state,
+            **fb_pass_kwargs,
         )
     except Exception:
         # Fall back to the pre-FB file if the pass fails.
@@ -632,6 +643,7 @@ def run_phased_night_mode(
             enrich_manifest,
             resume=resume,
             night_fb_run_state=night_fb_run_state,
+            fb_max_rows_override=fb_max_rows_override,
         )
     finally:
         close_night_fb_run_state(night_fb_run_state)
