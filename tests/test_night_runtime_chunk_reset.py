@@ -311,3 +311,153 @@ def test_night_mode_runner_passes_runtime_reset_interval_to_master_enrichment(mo
     night_mode_runner.run_night_mode(config_path.as_posix(), run_root=run_root.as_posix())
 
     assert captured["interval"] == 7
+
+
+def _chunk_lines(logs, prefix):
+    return [line for line in logs if str(line).startswith(prefix)]
+
+
+def test_chunk_yield_summary_emits_boundary_and_partial_final_chunk(monkeypatch):
+    worker, logs = _make_worker(monkeypatch)
+    worker.night_runtime_reset_interval_rows = 2
+
+    seed_df = pd.DataFrame(
+        [{"Artist Name": f"Artist {idx}"} for idx in range(5)],
+        dtype=str,
+    ).fillna("")
+
+    def fake_run_row_linear(df, directory_indexes, priority, fb_driver, total, row_ids=None):
+        active_rows = list(row_ids or [])
+        for row_idx in active_rows:
+            worker._record_chunk_source_opportunity("facebook", row_idx)
+            worker._record_chunk_source_attempt("facebook", row_idx)
+            if row_idx in {0, 2, 4}:
+                worker._record_chunk_source_found("facebook", row_idx, [f"fb{row_idx}@example.com"])
+                worker._record_chunk_source_written(
+                    "facebook",
+                    row_idx,
+                    before_row={"Email": "", "Email_All": ""},
+                    after_row={
+                        "Email": "",
+                        "Email_All": f"fb{row_idx}@example.com",
+                        "__fb_emails_applied": f"fb{row_idx}@example.com",
+                    },
+                    found_emails=[f"fb{row_idx}@example.com"],
+                )
+            if row_idx in {1, 4}:
+                worker._record_chunk_source_opportunity("instagram", row_idx)
+                worker._record_chunk_source_attempt("instagram", row_idx)
+                worker._record_chunk_source_found("instagram", row_idx, [f"ig{row_idx}@example.com"])
+                worker._record_chunk_source_written(
+                    "instagram",
+                    row_idx,
+                    before_row={"Email": "", "Email_All": ""},
+                    after_row={"Email": "", "Email_All": f"ig{row_idx}@example.com"},
+                    found_emails=[f"ig{row_idx}@example.com"],
+                )
+
+    worker._run_row_linear = fake_run_row_linear
+    worker._reset_night_runtime_chunk = lambda **kwargs: "driver_reset"
+
+    worker._run_with_night_runtime_chunks(
+        seed_df,
+        directory_indexes={},
+        priority=[],
+        fb_driver="driver_0",
+        total=len(seed_df.index),
+        enrichment_mode="row_linear",
+    )
+
+    summary_lines = _chunk_lines(logs, "[Chunk Yield] ")
+    assert summary_lines == [
+        "[Chunk Yield] chunk_index=1 row_start_index=0 row_end_index=1 rows_in_chunk=2 configured_interval=2 chunk_end_reason=reset_boundary",
+        "[Chunk Yield] chunk_index=2 row_start_index=2 row_end_index=3 rows_in_chunk=2 configured_interval=2 chunk_end_reason=reset_boundary",
+        "[Chunk Yield] chunk_index=3 row_start_index=4 row_end_index=4 rows_in_chunk=1 configured_interval=2 chunk_end_reason=end_of_run",
+    ]
+    assert _chunk_lines(logs, "[Chunk Yield][FB] ") == [
+        "[Chunk Yield][FB] chunk_index=1 fb_opportunity_rows=2 fb_attempted_rows=2 fb_email_found_rows=1 fb_email_written_rows=1",
+        "[Chunk Yield][FB] chunk_index=2 fb_opportunity_rows=2 fb_attempted_rows=2 fb_email_found_rows=1 fb_email_written_rows=1",
+        "[Chunk Yield][FB] chunk_index=3 fb_opportunity_rows=1 fb_attempted_rows=1 fb_email_found_rows=1 fb_email_written_rows=1",
+    ]
+    assert _chunk_lines(logs, "[Chunk Yield][IG] ") == [
+        "[Chunk Yield][IG] chunk_index=1 ig_opportunity_rows=1 ig_attempted_rows=1 ig_email_found_rows=1 ig_email_written_rows=1",
+        "[Chunk Yield][IG] chunk_index=2 ig_opportunity_rows=0 ig_attempted_rows=0 ig_email_found_rows=0 ig_email_written_rows=0",
+        "[Chunk Yield][IG] chunk_index=3 ig_opportunity_rows=1 ig_attempted_rows=1 ig_email_found_rows=1 ig_email_written_rows=1",
+    ]
+
+
+def test_chunk_yield_fb_metrics_use_applied_marker_for_written_rows(monkeypatch):
+    worker, logs = _make_worker(monkeypatch)
+
+    worker._start_chunk_yield_window(chunk_index=1, active_row_ids=[0, 1, 2], configured_interval=3)
+
+    worker._record_chunk_source_opportunity("facebook", 0)
+    worker._record_chunk_source_attempt("facebook", 0)
+    worker._record_chunk_source_found("facebook", 0, ["found0@example.com"])
+    worker._record_chunk_source_written(
+        "facebook",
+        0,
+        before_row={"Email": "", "Email_All": ""},
+        after_row={
+            "Email": "",
+            "Email_All": "found0@example.com",
+            "__fb_emails_applied": "found0@example.com",
+        },
+        found_emails=["found0@example.com"],
+    )
+
+    worker._record_chunk_source_opportunity("facebook", 1)
+    worker._record_chunk_source_attempt("facebook", 1)
+    worker._record_chunk_source_found("facebook", 1, ["found1@example.com"])
+    worker._record_chunk_source_written(
+        "facebook",
+        1,
+        before_row={"Email": "", "Email_All": ""},
+        after_row={
+            "Email": "",
+            "Email_All": "found1@example.com",
+            "__fb_emails_applied": "",
+        },
+        found_emails=["found1@example.com"],
+    )
+
+    worker._record_chunk_source_opportunity("facebook", 2)
+    worker._emit_chunk_yield_summary(chunk_end_reason="end_of_run")
+
+    assert _chunk_lines(logs, "[Chunk Yield][FB] ") == [
+        "[Chunk Yield][FB] chunk_index=1 fb_opportunity_rows=3 fb_attempted_rows=2 fb_email_found_rows=2 fb_email_written_rows=1"
+    ]
+
+
+def test_chunk_yield_ig_metrics_use_email_delta_for_written_rows(monkeypatch):
+    worker, logs = _make_worker(monkeypatch)
+
+    worker._start_chunk_yield_window(chunk_index=1, active_row_ids=[0, 1], configured_interval=2)
+
+    worker._record_chunk_source_opportunity("instagram", 0)
+    worker._record_chunk_source_attempt("instagram", 0)
+    worker._record_chunk_source_found("instagram", 0, ["ig0@example.com"])
+    worker._record_chunk_source_written(
+        "instagram",
+        0,
+        before_row={"Email": "", "Email_All": ""},
+        after_row={"Email": "", "Email_All": "ig0@example.com"},
+        found_emails=["ig0@example.com"],
+    )
+
+    worker._record_chunk_source_opportunity("instagram", 1)
+    worker._record_chunk_source_attempt("instagram", 1)
+    worker._record_chunk_source_found("instagram", 1, ["ig1@example.com"])
+    worker._record_chunk_source_written(
+        "instagram",
+        1,
+        before_row={"Email": "", "Email_All": "ig1@example.com"},
+        after_row={"Email": "", "Email_All": "ig1@example.com"},
+        found_emails=["ig1@example.com"],
+    )
+
+    worker._emit_chunk_yield_summary(chunk_end_reason="end_of_run")
+
+    assert _chunk_lines(logs, "[Chunk Yield][IG] ") == [
+        "[Chunk Yield][IG] chunk_index=1 ig_opportunity_rows=2 ig_attempted_rows=2 ig_email_found_rows=2 ig_email_written_rows=1"
+    ]

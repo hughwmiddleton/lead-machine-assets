@@ -242,6 +242,36 @@ class EnrichmentYieldTracker:
         self.counts[source] = self.counts.get(source, 0) + 1
         return True
 
+
+@dataclass
+class ChunkYieldSourceRowState:
+    opportunity: bool = False
+    attempted: bool = False
+    email_found: bool = False
+    email_written: bool = False
+
+
+@dataclass
+class ChunkYieldWindow:
+    chunk_index: int
+    row_ids: List[Any]
+    configured_interval: int
+    source_rows: Dict[str, Dict[Any, ChunkYieldSourceRowState]] = field(
+        default_factory=lambda: {"facebook": {}, "instagram": {}}
+    )
+
+    @property
+    def row_start_index(self) -> Any:
+        return self.row_ids[0] if self.row_ids else "<none>"
+
+    @property
+    def row_end_index(self) -> Any:
+        return self.row_ids[-1] if self.row_ids else "<none>"
+
+    @property
+    def rows_in_chunk(self) -> int:
+        return len(self.row_ids)
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -2407,6 +2437,31 @@ def _row_email_summary_snapshot(df: pd.DataFrame, row_idx) -> Dict[str, str]:
         else:
             snapshot[col] = ""
     return snapshot
+
+
+def _normalized_email_set_from_values(*values: Any) -> Set[str]:
+    emails: Set[str] = set()
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, (list, tuple, set)):
+            items = list(value)
+        else:
+            items = [value]
+        for item in items:
+            normalized = normalize_email_value(item)
+            if normalized:
+                emails.add(normalized)
+    return emails
+
+
+def _row_email_set(row_like: Any) -> Set[str]:
+    if row_like is None or not hasattr(row_like, "get"):
+        return set()
+    return _normalized_email_set_from_values(
+        row_like.get("Email", ""),
+        row_like.get("Email_All", ""),
+    )
 
 
 def _canonicalize_fb_url(raw: str) -> str:
@@ -11694,6 +11749,116 @@ class CrossDirectoryEnricherWorker(QThread):
                 selected.append(row_idx)
         return selected
 
+    def _start_chunk_yield_window(
+        self,
+        *,
+        chunk_index: int,
+        active_row_ids: List[Any],
+        configured_interval: int,
+    ) -> None:
+        if not active_row_ids:
+            self._active_chunk_yield = None
+            return
+        self._active_chunk_yield = ChunkYieldWindow(
+            chunk_index=chunk_index,
+            row_ids=list(active_row_ids),
+            configured_interval=configured_interval,
+        )
+
+    def _active_chunk_source_row_state(
+        self,
+        source: str,
+        row_idx: Any,
+    ) -> Optional[ChunkYieldSourceRowState]:
+        chunk = getattr(self, "_active_chunk_yield", None)
+        if chunk is None or row_idx not in chunk.row_ids:
+            return None
+        source_rows = chunk.source_rows.setdefault(source, {})
+        row_state = source_rows.get(row_idx)
+        if row_state is None:
+            row_state = ChunkYieldSourceRowState()
+            source_rows[row_idx] = row_state
+        return row_state
+
+    def _record_chunk_source_opportunity(self, source: str, row_idx: Any) -> None:
+        row_state = self._active_chunk_source_row_state(source, row_idx)
+        if row_state is not None:
+            row_state.opportunity = True
+
+    def _record_chunk_source_attempt(self, source: str, row_idx: Any) -> None:
+        row_state = self._active_chunk_source_row_state(source, row_idx)
+        if row_state is not None:
+            row_state.attempted = True
+
+    def _record_chunk_source_found(self, source: str, row_idx: Any, emails: Iterable[Any]) -> None:
+        row_state = self._active_chunk_source_row_state(source, row_idx)
+        if row_state is None:
+            return
+        if _normalized_email_set_from_values(emails):
+            row_state.email_found = True
+
+    def _record_chunk_source_written(
+        self,
+        source: str,
+        row_idx: Any,
+        *,
+        before_row: Any,
+        after_row: Any,
+        found_emails: Iterable[Any],
+    ) -> None:
+        row_state = self._active_chunk_source_row_state(source, row_idx)
+        if row_state is None:
+            return
+
+        found_email_set = _normalized_email_set_from_values(found_emails)
+        if not found_email_set:
+            return
+
+        if source == "facebook":
+            applied_email_set = _normalized_email_set_from_values(
+                after_row.get("__fb_emails_applied", "") if hasattr(after_row, "get") else ""
+            )
+            if applied_email_set & found_email_set:
+                row_state.email_written = True
+            return
+
+        before_email_set = _row_email_set(before_row)
+        after_email_set = _row_email_set(after_row)
+        if (after_email_set & found_email_set) - before_email_set:
+            row_state.email_written = True
+
+    def _emit_chunk_yield_summary(self, *, chunk_end_reason: str) -> None:
+        chunk = getattr(self, "_active_chunk_yield", None)
+        if chunk is None:
+            return
+
+        self.log_message.emit(
+            "[Chunk Yield] "
+            f"chunk_index={chunk.chunk_index} "
+            f"row_start_index={chunk.row_start_index} "
+            f"row_end_index={chunk.row_end_index} "
+            f"rows_in_chunk={chunk.rows_in_chunk} "
+            f"configured_interval={chunk.configured_interval} "
+            f"chunk_end_reason={chunk_end_reason}"
+        )
+
+        for source, prefix in (("facebook", "fb"), ("instagram", "ig")):
+            row_states = chunk.source_rows.get(source, {})
+            opportunity_rows = sum(1 for state in row_states.values() if state.opportunity)
+            attempted_rows = sum(1 for state in row_states.values() if state.attempted)
+            email_found_rows = sum(1 for state in row_states.values() if state.email_found)
+            email_written_rows = sum(1 for state in row_states.values() if state.email_written)
+            self.log_message.emit(
+                f"[Chunk Yield][{prefix.upper()}] "
+                f"chunk_index={chunk.chunk_index} "
+                f"{prefix}_opportunity_rows={opportunity_rows} "
+                f"{prefix}_attempted_rows={attempted_rows} "
+                f"{prefix}_email_found_rows={email_found_rows} "
+                f"{prefix}_email_written_rows={email_written_rows}"
+            )
+
+        self._active_chunk_yield = None
+
     def _resolve_night_runtime_reset_interval_rows(self) -> int:
         if not getattr(self, "night_mode", False):
             return 0
@@ -11898,13 +12063,21 @@ class CrossDirectoryEnricherWorker(QThread):
         }
         current_fb_driver = fb_driver
         completed_rows = 0
-        for chunk_start in range(0, len(row_ids), interval_rows):
+        for chunk_index, chunk_start in enumerate(range(0, len(row_ids), interval_rows), start=1):
             active_row_ids = row_ids[chunk_start : chunk_start + interval_rows]
+            self._start_chunk_yield_window(
+                chunk_index=chunk_index,
+                active_row_ids=active_row_ids,
+                configured_interval=interval_rows,
+            )
             _run_chunk(active_row_ids, current_fb_driver)
             completed_rows += len(active_row_ids)
             boundary_reached = completed_rows < len(row_ids)
             next_row_id = row_ids[completed_rows] if boundary_reached else "<none>"
             next_row_index = position_by_row.get(next_row_id, "<none>") if boundary_reached else "<none>"
+            self._emit_chunk_yield_summary(
+                chunk_end_reason="reset_boundary" if boundary_reached else "end_of_run"
+            )
             self._emit_runtime_reset_log(
                 f"[Night Runtime Reset] interval_rows={interval_rows} completed_rows={completed_rows} "
                 f"boundary_reached={1 if boundary_reached else 0} next_row_index={next_row_index} next_row_id={next_row_id}"
@@ -12009,6 +12182,7 @@ class CrossDirectoryEnricherWorker(QThread):
         self._bc_discover_cache = {}
         self._bc_discover_fetches = 0
         self._instagram_hidden_contact_attempt_keys = set()
+        self._active_chunk_yield = None
         try:
             fb_driver = self._create_fb_runtime_for_current_chunk()
             if not os.path.exists(self.seed_csv_path):
@@ -14241,6 +14415,8 @@ class CrossDirectoryEnricherWorker(QThread):
             hidden_surface_attempt_keys = set()
             self._instagram_hidden_contact_attempt_keys = hidden_surface_attempt_keys
         hidden_surface_attempt_key = (id(seed_df), int(row_idx))
+        self._record_chunk_source_opportunity("instagram", row_idx)
+        self._record_chunk_source_attempt("instagram", row_idx)
         self.log_message.emit(f"[IG Email] Visiting {ig_url}")
         with _instagram_profile_fetch_scope(self.session, ig_url, retain_live_page=False) as profile_fetch:
             html = profile_fetch.html
@@ -14580,6 +14756,7 @@ class CrossDirectoryEnricherWorker(QThread):
 
         found_email = all_ig_emails[0]
         self.log_message.emit(f"[IG Email] Found email: {found_email}")
+        self._record_chunk_source_found("instagram", row_idx, all_ig_emails)
         if not cell_to_str(seed_df.at[row_idx, "Email"]):
             seed_df.at[row_idx, "Email"] = found_email
         seed_df.at[row_idx, "Email_All"] = _merge_email_all(seed_df.at[row_idx, "Email_All"], all_ig_emails)
@@ -14598,6 +14775,13 @@ class CrossDirectoryEnricherWorker(QThread):
             seed_df.at[row_idx, "Email_Source_Type"] = "instagram_enrich"
         if not cell_to_str(seed_df.at[row_idx, "Email_Extract_Method"]):
             seed_df.at[row_idx, "Email_Extract_Method"] = selected_extract_method
+        self._record_chunk_source_written(
+            "instagram",
+            row_idx,
+            before_row=email_before,
+            after_row=_row_email_summary_snapshot(seed_df, row_idx),
+            found_emails=all_ig_emails,
+        )
         try:
             from pipeline_runner import record_email_summary_row_change
 
@@ -14929,6 +15113,9 @@ class CrossDirectoryEnricherWorker(QThread):
                     self._set_platform_state("facebook", "skipped")
                     return False
 
+                can_attempt_fb_path = bool(existing_fb_links)
+                discovery_row = None
+                has_seeded_fb = False
                 if not existing_fb_links:
                     discovery_row = seed_df.loc[row_idx]
                     seeded_fb_url, _ = ensure_canonical_facebook_url(discovery_row, set_row=False)
@@ -14937,6 +15124,14 @@ class CrossDirectoryEnricherWorker(QThread):
                         self.log_message.emit(
                             "[FB Discovery][Skip] Unearthed row without seeded Facebook_URL"
                         )
+                    else:
+                        can_attempt_fb_path = True
+                if can_attempt_fb_path:
+                    self._record_chunk_source_opportunity("facebook", row_idx)
+                    self._record_chunk_source_attempt("facebook", row_idx)
+                if not existing_fb_links:
+                    if is_unearthed and not has_seeded_fb:
+                        pass
                     elif self._discover_facebook_identity(seed_df, row_idx, fb_driver, ctx):
                         discovered_fb_url = _get_canonical_fb_url(seed_df.loc[row_idx])
                         if discovered_fb_url:
@@ -14983,6 +15178,7 @@ class CrossDirectoryEnricherWorker(QThread):
                     if "FB_Status" not in seed_df.columns:
                         seed_df["FB_Status"] = ""
                     if fb_emails:
+                        self._record_chunk_source_found("facebook", row_idx, fb_emails)
                         fb_status_val = str(seed_df.at[row_idx, "FB_Status"] or "")
                         if _fb_status_is_rejected(fb_status_val):
                             artist_label = cell_to_str(seed_df.at[row_idx, "Artist Name"]) or "<unknown>"
@@ -15035,6 +15231,13 @@ class CrossDirectoryEnricherWorker(QThread):
                                 seed_df.at[row_idx, "Email_Extract_Method"] = "regex"
                             seed_df.at[row_idx, "__fb_emails_applied"] = ";".join(
                                 sorted({e.strip().lower() for e in fb_emails if e})
+                            )
+                            self._record_chunk_source_written(
+                                "facebook",
+                                row_idx,
+                                before_row=email_before,
+                                after_row=seed_df.loc[row_idx],
+                                found_emails=fb_emails,
                             )
                             existing_fb_status = cell_to_str(seed_df.at[row_idx, "FB_Status"])
                             if existing_fb_status in {"pass_a_no_email_on_page", "pass_a_skipped_no_fb_url"}:
