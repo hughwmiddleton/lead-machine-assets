@@ -246,9 +246,13 @@ class EnrichmentYieldTracker:
 @dataclass
 class ChunkYieldSourceRowState:
     opportunity: bool = False
-    attempted: bool = False
+    attempt_seams: Set[str] = field(default_factory=set)
     email_found: bool = False
     email_written: bool = False
+
+    @property
+    def attempted(self) -> bool:
+        return bool(self.attempt_seams)
 
 
 @dataclass
@@ -2449,9 +2453,13 @@ def _normalized_email_set_from_values(*values: Any) -> Set[str]:
         else:
             items = [value]
         for item in items:
-            normalized = normalize_email_value(item)
-            if normalized:
-                emails.add(normalized)
+            text = str(item or "").strip()
+            if not text:
+                continue
+            for token in re.split(r"[\s,;|]+", text):
+                normalized = normalize_email_value(token)
+                if normalized:
+                    emails.add(normalized)
     return emails
 
 
@@ -2462,6 +2470,56 @@ def _row_email_set(row_like: Any) -> Set[str]:
         row_like.get("Email", ""),
         row_like.get("Email_All", ""),
     )
+
+
+def _committed_row_email_delta(
+    before_row: Any,
+    after_row: Any,
+) -> Set[str]:
+    """Return the committed email delta for chunk write attribution.
+
+    Snapshot fields:
+    - before_row["Email"]
+    - before_row["Email_All"]
+    - after_row["Email"]
+    - after_row["Email_All"]
+
+    Normalization rules:
+    - trim surrounding whitespace
+    - collapse whitespace around "@"
+    - lowercase
+    - drop invalid/non-email tokens
+    - dedupe via sets
+    - ignore ordering in Email_All
+
+    Delta computation:
+    - committed_delta = normalized(after Email + Email_All) - normalized(before Email + Email_All)
+    """
+
+    before_email_set = _row_email_set(before_row)
+    after_email_set = _row_email_set(after_row)
+    return after_email_set - before_email_set
+
+
+def _committed_row_email_delta_intersection(
+    before_row: Any,
+    after_row: Any,
+    found_emails: Iterable[Any],
+) -> Tuple[Set[str], Set[str]]:
+    """Return the committed delta and its source-bounded overlap with found emails.
+
+    The found email set is normalized with the same rules as the committed row
+    snapshots. The overlap is:
+    - committed_delta & normalized(found_emails)
+
+    IG chunk written attribution is allowed only when this overlap is non-empty,
+    which prevents later writes from other sources from being attributed back to
+    the IG path.
+    """
+
+    committed_delta = _committed_row_email_delta(before_row, after_row)
+    found_email_set = _normalized_email_set_from_values(found_emails)
+    return committed_delta, committed_delta & found_email_set
 
 
 def _canonicalize_fb_url(raw: str) -> str:
@@ -11785,10 +11843,17 @@ class CrossDirectoryEnricherWorker(QThread):
         if row_state is not None:
             row_state.opportunity = True
 
-    def _record_chunk_source_attempt(self, source: str, row_idx: Any) -> None:
+    def _record_chunk_source_attempt(
+        self,
+        source: str,
+        row_idx: Any,
+        *,
+        seam: str = "execution",
+    ) -> None:
         row_state = self._active_chunk_source_row_state(source, row_idx)
         if row_state is not None:
-            row_state.attempted = True
+            seam_name = str(seam or "").strip() or "execution"
+            row_state.attempt_seams.add(seam_name)
 
     def _record_chunk_source_found(self, source: str, row_idx: Any, emails: Iterable[Any]) -> None:
         row_state = self._active_chunk_source_row_state(source, row_idx)
@@ -11822,9 +11887,12 @@ class CrossDirectoryEnricherWorker(QThread):
                 row_state.email_written = True
             return
 
-        before_email_set = _row_email_set(before_row)
-        after_email_set = _row_email_set(after_row)
-        if (after_email_set & found_email_set) - before_email_set:
+        committed_delta, delta_intersection = _committed_row_email_delta_intersection(
+            before_row,
+            after_row,
+            found_email_set,
+        )
+        if committed_delta and delta_intersection:
             row_state.email_written = True
 
     def _emit_chunk_yield_summary(self, *, chunk_end_reason: str) -> None:
@@ -11848,10 +11916,12 @@ class CrossDirectoryEnricherWorker(QThread):
             attempted_rows = sum(1 for state in row_states.values() if state.attempted)
             email_found_rows = sum(1 for state in row_states.values() if state.email_found)
             email_written_rows = sum(1 for state in row_states.values() if state.email_written)
+            opportunity_present = 1 if opportunity_rows else 0
             self.log_message.emit(
                 f"[Chunk Yield][{prefix.upper()}] "
                 f"chunk_index={chunk.chunk_index} "
                 f"{prefix}_opportunity_rows={opportunity_rows} "
+                f"{prefix}_opportunity_present={opportunity_present} "
                 f"{prefix}_attempted_rows={attempted_rows} "
                 f"{prefix}_email_found_rows={email_found_rows} "
                 f"{prefix}_email_written_rows={email_written_rows}"
@@ -14040,6 +14110,11 @@ class CrossDirectoryEnricherWorker(QThread):
             seed_df[FB_DISCOVERY_ATTEMPT_FLAG_COL] = ""
         seed_df.at[row_idx, FB_DISCOVERY_ATTEMPT_FLAG_COL] = "1"
         self._fb_discovery_attempted_rows.add(row_idx)
+        self._record_chunk_source_attempt(
+            "facebook",
+            row_idx,
+            seam="discovery_execution",
+        )
         try:
             discovered_fb_url = _discover_facebook_url_bounded(
                 fb_driver, artist, extra_signal, self.log_message.emit
@@ -14416,7 +14491,7 @@ class CrossDirectoryEnricherWorker(QThread):
             self._instagram_hidden_contact_attempt_keys = hidden_surface_attempt_keys
         hidden_surface_attempt_key = (id(seed_df), int(row_idx))
         self._record_chunk_source_opportunity("instagram", row_idx)
-        self._record_chunk_source_attempt("instagram", row_idx)
+        self._record_chunk_source_attempt("instagram", row_idx, seam="profile_fetch")
         self.log_message.emit(f"[IG Email] Visiting {ig_url}")
         with _instagram_profile_fetch_scope(self.session, ig_url, retain_live_page=False) as profile_fetch:
             html = profile_fetch.html
@@ -15128,7 +15203,6 @@ class CrossDirectoryEnricherWorker(QThread):
                         can_attempt_fb_path = True
                 if can_attempt_fb_path:
                     self._record_chunk_source_opportunity("facebook", row_idx)
-                    self._record_chunk_source_attempt("facebook", row_idx)
                 if not existing_fb_links:
                     if is_unearthed and not has_seeded_fb:
                         pass
@@ -15145,6 +15219,11 @@ class CrossDirectoryEnricherWorker(QThread):
                         fb_session = getattr(self.night_fb_run_state, "session", None)
 
                     _st_row_label = str(artist or "")[:60]
+                    self._record_chunk_source_attempt(
+                        "facebook",
+                        row_idx,
+                        seam="page_fetch_execution",
+                    )
                     try:
                         for candidate in existing_fb_links:
                             if fb_session is not None:

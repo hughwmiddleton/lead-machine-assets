@@ -375,14 +375,14 @@ def test_chunk_yield_summary_emits_boundary_and_partial_final_chunk(monkeypatch)
         "[Chunk Yield] chunk_index=3 row_start_index=4 row_end_index=4 rows_in_chunk=1 configured_interval=2 chunk_end_reason=end_of_run",
     ]
     assert _chunk_lines(logs, "[Chunk Yield][FB] ") == [
-        "[Chunk Yield][FB] chunk_index=1 fb_opportunity_rows=2 fb_attempted_rows=2 fb_email_found_rows=1 fb_email_written_rows=1",
-        "[Chunk Yield][FB] chunk_index=2 fb_opportunity_rows=2 fb_attempted_rows=2 fb_email_found_rows=1 fb_email_written_rows=1",
-        "[Chunk Yield][FB] chunk_index=3 fb_opportunity_rows=1 fb_attempted_rows=1 fb_email_found_rows=1 fb_email_written_rows=1",
+        "[Chunk Yield][FB] chunk_index=1 fb_opportunity_rows=2 fb_opportunity_present=1 fb_attempted_rows=2 fb_email_found_rows=1 fb_email_written_rows=1",
+        "[Chunk Yield][FB] chunk_index=2 fb_opportunity_rows=2 fb_opportunity_present=1 fb_attempted_rows=2 fb_email_found_rows=1 fb_email_written_rows=1",
+        "[Chunk Yield][FB] chunk_index=3 fb_opportunity_rows=1 fb_opportunity_present=1 fb_attempted_rows=1 fb_email_found_rows=1 fb_email_written_rows=1",
     ]
     assert _chunk_lines(logs, "[Chunk Yield][IG] ") == [
-        "[Chunk Yield][IG] chunk_index=1 ig_opportunity_rows=1 ig_attempted_rows=1 ig_email_found_rows=1 ig_email_written_rows=1",
-        "[Chunk Yield][IG] chunk_index=2 ig_opportunity_rows=0 ig_attempted_rows=0 ig_email_found_rows=0 ig_email_written_rows=0",
-        "[Chunk Yield][IG] chunk_index=3 ig_opportunity_rows=1 ig_attempted_rows=1 ig_email_found_rows=1 ig_email_written_rows=1",
+        "[Chunk Yield][IG] chunk_index=1 ig_opportunity_rows=1 ig_opportunity_present=1 ig_attempted_rows=1 ig_email_found_rows=1 ig_email_written_rows=1",
+        "[Chunk Yield][IG] chunk_index=2 ig_opportunity_rows=0 ig_opportunity_present=0 ig_attempted_rows=0 ig_email_found_rows=0 ig_email_written_rows=0",
+        "[Chunk Yield][IG] chunk_index=3 ig_opportunity_rows=1 ig_opportunity_present=1 ig_attempted_rows=1 ig_email_found_rows=1 ig_email_written_rows=1",
     ]
 
 
@@ -425,17 +425,34 @@ def test_chunk_yield_fb_metrics_use_applied_marker_for_written_rows(monkeypatch)
     worker._emit_chunk_yield_summary(chunk_end_reason="end_of_run")
 
     assert _chunk_lines(logs, "[Chunk Yield][FB] ") == [
-        "[Chunk Yield][FB] chunk_index=1 fb_opportunity_rows=3 fb_attempted_rows=2 fb_email_found_rows=2 fb_email_written_rows=1"
+        "[Chunk Yield][FB] chunk_index=1 fb_opportunity_rows=3 fb_opportunity_present=1 fb_attempted_rows=2 fb_email_found_rows=2 fb_email_written_rows=1"
     ]
 
 
-def test_chunk_yield_ig_metrics_use_email_delta_for_written_rows(monkeypatch):
+def test_chunk_yield_fb_attempted_rows_require_execution_seam(monkeypatch):
     worker, logs = _make_worker(monkeypatch)
 
     worker._start_chunk_yield_window(chunk_index=1, active_row_ids=[0, 1], configured_interval=2)
 
+    worker._record_chunk_source_opportunity("facebook", 0)
+    worker._record_chunk_source_opportunity("facebook", 1)
+    worker._record_chunk_source_attempt("facebook", 1, seam="page_fetch_execution")
+    worker._record_chunk_source_found("facebook", 1, ["fb1@example.com"])
+
+    worker._emit_chunk_yield_summary(chunk_end_reason="end_of_run")
+
+    assert _chunk_lines(logs, "[Chunk Yield][FB] ") == [
+        "[Chunk Yield][FB] chunk_index=1 fb_opportunity_rows=2 fb_opportunity_present=1 fb_attempted_rows=1 fb_email_found_rows=1 fb_email_written_rows=0"
+    ]
+
+
+def test_chunk_yield_ig_metrics_require_committed_delta_intersection(monkeypatch):
+    worker, logs = _make_worker(monkeypatch)
+
+    worker._start_chunk_yield_window(chunk_index=1, active_row_ids=[0, 1, 2], configured_interval=3)
+
     worker._record_chunk_source_opportunity("instagram", 0)
-    worker._record_chunk_source_attempt("instagram", 0)
+    worker._record_chunk_source_attempt("instagram", 0, seam="profile_fetch")
     worker._record_chunk_source_found("instagram", 0, ["ig0@example.com"])
     worker._record_chunk_source_written(
         "instagram",
@@ -446,18 +463,46 @@ def test_chunk_yield_ig_metrics_use_email_delta_for_written_rows(monkeypatch):
     )
 
     worker._record_chunk_source_opportunity("instagram", 1)
-    worker._record_chunk_source_attempt("instagram", 1)
+    worker._record_chunk_source_attempt("instagram", 1, seam="profile_fetch")
     worker._record_chunk_source_found("instagram", 1, ["ig1@example.com"])
     worker._record_chunk_source_written(
         "instagram",
         1,
-        before_row={"Email": "", "Email_All": "ig1@example.com"},
-        after_row={"Email": "", "Email_All": "ig1@example.com"},
+        before_row={"Email": "", "Email_All": ""},
+        after_row={"Email": "", "Email_All": "other-source@example.com"},
         found_emails=["ig1@example.com"],
+    )
+
+    worker._record_chunk_source_opportunity("instagram", 2)
+    worker._record_chunk_source_attempt("instagram", 2, seam="profile_fetch")
+    worker._record_chunk_source_found("instagram", 2, ["ig2@example.com"])
+    worker._record_chunk_source_written(
+        "instagram",
+        2,
+        before_row={"Email": "", "Email_All": "other-source@example.com"},
+        after_row={"Email": "", "Email_All": "other-source@example.com;ig2@example.com"},
+        found_emails=["ig2@example.com"],
     )
 
     worker._emit_chunk_yield_summary(chunk_end_reason="end_of_run")
 
     assert _chunk_lines(logs, "[Chunk Yield][IG] ") == [
-        "[Chunk Yield][IG] chunk_index=1 ig_opportunity_rows=2 ig_attempted_rows=2 ig_email_found_rows=2 ig_email_written_rows=1"
+        "[Chunk Yield][IG] chunk_index=1 ig_opportunity_rows=3 ig_opportunity_present=1 ig_attempted_rows=3 ig_email_found_rows=3 ig_email_written_rows=2"
+    ]
+
+
+def test_chunk_yield_zero_opportunity_chunk_emits_presence_flags(monkeypatch):
+    worker, logs = _make_worker(monkeypatch)
+
+    worker._start_chunk_yield_window(chunk_index=1, active_row_ids=[0, 1], configured_interval=2)
+    worker._emit_chunk_yield_summary(chunk_end_reason="end_of_run")
+
+    assert _chunk_lines(logs, "[Chunk Yield] ") == [
+        "[Chunk Yield] chunk_index=1 row_start_index=0 row_end_index=1 rows_in_chunk=2 configured_interval=2 chunk_end_reason=end_of_run"
+    ]
+    assert _chunk_lines(logs, "[Chunk Yield][FB] ") == [
+        "[Chunk Yield][FB] chunk_index=1 fb_opportunity_rows=0 fb_opportunity_present=0 fb_attempted_rows=0 fb_email_found_rows=0 fb_email_written_rows=0"
+    ]
+    assert _chunk_lines(logs, "[Chunk Yield][IG] ") == [
+        "[Chunk Yield][IG] chunk_index=1 ig_opportunity_rows=0 ig_opportunity_present=0 ig_attempted_rows=0 ig_email_found_rows=0 ig_email_written_rows=0"
     ]
