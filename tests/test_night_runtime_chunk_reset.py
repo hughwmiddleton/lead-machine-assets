@@ -446,6 +446,23 @@ def test_chunk_yield_fb_attempted_rows_require_execution_seam(monkeypatch):
     ]
 
 
+def test_chunk_yield_fb_attempted_rows_dedupe_multiple_execution_seams(monkeypatch):
+    worker, logs = _make_worker(monkeypatch)
+
+    worker._start_chunk_yield_window(chunk_index=1, active_row_ids=[0], configured_interval=1)
+
+    worker._record_chunk_source_opportunity("facebook", 0)
+    worker._record_chunk_source_attempt("facebook", 0, seam="discovery_execution")
+    worker._record_chunk_source_attempt("facebook", 0, seam="page_fetch_execution")
+    worker._record_chunk_source_found("facebook", 0, ["fb0@example.com"])
+
+    worker._emit_chunk_yield_summary(chunk_end_reason="end_of_run")
+
+    assert _chunk_lines(logs, "[Chunk Yield][FB] ") == [
+        "[Chunk Yield][FB] chunk_index=1 fb_opportunity_rows=1 fb_opportunity_present=1 fb_attempted_rows=1 fb_email_found_rows=1 fb_email_written_rows=0"
+    ]
+
+
 def test_chunk_yield_ig_metrics_require_committed_delta_intersection(monkeypatch):
     worker, logs = _make_worker(monkeypatch)
 
@@ -491,6 +508,52 @@ def test_chunk_yield_ig_metrics_require_committed_delta_intersection(monkeypatch
     ]
 
 
+def test_chunk_yield_ig_written_rows_ignore_non_intersecting_deltas(monkeypatch):
+    worker, logs = _make_worker(monkeypatch)
+
+    worker._start_chunk_yield_window(chunk_index=1, active_row_ids=[0], configured_interval=1)
+
+    worker._record_chunk_source_opportunity("instagram", 0)
+    worker._record_chunk_source_attempt("instagram", 0, seam="profile_fetch")
+    worker._record_chunk_source_found("instagram", 0, ["ig0@example.com"])
+    worker._record_chunk_source_written(
+        "instagram",
+        0,
+        before_row={"Email": "", "Email_All": ""},
+        after_row={"Email": "other@example.com", "Email_All": "other@example.com"},
+        found_emails=["ig0@example.com"],
+    )
+
+    worker._emit_chunk_yield_summary(chunk_end_reason="end_of_run")
+
+    assert _chunk_lines(logs, "[Chunk Yield][IG] ") == [
+        "[Chunk Yield][IG] chunk_index=1 ig_opportunity_rows=1 ig_opportunity_present=1 ig_attempted_rows=1 ig_email_found_rows=1 ig_email_written_rows=0"
+    ]
+
+
+def test_chunk_yield_ig_written_rows_ignore_noop_delta(monkeypatch):
+    worker, logs = _make_worker(monkeypatch)
+
+    worker._start_chunk_yield_window(chunk_index=1, active_row_ids=[0], configured_interval=1)
+
+    worker._record_chunk_source_opportunity("instagram", 0)
+    worker._record_chunk_source_attempt("instagram", 0, seam="profile_fetch")
+    worker._record_chunk_source_found("instagram", 0, ["ig0@example.com"])
+    worker._record_chunk_source_written(
+        "instagram",
+        0,
+        before_row={"Email": "ig0@example.com", "Email_All": "ig0@example.com"},
+        after_row={"Email": "ig0@example.com", "Email_All": "ig0@example.com"},
+        found_emails=["ig0@example.com"],
+    )
+
+    worker._emit_chunk_yield_summary(chunk_end_reason="end_of_run")
+
+    assert _chunk_lines(logs, "[Chunk Yield][IG] ") == [
+        "[Chunk Yield][IG] chunk_index=1 ig_opportunity_rows=1 ig_opportunity_present=1 ig_attempted_rows=1 ig_email_found_rows=1 ig_email_written_rows=0"
+    ]
+
+
 def test_chunk_yield_zero_opportunity_chunk_emits_presence_flags(monkeypatch):
     worker, logs = _make_worker(monkeypatch)
 
@@ -506,3 +569,23 @@ def test_chunk_yield_zero_opportunity_chunk_emits_presence_flags(monkeypatch):
     assert _chunk_lines(logs, "[Chunk Yield][IG] ") == [
         "[Chunk Yield][IG] chunk_index=1 ig_opportunity_rows=0 ig_opportunity_present=0 ig_attempted_rows=0 ig_email_found_rows=0 ig_email_written_rows=0"
     ]
+
+
+def test_chunk_yield_email_normalization_handles_multi_value_fields():
+    assert cde._normalized_email_set_from_values("a@x.com;b@y.com") == {
+        "a@x.com",
+        "b@y.com",
+    }
+    assert cde._normalized_email_set_from_values("A@X.COM ; b@y.com") == {
+        "a@x.com",
+        "b@y.com",
+    }
+
+    committed_delta, delta_intersection = cde._committed_row_email_delta_intersection(
+        before_row={"Email": "", "Email_All": "a@x.com;b@y.com"},
+        after_row={"Email": "", "Email_All": "A@X.COM ; b@y.com ; c@z.com"},
+        found_emails=[" C@Z.COM ", "", "c@z.com"],
+    )
+
+    assert committed_delta == {"c@z.com"}
+    assert delta_intersection == {"c@z.com"}

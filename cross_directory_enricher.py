@@ -2443,7 +2443,12 @@ def _row_email_summary_snapshot(df: pd.DataFrame, row_idx) -> Dict[str, str]:
     return snapshot
 
 
+_CHUNK_YIELD_EMAIL_VALUE_SPLIT_RE = re.compile(r"[;,|\n\r]+")
+
+
 def _normalized_email_set_from_values(*values: Any) -> Set[str]:
+    """Normalize Email/Email_All-style values for chunk attribution metrics."""
+
     emails: Set[str] = set()
     for value in values:
         if value is None:
@@ -2456,10 +2461,19 @@ def _normalized_email_set_from_values(*values: Any) -> Set[str]:
             text = str(item or "").strip()
             if not text:
                 continue
-            for token in re.split(r"[\s,;|]+", text):
-                normalized = normalize_email_value(token)
+            for token in _CHUNK_YIELD_EMAIL_VALUE_SPLIT_RE.split(text):
+                fragment = str(token or "").strip()
+                if not fragment:
+                    continue
+                normalized = normalize_email_value(fragment)
                 if normalized:
                     emails.add(normalized)
+                    continue
+                if any(ch.isspace() for ch in fragment):
+                    for fallback_token in re.split(r"\s+", fragment):
+                        fallback_normalized = normalize_email_value(fallback_token)
+                        if fallback_normalized:
+                            emails.add(fallback_normalized)
     return emails
 
 
@@ -2485,11 +2499,13 @@ def _committed_row_email_delta(
     - after_row["Email_All"]
 
     Normalization rules:
+    - split multi-value fields on ";", ",", "|", or line breaks
     - trim surrounding whitespace
     - collapse whitespace around "@"
     - lowercase
-    - drop invalid/non-email tokens
     - dedupe via sets
+    - drop invalid/non-email tokens
+    - ignore empty tokens
     - ignore ordering in Email_All
 
     Delta computation:
@@ -11916,6 +11932,8 @@ class CrossDirectoryEnricherWorker(QThread):
             attempted_rows = sum(1 for state in row_states.values() if state.attempted)
             email_found_rows = sum(1 for state in row_states.values() if state.email_found)
             email_written_rows = sum(1 for state in row_states.values() if state.email_written)
+            # Derived visibility flag only. This distinguishes zero-opportunity
+            # chunks from chunks that had opportunity but produced no yield.
             opportunity_present = 1 if opportunity_rows else 0
             self.log_message.emit(
                 f"[Chunk Yield][{prefix.upper()}] "
