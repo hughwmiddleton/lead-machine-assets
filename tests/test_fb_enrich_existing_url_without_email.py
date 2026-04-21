@@ -343,6 +343,9 @@ def test_fb_enrich_uses_explicit_share_entrypoint_without_discovery(monkeypatch)
     logs = []
     worker = _make_worker(logs)
     worker._row_allows_heavy_enricher = lambda *args, **kwargs: SimpleNamespace(allowed=True)
+    worker._get_night_fb_share_promotion_resolver = lambda: (
+        lambda raw: "https://www.facebook.com/artistsharepage"
+    )
     seed_df = _seed_df(
         {
             "Artist Name": "Share Entrypoint",
@@ -377,7 +380,7 @@ def test_fb_enrich_uses_explicit_share_entrypoint_without_discovery(monkeypatch)
     matched = worker._enrich_row_facebook(seed_df, 0, object(), ctx)
 
     assert matched is True
-    assert calls == ["https://www.facebook.com/share/19bactwuev"]
+    assert calls == ["https://www.facebook.com/artistsharepage"]
     assert seed_df.at[0, "Email"] == "sharefb@example.com"
     assert seed_df.at[0, "Facebook_URL"] == "https://www.facebook.com/artistsharepage"
     assert seed_df.at[0, "facebook_url"] == "https://www.facebook.com/artistsharepage"
@@ -1018,6 +1021,102 @@ def test_fb_enrich_preserves_seeded_unearthed_fb_scrape(monkeypatch):
     assert seed_df.at[0, "Email"] == "seeded@example.com"
     assert seed_df.at[0, "Facebook_URL"] == "https://www.facebook.com/unearthedseeded"
     assert not any("[FB Discovery][Skip] Unearthed row without seeded Facebook_URL" in msg for msg in logs)
+
+
+def test_fb_enrich_resolves_share_url_before_unearthed_gate(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    worker._row_allows_heavy_enricher = lambda *args, **kwargs: SimpleNamespace(allowed=True)
+    worker._ensure_fb_discovery_session = lambda driver: (True, "authenticated")
+    worker._get_night_fb_share_promotion_resolver = lambda: (
+        lambda raw: "https://www.facebook.com/unearthedsharepage"
+    )
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Unearthed Share",
+            "Email": "",
+            "Email_All": "",
+            "facebook_url": "",
+            "Facebook_URL": "",
+            "Facebook URL": "",
+            "Social Link": "https://www.facebook.com/share/19BActwuev?mibextid=wwXIfr",
+            "External Links": "",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+            "Source Directory": "Triple J Unearthed",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+
+    extract_calls = []
+
+    def fake_extract(driver_obj, url, log_fn=None, **kwargs):
+        extract_calls.append(url)
+        return (["share@example.com"], url, "")
+
+    monkeypatch.setattr(cde, "_extract_fb_emails_bounded", fake_extract)
+    monkeypatch.setattr(
+        worker,
+        "_discover_facebook_identity",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("discovery should not run for resolved share URL")),
+    )
+
+    matched = worker._enrich_row_facebook(seed_df, 0, object(), ctx)
+
+    assert matched is True
+    assert extract_calls == ["https://www.facebook.com/unearthedsharepage"]
+    assert seed_df.at[0, "facebook_url"] == "https://www.facebook.com/unearthedsharepage"
+    assert seed_df.at[0, "Facebook_URL"] == "https://www.facebook.com/unearthedsharepage"
+    assert seed_df.at[0, "Facebook URL"] == "https://www.facebook.com/unearthedsharepage"
+    assert seed_df.at[0, cde.FB_OPPORTUNITY_STATE_COL] == "fb_opportunity_present"
+    assert seed_df.at[0, cde.FB_GATE_STATE_COL] == ""
+    assert not any("[Unearthed Path] strict explicit-only FB mode; skipping Night FB discovery" in msg for msg in logs)
+
+
+def test_fb_enrich_disallowed_resolved_share_url_stays_skipped_for_unearthed(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    worker._row_allows_heavy_enricher = lambda *args, **kwargs: SimpleNamespace(allowed=True)
+    worker._ensure_fb_discovery_session = lambda driver: (True, "authenticated")
+    worker._get_night_fb_share_promotion_resolver = lambda: (
+        lambda raw: "https://www.facebook.com/groups/not-a-page"
+    )
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Unearthed Bad Share",
+            "Email": "",
+            "Email_All": "",
+            "facebook_url": "",
+            "Facebook_URL": "",
+            "Facebook URL": "",
+            "Social Link": "https://www.facebook.com/share/19BActwuev?mibextid=wwXIfr",
+            "External Links": "",
+            "Source Directory": "Triple J Unearthed",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+
+    monkeypatch.setattr(
+        worker,
+        "_discover_facebook_identity",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("discovery should not run for disallowed share result")),
+    )
+    monkeypatch.setattr(
+        cde,
+        "_extract_fb_emails_bounded",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("disallowed share result must not reach scrape")),
+    )
+
+    matched = worker._enrich_row_facebook(seed_df, 0, object(), ctx)
+
+    assert matched is False
+    assert seed_df.at[0, "facebook_url"] == ""
+    assert seed_df.at[0, "Facebook_URL"] == ""
+    assert seed_df.at[0, "Facebook URL"] == ""
+    assert seed_df.at[0, cde.FB_OPPORTUNITY_STATE_COL] == "no_fb_opportunity"
+    assert seed_df.at[0, cde.FB_GATE_STATE_COL] == "skipped_no_canonical_facebook_url"
+    assert any("[Unearthed Path] strict explicit-only FB mode; skipping Night FB discovery" in msg for msg in logs)
 
 
 def test_fb_enrich_unearthed_explicit_url_merges_with_existing_instagram_email(monkeypatch):

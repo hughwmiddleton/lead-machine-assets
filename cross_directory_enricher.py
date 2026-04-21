@@ -63,6 +63,7 @@ from fb_attribution import (
     FB_DEBUG_REASON_COL,
     FB_EXTRACT_STATE_COL,
     FB_GATE_STATE_COL,
+    FB_OPPORTUNITY_STATE_COL,
     FB_TERMINAL_REASON_COL,
     FB_WRITE_STATE_COL,
     IG_ATTEMPT_STATE_COL,
@@ -11550,43 +11551,75 @@ def _ensure_email_columns(df: Optional[pd.DataFrame]) -> Optional[pd.DataFrame]:
     return df
 
 
-def _apply_fb_promotion_df(df: pd.DataFrame, log_fn: Optional[Callable[[str], None]] = None) -> pd.DataFrame:
-    """Promote Facebook URLs from generic link fields into facebook_url/Facebook_URL."""
-    if df is None or df.empty:
-        return df
+def _apply_fb_promotion_row(
+    df: pd.DataFrame,
+    row_idx: Any,
+    *,
+    share_resolver: Optional[Callable[[str], Optional[str]]] = None,
+) -> Tuple[bool, bool, str]:
+    """Promote Facebook URLs for a single row into authoritative Facebook fields."""
+    if df is None or df.empty or row_idx not in df.index:
+        return False, False, ""
     if "facebook_url" not in df.columns:
         df["facebook_url"] = ""
     if "Facebook_URL" not in df.columns:
         df["Facebook_URL"] = ""
     if "Facebook URL" not in df.columns:
         df["Facebook URL"] = ""
+    new_url, source = ensure_canonical_facebook_url(
+        df.loc[row_idx],
+        set_row=False,
+        share_resolver=share_resolver,
+    )
+    if not new_url:
+        return False, False, ""
+    wrote = False
+    promoted_into_canonical = False
+    current_canonical_raw = _coerce_directory_value(df.loc[row_idx, "Facebook_URL"])
+    current_canonical = canonicalize_facebook_url(current_canonical_raw)
+    if current_canonical and current_canonical_raw != current_canonical:
+        df.loc[row_idx, "Facebook_URL"] = current_canonical
+    elif not current_canonical:
+        df.loc[row_idx, "Facebook_URL"] = new_url
+        wrote = True
+        promoted_into_canonical = True
+    if not canonicalize_facebook_url(df.loc[row_idx, "facebook_url"]):
+        df.loc[row_idx, "facebook_url"] = new_url
+        wrote = True
+    if "Facebook URL" in df.columns and not canonicalize_facebook_url(df.loc[row_idx, "Facebook URL"]):
+        df.loc[row_idx, "Facebook URL"] = new_url
+        wrote = True
+    return wrote, promoted_into_canonical, source
+
+
+def _apply_fb_promotion_df(
+    df: pd.DataFrame,
+    log_fn: Optional[Callable[[str], None]] = None,
+    *,
+    share_resolver: Optional[Callable[[str], Optional[str]]] = None,
+) -> pd.DataFrame:
+    """Promote Facebook URLs from generic link fields into facebook_url/Facebook_URL."""
+    if df is None or df.empty:
+        return df
     populated = 0
     canonical_from_alias = 0
     canonical_from_links = 0
     for idx in df.index:
-        new_url, source = ensure_canonical_facebook_url(df.loc[idx], set_row=False)
-        if not new_url:
+        wrote, promoted_into_canonical, source = _apply_fb_promotion_row(
+            df,
+            idx,
+            share_resolver=share_resolver,
+        )
+        if not source:
             continue
-        wrote = False
-        current_canonical_raw = _coerce_directory_value(df.loc[idx, "Facebook_URL"])
-        current_canonical = canonicalize_facebook_url(current_canonical_raw)
-        if current_canonical and current_canonical_raw != current_canonical:
-            df.loc[idx, "Facebook_URL"] = current_canonical
-        elif not current_canonical:
-            df.loc[idx, "Facebook_URL"] = new_url
-            wrote = True
-            if source in {"Social Link", "External Links", "Website", "Websites", "Website URL"}:
-                canonical_from_links += 1
-            elif source and source != "Facebook_URL":
-                canonical_from_alias += 1
-        if not canonicalize_facebook_url(df.loc[idx, "facebook_url"]):
-            df.loc[idx, "facebook_url"] = new_url
-            wrote = True
-        if "Facebook URL" in df.columns and not canonicalize_facebook_url(df.loc[idx, "Facebook URL"]):
-            df.loc[idx, "Facebook URL"] = new_url
-            wrote = True
         if wrote:
             populated += 1
+        if not promoted_into_canonical:
+            continue
+        if source in {"Social Link", "External Links", "Website", "Websites", "Website URL"}:
+            canonical_from_links += 1
+        elif source and source != "Facebook_URL":
+            canonical_from_alias += 1
     if log_fn and populated:
         _safe_log(log_fn, "[FB Promotion] facebook_url populated for %s rows", populated)
     if log_fn and canonical_from_alias:
@@ -11828,6 +11861,7 @@ class CrossDirectoryEnricherWorker(QThread):
         self._fb_session_warmup_complete: bool = False
         self._fb_session_auth_reason: str = ""
         self._fb_session_invalid: bool = False
+        self._night_fb_share_promotion_resolver: Optional[Callable[[str], Optional[str]]] = None
         self.night_fb_run_state: Optional[NightFBRunState] = None
         self._spotify_discovery_attempted_rows: Set[Any] = set()
         self._spotify_sparse_bandcamp_attempted_rows: Set[Any] = set()
@@ -12175,8 +12209,29 @@ class CrossDirectoryEnricherWorker(QThread):
         self._initial_fb_session_warmup_complete = False
         self._fb_session_auth_reason = ""
         self._fb_session_invalid = False
+        self._night_fb_share_promotion_resolver = None
         if getattr(self, "night_mode", False) and self.night_fb_run_state is not None:
             reset_night_fb_run_runtime_state(self.night_fb_run_state)
+
+    def _get_night_fb_share_promotion_resolver(self) -> Optional[Callable[[str], Optional[str]]]:
+        if not getattr(self, "night_mode", False):
+            return None
+        if self._night_fb_share_promotion_resolver is not None:
+            return self._night_fb_share_promotion_resolver
+        night_fb_state = self.night_fb_run_state
+        session_source = getattr(night_fb_state, "session_source", None)
+        night_fb_source = session_source if session_source is not None else normalize_night_fb_session_source()
+        if not night_fb_source.can_probe:
+            return None
+        from pipeline_runner import _build_night_fb_share_promotion_resolver
+
+        self._night_fb_share_promotion_resolver = _build_night_fb_share_promotion_resolver(
+            fb_username=str(os.environ.get("FB_USERNAME", "") or ""),
+            fb_password=str(os.environ.get("FB_PASSWORD", "") or ""),
+            night_fb_run_state=night_fb_state,
+            logger=getattr(self.log_message, "emit", None),
+        )
+        return self._night_fb_share_promotion_resolver
 
     def _reset_ig_runtime_local_state(self) -> None:
         self._instagram_hidden_contact_attempt_keys = set()
@@ -12429,7 +12484,11 @@ class CrossDirectoryEnricherWorker(QThread):
             self.log_message.emit(
                 "[Schema] ensured email columns: Email, Email_All, Email_Type, Email_Source_URL, Email_Source_Type, Email_Extract_Method, Email_Provenance_JSON"
             )
-            seed_df = _apply_fb_promotion_df(seed_df, log_fn=self.log_message.emit)
+            seed_df = _apply_fb_promotion_df(
+                seed_df,
+                log_fn=self.log_message.emit,
+                share_resolver=self._get_night_fb_share_promotion_resolver(),
+            )
             seed_df = ensure_ig_attribution_columns(seed_df)
             if getattr(self, "night_mode", False):
                 seed_df = ensure_fb_attribution_columns(seed_df)
@@ -15325,6 +15384,11 @@ class CrossDirectoryEnricherWorker(QThread):
         position = ctx["position"]
         total = ctx["total"]
         seed_df = ensure_fb_attribution_columns(seed_df)
+        share_resolver = self._get_night_fb_share_promotion_resolver()
+        _apply_fb_promotion_row(seed_df, row_idx, share_resolver=share_resolver)
+        if _get_canonical_fb_url(seed_df.loc[row_idx]):
+            if cell_to_str(seed_df.at[row_idx, FB_OPPORTUNITY_STATE_COL]) in {"", "no_fb_opportunity"}:
+                seed_df.at[row_idx, FB_OPPORTUNITY_STATE_COL] = "fb_opportunity_present"
         apply_fb_opportunity_state_df(seed_df, overwrite=False)
         try:
             from pipeline_runner import finalize_fb_row_attribution
@@ -15816,7 +15880,11 @@ class CrossDirectoryEnricherWorker(QThread):
                     phase_label="post_website",
                 )
             # Refresh Facebook promotion after live/directory phases so newly discovered FB links are usable.
-            seed_df = _apply_fb_promotion_df(seed_df, log_fn=self.log_message.emit)
+            seed_df = _apply_fb_promotion_df(
+                seed_df,
+                log_fn=self.log_message.emit,
+                share_resolver=self._get_night_fb_share_promotion_resolver(),
+            )
             # Phase 5: Facebook
             if ENABLE_FACEBOOK_ENRICHMENT and fb_driver:
                 self._phase_facebook(seed_df, fb_driver, total, row_ids=row_ids)
@@ -15942,7 +16010,11 @@ class CrossDirectoryEnricherWorker(QThread):
         """Interleave SC, LF (live lookup), and FB across rows to avoid bursts."""
 
         seed_df = _apply_unearthed_platform_promotion_df(seed_df, log_fn=self.log_message.emit)
-        seed_df = _apply_fb_promotion_df(seed_df, log_fn=self.log_message.emit)
+        seed_df = _apply_fb_promotion_df(
+            seed_df,
+            log_fn=self.log_message.emit,
+            share_resolver=self._get_night_fb_share_promotion_resolver(),
+        )
         rows = [
             row_idx
             for row_idx in self._ordered_interleaved_row_ids(seed_df, row_ids=row_ids)

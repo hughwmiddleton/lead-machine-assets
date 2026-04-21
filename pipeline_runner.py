@@ -1915,6 +1915,11 @@ def _build_night_fb_share_promotion_resolver(
             authed_session_available=True,
         )
         canonical = canonicalize_facebook_url(resolved_url)
+        if canonical and canonical != raw_candidate:
+            _safe_log_console(
+                logger,
+                f'[FB Promotion][Share Resolve] raw="{raw_candidate}" canonical="{canonical}"',
+            )
         return canonical or None
 
     return _resolve

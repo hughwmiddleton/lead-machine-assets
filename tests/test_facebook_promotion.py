@@ -70,6 +70,21 @@ def test_promote_does_not_emit_canonical_fb_for_unresolved_share_noise():
     assert "Facebook_URL" not in row or row.get("Facebook_URL", "") == ""
 
 
+def test_promote_does_not_accept_disallowed_shape_from_share_resolution():
+    row = {
+        "Social Link": "https://www.facebook.com/share/19BActwuev?mibextid=wwXIfr",
+        "facebook_url": "",
+        "Facebook_URL": "",
+        "Facebook URL": "",
+    }
+
+    promote_facebook_url(row, share_resolver=lambda raw: "https://www.facebook.com/groups/not-a-page")
+
+    assert row["facebook_url"] == ""
+    assert row["Facebook_URL"] == ""
+    assert row["Facebook URL"] == ""
+
+
 def test_extract_accepts_numeric_profile_and_rejects_groups():
     assert extract_facebook_url_from_text("https://www.facebook.com/profile.php?id=12345") == "https://www.facebook.com/profile.php?id=12345"
     assert extract_facebook_url_from_text("https://www.facebook.com/profile.php?id=abc") is None
