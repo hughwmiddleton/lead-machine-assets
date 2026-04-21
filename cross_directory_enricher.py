@@ -69,12 +69,16 @@ from fb_attribution import (
     IG_ATTEMPT_STATE_COL,
     IG_EXECUTION_PATH_COL,
     IG_EXTRACT_STATE_COL,
+    IG_NORMALIZED_TERMINAL_OUTCOME_COL,
+    IG_NORMALIZED_TERMINAL_REASON_COL,
     IG_OPPORTUNITY_STATE_COL,
+    IG_SURFACE_REASON_COL,
     IG_TERMINAL_REASON_COL,
     IG_WRITE_STATE_COL,
     apply_fb_opportunity_state_df,
     ensure_fb_attribution_columns,
     ensure_ig_attribution_columns,
+    finalize_ig_normalized_terminal,
 )
 
 from facebook_enrich import (
@@ -2619,6 +2623,13 @@ def _ensure_instagram_row_attribution(seed_df: pd.DataFrame, row_idx: Any) -> No
         seed_df.at[row_idx, IG_WRITE_STATE_COL] = "ig_no_email_written"
 
 
+def finalize_instagram_row_attribution(seed_df: pd.DataFrame, row_idx: Any) -> None:
+    if seed_df is None or row_idx not in getattr(seed_df, "index", []):
+        return
+    ensure_ig_attribution_columns(seed_df)
+    finalize_ig_normalized_terminal(seed_df, row_idx)
+
+
 def _mark_instagram_not_attempted(
     seed_df: pd.DataFrame,
     row_idx: Any,
@@ -2627,6 +2638,7 @@ def _mark_instagram_not_attempted(
 ) -> None:
     _ensure_instagram_row_attribution(seed_df, row_idx)
     opportunity_state = cell_to_str(seed_df.at[row_idx, IG_OPPORTUNITY_STATE_COL])
+    seed_df.at[row_idx, IG_SURFACE_REASON_COL] = ""
     seed_df.at[row_idx, IG_ATTEMPT_STATE_COL] = "ig_not_attempted"
     if opportunity_state == "no_ig_opportunity":
         seed_df.at[row_idx, IG_EXTRACT_STATE_COL] = "ig_extract_not_applicable"
@@ -2636,6 +2648,7 @@ def _mark_instagram_not_attempted(
         seed_df.at[row_idx, IG_TERMINAL_REASON_COL] = terminal_reason
     if not cell_to_str(seed_df.at[row_idx, IG_WRITE_STATE_COL]):
         seed_df.at[row_idx, IG_WRITE_STATE_COL] = "ig_no_email_written"
+    finalize_instagram_row_attribution(seed_df, row_idx)
 
 
 def _classify_instagram_write_state(
@@ -14682,6 +14695,7 @@ class CrossDirectoryEnricherWorker(QThread):
         """Extract email from the canonical Instagram profile HTML in a single fetch."""
         row = seed_df.loc[row_idx]
         _ensure_instagram_row_attribution(seed_df, row_idx)
+        seed_df.at[row_idx, IG_SURFACE_REASON_COL] = ""
         force_unearthed_ig = _should_force_unearthed_platform_enrichment(row, "instagram")
         if _row_has_email(row) and not force_unearthed_ig:
             _mark_instagram_not_attempted(
@@ -14720,7 +14734,13 @@ class CrossDirectoryEnricherWorker(QThread):
                 seed_df.at[row_idx, IG_EXTRACT_STATE_COL] = "ig_extract_blocked_or_unavailable"
                 seed_df.at[row_idx, IG_WRITE_STATE_COL] = "ig_no_email_written"
                 seed_df.at[row_idx, IG_TERMINAL_REASON_COL] = "ig_blocked_or_unavailable"
+                seed_df.at[row_idx, IG_SURFACE_REASON_COL] = (
+                    f"profile_fetch_http_{int(status)}"
+                    if status is not None
+                    else "profile_fetch_http_error"
+                )
                 seed_df.at[row_idx, IG_EXECUTION_PATH_COL] = path_tracker.terminal_path()
+                finalize_instagram_row_attribution(seed_df, row_idx)
                 self._set_platform_state("instagram", "skipped")
                 return False
             if not _instagram_profile_fetch_usable(status, html):
@@ -14730,7 +14750,11 @@ class CrossDirectoryEnricherWorker(QThread):
                 seed_df.at[row_idx, IG_EXTRACT_STATE_COL] = "ig_extract_blocked_or_unavailable"
                 seed_df.at[row_idx, IG_WRITE_STATE_COL] = "ig_no_email_written"
                 seed_df.at[row_idx, IG_TERMINAL_REASON_COL] = "ig_blocked_or_unavailable"
+                seed_df.at[row_idx, IG_SURFACE_REASON_COL] = (
+                    "profile_fetch_soft_block" if _detect_soft_block(html or "") else "profile_fetch_unusable_surface"
+                )
                 seed_df.at[row_idx, IG_EXECUTION_PATH_COL] = path_tracker.terminal_path()
+                finalize_instagram_row_attribution(seed_df, row_idx)
                 self._set_platform_state("instagram", "skipped")
                 return False
 
@@ -14845,6 +14869,7 @@ class CrossDirectoryEnricherWorker(QThread):
                 if not all_ig_emails and not _row_has_email(seed_df.loc[row_idx]):
                     live_page = _get_shared_live_page()
                     if live_page is None:
+                        seed_df.at[row_idx, IG_SURFACE_REASON_COL] = "bridge_not_profile_surface_or_unavailable"
                         self.log_message.emit(
                             "[IG Bridge Gate] live_bridge=0 action=skip_live_onehop reason=bridge_failed"
                         )
@@ -15078,6 +15103,7 @@ class CrossDirectoryEnricherWorker(QThread):
             seed_df.at[row_idx, IG_WRITE_STATE_COL] = "ig_no_email_written"
             seed_df.at[row_idx, IG_TERMINAL_REASON_COL] = "ig_no_email_found"
             seed_df.at[row_idx, IG_EXECUTION_PATH_COL] = path_tracker.terminal_path()
+            finalize_instagram_row_attribution(seed_df, row_idx)
             self._set_platform_state("instagram", "skipped")
             return False
 
@@ -15126,6 +15152,7 @@ class CrossDirectoryEnricherWorker(QThread):
         else:
             seed_df.at[row_idx, IG_TERMINAL_REASON_COL] = "ig_indeterminate"
         seed_df.at[row_idx, IG_EXECUTION_PATH_COL] = path_tracker.terminal_path()
+        finalize_instagram_row_attribution(seed_df, row_idx)
         try:
             from pipeline_runner import record_email_summary_row_change
 

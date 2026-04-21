@@ -39,17 +39,24 @@ from fb_attribution import (
     FB_DEBUG_REASON_COL,
     FB_EXTRACT_STATE_COL,
     FB_GATE_STATE_COL,
+    FB_NORMALIZED_TERMINAL_OUTCOME_COL,
+    FB_NORMALIZED_TERMINAL_REASON_COL,
     FB_OPPORTUNITY_STATE_COL,
     FB_TERMINAL_REASON_COL,
     FB_WRITE_STATE_COL,
     IG_ATTEMPT_STATE_COL,
     IG_EXECUTION_PATH_COL,
     IG_EXTRACT_STATE_COL,
+    IG_NORMALIZED_TERMINAL_OUTCOME_COL,
+    IG_NORMALIZED_TERMINAL_REASON_COL,
     IG_OPPORTUNITY_STATE_COL,
+    IG_SURFACE_REASON_COL,
     IG_TERMINAL_REASON_COL,
     IG_WRITE_STATE_COL,
+    apply_platform_terminal_normalization_df,
     apply_fb_opportunity_state_df,
     ensure_fb_attribution_columns,
+    finalize_fb_normalized_terminal,
 )
 from html_fetcher import close_job_browser
 from source_scheduler import (
@@ -751,6 +758,7 @@ def finalize_fb_row_attribution(df: pd.DataFrame, row_idx: Any) -> None:
     df.at[row_idx, FB_DEBUG_REASON_COL] = _classify_fb_debug_reason(df.loc[row_idx])
     df.at[row_idx, FB_EXTRACT_STATE_COL] = _classify_fb_extract_state(df.loc[row_idx])
     df.at[row_idx, FB_TERMINAL_REASON_COL] = _classify_fb_terminal_reason(df.loc[row_idx])
+    finalize_fb_normalized_terminal(df, row_idx)
 
 
 FB_DEBUG_SUMMARY_ORDER: Sequence[str] = (
@@ -2027,12 +2035,17 @@ FINAL_EXPORT_COLUMNS: Sequence[str] = [
     FB_WRITE_STATE_COL,
     FB_DEBUG_REASON_COL,
     FB_TERMINAL_REASON_COL,
+    FB_NORMALIZED_TERMINAL_OUTCOME_COL,
+    FB_NORMALIZED_TERMINAL_REASON_COL,
     IG_OPPORTUNITY_STATE_COL,
     IG_ATTEMPT_STATE_COL,
     IG_EXTRACT_STATE_COL,
     IG_WRITE_STATE_COL,
     IG_TERMINAL_REASON_COL,
     IG_EXECUTION_PATH_COL,
+    IG_SURFACE_REASON_COL,
+    IG_NORMALIZED_TERMINAL_OUTCOME_COL,
+    IG_NORMALIZED_TERMINAL_REASON_COL,
 ]
 
 WOODPECKER_EXPORT_COLUMNS: Sequence[str] = [
@@ -2071,12 +2084,17 @@ WOODPECKER_EXPORT_COLUMNS: Sequence[str] = [
     FB_WRITE_STATE_COL,
     FB_DEBUG_REASON_COL,
     FB_TERMINAL_REASON_COL,
+    FB_NORMALIZED_TERMINAL_OUTCOME_COL,
+    FB_NORMALIZED_TERMINAL_REASON_COL,
     IG_OPPORTUNITY_STATE_COL,
     IG_ATTEMPT_STATE_COL,
     IG_EXTRACT_STATE_COL,
     IG_WRITE_STATE_COL,
     IG_TERMINAL_REASON_COL,
     IG_EXECUTION_PATH_COL,
+    IG_SURFACE_REASON_COL,
+    IG_NORMALIZED_TERMINAL_OUTCOME_COL,
+    IG_NORMALIZED_TERMINAL_REASON_COL,
 ]
 
 _AU_STATE_TOKENS = ("nsw", "vic", "qld", "wa", "sa", "tas", "act", "nt")
@@ -4135,12 +4153,17 @@ DEFAULT_EXPORT_COLUMNS: Sequence[str] = [
     FB_WRITE_STATE_COL,
     FB_DEBUG_REASON_COL,
     FB_TERMINAL_REASON_COL,
+    FB_NORMALIZED_TERMINAL_OUTCOME_COL,
+    FB_NORMALIZED_TERMINAL_REASON_COL,
     IG_OPPORTUNITY_STATE_COL,
     IG_ATTEMPT_STATE_COL,
     IG_EXTRACT_STATE_COL,
     IG_WRITE_STATE_COL,
     IG_TERMINAL_REASON_COL,
     IG_EXECUTION_PATH_COL,
+    IG_SURFACE_REASON_COL,
+    IG_NORMALIZED_TERMINAL_OUTCOME_COL,
+    IG_NORMALIZED_TERMINAL_REASON_COL,
     "Played on triple J",
     "Played on Unearthed",
     "Release Date",
@@ -4178,6 +4201,7 @@ def export_master_leads(
         consolidated_df = pd.read_csv(input_csv, dtype=str, keep_default_na=False)
         consolidated_df = consolidated_df.fillna("")
         consolidated_df = _consolidate_email_all(consolidated_df)
+        consolidated_df = apply_platform_terminal_normalization_df(consolidated_df)
         consolidated_df = recompute_final_status_post_enrichment(consolidated_df, export_logger)
         rows = consolidated_df.to_dict(orient="records")
 

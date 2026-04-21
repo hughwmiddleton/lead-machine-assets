@@ -11,6 +11,8 @@ from fb_attribution import (
     FB_ATTEMPT_STATE_COL,
     FB_DEBUG_REASON_COL,
     FB_GATE_STATE_COL,
+    FB_NORMALIZED_TERMINAL_OUTCOME_COL,
+    FB_NORMALIZED_TERMINAL_REASON_COL,
     FB_OPPORTUNITY_STATE_COL,
     FB_WRITE_STATE_COL,
 )
@@ -541,6 +543,8 @@ def test_content_unavailable_status_preserves_distinct_attempt_outcome(monkeypat
     assert helper.calls == 1
     assert df_out.loc[0, FB_ATTEMPT_STATE_COL] == "attempted_fb_content_unavailable"
     assert df_out.loc[0, FB_WRITE_STATE_COL] == "fb_no_email_written"
+    assert df_out.loc[0, FB_NORMALIZED_TERMINAL_OUTCOME_COL] == "platform_blocked_or_gated"
+    assert df_out.loc[0, FB_NORMALIZED_TERMINAL_REASON_COL] == "fb_content_unavailable"
 
 
 def test_attempted_with_accepted_email_records_write(monkeypatch, tmp_path):
@@ -577,6 +581,8 @@ def test_attempted_with_accepted_email_records_write(monkeypatch, tmp_path):
     assert df_out.loc[0, FB_ATTEMPT_STATE_COL] == "attempted_fb_found_email"
     assert df_out.loc[0, FB_WRITE_STATE_COL] == "fb_wrote_email"
     assert df_out.loc[0, FB_DEBUG_REASON_COL] == "email_written"
+    assert df_out.loc[0, FB_NORMALIZED_TERMINAL_OUTCOME_COL] == "success"
+    assert df_out.loc[0, FB_NORMALIZED_TERMINAL_REASON_COL] == "fb_email_written"
     provenance = json.loads(df_out.loc[0, EMAIL_PROVENANCE_JSON_COL])
     assert provenance["fb@example.com"]["surface"] == "facebook_about"
     assert provenance["fb@example.com"]["source_type"] == "facebook_enrich"

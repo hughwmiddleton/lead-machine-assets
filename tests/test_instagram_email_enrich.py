@@ -237,6 +237,9 @@ def test_instagram_attribution_blocked_surface_marks_terminal_reason(monkeypatch
     assert seed_df.at[0, cde.IG_EXTRACT_STATE_COL] == "ig_extract_blocked_or_unavailable"
     assert seed_df.at[0, cde.IG_WRITE_STATE_COL] == "ig_no_email_written"
     assert seed_df.at[0, cde.IG_TERMINAL_REASON_COL] == "ig_blocked_or_unavailable"
+    assert seed_df.at[0, cde.IG_SURFACE_REASON_COL] == "profile_fetch_http_403"
+    assert seed_df.at[0, cde.IG_NORMALIZED_TERMINAL_OUTCOME_COL] == "platform_blocked_or_gated"
+    assert seed_df.at[0, cde.IG_NORMALIZED_TERMINAL_REASON_COL] == "profile_fetch_http_403"
     assert seed_df.at[0, cde.IG_EXECUTION_PATH_COL] == "direct_profile"
 
 
@@ -286,6 +289,39 @@ def test_instagram_attribution_does_not_inherit_later_fb_success_when_ig_finds_n
     assert without_fb_seed.at[0, cde.IG_TERMINAL_REASON_COL] == "ig_no_email_found"
     assert with_later_fb_seed.at[0, cde.IG_ATTEMPT_STATE_COL] == without_fb_seed.at[0, cde.IG_ATTEMPT_STATE_COL]
     assert with_later_fb_seed.at[0, cde.IG_EXTRACT_STATE_COL] == without_fb_seed.at[0, cde.IG_EXTRACT_STATE_COL]
+
+
+def test_instagram_bridge_failure_static_only_maps_to_platform_blocked(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "IG Bridge Fail",
+            "Email": "",
+            "Email_All": "",
+            "Instagram_URL": "https://instagram.com/bridgefail/",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+
+    @contextmanager
+    def fake_fetch_scope(session, ig_url, retain_live_page=False):  # noqa: ANN001
+        yield SimpleNamespace(html="<html><body>profile shell</body></html>", status=200)
+
+    monkeypatch.setattr(cde, "_instagram_profile_fetch_scope", fake_fetch_scope)
+    monkeypatch.setattr(cde, "_instagram_profile_fetch_usable", lambda status, html: True)
+    monkeypatch.setattr(cde, "_extract_instagram_direct_profile_candidate_emails", lambda html, soup=None: [])
+    monkeypatch.setattr(cde, "_open_instagram_live_page_bridge", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cde, "_filter_instagram_email_candidates_for_acceptance", lambda emails, log=None: emails)
+
+    matched = worker._enrich_row_instagram_email(seed_df, 0, ctx)
+
+    assert matched is False
+    assert seed_df.at[0, cde.IG_ATTEMPT_STATE_COL] == "attempted_ig_no_email_found"
+    assert seed_df.at[0, cde.IG_TERMINAL_REASON_COL] == "ig_no_email_found"
+    assert seed_df.at[0, cde.IG_SURFACE_REASON_COL] == "bridge_not_profile_surface_or_unavailable"
+    assert seed_df.at[0, cde.IG_NORMALIZED_TERMINAL_OUTCOME_COL] == "platform_blocked_or_gated"
+    assert seed_df.at[0, cde.IG_NORMALIZED_TERMINAL_REASON_COL] == "bridge_not_profile_surface_or_unavailable"
 
 
 def test_unearthed_instagram_merge_preserves_existing_facebook_email(monkeypatch):
