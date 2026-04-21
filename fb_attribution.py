@@ -9,15 +9,35 @@ from source_scheduler import canonicalize_facebook_url, promote_facebook_url
 FB_OPPORTUNITY_STATE_COL = "FB_Opportunity_State"
 FB_GATE_STATE_COL = "FB_Gate_State"
 FB_ATTEMPT_STATE_COL = "FB_Attempt_State"
+FB_EXTRACT_STATE_COL = "FB_Extract_State"
 FB_WRITE_STATE_COL = "FB_Write_State"
 FB_DEBUG_REASON_COL = "FB_Debug_Reason"
+FB_TERMINAL_REASON_COL = "FB_Terminal_Reason"
+
+IG_OPPORTUNITY_STATE_COL = "IG_Opportunity_State"
+IG_ATTEMPT_STATE_COL = "IG_Attempt_State"
+IG_EXTRACT_STATE_COL = "IG_Extract_State"
+IG_WRITE_STATE_COL = "IG_Write_State"
+IG_TERMINAL_REASON_COL = "IG_Terminal_Reason"
+IG_EXECUTION_PATH_COL = "IG_Execution_Path"
 
 FB_ATTRIBUTION_COLUMNS = (
     FB_OPPORTUNITY_STATE_COL,
     FB_GATE_STATE_COL,
     FB_ATTEMPT_STATE_COL,
+    FB_EXTRACT_STATE_COL,
     FB_WRITE_STATE_COL,
     FB_DEBUG_REASON_COL,
+    FB_TERMINAL_REASON_COL,
+)
+
+IG_ATTRIBUTION_COLUMNS = (
+    IG_OPPORTUNITY_STATE_COL,
+    IG_ATTEMPT_STATE_COL,
+    IG_EXTRACT_STATE_COL,
+    IG_WRITE_STATE_COL,
+    IG_TERMINAL_REASON_COL,
+    IG_EXECUTION_PATH_COL,
 )
 
 
@@ -36,6 +56,16 @@ def ensure_fb_attribution_columns(df: pd.DataFrame) -> pd.DataFrame:
     if df is None:
         return df
     for col in FB_ATTRIBUTION_COLUMNS:
+        if col not in df.columns:
+            df[col] = ""
+        df[col] = df[col].fillna("").astype(str)
+    return df
+
+
+def ensure_ig_attribution_columns(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None:
+        return df
+    for col in IG_ATTRIBUTION_COLUMNS:
         if col not in df.columns:
             df[col] = ""
         df[col] = df[col].fillna("").astype(str)

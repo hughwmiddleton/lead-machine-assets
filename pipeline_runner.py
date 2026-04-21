@@ -37,9 +37,17 @@ from fb_attribution import (
     FB_ATTEMPT_STATE_COL,
     FB_ATTRIBUTION_COLUMNS,
     FB_DEBUG_REASON_COL,
+    FB_EXTRACT_STATE_COL,
     FB_GATE_STATE_COL,
     FB_OPPORTUNITY_STATE_COL,
+    FB_TERMINAL_REASON_COL,
     FB_WRITE_STATE_COL,
+    IG_ATTEMPT_STATE_COL,
+    IG_EXECUTION_PATH_COL,
+    IG_EXTRACT_STATE_COL,
+    IG_OPPORTUNITY_STATE_COL,
+    IG_TERMINAL_REASON_COL,
+    IG_WRITE_STATE_COL,
     apply_fb_opportunity_state_df,
     ensure_fb_attribution_columns,
 )
@@ -612,6 +620,28 @@ def _classify_fb_write_state(before: Dict[str, Any], after: Dict[str, Any], atte
     return "fb_no_email_written"
 
 
+def _classify_fb_extract_state(row_like: Any) -> str:
+    attempt_state_norm = _cell_str(row_like.get(FB_ATTEMPT_STATE_COL, "")).lower() if hasattr(row_like, "get") else ""
+    write_state_norm = _cell_str(row_like.get(FB_WRITE_STATE_COL, "")).lower() if hasattr(row_like, "get") else ""
+    opportunity_norm = _cell_str(row_like.get(FB_OPPORTUNITY_STATE_COL, "")).lower() if hasattr(row_like, "get") else ""
+
+    if write_state_norm in {"fb_wrote_email", "fb_wrote_email_all_only", "fb_found_email_not_applied"}:
+        return "fb_found_usable_email"
+    if attempt_state_norm in {"attempted_fb_found_email", "attempted_fb_rejected_by_acceptance_guard"}:
+        return "fb_found_usable_email"
+    if attempt_state_norm in {"attempted_fb_login_wall_or_checkpoint", "attempted_fb_content_unavailable"}:
+        return "fb_extract_blocked_or_unavailable"
+    if attempt_state_norm == "attempted_fb_timeout_or_fetch_error":
+        return "fb_extract_unavailable"
+    if attempt_state_norm in {"attempted_fb_no_email_on_page", "attempted_fb"}:
+        return "fb_no_usable_email_found"
+    if opportunity_norm == "no_fb_opportunity":
+        return "fb_extract_not_applicable"
+    if opportunity_norm:
+        return "fb_extract_not_attempted"
+    return "fb_extract_indeterminate"
+
+
 def _classify_fb_attempt_state_from_status(status: str, existing: str = "") -> str:
     existing_clean = _cell_str(existing)
     if existing_clean and existing_clean != "attempted_fb":
@@ -673,6 +703,54 @@ def _classify_fb_debug_reason(row_like: Any) -> str:
         return "no_fb_candidate"
 
     return ""
+
+
+def _classify_fb_terminal_reason(row_like: Any) -> str:
+    write_state_norm = _cell_str(row_like.get(FB_WRITE_STATE_COL, "")).lower() if hasattr(row_like, "get") else ""
+    attempt_state_norm = _cell_str(row_like.get(FB_ATTEMPT_STATE_COL, "")).lower() if hasattr(row_like, "get") else ""
+    gate_norm = _cell_str(row_like.get(FB_GATE_STATE_COL, "")).lower() if hasattr(row_like, "get") else ""
+    opportunity_norm = _cell_str(row_like.get(FB_OPPORTUNITY_STATE_COL, "")).lower() if hasattr(row_like, "get") else ""
+
+    if write_state_norm in {"fb_wrote_email", "fb_wrote_email_all_only"}:
+        return "fb_email_written"
+    if write_state_norm == "fb_found_email_not_applied":
+        return "fb_found_email_not_written"
+
+    if attempt_state_norm == "attempted_fb_login_wall_or_checkpoint":
+        return "fb_login_required_or_blocked"
+    if attempt_state_norm == "attempted_fb_content_unavailable":
+        return "fb_content_unavailable"
+    if attempt_state_norm == "attempted_fb_timeout_or_fetch_error":
+        return "fb_timeout_or_fetch_error"
+    if attempt_state_norm in {"attempted_fb_no_email_on_page", "attempted_fb"}:
+        return "fb_no_email_found"
+
+    if opportunity_norm == "no_fb_opportunity":
+        return "no_fb_opportunity"
+    if gate_norm == "skipped_existing_usable_email":
+        return "fb_opportunity_not_attempted_existing_email_gate"
+    if gate_norm == "skipped_terminal_fb_status":
+        return "fb_opportunity_not_attempted_terminal_state_gate"
+    if gate_norm in {"skipped_duplicate_fb_discovery", "skipped_other_gate"}:
+        return "fb_opportunity_not_attempted_gate"
+    if gate_norm in {"skipped_no_identity_anchor", "skipped_no_canonical_facebook_url"}:
+        return "no_fb_opportunity"
+    if opportunity_norm:
+        return "fb_opportunity_not_attempted"
+    return "fb_indeterminate"
+
+
+def finalize_fb_row_attribution(df: pd.DataFrame, row_idx: Any) -> None:
+    if df is None or row_idx not in getattr(df, "index", []):
+        return
+    ensure_fb_attribution_columns(df)
+    if not _cell_str(df.at[row_idx, FB_ATTEMPT_STATE_COL]):
+        df.at[row_idx, FB_ATTEMPT_STATE_COL] = "fb_not_attempted"
+    if not _cell_str(df.at[row_idx, FB_WRITE_STATE_COL]):
+        df.at[row_idx, FB_WRITE_STATE_COL] = "fb_no_email_written"
+    df.at[row_idx, FB_DEBUG_REASON_COL] = _classify_fb_debug_reason(df.loc[row_idx])
+    df.at[row_idx, FB_EXTRACT_STATE_COL] = _classify_fb_extract_state(df.loc[row_idx])
+    df.at[row_idx, FB_TERMINAL_REASON_COL] = _classify_fb_terminal_reason(df.loc[row_idx])
 
 
 FB_DEBUG_SUMMARY_ORDER: Sequence[str] = (
@@ -1940,8 +2018,16 @@ FINAL_EXPORT_COLUMNS: Sequence[str] = [
     FB_OPPORTUNITY_STATE_COL,
     FB_GATE_STATE_COL,
     FB_ATTEMPT_STATE_COL,
+    FB_EXTRACT_STATE_COL,
     FB_WRITE_STATE_COL,
     FB_DEBUG_REASON_COL,
+    FB_TERMINAL_REASON_COL,
+    IG_OPPORTUNITY_STATE_COL,
+    IG_ATTEMPT_STATE_COL,
+    IG_EXTRACT_STATE_COL,
+    IG_WRITE_STATE_COL,
+    IG_TERMINAL_REASON_COL,
+    IG_EXECUTION_PATH_COL,
 ]
 
 WOODPECKER_EXPORT_COLUMNS: Sequence[str] = [
@@ -1973,6 +2059,19 @@ WOODPECKER_EXPORT_COLUMNS: Sequence[str] = [
     "final_status",
     "Needs_Review",
     "FB_Review_Reason",
+    FB_OPPORTUNITY_STATE_COL,
+    FB_GATE_STATE_COL,
+    FB_ATTEMPT_STATE_COL,
+    FB_EXTRACT_STATE_COL,
+    FB_WRITE_STATE_COL,
+    FB_DEBUG_REASON_COL,
+    FB_TERMINAL_REASON_COL,
+    IG_OPPORTUNITY_STATE_COL,
+    IG_ATTEMPT_STATE_COL,
+    IG_EXTRACT_STATE_COL,
+    IG_WRITE_STATE_COL,
+    IG_TERMINAL_REASON_COL,
+    IG_EXECUTION_PATH_COL,
 ]
 
 _AU_STATE_TOKENS = ("nsw", "vic", "qld", "wa", "sa", "tas", "act", "nt")
@@ -3800,6 +3899,7 @@ def run_facebook_global_pass_nightmode(
 
                 processed_this_run += 1
                 attempted_total += 1
+                df.at[idx, FB_ATTEMPT_STATE_COL] = "attempted_fb"
 
                 if short_break_every > 0 and processed_this_run % short_break_every == 0:
                     pause = (random.uniform(*short_break_range) if short_break_range else 0.0) * multiplier
@@ -3920,6 +4020,7 @@ def run_facebook_global_pass_nightmode(
                 df.at[idx, FB_WRITE_STATE_COL] = _classify_fb_write_state(write_before, write_after, attempt_state)
 
             df.at[idx, FB_DEBUG_REASON_COL] = _classify_fb_debug_reason(df.loc[idx])
+            finalize_fb_row_attribution(df, idx)
 
             state.update(
                 {
@@ -4025,8 +4126,16 @@ DEFAULT_EXPORT_COLUMNS: Sequence[str] = [
     FB_OPPORTUNITY_STATE_COL,
     FB_GATE_STATE_COL,
     FB_ATTEMPT_STATE_COL,
+    FB_EXTRACT_STATE_COL,
     FB_WRITE_STATE_COL,
     FB_DEBUG_REASON_COL,
+    FB_TERMINAL_REASON_COL,
+    IG_OPPORTUNITY_STATE_COL,
+    IG_ATTEMPT_STATE_COL,
+    IG_EXTRACT_STATE_COL,
+    IG_WRITE_STATE_COL,
+    IG_TERMINAL_REASON_COL,
+    IG_EXECUTION_PATH_COL,
     "Played on triple J",
     "Played on Unearthed",
     "Release Date",

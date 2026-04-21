@@ -638,3 +638,61 @@ def test_nightmode_fb_pass_logs_outer_row_gate(monkeypatch, tmp_path):
 
     assert any("row=0" in msg and "artist='Skip Me'" in msg and "email_present=True" in msg and "eligible_for_fb=False" in msg for msg in row_gate_logs)
     assert any("row=1" in msg and "artist='Try Me'" in msg and "fb_url_present=False" in msg and "eligible_for_fb=True" in msg for msg in row_gate_logs)
+
+
+def test_finalize_fb_row_attribution_classifies_authoritative_outcomes():
+    df = pd.DataFrame(
+        [
+            {pipeline_runner.FB_OPPORTUNITY_STATE_COL: "no_fb_opportunity"},
+            {
+                pipeline_runner.FB_OPPORTUNITY_STATE_COL: "fb_opportunity_present",
+                pipeline_runner.FB_GATE_STATE_COL: "skipped_existing_usable_email",
+            },
+            {
+                pipeline_runner.FB_OPPORTUNITY_STATE_COL: "fb_opportunity_present",
+                pipeline_runner.FB_ATTEMPT_STATE_COL: "attempted_fb_no_email_on_page",
+            },
+            {
+                pipeline_runner.FB_OPPORTUNITY_STATE_COL: "fb_opportunity_present",
+                pipeline_runner.FB_ATTEMPT_STATE_COL: "attempted_fb_found_email",
+                pipeline_runner.FB_WRITE_STATE_COL: "fb_found_email_not_applied",
+            },
+            {
+                pipeline_runner.FB_OPPORTUNITY_STATE_COL: "fb_opportunity_present",
+                pipeline_runner.FB_ATTEMPT_STATE_COL: "attempted_fb_found_email",
+                pipeline_runner.FB_WRITE_STATE_COL: "fb_wrote_email",
+            },
+            {
+                pipeline_runner.FB_OPPORTUNITY_STATE_COL: "fb_opportunity_present",
+                pipeline_runner.FB_ATTEMPT_STATE_COL: "attempted_fb_login_wall_or_checkpoint",
+            },
+            {},
+        ],
+        dtype=str,
+    ).fillna("")
+
+    for idx in df.index:
+        pipeline_runner.finalize_fb_row_attribution(df, idx)
+
+    assert df.loc[0, pipeline_runner.FB_TERMINAL_REASON_COL] == "no_fb_opportunity"
+    assert df.loc[0, pipeline_runner.FB_EXTRACT_STATE_COL] == "fb_extract_not_applicable"
+
+    assert df.loc[1, pipeline_runner.FB_ATTEMPT_STATE_COL] == "fb_not_attempted"
+    assert df.loc[1, pipeline_runner.FB_TERMINAL_REASON_COL] == "fb_opportunity_not_attempted_existing_email_gate"
+    assert df.loc[1, pipeline_runner.FB_EXTRACT_STATE_COL] == "fb_extract_not_attempted"
+
+    assert df.loc[2, pipeline_runner.FB_TERMINAL_REASON_COL] == "fb_no_email_found"
+    assert df.loc[2, pipeline_runner.FB_EXTRACT_STATE_COL] == "fb_no_usable_email_found"
+
+    assert df.loc[3, pipeline_runner.FB_TERMINAL_REASON_COL] == "fb_found_email_not_written"
+    assert df.loc[3, pipeline_runner.FB_EXTRACT_STATE_COL] == "fb_found_usable_email"
+
+    assert df.loc[4, pipeline_runner.FB_TERMINAL_REASON_COL] == "fb_email_written"
+    assert df.loc[4, pipeline_runner.FB_EXTRACT_STATE_COL] == "fb_found_usable_email"
+
+    assert df.loc[5, pipeline_runner.FB_TERMINAL_REASON_COL] == "fb_login_required_or_blocked"
+    assert df.loc[5, pipeline_runner.FB_EXTRACT_STATE_COL] == "fb_extract_blocked_or_unavailable"
+
+    assert df.loc[6, pipeline_runner.FB_ATTEMPT_STATE_COL] == "fb_not_attempted"
+    assert df.loc[6, pipeline_runner.FB_TERMINAL_REASON_COL] == "fb_indeterminate"
+    assert df.loc[6, pipeline_runner.FB_EXTRACT_STATE_COL] == "fb_extract_indeterminate"
