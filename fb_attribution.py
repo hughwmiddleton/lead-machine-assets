@@ -218,6 +218,10 @@ def _ig_surface_reason_is_platform_limited(surface_reason: str) -> bool:
     }
 
 
+def _ig_attempt_state_has_real_attempt(attempt_state: str) -> bool:
+    return _clean_text(attempt_state).lower().startswith("attempted_ig")
+
+
 def classify_ig_normalized_terminal(row_like: Any) -> Dict[str, str]:
     write_state = _row_text(row_like, IG_WRITE_STATE_COL).lower()
     attempt_state = _row_text(row_like, IG_ATTEMPT_STATE_COL).lower()
@@ -225,6 +229,8 @@ def classify_ig_normalized_terminal(row_like: Any) -> Dict[str, str]:
     opportunity_state = _row_text(row_like, IG_OPPORTUNITY_STATE_COL).lower()
     terminal_reason = _row_text(row_like, IG_TERMINAL_REASON_COL)
     surface_reason = _row_text(row_like, IG_SURFACE_REASON_COL)
+    if not _ig_attempt_state_has_real_attempt(attempt_state):
+        surface_reason = ""
 
     if write_state in {"ig_wrote_email", "ig_wrote_email_all_only"}:
         return {
@@ -282,6 +288,8 @@ def finalize_ig_normalized_terminal(df: pd.DataFrame, row_idx: Any) -> None:
     if df is None or row_idx not in getattr(df, "index", []):
         return
     ensure_ig_attribution_columns(df)
+    if not _ig_attempt_state_has_real_attempt(_row_text(df.loc[row_idx], IG_ATTEMPT_STATE_COL)):
+        df.at[row_idx, IG_SURFACE_REASON_COL] = ""
     normalized = classify_ig_normalized_terminal(df.loc[row_idx])
     df.at[row_idx, IG_NORMALIZED_TERMINAL_OUTCOME_COL] = normalized["outcome"]
     df.at[row_idx, IG_NORMALIZED_TERMINAL_REASON_COL] = normalized["reason"]

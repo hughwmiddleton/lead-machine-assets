@@ -211,6 +211,43 @@ def test_instagram_attribution_one_hop_success_persists_terminal_path(monkeypatc
     assert seed_df.at[0, cde.IG_EXECUTION_PATH_COL] == "one_hop"
 
 
+def test_instagram_normalized_terminal_finalizes_once_from_authoritative_seam(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Blocked IG Once",
+            "Email": "",
+            "Email_All": "",
+            "Instagram_URL": "https://instagram.com/blockedonce/",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+
+    @contextmanager
+    def fake_fetch_scope(session, ig_url, retain_live_page=False):  # noqa: ANN001
+        yield SimpleNamespace(html="", status=403)
+
+    monkeypatch.setattr(cde, "_instagram_profile_fetch_scope", fake_fetch_scope)
+
+    finalize_calls = 0
+    original_finalize = cde.finalize_instagram_row_attribution
+
+    def counted_finalize(df, row_idx):  # noqa: ANN001
+        nonlocal finalize_calls
+        finalize_calls += 1
+        return original_finalize(df, row_idx)
+
+    monkeypatch.setattr(cde, "finalize_instagram_row_attribution", counted_finalize)
+
+    matched = worker._run_instagram_row(seed_df, 0, ctx)
+
+    assert matched is False
+    assert finalize_calls == 1
+    assert seed_df.at[0, cde.IG_NORMALIZED_TERMINAL_OUTCOME_COL] == "platform_blocked_or_gated"
+    assert seed_df.at[0, cde.IG_NORMALIZED_TERMINAL_REASON_COL] == "profile_fetch_http_403"
+
+
 def test_instagram_attribution_blocked_surface_marks_terminal_reason(monkeypatch):
     logs = []
     worker = _make_worker(logs)
@@ -230,7 +267,7 @@ def test_instagram_attribution_blocked_surface_marks_terminal_reason(monkeypatch
 
     monkeypatch.setattr(cde, "_instagram_profile_fetch_scope", fake_fetch_scope)
 
-    matched = worker._enrich_row_instagram_email(seed_df, 0, ctx)
+    matched = worker._run_instagram_row(seed_df, 0, ctx)
 
     assert matched is False
     assert seed_df.at[0, cde.IG_ATTEMPT_STATE_COL] == "attempted_ig_blocked_or_unavailable"
@@ -314,7 +351,7 @@ def test_instagram_bridge_failure_static_only_maps_to_platform_blocked(monkeypat
     monkeypatch.setattr(cde, "_open_instagram_live_page_bridge", lambda *args, **kwargs: None)
     monkeypatch.setattr(cde, "_filter_instagram_email_candidates_for_acceptance", lambda emails, log=None: emails)
 
-    matched = worker._enrich_row_instagram_email(seed_df, 0, ctx)
+    matched = worker._run_instagram_row(seed_df, 0, ctx)
 
     assert matched is False
     assert seed_df.at[0, cde.IG_ATTEMPT_STATE_COL] == "attempted_ig_no_email_found"

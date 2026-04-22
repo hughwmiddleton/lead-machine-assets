@@ -151,6 +151,31 @@ def test_ig_normalized_terminal_success_has_precedence_over_surface_failure():
     }
 
 
+def test_ig_finalizer_clears_stale_surface_reason_without_attempt():
+    df = pd.DataFrame(
+        [
+            {
+                IG_OPPORTUNITY_STATE_COL: "ig_opportunity_present",
+                IG_ATTEMPT_STATE_COL: "ig_not_attempted",
+                IG_EXTRACT_STATE_COL: "ig_extract_not_attempted",
+                IG_WRITE_STATE_COL: "ig_no_email_written",
+                IG_TERMINAL_REASON_COL: "ig_opportunity_not_attempted_existing_email_gate",
+                IG_SURFACE_REASON_COL: "profile_fetch_http_403",
+            }
+        ],
+        dtype=str,
+    ).fillna("")
+
+    finalize_ig_normalized_terminal(df, 0)
+
+    assert df.at[0, IG_SURFACE_REASON_COL] == ""
+    assert df.at[0, IG_NORMALIZED_TERMINAL_OUTCOME_COL] == UNKNOWN_OUTCOME
+    assert (
+        df.at[0, IG_NORMALIZED_TERMINAL_REASON_COL]
+        == "ig_opportunity_not_attempted_existing_email_gate"
+    )
+
+
 def test_platform_finalizers_are_observational_only():
     df = pd.DataFrame(
         [

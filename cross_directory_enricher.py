@@ -2648,7 +2648,6 @@ def _mark_instagram_not_attempted(
         seed_df.at[row_idx, IG_TERMINAL_REASON_COL] = terminal_reason
     if not cell_to_str(seed_df.at[row_idx, IG_WRITE_STATE_COL]):
         seed_df.at[row_idx, IG_WRITE_STATE_COL] = "ig_no_email_written"
-    finalize_instagram_row_attribution(seed_df, row_idx)
 
 
 def _classify_instagram_write_state(
@@ -14691,6 +14690,52 @@ class CrossDirectoryEnricherWorker(QThread):
                 seed_df.at[row_idx, "BC_403_Count"] = bc_stats.get("http_403", "")
         return (enriched, False)
 
+    def _run_instagram_row(
+        self,
+        seed_df,
+        row_idx,
+        ctx=None,
+        *,
+        bypass_shared: bool = False,
+        on_domain_reuse_gate=None,
+        set_platform_state_on_domain_reuse: bool = False,
+    ):
+        completed = False
+        try:
+            if bypass_shared:
+                _mark_instagram_not_attempted(
+                    seed_df,
+                    row_idx,
+                    terminal_reason="ig_opportunity_not_attempted_platform_bypass",
+                )
+                completed = True
+                return False
+
+            if ctx is None:
+                return False
+
+            force_unearthed_ig = _should_force_unearthed_platform_enrichment(seed_df.loc[row_idx], "instagram")
+            if self._should_short_circuit_after_domain_reuse(seed_df, row_idx, ctx) and not force_unearthed_ig:
+                _mark_instagram_not_attempted(
+                    seed_df,
+                    row_idx,
+                    terminal_reason="ig_opportunity_not_attempted_domain_reuse_gate",
+                )
+                completed = True
+                if callable(on_domain_reuse_gate):
+                    on_domain_reuse_gate()
+                if set_platform_state_on_domain_reuse:
+                    self._set_platform_state("instagram", "skipped")
+                return False
+
+            matched = self._enrich_row_instagram_email(seed_df, row_idx, ctx)
+            completed = True
+            return matched
+        finally:
+            if completed:
+                # Normalize from the row's committed IG-native terminal state, once.
+                finalize_instagram_row_attribution(seed_df, row_idx)
+
     def _enrich_row_instagram_email(self, seed_df, row_idx, ctx):
         """Extract email from the canonical Instagram profile HTML in a single fetch."""
         row = seed_df.loc[row_idx]
@@ -14740,7 +14785,6 @@ class CrossDirectoryEnricherWorker(QThread):
                     else "profile_fetch_http_error"
                 )
                 seed_df.at[row_idx, IG_EXECUTION_PATH_COL] = path_tracker.terminal_path()
-                finalize_instagram_row_attribution(seed_df, row_idx)
                 self._set_platform_state("instagram", "skipped")
                 return False
             if not _instagram_profile_fetch_usable(status, html):
@@ -14754,7 +14798,6 @@ class CrossDirectoryEnricherWorker(QThread):
                     "profile_fetch_soft_block" if _detect_soft_block(html or "") else "profile_fetch_unusable_surface"
                 )
                 seed_df.at[row_idx, IG_EXECUTION_PATH_COL] = path_tracker.terminal_path()
-                finalize_instagram_row_attribution(seed_df, row_idx)
                 self._set_platform_state("instagram", "skipped")
                 return False
 
@@ -15103,7 +15146,6 @@ class CrossDirectoryEnricherWorker(QThread):
             seed_df.at[row_idx, IG_WRITE_STATE_COL] = "ig_no_email_written"
             seed_df.at[row_idx, IG_TERMINAL_REASON_COL] = "ig_no_email_found"
             seed_df.at[row_idx, IG_EXECUTION_PATH_COL] = path_tracker.terminal_path()
-            finalize_instagram_row_attribution(seed_df, row_idx)
             self._set_platform_state("instagram", "skipped")
             return False
 
@@ -15152,7 +15194,6 @@ class CrossDirectoryEnricherWorker(QThread):
         else:
             seed_df.at[row_idx, IG_TERMINAL_REASON_COL] = "ig_indeterminate"
         seed_df.at[row_idx, IG_EXECUTION_PATH_COL] = path_tracker.terminal_path()
-        finalize_instagram_row_attribution(seed_df, row_idx)
         try:
             from pipeline_runner import record_email_summary_row_change
 
@@ -15940,21 +15981,24 @@ class CrossDirectoryEnricherWorker(QThread):
                     continue
                 bypass_shared = self._should_bypass_unearthed_shared_enrichers(row_idx)
                 if (not bypass_shared) and self._should_short_circuit_after_domain_reuse(seed_df, row_idx, ctx):
-                    _mark_instagram_not_attempted(
+                    def _finalize_fb_domain_reuse_gate() -> None:
+                        try:
+                            from pipeline_runner import finalize_fb_row_attribution
+
+                            ensure_fb_attribution_columns(seed_df)
+                            apply_fb_opportunity_state_df(seed_df, overwrite=False)
+                            if not cell_to_str(seed_df.at[row_idx, FB_GATE_STATE_COL]):
+                                seed_df.at[row_idx, FB_GATE_STATE_COL] = "skipped_existing_usable_email"
+                            finalize_fb_row_attribution(seed_df, row_idx)
+                        except Exception:
+                            pass
+
+                    self._run_instagram_row(
                         seed_df,
                         row_idx,
-                        terminal_reason="ig_opportunity_not_attempted_domain_reuse_gate",
+                        ctx,
+                        on_domain_reuse_gate=_finalize_fb_domain_reuse_gate,
                     )
-                    try:
-                        from pipeline_runner import finalize_fb_row_attribution
-
-                        seed_df = ensure_fb_attribution_columns(seed_df)
-                        apply_fb_opportunity_state_df(seed_df, overwrite=False)
-                        if not cell_to_str(seed_df.at[row_idx, FB_GATE_STATE_COL]):
-                            seed_df.at[row_idx, FB_GATE_STATE_COL] = "skipped_existing_usable_email"
-                        finalize_fb_row_attribution(seed_df, row_idx)
-                    except Exception:
-                        pass
                     self._update_progress(position, total)
                     continue
                 self._init_row_enrichment_state()
@@ -15973,7 +16017,12 @@ class CrossDirectoryEnricherWorker(QThread):
                             self._update_progress(position, total)
                             continue
                     enriched |= self._run_spotify_discovery_pass(seed_df, row_idx, ctx, fb_driver=fb_driver)
-                enriched |= self._enrich_row_instagram_email(seed_df, row_idx, ctx)
+                enriched |= self._run_instagram_row(
+                    seed_df,
+                    row_idx,
+                    ctx,
+                    bypass_shared=bypass_shared,
+                )
                 if not bypass_shared:
                     enriched |= self._enrich_row_website_email(seed_df, row_idx, ctx)
                 if ENABLE_FACEBOOK_ENRICHMENT and fb_driver:
@@ -16423,26 +16472,18 @@ class CrossDirectoryEnricherWorker(QThread):
         for row_idx in self._selected_row_ids(seed_df, row_ids):
             position = seed_df.index.get_loc(row_idx) + 1
             if self._should_bypass_unearthed_shared_enrichers(row_idx, platform="instagram"):
-                _mark_instagram_not_attempted(
-                    seed_df,
-                    row_idx,
-                    terminal_reason="ig_opportunity_not_attempted_platform_bypass",
-                )
+                self._run_instagram_row(seed_df, row_idx, None, bypass_shared=True)
                 continue
             ctx = self._build_row_context(seed_df, row_idx, position, total)
             if not ctx:
                 continue
-            force_unearthed_ig = _should_force_unearthed_platform_enrichment(seed_df.loc[row_idx], "instagram")
-            if self._should_short_circuit_after_domain_reuse(seed_df, row_idx, ctx) and not force_unearthed_ig:
-                _mark_instagram_not_attempted(
-                    seed_df,
-                    row_idx,
-                    terminal_reason="ig_opportunity_not_attempted_domain_reuse_gate",
-                )
-                self._set_platform_state("instagram", "skipped")
-                continue
             self._init_row_enrichment_state()
-            self._enrich_row_instagram_email(seed_df, row_idx, ctx)
+            self._run_instagram_row(
+                seed_df,
+                row_idx,
+                ctx,
+                set_platform_state_on_domain_reuse=True,
+            )
 
     def _phase_website_email(self, seed_df, total, row_ids: Optional[Iterable[Any]] = None):
         for row_idx in self._selected_row_ids(seed_df, row_ids):
