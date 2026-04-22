@@ -135,6 +135,21 @@ from night_mode_fb import (
 )
 
 NIGHT_RUNTIME_RESET_INTERVAL_ROWS_DEFAULT = 50
+NIGHT_RUNTIME_CANARY_TIMEOUT_S = 1.0
+NIGHT_RUNTIME_CANARY_IG_URL = "https://www.instagram.com/"
+
+
+class NightRuntimeCanaryFailure(RuntimeError):
+    """Raised when a post-reset runtime canary cannot prove runtime usability."""
+
+    def __init__(self, source: str, reason: str, attempt_index: int):
+        self.source = str(source or "").strip().lower() or "unknown"
+        self.reason = str(reason or "").strip().lower() or "unknown_failure"
+        self.attempt_index = int(attempt_index or 0)
+        super().__init__(
+            f"post-reset runtime canary failed source={self.source} "
+            f"reason={self.reason} attempt={self.attempt_index}"
+        )
 
 
 ENRICHMENT_YIELD_SOURCE_ALIASES = {
@@ -12247,6 +12262,13 @@ class CrossDirectoryEnricherWorker(QThread):
 
     def _reset_ig_runtime_local_state(self) -> None:
         self._instagram_hidden_contact_attempt_keys = set()
+        canary_page = getattr(self, "_night_runtime_ig_canary_page", None)
+        self._night_runtime_ig_canary_page = None
+        if canary_page is not None:
+            try:
+                canary_page.close()
+            except Exception:
+                pass
         try:
             html_fetcher.close_job_browser("global")
         except Exception:
@@ -12264,7 +12286,218 @@ class CrossDirectoryEnricherWorker(QThread):
                 ensure_context("global")
         except Exception:
             pass
+        self._prepare_ig_runtime_canary_page()
         return self._create_fb_runtime_for_current_chunk()
+
+    def _prepare_ig_runtime_canary_page(self):
+        self._night_runtime_ig_canary_page = None
+        shared_job_browser = getattr(html_fetcher, "_JOB_BROWSERS", {}).get("global")
+        context = getattr(shared_job_browser, "context", None) if shared_job_browser is not None else None
+        if context is None:
+            return None
+        try:
+            canary_page = context.new_page()
+        except Exception:
+            return None
+        self._night_runtime_ig_canary_page = canary_page
+        return canary_page
+
+    @staticmethod
+    def _runtime_canary_exception_reason(exc: Exception, *, source: str) -> str:
+        if source == "facebook" and _fb_exception_is_fatal_session(exc):
+            return "session_invalid"
+        message = cell_to_str(exc).strip().lower()
+        if "timeout" in message:
+            return "timeout"
+        if source == "facebook":
+            return "driver_error"
+        return "page_error"
+
+    def _fb_runtime_canary_explicitly_disabled(self) -> bool:
+        if not ENABLE_FACEBOOK_ENRICHMENT:
+            return True
+        if not getattr(self, "night_mode", False):
+            return False
+        run_state = getattr(self, "night_fb_run_state", None)
+        if run_state is None:
+            return False
+        session_source = getattr(run_state, "session_source", None)
+        return bool(session_source is not None and not bool(getattr(session_source, "can_probe", True)))
+
+    @staticmethod
+    def _normalize_runtime_canary_dom_probe(probe_result: Any) -> Tuple[str, bool]:
+        ready_state = ""
+        has_body = False
+        if isinstance(probe_result, dict):
+            ready_state = cell_to_str(
+                probe_result.get("readyState", probe_result.get("ready_state", ""))
+            ).strip().lower()
+            has_body = bool(probe_result.get("hasBody", probe_result.get("has_body", False)))
+            return ready_state, has_body
+        if isinstance(probe_result, (list, tuple)):
+            if probe_result:
+                ready_state = cell_to_str(probe_result[0]).strip().lower()
+            if len(probe_result) > 1:
+                has_body = bool(probe_result[1])
+            return ready_state, has_body
+        return cell_to_str(probe_result).strip().lower(), False
+
+    def _wait_for_runtime_canary_dom_signal(
+        self,
+        *,
+        source: str,
+        state_probe: Callable[[], Dict[str, Any]],
+    ) -> Tuple[bool, str]:
+        deadline = time.time() + max(float(NIGHT_RUNTIME_CANARY_TIMEOUT_S or 0.0), 0.1)
+        while True:
+            try:
+                probe_state = state_probe() or {}
+            except Exception as exc:
+                return False, self._runtime_canary_exception_reason(exc, source=source)
+
+            surface_reason = cell_to_str(probe_state.get("surface_reason", "")).strip().lower()
+            if surface_reason:
+                return False, surface_reason
+
+            ready_state, has_body = self._normalize_runtime_canary_dom_probe(
+                probe_state.get(
+                    "dom_probe",
+                    (
+                        probe_state.get("ready_state", ""),
+                        probe_state.get("has_body", False),
+                    ),
+                )
+            )
+            if ready_state in {"interactive", "complete"} or has_body:
+                return True, "ready"
+            if time.time() >= deadline:
+                return False, "dom_not_ready"
+            time.sleep(0.05)
+
+    def _run_fb_runtime_canary(self, fb_driver) -> Tuple[bool, str]:
+        if self._fb_runtime_canary_explicitly_disabled():
+            return True, "source_disabled"
+        if fb_driver is None:
+            return False, "no_driver"
+
+        decision = probe_night_fb_session_decision(fb_driver, visit_home=False)
+        if not (decision.authenticated and decision.usable):
+            return False, decision.reason or decision.state or "session_unusable"
+
+        try:
+            set_script_timeout = getattr(fb_driver, "set_script_timeout", None)
+            if callable(set_script_timeout):
+                set_script_timeout(NIGHT_RUNTIME_CANARY_TIMEOUT_S)
+        except Exception as exc:
+            return False, self._runtime_canary_exception_reason(exc, source="facebook")
+
+        def _probe_state() -> Dict[str, Any]:
+            current_url = cell_to_str(getattr(fb_driver, "current_url", "")).strip()
+            page_source = cell_to_str(getattr(fb_driver, "page_source", "")).strip()
+            if _is_fb_login_or_security_url(current_url):
+                return {"surface_reason": "login_wall"}
+            warning_reason = cell_to_str(
+                _looks_like_fb_warning_or_block(page_source, current_url)
+            ).strip().lower()
+            return {
+                "surface_reason": warning_reason,
+                "dom_probe": fb_driver.execute_script(
+                    "return [document.readyState || '', !!document.body];"
+                ),
+            }
+
+        return self._wait_for_runtime_canary_dom_signal(
+            source="facebook",
+            state_probe=_probe_state,
+        )
+
+    def _run_ig_runtime_canary(self) -> Tuple[bool, str]:
+        shared_job_browser = getattr(html_fetcher, "_JOB_BROWSERS", {}).get("global")
+        if shared_job_browser is None:
+            return False, "no_browser"
+        browser = getattr(shared_job_browser, "browser", None)
+        context = getattr(shared_job_browser, "context", None)
+        page = getattr(self, "_night_runtime_ig_canary_page", None)
+        if browser is None:
+            return False, "no_browser"
+        if context is None:
+            return False, "no_context"
+        if page is None:
+            return False, "no_page"
+        try:
+            is_closed = getattr(page, "is_closed", None)
+            if callable(is_closed) and is_closed():
+                return False, "page_closed"
+        except Exception:
+            return False, "page_invalid"
+
+        def _probe_state() -> Dict[str, Any]:
+            current_url = cell_to_str(getattr(page, "url", "")).strip()
+            page_html = cell_to_str(page.content()).strip()
+            current_url_l = current_url.lower()
+            page_html_l = page_html.lower()
+            surface_reason = ""
+            if _detect_soft_block(page_html):
+                surface_reason = "blocked_surface"
+            elif any(token in current_url_l for token in ("/accounts/login", "/challenge", "/checkpoint", "/consent")):
+                surface_reason = "blocked_surface"
+            elif any(
+                token in page_html_l
+                for token in (
+                    "security check",
+                    "challenge_required",
+                    "checkpoint",
+                    "consent",
+                )
+            ):
+                surface_reason = "blocked_surface"
+            elif any(
+                token in page_html_l
+                for token in (
+                    "sorry, something went wrong",
+                    "page isn't available",
+                    "sorry, this page isn't available",
+                    "account suspended",
+                )
+            ):
+                surface_reason = "error_surface"
+            return {
+                "surface_reason": surface_reason,
+                "dom_probe": page.evaluate(
+                    "() => [document.readyState || '', Boolean(document.body)]"
+                ),
+            }
+
+        return self._wait_for_runtime_canary_dom_signal(
+            source="instagram",
+            state_probe=_probe_state,
+        )
+
+    def _run_post_reset_runtime_canary(
+        self,
+        *,
+        fb_driver,
+        attempt_index: int,
+    ) -> None:
+        self._emit_runtime_reset_log(
+            f"[Runtime Canary] phase=start attempt={attempt_index}"
+        )
+
+        fb_passed, fb_reason = self._run_fb_runtime_canary(fb_driver)
+        fb_log = f"[Runtime Canary][FB] attempt={attempt_index} result={'pass' if fb_passed else 'fail'}"
+        if fb_reason and (fb_reason != "ready" or not fb_passed):
+            fb_log += f" reason={fb_reason}"
+        self._emit_runtime_reset_log(fb_log)
+
+        ig_passed, ig_reason = self._run_ig_runtime_canary()
+        ig_log = f"[Runtime Canary][IG] attempt={attempt_index} result={'pass' if ig_passed else 'fail'}"
+        if ig_reason and (ig_reason != "ready" or not ig_passed):
+            ig_log += f" reason={ig_reason}"
+        self._emit_runtime_reset_log(ig_log)
+        if not fb_passed:
+            raise NightRuntimeCanaryFailure("facebook", fb_reason, attempt_index)
+        if not ig_passed:
+            raise NightRuntimeCanaryFailure("instagram", ig_reason, attempt_index)
 
     def _reset_night_runtime_chunk(
         self,
@@ -12274,24 +12507,53 @@ class CrossDirectoryEnricherWorker(QThread):
         next_row_id: Any,
         next_row_index: Any,
     ):
-        self._emit_runtime_reset_log(
-            f"[Night Runtime Reset] interval_rows={interval_rows} completed_rows={completed_rows} "
-            f"teardown_start=1 next_row_index={next_row_index} next_row_id={next_row_id}"
-        )
-        self._teardown_night_runtime_for_chunk()
-        self._emit_runtime_reset_log(
-            f"[Night Runtime Reset] interval_rows={interval_rows} completed_rows={completed_rows} teardown_complete=1"
-        )
-        self._emit_runtime_reset_log(
-            f"[Night Runtime Reset] interval_rows={interval_rows} completed_rows={completed_rows} "
-            f"recreate_start=1 next_row_index={next_row_index} next_row_id={next_row_id}"
-        )
-        fb_driver = self._recreate_night_runtime_for_chunk()
-        self._emit_runtime_reset_log(
-            f"[Night Runtime Reset] interval_rows={interval_rows} completed_rows={completed_rows} "
-            f"recreate_complete=1 next_row_index={next_row_index} next_row_id={next_row_id} "
-            f"fb_driver_ready={1 if fb_driver is not None else 0}"
-        )
+        def _teardown_and_recreate(*, canary_attempt: int):
+            reset_scope = (
+                f"interval_rows={interval_rows} completed_rows={completed_rows} "
+                f"next_row_index={next_row_index} next_row_id={next_row_id} canary_attempt={canary_attempt}"
+            )
+            self._emit_runtime_reset_log(
+                f"[Night Runtime Reset] {reset_scope} teardown_start=1"
+            )
+            self._teardown_night_runtime_for_chunk()
+            self._emit_runtime_reset_log(
+                f"[Night Runtime Reset] {reset_scope} teardown_complete=1"
+            )
+            self._emit_runtime_reset_log(
+                f"[Night Runtime Reset] {reset_scope} recreate_start=1"
+            )
+            recreated_fb_driver = self._recreate_night_runtime_for_chunk()
+            self._emit_runtime_reset_log(
+                f"[Night Runtime Reset] {reset_scope} recreate_complete=1 "
+                f"fb_driver_ready={1 if recreated_fb_driver is not None else 0}"
+            )
+            return recreated_fb_driver
+
+        fb_driver = _teardown_and_recreate(canary_attempt=1)
+        try:
+            self._run_post_reset_runtime_canary(
+                fb_driver=fb_driver,
+                attempt_index=1,
+            )
+        except NightRuntimeCanaryFailure as first_failure:
+            self._emit_runtime_reset_log(
+                f"[Runtime Canary] retry=1 action=recreate_runtime source={first_failure.source} "
+                f"reason={first_failure.reason}"
+            )
+            fb_driver = _teardown_and_recreate(canary_attempt=2)
+            try:
+                self._run_post_reset_runtime_canary(
+                    fb_driver=fb_driver,
+                    attempt_index=2,
+                )
+            except NightRuntimeCanaryFailure as final_failure:
+                self._emit_runtime_reset_log(
+                    f"[Runtime Canary] final_disposition=block source={final_failure.source} "
+                    f"reason={final_failure.reason} attempt={final_failure.attempt_index}"
+                )
+                raise
+
+        self._emit_runtime_reset_log("[Runtime Canary] final_disposition=resume")
         return fb_driver
 
     def _run_with_night_runtime_chunks(

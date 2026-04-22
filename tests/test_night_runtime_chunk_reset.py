@@ -3,6 +3,7 @@ import shutil
 from types import SimpleNamespace
 
 import pandas as pd
+import pytest
 
 import cross_directory_enricher as cde
 import night_mode_fb as nmfb
@@ -26,11 +27,117 @@ class _DummyPlaywright:
         self.stopped = True
 
 
+class _DummyFbDriver:
+    def __init__(
+        self,
+        *,
+        url: str = "https://www.facebook.com/",
+        html: str = "<html><body>Facebook</body></html>",
+        authenticated: bool = True,
+        ready_state: str = "complete",
+        ready_states: list[str] | None = None,
+        has_body: bool = True,
+        has_body_states: list[bool] | None = None,
+        script_error: Exception | None = None,
+    ) -> None:
+        self.current_url = url
+        self.page_source = html
+        self._authenticated = authenticated
+        self._ready_state = ready_state
+        self._ready_states = list(ready_states or [])
+        self._has_body = has_body
+        self._has_body_states = list(has_body_states or [])
+        self._script_error = script_error
+        self.script_timeouts = []
+
+    def get_cookie(self, name: str):
+        if name == "c_user" and self._authenticated:
+            return {"name": "c_user", "value": "1"}
+        return None
+
+    def set_script_timeout(self, timeout: float) -> None:
+        self.script_timeouts.append(timeout)
+
+    def execute_script(self, script: str):
+        if self._script_error is not None:
+            raise self._script_error
+        ready_state = self._ready_states.pop(0) if self._ready_states else self._ready_state
+        has_body = self._has_body_states.pop(0) if self._has_body_states else self._has_body
+        if "document.readyState" in script and "document.body" in script:
+            return [ready_state, has_body]
+        if "document.readyState" in script:
+            return ready_state
+        return None
+
+
+class _DummyIgCanaryPage(_DummyClosable):
+    def __init__(
+        self,
+        *,
+        url: str = "about:blank",
+        html: str = "<html><body>Instagram</body></html>",
+        ready_state: str = "complete",
+        ready_states: list[str] | None = None,
+        has_body: bool = True,
+        has_body_states: list[bool] | None = None,
+        goto_error: Exception | None = None,
+        content_error: Exception | None = None,
+        evaluate_error: Exception | None = None,
+    ) -> None:
+        super().__init__()
+        self.url = url
+        self.html = html
+        self.ready_state = ready_state
+        self.ready_states = list(ready_states or [])
+        self.has_body = has_body
+        self.has_body_states = list(has_body_states or [])
+        self.goto_error = goto_error
+        self.content_error = content_error
+        self.evaluate_error = evaluate_error
+        self.goto_calls = []
+
+    def goto(self, url: str, *, wait_until: str, timeout: int) -> None:
+        self.goto_calls.append((url, wait_until, timeout))
+        if self.goto_error is not None:
+            raise self.goto_error
+        self.url = url
+
+    def content(self) -> str:
+        if self.content_error is not None:
+            raise self.content_error
+        return self.html
+
+    def evaluate(self, script: str) -> str:
+        if self.evaluate_error is not None:
+            raise self.evaluate_error
+        ready_state = self.ready_states.pop(0) if self.ready_states else self.ready_state
+        has_body = self.has_body_states.pop(0) if self.has_body_states else self.has_body
+        if "document.readyState" in script and "document.body" in script:
+            return [ready_state, has_body]
+        return ready_state
+
+    def is_closed(self) -> bool:
+        return self.closed
+
+
+class _DummyIgContext:
+    def __init__(self, page) -> None:
+        self.page = page
+        self.new_page_calls = 0
+
+    def new_page(self):
+        self.new_page_calls += 1
+        return self.page
+
+
 def _make_worker(monkeypatch):
     monkeypatch.setattr(cde.CrossDirectoryEnricherWorker, "__init__", lambda self, *args, **kwargs: None)
+    cde.html_fetcher._JOB_BROWSERS.clear()
     worker = cde.CrossDirectoryEnricherWorker(None, None)
     logs = []
     worker.night_mode = True
+    worker.night_fb_run_state = None
+    worker._night_runtime_ig_canary_page = None
     worker.log_message = SimpleNamespace(emit=lambda msg: logs.append(str(msg)))
     return worker, logs
 
@@ -199,6 +306,7 @@ def test_runtime_chunk_reset_tears_down_fb_and_ig_runtime_state(monkeypatch):
     cleanup_calls = []
     monkeypatch.setattr(cde, "_cleanup_enricher_facebook_driver", lambda: cleanup_calls.append("cleanup"))
     worker._recreate_night_runtime_for_chunk = lambda: "driver_fresh"
+    worker._run_post_reset_runtime_canary = lambda **kwargs: None
 
     result = worker._reset_night_runtime_chunk(
         interval_rows=2,
@@ -237,6 +345,290 @@ def test_runtime_chunk_reset_tears_down_fb_and_ig_runtime_state(monkeypatch):
     assert any("teardown_complete=1" in line for line in logs)
     assert any("recreate_start=1" in line for line in logs)
     assert any("recreate_complete=1" in line for line in logs)
+
+
+def test_runtime_canary_seam_is_owned_only_by_reset_chunk(monkeypatch):
+    worker, _logs = _make_worker(monkeypatch)
+    calls = []
+
+    page = _DummyIgCanaryPage()
+    monkeypatch.setattr(
+        cde.html_fetcher,
+        "_ensure_context",
+        lambda job_id: SimpleNamespace(
+            context=_DummyIgContext(page),
+            browser=object(),
+            playwright=object(),
+        ),
+    )
+    worker._create_fb_runtime_for_current_chunk = lambda: "driver_fresh"
+    worker._run_post_reset_runtime_canary = lambda **kwargs: calls.append(kwargs)
+    worker._teardown_night_runtime_for_chunk = lambda: None
+
+    assert worker._recreate_night_runtime_for_chunk() == "driver_fresh"
+    assert calls == []
+
+    worker._reset_night_runtime_chunk(
+        interval_rows=2,
+        completed_rows=2,
+        next_row_id=2,
+        next_row_index=3,
+    )
+
+    assert calls == [{"fb_driver": "driver_fresh", "attempt_index": 1}]
+
+
+def test_runtime_canary_passes_for_fb_and_ig(monkeypatch):
+    worker, logs = _make_worker(monkeypatch)
+    fb_driver = _DummyFbDriver(url="about:blank")
+    ig_page = _DummyIgCanaryPage()
+    ig_context = _DummyIgContext(ig_page)
+    worker._night_runtime_ig_canary_page = ig_page
+    monkeypatch.setitem(
+        cde.html_fetcher._JOB_BROWSERS,
+        "global",
+        SimpleNamespace(
+            context=ig_context,
+            browser=object(),
+            playwright=object(),
+        ),
+    )
+
+    worker._run_post_reset_runtime_canary(fb_driver=fb_driver, attempt_index=1)
+
+    assert fb_driver.script_timeouts == [cde.NIGHT_RUNTIME_CANARY_TIMEOUT_S]
+    assert ig_page.goto_calls == []
+    assert ig_context.new_page_calls == 0
+    assert any("[Runtime Canary][FB] attempt=1 result=pass" in line for line in logs)
+    assert any("[Runtime Canary][IG] attempt=1 result=pass" in line for line in logs)
+
+
+def test_fb_runtime_canary_tolerates_neutral_current_surface_and_uses_session_probe(monkeypatch):
+    worker, _logs = _make_worker(monkeypatch)
+    probe_calls = []
+
+    def fake_probe(driver, *, visit_home):
+        probe_calls.append((driver.current_url, visit_home))
+        return SimpleNamespace(
+            authenticated=True,
+            usable=True,
+            reason="authenticated",
+            state="authenticated",
+        )
+
+    monkeypatch.setattr(cde, "probe_night_fb_session_decision", fake_probe)
+
+    passed, reason = worker._run_fb_runtime_canary(
+        _DummyFbDriver(url="about:blank")
+    )
+
+    assert passed is True
+    assert reason == "ready"
+    assert probe_calls == [("about:blank", False)]
+
+
+def test_ig_runtime_canary_uses_existing_page_without_navigation(monkeypatch):
+    worker, _logs = _make_worker(monkeypatch)
+    ig_page = _DummyIgCanaryPage(url="about:blank")
+    ig_context = _DummyIgContext(ig_page)
+    worker._night_runtime_ig_canary_page = ig_page
+    monkeypatch.setitem(
+        cde.html_fetcher._JOB_BROWSERS,
+        "global",
+        SimpleNamespace(
+            context=ig_context,
+            browser=object(),
+            playwright=object(),
+        ),
+    )
+
+    passed, reason = worker._run_ig_runtime_canary()
+
+    assert passed is True
+    assert reason == "ready"
+    assert ig_page.goto_calls == []
+    assert ig_context.new_page_calls == 0
+
+
+def test_runtime_canary_tolerates_bounded_dom_stabilization(monkeypatch):
+    worker, _logs = _make_worker(monkeypatch)
+    monkeypatch.setattr(cde, "NIGHT_RUNTIME_CANARY_TIMEOUT_S", 0.2)
+
+    fb_driver = _DummyFbDriver(
+        url="about:blank",
+        ready_states=["loading", "interactive"],
+        has_body_states=[False, True],
+    )
+    ig_page = _DummyIgCanaryPage(
+        ready_states=["loading", "interactive"],
+        has_body_states=[False, True],
+    )
+    worker._night_runtime_ig_canary_page = ig_page
+    monkeypatch.setitem(
+        cde.html_fetcher._JOB_BROWSERS,
+        "global",
+        SimpleNamespace(
+            context=_DummyIgContext(ig_page),
+            browser=object(),
+            playwright=object(),
+        ),
+    )
+
+    worker._run_post_reset_runtime_canary(fb_driver=fb_driver, attempt_index=1)
+
+
+def test_runtime_canary_fails_when_dom_never_stabilizes_within_budget(monkeypatch):
+    worker, _logs = _make_worker(monkeypatch)
+    monkeypatch.setattr(cde, "NIGHT_RUNTIME_CANARY_TIMEOUT_S", 0.05)
+
+    ig_page = _DummyIgCanaryPage(
+        html="",
+        ready_state="loading",
+        has_body=False,
+    )
+    worker._night_runtime_ig_canary_page = ig_page
+    monkeypatch.setitem(
+        cde.html_fetcher._JOB_BROWSERS,
+        "global",
+        SimpleNamespace(
+            context=_DummyIgContext(ig_page),
+            browser=object(),
+            playwright=object(),
+        ),
+    )
+
+    passed, reason = worker._run_ig_runtime_canary()
+
+    assert passed is False
+    assert reason == "dom_not_ready"
+
+
+def test_runtime_canary_retry_recreates_once_then_resumes(monkeypatch):
+    worker, logs = _make_worker(monkeypatch)
+    attempts = {"count": 0}
+    teardown_calls = []
+
+    def fake_teardown():
+        teardown_calls.append("teardown")
+
+    def fake_recreate():
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            page = _DummyIgCanaryPage(evaluate_error=TimeoutError("timeout"))
+            worker._night_runtime_ig_canary_page = page
+            monkeypatch.setitem(
+                cde.html_fetcher._JOB_BROWSERS,
+                "global",
+                SimpleNamespace(
+                    context=_DummyIgContext(page),
+                    browser=object(),
+                    playwright=object(),
+                ),
+            )
+            return _DummyFbDriver()
+
+        page = _DummyIgCanaryPage()
+        worker._night_runtime_ig_canary_page = page
+        monkeypatch.setitem(
+            cde.html_fetcher._JOB_BROWSERS,
+            "global",
+            SimpleNamespace(
+                context=_DummyIgContext(page),
+                browser=object(),
+                playwright=object(),
+            ),
+        )
+        return _DummyFbDriver()
+
+    worker._teardown_night_runtime_for_chunk = fake_teardown
+    worker._recreate_night_runtime_for_chunk = fake_recreate
+
+    result = worker._reset_night_runtime_chunk(
+        interval_rows=2,
+        completed_rows=2,
+        next_row_id=2,
+        next_row_index=3,
+    )
+
+    assert isinstance(result, _DummyFbDriver)
+    assert attempts["count"] == 2
+    assert teardown_calls == ["teardown", "teardown"]
+    assert any("[Runtime Canary][IG] attempt=1 result=fail reason=timeout" in line for line in logs)
+    assert any("[Runtime Canary] retry=1 action=recreate_runtime source=instagram reason=timeout" in line for line in logs)
+    assert any("[Runtime Canary][IG] attempt=2 result=pass" in line for line in logs)
+    assert any("[Runtime Canary] final_disposition=resume" in line for line in logs)
+
+
+def test_runtime_canary_blocks_run_after_second_failure(monkeypatch):
+    worker, logs = _make_worker(monkeypatch)
+    attempts = {"count": 0}
+
+    def fake_recreate():
+        attempts["count"] += 1
+        page = _DummyIgCanaryPage()
+        worker._night_runtime_ig_canary_page = page
+        monkeypatch.setitem(
+            cde.html_fetcher._JOB_BROWSERS,
+            "global",
+            SimpleNamespace(
+                context=_DummyIgContext(page),
+                browser=object(),
+                playwright=object(),
+            ),
+        )
+        return _DummyFbDriver(authenticated=False)
+
+    worker._teardown_night_runtime_for_chunk = lambda: None
+    worker._recreate_night_runtime_for_chunk = fake_recreate
+
+    with pytest.raises(cde.NightRuntimeCanaryFailure) as excinfo:
+        worker._reset_night_runtime_chunk(
+            interval_rows=2,
+            completed_rows=2,
+            next_row_id=2,
+            next_row_index=3,
+        )
+
+    assert excinfo.value.source == "facebook"
+    assert excinfo.value.reason == "not_authenticated"
+    assert attempts["count"] == 2
+    assert any("[Runtime Canary][FB] attempt=1 result=fail reason=not_authenticated" in line for line in logs)
+    assert any("[Runtime Canary][FB] attempt=2 result=fail reason=not_authenticated" in line for line in logs)
+    assert any("[Runtime Canary] final_disposition=block source=facebook reason=not_authenticated attempt=2" in line for line in logs)
+
+
+def test_runtime_canary_failure_does_not_consume_next_chunk_rows(monkeypatch):
+    worker, _logs = _make_worker(monkeypatch)
+    worker.night_runtime_reset_interval_rows = 2
+
+    seed_df = pd.DataFrame(
+        [{"Artist Name": f"Artist {idx}", "marker": ""} for idx in range(4)],
+        dtype=str,
+    ).fillna("")
+
+    processed_rows = []
+
+    def fake_run_row_linear(df, directory_indexes, priority, fb_driver, total, row_ids=None):
+        for row_idx in list(row_ids or []):
+            processed_rows.append(row_idx)
+            df.at[row_idx, "marker"] = f"done-{row_idx}"
+
+    worker._run_row_linear = fake_run_row_linear
+    worker._teardown_night_runtime_for_chunk = lambda: None
+    worker._recreate_night_runtime_for_chunk = lambda: _DummyFbDriver(authenticated=False)
+
+    with pytest.raises(cde.NightRuntimeCanaryFailure):
+        worker._run_with_night_runtime_chunks(
+            seed_df,
+            directory_indexes={},
+            priority=[],
+            fb_driver="driver_0",
+            total=len(seed_df.index),
+            enrichment_mode="row_linear",
+        )
+
+    assert processed_rows == [0, 1]
+    assert seed_df["marker"].tolist() == ["done-0", "done-1", "", ""]
 
 
 def test_night_mode_runner_passes_runtime_reset_interval_to_master_enrichment(monkeypatch, tmp_path):
