@@ -225,5 +225,7 @@ def test_night_fb_promotes_final_reloaded_dataframe_before_intake(monkeypatch, t
     assert handoff_logs
     assert "identity_ok=1" in handoff_logs[-1]
     assert "canonical_field_present=2" in handoff_logs[-1]
+    assert any("[FB Share Canonicalize]" in msg and "artist='Share Artist'" in msg and "detected=1" in msg for msg in logged)
+    assert any("[FB Share Canonicalize]" in msg and "artist='Share Artist'" in msg and "outcome='resolved'" in msg for msg in logged)
     assert any("artist='Share Artist'" in msg and "fb_url_present=True" in msg for msg in logged)
     assert any("artist='Direct Artist'" in msg and "fb_url_present=True" in msg for msg in logged)

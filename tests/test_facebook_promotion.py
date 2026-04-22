@@ -204,6 +204,66 @@ def test_dataframe_promotion_resolves_share_url_from_social_link():
     assert promoted.at[0, "Facebook URL"] == "https://www.facebook.com/artistsharepage"
 
 
+def test_dataframe_promotion_replaces_direct_share_alias_with_canonical_url_and_logs():
+    df = pytest.importorskip("pandas").DataFrame(
+        [
+            {
+                "Artist Name": "Alias Share",
+                "facebook_url": "https://www.facebook.com/share/19BActwuev?mibextid=wwXIfr",
+                "Facebook_URL": "",
+                "Facebook URL": "",
+                "Social Link": "",
+                "External Links": "",
+            }
+        ],
+        dtype=str,
+    ).fillna("")
+    logs = []
+
+    promoted = pipeline_runner._promote_fb_urls_df(
+        df.copy(),
+        logger=logs.append,
+        share_resolver=lambda raw: "https://web.facebook.com/aliassharepage/?mibextid=wwXIfr",
+    )
+
+    assert promoted.at[0, "facebook_url"] == "https://www.facebook.com/aliassharepage"
+    assert promoted.at[0, "Facebook_URL"] == "https://www.facebook.com/aliassharepage"
+    assert promoted.at[0, "Facebook URL"] == "https://www.facebook.com/aliassharepage"
+    assert any("[FB Share Canonicalize]" in msg and "detected=1" in msg and "source_field='facebook_url'" in msg for msg in logs)
+    assert any("[FB Share Canonicalize]" in msg and "outcome='resolved'" in msg for msg in logs)
+
+
+def test_dataframe_promotion_clears_unresolved_share_aliases_but_preserves_source_fields():
+    df = pytest.importorskip("pandas").DataFrame(
+        [
+            {
+                "Artist Name": "Unresolved Share",
+                "facebook_url": "https://www.facebook.com/share/19BActwuev?mibextid=wwXIfr",
+                "Facebook_URL": "https://www.facebook.com/share/19BActwuev?mibextid=wwXIfr",
+                "Facebook URL": "https://www.facebook.com/share/19BActwuev?mibextid=wwXIfr",
+                "Social Link": "https://www.facebook.com/share/19BActwuev?mibextid=wwXIfr | https://www.instagram.com/unresolvedshare",
+                "External Links": "",
+            }
+        ],
+        dtype=str,
+    ).fillna("")
+    logs = []
+
+    promoted = pipeline_runner._promote_fb_urls_df(
+        df.copy(),
+        logger=logs.append,
+        share_resolver=lambda raw: "https://www.facebook.com/share/stillwrapped",
+    )
+
+    assert promoted.at[0, "facebook_url"] == ""
+    assert promoted.at[0, "Facebook_URL"] == ""
+    assert promoted.at[0, "Facebook URL"] == ""
+    assert "instagram.com/unresolvedshare" in promoted.at[0, "Social Link"]
+    assert "facebook.com/share/19BActwuev" in promoted.at[0, "Social Link"]
+    assert any("[FB Share Canonicalize]" in msg and "detected=1" in msg and "source_field='Facebook_URL'" in msg for msg in logs)
+    assert any("[FB Share Canonicalize]" in msg and "outcome='unresolved'" in msg and "reason='canonicalization_dropped'" in msg for msg in logs)
+
+
 def test_dataframe_promotion_preserves_existing_canonical_value():
     df = pytest.importorskip("pandas").DataFrame(
         [

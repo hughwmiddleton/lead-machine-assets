@@ -161,6 +161,31 @@ _EMAIL_ROLE_PRIORITY: Dict[str, int] = {
 }
 
 _LINK_TOKEN_SPLIT_RE = re.compile(r"\s*\|\s*|\s*,\s*|\s+")
+_FB_SHARE_ALLOWED_HOSTS = {
+    "facebook.com",
+    "www.facebook.com",
+    "m.facebook.com",
+    "web.facebook.com",
+    "touch.facebook.com",
+}
+_FB_SHARE_DIRECT_FIELDS: Tuple[str, ...] = (
+    "Facebook_URL",
+    "Facebook URL",
+    "facebook_url",
+)
+_FB_SHARE_SOURCE_FIELDS: Tuple[str, ...] = (
+    "Facebook_URL",
+    "Facebook URL",
+    "facebook_url",
+    "FB_URL",
+    "facebook",
+    "Facebook",
+    "Social Link",
+    "External Links",
+    "Website",
+    "Websites",
+    "Website URL",
+)
 
 
 def _normalize_ws_lower(value: str) -> str:
@@ -230,6 +255,144 @@ def _split_links(cell: Any) -> List[str]:
         seen.add(key)
         result.append(t)
     return result
+
+
+def _row_get_ci_value(row: Any, field_name: str) -> str:
+    if row is None:
+        return ""
+    for key, value in (row.items() if hasattr(row, "items") else []):
+        try:
+            if str(key) != field_name:
+                continue
+        except Exception:
+            continue
+        return _cell_str(value)
+    for key, value in (row.items() if hasattr(row, "items") else []):
+        try:
+            if str(key).lower() != field_name.lower():
+                continue
+        except Exception:
+            continue
+        return _cell_str(value)
+    return ""
+
+
+def _is_explicit_fb_share_url(raw: Any) -> bool:
+    candidate = _cell_str(raw)
+    if not candidate:
+        return False
+    if candidate.startswith("//"):
+        candidate = "https:" + candidate
+    elif candidate.startswith("/"):
+        candidate = "https://www.facebook.com" + candidate
+    elif "://" not in candidate:
+        candidate = "https://" + candidate
+    try:
+        parsed = urlsplit(candidate)
+    except Exception:
+        return False
+    host = (parsed.netloc or "").lower()
+    if host not in _FB_SHARE_ALLOWED_HOSTS:
+        return False
+    path = (parsed.path or "").strip()
+    lowered_path = path.lower()
+    if lowered_path in {"/share.php", "/sharer.php"}:
+        return True
+    if lowered_path == "/dialog/share" or lowered_path.startswith("/dialog/share/"):
+        return True
+    parts = [part for part in lowered_path.split("/") if part]
+    return len(parts) >= 2 and parts[0] == "share"
+
+
+def _find_explicit_fb_share_candidate(row: Any) -> Tuple[str, str]:
+    direct_fields = {field.lower() for field in _FB_SHARE_DIRECT_FIELDS}
+    for field in _FB_SHARE_SOURCE_FIELDS:
+        raw_value = _row_get_ci_value(row, field)
+        if not raw_value:
+            continue
+        candidates = [raw_value] if field.lower() in direct_fields else _LINK_TOKEN_SPLIT_RE.split(raw_value)
+        for candidate in candidates:
+            share_candidate = _cell_str(candidate)
+            if _is_explicit_fb_share_url(share_candidate):
+                return (share_candidate, field)
+    return ("", "")
+
+
+def _direct_canonical_fb_url_for_row(row: Any) -> str:
+    for field in ("Facebook_URL", "facebook_url", "Facebook URL", "FB_URL", "facebook", "Facebook"):
+        canonical = canonicalize_facebook_url(_row_get_ci_value(row, field))
+        if canonical:
+            return canonical
+    return ""
+
+
+def _write_explicit_fb_canonical_fields(df: pd.DataFrame, idx: int, canonical_url: str) -> None:
+    if not canonical_url:
+        return
+    for field in _FB_SHARE_DIRECT_FIELDS:
+        if field in df.columns:
+            df.at[idx, field] = canonical_url
+
+
+def _clear_explicit_fb_share_aliases(df: pd.DataFrame, idx: int) -> None:
+    for field in _FB_SHARE_DIRECT_FIELDS:
+        if field not in df.columns:
+            continue
+        if _is_explicit_fb_share_url(df.at[idx, field]):
+            df.at[idx, field] = ""
+
+
+def _canonicalize_explicit_fb_share_for_row(
+    df: pd.DataFrame,
+    idx: int,
+    *,
+    share_resolver: Optional[Callable[[str], Optional[str]]] = None,
+    logger: LoggerFn = None,
+) -> Tuple[str, str]:
+    row = df.loc[idx]
+    direct_canonical = _direct_canonical_fb_url_for_row(row)
+    if direct_canonical:
+        _write_explicit_fb_canonical_fields(df, idx, direct_canonical)
+        return (direct_canonical, "")
+
+    raw_share_url, source_field = _find_explicit_fb_share_candidate(row)
+    if not raw_share_url:
+        return ("", "")
+
+    artist_label = _cell_str(row.get("Artist Name", "") or row.get("Artist", "") or "<unknown>")
+    _safe_log_console(
+        logger,
+        f"[FB Share Canonicalize] artist='{artist_label}' detected=1 source_field='{source_field}' url='{raw_share_url}'",
+    )
+
+    resolved_url = ""
+    canonical_url = ""
+    reason = ""
+    if share_resolver is None:
+        reason = "missing_resolver"
+    else:
+        try:
+            resolved_url = _cell_str(share_resolver(raw_share_url))
+        except Exception:
+            reason = "resolver_error"
+        canonical_url = canonicalize_facebook_url(resolved_url)
+        if not canonical_url:
+            reason = reason or "canonicalization_dropped"
+
+    if canonical_url:
+        _write_explicit_fb_canonical_fields(df, idx, canonical_url)
+        _safe_log_console(
+            logger,
+            f"[FB Share Canonicalize] artist='{artist_label}' outcome='resolved' canonical_url='{canonical_url}'",
+        )
+        return (canonical_url, source_field)
+
+    _clear_explicit_fb_share_aliases(df, idx)
+    _safe_log_console(
+        logger,
+        f"[FB Share Canonicalize] artist='{artist_label}' outcome='unresolved' reason='{reason or 'unresolved'}'",
+    )
+    return ("", source_field)
 
 
 def _merge_link_columns(target: MutableMapping[str, Any], incoming: MutableMapping[str, Any], cols: Sequence[str]) -> None:
@@ -1858,7 +2021,13 @@ def _promote_fb_urls_df(
     canonical_from_alias = 0
     canonical_from_links = 0
     for idx in df.index:
-        new_url, source = ensure_canonical_facebook_url(df.loc[idx], set_row=False, share_resolver=share_resolver)
+        _canonicalize_explicit_fb_share_for_row(
+            df,
+            idx,
+            share_resolver=share_resolver,
+            logger=logger,
+        )
+        new_url, source = ensure_canonical_facebook_url(df.loc[idx], set_row=False)
         if not new_url:
             continue
         wrote = False
@@ -3582,11 +3751,10 @@ def run_facebook_global_pass_nightmode(
         raise AssertionError("Night FB post-promotion preparation changed dataframe identity")
     canonical_present = 0
     for idx in df.index:
-        try:
-            canonical_url, _ = ensure_canonical_facebook_url(df.loc[idx], set_row=False)
-        except Exception:
-            canonical_url = ""
+        canonical_url = canonicalize_facebook_url(df.at[idx, "Facebook_URL"] if "Facebook_URL" in df.columns else "")
         if canonical_url:
+            if "Facebook_URL" in df.columns and _cell_str(df.at[idx, "Facebook_URL"]) != canonical_url:
+                df.at[idx, "Facebook_URL"] = canonical_url
             canonical_present += 1
     _safe_log_console(
         logger,
@@ -3619,7 +3787,7 @@ def run_facebook_global_pass_nightmode(
             row = df.loc[idx]
             if _cell_str(row.get(FB_OPPORTUNITY_STATE_COL, "")).lower() != "fb_opportunity_present":
                 continue
-            canonical_fb_url, _ = ensure_canonical_facebook_url(row, set_row=False)
+            canonical_fb_url = canonicalize_facebook_url(df.at[idx, "Facebook_URL"] if "Facebook_URL" in df.columns else "")
             if canonical_fb_url:
                 allow_preseeded_fb_attempt_pass = True
                 break
@@ -3796,9 +3964,15 @@ def run_facebook_global_pass_nightmode(
 
             should_skip_due_to_email = _should_skip_row_due_to_email(row, skip_rows_with_email, logger)
             terminal_statuses = {"no_candidates", "unearthed_no_emails"}
-            canonical_facebook_url, _ = ensure_canonical_facebook_url(row, set_row=False)
+            canonical_facebook_url = canonicalize_facebook_url(df.at[idx, "Facebook_URL"] if "Facebook_URL" in df.columns else "")
+            if canonical_facebook_url and "Facebook_URL" in df.columns and _cell_str(df.at[idx, "Facebook_URL"]) != canonical_facebook_url:
+                df.at[idx, "Facebook_URL"] = canonical_facebook_url
             has_canonical_facebook_url = bool(canonical_facebook_url)
-            explicit_fb_entrypoints = explicit_fb_entrypoint_urls_for_row(row.to_dict())
+            explicit_fb_entrypoints = (
+                [canonical_facebook_url]
+                if canonical_facebook_url
+                else explicit_fb_entrypoint_urls_for_row(row.to_dict())
+            )
             has_explicit_fb_entrypoint = bool(explicit_fb_entrypoints)
             is_unearthed_source = _is_unearthed_source_row(row)
             unearthed_fb_first_active = bool(
