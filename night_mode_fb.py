@@ -2468,6 +2468,27 @@ def _canonicalize_and_dedupe_explicit_fb_urls(
     return canonical
 
 
+def _explicit_pass_a_execution_urls(
+    canonical_urls: Sequence[str],
+    share_runtime_fallback_urls: Sequence[str],
+) -> List[str]:
+    """
+    Build the bounded PASS A execution list.
+
+    Runtime /share fallback URLs are execution-only entrypoints for rows with
+    no accepted canonical URL. Canonical rows keep the existing canonical-only
+    PASS A behavior.
+    """
+
+    if canonical_urls:
+        return list(canonical_urls)
+
+    for share_url in share_runtime_fallback_urls or []:
+        if _is_allowed_fb_share_entrypoint_url(share_url):
+            return [share_url]
+    return []
+
+
 def _explicit_fb_row_value(row: Dict[str, str], field: str) -> str:
     for key, value in (row or {}).items():
         try:
@@ -10731,10 +10752,7 @@ class NightModeFacebookEnricher:
         fb_urls = _canonicalize_and_dedupe_explicit_fb_urls(
             fb_urls, logger=self.logger, debug=self._debug_fb_url_flow
         )
-        pass_a_urls: List[str] = list(fb_urls)
-        for share_url in share_runtime_fallback_urls:
-            if share_url not in pass_a_urls:
-                pass_a_urls.append(share_url)
+        pass_a_urls = _explicit_pass_a_execution_urls(fb_urls, share_runtime_fallback_urls)
         explicit_intake = classify_explicit_fb_intake(
             prepared_explicit_row,
             accepted_urls=fb_urls,

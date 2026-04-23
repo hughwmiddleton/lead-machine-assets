@@ -503,6 +503,69 @@ def test_unearthed_runtime_share_fallback_never_commits_raw_share_url(monkeypatc
     assert any("[FB Share Runtime Resolve] canonical_url='' commit=0" in msg for msg in logs)
 
 
+def test_canonical_url_ignores_stale_share_runtime_marker(monkeypatch, enricher):
+    logs = []
+    enricher.logger = lambda msg: logs.append(msg)
+    monkeypatch.setattr(enricher, "_maybe_recover_or_skip_on_checkpoint", lambda: True)
+    monkeypatch.setattr(enricher, "_has_authenticated_session", lambda: True)
+    monkeypatch.setattr(
+        enricher,
+        "_search_for_page",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("canonical no-email PASS A should not invoke PASS B")),
+    )
+
+    canonical_url = "https://www.facebook.com/canonical.runtime.marker"
+    share_url = "https://www.facebook.com/share/19BActwuev?mibextid=wwXIfr"
+    resolve_calls = []
+    scrape_calls = []
+
+    monkeypatch.setattr(
+        enricher,
+        "_resolve_pass_a_explicit_scrape_url",
+        lambda direct_url, authed_session_available=False: resolve_calls.append(direct_url) or direct_url,
+    )
+
+    def fake_scrape(self, fb_url, row, artist_name, allow_anon=False, candidate_context=None):
+        scrape_calls.append(fb_url)
+        if fb_url != canonical_url:
+            raise AssertionError(f"unexpected PASS A target: {fb_url}")
+        return (
+            nmfb.NightModeFacebookResult(
+                email="",
+                email_all="",
+                facebook_url=canonical_url,
+                email_source_url=canonical_url,
+                email_extract_method="regex",
+            ),
+            [],
+            "session",
+            "no_email_on_page",
+        )
+
+    monkeypatch.setattr(nmfb.NightModeFacebookEnricher, "_scrape_single_fb_candidate", fake_scrape)
+
+    row = {
+        "Artist Name": "Canonical Runtime Marker",
+        "Source Directory": "unearthed",
+        "Email": "",
+        "Email_All": "",
+        "Facebook_URL": canonical_url,
+        "Social Link": share_url,
+        nmfb.FB_SHARE_RUNTIME_FALLBACK_URL_COL: share_url,
+        nmfb.FB_SHARE_RUNTIME_FALLBACK_SOURCE_COL: "Social Link",
+    }
+
+    result = enricher.enrich_row_with_facebook_night(row)
+
+    assert resolve_calls == [canonical_url]
+    assert scrape_calls == [canonical_url]
+    assert result.get("FB_Status", "") == "pass_a_no_email_on_page"
+    assert result.get("Facebook_URL", "") == canonical_url
+    assert any('[Night FB][Explicit Intake]' in msg and 'outcome="attempt"' in msg for msg in logs)
+    assert any(f"[Night FB] Using explicit FB URLs: ['{canonical_url}']" in msg for msg in logs)
+    assert not any("[FB Share Runtime Resolve]" in msg for msg in logs)
+
+
 def test_non_unearthed_without_seeded_fb_still_runs_search(monkeypatch, enricher):
     search_calls = []
     monkeypatch.setattr(enricher, "_maybe_recover_or_skip_on_checkpoint", lambda: True)

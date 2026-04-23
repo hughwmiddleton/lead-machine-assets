@@ -96,7 +96,7 @@ def test_miya_zawa_unresolved_smoke_remains_truthful_without_fake_url(tmp_path: 
     assert artifacts.summary["facebook_url_alias"] == ""
     assert artifacts.summary["facebook_url_title_alias"] == ""
     assert artifacts.summary["fb_url_present"] is False
-    assert artifacts.summary["fb_entrypoint_present"] is False
+    assert artifacts.summary["fb_entrypoint_present"] is True
     assert artifacts.summary["explicit_intake_outcome"] == "attempt_share_runtime_fallback"
     assert artifacts.summary["fb_scrape_started"] is True
     assert artifacts.summary["helper_calls"] == 1
@@ -196,7 +196,7 @@ def test_multi_row_unresolved_smoke_stays_truthful_per_row(tmp_path: Path) -> No
         assert row["facebook_url_alias"] == ""
         assert row["facebook_url_title_alias"] == ""
         assert row["fb_url_present"] is False
-        assert row["fb_entrypoint_present"] is False
+        assert row["fb_entrypoint_present"] is True
         assert row["explicit_intake_outcome"] == "attempt_share_runtime_fallback"
         assert row["fb_scrape_started"] is True
         assert row["pass_a_attempted"] == 1
