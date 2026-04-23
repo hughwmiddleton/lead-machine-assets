@@ -1143,6 +1143,34 @@ def test_classify_explicit_fb_intake_allows_runtime_share_fallback() -> None:
     assert decision.canonical_value_present is False
 
 
+def test_explicit_fb_entrypoint_present_allows_runtime_share_fallback_only_at_admission() -> None:
+    share_url = "https://www.facebook.com/share/19BActwuev?mibextid=wwXIfr"
+    row = {
+        "Artist Name": "Fallback Share",
+        "Source Directory": "unearthed",
+        "Facebook_URL": "",
+        "Social Link": share_url,
+        night_mode_fb.FB_SHARE_RUNTIME_FALLBACK_URL_COL: share_url,
+        night_mode_fb.FB_SHARE_RUNTIME_FALLBACK_SOURCE_COL: "Social Link",
+    }
+
+    assert night_mode_fb.explicit_fb_entrypoint_urls_for_row(row) == []
+    assert night_mode_fb.explicit_fb_entrypoint_present_for_row(row) is True
+
+
+def test_explicit_fb_entrypoint_present_requires_runtime_marker_for_share_url() -> None:
+    share_url = "https://www.facebook.com/share/19BActwuev?mibextid=wwXIfr"
+    row = {
+        "Artist Name": "Fallback Share",
+        "Source Directory": "unearthed",
+        "Facebook_URL": "",
+        "Social Link": share_url,
+    }
+
+    assert night_mode_fb.explicit_fb_entrypoint_urls_for_row(row) == []
+    assert night_mode_fb.explicit_fb_entrypoint_present_for_row(row) is False
+
+
 def test_pass_a_uses_fb_url_from_social_link(monkeypatch) -> None:
     enricher = night_mode_fb.NightModeFacebookEnricher(
         legacy_module=None,

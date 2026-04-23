@@ -2542,6 +2542,19 @@ def _fb_share_runtime_fallback_source_for_row(row: Dict[str, str]) -> str:
     return _fb_share_runtime_fallback_value(row, FB_SHARE_RUNTIME_FALLBACK_SOURCE_COL)
 
 
+def explicit_fb_entrypoint_present_for_row(
+    row: Dict[str, str],
+    *,
+    accepted_urls: Optional[Sequence[str]] = None,
+    share_runtime_fallback_urls: Optional[Sequence[str]] = None,
+) -> bool:
+    authoritative_urls = explicit_fb_entrypoint_urls_for_row(row, accepted_urls=accepted_urls)
+    runtime_urls = list(share_runtime_fallback_urls) if share_runtime_fallback_urls is not None else []
+    if not runtime_urls:
+        runtime_urls = fb_share_runtime_fallback_urls_for_row(row)
+    return bool(authoritative_urls or runtime_urls)
+
+
 def _looks_like_explicit_fb_candidate(value: str) -> bool:
     lowered = (value or "").strip().lower()
     if not lowered:
@@ -10676,9 +10689,14 @@ class NightModeFacebookEnricher:
         row_id = self._fb_driver_row_id(row=result, artist_name=artist_name, row_index=row_index)
         is_unearthed = self._is_unearthed_source(result)
         explicit_fb_entrypoints = explicit_fb_entrypoint_urls_for_row(result)
-        share_runtime_fallback_present = bool(fb_share_runtime_fallback_urls_for_row(result))
-        has_seeded_fb = bool(explicit_fb_entrypoints)
-        unearthed_fb_first_active = bool(is_unearthed and (has_seeded_fb or share_runtime_fallback_present))
+        share_runtime_fallback_urls = fb_share_runtime_fallback_urls_for_row(result)
+        share_runtime_fallback_present = bool(share_runtime_fallback_urls)
+        has_seeded_fb = explicit_fb_entrypoint_present_for_row(
+            result,
+            accepted_urls=explicit_fb_entrypoints,
+            share_runtime_fallback_urls=share_runtime_fallback_urls,
+        )
+        unearthed_fb_first_active = bool(is_unearthed and has_seeded_fb)
         skip_due_to_email, email_all_clean = _row_has_usable_email_for_fb_skip(result)
         if skip_due_to_email and not unearthed_fb_first_active:
             self.fb_rows_skipped["no_opportunity"] += 1

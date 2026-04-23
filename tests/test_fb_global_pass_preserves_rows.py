@@ -107,6 +107,11 @@ def test_fb_global_pass_preserves_rows_and_emails(monkeypatch, tmp_path):
     monkeypatch.setattr(pipeline_runner, "_load_legacy_module", _make_dummy_module)
     monkeypatch.setattr(pipeline_runner, "_load_fb_state", lambda _: {})
     monkeypatch.setattr(pipeline_runner, "_write_fb_state", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        pipeline_runner,
+        "_build_night_fb_share_promotion_resolver",
+        lambda **kwargs: (lambda url: ""),
+    )
 
     status = pipeline_runner.run_facebook_global_pass_nightmode(
         input_csv=input_csv.as_posix(),
@@ -164,6 +169,79 @@ def test_fb_global_pass_preserves_rows_and_emails(monkeypatch, tmp_path):
 
     # Status object reflects that work happened but total rows equal input.
     assert status.total_rows == len(rows)
+
+
+def test_fb_global_pass_runtime_share_fallback_admits_row_once_without_canonical_mutation(monkeypatch, tmp_path):
+    share_url = "https://www.facebook.com/share/19BActwuev?mibextid=wwXIfr"
+    input_csv = tmp_path / "master_pre_fb_runtime_share.csv"
+    output_csv = tmp_path / "master_post_fb_runtime_share.csv"
+    state_path = tmp_path / "fb_state_runtime_share.json"
+    pd.DataFrame(
+        [
+            {
+                "Artist Name": "Runtime Share",
+                "Source Directory": "unearthed",
+                "__source_job": "job_unearthed_runtime",
+                "Email": "",
+                "Email_All": "",
+                "Social Link": share_url,
+                "Facebook_URL": "",
+                nmfb.FB_SHARE_RUNTIME_FALLBACK_URL_COL: share_url,
+                nmfb.FB_SHARE_RUNTIME_FALLBACK_SOURCE_COL: "Social Link",
+            }
+        ]
+    ).to_csv(input_csv, index=False)
+
+    logs = []
+
+    class RuntimeShareHelper(DummyFBHelper):
+        def enrich_row_with_facebook_night(self, row, row_index=0):
+            self.calls += 1
+            self.rows.append({"row": dict(row or {}), "row_index": row_index})
+            return {
+                "FB_Status": "pass_a_no_email_on_page",
+                "FB_Reason": "session_fetch_ok_no_email",
+                "Email": "",
+                "Email_All": "",
+                "Facebook_URL": "",
+            }
+
+    helper = RuntimeShareHelper()
+
+    monkeypatch.setenv("FB_USERNAME", "user")
+    monkeypatch.setenv("FB_PASSWORD", "pass")
+    monkeypatch.setattr(pipeline_runner, "NightModeFacebookEnricher", lambda *args, **kwargs: helper)
+    monkeypatch.setattr(pipeline_runner, "_load_legacy_module", _make_dummy_module)
+    monkeypatch.setattr(pipeline_runner, "_load_fb_state", lambda _: {})
+    monkeypatch.setattr(pipeline_runner, "_write_fb_state", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        pipeline_runner,
+        "_build_night_fb_share_promotion_resolver",
+        lambda **kwargs: (lambda url: ""),
+    )
+
+    pipeline_runner.run_facebook_global_pass_nightmode(
+        input_csv=input_csv.as_posix(),
+        output_csv=output_csv.as_posix(),
+        state_path=state_path.as_posix(),
+        skip_rows_with_email=True,
+        logger=logs.append,
+    )
+
+    df_out = pd.read_csv(output_csv, dtype=str, keep_default_na=False).fillna("")
+    row_gate_logs = [msg for msg in logs if "[Night FB][Row Gate]" in msg]
+
+    assert helper.calls == 1
+    assert any(
+        "artist='Runtime Share'" in msg
+        and "fb_url_present=False" in msg
+        and "fb_entrypoint_present=True" in msg
+        and "share_runtime_fallback=True" in msg
+        and "eligible_for_fb=True" in msg
+        for msg in row_gate_logs
+    )
+    assert df_out.loc[0, "Facebook_URL"] == ""
+    assert df_out.loc[0, "FB_Status"] == "pass_a_no_email_on_page"
 
 
 def test_nightmode_fb_pass_allows_discovery_fallback_without_canonical_fb_url_even_if_attempted(

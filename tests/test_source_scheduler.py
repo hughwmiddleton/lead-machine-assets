@@ -885,7 +885,7 @@ def test_row_linear_unresolved_share_url_sets_runtime_fallback_before_fb_first_g
     assert "canonical_present=0" in logs[readiness_idx]
     assert "share_runtime_fallback=1" in logs[readiness_idx]
     assert "fb_url_present=False" in logs[readiness_idx]
-    assert "fb_entrypoint_present=False" in logs[readiness_idx]
+    assert "fb_entrypoint_present=True" in logs[readiness_idx]
     assert seed_df.at[0, "__fb_share_runtime_fallback_url"] == "https://www.facebook.com/share/19BActwuev?mibextid=wwXIfr"
     assert sum(1 for line in logs if "[FB Share Canonicalize]" in line and "artist='Migsy'" in line) == 2
     assert not any("[Unearthed Path] no usable FB URL, resuming standard path artist='Migsy' row=0" in line for line in logs)

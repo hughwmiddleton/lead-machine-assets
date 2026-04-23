@@ -113,6 +113,7 @@ from night_mode_fb import (
     NightFBRunState,
     NightModeFacebookEnricher,
     _build_fb_discovery_query,
+    explicit_fb_entrypoint_present_for_row,
     fb_share_runtime_fallback_urls_for_row,
     classify_explicit_fb_intake,
     explicit_fb_entrypoint_urls_for_row,
@@ -1990,9 +1991,15 @@ def _row_has_usable_unearthed_fb_entrypoint(row: Any) -> bool:
         row_payload = row
     try:
         explicit_urls = explicit_fb_entrypoint_urls_for_row(row_payload)
+        share_runtime_fallback_urls = fb_share_runtime_fallback_urls_for_row(row_payload)
     except Exception:
         explicit_urls = []
-    return bool(explicit_urls)
+        share_runtime_fallback_urls = []
+    return explicit_fb_entrypoint_present_for_row(
+        row_payload,
+        accepted_urls=explicit_urls,
+        share_runtime_fallback_urls=share_runtime_fallback_urls,
+    )
 
 
 def _should_force_unearthed_platform_enrichment(row: Any, platform: str) -> bool:
@@ -14580,10 +14587,14 @@ class CrossDirectoryEnricherWorker(QThread):
         if existing_fb_url:
             return False
 
-        explicit_fb_entrypoints = explicit_fb_entrypoint_urls_for_row(
-            seed_df.loc[row_idx].to_dict()
-        )
-        if explicit_fb_entrypoints:
+        row_payload = seed_df.loc[row_idx].to_dict()
+        explicit_fb_entrypoints = explicit_fb_entrypoint_urls_for_row(row_payload)
+        share_runtime_fallback_urls = fb_share_runtime_fallback_urls_for_row(row_payload)
+        if explicit_fb_entrypoint_present_for_row(
+            row_payload,
+            accepted_urls=explicit_fb_entrypoints,
+            share_runtime_fallback_urls=share_runtime_fallback_urls,
+        ):
             self.log_message.emit(
                 f"[FB Discover] Explicit FB entrypoint already present for '{artist}'; skipping bounded discovery."
             )
@@ -16388,14 +16399,19 @@ class CrossDirectoryEnricherWorker(QThread):
             canonical_url, _ = ensure_canonical_facebook_url(row_payload, set_row=False)
             canonical_present = bool(canonicalize_facebook_url(canonical_url))
             explicit_fb_entrypoints = explicit_fb_entrypoint_urls_for_row(row_payload)
-            fb_entrypoint_present = bool(explicit_fb_entrypoints)
-            share_runtime_fallback = bool(fb_share_runtime_fallback_urls_for_row(row_payload))
+            share_runtime_fallback_urls = fb_share_runtime_fallback_urls_for_row(row_payload)
+            share_runtime_fallback = bool(share_runtime_fallback_urls)
+            fb_entrypoint_present = explicit_fb_entrypoint_present_for_row(
+                row_payload,
+                accepted_urls=explicit_fb_entrypoints,
+                share_runtime_fallback_urls=share_runtime_fallback_urls,
+            )
             self.log_message.emit(
                 f"[Unearthed Path][FB Readiness] artist='{artist}' row={row_idx} "
                 f"canonical_present={int(canonical_present)} share_runtime_fallback={int(share_runtime_fallback)} "
                 f"fb_url_present={canonical_present} fb_entrypoint_present={fb_entrypoint_present}"
             )
-            if canonical_present or fb_entrypoint_present or share_runtime_fallback:
+            if canonical_present or fb_entrypoint_present:
                 streamlined_rows.add(row_idx)
                 self.log_message.emit(
                     f"[Unearthed Path] activated artist='{artist}' row={row_idx}"
