@@ -2373,6 +2373,46 @@ def _canonicalize_explicit_fb_entrypoint_url(url: str) -> Optional[str]:
     return norm
 
 
+_FB_SHARE_RESOLVED_TRIM_SUFFIXES = frozenset(
+    {
+        "about",
+        "about_contact_and_basic_info",
+        "about_details",
+        "contact",
+        "photos",
+        "posts",
+    }
+)
+
+
+def _canonicalize_share_resolved_fb_url(url: str) -> str:
+    """Collapse share-landing FB URLs into an explicit-safe canonical page/profile URL."""
+    norm = _normalise_fb_url(url)
+    if not norm:
+        return ""
+    try:
+        parsed = urllib.parse.urlparse(norm)
+    except Exception:
+        return ""
+
+    path_parts = [part for part in (parsed.path or "").split("/") if part]
+    lower_parts = [part.lower() for part in path_parts]
+    if len(path_parts) == 2 and lower_parts[1] in _FB_SHARE_RESOLVED_TRIM_SUFFIXES:
+        norm = urllib.parse.urlunparse(("https", "www.facebook.com", f"/{path_parts[0]}", "", "", ""))
+    elif len(path_parts) == 4 and lower_parts[0] == "people" and lower_parts[3] in _FB_SHARE_RESOLVED_TRIM_SUFFIXES:
+        norm = urllib.parse.urlunparse(
+            ("https", "www.facebook.com", f"/people/{path_parts[1]}/{path_parts[2]}", "", "", "")
+        )
+
+    canonical = _canonicalize_explicit_fb_entrypoint_url(norm)
+    if not canonical:
+        return ""
+    guard_reason, _ = _explicit_fb_pre_scrape_guard_reason(canonical)
+    if guard_reason:
+        return ""
+    return canonical
+
+
 def _canonicalize_and_dedupe_explicit_fb_urls(
     urls: Sequence[str], logger: LoggerFn = None, debug: bool = False
 ) -> List[str]:
@@ -6783,6 +6823,47 @@ def _pick_fb_contact_link(soup: BeautifulSoup, base_url: str) -> Optional[str]:
     return candidates[0][3]
 
 
+def _extract_share_landing_canonical_fb_url(
+    page_html: str,
+    *,
+    current_url: str = "",
+    requested_url: str = "",
+) -> str:
+    html_text = str(page_html or "")
+    if not html_text.strip():
+        return ""
+    try:
+        soup = BeautifulSoup(html_text, "html.parser")
+    except Exception:
+        return ""
+
+    base_url = current_url or requested_url or "https://www.facebook.com/"
+    raw_candidates: List[str] = []
+    for selector, attr in (
+        ('meta[property="og:url"]', "content"),
+        ('link[rel="canonical"]', "href"),
+    ):
+        tag = soup.select_one(selector)
+        value = str(tag.get(attr, "") or "").strip() if tag else ""
+        if value:
+            raw_candidates.append(value)
+
+    contact_link = _pick_fb_contact_link(soup, base_url)
+    if contact_link:
+        raw_candidates.append(contact_link)
+
+    seen: Set[str] = set()
+    for raw_candidate in raw_candidates:
+        resolved_candidate = urllib.parse.urljoin(base_url, raw_candidate).split("#", 1)[0]
+        if resolved_candidate in seen:
+            continue
+        seen.add(resolved_candidate)
+        canonical = _canonicalize_share_resolved_fb_url(resolved_candidate)
+        if canonical:
+            return canonical
+    return ""
+
+
 def _night_fb_has_music_signals(soup: BeautifulSoup, meta: Optional[Dict[str, str]] = None) -> bool:
     if soup is None:
         return False
@@ -8038,11 +8119,18 @@ class NightModeFacebookEnricher:
                 or _safe_current_url(driver)
                 or target_url
             )
+            page_html = str(getattr(driver, "page_source", "") or "")
         except Exception as exc:
             _log(self.logger, f"[Night FB][PASS A] share wrapper resolution failed for '{target_url}': {exc}")
             return target_url
 
-        canonical_resolved = _normalise_fb_url(resolved_url)
+        canonical_resolved = _canonicalize_share_resolved_fb_url(resolved_url)
+        if not canonical_resolved:
+            canonical_resolved = _extract_share_landing_canonical_fb_url(
+                page_html,
+                current_url=resolved_url,
+                requested_url=target_url,
+            )
         if not canonical_resolved or _is_allowed_fb_share_entrypoint_url(canonical_resolved):
             return target_url
 

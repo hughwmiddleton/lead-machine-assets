@@ -21,8 +21,10 @@ import pipeline_runner
 from night_mode_fb import NightFBRunState, NightFBSessionSource
 
 DEFAULT_FIXTURE = REPO_ROOT / "tests" / "fixtures" / "miya_zawa_unearthed_share_pre_fb.csv"
+DEFAULT_MULTI_ROW_FIXTURE = REPO_ROOT / "tests" / "fixtures" / "fb_share_multi_row_pre_fb.csv"
 DEFAULT_OUTPUT_ROOT = Path("/tmp/lead-machine-miya-zawa-share-smoke")
 DEFAULT_RESOLVED_URL = "https://www.facebook.com/itsmiyazawa"
+FIXTURE_RESOLVED_URL_COLUMN = "Smoke_Resolved_Facebook_URL"
 
 
 class _SmokeLogger:
@@ -89,8 +91,11 @@ class SmokeRunArtifacts:
     state_path: Path
     log_path: Path
     summary_path: Path
+    rows_summary_path: Path
     log_lines: list[str]
     row: dict[str, str]
+    rows: list[dict[str, Any]]
+    rows_by_artist: dict[str, dict[str, Any]]
     summary: dict[str, Any]
 
 
@@ -124,9 +129,123 @@ def _extract_pass_a_attempted(line: str) -> int:
     return int(match.group(1)) if match else 0
 
 
+def _extract_log_int(line: str, key: str) -> int | None:
+    match = re.search(rf"{re.escape(key)}=(\d+)", line)
+    return int(match.group(1)) if match else None
+
+
+def _extract_log_str(line: str, key: str) -> str:
+    for quote in ("'", '"'):
+        match = re.search(rf"{re.escape(key)}={quote}([^{quote}]*){quote}", line)
+        if match:
+            return match.group(1)
+    return ""
+
+
+def _extract_share_outcome(line: str) -> str:
+    match = re.search(r"outcome='([^']+)'", line)
+    return match.group(1) if match else ""
+
+
+def _extract_share_canonical_url(line: str) -> str:
+    match = re.search(r"canonical_url='([^']+)'", line)
+    if match:
+        return match.group(1)
+    match = re.search(r"resolved_url='([^']+)'", line)
+    return match.group(1) if match else ""
+
+
 def _write_df(df: pd.DataFrame, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(path, index=False)
+
+
+def _build_fixture_resolved_url_map(fixture_df: pd.DataFrame) -> dict[str, str]:
+    resolved_map: dict[str, str] = {}
+    if FIXTURE_RESOLVED_URL_COLUMN not in fixture_df.columns:
+        return resolved_map
+
+    for _, row in fixture_df.iterrows():
+        row_dict = row.to_dict()
+        resolved_url = str(row_dict.get(FIXTURE_RESOLVED_URL_COLUMN, "") or "").strip()
+        if not resolved_url:
+            continue
+        raw_share_url, _ = pipeline_runner._find_explicit_fb_share_candidate(row_dict)
+        if not raw_share_url:
+            artist_name = str(row_dict.get("Artist Name", "") or row_dict.get("Artist", "") or "<unknown>")
+            raise ValueError(
+                f"Fixture row for '{artist_name}' provided {FIXTURE_RESOLVED_URL_COLUMN} but has no Facebook /share URL"
+            )
+        existing = resolved_map.get(raw_share_url)
+        if existing and existing != resolved_url:
+            raise ValueError(f"Conflicting resolved URLs for share fixture {raw_share_url}")
+        resolved_map[raw_share_url] = resolved_url
+    return resolved_map
+
+
+def _build_row_summaries(
+    out_df: pd.DataFrame,
+    *,
+    log_lines: list[str],
+    helper: _SmokeNightFBHelper,
+) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
+    gate_lines_by_row: dict[int, str] = {}
+    intake_lines_by_artist: dict[str, str] = {}
+    share_lines_by_artist: dict[str, str] = {}
+    attempted_row_indices = {
+        int(item["row_index"])
+        for item in helper.rows
+        if str(item.get("row_index", "")).strip().isdigit()
+    }
+
+    for line in log_lines:
+        if "[Night FB][Row Gate]" in line:
+            row_index = _extract_log_int(line, "row")
+            if row_index is not None:
+                gate_lines_by_row[row_index] = line
+        elif "[Night FB][Explicit Intake]" in line:
+            artist_name = _extract_log_str(line, "artist")
+            if artist_name:
+                intake_lines_by_artist[artist_name] = line
+        elif "[FB Share Canonicalize]" in line and "outcome='" in line:
+            artist_name = _extract_log_str(line, "artist")
+            if artist_name:
+                share_lines_by_artist[artist_name] = line
+
+    rows: list[dict[str, Any]] = []
+    rows_by_artist: dict[str, dict[str, Any]] = {}
+    for idx, (_, row) in enumerate(out_df.iterrows()):
+        row_dict = row.to_dict()
+        artist_name = str(row_dict.get("Artist Name", "") or row_dict.get("Artist", "") or f"row-{idx}")
+        gate_line = gate_lines_by_row.get(idx, "")
+        intake_line = intake_lines_by_artist.get(artist_name, "")
+        share_line = share_lines_by_artist.get(artist_name, "")
+        row_summary = {
+            "row_index": int(idx),
+            "artist_name": artist_name,
+            "social_link": row_dict.get("Social Link", ""),
+            "canonical_facebook_url": row_dict.get("Facebook_URL", ""),
+            "facebook_url_alias": row_dict.get("facebook_url", ""),
+            "facebook_url_title_alias": row_dict.get("Facebook URL", ""),
+            "fb_status": row_dict.get("FB_Status", ""),
+            "fb_opportunity_state": row_dict.get("FB_Opportunity_State", ""),
+            "fb_gate_state": row_dict.get("FB_Gate_State", ""),
+            "fb_attempt_state": row_dict.get("FB_Attempt_State", ""),
+            "fb_write_state": row_dict.get("FB_Write_State", ""),
+            "fb_url_present": _extract_gate_bool(gate_line, "fb_url_present"),
+            "fb_entrypoint_present": _extract_gate_bool(gate_line, "fb_entrypoint_present"),
+            "explicit_intake_outcome": _extract_intake_outcome(intake_line),
+            "fb_scrape_started": idx in attempted_row_indices,
+            "pass_a_attempted": int(idx in attempted_row_indices),
+            "share_canonicalization_outcome": _extract_share_outcome(share_line),
+            "share_canonicalization_url": _extract_share_canonical_url(share_line),
+        }
+        rows.append(row_summary)
+
+        row_key = artist_name if artist_name not in rows_by_artist else f"{artist_name}#{idx}"
+        rows_by_artist[row_key] = row_summary
+
+    return rows, rows_by_artist
 
 
 def run_smoke(
@@ -143,10 +262,13 @@ def run_smoke(
     state_path = output_root / "facebook_state.json"
     log_path = output_root / "smoke.log"
     summary_path = output_root / "summary.json"
+    rows_summary_path = output_root / "row_summaries.json"
 
     fixture_df = _load_fixture_df(fixture_path)
-    if len(fixture_df.index) != 1:
-        raise ValueError(f"Expected exactly one fixture row, found {len(fixture_df.index)} in {fixture_path}")
+    fixture_row_count = int(len(fixture_df.index))
+    if fixture_row_count < 1:
+        raise ValueError(f"Expected at least one fixture row in {fixture_path}")
+    fixture_resolved_url_map = _build_fixture_resolved_url_map(fixture_df)
 
     output_root.mkdir(parents=True, exist_ok=True)
     log_path.write_text("", encoding="utf-8")
@@ -159,7 +281,7 @@ def run_smoke(
 
     resolver: Optional[Callable[[str], Optional[str]]]
     if mode == "resolved":
-        resolver = lambda raw: resolved_url
+        resolver = lambda raw: fixture_resolved_url_map.get(str(raw or "").strip(), resolved_url)
     elif mode == "unresolved":
         resolver = lambda raw: ""
     else:
@@ -188,7 +310,7 @@ def run_smoke(
         helper.rows.append(
             {
                 "row": dict(row or {}),
-                "row_index": int(len(helper.rows)),
+                "row_index": int(str((row or {}).get("__row_id", len(helper.rows))) or len(helper.rows)),
                 "artist_name": artist_name,
                 "allow_anon": allow_anon,
                 "candidate_context": dict(candidate_context or {}),
@@ -225,7 +347,7 @@ def run_smoke(
             input_csv=input_csv.as_posix(),
             output_csv=output_csv.as_posix(),
             state_path=state_path.as_posix(),
-            max_rows_per_run=1,
+            max_rows_per_run=max(1, fixture_row_count),
             per_row_delay_range=(0.0, 0.0),
             short_break_every=0,
             long_break_every=0,
@@ -243,15 +365,18 @@ def run_smoke(
 
     out_df = _load_fixture_df(output_csv)
     row = out_df.iloc[0].to_dict()
+    rows, rows_by_artist = _build_row_summaries(out_df, log_lines=list(logger.lines), helper=helper)
     gate_line = _last_match(logger.lines, "[Night FB][Row Gate]")
     intake_line = _last_match(logger.lines, "[Night FB][Explicit Intake]")
     pass_a_summary_line = _last_match(logger.lines, "[FB Night][PASS A Summary]")
+    rows_summary_path.write_text(json.dumps({"rows": rows, "rows_by_artist": rows_by_artist}, indent=2), encoding="utf-8")
 
     summary = {
         "fixture_path": fixture_path.as_posix(),
         "output_root": output_root.as_posix(),
         "mode": mode,
         "input_rows": int(len(out_df.index)),
+        "resolved_fixture_rows": int(len(fixture_resolved_url_map)),
         "helper_calls": int(helper.calls),
         "helper_urls": list(helper.visited_urls),
         "canonical_facebook_url": row.get("Facebook_URL", ""),
@@ -268,6 +393,9 @@ def run_smoke(
         "explicit_intake_outcome": _extract_intake_outcome(intake_line),
         "fb_scrape_started": bool(helper.calls),
         "pass_a_attempted": _extract_pass_a_attempted(pass_a_summary_line),
+        "rows_with_canonical_facebook_url": sum(bool(item["canonical_facebook_url"]) for item in rows),
+        "rows_with_explicit_intake_attempt": sum(item["explicit_intake_outcome"] == "attempt" for item in rows),
+        "rows_with_pass_a_attempt": sum(item["pass_a_attempted"] for item in rows),
         "night_fb_discovery_skipped": any(
             "[Unearthed Path] no usable FB URL; skipping Night FB discovery" in line for line in logger.lines
         ),
@@ -277,6 +405,7 @@ def run_smoke(
         ),
         "logs_path": log_path.as_posix(),
         "output_csv": output_csv.as_posix(),
+        "rows_summary_path": rows_summary_path.as_posix(),
     }
     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
@@ -288,20 +417,25 @@ def run_smoke(
         state_path=state_path,
         log_path=log_path,
         summary_path=summary_path,
+        rows_summary_path=rows_summary_path,
         log_lines=list(logger.lines),
         row=row,
+        rows=rows,
+        rows_by_artist=rows_by_artist,
         summary=summary,
     )
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run the single-row miya-zawa Unearthed Facebook /share smoke harness.",
+        description="Run the default miya-zawa canary or a custom Facebook /share smoke fixture.",
     )
     parser.add_argument(
         "--fixture",
+        "--fixture-path",
+        dest="fixture_path",
         default=str(DEFAULT_FIXTURE),
-        help="Path to the one-row pre-FB miya-zawa fixture CSV.",
+        help="Path to the pre-FB smoke fixture CSV. Defaults to the single-row miya-zawa canary.",
     )
     parser.add_argument(
         "--output-root",
@@ -325,7 +459,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     artifacts = run_smoke(
-        fixture_path=Path(args.fixture),
+        fixture_path=Path(args.fixture_path),
         output_root=Path(args.output_root),
         mode=args.mode,
         resolved_url=args.resolved_url,

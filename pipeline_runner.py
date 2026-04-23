@@ -318,6 +318,53 @@ def _find_explicit_fb_share_candidate(row: Any) -> Tuple[str, str]:
     return ("", "")
 
 
+def _share_canonicalization_failure_reason(raw_share_url: str, resolved_url: str) -> str:
+    candidate = _cell_str(resolved_url)
+    if not candidate:
+        return "resolver_returned_blank"
+    if _is_explicit_fb_share_url(candidate):
+        return "redirect_stayed_on_share_wrapper"
+    if is_fb_login_redirect(candidate):
+        return "redirect_resolved_to_login_surface"
+
+    lowered = candidate.lower()
+    if any(token in lowered for token in ("/login", "/checkpoint", "/consent", "/recover", "/register", "two-factor", "two_factor")):
+        return "redirect_resolved_to_login_surface"
+
+    try:
+        parsed = urlsplit(candidate)
+    except Exception:
+        return "resolver_returned_malformed_url"
+
+    host = (parsed.netloc or "").lower()
+    if host.startswith("business.facebook.com") or "business.facebook.com" in host:
+        return "redirect_resolved_to_business_surface"
+    if host and "facebook.com" not in host and host not in {"fb.com", "www.fb.com", "m.fb.com", "fb.me", "www.fb.me", "m.fb.me"}:
+        return "redirect_resolved_to_non_facebook_surface"
+
+    path = (parsed.path or "").lower()
+    if path.startswith(
+        (
+            "/dialog/",
+            "/events",
+            "/groups",
+            "/permalink.php",
+            "/photo.php",
+            "/plugins/",
+            "/reel",
+            "/share.php",
+            "/sharer.php",
+            "/story.php",
+            "/watch",
+        )
+    ):
+        return "redirect_did_not_resolve_to_explicit_profile"
+
+    if candidate == _cell_str(raw_share_url):
+        return "redirect_stayed_on_share_wrapper"
+    return "redirect_did_not_resolve_to_explicit_profile"
+
+
 def _direct_canonical_fb_url_for_row(row: Any) -> str:
     for field in ("Facebook_URL", "facebook_url", "Facebook URL", "FB_URL", "facebook", "Facebook"):
         canonical = canonicalize_facebook_url(_row_get_ci_value(row, field))
@@ -375,9 +422,10 @@ def _canonicalize_explicit_fb_share_for_row(
             resolved_url = _cell_str(share_resolver(raw_share_url))
         except Exception:
             reason = "resolver_error"
-        canonical_url = canonicalize_facebook_url(resolved_url)
+        canonical_candidates = explicit_fb_entrypoint_urls_for_row({"Facebook_URL": resolved_url}) if resolved_url else []
+        canonical_url = _cell_str(canonical_candidates[0]) if canonical_candidates else ""
         if not canonical_url:
-            reason = reason or "canonicalization_dropped"
+            reason = reason or _share_canonicalization_failure_reason(raw_share_url, resolved_url)
 
     if canonical_url:
         _write_explicit_fb_canonical_fields(df, idx, canonical_url)
@@ -388,9 +436,10 @@ def _canonicalize_explicit_fb_share_for_row(
         return (canonical_url, source_field)
 
     _clear_explicit_fb_share_aliases(df, idx)
+    resolved_fragment = f" resolved_url='{resolved_url}'" if resolved_url else ""
     _safe_log_console(
         logger,
-        f"[FB Share Canonicalize] artist='{artist_label}' outcome='unresolved' reason='{reason or 'unresolved'}'",
+        f"[FB Share Canonicalize] artist='{artist_label}' outcome='unresolved' reason='{reason or 'unresolved'}'{resolved_fragment}",
     )
     return ("", source_field)
 

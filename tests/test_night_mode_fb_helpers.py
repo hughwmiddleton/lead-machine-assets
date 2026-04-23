@@ -1001,6 +1001,56 @@ def test_explicit_fb_entrypoint_urls_canonicalize_p_shapes() -> None:
     ) == ["https://www.facebook.com/echostar"]
 
 
+def test_share_resolved_fb_url_trims_about_suffixes_and_rejects_business_surfaces() -> None:
+    assert (
+        night_mode_fb._canonicalize_share_resolved_fb_url(
+            "https://www.facebook.com/ItsMiyaZawa/about?ref=page_internal"
+        )
+        == "https://www.facebook.com/itsmiyazawa"
+    )
+    assert (
+        night_mode_fb._canonicalize_share_resolved_fb_url(
+            "https://www.facebook.com/p/EchoStar-1000000000123/about"
+        )
+        == "https://www.facebook.com/people/echostar/1000000000123"
+    )
+    assert night_mode_fb._canonicalize_share_resolved_fb_url("https://business.facebook.com/latest/composer/123") == ""
+
+
+def test_resolve_pass_a_explicit_scrape_url_recovers_canonical_from_share_landing_html() -> None:
+    enricher = night_mode_fb.NightModeFacebookEnricher.__new__(night_mode_fb.NightModeFacebookEnricher)
+    enricher.logger = None
+
+    class _Driver:
+        current_url = "https://www.facebook.com/share/15ZPp4vohe/?mibextid=wwXIfr"
+        page_source = """
+            <html>
+              <head>
+                <link rel="canonical" href="https://www.facebook.com/ItsMiyaZawa/about?ref=page_internal" />
+              </head>
+              <body>
+                <div>share landing</div>
+              </body>
+            </html>
+        """
+
+    class _Session:
+        last_nav_current_url = "https://www.facebook.com/share/15ZPp4vohe/?mibextid=wwXIfr"
+
+        @staticmethod
+        def navigate(url, logger=None):
+            return _Driver()
+
+    enricher._ensure_session = lambda: _Session()
+
+    resolved = enricher._resolve_pass_a_explicit_scrape_url(
+        "https://www.facebook.com/share/15ZPp4vohe/?mibextid=wwXIfr",
+        authed_session_available=True,
+    )
+
+    assert resolved == "https://www.facebook.com/itsmiyazawa"
+
+
 def test_classify_explicit_fb_intake_accepts_canonicalized_p_url() -> None:
     decision = night_mode_fb.classify_explicit_fb_intake(
         {"Artist Name": "Kyla Belle", "Facebook_URL": "https://www.facebook.com/p/Kyla-Belle-100063568093299"}
