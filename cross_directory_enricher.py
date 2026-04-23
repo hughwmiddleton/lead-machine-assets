@@ -11582,6 +11582,7 @@ def _apply_fb_promotion_row(
     df: pd.DataFrame,
     row_idx: Any,
     *,
+    log_fn: Optional[Callable[[str], None]] = None,
     share_resolver: Optional[Callable[[str], Optional[str]]] = None,
 ) -> Tuple[bool, bool, str]:
     """Promote Facebook URLs for a single row into authoritative Facebook fields."""
@@ -11593,6 +11594,18 @@ def _apply_fb_promotion_row(
         df["Facebook_URL"] = ""
     if "Facebook URL" not in df.columns:
         df["Facebook URL"] = ""
+    if share_resolver is not None:
+        try:
+            from pipeline_runner import _canonicalize_explicit_fb_share_for_row as _canonicalize_explicit_share_for_row
+        except Exception:
+            _canonicalize_explicit_share_for_row = None  # type: ignore[assignment]
+        if callable(_canonicalize_explicit_share_for_row):
+            _canonicalize_explicit_share_for_row(
+                df,
+                row_idx,
+                share_resolver=share_resolver,
+                logger=log_fn,
+            )
     new_url, source = ensure_canonical_facebook_url(
         df.loc[row_idx],
         set_row=False,
@@ -11635,6 +11648,7 @@ def _apply_fb_promotion_df(
         wrote, promoted_into_canonical, source = _apply_fb_promotion_row(
             df,
             idx,
+            log_fn=log_fn,
             share_resolver=share_resolver,
         )
         if not source:
@@ -11653,6 +11667,39 @@ def _apply_fb_promotion_df(
         _safe_log(log_fn, "[FB Promotion] canonical Facebook_URL backfilled from alias fields for %s rows", canonical_from_alias)
     if log_fn and canonical_from_links:
         _safe_log(log_fn, "[FB Promotion] canonical Facebook_URL backfilled from Social Link / External Links for %s rows", canonical_from_links)
+    return df
+
+
+def _canonicalize_unearthed_share_rows_df(
+    df: pd.DataFrame,
+    *,
+    row_ids: Optional[Iterable[Any]] = None,
+    log_fn: Optional[Callable[[str], None]] = None,
+    share_resolver: Optional[Callable[[str], Optional[str]]] = None,
+) -> pd.DataFrame:
+    """Resolve explicit Facebook /share wrappers for Unearthed rows before readiness gating."""
+    if df is None or df.empty or share_resolver is None:
+        return df
+    try:
+        from pipeline_runner import _canonicalize_explicit_fb_share_for_row as _canonicalize_explicit_share_for_row
+    except Exception:
+        return df
+    selected_rows = set(row_ids) if row_ids is not None else None
+    for row_idx in df.index:
+        if selected_rows is not None and row_idx not in selected_rows:
+            continue
+        try:
+            row = df.loc[row_idx]
+        except Exception:
+            continue
+        if not _row_is_unearthed_source(row):
+            continue
+        _canonicalize_explicit_share_for_row(
+            df,
+            row_idx,
+            share_resolver=share_resolver,
+            logger=log_fn,
+        )
     return df
 
 
@@ -12241,11 +12288,12 @@ class CrossDirectoryEnricherWorker(QThread):
             reset_night_fb_run_runtime_state(self.night_fb_run_state)
 
     def _get_night_fb_share_promotion_resolver(self) -> Optional[Callable[[str], Optional[str]]]:
-        if not getattr(self, "night_mode", False):
+        if not self.__dict__.get("night_mode", False):
             return None
-        if self._night_fb_share_promotion_resolver is not None:
-            return self._night_fb_share_promotion_resolver
-        night_fb_state = self.night_fb_run_state
+        cached_resolver = self.__dict__.get("_night_fb_share_promotion_resolver")
+        if cached_resolver is not None:
+            return cached_resolver
+        night_fb_state = self.__dict__.get("night_fb_run_state")
         session_source = getattr(night_fb_state, "session_source", None)
         night_fb_source = session_source if session_source is not None else normalize_night_fb_session_source()
         if not night_fb_source.can_probe:
@@ -15715,7 +15763,7 @@ class CrossDirectoryEnricherWorker(QThread):
         total = ctx["total"]
         seed_df = ensure_fb_attribution_columns(seed_df)
         share_resolver = self._get_night_fb_share_promotion_resolver()
-        _apply_fb_promotion_row(seed_df, row_idx, share_resolver=share_resolver)
+        _apply_fb_promotion_row(seed_df, row_idx, log_fn=self.log_message.emit, share_resolver=share_resolver)
         if _get_canonical_fb_url(seed_df.loc[row_idx]):
             if cell_to_str(seed_df.at[row_idx, FB_OPPORTUNITY_STATE_COL]) in {"", "no_fb_opportunity"}:
                 seed_df.at[row_idx, FB_OPPORTUNITY_STATE_COL] = "fb_opportunity_present"
@@ -16175,6 +16223,13 @@ class CrossDirectoryEnricherWorker(QThread):
         use_scheduler = (
             os.getenv("SOURCE_DIVERSITY_SCHEDULER", "0").strip().lower() in {"1", "true", "yes", "on"}
         )
+        share_resolver = self._get_night_fb_share_promotion_resolver()
+        seed_df = _canonicalize_unearthed_share_rows_df(
+            seed_df,
+            row_ids=row_ids,
+            log_fn=self.log_message.emit,
+            share_resolver=share_resolver,
+        )
         self._unearthed_fb_first_row_ids = self._collect_unearthed_fb_first_row_ids(seed_df, row_ids=row_ids)
         seed_df = _apply_unearthed_platform_promotion_df(seed_df, log_fn=self.log_message.emit)
         if use_scheduler:
@@ -16213,7 +16268,7 @@ class CrossDirectoryEnricherWorker(QThread):
             seed_df = _apply_fb_promotion_df(
                 seed_df,
                 log_fn=self.log_message.emit,
-                share_resolver=self._get_night_fb_share_promotion_resolver(),
+                share_resolver=share_resolver,
             )
             # Phase 5: Facebook
             if ENABLE_FACEBOOK_ENRICHMENT and fb_driver:
@@ -16230,6 +16285,13 @@ class CrossDirectoryEnricherWorker(QThread):
 
     def _run_row_linear(self, seed_df, directory_indexes, priority, fb_driver, total, row_ids: Optional[Iterable[Any]] = None):
         """Run row-linear enrichment while preserving the Unearthed explicit-FB fast path."""
+        share_resolver = self._get_night_fb_share_promotion_resolver()
+        seed_df = _canonicalize_unearthed_share_rows_df(
+            seed_df,
+            row_ids=row_ids,
+            log_fn=self.log_message.emit,
+            share_resolver=share_resolver,
+        )
         self._unearthed_fb_first_row_ids = self._collect_unearthed_fb_first_row_ids(seed_df, row_ids=row_ids)
         seed_df = _apply_unearthed_platform_promotion_df(seed_df, log_fn=self.log_message.emit)
         selected_row_ids = self._selected_row_ids(seed_df, row_ids)
@@ -16318,7 +16380,17 @@ class CrossDirectoryEnricherWorker(QThread):
             if not _row_is_unearthed_source(row):
                 continue
             artist = cell_to_str(row.get("Artist Name", "")) or "<unknown>"
-            if _row_has_usable_unearthed_fb_entrypoint(row):
+            row_payload = row.to_dict()
+            canonical_url, _ = ensure_canonical_facebook_url(row_payload, set_row=False)
+            canonical_present = bool(canonicalize_facebook_url(canonical_url))
+            explicit_fb_entrypoints = explicit_fb_entrypoint_urls_for_row(row_payload)
+            fb_entrypoint_present = bool(explicit_fb_entrypoints)
+            self.log_message.emit(
+                f"[Unearthed Path][FB Readiness] artist='{artist}' row={row_idx} "
+                f"canonical_present={int(canonical_present)} fb_url_present={canonical_present} "
+                f"fb_entrypoint_present={fb_entrypoint_present}"
+            )
+            if canonical_present or fb_entrypoint_present:
                 streamlined_rows.add(row_idx)
                 self.log_message.emit(
                     f"[Unearthed Path] activated artist='{artist}' row={row_idx}"

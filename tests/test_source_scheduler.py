@@ -469,7 +469,7 @@ def test_scheduler_mode_excludes_unearthed_fb_first_rows(monkeypatch):
 
     monkeypatch.setattr(cde.CrossDirectoryEnricherWorker, "__init__", lambda self, *a, **k: None)
     monkeypatch.setattr(cde, "ENABLE_FACEBOOK_ENRICHMENT", True)
-    monkeypatch.setattr(cde, "_apply_fb_promotion_df", lambda df, log_fn=None: df)
+    monkeypatch.setattr(cde, "_apply_fb_promotion_df", lambda df, log_fn=None, share_resolver=None: df)
 
     captured = {}
 
@@ -593,7 +593,7 @@ def test_row_linear_unearthed_fb_first_bypasses_shared_enrichers(monkeypatch):
         assert 0 not in calls[phase_name]
         assert 1 in calls[phase_name]
         assert 2 in calls[phase_name]
-    assert 0 in calls["ig"]
+    assert 0 not in calls["ig"]
     assert 1 in calls["ig"]
     assert 2 in calls["ig"]
     assert 0 in calls["fb"]
@@ -602,6 +602,99 @@ def test_row_linear_unearthed_fb_first_bypasses_shared_enrichers(monkeypatch):
     assert any("[Unearthed Path] activated artist='Unearthed FB First' row=0" in line for line in logs)
     assert any("[Unearthed Path] skipping non-essential enrichers artist='Unearthed FB First' row=0" in line for line in logs)
     assert any("[Unearthed Path] no usable FB URL, resuming standard path artist='Unearthed Fallback' row=1" in line for line in logs)
+
+
+def test_row_linear_unearthed_share_url_is_canonicalized_before_fb_first_gate(monkeypatch):
+    import pandas as pd
+    import cross_directory_enricher as cde
+
+    monkeypatch.setattr(cde.CrossDirectoryEnricherWorker, "__init__", lambda self, *a, **k: None)
+    monkeypatch.setattr(cde, "ENABLE_FACEBOOK_ENRICHMENT", True)
+
+    logs = []
+
+    class Log:
+        @staticmethod
+        def emit(msg, *args, **kwargs):
+            logs.append(str(msg))
+
+    worker = cde.CrossDirectoryEnricherWorker(None, None)
+    worker.enable_live_search = True
+    worker.log_message = Log()
+    worker._update_progress = lambda *args, **kwargs: None
+    worker._should_short_circuit_after_domain_reuse = lambda *args, **kwargs: False
+    worker._init_row_enrichment_state = lambda: None
+    worker._log_spotify_discovery_summary = lambda *args, **kwargs: None
+    worker._get_night_fb_share_promotion_resolver = lambda: (
+        lambda raw: "https://www.facebook.com/kyrasione"
+    )
+
+    calls = {"dir": [], "sc": [], "lf": [], "spotify": [], "ig": [], "website": [], "fb": []}
+
+    worker._build_row_context = lambda df, row_idx, position, total: {
+        "artist": df.at[row_idx, "Artist Name"],
+        "position": position,
+        "total": total,
+        "spotify_id": "",
+    }
+    worker._enrich_row_directories = lambda df, row_idx, directory_indexes, priority, ctx: calls["dir"].append(row_idx) or False
+    worker._enrich_row_sc_live = lambda df, row_idx, ctx: (calls["sc"].append(row_idx) or False, False)
+    worker._enrich_row_live_lookup = lambda df, row_idx, ctx: (calls["lf"].append(row_idx) or False, False)
+    worker._run_spotify_discovery_pass = lambda df, row_idx, ctx, fb_driver=None: calls["spotify"].append(row_idx) or False
+    worker._enrich_row_instagram_email = lambda df, row_idx, ctx: calls["ig"].append(row_idx) or False
+    worker._enrich_row_website_email = lambda df, row_idx, ctx: calls["website"].append(row_idx) or False
+    worker._enrich_row_facebook = lambda df, row_idx, fb_driver, ctx: calls["fb"].append(row_idx) or False
+
+    seed_df = pd.DataFrame(
+        [
+            {
+                "Artist Name": "Kyra Sione",
+                "Source Directory": "Unearthed",
+                "Social Link": "https://www.facebook.com/share/19BActwuev?mibextid=wwXIfr",
+                "Facebook_URL": "",
+                "facebook_url": "",
+                "Facebook URL": "",
+                "External Links": "",
+                "Email": "",
+                "Email_All": "",
+                "SoundCloud Link": "",
+            },
+            {
+                "Artist Name": "Spotify Control",
+                "Source Directory": "Spotify",
+                "Social Link": "",
+                "Facebook_URL": "",
+                "facebook_url": "",
+                "Facebook URL": "",
+                "External Links": "",
+                "Email": "",
+                "Email_All": "",
+                "SoundCloud Link": "",
+            },
+        ],
+        dtype=str,
+    ).fillna("")
+
+    worker._run_row_linear(seed_df, directory_indexes={}, priority=[], fb_driver=object(), total=len(seed_df))
+
+    assert seed_df.at[0, "Facebook_URL"] == "https://www.facebook.com/kyrasione"
+    assert seed_df.at[0, "facebook_url"] == "https://www.facebook.com/kyrasione"
+    assert seed_df.at[0, "Facebook URL"] == "https://www.facebook.com/kyrasione"
+    for phase_name in ("dir", "sc", "lf", "spotify", "website"):
+        assert 0 not in calls[phase_name]
+    assert 0 in calls["fb"]
+
+    detect_idx = next(i for i, line in enumerate(logs) if "[FB Share Canonicalize]" in line and "artist='Kyra Sione'" in line and "detected=1" in line)
+    resolved_idx = next(i for i, line in enumerate(logs) if "[FB Share Canonicalize]" in line and "artist='Kyra Sione'" in line and "outcome='resolved'" in line)
+    readiness_idx = next(i for i, line in enumerate(logs) if "[Unearthed Path][FB Readiness]" in line and "artist='Kyra Sione'" in line)
+    activated_idx = next(i for i, line in enumerate(logs) if "[Unearthed Path] activated artist='Kyra Sione' row=0" in line)
+
+    assert detect_idx < resolved_idx < readiness_idx < activated_idx
+    assert "canonical_present=1" in logs[readiness_idx]
+    assert "fb_url_present=True" in logs[readiness_idx]
+    assert "fb_entrypoint_present=True" in logs[readiness_idx]
+    assert sum(1 for line in logs if "[FB Share Canonicalize]" in line and "artist='Kyra Sione'" in line) == 2
+    assert not any("[Unearthed Path] no usable FB URL, resuming standard path artist='Kyra Sione'" in line for line in logs)
 
 
 def test_row_linear_unearthed_fb_first_still_runs_instagram_when_fb_driver_unavailable(monkeypatch):
@@ -650,7 +743,7 @@ def test_row_linear_unearthed_fb_first_still_runs_instagram_when_fb_driver_unava
 
     worker._run_row_linear(seed_df, directory_indexes={}, priority=[], fb_driver=None, total=len(seed_df))
 
-    assert calls["ig"] == [0]
+    assert calls["ig"] == []
     assert calls["fb"] == []
 
 
@@ -713,6 +806,86 @@ def test_row_linear_unearthed_without_usable_explicit_fb_does_not_bypass(monkeyp
     for phase_name in calls:
         assert calls[phase_name] == [0]
     assert any("[Unearthed Path] no usable FB URL, resuming standard path artist='Unearthed Guarded' row=0" in line for line in logs)
+
+
+def test_row_linear_unresolved_share_url_stays_blocked_before_fb_first_gate(monkeypatch):
+    import pandas as pd
+    import cross_directory_enricher as cde
+
+    monkeypatch.setattr(cde.CrossDirectoryEnricherWorker, "__init__", lambda self, *a, **k: None)
+    monkeypatch.setattr(cde, "ENABLE_FACEBOOK_ENRICHMENT", True)
+
+    logs = []
+
+    class Log:
+        @staticmethod
+        def emit(msg, *args, **kwargs):
+            logs.append(str(msg))
+
+    worker = cde.CrossDirectoryEnricherWorker(None, None)
+    worker.enable_live_search = True
+    worker.log_message = Log()
+    worker._update_progress = lambda *args, **kwargs: None
+    worker._should_short_circuit_after_domain_reuse = lambda *args, **kwargs: False
+    worker._init_row_enrichment_state = lambda: None
+    worker._log_spotify_discovery_summary = lambda *args, **kwargs: None
+    worker._get_night_fb_share_promotion_resolver = lambda: (
+        lambda raw: "https://www.facebook.com/share/stillwrapped"
+    )
+
+    calls = {"dir": [], "sc": [], "lf": [], "spotify": [], "ig": [], "website": [], "fb": []}
+
+    worker._build_row_context = lambda df, row_idx, position, total: {
+        "artist": df.at[row_idx, "Artist Name"],
+        "position": position,
+        "total": total,
+        "spotify_id": "",
+    }
+    worker._enrich_row_directories = lambda df, row_idx, directory_indexes, priority, ctx: calls["dir"].append(row_idx) or False
+    worker._enrich_row_sc_live = lambda df, row_idx, ctx: (calls["sc"].append(row_idx) or False, False)
+    worker._enrich_row_live_lookup = lambda df, row_idx, ctx: (calls["lf"].append(row_idx) or False, False)
+    worker._run_spotify_discovery_pass = lambda df, row_idx, ctx, fb_driver=None: calls["spotify"].append(row_idx) or False
+    worker._enrich_row_instagram_email = lambda df, row_idx, ctx: calls["ig"].append(row_idx) or False
+    worker._enrich_row_website_email = lambda df, row_idx, ctx: calls["website"].append(row_idx) or False
+    worker._enrich_row_facebook = lambda df, row_idx, fb_driver, ctx: calls["fb"].append(row_idx) or False
+
+    seed_df = pd.DataFrame(
+        [
+            {
+                "Artist Name": "Migsy",
+                "Source Directory": "Unearthed",
+                "Social Link": "https://www.facebook.com/share/19BActwuev?mibextid=wwXIfr",
+                "Facebook_URL": "",
+                "facebook_url": "",
+                "Facebook URL": "",
+                "External Links": "",
+                "Email": "",
+                "Email_All": "",
+                "SoundCloud Link": "",
+            },
+        ],
+        dtype=str,
+    ).fillna("")
+
+    worker._run_row_linear(seed_df, directory_indexes={}, priority=[], fb_driver=object(), total=len(seed_df))
+
+    assert seed_df.at[0, "Facebook_URL"] == ""
+    assert seed_df.at[0, "facebook_url"] == ""
+    assert seed_df.at[0, "Facebook URL"] == ""
+    for phase_name in calls:
+        assert calls[phase_name] == [0]
+
+    detect_idx = next(i for i, line in enumerate(logs) if "[FB Share Canonicalize]" in line and "artist='Migsy'" in line and "detected=1" in line)
+    unresolved_idx = next(i for i, line in enumerate(logs) if "[FB Share Canonicalize]" in line and "artist='Migsy'" in line and "outcome='unresolved'" in line)
+    readiness_idx = next(i for i, line in enumerate(logs) if "[Unearthed Path][FB Readiness]" in line and "artist='Migsy'" in line)
+    fallback_idx = next(i for i, line in enumerate(logs) if "[Unearthed Path] no usable FB URL, resuming standard path artist='Migsy' row=0" in line)
+
+    assert detect_idx < unresolved_idx < readiness_idx < fallback_idx
+    assert "canonical_present=0" in logs[readiness_idx]
+    assert "fb_url_present=False" in logs[readiness_idx]
+    assert "fb_entrypoint_present=False" in logs[readiness_idx]
+    assert sum(1 for line in logs if "[FB Share Canonicalize]" in line and "artist='Migsy'" in line) == 2
+    assert not any("[Unearthed Path] activated artist='Migsy'" in line for line in logs)
 
 
 def test_row_linear_non_unearthed_explicit_fb_row_remains_unchanged(monkeypatch):

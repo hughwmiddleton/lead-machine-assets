@@ -399,7 +399,7 @@ def test_sc_retry_skipped_if_row_enriched_elsewhere(monkeypatch):
         "spotify_id": "",
     }
 
-    def fake_phase_live_lookup(df, total):
+    def fake_phase_live_lookup(df, total, row_ids=None):
         now[0] += 20.0
         df.at[2, "SoundCloud Link"] = "https://soundcloud.com/already-filled"
 
@@ -437,7 +437,7 @@ def test_source_phased_top_level_order_unchanged(monkeypatch):
     monkeypatch.setattr(
         cde,
         "_apply_fb_promotion_df",
-        lambda df, log_fn=None: calls.append("fb_promote") or df,
+        lambda df, log_fn=None, share_resolver=None: calls.append("fb_promote") or df,
     )
     w._phase_directory_matching = lambda *args, **kwargs: calls.append("directory")
     w._phase_soundcloud = lambda *args, **kwargs: calls.append("soundcloud") or {}
@@ -483,7 +483,7 @@ def test_unearthed_fb_first_source_phased_bypasses_shared_enrichers(monkeypatch)
     w._lf_endpoint_in_cooldown = lambda *args, **kwargs: False
     w._set_platform_state = lambda *args, **kwargs: None
     monkeypatch.setattr(cde, "ENABLE_FACEBOOK_ENRICHMENT", True)
-    monkeypatch.setattr(cde, "_apply_fb_promotion_df", lambda df, log_fn=None: df)
+    monkeypatch.setattr(cde, "_apply_fb_promotion_df", lambda df, log_fn=None, share_resolver=None: df)
 
     calls = {"dir": [], "sc": [], "lf": [], "ig": [], "website": [], "fb": []}
 
@@ -578,6 +578,96 @@ def test_unearthed_fb_first_source_phased_bypasses_shared_enrichers(monkeypatch)
     assert 0 not in calls["lf"]
     assert any("[Unearthed Path] activated artist='Unearthed FB First' row=0" in line for line in logs)
     assert any("[Unearthed Path] no usable FB URL, resuming standard path artist='Unearthed Fallback' row=1" in line for line in logs)
+
+
+def test_unearthed_share_url_source_phased_is_canonicalized_before_fb_first_gate(monkeypatch):
+    import pandas as pd
+    import cross_directory_enricher as cde
+
+    monkeypatch.setattr(cde.CrossDirectoryEnricherWorker, "__init__", lambda self, *a, **k: None)
+    monkeypatch.setattr(cde, "ENABLE_FACEBOOK_ENRICHMENT", True)
+
+    logs = []
+
+    class Log:
+        @staticmethod
+        def emit(msg, *args, **kwargs):
+            logs.append(str(msg))
+
+    w = cde.CrossDirectoryEnricherWorker(None, None)
+    w.enable_live_search = True
+    w.log_message = Log()
+    w._get_night_fb_share_promotion_resolver = lambda: (
+        lambda raw: "https://www.facebook.com/zedena"
+    )
+    w._phase_directory_matching = lambda *args, **kwargs: None
+    w._phase_spotify_discovery = lambda *args, **kwargs: None
+    w._phase_instagram_email = lambda *args, **kwargs: None
+    w._phase_website_email = lambda *args, **kwargs: None
+    w._phase_soundcloud = lambda *args, **kwargs: {}
+    w._phase_live_lookup = lambda *args, **kwargs: None
+    w._phase_facebook = lambda *args, **kwargs: None
+
+    calls = {"sc": [], "lf": [], "ig": [], "website": [], "fb": []}
+
+    def build_ctx(df, row_idx, position, total):
+        return {
+            "artist": df.at[row_idx, "Artist Name"],
+            "position": position,
+            "total": total,
+            "spotify_id": "",
+        }
+
+    w._build_row_context = build_ctx
+    w._enrich_row_directories = lambda *args, **kwargs: False
+    w._enrich_row_sc_live = lambda df, row_idx, ctx: (calls["sc"].append(row_idx) or False, False)
+    w._enrich_row_live_lookup = lambda df, row_idx, ctx, skip_lastfm=False: (calls["lf"].append(row_idx) or False, False)
+    w._enrich_row_instagram_email = lambda df, row_idx, ctx: calls["ig"].append(row_idx) or False
+    w._enrich_row_website_email = lambda df, row_idx, ctx: calls["website"].append(row_idx) or False
+    w._enrich_row_facebook = lambda df, row_idx, fb_driver, ctx: calls["fb"].append(row_idx) or False
+
+    seed_df = pd.DataFrame(
+        [
+            {
+                "Artist Name": "Zedena",
+                "Source Directory": "Unearthed",
+                "Email": "",
+                "Email_All": "",
+                "Social Link": "https://www.facebook.com/share/19BActwuev?mibextid=wwXIfr",
+                "External Links": "",
+                "Facebook_URL": "",
+                "SoundCloud Link": "",
+            },
+            {
+                "Artist Name": "Spotify Control",
+                "Source Directory": "Spotify",
+                "Email": "",
+                "Email_All": "",
+                "Social Link": "",
+                "External Links": "",
+                "Facebook_URL": "",
+                "SoundCloud Link": "",
+            },
+        ],
+        dtype=str,
+    ).fillna("")
+
+    w._run_source_phased(seed_df, directory_indexes={}, priority=[], fb_driver=object(), total=len(seed_df))
+
+    assert seed_df.at[0, "Facebook_URL"] == "https://www.facebook.com/zedena"
+    assert seed_df.at[0, "facebook_url"] == "https://www.facebook.com/zedena"
+    assert seed_df.at[0, "Facebook URL"] == "https://www.facebook.com/zedena"
+
+    detect_idx = next(i for i, line in enumerate(logs) if "[FB Share Canonicalize]" in line and "artist='Zedena'" in line and "detected=1" in line)
+    resolved_idx = next(i for i, line in enumerate(logs) if "[FB Share Canonicalize]" in line and "artist='Zedena'" in line and "outcome='resolved'" in line)
+    readiness_idx = next(i for i, line in enumerate(logs) if "[Unearthed Path][FB Readiness]" in line and "artist='Zedena'" in line)
+
+    assert detect_idx < resolved_idx < readiness_idx
+    assert "canonical_present=1" in logs[readiness_idx]
+    assert "fb_url_present=True" in logs[readiness_idx]
+    assert "fb_entrypoint_present=True" in logs[readiness_idx]
+    assert any("[Unearthed Path] activated artist='Zedena' row=0" in line for line in logs)
+    assert not any("[Unearthed Path] no usable FB URL, resuming standard path artist='Zedena'" in line for line in logs)
 
 
 def test_breaker_has_grace_period():
