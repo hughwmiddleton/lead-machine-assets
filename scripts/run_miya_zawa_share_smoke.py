@@ -68,9 +68,13 @@ class _SmokeNightFBHelper:
         payload_row = dict(row or {})
         self.rows.append({"row": payload_row, "row_index": row_index})
         canonical_url = str(payload_row.get("Facebook_URL", "") or "").strip()
-        if canonical_url:
-            self.visited_urls.append(canonical_url)
-            self._logger(f"[FB Email] Visiting {canonical_url}")
+        visit_url = canonical_url
+        if not visit_url:
+            fallback_urls = nmfb.fb_share_runtime_fallback_urls_for_row(payload_row)
+            visit_url = fallback_urls[0] if fallback_urls else ""
+        if visit_url:
+            self.visited_urls.append(visit_url)
+            self._logger(f"[FB Email] Visiting {visit_url}")
         return {
             "FB_Status": "pass_a_content_unavailable",
             "FB_Attempt_State": "attempted_fb_content_unavailable",
@@ -394,7 +398,9 @@ def run_smoke(
         "fb_scrape_started": bool(helper.calls),
         "pass_a_attempted": _extract_pass_a_attempted(pass_a_summary_line),
         "rows_with_canonical_facebook_url": sum(bool(item["canonical_facebook_url"]) for item in rows),
-        "rows_with_explicit_intake_attempt": sum(item["explicit_intake_outcome"] == "attempt" for item in rows),
+        "rows_with_explicit_intake_attempt": sum(
+            item["explicit_intake_outcome"] in {"attempt", "attempt_share_runtime_fallback"} for item in rows
+        ),
         "rows_with_pass_a_attempt": sum(item["pass_a_attempted"] for item in rows),
         "night_fb_discovery_skipped": any(
             "[Unearthed Path] no usable FB URL; skipping Night FB discovery" in line for line in logger.lines

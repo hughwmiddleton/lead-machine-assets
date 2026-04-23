@@ -1119,8 +1119,28 @@ def test_classify_explicit_fb_intake_reports_no_explicit_url() -> None:
 
     assert decision.outcome == "no_explicit_url"
     assert decision.accepted_urls == []
+    assert decision.runtime_share_fallback_urls == []
     assert decision.rejected_invalid == []
     assert decision.rejected_guard == []
+
+
+def test_classify_explicit_fb_intake_allows_runtime_share_fallback() -> None:
+    share_url = "https://www.facebook.com/share/19BActwuev?mibextid=wwXIfr"
+    decision = night_mode_fb.classify_explicit_fb_intake(
+        {
+            "Artist Name": "Fallback Share",
+            "Source Directory": "unearthed",
+            "Facebook_URL": "",
+            "Social Link": share_url,
+            night_mode_fb.FB_SHARE_RUNTIME_FALLBACK_URL_COL: share_url,
+            night_mode_fb.FB_SHARE_RUNTIME_FALLBACK_SOURCE_COL: "Social Link",
+        }
+    )
+
+    assert decision.outcome == "attempt_share_runtime_fallback"
+    assert decision.accepted_urls == []
+    assert decision.runtime_share_fallback_urls == [share_url]
+    assert decision.canonical_value_present is False
 
 
 def test_pass_a_uses_fb_url_from_social_link(monkeypatch) -> None:

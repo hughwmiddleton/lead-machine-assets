@@ -137,6 +137,8 @@ _EXPLICIT_FB_INTAKE_FIELDS = (
 _EXPLICIT_FB_ALLOWED_HOSTS = ("facebook.com", "m.facebook.com", "web.facebook.com", "touch.facebook.com", "fb.com", "fb.me")
 _EXPLICIT_FB_PREFILTER_PATHS = ("/r.php", "/login", "/share.php", "/l.php", "/dialog/")
 _DIRECT_FB_ROW_FIELDS = ("Facebook_URL", "Facebook URL", "facebook_url", "facebook url")
+FB_SHARE_RUNTIME_FALLBACK_URL_COL = "__fb_share_runtime_fallback_url"
+FB_SHARE_RUNTIME_FALLBACK_SOURCE_COL = "__fb_share_runtime_fallback_source"
 _FB_HOME_SEARCH_INPUT_SELECTORS: Tuple[Tuple[str, str], ...] = (
     (By.CSS_SELECTOR, 'input[aria-label="Search Facebook"]'),
     (By.CSS_SELECTOR, 'input[placeholder="Search Facebook"]'),
@@ -191,6 +193,7 @@ class ExplicitFbIntakeDecision:
     outcome: str
     source_fields: List[str]
     accepted_urls: List[str]
+    runtime_share_fallback_urls: List[str]
     rejected_invalid: List[str]
     rejected_guard: List[str]
     promotion_expected_missing_canonical: bool
@@ -2507,6 +2510,38 @@ def _explicit_fb_row_lookup(row: Dict[str, str], field: str) -> Tuple[str, str]:
     return "", ""
 
 
+def _fb_share_runtime_fallback_value(row: Dict[str, str], field: str) -> str:
+    for key, value in (row or {}).items():
+        try:
+            if str(key).lower() != field.lower():
+                continue
+        except Exception:
+            continue
+        try:
+            import pandas as _pd  # type: ignore
+
+            if _pd.isna(value):
+                return ""
+        except Exception:
+            pass
+        try:
+            return str(value or "").strip()
+        except Exception:
+            return ""
+    return ""
+
+
+def fb_share_runtime_fallback_urls_for_row(row: Dict[str, str]) -> List[str]:
+    raw_value = _fb_share_runtime_fallback_value(row, FB_SHARE_RUNTIME_FALLBACK_URL_COL)
+    if not raw_value or not _is_allowed_fb_share_entrypoint_url(raw_value):
+        return []
+    return [raw_value]
+
+
+def _fb_share_runtime_fallback_source_for_row(row: Dict[str, str]) -> str:
+    return _fb_share_runtime_fallback_value(row, FB_SHARE_RUNTIME_FALLBACK_SOURCE_COL)
+
+
 def _looks_like_explicit_fb_candidate(value: str) -> bool:
     lowered = (value or "").strip().lower()
     if not lowered:
@@ -2586,8 +2621,12 @@ def classify_explicit_fb_intake(
     row: Dict[str, str],
     *,
     accepted_urls: Optional[Sequence[str]] = None,
+    share_runtime_fallback_urls: Optional[Sequence[str]] = None,
 ) -> ExplicitFbIntakeDecision:
     accepted_urls = _authoritative_explicit_fb_urls_for_row(row, accepted_urls=accepted_urls)
+    runtime_share_fallback_urls = list(share_runtime_fallback_urls) if share_runtime_fallback_urls is not None else []
+    if not runtime_share_fallback_urls:
+        runtime_share_fallback_urls = fb_share_runtime_fallback_urls_for_row(row)
 
     source_fields: List[str] = []
     rejected_invalid: List[str] = []
@@ -2631,9 +2670,15 @@ def classify_explicit_fb_intake(
     for field in blocked_source_fields:
         if field not in source_fields:
             source_fields.append(field)
+    if runtime_share_fallback_urls:
+        runtime_source = _fb_share_runtime_fallback_source_for_row(row) or "share_runtime_fallback"
+        if runtime_source not in source_fields:
+            source_fields.append(runtime_source)
 
     if accepted_urls:
         outcome = "attempt"
+    elif runtime_share_fallback_urls:
+        outcome = "attempt_share_runtime_fallback"
     elif rejected_invalid:
         outcome = "reject_invalid"
     elif rejected_guard:
@@ -2646,6 +2691,8 @@ def classify_explicit_fb_intake(
     message = outcome
     if outcome == "attempt":
         message = "explicit URL present and queued for PASS A"
+    elif outcome == "attempt_share_runtime_fallback":
+        message = "share URL queued for single runtime PASS A fallback"
     elif outcome == "reject_invalid":
         message = "explicit URL present but rejected as invalid"
     elif outcome == "reject_guard":
@@ -2659,6 +2706,7 @@ def classify_explicit_fb_intake(
         outcome=outcome,
         source_fields=source_fields,
         accepted_urls=list(accepted_urls),
+        runtime_share_fallback_urls=list(runtime_share_fallback_urls),
         rejected_invalid=rejected_invalid,
         rejected_guard=rejected_guard,
         promotion_expected_missing_canonical=promotion_expected_missing_canonical,
@@ -2687,8 +2735,9 @@ def _log_explicit_fb_intake(logger: LoggerFn, artist_name: str, decision: Explic
     ]
     if decision.source_fields:
         parts.append(f'source="{_compact_explicit_fb_values(decision.source_fields, limit=3, width=48)}"')
-    if decision.accepted_urls:
-        parts.append(f'urls="{_compact_explicit_fb_values(decision.accepted_urls)}"')
+    logged_urls = decision.accepted_urls or decision.runtime_share_fallback_urls
+    if logged_urls:
+        parts.append(f'urls="{_compact_explicit_fb_values(logged_urls)}"')
     if decision.rejected_invalid:
         parts.append(f'invalid="{_compact_explicit_fb_values(decision.rejected_invalid, limit=1)}"')
     if decision.invalid_reason:
@@ -2701,6 +2750,8 @@ def _log_explicit_fb_intake(logger: LoggerFn, artist_name: str, decision: Explic
         parts.append('canonical_field="present"')
     elif decision.promotion_expected_missing_canonical or decision.source_fallback_blocked:
         parts.append('canonical_field="blank"')
+    if decision.runtime_share_fallback_urls:
+        parts.append('share_runtime_fallback="1"')
     if decision.promotion_expected_missing_canonical:
         parts.append('promotion_expected="1"')
         if decision.promotion_source:
@@ -10625,8 +10676,9 @@ class NightModeFacebookEnricher:
         row_id = self._fb_driver_row_id(row=result, artist_name=artist_name, row_index=row_index)
         is_unearthed = self._is_unearthed_source(result)
         explicit_fb_entrypoints = explicit_fb_entrypoint_urls_for_row(result)
+        share_runtime_fallback_present = bool(fb_share_runtime_fallback_urls_for_row(result))
         has_seeded_fb = bool(explicit_fb_entrypoints)
-        unearthed_fb_first_active = bool(is_unearthed and has_seeded_fb)
+        unearthed_fb_first_active = bool(is_unearthed and (has_seeded_fb or share_runtime_fallback_present))
         skip_due_to_email, email_all_clean = _row_has_usable_email_for_fb_skip(result)
         if skip_due_to_email and not unearthed_fb_first_active:
             self.fb_rows_skipped["no_opportunity"] += 1
@@ -10651,6 +10703,7 @@ class NightModeFacebookEnricher:
         )
         prepared_explicit_row, authed_session_available = self._prepare_explicit_fb_row_for_intake(result)
         raw_fb_url = _clean_val(prepared_explicit_row.get("Facebook_URL", ""))
+        share_runtime_fallback_urls = fb_share_runtime_fallback_urls_for_row(prepared_explicit_row)
         if raw_fb_url and _is_invalid_fb_value(raw_fb_url) and self._debug_fb_url_flow:
             _log(self.logger, f"[Night FB] Skipping invalid facebook_url value: {raw_fb_url}")
         facebook_url = _normalise_fb_url(raw_fb_url) if _is_valid_fb_url_value(raw_fb_url) else ""
@@ -10660,9 +10713,17 @@ class NightModeFacebookEnricher:
         fb_urls = _canonicalize_and_dedupe_explicit_fb_urls(
             fb_urls, logger=self.logger, debug=self._debug_fb_url_flow
         )
-        explicit_intake = classify_explicit_fb_intake(prepared_explicit_row, accepted_urls=fb_urls)
+        pass_a_urls: List[str] = list(fb_urls)
+        for share_url in share_runtime_fallback_urls:
+            if share_url not in pass_a_urls:
+                pass_a_urls.append(share_url)
+        explicit_intake = classify_explicit_fb_intake(
+            prepared_explicit_row,
+            accepted_urls=fb_urls,
+            share_runtime_fallback_urls=share_runtime_fallback_urls,
+        )
         _log_explicit_fb_intake(self.logger, artist_name, explicit_intake)
-        if not fb_urls:
+        if not pass_a_urls:
             invalid_field, invalid_value = _find_invalid_direct_fb_row_value(result)
             if invalid_field and invalid_value:
                 _log(
@@ -10677,7 +10738,7 @@ class NightModeFacebookEnricher:
 
         if self._debug_fb_url_flow and self._debug_fb_url_flow_seen < self._debug_fb_url_flow_limit:
             self._debug_fb_url_flow_seen += 1
-            if fb_urls:
+            if pass_a_urls:
                 self._debug_fb_url_flow_with_urls += 1
             raw_social = _clean_val(result.get("Social Link", ""))
             raw_external = _clean_val(result.get("External Links", ""))
@@ -10688,7 +10749,7 @@ class NightModeFacebookEnricher:
                 f"\"{artist_name}\" src_dir=\"{_clean_val(result.get('Source Directory', ''))}\""
                 f" src_job=\"{_clean_val(result.get('__source_job', ''))}\""
                 f" fb_url_raw=\"{raw_fb}\" social_raw=\"{raw_social}\" external_raw=\"{raw_external}\""
-                f" extracted={fb_urls}",
+                f" extracted={pass_a_urls}",
             )
             if self._debug_fb_url_flow_seen == self._debug_fb_url_flow_limit:
                 self._emit_fb_url_flow_summary(prefix="[Night FB][URLFLOW] limit reached")
@@ -10701,7 +10762,17 @@ class NightModeFacebookEnricher:
             emails: List[str] = []
             # Guard for downstream reject_reason usage during PASS B apply phase.
             reject_reason = ""
-            if not fb_urls and self._search_disabled_due_to_checkpoint:
+            share_runtime_attempted = False
+            share_runtime_committed = False
+
+            def _log_share_runtime_resolution(committed_url: str = "") -> None:
+                canonical_url = canonicalize_facebook_url(committed_url)
+                _log(
+                    self.logger,
+                    f"[FB Share Runtime Resolve] canonical_url='{canonical_url or ''}' commit={1 if canonical_url else 0}",
+                )
+
+            if not pass_a_urls and self._search_disabled_due_to_checkpoint:
                 result["FB_Status"] = "checkpoint_search_disabled"
                 result["FB_Reason"] = "checkpoint"
                 _log(self.logger, "[Night FB] search disabled due to checkpoint; skipping FB search.")
@@ -10710,7 +10781,7 @@ class NightModeFacebookEnricher:
             # Unearthed admission is based on the final accepted/canonical
             # explicit FB URL state. Missing and rejected-invalid seeds should
             # behave the same here.
-            if is_unearthed and not fb_urls:
+            if is_unearthed and not pass_a_urls:
                 _log(self.logger, "[Unearthed Path] no usable FB URL; skipping Night FB discovery")
                 return _finish(result, attempted=False)
 
@@ -10724,7 +10795,7 @@ class NightModeFacebookEnricher:
             best_visible_contact_surfaces: List[Tuple[FacebookAcceptedPageFetchResult, str]] = []
             explicit_content_unavailable_unrecovered = False
 
-            if not fb_urls:
+            if not pass_a_urls:
                 if not result.get("FB_Status"):
                     result["FB_Status"] = "pass_a_skipped_no_fb_url"
                 if not result.get("FB_Reason"):
@@ -10737,12 +10808,15 @@ class NightModeFacebookEnricher:
                     authed_session_available = self._has_authenticated_session()
                 pass_a_mode = "session" if authed_session_available else "legacy_anon_probe"
                 if authed_session_available:
-                    _log(self.logger, f"[Night FB] Using explicit FB URLs with authenticated session: {fb_urls}")
+                    _log(self.logger, f"[Night FB] Using explicit FB URLs with authenticated session: {pass_a_urls}")
                 else:
-                    _log(self.logger, f"[Night FB] Falling back to legacy anon probe for explicit FB URLs: {fb_urls}")
-                _log(self.logger, f"[Night FB] Using explicit FB URLs: {fb_urls}")
+                    _log(self.logger, f"[Night FB] Falling back to legacy anon probe for explicit FB URLs: {pass_a_urls}")
+                _log(self.logger, f"[Night FB] Using explicit FB URLs: {pass_a_urls}")
                 allow_anon_for_explicit = False if authed_session_available else allow_anon
-                for direct_url in fb_urls:
+                for direct_url in pass_a_urls:
+                    is_share_runtime_fallback = direct_url in share_runtime_fallback_urls
+                    if is_share_runtime_fallback:
+                        share_runtime_attempted = True
                     scrape_target_url = self._resolve_pass_a_explicit_scrape_url(
                         direct_url,
                         authed_session_available=authed_session_available,
@@ -10838,6 +10912,9 @@ class NightModeFacebookEnricher:
                                 result["FB_Reason"] = "explicit_url"
                                 self._pass_a_bump("found_email")
                                 self._pass_a_log_row(artist_name, page_url, driver_kind, "found_email", reason_for_log, mode=pass_a_mode)
+                                if is_share_runtime_fallback:
+                                    share_runtime_committed = bool(canonicalize_facebook_url(result.get("Facebook_URL", "")))
+                                    _log_share_runtime_resolution(result.get("Facebook_URL", ""))
                                 return _finish(result)
                             else:
                                 page_url = night_result.facebook_url or _normalise_fb_url(direct_url)
@@ -10910,6 +10987,9 @@ class NightModeFacebookEnricher:
                                 "explicit_url",
                                 mode=pass_a_mode,
                             )
+                            if share_runtime_attempted:
+                                share_runtime_committed = bool(canonicalize_facebook_url(result.get("Facebook_URL", "")))
+                                _log_share_runtime_resolution(result.get("Facebook_URL", ""))
                             return _finish(result)
                         result["FB_Status"] = "pass_a_no_email_on_page"
                         result["FB_Reason"] = best_reason or ("anon_fetch_ok_no_email" if best_driver.startswith("anon") else "session_fetch_ok_no_email")
@@ -10921,7 +11001,7 @@ class NightModeFacebookEnricher:
                     # Diagnostics fallback for first URL
                     reason_code: Optional[str] = None
                     diag_emails: List[str] = []
-                    probe_url = fb_urls[0] if fb_urls else ""
+                    probe_url = "" if share_runtime_attempted else (pass_a_urls[0] if pass_a_urls else "")
                     if probe_url:
                         diag_emails, reason_code, diag_method = self._diagnose_explicit_fb_failure(
                             probe_url,
@@ -10957,25 +11037,43 @@ class NightModeFacebookEnricher:
                                 "explicit_url",
                                 mode=pass_a_mode,
                             )
+                            if share_runtime_attempted:
+                                share_runtime_committed = bool(canonicalize_facebook_url(result.get("Facebook_URL", "")))
+                                _log_share_runtime_resolution(result.get("Facebook_URL", ""))
                             return _finish(result)
                     if reason_code:
                         if reason_code == "timeout":
                             result["FB_Status"] = "pass_a_timeout"
                             result["FB_Reason"] = "timeout"
                             self._pass_a_bump("fetch_error")
-                            _log(self.logger, f"[Night FB] Explicit FB URL timed out; falling back to search.")
+                            if share_runtime_attempted:
+                                _log(self.logger, "[Night FB] Explicit FB URL timed out during share runtime fallback.")
+                            else:
+                                _log(self.logger, "[Night FB] Explicit FB URL timed out; falling back to search.")
                         else:
                             result["FB_Status"] = "pass_a_login_wall" if reason_code.startswith("redirect") else "pass_a_no_email_on_page"
                             result["FB_Reason"] = "anon_login_wall" if "login" in reason_code else "anon_fetch_ok_no_email"
                             self._pass_a_bump("login_wall" if "login" in reason_code else "no_email_on_page")
-                            _log(self.logger, f"[Night FB] Explicit FB URL had no emails (reason={reason_code}); falling back to search.")
+                            if share_runtime_attempted:
+                                _log(self.logger, f"[Night FB] Explicit FB URL had no emails during share runtime fallback (reason={reason_code}).")
+                            else:
+                                _log(self.logger, f"[Night FB] Explicit FB URL had no emails (reason={reason_code}); falling back to search.")
                     elif not result.get("FB_Status"):
-                        _log(self.logger, "[Night FB] Explicit FB URLs produced no results; falling back to search.")
+                        if share_runtime_attempted:
+                            _log(self.logger, "[Night FB] Explicit FB URLs produced no results during share runtime fallback.")
+                        else:
+                            _log(self.logger, "[Night FB] Explicit FB URLs produced no results; falling back to search.")
                         if not result.get("FB_Status"):
                             result["FB_Status"] = "pass_a_no_email_on_page"
                             result["FB_Reason"] = "session_fetch_ok_no_email"
                             self._pass_a_bump("no_email_on_page")
-                    _log(self.logger, "[Night FB] Falling back to PASS B (search) after PASS A.")
+                    if not share_runtime_attempted:
+                        _log(self.logger, "[Night FB] Falling back to PASS B (search) after PASS A.")
+
+                if share_runtime_attempted and not share_runtime_committed:
+                    _log_share_runtime_resolution("")
+                if share_runtime_attempted:
+                    return _finish(result)
 
             if not page_url:
                 session = self._ensure_session()

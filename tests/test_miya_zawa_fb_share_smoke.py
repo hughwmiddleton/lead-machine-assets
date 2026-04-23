@@ -29,6 +29,11 @@ def _rows_by_artist(fixture_path: Path) -> dict[str, dict[str, str]]:
     return {row["Artist Name"]: row for row in _fixture_rows(fixture_path)}
 
 
+def _share_url_for_row(row: dict[str, str]) -> str:
+    share_url, _ = pipeline_runner._find_explicit_fb_share_candidate(row)
+    return share_url
+
+
 def test_miya_zawa_fixture_preserves_raw_share_shape() -> None:
     row = _fixture_row()
 
@@ -92,12 +97,12 @@ def test_miya_zawa_unresolved_smoke_remains_truthful_without_fake_url(tmp_path: 
     assert artifacts.summary["facebook_url_title_alias"] == ""
     assert artifacts.summary["fb_url_present"] is False
     assert artifacts.summary["fb_entrypoint_present"] is False
-    assert artifacts.summary["explicit_intake_outcome"] == "no_explicit_url"
-    assert artifacts.summary["fb_scrape_started"] is False
-    assert artifacts.summary["helper_calls"] == 0
-    assert artifacts.summary["helper_urls"] == []
-    assert artifacts.summary["pass_a_attempted"] == 0
-    assert artifacts.summary["night_fb_discovery_skipped"] is True
+    assert artifacts.summary["explicit_intake_outcome"] == "attempt_share_runtime_fallback"
+    assert artifacts.summary["fb_scrape_started"] is True
+    assert artifacts.summary["helper_calls"] == 1
+    assert artifacts.summary["helper_urls"] == [_share_url_for_row(_fixture_row())]
+    assert artifacts.summary["pass_a_attempted"] == 1
+    assert artifacts.summary["night_fb_discovery_skipped"] is False
     assert artifacts.summary["discovery_logs_present"] is False
     assert artifacts.row["Social Link"] == _fixture_row()["Social Link"]
     assert any(
@@ -106,8 +111,9 @@ def test_miya_zawa_unresolved_smoke_remains_truthful_without_fake_url(tmp_path: 
         and "reason='resolver_returned_blank'" in line
         for line in artifacts.log_lines
     )
-    assert any('[Night FB][Explicit Intake]' in line and 'outcome="no_explicit_url"' in line for line in artifacts.log_lines)
-    assert not any("[FB Email] Visiting" in line for line in artifacts.log_lines)
+    assert any("share_runtime_fallback=True" in line for line in artifacts.log_lines if "[Night FB][Row Gate]" in line)
+    assert any('[Night FB][Explicit Intake]' in line and 'outcome="attempt_share_runtime_fallback"' in line for line in artifacts.log_lines)
+    assert any(f"[FB Email] Visiting {_share_url_for_row(_fixture_row())}" in line for line in artifacts.log_lines)
 
 
 def test_multi_row_share_fixture_loads_for_smoke_expansion() -> None:
@@ -177,12 +183,12 @@ def test_multi_row_unresolved_smoke_stays_truthful_per_row(tmp_path: Path) -> No
     )
 
     assert artifacts.summary["input_rows"] == len(fixture_rows_by_artist)
-    assert artifacts.summary["helper_calls"] == 0
-    assert artifacts.summary["helper_urls"] == []
-    assert artifacts.summary["pass_a_attempted"] == 0
+    assert artifacts.summary["helper_calls"] == len(fixture_rows_by_artist)
+    assert artifacts.summary["helper_urls"] == [_share_url_for_row(row) for row in fixture_rows_by_artist.values()]
+    assert artifacts.summary["pass_a_attempted"] == len(fixture_rows_by_artist)
     assert artifacts.summary["rows_with_canonical_facebook_url"] == 0
-    assert artifacts.summary["rows_with_explicit_intake_attempt"] == 0
-    assert artifacts.summary["rows_with_pass_a_attempt"] == 0
+    assert artifacts.summary["rows_with_explicit_intake_attempt"] == len(fixture_rows_by_artist)
+    assert artifacts.summary["rows_with_pass_a_attempt"] == len(fixture_rows_by_artist)
 
     for artist_name, fixture_row in fixture_rows_by_artist.items():
         row = artifacts.rows_by_artist[artist_name]
@@ -191,9 +197,9 @@ def test_multi_row_unresolved_smoke_stays_truthful_per_row(tmp_path: Path) -> No
         assert row["facebook_url_title_alias"] == ""
         assert row["fb_url_present"] is False
         assert row["fb_entrypoint_present"] is False
-        assert row["explicit_intake_outcome"] == "no_explicit_url"
-        assert row["fb_scrape_started"] is False
-        assert row["pass_a_attempted"] == 0
+        assert row["explicit_intake_outcome"] == "attempt_share_runtime_fallback"
+        assert row["fb_scrape_started"] is True
+        assert row["pass_a_attempted"] == 1
         assert row["share_canonicalization_outcome"] == "unresolved"
         assert row["share_canonicalization_url"] == ""
         assert row["social_link"] == fixture_row["Social Link"]

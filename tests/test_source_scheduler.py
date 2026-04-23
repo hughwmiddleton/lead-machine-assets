@@ -808,7 +808,7 @@ def test_row_linear_unearthed_without_usable_explicit_fb_does_not_bypass(monkeyp
     assert any("[Unearthed Path] no usable FB URL, resuming standard path artist='Unearthed Guarded' row=0" in line for line in logs)
 
 
-def test_row_linear_unresolved_share_url_stays_blocked_before_fb_first_gate(monkeypatch):
+def test_row_linear_unresolved_share_url_sets_runtime_fallback_before_fb_first_gate(monkeypatch):
     import pandas as pd
     import cross_directory_enricher as cde
 
@@ -830,7 +830,7 @@ def test_row_linear_unresolved_share_url_stays_blocked_before_fb_first_gate(monk
     worker._init_row_enrichment_state = lambda: None
     worker._log_spotify_discovery_summary = lambda *args, **kwargs: None
     worker._get_night_fb_share_promotion_resolver = lambda: (
-        lambda raw: "https://www.facebook.com/share/stillwrapped"
+        lambda raw: ""
     )
 
     calls = {"dir": [], "sc": [], "lf": [], "spotify": [], "ig": [], "website": [], "fb": []}
@@ -872,20 +872,23 @@ def test_row_linear_unresolved_share_url_stays_blocked_before_fb_first_gate(monk
     assert seed_df.at[0, "Facebook_URL"] == ""
     assert seed_df.at[0, "facebook_url"] == ""
     assert seed_df.at[0, "Facebook URL"] == ""
-    for phase_name in calls:
-        assert calls[phase_name] == [0]
+    for phase_name in ("dir", "sc", "lf", "spotify", "website"):
+        assert 0 not in calls[phase_name]
+    assert 0 in calls["fb"]
 
     detect_idx = next(i for i, line in enumerate(logs) if "[FB Share Canonicalize]" in line and "artist='Migsy'" in line and "detected=1" in line)
     unresolved_idx = next(i for i, line in enumerate(logs) if "[FB Share Canonicalize]" in line and "artist='Migsy'" in line and "outcome='unresolved'" in line)
     readiness_idx = next(i for i, line in enumerate(logs) if "[Unearthed Path][FB Readiness]" in line and "artist='Migsy'" in line)
-    fallback_idx = next(i for i, line in enumerate(logs) if "[Unearthed Path] no usable FB URL, resuming standard path artist='Migsy' row=0" in line)
+    activated_idx = next(i for i, line in enumerate(logs) if "[Unearthed Path] activated artist='Migsy' row=0" in line)
 
-    assert detect_idx < unresolved_idx < readiness_idx < fallback_idx
+    assert detect_idx < unresolved_idx < readiness_idx < activated_idx
     assert "canonical_present=0" in logs[readiness_idx]
+    assert "share_runtime_fallback=1" in logs[readiness_idx]
     assert "fb_url_present=False" in logs[readiness_idx]
     assert "fb_entrypoint_present=False" in logs[readiness_idx]
+    assert seed_df.at[0, "__fb_share_runtime_fallback_url"] == "https://www.facebook.com/share/19BActwuev?mibextid=wwXIfr"
     assert sum(1 for line in logs if "[FB Share Canonicalize]" in line and "artist='Migsy'" in line) == 2
-    assert not any("[Unearthed Path] activated artist='Migsy'" in line for line in logs)
+    assert not any("[Unearthed Path] no usable FB URL, resuming standard path artist='Migsy' row=0" in line for line in logs)
 
 
 def test_row_linear_non_unearthed_explicit_fb_row_remains_unchanged(monkeypatch):
