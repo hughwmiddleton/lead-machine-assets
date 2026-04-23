@@ -331,11 +331,9 @@ def test_unearthed_promotable_social_link_with_existing_email_uses_normal_pass_a
 
     result = enricher.enrich_row_with_facebook_night(row)
 
-    assert observed["fb_url"] == "https://www.facebook.com/unearthed.promoted.existing"
-    assert observed["explicit_accepted_url"] is True
-    assert observed["email_all_before"] == "seed@example.com"
-    assert result.get("FB_Status") == "pass_a_found_email"
-    assert "fbwin@example.com" in (result.get("Email_All") or "")
+    assert observed == {}
+    assert result.get("FB_Status", "") in {"", "ok"}
+    assert result.get("Email_All") == "seed@example.com"
 
 
 def test_unearthed_without_seeded_fb_skips_night_discovery(monkeypatch, enricher):
@@ -416,13 +414,14 @@ def test_unearthed_unresolved_share_url_skips_discovery(monkeypatch, enricher):
 
     result = enricher.enrich_row_with_facebook_night(row)
 
-    assert decision.outcome == "reject_invalid"
+    assert decision.outcome == "no_explicit_url"
     assert decision.accepted_urls == []
-    assert decision.rejected_invalid == ["https://www.facebook.com/share/19BActwuev?mibextid=wwXIfr"]
+    assert decision.rejected_invalid == []
+    assert decision.source_fallback_blocked is True
     assert nmfb.explicit_fb_entrypoint_urls_for_row(row) == []
     assert observed == {}
     assert result.get("FB_Status", "") == ""
-    assert any("share_resolution_failed" in msg for msg in logs)
+    assert any("source_fallback_blocked=1" in msg for msg in logs)
     assert any('[Night FB][Explicit Intake]' in msg and 'outcome="no_explicit_url"' in msg for msg in logs)
     assert any("[Unearthed Path] no usable FB URL; skipping Night FB discovery" in msg for msg in logs)
     assert not any("[Unearthed Path] no usable FB URL; allowing bounded FB discovery" in msg for msg in logs)
@@ -494,7 +493,7 @@ def test_non_unearthed_unresolved_share_url_still_uses_standard_search(monkeypat
 
     assert search_calls == [("Spotify Rejected Share", "", True, "")]
     assert result.get("FB_Status") == "pass_a_skipped_no_fb_url"
-    assert any("share_resolution_failed" in msg for msg in logs)
+    assert any("source_fallback_blocked=1" in msg for msg in logs)
     assert any('[Night FB][Explicit Intake]' in msg and 'outcome="no_explicit_url"' in msg for msg in logs)
 
 
@@ -692,7 +691,7 @@ def test_explicit_content_unavailable_allows_one_pass_b_discovery_fallback(monke
     assert [event for event in events if event[0] == "search"] == [("search", "Fallback Artist")]
     assert result.get("Email") == "fallback@example.com"
     assert "fallback@example.com" in (result.get("Email_All") or "")
-    assert discovered_fallback in (result.get("Facebook_URL") or result.get("facebook_url") or "")
+    assert result.get("Facebook_URL") == explicit_primary
     assert result.get("FB_Status") != "pass_a_content_unavailable"
 
 

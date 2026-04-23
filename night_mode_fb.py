@@ -195,6 +195,7 @@ class ExplicitFbIntakeDecision:
     rejected_guard: List[str]
     promotion_expected_missing_canonical: bool
     canonical_value_present: bool
+    source_fallback_blocked: bool = False
     promotion_source: str = ""
     invalid_reason: str = ""
     guard_reason: str = ""
@@ -1986,6 +1987,120 @@ def _extract_fb_urls_for_night_mode(row):
     return urls
 
 
+def _authoritative_raw_facebook_url(row: Dict[str, str]) -> str:
+    if row is None or not hasattr(row, "get"):
+        return ""
+    try:
+        value = row.get("Facebook_URL", "")
+    except Exception:
+        value = ""
+    try:
+        import pandas as _pd  # type: ignore
+
+        if _pd.isna(value):
+            return ""
+    except Exception:
+        pass
+    try:
+        return str(value or "").strip()
+    except Exception:
+        return ""
+
+
+def _authoritative_explicit_fb_url_for_row(row: Dict[str, str]) -> str:
+    raw = _authoritative_raw_facebook_url(row)
+    if not raw or not _is_valid_fb_url_value(raw):
+        return ""
+    if _explicit_fb_prefilter_reason(raw):
+        return ""
+    canonical = _normalise_fb_url(raw)
+    if not canonical:
+        return ""
+    canonical = _canonicalize_explicit_fb_entrypoint_url(canonical)
+    if not canonical:
+        return ""
+    guard_reason, _ = _explicit_fb_pre_scrape_guard_reason(canonical)
+    if guard_reason:
+        return ""
+    return canonical
+
+
+def _authoritative_explicit_fb_urls_for_row(
+    row: Dict[str, str],
+    *,
+    accepted_urls: Optional[Sequence[str]] = None,
+) -> List[str]:
+    urls = list(accepted_urls) if accepted_urls is not None else []
+    if not urls:
+        canonical = _authoritative_explicit_fb_url_for_row(row)
+        if canonical:
+            urls = [canonical]
+    routed: List[str] = []
+    seen: Set[str] = set()
+    for url in urls:
+        canonical = _authoritative_explicit_fb_url_for_row({"Facebook_URL": url})
+        key = _normalise_fb_url(canonical) or str(canonical or "").strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        routed.append(canonical)
+    return routed
+
+
+def _blocked_source_fb_fallback_fields(row: Dict[str, str]) -> List[str]:
+    candidate_fields = ("Social Link", "External Links", "Website", "Websites", "Website URL")
+    blocked_fields: List[str] = []
+    seen_fields: Set[str] = set()
+    for field in candidate_fields:
+        actual_field, raw = _explicit_fb_row_lookup(row, field)
+        label = actual_field or field
+        label_key = label.lower()
+        if label_key in seen_fields or not raw:
+            continue
+        seen_fields.add(label_key)
+        for part in _FB_SPLIT_PATTERN.split(raw):
+            candidate = str(part or "").strip()
+            if not candidate or not _looks_like_explicit_fb_candidate(candidate):
+                continue
+            blocked_fields.append(label)
+            break
+    return blocked_fields
+
+
+def _guard_authoritative_fb_url_update(
+    current_value: Any,
+    proposed_value: Any,
+    *,
+    artist_name: str = "",
+    logger: LoggerFn = None,
+    context: str = "",
+) -> Tuple[str, bool]:
+    current_raw = str(current_value or "").strip() if current_value is not None else ""
+    proposed_raw = str(proposed_value or "").strip() if proposed_value is not None else ""
+    current_canonical = _authoritative_explicit_fb_url_for_row({"Facebook_URL": current_raw})
+    proposed_canonical = _authoritative_explicit_fb_url_for_row({"Facebook_URL": proposed_raw})
+
+    if not proposed_canonical:
+        if current_canonical:
+            if logger:
+                _log(
+                    logger,
+                    f"[FB Authority] artist='{artist_name or '<unknown>'}' overwrite_blocked=1 context='{context or 'facebook_url_write'}' attempted_value='{proposed_raw or '<blank>'}'",
+                )
+            return current_canonical, True
+        return current_raw, False
+
+    if current_canonical and current_canonical != proposed_canonical:
+        if logger:
+            _log(
+                logger,
+                f"[FB Authority] artist='{artist_name or '<unknown>'}' overwrite_blocked=1 context='{context or 'facebook_url_write'}' attempted_value='{proposed_raw or '<blank>'}'",
+            )
+        return current_canonical, True
+
+    return proposed_canonical, False
+
+
 _FB_LOW_INFO_SONG_TITLE_TOKENS = frozenset(
     {
         "acoustic",
@@ -2432,100 +2547,50 @@ def classify_explicit_fb_intake(
     *,
     accepted_urls: Optional[Sequence[str]] = None,
 ) -> ExplicitFbIntakeDecision:
-    accepted_urls = list(accepted_urls) if accepted_urls is not None else _canonicalize_and_dedupe_explicit_fb_urls(_extract_fb_urls_for_night_mode(row))
+    accepted_urls = _authoritative_explicit_fb_urls_for_row(row, accepted_urls=accepted_urls)
 
-    source_fields_seen: List[str] = []
-    source_fields_set: Set[str] = set()
-    scanned_actual_fields: Set[str] = set()
+    source_fields: List[str] = []
     rejected_invalid: List[str] = []
-    rejected_invalid_seen: Set[str] = set()
     rejected_guard: List[str] = []
-    rejected_guard_seen: Set[str] = set()
     invalid_reason = ""
     guard_reason = ""
-    accepted_sources_by_url: Dict[str, str] = {}
-
-    for field in _EXPLICIT_FB_INTAKE_FIELDS:
-        actual_field, raw = _explicit_fb_row_lookup(row, field)
-        actual_field_key = (actual_field or field).lower()
-        if actual_field and actual_field_key in scanned_actual_fields:
-            continue
-        if actual_field:
-            scanned_actual_fields.add(actual_field_key)
-        if not raw:
-            continue
-        parts = _FB_SPLIT_PATTERN.split(raw)
-        is_direct_fb_field = actual_field_key in {"facebook_url", "facebook url"}
-        for part in parts:
-            candidate = str(part or "").strip()
-            if not candidate or (not is_direct_fb_field and not _looks_like_explicit_fb_candidate(candidate)):
-                continue
-            source_label = actual_field or field
-            if source_label not in source_fields_set:
-                source_fields_seen.append(source_label)
-                source_fields_set.add(source_label)
-            if not _is_valid_fb_url_value(candidate):
-                if candidate not in rejected_invalid_seen:
-                    rejected_invalid.append(candidate)
-                    rejected_invalid_seen.add(candidate)
-                if not invalid_reason:
-                    invalid_reason = "invalid_placeholder_or_malformed"
-                continue
-            if not any(host in candidate.lower() for host in _EXPLICIT_FB_ALLOWED_HOSTS):
-                if candidate not in rejected_invalid_seen:
-                    rejected_invalid.append(candidate)
-                    rejected_invalid_seen.add(candidate)
-                if not invalid_reason:
-                    invalid_reason = "missing_fb_host"
-                continue
-            prefilter_reason = _explicit_fb_prefilter_reason(candidate)
+    authoritative_raw = _authoritative_raw_facebook_url(row)
+    canonical_value_present = bool(accepted_urls)
+    if canonical_value_present:
+        source_fields.append("Facebook_URL")
+    elif authoritative_raw:
+        if not _is_valid_fb_url_value(authoritative_raw):
+            rejected_invalid.append(authoritative_raw)
+            invalid_reason = "invalid_placeholder_or_malformed"
+        elif not any(host in authoritative_raw.lower() for host in _EXPLICIT_FB_ALLOWED_HOSTS):
+            rejected_invalid.append(authoritative_raw)
+            invalid_reason = "missing_fb_host"
+        else:
+            prefilter_reason = _explicit_fb_prefilter_reason(authoritative_raw)
+            canonical_candidate = _normalise_fb_url(authoritative_raw)
+            canonical_candidate = _canonicalize_explicit_fb_entrypoint_url(canonical_candidate) if canonical_candidate else None
             if prefilter_reason:
-                if candidate not in rejected_guard_seen:
-                    rejected_guard.append(candidate)
-                    rejected_guard_seen.add(candidate)
-                if not guard_reason:
-                    guard_reason = prefilter_reason
-                continue
-            canonical = _normalise_fb_url(candidate)
-            if not canonical:
-                if candidate not in rejected_invalid_seen:
-                    rejected_invalid.append(candidate)
-                    rejected_invalid_seen.add(candidate)
-                if not invalid_reason:
-                    invalid_reason = "canonicalization_dropped"
-                continue
-            canonical = _canonicalize_explicit_fb_entrypoint_url(canonical)
-            if not canonical:
-                if candidate not in rejected_invalid_seen:
-                    rejected_invalid.append(candidate)
-                    rejected_invalid_seen.add(candidate)
-                if not invalid_reason:
-                    invalid_reason = "canonicalization_dropped"
-                continue
-            accepted_sources_by_url.setdefault(canonical, source_label)
-            guard_reject_reason, guard_sample = _explicit_fb_pre_scrape_guard_reason(canonical)
-            if guard_reject_reason:
-                if guard_sample not in rejected_guard_seen:
+                rejected_guard.append(authoritative_raw)
+                guard_reason = prefilter_reason
+            elif not canonical_candidate:
+                rejected_invalid.append(authoritative_raw)
+                invalid_reason = "canonicalization_dropped"
+            else:
+                guard_reject_reason, guard_sample = _explicit_fb_pre_scrape_guard_reason(canonical_candidate)
+                if guard_reject_reason:
                     rejected_guard.append(guard_sample)
-                    rejected_guard_seen.add(guard_sample)
-                if not guard_reason:
                     guard_reason = guard_reject_reason
+                else:
+                    rejected_invalid.append(authoritative_raw)
+                    invalid_reason = "canonicalization_dropped"
 
-    source_fields = []
-    source_seen: Set[str] = set()
-    for url in accepted_urls:
-        source = accepted_sources_by_url.get(url, "")
-        if source and source not in source_seen:
-            source_fields.append(source)
-            source_seen.add(source)
-    for field in source_fields_seen:
-        if field not in source_seen:
-            source_fields.append(field)
-            source_seen.add(field)
-
-    canonical_value_present = bool(canonicalize_facebook_url(_explicit_fb_row_value(row, "Facebook_URL")))
     promoted_url, promotion_source = ensure_canonical_facebook_url(row, set_row=False)
     promotion_expected_missing_canonical = bool(promoted_url and not canonical_value_present)
+    blocked_source_fields = _blocked_source_fb_fallback_fields(row)
+    source_fallback_blocked = bool(blocked_source_fields and not canonical_value_present)
+    for field in blocked_source_fields:
+        if field not in source_fields:
+            source_fields.append(field)
 
     if accepted_urls:
         outcome = "attempt"
@@ -2548,7 +2613,7 @@ def classify_explicit_fb_intake(
     elif outcome == "promotion_expected_missing_canonical":
         message = "promotion source had FB URL but canonical field was blank at intake"
     elif outcome == "no_explicit_url":
-        message = "no explicit FB URL detected on row"
+        message = "no canonical Facebook_URL detected for explicit intake"
 
     return ExplicitFbIntakeDecision(
         outcome=outcome,
@@ -2558,6 +2623,7 @@ def classify_explicit_fb_intake(
         rejected_guard=rejected_guard,
         promotion_expected_missing_canonical=promotion_expected_missing_canonical,
         canonical_value_present=canonical_value_present,
+        source_fallback_blocked=source_fallback_blocked,
         promotion_source=promotion_source or "",
         invalid_reason=invalid_reason,
         guard_reason=guard_reason,
@@ -2570,19 +2636,7 @@ def explicit_fb_entrypoint_urls_for_row(
     *,
     accepted_urls: Optional[Sequence[str]] = None,
 ) -> List[str]:
-    urls = list(accepted_urls) if accepted_urls is not None else _canonicalize_and_dedupe_explicit_fb_urls(_extract_fb_urls_for_night_mode(row))
-    routed: List[str] = []
-    seen: Set[str] = set()
-    for url in urls:
-        guard_reason, _ = _explicit_fb_pre_scrape_guard_reason(url)
-        if guard_reason:
-            continue
-        key = _normalise_fb_url(url) or str(url or "").strip()
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        routed.append(url)
-    return routed
+    return _authoritative_explicit_fb_urls_for_row(row, accepted_urls=accepted_urls)
 
 
 def _log_explicit_fb_intake(logger: LoggerFn, artist_name: str, decision: ExplicitFbIntakeDecision) -> None:
@@ -2605,12 +2659,16 @@ def _log_explicit_fb_intake(logger: LoggerFn, artist_name: str, decision: Explic
         parts.append(f'guard_reason="{decision.guard_reason}"')
     if decision.canonical_value_present:
         parts.append('canonical_field="present"')
-    elif decision.promotion_expected_missing_canonical:
+    elif decision.promotion_expected_missing_canonical or decision.source_fallback_blocked:
         parts.append('canonical_field="blank"')
     if decision.promotion_expected_missing_canonical:
         parts.append('promotion_expected="1"')
         if decision.promotion_source:
             parts.append(f'promotion_source="{decision.promotion_source}"')
+    if decision.source_fallback_blocked:
+        parts.append("source_fallback_blocked=1")
+    if decision.message:
+        parts.append(f'message="{decision.message}"')
     _log(logger, " ".join(parts))
 
 
@@ -8002,65 +8060,21 @@ class NightModeFacebookEnricher:
         authed_session_available: Optional[bool] = None,
     ) -> Tuple[Dict[str, str], Optional[bool]]:
         prepared_row = dict(row or {})
-        scanned_actual_fields: Set[str] = set()
+        authoritative_raw = _authoritative_raw_facebook_url(row)
+        authoritative_canonical = _authoritative_explicit_fb_url_for_row(row)
+        prepared_row["Facebook_URL"] = authoritative_canonical or authoritative_raw
 
-        def _resolve_share_candidate(candidate: str) -> Optional[str]:
-            nonlocal authed_session_available
-            raw_candidate = str(candidate or "").strip()
-            if not raw_candidate:
-                return None
-            if authed_session_available is None:
-                authed_session_available = self._has_authenticated_session()
-            resolved_candidate = self._resolve_pass_a_explicit_scrape_url(
-                raw_candidate,
-                authed_session_available=bool(authed_session_available),
-            )
-            canonical_candidate = _canonicalize_explicit_fb_entrypoint_url(resolved_candidate or "")
-            guard_reason = ""
-            if canonical_candidate:
-                guard_reason, _ = _explicit_fb_pre_scrape_guard_reason(canonical_candidate)
-            if canonical_candidate and not guard_reason and not _is_allowed_fb_share_entrypoint_url(canonical_candidate):
-                if canonical_candidate != raw_candidate:
-                    _log(
-                        self.logger,
-                        f'[Night FB][Explicit Intake] share_resolved raw="{raw_candidate}" resolved="{canonical_candidate}"',
-                    )
-                return canonical_candidate
-            failure_reason = guard_reason or "session_unavailable"
-            if authed_session_available:
-                failure_reason = guard_reason or "canonicalization_dropped"
-                normalized_resolved = _normalise_fb_url(resolved_candidate)
-                if normalized_resolved and _is_allowed_fb_share_entrypoint_url(normalized_resolved):
-                    failure_reason = "remained_share_wrapper"
+        blocked_fields = _blocked_source_fb_fallback_fields(row)
+        if blocked_fields and not authoritative_canonical:
             _log(
                 self.logger,
-                f'[Night FB][Explicit Intake] share_resolution_failed raw="{raw_candidate}" reason="{failure_reason}"',
+                f"[FB Authority] artist='{prepared_row.get('Artist Name', '') or prepared_row.get('Artist', '') or '<unknown>'}' canonical_present=0 source_fallback_blocked=1 blocked_fields='{','.join(blocked_fields)}'",
             )
-            return None
-
-        for field in _EXPLICIT_FB_INTAKE_FIELDS:
-            actual_field, raw = _explicit_fb_row_lookup(row, field)
-            actual_field_key = (actual_field or field).lower()
-            if actual_field and actual_field_key in scanned_actual_fields:
-                continue
-            if actual_field:
-                scanned_actual_fields.add(actual_field_key)
-            if not raw:
-                continue
-            parts = _FB_SPLIT_PATTERN.split(raw)
-            is_direct_fb_field = actual_field_key in {"facebook_url", "facebook url"}
-            prepared_values: List[str] = []
-            for part in parts:
-                candidate = str(part or "").strip()
-                if not candidate or (not is_direct_fb_field and not _looks_like_explicit_fb_candidate(candidate)):
-                    continue
-                if _is_allowed_fb_share_entrypoint_url(candidate):
-                    resolved_share_candidate = _resolve_share_candidate(candidate)
-                    if resolved_share_candidate:
-                        prepared_values.append(resolved_share_candidate)
-                    continue
-                prepared_values.append(candidate)
-            prepared_row[actual_field or field] = " | ".join(prepared_values)
+        elif authoritative_canonical:
+            _log(
+                self.logger,
+                f"[FB Authority] artist='{prepared_row.get('Artist Name', '') or prepared_row.get('Artist', '') or '<unknown>'}' canonical_present=1 source_fallback_blocked=0",
+            )
 
         return prepared_row, authed_session_available
 
@@ -10068,7 +10082,14 @@ class NightModeFacebookEnricher:
         target_row["Email_Type"] = night_result.email_type
         canonical_fb_url = canonicalize_facebook_url(night_result.facebook_url)
         if canonical_fb_url:
-            target_row["Facebook_URL"] = canonical_fb_url
+            next_fb_url, _ = _guard_authoritative_fb_url_update(
+                target_row.get("Facebook_URL", ""),
+                canonical_fb_url,
+                artist_name=artist_name,
+                logger=self.logger,
+                context="apply_night_fb_result",
+            )
+            target_row["Facebook_URL"] = next_fb_url
         provenance_emails = emails or night_result.email_all or night_result.email
         provenance_surface = "facebook_about" if (night_result.email_source or "").strip().lower() == "about" else "facebook_main"
         provenance_source_context = getattr(night_result, "source_context", None)
@@ -10516,11 +10537,8 @@ class NightModeFacebookEnricher:
         row_id = self._fb_driver_row_id(row=result, artist_name=artist_name, row_index=row_index)
         is_unearthed = self._is_unearthed_source(result)
         explicit_fb_entrypoints = explicit_fb_entrypoint_urls_for_row(result)
-        promoted_fb_url, _ = ensure_canonical_facebook_url(result, set_row=False)
-        has_seeded_fb = bool(promoted_fb_url)
-        unearthed_fb_first_active = bool(
-            is_unearthed and (promoted_fb_url or explicit_fb_entrypoints)
-        )
+        has_seeded_fb = bool(explicit_fb_entrypoints)
+        unearthed_fb_first_active = bool(is_unearthed and has_seeded_fb)
         skip_due_to_email, email_all_clean = _row_has_usable_email_for_fb_skip(result)
         if skip_due_to_email and not unearthed_fb_first_active:
             self.fb_rows_skipped["no_opportunity"] += 1
@@ -10988,7 +11006,14 @@ class NightModeFacebookEnricher:
                 # Page reached but no emails extracted.
                 if _is_fb_login_or_security_url(page_url):
                     result["FB_Status"] = "login_redirect"
-                    result["Facebook_URL"] = ""
+                    existing_fb_url, _ = _guard_authoritative_fb_url_update(
+                        result.get("Facebook_URL", ""),
+                        "",
+                        artist_name=artist_name,
+                        logger=self.logger,
+                        context="login_redirect",
+                    )
+                    result["Facebook_URL"] = existing_fb_url
                     self._register_login_wall()
                     _log(self.logger, f"[Night FB] Detected login redirect for '{artist_name}' -> {page_url}, marking FB_Status='login_redirect'.")
                 else:

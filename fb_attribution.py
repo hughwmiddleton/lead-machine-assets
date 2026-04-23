@@ -4,7 +4,7 @@ from typing import Any, Dict, Tuple
 
 import pandas as pd
 
-from source_scheduler import canonicalize_facebook_url, promote_facebook_url
+from source_scheduler import canonicalize_facebook_url
 
 FB_OPPORTUNITY_STATE_COL = "FB_Opportunity_State"
 FB_GATE_STATE_COL = "FB_Gate_State"
@@ -100,14 +100,7 @@ def canonical_fb_url_from_row(row: Any) -> str:
         raw = _clean_text(row.get("Facebook_URL", ""))  # type: ignore[attr-defined]
     except Exception:
         raw = ""
-    canonical = canonicalize_facebook_url(raw)
-    if canonical:
-        return canonical
-    try:
-        promoted = promote_facebook_url(row, set_row=False)
-    except Exception:
-        promoted = raw
-    return canonicalize_facebook_url(promoted)
+    return canonicalize_facebook_url(raw)
 
 
 def classify_fb_opportunity_state(row: Any) -> str:

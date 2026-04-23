@@ -1865,6 +1865,42 @@ def _cell_str(v) -> str:
     return str(v)
 
 
+def _authoritative_fb_url_candidate(value: Any) -> str:
+    raw = _cell_str(value).strip()
+    if not raw:
+        return ""
+    urls = explicit_fb_entrypoint_urls_for_row({"Facebook_URL": raw})
+    return urls[0] if urls else ""
+
+
+def _guard_authoritative_fb_write(
+    existing_value: Any,
+    proposed_value: Any,
+    *,
+    artist_label: str = "",
+    logger: LoggerFn = None,
+    context: str = "",
+) -> str:
+    current = _authoritative_fb_url_candidate(existing_value)
+    proposed = _authoritative_fb_url_candidate(proposed_value)
+    proposed_raw = _cell_str(proposed_value).strip()
+    if not proposed:
+        if current:
+            _safe_log_console(
+                logger,
+                f"[FB Authority] artist='{artist_label or '<unknown>'}' overwrite_blocked=1 context='{context or 'facebook_url_write'}' attempted_value='{proposed_raw or '<blank>'}'",
+            )
+            return current
+        return _cell_str(existing_value).strip()
+    if current and current != proposed:
+        _safe_log_console(
+            logger,
+            f"[FB Authority] artist='{artist_label or '<unknown>'}' overwrite_blocked=1 context='{context or 'facebook_url_write'}' attempted_value='{proposed_raw or '<blank>'}'",
+        )
+        return current
+    return proposed
+
+
 def _facebook_about_url(raw_url: str) -> str:
     """Return a best-effort Facebook About URL for a profile/page link."""
     url = _cell_str(raw_url).strip()
@@ -3529,7 +3565,13 @@ def run_facebook_global_pass(
                             fb_status_val or ("ok" if email_val or filtered_email_all else "no_candidates")
                         )
                         if fb_url_val:
-                            updated_df.at[rid_int, "Facebook_URL"] = fb_url_val
+                            updated_df.at[rid_int, "Facebook_URL"] = _guard_authoritative_fb_write(
+                                updated_df.at[rid_int, "Facebook_URL"] if "Facebook_URL" in updated_df.columns else "",
+                                fb_url_val,
+                                artist_label=str(artist_for_log),
+                                logger=_LOGGER.info,
+                                context="temp_output_merge",
+                            )
                     elif not email_val and not fb_url_val and not pd.isna(rid):
                         try:
                             rid_int = int(float(rid))
@@ -3964,15 +4006,11 @@ def run_facebook_global_pass_nightmode(
 
             should_skip_due_to_email = _should_skip_row_due_to_email(row, skip_rows_with_email, logger)
             terminal_statuses = {"no_candidates", "unearthed_no_emails"}
-            canonical_facebook_url = canonicalize_facebook_url(df.at[idx, "Facebook_URL"] if "Facebook_URL" in df.columns else "")
+            explicit_fb_entrypoints = explicit_fb_entrypoint_urls_for_row(row.to_dict())
+            canonical_facebook_url = explicit_fb_entrypoints[0] if explicit_fb_entrypoints else ""
             if canonical_facebook_url and "Facebook_URL" in df.columns and _cell_str(df.at[idx, "Facebook_URL"]) != canonical_facebook_url:
                 df.at[idx, "Facebook_URL"] = canonical_facebook_url
             has_canonical_facebook_url = bool(canonical_facebook_url)
-            explicit_fb_entrypoints = (
-                [canonical_facebook_url]
-                if canonical_facebook_url
-                else explicit_fb_entrypoint_urls_for_row(row.to_dict())
-            )
             has_explicit_fb_entrypoint = bool(explicit_fb_entrypoints)
             is_unearthed_source = _is_unearthed_source_row(row)
             unearthed_fb_first_active = bool(
@@ -4196,7 +4234,16 @@ def run_facebook_global_pass_nightmode(
                         cols_to_copy.append("Email_Type")
                     for col in cols_to_copy:
                         if col in enriched:
-                            df.at[idx, col] = enriched.get(col, "")
+                            if col == "Facebook_URL":
+                                df.at[idx, col] = _guard_authoritative_fb_write(
+                                    df.at[idx, "Facebook_URL"] if "Facebook_URL" in df.columns else "",
+                                    enriched.get(col, ""),
+                                    artist_label=str(artist_label),
+                                    logger=logger,
+                                    context="night_fb_merge",
+                                )
+                            else:
+                                df.at[idx, col] = enriched.get(col, "")
                     if not status_val:
                         email_now = enriched.get("Email", "") or ""
                         fb_url_now = enriched.get("Facebook_URL", "") or ""
