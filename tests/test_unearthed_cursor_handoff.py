@@ -323,7 +323,7 @@ def test_scrape_website_waits_for_full_post_cursor_window_before_slicing(monkeyp
     assert load_more_requests == 2
 
 
-def test_scrape_website_resumes_from_terminal_logical_cursor_occurrence(monkeypatch, tmp_path) -> None:
+def test_scrape_website_stops_at_first_resolved_cursor_during_discovery(monkeypatch, tmp_path) -> None:
     visited_profile_urls, load_more_requests = _run_fake_unearthed_scrape(
         monkeypatch,
         tmp_path,
@@ -336,8 +336,8 @@ def test_scrape_website_resumes_from_terminal_logical_cursor_occurrence(monkeypa
     )
 
     assert visited_profile_urls == [
-        "https://www.abc.net.au/triplejunearthed/artist/artist-5",
-        "https://www.abc.net.au/triplejunearthed/artist/artist-6",
+        "https://www.abc.net.au/triplejunearthed/artist/artist-3",
+        "https://www.abc.net.au/triplejunearthed/artist/artist-4",
     ]
     assert load_more_requests == 1
 
@@ -533,6 +533,81 @@ def test_scrape_website_cursor_discovery_logs_progress_and_early_resolution(monk
     assert '[UE Resume Debug] cursor_search_progress target_slug="artist-120" discovered_count=50' in captured.out
     assert '[UE Resume Debug] cursor_search_progress target_slug="artist-120" discovered_count=100' in captured.out
     assert '[UE Resume Debug] cursor_resolved target_slug="artist-120" matched_index=119 resolved_resume_index=120 discovered_count=120' in captured.out
+
+
+def test_scrape_website_stops_cursor_search_after_resolution(monkeypatch, tmp_path, capsys) -> None:
+    visited_profile_urls, load_more_requests = _run_fake_unearthed_scrape(
+        monkeypatch,
+        tmp_path,
+        [
+            [f"artist-{index}" for index in range(1, 51)],
+            [f"artist-{index}" for index in range(1, 151)],
+            [f"artist-{index}" for index in range(1, 2001)],
+        ],
+        max_artists=2,
+        resume_mode="cursor",
+        persistent_cursor="https://www.abc.net.au/triplejunearthed/artist/artist-120",
+        extra_job_config={"unearthed_cursor_search_limit": 2000},
+    )
+
+    captured = capsys.readouterr()
+
+    assert visited_profile_urls == [
+        "https://www.abc.net.au/triplejunearthed/artist/artist-121",
+        "https://www.abc.net.au/triplejunearthed/artist/artist-122",
+    ]
+    assert load_more_requests == 1
+    assert "Found 122 artist profile URLs so far..." in captured.out
+    assert "Found 150 artist profile URLs so far..." not in captured.out
+    assert "Found 2000 artist profile URLs so far..." not in captured.out
+
+
+def test_scrape_website_fills_only_required_post_cursor_slice(monkeypatch, tmp_path, capsys) -> None:
+    visited_profile_urls, load_more_requests = _run_fake_unearthed_scrape(
+        monkeypatch,
+        tmp_path,
+        [
+            [f"artist-{index}" for index in range(1, 121)],
+            [f"artist-{index}" for index in range(1, 181)],
+        ],
+        max_artists=5,
+        resume_mode="cursor",
+        persistent_cursor="https://www.abc.net.au/triplejunearthed/artist/artist-120",
+        extra_job_config={"unearthed_cursor_search_limit": 2000},
+    )
+
+    captured = capsys.readouterr()
+
+    assert visited_profile_urls == [
+        "https://www.abc.net.au/triplejunearthed/artist/artist-121",
+        "https://www.abc.net.au/triplejunearthed/artist/artist-122",
+        "https://www.abc.net.au/triplejunearthed/artist/artist-123",
+        "https://www.abc.net.au/triplejunearthed/artist/artist-124",
+        "https://www.abc.net.au/triplejunearthed/artist/artist-125",
+    ]
+    assert load_more_requests == 1
+    assert "Found 125 artist profile URLs so far..." in captured.out
+    assert "Found 180 artist profile URLs so far..." not in captured.out
+
+
+def test_scrape_website_cursor_resume_debug_logs_once_after_resolution(monkeypatch, tmp_path, capsys) -> None:
+    _run_fake_unearthed_scrape(
+        monkeypatch,
+        tmp_path,
+        [
+            [f"artist-{index}" for index in range(1, 121)],
+            [f"artist-{index}" for index in range(1, 181)],
+        ],
+        max_artists=5,
+        resume_mode="cursor",
+        persistent_cursor="https://www.abc.net.au/triplejunearthed/artist/artist-120",
+    )
+
+    captured = capsys.readouterr()
+
+    assert captured.out.count("[UE Resume Debug] resolver ") == 1
+    assert captured.out.count("[UE Resume Debug] cursor_resolved ") == 1
+    assert captured.out.count("[UE Resume Debug] slice_decision ") == 1
 
 
 def test_unearthed_full_pipeline_wrapper_propagates_resume_boundary_errors(tmp_path) -> None:

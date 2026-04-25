@@ -1571,7 +1571,10 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
                 else "",
             }
 
-        def _discover_current_listing_page(stop_on_target: bool = False) -> int | None:
+        def _discover_current_listing_page(
+            stop_on_target: bool = False,
+            stop_after_count: int | None = None,
+        ) -> int | None:
             nonlocal next_cursor_progress_log_count
             soup = BeautifulSoup(driver.page_source, 'html.parser')
             artist_links = soup.select('a.HU3iy.p1_Ju.mqDRk.FQED6.O_grP[href^="/triplejunearthed/artist/"]')
@@ -1598,6 +1601,8 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
                             f'last_url="{profile_url}"'
                         )
                         next_cursor_progress_log_count += cursor_search_progress_every
+                    if stop_after_count is not None and len(ordered_profile_urls) >= stop_after_count:
+                        return None
                     normalized_profile_url = _normalize_unearthed_profile_url_for_match(profile_url)
                     profile_slug = normalize_unearthed_cursor(profile_url)
                     if stop_on_target and (
@@ -1637,24 +1642,26 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
                     search_exhausted = True
                     print("No more 'Load More' button found or error:", e)
                     break
-            while resolved_resume_index is not None and not _is_unearthed_slice_ready(
-                ordered_profile_urls,
-                target_profile_url,
-                max_artists,
-            ):
-                _discover_current_listing_page()
-                print(f"Found {len(ordered_profile_urls)} artist profile URLs so far...")
-                if _is_unearthed_slice_ready(ordered_profile_urls, target_profile_url, max_artists):
-                    break
-                try:
-                    load_more_button = WebDriverWait(driver, 10).until(
-                        EC.element_to_be_clickable((By.XPATH, '//button[contains(text(), "Load more")]'))
-                    )
-                    load_more_button.click()
-                    time.sleep(random.uniform(3, 5))
-                except Exception as e:
-                    print("No more 'Load More' button found or error:", e)
-                    break
+
+            if resolved_resume_index is not None:
+                def _resolved_slice_ready() -> bool:
+                    return max_artists <= 0 or len(ordered_profile_urls) >= resolved_resume_index + max_artists
+
+                required_discovered_count = resolved_resume_index + max_artists
+                while not _resolved_slice_ready():
+                    _discover_current_listing_page(stop_after_count=required_discovered_count)
+                    print(f"Found {len(ordered_profile_urls)} artist profile URLs so far...")
+                    if _resolved_slice_ready():
+                        break
+                    try:
+                        load_more_button = WebDriverWait(driver, 10).until(
+                            EC.element_to_be_clickable((By.XPATH, '//button[contains(text(), "Load more")]'))
+                        )
+                        load_more_button.click()
+                        time.sleep(random.uniform(3, 5))
+                    except Exception as e:
+                        print("No more 'Load More' button found or error:", e)
+                        break
         else:
             while _count_unearthed_remaining_profile_urls(ordered_profile_urls, target_profile_url) < max_artists:
                 _discover_current_listing_page()
@@ -1676,7 +1683,13 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
             remaining_after_resume_index = 0
             if resolved_resume_index is not None:
                 remaining_after_resume_index = len(ordered_profile_urls[resolved_resume_index:])
-            slice_ready = _is_unearthed_slice_ready(ordered_profile_urls, target_profile_url, max_artists)
+            slice_ready = (
+                max_artists <= 0
+                or (
+                    resolved_resume_index is not None
+                    and len(ordered_profile_urls) >= resolved_resume_index + max_artists
+                )
+            )
             _log_unearthed_resume_debug(
                 "discovery_sample "
                 f"first10={ordered_profile_urls[:10]} "
