@@ -12195,6 +12195,10 @@ class NightModeTab(QtWidgets.QWidget):
         ("Start fresh (ignore previous progress)", "fresh"),
         ("Selected cursor entry point", "selected"),
     ]
+    UNEARTHED_SOURCE_MODE_OPTIONS = [
+        ("Discover from website", False),
+        ("Use saved URL index", True),
+    ]
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -12270,6 +12274,13 @@ class NightModeTab(QtWidgets.QWidget):
         self._set_unearthed_resume_mode("auto")
         options_layout.addWidget(unearthed_resume_label)
         options_layout.addWidget(self.unearthed_resume_mode_combo)
+        unearthed_source_label = QtWidgets.QLabel("Unearthed Source Mode:")
+        self.unearthed_source_mode_combo = QtWidgets.QComboBox()
+        for label, value in self.UNEARTHED_SOURCE_MODE_OPTIONS:
+            self.unearthed_source_mode_combo.addItem(label, value)
+        self._set_unearthed_source_mode(False)
+        options_layout.addWidget(unearthed_source_label)
+        options_layout.addWidget(self.unearthed_source_mode_combo)
         self.resume_checkbox = QtWidgets.QCheckBox("Resume unfinished jobs")
         self.stop_on_failure_checkbox = QtWidgets.QCheckBox("Stop on first failure")
         self.phased_checkbox = QtWidgets.QCheckBox("Use phased runner (v2)")
@@ -12290,6 +12301,10 @@ class NightModeTab(QtWidgets.QWidget):
         selected_cursor_layout.addWidget(self.unearthed_selected_cursor_edit)
         layout.addLayout(selected_cursor_layout)
         self.unearthed_resume_mode_combo.currentIndexChanged.connect(self._sync_unearthed_resume_controls)
+
+        self.unearthed_index_status_label = QtWidgets.QLabel("")
+        layout.addWidget(self.unearthed_index_status_label)
+        self.unearthed_source_mode_combo.currentIndexChanged.connect(self._sync_unearthed_source_mode_controls)
 
         fb_row = QtWidgets.QHBoxLayout()
         fb_user_label = QtWidgets.QLabel("FB Username (optional):")
@@ -12417,6 +12432,7 @@ class NightModeTab(QtWidgets.QWidget):
 
         self.setLayout(layout)
         self._sync_unearthed_resume_controls()
+        self._sync_unearthed_source_mode_controls()
         self._toggle_master_live_controls()
         self._load_config_summary()
         self._refresh_run_summary()
@@ -12504,14 +12520,50 @@ class NightModeTab(QtWidgets.QWidget):
         self.unearthed_selected_cursor_label.setEnabled(selected_mode)
         self.unearthed_selected_cursor_edit.setEnabled(selected_mode)
 
+    def _current_unearthed_use_url_index(self) -> bool:
+        return bool(self.unearthed_source_mode_combo.currentData())
+
+    def _set_unearthed_source_mode(self, use_url_index) -> None:
+        target = bool(use_url_index)
+        for idx in range(self.unearthed_source_mode_combo.count()):
+            if bool(self.unearthed_source_mode_combo.itemData(idx)) == target:
+                self.unearthed_source_mode_combo.setCurrentIndex(idx)
+                return
+        self.unearthed_source_mode_combo.setCurrentIndex(0)
+
+    def _unearthed_url_index_path(self) -> str:
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "unearthed_artist_url_index.csv")
+
+    def _unearthed_url_index_status_text(self) -> str:
+        index_path = self._unearthed_url_index_path()
+        if not os.path.exists(index_path):
+            return "Index not found"
+        try:
+            with open(index_path, "r", encoding="utf-8", newline="") as f:
+                rows = [row for row in csv.reader(f) if any(str(cell).strip() for cell in row)]
+            count = max(len(rows) - 1, 0)
+        except Exception:
+            count = 0
+        return f"Index contains: {count} artist URLs"
+
+    def _sync_unearthed_source_mode_controls(self) -> None:
+        if self._current_unearthed_use_url_index():
+            self.unearthed_index_status_label.setText(self._unearthed_url_index_status_text())
+            self.unearthed_index_status_label.setVisible(True)
+        else:
+            self.unearthed_index_status_label.clear()
+            self.unearthed_index_status_label.setVisible(False)
+
     def _night_mode_jobs_for_config(self):
         resume_mode = self._current_unearthed_resume_mode()
         selected_cursor = self._current_unearthed_selected_cursor()
+        use_url_index = self._current_unearthed_use_url_index()
         config_jobs = []
         for job in self.jobs:
             job_copy = dict(job)
             if str(job_copy.get("directory") or "").strip().lower() == "unearthed":
                 job_copy["unearthed_resume_mode"] = resume_mode
+                job_copy["use_unearthed_url_index"] = use_url_index
                 if selected_cursor:
                     job_copy["unearthed_selected_cursor"] = selected_cursor
             config_jobs.append(job_copy)
@@ -12619,6 +12671,17 @@ class NightModeTab(QtWidgets.QWidget):
         self._set_unearthed_resume_mode(config.get("unearthed_resume_mode", "auto"))
         self._set_unearthed_selected_cursor(config.get("unearthed_selected_cursor", ""))
         self._sync_unearthed_resume_controls()
+        use_url_index = bool(config.get("use_unearthed_url_index", False))
+        jobs = config.get("jobs", [])
+        if isinstance(jobs, list):
+            for job in jobs:
+                if not isinstance(job, dict):
+                    continue
+                if str(job.get("directory") or "").strip().lower() == "unearthed":
+                    use_url_index = bool(job.get("use_unearthed_url_index", False))
+                    break
+        self._set_unearthed_source_mode(use_url_index)
+        self._sync_unearthed_source_mode_controls()
         export_mode = (config.get("export_mode") or "both").strip().lower()
         if export_mode in {"both", "per_directory", "combined"}:
             idx = self.export_mode_combo.findText(export_mode)
@@ -12651,7 +12714,6 @@ class NightModeTab(QtWidgets.QWidget):
         self._toggle_master_live_controls()
         sc_meta_cfg = config.get("soundcloud_meta_enricher", {}) or {}
         self.sc_meta_checkbox.setChecked(bool(sc_meta_cfg.get("enabled", False)))
-        jobs = config.get("jobs", [])
         if isinstance(jobs, list):
             self.jobs = jobs
             self._refresh_jobs_table()

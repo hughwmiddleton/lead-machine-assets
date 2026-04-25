@@ -1042,3 +1042,59 @@ def test_night_mode_selected_cursor_round_trips_into_saved_config(qapp, monkeypa
     assert payload["jobs"][0]["unearthed_resume_mode"] == "selected"
     assert payload["jobs"][0]["unearthed_selected_cursor"] == checkpoint
     assert "unearthed_selected_cursor" not in payload["jobs"][1]
+
+
+def test_night_mode_unearthed_source_mode_writes_explicit_default_flag(qapp):
+    module = _load_legacy_module()
+    tab = module.NightModeTab()
+    tab.jobs = [
+        {"job_id": "job_unearthed_1", "directory": "unearthed", "target_valid_leads": 15},
+        {"job_id": "job_spotify_1", "directory": "spotify", "target_valid_leads": 10},
+    ]
+
+    jobs = tab._night_mode_jobs_for_config()
+
+    assert tab._current_unearthed_use_url_index() is False
+    assert jobs[0]["use_unearthed_url_index"] is False
+    assert "use_unearthed_url_index" not in jobs[1]
+
+
+def test_night_mode_unearthed_source_mode_writes_index_flag(qapp, monkeypatch, tmp_path):
+    module = _load_legacy_module()
+    tab = module.NightModeTab()
+    index_path = tmp_path / "unearthed_artist_url_index.csv"
+    index_path.write_text("artist_url\nhttps://example.test/a\nhttps://example.test/b\n", encoding="utf-8")
+    monkeypatch.setattr(tab, "_unearthed_url_index_path", lambda: str(index_path))
+    tab.jobs = [{"job_id": "job_unearthed_1", "directory": "unearthed"}]
+
+    tab._set_unearthed_source_mode(True)
+    tab._sync_unearthed_source_mode_controls()
+    jobs = tab._night_mode_jobs_for_config()
+
+    assert jobs[0]["use_unearthed_url_index"] is True
+    assert tab.unearthed_index_status_label.text() == "Index contains: 2 artist URLs"
+
+
+def test_night_mode_unearthed_source_mode_reports_missing_index(qapp, monkeypatch, tmp_path):
+    module = _load_legacy_module()
+    tab = module.NightModeTab()
+    missing_path = tmp_path / "missing.csv"
+    monkeypatch.setattr(tab, "_unearthed_url_index_path", lambda: str(missing_path))
+
+    tab._set_unearthed_source_mode(True)
+    tab._sync_unearthed_source_mode_controls()
+
+    assert tab.unearthed_index_status_label.text() == "Index not found"
+
+
+def test_night_mode_unearthed_source_mode_reports_empty_index(qapp, monkeypatch, tmp_path):
+    module = _load_legacy_module()
+    tab = module.NightModeTab()
+    index_path = tmp_path / "unearthed_artist_url_index.csv"
+    index_path.write_text("artist_url\n", encoding="utf-8")
+    monkeypatch.setattr(tab, "_unearthed_url_index_path", lambda: str(index_path))
+
+    tab._set_unearthed_source_mode(True)
+    tab._sync_unearthed_source_mode_controls()
+
+    assert tab.unearthed_index_status_label.text() == "Index contains: 0 artist URLs"
