@@ -1191,6 +1191,200 @@ def _unearthed_cursor_path() -> str:
     )
 
 
+UNEARTHED_ARTIST_URL_INDEX_COLUMNS = [
+    "artist_url",
+    "artist_slug",
+    "first_seen_at",
+    "last_seen_at",
+    "source",
+]
+
+
+def _unearthed_artist_url_index_path() -> str:
+    return os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "data",
+        "unearthed_artist_url_index.csv",
+    )
+
+
+def normalize_unearthed_artist_url(value: str | None) -> tuple[str, str]:
+    raw_value = value.strip() if isinstance(value, str) else ""
+    if not raw_value:
+        return "", ""
+    parsed = urlparse(raw_value)
+    if not (parsed.scheme or parsed.netloc or raw_value.startswith("/")):
+        slug = raw_value.strip("/").split("?", 1)[0].split("#", 1)[0].strip().lower()
+        slug = re.sub(r"\s+", "-", slug)
+        if not slug:
+            return "", ""
+        return f"https://www.abc.net.au/triplejunearthed/artist/{slug}", slug
+    path = (parsed.path or "").rstrip("/")
+    slug_match = re.search(r"/triplejunearthed/artist/([^/]+)$", path, flags=re.IGNORECASE)
+    if not slug_match:
+        slug_match = re.search(r"/artist/([^/]+)$", path, flags=re.IGNORECASE)
+    if not slug_match:
+        return "", ""
+    slug = unquote(slug_match.group(1)).strip().lower()
+    slug = re.sub(r"\s+", "-", slug)
+    if not slug:
+        return "", ""
+    return f"https://www.abc.net.au/triplejunearthed/artist/{slug}", slug
+
+
+def _load_unearthed_artist_url_index(index_path: str | None = None) -> list[dict]:
+    path = index_path or _unearthed_artist_url_index_path()
+    rows: list[dict] = []
+    if not os.path.exists(path):
+        print("[UE Index] loaded existing index rows=0")
+        return rows
+    seen_urls: set[str] = set()
+    seen_slugs: set[str] = set()
+    try:
+        with open(path, "r", newline="", encoding="utf-8-sig") as handle:
+            reader = csv.DictReader(handle)
+            for row in reader:
+                normalized_url, slug = normalize_unearthed_artist_url(row.get("artist_url") or row.get("artist_slug"))
+                if not normalized_url or not slug:
+                    continue
+                if normalized_url in seen_urls or slug in seen_slugs:
+                    continue
+                seen_urls.add(normalized_url)
+                seen_slugs.add(slug)
+                rows.append(
+                    {
+                        "artist_url": normalized_url,
+                        "artist_slug": slug,
+                        "first_seen_at": (row.get("first_seen_at") or "").strip(),
+                        "last_seen_at": (row.get("last_seen_at") or "").strip(),
+                        "source": (row.get("source") or "").strip(),
+                    }
+                )
+    except Exception as exc:
+        print(f"[UE Index] failed loading index path={path!r}: {exc}")
+        rows = []
+    print(f"[UE Index] loaded existing index rows={len(rows)}")
+    return rows
+
+
+def _write_unearthed_artist_url_index(rows: list[dict], index_path: str | None = None) -> None:
+    path = index_path or _unearthed_artist_url_index_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp_path = f"{path}.tmp"
+    with open(tmp_path, "w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=UNEARTHED_ARTIST_URL_INDEX_COLUMNS)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({col: row.get(col, "") for col in UNEARTHED_ARTIST_URL_INDEX_COLUMNS})
+        try:
+            handle.flush()
+            os.fsync(handle.fileno())
+        except OSError:
+            pass
+    os.replace(tmp_path, path)
+
+
+def upsert_unearthed_artist_url_index(
+    artist_urls,
+    source: str = "discovery",
+    index_path: str | None = None,
+) -> dict:
+    if isinstance(artist_urls, str):
+        artist_urls = [artist_urls]
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+    existing_rows = _load_unearthed_artist_url_index(index_path)
+    ordered_rows: list[dict] = []
+    by_url: dict[str, dict] = {}
+    by_slug: dict[str, dict] = {}
+    for row in existing_rows:
+        normalized_url, slug = normalize_unearthed_artist_url(row.get("artist_url") or row.get("artist_slug"))
+        if not normalized_url or not slug:
+            continue
+        if normalized_url in by_url or slug in by_slug:
+            continue
+        normalized_row = {
+            "artist_url": normalized_url,
+            "artist_slug": slug,
+            "first_seen_at": row.get("first_seen_at") or now,
+            "last_seen_at": row.get("last_seen_at") or row.get("first_seen_at") or now,
+            "source": row.get("source") or source,
+        }
+        ordered_rows.append(normalized_row)
+        by_url[normalized_url] = normalized_row
+        by_slug[slug] = normalized_row
+
+    new_urls = 0
+    updated_existing = 0
+    for artist_url in artist_urls or []:
+        normalized_url, slug = normalize_unearthed_artist_url(artist_url)
+        if not normalized_url or not slug:
+            continue
+        print(f'[UE Index] discovered artist_url="{normalized_url}"')
+        existing = by_url.get(normalized_url) or by_slug.get(slug)
+        if existing:
+            existing["artist_url"] = normalized_url
+            existing["artist_slug"] = slug
+            existing["last_seen_at"] = now
+            if not existing.get("first_seen_at"):
+                existing["first_seen_at"] = now
+            if not existing.get("source"):
+                existing["source"] = source
+            by_url[normalized_url] = existing
+            by_slug[slug] = existing
+            updated_existing += 1
+            continue
+        row = {
+            "artist_url": normalized_url,
+            "artist_slug": slug,
+            "first_seen_at": now,
+            "last_seen_at": now,
+            "source": source,
+        }
+        ordered_rows.append(row)
+        by_url[normalized_url] = row
+        by_slug[slug] = row
+        new_urls += 1
+
+    _write_unearthed_artist_url_index(ordered_rows, index_path)
+    print(f"[UE Index] added new_urls={new_urls} updated_existing={updated_existing} total={len(ordered_rows)}")
+    return {"new_urls": new_urls, "updated_existing": updated_existing, "total": len(ordered_rows)}
+
+
+def load_unearthed_indexed_artist_urls(index_path: str | None = None) -> list[str]:
+    rows = _load_unearthed_artist_url_index(index_path)
+    urls = [row["artist_url"] for row in rows if row.get("artist_url")]
+    print(f"[UE Index] using indexed URLs rows={len(urls)}")
+    return urls
+
+
+def backfill_unearthed_artist_url_index(source_paths, index_path: str | None = None) -> dict:
+    urls: list[str] = []
+    for source_path in source_paths or []:
+        path = str(source_path or "").strip()
+        if not path or not os.path.exists(path):
+            continue
+        try:
+            with open(path, "r", newline="", encoding="utf-8-sig") as handle:
+                reader = csv.DictReader(handle)
+                for row in reader:
+                    candidates = [
+                        row.get("artist_url"),
+                        row.get("Artist URL"),
+                        row.get("Profile URL"),
+                        row.get("Source URL"),
+                    ]
+                    if not any(candidates):
+                        candidates.append(row.get("artist_slug") or row.get("Artist Slug") or row.get("Artist Name"))
+                    for candidate in candidates:
+                        normalized_url, _slug = normalize_unearthed_artist_url(candidate)
+                        if normalized_url:
+                            urls.append(normalized_url)
+                            break
+        except Exception as exc:
+            print(f"[UE Index] backfill skipped source={path!r}: {exc}")
+    return upsert_unearthed_artist_url_index(urls, source="backfill", index_path=index_path)
+
+
 def _load_unearthed_persistent_cursor() -> str | None:
     try:
         with open(_unearthed_cursor_path(), "r", encoding="utf-8") as handle:
@@ -1255,12 +1449,13 @@ def _append_unearthed_profile_url(
     ordered_profile_urls: list[str],
     seen_profile_urls: set[str],
     profile_url: str,
-) -> None:
+) -> bool:
     normalized_profile_url = profile_url.strip() if isinstance(profile_url, str) else ""
     if not normalized_profile_url or normalized_profile_url in seen_profile_urls:
-        return
+        return False
     seen_profile_urls.add(normalized_profile_url)
     ordered_profile_urls.append(normalized_profile_url)
+    return True
 
 
 def normalize_unearthed_cursor(value: str | None) -> str:
@@ -1467,16 +1662,19 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
     fb_driver = None
     artist_data = []
     job_config = job_config or {}
+    use_url_index = bool(job_config.get("use_unearthed_url_index")) if isinstance(job_config, dict) else False
+    index_path = str(job_config.get("unearthed_url_index_path") or "").strip() if isinstance(job_config, dict) else ""
     selected_cursor_strict = False
     resume_cursor_strict = False
     resume_mode = ""
     terminal_profile_url = None
     scrape_completed = False
     try:
-        driver.get(url)
-        WebDriverWait(driver, 20).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, 'a[href^="/triplejunearthed/artist/"]'))
-        )
+        if not use_url_index:
+            driver.get(url)
+            WebDriverWait(driver, 20).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, 'a[href^="/triplejunearthed/artist/"]'))
+            )
         # Load existing CSV data if available
         existing_data = pd.DataFrame()
         if os.path.exists(existing_csv):
@@ -1499,6 +1697,15 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
         cursor_search_progress_every = 50
         next_cursor_progress_log_count = cursor_search_progress_every
         search_exhausted = False
+        if use_url_index:
+            indexed_urls = load_unearthed_indexed_artist_urls(index_path or None)
+            for indexed_url in indexed_urls:
+                _append_unearthed_profile_url(ordered_profile_urls, seen_profile_urls, indexed_url)
+            if max_artists and max_artists > 0:
+                ordered_profile_urls = ordered_profile_urls[:max_artists]
+                seen_profile_urls = set(ordered_profile_urls)
+            target_profile_url = None
+            resume_enabled = False
         if resume_enabled:
             resume_mode = str(job_config.get("unearthed_resume_mode", "auto") or "auto").strip().lower()
             if resume_mode not in {"auto", "cursor", "fresh", "selected"}:
@@ -1587,11 +1794,13 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
                     continue
                 href = link.get('href', '')
                 if href.startswith('/triplejunearthed/artist/'):
-                    profile_url = "https://www.abc.net.au" + href
-                    prior_count = len(ordered_profile_urls)
-                    _append_unearthed_profile_url(ordered_profile_urls, seen_profile_urls, profile_url)
-                    if len(ordered_profile_urls) == prior_count:
+                    profile_url, _profile_slug = normalize_unearthed_artist_url("https://www.abc.net.au" + href)
+                    if not profile_url:
                         continue
+                    prior_count = len(ordered_profile_urls)
+                    if not _append_unearthed_profile_url(ordered_profile_urls, seen_profile_urls, profile_url):
+                        continue
+                    upsert_unearthed_artist_url_index([profile_url], source="discovery", index_path=index_path or None)
                     listing_metadata_by_url.setdefault(profile_url, _extract_listing_metadata(listing_card))
                     while stop_on_target and len(ordered_profile_urls) >= next_cursor_progress_log_count:
                         _log_unearthed_resume_debug(
@@ -1614,7 +1823,9 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
                         return None
             return None
 
-        if target_profile_url:
+        if use_url_index:
+            pass
+        elif target_profile_url:
             while resolved_resume_index is None and len(ordered_profile_urls) < cursor_search_limit:
                 matched_index = _discover_current_listing_page(stop_on_target=True)
                 print(f"Found {len(ordered_profile_urls)} artist profile URLs so far...")
@@ -1662,7 +1873,7 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
                     except Exception as e:
                         print("No more 'Load More' button found or error:", e)
                         break
-        else:
+        elif not use_url_index:
             while _count_unearthed_remaining_profile_urls(ordered_profile_urls, target_profile_url) < max_artists:
                 _discover_current_listing_page()
                 print(f"Found {len(ordered_profile_urls)} artist profile URLs so far...")
@@ -13176,6 +13387,13 @@ def run_unearthed_pipeline(
     target_url = (search_term or "").strip() or UNEARTHED_DEFAULT_URL
     target_max = max_results or (job_config.get("target_valid_leads") if job_config else None)
     out_path = output_csv or (job_config.get("output_csv") if job_config else "") or "unearthed_output.csv"
+    if job_config and job_config.get("backfill_unearthed_url_index"):
+        backfill_sources = job_config.get("unearthed_url_index_backfill_sources") or []
+        index_path = str(job_config.get("unearthed_url_index_path") or "").strip() or None
+        backfill_unearthed_artist_url_index(backfill_sources, index_path=index_path)
+        if job_config.get("unearthed_url_index_backfill_only"):
+            save_to_csv([], out_path)
+            return out_path
     scrape_website(
         target_url,
         existing_csv=out_path,

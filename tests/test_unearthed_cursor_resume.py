@@ -125,7 +125,7 @@ def _run_fake_resume_scrape(
     def _persist_state() -> None:
         side_effects["persist_calls"].append("persisted")
 
-    job_config = {}
+    job_config = {"unearthed_url_index_path": str(tmp_path / "unearthed_artist_url_index.csv")}
     if resume_mode is not None:
         job_config["unearthed_resume_mode"] = resume_mode
     if selected_cursor is not None:
