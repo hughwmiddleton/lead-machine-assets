@@ -7,6 +7,7 @@ changes to scrapers do not require updating the orchestration layer.
 from __future__ import annotations
 
 import csv
+import hashlib
 import importlib.util
 import json
 import logging
@@ -93,6 +94,139 @@ _LOGGER = logging.getLogger(__name__)
 EMAIL_PRIORITY_COLS: Sequence[str] = ("Email", "Email_All", "Directory_Email", "Unearthed_Email")
 
 _EMAIL_SUMMARY = {"emails_found": 0, "pattern_emails": 0}
+
+
+class ResumeCheckpointError(RuntimeError):
+    """Raised when an on-disk row checkpoint is unsafe to resume from."""
+
+    def __init__(self, reason: str, path: str = "") -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.path = path
+
+
+@dataclass
+class ResumeCheckpoint:
+    job_id: str
+    path: str
+    meta_path: str
+    total_rows: int
+    last_completed_row_index: int = -1
+    fresh: bool = True
+
+    @property
+    def resume_row_index(self) -> int:
+        return self.last_completed_row_index + 1
+
+    @property
+    def is_complete(self) -> bool:
+        return self.total_rows > 0 and self.last_completed_row_index == self.total_rows - 1
+
+    def append_completed(self, row_index: int, logger: LoggerFn = None) -> None:
+        if row_index <= self.last_completed_row_index:
+            _safe_log(logger, '[Resume Error] invalid_checkpoint reason="non_monotonic_append"')
+            raise ResumeCheckpointError("non_monotonic_append", self.path)
+        os.makedirs(os.path.dirname(os.path.abspath(self.path)), exist_ok=True)
+        with open(self.path, "a", encoding="utf-8") as handle:
+            handle.write(f"{int(row_index)}\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        self.last_completed_row_index = int(row_index)
+        self.fresh = False
+        _safe_log(logger, f"[Checkpoint] row_completed={row_index}")
+
+
+def stable_resume_hash(input_csv_path: str, config_signature: str) -> str:
+    payload = f"{os.path.abspath(input_csv_path or '')}{config_signature or ''}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def stable_resume_config_signature(config: Mapping[str, Any]) -> str:
+    return json.dumps(dict(config or {}), sort_keys=True, separators=(",", ":"), default=str)
+
+
+def build_resume_checkpoint(
+    input_csv_path: str,
+    output_dir: str,
+    total_rows: int,
+    config: Mapping[str, Any],
+    logger: LoggerFn = None,
+) -> ResumeCheckpoint:
+    config_signature = stable_resume_config_signature(config)
+    job_id = stable_resume_hash(input_csv_path, config_signature)
+    checkpoint_dir = os.path.join(output_dir, "checkpoints")
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    checkpoint_path = os.path.join(checkpoint_dir, f"{job_id}.checkpoint")
+    meta_path = os.path.join(checkpoint_dir, f"{job_id}.checkpoint.meta.json")
+    _safe_log(logger, f"[Resume] job_rows_snapshot total_rows={total_rows}")
+
+    if not os.path.exists(checkpoint_path):
+        with open(meta_path, "w", encoding="utf-8") as handle:
+            json.dump({"job_id": job_id, "total_rows": int(total_rows), "config_signature": config_signature}, handle, sort_keys=True)
+            handle.flush()
+            os.fsync(handle.fileno())
+        _safe_log(logger, "[Resume] no checkpoint found \u2192 starting fresh run")
+        return ResumeCheckpoint(job_id, checkpoint_path, meta_path, int(total_rows))
+
+    try:
+        if os.path.getsize(checkpoint_path) == 0:
+            with open(meta_path, "w", encoding="utf-8") as handle:
+                json.dump({"job_id": job_id, "total_rows": int(total_rows), "config_signature": config_signature}, handle, sort_keys=True)
+                handle.flush()
+                os.fsync(handle.fileno())
+            _safe_log(logger, "[Resume] no checkpoint found \u2192 starting fresh run")
+            return ResumeCheckpoint(job_id, checkpoint_path, meta_path, int(total_rows))
+    except OSError as exc:
+        _safe_log(logger, f'[Resume Error] invalid_checkpoint path="{checkpoint_path}" reason="unreadable"')
+        raise ResumeCheckpointError("unreadable", checkpoint_path) from exc
+
+    try:
+        with open(meta_path, "r", encoding="utf-8") as handle:
+            meta = json.load(handle)
+        checkpoint_total_rows = int(meta.get("total_rows"))
+    except Exception as exc:
+        _safe_log(logger, f'[Resume Error] invalid_checkpoint path="{checkpoint_path}" reason="meta_unreadable"')
+        raise ResumeCheckpointError("meta_unreadable", checkpoint_path) from exc
+    if checkpoint_total_rows != int(total_rows):
+        _safe_log(logger, '[Resume Error] invalid_checkpoint reason="row_count_mismatch"')
+        raise ResumeCheckpointError("row_count_mismatch", checkpoint_path)
+
+    last_valid = -1
+    try:
+        with open(checkpoint_path, "rb") as handle:
+            data = handle.read()
+    except OSError as exc:
+        _safe_log(logger, f'[Resume Error] invalid_checkpoint path="{checkpoint_path}" reason="unreadable"')
+        raise ResumeCheckpointError("unreadable", checkpoint_path) from exc
+
+    ends_with_newline = data.endswith(b"\n")
+    lines = data.splitlines()
+    for line_no, raw_line in enumerate(lines, start=1):
+        if line_no == len(lines) and not ends_with_newline:
+            continue
+        text = raw_line.decode("utf-8", errors="strict").strip()
+        try:
+            value = int(text)
+        except Exception:
+            _safe_log(logger, f'[Resume Error] invalid_checkpoint path="{checkpoint_path}" reason="corrupt"')
+            raise ResumeCheckpointError("corrupt", checkpoint_path)
+        if value <= last_valid:
+            _safe_log(logger, '[Resume Error] invalid_checkpoint reason="non_monotonic_sequence"')
+            raise ResumeCheckpointError("non_monotonic_sequence", checkpoint_path)
+        last_valid = value
+
+    if last_valid >= int(total_rows):
+        _safe_log(logger, '[Resume Error] invalid_checkpoint reason="row_out_of_bounds"')
+        raise ResumeCheckpointError("row_out_of_bounds", checkpoint_path)
+
+    checkpoint = ResumeCheckpoint(job_id, checkpoint_path, meta_path, int(total_rows), last_valid, fresh=False)
+    _safe_log(logger, "[Resume] detected previous run state")
+    _safe_log(logger, f"[Resume] last_completed_row={last_valid} total_rows={total_rows}")
+    if checkpoint.is_complete:
+        _safe_log(logger, f"[Resume] job_complete rows={total_rows}/{total_rows}")
+    else:
+        _safe_log(logger, f"[Resume] resuming from row {checkpoint.resume_row_index}")
+    return checkpoint
 ENRICHMENT_YIELD_SOURCE_ORDER: Sequence[str] = (
     "website",
     "facebook",
@@ -3806,6 +3940,39 @@ def run_facebook_global_pass_nightmode(
 
     # Always start from the full input to avoid losing rows when smoke caps are used.
     df = pd.read_csv(input_csv, dtype=str, keep_default_na=False).fillna("")
+    total_rows_snapshot = len(df.index)
+    checkpoint = build_resume_checkpoint(
+        input_csv,
+        os.path.dirname(os.path.abspath(output_csv)) or ".",
+        total_rows_snapshot,
+        {
+            "enrichment_mode": "facebook_global_pass",
+            "enabled_sources": ["facebook"],
+            "skip_rows_with_email": bool(skip_rows_with_email),
+            "max_rows_per_run": int(max_rows_per_run or 0),
+        },
+        logger=logger,
+    )
+    if checkpoint.last_completed_row_index >= 0 and not os.path.exists(output_csv):
+        _safe_log_console(logger, f'[Resume Error] invalid_checkpoint path="{checkpoint.path}" reason="output_missing"')
+        raise ResumeCheckpointError("output_missing", checkpoint.path)
+    if checkpoint.is_complete:
+        if local_night_fb_run_state:
+            close_night_fb_run_state(night_fb_run_state)
+        return FacebookGlobalPassStatus(
+            processed_rows=total_rows_snapshot,
+            total_rows=total_rows_snapshot,
+            completed=True,
+            hit_captcha=False,
+            limit_reached=False,
+            attempted_total=0,
+        )
+
+    def _mark_remaining_rows_complete() -> None:
+        for row_index in range(checkpoint.resume_row_index, total_rows_snapshot):
+            checkpoint.append_completed(row_index, logger=logger)
+        if total_rows_snapshot == 0 or checkpoint.last_completed_row_index == total_rows_snapshot - 1:
+            _safe_log_console(logger, f"[Resume] job_complete rows={total_rows_snapshot}/{total_rows_snapshot}")
 
     # If an output already exists, overlay any previously enriched columns onto the
     # full input frame instead of trusting the prior (possibly truncated) file.
@@ -3911,10 +4078,10 @@ def run_facebook_global_pass_nightmode(
                 allow_preseeded_fb_attempt_pass = True
                 break
     state = _load_fb_state(state_path)
-    last_index = int(state.get("fb_last_index", -1) or -1)
+    last_index = int(checkpoint.last_completed_row_index)
     attempted_total = int(state.get("fb_attempted_total", 0) or 0)
     captcha_flag = bool(state.get("fb_captcha_flag", False))
-    completed_rows = int(state.get("fb_completed", 0) or 0)
+    completed_rows = max(0, int(checkpoint.last_completed_row_index) + 1)
 
     try:
         os.environ["DISABLE_ORIGIN_AUTO_VALIDATE_PROMPT"] = "1"
@@ -3941,6 +4108,7 @@ def run_facebook_global_pass_nightmode(
         _write_fb_state(state_path, state)
         df.drop(columns=["__row_id"], inplace=True, errors="ignore")
         df.to_csv(output_csv, index=False)
+        _mark_remaining_rows_complete()
         _log_fb_debug_summary(df, logger)
         if local_night_fb_run_state:
             close_night_fb_run_state(night_fb_run_state)
@@ -3977,6 +4145,7 @@ def run_facebook_global_pass_nightmode(
             _write_fb_state(state_path, state)
             df.drop(columns=["__row_id"], inplace=True, errors="ignore")
             df.to_csv(output_csv, index=False)
+            _mark_remaining_rows_complete()
             _log_fb_debug_summary(df, logger)
             if local_night_fb_run_state:
                 close_night_fb_run_state(night_fb_run_state)
@@ -4008,6 +4177,7 @@ def run_facebook_global_pass_nightmode(
         _write_fb_state(state_path, state)
         df.drop(columns=["__row_id"], inplace=True, errors="ignore")
         df.to_csv(output_csv, index=False)
+        _mark_remaining_rows_complete()
         _log_fb_debug_summary(df, logger)
         if local_night_fb_run_state:
             close_night_fb_run_state(night_fb_run_state)
@@ -4243,8 +4413,8 @@ def run_facebook_global_pass_nightmode(
                         _safe_log_console(logger, f"[FB Night] Captcha detected at row {idx}; stopping early.")
                         state.update(
                             {
-                                "fb_last_index": last_index,
-                                "fb_completed": completed_rows,
+                                "fb_last_index": checkpoint.last_completed_row_index,
+                                "fb_completed": max(0, checkpoint.last_completed_row_index + 1),
                                 "fb_attempted_total": attempted_total,
                                 "fb_captcha_flag": True,
                                 "fb_total_rows": total_rows,
@@ -4361,6 +4531,8 @@ def run_facebook_global_pass_nightmode(
                     "fb_resume_input": os.path.abspath(input_csv),
                 }
             )
+            df.drop(columns=["__row_id"], errors="ignore").to_csv(output_csv, index=False)
+            checkpoint.append_completed(int(idx), logger=logger)
             _write_state_with_pass_a(state)
 
             if skip_row:
@@ -4371,6 +4543,8 @@ def run_facebook_global_pass_nightmode(
                 _safe_log_console(logger, f"[FB Night] Hit max_rows_per_run={max_rows_per_run}; stopping.")
                 break
 
+    last_index = checkpoint.last_completed_row_index
+    completed_rows = max(0, checkpoint.last_completed_row_index + 1)
     run_completed = (last_index >= total_rows - 1) and not captcha_detected
     state.update(
         {
@@ -4418,6 +4592,8 @@ def run_facebook_global_pass_nightmode(
 
     df.drop(columns=["__row_id"], inplace=True, errors="ignore")
     df.to_csv(output_csv, index=False)
+    if run_completed:
+        _safe_log_console(logger, f"[Resume] job_complete rows={total_rows}/{total_rows}")
     _log_fb_refine_summary(df, logger)
     _log_fb_debug_summary(df, logger)
     if local_night_fb_run_state:

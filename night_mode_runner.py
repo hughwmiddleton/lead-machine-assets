@@ -1634,43 +1634,32 @@ def run_night_mode(
                 fb_rows_total = fb_state.get("fb_total_rows")
                 try:
                     fb_status: Optional[FacebookGlobalPassStatus] = None
-                    if resume and fb_completed and os.path.exists(master_post_fb):
-                        logger.info("[Master] Resume: Facebook global pass already completed; skipping.")
-                        fb_status = FacebookGlobalPassStatus(
-                            processed_rows=fb_state.get("fb_completed", 0) or 0,
-                            total_rows=fb_state.get("fb_total_rows", 0) or 0,
-                            completed=True,
-                            hit_captcha=False,
-                            limit_reached=False,
-                            attempted_total=fb_state.get("fb_attempted_total", 0) or 0,
+                    attempt = 0
+                    while True:
+                        fb_status = _call_with_optional_night_fb_run_state(
+                            run_facebook_global_pass_nightmode,
+                            master_pre_fb,
+                            master_post_fb,
+                            state_path=fb_state_path,
+                            max_rows_per_run=fb_max_rows_per_run,
+                            logger=logger.info,
+                            night_fb_run_state=night_fb_run_state,
                         )
-                    else:
-                        attempt = 0
-                        while True:
-                            fb_status = _call_with_optional_night_fb_run_state(
-                                run_facebook_global_pass_nightmode,
-                                master_pre_fb,
-                                master_post_fb,
-                                state_path=fb_state_path,
-                                max_rows_per_run=fb_max_rows_per_run,
-                                logger=logger.info,
-                                night_fb_run_state=night_fb_run_state,
+                        fb_state = _load_state(fb_state_path)
+                        fb_completed = fb_status.completed
+                        fb_limit_hit = fb_status.limit_reached
+                        fb_rows_total = fb_state.get("fb_total_rows")
+                        if fb_status.hit_captcha and fb_auto_resume and attempt < fb_max_auto_resume_attempts:
+                            attempt += 1
+                            logger.info(
+                                "[Master] Captcha detected; cooling down for %s seconds before retry (%s/%s).",
+                                fb_cooldown_seconds,
+                                attempt,
+                                fb_max_auto_resume_attempts,
                             )
-                            fb_state = _load_state(fb_state_path)
-                            fb_completed = fb_status.completed
-                            fb_limit_hit = fb_status.limit_reached
-                            fb_rows_total = fb_state.get("fb_total_rows")
-                            if fb_status.hit_captcha and fb_auto_resume and attempt < fb_max_auto_resume_attempts:
-                                attempt += 1
-                                logger.info(
-                                    "[Master] Captcha detected; cooling down for %s seconds before retry (%s/%s).",
-                                    fb_cooldown_seconds,
-                                    attempt,
-                                    fb_max_auto_resume_attempts,
-                                )
-                                time.sleep(max(fb_cooldown_seconds, 0))
-                                continue
-                            break
+                            time.sleep(max(fb_cooldown_seconds, 0))
+                            continue
+                        break
                     if fb_status and fb_status.completed:
                         logger.info("[Master] Facebook global pass completed: %s", master_post_fb)
                     else:

@@ -12024,6 +12024,8 @@ class CrossDirectoryEnricherWorker(QThread):
         self._festival_expansion_raw_csv_path: str = _festival_expansion_raw_path(output_csv_path)
         self._domain_org_sidecar_path: str = _domain_org_index_path(output_csv_path)
         self._yield_tracker = yield_tracker or EnrichmentYieldTracker()
+        self._resume_checkpoint = None
+        self._resume_row_index: int = 0
         # Share live-search budget with SoundCloud aggregator fetches.
         try:
             def _agg_budget_check():
@@ -12060,13 +12062,27 @@ class CrossDirectoryEnricherWorker(QThread):
         if seed_df is None:
             return []
         if row_ids is None:
-            return list(seed_df.index)
-        selected: List[Any] = []
-        index_membership = set(seed_df.index)
-        for row_idx in row_ids:
-            if row_idx in index_membership:
-                selected.append(row_idx)
-        return selected
+            base_rows = list(seed_df.index)
+        else:
+            base_rows = []
+            index_membership = set(seed_df.index)
+            for row_idx in row_ids:
+                if row_idx in index_membership:
+                    base_rows.append(row_idx)
+        resume_row_index = int(getattr(self, "_resume_row_index", 0) or 0)
+        if resume_row_index <= 0:
+            return base_rows
+        return [row_idx for row_idx in base_rows if isinstance(row_idx, int) and row_idx >= resume_row_index]
+
+    def _checkpoint_row_complete(self, seed_df: pd.DataFrame, row_idx: Any) -> None:
+        checkpoint = getattr(self, "_resume_checkpoint", None)
+        if checkpoint is None:
+            return
+        if not isinstance(row_idx, int):
+            raise RuntimeError(f"resume checkpoint row index must be int, got {type(row_idx).__name__}")
+        _ensure_parent_dir(self.output_csv_path)
+        seed_df.to_csv(self.output_csv_path, index=False, encoding="utf-8-sig")
+        checkpoint.append_completed(row_idx, logger=self.log_message.emit)
 
     def _start_chunk_yield_window(
         self,
@@ -12805,6 +12821,8 @@ class CrossDirectoryEnricherWorker(QThread):
             dedupe_message = getattr(dedupe_pre_enrich, "_last_log_message", "")
             if dedupe_message:
                 self.log_message.emit(dedupe_message)
+            if getattr(self, "night_mode", False):
+                seed_df = seed_df.reset_index(drop=True)
             self._festival_expansion_existing_keys = {
                 normalise_artist_name(_clean_cell(name))
                 for name in seed_df.get("Artist Name", pd.Series(dtype=str)).tolist()
@@ -12825,6 +12843,64 @@ class CrossDirectoryEnricherWorker(QThread):
                 seed_df = apply_fb_opportunity_state_df(seed_df, overwrite=True)
             total = len(seed_df.index)
             self.total_rows = total
+            if getattr(self, "night_mode", False):
+                try:
+                    from pipeline_runner import ResumeCheckpointError, build_resume_checkpoint
+
+                    enrichment_mode = os.getenv("ENRICHMENT_MODE", "row_linear")
+                    self._resume_checkpoint = build_resume_checkpoint(
+                        self.seed_csv_path,
+                        os.path.dirname(os.path.abspath(self.output_csv_path)) or ".",
+                        total,
+                        {
+                            "enrichment_mode": enrichment_mode,
+                            "enabled_sources": {
+                                "bandcamp": bool(self.bandcamp_csv_path),
+                                "soundcloud": bool(self.soundcloud_csv_path),
+                                "lastfm": bool(self.lastfm_csv_path),
+                                "unearthed": bool(self.unearthed_csv_path),
+                                "live_search": bool(self.enable_live_search),
+                                "facebook": bool(ENABLE_FACEBOOK_ENRICHMENT),
+                                "instagram": True,
+                                "website": True,
+                            },
+                            "max_live_searches": int(self.max_live_searches or 0),
+                            "bandcamp_csv_path": os.path.abspath(self.bandcamp_csv_path) if self.bandcamp_csv_path else "",
+                            "soundcloud_csv_path": os.path.abspath(self.soundcloud_csv_path) if self.soundcloud_csv_path else "",
+                            "lastfm_csv_path": os.path.abspath(self.lastfm_csv_path) if self.lastfm_csv_path else "",
+                            "unearthed_csv_path": os.path.abspath(self.unearthed_csv_path) if self.unearthed_csv_path else "",
+                        },
+                        logger=self.log_message.emit,
+                    )
+                    self._resume_row_index = int(self._resume_checkpoint.resume_row_index)
+                    if self._resume_checkpoint.last_completed_row_index >= 0:
+                        if not os.path.exists(self.output_csv_path):
+                            self.log_message.emit(
+                                f'[Resume Error] invalid_checkpoint path="{self._resume_checkpoint.path}" reason="output_missing"'
+                            )
+                            self.finished.emit("")
+                            return
+                        previous_df = _read_csv_flexible(self.output_csv_path)
+                        if previous_df is None or len(previous_df.index) != total:
+                            self.log_message.emit(
+                                f'[Resume Error] invalid_checkpoint path="{self._resume_checkpoint.path}" reason="row_count_mismatch"'
+                            )
+                            self.finished.emit("")
+                            return
+                        previous_df = previous_df.fillna("").reset_index(drop=True)
+                        for col in previous_df.columns:
+                            if col not in seed_df.columns:
+                                seed_df[col] = ""
+                        shared_cols = [col for col in previous_df.columns if col in seed_df.columns]
+                        completed_until = self._resume_checkpoint.last_completed_row_index
+                        if completed_until >= 0 and shared_cols:
+                            seed_df.loc[:completed_until, shared_cols] = previous_df.loc[:completed_until, shared_cols]
+                    if self._resume_checkpoint.is_complete:
+                        self.finished.emit(self.output_csv_path)
+                        return
+                except ResumeCheckpointError:
+                    self.finished.emit("")
+                    return
             if getattr(self, "night_mode", False):
                 # Reset per-run SoundCloud cache for deterministic Night Mode attempts.
                 self._night_sc_cache = {}
@@ -12962,6 +13038,8 @@ class CrossDirectoryEnricherWorker(QThread):
                 self.log_message.emit(f"[Enricher] Failed to write output CSV: {exc}")
                 self.finished.emit("")
                 return
+            if getattr(self, "_resume_checkpoint", None) is not None:
+                self.log_message.emit(f"[Resume] job_complete rows={total}/{total}")
             self.log_message.emit(f"[Enricher] Enriched CSV written to {self.output_csv_path}")
             try:
                 _write_domain_org_sidecar(
@@ -16258,6 +16336,8 @@ class CrossDirectoryEnricherWorker(QThread):
                 self._phase_instagram_email(seed_df, total, row_ids=row_ids)
                 self._phase_website_email(seed_df, total, row_ids=row_ids)
                 self._run_interleaved_sources(seed_df, fb_driver, total, row_ids=row_ids)
+                for completed_row_idx in self._selected_row_ids(seed_df, row_ids=row_ids):
+                    self._checkpoint_row_complete(seed_df, completed_row_idx)
                 return
             sc_deferred_rows: Dict[Any, Dict[str, Any]] = {}
             # Phase 1: Dedicated SoundCloud live check
@@ -16295,6 +16375,8 @@ class CrossDirectoryEnricherWorker(QThread):
                         sc_deferred_rows,
                         phase_label="final_window",
                     )
+            for completed_row_idx in self._selected_row_ids(seed_df, row_ids=row_ids):
+                self._checkpoint_row_complete(seed_df, completed_row_idx)
         finally:
             self._unearthed_fb_first_row_ids = set()
 
@@ -16317,6 +16399,7 @@ class CrossDirectoryEnricherWorker(QThread):
                 ctx = self._build_row_context(seed_df, row_idx, position, total)
                 if not ctx:
                     self._update_progress(position, total)
+                    self._checkpoint_row_complete(seed_df, row_idx)
                     continue
                 bypass_shared = self._should_bypass_unearthed_shared_enrichers(row_idx)
                 if (not bypass_shared) and self._should_short_circuit_after_domain_reuse(seed_df, row_idx, ctx):
@@ -16339,6 +16422,7 @@ class CrossDirectoryEnricherWorker(QThread):
                         on_domain_reuse_gate=_finalize_fb_domain_reuse_gate,
                     )
                     self._update_progress(position, total)
+                    self._checkpoint_row_complete(seed_df, row_idx)
                     continue
                 self._init_row_enrichment_state()
                 enriched = False
@@ -16349,11 +16433,13 @@ class CrossDirectoryEnricherWorker(QThread):
                         enriched |= sc_enriched
                         if skip_rest:
                             self._update_progress(position, total)
+                            self._checkpoint_row_complete(seed_df, row_idx)
                             continue
                         ll_enriched, skip_rest = self._enrich_row_live_lookup(seed_df, row_idx, ctx)
                         enriched |= ll_enriched
                         if skip_rest:
                             self._update_progress(position, total)
+                            self._checkpoint_row_complete(seed_df, row_idx)
                             continue
                     enriched |= self._run_spotify_discovery_pass(seed_df, row_idx, ctx, fb_driver=fb_driver)
                 enriched |= self._run_instagram_row(
@@ -16371,6 +16457,7 @@ class CrossDirectoryEnricherWorker(QThread):
                         f"[Enricher] Row {position}/{total}: no enrichment for {ctx['artist']!r}."
                     )
                 self._update_progress(position, total)
+                self._checkpoint_row_complete(seed_df, row_idx)
             self._log_spotify_discovery_summary("[Enricher][Spotify Discovery]")
         finally:
             self._unearthed_fb_first_row_ids = set()
