@@ -1365,6 +1365,29 @@ def _log_unearthed_resume_debug(message: str) -> None:
     print(f"[UE Resume Debug] {message}")
 
 
+def _default_unearthed_cursor_search_limit(max_artists: int) -> int:
+    safe_max_artists = 0
+    try:
+        safe_max_artists = int(max_artists or 0)
+    except Exception:
+        safe_max_artists = 0
+    return min(max(safe_max_artists * 5, 2000), 10000)
+
+
+def _resolve_unearthed_cursor_search_limit(job_config: dict | None, max_artists: int) -> int:
+    default_limit = _default_unearthed_cursor_search_limit(max_artists)
+    configured_limit = None
+    if isinstance(job_config, dict):
+        configured_limit = job_config.get("unearthed_cursor_search_limit")
+    try:
+        resolved_limit = int(configured_limit)
+    except Exception:
+        resolved_limit = default_limit
+    if resolved_limit <= 0:
+        resolved_limit = default_limit
+    return min(resolved_limit, 10000)
+
+
 def _resolve_unearthed_resume_index(
     ordered_profile_urls: list[str],
     target_profile_url: str | None,
@@ -1467,6 +1490,14 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
             "_night_mode_state" in job_config or "unearthed_resume_mode" in job_config
         )
         target_profile_url = None
+        cursor_search_limit = 0
+        normalized_target_profile_url = ""
+        target_slug = ""
+        matched_index = None
+        resolved_resume_index = None
+        cursor_resolved_discovered_count = None
+        cursor_search_progress_every = 50
+        next_cursor_progress_log_count = cursor_search_progress_every
         search_exhausted = False
         if resume_enabled:
             resume_mode = str(job_config.get("unearthed_resume_mode", "auto") or "auto").strip().lower()
@@ -1486,6 +1517,10 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
                     raise UnearthedSelectedCursorError(
                         "Selected cursor entry point mode requires a non-empty Unearthed checkpoint URL."
                     )
+        if target_profile_url:
+            cursor_search_limit = _resolve_unearthed_cursor_search_limit(job_config, max_artists)
+            normalized_target_profile_url = _normalize_unearthed_profile_url_for_match(target_profile_url)
+            target_slug = normalize_unearthed_cursor(target_profile_url)
 
         def _resolve_listing_card(link_tag):
             link_text = " ".join(link_tag.stripped_strings)
@@ -1536,7 +1571,8 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
                 else "",
             }
 
-        def _discover_current_listing_page() -> None:
+        def _discover_current_listing_page(stop_on_target: bool = False) -> int | None:
+            nonlocal next_cursor_progress_log_count
             soup = BeautifulSoup(driver.page_source, 'html.parser')
             artist_links = soup.select('a.HU3iy.p1_Ju.mqDRk.FQED6.O_grP[href^="/triplejunearthed/artist/"]')
             if not artist_links:
@@ -1549,11 +1585,63 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
                 href = link.get('href', '')
                 if href.startswith('/triplejunearthed/artist/'):
                     profile_url = "https://www.abc.net.au" + href
+                    prior_count = len(ordered_profile_urls)
                     _append_unearthed_profile_url(ordered_profile_urls, seen_profile_urls, profile_url)
+                    if len(ordered_profile_urls) == prior_count:
+                        continue
                     listing_metadata_by_url.setdefault(profile_url, _extract_listing_metadata(listing_card))
+                    while stop_on_target and len(ordered_profile_urls) >= next_cursor_progress_log_count:
+                        _log_unearthed_resume_debug(
+                            "cursor_search_progress "
+                            f'target_slug="{target_slug}" '
+                            f"discovered_count={len(ordered_profile_urls)} "
+                            f'last_url="{profile_url}"'
+                        )
+                        next_cursor_progress_log_count += cursor_search_progress_every
+                    normalized_profile_url = _normalize_unearthed_profile_url_for_match(profile_url)
+                    profile_slug = normalize_unearthed_cursor(profile_url)
+                    if stop_on_target and (
+                        (normalized_target_profile_url and normalized_profile_url == normalized_target_profile_url)
+                        or (target_slug and profile_slug == target_slug)
+                    ):
+                        return len(ordered_profile_urls) - 1
+                    if stop_on_target and len(ordered_profile_urls) >= cursor_search_limit:
+                        return None
+            return None
 
         if target_profile_url:
-            while True:
+            while resolved_resume_index is None and len(ordered_profile_urls) < cursor_search_limit:
+                matched_index = _discover_current_listing_page(stop_on_target=True)
+                print(f"Found {len(ordered_profile_urls)} artist profile URLs so far...")
+                if matched_index is not None:
+                    resolved_resume_index = matched_index + 1
+                    cursor_resolved_discovered_count = len(ordered_profile_urls)
+                    _log_unearthed_resume_debug(
+                        "cursor_resolved "
+                        f'target_slug="{target_slug}" '
+                        f"matched_index={matched_index} "
+                        f"resolved_resume_index={resolved_resume_index} "
+                        f"discovered_count={cursor_resolved_discovered_count}"
+                    )
+                    break
+                if len(ordered_profile_urls) >= cursor_search_limit:
+                    search_exhausted = True
+                    break
+                try:
+                    load_more_button = WebDriverWait(driver, 10).until(
+                        EC.element_to_be_clickable((By.XPATH, '//button[contains(text(), "Load more")]'))
+                    )
+                    load_more_button.click()
+                    time.sleep(random.uniform(3, 5))
+                except Exception as e:
+                    search_exhausted = True
+                    print("No more 'Load More' button found or error:", e)
+                    break
+            while resolved_resume_index is not None and not _is_unearthed_slice_ready(
+                ordered_profile_urls,
+                target_profile_url,
+                max_artists,
+            ):
                 _discover_current_listing_page()
                 print(f"Found {len(ordered_profile_urls)} artist profile URLs so far...")
                 if _is_unearthed_slice_ready(ordered_profile_urls, target_profile_url, max_artists):
@@ -1565,7 +1653,6 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
                     load_more_button.click()
                     time.sleep(random.uniform(3, 5))
                 except Exception as e:
-                    search_exhausted = True
                     print("No more 'Load More' button found or error:", e)
                     break
         else:
@@ -1608,13 +1695,14 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
                     f"search_exhausted={search_exhausted}"
                 )
             else:
-                _log_unearthed_resume_debug(
-                    "cursor_resolved "
-                    f'target_slug="{target_slug}" '
-                    f"matched_index={matched_index} "
-                    f"resolved_resume_index={resolved_resume_index} "
-                    f"discovered_count={len(ordered_profile_urls)}"
-                )
+                if cursor_resolved_discovered_count is None:
+                    _log_unearthed_resume_debug(
+                        "cursor_resolved "
+                        f'target_slug="{target_slug}" '
+                        f"matched_index={matched_index} "
+                        f"resolved_resume_index={resolved_resume_index} "
+                        f"discovered_count={len(ordered_profile_urls)}"
+                    )
                 _log_unearthed_resume_debug(
                     "slice_decision "
                     f"resolved_resume_index={resolved_resume_index} "

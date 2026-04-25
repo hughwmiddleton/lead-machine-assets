@@ -70,6 +70,7 @@ def _run_fake_resume_scrape(
     selected_cursor: str | None = None,
     include_state: bool = False,
     side_effects=None,
+    extra_job_config: dict | None = None,
 ):
     module = pipeline_runner._load_legacy_module()
     driver = _FakeUnearthedDriver([
@@ -132,6 +133,8 @@ def _run_fake_resume_scrape(
     if include_state:
         job_config["_night_mode_state"] = state
         job_config["_night_mode_state_persist"] = _persist_state
+    if extra_job_config:
+        job_config.update(extra_job_config)
 
     module.scrape_website(
         "https://www.abc.net.au/triplejunearthed",
@@ -172,6 +175,23 @@ def test_resume_index_resolves_by_slug_across_url_formats() -> None:
     ) == 1
 
 
+def test_unearthed_cursor_search_limit_default_and_clamps() -> None:
+    module = pipeline_runner._load_legacy_module()
+
+    assert module._default_unearthed_cursor_search_limit(10) == 2000
+    assert module._default_unearthed_cursor_search_limit(500) == 2500
+    assert module._default_unearthed_cursor_search_limit(5000) == 10000
+    assert module._resolve_unearthed_cursor_search_limit({}, 10) == 2000
+    assert module._resolve_unearthed_cursor_search_limit(
+        {"unearthed_cursor_search_limit": -1},
+        10,
+    ) == 2000
+    assert module._resolve_unearthed_cursor_search_limit(
+        {"unearthed_cursor_search_limit": 25000},
+        10,
+    ) == 10000
+
+
 def test_unresolved_cursor_fails_safely_without_side_effects(monkeypatch, tmp_path, capsys) -> None:
     module = pipeline_runner._load_legacy_module()
 
@@ -184,6 +204,7 @@ def test_unresolved_cursor_fails_safely_without_side_effects(monkeypatch, tmp_pa
             resume_mode="cursor",
             persistent_cursor="https://www.abc.net.au/triplejunearthed/artist/missing-artist",
             include_state=True,
+            extra_job_config={"unearthed_cursor_search_limit": 100},
         )
 
     captured = capsys.readouterr()
