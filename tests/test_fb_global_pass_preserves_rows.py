@@ -41,6 +41,224 @@ def _make_dummy_module():
     return SimpleNamespace(scrape_csv=lambda *args, **kwargs: None)
 
 
+def _reset_forced_driver_crash_test_state(monkeypatch):
+    monkeypatch.setattr(pipeline_runner, "_forced_driver_crash_triggered", False)
+    monkeypatch.setattr(pipeline_runner, "_forced_driver_crash_already_logged_rows", set())
+
+
+def test_forced_driver_crash_test_disabled_by_default(monkeypatch, tmp_path):
+    _reset_forced_driver_crash_test_state(monkeypatch)
+    input_csv = tmp_path / "master_pre_fb.csv"
+    output_csv = tmp_path / "master_post_fb.csv"
+    state_path = tmp_path / "fb_state.json"
+    pd.DataFrame(
+        [
+            {
+                "Artist Name": "Default Path",
+                "Email": "",
+                "Email_All": "",
+                "Social Link": "",
+                "Facebook_URL": "https://facebook.com/defaultpath",
+            }
+        ]
+    ).to_csv(input_csv, index=False)
+
+    helper = DummyFBHelper()
+    logs = []
+    monkeypatch.delenv("ENABLE_DRIVER_CRASH_TEST", raising=False)
+    monkeypatch.setenv("FORCE_DRIVER_CRASH_ROW", "0")
+    monkeypatch.setenv("FB_USERNAME", "user")
+    monkeypatch.setenv("FB_PASSWORD", "pass")
+    monkeypatch.setattr(pipeline_runner, "NightModeFacebookEnricher", lambda *args, **kwargs: helper)
+    monkeypatch.setattr(pipeline_runner, "_load_legacy_module", _make_dummy_module)
+    monkeypatch.setattr(pipeline_runner, "_load_fb_state", lambda _: {})
+    monkeypatch.setattr(pipeline_runner, "_write_fb_state", lambda *args, **kwargs: None)
+
+    status = pipeline_runner.run_facebook_global_pass_nightmode(
+        input_csv=input_csv.as_posix(),
+        output_csv=output_csv.as_posix(),
+        state_path=state_path.as_posix(),
+        skip_rows_with_email=False,
+        logger=logs.append,
+    )
+
+    assert status.completed is True
+    assert helper.calls == 1
+    assert not any("[Driver Recovery Test]" in msg for msg in logs)
+    assert not any("[Driver Recovery] crash_detected" in msg for msg in logs)
+
+
+def test_forced_driver_crash_test_once_retries_same_row_and_continues(monkeypatch, tmp_path):
+    _reset_forced_driver_crash_test_state(monkeypatch)
+    input_csv = tmp_path / "master_pre_fb.csv"
+    output_csv = tmp_path / "master_post_fb.csv"
+    state_path = tmp_path / "fb_state.json"
+    pd.DataFrame(
+        [
+            {
+                "Artist Name": "Before Crash",
+                "Email": "",
+                "Email_All": "",
+                "Social Link": "",
+                "Facebook_URL": "https://facebook.com/beforecrash",
+            },
+            {
+                "Artist Name": "Crash Once",
+                "Email": "",
+                "Email_All": "",
+                "Social Link": "",
+                "Facebook_URL": "https://facebook.com/crashonce",
+            },
+            {
+                "Artist Name": "After Crash",
+                "Email": "",
+                "Email_All": "",
+                "Social Link": "",
+                "Facebook_URL": "https://facebook.com/aftercrash",
+            },
+        ]
+    ).to_csv(input_csv, index=False)
+
+    class QuitTrackingDriver:
+        def __init__(self):
+            self.quit_called = False
+
+        def quit(self):
+            self.quit_called = True
+
+    class CrashHarnessHelper(DummyFBHelper):
+        def __init__(self):
+            super().__init__()
+            self.driver = QuitTrackingDriver()
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    helpers = []
+
+    def fake_helper(*args, **kwargs):
+        helper = CrashHarnessHelper()
+        helpers.append(helper)
+        return helper
+
+    logs = []
+    monkeypatch.setenv("ENABLE_DRIVER_CRASH_TEST", "1")
+    monkeypatch.setenv("FORCE_DRIVER_CRASH_ROW", "1")
+    monkeypatch.delenv("FORCE_DRIVER_CRASH_REPEAT", raising=False)
+    monkeypatch.setenv("FB_USERNAME", "user")
+    monkeypatch.setenv("FB_PASSWORD", "pass")
+    monkeypatch.setattr(pipeline_runner, "NightModeFacebookEnricher", fake_helper)
+    monkeypatch.setattr(pipeline_runner, "_load_legacy_module", _make_dummy_module)
+    monkeypatch.setattr(pipeline_runner, "_load_fb_state", lambda _: {})
+    monkeypatch.setattr(pipeline_runner, "_write_fb_state", lambda *args, **kwargs: None)
+
+    status = pipeline_runner.run_facebook_global_pass_nightmode(
+        input_csv=input_csv.as_posix(),
+        output_csv=output_csv.as_posix(),
+        state_path=state_path.as_posix(),
+        skip_rows_with_email=False,
+        logger=logs.append,
+    )
+
+    checkpoint_files = list((tmp_path / "checkpoints").glob("*.checkpoint"))
+    checkpoint_lines = checkpoint_files[0].read_text(encoding="utf-8").splitlines()
+    attempted_rows = [entry["row_index"] for helper in helpers for entry in helper.rows]
+
+    assert status.completed is True
+    assert len(helpers) == 2
+    assert helpers[0].driver.quit_called is True
+    assert helpers[0].closed is True
+    assert attempted_rows == [0, 1, 2]
+    assert checkpoint_lines == ["0", "1", "2"]
+    assert any("[Driver Recovery Test] forcing_driver_crash row=1 repeat=False" in msg for msg in logs)
+    assert any("[Driver Recovery Test] crash_already_triggered row=1" in msg for msg in logs)
+    assert any("[Driver Recovery] crash_detected row=1" in msg for msg in logs)
+    assert any("[Driver Recovery] restarting_driver row=1 attempt=1" in msg for msg in logs)
+    assert any("[Driver Recovery] recovery_success row=1" in msg for msg in logs)
+
+
+def test_forced_driver_crash_test_repeat_fails_without_failed_row_checkpoint(monkeypatch, tmp_path):
+    _reset_forced_driver_crash_test_state(monkeypatch)
+    input_csv = tmp_path / "master_pre_fb.csv"
+    output_csv = tmp_path / "master_post_fb.csv"
+    state_path = tmp_path / "fb_state.json"
+    pd.DataFrame(
+        [
+            {
+                "Artist Name": "Before Repeat Crash",
+                "Email": "",
+                "Email_All": "",
+                "Social Link": "",
+                "Facebook_URL": "https://facebook.com/beforerepeat",
+            },
+            {
+                "Artist Name": "Repeat Crash",
+                "Email": "",
+                "Email_All": "",
+                "Social Link": "",
+                "Facebook_URL": "https://facebook.com/repeatcrash",
+            },
+            {
+                "Artist Name": "Should Not Process",
+                "Email": "",
+                "Email_All": "",
+                "Social Link": "",
+                "Facebook_URL": "https://facebook.com/notprocessed",
+            },
+        ]
+    ).to_csv(input_csv, index=False)
+
+    class CrashHarnessHelper(DummyFBHelper):
+        def __init__(self):
+            super().__init__()
+            self.driver = SimpleNamespace(quit=lambda: None)
+
+        def close(self):
+            pass
+
+    helpers = []
+
+    def fake_helper(*args, **kwargs):
+        helper = CrashHarnessHelper()
+        helpers.append(helper)
+        return helper
+
+    logs = []
+    monkeypatch.setenv("ENABLE_DRIVER_CRASH_TEST", "1")
+    monkeypatch.setenv("FORCE_DRIVER_CRASH_ROW", "1")
+    monkeypatch.setenv("FORCE_DRIVER_CRASH_REPEAT", "1")
+    monkeypatch.setenv("FB_USERNAME", "user")
+    monkeypatch.setenv("FB_PASSWORD", "pass")
+    monkeypatch.setattr(pipeline_runner, "NightModeFacebookEnricher", fake_helper)
+    monkeypatch.setattr(pipeline_runner, "_load_legacy_module", _make_dummy_module)
+    monkeypatch.setattr(pipeline_runner, "_load_fb_state", lambda _: {})
+    monkeypatch.setattr(pipeline_runner, "_write_fb_state", lambda *args, **kwargs: None)
+
+    with pytest.raises(pipeline_runner.WebDriverException, match="Forced driver crash"):
+        pipeline_runner.run_facebook_global_pass_nightmode(
+            input_csv=input_csv.as_posix(),
+            output_csv=output_csv.as_posix(),
+            state_path=state_path.as_posix(),
+            skip_rows_with_email=False,
+            logger=logs.append,
+        )
+
+    checkpoint_files = list((tmp_path / "checkpoints").glob("*.checkpoint"))
+    checkpoint_lines = checkpoint_files[0].read_text(encoding="utf-8").splitlines()
+    attempted_rows = [entry["row_index"] for helper in helpers for entry in helper.rows]
+    df_out = pd.read_csv(output_csv, dtype=str, keep_default_na=False).fillna("")
+
+    assert checkpoint_lines == ["0"]
+    assert attempted_rows == [0]
+    assert df_out.loc[0, "FB_Status"] == "ok"
+    assert len(df_out.index) == 3
+    assert df_out.loc[1, "FB_Status"] == ""
+    assert df_out.loc[2, "FB_Status"] == ""
+    assert any("[Driver Recovery Test] forcing_driver_crash row=1 repeat=True" in msg for msg in logs)
+    assert any("[Driver Recovery] recovery_failed row=1 attempts=2" in msg for msg in logs)
+
+
 def test_nightmode_fb_driver_recovery_retries_same_row(monkeypatch, tmp_path):
     input_csv = tmp_path / "master_pre_fb.csv"
     output_csv = tmp_path / "master_post_fb.csv"

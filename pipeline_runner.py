@@ -108,6 +108,9 @@ _LEGACY_MODULE = None
 _LOGGER = logging.getLogger(__name__)
 EMAIL_PRIORITY_COLS: Sequence[str] = ("Email", "Email_All", "Directory_Email", "Unearthed_Email")
 MAX_DRIVER_RECOVERY_ATTEMPTS = 2
+_FORCED_DRIVER_CRASH_MESSAGE = "Forced driver crash for NM-S231 test"
+_forced_driver_crash_triggered = False
+_forced_driver_crash_already_logged_rows: Set[int] = set()
 
 _EMAIL_SUMMARY = {"emails_found": 0, "pattern_emails": 0}
 
@@ -279,6 +282,8 @@ def _is_recoverable_driver_error(exc: BaseException) -> bool:
     if isinstance(exc, FacebookDriverError):
         return any(token in message for token in _DRIVER_RECOVERY_ERROR_TOKENS)
     if isinstance(exc, WebDriverException):
+        if _FORCED_DRIVER_CRASH_MESSAGE.lower() in message:
+            return True
         return any(token in message for token in _DRIVER_RECOVERY_ERROR_TOKENS)
     return False
 
@@ -296,6 +301,42 @@ def _terminate_fb_helper_for_recovery(helper: Any) -> bool:
     except Exception:
         return False
     return True
+
+
+def _maybe_force_driver_crash_for_test(row_index: int, helper: Any, logger: LoggerFn = None) -> None:
+    """Opt-in NM-S231 harness: crash the active browser/session for recovery tests only."""
+    global _forced_driver_crash_triggered
+
+    if os.getenv("ENABLE_DRIVER_CRASH_TEST") != "1":
+        return
+
+    target_raw = str(os.getenv("FORCE_DRIVER_CRASH_ROW", "") or "").strip()
+    try:
+        target_row = int(target_raw)
+    except Exception:
+        return
+    if int(row_index) != target_row:
+        return
+
+    repeat = os.getenv("FORCE_DRIVER_CRASH_REPEAT") == "1"
+    if _forced_driver_crash_triggered and not repeat:
+        if int(row_index) not in _forced_driver_crash_already_logged_rows:
+            _forced_driver_crash_already_logged_rows.add(int(row_index))
+            _safe_log_console(logger, f"[Driver Recovery Test] crash_already_triggered row={row_index}")
+        return
+
+    _forced_driver_crash_triggered = True
+    _safe_log_console(logger, f"[Driver Recovery Test] forcing_driver_crash row={row_index} repeat={repeat}")
+    for attr in ("driver", "browser", "page"):
+        driver = getattr(helper, attr, None)
+        quit_method = getattr(driver, "quit", None)
+        if callable(quit_method):
+            try:
+                quit_method()
+            except Exception:
+                pass
+            break
+    raise WebDriverException(_FORCED_DRIVER_CRASH_MESSAGE)
 
 
 class _NightFBDriverOwner:
@@ -4524,6 +4565,7 @@ def run_facebook_global_pass_nightmode(
                 for attempt in range(MAX_DRIVER_RECOVERY_ATTEMPTS + 1):
                     try:
                         clean_row = {k: ("" if pd.isna(v) else v) for k, v in row.to_dict().items()}
+                        _maybe_force_driver_crash_for_test(int(idx), fb_helper, logger=logger)
                         enriched = fb_helper.enrich_row_with_facebook_night(clean_row, row_index=idx)
                         if attempt > 0:
                             _safe_log_console(logger, f"[Driver Recovery] recovery_success row={idx}")
