@@ -264,7 +264,7 @@ def test_unearthed_profile_batches_chain_forward_across_trailing_slash_cursor_mi
     assert third_batch == ordered_profile_urls[4:6]
 
 
-def test_unearthed_slice_still_falls_back_to_fresh_start_for_missing_cursor() -> None:
+def test_unearthed_slice_raises_for_missing_cursor() -> None:
     module = pipeline_runner._load_legacy_module()
 
     ordered_profile_urls = [
@@ -273,11 +273,12 @@ def test_unearthed_slice_still_falls_back_to_fresh_start_for_missing_cursor() ->
         "https://www.abc.net.au/triplejunearthed/artist/artist-3",
     ]
 
-    assert module._slice_unearthed_profile_urls(
-        ordered_profile_urls,
-        "https://www.abc.net.au/triplejunearthed/artist/missing",
-        2,
-    ) == ordered_profile_urls[0:2]
+    with pytest.raises(module.UnearthedResumeCursorError):
+        module._slice_unearthed_profile_urls(
+            ordered_profile_urls,
+            "https://www.abc.net.au/triplejunearthed/artist/missing",
+            2,
+        )
 
 
 def test_scrape_website_waits_until_cursor_is_rediscovered_before_slicing(monkeypatch, tmp_path) -> None:
@@ -434,10 +435,14 @@ def test_scrape_website_emits_resume_debug_summary_without_changing_slice_flow(m
     assert "[UE Resume Debug] resolver" in captured.out
     assert "target_profile_url='https://www.abc.net.au/triplejunearthed/artist/artist-2'" in captured.out
     assert "normalized_target_profile_url='https://www.abc.net.au/triplejunearthed/artist/artist-2'" in captured.out
+    assert "target_slug='artist-2'" in captured.out
     assert "exact_match_indices=[1]" in captured.out
     assert "normalized_match_indices=[1]" in captured.out
+    assert "slug_match_indices=[1]" in captured.out
+    assert "matched_index=1" in captured.out
     assert "resolved_resume_index=2" in captured.out
     assert "[UE Resume Debug] discovery_sample" in captured.out
+    assert "[UE Resume Debug] cursor_resolved" in captured.out
     assert "[UE Resume Debug] slice_decision" in captured.out
     assert "remaining_after_resume_index=2" in captured.out
     assert "slice_ready=True" in captured.out

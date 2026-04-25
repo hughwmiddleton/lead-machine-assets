@@ -3192,7 +3192,9 @@ def run_directory_job(job_config: Dict[str, Any], raw_output_path: str, logger: 
             # Try full Unearthed pipeline with contact/email pass first.
             try:
                 full_csv = _run_unearthed_full_pipeline(job_config, output_path, module, logger)
-            except Exception:
+            except Exception as exc:
+                if exc.__class__.__name__ in {"UnearthedResumeCursorError", "UnearthedSelectedCursorError"}:
+                    raise
                 full_csv = None
             if full_csv:
                 _dedupe_unearthed_csv(full_csv, logger=logger)

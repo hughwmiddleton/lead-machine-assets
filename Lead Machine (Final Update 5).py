@@ -1263,13 +1263,41 @@ def _append_unearthed_profile_url(
     ordered_profile_urls.append(normalized_profile_url)
 
 
+def normalize_unearthed_cursor(value: str | None) -> str:
+    normalized_value = value.strip() if isinstance(value, str) else ""
+    if not normalized_value:
+        return ""
+    parsed = urlparse(normalized_value)
+    normalized_path = (parsed.path or "").rstrip("/")
+    if parsed.scheme or parsed.netloc or normalized_value.startswith("/"):
+        slug_match = re.search(r"/artist/([^/]+)$", normalized_path, flags=re.IGNORECASE)
+        if slug_match:
+            return slug_match.group(1).strip().lower()
+        fallback_slug = normalized_path.strip("/").rsplit("/", 1)[-1].strip()
+        return fallback_slug.lower()
+    return normalized_path.strip().lower()
+
+
 def _normalize_unearthed_profile_url_for_match(profile_url: str | None) -> str:
     normalized_profile_url = profile_url.strip() if isinstance(profile_url, str) else ""
     if not normalized_profile_url:
         return ""
     parsed = urlparse(normalized_profile_url)
-    normalized_path = parsed.path.rstrip("/") or parsed.path
-    return urlunparse(parsed._replace(path=normalized_path))
+    if not (parsed.scheme or parsed.netloc or normalized_profile_url.startswith("/")):
+        return ""
+    normalized_path = (parsed.path or "").rstrip("/")
+    if not normalized_path:
+        return ""
+    return urlunparse(
+        parsed._replace(
+            scheme=(parsed.scheme or "https").lower(),
+            netloc=(parsed.netloc or "").lower(),
+            path=normalized_path.lower(),
+            params="",
+            query="",
+            fragment="",
+        )
+    )
 
 
 class UnearthedSelectedCursorError(RuntimeError):
@@ -1285,8 +1313,10 @@ def _build_unearthed_resume_debug_details(
     target_profile_url: str | None,
 ) -> dict:
     normalized_target_profile_url = _normalize_unearthed_profile_url_for_match(target_profile_url)
+    target_slug = normalize_unearthed_cursor(target_profile_url)
     exact_match_indices = []
     normalized_match_indices = []
+    slug_match_indices = []
     if target_profile_url:
         exact_match_indices = [
             profile_index
@@ -1299,22 +1329,34 @@ def _build_unearthed_resume_debug_details(
             for profile_index, profile_url in enumerate(ordered_profile_urls)
             if _normalize_unearthed_profile_url_for_match(profile_url) == normalized_target_profile_url
         ]
-    resolved_resume_index = None
-    if normalized_target_profile_url:
+    if target_slug:
+        slug_match_indices = [
+            profile_index
+            for profile_index, profile_url in enumerate(ordered_profile_urls)
+            if normalize_unearthed_cursor(profile_url) == target_slug
+        ]
+    matched_index = None
+    if normalized_target_profile_url or target_slug:
         for profile_index in range(len(ordered_profile_urls) - 1, -1, -1):
             profile_url = ordered_profile_urls[profile_index]
-            if (
-                profile_url == target_profile_url
-                or _normalize_unearthed_profile_url_for_match(profile_url) == normalized_target_profile_url
-            ):
-                resolved_resume_index = profile_index + 1
+            normalized_profile_url = _normalize_unearthed_profile_url_for_match(profile_url)
+            profile_slug = normalize_unearthed_cursor(profile_url)
+            if normalized_target_profile_url and normalized_profile_url == normalized_target_profile_url:
+                matched_index = profile_index
                 break
+            if target_slug and profile_slug == target_slug:
+                matched_index = profile_index
+                break
+    resolved_resume_index = matched_index + 1 if matched_index is not None else None
     return {
         "target_profile_url": target_profile_url,
         "normalized_target_profile_url": normalized_target_profile_url,
+        "target_slug": target_slug,
         "ordered_profile_urls_count": len(ordered_profile_urls),
         "exact_match_indices": exact_match_indices,
         "normalized_match_indices": normalized_match_indices,
+        "slug_match_indices": slug_match_indices,
+        "matched_index": matched_index,
         "resolved_resume_index": resolved_resume_index,
     }
 
@@ -1334,9 +1376,12 @@ def _resolve_unearthed_resume_index(
         "resolver "
         f"target_profile_url={debug_details['target_profile_url']!r} "
         f"normalized_target_profile_url={debug_details['normalized_target_profile_url']!r} "
+        f"target_slug={debug_details['target_slug']!r} "
         f"ordered_profile_urls_count={debug_details['ordered_profile_urls_count']} "
         f"exact_match_indices={debug_details['exact_match_indices']} "
         f"normalized_match_indices={debug_details['normalized_match_indices']} "
+        f"slug_match_indices={debug_details['slug_match_indices']} "
+        f"matched_index={debug_details['matched_index']} "
         f"resolved_resume_index={debug_details['resolved_resume_index']}"
     )
     return debug_details["resolved_resume_index"]
@@ -1385,8 +1430,12 @@ def _slice_unearthed_profile_urls(
     resume_index = 0
     if target_profile_url:
         resolved_resume_index = _resolve_unearthed_resume_index(ordered_profile_urls, target_profile_url)
-        if resolved_resume_index is not None:
-            resume_index = resolved_resume_index
+        if resolved_resume_index is None:
+            raise UnearthedResumeCursorError(
+                "Unearthed resume target was not found in the discovered profile stream: "
+                f"{target_profile_url}"
+            )
+        resume_index = resolved_resume_index
     return ordered_profile_urls[resume_index:resume_index + max_artists]
 
 
@@ -1418,6 +1467,7 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
             "_night_mode_state" in job_config or "unearthed_resume_mode" in job_config
         )
         target_profile_url = None
+        search_exhausted = False
         if resume_enabled:
             resume_mode = str(job_config.get("unearthed_resume_mode", "auto") or "auto").strip().lower()
             if resume_mode not in {"auto", "cursor", "fresh", "selected"}:
@@ -1515,6 +1565,7 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
                     load_more_button.click()
                     time.sleep(random.uniform(3, 5))
                 except Exception as e:
+                    search_exhausted = True
                     print("No more 'Load More' button found or error:", e)
                     break
         else:
@@ -1532,45 +1583,46 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
                     break
         if target_profile_url:
             debug_details = _build_unearthed_resume_debug_details(ordered_profile_urls, target_profile_url)
+            target_slug = debug_details["target_slug"]
+            matched_index = debug_details["matched_index"]
             resolved_resume_index = debug_details["resolved_resume_index"]
             remaining_after_resume_index = 0
             if resolved_resume_index is not None:
                 remaining_after_resume_index = len(ordered_profile_urls[resolved_resume_index:])
             slice_ready = _is_unearthed_slice_ready(ordered_profile_urls, target_profile_url, max_artists)
-            strict_unresolved_resume = (
-                resolved_resume_index is None
-                and bool(target_profile_url)
-                and (selected_cursor_strict or resume_cursor_strict)
-            )
-            fallback_to_zero = resolved_resume_index is None and not strict_unresolved_resume
-            fallback_reason = ""
-            if strict_unresolved_resume:
-                fallback_reason = f"{resume_mode or 'resume'}_cursor_unresolved"
-            elif fallback_to_zero:
-                if not debug_details["normalized_target_profile_url"]:
-                    fallback_reason = "empty_normalized_target"
-                elif debug_details["normalized_match_indices"]:
-                    fallback_reason = "matched_but_unresolved"
-                else:
-                    fallback_reason = "no_matches"
-            elif remaining_after_resume_index < max_artists:
-                fallback_reason = "insufficient_post_cursor_rows"
-            else:
-                fallback_reason = "resume_window_ready"
             _log_unearthed_resume_debug(
                 "discovery_sample "
                 f"first10={ordered_profile_urls[:10]} "
                 f"last10={ordered_profile_urls[-10:]}"
             )
-            _log_unearthed_resume_debug(
-                "slice_decision "
-                f"resolved_resume_index={resolved_resume_index} "
-                f"remaining_after_resume_index={remaining_after_resume_index} "
-                f"max_artists={max_artists} "
-                f"slice_ready={slice_ready} "
-                f"fallback_to_zero={fallback_to_zero} "
-                f"fallback_reason={fallback_reason}"
-            )
+            if resolved_resume_index is None:
+                first_url = ordered_profile_urls[0] if ordered_profile_urls else ""
+                last_url = ordered_profile_urls[-1] if ordered_profile_urls else ""
+                print(
+                    "[UE Resume Error] cursor_unresolved "
+                    f'target_profile_url="{target_profile_url}" '
+                    f'target_slug="{target_slug}" '
+                    f"discovered_count={len(ordered_profile_urls)} "
+                    f'first_url="{first_url}" '
+                    f'last_url="{last_url}" '
+                    f"search_exhausted={search_exhausted}"
+                )
+            else:
+                _log_unearthed_resume_debug(
+                    "cursor_resolved "
+                    f'target_slug="{target_slug}" '
+                    f"matched_index={matched_index} "
+                    f"resolved_resume_index={resolved_resume_index} "
+                    f"discovered_count={len(ordered_profile_urls)}"
+                )
+                _log_unearthed_resume_debug(
+                    "slice_decision "
+                    f"resolved_resume_index={resolved_resume_index} "
+                    f"remaining_after_resume_index={remaining_after_resume_index} "
+                    f"max_artists={max_artists} "
+                    f"slice_ready={slice_ready} "
+                    "fallback_to_zero=False"
+                )
             if selected_cursor_strict and resolved_resume_index is None:
                 raise UnearthedSelectedCursorError(
                     "Selected Unearthed cursor entry point was not found in the discovered profile stream: "
