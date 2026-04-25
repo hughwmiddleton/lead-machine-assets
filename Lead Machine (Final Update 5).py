@@ -1178,6 +1178,11 @@ def setup_facebook_driver():
 # -----------------------------------------------------------------------------
 # Unearthed Page 1 should only collect socials; email scraping happens in later passes.
 SCRAPE_FB_EMAILS_ON_UNEARTHED_PAGE1 = False
+UNEARTHED_LOAD_MORE_MAX_ATTEMPTS = 3
+UNEARTHED_LOAD_MORE_XPATH = (
+    "//button[contains(translate(normalize-space(.), "
+    "'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'load more')]"
+)
 
 
 # =============================================================================
@@ -1823,6 +1828,88 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
                         return None
             return None
 
+        def _click_unearthed_load_more(
+            urls_before: int,
+            discover_after_click,
+            max_attempts: int = UNEARTHED_LOAD_MORE_MAX_ATTEMPTS,
+            wait_seconds: int = 12,
+        ) -> bool:
+            last_exception = None
+            terminal_reason = "load_more_unavailable"
+
+            def _log_terminal(reason: str, exception: Exception | None = None) -> None:
+                try:
+                    buttons = driver.find_elements(By.TAG_NAME, "button")
+                except Exception as button_error:
+                    buttons = []
+                    exception = exception or button_error
+                try:
+                    body_text = driver.find_element(By.TAG_NAME, "body").text
+                    body_has_load_more = "load more" in body_text.lower()
+                except Exception:
+                    body_has_load_more = False
+                candidate_texts = []
+                for button in buttons:
+                    try:
+                        text = " ".join((button.text or "").split())
+                    except Exception:
+                        text = ""
+                    if text and "load more" in text.lower():
+                        candidate_texts.append(text)
+                if not candidate_texts:
+                    for button in buttons[:10]:
+                        try:
+                            text = " ".join((button.text or "").split())
+                        except Exception:
+                            text = ""
+                        if text:
+                            candidate_texts.append(text)
+                candidate_texts = candidate_texts[:10]
+                exception_text = ""
+                if exception is not None:
+                    exception_text = f"{type(exception).__name__}: {exception}"
+                print(
+                    f'[UE LoadMore] terminal reason="{reason}" '
+                    f"urls_before={urls_before} buttons_found={len(buttons)} "
+                    f"body_has_load_more={body_has_load_more}"
+                )
+                print(f"[UE LoadMore] candidate_texts={candidate_texts}")
+                print(f'[UE LoadMore] exception="{exception_text}"')
+
+            for _attempt in range(max_attempts):
+                try:
+                    load_more_button = WebDriverWait(driver, 5).until(
+                        EC.presence_of_element_located((By.XPATH, UNEARTHED_LOAD_MORE_XPATH))
+                    )
+                    driver.execute_script(
+                        "arguments[0].scrollIntoView({block: 'center', inline: 'nearest'});",
+                        load_more_button,
+                    )
+                    time.sleep(random.uniform(0.2, 0.6))
+                    terminal_reason = "button_not_usable"
+                    if not (load_more_button.is_displayed() and load_more_button.is_enabled()):
+                        continue
+                    terminal_reason = "click_or_wait_failed"
+                    try:
+                        load_more_button.click()
+                    except Exception as click_error:
+                        last_exception = click_error
+                        driver.execute_script("arguments[0].click();", load_more_button)
+
+                    def _count_increased(_driver) -> bool:
+                        discover_after_click()
+                        return len(ordered_profile_urls) > urls_before
+
+                    terminal_reason = "count_not_increased"
+                    WebDriverWait(driver, wait_seconds, poll_frequency=0.5).until(_count_increased)
+                    return True
+                except Exception as error:
+                    last_exception = error
+                    time.sleep(random.uniform(0.8, 1.4))
+
+            _log_terminal(terminal_reason, last_exception)
+            return False
+
         if use_url_index:
             pass
         elif target_profile_url:
@@ -1843,15 +1930,25 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
                 if len(ordered_profile_urls) >= cursor_search_limit:
                     search_exhausted = True
                     break
-                try:
-                    load_more_button = WebDriverWait(driver, 10).until(
-                        EC.element_to_be_clickable((By.XPATH, '//button[contains(text(), "Load more")]'))
-                    )
-                    load_more_button.click()
-                    time.sleep(random.uniform(3, 5))
-                except Exception as e:
+                def _discover_cursor_after_load_more():
+                    nonlocal resolved_resume_index, cursor_resolved_discovered_count
+                    loaded_matched_index = _discover_current_listing_page(stop_on_target=True)
+                    if loaded_matched_index is not None:
+                        resolved_resume_index = loaded_matched_index + 1
+                        cursor_resolved_discovered_count = len(ordered_profile_urls)
+                        _log_unearthed_resume_debug(
+                            "cursor_resolved "
+                            f'target_slug="{target_slug}" '
+                            f"matched_index={loaded_matched_index} "
+                            f"resolved_resume_index={resolved_resume_index} "
+                            f"discovered_count={cursor_resolved_discovered_count}"
+                        )
+
+                if not _click_unearthed_load_more(
+                    len(ordered_profile_urls),
+                    _discover_cursor_after_load_more,
+                ):
                     search_exhausted = True
-                    print("No more 'Load More' button found or error:", e)
                     break
 
             if resolved_resume_index is not None:
@@ -1864,27 +1961,19 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
                     print(f"Found {len(ordered_profile_urls)} artist profile URLs so far...")
                     if _resolved_slice_ready():
                         break
-                    try:
-                        load_more_button = WebDriverWait(driver, 10).until(
-                            EC.element_to_be_clickable((By.XPATH, '//button[contains(text(), "Load more")]'))
-                        )
-                        load_more_button.click()
-                        time.sleep(random.uniform(3, 5))
-                    except Exception as e:
-                        print("No more 'Load More' button found or error:", e)
+                    if not _click_unearthed_load_more(
+                        len(ordered_profile_urls),
+                        lambda: _discover_current_listing_page(stop_after_count=required_discovered_count),
+                    ):
                         break
         elif not use_url_index:
             while _count_unearthed_remaining_profile_urls(ordered_profile_urls, target_profile_url) < max_artists:
                 _discover_current_listing_page()
                 print(f"Found {len(ordered_profile_urls)} artist profile URLs so far...")
-                try:
-                    load_more_button = WebDriverWait(driver, 10).until(
-                        EC.element_to_be_clickable((By.XPATH, '//button[contains(text(), "Load more")]'))
-                    )
-                    load_more_button.click()
-                    time.sleep(random.uniform(3, 5))
-                except Exception as e:
-                    print("No more 'Load More' button found or error:", e)
+                if not _click_unearthed_load_more(
+                    len(ordered_profile_urls),
+                    _discover_current_listing_page,
+                ):
                     break
         if target_profile_url:
             debug_details = _build_unearthed_resume_debug_details(ordered_profile_urls, target_profile_url)
