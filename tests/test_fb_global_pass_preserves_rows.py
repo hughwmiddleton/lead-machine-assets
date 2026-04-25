@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import night_mode_fb as nmfb
 import pandas as pd
 import pipeline_runner
+import pytest
 from fb_attribution import FB_GATE_STATE_COL
 
 
@@ -38,6 +39,176 @@ class DummyFBHelper:
 
 def _make_dummy_module():
     return SimpleNamespace(scrape_csv=lambda *args, **kwargs: None)
+
+
+def test_nightmode_fb_driver_recovery_retries_same_row(monkeypatch, tmp_path):
+    input_csv = tmp_path / "master_pre_fb.csv"
+    output_csv = tmp_path / "master_post_fb.csv"
+    state_path = tmp_path / "fb_state.json"
+    pd.DataFrame(
+        [
+            {
+                "Artist Name": "Recover Me",
+                "Email": "",
+                "Email_All": "",
+                "Social Link": "",
+                "Facebook_URL": "https://facebook.com/recoverme",
+            }
+        ]
+    ).to_csv(input_csv, index=False)
+
+    class RecoveringHelper(DummyFBHelper):
+        def __init__(self, should_crash=False):
+            super().__init__()
+            self.should_crash = should_crash
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+        def enrich_row_with_facebook_night(self, row, row_index=0):
+            self.calls += 1
+            self.rows.append({"row": dict(row or {}), "row_index": row_index})
+            if self.should_crash:
+                raise nmfb.FacebookDriverError("invalid session id: browser has disconnected")
+            return super().enrich_row_with_facebook_night(row, row_index=row_index)
+
+    helpers = []
+
+    def fake_helper(*args, **kwargs):
+        helper = RecoveringHelper(should_crash=(len(helpers) == 0))
+        helpers.append(helper)
+        return helper
+
+    logs = []
+    monkeypatch.setenv("FB_USERNAME", "user")
+    monkeypatch.setenv("FB_PASSWORD", "pass")
+    monkeypatch.setattr(pipeline_runner, "NightModeFacebookEnricher", fake_helper)
+    monkeypatch.setattr(pipeline_runner, "_load_legacy_module", _make_dummy_module)
+    monkeypatch.setattr(pipeline_runner, "_load_fb_state", lambda _: {})
+    monkeypatch.setattr(pipeline_runner, "_write_fb_state", lambda *args, **kwargs: None)
+
+    status = pipeline_runner.run_facebook_global_pass_nightmode(
+        input_csv=input_csv.as_posix(),
+        output_csv=output_csv.as_posix(),
+        state_path=state_path.as_posix(),
+        skip_rows_with_email=False,
+        logger=logs.append,
+    )
+
+    checkpoint_files = list((tmp_path / "checkpoints").glob("*.checkpoint"))
+    checkpoint_lines = checkpoint_files[0].read_text(encoding="utf-8").splitlines()
+    df_out = pd.read_csv(output_csv, dtype=str, keep_default_na=False).fillna("")
+
+    assert status.completed is True
+    assert len(helpers) == 2
+    assert helpers[0].closed is True
+    assert helpers[0].rows[0]["row_index"] == 0
+    assert helpers[1].rows[0]["row_index"] == 0
+    assert checkpoint_lines == ["0"]
+    assert df_out.loc[0, "FB_Status"] == "ok"
+    assert any("[Driver Recovery] crash_detected row=0" in msg for msg in logs)
+    assert any("[Driver Recovery] restarting_driver row=0 attempt=1" in msg for msg in logs)
+    assert any("[Driver Recovery] stale_driver_terminated row=0 success=true" in msg for msg in logs)
+    assert any("[Driver Recovery] recovery_success row=0" in msg for msg in logs)
+
+
+def test_nightmode_fb_driver_recovery_limit_fails_without_checkpoint(monkeypatch, tmp_path):
+    input_csv = tmp_path / "master_pre_fb.csv"
+    output_csv = tmp_path / "master_post_fb.csv"
+    state_path = tmp_path / "fb_state.json"
+    pd.DataFrame(
+        [
+            {
+                "Artist Name": "Crash Loop",
+                "Email": "",
+                "Email_All": "",
+                "Social Link": "",
+                "Facebook_URL": "https://facebook.com/crashloop",
+            }
+        ]
+    ).to_csv(input_csv, index=False)
+
+    class CrashingHelper(DummyFBHelper):
+        def close(self):
+            pass
+
+        def enrich_row_with_facebook_night(self, row, row_index=0):
+            self.calls += 1
+            raise nmfb.FacebookDriverError("driver_session_died: chrome not reachable")
+
+    logs = []
+    monkeypatch.setenv("FB_USERNAME", "user")
+    monkeypatch.setenv("FB_PASSWORD", "pass")
+    monkeypatch.setattr(pipeline_runner, "NightModeFacebookEnricher", lambda *args, **kwargs: CrashingHelper())
+    monkeypatch.setattr(pipeline_runner, "_load_legacy_module", _make_dummy_module)
+    monkeypatch.setattr(pipeline_runner, "_load_fb_state", lambda _: {})
+    monkeypatch.setattr(pipeline_runner, "_write_fb_state", lambda *args, **kwargs: None)
+
+    with pytest.raises(nmfb.FacebookDriverError):
+        pipeline_runner.run_facebook_global_pass_nightmode(
+            input_csv=input_csv.as_posix(),
+            output_csv=output_csv.as_posix(),
+            state_path=state_path.as_posix(),
+            skip_rows_with_email=False,
+            logger=logs.append,
+        )
+
+    checkpoint_files = list((tmp_path / "checkpoints").glob("*.checkpoint"))
+    checkpoint_text = checkpoint_files[0].read_text(encoding="utf-8") if checkpoint_files else ""
+
+    assert checkpoint_text == ""
+    assert not output_csv.exists()
+    assert any("[Driver Recovery] recovery_failed row=0 attempts=2" in msg for msg in logs)
+
+
+def test_nightmode_fb_non_recoverable_error_fails_without_retry(monkeypatch, tmp_path):
+    input_csv = tmp_path / "master_pre_fb.csv"
+    output_csv = tmp_path / "master_post_fb.csv"
+    state_path = tmp_path / "fb_state.json"
+    pd.DataFrame(
+        [
+            {
+                "Artist Name": "No Retry",
+                "Email": "",
+                "Email_All": "",
+                "Social Link": "",
+                "Facebook_URL": "https://facebook.com/noretry",
+            }
+        ]
+    ).to_csv(input_csv, index=False)
+
+    class NonRecoverableHelper(DummyFBHelper):
+        def close(self):
+            pass
+
+        def enrich_row_with_facebook_night(self, row, row_index=0):
+            raise RuntimeError("no email found")
+
+    logs = []
+    monkeypatch.setenv("FB_USERNAME", "user")
+    monkeypatch.setenv("FB_PASSWORD", "pass")
+    monkeypatch.setattr(pipeline_runner, "NightModeFacebookEnricher", lambda *args, **kwargs: NonRecoverableHelper())
+    monkeypatch.setattr(pipeline_runner, "_load_legacy_module", _make_dummy_module)
+    monkeypatch.setattr(pipeline_runner, "_load_fb_state", lambda _: {})
+    monkeypatch.setattr(pipeline_runner, "_write_fb_state", lambda *args, **kwargs: None)
+
+    with pytest.raises(RuntimeError, match="no email found"):
+        pipeline_runner.run_facebook_global_pass_nightmode(
+            input_csv=input_csv.as_posix(),
+            output_csv=output_csv.as_posix(),
+            state_path=state_path.as_posix(),
+            skip_rows_with_email=False,
+            logger=logs.append,
+        )
+
+    checkpoint_files = list((tmp_path / "checkpoints").glob("*.checkpoint"))
+    checkpoint_text = checkpoint_files[0].read_text(encoding="utf-8") if checkpoint_files else ""
+
+    assert checkpoint_text == ""
+    assert not output_csv.exists()
+    assert any('[Driver Recovery] non_recoverable_error row=0 error="no email found"' in msg for msg in logs)
+    assert not any("[Driver Recovery] restarting_driver row=0" in msg for msg in logs)
 
 
 def test_fb_global_pass_preserves_rows_and_emails(monkeypatch, tmp_path):

@@ -24,6 +24,21 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple, Union, MutableMapping
 
 import pandas as pd
+try:
+    from selenium.common.exceptions import (
+        InvalidSessionIdException,
+        SessionNotCreatedException,
+        WebDriverException,
+    )
+except Exception:  # pragma: no cover - selenium is an optional runtime dependency in some tests
+    class WebDriverException(Exception):  # type: ignore
+        pass
+
+    class InvalidSessionIdException(WebDriverException):  # type: ignore
+        pass
+
+    class SessionNotCreatedException(WebDriverException):  # type: ignore
+        pass
 from email_provenance import (
     EMAIL_PROVENANCE_JSON_COL,
     _set_email_with_provenance,
@@ -92,6 +107,7 @@ LoggerFn = Optional[Callable[[str], None]]
 _LEGACY_MODULE = None
 _LOGGER = logging.getLogger(__name__)
 EMAIL_PRIORITY_COLS: Sequence[str] = ("Email", "Email_All", "Directory_Email", "Unearthed_Email")
+MAX_DRIVER_RECOVERY_ATTEMPTS = 2
 
 _EMAIL_SUMMARY = {"emails_found": 0, "pattern_emails": 0}
 
@@ -227,6 +243,111 @@ def build_resume_checkpoint(
     else:
         _safe_log(logger, f"[Resume] resuming from row {checkpoint.resume_row_index}")
     return checkpoint
+
+
+_DRIVER_RECOVERY_ERROR_TOKENS: Sequence[str] = (
+    "browser closed unexpectedly",
+    "browser has disconnected",
+    "browser disconnected",
+    "browser died",
+    "chrome not reachable",
+    "crashed",
+    "dead session",
+    "devtoolsactiveport",
+    "disconnected",
+    "driver_session_died",
+    "failed to check if window was closed",
+    "invalid session id",
+    "navigation failed",
+    "no such window",
+    "not connected to devtools",
+    "page crash",
+    "session deleted",
+    "session not created",
+    "target window already closed",
+    "unable to discover open pages",
+    "web view not found",
+    "window already closed",
+)
+
+
+def _is_recoverable_driver_error(exc: BaseException) -> bool:
+    """Return True only for browser/driver/session death, not row extraction misses."""
+    if isinstance(exc, (InvalidSessionIdException, SessionNotCreatedException)):
+        return True
+    message = str(exc or "").lower()
+    if isinstance(exc, FacebookDriverError):
+        return any(token in message for token in _DRIVER_RECOVERY_ERROR_TOKENS)
+    if isinstance(exc, WebDriverException):
+        return any(token in message for token in _DRIVER_RECOVERY_ERROR_TOKENS)
+    return False
+
+
+def _terminate_fb_helper_for_recovery(helper: Any) -> bool:
+    close_method = getattr(helper, "close", None)
+    exit_method = getattr(helper, "__exit__", None)
+    try:
+        if callable(close_method):
+            close_method()
+            return True
+        if callable(exit_method):
+            exit_method(None, None, None)
+            return True
+    except Exception:
+        return False
+    return True
+
+
+class _NightFBDriverOwner:
+    """Single owner for the active Night FB helper/driver graph during a job."""
+
+    def __init__(
+        self,
+        module: Any,
+        fb_username: str,
+        fb_password: str,
+        logger: LoggerFn,
+        *,
+        allow_preseeded_fb_attempt_pass: bool,
+        night_fb_run_state: Optional[NightFBRunState],
+    ) -> None:
+        self.module = module
+        self.fb_username = fb_username
+        self.fb_password = fb_password
+        self.logger = logger
+        self.allow_preseeded_fb_attempt_pass = allow_preseeded_fb_attempt_pass
+        self.night_fb_run_state = night_fb_run_state
+        self.helper: Optional[NightModeFacebookEnricher] = None
+
+    def start(self) -> NightModeFacebookEnricher:
+        helper = NightModeFacebookEnricher(
+            self.module,
+            self.fb_username,
+            self.fb_password,
+            logger=lambda msg: _safe_log_console(self.logger, msg),
+            use_shared_session=False,
+            run_state=None if self.allow_preseeded_fb_attempt_pass else self.night_fb_run_state,
+        )
+        enter = getattr(helper, "__enter__", None)
+        if callable(enter):
+            entered = enter()
+            if entered is not None:
+                helper = entered
+        self.helper = helper
+        return helper
+
+    def close(self) -> bool:
+        helper = self.helper
+        self.helper = None
+        if helper is None:
+            return True
+        return _terminate_fb_helper_for_recovery(helper)
+
+    def restart(self) -> Tuple[NightModeFacebookEnricher, bool]:
+        terminated = self.close()
+        helper = self.start()
+        return helper, terminated
+
 ENRICHMENT_YIELD_SOURCE_ORDER: Sequence[str] = (
     "website",
     "facebook",
@@ -4193,14 +4314,15 @@ def run_facebook_global_pass_nightmode(
     processed_this_run = 0
     limit_reached = False
     captcha_detected = False
-    fb_helper = NightModeFacebookEnricher(
+    fb_owner = _NightFBDriverOwner(
         module,
         fb_username,
         fb_password,
-        logger=lambda msg: _safe_log_console(logger, msg),
-        use_shared_session=False,
-        run_state=None if allow_preseeded_fb_attempt_pass else night_fb_run_state,
+        logger,
+        allow_preseeded_fb_attempt_pass=allow_preseeded_fb_attempt_pass,
+        night_fb_run_state=night_fb_run_state,
     )
+    fb_helper = fb_owner.start()
 
     def _write_state_with_pass_a(extra: Dict[str, Any]) -> None:
         try:
@@ -4212,7 +4334,7 @@ def run_facebook_global_pass_nightmode(
         state.update(extra)
         _write_fb_state(state_path, state)
 
-    with fb_helper:
+    try:
         failed, fail_reason = (fb_helper.get_session_failure() if hasattr(fb_helper, "get_session_failure") else (False, ""))  # type: ignore[attr-defined]
         if failed:
             _safe_log_console(logger, f"[FB Night] Skipping FB pass: session failed to start ({fail_reason or 'unknown'})")
@@ -4231,8 +4353,7 @@ def run_facebook_global_pass_nightmode(
                 break
             if idx <= last_index:
                 continue
-            completed_rows += 1
-            last_index = idx
+            row_start_snapshot = df.loc[idx].copy(deep=True)
 
             artist_label = row.get("Artist Name", "") or row.get("Artist", "") or "<unknown>"
 
@@ -4400,31 +4521,50 @@ def run_facebook_global_pass_nightmode(
                     _safe_log_console(logger, f"[FB Night] Long break for {pause:.2f}s after {processed_this_run} rows.")
                     _safe_sleep(pause)
 
-                try:
-                    clean_row = {k: ("" if pd.isna(v) else v) for k, v in row.to_dict().items()}
-                    enriched = fb_helper.enrich_row_with_facebook_night(clean_row, row_index=idx)
-                except FacebookDriverError as exc:
-                    _safe_log_console(logger, f"[FB Night] Driver error at row {idx}: {exc}")
-                    enriched = {"FB_Status": "driver_error", FB_ATTEMPT_STATE_COL: "attempted_fb_timeout_or_fetch_error"}
-                except Exception as exc:  # pragma: no cover - defensive
-                    if _is_captcha_error(exc):
-                        captcha_flag = True
-                        captcha_detected = True
-                        _safe_log_console(logger, f"[FB Night] Captcha detected at row {idx}; stopping early.")
-                        state.update(
-                            {
-                                "fb_last_index": checkpoint.last_completed_row_index,
-                                "fb_completed": max(0, checkpoint.last_completed_row_index + 1),
-                                "fb_attempted_total": attempted_total,
-                                "fb_captcha_flag": True,
-                                "fb_total_rows": total_rows,
-                                "fb_resume_input": os.path.abspath(input_csv),
-                            }
-                        )
-                        _write_state_with_pass_a(state)
+                for attempt in range(MAX_DRIVER_RECOVERY_ATTEMPTS + 1):
+                    try:
+                        clean_row = {k: ("" if pd.isna(v) else v) for k, v in row.to_dict().items()}
+                        enriched = fb_helper.enrich_row_with_facebook_night(clean_row, row_index=idx)
+                        if attempt > 0:
+                            _safe_log_console(logger, f"[Driver Recovery] recovery_success row={idx}")
                         break
-                    _safe_log_console(logger, f"[FB Night] Night FB enrich failed at row {idx}: {exc}")
-                    enriched = None
+                    except Exception as exc:  # pragma: no cover - defensive
+                        if _is_captcha_error(exc):
+                            captcha_flag = True
+                            captcha_detected = True
+                            _safe_log_console(logger, f"[FB Night] Captcha detected at row {idx}; stopping early.")
+                            state.update(
+                                {
+                                    "fb_last_index": checkpoint.last_completed_row_index,
+                                    "fb_completed": max(0, checkpoint.last_completed_row_index + 1),
+                                    "fb_attempted_total": attempted_total,
+                                    "fb_captcha_flag": True,
+                                    "fb_total_rows": total_rows,
+                                    "fb_resume_input": os.path.abspath(input_csv),
+                                }
+                            )
+                            _write_state_with_pass_a(state)
+                            break
+                        if not _is_recoverable_driver_error(exc):
+                            _safe_log_console(logger, f'[Driver Recovery] non_recoverable_error row={idx} error="{exc}"')
+                            raise
+                        _safe_log_console(logger, f'[Driver Recovery] crash_detected row={idx} error="{exc}"')
+                        if attempt == MAX_DRIVER_RECOVERY_ATTEMPTS:
+                            _safe_log_console(
+                                logger,
+                                f"[Driver Recovery] recovery_failed row={idx} attempts={MAX_DRIVER_RECOVERY_ATTEMPTS}",
+                            )
+                            raise
+                        _safe_log_console(logger, f"[Driver Recovery] restarting_driver row={idx} attempt={attempt + 1}")
+                        df.loc[idx] = row_start_snapshot
+                        row = df.loc[idx]
+                        fb_helper, terminated = fb_owner.restart()
+                        _safe_log_console(
+                            logger,
+                            f"[Driver Recovery] stale_driver_terminated row={idx} success={str(bool(terminated)).lower()}",
+                        )
+                if captcha_detected:
+                    break
 
                 write_before = _fb_write_surface_snapshot(df.loc[idx])
                 if enriched:
@@ -4520,6 +4660,8 @@ def run_facebook_global_pass_nightmode(
 
             df.at[idx, FB_DEBUG_REASON_COL] = _classify_fb_debug_reason(df.loc[idx])
             finalize_fb_row_attribution(df, idx)
+            last_index = int(idx)
+            completed_rows = max(0, int(checkpoint.last_completed_row_index) + 2)
 
             state.update(
                 {
@@ -4542,6 +4684,8 @@ def run_facebook_global_pass_nightmode(
                 limit_reached = True
                 _safe_log_console(logger, f"[FB Night] Hit max_rows_per_run={max_rows_per_run}; stopping.")
                 break
+    finally:
+        fb_owner.close()
 
     last_index = checkpoint.last_completed_row_index
     completed_rows = max(0, checkpoint.last_completed_row_index + 1)
