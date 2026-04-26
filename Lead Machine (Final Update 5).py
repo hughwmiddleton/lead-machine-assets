@@ -1362,6 +1362,22 @@ def load_unearthed_indexed_artist_urls(index_path: str | None = None) -> list[st
     return urls
 
 
+def _unearthed_profile_urls_match(left: str | None, right: str | None) -> bool:
+    left_url, left_slug = normalize_unearthed_artist_url(left)
+    right_url, right_slug = normalize_unearthed_artist_url(right)
+    if left_url and right_url and left_url == right_url:
+        return True
+    return bool(left_slug and right_slug and left_slug == right_slug)
+
+
+def _unearthed_index_tail_url(index_path: str | None = None) -> str | None:
+    rows = _load_unearthed_artist_url_index(index_path)
+    if not rows:
+        return None
+    tail_url = str(rows[-1].get("artist_url") or "").strip()
+    return tail_url or None
+
+
 def backfill_unearthed_artist_url_index(source_paths, index_path: str | None = None) -> dict:
     urls: list[str] = []
     for source_path in source_paths or []:
@@ -1672,6 +1688,11 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
     selected_cursor_strict = False
     resume_cursor_strict = False
     resume_mode = ""
+    resume_cursor_source = ""
+    resume_continue_active = False
+    resume_new_urls_added = 0
+    resume_duplicates_seen = 0
+    resume_total_index = 0
     terminal_profile_url = None
     scrape_completed = False
     try:
@@ -1715,24 +1736,55 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
             resume_mode = str(job_config.get("unearthed_resume_mode", "auto") or "auto").strip().lower()
             if resume_mode not in {"auto", "cursor", "fresh", "selected"}:
                 resume_mode = "auto"
-            persistent_cursor = _load_unearthed_persistent_cursor()
-            if resume_mode == "auto":
-                target_profile_url = persistent_cursor
-                resume_cursor_strict = bool(target_profile_url)
-            elif resume_mode == "cursor":
-                target_profile_url = persistent_cursor
-                resume_cursor_strict = bool(target_profile_url)
-            elif resume_mode == "selected":
+            persistent_cursor = None if resume_mode == "fresh" else _load_unearthed_persistent_cursor()
+            run_root_cursor = ""
+            if isinstance(state, dict):
+                run_root_cursor = str(state.get("unearthed_last_profile_url") or "").strip()
+            index_tail_url = None
+            if resume_mode in {"auto", "cursor"}:
+                index_tail_url = _unearthed_index_tail_url(index_path or None)
+            if resume_mode == "selected":
                 selected_cursor_strict = True
                 target_profile_url = str(job_config.get("unearthed_selected_cursor") or "").strip()
+                resume_cursor_source = "job_config"
                 if not target_profile_url:
                     raise UnearthedSelectedCursorError(
                         "Selected cursor entry point mode requires a non-empty Unearthed checkpoint URL."
                     )
+            elif resume_mode in {"auto", "cursor"}:
+                if index_tail_url:
+                    target_profile_url = index_tail_url
+                    resume_cursor_source = "index_tail"
+                    for stale_source, stale_cursor in (
+                        ("run_root", run_root_cursor),
+                        ("global", persistent_cursor),
+                    ):
+                        stale_cursor = str(stale_cursor or "").strip()
+                        if stale_cursor and not _unearthed_profile_urls_match(stale_cursor, index_tail_url):
+                            print(
+                                "[UE Resume] stale_cursor_ignored "
+                                f'cursor_source="{stale_source}" '
+                                f'cursor_url="{stale_cursor}" '
+                                f'index_tail_url="{index_tail_url}"'
+                            )
+                elif persistent_cursor:
+                    target_profile_url = persistent_cursor
+                    resume_cursor_source = "global"
+                elif run_root_cursor:
+                    target_profile_url = run_root_cursor
+                    resume_cursor_source = "run_root"
+                resume_cursor_strict = bool(target_profile_url)
         if target_profile_url:
             cursor_search_limit = _resolve_unearthed_cursor_search_limit(job_config, max_artists)
             normalized_target_profile_url = _normalize_unearthed_profile_url_for_match(target_profile_url)
             target_slug = normalize_unearthed_cursor(target_profile_url)
+            resume_continue_active = resume_mode in {"auto", "cursor"} and bool(target_profile_url)
+            if resume_continue_active:
+                print(
+                    "[UE Resume] "
+                    f'mode="continue" cursor_source="{resume_cursor_source or "unknown"}" '
+                    f'target_url="{target_profile_url}"'
+                )
 
         def _resolve_listing_card(link_tag):
             link_text = " ".join(link_tag.stripped_strings)
@@ -1787,7 +1839,7 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
             stop_on_target: bool = False,
             stop_after_count: int | None = None,
         ) -> int | None:
-            nonlocal next_cursor_progress_log_count
+            nonlocal next_cursor_progress_log_count, resume_duplicates_seen, resume_new_urls_added, resume_total_index
             soup = BeautifulSoup(driver.page_source, 'html.parser')
             artist_links = soup.select('a.HU3iy.p1_Ju.mqDRk.FQED6.O_grP[href^="/triplejunearthed/artist/"]')
             if not artist_links:
@@ -1802,10 +1854,10 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
                     profile_url, _profile_slug = normalize_unearthed_artist_url("https://www.abc.net.au" + href)
                     if not profile_url:
                         continue
-                    prior_count = len(ordered_profile_urls)
                     if not _append_unearthed_profile_url(ordered_profile_urls, seen_profile_urls, profile_url):
+                        if resume_continue_active:
+                            resume_duplicates_seen += 1
                         continue
-                    upsert_unearthed_artist_url_index([profile_url], source="discovery", index_path=index_path or None)
                     listing_metadata_by_url.setdefault(profile_url, _extract_listing_metadata(listing_card))
                     while stop_on_target and len(ordered_profile_urls) >= next_cursor_progress_log_count:
                         _log_unearthed_resume_debug(
@@ -1815,8 +1867,6 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
                             f'last_url="{profile_url}"'
                         )
                         next_cursor_progress_log_count += cursor_search_progress_every
-                    if stop_after_count is not None and len(ordered_profile_urls) >= stop_after_count:
-                        return None
                     normalized_profile_url = _normalize_unearthed_profile_url_for_match(profile_url)
                     profile_slug = normalize_unearthed_cursor(profile_url)
                     if stop_on_target and (
@@ -1824,6 +1874,21 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
                         or (target_slug and profile_slug == target_slug)
                     ):
                         return len(ordered_profile_urls) - 1
+                    should_persist_discovered_url = not resume_continue_active
+                    if resume_continue_active and resolved_resume_index is not None:
+                        should_persist_discovered_url = len(ordered_profile_urls) - 1 >= resolved_resume_index
+                    if should_persist_discovered_url:
+                        index_result = upsert_unearthed_artist_url_index(
+                            [profile_url],
+                            source="discovery",
+                            index_path=index_path or None,
+                        )
+                        if resume_continue_active:
+                            resume_new_urls_added += int(index_result.get("new_urls", 0) or 0)
+                            resume_duplicates_seen += int(index_result.get("updated_existing", 0) or 0)
+                            resume_total_index = int(index_result.get("total", resume_total_index) or 0)
+                    if stop_after_count is not None and len(ordered_profile_urls) >= stop_after_count:
+                        return None
                     if stop_on_target and len(ordered_profile_urls) >= cursor_search_limit:
                         return None
             return None
@@ -1879,22 +1944,32 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
             for _attempt in range(max_attempts):
                 try:
                     load_more_button = WebDriverWait(driver, 5).until(
-                        EC.presence_of_element_located((By.XPATH, UNEARTHED_LOAD_MORE_XPATH))
+                        EC.element_to_be_clickable((By.XPATH, UNEARTHED_LOAD_MORE_XPATH))
                     )
-                    driver.execute_script(
-                        "arguments[0].scrollIntoView({block: 'center', inline: 'nearest'});",
-                        load_more_button,
-                    )
+                    if hasattr(driver, "execute_script"):
+                        driver.execute_script(
+                            "arguments[0].scrollIntoView({block: 'center', inline: 'nearest'});",
+                            load_more_button,
+                        )
                     time.sleep(random.uniform(0.2, 0.6))
                     terminal_reason = "button_not_usable"
-                    if not (load_more_button.is_displayed() and load_more_button.is_enabled()):
+                    is_displayed = load_more_button.is_displayed() if hasattr(load_more_button, "is_displayed") else True
+                    is_enabled = load_more_button.is_enabled() if hasattr(load_more_button, "is_enabled") else True
+                    if not (is_displayed and is_enabled):
                         continue
                     terminal_reason = "click_or_wait_failed"
                     try:
                         load_more_button.click()
                     except Exception as click_error:
                         last_exception = click_error
-                        driver.execute_script("arguments[0].click();", load_more_button)
+                        if hasattr(driver, "execute_script"):
+                            driver.execute_script("arguments[0].click();", load_more_button)
+                        else:
+                            raise
+
+                    discover_after_click()
+                    if len(ordered_profile_urls) > urls_before:
+                        return True
 
                     def _count_increased(_driver) -> bool:
                         discover_after_click()
@@ -1905,6 +1980,8 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
                     return True
                 except Exception as error:
                     last_exception = error
+                    if "no more pages" in str(error).lower():
+                        break
                     time.sleep(random.uniform(0.8, 1.4))
 
             _log_terminal(terminal_reason, last_exception)
@@ -1950,6 +2027,8 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
                 ):
                     search_exhausted = True
                     break
+                if resolved_resume_index is None and len(ordered_profile_urls) >= cursor_search_limit:
+                    search_exhausted = True
 
             if resolved_resume_index is not None:
                 def _resolved_slice_ready() -> bool:
@@ -1966,6 +2045,7 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
                         lambda: _discover_current_listing_page(stop_after_count=required_discovered_count),
                     ):
                         break
+                    print(f"Found {len(ordered_profile_urls)} artist profile URLs so far...")
         elif not use_url_index:
             while _count_unearthed_remaining_profile_urls(ordered_profile_urls, target_profile_url) < max_artists:
                 _discover_current_listing_page()
@@ -1998,6 +2078,12 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
             if resolved_resume_index is None:
                 first_url = ordered_profile_urls[0] if ordered_profile_urls else ""
                 last_url = ordered_profile_urls[-1] if ordered_profile_urls else ""
+                if resume_continue_active:
+                    print(
+                        "[UE Resume Error] cursor_not_found "
+                        f'target_url="{target_profile_url}" '
+                        f"discovered_count={len(ordered_profile_urls)}"
+                    )
                 print(
                     "[UE Resume Error] cursor_unresolved "
                     f'target_profile_url="{target_profile_url}" '
@@ -2016,6 +2102,14 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
                         f"resolved_resume_index={resolved_resume_index} "
                         f"discovered_count={len(ordered_profile_urls)}"
                     )
+                    cursor_resolved_discovered_count = len(ordered_profile_urls)
+                if resume_continue_active:
+                    print(
+                        "[UE Resume] cursor_found "
+                        f"discovered_count={cursor_resolved_discovered_count} "
+                        f'target_slug="{target_slug}"'
+                    )
+                    print(f'[UE Resume] collecting_after_cursor target_slug="{target_slug}"')
                 _log_unearthed_resume_debug(
                     "slice_decision "
                     f"resolved_resume_index={resolved_resume_index} "
@@ -2036,6 +2130,28 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
                     f"{target_profile_url}"
                 )
         profile_urls = _slice_unearthed_profile_urls(ordered_profile_urls, target_profile_url, max_artists)
+        if resume_continue_active and resolved_resume_index is not None:
+            if resume_total_index <= 0:
+                resume_total_index = len(load_unearthed_indexed_artist_urls(index_path or None))
+            if resume_new_urls_added > 0:
+                print(
+                    "[UE Resume] "
+                    f"new_urls_added={resume_new_urls_added} "
+                    f"duplicates_seen={resume_duplicates_seen} "
+                    f"total_index={resume_total_index}"
+                )
+            elif not profile_urls:
+                print(
+                    "[UE Resume] "
+                    f"no_new_urls_after_cursor duplicates_seen={resume_duplicates_seen} "
+                    f"total_index={resume_total_index}"
+                )
+            else:
+                print(
+                    "[UE Resume] "
+                    f"new_urls_added=0 duplicates_seen={resume_duplicates_seen} "
+                    f"total_index={resume_total_index}"
+                )
         print(f"Total artist profile URLs to scrape: {len(profile_urls)}")
         if not profile_urls:
             print("No artist profile URLs found. Please check the website structure or selectors.")

@@ -362,6 +362,75 @@ def test_scrape_website_auto_resume_uses_fresh_persistent_cursor_over_runtime_st
     assert load_more_requests == 0
 
 
+def test_scrape_website_continue_prefers_index_tail_over_stale_global_cursor(monkeypatch, tmp_path, capsys) -> None:
+    module = pipeline_runner._load_legacy_module()
+    index_path = tmp_path / "unearthed_artist_url_index.csv"
+    module.upsert_unearthed_artist_url_index(
+        [
+            "https://www.abc.net.au/triplejunearthed/artist/artist-1",
+            "https://www.abc.net.au/triplejunearthed/artist/artist-2",
+            "https://www.abc.net.au/triplejunearthed/artist/artist-3",
+        ],
+        index_path=str(index_path),
+    )
+
+    visited_profile_urls, load_more_requests = _run_fake_unearthed_scrape(
+        monkeypatch,
+        tmp_path,
+        [["artist-1", "artist-2", "artist-3", "artist-4", "artist-5"]],
+        max_artists=2,
+        resume_mode="cursor",
+        persistent_cursor="https://www.abc.net.au/triplejunearthed/artist/artist-1",
+    )
+
+    captured = capsys.readouterr()
+
+    assert visited_profile_urls == [
+        "https://www.abc.net.au/triplejunearthed/artist/artist-4",
+        "https://www.abc.net.au/triplejunearthed/artist/artist-5",
+    ]
+    assert load_more_requests == 0
+    assert 'cursor_source="index_tail"' in captured.out
+    assert '[UE Resume] stale_cursor_ignored cursor_source="global"' in captured.out
+    assert module.load_unearthed_indexed_artist_urls(str(index_path)) == [
+        "https://www.abc.net.au/triplejunearthed/artist/artist-1",
+        "https://www.abc.net.au/triplejunearthed/artist/artist-2",
+        "https://www.abc.net.au/triplejunearthed/artist/artist-3",
+        "https://www.abc.net.au/triplejunearthed/artist/artist-4",
+        "https://www.abc.net.au/triplejunearthed/artist/artist-5",
+    ]
+
+
+def test_scrape_website_continue_at_index_tail_with_no_more_depth_keeps_index_unchanged(monkeypatch, tmp_path, capsys) -> None:
+    module = pipeline_runner._load_legacy_module()
+    index_path = tmp_path / "unearthed_artist_url_index.csv"
+    module.upsert_unearthed_artist_url_index(
+        [
+            "https://www.abc.net.au/triplejunearthed/artist/artist-1",
+            "https://www.abc.net.au/triplejunearthed/artist/artist-2",
+            "https://www.abc.net.au/triplejunearthed/artist/artist-3",
+        ],
+        index_path=str(index_path),
+    )
+    original_index_text = index_path.read_text(encoding="utf-8")
+
+    visited_profile_urls, load_more_requests = _run_fake_unearthed_scrape(
+        monkeypatch,
+        tmp_path,
+        [["artist-1", "artist-2", "artist-3"]],
+        max_artists=2,
+        resume_mode="cursor",
+        persistent_cursor="https://www.abc.net.au/triplejunearthed/artist/artist-1",
+    )
+
+    captured = capsys.readouterr()
+
+    assert visited_profile_urls == []
+    assert load_more_requests == 1
+    assert "[UE Resume] no_new_urls_after_cursor" in captured.out
+    assert index_path.read_text(encoding="utf-8") == original_index_text
+
+
 def test_scrape_website_cursor_jobs_write_terminal_cursor_for_next_job_without_runtime_state(monkeypatch, tmp_path) -> None:
     cursor_state = {
         "value": "https://www.abc.net.au/triplejunearthed/artist/artist-2",
