@@ -3117,6 +3117,49 @@ def _merge_festival_expansion_output(
     return len(kept_rows)
 
 
+def _valid_existing_enriched_csv(path: str) -> Tuple[bool, str]:
+    if not path or not os.path.exists(path):
+        return False, "missing"
+    try:
+        if os.path.getsize(path) <= 0:
+            return False, "empty"
+    except OSError as exc:
+        return False, f"stat_failed:{type(exc).__name__}"
+
+    try:
+        with open(path, "r", encoding="utf-8", newline="") as handle:
+            reader = csv.reader(handle, strict=True)
+            header = next(reader, None)
+            if not header or not any(str(cell).strip() for cell in header):
+                return False, "missing_header"
+            for row in reader:
+                if row and any(str(cell).strip() for cell in row):
+                    return True, "valid"
+            return False, "missing_data_row"
+    except csv.Error as exc:
+        return False, f"csv_parse_failed:{exc}"
+    except Exception as exc:
+        return False, f"csv_read_failed:{type(exc).__name__}:{exc}"
+
+
+def _resolve_master_enrichment_failure_output(seed_csv_path: str, output_csv_path: str, logger: LoggerFn = None) -> str:
+    valid, reason = _valid_existing_enriched_csv(output_csv_path)
+    if valid:
+        _safe_log(
+            logger,
+            f"[Master Enrich] preserved_existing_enriched_output path={output_csv_path}",
+        )
+        return output_csv_path
+
+    _safe_log(
+        logger,
+        f"[Master Enrich] fallback_to_raw_due_to_missing_or_invalid_enriched_output "
+        f"path={output_csv_path} reason={reason}",
+    )
+    shutil.copyfile(seed_csv_path, output_csv_path)
+    return output_csv_path
+
+
 def run_master_enrichment(
     seed_csv_path: str,
     output_csv_path: str,
@@ -3145,8 +3188,7 @@ def run_master_enrichment(
         import cross_directory_enricher
     except Exception as exc:
         _safe_log(logger, f"[Master Enrich] cross_directory_enricher unavailable: {exc}")
-        shutil.copyfile(seed_csv_path, output_csv_path)
-        return output_csv_path
+        return _resolve_master_enrichment_failure_output(seed_csv_path, output_csv_path, logger=logger)
 
     try:
         bandcamp_path_final = bandcamp_csv_path or ""
@@ -3349,8 +3391,7 @@ def run_master_enrichment(
         emit_enrichment_yield_summary(logger, dict(getattr(yield_tracker, "counts", {}) or {}))
     except Exception as exc:
         _safe_log(logger, f"[Master Enrich] Enricher failed safely: {exc}")
-        shutil.copyfile(seed_csv_path, output_csv_path)
-        return output_csv_path
+        return _resolve_master_enrichment_failure_output(seed_csv_path, output_csv_path, logger=logger)
     finally:
         if local_night_fb_run_state:
             close_night_fb_run_state(night_fb_run_state)
