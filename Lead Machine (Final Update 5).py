@@ -10934,6 +10934,274 @@ class AutoValidateWorker(QtCore.QThread):
             pass
 
 
+CAMPAIGN_PREP_OUTPUT_ORDER = [
+    "Inside_VIC.csv",
+    "Outside_VIC.csv",
+    "Inside_VIC_Played_TripleJ.csv",
+    "Inside_VIC_Played_Unearthed.csv",
+    "Inside_VIC_Neither.csv",
+    "Outside_VIC_Played_TripleJ.csv",
+    "Outside_VIC_Played_Unearthed.csv",
+    "Outside_VIC_Neither.csv",
+]
+
+
+def _campaign_prep_casefold_columns(columns: List[str]) -> Dict[str, str]:
+    folded: Dict[str, str] = {}
+    for column in columns:
+        key = str(column).lower()
+        if key not in folded:
+            folded[key] = column
+    return folded
+
+
+def _campaign_prep_required_column(columns_by_lower: Dict[str, str], name: str) -> Optional[str]:
+    return columns_by_lower.get(name.lower())
+
+
+def _campaign_prep_truthy(value) -> bool:
+    return str(value if value is not None else "").strip().lower() in {"yes", "true", "1", "1.0", "y"}
+
+
+def _campaign_prep_inside_vic(value) -> bool:
+    loc = str(value if value is not None else "").strip().lower()
+    if not loc:
+        return False
+    return "melbourne" in loc or "victoria" in loc or re.search(r"\bvic\b", loc) is not None
+
+
+def _campaign_prep_email_tokens(value) -> List[str]:
+    raw = "" if value is None else str(value)
+    tokens: List[str] = []
+    for token in raw.split(","):
+        cleaned = token.strip()
+        if cleaned in ("", "nan", "None"):
+            continue
+        tokens.append(cleaned)
+    return tokens
+
+
+def _campaign_prep_atomic_write_csv(path: Path, rows: List[dict], columns: List[str]) -> None:
+    tmp_path = path.with_name(f"{path.name}.tmp")
+    try:
+        output_df = pd.DataFrame(rows, columns=columns)
+        with open(tmp_path, "w", encoding="utf-8", newline="") as handle:
+            output_df.to_csv(handle, index=False)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except Exception:
+            pass
+        raise
+
+
+def generate_campaign_csvs(
+    input_csv_path: str,
+    output_dir: str,
+    split_multiple_emails: bool = False,
+    email_column_candidates: tuple[str, ...] = ("emails", "email", "Email", "Email_All"),
+) -> dict:
+    read_kwargs = {
+        "dtype": str,
+        "keep_default_na": False,
+    }
+    try:
+        df = pd.read_csv(input_csv_path, na_filter=False, **read_kwargs)
+    except TypeError:
+        df = pd.read_csv(input_csv_path, **read_kwargs)
+    df = df.where(pd.notna(df), "")
+    df = df.astype(str)
+
+    columns = [str(column) for column in df.columns]
+    columns_by_lower = _campaign_prep_casefold_columns(columns)
+    location_column = _campaign_prep_required_column(columns_by_lower, "location")
+    triplej_column = _campaign_prep_required_column(columns_by_lower, "Played on triple J")
+    unearthed_column = _campaign_prep_required_column(columns_by_lower, "Played on Unearthed")
+    missing = [
+        name
+        for name, column in (
+            ("location", location_column),
+            ("Played on triple J", triplej_column),
+            ("Played on Unearthed", unearthed_column),
+        )
+        if column is None
+    ]
+    if missing:
+        raise ValueError(f"Missing required columns: {missing}\nDetected columns: {columns}")
+
+    email_column = None
+    if split_multiple_emails:
+        for candidate in email_column_candidates:
+            match = columns_by_lower.get(str(candidate).lower())
+            if match is not None:
+                email_column = match
+                break
+
+    output_rows: Dict[str, List[dict]] = {name: [] for name in CAMPAIGN_PREP_OUTPUT_ORDER}
+    column_indexes = {column: idx for idx, column in enumerate(columns)}
+
+    for i in range(len(df)):
+        row = {
+            column: ("" if pd.isna(df.iat[i, column_indexes[column]]) else df.iat[i, column_indexes[column]])
+            for column in columns
+        }
+        rows_for_segmentation = [dict(row)]
+        if split_multiple_emails and email_column is not None:
+            tokens = _campaign_prep_email_tokens(row.get(email_column, ""))
+            if len(tokens) > 1:
+                rows_for_segmentation = []
+                for token in tokens:
+                    split_row = dict(row)
+                    split_row[email_column] = token
+                    rows_for_segmentation.append(split_row)
+            elif len(tokens) == 1:
+                split_row = dict(row)
+                split_row[email_column] = tokens[0]
+                rows_for_segmentation = [split_row]
+
+        for final_row in rows_for_segmentation:
+            location_segment = "Inside_VIC" if _campaign_prep_inside_vic(final_row.get(location_column, "")) else "Outside_VIC"
+            if _campaign_prep_truthy(final_row.get(triplej_column, "")):
+                playback_segment = "Played_TripleJ"
+            elif _campaign_prep_truthy(final_row.get(unearthed_column, "")):
+                playback_segment = "Played_Unearthed"
+            else:
+                playback_segment = "Neither"
+
+            output_rows[f"{location_segment}.csv"].append(dict(final_row))
+            output_rows[f"{location_segment}_{playback_segment}.csv"].append(dict(final_row))
+
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    result: Dict[str, int] = {}
+    for filename in CAMPAIGN_PREP_OUTPUT_ORDER:
+        rows = output_rows[filename]
+        if filename not in ("Inside_VIC.csv", "Outside_VIC.csv") and not rows:
+            continue
+        _campaign_prep_atomic_write_csv(output_path / filename, rows, columns)
+        result[filename] = len(rows)
+    return result
+
+
+class CampaignPrepTab(QtWidgets.QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._build_ui()
+
+    def _build_ui(self):
+        layout = QtWidgets.QVBoxLayout()
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+
+        input_row = QtWidgets.QHBoxLayout()
+        input_label = QtWidgets.QLabel("Master CSV:")
+        self.input_csv_edit = QtWidgets.QLineEdit()
+        self.input_csv_edit.setPlaceholderText("Select enriched/master CSV.")
+        self.input_csv_edit.textChanged.connect(lambda text: self._update_path_tooltip(self.input_csv_edit, text))
+        input_browse = QtWidgets.QPushButton("Browse...")
+        input_browse.clicked.connect(self._browse_input_csv)
+        input_row.addWidget(input_label)
+        input_row.addWidget(self.input_csv_edit)
+        input_row.addWidget(input_browse)
+        layout.addLayout(input_row)
+
+        output_row = QtWidgets.QHBoxLayout()
+        output_label = QtWidgets.QLabel("Output folder:")
+        self.output_dir_edit = QtWidgets.QLineEdit()
+        self.output_dir_edit.setPlaceholderText("Select folder for campaign CSVs.")
+        self.output_dir_edit.textChanged.connect(lambda text: self._update_path_tooltip(self.output_dir_edit, text))
+        output_browse = QtWidgets.QPushButton("Browse...")
+        output_browse.clicked.connect(self._browse_output_dir)
+        output_row.addWidget(output_label)
+        output_row.addWidget(self.output_dir_edit)
+        output_row.addWidget(output_browse)
+        layout.addLayout(output_row)
+
+        self.split_emails_checkbox = QtWidgets.QCheckBox("Split multiple emails into separate rows")
+        self.split_emails_checkbox.setChecked(False)
+        layout.addWidget(self.split_emails_checkbox)
+
+        controls = QtWidgets.QHBoxLayout()
+        self.generate_button = QtWidgets.QPushButton("Generate Campaign CSVs")
+        self.generate_button.clicked.connect(self._generate_campaign_csvs)
+        controls.addWidget(self.generate_button)
+        controls.addStretch()
+        layout.addLayout(controls)
+
+        self.summary_view = QtWidgets.QPlainTextEdit()
+        self.summary_view.setReadOnly(True)
+        self.summary_view.setMinimumHeight(160)
+        self.summary_view.setPlaceholderText("Generated file summary will appear here.")
+        layout.addWidget(self.summary_view)
+        layout.addStretch()
+        self.setLayout(layout)
+
+    def _update_path_tooltip(self, widget: QtWidgets.QLineEdit, text: Optional[str] = None):
+        tooltip_text = (text if text is not None else widget.text()).strip()
+        widget.setToolTip(tooltip_text)
+
+    def _set_line_edit_path(self, widget: QtWidgets.QLineEdit, text: str):
+        widget.setText(text)
+        self._update_path_tooltip(widget, text)
+        widget.setCursorPosition(0)
+
+    def _browse_input_csv(self):
+        file_path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Select Master CSV",
+            "",
+            "CSV Files (*.csv);;All Files (*)",
+        )
+        if file_path:
+            self._set_line_edit_path(self.input_csv_edit, file_path)
+
+    def _browse_output_dir(self):
+        folder_path = QtWidgets.QFileDialog.getExistingDirectory(
+            self,
+            "Select Campaign Output Folder",
+            "",
+        )
+        if folder_path:
+            self._set_line_edit_path(self.output_dir_edit, folder_path)
+
+    def _generate_campaign_csvs(self):
+        input_csv_path = self.input_csv_edit.text().strip()
+        output_dir = self.output_dir_edit.text().strip()
+        if not input_csv_path:
+            QtWidgets.QMessageBox.warning(self, "Campaign Prep", "Select a master CSV before generating campaign files.")
+            return
+        if not os.path.isfile(input_csv_path):
+            QtWidgets.QMessageBox.warning(self, "Campaign Prep", f"Master CSV not found:\n{input_csv_path}")
+            return
+        if not output_dir:
+            QtWidgets.QMessageBox.warning(self, "Campaign Prep", "Select an output folder before generating campaign files.")
+            return
+
+        self.generate_button.setEnabled(False)
+        self.summary_view.setPlainText("Generating campaign CSVs...")
+        QtWidgets.QApplication.processEvents()
+        try:
+            result = generate_campaign_csvs(
+                input_csv_path,
+                output_dir,
+                split_multiple_emails=self.split_emails_checkbox.isChecked(),
+            )
+            lines = [f"{filename}: {count} rows" for filename, count in result.items()]
+            summary = "\n".join(lines)
+            self.summary_view.setPlainText(summary)
+            QtWidgets.QMessageBox.information(self, "Campaign CSVs Generated", summary)
+        except Exception as exc:
+            message = f"Could not generate campaign CSVs:\n{exc}"
+            self.summary_view.setPlainText(message)
+            QtWidgets.QMessageBox.critical(self, "Campaign Prep Error", message)
+        finally:
+            self.generate_button.setEnabled(True)
+
+
 class LeadVaultWorker(QtCore.QThread):
     finished_signal = QtCore.pyqtSignal(dict)
     error_signal = QtCore.pyqtSignal(str)
@@ -13231,6 +13499,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tabs.addTab(self.cross_enricher_tab, "Cross-Directory Enricher")
         self.lead_vault_tab = LeadVaultTab()
         self.tabs.addTab(self.lead_vault_tab, "Lead Vault")
+        self.campaign_prep_tab = CampaignPrepTab()
+        self.tabs.addTab(self.campaign_prep_tab, "Campaign Prep")
         self.auto_validate_tab = AutoValidateTab()
         self.tabs.addTab(self.auto_validate_tab, "Auto-Validate")
         self.night_mode_tab = NightModeTab()
