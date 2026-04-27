@@ -146,6 +146,111 @@ def test_generate_campaign_csvs_no_email_column_is_safe_and_missing_columns_are_
     assert "Accepted aliases: ['Location', 'location', 'City', 'city', 'State', 'state']" in str(excinfo.value)
 
 
+def test_generate_campaign_csvs_filters_rows_without_email_after_splitting(tmp_path):
+    module = _load_legacy_module()
+    columns = ["Artist", "Location", "emails", "Unearthed"]
+    input_path = tmp_path / "master.csv"
+    output_dir = tmp_path / "campaign"
+    _write_csv(
+        input_path,
+        [
+            {"Artist": "Act A", "Location": "Melbourne", "emails": "a@test.com, ", "Unearthed": ""},
+            {"Artist": "Act B", "Location": "VIC", "emails": " ", "Unearthed": "yes"},
+            {"Artist": "Act C", "Location": "Sydney", "emails": "nan", "Unearthed": ""},
+            {"Artist": "Act D", "Location": "Adelaide", "emails": "None", "Unearthed": "yes"},
+            {"Artist": "Act E", "Location": "Brisbane", "emails": "e@test.com, f@test.com,,", "Unearthed": ""},
+        ],
+        columns,
+    )
+    source_bytes = input_path.read_bytes()
+
+    result = module.generate_campaign_csvs(
+        str(input_path),
+        str(output_dir),
+        split_multiple_emails=True,
+        remove_rows_without_emails=True,
+    )
+
+    assert result == {
+        "Inside_VIC.csv": 1,
+        "Outside_VIC.csv": 2,
+        "Inside_VIC_Neither.csv": 1,
+        "Outside_VIC_Neither.csv": 2,
+    }
+    _, inside_rows = _read_csv(output_dir / "Inside_VIC.csv")
+    _, outside_rows = _read_csv(output_dir / "Outside_VIC.csv")
+    assert [row["emails"] for row in inside_rows] == ["a@test.com"]
+    assert [row["emails"] for row in outside_rows] == ["e@test.com", "f@test.com"]
+    assert input_path.read_bytes() == source_bytes
+    assert not (output_dir / "Outside_VIC_Played_Unearthed.csv").exists()
+
+
+def test_generate_campaign_csvs_no_email_column_filter_on_writes_empty_primary_files(tmp_path):
+    module = _load_legacy_module()
+    columns = ["Artist", "Location", "Unearthed"]
+    input_path = tmp_path / "master.csv"
+    output_dir = tmp_path / "campaign"
+    _write_csv(
+        input_path,
+        [
+            {"Artist": "Act A", "Location": "Victoria", "Unearthed": "yes"},
+            {"Artist": "Act B", "Location": "Sydney", "Unearthed": "yes"},
+        ],
+        columns,
+    )
+
+    result = module.generate_campaign_csvs(
+        str(input_path),
+        str(output_dir),
+        remove_rows_without_emails=True,
+    )
+
+    assert result == {
+        "Inside_VIC.csv": 0,
+        "Outside_VIC.csv": 0,
+    }
+    inside_columns, inside_rows = _read_csv(output_dir / "Inside_VIC.csv")
+    outside_columns, outside_rows = _read_csv(output_dir / "Outside_VIC.csv")
+    assert inside_columns == columns
+    assert outside_columns == columns
+    assert inside_rows == []
+    assert outside_rows == []
+    assert sorted(path.name for path in output_dir.glob("*.csv")) == ["Inside_VIC.csv", "Outside_VIC.csv"]
+
+
+def test_generate_campaign_csvs_filter_all_rows_removed_writes_primary_headers_only(tmp_path):
+    module = _load_legacy_module()
+    columns = ["Artist", "Location", "emails"]
+    input_path = tmp_path / "master.csv"
+    output_dir = tmp_path / "campaign"
+    _write_csv(
+        input_path,
+        [
+            {"Artist": "Act A", "Location": "Victoria", "emails": ""},
+            {"Artist": "Act B", "Location": "Sydney", "emails": "None"},
+        ],
+        columns,
+    )
+
+    result = module.generate_campaign_csvs(
+        str(input_path),
+        str(output_dir),
+        remove_rows_without_emails=True,
+    )
+
+    assert result == {
+        "Inside_VIC.csv": 0,
+        "Outside_VIC.csv": 0,
+    }
+    inside_columns, inside_rows = _read_csv(output_dir / "Inside_VIC.csv")
+    outside_columns, outside_rows = _read_csv(output_dir / "Outside_VIC.csv")
+    assert inside_columns == columns
+    assert outside_columns == columns
+    assert inside_rows == []
+    assert outside_rows == []
+    assert sorted(path.name for path in output_dir.glob("*.csv")) == ["Inside_VIC.csv", "Outside_VIC.csv"]
+
+
 def test_generate_campaign_csvs_supports_real_master_headers_and_alias_priority(tmp_path):
     module = _load_legacy_module()
     columns = [
@@ -267,6 +372,48 @@ def test_generate_campaign_csvs_woodpecker_missing_fields_are_blank_and_duplicat
     assert rows[0]["Facebook"] == ""
 
 
+def test_generate_campaign_csvs_woodpecker_filter_uses_resolved_email_without_fallback(tmp_path):
+    module = _load_legacy_module()
+    columns = ["Artist", "Location", "Primary_Email", "All_Emails"]
+    input_path = tmp_path / "master.csv"
+    output_dir = tmp_path / "campaign"
+    _write_csv(
+        input_path,
+        [
+            {
+                "Artist": "Act A",
+                "Location": "VIC",
+                "Primary_Email": "",
+                "All_Emails": "fallback@example.com",
+            },
+            {
+                "Artist": "Act B",
+                "Location": "VIC",
+                "Primary_Email": "primary@example.com",
+                "All_Emails": "other@example.com",
+            },
+        ],
+        columns,
+    )
+
+    result = module.generate_campaign_csvs(
+        str(input_path),
+        str(output_dir),
+        export_format="woodpecker",
+        remove_rows_without_emails=True,
+    )
+
+    assert result == {
+        "Inside_VIC.csv": 1,
+        "Outside_VIC.csv": 0,
+        "Inside_VIC_Neither.csv": 1,
+    }
+    output_columns, rows = _read_csv(output_dir / "Inside_VIC.csv")
+    assert output_columns == module.CAMPAIGN_PREP_WOODPECKER_COLUMNS
+    assert [row["Email"] for row in rows] == ["primary@example.com"]
+    assert rows[0]["Artist"] == "Act B"
+
+
 def test_generate_campaign_csvs_input_headers_and_invalid_format(tmp_path):
     module = _load_legacy_module()
     input_path = tmp_path / "master.csv"
@@ -327,3 +474,33 @@ def test_main_window_contains_campaign_prep_tab(qapp):
         for index in range(window.campaign_prep_tab.export_format_combo.count())
     ] == ["lead_machine_full", "woodpecker", "input_headers"]
     window.close()
+
+
+def test_campaign_prep_remove_rows_without_emails_checkbox_defaults_and_passes_value(qapp, tmp_path, monkeypatch):
+    module = _load_legacy_module()
+    input_path = tmp_path / "master.csv"
+    output_dir = tmp_path / "campaign"
+    output_dir.mkdir()
+    _write_csv(input_path, [{"Artist": "Act", "Location": "VIC", "emails": ""}], ["Artist", "Location", "emails"])
+    calls = []
+
+    def fake_generate(*args, **kwargs):
+        calls.append((args, kwargs))
+        return {"Inside_VIC.csv": 0, "Outside_VIC.csv": 0}
+
+    monkeypatch.setattr(module, "generate_campaign_csvs", fake_generate)
+    monkeypatch.setattr(module.QtWidgets.QMessageBox, "information", lambda *args, **kwargs: None)
+
+    tab = module.CampaignPrepTab()
+    assert tab.remove_rows_without_emails_checkbox.text() == "Remove rows without emails"
+    assert tab.remove_rows_without_emails_checkbox.isChecked() is False
+
+    tab.input_csv_edit.setText(str(input_path))
+    tab.output_dir_edit.setText(str(output_dir))
+    tab.split_emails_checkbox.setChecked(True)
+    tab.remove_rows_without_emails_checkbox.setChecked(True)
+    tab._generate_campaign_csvs()
+
+    assert calls[0][1]["split_multiple_emails"] is True
+    assert calls[0][1]["remove_rows_without_emails"] is True
+    tab.close()

@@ -11006,6 +11006,11 @@ def _campaign_prep_email_tokens(value) -> List[str]:
     return tokens
 
 
+def _campaign_prep_has_email_value(value) -> bool:
+    cleaned = str(value).strip()
+    return cleaned.lower() not in {"", "nan", "none"}
+
+
 def _campaign_prep_atomic_write_csv(path: Path, rows: List[dict], columns: List[str]) -> None:
     tmp_path = path.with_name(f"{path.name}.tmp")
     try:
@@ -11102,6 +11107,7 @@ def generate_campaign_csvs(
     output_dir: str,
     split_multiple_emails: bool = False,
     export_format: str = "lead_machine_full",
+    remove_rows_without_emails: bool = False,
     email_column_candidates: tuple[str, ...] = (
         "emails",
         "email",
@@ -11162,6 +11168,16 @@ def generate_campaign_csvs(
                 split_row = copy.deepcopy(row)
                 split_row[email_column] = tokens[0]
                 rows_for_segmentation = [split_row]
+
+        if remove_rows_without_emails:
+            if email_column is None:
+                rows_for_segmentation = []
+            else:
+                rows_for_segmentation = [
+                    split_row
+                    for split_row in rows_for_segmentation
+                    if _campaign_prep_has_email_value(split_row.get(email_column, ""))
+                ]
 
         for final_row in rows_for_segmentation:
             location_segment = "Inside_VIC" if _campaign_prep_inside_vic(final_row.get(location_column, "")) else "Outside_VIC"
@@ -11225,6 +11241,10 @@ class CampaignPrepTab(QtWidgets.QWidget):
         self.split_emails_checkbox = QtWidgets.QCheckBox("Split multiple emails into separate rows")
         self.split_emails_checkbox.setChecked(False)
         layout.addWidget(self.split_emails_checkbox)
+
+        self.remove_rows_without_emails_checkbox = QtWidgets.QCheckBox("Remove rows without emails")
+        self.remove_rows_without_emails_checkbox.setChecked(False)
+        layout.addWidget(self.remove_rows_without_emails_checkbox)
 
         format_row = QtWidgets.QHBoxLayout()
         format_label = QtWidgets.QLabel("Export format:")
@@ -11303,6 +11323,7 @@ class CampaignPrepTab(QtWidgets.QWidget):
                 output_dir,
                 split_multiple_emails=self.split_emails_checkbox.isChecked(),
                 export_format=self.export_format_combo.currentData() or "lead_machine_full",
+                remove_rows_without_emails=self.remove_rows_without_emails_checkbox.isChecked(),
             )
             lines = [f"{filename}: {count} rows" for filename, count in result.items()]
             summary = "\n".join(lines)
