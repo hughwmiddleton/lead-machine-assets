@@ -25,6 +25,7 @@ import traceback
 import tempfile
 import shutil
 import logging
+import copy
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -10959,6 +10960,30 @@ def _campaign_prep_required_column(columns_by_lower: Dict[str, str], name: str) 
     return columns_by_lower.get(name.lower())
 
 
+def _campaign_prep_resolve_alias(columns_by_lower: Dict[str, str], aliases: Tuple[str, ...]) -> Optional[str]:
+    for alias in aliases:
+        match = columns_by_lower.get(str(alias).lower())
+        if match is not None:
+            return match
+    return None
+
+
+def _campaign_prep_required_alias(
+    columns_by_lower: Dict[str, str],
+    columns: List[str],
+    logical_name: str,
+    aliases: Tuple[str, ...],
+) -> str:
+    match = _campaign_prep_resolve_alias(columns_by_lower, aliases)
+    if match is None:
+        raise ValueError(
+            f"Missing required logical field: {logical_name}\n"
+            f"Detected columns: {columns}\n"
+            f"Accepted aliases: {list(aliases)}"
+        )
+    return match
+
+
 def _campaign_prep_truthy(value) -> bool:
     return str(value if value is not None else "").strip().lower() in {"yes", "true", "1", "1.0", "y"}
 
@@ -10975,7 +11000,7 @@ def _campaign_prep_email_tokens(value) -> List[str]:
     tokens: List[str] = []
     for token in raw.split(","):
         cleaned = token.strip()
-        if cleaned in ("", "nan", "None"):
+        if cleaned.lower() in ("", "nan", "none"):
             continue
         tokens.append(cleaned)
     return tokens
@@ -10999,12 +11024,98 @@ def _campaign_prep_atomic_write_csv(path: Path, rows: List[dict], columns: List[
         raise
 
 
+CAMPAIGN_PREP_LOCATION_ALIASES = (
+    "Location",
+    "location",
+    "City",
+    "city",
+    "State",
+    "state",
+)
+
+CAMPAIGN_PREP_TRIPLEJ_ALIASES = (
+    "Played on triple J",
+    "Played_On_Triple_J",
+    "played_on_triple_j",
+    "TripleJ",
+    "Triple_J",
+)
+
+CAMPAIGN_PREP_UNEARTHED_ALIASES = (
+    "Played on Unearthed",
+    "Played_On_Unearthed",
+    "played_on_unearthed",
+    "Unearthed",
+)
+
+CAMPAIGN_PREP_WOODPECKER_COLUMNS = [
+    "Email",
+    "First Name",
+    "Company",
+    "Artist",
+    "Location",
+    "Song Title",
+    "Sounds Like",
+    "Website",
+    "Instagram",
+    "Facebook",
+    "Source URL",
+    "Notes",
+]
+
+CAMPAIGN_PREP_WOODPECKER_ALIASES = [
+    ("First Name", ("Contact_Name", "Artist")),
+    ("Company", ("Organization", "Artist")),
+    ("Artist", ("Artist",)),
+    ("Location", CAMPAIGN_PREP_LOCATION_ALIASES),
+    ("Song Title", ("Song_Title", "Song Title")),
+    ("Sounds Like", ("Sounds Like", "Sounds_Like")),
+    ("Website", ("Website",)),
+    ("Instagram", ("Instagram_URL", "Instagram")),
+    ("Facebook", ("Facebook_URL", "Facebook")),
+    ("Source URL", ("Source_URL", "Social Link")),
+    ("Notes", ("Notes",)),
+]
+
+
+def _campaign_prep_export_row(
+    row: dict,
+    export_format: str,
+    columns_by_lower: Dict[str, str],
+    email_column: Optional[str],
+) -> dict:
+    if export_format in ("lead_machine_full", "input_headers"):
+        return dict(row)
+    if export_format != "woodpecker":
+        raise ValueError(f"Invalid export_format: {export_format}")
+
+    output = {column: "" for column in CAMPAIGN_PREP_WOODPECKER_COLUMNS}
+    output["Email"] = row.get(email_column, "") if email_column is not None else ""
+    for output_column, aliases in CAMPAIGN_PREP_WOODPECKER_ALIASES:
+        source_column = _campaign_prep_resolve_alias(columns_by_lower, aliases)
+        output[output_column] = row.get(source_column, "") if source_column is not None else ""
+    return output
+
+
 def generate_campaign_csvs(
     input_csv_path: str,
     output_dir: str,
     split_multiple_emails: bool = False,
-    email_column_candidates: tuple[str, ...] = ("emails", "email", "Email", "Email_All"),
+    export_format: str = "lead_machine_full",
+    email_column_candidates: tuple[str, ...] = (
+        "emails",
+        "email",
+        "Email",
+        "Email_All",
+        "Primary_Email",
+        "All_Emails",
+        "Primary Email",
+        "All Emails",
+    ),
 ) -> dict:
+    if export_format not in ("lead_machine_full", "woodpecker", "input_headers"):
+        raise ValueError(f"Invalid export_format: {export_format}")
+
     read_kwargs = {
         "dtype": str,
         "keep_default_na": False,
@@ -11018,48 +11129,37 @@ def generate_campaign_csvs(
 
     columns = [str(column) for column in df.columns]
     columns_by_lower = _campaign_prep_casefold_columns(columns)
-    location_column = _campaign_prep_required_column(columns_by_lower, "location")
-    triplej_column = _campaign_prep_required_column(columns_by_lower, "Played on triple J")
-    unearthed_column = _campaign_prep_required_column(columns_by_lower, "Played on Unearthed")
-    missing = [
-        name
-        for name, column in (
-            ("location", location_column),
-            ("Played on triple J", triplej_column),
-            ("Played on Unearthed", unearthed_column),
-        )
-        if column is None
-    ]
-    if missing:
-        raise ValueError(f"Missing required columns: {missing}\nDetected columns: {columns}")
+    location_column = _campaign_prep_required_alias(
+        columns_by_lower,
+        columns,
+        "location",
+        CAMPAIGN_PREP_LOCATION_ALIASES,
+    )
+    triplej_column = _campaign_prep_resolve_alias(columns_by_lower, CAMPAIGN_PREP_TRIPLEJ_ALIASES)
+    unearthed_column = _campaign_prep_resolve_alias(columns_by_lower, CAMPAIGN_PREP_UNEARTHED_ALIASES)
 
-    email_column = None
-    if split_multiple_emails:
-        for candidate in email_column_candidates:
-            match = columns_by_lower.get(str(candidate).lower())
-            if match is not None:
-                email_column = match
-                break
+    email_column = _campaign_prep_resolve_alias(columns_by_lower, email_column_candidates)
 
     output_rows: Dict[str, List[dict]] = {name: [] for name in CAMPAIGN_PREP_OUTPUT_ORDER}
     column_indexes = {column: idx for idx, column in enumerate(columns)}
+    output_columns = CAMPAIGN_PREP_WOODPECKER_COLUMNS if export_format == "woodpecker" else columns
 
     for i in range(len(df)):
         row = {
             column: ("" if pd.isna(df.iat[i, column_indexes[column]]) else df.iat[i, column_indexes[column]])
             for column in columns
         }
-        rows_for_segmentation = [dict(row)]
+        rows_for_segmentation = [copy.deepcopy(row)]
         if split_multiple_emails and email_column is not None:
             tokens = _campaign_prep_email_tokens(row.get(email_column, ""))
             if len(tokens) > 1:
                 rows_for_segmentation = []
                 for token in tokens:
-                    split_row = dict(row)
+                    split_row = copy.deepcopy(row)
                     split_row[email_column] = token
                     rows_for_segmentation.append(split_row)
             elif len(tokens) == 1:
-                split_row = dict(row)
+                split_row = copy.deepcopy(row)
                 split_row[email_column] = tokens[0]
                 rows_for_segmentation = [split_row]
 
@@ -11072,8 +11172,9 @@ def generate_campaign_csvs(
             else:
                 playback_segment = "Neither"
 
-            output_rows[f"{location_segment}.csv"].append(dict(final_row))
-            output_rows[f"{location_segment}_{playback_segment}.csv"].append(dict(final_row))
+            export_row = _campaign_prep_export_row(final_row, export_format, columns_by_lower, email_column)
+            output_rows[f"{location_segment}.csv"].append(dict(export_row))
+            output_rows[f"{location_segment}_{playback_segment}.csv"].append(dict(export_row))
 
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -11082,7 +11183,7 @@ def generate_campaign_csvs(
         rows = output_rows[filename]
         if filename not in ("Inside_VIC.csv", "Outside_VIC.csv") and not rows:
             continue
-        _campaign_prep_atomic_write_csv(output_path / filename, rows, columns)
+        _campaign_prep_atomic_write_csv(output_path / filename, rows, output_columns)
         result[filename] = len(rows)
     return result
 
@@ -11124,6 +11225,18 @@ class CampaignPrepTab(QtWidgets.QWidget):
         self.split_emails_checkbox = QtWidgets.QCheckBox("Split multiple emails into separate rows")
         self.split_emails_checkbox.setChecked(False)
         layout.addWidget(self.split_emails_checkbox)
+
+        format_row = QtWidgets.QHBoxLayout()
+        format_label = QtWidgets.QLabel("Export format:")
+        self.export_format_combo = QtWidgets.QComboBox()
+        self.export_format_combo.addItem("Lead Machine / Full Export", "lead_machine_full")
+        self.export_format_combo.addItem("Woodpecker", "woodpecker")
+        self.export_format_combo.addItem("Input Headers / Custom", "input_headers")
+        self.export_format_combo.setCurrentIndex(0)
+        format_row.addWidget(format_label)
+        format_row.addWidget(self.export_format_combo)
+        format_row.addStretch()
+        layout.addLayout(format_row)
 
         controls = QtWidgets.QHBoxLayout()
         self.generate_button = QtWidgets.QPushButton("Generate Campaign CSVs")
@@ -11189,6 +11302,7 @@ class CampaignPrepTab(QtWidgets.QWidget):
                 input_csv_path,
                 output_dir,
                 split_multiple_emails=self.split_emails_checkbox.isChecked(),
+                export_format=self.export_format_combo.currentData() or "lead_machine_full",
             )
             lines = [f"{filename}: {count} rows" for filename, count in result.items()]
             summary = "\n".join(lines)
