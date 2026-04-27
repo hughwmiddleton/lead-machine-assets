@@ -41,6 +41,7 @@ from pipeline_runner import (
 )
 from source_scheduler import canonicalize_facebook_url, ensure_canonical_facebook_url, promote_facebook_url
 from soundcloud_metadata_enricher import enrich_soundcloud_metadata
+from progress_state import finalize_progress, init_progress
 
 
 def _call_with_optional_night_fb_run_state(fn, *args, night_fb_run_state=None, **kwargs):
@@ -1469,6 +1470,11 @@ def run_night_mode(
     if fb_max_rows_per_run < 0:
         fb_max_rows_per_run = 0
     run_dir, created_new = _ensure_run_dir(resume, run_root)
+    init_progress(
+        total_rows=None,
+        run_id=os.path.basename(os.path.abspath(run_dir)),
+        meta={"phase": "discovery", "current_status": "night_mode_start"},
+    )
     if created_new:
         snapshot_path = os.path.join(run_dir, "config_snapshot.json")
         _write_json(snapshot_path, config)
@@ -1595,6 +1601,11 @@ def run_night_mode(
             if master_enrichment_enabled:
                 master_raw = _merge_raw_master(run_dir, job_states, logger, stats=stats)
                 if master_raw and os.path.exists(master_raw):
+                    init_progress(
+                        total_rows=_count_data_rows(master_raw),
+                        run_id=os.path.basename(os.path.abspath(run_dir)),
+                        meta={"phase": "processing", "current_status": "master_raw_ready"},
+                    )
                     master_enriched = os.path.join(run_dir, "master_enriched.csv")
                     master_enriched = _call_with_optional_master_enrichment_kwargs(
                         run_master_enrichment,
@@ -1616,6 +1627,12 @@ def run_night_mode(
                         pass
             else:
                 master_pre_fb = _merge_master(run_dir, job_states, logger)
+                if master_pre_fb and os.path.exists(master_pre_fb):
+                    init_progress(
+                        total_rows=_count_data_rows(master_pre_fb),
+                        run_id=os.path.basename(os.path.abspath(run_dir)),
+                        meta={"phase": "processing", "current_status": "master_pre_fb_ready"},
+                    )
             if master_pre_fb and os.path.exists(master_pre_fb):
                 try:
                     df_master = pd.read_csv(master_pre_fb, dtype=str, keep_default_na=False).fillna("")
@@ -1686,6 +1703,15 @@ def run_night_mode(
                             export_profile=export_profile,
                         )
                         logger.info("[Master] Exported client-facing leads CSV: %s", export_path)
+                        try:
+                            finalize_progress(
+                                {
+                                    "emails_found": _count_nonempty_email_rows(master_final),
+                                    "current_status": "export_complete",
+                                }
+                            )
+                        except Exception:
+                            pass
                     except Exception as exc:
                         logger.error("[Master] Final validation failed safely: %s", exc)
                         master_final = master_post_fb
@@ -1709,6 +1735,11 @@ def run_night_mode(
             stats.emails_total = _count_nonempty_email_rows(final_artifact)
         except Exception:
             pass
+    try:
+        if final_artifact:
+            finalize_progress({"emails_found": stats.emails_total, "current_status": "run_complete"})
+    except Exception:
+        pass
     _emit_smoke_summary(stats, summary_logger)
     try:
         run_summary = _build_run_summary(

@@ -146,6 +146,7 @@ from lead_vault.alias_map import map_headers_to_canonical
 from lead_vault.merge import merge_csv_into_master, preview_csv_import, preview_csv_merge_counts
 from lead_vault.schema import get_canonical_master_schema, get_default_master_csv_path
 from lead_vault.stats import summarize_master_dataset
+from progress_state import init_progress, read_progress, update_progress
 
 NIGHT_MODE_RUN_SUMMARY_FILENAME = "run_summary.json"
 NIGHT_MODE_RUN_SUMMARY_PLACEHOLDER = "No runs detected yet.\nRun Lead Machine to generate results."
@@ -1682,6 +1683,7 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
     driver = setup_driver()
     fb_driver = None
     artist_data = []
+    profile_urls = []
     job_config = job_config or {}
     use_url_index = bool(job_config.get("use_unearthed_url_index")) if isinstance(job_config, dict) else False
     index_path = str(job_config.get("unearthed_url_index_path") or "").strip() if isinstance(job_config, dict) else ""
@@ -1695,6 +1697,7 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
     resume_total_index = 0
     terminal_profile_url = None
     scrape_completed = False
+    last_discovery_progress_at = 0.0
     try:
         if not use_url_index:
             driver.get(url)
@@ -1839,7 +1842,7 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
             stop_on_target: bool = False,
             stop_after_count: int | None = None,
         ) -> int | None:
-            nonlocal next_cursor_progress_log_count, resume_duplicates_seen, resume_new_urls_added, resume_total_index
+            nonlocal next_cursor_progress_log_count, resume_duplicates_seen, resume_new_urls_added, resume_total_index, last_discovery_progress_at
             soup = BeautifulSoup(driver.page_source, 'html.parser')
             artist_links = soup.select('a.HU3iy.p1_Ju.mqDRk.FQED6.O_grP[href^="/triplejunearthed/artist/"]')
             if not artist_links:
@@ -1887,6 +1890,20 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
                             resume_new_urls_added += int(index_result.get("new_urls", 0) or 0)
                             resume_duplicates_seen += int(index_result.get("updated_existing", 0) or 0)
                             resume_total_index = int(index_result.get("total", resume_total_index) or 0)
+                    progress_now = time.time()
+                    if progress_now - last_discovery_progress_at >= 0.25:
+                        last_discovery_progress_at = progress_now
+                        try:
+                            update_progress(
+                                0,
+                                meta={
+                                    "phase": "discovery",
+                                    "discovered_urls": len(ordered_profile_urls),
+                                    "current_source": "unearthed",
+                                },
+                            )
+                        except Exception:
+                            pass
                     if stop_after_count is not None and len(ordered_profile_urls) >= stop_after_count:
                         return None
                     if stop_on_target and len(ordered_profile_urls) >= cursor_search_limit:
@@ -2130,6 +2147,26 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
                     f"{target_profile_url}"
                 )
         profile_urls = _slice_unearthed_profile_urls(ordered_profile_urls, target_profile_url, max_artists)
+        run_id = ""
+        if isinstance(job_config, dict):
+            run_id = str(job_config.get("job_id") or job_config.get("run_id") or "").strip()
+        run_id = run_id or datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        try:
+            update_progress(
+                0,
+                meta={
+                    "phase": "discovery",
+                    "discovered_urls": len(profile_urls),
+                    "current_source": "unearthed",
+                },
+            )
+            init_progress(
+                total_rows=len(profile_urls),
+                run_id=run_id,
+                meta={"phase": "processing", "current_source": "unearthed"},
+            )
+        except Exception:
+            pass
         if resume_continue_active and resolved_resume_index is not None:
             if resume_total_index <= 0:
                 resume_total_index = len(load_unearthed_indexed_artist_urls(index_path or None))
@@ -2227,6 +2264,18 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
             except Exception:
                 pass
     save_to_csv(artist_data, existing_csv)
+    try:
+        update_progress(
+            len(profile_urls),
+            meta={
+                "phase": "processing",
+                "emails_found": sum(1 for row in artist_data if len(row) > 13 and str(row[13] or "").strip()),
+                "current_source": "unearthed",
+                "current_status": "row_write_complete",
+            },
+        )
+    except Exception:
+        pass
     if scrape_completed and terminal_profile_url and resume_enabled:
         if isinstance(state, dict):
             state["unearthed_last_profile_url"] = terminal_profile_url
@@ -12324,6 +12373,11 @@ class NightModeTab(QtWidgets.QWidget):
         self._log_buffer: list[str] = []
         self._phased_enabled = False
         self._build_ui()
+        self._progress_timer = QtCore.QTimer(self)
+        self._progress_timer.setInterval(1500)
+        self._progress_timer.timeout.connect(self._refresh_runtime_progress)
+        self._progress_timer.start()
+        self._refresh_runtime_progress()
 
     def _build_ui(self):
         layout = QtWidgets.QVBoxLayout()
@@ -12542,6 +12596,17 @@ class NightModeTab(QtWidgets.QWidget):
         # Status + log
         self.status_label = QtWidgets.QLabel("Status: idle")
         layout.addWidget(self.status_label)
+        progress_group = QtWidgets.QGroupBox("Run Progress")
+        progress_layout = QtWidgets.QVBoxLayout()
+        self.runtime_progress_bar = QtWidgets.QProgressBar()
+        self.runtime_progress_bar.setRange(0, 1000)
+        self.runtime_progress_bar.setValue(0)
+        progress_layout.addWidget(self.runtime_progress_bar)
+        self.runtime_progress_detail = QtWidgets.QLabel("idle")
+        self.runtime_progress_detail.setWordWrap(True)
+        progress_layout.addWidget(self.runtime_progress_detail)
+        progress_group.setLayout(progress_layout)
+        layout.addWidget(progress_group)
         self.log_console = QtWidgets.QPlainTextEdit()
         self.log_console.setReadOnly(True)
         layout.addWidget(self.log_console)
@@ -12579,6 +12644,50 @@ class NightModeTab(QtWidgets.QWidget):
             f"Rows updated: {int(summary.get('vault_rows_updated', 0) or 0)}",
         ]
         return "\n".join(lines)
+
+    def _format_eta(self, eta_seconds) -> str:
+        try:
+            seconds = int(eta_seconds)
+        except Exception:
+            return "ETA unknown"
+        if seconds < 0:
+            return "ETA unknown"
+        hours, remainder = divmod(seconds, 3600)
+        minutes, secs = divmod(remainder, 60)
+        if hours:
+            return f"ETA {hours}h {minutes}m"
+        if minutes:
+            return f"ETA {minutes}m {secs}s"
+        return f"ETA {secs}s"
+
+    def _refresh_runtime_progress(self):
+        progress = read_progress()
+        phase = str(progress.get("phase") or "idle")
+        processed = int(progress.get("processed_rows") or 0)
+        total = progress.get("total_rows")
+        percentage = progress.get("percentage")
+        if percentage is None:
+            self.runtime_progress_bar.setRange(0, 0 if phase not in {"idle", "complete"} else 1000)
+            self.runtime_progress_bar.setValue(0)
+            pct_text = "--"
+        else:
+            self.runtime_progress_bar.setRange(0, 1000)
+            pct_value = max(0.0, min(float(percentage), 100.0))
+            self.runtime_progress_bar.setValue(int(round(pct_value * 10)))
+            pct_text = f"{pct_value:.1f}%"
+        rows_text = f"{processed} / {total}" if total is not None else f"{processed} / unknown"
+        emails = int(progress.get("emails_found") or 0)
+        source = str(progress.get("current_source") or "").strip()
+        status = str(progress.get("current_status") or "").strip()
+        source_status = " | ".join(part for part in (source, status) if part)
+        details = [
+            f"{phase} | {pct_text} | rows {rows_text}",
+            f"emails {emails}",
+            self._format_eta(progress.get("eta_seconds")),
+        ]
+        if source_status:
+            details.append(source_status)
+        self.runtime_progress_detail.setText(" | ".join(details))
 
     def _update_jobs_summary_from_jobs(self):
         lines = []

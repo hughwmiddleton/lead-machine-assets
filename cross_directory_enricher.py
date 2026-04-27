@@ -58,6 +58,7 @@ from email_normalizer import (
     normalize_obfuscated_email_patterns,
 )
 from email_provenance import EMAIL_PROVENANCE_JSON_COL, _set_email_with_provenance, merge_email_provenance_into_target
+from progress_state import init_progress, update_progress
 from fb_attribution import (
     FB_ATTEMPT_STATE_COL,
     FB_DEBUG_REASON_COL,
@@ -12083,6 +12084,26 @@ class CrossDirectoryEnricherWorker(QThread):
         _ensure_parent_dir(self.output_csv_path)
         seed_df.to_csv(self.output_csv_path, index=False, encoding="utf-8-sig")
         checkpoint.append_completed(row_idx, logger=self.log_message.emit)
+        try:
+            processed_rows = int(row_idx) + 1
+            meta = {
+                "phase": "enrichment",
+                "current_status": "row_write_complete",
+            }
+            source_guess = ""
+            if self.unearthed_csv_path:
+                source_guess = "unearthed"
+            elif self.bandcamp_csv_path:
+                source_guess = "bandcamp"
+            elif self.soundcloud_csv_path:
+                source_guess = "soundcloud"
+            elif self.lastfm_csv_path:
+                source_guess = "lastfm"
+            if source_guess:
+                meta["current_source"] = source_guess
+            update_progress(processed_rows, meta=meta)
+        except Exception:
+            pass
 
     def _start_chunk_yield_window(
         self,
@@ -12843,6 +12864,15 @@ class CrossDirectoryEnricherWorker(QThread):
                 seed_df = apply_fb_opportunity_state_df(seed_df, overwrite=True)
             total = len(seed_df.index)
             self.total_rows = total
+            if not getattr(self, "night_mode", False):
+                try:
+                    init_progress(
+                        total,
+                        os.path.basename(os.path.abspath(self.output_csv_path or self.seed_csv_path or "enrichment")),
+                        meta={"phase": "enrichment", "current_status": "enrichment_start"},
+                    )
+                except Exception:
+                    pass
             if getattr(self, "night_mode", False):
                 try:
                     from pipeline_runner import ResumeCheckpointError, build_resume_checkpoint
@@ -12896,6 +12926,13 @@ class CrossDirectoryEnricherWorker(QThread):
                         if completed_until >= 0 and shared_cols:
                             seed_df.loc[:completed_until, shared_cols] = previous_df.loc[:completed_until, shared_cols]
                     if self._resume_checkpoint.is_complete:
+                        try:
+                            update_progress(
+                                total,
+                                meta={"phase": "enrichment", "current_status": "row_write_complete"},
+                            )
+                        except Exception:
+                            pass
                         self.finished.emit(self.output_csv_path)
                         return
                 except ResumeCheckpointError:
@@ -13038,6 +13075,24 @@ class CrossDirectoryEnricherWorker(QThread):
                 self.log_message.emit(f"[Enricher] Failed to write output CSV: {exc}")
                 self.finished.emit("")
                 return
+            try:
+                email_count = 0
+                for column in ("Email", "Email_All"):
+                    if column in seed_df.columns:
+                        email_count = max(
+                            email_count,
+                            int(seed_df[column].fillna("").astype(str).str.strip().ne("").sum()),
+                        )
+                update_progress(
+                    total,
+                    meta={
+                        "phase": "enrichment",
+                        "emails_found": email_count,
+                        "current_status": "row_write_complete",
+                    },
+                )
+            except Exception:
+                pass
             if getattr(self, "_resume_checkpoint", None) is not None:
                 self.log_message.emit(f"[Resume] job_complete rows={total}/{total}")
             self.log_message.emit(f"[Enricher] Enriched CSV written to {self.output_csv_path}")
