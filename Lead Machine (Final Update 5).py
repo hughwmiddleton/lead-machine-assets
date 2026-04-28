@@ -1332,6 +1332,35 @@ def _resolve_unearthed_url_index_path(job_config: dict | None = None) -> str:
     return configured or _unearthed_artist_url_index_path()
 
 
+def _ue_startup_log(message: str) -> None:
+    try:
+        print(f"[UE Startup] {message}")
+    except Exception:
+        pass
+
+
+def _ue_startup_warn(message: str) -> None:
+    try:
+        print(f"[UE Startup][WARN] {message}")
+    except Exception:
+        pass
+
+
+def _ue_startup_elapsed(started_at: float) -> float:
+    try:
+        return max(time.time() - float(started_at), 0.0)
+    except Exception:
+        return 0.0
+
+
+def _ue_startup_warn_if_slow(step: str, elapsed_sec: float, threshold_sec: float) -> None:
+    try:
+        if float(elapsed_sec) > float(threshold_sec):
+            _ue_startup_warn(f"slow_step step={step} elapsed_sec={float(elapsed_sec):.3f}")
+    except Exception:
+        pass
+
+
 def _ensure_unearthed_custom_index_dir() -> str:
     os.makedirs(UNEARTHED_CUSTOM_INDEX_DIR, exist_ok=True)
     return UNEARTHED_CUSTOM_INDEX_DIR
@@ -1972,11 +2001,31 @@ def _slice_unearthed_profile_urls(
 def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200, fb_session=None, job_config=None):
     job_config = job_config or {}
     use_url_index = bool(job_config.get("use_unearthed_url_index")) if isinstance(job_config, dict) else False
+    resume_mode_for_log = str(job_config.get("unearthed_resume_mode", "auto") or "auto").strip() if isinstance(job_config, dict) else ""
+    manual_start_for_log = job_config.get("unearthed_start_index_position") if isinstance(job_config, dict) else None
+    source_mode_for_log = "index" if use_url_index else "listing"
+    output_dir_for_log = os.path.dirname(os.path.abspath(str(existing_csv or ""))) if existing_csv else ""
+    _ue_startup_log(
+        "job_entry "
+        f"source_mode={source_mode_for_log} "
+        f"resume_mode={resume_mode_for_log} "
+        f"manual_start={manual_start_for_log if manual_start_for_log is not None else ''} "
+        f"scrape_count={max_artists} "
+        f"output_dir={output_dir_for_log}"
+    )
     index_path = _resolve_unearthed_url_index_path(job_config)
+    _ue_startup_log(f"index_resolve_start path={index_path}")
     index_path_explicit = bool(str(job_config.get("unearthed_url_index_path") or "").strip()) if isinstance(job_config, dict) else False
     if index_path_explicit:
         _validate_unearthed_index_access(index_path, require_existing=True)
-    driver = setup_driver()
+    browser_init_started_at = time.time()
+    _ue_startup_log("browser_init_start")
+    try:
+        driver = setup_driver()
+    finally:
+        browser_init_elapsed = _ue_startup_elapsed(browser_init_started_at)
+        _ue_startup_log(f"browser_init_done elapsed_sec={browser_init_elapsed:.3f}")
+        _ue_startup_warn_if_slow("browser_init", browser_init_elapsed, 15.0)
     fb_driver = None
     artist_data = []
     profile_urls = []
@@ -2020,10 +2069,22 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
         next_cursor_progress_log_count = cursor_search_progress_every
         search_exhausted = False
         if use_url_index:
+            index_load_started_at = time.time()
             indexed_urls = load_unearthed_indexed_artist_urls(index_path, require_existing=index_path_explicit)
+            index_load_elapsed = _ue_startup_elapsed(index_load_started_at)
+            _ue_startup_log(
+                f"index_loaded rows={len(indexed_urls)} path={index_path} elapsed_sec={index_load_elapsed:.3f}"
+            )
+            _ue_startup_warn_if_slow("index_load", index_load_elapsed, 5.0)
+            total_index_rows = len(indexed_urls)
             resume_mode = str(job_config.get("unearthed_resume_mode", "auto") or "auto").strip().lower()
             if resume_mode not in {"auto", "cursor", "fresh", "selected"}:
                 resume_mode = "auto"
+            _ue_startup_log(
+                f"index_slice_start start={job_config.get('unearthed_start_index_position') if job_config.get('unearthed_start_index_position') is not None else ''} "
+                f"requested_count={max_artists} total_rows={total_index_rows}"
+            )
+            index_slice_started_at = time.time()
             indexed_urls, _index_start, _index_end, _index_count = _select_unearthed_index_profile_urls(
                 indexed_urls,
                 index_path,
@@ -2031,6 +2092,18 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
                 resume_mode,
                 job_config.get("unearthed_start_index_position"),
             )
+            index_slice_elapsed = _ue_startup_elapsed(index_slice_started_at)
+            first_index_url = indexed_urls[0] if indexed_urls else ""
+            last_index_url = indexed_urls[-1] if indexed_urls else ""
+            _ue_startup_log(
+                f"index_slice_done start={_index_start} end={_index_end} count={_index_count} "
+                f"first_url={first_index_url} last_url={last_index_url} elapsed_sec={index_slice_elapsed:.3f}"
+            )
+            _ue_startup_warn_if_slow("index_slice", index_slice_elapsed, 5.0)
+            if not indexed_urls:
+                _ue_startup_warn(
+                    f"empty_slice start={_index_start} requested_count={max_artists} total_rows={total_index_rows}"
+                )
             for indexed_url in indexed_urls:
                 _append_unearthed_profile_url(ordered_profile_urls, seen_profile_urls, indexed_url)
             target_profile_url = None
@@ -2493,7 +2566,11 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
         print(f"Total artist profile URLs to scrape: {len(profile_urls)}")
         if not profile_urls:
             print("No artist profile URLs found. Please check the website structure or selectors.")
-        for profile_url in profile_urls:
+        first_fetch_logged = False
+        if profile_urls:
+            first_profile_url = profile_urls[0]
+            _ue_startup_log(f"first_profile_prepare row_offset=0 url={first_profile_url}")
+        for row_offset, profile_url in enumerate(profile_urls):
             # Lazily initialize FB driver only if we encounter a Facebook link later.
             if fb_driver is None and SCRAPE_FB_EMAILS_ON_UNEARTHED_PAGE1:
                 try:
@@ -2503,19 +2580,35 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
                         fb_driver = setup_facebook_driver()
                 except Exception:
                     fb_driver = None
-            (
-                social_links,
-                location,
-                song_title,
-                sounds_like,
-                artist_name,
-                release_date,
-                primary_genre_value,
-                unearthed_genre_raw,
-                email_value,
-            ) = scrape_artist_profile(
-                driver, profile_url, fb_driver=fb_driver
-            )
+            first_fetch_started_at = None
+            if not first_fetch_logged:
+                first_fetch_started_at = time.time()
+                _ue_startup_log(f"first_profile_fetch_start row_offset={row_offset} url={profile_url}")
+            first_fetch_success = 0
+            try:
+                (
+                    social_links,
+                    location,
+                    song_title,
+                    sounds_like,
+                    artist_name,
+                    release_date,
+                    primary_genre_value,
+                    unearthed_genre_raw,
+                    email_value,
+                ) = scrape_artist_profile(
+                    driver, profile_url, fb_driver=fb_driver
+                )
+                first_fetch_success = 1
+            finally:
+                if not first_fetch_logged and first_fetch_started_at is not None:
+                    first_fetch_elapsed = _ue_startup_elapsed(first_fetch_started_at)
+                    _ue_startup_log(
+                        f"first_profile_fetch_done row_offset={row_offset} url={profile_url} "
+                        f"success={first_fetch_success} elapsed_sec={first_fetch_elapsed:.3f}"
+                    )
+                    _ue_startup_warn_if_slow("first_profile_fetch", first_fetch_elapsed, 15.0)
+                    first_fetch_logged = True
             listing_metadata = listing_metadata_by_url.get(profile_url, {})
             location = (listing_metadata.get("location") or location or "").strip()
             # Determine drum status from the full page source.
@@ -2564,7 +2657,11 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
                 fb_driver.quit()
             except Exception:
                 pass
+    raw_write_started_at = time.time()
+    _ue_startup_log(f"raw_write_start rows={len(artist_data)} path={existing_csv}")
     save_to_csv(artist_data, existing_csv)
+    raw_write_elapsed = _ue_startup_elapsed(raw_write_started_at)
+    _ue_startup_log(f"raw_write_done rows={len(artist_data)} path={existing_csv} elapsed_sec={raw_write_elapsed:.3f}")
     try:
         update_progress(
             len(profile_urls),
@@ -2586,6 +2683,7 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
                 persist_state()
             except Exception:
                 pass
+    _ue_startup_log(f"handoff_to_master rows={len(artist_data)} raw_csv={existing_csv}")
 
 # ---------------------------
 # Unearthed: release date extraction (robust)

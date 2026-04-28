@@ -297,6 +297,31 @@ def test_unearthed_index_manual_start_1500_selects_expected_slice_and_persists(m
     assert set(urls[0:1500]).isdisjoint(set(scraped))
 
 
+def test_unearthed_index_startup_logging_markers(monkeypatch, tmp_path, capsys):
+    module = pipeline_runner._load_legacy_module()
+    index_path = tmp_path / "unearthed_artist_url_index.csv"
+    cursor_path = tmp_path / "unearthed_cursor.json"
+    urls = [_artist_url(f"artist-{idx}") for idx in range(20)]
+    _write_index_urls(module, index_path, urls)
+
+    _run_index_scrape(
+        module,
+        monkeypatch,
+        tmp_path,
+        index_path,
+        cursor_path,
+        max_artists=10,
+        resume_mode="cursor",
+        manual_start=5,
+    )
+    captured = capsys.readouterr()
+
+    assert "[UE Startup] job_entry" in captured.out
+    assert "[UE Startup] index_loaded" in captured.out
+    assert "[UE Startup] index_slice_done" in captured.out
+    assert "[UE Startup] first_profile_prepare" in captured.out
+
+
 def test_unearthed_index_manual_start_overrides_cursor(monkeypatch, tmp_path):
     module = pipeline_runner._load_legacy_module()
     index_path = tmp_path / "unearthed_artist_url_index.csv"
