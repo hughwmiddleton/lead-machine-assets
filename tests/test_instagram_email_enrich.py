@@ -61,7 +61,7 @@ def test_instagram_attribution_no_opportunity_sets_row_reason():
     assert seed_df.at[0, cde.IG_TERMINAL_REASON_COL] == "no_ig_opportunity"
 
 
-def test_instagram_attribution_existing_email_gate_preserves_no_attempt():
+def test_instagram_same_url_success_gate_preserves_no_attempt():
     logs = []
     worker = _make_worker(logs)
     seed_df = _seed_df(
@@ -72,6 +72,14 @@ def test_instagram_attribution_existing_email_gate_preserves_no_attempt():
             "Instagram_URL": "https://instagram.com/gatedig/",
         }
     )
+    _set_email_with_provenance(
+        (seed_df, 0),
+        "existing@example.com",
+        source_url="https://www.instagram.com/gatedig/",
+        source_type="instagram_enrich",
+        method="regex",
+        surface="instagram_profile",
+    )
 
     matched = worker._enrich_row_instagram_email(seed_df, 0, {"artist": "Gated IG"})
 
@@ -80,7 +88,48 @@ def test_instagram_attribution_existing_email_gate_preserves_no_attempt():
     assert seed_df.at[0, cde.IG_ATTEMPT_STATE_COL] == "ig_not_attempted"
     assert seed_df.at[0, cde.IG_EXTRACT_STATE_COL] == "ig_extract_not_attempted"
     assert seed_df.at[0, cde.IG_WRITE_STATE_COL] == "ig_no_email_written"
-    assert seed_df.at[0, cde.IG_TERMINAL_REASON_COL] == "ig_opportunity_not_attempted_existing_email_gate"
+    assert seed_df.at[0, cde.IG_TERMINAL_REASON_COL] == "ig_opportunity_not_attempted_same_source_url_success"
+
+
+def test_instagram_fb_email_does_not_block_ig_scrape(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "FB Existing IG Allowed",
+            "Email": "fb@example.com",
+            "Email_All": "fb@example.com",
+            "Instagram_URL": "https://instagram.com/igallowed/",
+        }
+    )
+    _set_email_with_provenance(
+        (seed_df, 0),
+        "fb@example.com",
+        source_url="https://www.facebook.com/igallowed",
+        source_type="facebook_enrich",
+        method="regex",
+        surface="facebook_main",
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+
+    @contextmanager
+    def fake_fetch_scope(session, ig_url, retain_live_page=False):  # noqa: ANN001
+        yield SimpleNamespace(html="<html><body>ig@example.com</body></html>", status=200)
+
+    monkeypatch.setattr(cde, "_instagram_profile_fetch_scope", fake_fetch_scope)
+    monkeypatch.setattr(cde, "_instagram_profile_fetch_usable", lambda status, html: True)
+    monkeypatch.setattr(
+        cde,
+        "_extract_instagram_direct_profile_candidate_emails",
+        lambda html, soup=None: ["ig@example.com"],
+    )
+    monkeypatch.setattr(cde, "_filter_instagram_email_candidates_for_acceptance", lambda emails, log=None: emails)
+
+    matched = worker._enrich_row_instagram_email(seed_df, 0, ctx)
+
+    assert matched is True
+    assert logs[0] == "[IG Email] Visiting https://www.instagram.com/igallowed/"
+    assert set(seed_df.at[0, "Email_All"].split(";")) == {"fb@example.com", "ig@example.com"}
 
 
 def test_instagram_attribution_direct_profile_success_marks_write(monkeypatch):

@@ -47,6 +47,7 @@ from email_provenance import (
     merge_email_provenance_into_target,
     normalize_email_key,
     parse_email_provenance_json,
+    row_has_successful_source_url_provenance,
 )
 from email_normalizer import filter_system_telemetry_emails
 from fb_email_skip_gate import (
@@ -1233,6 +1234,7 @@ def _classify_fb_debug_reason(row_like: Any) -> str:
     if gate_norm in {
         "skipped_duplicate_fb_discovery",
         "skipped_existing_usable_email",
+        "skipped_same_source_url_success",
         "skipped_other_gate",
         "skipped_terminal_fb_status",
     }:
@@ -1276,6 +1278,8 @@ def _classify_fb_terminal_reason(row_like: Any) -> str:
         return "no_fb_opportunity"
     if gate_norm == "skipped_existing_usable_email":
         return "fb_opportunity_not_attempted_existing_email_gate"
+    if gate_norm == "skipped_same_source_url_success":
+        return "fb_opportunity_not_attempted_same_source_url_success"
     if gate_norm == "skipped_terminal_fb_status":
         return "fb_opportunity_not_attempted_terminal_state_gate"
     if gate_norm in {"skipped_duplicate_fb_discovery", "skipped_other_gate"}:
@@ -4442,7 +4446,20 @@ def run_facebook_global_pass_nightmode(
                 share_runtime_fallback_urls=share_runtime_fallback_urls,
             ) or has_promotable_explicit_fb_entrypoint
             is_unearthed_source = _is_unearthed_source_row(row)
-            effective_skip_due_to_email = bool(has_email_effective)
+            explicit_execution_urls = list(explicit_fb_entrypoints or []) + list(share_runtime_fallback_urls or [])
+            same_fb_url_success = bool(
+                explicit_execution_urls
+                and all(
+                    row_has_successful_source_url_provenance(
+                        row,
+                        source_type="facebook",
+                        source_url=url,
+                        canonicalize_url=canonicalize_facebook_url,
+                    )
+                    for url in explicit_execution_urls
+                )
+            )
+            effective_skip_due_to_email = bool(same_fb_url_success)
             final_fb_statuses = {"login_redirect", "no_candidates", "ok", "found"} | terminal_statuses
             has_upstream_identity_anchor = _night_fb_has_upstream_identity_anchor(row)
             fb_status_allows_run = fb_status_val not in final_fb_statuses
@@ -4460,7 +4477,7 @@ def run_facebook_global_pass_nightmode(
                 or has_upstream_identity_anchor
                 or unearthed_no_url_discovery_eligible
             )
-            if has_email_effective:
+            if same_fb_url_success:
                 should_run_night_fb = False
             else:
                 should_run_night_fb = fb_status_allows_run and fb_identity_path_eligible
@@ -4488,18 +4505,19 @@ def run_facebook_global_pass_nightmode(
                 f"email_present={has_email_effective} fb_url_present={has_canonical_facebook_url} "
                 f"fb_entrypoint_present={has_explicit_fb_entrypoint} "
                 f"share_runtime_fallback={share_runtime_fallback} "
+                f"same_fb_url_success={same_fb_url_success} "
                 f"eligible_for_fb={eligible_for_fb}",
             )
 
             skip_row = False
 
             if effective_skip_due_to_email:
-                df.at[idx, FB_GATE_STATE_COL] = "skipped_existing_usable_email"
+                df.at[idx, FB_GATE_STATE_COL] = "skipped_same_source_url_success"
                 if not _cell_str(df.at[idx, FB_WRITE_STATE_COL]):
                     df.at[idx, FB_WRITE_STATE_COL] = "fb_no_email_written"
                 _safe_log_console(
                     logger,
-                    f"[Night FB] Skipping row {idx} ('{artist_label}') - email_already_present (Email_All='{email_all_clean}').",
+                    f"[Night FB] Skipping row {idx} ('{artist_label}') - same Facebook URL already produced usable email.",
                 )
                 skip_row = True
 

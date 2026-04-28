@@ -4,6 +4,7 @@ import pandas as pd
 
 import night_mode_fb as nmfb
 import pipeline_runner
+from email_provenance import _set_email_with_provenance
 from fb_attribution import FB_GATE_STATE_COL
 
 
@@ -93,7 +94,7 @@ def test_missing_email_with_valid_fb_url_runs(monkeypatch, tmp_path):
     assert any("eligible_for_fb=True" in msg for msg in logs if "[Night FB][Row Gate]" in msg)
 
 
-def test_unearthed_existing_email_with_valid_fb_url_does_not_run(monkeypatch, tmp_path):
+def test_unearthed_existing_ig_email_with_valid_fb_url_still_runs(monkeypatch, tmp_path):
     helper, logs, df_out = _run_night_fb_pass(
         monkeypatch,
         tmp_path,
@@ -104,19 +105,47 @@ def test_unearthed_existing_email_with_valid_fb_url_does_not_run(monkeypatch, tm
                 "__source_job": "job_unearthed",
                 "Email": "known@example.com",
                 "Email_All": "known@example.com",
+                "Email_Source_URL": "https://instagram.com/hasemail",
+                "Email_Source_Type": "instagram_enrich",
                 "Facebook_URL": "https://facebook.com/hasemail",
             }
         ],
     )
 
-    assert helper.calls == 0
+    assert helper.calls == 1
     assert df_out.loc[0, "Artist Name"] == "Has Email"
-    assert df_out.loc[0, FB_GATE_STATE_COL] == "skipped_existing_usable_email"
-    assert any("email_already_present" in msg for msg in logs)
-    assert any("email_present=True" in msg and "eligible_for_fb=False" in msg for msg in logs)
+    assert any("email_present=True" in msg and "eligible_for_fb=True" in msg for msg in logs)
 
 
-def test_existing_email_blocks_unearthed_fb_first_and_share_fallback(monkeypatch, tmp_path):
+def test_same_fb_url_success_provenance_skips_night_fb(monkeypatch, tmp_path):
+    df = pd.DataFrame(
+        [
+            {
+                "Artist Name": "Has Same FB Success",
+                "Email": "known@example.com",
+                "Email_All": "known@example.com",
+                "Facebook_URL": "https://facebook.com/hasemail",
+            }
+        ],
+        dtype=str,
+    ).fillna("")
+    _set_email_with_provenance(
+        (df, 0),
+        "known@example.com",
+        source_url="https://www.facebook.com/hasemail",
+        source_type="facebook_enrich",
+        method="regex",
+        surface="facebook_main",
+    )
+
+    helper, logs, df_out = _run_night_fb_pass(monkeypatch, tmp_path, df.to_dict("records"))
+
+    assert helper.calls == 0
+    assert df_out.loc[0, FB_GATE_STATE_COL] == "skipped_same_source_url_success"
+    assert any("same_fb_url_success=True" in msg and "eligible_for_fb=False" in msg for msg in logs)
+
+
+def test_existing_ig_email_allows_unearthed_fb_first_and_share_fallback(monkeypatch, tmp_path):
     share_url = "https://www.facebook.com/share/19BActwuev?mibextid=wwXIfr"
     helper, logs, df_out = _run_night_fb_pass(
         monkeypatch,
@@ -136,9 +165,8 @@ def test_existing_email_blocks_unearthed_fb_first_and_share_fallback(monkeypatch
         ],
     )
 
-    assert helper.calls == 0
-    assert df_out.loc[0, FB_GATE_STATE_COL] == "skipped_existing_usable_email"
-    assert any("share_runtime_fallback=True" in msg and "eligible_for_fb=False" in msg for msg in logs)
+    assert helper.calls == 1
+    assert any("share_runtime_fallback=True" in msg and "eligible_for_fb=True" in msg for msg in logs)
 
 
 def test_missing_email_with_share_runtime_fallback_runs(monkeypatch, tmp_path):
@@ -214,6 +242,6 @@ def test_email_skip_preserves_row_count_and_order(monkeypatch, tmp_path):
 
     helper, _logs, df_out = _run_night_fb_pass(monkeypatch, tmp_path, rows)
 
-    assert helper.calls == 1
+    assert helper.calls == 3
     assert list(df_out["Artist Name"]) == ["First", "Second", "Third"]
     assert len(df_out) == 3

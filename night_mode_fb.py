@@ -45,7 +45,7 @@ from source_scheduler import (
     ensure_canonical_facebook_url,
     preferred_upstream_identity_hint,
 )
-from email_provenance import merge_email_provenance_into_target
+from email_provenance import merge_email_provenance_into_target, row_has_successful_source_url_provenance
 from email_normalizer import filter_system_telemetry_emails, normalize_email_value
 from fb_email_skip_gate import row_has_usable_email_for_fb_skip
 
@@ -9322,6 +9322,17 @@ class NightModeFacebookEnricher:
                 _log(self.logger, f"[Night FB][Gate] rejected url={raw_fb_url!r} before scrape reason={guard_reason}")
             return None
         candidate_url = _normalise_fb_url(raw_fb_url or "")
+        if row_has_successful_source_url_provenance(
+            row,
+            source_type="facebook",
+            source_url=candidate_url,
+            canonicalize_url=canonicalize_facebook_url,
+        ):
+            _log(
+                self.logger,
+                f'[Night FB] Skipping previously successful Facebook URL for artist="{artist_name or "<unknown>"}" url="{candidate_url or raw_fb_url or "<blank>"}"',
+            )
+            return None
         _log(
             self.logger,
             f'[Night FB] Starting FB scrape for artist="{artist_name or "<unknown>"}" url="{candidate_url or raw_fb_url or "<blank>"}"',
@@ -10701,16 +10712,6 @@ class NightModeFacebookEnricher:
 
         artist_name = _clean_val(result.get("Artist Name", ""))
         is_unearthed = self._is_unearthed_source(result)
-        skip_due_to_email, email_all_clean = _row_has_usable_email_for_fb_skip(result)
-        if skip_due_to_email:
-            self.fb_rows_skipped["no_opportunity"] += 1
-            _log(
-                self.logger,
-                f"[Night FB] Skipping row before FB scrape for artist='{artist_name or '<unknown>'}' because email_already_present ({email_all_clean!r}).",
-            )
-            if not result.get("FB_Status"):
-                result["FB_Status"] = "ok"
-            return _finish(result, attempted=False)
         location = _clean_val(result.get("Location", ""))
         song_title = _clean_val(
             result.get("Song Title", "")

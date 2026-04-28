@@ -339,6 +339,134 @@ def test_fb_enrich_runs_when_fb_url_present_or_promotable(monkeypatch, row_overr
     assert not any("already has facebook link" in msg.lower() for msg in logs)
 
 
+def test_fb_enrich_skips_same_fb_url_that_already_produced_email(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Same FB URL",
+            "Email": "fb@example.com",
+            "Email_All": "fb@example.com",
+            "facebook_url": "https://www.facebook.com/samefb",
+            "Facebook_URL": "https://www.facebook.com/samefb",
+            "Social Link": "",
+            "External Links": "",
+            "Source Directory": "",
+            "Source URL": "",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+        }
+    )
+    _set_email_with_provenance(
+        (seed_df, 0),
+        "fb@example.com",
+        source_url="https://www.facebook.com/samefb",
+        source_type="facebook_enrich",
+        method="regex",
+        surface="facebook_main",
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    calls = []
+
+    def fake_extract(driver, url, log_fn=None, **kwargs):
+        calls.append(url)
+        return (["new@example.com"], url, "")
+
+    monkeypatch.setattr(cde, "_extract_fb_emails_bounded", fake_extract)
+
+    matched = worker._enrich_row_facebook(seed_df, 0, object(), ctx)
+
+    assert matched is False
+    assert calls == []
+    assert any("Skipping previously successful Facebook URL" in msg for msg in logs)
+
+
+def test_fb_enrich_existing_ig_email_does_not_block_fb(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "IG Email FB Allowed",
+            "Email": "ig@example.com",
+            "Email_All": "ig@example.com",
+            "facebook_url": "https://www.facebook.com/fballowed",
+            "Facebook_URL": "https://www.facebook.com/fballowed",
+            "Social Link": "",
+            "External Links": "",
+            "Source Directory": "",
+            "Source URL": "",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+        }
+    )
+    _set_email_with_provenance(
+        (seed_df, 0),
+        "ig@example.com",
+        source_url="https://www.instagram.com/fballowed/",
+        source_type="instagram_enrich",
+        method="regex",
+        surface="instagram_profile",
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    calls = []
+
+    def fake_extract(driver, url, log_fn=None, **kwargs):
+        calls.append(url)
+        return (["fb@example.com"], "https://www.facebook.com/fballowed", "")
+
+    monkeypatch.setattr(cde, "_extract_fb_emails_bounded", fake_extract)
+
+    matched = worker._enrich_row_facebook(seed_df, 0, object(), ctx)
+
+    assert matched is True
+    assert calls == ["https://www.facebook.com/fballowed"]
+    assert set(seed_df.at[0, "Email_All"].split(";")) == {"ig@example.com", "fb@example.com"}
+
+
+def test_fb_enrich_placeholder_same_url_does_not_create_success_skip(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Placeholder FB",
+            "Email": "name@example.com",
+            "Email_All": "name@example.com",
+            "facebook_url": "https://www.facebook.com/placeholderfb",
+            "Facebook_URL": "https://www.facebook.com/placeholderfb",
+            "Social Link": "",
+            "External Links": "",
+            "Source Directory": "",
+            "Source URL": "",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+        }
+    )
+    _set_email_with_provenance(
+        (seed_df, 0),
+        "name@example.com",
+        source_url="https://www.facebook.com/placeholderfb",
+        source_type="facebook_enrich",
+        method="regex",
+        surface="facebook_main",
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    calls = []
+
+    def fake_extract(driver, url, log_fn=None, **kwargs):
+        calls.append(url)
+        return (["real@example.com"], "https://www.facebook.com/placeholderfb", "")
+
+    monkeypatch.setattr(cde, "_extract_fb_emails_bounded", fake_extract)
+
+    matched = worker._enrich_row_facebook(seed_df, 0, object(), ctx)
+
+    assert matched is True
+    assert calls == ["https://www.facebook.com/placeholderfb"]
+
+
 def test_fb_enrich_uses_explicit_share_entrypoint_without_discovery(monkeypatch):
     logs = []
     worker = _make_worker(logs)
@@ -769,7 +897,7 @@ def test_fb_enrich_success_normalizes_stale_pass_a_status_fields(monkeypatch):
     assert provenance["mikeadams@littleempiremusic.com"]["source_url"] == "https://www.facebook.com/iamgodlands"
 
 
-def test_fb_enrich_skips_when_email_present(monkeypatch):
+def test_fb_enrich_skips_when_same_fb_url_already_succeeded(monkeypatch):
     logs = []
     worker = _make_worker(logs)
     seed_df = _seed_df(
@@ -782,6 +910,14 @@ def test_fb_enrich_skips_when_email_present(monkeypatch):
             "Social Link": "",
             "External Links": "",
         }
+    )
+    _set_email_with_provenance(
+        (seed_df, 0),
+        "existing@example.com",
+        source_url="https://www.facebook.com/socialfb",
+        source_type="facebook_enrich",
+        method="regex",
+        surface="facebook_main",
     )
     ctx = worker._build_row_context(seed_df, 0, 1, 1)
 
@@ -802,7 +938,7 @@ def test_fb_enrich_skips_when_email_present(monkeypatch):
     assert "skip" in " ".join(logs).lower()
 
 
-def test_fb_enrich_skip_with_non_fb_email_does_not_flip_fb_status(monkeypatch):
+def test_fb_enrich_non_fb_email_still_attempts_and_preserves_no_email_status(monkeypatch):
     logs = []
     worker = _make_worker(logs)
     seed_df = _seed_df(
@@ -822,17 +958,20 @@ def test_fb_enrich_skip_with_non_fb_email_does_not_flip_fb_status(monkeypatch):
     )
     ctx = worker._build_row_context(seed_df, 0, 1, 1)
 
-    monkeypatch.setattr(
-        cde,
-        "_extract_fb_emails_bounded",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("facebook extraction should be skipped")),
-    )
+    calls = []
+
+    def fake_extract(driver, url, log_fn=None, **kwargs):
+        calls.append(url)
+        return ([], "https://www.facebook.com/igonly", "no_email_on_page")
+
+    monkeypatch.setattr(cde, "_extract_fb_emails_bounded", fake_extract)
 
     matched = worker._enrich_row_facebook(seed_df, 0, object(), ctx)
 
     assert matched is False
+    assert calls == ["https://www.facebook.com/igonly"]
     assert seed_df.at[0, "FB_Status"] == "pass_a_no_email_on_page"
-    assert seed_df.at[0, "FB_Attempt_State"] == "attempted_fb_no_email_on_page"
+    assert seed_df.at[0, "FB_Attempt_State"] == "attempted_fb"
     assert seed_df.at[0, "FB_Write_State"] == "fb_no_email_written"
     assert seed_df.at[0, "FB_Debug_Reason"] == "no_email_visible"
 

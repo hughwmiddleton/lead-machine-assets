@@ -7,7 +7,11 @@ from urllib.parse import urlsplit
 
 import pandas as pd
 
-from email_normalizer import filter_system_telemetry_emails, normalize_email_value
+from email_normalizer import (
+    filter_system_telemetry_emails,
+    is_obvious_placeholder_email,
+    normalize_email_value,
+)
 
 EMAIL_PROVENANCE_JSON_COL = "Email_Provenance_JSON"
 
@@ -207,6 +211,53 @@ def get_email_provenance_entry(row_like: Any, email: Any) -> Dict[str, str]:
     if not normalized:
         return {}
     return dict(get_row_email_provenance(row_like).get(normalized) or {})
+
+
+def row_has_successful_source_url_provenance(
+    row_like: Any,
+    *,
+    source_type: str,
+    source_url: Any,
+    canonicalize_url,
+) -> bool:
+    """Return True only for a row-local usable email from the same source URL."""
+    if row_like is None or not hasattr(row_like, "get"):
+        return False
+
+    requested_type = _clean_str(source_type).lower()
+    if not requested_type:
+        return False
+    try:
+        requested_canonical = _clean_str(canonicalize_url(source_url))
+    except Exception:
+        requested_canonical = ""
+    if not requested_canonical:
+        return False
+
+    suspect_present = bool(
+        _clean_str(row_like.get("Suspect_Email", ""))
+        or _clean_str(row_like.get("Suspect_Email_All", ""))
+    )
+    if suspect_present:
+        return False
+    email_source = _clean_str(row_like.get("Email Source", ""))
+    if email_source == "Quarantined (repeat email)":
+        return False
+
+    for email, meta in get_row_email_provenance(row_like).items():
+        normalized_email = normalize_email_key(email)
+        if not normalized_email or is_obvious_placeholder_email(normalized_email):
+            continue
+        provenance_type = _clean_str(meta.get("source_type", "")).lower()
+        if not provenance_type.startswith(requested_type):
+            continue
+        try:
+            provenance_canonical = _clean_str(canonicalize_url(meta.get("source_url", "")))
+        except Exception:
+            provenance_canonical = ""
+        if provenance_canonical and provenance_canonical == requested_canonical:
+            return True
+    return False
 
 
 def merge_email_provenance_map(
