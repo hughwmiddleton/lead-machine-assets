@@ -32,7 +32,33 @@ def _write_cursor(path, index_path, last_position: int, last_url: str) -> None:
     )
 
 
-def _run_index_scrape(module, monkeypatch, tmp_path, index_path, cursor_path, *, max_artists, resume_mode):
+def _write_index_urls(module, index_path, urls: list[str]) -> None:
+    rows = []
+    for url in urls:
+        normalized_url, slug = module.normalize_unearthed_artist_url(url)
+        rows.append(
+            {
+                "artist_url": normalized_url,
+                "artist_slug": slug,
+                "first_seen_at": "2026-04-28T00:00:00+00:00",
+                "last_seen_at": "2026-04-28T00:00:00+00:00",
+                "source": "test",
+            }
+        )
+    module._write_unearthed_artist_url_index(rows, index_path=str(index_path), require_existing=False)
+
+
+def _run_index_scrape(
+    module,
+    monkeypatch,
+    tmp_path,
+    index_path,
+    cursor_path,
+    *,
+    max_artists,
+    resume_mode,
+    manual_start=None,
+):
     class Driver:
         page_source = ""
 
@@ -55,15 +81,19 @@ def _run_index_scrape(module, monkeypatch, tmp_path, index_path, cursor_path, *,
     )
     monkeypatch.setattr(module, "save_to_csv", lambda *_args, **_kwargs: None)
 
+    job_config = {
+        "use_unearthed_url_index": True,
+        "unearthed_resume_mode": resume_mode,
+        "unearthed_url_index_path": str(index_path),
+    }
+    if manual_start is not None:
+        job_config["unearthed_start_index_position"] = manual_start
+
     module.scrape_website(
         "https://www.abc.net.au/triplejunearthed",
         existing_csv=str(tmp_path / "raw.csv"),
         max_artists=max_artists,
-        job_config={
-            "use_unearthed_url_index": True,
-            "unearthed_resume_mode": resume_mode,
-            "unearthed_url_index_path": str(index_path),
-        },
+        job_config=job_config,
     )
     return scraped
 
@@ -214,6 +244,154 @@ def test_unearthed_index_continue_run_advances_from_persisted_position(monkeypat
     assert scraped == urls[2:4]
     assert payload["last_position"] == 3
     assert payload["last_url"] == urls[3]
+
+
+def test_unearthed_index_blank_manual_start_uses_cursor(monkeypatch, tmp_path):
+    module = pipeline_runner._load_legacy_module()
+    index_path = tmp_path / "unearthed_artist_url_index.csv"
+    cursor_path = tmp_path / "unearthed_cursor.json"
+    urls = [_artist_url(f"artist-{idx}") for idx in range(6)]
+    _write_index_urls(module, index_path, urls)
+    _write_cursor(cursor_path, index_path, 1, urls[1])
+
+    scraped = _run_index_scrape(
+        module,
+        monkeypatch,
+        tmp_path,
+        index_path,
+        cursor_path,
+        max_artists=2,
+        resume_mode="cursor",
+        manual_start="",
+    )
+    payload = json.loads(cursor_path.read_text(encoding="utf-8"))
+
+    assert scraped == urls[2:4]
+    assert payload["last_position"] == 3
+    assert payload["last_url"] == urls[3]
+
+
+def test_unearthed_index_manual_start_1500_selects_expected_slice_and_persists(monkeypatch, tmp_path):
+    module = pipeline_runner._load_legacy_module()
+    index_path = tmp_path / "unearthed_artist_url_index.csv"
+    cursor_path = tmp_path / "unearthed_cursor.json"
+    urls = [_artist_url(f"artist-{idx}") for idx in range(3100)]
+    _write_index_urls(module, index_path, urls)
+    _write_cursor(cursor_path, index_path, 1499, urls[1499])
+
+    scraped = _run_index_scrape(
+        module,
+        monkeypatch,
+        tmp_path,
+        index_path,
+        cursor_path,
+        max_artists=1500,
+        resume_mode="cursor",
+        manual_start=1500,
+    )
+    payload = json.loads(cursor_path.read_text(encoding="utf-8"))
+
+    assert scraped == urls[1500:3000]
+    assert payload["last_position"] == 2999
+    assert payload["last_url"] == urls[2999]
+    assert set(urls[0:1500]).isdisjoint(set(scraped))
+
+
+def test_unearthed_index_manual_start_overrides_cursor(monkeypatch, tmp_path):
+    module = pipeline_runner._load_legacy_module()
+    index_path = tmp_path / "unearthed_artist_url_index.csv"
+    cursor_path = tmp_path / "unearthed_cursor.json"
+    urls = [_artist_url(f"artist-{idx}") for idx in range(10)]
+    _write_index_urls(module, index_path, urls)
+    _write_cursor(cursor_path, index_path, 6, urls[6])
+
+    scraped = _run_index_scrape(
+        module,
+        monkeypatch,
+        tmp_path,
+        index_path,
+        cursor_path,
+        max_artists=3,
+        resume_mode="cursor",
+        manual_start=2,
+    )
+    payload = json.loads(cursor_path.read_text(encoding="utf-8"))
+
+    assert scraped == urls[2:5]
+    assert payload["last_position"] == 4
+    assert payload["last_url"] == urls[4]
+
+
+def test_unearthed_index_invalid_manual_start_does_not_corrupt_cursor(monkeypatch, tmp_path):
+    module = pipeline_runner._load_legacy_module()
+    index_path = tmp_path / "unearthed_artist_url_index.csv"
+    cursor_path = tmp_path / "unearthed_cursor.json"
+    urls = [_artist_url(f"artist-{idx}") for idx in range(6)]
+    _write_index_urls(module, index_path, urls)
+    _write_cursor(cursor_path, index_path, 2, urls[2])
+    original_payload = json.loads(cursor_path.read_text(encoding="utf-8"))
+
+    scraped = _run_index_scrape(
+        module,
+        monkeypatch,
+        tmp_path,
+        index_path,
+        cursor_path,
+        max_artists=2,
+        resume_mode="cursor",
+        manual_start="not-an-int",
+    )
+
+    assert scraped == []
+    assert json.loads(cursor_path.read_text(encoding="utf-8")) == original_payload
+
+
+def test_unearthed_index_negative_manual_start_does_not_corrupt_cursor(monkeypatch, tmp_path):
+    module = pipeline_runner._load_legacy_module()
+    index_path = tmp_path / "unearthed_artist_url_index.csv"
+    cursor_path = tmp_path / "unearthed_cursor.json"
+    urls = [_artist_url(f"artist-{idx}") for idx in range(6)]
+    _write_index_urls(module, index_path, urls)
+    _write_cursor(cursor_path, index_path, 2, urls[2])
+    original_payload = json.loads(cursor_path.read_text(encoding="utf-8"))
+
+    scraped = _run_index_scrape(
+        module,
+        monkeypatch,
+        tmp_path,
+        index_path,
+        cursor_path,
+        max_artists=2,
+        resume_mode="cursor",
+        manual_start=-1,
+    )
+
+    assert scraped == []
+    assert json.loads(cursor_path.read_text(encoding="utf-8")) == original_payload
+
+
+def test_unearthed_index_manual_start_beyond_index_clamps_without_cursor_write(monkeypatch, tmp_path):
+    module = pipeline_runner._load_legacy_module()
+    index_path = tmp_path / "unearthed_artist_url_index.csv"
+    cursor_path = tmp_path / "unearthed_cursor.json"
+    urls = [_artist_url(f"artist-{idx}") for idx in range(6)]
+    _write_index_urls(module, index_path, urls)
+    _write_cursor(cursor_path, index_path, 2, urls[2])
+    original_payload = json.loads(cursor_path.read_text(encoding="utf-8"))
+
+    scraped = _run_index_scrape(
+        module,
+        monkeypatch,
+        tmp_path,
+        index_path,
+        cursor_path,
+        max_artists=2,
+        resume_mode="cursor",
+        manual_start=100,
+    )
+
+    assert scraped == []
+    assert json.loads(cursor_path.read_text(encoding="utf-8")) == original_payload
 
 
 def test_unearthed_index_cursor_is_bound_to_index_path(monkeypatch, tmp_path, capsys):

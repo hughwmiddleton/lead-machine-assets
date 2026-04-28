@@ -133,7 +133,7 @@ from urllib.parse import (
 )
 from unearthed_common import extract_unearthed_genre_text, parse_unearthed_genre
 import urllib.parse as _urlparse
-from PyQt5 import QtWidgets, QtCore
+from PyQt5 import QtWidgets, QtCore, QtGui
 from dateutil import parser as dparser
 from dateutil.relativedelta import relativedelta
 import unicodedata
@@ -1660,6 +1660,7 @@ def _select_unearthed_index_profile_urls(
     index_path: str | None,
     max_artists: int,
     resume_mode: str,
+    manual_start_position=None,
 ) -> tuple[list[str], int, int, int]:
     index_rows = len(indexed_urls)
     batch_size = max(int(max_artists or 0), 0)
@@ -1668,7 +1669,18 @@ def _select_unearthed_index_profile_urls(
         normalized_mode = "auto"
 
     start = 0
-    if normalized_mode == "cursor":
+    manual_start_raw = "" if manual_start_position is None else str(manual_start_position).strip()
+    manual_start_applied = False
+    if manual_start_raw:
+        try:
+            manual_start = int(manual_start_raw)
+        except Exception as exc:
+            raise ValueError(f"Invalid Unearthed start index position: {manual_start_raw!r}") from exc
+        if manual_start < 0:
+            raise ValueError(f"Invalid Unearthed start index position: {manual_start}")
+        start = min(manual_start, index_rows)
+        manual_start_applied = True
+    elif normalized_mode == "cursor":
         cursor, reason = _load_unearthed_index_cursor(index_path)
         if cursor is None:
             print("[UE Index Cursor] no valid cursor found → starting at 0")
@@ -1691,6 +1703,7 @@ def _select_unearthed_index_profile_urls(
     print(
         f"[UE Index Cursor] mode={normalized_mode} index_rows={index_rows} "
         f"start={start} end={end_inclusive} count={len(selected_urls)}"
+        f" manual_start={'yes' if manual_start_applied else 'no'}"
     )
     if selected_urls:
         _write_unearthed_index_cursor(index_path, end_inclusive, selected_urls[-1], len(selected_urls))
@@ -2016,6 +2029,7 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
                 index_path,
                 max_artists,
                 resume_mode,
+                job_config.get("unearthed_start_index_position"),
             )
             for indexed_url in indexed_urls:
                 _append_unearthed_profile_url(ordered_profile_urls, seen_profile_urls, indexed_url)
@@ -13132,6 +13146,11 @@ class NightModeTab(QtWidgets.QWidget):
             "https://www.abc.net.au/triplejunearthed/artist/artist-slug"
         )
         output_resume_layout.addLayout(_lm_row_with_label_widget(self.unearthed_selected_cursor_label, self.unearthed_selected_cursor_edit))
+        self.unearthed_start_index_label = QtWidgets.QLabel("Start from index position:")
+        self.unearthed_start_index_edit = QtWidgets.QLineEdit()
+        self.unearthed_start_index_edit.setPlaceholderText("Optional, e.g. 1500")
+        self.unearthed_start_index_edit.setValidator(QtGui.QIntValidator(0, 100000000, self))
+        output_resume_layout.addLayout(_lm_row_with_label_widget(self.unearthed_start_index_label, self.unearthed_start_index_edit))
         self.unearthed_resume_mode_combo.currentIndexChanged.connect(self._sync_unearthed_resume_controls)
 
         self.unearthed_index_status_label = QtWidgets.QLabel("")
@@ -13352,6 +13371,12 @@ class NightModeTab(QtWidgets.QWidget):
     def _set_unearthed_selected_cursor(self, value) -> None:
         self.unearthed_selected_cursor_edit.setText(str(value or "").strip())
 
+    def _current_unearthed_start_index_position(self) -> str:
+        return str(self.unearthed_start_index_edit.text() or "").strip()
+
+    def _set_unearthed_start_index_position(self, value) -> None:
+        self.unearthed_start_index_edit.setText(str(value or "").strip())
+
     def _sync_unearthed_resume_controls(self) -> None:
         selected_mode = self._current_unearthed_resume_mode() == "selected"
         self.unearthed_selected_cursor_label.setEnabled(selected_mode)
@@ -13528,6 +13553,7 @@ class NightModeTab(QtWidgets.QWidget):
     def _night_mode_jobs_for_config(self):
         resume_mode = self._current_unearthed_resume_mode()
         selected_cursor = self._current_unearthed_selected_cursor()
+        start_index_position = self._current_unearthed_start_index_position()
         use_url_index = self._current_unearthed_use_url_index()
         config_jobs = []
         for job in self.jobs:
@@ -13538,6 +13564,8 @@ class NightModeTab(QtWidgets.QWidget):
                 job_copy["unearthed_url_index_path"] = self._active_unearthed_index_path
                 if selected_cursor:
                     job_copy["unearthed_selected_cursor"] = selected_cursor
+                if start_index_position:
+                    job_copy["unearthed_start_index_position"] = start_index_position
             config_jobs.append(job_copy)
         return config_jobs
 
@@ -13590,6 +13618,7 @@ class NightModeTab(QtWidgets.QWidget):
             "jobs": self._night_mode_jobs_for_config(),
             "unearthed_resume_mode": self._current_unearthed_resume_mode(),
             "unearthed_selected_cursor": self._current_unearthed_selected_cursor(),
+            "unearthed_start_index_position": self._current_unearthed_start_index_position(),
             "unearthed_url_index_path": self._active_unearthed_index_path,
         }
         config["phased"] = self.phased_checkbox.isChecked()
@@ -13643,6 +13672,7 @@ class NightModeTab(QtWidgets.QWidget):
             return
         self._set_unearthed_resume_mode(config.get("unearthed_resume_mode", "auto"))
         self._set_unearthed_selected_cursor(config.get("unearthed_selected_cursor", ""))
+        self._set_unearthed_start_index_position(config.get("unearthed_start_index_position", ""))
         self._sync_unearthed_resume_controls()
         use_url_index = bool(config.get("use_unearthed_url_index", False))
         index_path = str(config.get("unearthed_url_index_path") or "").strip()
@@ -13654,6 +13684,8 @@ class NightModeTab(QtWidgets.QWidget):
                 if str(job.get("directory") or "").strip().lower() == "unearthed":
                     use_url_index = bool(job.get("use_unearthed_url_index", False))
                     index_path = str(job.get("unearthed_url_index_path") or index_path).strip()
+                    if not self._current_unearthed_start_index_position():
+                        self._set_unearthed_start_index_position(job.get("unearthed_start_index_position", ""))
                     break
         self._set_unearthed_url_index_path(index_path or _unearthed_artist_url_index_path())
         self._set_unearthed_source_mode(use_url_index)
@@ -13716,6 +13748,7 @@ class NightModeTab(QtWidgets.QWidget):
                 "jobs": self._night_mode_jobs_for_config(),
                 "unearthed_resume_mode": self._current_unearthed_resume_mode(),
                 "unearthed_selected_cursor": self._current_unearthed_selected_cursor(),
+                "unearthed_start_index_position": self._current_unearthed_start_index_position(),
                 "unearthed_url_index_path": self._active_unearthed_index_path,
             }
             config["phased"] = self._phased_enabled

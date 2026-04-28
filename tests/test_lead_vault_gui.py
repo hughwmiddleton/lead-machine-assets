@@ -1044,6 +1044,32 @@ def test_night_mode_selected_cursor_round_trips_into_saved_config(qapp, monkeypa
     assert "unearthed_selected_cursor" not in payload["jobs"][1]
 
 
+def test_night_mode_start_index_position_round_trips_into_saved_config(qapp, monkeypatch, tmp_path):
+    module = _load_legacy_module()
+    tab = module.NightModeTab()
+    tab.jobs = [
+        {"job_id": "job_unearthed_1", "directory": "unearthed", "target_valid_leads": 15},
+        {"job_id": "job_spotify_1", "directory": "spotify", "target_valid_leads": 10},
+    ]
+    tab._set_unearthed_source_mode(True)
+    tab._set_unearthed_start_index_position("1500")
+
+    output_path = tmp_path / "overnight_jobs.json"
+    monkeypatch.setattr(
+        module.QtWidgets.QFileDialog,
+        "getSaveFileName",
+        lambda *args, **kwargs: (str(output_path), "JSON Files (*.json)"),
+    )
+
+    tab._save_config_to_file()
+
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+
+    assert payload["unearthed_start_index_position"] == "1500"
+    assert payload["jobs"][0]["unearthed_start_index_position"] == "1500"
+    assert "unearthed_start_index_position" not in payload["jobs"][1]
+
+
 def test_night_mode_unearthed_source_mode_writes_explicit_default_flag(qapp):
     module = _load_legacy_module()
     tab = module.NightModeTab()
