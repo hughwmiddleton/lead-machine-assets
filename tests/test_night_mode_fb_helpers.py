@@ -2,6 +2,7 @@ import pandas as pd
 import pytest
 
 import night_mode_fb
+from email_provenance import _set_email_with_provenance
 from origin_validator import dedupe_pre_auto_validate
 
 
@@ -1876,11 +1877,6 @@ def test_existing_email_short_circuits_before_fb_scrape_even_for_unearthed(monke
     logs = []
     enricher.logger = logs.append
 
-    def _fail_scrape(self, *args, **kwargs):  # noqa: ANN001
-        raise AssertionError("rows with existing usable email must not scrape Facebook")
-
-    monkeypatch.setattr(night_mode_fb.NightModeFacebookEnricher, "_scrape_single_fb_candidate", _fail_scrape)
-
     row = {
         "Artist Name": "Unearthed Has Email",
         "Source Directory": "unearthed",
@@ -1889,12 +1885,20 @@ def test_existing_email_short_circuits_before_fb_scrape_even_for_unearthed(monke
         "Email_All": "known@example.com",
         "Facebook_URL": "https://facebook.com/unearthedhasemail",
     }
+    _set_email_with_provenance(
+        row,
+        "known@example.com",
+        source_url="https://www.facebook.com/unearthedhasemail",
+        source_type="facebook_enrich",
+        method="regex",
+        surface="facebook_main",
+    )
 
     result = enricher.enrich_row_with_facebook_night(row)
 
     assert result["Email_All"] == "known@example.com"
-    assert result["FB_Status"] == "ok"
-    assert any("email_already_present" in msg for msg in logs)
+    assert result["FB_Status"] == "pass_a_fetch_error"
+    assert any("Skipping previously successful Facebook URL" in msg for msg in logs)
 
 
 def test_explicit_fb_url_placeholders_rejected(monkeypatch) -> None:

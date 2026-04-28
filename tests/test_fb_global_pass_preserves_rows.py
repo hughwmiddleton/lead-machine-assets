@@ -5,6 +5,7 @@ import night_mode_fb as nmfb
 import pandas as pd
 import pipeline_runner
 import pytest
+from email_provenance import _set_email_with_provenance
 from fb_attribution import FB_GATE_STATE_COL
 
 
@@ -515,19 +516,20 @@ def test_fb_global_pass_preserves_rows_and_emails(monkeypatch, tmp_path):
     assert len(df_out.index) == len(rows)
     assert df_out["Artist Name"].tolist() == [row["Artist Name"] for row in rows]
 
-    # Unearthed row is present and untouched.
+    # Unearthed row has an existing email but no same-source FB provenance, so it can still run.
     unearthed_rows = df_out[df_out["__source_job"] == "job_unearthed_6"]
     assert len(unearthed_rows) == 1
-    assert unearthed_rows.iloc[0]["Email"] == "unearthed@example.com"
-    assert unearthed_rows.iloc[0]["Email_All"] == "unearthed@example.com"
+    assert unearthed_rows.iloc[0]["Email"] == "fb@example.com"
+    assert "fb@example.com" in unearthed_rows.iloc[0]["Email_All"]
 
-    # Rows with existing email are skipped and not cleared.
+    # A row with existing email but no FB identity anchor is skipped for no candidate, not because of the email.
     existing_email_rows = df_out[df_out["__source_job"] == "job_email"]
     assert existing_email_rows.iloc[0]["Email"] == "sc@example.com"
     assert existing_email_rows.iloc[0]["Email_All"] == "sc@example.com"
+    assert existing_email_rows.iloc[0][FB_GATE_STATE_COL] == "skipped_no_identity_anchor"
 
     # Rows attempted for FB enrichment get FB-derived email/status, including blank-FB fallback discovery.
-    fb_attempted = df_out[df_out["__source_job"].isin(["job_fb_url", "job_social_fb", "job_anchor"])]
+    fb_attempted = df_out[df_out["__source_job"].isin(["job_unearthed_6", "job_fb_url", "job_social_fb", "job_anchor"])]
     assert (fb_attempted["Email"] == "fb@example.com").all()
     assert (fb_attempted["Email_All"].str.contains("fb@example.com")).all()
     assert (fb_attempted["FB_Status"].str.lower() == "ok").all()
@@ -551,6 +553,7 @@ def test_fb_global_pass_preserves_rows_and_emails(monkeypatch, tmp_path):
     # Only rows without existing emails were attempted.
     assert helper.calls == len(fb_attempted.index)
     assert {entry["row"]["Artist Name"] for entry in helper.rows} == {
+        "Unearthed Artist",
         "Has FB URL",
         "Social Link FB",
         "Anchored Only",
@@ -1063,7 +1066,7 @@ def test_nightmode_fb_pass_logs_outer_row_gate(monkeypatch, tmp_path):
     input_csv = tmp_path / "master_pre_fb.csv"
     output_csv = tmp_path / "master_post_fb.csv"
     state_path = tmp_path / "fb_state.json"
-    pd.DataFrame(
+    df = pd.DataFrame(
         [
             {
                 "Artist Name": "Skip Me",
@@ -1081,7 +1084,16 @@ def test_nightmode_fb_pass_logs_outer_row_gate(monkeypatch, tmp_path):
                 "Facebook_URL": "",
             },
         ]
-    ).to_csv(input_csv, index=False)
+    )
+    _set_email_with_provenance(
+        (df, 0),
+        "skip@example.com",
+        source_url="https://www.facebook.com/skipme",
+        source_type="facebook_enrich",
+        method="regex",
+        surface="facebook_main",
+    )
+    df.to_csv(input_csv, index=False)
 
     helper = DummyFBHelper()
     logs = []
@@ -1103,7 +1115,14 @@ def test_nightmode_fb_pass_logs_outer_row_gate(monkeypatch, tmp_path):
 
     row_gate_logs = [msg for msg in logs if "[Night FB][Row Gate]" in msg]
 
-    assert any("row=0" in msg and "artist='Skip Me'" in msg and "email_present=True" in msg and "eligible_for_fb=False" in msg for msg in row_gate_logs)
+    assert any(
+        "row=0" in msg
+        and "artist='Skip Me'" in msg
+        and "email_present=True" in msg
+        and "same_fb_url_success=True" in msg
+        and "eligible_for_fb=False" in msg
+        for msg in row_gate_logs
+    )
     assert any("row=1" in msg and "artist='Try Me'" in msg and "fb_url_present=False" in msg and "eligible_for_fb=True" in msg for msg in row_gate_logs)
 
 

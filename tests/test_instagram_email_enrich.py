@@ -4432,20 +4432,39 @@ def test_instagram_email_negative_skips_without_fetch(monkeypatch, row):
     )
     for key, value in row.items():
         seed_df.at[0, key] = value
-    before = seed_df.copy(deep=True)
     ctx = worker._build_row_context(seed_df, 0, 1, 1)
 
-    monkeypatch.setattr(
-        cde,
-        "_fetch_instagram_profile_html",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("fetch should not run")),
-    )
+    fetch_calls = []
+
+    def fake_fetch(session, url):  # noqa: ANN001
+        fetch_calls.append(url)
+        return ("<html><body>No email here</body></html>", 200)
+
+    if row["Email"]:
+        monkeypatch.setattr(cde, "_fetch_instagram_profile_html", fake_fetch)
+        monkeypatch.setattr(cde, "_instagram_profile_fetch_usable", lambda status, html: True)
+    else:
+        monkeypatch.setattr(
+            cde,
+            "_fetch_instagram_profile_html",
+            lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("fetch should not run")),
+        )
 
     matched = worker._enrich_row_instagram_email(seed_df, 0, ctx)
 
     assert matched is False
-    assert seed_df.equals(before)
-    assert logs == []
+    assert seed_df.at[0, "Email"] == row["Email"]
+    assert seed_df.at[0, "Email_All"] == row["Email_All"]
+    if row["Email"]:
+        assert fetch_calls == ["https://www.instagram.com/igartist/"]
+        _assert_ig_visit_and_outcome(
+            logs,
+            "https://www.instagram.com/igartist/",
+            "[IG Email] no_email_visible",
+        )
+    else:
+        assert fetch_calls == []
+        assert seed_df.at[0, cde.IG_OPPORTUNITY_STATE_COL] == "no_ig_opportunity"
 
 
 def test_instagram_email_no_visible_or_meta_email_keeps_one_hop_bounded_and_no_extract(monkeypatch):
@@ -7873,11 +7892,14 @@ def test_instagram_email_existing_row_email_skips_one_hop_stage(monkeypatch):
     )
     ctx = worker._build_row_context(seed_df, 0, 1, 1)
 
-    monkeypatch.setattr(
-        cde,
-        "_fetch_instagram_profile_html",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("instagram fetch should not run")),
-    )
+    fetch_calls = []
+
+    def fake_fetch(session, url):  # noqa: ANN001
+        fetch_calls.append(url)
+        return ("<html><body>fresh@artist.com</body></html>", 200)
+
+    monkeypatch.setattr(cde, "_fetch_instagram_profile_html", fake_fetch)
+    monkeypatch.setattr(cde, "_instagram_profile_fetch_usable", lambda status, html: True)
     monkeypatch.setattr(
         cde,
         "_fetch_website_html_bounded",
@@ -7886,10 +7908,15 @@ def test_instagram_email_existing_row_email_skips_one_hop_stage(monkeypatch):
 
     matched = worker._enrich_row_instagram_email(seed_df, 0, ctx)
 
-    assert matched is False
+    assert matched is True
+    assert fetch_calls == ["https://www.instagram.com/existingemailartist/"]
     assert seed_df.at[0, "Email"] == "existing@artist.com"
-    assert seed_df.at[0, "Email_All"] == "existing@artist.com"
-    assert logs == []
+    assert seed_df.at[0, "Email_All"] == "existing@artist.com;fresh@artist.com"
+    _assert_ig_visit_and_outcome(
+        logs,
+        "https://www.instagram.com/existingemailartist/",
+        "[IG Email] Found email: fresh@artist.com",
+    )
 
 
 def test_instagram_email_one_hop_ranks_targets_but_still_fetches_only_one_url(monkeypatch):

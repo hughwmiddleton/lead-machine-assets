@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pandas as pd
 
-from email_provenance import EMAIL_PROVENANCE_JSON_COL
+from email_provenance import EMAIL_PROVENANCE_JSON_COL, _set_email_with_provenance
 import night_mode_runner
 import pipeline_runner
 from fb_attribution import (
@@ -402,24 +402,31 @@ def test_share_entrypoint_runs_without_identity_anchor(monkeypatch, tmp_path):
 
 def test_existing_email_sets_skip_gate_attribution(monkeypatch, tmp_path):
     helper = StaticFBHelper({})
+    row = {
+        "Artist Name": "Has Email",
+        "Email": "seed@example.com",
+        "Email_All": "seed@example.com",
+        "Social Link": "",
+        "Facebook_URL": "https://facebook.com/hasemail",
+    }
+    _set_email_with_provenance(
+        row,
+        "seed@example.com",
+        source_url="https://www.facebook.com/hasemail",
+        source_type="facebook_enrich",
+        method="regex",
+        surface="facebook_main",
+    )
     df_out, _ = _run_night_fb_pass(
         monkeypatch,
         tmp_path,
-        [
-            {
-                "Artist Name": "Has Email",
-                "Email": "seed@example.com",
-                "Email_All": "seed@example.com",
-                "Social Link": "",
-                "Facebook_URL": "https://facebook.com/hasemail",
-            }
-        ],
+        [row],
         helper,
     )
 
     assert helper.calls == 0
     assert df_out.loc[0, FB_OPPORTUNITY_STATE_COL] == "fb_opportunity_present"
-    assert df_out.loc[0, FB_GATE_STATE_COL] == "skipped_existing_usable_email"
+    assert df_out.loc[0, FB_GATE_STATE_COL] == "skipped_same_source_url_success"
     assert df_out.loc[0, FB_WRITE_STATE_COL] == "fb_no_email_written"
 
 
@@ -431,25 +438,32 @@ def test_unearthed_existing_email_with_explicit_fb_is_email_gated(monkeypatch, t
             "Facebook_URL": "https://facebook.com/unearthed-hasemail",
         }
     )
+    row = {
+        "Artist Name": "Unearthed Has Email",
+        "Source Directory": "Unearthed",
+        "Email": "seed@example.com",
+        "Email_All": "seed@example.com",
+        "Social Link": "",
+        "Facebook_URL": "https://facebook.com/unearthed-hasemail",
+    }
+    _set_email_with_provenance(
+        row,
+        "seed@example.com",
+        source_url="https://www.facebook.com/unearthed-hasemail",
+        source_type="facebook_enrich",
+        method="regex",
+        surface="facebook_main",
+    )
     df_out, _ = _run_night_fb_pass(
         monkeypatch,
         tmp_path,
-        [
-            {
-                "Artist Name": "Unearthed Has Email",
-                "Source Directory": "Unearthed",
-                "Email": "seed@example.com",
-                "Email_All": "seed@example.com",
-                "Social Link": "",
-                "Facebook_URL": "https://facebook.com/unearthed-hasemail",
-            }
-        ],
+        [row],
         helper,
     )
 
     assert helper.calls == 0
     assert df_out.loc[0, FB_OPPORTUNITY_STATE_COL] in {"", "fb_opportunity_present"}
-    assert df_out.loc[0, FB_GATE_STATE_COL] == "skipped_existing_usable_email"
+    assert df_out.loc[0, FB_GATE_STATE_COL] == "skipped_same_source_url_success"
     assert df_out.loc[0, FB_ATTEMPT_STATE_COL] == "fb_not_attempted"
     assert df_out.loc[0, FB_WRITE_STATE_COL] == "fb_no_email_written"
 

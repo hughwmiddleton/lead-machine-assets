@@ -331,9 +331,14 @@ def test_unearthed_promotable_social_link_with_existing_email_uses_normal_pass_a
 
     result = enricher.enrich_row_with_facebook_night(row)
 
-    assert observed == {}
-    assert result.get("FB_Status", "") in {"", "ok"}
-    assert result.get("Email_All") == "seed@example.com"
+    assert observed == {
+        "fb_url": "https://www.facebook.com/unearthed.promoted.existing",
+        "explicit_accepted_url": True,
+        "email_all_before": "seed@example.com",
+    }
+    assert result.get("FB_Status") == "pass_a_found_email"
+    assert result.get("Email") == "fbwin@example.com"
+    assert result.get("Email_All") == "seed@example.com;fbwin@example.com"
 
 
 def test_unearthed_without_seeded_fb_skips_night_discovery(monkeypatch, enricher):

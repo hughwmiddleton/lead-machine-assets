@@ -237,7 +237,7 @@ def test_facebook_discovery_still_skips_non_spotify_row_with_email(tmp_path, mon
 
     worker._enrich_row_facebook(df, 0, object(), ctx)
 
-    assert discovered["count"] == 0
+    assert discovered["count"] == 1
 
 
 def test_website_crawl_runs_for_spotify_origin_row_even_with_email(tmp_path, monkeypatch):
