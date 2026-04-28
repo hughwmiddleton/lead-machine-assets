@@ -3577,7 +3577,9 @@ def run_directory_job(job_config: Dict[str, Any], raw_output_path: str, logger: 
         elapsed = time.time() - main_load_start
         _nm_ue_dispatch_log(logger, f"[NM UE Dispatch] main_script_load_done elapsed_sec={elapsed:.3f}")
         post_main_gap_start = time.time()
+        print("[NM UE Dispatch][RAW] before_post_main_gap_log", flush=True)
         _nm_ue_dispatch_log(logger, "[NM UE Dispatch] post_main_gap step=main_script_load_slow_check phase=start")
+        print("[NM UE Dispatch][RAW] after_post_main_gap_log", flush=True)
         _nm_ue_dispatch_warn_if_slow(logger, "main_script_load", main_load_start)
         post_main_gap_elapsed = time.time() - post_main_gap_start
         _nm_ue_dispatch_log(
