@@ -290,6 +290,30 @@ def _wrap_logger_for_stats(logger_fn, stats: Optional[SmokeStats]):
     return _log
 
 
+def _nm_ue_dispatch_log(logger: Optional[logging.Logger], message: str) -> None:
+    if not message:
+        return
+    try:
+        if logger is not None:
+            logger.info(message)
+        else:
+            logging.getLogger(__name__).info(message)
+    except Exception:
+        pass
+
+
+def _nm_ue_dispatch_warn_if_slow(logger: Optional[logging.Logger], step: str, start_time: float) -> None:
+    try:
+        elapsed = time.time() - float(start_time)
+    except Exception:
+        return
+    if elapsed > 10:
+        _nm_ue_dispatch_log(
+            logger,
+            f"[NM UE Dispatch][WARN] slow_step step={step} elapsed_sec={elapsed:.3f}",
+        )
+
+
 def _emit_smoke_summary(stats: SmokeStats, logger: logging.Logger) -> None:
     degraded_reasons: List[str] = []
     if stats.jobs_skipped:
@@ -1288,6 +1312,7 @@ def _process_job(
     stop_on_failure: bool,
     per_job_validate: bool = True,
     with_sc_meta: bool = False,
+    job_index: Optional[int] = None,
 ) -> Dict[str, Any]:
     job_id = job.get("job_id") or f"job_{len(job)}"
     directory = (job.get("directory") or "").strip().lower()
@@ -1313,12 +1338,36 @@ def _process_job(
         return state
 
     start_time = time.time()
+    if directory == "unearthed":
+        _nm_ue_dispatch_log(
+            logger,
+            "[NM UE Dispatch] job_entry "
+            f"job_index={job_index if job_index is not None else ''} "
+            f"source={directory} "
+            f"output_dir={job_dir} "
+            f"scrape_count={job.get('target_valid_leads', job.get('target_count', job.get('max_results', job.get('max_artists', ''))))} "
+            f"use_unearthed_url_index={job.get('use_unearthed_url_index', '')} "
+            f"manual_start={job.get('manual_start', job.get('unearthed_manual_start', ''))} "
+            f"resume_mode={job.get('resume_mode', job.get('unearthed_resume_mode', ''))}",
+        )
     state["status"] = "running"
+    job_status_start = time.time()
     _write_json(state_path, state)
+    if directory == "unearthed":
+        elapsed = time.time() - job_status_start
+        _nm_ue_dispatch_log(
+            logger,
+            f"[NM UE Dispatch] job_status_written path={state_path} elapsed_sec={elapsed:.3f}",
+        )
+        _nm_ue_dispatch_warn_if_slow(logger, "job_status_write", job_status_start)
 
     try:
         runtime_job = job
         if directory == "unearthed":
+            _nm_ue_dispatch_log(
+                logger,
+                f"[NM UE Dispatch] unearthed_dispatch_selected job_index={job_index if job_index is not None else ''} phased=0",
+            )
             runtime_job = dict(job)
 
             def _persist_runtime_state() -> None:
@@ -1332,7 +1381,20 @@ def _process_job(
             pipeline_runner.ensure_final_raw_csv(state["raw_csv"], job_id, logger=logger.info)
         else:
             logger.info("Starting scrape for job %s", job_id)
-            run_directory_job(runtime_job, state["raw_csv"], logger=logger.info)
+            previous_dispatch_job_index = getattr(pipeline_runner, "_NM_UE_DISPATCH_JOB_INDEX", "")
+            if directory == "unearthed":
+                try:
+                    pipeline_runner._NM_UE_DISPATCH_JOB_INDEX = str(job_index if job_index is not None else "")
+                except Exception:
+                    pass
+            try:
+                run_directory_job(runtime_job, state["raw_csv"], logger=logger.info)
+            finally:
+                if directory == "unearthed":
+                    try:
+                        pipeline_runner._NM_UE_DISPATCH_JOB_INDEX = previous_dispatch_job_index
+                    except Exception:
+                        pass
             pipeline_runner.ensure_final_raw_csv(state["raw_csv"], job_id, logger=logger.info)
         raw_row_count = _count_data_rows(state["raw_csv"])
         state["row_count"] = raw_row_count
@@ -1414,6 +1476,7 @@ def run_night_mode(
     with_sc_meta: bool = False,
 ) -> Dict[str, Any]:
     stats = SmokeStats()
+    config_load_start = time.time()
     config = _load_json(config_path)
     stats.jobs_attempted = len(config.get("jobs", []))
     export_mode = (export_mode_override or config.get("export_mode") or DEFAULT_EXPORT_MODE).strip().lower()
@@ -1479,6 +1542,17 @@ def run_night_mode(
         snapshot_path = os.path.join(run_dir, "config_snapshot.json")
         _write_json(snapshot_path, config)
     master_logger = _setup_logger(os.path.join(run_dir, "master_log.txt"), "master")
+    config_jobs = config.get("jobs", []) or []
+    if any("unearthed" in str(job.get("directory") or "").strip().lower() for job in config_jobs if isinstance(job, dict)):
+        _nm_ue_dispatch_log(
+            master_logger,
+            "[NM UE Dispatch] config_loaded "
+            f"jobs={len(config_jobs)} "
+            f"export_mode={export_mode} "
+            "phased=0 "
+            f"run_root={run_root}",
+        )
+        _nm_ue_dispatch_warn_if_slow(master_logger, "config_load", config_load_start)
     spotify_fallback_cfg = _load_spotify_zero_row_fallback_config()
     if spotify_fallback_cfg.enabled and spotify_fallback_cfg.invalid_tokens:
         master_logger.warning(
@@ -1486,7 +1560,7 @@ def run_night_mode(
             ", ".join(spotify_fallback_cfg.invalid_tokens),
         )
 
-    jobs = config.get("jobs", []) or []
+    jobs = config_jobs
     root_unearthed_index_path = str(config.get("unearthed_url_index_path") or "").strip()
     root_use_unearthed_url_index = config.get("use_unearthed_url_index")
     if root_unearthed_index_path or root_use_unearthed_url_index is not None:
@@ -1507,7 +1581,12 @@ def run_night_mode(
     pending_skip_job_ids: Dict[str, str] = {}
     job_states: List[Dict[str, Any]] = []
 
-    def _process_job_now(job: Dict[str, Any], *, allow_stop_on_failure: bool) -> Dict[str, Any]:
+    def _process_job_now(
+        job: Dict[str, Any],
+        *,
+        allow_stop_on_failure: bool,
+        job_index: Optional[int] = None,
+    ) -> Dict[str, Any]:
         return _process_job(
             job,
             run_dir,
@@ -1515,6 +1594,7 @@ def run_night_mode(
             stop_on_failure=allow_stop_on_failure,
             per_job_validate=not master_enrichment_enabled,
             with_sc_meta=with_sc_meta,
+            job_index=job_index,
         )
 
     def _find_pending_job_for_source(source: str, start_index: int) -> Optional[Tuple[int, Dict[str, Any]]]:
@@ -1546,7 +1626,7 @@ def run_night_mode(
             job_states.append(skipped_state)
             continue
 
-        result_state = _process_job_now(job, allow_stop_on_failure=stop_on_failure)
+        result_state = _process_job_now(job, allow_stop_on_failure=stop_on_failure, job_index=idx)
         processed_states[job_id] = result_state
         job_states.append(result_state)
 
@@ -1574,7 +1654,11 @@ def run_night_mode(
                             continue
                         fallback_idx, fallback_job = pending
                         fallback_job_id = _job_id_for_index(fallback_job, fallback_idx)
-                        fallback_state = _process_job_now(fallback_job, allow_stop_on_failure=False)
+                        fallback_state = _process_job_now(
+                            fallback_job,
+                            allow_stop_on_failure=False,
+                            job_index=fallback_idx,
+                        )
                         processed_states[fallback_job_id] = fallback_state
                         fallback_rows = _job_row_count(fallback_state)
                         if fallback_rows > 0:

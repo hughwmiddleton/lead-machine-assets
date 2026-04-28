@@ -2,6 +2,7 @@ import json
 import os
 import shutil
 import tempfile
+import types
 import unittest
 from unittest import mock
 from typing import List
@@ -257,6 +258,54 @@ class NightModeRunnerDummyTest(unittest.TestCase):
         self.assertEqual(summary["orgs_created"], 0)
         self.assertEqual(summary["vault_rows_added"], 0)
         self.assertEqual(summary["vault_rows_updated"], 0)
+
+    def test_unearthed_dispatch_visibility_logs(self) -> None:
+        config_path = os.path.join(self.tmpdir.name, "ue_config.json")
+        config = {
+            "export_mode": "per_directory",
+            "master_enrichment": {"enabled": False},
+            "jobs": [
+                {
+                    "job_id": "job_unearthed_1",
+                    "directory": "unearthed",
+                    "target_valid_leads": 1,
+                    "use_unearthed_url_index": True,
+                    "unearthed_resume_mode": "cursor",
+                }
+            ],
+        }
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=2)
+
+        def fake_scrape_website(search_term, existing_csv=None, max_artists=200, job_config=None):
+            pd.DataFrame([{"Artist Name": "test artist", "Email": ""}]).to_csv(existing_csv, index=False)
+
+        fake_module = types.SimpleNamespace(
+            UNEARTHED_DEFAULT_URL="https://example.test/unearthed",
+            scrape_website=fake_scrape_website,
+        )
+
+        def fake_run_enrichment(raw_csv_path, enriched_output_path, logger=None, night_mode=False):
+            shutil.copyfile(raw_csv_path, enriched_output_path)
+            return enriched_output_path
+
+        with mock.patch.object(pipeline_runner, "_load_legacy_module", return_value=fake_module), mock.patch.object(
+            night_mode_runner, "run_enrichment", side_effect=fake_run_enrichment
+        ):
+            result = night_mode_runner.run_night_mode(config_path, run_root=self.run_root)
+
+        master_log_path = os.path.join(result["run_dir"], "master_log.txt")
+        job_log_path = os.path.join(result["run_dir"], "job_unearthed_1", "log.txt")
+        with open(master_log_path, "r", encoding="utf-8") as f:
+            master_log = f.read()
+        with open(job_log_path, "r", encoding="utf-8") as f:
+            job_log = f.read()
+
+        combined_log = master_log + "\n" + job_log
+        self.assertIn("[NM UE Dispatch] config_loaded", combined_log)
+        self.assertIn("[NM UE Dispatch] job_entry", combined_log)
+        self.assertIn("[NM UE Dispatch] unearthed_dispatch_selected", combined_log)
+        self.assertIn("[NM UE Dispatch] scrape_call_start", combined_log)
 
     def test_smoke_summary_email_total_uses_final_artifact_count(self) -> None:
         config_path = os.path.join(self.tmpdir.name, "config.json")

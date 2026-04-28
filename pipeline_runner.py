@@ -120,6 +120,7 @@ _forced_driver_crash_triggered = False
 _forced_driver_crash_already_logged_rows: Set[int] = set()
 
 _EMAIL_SUMMARY = {"emails_found": 0, "pattern_emails": 0}
+_NM_UE_DISPATCH_JOB_INDEX = ""
 
 
 class ResumeCheckpointError(RuntimeError):
@@ -1907,8 +1908,7 @@ def _load_legacy_module():
     """
     global _LEGACY_MODULE
     if _LEGACY_MODULE is None:
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        legacy_path = os.path.join(base_dir, "Lead Machine (Final Update 5).py")
+        legacy_path = _legacy_module_path()
         spec = importlib.util.spec_from_file_location("lead_machine_main", legacy_path)
         if spec is None or spec.loader is None:
             raise ImportError(f"Unable to load legacy module from {legacy_path}")
@@ -1916,6 +1916,11 @@ def _load_legacy_module():
         spec.loader.exec_module(module)  # type: ignore[arg-type]
         _LEGACY_MODULE = module
     return _LEGACY_MODULE
+
+
+def _legacy_module_path() -> str:
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base_dir, "Lead Machine (Final Update 5).py")
 
 
 def _safe_log(logger: LoggerFn, message: str) -> None:
@@ -1928,6 +1933,31 @@ def _safe_log(logger: LoggerFn, message: str) -> None:
         except Exception:
             pass
     _LOGGER.info(message)
+
+
+def _nm_ue_dispatch_warn_if_slow(logger: LoggerFn, step: str, start_time: float) -> None:
+    try:
+        elapsed = time.time() - float(start_time)
+    except Exception:
+        return
+    if elapsed > 10:
+        _safe_log(
+            logger,
+            f"[NM UE Dispatch][WARN] slow_step step={step} elapsed_sec={elapsed:.3f}",
+        )
+
+
+def _nm_ue_dispatch_job_index(job_config: Mapping[str, Any]) -> str:
+    try:
+        explicit = str(job_config.get("_night_mode_job_index", "") or "").strip()
+    except Exception:
+        explicit = ""
+    if explicit:
+        return explicit
+    try:
+        return str(_NM_UE_DISPATCH_JOB_INDEX or "").strip()
+    except Exception:
+        return ""
 
 
 def _safe_log_console(logger: LoggerFn, message: str) -> None:
@@ -3523,11 +3553,31 @@ def run_directory_job(job_config: Dict[str, Any], raw_output_path: str, logger: 
     _ensure_parent(str(tmp_path))
     output_path = tmp_path.as_posix()
 
-    module = _load_legacy_module()
     directory = (job_config.get("directory") or "").strip().lower()
     target_count = int(job_config.get("target_valid_leads") or job_config.get("target_count") or 0)
     mode = (job_config.get("mode") or "").strip().lower()
     job_label = job_config.get("job_id") or job_config.get("slug") or directory or "unknown"
+    is_unearthed = "unearthed" in directory
+
+    if is_unearthed:
+        legacy_path = _legacy_module_path()
+        _safe_log(logger, f"[NM UE Dispatch] main_script_load_start path={legacy_path}")
+        main_load_start = time.time()
+        module = _load_legacy_module()
+        elapsed = time.time() - main_load_start
+        _safe_log(logger, f"[NM UE Dispatch] main_script_load_done elapsed_sec={elapsed:.3f}")
+        _nm_ue_dispatch_warn_if_slow(logger, "main_script_load", main_load_start)
+        _safe_log(logger, "[NM UE Dispatch] scraper_resolve_start")
+        resolve_start = time.time()
+        scraper_found = 1 if callable(getattr(module, "scrape_website", None)) else 0
+        resolve_elapsed = time.time() - resolve_start
+        _safe_log(
+            logger,
+            f"[NM UE Dispatch] scraper_resolve_done found={scraper_found} elapsed_sec={resolve_elapsed:.3f}",
+        )
+        _nm_ue_dispatch_warn_if_slow(logger, "scraper_resolve", resolve_start)
+    else:
+        module = _load_legacy_module()
 
     _safe_log(logger, f"[Directory] Running job for directory={directory} slug={job_config.get('slug', '')} job_id={job_config.get('job_id', '')}")
 
@@ -3535,7 +3585,10 @@ def run_directory_job(job_config: Dict[str, Any], raw_output_path: str, logger: 
     success = False
 
     try:
-        if "unearthed" in directory:
+        if is_unearthed:
+            scrape_call_start = time.time()
+            dispatch_job_index = _nm_ue_dispatch_job_index(job_config)
+            _safe_log(logger, f"[NM UE Dispatch] scrape_call_start job_index={dispatch_job_index} source=unearthed")
             # Try full Unearthed pipeline with contact/email pass first.
             try:
                 full_csv = _run_unearthed_full_pipeline(job_config, output_path, module, logger)
@@ -3563,6 +3616,12 @@ def run_directory_job(job_config: Dict[str, Any], raw_output_path: str, logger: 
                 finalize_result = _finalize_tmp_csv(tmp_path, final_path)
                 result_path = str(finalize_result.final_path)
                 success = True
+            scrape_elapsed = time.time() - scrape_call_start
+            _safe_log(
+                logger,
+                f"[NM UE Dispatch] scrape_call_returned job_index={dispatch_job_index} elapsed_sec={scrape_elapsed:.3f}",
+            )
+            _nm_ue_dispatch_warn_if_slow(logger, "scrape_call", scrape_call_start)
 
         elif directory == "spotify":
             params = {

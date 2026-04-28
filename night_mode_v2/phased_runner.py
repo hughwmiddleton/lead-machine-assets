@@ -7,6 +7,7 @@ existing v1 job execution helpers without altering their behaviour.
 import hashlib
 import json
 import os
+import time
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
@@ -18,6 +19,24 @@ from night_mode_v2.schema_registry import validate_schema
 
 import night_mode_runner
 import pipeline_runner
+
+
+def _nm_ue_dispatch_log(message: str) -> None:
+    if not message:
+        return
+    try:
+        print(message, flush=True)
+    except Exception:
+        pass
+
+
+def _nm_ue_dispatch_warn_if_slow(step: str, start_time: float) -> None:
+    try:
+        elapsed = time.time() - float(start_time)
+    except Exception:
+        return
+    if elapsed > 10:
+        _nm_ue_dispatch_log(f"[NM UE Dispatch][WARN] slow_step step={step} elapsed_sec={elapsed:.3f}")
 
 
 def _ensure_manifest_skeleton(manifest: Dict[str, Any], run_dir: str, cfg_hash: str) -> Dict[str, Any]:
@@ -87,7 +106,18 @@ def _write_job_status(job_dir: str, payload: Dict[str, Any]) -> None:
 
 
 def run_seed_phase(config_path: str, run_dir: str, resume: bool = False) -> Dict[str, Any]:
+    config_load_start = time.time()
     config = _load_config(config_path)
+    config_jobs = config.get("jobs", []) or []
+    if any("unearthed" in str(job.get("directory") or "").strip().lower() for job in config_jobs if isinstance(job, dict)):
+        _nm_ue_dispatch_log(
+            "[NM UE Dispatch] config_loaded "
+            f"jobs={len(config_jobs)} "
+            f"export_mode={config.get('export_mode', '')} "
+            "phased=1 "
+            f"run_root={run_dir}"
+        )
+        _nm_ue_dispatch_warn_if_slow("config_load", config_load_start)
     cfg_hash = config_hash(config)
     manifest_path = os.path.join(run_dir, "run_manifest_v2.json")
 
@@ -104,17 +134,31 @@ def run_seed_phase(config_path: str, run_dir: str, resume: bool = False) -> Dict
 
     os.makedirs(run_dir, exist_ok=True)
 
-    jobs = config.get("jobs", []) or []
+    jobs = config_jobs
     total_jobs = len(jobs)
     completed_jobs = 0
     failed_jobs = 0
 
     for idx, job in enumerate(jobs):
         job_id = job.get("job_id") or job.get("id") or f"job_{idx + 1}"
+        directory = str(job.get("directory") or "").strip().lower()
+        is_unearthed = "unearthed" in directory
         job_dir = os.path.join(run_dir, job_id)
         os.makedirs(job_dir, exist_ok=True)
         raw_csv = os.path.join(job_dir, "raw.csv")
         raw_tmp = os.path.join(job_dir, "raw.tmp.csv")
+        if is_unearthed:
+            _nm_ue_dispatch_log(
+                "[NM UE Dispatch] job_entry "
+                f"job_index={idx} "
+                f"source={directory} "
+                f"output_dir={job_dir} "
+                f"scrape_count={job.get('target_valid_leads', job.get('target_count', job.get('max_results', job.get('max_artists', ''))))} "
+                f"use_unearthed_url_index={job.get('use_unearthed_url_index', '')} "
+                f"manual_start={job.get('manual_start', job.get('unearthed_manual_start', ''))} "
+                f"resume_mode={job.get('resume_mode', job.get('unearthed_resume_mode', ''))}"
+            )
+        job_status_start = time.time()
         _write_job_status(
             job_dir,
             {
@@ -126,6 +170,12 @@ def run_seed_phase(config_path: str, run_dir: str, resume: bool = False) -> Dict
                 "error": "",
             },
         )
+        if is_unearthed:
+            elapsed = time.time() - job_status_start
+            _nm_ue_dispatch_log(
+                f"[NM UE Dispatch] job_status_written path={_job_status_path(job_dir)} elapsed_sec={elapsed:.3f}"
+            )
+            _nm_ue_dispatch_warn_if_slow("job_status_write", job_status_start)
         if os.path.exists(raw_tmp):
             try:
                 os.remove(raw_tmp)
@@ -175,9 +225,30 @@ def run_seed_phase(config_path: str, run_dir: str, resume: bool = False) -> Dict
         else:
             error_msg = ""
             try:
+                if is_unearthed:
+                    _nm_ue_dispatch_log(f"[NM UE Dispatch] unearthed_dispatch_selected job_index={idx} phased=1")
+                    _nm_ue_dispatch_log(f"[NM UE Dispatch] phased_setup_start job_index={idx}")
+                    phased_setup_start = time.time()
                 runtime_job = _build_seed_runtime_job(job, job_id=job_id, raw_csv=raw_csv)
+                if is_unearthed:
+                    phased_elapsed = time.time() - phased_setup_start
+                    _nm_ue_dispatch_log(f"[NM UE Dispatch] phased_setup_done elapsed_sec={phased_elapsed:.3f}")
+                    _nm_ue_dispatch_warn_if_slow("phased_setup", phased_setup_start)
                 try:
-                    pipeline_runner.run_directory_job(runtime_job, raw_csv, logger=None)
+                    previous_dispatch_job_index = getattr(pipeline_runner, "_NM_UE_DISPATCH_JOB_INDEX", "")
+                    if is_unearthed:
+                        try:
+                            pipeline_runner._NM_UE_DISPATCH_JOB_INDEX = str(idx)
+                        except Exception:
+                            pass
+                    try:
+                        pipeline_runner.run_directory_job(runtime_job, raw_csv, logger=None)
+                    finally:
+                        if is_unearthed:
+                            try:
+                                pipeline_runner._NM_UE_DISPATCH_JOB_INDEX = previous_dispatch_job_index
+                            except Exception:
+                                pass
                 except TypeError:
                     night_mode_runner._process_job(
                         job=job,
@@ -185,6 +256,7 @@ def run_seed_phase(config_path: str, run_dir: str, resume: bool = False) -> Dict
                         resume=False,
                         stop_on_failure=False,
                         per_job_validate=False,
+                        job_index=idx,
                     )
                 pipeline_runner.ensure_final_raw_csv(raw_csv, job_id, logger=None)
             except Exception as exc:
