@@ -22,7 +22,10 @@ from fb_attribution import (  # noqa: E402
     FB_ATTEMPT_STATE_COL,
     FB_DEBUG_REASON_COL,
     FB_GATE_STATE_COL,
+    FB_NORMALIZED_TERMINAL_OUTCOME_COL,
+    FB_NORMALIZED_TERMINAL_REASON_COL,
     FB_OPPORTUNITY_STATE_COL,
+    FB_TERMINAL_REASON_COL,
     FB_WRITE_STATE_COL,
     ensure_fb_attribution_columns,
 )
@@ -37,6 +40,14 @@ ELIGIBLE_OPPORTUNITY_STATES = {
     "fb_opportunity_present",
     "fb_discovery_fallback_eligible",
 }
+
+DRIVER_ERROR_DETECTION_COLUMNS = (
+    FB_DEBUG_REASON_COL,
+    "FB_Status",
+    FB_TERMINAL_REASON_COL,
+    FB_NORMALIZED_TERMINAL_REASON_COL,
+    FB_NORMALIZED_TERMINAL_OUTCOME_COL,
+)
 
 RECOVERY_TRACE_COLUMNS = (
     "retry_attempted",
@@ -139,9 +150,12 @@ def _attempt_state_completed_success(row: Mapping[str, Any]) -> bool:
     )
 
 
+def _has_driver_error_marker(row: Mapping[str, Any]) -> bool:
+    return any("driver_error" in _cell(row.get(col, "")).lower() for col in DRIVER_ERROR_DETECTION_COLUMNS)
+
+
 def row_qualifies_for_recovery(row: Mapping[str, Any]) -> bool:
-    debug_reason = _cell(row.get(FB_DEBUG_REASON_COL, "")).lower()
-    if "driver_error" not in debug_reason:
+    if not _has_driver_error_marker(row):
         return False
     opportunity = _cell(row.get(FB_OPPORTUNITY_STATE_COL, "")).lower()
     if opportunity not in ELIGIBLE_OPPORTUNITY_STATES:

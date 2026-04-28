@@ -43,6 +43,35 @@ def test_selection_identifies_driver_error_with_fb_opportunity():
     assert row_qualifies_for_recovery(_base_row()) is True
 
 
+def test_selection_identifies_final_export_status_driver_error():
+    row = _base_row(FB_Status="driver_error", FB_Debug_Reason="")
+
+    assert row_qualifies_for_recovery(row) is True
+
+
+def test_selection_identifies_debug_reason_driver_error():
+    row = _base_row(FB_Status="", FB_Debug_Reason="driver_error")
+
+    assert row_qualifies_for_recovery(row) is True
+
+
+def test_selection_ignores_non_driver_terminal_status():
+    row = _base_row(FB_Status="pass_a_no_email_on_page", FB_Debug_Reason="")
+
+    assert row_qualifies_for_recovery(row) is False
+
+
+def test_selection_identifies_driver_error_in_terminal_fields():
+    for column in (
+        "FB_Terminal_Reason",
+        "FB_Normalized_Terminal_Reason",
+        "FB_Normalized_Terminal_Outcome",
+    ):
+        row = _base_row(FB_Status="", FB_Debug_Reason="", **{column: "driver_error"})
+
+        assert row_qualifies_for_recovery(row) is True
+
+
 def test_successful_retry_updates_fb_status_and_email():
     calls = []
 
