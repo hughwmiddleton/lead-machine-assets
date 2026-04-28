@@ -1865,6 +1865,38 @@ def test_explicit_fb_urls_canonicalized_and_deduped(monkeypatch) -> None:
     assert result.get("FB_Status"), "PASS A should still produce a status even without emails"
 
 
+def test_existing_email_short_circuits_before_fb_scrape_even_for_unearthed(monkeypatch) -> None:
+    enricher = night_mode_fb.NightModeFacebookEnricher(
+        legacy_module=None,
+        username="",
+        password="",
+        logger=None,
+        use_shared_session=False,
+    )
+    logs = []
+    enricher.logger = logs.append
+
+    def _fail_scrape(self, *args, **kwargs):  # noqa: ANN001
+        raise AssertionError("rows with existing usable email must not scrape Facebook")
+
+    monkeypatch.setattr(night_mode_fb.NightModeFacebookEnricher, "_scrape_single_fb_candidate", _fail_scrape)
+
+    row = {
+        "Artist Name": "Unearthed Has Email",
+        "Source Directory": "unearthed",
+        "__source_job": "job_unearthed",
+        "Email": "known@example.com",
+        "Email_All": "known@example.com",
+        "Facebook_URL": "https://facebook.com/unearthedhasemail",
+    }
+
+    result = enricher.enrich_row_with_facebook_night(row)
+
+    assert result["Email_All"] == "known@example.com"
+    assert result["FB_Status"] == "ok"
+    assert any("email_already_present" in msg for msg in logs)
+
+
 def test_explicit_fb_url_placeholders_rejected(monkeypatch) -> None:
     enricher = night_mode_fb.NightModeFacebookEnricher(
         legacy_module=None,

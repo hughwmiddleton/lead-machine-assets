@@ -1,0 +1,13 @@
+{
+  "current_status": "run_complete",
+  "elapsed_seconds": 0.030852794647216797,
+  "emails_found": 1,
+  "eta_seconds": 0,
+  "last_update_time": 1777335971.5233269,
+  "percentage": 100.0,
+  "phase": "complete",
+  "processed_rows": 0,
+  "run_id": "2026-04-28_102611",
+  "start_time": 1777335971.492474,
+  "total_rows": 1
+}

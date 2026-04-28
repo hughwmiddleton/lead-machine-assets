@@ -47,6 +47,7 @@ from source_scheduler import (
 )
 from email_provenance import merge_email_provenance_into_target
 from email_normalizer import filter_system_telemetry_emails, normalize_email_value
+from fb_email_skip_gate import row_has_usable_email_for_fb_skip
 
 try:
     import facebook_enrich  # type: ignore
@@ -1873,15 +1874,7 @@ def _clean_row_string(value: Any) -> str:
 
 
 def _row_has_usable_email_for_fb_skip(row: Dict[str, Any]) -> Tuple[bool, str]:
-    email_all = _clean_row_string((row or {}).get("Email_All", ""))
-    email_source = _clean_row_string((row or {}).get("Email Source", "")).lower()
-    suspect_email = _clean_row_string((row or {}).get("Suspect_Email", ""))
-    suspect_email_all = _clean_row_string((row or {}).get("Suspect_Email_All", ""))
-
-    quarantined_repeat = email_source == "quarantined (repeat email)"
-    suspect_present = bool(suspect_email or suspect_email_all)
-    has_email_effective = bool(email_all) and not quarantined_repeat and not suspect_present
-    return has_email_effective, email_all
+    return row_has_usable_email_for_fb_skip(row or {})
 
 
 def _raw_fb_value_for_log(value: Any) -> str:
@@ -10707,32 +10700,17 @@ class NightModeFacebookEnricher:
             return _finish(self._mark_row_checkpoint(result))
 
         artist_name = _clean_val(result.get("Artist Name", ""))
-        row_id = self._fb_driver_row_id(row=result, artist_name=artist_name, row_index=row_index)
         is_unearthed = self._is_unearthed_source(result)
-        explicit_fb_entrypoints = explicit_fb_entrypoint_urls_for_row(result)
-        share_runtime_fallback_urls = fb_share_runtime_fallback_urls_for_row(result)
-        share_runtime_fallback_present = bool(share_runtime_fallback_urls)
-        has_seeded_fb = explicit_fb_entrypoint_present_for_row(
-            result,
-            accepted_urls=explicit_fb_entrypoints,
-            share_runtime_fallback_urls=share_runtime_fallback_urls,
-        )
-        unearthed_fb_first_active = bool(is_unearthed and has_seeded_fb)
         skip_due_to_email, email_all_clean = _row_has_usable_email_for_fb_skip(result)
-        if skip_due_to_email and not unearthed_fb_first_active:
+        if skip_due_to_email:
             self.fb_rows_skipped["no_opportunity"] += 1
             _log(
                 self.logger,
-                f"[Night FB] Skipping row before FB scrape for artist='{artist_name or '<unknown>'}' because Email_All is already populated ({email_all_clean!r}).",
+                f"[Night FB] Skipping row before FB scrape for artist='{artist_name or '<unknown>'}' because email_already_present ({email_all_clean!r}).",
             )
             if not result.get("FB_Status"):
                 result["FB_Status"] = "ok"
             return _finish(result, attempted=False)
-        if skip_due_to_email and unearthed_fb_first_active:
-            _log(
-                self.logger,
-                f"[Unearthed Path] forcing FB extraction despite existing email artist='{artist_name or '<unknown>'}'",
-            )
         location = _clean_val(result.get("Location", ""))
         song_title = _clean_val(
             result.get("Song Title", "")

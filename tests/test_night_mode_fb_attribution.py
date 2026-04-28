@@ -193,7 +193,7 @@ def test_no_facebook_url_without_identity_anchor_skips_night_discovery(monkeypat
     assert helper.calls == 0
     assert df_out.loc[0, FB_OPPORTUNITY_STATE_COL] == "no_fb_opportunity"
     assert df_out.loc[0, FB_GATE_STATE_COL] == "skipped_no_identity_anchor"
-    assert df_out.loc[0, FB_ATTEMPT_STATE_COL] == ""
+    assert df_out.loc[0, FB_ATTEMPT_STATE_COL] == "fb_not_attempted"
     assert df_out.loc[0, FB_WRITE_STATE_COL] == "fb_no_email_written"
 
 
@@ -423,7 +423,7 @@ def test_existing_email_sets_skip_gate_attribution(monkeypatch, tmp_path):
     assert df_out.loc[0, FB_WRITE_STATE_COL] == "fb_no_email_written"
 
 
-def test_unearthed_existing_email_with_explicit_fb_still_runs(monkeypatch, tmp_path):
+def test_unearthed_existing_email_with_explicit_fb_is_email_gated(monkeypatch, tmp_path):
     helper = StaticFBHelper(
         {
             "FB_Status": "pass_a_no_email_on_page",
@@ -447,10 +447,10 @@ def test_unearthed_existing_email_with_explicit_fb_still_runs(monkeypatch, tmp_p
         helper,
     )
 
-    assert helper.calls == 1
+    assert helper.calls == 0
     assert df_out.loc[0, FB_OPPORTUNITY_STATE_COL] in {"", "fb_opportunity_present"}
-    assert df_out.loc[0, FB_GATE_STATE_COL] == ""
-    assert df_out.loc[0, FB_ATTEMPT_STATE_COL] == "attempted_fb_no_email_on_page"
+    assert df_out.loc[0, FB_GATE_STATE_COL] == "skipped_existing_usable_email"
+    assert df_out.loc[0, FB_ATTEMPT_STATE_COL] == "fb_not_attempted"
     assert df_out.loc[0, FB_WRITE_STATE_COL] == "fb_no_email_written"
 
 

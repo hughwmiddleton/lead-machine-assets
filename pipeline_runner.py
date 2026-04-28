@@ -48,7 +48,12 @@ from email_provenance import (
     normalize_email_key,
     parse_email_provenance_json,
 )
-from email_normalizer import filter_system_telemetry_emails, is_obvious_placeholder_email
+from email_normalizer import filter_system_telemetry_emails
+from fb_email_skip_gate import (
+    is_quarantined_repeat_email_row,
+    row_has_usable_email_for_fb_skip,
+    should_skip_row_due_to_email_for_fb,
+)
 from fb_attribution import (
     FB_ATTEMPT_STATE_COL,
     FB_ATTRIBUTION_COLUMNS,
@@ -94,6 +99,7 @@ from night_mode_fb import (
     FacebookDriverError,
     NightFBRunState,
     NightModeFacebookEnricher,
+    classify_explicit_fb_intake,
     explicit_fb_entrypoint_present_for_row,
     fb_share_runtime_fallback_urls_for_row,
     close_night_fb_run_state,
@@ -3767,14 +3773,7 @@ def _has_facebook_clue(row: pd.Series) -> bool:
     return bool(name)
 
 def _is_quarantined_repeat(row: pd.Series) -> bool:
-    email_source = _cell_str(row.get("Email Source"))
-    suspect_email = _cell_str(row.get("Suspect_Email"))
-    suspect_email_all = _cell_str(row.get("Suspect_Email_All"))
-    email_val = _cell_str(row.get("Email"))
-    email_all_val = _cell_str(row.get("Email_All"))
-    suspect_present = bool(suspect_email or suspect_email_all)
-    cleared_email_fields = (email_val == "" and email_all_val == "")
-    return email_source == "Quarantined (repeat email)" or (cleared_email_fields and suspect_present)
+    return is_quarantined_repeat_email_row(row)
 
 
 def _is_unearthed_source_row(row: pd.Series) -> bool:
@@ -3789,29 +3788,7 @@ def _is_unearthed_source_row(row: pd.Series) -> bool:
 def _should_skip_row_due_to_email(
     row: pd.Series, skip_rows_with_email: bool = True, logger: LoggerFn = _LOGGER
 ) -> bool:
-    email_all_clean = str(row.get("Email_All") or "").strip()
-    suspect_email = _cell_str(row.get("Suspect_Email"))
-    suspect_email_all = _cell_str(row.get("Suspect_Email_All"))
-    suspect_present = bool(suspect_email or suspect_email_all)
-    normalized_emails = normalize_emails(email_all_clean)
-    has_email_raw = bool(email_all_clean)
-    has_non_placeholder_email = any(not is_obvious_placeholder_email(email) for email in normalized_emails)
-    if has_email_raw and not normalized_emails:
-        has_non_placeholder_email = True
-    quarantined_repeat = _is_quarantined_repeat(row)
-    # Suspect email flags override Email_All presence; treat as no usable email.
-    has_email_effective = has_non_placeholder_email and not quarantined_repeat and not suspect_present
-
-    if quarantined_repeat and has_email_raw:
-        row_id = row.get("__row_id", row.name)
-        artist = _cell_str(row.get("Artist Name"))
-        _safe_log(
-            logger,
-            f"[FB SkipGate] allowing quarantined repeat-email row {row_id} ('{artist}') despite Email_All present",
-        )
-        return False
-
-    return bool(skip_rows_with_email and has_email_effective)
+    return should_skip_row_due_to_email_for_fb(row, skip_rows_with_email, logger)
 
 
 def _night_fb_has_upstream_identity_anchor(row: pd.Series) -> bool:
@@ -4439,28 +4416,23 @@ def run_facebook_global_pass_nightmode(
 
             artist_label = row.get("Artist Name", "") or row.get("Artist", "") or "<unknown>"
 
-            email_all_val = row.get("Email_All", "")
-            if pd.isna(email_all_val):
-                email_all_val = ""
-            email_all_clean = str(email_all_val or "").strip()
-            normalized_emails = normalize_emails(email_all_clean)
-            has_email_raw = bool(email_all_clean)
-            has_non_placeholder_email = any(not is_obvious_placeholder_email(email) for email in normalized_emails)
-            if has_email_raw and not normalized_emails:
-                has_non_placeholder_email = True
-            quarantined_repeat = _is_quarantined_repeat(row)
-            has_email_effective = has_non_placeholder_email and not quarantined_repeat
+            has_email_effective, email_all_clean = row_has_usable_email_for_fb_skip(row)
 
             fb_status_val_raw = str(row.get("FB_Status", "") or "").strip()
             fb_status_val = fb_status_val_raw.lower()
 
-            should_skip_due_to_email = _should_skip_row_due_to_email(row, skip_rows_with_email, logger)
             terminal_statuses = {"no_candidates", "unearthed_no_emails"}
             row_payload = row.to_dict()
             explicit_fb_entrypoints = explicit_fb_entrypoint_urls_for_row(row_payload)
             share_runtime_fallback_urls = fb_share_runtime_fallback_urls_for_row(row_payload)
             share_runtime_fallback = bool(share_runtime_fallback_urls)
             canonical_facebook_url = explicit_fb_entrypoints[0] if explicit_fb_entrypoints else ""
+            explicit_fb_intake = classify_explicit_fb_intake(
+                row_payload,
+                accepted_urls=explicit_fb_entrypoints,
+                share_runtime_fallback_urls=share_runtime_fallback_urls,
+            )
+            has_promotable_explicit_fb_entrypoint = bool(explicit_fb_intake.promotion_expected_missing_canonical)
             if canonical_facebook_url and "Facebook_URL" in df.columns and _cell_str(df.at[idx, "Facebook_URL"]) != canonical_facebook_url:
                 df.at[idx, "Facebook_URL"] = canonical_facebook_url
             has_canonical_facebook_url = bool(canonical_facebook_url)
@@ -4468,30 +4440,30 @@ def run_facebook_global_pass_nightmode(
                 row_payload,
                 accepted_urls=explicit_fb_entrypoints,
                 share_runtime_fallback_urls=share_runtime_fallback_urls,
-            )
+            ) or has_promotable_explicit_fb_entrypoint
             is_unearthed_source = _is_unearthed_source_row(row)
-            unearthed_fb_first_active = bool(
-                is_unearthed_source and (has_canonical_facebook_url or has_explicit_fb_entrypoint)
-            )
-            if should_skip_due_to_email and unearthed_fb_first_active:
-                _safe_log_console(
-                    logger,
-                    f"[Unearthed Path] forcing FB extraction despite existing email row={idx} artist={artist_label!r}",
-                )
-            effective_skip_due_to_email = bool(should_skip_due_to_email and not unearthed_fb_first_active)
+            effective_skip_due_to_email = bool(has_email_effective)
             final_fb_statuses = {"login_redirect", "no_candidates", "ok", "found"} | terminal_statuses
             has_upstream_identity_anchor = _night_fb_has_upstream_identity_anchor(row)
-            should_run_night_fb = (
-                (not has_email_effective) or unearthed_fb_first_active
-            ) and (fb_status_val not in final_fb_statuses)
+            fb_status_allows_run = fb_status_val not in final_fb_statuses
             unearthed_no_url_discovery_eligible = bool(
                 is_unearthed_source
                 and (not has_canonical_facebook_url)
                 and (not has_explicit_fb_entrypoint)
-                and should_run_night_fb
+                and fb_status_allows_run
                 and not effective_skip_due_to_email
                 and fb_status_val not in terminal_statuses
             )
+            fb_identity_path_eligible = bool(
+                has_canonical_facebook_url
+                or has_explicit_fb_entrypoint
+                or has_upstream_identity_anchor
+                or unearthed_no_url_discovery_eligible
+            )
+            if has_email_effective:
+                should_run_night_fb = False
+            else:
+                should_run_night_fb = fb_status_allows_run and fb_identity_path_eligible
             discovery_fallback_eligible = bool(
                 (not has_canonical_facebook_url)
                 and (not has_explicit_fb_entrypoint)
@@ -4508,12 +4480,7 @@ def run_facebook_global_pass_nightmode(
                 should_run_night_fb
                 and not effective_skip_due_to_email
                 and fb_status_val not in terminal_statuses
-                and (
-                    has_canonical_facebook_url
-                    or has_explicit_fb_entrypoint
-                    or has_upstream_identity_anchor
-                    or unearthed_no_url_discovery_eligible
-                )
+                and fb_identity_path_eligible
             )
             _safe_log_console(
                 logger,
@@ -4532,7 +4499,7 @@ def run_facebook_global_pass_nightmode(
                     df.at[idx, FB_WRITE_STATE_COL] = "fb_no_email_written"
                 _safe_log_console(
                     logger,
-                    f"[Night FB] Skipping row {idx} ('{artist_label}') – email already present (Email_All='{email_all_clean}').",
+                    f"[Night FB] Skipping row {idx} ('{artist_label}') - email_already_present (Email_All='{email_all_clean}').",
                 )
                 skip_row = True
 
