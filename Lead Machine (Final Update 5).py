@@ -1585,6 +1585,122 @@ def _load_unearthed_persistent_cursor() -> str | None:
     return cursor_value or None
 
 
+def _canonical_unearthed_index_identity(index_path: str | None = None) -> str:
+    return os.path.abspath(str(index_path or _unearthed_artist_url_index_path()).strip())
+
+
+def _load_unearthed_index_cursor(index_path: str | None = None) -> tuple[dict | None, str]:
+    expected_index_path = _canonical_unearthed_index_identity(index_path)
+    try:
+        with open(_unearthed_cursor_path(), "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except FileNotFoundError:
+        return None, "missing_file"
+    except json.JSONDecodeError:
+        return None, "corrupted_state"
+    except Exception:
+        return None, "unreadable_state"
+    if not isinstance(payload, dict):
+        return None, "corrupted_state"
+    cursor_index_path = str(payload.get("index_file_path") or "").strip()
+    if not cursor_index_path:
+        return None, "missing_index_file_path"
+    if os.path.abspath(cursor_index_path) != expected_index_path:
+        return None, "index_path_mismatch"
+    try:
+        last_position = int(payload.get("last_position"))
+    except Exception:
+        return None, "invalid_position"
+    if last_position < 0:
+        return None, "invalid_position"
+    last_url = str(payload.get("last_url") or "").strip()
+    if not last_url:
+        return None, "missing_last_url"
+    return {
+        "index_file_path": expected_index_path,
+        "last_position": last_position,
+        "last_url": last_url,
+        "timestamp": str(payload.get("timestamp") or "").strip(),
+        "batch_size": payload.get("batch_size"),
+    }, ""
+
+
+def _write_unearthed_index_cursor(
+    index_path: str | None,
+    last_position: int,
+    last_url: str | None,
+    batch_size: int,
+) -> None:
+    cursor_value = last_url.strip() if isinstance(last_url, str) else ""
+    if not cursor_value:
+        return
+    payload = {
+        "unearthed_persistent_cursor": cursor_value,
+        "index_file_path": _canonical_unearthed_index_identity(index_path),
+        "last_position": int(last_position),
+        "last_url": cursor_value,
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+        "batch_size": int(batch_size),
+    }
+    try:
+        cursor_path = _unearthed_cursor_path()
+        os.makedirs(os.path.dirname(cursor_path), exist_ok=True)
+        tmp_path = f"{cursor_path}.tmp"
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, cursor_path)
+    except Exception as exc:
+        print(f"[UE Index Cursor] persist failed reason={exc.__class__.__name__}: {exc}")
+
+
+def _select_unearthed_index_profile_urls(
+    indexed_urls: list[str],
+    index_path: str | None,
+    max_artists: int,
+    resume_mode: str,
+) -> tuple[list[str], int, int, int]:
+    index_rows = len(indexed_urls)
+    batch_size = max(int(max_artists or 0), 0)
+    normalized_mode = str(resume_mode or "auto").strip().lower()
+    if normalized_mode not in {"auto", "cursor", "fresh", "selected"}:
+        normalized_mode = "auto"
+
+    start = 0
+    if normalized_mode == "cursor":
+        cursor, reason = _load_unearthed_index_cursor(index_path)
+        if cursor is None:
+            print("[UE Index Cursor] no valid cursor found → starting at 0")
+            print(f"[UE Index Cursor] ignored cursor reason={reason}")
+        else:
+            last_position = int(cursor["last_position"])
+            last_url = str(cursor["last_url"] or "").strip()
+            if last_position >= index_rows:
+                print("[UE Index Cursor] no valid cursor found → starting at 0")
+                print("[UE Index Cursor] ignored cursor reason=position_out_of_bounds")
+            elif not _unearthed_profile_urls_match(indexed_urls[last_position], last_url):
+                print("[UE Index Cursor] no valid cursor found → starting at 0")
+                print("[UE Index Cursor] ignored cursor reason=last_url_mismatch")
+            else:
+                start = last_position + 1
+
+    end_exclusive = min(start + batch_size, index_rows) if batch_size > 0 else start
+    selected_urls = indexed_urls[start:end_exclusive]
+    end_inclusive = end_exclusive - 1
+    print(
+        f"[UE Index Cursor] mode={normalized_mode} index_rows={index_rows} "
+        f"start={start} end={end_inclusive} count={len(selected_urls)}"
+    )
+    if selected_urls:
+        _write_unearthed_index_cursor(index_path, end_inclusive, selected_urls[-1], len(selected_urls))
+        print(
+            f"[UE Index Cursor] persisted last_position={end_inclusive} "
+            f"last_url={selected_urls[-1]}"
+        )
+    return selected_urls, start, end_inclusive, len(selected_urls)
+
+
 def _write_unearthed_persistent_cursor(profile_url: str | None) -> None:
     cursor_value = profile_url.strip() if isinstance(profile_url, str) else None
     if not cursor_value:
@@ -1892,11 +2008,17 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
         search_exhausted = False
         if use_url_index:
             indexed_urls = load_unearthed_indexed_artist_urls(index_path, require_existing=index_path_explicit)
+            resume_mode = str(job_config.get("unearthed_resume_mode", "auto") or "auto").strip().lower()
+            if resume_mode not in {"auto", "cursor", "fresh", "selected"}:
+                resume_mode = "auto"
+            indexed_urls, _index_start, _index_end, _index_count = _select_unearthed_index_profile_urls(
+                indexed_urls,
+                index_path,
+                max_artists,
+                resume_mode,
+            )
             for indexed_url in indexed_urls:
                 _append_unearthed_profile_url(ordered_profile_urls, seen_profile_urls, indexed_url)
-            if max_artists and max_artists > 0:
-                ordered_profile_urls = ordered_profile_urls[:max_artists]
-                seen_profile_urls = set(ordered_profile_urls)
             target_profile_url = None
             resume_enabled = False
         if resume_enabled:

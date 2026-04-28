@@ -111,7 +111,10 @@ def _run_fake_unearthed_scrape(
     monkeypatch.setattr(module, "_load_unearthed_persistent_cursor", cursor_loader)
     monkeypatch.setattr(module, "_write_unearthed_persistent_cursor", cursor_writer)
 
-    job_config = {"unearthed_url_index_path": str(tmp_path / "unearthed_artist_url_index.csv")}
+    index_path = tmp_path / "unearthed_artist_url_index.csv"
+    if not index_path.exists():
+        module._write_empty_unearthed_artist_url_index(str(index_path))
+    job_config = {"unearthed_url_index_path": str(index_path)}
     effective_resume_mode = resume_mode if resume_mode is not None else ("cursor" if target_profile_url else None)
     if effective_resume_mode:
         job_config["unearthed_resume_mode"] = effective_resume_mode
