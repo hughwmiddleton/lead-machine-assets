@@ -1935,13 +1935,23 @@ def _safe_log(logger: LoggerFn, message: str) -> None:
     _LOGGER.info(message)
 
 
+def _nm_ue_dispatch_log(logger: LoggerFn, message: str) -> None:
+    if not message:
+        return
+    try:
+        print(message, flush=True)
+        _safe_log(logger, message)
+    except Exception:
+        pass
+
+
 def _nm_ue_dispatch_warn_if_slow(logger: LoggerFn, step: str, start_time: float) -> None:
     try:
         elapsed = time.time() - float(start_time)
     except Exception:
         return
     if elapsed > 10:
-        _safe_log(
+        _nm_ue_dispatch_log(
             logger,
             f"[NM UE Dispatch][WARN] slow_step step={step} elapsed_sec={elapsed:.3f}",
         )
@@ -3561,17 +3571,17 @@ def run_directory_job(job_config: Dict[str, Any], raw_output_path: str, logger: 
 
     if is_unearthed:
         legacy_path = _legacy_module_path()
-        _safe_log(logger, f"[NM UE Dispatch] main_script_load_start path={legacy_path}")
+        _nm_ue_dispatch_log(logger, f"[NM UE Dispatch] main_script_load_start path={legacy_path}")
         main_load_start = time.time()
         module = _load_legacy_module()
         elapsed = time.time() - main_load_start
-        _safe_log(logger, f"[NM UE Dispatch] main_script_load_done elapsed_sec={elapsed:.3f}")
+        _nm_ue_dispatch_log(logger, f"[NM UE Dispatch] main_script_load_done elapsed_sec={elapsed:.3f}")
         _nm_ue_dispatch_warn_if_slow(logger, "main_script_load", main_load_start)
-        _safe_log(logger, "[NM UE Dispatch] scraper_resolve_start")
+        _nm_ue_dispatch_log(logger, "[NM UE Dispatch] scraper_resolve_start")
         resolve_start = time.time()
         scraper_found = 1 if callable(getattr(module, "scrape_website", None)) else 0
         resolve_elapsed = time.time() - resolve_start
-        _safe_log(
+        _nm_ue_dispatch_log(
             logger,
             f"[NM UE Dispatch] scraper_resolve_done found={scraper_found} elapsed_sec={resolve_elapsed:.3f}",
         )
@@ -3588,7 +3598,7 @@ def run_directory_job(job_config: Dict[str, Any], raw_output_path: str, logger: 
         if is_unearthed:
             scrape_call_start = time.time()
             dispatch_job_index = _nm_ue_dispatch_job_index(job_config)
-            _safe_log(logger, f"[NM UE Dispatch] scrape_call_start job_index={dispatch_job_index} source=unearthed")
+            _nm_ue_dispatch_log(logger, f"[NM UE Dispatch] scrape_call_start job_index={dispatch_job_index} source=unearthed")
             # Try full Unearthed pipeline with contact/email pass first.
             try:
                 full_csv = _run_unearthed_full_pipeline(job_config, output_path, module, logger)
@@ -3617,7 +3627,7 @@ def run_directory_job(job_config: Dict[str, Any], raw_output_path: str, logger: 
                 result_path = str(finalize_result.final_path)
                 success = True
             scrape_elapsed = time.time() - scrape_call_start
-            _safe_log(
+            _nm_ue_dispatch_log(
                 logger,
                 f"[NM UE Dispatch] scrape_call_returned job_index={dispatch_job_index} elapsed_sec={scrape_elapsed:.3f}",
             )

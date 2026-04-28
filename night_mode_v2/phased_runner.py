@@ -21,11 +21,13 @@ import night_mode_runner
 import pipeline_runner
 
 
-def _nm_ue_dispatch_log(message: str) -> None:
+def _nm_ue_dispatch_log(message: str, logger: Optional[Any] = None) -> None:
     if not message:
         return
     try:
         print(message, flush=True)
+        if logger:
+            logger.info(message)
     except Exception:
         pass
 

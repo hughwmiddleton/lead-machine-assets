@@ -1,12 +1,12 @@
 {
-  "current_source": "unearthed",
+  "current_status": "night_mode_start",
   "elapsed_seconds": 0.0,
   "eta_seconds": null,
-  "last_update_time": 1777353337.356553,
-  "percentage": 0.0,
-  "phase": "processing",
+  "last_update_time": 1777356114.4395058,
+  "percentage": null,
+  "phase": "discovery",
   "processed_rows": 0,
-  "run_id": "job_unearthed_1",
-  "start_time": 1777353337.356553,
-  "total_rows": 1500
+  "run_id": "2026-04-28_160154",
+  "start_time": 1777356114.4395058,
+  "total_rows": null
 }

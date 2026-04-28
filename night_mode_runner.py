@@ -294,6 +294,7 @@ def _nm_ue_dispatch_log(logger: Optional[logging.Logger], message: str) -> None:
     if not message:
         return
     try:
+        print(message, flush=True)
         if logger is not None:
             logger.info(message)
         else:
