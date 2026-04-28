@@ -153,6 +153,109 @@ NIGHT_MODE_RUN_SUMMARY_FILENAME = "run_summary.json"
 NIGHT_MODE_RUN_SUMMARY_PLACEHOLDER = "No runs detected yet.\nRun Lead Machine to generate results."
 LEAD_VAULT_UI_STATE_FILENAME = "lead_vault_ui_state.json"
 
+LM_SPACING_ROW = 12
+LM_SPACING_SECTION = 20
+LM_PADDING_CONTAINER = 16
+LM_PADDING_SECTION = 14
+LM_LABEL_COLUMN_WIDTH = 210
+LM_CONTROL_MIN_HEIGHT = 34
+LM_BUTTON_MIN_HEIGHT = 36
+LM_PROGRESS_MIN_HEIGHT = 22
+LM_LOG_MIN_HEIGHT = 180
+LM_TABLE_MIN_HEIGHT = 180
+
+
+def _lm_apply_control_sizing(widget: QtWidgets.QWidget) -> QtWidgets.QWidget:
+    if isinstance(widget, QtWidgets.QPushButton):
+        widget.setMinimumHeight(LM_BUTTON_MIN_HEIGHT)
+    elif isinstance(
+        widget,
+        (
+            QtWidgets.QLineEdit,
+            QtWidgets.QComboBox,
+            QtWidgets.QSpinBox,
+            QtWidgets.QDoubleSpinBox,
+        ),
+    ):
+        widget.setMinimumHeight(LM_CONTROL_MIN_HEIGHT)
+    elif isinstance(widget, QtWidgets.QCheckBox):
+        widget.setMinimumHeight(LM_CONTROL_MIN_HEIGHT)
+    elif isinstance(widget, QtWidgets.QProgressBar):
+        widget.setMinimumHeight(LM_PROGRESS_MIN_HEIGHT)
+    return widget
+
+
+def _lm_row(label_text: str, *widgets: QtWidgets.QWidget, add_stretch: bool = False) -> QtWidgets.QHBoxLayout:
+    row = QtWidgets.QHBoxLayout()
+    row.setContentsMargins(0, 0, 0, 0)
+    row.setSpacing(LM_SPACING_ROW)
+    label = QtWidgets.QLabel(label_text)
+    label.setFixedWidth(LM_LABEL_COLUMN_WIDTH)
+    label.setWordWrap(True)
+    row.addWidget(label)
+    for index, widget in enumerate(widgets):
+        _lm_apply_control_sizing(widget)
+        stretch = 1 if index == 0 and isinstance(widget, (QtWidgets.QLineEdit, QtWidgets.QComboBox, QtWidgets.QPlainTextEdit, QtWidgets.QTextEdit, QtWidgets.QTableWidget)) else 0
+        row.addWidget(widget, stretch)
+    if add_stretch:
+        row.addStretch()
+    return row
+
+
+def _lm_row_with_label_widget(label: QtWidgets.QLabel, *widgets: QtWidgets.QWidget, add_stretch: bool = False) -> QtWidgets.QHBoxLayout:
+    row = QtWidgets.QHBoxLayout()
+    row.setContentsMargins(0, 0, 0, 0)
+    row.setSpacing(LM_SPACING_ROW)
+    label.setFixedWidth(LM_LABEL_COLUMN_WIDTH)
+    label.setWordWrap(True)
+    row.addWidget(label)
+    for index, widget in enumerate(widgets):
+        _lm_apply_control_sizing(widget)
+        stretch = 1 if index == 0 and isinstance(widget, (QtWidgets.QLineEdit, QtWidgets.QComboBox, QtWidgets.QPlainTextEdit, QtWidgets.QTextEdit, QtWidgets.QTableWidget)) else 0
+        row.addWidget(widget, stretch)
+    if add_stretch:
+        row.addStretch()
+    return row
+
+
+def _lm_control_row(*widgets: QtWidgets.QWidget, add_stretch: bool = True) -> QtWidgets.QHBoxLayout:
+    return _lm_row("", *widgets, add_stretch=add_stretch)
+
+
+def _lm_section(title: str) -> tuple[QtWidgets.QGroupBox, QtWidgets.QVBoxLayout]:
+    group = QtWidgets.QGroupBox(title)
+    layout = QtWidgets.QVBoxLayout()
+    layout.setContentsMargins(
+        LM_PADDING_SECTION,
+        LM_PADDING_SECTION,
+        LM_PADDING_SECTION,
+        LM_PADDING_SECTION,
+    )
+    layout.setSpacing(LM_SPACING_ROW)
+    group.setLayout(layout)
+    return group, layout
+
+
+def _lm_scrolled_tab(tab: QtWidgets.QWidget, content_layout: QtWidgets.QVBoxLayout) -> None:
+    content_layout.setContentsMargins(
+        LM_PADDING_CONTAINER,
+        LM_PADDING_CONTAINER,
+        LM_PADDING_CONTAINER,
+        LM_PADDING_CONTAINER,
+    )
+    content_layout.setSpacing(LM_SPACING_SECTION)
+    content_layout.addStretch()
+    content = QtWidgets.QWidget()
+    content.setLayout(content_layout)
+    scroll_area = QtWidgets.QScrollArea()
+    scroll_area.setWidgetResizable(True)
+    scroll_area.setFrameShape(QtWidgets.QFrame.NoFrame)
+    scroll_area.setWidget(content)
+    outer_layout = QtWidgets.QVBoxLayout()
+    outer_layout.setContentsMargins(0, 0, 0, 0)
+    outer_layout.addWidget(scroll_area)
+    tab.setLayout(outer_layout)
+
 
 def _discover_latest_night_mode_run_dir(root: str) -> Optional[Path]:
     root_path = Path(root).expanduser()
@@ -11272,67 +11375,57 @@ class CampaignPrepTab(QtWidgets.QWidget):
 
     def _build_ui(self):
         layout = QtWidgets.QVBoxLayout()
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(10)
+        layout.setContentsMargins(
+            LM_PADDING_CONTAINER,
+            LM_PADDING_CONTAINER,
+            LM_PADDING_CONTAINER,
+            LM_PADDING_CONTAINER,
+        )
+        layout.setSpacing(LM_SPACING_SECTION)
 
-        input_row = QtWidgets.QHBoxLayout()
-        input_label = QtWidgets.QLabel("Master CSV:")
+        config_group, config_layout = _lm_section("Job Configuration")
         self.input_csv_edit = QtWidgets.QLineEdit()
         self.input_csv_edit.setPlaceholderText("Select enriched/master CSV.")
         self.input_csv_edit.textChanged.connect(lambda text: self._update_path_tooltip(self.input_csv_edit, text))
         input_browse = QtWidgets.QPushButton("Browse...")
         input_browse.clicked.connect(self._browse_input_csv)
-        input_row.addWidget(input_label)
-        input_row.addWidget(self.input_csv_edit)
-        input_row.addWidget(input_browse)
-        layout.addLayout(input_row)
+        config_layout.addLayout(_lm_row("Master CSV:", self.input_csv_edit, input_browse))
 
-        output_row = QtWidgets.QHBoxLayout()
-        output_label = QtWidgets.QLabel("Output folder:")
         self.output_dir_edit = QtWidgets.QLineEdit()
         self.output_dir_edit.setPlaceholderText("Select folder for campaign CSVs.")
         self.output_dir_edit.textChanged.connect(lambda text: self._update_path_tooltip(self.output_dir_edit, text))
         output_browse = QtWidgets.QPushButton("Browse...")
         output_browse.clicked.connect(self._browse_output_dir)
-        output_row.addWidget(output_label)
-        output_row.addWidget(self.output_dir_edit)
-        output_row.addWidget(output_browse)
-        layout.addLayout(output_row)
+        config_layout.addLayout(_lm_row("Output folder:", self.output_dir_edit, output_browse))
 
         self.split_emails_checkbox = QtWidgets.QCheckBox("Split multiple emails into separate rows")
         self.split_emails_checkbox.setChecked(False)
-        layout.addWidget(self.split_emails_checkbox)
+        config_layout.addLayout(_lm_control_row(self.split_emails_checkbox))
 
         self.remove_rows_without_emails_checkbox = QtWidgets.QCheckBox("Remove rows without emails")
         self.remove_rows_without_emails_checkbox.setChecked(False)
-        layout.addWidget(self.remove_rows_without_emails_checkbox)
+        config_layout.addLayout(_lm_control_row(self.remove_rows_without_emails_checkbox))
 
-        format_row = QtWidgets.QHBoxLayout()
-        format_label = QtWidgets.QLabel("Export format:")
         self.export_format_combo = QtWidgets.QComboBox()
         self.export_format_combo.addItem("Lead Machine / Full Export", "lead_machine_full")
         self.export_format_combo.addItem("Woodpecker", "woodpecker")
         self.export_format_combo.addItem("Input Headers / Custom", "input_headers")
         self.export_format_combo.setCurrentIndex(0)
-        format_row.addWidget(format_label)
-        format_row.addWidget(self.export_format_combo)
-        format_row.addStretch()
-        layout.addLayout(format_row)
+        config_layout.addLayout(_lm_row("Export format:", self.export_format_combo, add_stretch=True))
+        layout.addWidget(config_group)
 
-        controls = QtWidgets.QHBoxLayout()
+        output_group, output_layout = _lm_section("Run Output + Logs")
         self.generate_button = QtWidgets.QPushButton("Generate Campaign CSVs")
         self.generate_button.clicked.connect(self._generate_campaign_csvs)
-        controls.addWidget(self.generate_button)
-        controls.addStretch()
-        layout.addLayout(controls)
+        output_layout.addLayout(_lm_control_row(self.generate_button))
 
         self.summary_view = QtWidgets.QPlainTextEdit()
         self.summary_view.setReadOnly(True)
-        self.summary_view.setMinimumHeight(160)
+        self.summary_view.setMinimumHeight(LM_LOG_MIN_HEIGHT)
         self.summary_view.setPlaceholderText("Generated file summary will appear here.")
-        layout.addWidget(self.summary_view)
-        layout.addStretch()
-        self.setLayout(layout)
+        output_layout.addWidget(self.summary_view)
+        layout.addWidget(output_group)
+        _lm_scrolled_tab(self, layout)
 
     def _update_path_tooltip(self, widget: QtWidgets.QLineEdit, text: Optional[str] = None):
         tooltip_text = (text if text is not None else widget.text()).strip()
@@ -12399,79 +12492,80 @@ class CrossDirectoryEnricherTab(QtWidgets.QWidget):
 
     def _build_ui(self):
         layout = QtWidgets.QVBoxLayout()
+        files_group, files_layout = _lm_section("Job Configuration")
         self.seed_edit = self._add_file_row(
-            layout,
+            files_layout,
             "Seed CSV (Spotify):",
             "Select Spotify playlist CSV",
             required=True,
         )
         self.bandcamp_edit = self._add_file_row(
-            layout,
+            files_layout,
             "Bandcamp CSV:",
             "Optional Bandcamp directory CSV",
         )
         self.soundcloud_edit = self._add_file_row(
-            layout,
+            files_layout,
             "SoundCloud CSV:",
             "Optional SoundCloud directory CSV",
         )
         self.unearthed_edit = self._add_file_row(
-            layout,
+            files_layout,
             "Unearthed CSV:",
             "Optional Triple J Unearthed CSV",
         )
         self.lastfm_edit = self._add_file_row(
-            layout,
+            files_layout,
             "Last.fm CSV:",
             "Optional Last.fm directory CSV",
         )
+        layout.addWidget(files_group)
+
+        enrich_group, enrich_layout = _lm_section("Enrichment Controls")
         self.live_search_checkbox = QtWidgets.QCheckBox(
             "Try online directory search for unmatched artists"
         )
         self.live_search_checkbox.setChecked(True)
         self.live_search_checkbox.stateChanged.connect(self._toggle_live_controls)
-        layout.addWidget(self.live_search_checkbox)
+        enrich_layout.addLayout(_lm_control_row(self.live_search_checkbox))
         self.auto_validate_checkbox = QtWidgets.QCheckBox("Enable Origin Auto-Validate after this run")
         self.auto_validate_checkbox.setChecked(False)
-        layout.addWidget(self.auto_validate_checkbox)
-        live_layout = QtWidgets.QHBoxLayout()
-        live_label = QtWidgets.QLabel("Max live searches (0 = unlimited):")
+        enrich_layout.addLayout(_lm_control_row(self.auto_validate_checkbox))
         self.max_live_spin = QtWidgets.QSpinBox()
         self.max_live_spin.setRange(0, 1000)
         self.max_live_spin.setValue(50)
-        live_layout.addWidget(live_label)
-        live_layout.addWidget(self.max_live_spin)
-        live_layout.addStretch()
-        layout.addLayout(live_layout)
+        enrich_layout.addLayout(_lm_row("Max live searches (0 = unlimited):", self.max_live_spin, add_stretch=True))
+        layout.addWidget(enrich_group)
+
+        run_group, run_layout = _lm_section("Run Settings")
         self.start_button = QtWidgets.QPushButton("Start Enrichment")
         self.start_button.clicked.connect(self.start_enrichment)
-        layout.addWidget(self.start_button)
+        run_layout.addLayout(_lm_control_row(self.start_button))
+        layout.addWidget(run_group)
+
+        output_group, output_layout = _lm_section("Run Output + Logs")
         self.progress_bar = QtWidgets.QProgressBar()
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
-        layout.addWidget(self.progress_bar)
+        output_layout.addWidget(_lm_apply_control_sizing(self.progress_bar))
         self.log_console = QtWidgets.QPlainTextEdit()
         self.log_console.setReadOnly(True)
-        layout.addWidget(self.log_console)
-        layout.addStretch()
+        self.log_console.setMinimumHeight(LM_LOG_MIN_HEIGHT)
+        output_layout.addWidget(self.log_console)
+        layout.addWidget(output_group)
         if self.enricher_module is None:
             self.start_button.setEnabled(False)
             self.log_console.setPlainText(
                 "cross_directory_enricher.py not found. Place the module in the project root."
             )
-        self.setLayout(layout)
+        _lm_scrolled_tab(self, layout)
 
     def _add_file_row(self, parent_layout, label_text, placeholder, required=False):
-        row = QtWidgets.QHBoxLayout()
-        label = QtWidgets.QLabel(label_text)
         line_edit = QtWidgets.QLineEdit()
         line_edit.setPlaceholderText(placeholder)
         browse_button = QtWidgets.QPushButton("Browse...")
         browse_button.clicked.connect(lambda: self._browse_csv(line_edit))
-        row.addWidget(label)
-        row.addWidget(line_edit)
-        row.addWidget(browse_button)
-        parent_layout.addLayout(row)
+        parent_layout.addLayout(_lm_row(label_text, line_edit, browse_button))
         if required:
             line_edit.setProperty("required", True)
         return line_edit
@@ -12847,36 +12941,31 @@ class NightModeTab(QtWidgets.QWidget):
     def _build_ui(self):
         layout = QtWidgets.QVBoxLayout()
 
-        # Config selection
-        config_row = QtWidgets.QHBoxLayout()
-        config_label = QtWidgets.QLabel("Night Mode config (JSON):")
+        job_group, job_layout = _lm_section("Job Configuration")
         self.config_path_edit = QtWidgets.QLineEdit("overnight_jobs.json")
         browse_btn = QtWidgets.QPushButton("Browse...")
         browse_btn.clicked.connect(self._browse_config)
         reload_btn = QtWidgets.QPushButton("Reload")
         reload_btn.clicked.connect(self._load_config_summary)
-        config_row.addWidget(config_label)
-        config_row.addWidget(self.config_path_edit)
-        config_row.addWidget(browse_btn)
-        config_row.addWidget(reload_btn)
-        layout.addLayout(config_row)
+        job_layout.addLayout(_lm_row("Night Mode config (JSON):", self.config_path_edit, browse_btn, reload_btn))
 
-        # Job summary
         self.jobs_summary = QtWidgets.QPlainTextEdit()
         self.jobs_summary.setReadOnly(True)
         self.jobs_summary.setPlaceholderText("Load a config to view jobs (job_id, directory, mode, target_valid_leads, max_hours).")
-        layout.addWidget(self.jobs_summary)
+        self.jobs_summary.setMinimumHeight(LM_LOG_MIN_HEIGHT)
+        job_layout.addWidget(self.jobs_summary)
 
         jobs_label = QtWidgets.QLabel("Configure Night Mode jobs here. You can add multiple directories to run overnight in sequence.")
-        layout.addWidget(jobs_label)
+        jobs_label.setWordWrap(True)
+        job_layout.addLayout(_lm_control_row(jobs_label))
 
         self.jobs_table = QtWidgets.QTableWidget(0, 6)
         self.jobs_table.setHorizontalHeaderLabels(["#", "Directory", "Mode", "Input/Seed", "Target Leads", "Max Hours"])
         self.jobs_table.horizontalHeader().setStretchLastSection(True)
         self.jobs_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
-        layout.addWidget(self.jobs_table)
+        self.jobs_table.setMinimumHeight(LM_TABLE_MIN_HEIGHT)
+        job_layout.addWidget(self.jobs_table)
 
-        jobs_btn_row = QtWidgets.QHBoxLayout()
         add_btn = QtWidgets.QPushButton("Add job")
         edit_btn = QtWidgets.QPushButton("Edit job")
         remove_btn = QtWidgets.QPushButton("Remove job")
@@ -12887,172 +12976,103 @@ class NightModeTab(QtWidgets.QWidget):
         remove_btn.clicked.connect(self._remove_selected_job)
         save_btn.clicked.connect(self._save_config_to_file)
         load_btn.clicked.connect(self._browse_config)
-        jobs_btn_row.addWidget(add_btn)
-        jobs_btn_row.addWidget(edit_btn)
-        jobs_btn_row.addWidget(remove_btn)
-        jobs_btn_row.addStretch()
-        jobs_btn_row.addWidget(save_btn)
-        jobs_btn_row.addWidget(load_btn)
-        layout.addLayout(jobs_btn_row)
+        job_layout.addLayout(_lm_control_row(add_btn, edit_btn, remove_btn, save_btn, load_btn))
+        layout.addWidget(job_group)
 
-        # Options
-        options_layout = QtWidgets.QHBoxLayout()
-        export_label = QtWidgets.QLabel("Export mode:")
+        output_resume_group, output_resume_layout = _lm_section("Output / Resume Settings")
         self.export_mode_combo = QtWidgets.QComboBox()
         self.export_mode_combo.addItems(["both", "per_directory", "combined"])
-        options_layout.addWidget(export_label)
-        options_layout.addWidget(self.export_mode_combo)
-        unearthed_resume_label = QtWidgets.QLabel("Unearthed Resume Mode:")
+        output_resume_layout.addLayout(_lm_row("Export mode:", self.export_mode_combo, add_stretch=True))
         self.unearthed_resume_mode_combo = QtWidgets.QComboBox()
         for label, value in self.UNEARTHED_RESUME_MODE_OPTIONS:
             self.unearthed_resume_mode_combo.addItem(label, value)
         self._set_unearthed_resume_mode("auto")
-        options_layout.addWidget(unearthed_resume_label)
-        options_layout.addWidget(self.unearthed_resume_mode_combo)
-        unearthed_source_label = QtWidgets.QLabel("Unearthed Source Mode:")
+        output_resume_layout.addLayout(_lm_row("Unearthed Resume Mode:", self.unearthed_resume_mode_combo, add_stretch=True))
         self.unearthed_source_mode_combo = QtWidgets.QComboBox()
         for label, value in self.UNEARTHED_SOURCE_MODE_OPTIONS:
             self.unearthed_source_mode_combo.addItem(label, value)
         self._set_unearthed_source_mode(False)
-        options_layout.addWidget(unearthed_source_label)
-        options_layout.addWidget(self.unearthed_source_mode_combo)
-        index_label = QtWidgets.QLabel("Index File:")
+        output_resume_layout.addLayout(_lm_row("Unearthed Source Mode:", self.unearthed_source_mode_combo, add_stretch=True))
         self.unearthed_index_combo = QtWidgets.QComboBox()
         self.unearthed_index_combo.currentIndexChanged.connect(self._handle_unearthed_index_selection)
         self.unearthed_duplicate_index_button = QtWidgets.QPushButton("Duplicate Index")
         self.unearthed_duplicate_index_button.clicked.connect(self._save_current_unearthed_index_as)
-        options_layout.addWidget(index_label)
-        options_layout.addWidget(self.unearthed_index_combo)
-        options_layout.addWidget(self.unearthed_duplicate_index_button)
+        output_resume_layout.addLayout(_lm_row("Index File:", self.unearthed_index_combo, self.unearthed_duplicate_index_button))
         self.resume_checkbox = QtWidgets.QCheckBox("Resume unfinished jobs")
         self.stop_on_failure_checkbox = QtWidgets.QCheckBox("Stop on first failure")
         self.phased_checkbox = QtWidgets.QCheckBox("Use phased runner (v2)")
         self.phased_checkbox.setToolTip("Runs Night Mode via the v2 phased runner (seed \u2192 enrich \u2192 contact).")
-        options_layout.addWidget(self.resume_checkbox)
-        options_layout.addWidget(self.stop_on_failure_checkbox)
-        options_layout.addWidget(self.phased_checkbox)
-        options_layout.addStretch()
-        layout.addLayout(options_layout)
+        output_resume_layout.addLayout(_lm_control_row(self.resume_checkbox, self.stop_on_failure_checkbox, self.phased_checkbox))
 
-        selected_cursor_layout = QtWidgets.QHBoxLayout()
         self.unearthed_selected_cursor_label = QtWidgets.QLabel("Selected cursor checkpoint URL:")
         self.unearthed_selected_cursor_edit = QtWidgets.QLineEdit()
         self.unearthed_selected_cursor_edit.setPlaceholderText(
             "https://www.abc.net.au/triplejunearthed/artist/artist-slug"
         )
-        selected_cursor_layout.addWidget(self.unearthed_selected_cursor_label)
-        selected_cursor_layout.addWidget(self.unearthed_selected_cursor_edit)
-        layout.addLayout(selected_cursor_layout)
+        output_resume_layout.addLayout(_lm_row_with_label_widget(self.unearthed_selected_cursor_label, self.unearthed_selected_cursor_edit))
         self.unearthed_resume_mode_combo.currentIndexChanged.connect(self._sync_unearthed_resume_controls)
 
         self.unearthed_index_status_label = QtWidgets.QLabel("")
-        layout.addWidget(self.unearthed_index_status_label)
+        self.unearthed_index_status_label.setWordWrap(True)
+        output_resume_layout.addLayout(_lm_control_row(self.unearthed_index_status_label))
         self.unearthed_source_mode_combo.currentIndexChanged.connect(self._sync_unearthed_source_mode_controls)
+        layout.addWidget(output_resume_group)
 
-        fb_row = QtWidgets.QHBoxLayout()
-        fb_user_label = QtWidgets.QLabel("FB Username (optional):")
+        run_group, run_layout = _lm_section("Run Settings")
         self.fb_user_edit = QtWidgets.QLineEdit()
-        fb_pass_label = QtWidgets.QLabel("FB Password (optional):")
+        run_layout.addLayout(_lm_row("FB Username (optional):", self.fb_user_edit))
         self.fb_pass_edit = QtWidgets.QLineEdit()
         self.fb_pass_edit.setEchoMode(QtWidgets.QLineEdit.Password)
-        fb_row.addWidget(fb_user_label)
-        fb_row.addWidget(self.fb_user_edit)
-        fb_row.addWidget(fb_pass_label)
-        fb_row.addWidget(self.fb_pass_edit)
-        fb_row.addStretch()
-        layout.addLayout(fb_row)
+        run_layout.addLayout(_lm_row("FB Password (optional):", self.fb_pass_edit))
 
-        # Facebook auto-resume options
-        fb_resume_layout = QtWidgets.QHBoxLayout()
         self.fb_auto_resume_checkbox = QtWidgets.QCheckBox("Auto-resume FB after captcha")
         self.fb_cooldown_spin = QtWidgets.QSpinBox()
         self.fb_cooldown_spin.setRange(0, 36000)
         self.fb_cooldown_spin.setValue(600)
-        fb_cooldown_label = QtWidgets.QLabel("Cooldown (seconds):")
         self.fb_max_attempts_spin = QtWidgets.QSpinBox()
         self.fb_max_attempts_spin.setRange(0, 10)
         self.fb_max_attempts_spin.setValue(1)
-        fb_attempts_label = QtWidgets.QLabel("Max auto-resume attempts:")
         self.fb_max_rows_spin = QtWidgets.QSpinBox()
         self.fb_max_rows_spin.setRange(0, 100000)
         self.fb_max_rows_spin.setValue(100)
-        fb_max_rows_label = QtWidgets.QLabel("FB rows per run (0 = no limit):")
-        fb_resume_layout.addWidget(self.fb_auto_resume_checkbox)
-        fb_resume_layout.addSpacing(10)
-        fb_resume_layout.addWidget(fb_cooldown_label)
-        fb_resume_layout.addWidget(self.fb_cooldown_spin)
-        fb_resume_layout.addSpacing(10)
-        fb_resume_layout.addWidget(fb_attempts_label)
-        fb_resume_layout.addWidget(self.fb_max_attempts_spin)
-        fb_resume_layout.addSpacing(10)
-        fb_resume_layout.addWidget(fb_max_rows_label)
-        fb_resume_layout.addWidget(self.fb_max_rows_spin)
-        fb_resume_layout.addStretch()
-        layout.addLayout(fb_resume_layout)
+        run_layout.addLayout(_lm_control_row(self.fb_auto_resume_checkbox))
+        run_layout.addLayout(_lm_row("Cooldown (seconds):", self.fb_cooldown_spin, add_stretch=True))
+        run_layout.addLayout(_lm_row("Max auto-resume attempts:", self.fb_max_attempts_spin, add_stretch=True))
+        run_layout.addLayout(_lm_row("FB rows per run (0 = no limit):", self.fb_max_rows_spin, add_stretch=True))
 
-        # Master enrichment toggle
-        master_enrich_layout = QtWidgets.QHBoxLayout()
         default_live_max = getattr(cross_directory_enricher, "LIVE_SEARCH_MAX_ATTEMPTS", 50) if cross_directory_enricher else 50
         self.master_enrich_checkbox = QtWidgets.QCheckBox("Use master cross-directory enrichment (recommended)")
         self.master_enrich_checkbox.setChecked(True)
-        master_enrich_layout.addWidget(self.master_enrich_checkbox)
-        master_enrich_layout.addStretch()
-        layout.addLayout(master_enrich_layout)
+        run_layout.addLayout(_lm_control_row(self.master_enrich_checkbox))
 
-        # Master enrichment live search controls
-        master_live_layout = QtWidgets.QHBoxLayout()
         self.master_live_checkbox = QtWidgets.QCheckBox("Enable live directory search during master enrich")
         self.master_live_checkbox.setChecked(True)
-        master_live_label = QtWidgets.QLabel("Max live searches (0 = unlimited):")
         self.master_live_spin = QtWidgets.QSpinBox()
         self.master_live_spin.setRange(0, 10000)
         self.master_live_spin.setValue(default_live_max)
-        master_live_layout.addWidget(self.master_live_checkbox)
-        master_live_layout.addSpacing(10)
-        master_live_layout.addWidget(master_live_label)
-        master_live_layout.addWidget(self.master_live_spin)
-        master_live_layout.addStretch()
-        layout.addLayout(master_live_layout)
+        run_layout.addLayout(_lm_control_row(self.master_live_checkbox))
+        run_layout.addLayout(_lm_row("Max live searches (0 = unlimited):", self.master_live_spin, add_stretch=True))
         self.master_enrich_checkbox.stateChanged.connect(self._toggle_master_live_controls)
         self.master_live_checkbox.stateChanged.connect(self._toggle_master_live_controls)
 
-        sc_meta_layout = QtWidgets.QHBoxLayout()
         self.sc_meta_checkbox = QtWidgets.QCheckBox("Run SoundCloud metadata enricher (fills missing genre/date)")
         self.sc_meta_checkbox.setChecked(False)
-        sc_meta_layout.addWidget(self.sc_meta_checkbox)
-        sc_meta_layout.addStretch()
-        layout.addLayout(sc_meta_layout)
+        run_layout.addLayout(_lm_control_row(self.sc_meta_checkbox))
 
-        # Run root
-        run_root_layout = QtWidgets.QHBoxLayout()
-        run_root_label = QtWidgets.QLabel("Run root (optional):")
         self.run_root_edit = QtWidgets.QLineEdit()
         run_root_browse = QtWidgets.QPushButton("Browse...")
         run_root_browse.clicked.connect(self._browse_run_root)
-        run_root_layout.addWidget(run_root_label)
-        run_root_layout.addWidget(self.run_root_edit)
-        run_root_layout.addWidget(run_root_browse)
-        layout.addLayout(run_root_layout)
+        run_layout.addLayout(_lm_row("Run root (optional):", self.run_root_edit, run_root_browse))
 
-        run_summary_group = QtWidgets.QGroupBox("Run Summary")
-        run_summary_layout = QtWidgets.QVBoxLayout()
-        run_summary_controls = QtWidgets.QHBoxLayout()
         self.refresh_run_summary_button = QtWidgets.QPushButton("Refresh Summary")
         self.refresh_run_summary_button.clicked.connect(self._refresh_run_summary)
-        run_summary_controls.addWidget(self.refresh_run_summary_button)
-        run_summary_controls.addStretch()
-        run_summary_layout.addLayout(run_summary_controls)
+        run_layout.addLayout(_lm_control_row(self.refresh_run_summary_button))
         self.run_summary_view = QtWidgets.QPlainTextEdit()
         self.run_summary_view.setReadOnly(True)
-        self.run_summary_view.setMinimumHeight(120)
-        self.run_summary_view.setMaximumHeight(180)
+        self.run_summary_view.setMinimumHeight(LM_LOG_MIN_HEIGHT)
         self.run_summary_view.setPlaceholderText(NIGHT_MODE_RUN_SUMMARY_PLACEHOLDER)
-        run_summary_layout.addWidget(self.run_summary_view)
-        run_summary_group.setLayout(run_summary_layout)
-        layout.addWidget(run_summary_group)
+        run_layout.addWidget(self.run_summary_view)
 
-        # Controls
-        controls_layout = QtWidgets.QHBoxLayout()
         self.start_button = QtWidgets.QPushButton("Start Night Mode")
         self.start_button.clicked.connect(self._start_night_mode)
         self.stop_button = QtWidgets.QPushButton("Stop")
@@ -13060,31 +13080,27 @@ class NightModeTab(QtWidgets.QWidget):
         self.stop_button.setEnabled(False)
         clear_log_btn = QtWidgets.QPushButton("Clear log")
         clear_log_btn.clicked.connect(self._clear_log)
-        controls_layout.addWidget(self.start_button)
-        controls_layout.addWidget(self.stop_button)
-        controls_layout.addWidget(clear_log_btn)
-        controls_layout.addStretch()
-        layout.addLayout(controls_layout)
+        run_layout.addLayout(_lm_control_row(self.start_button, self.stop_button, clear_log_btn))
+        layout.addWidget(run_group)
 
-        # Status + log
+        output_group, output_layout = _lm_section("Run Output + Logs")
         self.status_label = QtWidgets.QLabel("Status: idle")
-        layout.addWidget(self.status_label)
-        progress_group = QtWidgets.QGroupBox("Run Progress")
-        progress_layout = QtWidgets.QVBoxLayout()
+        self.status_label.setWordWrap(True)
+        output_layout.addLayout(_lm_control_row(self.status_label))
         self.runtime_progress_bar = QtWidgets.QProgressBar()
         self.runtime_progress_bar.setRange(0, 1000)
         self.runtime_progress_bar.setValue(0)
-        progress_layout.addWidget(self.runtime_progress_bar)
+        output_layout.addWidget(_lm_apply_control_sizing(self.runtime_progress_bar))
         self.runtime_progress_detail = QtWidgets.QLabel("idle")
         self.runtime_progress_detail.setWordWrap(True)
-        progress_layout.addWidget(self.runtime_progress_detail)
-        progress_group.setLayout(progress_layout)
-        layout.addWidget(progress_group)
+        output_layout.addLayout(_lm_control_row(self.runtime_progress_detail))
         self.log_console = QtWidgets.QPlainTextEdit()
         self.log_console.setReadOnly(True)
-        layout.addWidget(self.log_console)
+        self.log_console.setMinimumHeight(LM_LOG_MIN_HEIGHT)
+        output_layout.addWidget(self.log_console)
+        layout.addWidget(output_group)
 
-        self.setLayout(layout)
+        _lm_scrolled_tab(self, layout)
         self._refresh_unearthed_index_selector()
         self._sync_unearthed_resume_controls()
         self._sync_unearthed_source_mode_controls()
@@ -13879,58 +13895,47 @@ class MainWindow(QtWidgets.QMainWindow):
             self.output_csv_edit.setText(file_path)
     def create_artist_tab(self):
         layout = QtWidgets.QVBoxLayout()
-        source_layout = QtWidgets.QHBoxLayout()
-        source_label = QtWidgets.QLabel("Source:")
+        config_group, config_layout = _lm_section("Job Configuration")
         self.source_combo = QtWidgets.QComboBox()
         self.source_combo.addItems(["Unearthed", "Bandcamp", "SoundCloud", "Last.fm Similar", "Spotify"])
         self.source_combo.currentTextChanged.connect(self.on_source_changed)
-        source_layout.addWidget(source_label)
-        source_layout.addWidget(self.source_combo)
-        layout.addLayout(source_layout)
-        url_layout = QtWidgets.QHBoxLayout()
+        config_layout.addLayout(_lm_row("Source:", self.source_combo, add_stretch=True))
         self.url_label = QtWidgets.QLabel("Website URL:")
         self.url_edit = QtWidgets.QLineEdit(UNEARTHED_DEFAULT_URL)
         self.url_edit.setPlaceholderText(UNEARTHED_DEFAULT_URL)
-        url_layout.addWidget(self.url_label)
-        url_layout.addWidget(self.url_edit)
-        layout.addLayout(url_layout)
-        pages_layout = QtWidgets.QHBoxLayout()
-        pages_label = QtWidgets.QLabel("Pages per Tag:")
+        config_layout.addLayout(_lm_row_with_label_widget(self.url_label, self.url_edit))
         self.pages_per_tag_edit = QtWidgets.QLineEdit(str(BANDCAMP_PAGES_PER_TAG))
         self.pages_per_tag_edit.setEnabled(False)
-        pages_layout.addWidget(pages_label)
-        pages_layout.addWidget(self.pages_per_tag_edit)
-        layout.addLayout(pages_layout)
-        max_artists_layout = QtWidgets.QHBoxLayout()
-        max_artists_label = QtWidgets.QLabel("Max Artists:")
+        config_layout.addLayout(_lm_row("Pages per Tag:", self.pages_per_tag_edit))
         self.max_artists_edit = QtWidgets.QLineEdit("200")
-        max_artists_layout.addWidget(max_artists_label)
-        max_artists_layout.addWidget(self.max_artists_edit)
-        layout.addLayout(max_artists_layout)
+        config_layout.addLayout(_lm_row("Max Artists:", self.max_artists_edit))
         self.sc_meta_checkbox = QtWidgets.QCheckBox("Run SoundCloud metadata enricher (fill missing genre/date)")
         self.sc_meta_checkbox.setChecked(False)
         self.sc_meta_checkbox.setVisible(False)
-        layout.addWidget(self.sc_meta_checkbox)
-        artist_output_layout = QtWidgets.QHBoxLayout()
-        artist_output_label = QtWidgets.QLabel("Output CSV:")
+        config_layout.addLayout(_lm_control_row(self.sc_meta_checkbox))
         self.artist_output_csv_edit = QtWidgets.QLineEdit("artist_social_links.csv")
         artist_output_browse = QtWidgets.QPushButton("Browse")
         artist_output_browse.clicked.connect(self.browse_artist_output_csv)
-        artist_output_layout.addWidget(artist_output_label)
-        artist_output_layout.addWidget(self.artist_output_csv_edit)
-        artist_output_layout.addWidget(artist_output_browse)
-        layout.addLayout(artist_output_layout)
+        config_layout.addLayout(_lm_row("Output CSV:", self.artist_output_csv_edit, artist_output_browse))
+        layout.addWidget(config_group)
+
+        run_group, run_layout = _lm_section("Run Settings")
         self.artist_start_button = QtWidgets.QPushButton("Start Artist Scraping")
         self.artist_start_button.clicked.connect(self.start_artist_scraping)
-        layout.addWidget(self.artist_start_button)
+        run_layout.addLayout(_lm_control_row(self.artist_start_button))
+        layout.addWidget(run_group)
+
+        output_group, output_layout = _lm_section("Run Output + Logs")
         self.artist_progress_bar = QtWidgets.QProgressBar()
         self.artist_progress_bar.setRange(0, 0)
         self.artist_progress_bar.setVisible(False)
-        layout.addWidget(self.artist_progress_bar)
+        output_layout.addWidget(_lm_apply_control_sizing(self.artist_progress_bar))
         self.artist_log = QtWidgets.QTextEdit()
         self.artist_log.setReadOnly(True)
-        layout.addWidget(self.artist_log)
-        self.artist_tab.setLayout(layout)
+        self.artist_log.setMinimumHeight(LM_LOG_MIN_HEIGHT)
+        output_layout.addWidget(self.artist_log)
+        layout.addWidget(output_group)
+        _lm_scrolled_tab(self.artist_tab, layout)
     def on_source_changed(self, source_text):
         if source_text == "Bandcamp":
             self.url_label.setText("Website URL:")
@@ -13966,55 +13971,44 @@ class MainWindow(QtWidgets.QMainWindow):
             self.sc_meta_checkbox.setVisible(False)
     def create_facebook_tab(self):
         layout = QtWidgets.QVBoxLayout()
-        input_layout = QtWidgets.QHBoxLayout()
-        input_label = QtWidgets.QLabel("Input CSV:")
+        config_group, config_layout = _lm_section("Job Configuration")
         self.input_csv_edit = QtWidgets.QLineEdit("test_artist_social_links.csv")
         input_browse = QtWidgets.QPushButton("Browse")
         input_browse.clicked.connect(self.browse_input_csv)
-        input_layout.addWidget(input_label)
-        input_layout.addWidget(self.input_csv_edit)
-        input_layout.addWidget(input_browse)
-        layout.addLayout(input_layout)
-        output_layout = QtWidgets.QHBoxLayout()
-        output_label = QtWidgets.QLabel("Output CSV:")
+        config_layout.addLayout(_lm_row("Input CSV:", self.input_csv_edit, input_browse))
         self.output_csv_edit = QtWidgets.QLineEdit("test_combined_artist_data.csv")
         output_browse = QtWidgets.QPushButton("Browse")
         output_browse.clicked.connect(self.browse_output_csv)
-        output_layout.addWidget(output_label)
-        output_layout.addWidget(self.output_csv_edit)
-        output_layout.addWidget(output_browse)
-        layout.addLayout(output_layout)
-        fb_layout = QtWidgets.QHBoxLayout()
-        fb_user_label = QtWidgets.QLabel("Facebook Username:")
+        config_layout.addLayout(_lm_row("Output CSV:", self.output_csv_edit, output_browse))
+        layout.addWidget(config_group)
+
+        run_group, run_layout = _lm_section("Run Settings")
         self.fb_username_edit = QtWidgets.QLineEdit()
-        fb_pass_label = QtWidgets.QLabel("Facebook Password:")
+        run_layout.addLayout(_lm_row("Facebook Username:", self.fb_username_edit))
         self.fb_password_edit = QtWidgets.QLineEdit()
         self.fb_password_edit.setEchoMode(QtWidgets.QLineEdit.Password)
-        fb_layout.addWidget(fb_user_label)
-        fb_layout.addWidget(self.fb_username_edit)
-        fb_layout.addWidget(fb_pass_label)
-        fb_layout.addWidget(self.fb_password_edit)
-        layout.addLayout(fb_layout)
-        max_emails_layout = QtWidgets.QHBoxLayout()
-        max_emails_label = QtWidgets.QLabel("Max Emails (optional):")
+        run_layout.addLayout(_lm_row("Facebook Password:", self.fb_password_edit))
         self.max_emails_edit = QtWidgets.QLineEdit()
-        max_emails_layout.addWidget(max_emails_label)
-        max_emails_layout.addWidget(self.max_emails_edit)
-        layout.addLayout(max_emails_layout)
+        run_layout.addLayout(_lm_row("Max Emails (optional):", self.max_emails_edit))
         self.fb_auto_validate_checkbox = QtWidgets.QCheckBox("Enable Origin Auto-Validate after this run")
         self.fb_auto_validate_checkbox.setChecked(False)
-        layout.addWidget(self.fb_auto_validate_checkbox)
+        run_layout.addLayout(_lm_control_row(self.fb_auto_validate_checkbox))
         self.fb_start_button = QtWidgets.QPushButton("Start Facebook Scraping")
         self.fb_start_button.clicked.connect(self.start_facebook_scraping)
-        layout.addWidget(self.fb_start_button)
+        run_layout.addLayout(_lm_control_row(self.fb_start_button))
+        layout.addWidget(run_group)
+
+        output_group, output_layout = _lm_section("Run Output + Logs")
         self.fb_progress_bar = QtWidgets.QProgressBar()
         self.fb_progress_bar.setRange(0, 0)
         self.fb_progress_bar.setVisible(False)
-        layout.addWidget(self.fb_progress_bar)
+        output_layout.addWidget(_lm_apply_control_sizing(self.fb_progress_bar))
         self.fb_log = QtWidgets.QTextEdit()
         self.fb_log.setReadOnly(True)
-        layout.addWidget(self.fb_log)
-        self.facebook_tab.setLayout(layout)
+        self.fb_log.setMinimumHeight(LM_LOG_MIN_HEIGHT)
+        output_layout.addWidget(self.fb_log)
+        layout.addWidget(output_group)
+        _lm_scrolled_tab(self.facebook_tab, layout)
     def start_artist_scraping(self):
         source = self.source_combo.currentText()
         url = self.url_edit.text().strip()
