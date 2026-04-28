@@ -1,0 +1,34 @@
+{
+  "export_mode": "both",
+  "jobs": [
+    {
+      "directory": "unearthed",
+      "mode": "",
+      "input_seed_csv": "",
+      "target_valid_leads": 1500,
+      "max_hours": 0,
+      "job_id": "job_unearthed_1",
+      "unearthed_resume_mode": "auto",
+      "use_unearthed_url_index": true,
+      "unearthed_url_index_path": "/Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/data/unearthed_artist_url_index.csv",
+      "unearthed_start_index_position": "1500"
+    }
+  ],
+  "unearthed_resume_mode": "auto",
+  "unearthed_selected_cursor": "",
+  "unearthed_start_index_position": "1500",
+  "unearthed_url_index_path": "/Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/data/unearthed_artist_url_index.csv",
+  "phased": true,
+  "facebook": {
+    "auto_resume_after_captcha": false,
+    "cooldown_seconds": 600,
+    "max_auto_resume_attempts": 1,
+    "max_rows_per_run": 0
+  },
+  "master_enrichment": {
+    "enabled": true
+  },
+  "soundcloud_meta_enricher": {
+    "enabled": false
+  }
+}

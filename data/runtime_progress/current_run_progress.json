@@ -1,14 +1,12 @@
 {
   "current_source": "unearthed",
-  "current_status": "row_write_complete",
-  "elapsed_seconds": 331.7305111885071,
-  "emails_found": 4,
-  "eta_seconds": 0,
-  "last_update_time": 1777350121.419799,
-  "percentage": 100.0,
-  "phase": "enrichment",
-  "processed_rows": 10,
+  "elapsed_seconds": 0.0,
+  "eta_seconds": null,
+  "last_update_time": 1777353337.356553,
+  "percentage": 0.0,
+  "phase": "processing",
+  "processed_rows": 0,
   "run_id": "job_unearthed_1",
-  "start_time": 1777349789.689288,
-  "total_rows": 10
+  "start_time": 1777353337.356553,
+  "total_rows": 1500
 }
