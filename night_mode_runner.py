@@ -1487,6 +1487,22 @@ def run_night_mode(
         )
 
     jobs = config.get("jobs", []) or []
+    root_unearthed_index_path = str(config.get("unearthed_url_index_path") or "").strip()
+    root_use_unearthed_url_index = config.get("use_unearthed_url_index")
+    if root_unearthed_index_path or root_use_unearthed_url_index is not None:
+        normalized_jobs = []
+        for job in jobs:
+            if not isinstance(job, dict):
+                normalized_jobs.append(job)
+                continue
+            job_copy = dict(job)
+            if "unearthed" in str(job_copy.get("directory") or "").strip().lower():
+                if root_unearthed_index_path and not str(job_copy.get("unearthed_url_index_path") or "").strip():
+                    job_copy["unearthed_url_index_path"] = root_unearthed_index_path
+                if root_use_unearthed_url_index is not None and "use_unearthed_url_index" not in job_copy:
+                    job_copy["use_unearthed_url_index"] = bool(root_use_unearthed_url_index)
+            normalized_jobs.append(job_copy)
+        jobs = normalized_jobs
     processed_states: Dict[str, Dict[str, Any]] = {}
     pending_skip_job_ids: Dict[str, str] = {}
     job_states: List[Dict[str, Any]] = []

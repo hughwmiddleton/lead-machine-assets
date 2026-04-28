@@ -1206,6 +1206,13 @@ UNEARTHED_ARTIST_URL_INDEX_COLUMNS = [
     "source",
 ]
 
+UNEARTHED_CUSTOM_INDEX_DIR = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "data",
+    "indexes",
+    "unearthed",
+)
+
 
 def _unearthed_artist_url_index_path() -> str:
     return os.path.join(
@@ -1213,6 +1220,47 @@ def _unearthed_artist_url_index_path() -> str:
         "data",
         "unearthed_artist_url_index.csv",
     )
+
+
+def _resolve_unearthed_url_index_path(job_config: dict | None = None) -> str:
+    configured = ""
+    if isinstance(job_config, dict):
+        configured = str(job_config.get("unearthed_url_index_path") or "").strip()
+    return configured or _unearthed_artist_url_index_path()
+
+
+def _ensure_unearthed_custom_index_dir() -> str:
+    os.makedirs(UNEARTHED_CUSTOM_INDEX_DIR, exist_ok=True)
+    return UNEARTHED_CUSTOM_INDEX_DIR
+
+
+def _validate_unearthed_index_access(index_path: str, *, require_existing: bool = True) -> None:
+    path = str(index_path or "").strip()
+    if not path:
+        raise ValueError("Unearthed URL index path is empty.")
+    if not path.lower().endswith(".csv"):
+        raise ValueError(f"Unearthed URL index must be a .csv file: {path}")
+    if require_existing and not os.path.exists(path):
+        raise FileNotFoundError(f"Unearthed URL index file not found: {path}")
+    if os.path.exists(path):
+        if not os.path.isfile(path):
+            raise OSError(f"Unearthed URL index path is not a file: {path}")
+        with open(path, "r", encoding="utf-8-sig", newline=""):
+            pass
+    parent = os.path.dirname(os.path.abspath(path)) or "."
+    if not os.path.isdir(parent):
+        raise FileNotFoundError(f"Unearthed URL index directory not found: {parent}")
+    probe_path = os.path.join(parent, f".{os.path.basename(path)}.write_test")
+    try:
+        with open(probe_path, "w", encoding="utf-8") as handle:
+            handle.write("")
+    finally:
+        if os.path.exists(probe_path):
+            os.remove(probe_path)
+
+
+def _write_empty_unearthed_artist_url_index(index_path: str) -> None:
+    _write_unearthed_artist_url_index([], index_path=index_path, require_existing=False)
 
 
 def normalize_unearthed_artist_url(value: str | None) -> tuple[str, str]:
@@ -1239,8 +1287,10 @@ def normalize_unearthed_artist_url(value: str | None) -> tuple[str, str]:
     return f"https://www.abc.net.au/triplejunearthed/artist/{slug}", slug
 
 
-def _load_unearthed_artist_url_index(index_path: str | None = None) -> list[dict]:
+def _load_unearthed_artist_url_index(index_path: str | None = None, *, require_existing: bool = False) -> list[dict]:
     path = index_path or _unearthed_artist_url_index_path()
+    if require_existing:
+        _validate_unearthed_index_access(path, require_existing=True)
     rows: list[dict] = []
     if not os.path.exists(path):
         print("[UE Index] loaded existing index rows=0")
@@ -1269,13 +1319,19 @@ def _load_unearthed_artist_url_index(index_path: str | None = None) -> list[dict
                 )
     except Exception as exc:
         print(f"[UE Index] failed loading index path={path!r}: {exc}")
-        rows = []
+        raise
     print(f"[UE Index] loaded existing index rows={len(rows)}")
     return rows
 
 
-def _write_unearthed_artist_url_index(rows: list[dict], index_path: str | None = None) -> None:
+def _write_unearthed_artist_url_index(
+    rows: list[dict],
+    index_path: str | None = None,
+    *,
+    require_existing: bool = False,
+) -> None:
     path = index_path or _unearthed_artist_url_index_path()
+    _validate_unearthed_index_access(path, require_existing=require_existing)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp_path = f"{path}.tmp"
     with open(tmp_path, "w", newline="", encoding="utf-8") as handle:
@@ -1295,11 +1351,12 @@ def upsert_unearthed_artist_url_index(
     artist_urls,
     source: str = "discovery",
     index_path: str | None = None,
+    require_existing: bool = False,
 ) -> dict:
     if isinstance(artist_urls, str):
         artist_urls = [artist_urls]
     now = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
-    existing_rows = _load_unearthed_artist_url_index(index_path)
+    existing_rows = _load_unearthed_artist_url_index(index_path, require_existing=require_existing)
     ordered_rows: list[dict] = []
     by_url: dict[str, dict] = {}
     by_slug: dict[str, dict] = {}
@@ -1352,13 +1409,13 @@ def upsert_unearthed_artist_url_index(
         by_slug[slug] = row
         new_urls += 1
 
-    _write_unearthed_artist_url_index(ordered_rows, index_path)
+    _write_unearthed_artist_url_index(ordered_rows, index_path, require_existing=require_existing)
     print(f"[UE Index] added new_urls={new_urls} updated_existing={updated_existing} total={len(ordered_rows)}")
     return {"new_urls": new_urls, "updated_existing": updated_existing, "total": len(ordered_rows)}
 
 
-def load_unearthed_indexed_artist_urls(index_path: str | None = None) -> list[str]:
-    rows = _load_unearthed_artist_url_index(index_path)
+def load_unearthed_indexed_artist_urls(index_path: str | None = None, *, require_existing: bool = False) -> list[str]:
+    rows = _load_unearthed_artist_url_index(index_path, require_existing=require_existing)
     urls = [row["artist_url"] for row in rows if row.get("artist_url")]
     print(f"[UE Index] using indexed URLs rows={len(urls)}")
     return urls
@@ -1372,8 +1429,8 @@ def _unearthed_profile_urls_match(left: str | None, right: str | None) -> bool:
     return bool(left_slug and right_slug and left_slug == right_slug)
 
 
-def _unearthed_index_tail_url(index_path: str | None = None) -> str | None:
-    rows = _load_unearthed_artist_url_index(index_path)
+def _unearthed_index_tail_url(index_path: str | None = None, *, require_existing: bool = False) -> str | None:
+    rows = _load_unearthed_artist_url_index(index_path, require_existing=require_existing)
     if not rows:
         return None
     tail_url = str(rows[-1].get("artist_url") or "").strip()
@@ -1681,13 +1738,16 @@ def _slice_unearthed_profile_urls(
 
 
 def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200, fb_session=None, job_config=None):
+    job_config = job_config or {}
+    use_url_index = bool(job_config.get("use_unearthed_url_index")) if isinstance(job_config, dict) else False
+    index_path = _resolve_unearthed_url_index_path(job_config)
+    index_path_explicit = bool(str(job_config.get("unearthed_url_index_path") or "").strip()) if isinstance(job_config, dict) else False
+    if index_path_explicit:
+        _validate_unearthed_index_access(index_path, require_existing=True)
     driver = setup_driver()
     fb_driver = None
     artist_data = []
     profile_urls = []
-    job_config = job_config or {}
-    use_url_index = bool(job_config.get("use_unearthed_url_index")) if isinstance(job_config, dict) else False
-    index_path = str(job_config.get("unearthed_url_index_path") or "").strip() if isinstance(job_config, dict) else ""
     selected_cursor_strict = False
     resume_cursor_strict = False
     resume_mode = ""
@@ -1728,7 +1788,7 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
         next_cursor_progress_log_count = cursor_search_progress_every
         search_exhausted = False
         if use_url_index:
-            indexed_urls = load_unearthed_indexed_artist_urls(index_path or None)
+            indexed_urls = load_unearthed_indexed_artist_urls(index_path, require_existing=index_path_explicit)
             for indexed_url in indexed_urls:
                 _append_unearthed_profile_url(ordered_profile_urls, seen_profile_urls, indexed_url)
             if max_artists and max_artists > 0:
@@ -1746,7 +1806,7 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
                 run_root_cursor = str(state.get("unearthed_last_profile_url") or "").strip()
             index_tail_url = None
             if resume_mode in {"auto", "cursor"}:
-                index_tail_url = _unearthed_index_tail_url(index_path or None)
+                index_tail_url = _unearthed_index_tail_url(index_path, require_existing=index_path_explicit)
             if resume_mode == "selected":
                 selected_cursor_strict = True
                 target_profile_url = str(job_config.get("unearthed_selected_cursor") or "").strip()
@@ -1885,7 +1945,8 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
                         index_result = upsert_unearthed_artist_url_index(
                             [profile_url],
                             source="discovery",
-                            index_path=index_path or None,
+                            index_path=index_path,
+                            require_existing=index_path_explicit,
                         )
                         if resume_continue_active:
                             resume_new_urls_added += int(index_result.get("new_urls", 0) or 0)
@@ -2170,7 +2231,7 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
             pass
         if resume_continue_active and resolved_resume_index is not None:
             if resume_total_index <= 0:
-                resume_total_index = len(load_unearthed_indexed_artist_urls(index_path or None))
+                resume_total_index = len(load_unearthed_indexed_artist_urls(index_path, require_existing=index_path_explicit))
             if resume_new_urls_added > 0:
                 print(
                     "[UE Resume] "
@@ -12772,6 +12833,7 @@ class NightModeTab(QtWidgets.QWidget):
         super().__init__(parent)
         self.worker = None
         self.jobs = []
+        self._active_unearthed_index_path = _unearthed_artist_url_index_path()
         self._bootstrap_stage = None  # None | "headless" | "headed" | "final_headless"
         self._log_buffer: list[str] = []
         self._phased_enabled = False
@@ -12854,6 +12916,14 @@ class NightModeTab(QtWidgets.QWidget):
         self._set_unearthed_source_mode(False)
         options_layout.addWidget(unearthed_source_label)
         options_layout.addWidget(self.unearthed_source_mode_combo)
+        index_label = QtWidgets.QLabel("Index File:")
+        self.unearthed_index_combo = QtWidgets.QComboBox()
+        self.unearthed_index_combo.currentIndexChanged.connect(self._handle_unearthed_index_selection)
+        self.unearthed_duplicate_index_button = QtWidgets.QPushButton("Duplicate Index")
+        self.unearthed_duplicate_index_button.clicked.connect(self._save_current_unearthed_index_as)
+        options_layout.addWidget(index_label)
+        options_layout.addWidget(self.unearthed_index_combo)
+        options_layout.addWidget(self.unearthed_duplicate_index_button)
         self.resume_checkbox = QtWidgets.QCheckBox("Resume unfinished jobs")
         self.stop_on_failure_checkbox = QtWidgets.QCheckBox("Stop on first failure")
         self.phased_checkbox = QtWidgets.QCheckBox("Use phased runner (v2)")
@@ -13015,6 +13085,7 @@ class NightModeTab(QtWidgets.QWidget):
         layout.addWidget(self.log_console)
 
         self.setLayout(layout)
+        self._refresh_unearthed_index_selector()
         self._sync_unearthed_resume_controls()
         self._sync_unearthed_source_mode_controls()
         self._toggle_master_live_controls()
@@ -13160,27 +13231,161 @@ class NightModeTab(QtWidgets.QWidget):
         self.unearthed_source_mode_combo.setCurrentIndex(0)
 
     def _unearthed_url_index_path(self) -> str:
-        return os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "unearthed_artist_url_index.csv")
+        return self._active_unearthed_index_path
+
+    def _set_unearthed_url_index_path(self, path: str) -> None:
+        resolved = os.path.abspath(str(path or "").strip() or _unearthed_artist_url_index_path())
+        self._active_unearthed_index_path = resolved
+        self._refresh_unearthed_index_selector()
+        self._sync_unearthed_source_mode_controls()
+
+    def _normalize_unearthed_index_filename(self, raw_name: str) -> str:
+        name = os.path.basename(str(raw_name or "").strip())
+        if not name:
+            raise ValueError("Enter an index filename.")
+        if name in {".", ".."} or os.path.sep in name or (os.path.altsep and os.path.altsep in name):
+            raise ValueError("Index filename must not include folders.")
+        if not name.lower().endswith(".csv"):
+            name = f"{name}.csv"
+        return name
+
+    def _unearthed_custom_index_path(self, raw_name: str) -> str:
+        name = self._normalize_unearthed_index_filename(raw_name)
+        return os.path.join(_ensure_unearthed_custom_index_dir(), name)
+
+    def _prompt_unearthed_index_filename(self, title: str) -> str | None:
+        raw_name, ok = QtWidgets.QInputDialog.getText(self, title, "Filename:")
+        if not ok:
+            return None
+        try:
+            return self._unearthed_custom_index_path(raw_name)
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(self, "Index File", str(exc))
+            return None
+
+    def _refresh_unearthed_index_selector(self) -> None:
+        if not hasattr(self, "unearthed_index_combo"):
+            return
+        _ensure_unearthed_custom_index_dir()
+        active_path = os.path.abspath(self._active_unearthed_index_path or _unearthed_artist_url_index_path())
+        default_path = os.path.abspath(_unearthed_artist_url_index_path())
+        self.unearthed_index_combo.blockSignals(True)
+        self.unearthed_index_combo.clear()
+        default_label = f"Default ({os.path.relpath(default_path, os.path.dirname(os.path.abspath(__file__)))})"
+        self.unearthed_index_combo.addItem(default_label, default_path)
+        for name in sorted(os.listdir(UNEARTHED_CUSTOM_INDEX_DIR)):
+            if not name.lower().endswith(".csv"):
+                continue
+            path = os.path.abspath(os.path.join(UNEARTHED_CUSTOM_INDEX_DIR, name))
+            self.unearthed_index_combo.addItem(name, path)
+        self.unearthed_index_combo.addItem("Create New Index...", "__create__")
+        self.unearthed_index_combo.addItem("Save Current Index As...", "__save_as__")
+        idx = self.unearthed_index_combo.findData(active_path)
+        if idx < 0:
+            self.unearthed_index_combo.insertItem(1, os.path.basename(active_path), active_path)
+            idx = 1
+        self.unearthed_index_combo.setCurrentIndex(idx)
+        self.unearthed_index_combo.blockSignals(False)
+
+    def _handle_unearthed_index_selection(self) -> None:
+        data = self.unearthed_index_combo.currentData()
+        previous_path = self._active_unearthed_index_path
+        if data == "__create__":
+            self._create_new_unearthed_index()
+            return
+        if data == "__save_as__":
+            self._save_current_unearthed_index_as()
+            return
+        if data:
+            self._active_unearthed_index_path = os.path.abspath(str(data))
+        if previous_path != self._active_unearthed_index_path:
+            self._sync_unearthed_source_mode_controls()
+
+    def _create_new_unearthed_index(self) -> None:
+        path = self._prompt_unearthed_index_filename("Create New Index")
+        if not path:
+            self._refresh_unearthed_index_selector()
+            return
+        if os.path.exists(path):
+            QtWidgets.QMessageBox.warning(self, "Index File", f"Index already exists:\n{path}")
+            self._refresh_unearthed_index_selector()
+            return
+        try:
+            _write_empty_unearthed_artist_url_index(path)
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, "Index File", f"Could not create index:\n{exc}")
+            self._refresh_unearthed_index_selector()
+            return
+        self._set_unearthed_url_index_path(path)
+
+    def _copy_unearthed_index_atomic(self, source_path: str, dest_path: str) -> None:
+        _validate_unearthed_index_access(source_path, require_existing=True)
+        if os.path.abspath(source_path) == os.path.abspath(dest_path):
+            raise ValueError("Destination index must be different from the active index.")
+        if os.path.exists(dest_path):
+            raise FileExistsError(f"Index already exists: {dest_path}")
+        os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+        tmp_path = f"{dest_path}.tmp"
+        with open(source_path, "rb") as source, open(tmp_path, "wb") as dest:
+            shutil.copyfileobj(source, dest)
+            dest.flush()
+            os.fsync(dest.fileno())
+        os.replace(tmp_path, dest_path)
+
+    def _save_current_unearthed_index_as(self) -> None:
+        source_path = self._active_unearthed_index_path
+        path = self._prompt_unearthed_index_filename("Save Current Index As")
+        if not path:
+            self._refresh_unearthed_index_selector()
+            return
+        try:
+            self._copy_unearthed_index_atomic(source_path, path)
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, "Index File", f"Could not save index copy:\n{exc}")
+            self._refresh_unearthed_index_selector()
+            return
+        self._set_unearthed_url_index_path(path)
 
     def _unearthed_url_index_status_text(self) -> str:
         index_path = self._unearthed_url_index_path()
         if not os.path.exists(index_path):
-            return "Index not found"
+            return f"ACTIVE INDEX: {os.path.basename(index_path)} | Index not found"
         try:
             with open(index_path, "r", encoding="utf-8", newline="") as f:
                 rows = [row for row in csv.reader(f) if any(str(cell).strip() for cell in row)]
             count = max(len(rows) - 1, 0)
-        except Exception:
-            count = 0
-        return f"Index contains: {count} artist URLs"
+            modified = datetime.datetime.fromtimestamp(os.path.getmtime(index_path)).strftime("%Y-%m-%d %H:%M:%S")
+        except Exception as exc:
+            return f"ACTIVE INDEX: {os.path.basename(index_path)} | Index error: {exc}"
+        return f"ACTIVE INDEX: {os.path.basename(index_path)} | Index contains: {count} artist URLs | Modified: {modified}"
 
     def _sync_unearthed_source_mode_controls(self) -> None:
-        if self._current_unearthed_use_url_index():
-            self.unearthed_index_status_label.setText(self._unearthed_url_index_status_text())
-            self.unearthed_index_status_label.setVisible(True)
-        else:
-            self.unearthed_index_status_label.clear()
-            self.unearthed_index_status_label.setVisible(False)
+        self.unearthed_index_status_label.setText(self._unearthed_url_index_status_text())
+        self.unearthed_index_status_label.setVisible(True)
+
+    def _set_unearthed_index_controls_enabled(self, enabled: bool) -> None:
+        for widget in (
+            self.unearthed_index_combo,
+            self.unearthed_duplicate_index_button,
+            self.unearthed_source_mode_combo,
+        ):
+            widget.setEnabled(enabled)
+
+    def _validate_active_unearthed_index_for_launch(self) -> bool:
+        has_unearthed_job = any(
+            str(job.get("directory") or "").strip().lower() == "unearthed"
+            for job in self.jobs
+        )
+        if not has_unearthed_job:
+            return True
+        try:
+            _validate_unearthed_index_access(self._active_unearthed_index_path, require_existing=True)
+        except Exception as exc:
+            self._append_log(f"[Night Mode] Index file error: {exc}")
+            QtWidgets.QMessageBox.warning(self, "Index File", f"Selected index file is not usable:\n{exc}")
+            self._sync_unearthed_source_mode_controls()
+            return False
+        return True
 
     def _night_mode_jobs_for_config(self):
         resume_mode = self._current_unearthed_resume_mode()
@@ -13192,6 +13397,7 @@ class NightModeTab(QtWidgets.QWidget):
             if str(job_copy.get("directory") or "").strip().lower() == "unearthed":
                 job_copy["unearthed_resume_mode"] = resume_mode
                 job_copy["use_unearthed_url_index"] = use_url_index
+                job_copy["unearthed_url_index_path"] = self._active_unearthed_index_path
                 if selected_cursor:
                     job_copy["unearthed_selected_cursor"] = selected_cursor
             config_jobs.append(job_copy)
@@ -13246,6 +13452,7 @@ class NightModeTab(QtWidgets.QWidget):
             "jobs": self._night_mode_jobs_for_config(),
             "unearthed_resume_mode": self._current_unearthed_resume_mode(),
             "unearthed_selected_cursor": self._current_unearthed_selected_cursor(),
+            "unearthed_url_index_path": self._active_unearthed_index_path,
         }
         config["phased"] = self.phased_checkbox.isChecked()
         config["facebook"] = {
@@ -13300,6 +13507,7 @@ class NightModeTab(QtWidgets.QWidget):
         self._set_unearthed_selected_cursor(config.get("unearthed_selected_cursor", ""))
         self._sync_unearthed_resume_controls()
         use_url_index = bool(config.get("use_unearthed_url_index", False))
+        index_path = str(config.get("unearthed_url_index_path") or "").strip()
         jobs = config.get("jobs", [])
         if isinstance(jobs, list):
             for job in jobs:
@@ -13307,7 +13515,9 @@ class NightModeTab(QtWidgets.QWidget):
                     continue
                 if str(job.get("directory") or "").strip().lower() == "unearthed":
                     use_url_index = bool(job.get("use_unearthed_url_index", False))
+                    index_path = str(job.get("unearthed_url_index_path") or index_path).strip()
                     break
+        self._set_unearthed_url_index_path(index_path or _unearthed_artist_url_index_path())
         self._set_unearthed_source_mode(use_url_index)
         self._sync_unearthed_source_mode_controls()
         export_mode = (config.get("export_mode") or "both").strip().lower()
@@ -13351,6 +13561,8 @@ class NightModeTab(QtWidgets.QWidget):
         if self.worker and self.worker.isRunning():
             QtWidgets.QMessageBox.information(self, "Night Mode", "Night Mode is already running.")
             return
+        if not self._validate_active_unearthed_index_for_launch():
+            return
         self._phased_enabled = self.phased_checkbox.isChecked()
         self._bootstrap_stage = "headless"
         self._launch_night_mode(headless=True)
@@ -13366,6 +13578,7 @@ class NightModeTab(QtWidgets.QWidget):
                 "jobs": self._night_mode_jobs_for_config(),
                 "unearthed_resume_mode": self._current_unearthed_resume_mode(),
                 "unearthed_selected_cursor": self._current_unearthed_selected_cursor(),
+                "unearthed_url_index_path": self._active_unearthed_index_path,
             }
             config["phased"] = self._phased_enabled
             config["facebook"] = {
@@ -13423,6 +13636,7 @@ class NightModeTab(QtWidgets.QWidget):
         self.status_label.setText(f"Status: running ({mode_label})")
         self.start_button.setEnabled(False)
         self.stop_button.setEnabled(True)
+        self._set_unearthed_index_controls_enabled(False)
         env = os.environ.copy()
         fb_user = self.fb_user_edit.text().strip()
         fb_pass = self.fb_pass_edit.text().strip()
@@ -13474,6 +13688,7 @@ class NightModeTab(QtWidgets.QWidget):
         self.status_label.setText(f"Status: {status}")
         self.start_button.setEnabled(True)
         self.stop_button.setEnabled(False)
+        self._set_unearthed_index_controls_enabled(True)
         self.worker = None
         self._bootstrap_stage = None
         self._refresh_run_summary()
@@ -14170,7 +14385,7 @@ def run_unearthed_pipeline(
     out_path = output_csv or (job_config.get("output_csv") if job_config else "") or "unearthed_output.csv"
     if job_config and job_config.get("backfill_unearthed_url_index"):
         backfill_sources = job_config.get("unearthed_url_index_backfill_sources") or []
-        index_path = str(job_config.get("unearthed_url_index_path") or "").strip() or None
+        index_path = _resolve_unearthed_url_index_path(job_config)
         backfill_unearthed_artist_url_index(backfill_sources, index_path=index_path)
         if job_config.get("unearthed_url_index_backfill_only"):
             save_to_csv([], out_path)

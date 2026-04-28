@@ -4,6 +4,7 @@ import csv
 from types import SimpleNamespace
 
 import pipeline_runner
+import pytest
 
 
 def _read_index(path):
@@ -42,6 +43,7 @@ def test_unearthed_url_index_upsert_dedupes_and_preserves_first_seen(tmp_path):
 def test_unearthed_discovery_persists_urls_incrementally(monkeypatch, tmp_path):
     module = pipeline_runner._load_legacy_module()
     index_path = tmp_path / "unearthed_artist_url_index.csv"
+    module._write_empty_unearthed_artist_url_index(str(index_path))
 
     class Driver:
         page_source = (
@@ -172,3 +174,16 @@ def test_unearthed_index_backfill_is_explicit_and_does_not_modify_source(tmp_pat
     assert [row["artist_url"] for row in rows] == [
         "https://www.abc.net.au/triplejunearthed/artist/artist-three"
     ]
+
+
+def test_unearthed_explicit_missing_index_path_fails_loudly(tmp_path):
+    module = pipeline_runner._load_legacy_module()
+    missing_path = tmp_path / "missing.csv"
+
+    with pytest.raises(FileNotFoundError):
+        module.scrape_website(
+            "https://www.abc.net.au/triplejunearthed",
+            existing_csv=str(tmp_path / "raw.csv"),
+            max_artists=1,
+            job_config={"unearthed_url_index_path": str(missing_path)},
+        )

@@ -1064,7 +1064,7 @@ def test_night_mode_unearthed_source_mode_writes_index_flag(qapp, monkeypatch, t
     tab = module.NightModeTab()
     index_path = tmp_path / "unearthed_artist_url_index.csv"
     index_path.write_text("artist_url\nhttps://example.test/a\nhttps://example.test/b\n", encoding="utf-8")
-    monkeypatch.setattr(tab, "_unearthed_url_index_path", lambda: str(index_path))
+    tab._set_unearthed_url_index_path(str(index_path))
     tab.jobs = [{"job_id": "job_unearthed_1", "directory": "unearthed"}]
 
     tab._set_unearthed_source_mode(True)
@@ -1072,19 +1072,21 @@ def test_night_mode_unearthed_source_mode_writes_index_flag(qapp, monkeypatch, t
     jobs = tab._night_mode_jobs_for_config()
 
     assert jobs[0]["use_unearthed_url_index"] is True
-    assert tab.unearthed_index_status_label.text() == "Index contains: 2 artist URLs"
+    assert jobs[0]["unearthed_url_index_path"] == str(index_path)
+    assert "ACTIVE INDEX: unearthed_artist_url_index.csv" in tab.unearthed_index_status_label.text()
+    assert "Index contains: 2 artist URLs" in tab.unearthed_index_status_label.text()
 
 
 def test_night_mode_unearthed_source_mode_reports_missing_index(qapp, monkeypatch, tmp_path):
     module = _load_legacy_module()
     tab = module.NightModeTab()
     missing_path = tmp_path / "missing.csv"
-    monkeypatch.setattr(tab, "_unearthed_url_index_path", lambda: str(missing_path))
+    tab._set_unearthed_url_index_path(str(missing_path))
 
     tab._set_unearthed_source_mode(True)
     tab._sync_unearthed_source_mode_controls()
 
-    assert tab.unearthed_index_status_label.text() == "Index not found"
+    assert "Index not found" in tab.unearthed_index_status_label.text()
 
 
 def test_night_mode_unearthed_source_mode_reports_empty_index(qapp, monkeypatch, tmp_path):
@@ -1092,9 +1094,9 @@ def test_night_mode_unearthed_source_mode_reports_empty_index(qapp, monkeypatch,
     tab = module.NightModeTab()
     index_path = tmp_path / "unearthed_artist_url_index.csv"
     index_path.write_text("artist_url\n", encoding="utf-8")
-    monkeypatch.setattr(tab, "_unearthed_url_index_path", lambda: str(index_path))
+    tab._set_unearthed_url_index_path(str(index_path))
 
     tab._set_unearthed_source_mode(True)
     tab._sync_unearthed_source_mode_controls()
 
-    assert tab.unearthed_index_status_label.text() == "Index contains: 0 artist URLs"
+    assert "Index contains: 0 artist URLs" in tab.unearthed_index_status_label.text()
