@@ -3576,7 +3576,15 @@ def run_directory_job(job_config: Dict[str, Any], raw_output_path: str, logger: 
         module = _load_legacy_module()
         elapsed = time.time() - main_load_start
         _nm_ue_dispatch_log(logger, f"[NM UE Dispatch] main_script_load_done elapsed_sec={elapsed:.3f}")
+        post_main_gap_start = time.time()
+        _nm_ue_dispatch_log(logger, "[NM UE Dispatch] post_main_gap step=main_script_load_slow_check phase=start")
         _nm_ue_dispatch_warn_if_slow(logger, "main_script_load", main_load_start)
+        post_main_gap_elapsed = time.time() - post_main_gap_start
+        _nm_ue_dispatch_log(
+            logger,
+            f"[NM UE Dispatch] post_main_gap step=main_script_load_slow_check phase=done elapsed_sec={post_main_gap_elapsed:.3f}",
+        )
+        _nm_ue_dispatch_warn_if_slow(logger, "main_script_load_slow_check", post_main_gap_start)
         _nm_ue_dispatch_log(logger, "[NM UE Dispatch] scraper_resolve_start")
         resolve_start = time.time()
         scraper_found = 1 if callable(getattr(module, "scrape_website", None)) else 0
