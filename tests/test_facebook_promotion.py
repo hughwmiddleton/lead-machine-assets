@@ -258,7 +258,7 @@ def test_dataframe_promotion_replaces_direct_share_alias_with_canonical_url_and_
     assert any("[FB Share Canonicalize]" in msg and "outcome='resolved'" in msg for msg in logs)
 
 
-def test_dataframe_promotion_clears_unresolved_share_aliases_but_preserves_source_fields():
+def test_dataframe_promotion_preserves_unresolved_share_aliases_and_source_fields():
     df = pytest.importorskip("pandas").DataFrame(
         [
             {
@@ -280,9 +280,9 @@ def test_dataframe_promotion_clears_unresolved_share_aliases_but_preserves_sourc
         share_resolver=lambda raw: "https://www.facebook.com/share/stillwrapped",
     )
 
-    assert promoted.at[0, "facebook_url"] == ""
-    assert promoted.at[0, "Facebook_URL"] == ""
-    assert promoted.at[0, "Facebook URL"] == ""
+    assert promoted.at[0, "facebook_url"] == "https://www.facebook.com/share/19BActwuev?mibextid=wwXIfr"
+    assert promoted.at[0, "Facebook_URL"] == "https://www.facebook.com/share/19BActwuev?mibextid=wwXIfr"
+    assert promoted.at[0, "Facebook URL"] == "https://www.facebook.com/share/19BActwuev?mibextid=wwXIfr"
     assert "instagram.com/unresolvedshare" in promoted.at[0, "Social Link"]
     assert "facebook.com/share/19BActwuev" in promoted.at[0, "Social Link"]
     assert any("[FB Share Canonicalize]" in msg and "detected=1" in msg and "source_field='Facebook_URL'" in msg for msg in logs)
@@ -292,6 +292,134 @@ def test_dataframe_promotion_clears_unresolved_share_aliases_but_preserves_sourc
         and "reason='redirect_stayed_on_share_wrapper'" in msg
         for msg in logs
     )
+    assert any(
+        "[FB Share Intake Trace]" in msg
+        and "raw_fb_url='https://www.facebook.com/share/19BActwuev?mibextid=wwXIfr'" in msg
+        and "resolution_attempted=true" in msg
+        and "resolution_success=false" in msg
+        and "state='fb_share_resolution_failed'" in msg
+        for msg in logs
+    )
+
+
+def test_share_in_social_link_is_resolved_before_opportunity_detection():
+    df = pytest.importorskip("pandas").DataFrame(
+        [
+            {
+                "Artist Name": "Social Share",
+                "Social Link": "https://www.instagram.com/social | https://www.facebook.com/share/XYZ",
+                "External Links": "",
+                "Facebook_URL": "",
+                "Facebook URL": "",
+                "facebook_url": "",
+                pipeline_runner.FB_OPPORTUNITY_STATE_COL: "",
+                pipeline_runner.FB_GATE_STATE_COL: "",
+            }
+        ],
+        dtype=str,
+    ).fillna("")
+    logs = []
+    calls = []
+
+    pipeline_runner._promote_fb_urls_df(
+        df,
+        logger=logs.append,
+        share_resolver=lambda raw: (calls.append(raw) or "https://www.facebook.com/socialcanonical"),
+    )
+    pipeline_runner.apply_fb_opportunity_state_df(df, overwrite=False)
+
+    assert calls == ["https://www.facebook.com/share/XYZ"]
+    assert df.at[0, "Facebook_URL"] == "https://www.facebook.com/socialcanonical"
+    assert df.at[0, pipeline_runner.FB_OPPORTUNITY_STATE_COL] == "fb_opportunity_present"
+    assert any(
+        "[FB Share Intake Trace]" in msg
+        and "resolved_fb_url='https://www.facebook.com/socialcanonical'" in msg
+        and "resolution_success=true" in msg
+        for msg in logs
+    )
+
+
+def test_share_in_external_links_is_resolved_before_opportunity_detection():
+    df = pytest.importorskip("pandas").DataFrame(
+        [
+            {
+                "Artist Name": "External Share",
+                "Social Link": "",
+                "External Links": "https://open.spotify.com/artist/1 | https://www.facebook.com/share/XYZ",
+                "Facebook_URL": "",
+                "Facebook URL": "",
+                "facebook_url": "",
+                pipeline_runner.FB_OPPORTUNITY_STATE_COL: "",
+                pipeline_runner.FB_GATE_STATE_COL: "",
+            }
+        ],
+        dtype=str,
+    ).fillna("")
+
+    pipeline_runner._promote_fb_urls_df(
+        df,
+        share_resolver=lambda raw: "https://www.facebook.com/externalcanonical",
+    )
+    pipeline_runner.apply_fb_opportunity_state_df(df, overwrite=False)
+
+    assert df.at[0, "Facebook_URL"] == "https://www.facebook.com/externalcanonical"
+    assert df.at[0, pipeline_runner.FB_OPPORTUNITY_STATE_COL] == "fb_opportunity_present"
+
+
+def test_canonical_fb_url_bypasses_share_resolver_and_keeps_existing_behaviour():
+    df = pytest.importorskip("pandas").DataFrame(
+        [
+            {
+                "Artist Name": "Canonical Artist",
+                "Social Link": "https://www.facebook.com/some.artist",
+                "External Links": "",
+                "Facebook_URL": "",
+                "Facebook URL": "",
+                "facebook_url": "",
+                pipeline_runner.FB_OPPORTUNITY_STATE_COL: "",
+                pipeline_runner.FB_GATE_STATE_COL: "",
+            }
+        ],
+        dtype=str,
+    ).fillna("")
+
+    def fail(raw: str) -> str:
+        raise AssertionError("resolver should not be called for canonical Facebook URLs")
+
+    pipeline_runner._promote_fb_urls_df(df, share_resolver=fail)
+    pipeline_runner.apply_fb_opportunity_state_df(df, overwrite=False)
+
+    assert df.at[0, "Facebook_URL"] == "https://www.facebook.com/some.artist"
+    assert df.at[0, pipeline_runner.FB_OPPORTUNITY_STATE_COL] == "fb_opportunity_present"
+
+
+def test_share_resolution_failure_is_explicit_before_no_opportunity():
+    raw_share = "https://www.facebook.com/share/XYZ"
+    df = pytest.importorskip("pandas").DataFrame(
+        [
+            {
+                "Artist Name": "Failed Share",
+                "Social Link": raw_share,
+                "External Links": "",
+                "Facebook_URL": "",
+                "Facebook URL": "",
+                "facebook_url": "",
+                pipeline_runner.FB_OPPORTUNITY_STATE_COL: "",
+                pipeline_runner.FB_GATE_STATE_COL: "",
+            }
+        ],
+        dtype=str,
+    ).fillna("")
+    logs = []
+
+    pipeline_runner._promote_fb_urls_df(df, logger=logs.append, share_resolver=lambda raw: "")
+    pipeline_runner.apply_fb_opportunity_state_df(df, overwrite=False)
+
+    assert raw_share in df.at[0, "Social Link"]
+    assert df.at[0, "Facebook_URL"] == ""
+    assert df.at[0, pipeline_runner.FB_GATE_STATE_COL] == "fb_share_resolution_failed"
+    assert df.at[0, pipeline_runner.FB_OPPORTUNITY_STATE_COL] == "no_fb_opportunity"
+    assert any("resolution_attempted=true" in msg and "resolution_success=false" in msg for msg in logs)
 
 
 def test_dataframe_promotion_preserves_existing_canonical_without_invoking_share_resolver():

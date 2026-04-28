@@ -689,14 +689,6 @@ def _write_explicit_fb_canonical_fields(df: pd.DataFrame, idx: int, canonical_ur
             df.at[idx, field] = canonical_url
 
 
-def _clear_explicit_fb_share_aliases(df: pd.DataFrame, idx: int) -> None:
-    for field in _FB_SHARE_DIRECT_FIELDS:
-        if field not in df.columns:
-            continue
-        if _is_explicit_fb_share_url(df.at[idx, field]):
-            df.at[idx, field] = ""
-
-
 def _set_fb_share_runtime_fallback(df: pd.DataFrame, idx: int, raw_share_url: str, source_field: str) -> None:
     if FB_SHARE_RUNTIME_FALLBACK_URL_COL not in df.columns:
         df[FB_SHARE_RUNTIME_FALLBACK_URL_COL] = ""
@@ -755,21 +747,32 @@ def _canonicalize_explicit_fb_share_for_row(
     if canonical_url:
         _write_explicit_fb_canonical_fields(df, idx, canonical_url)
         _clear_fb_share_runtime_fallback(df, idx)
+        if FB_GATE_STATE_COL in df.columns and _cell_str(df.at[idx, FB_GATE_STATE_COL]) == "fb_share_resolution_failed":
+            df.at[idx, FB_GATE_STATE_COL] = ""
         _safe_log_console(
             logger,
             f"[FB Share Canonicalize] artist='{artist_label}' outcome='resolved' canonical_url='{canonical_url}'",
         )
+        _safe_log_console(
+            logger,
+            f"[FB Share Intake Trace] artist='{artist_label}' raw_fb_url='{raw_share_url}' "
+            f"resolved_fb_url='{canonical_url}' resolution_attempted=true resolution_success=true",
+        )
         return (canonical_url, source_field)
 
-    _clear_explicit_fb_share_aliases(df, idx)
-    if reason == "resolver_returned_blank":
-        _set_fb_share_runtime_fallback(df, idx, raw_share_url, source_field)
-    else:
-        _clear_fb_share_runtime_fallback(df, idx)
+    _clear_fb_share_runtime_fallback(df, idx)
+    if FB_GATE_STATE_COL in df.columns:
+        df.at[idx, FB_GATE_STATE_COL] = "fb_share_resolution_failed"
     resolved_fragment = f" resolved_url='{resolved_url}'" if resolved_url else ""
     _safe_log_console(
         logger,
         f"[FB Share Canonicalize] artist='{artist_label}' outcome='unresolved' reason='{reason or 'unresolved'}'{resolved_fragment}",
+    )
+    _safe_log_console(
+        logger,
+        f"[FB Share Intake Trace] artist='{artist_label}' raw_fb_url='{raw_share_url}' "
+        f"resolved_fb_url='{resolved_url}' resolution_attempted=true resolution_success=false "
+        f"state='fb_share_resolution_failed'",
     )
     return ("", source_field)
 
@@ -4515,6 +4518,7 @@ def run_facebook_global_pass_nightmode(
                 accepted_urls=explicit_fb_entrypoints,
                 share_runtime_fallback_urls=share_runtime_fallback_urls,
             )
+            share_resolution_failed = _cell_str(df.at[idx, FB_GATE_STATE_COL]).lower() == "fb_share_resolution_failed"
             has_promotable_explicit_fb_entrypoint = bool(explicit_fb_intake.promotion_expected_missing_canonical)
             if canonical_facebook_url and "Facebook_URL" in df.columns and _cell_str(df.at[idx, "Facebook_URL"]) != canonical_facebook_url:
                 df.at[idx, "Facebook_URL"] = canonical_facebook_url
@@ -4590,7 +4594,19 @@ def run_facebook_global_pass_nightmode(
 
             skip_row = False
 
-            if effective_skip_due_to_email:
+            if share_resolution_failed:
+                if not _cell_str(df.at[idx, FB_WRITE_STATE_COL]):
+                    df.at[idx, FB_WRITE_STATE_COL] = "fb_no_email_written"
+                raw_share_url, _share_source = _find_explicit_fb_share_candidate(row_payload)
+                _safe_log_console(
+                    logger,
+                    f"[Night FB][Share Resolution Gate] row={idx} artist={artist_label!r} "
+                    f"raw_fb_url='{raw_share_url}' resolved_fb_url='' "
+                    f"resolution_attempted=true resolution_success=false state='fb_share_resolution_failed'",
+                )
+                skip_row = True
+
+            elif effective_skip_due_to_email:
                 df.at[idx, FB_GATE_STATE_COL] = "skipped_same_source_url_success"
                 if not _cell_str(df.at[idx, FB_WRITE_STATE_COL]):
                     df.at[idx, FB_WRITE_STATE_COL] = "fb_no_email_written"
