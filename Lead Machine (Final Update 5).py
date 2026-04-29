@@ -289,6 +289,15 @@ FB_DRIVER_RECOVERY_SUMMARY_KEYS = (
     "retry_success",
     "fb_email_found",
 )
+FB_SHARE_RECOVERY_DEFAULT_BATCH_SIZE = 40
+
+
+def _coerce_fb_share_recovery_batch_size(value) -> int:
+    try:
+        batch_size = int(value)
+    except Exception:
+        return FB_SHARE_RECOVERY_DEFAULT_BATCH_SIZE
+    return batch_size if batch_size > 0 else FB_SHARE_RECOVERY_DEFAULT_BATCH_SIZE
 
 
 def _parse_fb_driver_recovery_summary(stdout: str) -> Dict[str, str]:
@@ -13474,6 +13483,21 @@ class NightModeTab(QtWidgets.QWidget):
         run_layout.addLayout(_lm_row("FB recovery batch size:", self.fb_driver_recovery_batch_spin, add_stretch=True))
         run_layout.addLayout(_lm_control_row(self.fb_driver_recovery_copy_radio, self.fb_driver_recovery_in_place_radio))
 
+        self.fb_share_recovery_checkbox = QtWidgets.QCheckBox("Run FB /share recovery after Night Mode")
+        self.fb_share_recovery_checkbox.setChecked(False)
+        self.fb_share_recovery_batch_spin = QtWidgets.QSpinBox()
+        self.fb_share_recovery_batch_spin.setRange(1, 1000)
+        self.fb_share_recovery_batch_spin.setValue(FB_SHARE_RECOVERY_DEFAULT_BATCH_SIZE)
+        self.fb_share_recovery_copy_radio = QtWidgets.QRadioButton("Write recovered copy")
+        self.fb_share_recovery_copy_radio.setChecked(True)
+        self.fb_share_recovery_in_place_radio = QtWidgets.QRadioButton("In-place update")
+        self.fb_share_recovery_mode_group = QtWidgets.QButtonGroup(self)
+        self.fb_share_recovery_mode_group.addButton(self.fb_share_recovery_copy_radio)
+        self.fb_share_recovery_mode_group.addButton(self.fb_share_recovery_in_place_radio)
+        run_layout.addLayout(_lm_control_row(self.fb_share_recovery_checkbox))
+        run_layout.addLayout(_lm_row("FB /share recovery batch size:", self.fb_share_recovery_batch_spin, add_stretch=True))
+        run_layout.addLayout(_lm_control_row(self.fb_share_recovery_copy_radio, self.fb_share_recovery_in_place_radio))
+
         default_live_max = getattr(cross_directory_enricher, "LIVE_SEARCH_MAX_ATTEMPTS", 50) if cross_directory_enricher else 50
         self.master_enrich_checkbox = QtWidgets.QCheckBox("Use master cross-directory enrichment (recommended)")
         self.master_enrich_checkbox.setChecked(True)
@@ -13862,6 +13886,13 @@ class NightModeTab(QtWidgets.QWidget):
             config_jobs.append(job_copy)
         return config_jobs
 
+    def _fb_share_recovery_config_for_gui(self) -> Dict[str, object]:
+        return {
+            "enabled": self.fb_share_recovery_checkbox.isChecked(),
+            "batch_size": _coerce_fb_share_recovery_batch_size(self.fb_share_recovery_batch_spin.value()),
+            "output_mode": "in_place" if self.fb_share_recovery_in_place_radio.isChecked() else "copy",
+        }
+
     def _open_job_dialog(self, existing_job=None, index=None):
         dialog = NightModeJobDialog(existing_job, parent=self)
         if dialog.exec_() == QtWidgets.QDialog.Accepted:
@@ -13926,6 +13957,7 @@ class NightModeTab(QtWidgets.QWidget):
             "batch_size": int(self.fb_driver_recovery_batch_spin.value()),
             "output_mode": "in_place" if self.fb_driver_recovery_in_place_radio.isChecked() else "copy",
         }
+        config["fb_share_recovery"] = self._fb_share_recovery_config_for_gui()
         config["master_enrichment"] = {"enabled": self.master_enrich_checkbox.isChecked()}
         config["soundcloud_meta_enricher"] = {"enabled": self.sc_meta_checkbox.isChecked()}
         try:
@@ -14020,6 +14052,17 @@ class NightModeTab(QtWidgets.QWidget):
             self.fb_driver_recovery_in_place_radio.setChecked(True)
         else:
             self.fb_driver_recovery_copy_radio.setChecked(True)
+        fb_share_recovery_cfg = config.get("fb_share_recovery", {}) or {}
+        self.fb_share_recovery_checkbox.setChecked(bool(fb_share_recovery_cfg.get("enabled", False)))
+        self.fb_share_recovery_batch_spin.setValue(
+            _coerce_fb_share_recovery_batch_size(
+                fb_share_recovery_cfg.get("batch_size", self.fb_share_recovery_batch_spin.value())
+            )
+        )
+        if str(fb_share_recovery_cfg.get("output_mode", "copy") or "copy").strip().lower() in {"in_place", "in-place", "inplace"}:
+            self.fb_share_recovery_in_place_radio.setChecked(True)
+        else:
+            self.fb_share_recovery_copy_radio.setChecked(True)
         master_enrich_cfg = config.get("master_enrichment", {}) or {}
         self.master_enrich_checkbox.setChecked(bool(master_enrich_cfg.get("enabled", True)))
         self.master_live_checkbox.setChecked(bool(master_enrich_cfg.get("enable_live_search", True)))
@@ -14071,6 +14114,7 @@ class NightModeTab(QtWidgets.QWidget):
                 "batch_size": int(self.fb_driver_recovery_batch_spin.value()),
                 "output_mode": "in_place" if self.fb_driver_recovery_in_place_radio.isChecked() else "copy",
             }
+            config["fb_share_recovery"] = self._fb_share_recovery_config_for_gui()
             config["master_enrichment"] = {
                 "enabled": self.master_enrich_checkbox.isChecked(),
                 "enable_live_search": self.master_live_checkbox.isChecked(),
@@ -14090,7 +14134,17 @@ class NightModeTab(QtWidgets.QWidget):
             if not config_path or not os.path.exists(config_path):
                 QtWidgets.QMessageBox.warning(self, "Config missing", "Add jobs in the table or select a valid night mode config JSON.")
                 return
-            config_path_to_use = config_path
+            try:
+                with open(config_path, "r", encoding="utf-8") as f:
+                    config = json.load(f)
+                config["fb_share_recovery"] = self._fb_share_recovery_config_for_gui()
+                temp_dir = tempfile.mkdtemp(prefix="nightmode_")
+                config_path_to_use = os.path.join(temp_dir, "overnight_jobs_gui.json")
+                with open(config_path_to_use, "w", encoding="utf-8") as f:
+                    json.dump(config, f, indent=2)
+            except Exception as exc:
+                QtWidgets.QMessageBox.warning(self, "Config error", f"Could not prepare config:\n{exc}")
+                return
         base_dir = os.path.dirname(os.path.abspath(__file__))
         script_path = os.path.join(base_dir, "night_mode_runner.py")
         cmd = [sys.executable, script_path, "--config", config_path_to_use]
@@ -14114,6 +14168,14 @@ class NightModeTab(QtWidgets.QWidget):
         cmd.extend(["--fb-max-rows-per-run", str(int(self.fb_max_rows_spin.value()))])
         if self.sc_meta_checkbox.isChecked():
             cmd.append("--with-sc-meta")
+        if self.fb_share_recovery_checkbox.isChecked():
+            cmd.append("--enable-fb-share-recovery")
+            cmd.extend([
+                "--fb-share-recovery-batch-size",
+                str(_coerce_fb_share_recovery_batch_size(self.fb_share_recovery_batch_spin.value())),
+            ])
+            if self.fb_share_recovery_in_place_radio.isChecked():
+                cmd.append("--fb-share-recovery-in-place")
 
         self.log_console.clear()
         mode_label = "headless" if headless else "headed"

@@ -1100,16 +1100,31 @@ def _run_fb_share_recovery_after_export(
     if not os.path.exists(script_path):
         raise FileNotFoundError(f"FB share recovery script not found: {script_path}")
 
+    try:
+        normalized_batch_size = int(batch_size) if batch_size is not None else 40
+    except Exception:
+        normalized_batch_size = 40
+    if normalized_batch_size <= 0:
+        normalized_batch_size = 40
+
+    if logger:
+        logger.info("[FB Share Recovery] Starting post-run /share recovery")
+        logger.info("[FB Share Recovery] input=%s", export_path)
+        logger.info("[FB Share Recovery] batch_size=%s", normalized_batch_size)
+        logger.info("[FB Share Recovery] output_mode=%s", "in_place" if in_place else "copy")
+        if in_place:
+            logger.info("[FB Share Recovery] Running in-place update")
+
     cmd = [
         sys.executable,
         script_path,
         "--input",
         export_path,
+        "--limit",
+        str(normalized_batch_size),
     ]
     if in_place:
         cmd.append("--in-place")
-    if batch_size is not None:
-        cmd.extend(["--limit", str(max(int(batch_size), 1))])
 
     completed = subprocess.run(
         cmd,
