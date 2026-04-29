@@ -1,12 +1,14 @@
 {
-  "current_status": "night_mode_start",
-  "elapsed_seconds": 0.0,
-  "eta_seconds": null,
-  "last_update_time": 1777356114.4395058,
-  "percentage": null,
-  "phase": "discovery",
-  "processed_rows": 0,
-  "run_id": "2026-04-28_160154",
-  "start_time": 1777356114.4395058,
-  "total_rows": null
+  "current_source": "unearthed",
+  "current_status": "row_write_complete",
+  "elapsed_seconds": 19243.974807977676,
+  "emails_found": 447,
+  "eta_seconds": 13,
+  "last_update_time": 1777473978.539865,
+  "percentage": 99.9,
+  "phase": "enrichment",
+  "processed_rows": 1499,
+  "run_id": "job_unearthed_1",
+  "start_time": 1777454734.565057,
+  "total_rows": 1500
 }

@@ -11,12 +11,12 @@
       "unearthed_resume_mode": "auto",
       "use_unearthed_url_index": true,
       "unearthed_url_index_path": "/Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/data/unearthed_artist_url_index.csv",
-      "unearthed_start_index_position": "1500"
+      "unearthed_start_index_position": "3000"
     }
   ],
   "unearthed_resume_mode": "auto",
   "unearthed_selected_cursor": "",
-  "unearthed_start_index_position": "1500",
+  "unearthed_start_index_position": "3000",
   "unearthed_url_index_path": "/Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/data/unearthed_artist_url_index.csv",
   "phased": true,
   "facebook": {
@@ -24,6 +24,16 @@
     "cooldown_seconds": 600,
     "max_auto_resume_attempts": 1,
     "max_rows_per_run": 0
+  },
+  "fb_driver_recovery": {
+    "enabled": true,
+    "batch_size": 40,
+    "output_mode": "copy"
+  },
+  "fb_share_recovery": {
+    "enabled": false,
+    "batch_size": 40,
+    "output_mode": "copy"
   },
   "master_enrichment": {
     "enabled": true

@@ -1,8 +1,8 @@
 {
-  "unearthed_persistent_cursor": "https://www.abc.net.au/triplejunearthed/artist/adam-wynne",
+  "unearthed_persistent_cursor": "https://www.abc.net.au/triplejunearthed/artist/hade",
   "index_file_path": "/Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/data/unearthed_artist_url_index.csv",
-  "last_position": 3019,
-  "last_url": "https://www.abc.net.au/triplejunearthed/artist/adam-wynne",
-  "timestamp": "2026-04-28T05:15:37+00:00",
+  "last_position": 4499,
+  "last_url": "https://www.abc.net.au/triplejunearthed/artist/hade",
+  "timestamp": "2026-04-29T09:25:34+00:00",
   "batch_size": 1500
 }
