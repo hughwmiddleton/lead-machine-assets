@@ -748,10 +748,12 @@ def _run_fb_driver_recovery_chain(
 
     _log("FB Driver Recovery started")
     current_input = str(export_path)
-    latest_output = ""
+    latest_valid_output = str(export_path)
     aggregate = {key: 0 for key in FB_DRIVER_RECOVERY_SUMMARY_KEYS}
+    driver_error_rows = 0
     batches_run = 0
     stopped_reason = "max_batches"
+    attempted_recovery = False
 
     for batch_index in range(1, FB_DRIVER_RECOVERY_MAX_BATCHES + 1):
         batch_output = str(export_path.with_name(f"{export_path.stem}.fb_driver_recovered_batch{batch_index}{export_path.suffix or '.csv'}"))
@@ -786,7 +788,7 @@ def _run_fb_driver_recovery_chain(
         summary = _parse_fb_driver_recovery_summary(stdout)
         for key in FB_DRIVER_RECOVERY_SUMMARY_KEYS:
             aggregate[key] += _fb_driver_recovery_int(summary, key)
-        latest_output = batch_output
+        driver_error_rows += _fb_driver_recovery_int(summary, "driver_error_rows")
         batches_run = batch_index
 
         candidates_found = _fb_driver_recovery_int(summary, "candidates_found")
@@ -797,24 +799,31 @@ def _run_fb_driver_recovery_chain(
         if retry_attempted == 0:
             stopped_reason = "retry_attempted=0"
             break
+        _validate_recovered_csv_matches_original(str(export_path), batch_output)
+        attempted_recovery = True
+        latest_valid_output = batch_output
         current_input = batch_output
     else:
         _log(f"[FB Driver Recovery] Warning: max_batches reached ({FB_DRIVER_RECOVERY_MAX_BATCHES}); keeping latest output.")
 
-    if not latest_output:
-        raise RuntimeError("FB driver recovery did not produce an output CSV.")
-
-    if in_place:
+    if not attempted_recovery:
+        final_output = str(export_path)
+        _log("No FB driver recovery needed")
+    elif stopped_reason in {"candidates_found=0", "retry_attempted=0"}:
+        final_output = latest_valid_output
+        _log("No FB driver recovery needed")
+    elif in_place:
         final_output = str(export_path.with_name(f"{export_path.stem}.recovered_temp{export_path.suffix or '.csv'}"))
-        _copy_csv_atomic(latest_output, final_output)
+        _copy_csv_atomic(latest_valid_output, final_output)
         _validate_recovered_csv_matches_original(str(export_path), final_output)
         os.replace(final_output, str(export_path))
         final_output = str(export_path)
     else:
         final_output = str(export_path.with_name(f"{export_path.stem}.recovered_final{export_path.suffix or '.csv'}"))
-        _copy_csv_atomic(latest_output, final_output)
+        _copy_csv_atomic(latest_valid_output, final_output)
         _validate_recovered_csv_matches_original(str(export_path), final_output)
 
+    _log(f"driver_error_rows={driver_error_rows}")
     for key in FB_DRIVER_RECOVERY_SUMMARY_KEYS:
         _log(f"driver_{key}={aggregate[key]}")
     _log(f"final_recovered_csv={final_output}")
@@ -823,6 +832,7 @@ def _run_fb_driver_recovery_chain(
         "final_recovered_csv": final_output,
         "batches_run": batches_run,
         "stopped_reason": stopped_reason,
+        "driver_error_rows": driver_error_rows,
         **{f"driver_{key}": aggregate[key] for key in FB_DRIVER_RECOVERY_SUMMARY_KEYS},
     }
 

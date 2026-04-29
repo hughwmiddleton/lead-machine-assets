@@ -81,11 +81,58 @@ def test_fb_driver_recovery_batch_chaining_and_default_preserves_original(tmp_pa
 
     assert calls[0][calls[0].index("--input") + 1] == str(export)
     assert calls[1][calls[1].index("--input") + 1].endswith("master_export_leads.fb_driver_recovered_batch1.csv")
-    assert Path(result["final_recovered_csv"]).name == "master_export_leads.recovered_final.csv"
-    assert Path(result["final_recovered_csv"]).exists()
+    assert Path(result["final_recovered_csv"]).name == "master_export_leads.fb_driver_recovered_batch1.csv"
     assert (tmp_path / "master_export_leads.fb_driver_recovered_batch1.csv").exists()
     assert (tmp_path / "master_export_leads.fb_driver_recovered_batch2.csv").exists()
     assert export.read_text(encoding="utf-8") == original
+
+
+def test_fb_driver_recovery_zero_candidates_first_batch_is_noop_success(tmp_path, monkeypatch):
+    module = _load_legacy_module()
+    script = tmp_path / "scripts" / "recover_fb_driver_errors.py"
+    script.parent.mkdir()
+    script.write_text("# fixture\n", encoding="utf-8")
+    export = tmp_path / "master_export_leads.csv"
+    _write_export(export)
+    original = export.read_text(encoding="utf-8")
+    logs = []
+    validations = []
+
+    def fake_runner(cmd, **kwargs):
+        output_path = Path(cmd[cmd.index("--output") + 1])
+        output_path.write_text("Bad,Schema\nx,y\n", encoding="utf-8")
+        return SimpleNamespace(
+            returncode=0,
+            stdout="driver_error_rows=0\ncandidates_found=0\nretry_attempted=0\nretry_success=0\nfb_email_found=0\n",
+        )
+
+    monkeypatch.setattr(
+        module,
+        "_validate_recovered_csv_matches_original",
+        lambda original_csv, recovered_csv: validations.append((original_csv, recovered_csv)),
+    )
+
+    result = module._run_fb_driver_recovery_chain(
+        str(export),
+        runner=fake_runner,
+        python_executable="python",
+        base_dir=str(tmp_path),
+        logger_fn=logs.append,
+    )
+
+    assert result["final_recovered_csv"] == str(export)
+    assert result["driver_error_rows"] == 0
+    assert result["driver_candidates_found"] == 0
+    assert result["driver_retry_attempted"] == 0
+    assert validations == []
+    assert export.read_text(encoding="utf-8") == original
+    assert "FB Driver Recovery started" in logs
+    assert "driver_error_rows=0" in logs
+    assert "driver_candidates_found=0" in logs
+    assert "driver_retry_attempted=0" in logs
+    assert "No FB driver recovery needed" in logs
+    assert f"final_recovered_csv={export}" in logs
+    assert "FB Driver Recovery complete" in logs
 
 
 def test_fb_driver_recovery_stops_when_retry_attempted_zero(tmp_path):
@@ -113,6 +160,93 @@ def test_fb_driver_recovery_stops_when_retry_attempted_zero(tmp_path):
 
     assert len(calls) == 1
     assert result["stopped_reason"] == "retry_attempted=0"
+    assert result["final_recovered_csv"] == str(export)
+
+
+def test_fb_driver_recovery_validates_real_batch_before_later_noop(tmp_path, monkeypatch):
+    module = _load_legacy_module()
+    script = tmp_path / "scripts" / "recover_fb_driver_errors.py"
+    script.parent.mkdir()
+    script.write_text("# fixture\n", encoding="utf-8")
+    export = tmp_path / "master_export_leads.csv"
+    _write_export(export)
+    calls = []
+    validations = []
+    summaries = [
+        "candidates_found=10\nretry_attempted=10\nretry_success=2\nfb_email_found=2\n",
+        "candidates_found=0\nretry_attempted=0\nretry_success=0\nfb_email_found=0\n",
+    ]
+
+    def fake_runner(cmd, **kwargs):
+        calls.append(cmd)
+        input_path = Path(cmd[cmd.index("--input") + 1])
+        output_path = Path(cmd[cmd.index("--output") + 1])
+        if len(calls) == 1:
+            output_path.write_text(input_path.read_text(encoding="utf-8"), encoding="utf-8")
+        else:
+            output_path.write_text("Bad,Schema\nx,y\n", encoding="utf-8")
+        return SimpleNamespace(returncode=0, stdout=summaries[len(calls) - 1])
+
+    real_validate = module._validate_recovered_csv_matches_original
+
+    def fake_validate(original_csv, recovered_csv):
+        validations.append(Path(recovered_csv).name)
+        real_validate(original_csv, recovered_csv)
+
+    monkeypatch.setattr(module, "_validate_recovered_csv_matches_original", fake_validate)
+
+    result = module._run_fb_driver_recovery_chain(
+        str(export),
+        runner=fake_runner,
+        python_executable="python",
+        base_dir=str(tmp_path),
+    )
+
+    assert len(calls) == 2
+    assert validations == ["master_export_leads.fb_driver_recovered_batch1.csv"]
+    assert Path(result["final_recovered_csv"]).name == "master_export_leads.fb_driver_recovered_batch1.csv"
+
+
+def test_fb_driver_recovery_real_recovery_validates_before_finalizing(tmp_path, monkeypatch):
+    module = _load_legacy_module()
+    script = tmp_path / "scripts" / "recover_fb_driver_errors.py"
+    script.parent.mkdir()
+    script.write_text("# fixture\n", encoding="utf-8")
+    export = tmp_path / "master_export_leads.csv"
+    _write_export(export)
+    validations = []
+    original_max_batches = module.FB_DRIVER_RECOVERY_MAX_BATCHES
+    module.FB_DRIVER_RECOVERY_MAX_BATCHES = 1
+
+    def fake_runner(cmd, **kwargs):
+        input_path = Path(cmd[cmd.index("--input") + 1])
+        output_path = Path(cmd[cmd.index("--output") + 1])
+        output_path.write_text(input_path.read_text(encoding="utf-8"), encoding="utf-8")
+        return SimpleNamespace(returncode=0, stdout="candidates_found=10\nretry_attempted=10\nretry_success=3\nfb_email_found=3\n")
+
+    real_validate = module._validate_recovered_csv_matches_original
+
+    def fake_validate(original_csv, recovered_csv):
+        validations.append(Path(recovered_csv).name)
+        real_validate(original_csv, recovered_csv)
+
+    monkeypatch.setattr(module, "_validate_recovered_csv_matches_original", fake_validate)
+
+    try:
+        result = module._run_fb_driver_recovery_chain(
+            str(export),
+            runner=fake_runner,
+            python_executable="python",
+            base_dir=str(tmp_path),
+        )
+    finally:
+        module.FB_DRIVER_RECOVERY_MAX_BATCHES = original_max_batches
+
+    assert validations == [
+        "master_export_leads.fb_driver_recovered_batch1.csv",
+        "master_export_leads.recovered_final.csv",
+    ]
+    assert Path(result["final_recovered_csv"]).name == "master_export_leads.recovered_final.csv"
 
 
 def test_fb_driver_recovery_in_place_uses_temp_validation_before_replace(tmp_path, monkeypatch):
@@ -155,12 +289,8 @@ def test_fb_driver_recovery_in_place_uses_temp_validation_before_replace(tmp_pat
         base_dir=str(tmp_path),
     )
 
-    assert events == [
-        ("copy", "master_export_leads.recovered_temp.csv"),
-        ("validate", "master_export_leads.recovered_temp.csv"),
-        ("replace", "master_export_leads.recovered_temp.csv", "master_export_leads.csv"),
-    ]
-    assert "recovered@example.com" in export.read_text(encoding="utf-8")
+    assert events == []
+    assert "recovered@example.com" not in export.read_text(encoding="utf-8")
 
 
 def test_night_mode_toggle_off_does_not_start_recovery(qapp, monkeypatch):
