@@ -43,6 +43,78 @@ def test_selection_identifies_driver_error_with_fb_opportunity():
     assert row_qualifies_for_recovery(_base_row()) is True
 
 
+def test_discovery_fallback_without_canonical_url_is_skipped():
+    df, summary = recover_dataframe(
+        pd.DataFrame(
+            [
+                _base_row(
+                    FB_Opportunity_State="fb_discovery_fallback_eligible",
+                    Facebook_URL="",
+                )
+            ]
+        ),
+        dry_run=True,
+    )
+
+    assert summary.driver_error_rows == 1
+    assert summary.candidates_found == 0
+    assert summary.excluded_discovery_fallback_only == 1
+    assert df.at[0, "retry_attempted"] == ""
+
+
+def test_no_canonical_facebook_url_is_skipped():
+    df, summary = recover_dataframe(pd.DataFrame([_base_row(Facebook_URL="")]), dry_run=True)
+
+    assert summary.driver_error_rows == 1
+    assert summary.candidates_found == 0
+    assert summary.excluded_no_canonical_fb_url == 1
+    assert df.at[0, "retry_attempted"] == ""
+
+
+def test_share_facebook_url_is_skipped_as_no_canonical_url():
+    df, summary = recover_dataframe(
+        pd.DataFrame([_base_row(Facebook_URL="https://www.facebook.com/share/abc")]),
+        dry_run=True,
+    )
+
+    assert summary.driver_error_rows == 1
+    assert summary.candidates_found == 0
+    assert summary.excluded_no_canonical_fb_url == 1
+    assert df.at[0, "retry_attempted"] == ""
+
+
+def test_social_link_fb_without_canonical_url_is_not_recovered():
+    df, summary = recover_dataframe(
+        pd.DataFrame(
+            [
+                _base_row(
+                    Facebook_URL="",
+                    **{"Social Link": "https://www.facebook.com/exampleband"},
+                )
+            ]
+        ),
+        dry_run=True,
+    )
+
+    assert summary.candidates_found == 0
+    assert summary.excluded_no_canonical_fb_url == 1
+    assert df.at[0, "retry_attempted"] == ""
+
+
+def test_existing_fb_email_is_skipped_for_driver_error_recovery():
+    row = _base_row(
+        Email="artist@example.com",
+        Email_All="artist@example.com",
+        Email_Provenance_JSON=_fb_provenance(),
+    )
+    df, summary = recover_dataframe(pd.DataFrame([row]), dry_run=True)
+
+    assert summary.driver_error_rows == 1
+    assert summary.candidates_found == 0
+    assert summary.excluded_existing_fb_email == 1
+    assert df.at[0, "retry_attempted"] == ""
+
+
 def test_selection_identifies_final_export_status_driver_error():
     row = _base_row(FB_Status="driver_error", FB_Debug_Reason="")
 

@@ -29,6 +29,7 @@ from fb_attribution import (  # noqa: E402
     FB_WRITE_STATE_COL,
     ensure_fb_attribution_columns,
 )
+from source_scheduler import canonicalize_facebook_url  # noqa: E402
 
 try:  # noqa: E402
     from night_mode_fb import _classify_night_fb_attempt_state
@@ -91,6 +92,10 @@ FB_RESULT_COPY_COLUMNS = {
 @dataclass
 class RecoverySummary:
     rows_scanned: int = 0
+    driver_error_rows: int = 0
+    excluded_no_canonical_fb_url: int = 0
+    excluded_discovery_fallback_only: int = 0
+    excluded_existing_fb_email: int = 0
     candidates_found: int = 0
     retry_attempted: int = 0
     retry_success: int = 0
@@ -101,6 +106,10 @@ class RecoverySummary:
     def as_dict(self) -> Dict[str, int]:
         return {
             "rows_scanned": self.rows_scanned,
+            "driver_error_rows": self.driver_error_rows,
+            "excluded_no_canonical_fb_url": self.excluded_no_canonical_fb_url,
+            "excluded_discovery_fallback_only": self.excluded_discovery_fallback_only,
+            "excluded_existing_fb_email": self.excluded_existing_fb_email,
             "candidates_found": self.candidates_found,
             "retry_attempted": self.retry_attempted,
             "retry_success": self.retry_success,
@@ -154,21 +163,43 @@ def _has_driver_error_marker(row: Mapping[str, Any]) -> bool:
     return any("driver_error" in _cell(row.get(col, "")).lower() for col in DRIVER_ERROR_DETECTION_COLUMNS)
 
 
-def row_qualifies_for_recovery(row: Mapping[str, Any]) -> bool:
+def _canonical_recovery_fb_url(row: Mapping[str, Any]) -> str:
+    return canonicalize_facebook_url(_cell(row.get("Facebook_URL", "")))
+
+
+def _recovery_exclusion_reason(row: Mapping[str, Any]) -> str:
     if not _has_driver_error_marker(row):
-        return False
+        return "not_driver_error"
+
+    canonical_fb_url = _canonical_recovery_fb_url(row)
     opportunity = _cell(row.get(FB_OPPORTUNITY_STATE_COL, "")).lower()
-    if opportunity not in ELIGIBLE_OPPORTUNITY_STATES:
-        return False
-    if opportunity == "no_fb_opportunity":
-        return False
-    if _fb_status_indicates_email_found(row):
-        return False
-    if has_usable_fb_email(row):
-        return False
+    if opportunity == "fb_discovery_fallback_eligible" and not canonical_fb_url:
+        return "discovery_fallback_only"
+    if not canonical_fb_url:
+        return "no_canonical_fb_url"
+    if opportunity not in ELIGIBLE_OPPORTUNITY_STATES or opportunity == "no_fb_opportunity":
+        return "no_fb_opportunity"
+    if _fb_status_indicates_email_found(row) or has_usable_fb_email(row):
+        return "existing_fb_email"
     if _attempt_state_completed_success(row):
-        return False
-    return True
+        return "completed_success"
+    return ""
+
+
+def row_qualifies_for_recovery(row: Mapping[str, Any]) -> bool:
+    return _recovery_exclusion_reason(row) == ""
+
+
+def _record_recovery_exclusion(summary: RecoverySummary, reason: str) -> None:
+    if reason == "not_driver_error":
+        return
+    summary.driver_error_rows += 1
+    if reason == "discovery_fallback_only":
+        summary.excluded_discovery_fallback_only += 1
+    elif reason == "no_canonical_fb_url":
+        summary.excluded_no_canonical_fb_url += 1
+    elif reason == "existing_fb_email":
+        summary.excluded_existing_fb_email += 1
 
 
 def _classify_attempt_state(status: str, existing: str) -> str:
@@ -339,7 +370,9 @@ def recover_dataframe(
         for idx in out.index:
             before = out.loc[idx].copy(deep=True)
             row = {col: _cell(out.at[idx, col]) for col in out.columns}
-            if not row_qualifies_for_recovery(row):
+            exclusion_reason = _recovery_exclusion_reason(row)
+            _record_recovery_exclusion(summary, exclusion_reason)
+            if exclusion_reason:
                 continue
             summary.candidates_found += 1
             if limit is not None and attempted_candidates >= limit:
@@ -415,7 +448,7 @@ def candidate_indices(df: pd.DataFrame, *, limit: Optional[int] = None) -> List[
     matches: List[int] = []
     for idx in out.index:
         row = {col: _cell(out.at[idx, col]) for col in out.columns}
-        if row_qualifies_for_recovery(row):
+        if _recovery_exclusion_reason(row) == "":
             matches.append(int(idx))
             if limit is not None and len(matches) >= limit:
                 break
