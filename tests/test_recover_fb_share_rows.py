@@ -17,9 +17,9 @@ def _base_row(**overrides):
         "Email_Source_Type": "",
         "Email_Extract_Method": "",
         "Email_Provenance_JSON": "",
-        "FB_Status": "",
+        "FB_Status": "fb_share_resolution_failed",
         "FB_Opportunity_State": "no_fb_opportunity",
-        "FB_Gate_State": "",
+        "FB_Gate_State": "fb_share_resolution_failed",
         "FB_Attempt_State": "fb_not_attempted",
         "FB_Write_State": "",
         "FB_Debug_Reason": "",
@@ -51,37 +51,34 @@ def test_successful_resolution_enters_fb_enrichment_seam():
         fb_enricher=enricher,
     )
 
-    assert summary.candidates_found == 1
-    assert summary.resolution_success == 1
-    assert summary.fb_attempted == 1
+    assert summary.candidates == 1
+    assert summary.resolved == 1
+    assert summary.enriched == 1
     assert calls
     assert calls[0][1]["Facebook_URL"] == "https://www.facebook.com/resolvedartist"
     assert calls[0][1]["FB_Opportunity_State"] == "fb_opportunity_present"
     assert calls[0][1]["FB_Attempt_State"] == "attempted_fb"
-    assert df.at[0, "resolved_fb_url"] == "https://www.facebook.com/resolvedartist"
+    assert df.at[0, "Facebook_URL"] == "https://www.facebook.com/resolvedartist"
+    assert df.at[0, "FB_Status"] == "recovered_share_url"
     assert df.at[0, "FB_Opportunity_State"] == "fb_opportunity_present"
     assert df.at[0, "FB_Attempt_State"] == "attempted_fb_no_email_on_page"
 
 
 def test_failed_resolution_records_failure_and_does_not_attempt_fb():
     calls = []
+    before = pd.DataFrame([_base_row()])
 
     df, summary = recover_dataframe(
-        pd.DataFrame([_base_row()]),
+        before,
         share_resolver=lambda raw: "",
         fb_enricher=lambda row, idx: calls.append(row) or row,
     )
 
-    assert summary.candidates_found == 1
-    assert summary.resolution_failed == 1
-    assert summary.fb_attempted == 0
+    assert summary.candidates == 1
+    assert summary.failed == 1
+    assert summary.enriched == 0
     assert calls == []
-    assert df.at[0, "resolution_attempted"] == "true"
-    assert df.at[0, "resolution_success"] == "false"
-    assert df.at[0, "FB_Gate_State"] == "fb_share_resolution_failed"
-    assert "fb_share_resolution_failed" in df.at[0, "FB_Debug_Reason"]
-    assert df.at[0, "FB_Opportunity_State"] == "no_fb_opportunity"
-    assert df.at[0, "FB_Attempt_State"] == "fb_not_attempted"
+    pd.testing.assert_frame_equal(df, before)
 
 
 def test_already_processed_rows_are_untouched():
@@ -92,7 +89,7 @@ def test_already_processed_rows_are_untouched():
         fb_enricher=lambda row, idx: (_ for _ in ()).throw(AssertionError("FB should not run")),
     )
 
-    assert summary.candidates_found == 0
+    assert summary.candidates == 0
     assert df.at[0, "FB_Attempt_State"] == "attempted_fb_no_email_on_page"
     assert df.at[0, "Facebook_URL"] == ""
     assert df.at[0, "Unrelated Field"] == "keep-me"
@@ -111,7 +108,7 @@ def test_existing_fb_result_rows_are_untouched():
         fb_enricher=lambda row, idx: (_ for _ in ()).throw(AssertionError("FB should not run")),
     )
 
-    assert summary.candidates_found == 0
+    assert summary.candidates == 0
     assert df.at[0, "Email"] == "artist@example.com"
     assert df.at[0, "Facebook_URL"] == ""
 
@@ -145,3 +142,53 @@ def test_no_duplication_and_non_fb_fields_are_preserved():
     assert summary.rows_written == len(before.index)
     assert after.at[0, "Unrelated Field"] == "candidate"
     assert after.at[1, "Unrelated Field"] == "untouched"
+
+
+def test_valid_facebook_url_is_skipped_and_counted():
+    row = _base_row(Facebook_URL="https://www.facebook.com/alreadycanonical")
+    df, summary = recover_dataframe(
+        pd.DataFrame([row]),
+        share_resolver=lambda raw: (_ for _ in ()).throw(AssertionError("resolver should not run")),
+        fb_enricher=lambda row, idx: (_ for _ in ()).throw(AssertionError("FB should not run")),
+    )
+
+    assert summary.candidates == 0
+    assert summary.skipped_existing == 1
+    assert df.at[0, "Facebook_URL"] == "https://www.facebook.com/alreadycanonical"
+
+
+def test_state_column_can_select_share_failure():
+    row = _base_row(FB_Status="", FB_Gate_State="", state="fb_share_resolution_failed")
+    df, summary = recover_dataframe(
+        pd.DataFrame([row]),
+        share_resolver=lambda raw: "https://www.facebook.com/fromstate",
+        fb_enricher=lambda row, idx: row,
+    )
+
+    assert summary.candidates == 1
+    assert summary.resolved == 1
+    assert df.at[0, "Facebook_URL"] == "https://www.facebook.com/fromstate"
+
+
+def test_idempotency_second_run_does_not_reenrich():
+    calls = []
+
+    def enricher(row, idx):
+        calls.append(idx)
+        return row
+
+    first, first_summary = recover_dataframe(
+        pd.DataFrame([_base_row()]),
+        share_resolver=lambda raw: "https://www.facebook.com/resolvedartist",
+        fb_enricher=enricher,
+    )
+    second, second_summary = recover_dataframe(
+        first,
+        share_resolver=lambda raw: "https://www.facebook.com/other",
+        fb_enricher=lambda row, idx: (_ for _ in ()).throw(AssertionError("FB should not run twice")),
+    )
+
+    assert first_summary.enriched == 1
+    assert second_summary.candidates == 0
+    assert calls == [0]
+    pd.testing.assert_frame_equal(first, second)

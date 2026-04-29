@@ -20,6 +20,7 @@ import logging
 import os
 import re
 import shutil
+import subprocess
 import sys
 import time
 import traceback
@@ -1085,6 +1086,54 @@ def _write_run_summary(run_dir: str, summary: Dict[str, Any]) -> str:
     return path
 
 
+def _run_fb_share_recovery_after_export(
+    export_csv: str,
+    *,
+    batch_size: Optional[int] = None,
+    in_place: bool = False,
+    logger: Optional[logging.Logger] = None,
+) -> str:
+    export_path = str(export_csv or "").strip()
+    if not export_path or not os.path.exists(export_path):
+        raise FileNotFoundError(f"Final export not found: {export_csv}")
+    script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scripts", "recover_fb_share_rows.py")
+    if not os.path.exists(script_path):
+        raise FileNotFoundError(f"FB share recovery script not found: {script_path}")
+
+    cmd = [
+        sys.executable,
+        script_path,
+        "--input",
+        export_path,
+    ]
+    if in_place:
+        cmd.append("--in-place")
+    if batch_size is not None:
+        cmd.extend(["--limit", str(max(int(batch_size), 1))])
+
+    completed = subprocess.run(
+        cmd,
+        cwd=os.path.dirname(os.path.abspath(__file__)),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        check=False,
+    )
+    stdout = completed.stdout or ""
+    if logger:
+        for line in stdout.splitlines():
+            if line.strip():
+                logger.info("%s", line.strip())
+    if completed.returncode != 0:
+        raise RuntimeError(f"FB share recovery failed with code {completed.returncode}")
+    output_path = export_path
+    for raw_line in stdout.splitlines():
+        line = raw_line.strip()
+        if line.startswith("output="):
+            output_path = line.split("=", 1)[1].strip() or output_path
+    return output_path
+
+
 def _ensure_run_dir(resume: bool, run_root: str) -> Tuple[str, bool]:
     os.makedirs(run_root, exist_ok=True)
     if resume:
@@ -1475,6 +1524,9 @@ def run_night_mode(
     fb_max_attempts_override: Optional[int] = None,
     fb_max_rows_override: Optional[int] = None,
     with_sc_meta: bool = False,
+    enable_fb_share_recovery: Optional[bool] = None,
+    fb_share_recovery_batch_size: Optional[int] = None,
+    fb_share_recovery_in_place: Optional[bool] = None,
 ) -> Dict[str, Any]:
     stats = SmokeStats()
     config_load_start = time.time()
@@ -1509,6 +1561,28 @@ def run_night_mode(
     )
     fb_max_rows_config = fb_cfg.get("max_rows_per_run", config.get("facebook_max_rows_per_run", 100))
     fb_max_rows_per_run = fb_max_rows_config if fb_max_rows_override is None else fb_max_rows_override
+    share_recovery_cfg = config.get("fb_share_recovery", {}) or {}
+    fb_share_recovery_enabled = (
+        bool(share_recovery_cfg.get("enabled", config.get("enable_fb_share_recovery", False)))
+        if enable_fb_share_recovery is None
+        else bool(enable_fb_share_recovery)
+    )
+    fb_share_recovery_in_place_enabled = (
+        bool(share_recovery_cfg.get("in_place", False))
+        if fb_share_recovery_in_place is None
+        else bool(fb_share_recovery_in_place)
+    )
+    fb_share_recovery_batch_raw = (
+        fb_share_recovery_batch_size
+        if fb_share_recovery_batch_size is not None
+        else share_recovery_cfg.get("batch_size")
+    )
+    try:
+        fb_share_recovery_batch = int(fb_share_recovery_batch_raw) if fb_share_recovery_batch_raw is not None else None
+    except Exception:
+        fb_share_recovery_batch = None
+    if fb_share_recovery_batch is not None and fb_share_recovery_batch <= 0:
+        fb_share_recovery_batch = None
     if fb_max_rows_per_run is None:
         fb_max_rows_per_run = 100
     # Night Mode SoundCloud budgets (Night Mode only; legacy unaffected).
@@ -1804,6 +1878,17 @@ def run_night_mode(
                             export_profile=export_profile,
                         )
                         logger.info("[Master] Exported client-facing leads CSV: %s", export_path)
+                        if fb_share_recovery_enabled:
+                            try:
+                                recovered_export_path = _run_fb_share_recovery_after_export(
+                                    export_path,
+                                    batch_size=fb_share_recovery_batch,
+                                    in_place=fb_share_recovery_in_place_enabled,
+                                    logger=logger,
+                                )
+                                logger.info("[Master] FB share recovery output CSV: %s", recovered_export_path)
+                            except Exception as exc:
+                                logger.error("[Master] FB share recovery failed safely: %s", exc)
                         try:
                             finalize_progress(
                                 {
@@ -1910,6 +1995,17 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Maximum auto-resume attempts for FB pass after captcha (default from config or 1)",
     )
     parser.add_argument("--fb-max-rows-per-run", type=int, help="Limit FB rows per Night Mode run")
+    parser.add_argument(
+        "--enable-fb-share-recovery",
+        action="store_true",
+        help="Opt in to post-export Facebook /share URL recovery on master_export_leads.csv",
+    )
+    parser.add_argument("--fb-share-recovery-batch-size", type=int, help="Maximum share recovery candidates to process")
+    parser.add_argument(
+        "--fb-share-recovery-in-place",
+        action="store_true",
+        help="Explicitly overwrite master_export_leads.csv during post-export share recovery",
+    )
     return parser
 
 
@@ -1931,6 +2027,9 @@ def main(argv: Optional[List[str]] = None) -> None:
             fb_max_attempts_override=args.fb_max_auto_resume_attempts,
             fb_max_rows_override=args.fb_max_rows_per_run,
             with_sc_meta=args.with_sc_meta,
+            enable_fb_share_recovery=args.enable_fb_share_recovery,
+            fb_share_recovery_batch_size=args.fb_share_recovery_batch_size,
+            fb_share_recovery_in_place=args.fb_share_recovery_in_place,
         )
     else:
         result = run_night_mode(
@@ -1945,6 +2044,9 @@ def main(argv: Optional[List[str]] = None) -> None:
             fb_max_attempts_override=args.fb_max_auto_resume_attempts,
             fb_max_rows_override=args.fb_max_rows_per_run,
             with_sc_meta=args.with_sc_meta,
+            enable_fb_share_recovery=args.enable_fb_share_recovery,
+            fb_share_recovery_batch_size=args.fb_share_recovery_batch_size,
+            fb_share_recovery_in_place=args.fb_share_recovery_in_place,
         )
     print(json.dumps(result, indent=2))
 
