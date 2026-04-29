@@ -297,7 +297,7 @@ def test_dataframe_promotion_preserves_unresolved_share_aliases_and_source_field
         and "raw_fb_url='https://www.facebook.com/share/19BActwuev?mibextid=wwXIfr'" in msg
         and "resolution_attempted=true" in msg
         and "resolution_success=false" in msg
-        and "state='fb_share_resolution_failed'" in msg
+        and "state='share_runtime_fallback'" in msg
         for msg in logs
     )
 
@@ -393,7 +393,7 @@ def test_canonical_fb_url_bypasses_share_resolver_and_keeps_existing_behaviour()
     assert df.at[0, pipeline_runner.FB_OPPORTUNITY_STATE_COL] == "fb_opportunity_present"
 
 
-def test_share_resolution_failure_is_explicit_before_no_opportunity():
+def test_share_resolution_failure_seeds_runtime_fallback_before_no_opportunity():
     raw_share = "https://www.facebook.com/share/XYZ"
     df = pytest.importorskip("pandas").DataFrame(
         [
@@ -417,9 +417,51 @@ def test_share_resolution_failure_is_explicit_before_no_opportunity():
 
     assert raw_share in df.at[0, "Social Link"]
     assert df.at[0, "Facebook_URL"] == ""
-    assert df.at[0, pipeline_runner.FB_GATE_STATE_COL] == "fb_share_resolution_failed"
+    assert df.at[0, pipeline_runner.FB_SHARE_RUNTIME_FALLBACK_URL_COL] == raw_share
+    assert df.at[0, pipeline_runner.FB_SHARE_RUNTIME_FALLBACK_SOURCE_COL] == "Social Link"
+    assert df.at[0, pipeline_runner.FB_GATE_STATE_COL] == ""
     assert df.at[0, pipeline_runner.FB_OPPORTUNITY_STATE_COL] == "no_fb_opportunity"
     assert any("resolution_attempted=true" in msg and "resolution_success=false" in msg for msg in logs)
+    assert any("state='share_runtime_fallback'" in msg for msg in logs)
+
+
+def test_unresolved_share_does_not_gate_before_pass_a():
+    raw_share = "https://www.facebook.com/share/XYZ"
+    df = pytest.importorskip("pandas").DataFrame(
+        [
+            {
+                "Artist Name": "PASS A Share",
+                "Source Directory": "Unearthed",
+                "Social Link": raw_share,
+                "External Links": "",
+                "Facebook_URL": "",
+                "Facebook URL": "",
+                "facebook_url": "",
+                pipeline_runner.FB_GATE_STATE_COL: "",
+            }
+        ],
+        dtype=str,
+    ).fillna("")
+
+    pipeline_runner._promote_fb_urls_df(df, share_resolver=lambda raw: "")
+    row = df.loc[0].to_dict()
+
+    assert df.at[0, pipeline_runner.FB_GATE_STATE_COL] != "fb_share_resolution_failed"
+    assert pipeline_runner.explicit_fb_entrypoint_urls_for_row(row) == []
+    assert pipeline_runner.fb_share_runtime_fallback_urls_for_row(row) == [raw_share]
+    assert pipeline_runner.explicit_fb_entrypoint_present_for_row(row) is True
+
+
+def test_attempted_share_runtime_fallback_is_not_reentered():
+    raw_share = "https://www.facebook.com/share/XYZ"
+    row = {
+        pipeline_runner.FB_SHARE_RUNTIME_FALLBACK_URL_COL: raw_share,
+        pipeline_runner.FB_SHARE_RUNTIME_FALLBACK_SOURCE_COL: "Social Link",
+        pipeline_runner.FB_SHARE_RUNTIME_FALLBACK_ATTEMPTED_COL: "1",
+    }
+
+    assert pipeline_runner.fb_share_runtime_fallback_urls_for_row(row) == []
+    assert pipeline_runner.explicit_fb_entrypoint_present_for_row(row) is False
 
 
 def test_dataframe_promotion_preserves_existing_canonical_without_invoking_share_resolver():

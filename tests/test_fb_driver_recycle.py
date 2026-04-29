@@ -290,7 +290,7 @@ def test_fb_driver_recycle_mixed_rows_counts_executed_only(monkeypatch, tmp_path
     assert any("[FB Driver] reset_trigger=row_interval count=2" in msg for msg in logs)
 
 
-def test_fb_driver_recycle_does_not_count_share_resolution_failure(monkeypatch, tmp_path):
+def test_fb_driver_recycle_counts_share_runtime_fallback_execution(monkeypatch, tmp_path):
     rows = [
         {
             "Artist Name": "Share Failed",
@@ -301,11 +301,39 @@ def test_fb_driver_recycle_does_not_count_share_resolution_failure(monkeypatch, 
         }
     ]
 
-    harness, logs, _df_out = _run_fb_pass(monkeypatch, tmp_path, rows, [], reset_interval="1")
+    harness, logs, _df_out = _run_fb_pass(
+        monkeypatch,
+        tmp_path,
+        rows,
+        [{"FB_Status": "pass_a_no_email_on_page", "__fb_driver_execution_entered": "1"}],
+        reset_interval="1",
+    )
+
+    assert harness.attempted_rows == [0]
+    assert any("[FB Driver] attempt_counter=" in msg for msg in logs)
+
+
+def test_fb_driver_recycle_does_not_reenter_attempted_share_runtime_fallback(monkeypatch, tmp_path):
+    rows = [
+        {
+            "Artist Name": "Share Already Attempted",
+            "Source Directory": "Unearthed",
+            "Email": "",
+            "Email_All": "",
+            "Facebook_URL": "",
+            "Social Link": "https://www.facebook.com/share/abc123",
+            "FB_Status": "pass_a_no_email_on_page",
+            pipeline_runner.FB_SHARE_RUNTIME_FALLBACK_URL_COL: "https://www.facebook.com/share/abc123",
+            pipeline_runner.FB_SHARE_RUNTIME_FALLBACK_SOURCE_COL: "Social Link",
+            pipeline_runner.FB_SHARE_RUNTIME_FALLBACK_ATTEMPTED_COL: "1",
+        }
+    ]
+
+    harness, logs, df_out = _run_fb_pass(monkeypatch, tmp_path, rows, [], reset_interval="1")
 
     assert harness.attempted_rows == []
+    assert df_out.at[0, "FB_Status"] == "pass_a_no_email_on_page"
     assert not any("[FB Driver] attempt_counter=" in msg for msg in logs)
-    assert not any("[FB Driver] reset_trigger=" in msg for msg in logs)
 
 
 def test_fb_driver_recycle_does_not_count_existing_email_skip(monkeypatch, tmp_path):

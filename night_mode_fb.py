@@ -140,6 +140,7 @@ _EXPLICIT_FB_PREFILTER_PATHS = ("/r.php", "/login", "/share.php", "/l.php", "/di
 _DIRECT_FB_ROW_FIELDS = ("Facebook_URL", "Facebook URL", "facebook_url", "facebook url")
 FB_SHARE_RUNTIME_FALLBACK_URL_COL = "__fb_share_runtime_fallback_url"
 FB_SHARE_RUNTIME_FALLBACK_SOURCE_COL = "__fb_share_runtime_fallback_source"
+FB_SHARE_RUNTIME_FALLBACK_ATTEMPTED_COL = "__fb_share_runtime_fallback_attempted"
 _FB_HOME_SEARCH_INPUT_SELECTORS: Tuple[Tuple[str, str], ...] = (
     (By.CSS_SELECTOR, 'input[aria-label="Search Facebook"]'),
     (By.CSS_SELECTOR, 'input[placeholder="Search Facebook"]'),
@@ -2554,6 +2555,9 @@ def _fb_share_runtime_fallback_value(row: Dict[str, str], field: str) -> str:
 
 
 def fb_share_runtime_fallback_urls_for_row(row: Dict[str, str]) -> List[str]:
+    attempted = _fb_share_runtime_fallback_value(row, FB_SHARE_RUNTIME_FALLBACK_ATTEMPTED_COL).lower()
+    if attempted in {"1", "true", "yes", "attempted"}:
+        return []
     raw_value = _fb_share_runtime_fallback_value(row, FB_SHARE_RUNTIME_FALLBACK_URL_COL)
     if not raw_value or not _is_allowed_fb_share_entrypoint_url(raw_value):
         return []
@@ -10743,9 +10747,14 @@ class NightModeFacebookEnricher:
 
         if self._skip_fb_due_to_session_failure or self._session_failed:
             result["FB_Reason"] = self._session_failed_reason or self._skip_fb_due_to_session_failure_reason or "session_start_failed"
-            if row_has_fb_execution_path:
+            if self._fb_driver_execution_entered_this_row:
                 result["FB_Status"] = result.get("FB_Status", "") or "driver_error"
                 return _finish(result)
+            if row_has_fb_execution_path:
+                return _finish(
+                    _mark_night_fb_not_attempted(result, "fb_session_unavailable", result["FB_Reason"]),
+                    attempted=False,
+                )
             return _finish(
                 _mark_night_fb_not_attempted(result, "no_canonical_fb_url", result["FB_Reason"]),
                 attempted=False,
@@ -10919,6 +10928,7 @@ class NightModeFacebookEnricher:
                             candidate_context=explicit_candidate_context,
                         )
                     except FacebookDriverError:
+                        self._fb_driver_execution_entered_this_row = True
                         raise
                     except Exception as exc:
                         candidate = None
@@ -10990,6 +11000,7 @@ class NightModeFacebookEnricher:
                                 if is_share_runtime_fallback:
                                     share_runtime_committed = bool(canonicalize_facebook_url(result.get("Facebook_URL", "")))
                                     _log_share_runtime_resolution(result.get("Facebook_URL", ""))
+                                    result[FB_SHARE_RUNTIME_FALLBACK_ATTEMPTED_COL] = "1"
                                 return _finish(result)
                             else:
                                 page_url = night_result.facebook_url or _normalise_fb_url(direct_url)
@@ -11065,6 +11076,7 @@ class NightModeFacebookEnricher:
                             if share_runtime_attempted:
                                 share_runtime_committed = bool(canonicalize_facebook_url(result.get("Facebook_URL", "")))
                                 _log_share_runtime_resolution(result.get("Facebook_URL", ""))
+                                result[FB_SHARE_RUNTIME_FALLBACK_ATTEMPTED_COL] = "1"
                             return _finish(result)
                         result["FB_Status"] = "pass_a_no_email_on_page"
                         result["FB_Reason"] = best_reason or ("anon_fetch_ok_no_email" if best_driver.startswith("anon") else "session_fetch_ok_no_email")
@@ -11115,6 +11127,7 @@ class NightModeFacebookEnricher:
                             if share_runtime_attempted:
                                 share_runtime_committed = bool(canonicalize_facebook_url(result.get("Facebook_URL", "")))
                                 _log_share_runtime_resolution(result.get("Facebook_URL", ""))
+                                result[FB_SHARE_RUNTIME_FALLBACK_ATTEMPTED_COL] = "1"
                             return _finish(result)
                     if reason_code:
                         if reason_code == "timeout":
@@ -11148,6 +11161,7 @@ class NightModeFacebookEnricher:
                 if share_runtime_attempted and not share_runtime_committed:
                     _log_share_runtime_resolution("")
                 if share_runtime_attempted:
+                    result[FB_SHARE_RUNTIME_FALLBACK_ATTEMPTED_COL] = "1"
                     return _finish(result)
 
             if not allow_discovery:
@@ -11307,7 +11321,7 @@ class NightModeFacebookEnricher:
                 result["FB_Reason"] = reason
                 _log(self.logger, f"[Night FB] Circuit breaker tripped ({reason}); skipping FB for remainder of run.")
                 return _finish(result)
-            if row_has_fb_execution_path or pass_b_discovery_attempted:
+            if self._fb_driver_execution_entered_this_row:
                 result["FB_Status"] = "driver_error"
             else:
                 _mark_night_fb_not_attempted(result, "no_canonical_fb_url", "pre_execution_driver_error")

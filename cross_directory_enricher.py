@@ -12075,13 +12075,19 @@ class CrossDirectoryEnricherWorker(QThread):
             for row_idx in row_ids:
                 if row_idx in index_membership:
                     base_rows.append(row_idx)
-        resume_row_index = int(getattr(self, "_resume_row_index", 0) or 0)
+        try:
+            resume_row_index = int(getattr(self, "_resume_row_index", 0) or 0)
+        except RuntimeError:
+            resume_row_index = 0
         if resume_row_index <= 0:
             return base_rows
         return [row_idx for row_idx in base_rows if isinstance(row_idx, int) and row_idx >= resume_row_index]
 
     def _checkpoint_row_complete(self, seed_df: pd.DataFrame, row_idx: Any) -> None:
-        checkpoint = getattr(self, "_resume_checkpoint", None)
+        try:
+            checkpoint = getattr(self, "_resume_checkpoint", None)
+        except RuntimeError:
+            checkpoint = None
         if checkpoint is None:
             return
         if not isinstance(row_idx, int):

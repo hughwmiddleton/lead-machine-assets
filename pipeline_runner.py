@@ -95,6 +95,7 @@ except Exception:  # pragma: no cover - defensive
         return False
 
 from night_mode_fb import (
+    FB_SHARE_RUNTIME_FALLBACK_ATTEMPTED_COL,
     FB_SHARE_RUNTIME_FALLBACK_SOURCE_COL,
     FB_SHARE_RUNTIME_FALLBACK_URL_COL,
     FacebookDriverError,
@@ -846,8 +847,11 @@ def _set_fb_share_runtime_fallback(df: pd.DataFrame, idx: int, raw_share_url: st
         df[FB_SHARE_RUNTIME_FALLBACK_URL_COL] = ""
     if FB_SHARE_RUNTIME_FALLBACK_SOURCE_COL not in df.columns:
         df[FB_SHARE_RUNTIME_FALLBACK_SOURCE_COL] = ""
+    if FB_SHARE_RUNTIME_FALLBACK_ATTEMPTED_COL not in df.columns:
+        df[FB_SHARE_RUNTIME_FALLBACK_ATTEMPTED_COL] = ""
     df.at[idx, FB_SHARE_RUNTIME_FALLBACK_URL_COL] = _cell_str(raw_share_url)
     df.at[idx, FB_SHARE_RUNTIME_FALLBACK_SOURCE_COL] = _cell_str(source_field)
+    df.at[idx, FB_SHARE_RUNTIME_FALLBACK_ATTEMPTED_COL] = ""
 
 
 def _clear_fb_share_runtime_fallback(df: pd.DataFrame, idx: int) -> None:
@@ -855,6 +859,8 @@ def _clear_fb_share_runtime_fallback(df: pd.DataFrame, idx: int) -> None:
         df.at[idx, FB_SHARE_RUNTIME_FALLBACK_URL_COL] = ""
     if FB_SHARE_RUNTIME_FALLBACK_SOURCE_COL in df.columns:
         df.at[idx, FB_SHARE_RUNTIME_FALLBACK_SOURCE_COL] = ""
+    if FB_SHARE_RUNTIME_FALLBACK_ATTEMPTED_COL in df.columns:
+        df.at[idx, FB_SHARE_RUNTIME_FALLBACK_ATTEMPTED_COL] = ""
 
 
 def _canonicalize_explicit_fb_share_for_row(
@@ -870,8 +876,6 @@ def _canonicalize_explicit_fb_share_for_row(
         _write_explicit_fb_canonical_fields(df, idx, direct_canonical)
         _clear_fb_share_runtime_fallback(df, idx)
         return (direct_canonical, "")
-    existing_runtime_fallback_urls = fb_share_runtime_fallback_urls_for_row(row.to_dict())
-
     raw_share_url, source_field = _find_explicit_fb_share_candidate(row)
     if not raw_share_url:
         return ("", "")
@@ -913,12 +917,19 @@ def _canonicalize_explicit_fb_share_for_row(
         )
         return (canonical_url, source_field)
 
-    if existing_runtime_fallback_urls:
-        _set_fb_share_runtime_fallback(df, idx, existing_runtime_fallback_urls[0], source_field)
+    existing_attempted = (
+        _cell_str(df.at[idx, FB_SHARE_RUNTIME_FALLBACK_ATTEMPTED_COL])
+        if FB_SHARE_RUNTIME_FALLBACK_ATTEMPTED_COL in df.columns
+        else ""
+    )
+    if _is_explicit_fb_share_url(raw_share_url):
+        _set_fb_share_runtime_fallback(df, idx, raw_share_url, source_field)
+        if existing_attempted:
+            df.at[idx, FB_SHARE_RUNTIME_FALLBACK_ATTEMPTED_COL] = existing_attempted
     else:
         _clear_fb_share_runtime_fallback(df, idx)
-    if FB_GATE_STATE_COL in df.columns and not existing_runtime_fallback_urls:
-        df.at[idx, FB_GATE_STATE_COL] = "fb_share_resolution_failed"
+    if FB_GATE_STATE_COL in df.columns and _cell_str(df.at[idx, FB_GATE_STATE_COL]) == "fb_share_resolution_failed":
+        df.at[idx, FB_GATE_STATE_COL] = ""
     resolved_fragment = f" resolved_url='{resolved_url}'" if resolved_url else ""
     _safe_log_console(
         logger,
@@ -928,7 +939,7 @@ def _canonicalize_explicit_fb_share_for_row(
         logger,
         f"[FB Share Intake Trace] artist='{artist_label}' raw_fb_url='{raw_share_url}' "
         f"resolved_fb_url='{resolved_url}' resolution_attempted=true resolution_success=false "
-        f"state='{'share_runtime_fallback' if existing_runtime_fallback_urls else 'fb_share_resolution_failed'}'",
+        f"state='share_runtime_fallback'",
     )
     return ("", source_field)
 
@@ -4674,6 +4685,9 @@ def run_facebook_global_pass_nightmode(
             explicit_fb_entrypoints = explicit_fb_entrypoint_urls_for_row(row_payload)
             share_runtime_fallback_urls = fb_share_runtime_fallback_urls_for_row(row_payload)
             share_runtime_fallback = bool(share_runtime_fallback_urls)
+            share_runtime_fallback_attempted = _cell_str(
+                row_payload.get(FB_SHARE_RUNTIME_FALLBACK_ATTEMPTED_COL, "")
+            ).lower() in {"1", "true", "yes", "attempted"}
             canonical_facebook_url = explicit_fb_entrypoints[0] if explicit_fb_entrypoints else ""
             explicit_fb_intake = classify_explicit_fb_intake(
                 row_payload,
@@ -4712,6 +4726,7 @@ def run_facebook_global_pass_nightmode(
                 is_unearthed_source
                 and (not has_canonical_facebook_url)
                 and (not has_explicit_fb_entrypoint)
+                and (not share_runtime_fallback_attempted)
                 and fb_status_allows_run
                 and not effective_skip_due_to_email
                 and fb_status_val not in terminal_statuses
@@ -4951,6 +4966,7 @@ def run_facebook_global_pass_nightmode(
                         "FB_Review_Reason",
                         "FB_Refine_Decision",
                         "FB_Refine_Executed",
+                        FB_SHARE_RUNTIME_FALLBACK_ATTEMPTED_COL,
                     ]
                     if not fb_rejected:
                         cols_to_copy.append("Email_Type")
