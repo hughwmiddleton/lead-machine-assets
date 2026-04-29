@@ -1,8 +1,10 @@
 import csv
 import datetime as dt
+import hashlib
 import os
 import shutil
 import re
+import uuid
 import unicodedata
 from collections import defaultdict
 from pathlib import Path
@@ -103,6 +105,52 @@ def preview_csv_merge_counts(
         duplicate_strategy=duplicate_strategy,
         write_changes=False,
     )
+
+
+def confirm_csv_merge_preview(
+    preview_result: Dict[str, object],
+    *,
+    preview_session_id: Optional[str] = None,
+) -> Dict[str, object]:
+    if not isinstance(preview_result, dict):
+        raise ValueError("Merge preview result is required.")
+    if preview_result.get("duplicate_strategy") != "merge_consolidate":
+        raise ValueError("Only Merge + Consolidate previews can be confirmed from a cached snapshot.")
+
+    expected_session_id = str(preview_result.get("preview_session_id") or "")
+    if not expected_session_id:
+        raise ValueError("Merge preview is missing a preview_session_id. Re-run preview.")
+    if preview_session_id is not None and str(preview_session_id) != expected_session_id:
+        raise ValueError("Merge preview session mismatch. Re-run preview.")
+
+    source_path = Path(str(preview_result.get("source_path") or ""))
+    master_path = Path(str(preview_result.get("master_path") or ""))
+    if not source_path.exists():
+        raise ValueError("Incoming CSV changed or is missing. Re-run preview.")
+    if not master_path.exists():
+        raise ValueError("Master CSV changed or is missing. Re-run preview.")
+
+    if _file_sha256(source_path) != preview_result.get("incoming_csv_hash"):
+        raise ValueError("Incoming CSV changed after preview. Re-run preview.")
+    if _file_sha256(master_path) != preview_result.get("master_csv_hash"):
+        raise ValueError("Master CSV changed after preview. Re-run preview.")
+
+    snapshot = preview_result.get("merge_result_snapshot")
+    if not isinstance(snapshot, dict):
+        raise ValueError("Merge preview snapshot missing. Re-run preview.")
+    raw_final_rows = snapshot.get("final_rows")
+    if not isinstance(raw_final_rows, list):
+        raise ValueError("Merge preview final rows missing. Re-run preview.")
+
+    final_rows = [_copy_master_shaped_row(row if isinstance(row, dict) else {}) for row in raw_final_rows]
+    backup_path = _backup_master_csv(master_path)
+    _write_master_rows_exact(final_rows, master_path)
+
+    confirmed = dict(preview_result)
+    confirmed["backup_path"] = str(backup_path)
+    confirmed["dry_run"] = False
+    confirmed["confirmed_preview_session_id"] = expected_session_id
+    return confirmed
 
 
 def _run_csv_merge(
@@ -240,15 +288,22 @@ def _run_consolidating_csv_merge(
     master_path: Optional[PathLike] = None,
     write_changes: bool = True,
 ) -> Dict[str, object]:
+    resolved_master_path = Path(master_path) if master_path is not None else get_default_master_csv_path()
+    incoming_csv_hash = _file_sha256(source_path)
+    master_csv_hash = _file_sha256(resolved_master_path) if resolved_master_path.exists() else ""
     preview = preview_csv_import(
         source_path,
         header_overrides=header_overrides,
         ignored_headers=ignored_headers,
-        master_path=master_path,
+        master_path=resolved_master_path,
     )
     rows = list(read_csv_rows(source_path)["rows"])
     preview["row_count"] = len(rows)
     preview["duplicate_strategy"] = "merge_consolidate"
+    preview["dry_run"] = not write_changes
+    preview["preview_session_id"] = uuid.uuid4().hex if not write_changes else ""
+    preview["incoming_csv_hash"] = incoming_csv_hash
+    preview["master_csv_hash"] = master_csv_hash
     preview.update(
         {
             "rows_existing": 0,
@@ -259,13 +314,20 @@ def _run_consolidating_csv_merge(
             "rows_added_new": 0,
             "rows_final": 0,
             "backup_path": "",
+            "merge_preview_counts": {
+                "NEW": 0,
+                "UPGRADE": 0,
+                "KEEP_EXISTING": 0,
+                "UNCHANGED": 0,
+            },
+            "merge_preview_upgrade_rows": [],
+            "merge_result_snapshot": {},
         }
     )
     if preview["unmapped_headers"]:
         preview["rows_unresolved_mapping"] = len(rows)
         return preview
 
-    resolved_master_path = Path(master_path) if master_path is not None else get_default_master_csv_path()
     if write_changes:
         resolved_master_path = ensure_master_csv_exists(resolved_master_path)
     master_rows = _load_master_rows_exact(resolved_master_path) if resolved_master_path.exists() else []
@@ -353,6 +415,40 @@ def _run_consolidating_csv_merge(
                     }
                 )
                 continue
+
+            candidate = _copy_master_shaped_row(canonical_row)
+            candidate_score = _score_lead_vault_row(candidate, score_row=raw_row)
+            current = consolidated.get(key)
+            outcome = "NEW"
+            if current is not None:
+                current_row = _copy_master_shaped_row(current["row"])
+                current_score = int(current["score"])
+                if str(current["source"]) != "existing":
+                    outcome = "NEW"
+                elif _candidate_beats_current(
+                    candidate,
+                    candidate_score,
+                    current_row,
+                    current_score,
+                    current_source=str(current["source"]),
+                    candidate_source="incoming",
+                ):
+                    outcome = "UPGRADE"
+                    if current["source"] == "existing":
+                        preview["merge_preview_upgrade_rows"].append(
+                            _make_upgrade_preview_row(
+                                existing_row=current_row,
+                                incoming_row=candidate,
+                                existing_score=current_score,
+                                incoming_score=candidate_score,
+                                key=key,
+                            )
+                        )
+                elif _meaningfully_unchanged_preview(current_row, candidate, current_score, candidate_score):
+                    outcome = "UNCHANGED"
+                else:
+                    outcome = "KEEP_EXISTING"
+            preview["merge_preview_counts"][outcome] += 1
             _consider(canonical_row, source="incoming", score_row=raw_row)
         except Exception as exc:
             preview["rows_errors"] += 1
@@ -367,6 +463,14 @@ def _run_consolidating_csv_merge(
     final_rows.extend(_copy_master_shaped_row(item["row"]) for item in consolidated.values())
     preview["rows_added"] = preview["rows_added_new"]
     preview["rows_final"] = len(final_rows)
+    classified_total = sum(int(value) for value in preview["merge_preview_counts"].values())
+    if classified_total != len(rows) - int(preview.get("rows_errors", 0) or 0):
+        raise AssertionError("Merge preview classification count mismatch.")
+    preview["merge_result_snapshot"] = {
+        "final_rows": [_copy_master_shaped_row(row) for row in final_rows],
+        "outcome_counts": dict(preview["merge_preview_counts"]),
+        "upgrade_rows": list(preview["merge_preview_upgrade_rows"]),
+    }
 
     if write_changes:
         backup_path = _backup_master_csv(resolved_master_path)
@@ -859,6 +963,48 @@ def _candidate_beats_current(
     return False
 
 
+def _preview_primary_email(row: Dict[str, str]) -> str:
+    return _normalize_email(row.get("Primary_Email", ""))
+
+
+def _preview_email_all_values(row: Dict[str, str]) -> List[str]:
+    return _normalize_email_list(row.get("All_Emails", ""))
+
+
+def _meaningfully_unchanged_preview(
+    existing_row: Dict[str, str],
+    incoming_row: Dict[str, str],
+    existing_score: int,
+    incoming_score: int,
+) -> bool:
+    return (
+        _preview_primary_email(existing_row) == _preview_primary_email(incoming_row)
+        and set(_preview_email_all_values(existing_row)) == set(_preview_email_all_values(incoming_row))
+        and int(existing_score) == int(incoming_score)
+    )
+
+
+def _make_upgrade_preview_row(
+    *,
+    existing_row: Dict[str, str],
+    incoming_row: Dict[str, str],
+    existing_score: int,
+    incoming_score: int,
+    key: Tuple[str, str],
+) -> Dict[str, object]:
+    return {
+        "artist_name": _clean_cell(incoming_row.get("Artist", "")) or _clean_cell(existing_row.get("Artist", "")),
+        "key": key[1],
+        "key_type": key[0],
+        "existing_email": _preview_primary_email(existing_row),
+        "incoming_email": _preview_primary_email(incoming_row),
+        "existing_email_all_count": len(set(_preview_email_all_values(existing_row))),
+        "incoming_email_all_count": len(set(_preview_email_all_values(incoming_row))),
+        "existing_score": int(existing_score),
+        "incoming_score": int(incoming_score),
+    }
+
+
 def _merge_external_links(existing_row: Dict[str, str], incoming_row: Dict[str, str]) -> str:
     return _merge_tokenized_values(
         existing_row.get("External_Links", ""),
@@ -1130,6 +1276,14 @@ def _backup_master_csv(path: PathLike) -> Path:
     backup_path = source.with_name(f"master_backup_{timestamp}.csv")
     shutil.copy2(source, backup_path)
     return backup_path
+
+
+def _file_sha256(path: PathLike) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _coerce_run_datetime(value: Optional[dt.datetime]) -> dt.datetime:

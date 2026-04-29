@@ -3,7 +3,8 @@ import datetime as dt
 import os
 
 from lead_vault.alias_map import HEADER_ALIASES
-from lead_vault.merge import merge_csv_into_master, preview_csv_import, preview_csv_merge_counts
+import lead_vault.merge as merge_module
+from lead_vault.merge import confirm_csv_merge_preview, merge_csv_into_master, preview_csv_import, preview_csv_merge_counts
 from lead_vault.schema import get_canonical_master_schema
 
 
@@ -589,3 +590,156 @@ def test_merge_consolidate_null_key_is_logged_without_crash(tmp_path):
 
     assert result["rows_errors"] == 1
     assert rows == []
+
+
+def test_merge_consolidate_preview_classifies_rows_and_does_not_write_or_backup(tmp_path):
+    master_path = tmp_path / "master.csv"
+    source_path = tmp_path / "import.csv"
+    _write_csv(
+        master_path,
+        get_canonical_master_schema(),
+        [
+            _master_row(Artist="Upgrade", Source_URL="https://example.com/upgrade"),
+            _master_row(
+                Artist="Keep",
+                Source_URL="https://example.com/keep",
+                Primary_Email="keep@example.com",
+                All_Emails="keep@example.com",
+            ),
+            _master_row(
+                Artist="Same",
+                Source_URL="https://example.com/same",
+                Primary_Email="same@example.com",
+                All_Emails="same@example.com",
+            ),
+        ],
+    )
+    _write_csv(
+        source_path,
+        ["Artist Name", "artist_url", "Email", "Email_All"],
+        [
+            {"Artist Name": "New", "artist_url": "https://example.com/new", "Email": "new@example.com", "Email_All": ""},
+            {"Artist Name": "Upgrade", "artist_url": "https://example.com/upgrade", "Email": "upgrade@example.com", "Email_All": "team@example.com"},
+            {"Artist Name": "Keep", "artist_url": "https://example.com/keep", "Email": "", "Email_All": ""},
+            {"Artist Name": "Same", "artist_url": "https://example.com/same", "Email": "SAME@example.com ", "Email_All": " same@example.com "},
+        ],
+    )
+    before = master_path.read_text(encoding="utf-8-sig")
+
+    result = preview_csv_merge_counts(source_path, master_path=master_path, duplicate_strategy="merge_consolidate")
+
+    assert master_path.read_text(encoding="utf-8-sig") == before
+    assert not list(tmp_path.glob("master_backup_*.csv"))
+    assert result["preview_session_id"]
+    assert result["dry_run"] is True
+    assert result["merge_preview_counts"] == {
+        "NEW": 1,
+        "UPGRADE": 1,
+        "KEEP_EXISTING": 1,
+        "UNCHANGED": 1,
+    }
+    assert sum(result["merge_preview_counts"].values()) == result["row_count"]
+    assert result["rows_final"] == 4
+    assert len(result["merge_preview_upgrade_rows"]) == 1
+    upgrade = result["merge_preview_upgrade_rows"][0]
+    assert upgrade["artist_name"] == "Upgrade"
+    assert upgrade["existing_email"] == ""
+    assert upgrade["incoming_email"] == "upgrade@example.com"
+    assert upgrade["incoming_email_all_count"] == 1
+
+
+def test_confirm_merge_preview_writes_cached_snapshot_and_backup(tmp_path):
+    master_path = tmp_path / "master.csv"
+    source_path = tmp_path / "import.csv"
+    _write_csv(
+        master_path,
+        get_canonical_master_schema(),
+        [_master_row(Artist="Upgrade", Source_URL="https://example.com/upgrade")],
+    )
+    _write_csv(
+        source_path,
+        ["Artist Name", "artist_url", "Email"],
+        [{"Artist Name": "Upgrade", "artist_url": "https://example.com/upgrade", "Email": "upgrade@example.com"}],
+    )
+    preview = preview_csv_merge_counts(source_path, master_path=master_path, duplicate_strategy="merge_consolidate")
+
+    confirmed = confirm_csv_merge_preview(preview, preview_session_id=preview["preview_session_id"])
+    rows = _read_master_rows(master_path)
+
+    assert confirmed["merge_preview_counts"] == preview["merge_preview_counts"]
+    assert confirmed["rows_final"] == preview["rows_final"]
+    assert confirmed["backup_path"]
+    assert os.path.exists(confirmed["backup_path"])
+    assert rows == preview["merge_result_snapshot"]["final_rows"]
+    assert rows[0]["Primary_Email"] == "upgrade@example.com"
+
+
+def test_confirm_merge_preview_blocks_when_master_changes_after_preview(tmp_path):
+    master_path = tmp_path / "master.csv"
+    source_path = tmp_path / "import.csv"
+    _write_csv(master_path, get_canonical_master_schema(), [_master_row(Artist="Stable", Source_URL="https://example.com/stable")])
+    _write_csv(
+        source_path,
+        ["Artist Name", "artist_url", "Email"],
+        [{"Artist Name": "Stable", "artist_url": "https://example.com/stable", "Email": "new@example.com"}],
+    )
+    preview = preview_csv_merge_counts(source_path, master_path=master_path, duplicate_strategy="merge_consolidate")
+    before_snapshot = preview["merge_result_snapshot"]["final_rows"]
+    _write_csv(master_path, get_canonical_master_schema(), [_master_row(Artist="Changed", Source_URL="https://example.com/changed")])
+
+    try:
+        confirm_csv_merge_preview(preview, preview_session_id=preview["preview_session_id"])
+    except ValueError as exc:
+        assert "Master CSV changed" in str(exc)
+    else:
+        raise AssertionError("Expected changed master CSV to block preview confirmation")
+
+    rows = _read_master_rows(master_path)
+    assert rows != before_snapshot
+    assert rows[0]["Artist"] == "Changed"
+    assert not list(tmp_path.glob("master_backup_*.csv"))
+
+
+def test_confirm_merge_preview_blocks_session_mismatch(tmp_path):
+    master_path = tmp_path / "master.csv"
+    source_path = tmp_path / "import.csv"
+    _write_csv(master_path, get_canonical_master_schema(), [_master_row(Artist="Stable", Source_URL="https://example.com/stable")])
+    _write_csv(
+        source_path,
+        ["Artist Name", "artist_url", "Email"],
+        [{"Artist Name": "Stable", "artist_url": "https://example.com/stable", "Email": "new@example.com"}],
+    )
+    preview = preview_csv_merge_counts(source_path, master_path=master_path, duplicate_strategy="merge_consolidate")
+
+    try:
+        confirm_csv_merge_preview(preview, preview_session_id="wrong-session")
+    except ValueError as exc:
+        assert "session mismatch" in str(exc)
+    else:
+        raise AssertionError("Expected session mismatch to block preview confirmation")
+
+    assert not list(tmp_path.glob("master_backup_*.csv"))
+
+
+def test_confirm_merge_preview_does_not_recompute_scoring_or_deduplication(tmp_path, monkeypatch):
+    master_path = tmp_path / "master.csv"
+    source_path = tmp_path / "import.csv"
+    _write_csv(master_path, get_canonical_master_schema(), [_master_row(Artist="Stable", Source_URL="https://example.com/stable")])
+    _write_csv(
+        source_path,
+        ["Artist Name", "artist_url", "Email"],
+        [{"Artist Name": "Stable", "artist_url": "https://example.com/stable", "Email": "new@example.com"}],
+    )
+    preview = preview_csv_merge_counts(source_path, master_path=master_path, duplicate_strategy="merge_consolidate")
+
+    def fail_if_recomputed(*args, **kwargs):
+        raise AssertionError("confirm recomputed merge preview internals")
+
+    monkeypatch.setattr(merge_module, "_score_lead_vault_row", fail_if_recomputed)
+    monkeypatch.setattr(merge_module, "_lead_vault_consolidation_key", fail_if_recomputed)
+
+    confirmed = confirm_csv_merge_preview(preview, preview_session_id=preview["preview_session_id"])
+    rows = _read_master_rows(master_path)
+
+    assert confirmed["rows_final"] == preview["rows_final"]
+    assert rows[0]["Primary_Email"] == "new@example.com"

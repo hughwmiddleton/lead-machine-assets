@@ -144,7 +144,7 @@ import pipeline_runner
 from source_scheduler import canonicalize_facebook_url
 from lead_vault import EXPORT_PRESETS, WOODPECKER_EXPORT_PRESET, ensure_master_csv_exists, export_with_preset
 from lead_vault.alias_map import map_headers_to_canonical
-from lead_vault.merge import merge_csv_into_master, preview_csv_import, preview_csv_merge_counts
+from lead_vault.merge import confirm_csv_merge_preview, merge_csv_into_master, preview_csv_import, preview_csv_merge_counts
 from lead_vault.schema import get_canonical_master_schema, get_default_master_csv_path
 from lead_vault.stats import summarize_master_dataset
 from progress_state import init_progress, read_progress, update_progress
@@ -12367,6 +12367,14 @@ class LeadVaultWorker(QtCore.QThread):
                     ignored_headers=self.ignored_headers,
                     master_path=self.master_path,
                 )
+            elif self.mode == "merge_preview":
+                result = preview_csv_merge_counts(
+                    self.source_path,
+                    header_overrides=self.header_overrides,
+                    ignored_headers=self.ignored_headers,
+                    master_path=self.master_path,
+                    duplicate_strategy="merge_consolidate",
+                )
             elif self.mode == "import":
                 result = merge_csv_into_master(
                     self.source_path,
@@ -12391,6 +12399,7 @@ class LeadVaultTab(QtWidgets.QWidget):
         super().__init__(parent)
         self.worker: Optional[LeadVaultWorker] = None
         self.preview_result: Optional[dict] = None
+        self.merge_preview_result: Optional[dict] = None
         self._build_ui()
         self._restore_master_selection()
 
@@ -12863,6 +12872,7 @@ class LeadVaultTab(QtWidgets.QWidget):
 
     def _reset_preview_state(self):
         self.preview_result = None
+        self.merge_preview_result = None
         self.detected_headers_view.clear()
         self.mapped_headers_view.clear()
         self.summary_view.clear()
@@ -12922,7 +12932,19 @@ class LeadVaultTab(QtWidgets.QWidget):
             return
         import_mode = self.import_mode_combo.currentData() or "append_only"
         if import_mode == "merge_consolidate":
-            duplicate_strategy = "merge_consolidate"
+            self.preview_button.setEnabled(False)
+            self.import_button.setEnabled(False)
+            self.auto_map_known_button.setEnabled(False)
+            self.ignore_all_button.setEnabled(False)
+            self.summary_view.setPlainText("Running Merge + Consolidate preview...")
+            self._start_worker(
+                "merge_preview",
+                source_path,
+                header_overrides,
+                ignored_headers,
+                duplicate_strategy="merge_consolidate",
+            )
+            return
         else:
             duplicate_strategy = self._choose_duplicate_strategy(source_path, header_overrides, ignored_headers)
             if duplicate_strategy is None:
@@ -12952,8 +12974,14 @@ class LeadVaultTab(QtWidgets.QWidget):
             master_path=str(self._resolve_master_csv_path()),
             duplicate_strategy=duplicate_strategy,
         )
+        if mode == "merge_preview":
+            finished_handler = self._handle_merge_preview_finished
+        elif mode == "preview":
+            finished_handler = self._handle_preview_finished
+        else:
+            finished_handler = self._handle_import_finished
         self.worker.finished_signal.connect(
-            self._handle_preview_finished if mode == "preview" else self._handle_import_finished
+            finished_handler
         )
         self.worker.error_signal.connect(self._handle_worker_error)
         self.worker.start()
@@ -13042,6 +13070,43 @@ class LeadVaultTab(QtWidgets.QWidget):
         self.preview_button.setEnabled(True)
         self._stop_worker()
         self._refresh_import_button()
+
+    def _handle_merge_preview_finished(self, result: dict):
+        self.merge_preview_result = result
+        self.summary_view.setPlainText(self._format_merge_preview_summary(result))
+        self.preview_button.setEnabled(True)
+        self._stop_worker()
+        self._refresh_import_button()
+        if result.get("unmapped_headers"):
+            QtWidgets.QMessageBox.warning(self, "Lead Vault", "Resolve or ignore every unmapped column before merging.")
+            return
+        message_box = QtWidgets.QMessageBox(self)
+        message_box.setIcon(QtWidgets.QMessageBox.Question)
+        message_box.setWindowTitle("Lead Vault")
+        message_box.setText("Merge + Consolidate preview is ready.")
+        message_box.setInformativeText(self._format_merge_preview_summary(result))
+        confirm_button = message_box.addButton("Confirm Merge", QtWidgets.QMessageBox.AcceptRole)
+        cancel_button = message_box.addButton("Cancel", QtWidgets.QMessageBox.RejectRole)
+        message_box.setDefaultButton(confirm_button)
+        message_box.exec_()
+        if message_box.clickedButton() != confirm_button:
+            self.summary_view.setPlainText(self._format_merge_preview_summary(result) + "\n\nMerge cancelled. No changes were written.")
+            self.merge_preview_result = None
+            return
+        try:
+            confirmed = confirm_csv_merge_preview(
+                result,
+                preview_session_id=str(result.get("preview_session_id") or ""),
+            )
+        except Exception as exc:
+            self.summary_view.setPlainText(
+                self._format_merge_preview_summary(result)
+                + f"\n\nMerge blocked: {exc}\nRe-run preview before confirming."
+            )
+            QtWidgets.QMessageBox.warning(self, "Lead Vault", f"Merge blocked:\n{exc}\n\nRe-run preview before confirming.")
+            self.merge_preview_result = None
+            return
+        self._handle_import_finished(confirmed)
 
     def _handle_worker_error(self, message: str):
         self.preview_button.setEnabled(True)
@@ -13218,6 +13283,40 @@ class LeadVaultTab(QtWidgets.QWidget):
             return
         _, _, unresolved_headers = self._collect_manual_mapping_state()
         self.import_button.setEnabled(not unresolved_headers)
+
+    def _format_merge_preview_summary(self, result: dict) -> str:
+        counts = result.get("merge_preview_counts", {}) or {}
+        lines = [
+            f"Source: {result.get('source_path', '')}",
+            f"Master: {result.get('master_path', '')}",
+            "",
+            "Merge Preview:",
+            f"New artists: {counts.get('NEW', 0)}",
+            f"Upgrades: {counts.get('UPGRADE', 0)}",
+            f"Kept existing: {counts.get('KEEP_EXISTING', 0)}",
+            f"Unchanged: {counts.get('UNCHANGED', 0)}",
+            f"Final row count: {result.get('rows_final', 0)}",
+        ]
+        upgrade_rows = result.get("merge_preview_upgrade_rows", []) or []
+        if upgrade_rows:
+            lines.extend(["", "Upgrade Rows:"])
+            for row in upgrade_rows[:50]:
+                lines.append(
+                    "{artist} | {key} | Email {existing_email} -> {incoming_email} | "
+                    "Email_All {existing_count} -> {incoming_count} | Score {existing_score} -> {incoming_score}".format(
+                        artist=row.get("artist_name", ""),
+                        key=row.get("key", ""),
+                        existing_email=row.get("existing_email", ""),
+                        incoming_email=row.get("incoming_email", ""),
+                        existing_count=row.get("existing_email_all_count", 0),
+                        incoming_count=row.get("incoming_email_all_count", 0),
+                        existing_score=row.get("existing_score", 0),
+                        incoming_score=row.get("incoming_score", 0),
+                    )
+                )
+            if len(upgrade_rows) > 50:
+                lines.append(f"... {len(upgrade_rows) - 50} more upgrade row(s) not shown.")
+        return "\n".join(lines)
 
     def _format_summary(self, result: dict, preview_only: bool) -> str:
         lines = [
