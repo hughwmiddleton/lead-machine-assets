@@ -2,6 +2,7 @@ import json
 
 import pandas as pd
 
+from night_mode_fb import FacebookDriverError
 from scripts.recover_fb_driver_errors import recover_dataframe, row_qualifies_for_recovery
 
 
@@ -215,6 +216,104 @@ def test_retry_no_email_marks_success_without_email():
     assert df.at[0, "FB_Write_State"] == "fb_no_email_written"
     assert df.at[0, "Email"] == ""
     assert df.at[0, "retry_success"] == "true"
+
+
+def test_true_driver_exception_remains_driver_error():
+    def enricher(row, idx):
+        raise FacebookDriverError("session crashed")
+
+    df, summary = recover_dataframe(pd.DataFrame([_base_row()]), fb_enricher=enricher)
+
+    assert summary.candidates_found == 1
+    assert summary.retry_attempted == 1
+    assert summary.retry_success == 0
+    assert df.at[0, "FB_Status"] == "driver_error"
+    assert df.at[0, "retry_attempted"] == "true"
+    assert df.at[0, "retry_success"] == "false"
+
+
+def test_generic_recovery_exception_is_not_driver_error():
+    def enricher(row, idx):
+        raise ValueError("bad fixture")
+
+    df, summary = recover_dataframe(pd.DataFrame([_base_row()]), fb_enricher=enricher)
+
+    assert summary.candidates_found == 1
+    assert summary.retry_attempted == 1
+    assert summary.retry_success == 0
+    assert df.at[0, "FB_Status"] != "driver_error"
+    assert df.at[0, "FB_Status"] == "recovery_error"
+    assert "ValueError" in df.at[0, "FB_Debug_Reason"]
+    assert df.at[0, "retry_success"] == "false"
+
+
+def test_blank_facebook_url_driver_error_row_is_not_retried_or_reclassified():
+    def enricher(row, idx):
+        raise AssertionError("FB should not run")
+
+    df, summary = recover_dataframe(pd.DataFrame([_base_row(Facebook_URL="")]), fb_enricher=enricher)
+
+    assert summary.candidates_found == 0
+    assert summary.retry_attempted == 0
+    assert summary.excluded_no_canonical_fb_url == 1
+    assert df.at[0, "FB_Status"] == "driver_error"
+    assert df.at[0, "retry_attempted"] == ""
+
+
+def test_mixed_rows_preserve_count_order_schema_and_attempt_only_canonical_driver_candidate():
+    rows = [
+        _base_row(**{"Artist Name": "Canonical Driver"}),
+        _base_row(Facebook_URL="", **{"Artist Name": "Blank Driver"}),
+        _base_row(
+            FB_Status="no_candidates",
+            FB_Debug_Reason="",
+            Facebook_URL="",
+            **{"Artist Name": "Blank No Candidates"},
+        ),
+        _base_row(
+            FB_Status="no_canonical_fb_url",
+            FB_Debug_Reason="",
+            Facebook_URL="",
+            **{"Artist Name": "Blank No Canonical"},
+        ),
+    ]
+    for row in rows:
+        row.update(
+            {
+                "FB_Extract_State": "",
+                "FB_Terminal_Reason": "",
+                "FB_Normalized_Terminal_Outcome": "",
+                "FB_Normalized_Terminal_Reason": "",
+                "FB_Reason": "",
+                "retry_attempted": "",
+                "retry_success": "",
+                "previous_fb_debug_reason": "",
+                "new_FB_Status": "",
+                "new_FB_Attempt_State": "",
+            }
+        )
+    before = pd.DataFrame(rows)
+    calls = []
+
+    def enricher(row, idx):
+        calls.append(idx)
+        out = row.copy()
+        out["FB_Status"] = "pass_a_no_email_on_page"
+        out["FB_Attempt_State"] = "attempted_fb_no_email_on_page"
+        return out
+
+    after, summary = recover_dataframe(before, fb_enricher=enricher)
+
+    assert len(after.index) == len(before.index)
+    assert list(after["Artist Name"]) == list(before["Artist Name"])
+    assert list(after.columns) == list(before.columns)
+    assert calls == [0]
+    assert summary.candidates_found == 1
+    assert summary.retry_attempted == 1
+    assert after.at[0, "retry_attempted"] == "true"
+    assert after.at[1, "retry_attempted"] == ""
+    assert after.at[2, "retry_attempted"] == ""
+    assert after.at[3, "retry_attempted"] == ""
 
 
 def test_already_valid_fb_rows_are_skipped():

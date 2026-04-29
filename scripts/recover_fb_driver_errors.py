@@ -32,9 +32,16 @@ from fb_attribution import (  # noqa: E402
 from source_scheduler import canonicalize_facebook_url  # noqa: E402
 
 try:  # noqa: E402
-    from night_mode_fb import _classify_night_fb_attempt_state
+    from night_mode_fb import FacebookDriverError, _classify_night_fb_attempt_state
 except Exception:  # pragma: no cover - defensive import fallback
+    FacebookDriverError = None  # type: ignore[assignment]
     _classify_night_fb_attempt_state = None  # type: ignore
+
+try:  # noqa: E402
+    from selenium.common.exceptions import TimeoutException, WebDriverException
+except Exception:  # pragma: no cover - selenium may be unavailable in isolated tests
+    TimeoutException = None  # type: ignore[assignment]
+    WebDriverException = None  # type: ignore[assignment]
 
 
 ELIGIBLE_OPPORTUNITY_STATES = {
@@ -87,6 +94,59 @@ FB_RESULT_COPY_COLUMNS = {
     FB_WRITE_STATE_COL,
     FB_DEBUG_REASON_COL,
 }
+
+
+def _driver_exception_types() -> Tuple[type, ...]:
+    return tuple(
+        exc_type
+        for exc_type in (FacebookDriverError, TimeoutException, WebDriverException)
+        if isinstance(exc_type, type)
+    )
+
+
+def _is_recovery_driver_exception(exc: BaseException) -> bool:
+    """Return True only for recovery exceptions tied to browser/driver execution."""
+    driver_types = _driver_exception_types()
+    if driver_types and isinstance(exc, driver_types):
+        return True
+
+    exc_type = type(exc)
+    class_name = exc_type.__name__.lower()
+    module_name = exc_type.__module__.lower()
+    if "selenium" in module_name:
+        return True
+    if any(token in class_name for token in ("webdriver", "driver", "browser", "session", "captcha", "checkpoint")):
+        return True
+
+    if isinstance(exc, (ValueError, TypeError, KeyError, IndexError, AttributeError, AssertionError)):
+        return False
+
+    message = str(exc).lower()
+    driver_message_tokens = (
+        "browser",
+        "captcha",
+        "checkpoint",
+        "chrome",
+        "chromedriver",
+        "driver",
+        "invalid session",
+        "navigation",
+        "net::",
+        "session crashed",
+        "session deleted",
+        "session not created",
+        "session unavailable",
+        "target window already closed",
+        "timed out receiving message from renderer",
+        "webdriver",
+    )
+    return isinstance(exc, RuntimeError) and any(token in message for token in driver_message_tokens)
+
+
+def _recovery_exception_debug_reason(exc: BaseException) -> str:
+    message = str(exc).strip()
+    suffix = f": {message}" if message else ""
+    return f"recovery_error:{type(exc).__name__}{suffix}"
 
 
 @dataclass
@@ -216,6 +276,8 @@ def _classify_attempt_state(status: str, existing: str) -> str:
 def _retry_completed(status: str, attempt_state: str) -> bool:
     status_norm = _cell(status).lower()
     attempt_norm = _cell(attempt_state).lower()
+    if status_norm == "recovery_error":
+        return False
     if "driver_error" in status_norm or "unearthed_driver_error" in status_norm:
         return False
     if "driver_error" in attempt_norm:
@@ -393,8 +455,12 @@ def recover_dataframe(
                 enriched = fb_enricher({k: _cell(v) for k, v in working.items()}, int(idx)) if fb_enricher else working
             except Exception as exc:
                 enriched = dict(working)
-                enriched["FB_Status"] = "driver_error"
-                enriched[FB_DEBUG_REASON_COL] = previous_debug or "driver_error"
+                if _is_recovery_driver_exception(exc):
+                    enriched["FB_Status"] = "driver_error"
+                    enriched[FB_DEBUG_REASON_COL] = previous_debug or "driver_error"
+                else:
+                    enriched["FB_Status"] = "recovery_error"
+                    enriched[FB_DEBUG_REASON_COL] = _recovery_exception_debug_reason(exc)
                 enriched["FB_Reason"] = str(exc)
 
             if enriched:
