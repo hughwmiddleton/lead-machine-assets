@@ -373,6 +373,179 @@ def test_manual_mapping_table_uses_conservative_column_sizing(qapp):
     assert tab.unmapped_table.columnWidth(0) >= 250
 
 
+def test_merge_preview_dialog_renders_structured_summary_and_table_without_recounting(qapp):
+    module = _load_legacy_module()
+    tab = module.LeadVaultTab()
+    upgrade_rows = [
+        {
+            "artist_name": f"Artist {index}",
+            "key": f"https://example.com/{index}",
+            "existing_email": None if index == 0 else f"old{index}@example.com",
+            "incoming_email": f"new{index}@example.com",
+            "existing_email_all": None if index == 0 else f"old{index}@example.com;team{index}@example.com",
+            "incoming_email_all": f"new{index}@example.com;team{index}@example.com",
+            "existing_score": index,
+            "incoming_score": index + 10,
+        }
+        for index in range(150)
+    ]
+    result = {
+        "merge_preview_counts": {
+            "NEW": 3,
+            "UPGRADE": 250,
+            "KEEP_EXISTING": 7,
+            "UNCHANGED": 11,
+        },
+        "rows_final": 999,
+        "merge_preview_upgrade_rows": upgrade_rows,
+    }
+
+    dialog = tab._build_merge_preview_dialog(result)
+
+    assert dialog.windowTitle() == "Merge + Consolidate Preview"
+    assert dialog.minimumWidth() >= 1000
+    assert dialog.minimumHeight() >= 650
+
+    labels_text = "\n".join(label.text() for label in dialog.findChildren(QtWidgets.QLabel))
+    assert "Merge preview is ready." in labels_text
+    assert "New artists:" in labels_text
+    assert "3" in labels_text
+    assert "Upgrades:" in labels_text
+    assert "250" in labels_text
+    assert "Kept existing:" in labels_text
+    assert "7" in labels_text
+    assert "Unchanged:" in labels_text
+    assert "11" in labels_text
+    assert "Final row count:" in labels_text
+    assert "999" in labels_text
+    assert "Showing first 100 of 250 upgrade rows." in labels_text
+    assert "Upgrade Rows:" not in labels_text
+
+    table = dialog.findChild(QtWidgets.QTableWidget, "mergePreviewUpgradeTable")
+    assert table is not None
+    assert table.rowCount() == 100
+    assert [
+        table.horizontalHeaderItem(index).text()
+        for index in range(table.columnCount())
+    ] == [
+        "Artist",
+        "Key",
+        "Existing Email",
+        "Incoming Email",
+        "Existing Email_All",
+        "Incoming Email_All",
+        "Existing Score",
+        "Incoming Score",
+    ]
+    assert table.item(0, 0).text() == "Artist 0"
+    assert table.item(0, 2).text() == ""
+    assert table.item(0, 4).text() == ""
+    assert table.item(0, 7).text() == "10"
+    assert table.item(99, 0).text() == "Artist 99"
+    assert table.horizontalHeader().sectionResizeMode(6) == QtWidgets.QHeaderView.Fixed
+    assert table.horizontalHeader().sectionResizeMode(7) == QtWidgets.QHeaderView.Fixed
+
+    dialog.close()
+
+
+def test_merge_preview_dialog_handles_empty_upgrade_rows(qapp):
+    module = _load_legacy_module()
+    tab = module.LeadVaultTab()
+
+    dialog = tab._build_merge_preview_dialog(
+        {
+            "merge_preview_counts": {
+                "NEW": 0,
+                "UPGRADE": 0,
+                "KEEP_EXISTING": 0,
+                "UNCHANGED": 0,
+            },
+            "rows_final": 0,
+            "merge_preview_upgrade_rows": [],
+        }
+    )
+
+    labels_text = "\n".join(label.text() for label in dialog.findChildren(QtWidgets.QLabel))
+    table = dialog.findChild(QtWidgets.QTableWidget, "mergePreviewUpgradeTable")
+
+    assert "No upgrade rows." in labels_text
+    assert table is not None
+    assert table.rowCount() == 0
+    dialog.close()
+
+
+def test_merge_preview_cancel_summary_is_clean(qapp, monkeypatch):
+    module = _load_legacy_module()
+    tab = module.LeadVaultTab()
+    result = {
+        "unmapped_headers": [],
+        "merge_preview_counts": {
+            "NEW": 1,
+            "UPGRADE": 2,
+            "KEEP_EXISTING": 3,
+            "UNCHANGED": 4,
+        },
+        "rows_final": 10,
+        "merge_preview_upgrade_rows": [],
+    }
+
+    class FakeDialog:
+        def exec_(self):
+            return QtWidgets.QDialog.Rejected
+
+    monkeypatch.setattr(tab, "_build_merge_preview_dialog", lambda _result: FakeDialog())
+
+    tab._handle_merge_preview_finished(result)
+
+    assert tab.summary_view.toPlainText() == "Merge preview cancelled. No changes made."
+    assert tab.merge_preview_result is None
+
+
+def test_merge_preview_confirm_summary_is_clean_and_uses_cached_preview(qapp, monkeypatch):
+    module = _load_legacy_module()
+    tab = module.LeadVaultTab()
+    result = {
+        "unmapped_headers": [],
+        "duplicate_strategy": "merge_consolidate",
+        "preview_session_id": "session-123",
+        "merge_preview_counts": {
+            "NEW": 1,
+            "UPGRADE": 250,
+            "KEEP_EXISTING": 3,
+            "UNCHANGED": 4,
+        },
+        "rows_final": 10,
+        "merge_preview_upgrade_rows": [{"artist_name": "Hidden upgrade"}],
+    }
+    calls = []
+
+    class FakeDialog:
+        def exec_(self):
+            return QtWidgets.QDialog.Accepted
+
+    def fake_confirm(preview, *, preview_session_id=None):
+        calls.append((preview, preview_session_id))
+        confirmed = dict(preview)
+        confirmed["dry_run"] = False
+        return confirmed
+
+    monkeypatch.setattr(tab, "_build_merge_preview_dialog", lambda _result: FakeDialog())
+    monkeypatch.setattr(module, "confirm_csv_merge_preview", fake_confirm)
+
+    tab._handle_merge_preview_finished(result)
+
+    assert calls == [(result, "session-123")]
+    assert tab.summary_view.toPlainText() == (
+        "Merge confirmed.\n\n"
+        "New artists: 1\n"
+        "Upgrades: 250\n"
+        "Kept existing: 3\n"
+        "Unchanged: 4\n"
+        "Final row count: 10"
+    )
+    assert "Hidden upgrade" not in tab.summary_view.toPlainText()
+
+
 def test_manual_mapping_is_passed_to_backend_worker_and_summary_updates(qapp, monkeypatch, tmp_path):
     module = _load_legacy_module()
     source_path = tmp_path / "input.csv"

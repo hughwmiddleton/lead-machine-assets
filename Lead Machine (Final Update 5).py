@@ -13080,17 +13080,9 @@ class LeadVaultTab(QtWidgets.QWidget):
         if result.get("unmapped_headers"):
             QtWidgets.QMessageBox.warning(self, "Lead Vault", "Resolve or ignore every unmapped column before merging.")
             return
-        message_box = QtWidgets.QMessageBox(self)
-        message_box.setIcon(QtWidgets.QMessageBox.Question)
-        message_box.setWindowTitle("Lead Vault")
-        message_box.setText("Merge + Consolidate preview is ready.")
-        message_box.setInformativeText(self._format_merge_preview_summary(result))
-        confirm_button = message_box.addButton("Confirm Merge", QtWidgets.QMessageBox.AcceptRole)
-        cancel_button = message_box.addButton("Cancel", QtWidgets.QMessageBox.RejectRole)
-        message_box.setDefaultButton(confirm_button)
-        message_box.exec_()
-        if message_box.clickedButton() != confirm_button:
-            self.summary_view.setPlainText(self._format_merge_preview_summary(result) + "\n\nMerge cancelled. No changes were written.")
+        dialog = self._build_merge_preview_dialog(result)
+        if dialog.exec_() != QtWidgets.QDialog.Accepted:
+            self.summary_view.setPlainText("Merge preview cancelled. No changes made.")
             self.merge_preview_result = None
             return
         try:
@@ -13107,6 +13099,115 @@ class LeadVaultTab(QtWidgets.QWidget):
             self.merge_preview_result = None
             return
         self._handle_import_finished(confirmed)
+
+    def _build_merge_preview_dialog(self, result: dict) -> QtWidgets.QDialog:
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("Merge + Consolidate Preview")
+        dialog.setMinimumSize(1000, 650)
+
+        layout = QtWidgets.QVBoxLayout(dialog)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(12)
+
+        header_label = QtWidgets.QLabel("Merge preview is ready.")
+        header_font = header_label.font()
+        header_font.setPointSize(header_font.pointSize() + 2)
+        header_font.setBold(True)
+        header_label.setFont(header_font)
+        layout.addWidget(header_label)
+
+        summary_group = QtWidgets.QGroupBox("Summary")
+        summary_layout = QtWidgets.QGridLayout(summary_group)
+        summary_layout.setColumnStretch(1, 1)
+        for row_index, (label, value) in enumerate(self._merge_preview_summary_items(result)):
+            name_label = QtWidgets.QLabel(label)
+            value_label = QtWidgets.QLabel(self._preview_cell_text(value))
+            value_label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+            summary_layout.addWidget(name_label, row_index, 0)
+            summary_layout.addWidget(value_label, row_index, 1)
+        layout.addWidget(summary_group)
+
+        upgrade_rows = result.get("merge_preview_upgrade_rows", []) or []
+        total_upgrades = self._merge_preview_count_value(result, "UPGRADE")
+        displayed_rows = list(upgrade_rows[:100])
+
+        total_upgrades_int = self._preview_count_as_int(total_upgrades)
+        if total_upgrades_int == 0:
+            table_message = "No upgrade rows."
+        elif total_upgrades_int > 100:
+            table_message = f"Showing first 100 of {self._preview_cell_text(total_upgrades)} upgrade rows."
+        else:
+            table_message = ""
+        table_message_label = QtWidgets.QLabel(table_message)
+        layout.addWidget(table_message_label)
+
+        table = QtWidgets.QTableWidget(0, 8)
+        table.setObjectName("mergePreviewUpgradeTable")
+        table.setHorizontalHeaderLabels(
+            [
+                "Artist",
+                "Key",
+                "Existing Email",
+                "Incoming Email",
+                "Existing Email_All",
+                "Incoming Email_All",
+                "Existing Score",
+                "Incoming Score",
+            ]
+        )
+        table.setSortingEnabled(False)
+        table.setAlternatingRowColors(True)
+        table.setWordWrap(False)
+        table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        table.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
+        table.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
+        table.setSizeAdjustPolicy(QtWidgets.QAbstractScrollArea.AdjustIgnored)
+        table.verticalHeader().setVisible(False)
+
+        table.setUpdatesEnabled(False)
+        table.setRowCount(len(displayed_rows))
+        field_names = [
+            ("artist_name",),
+            ("key",),
+            ("existing_email",),
+            ("incoming_email",),
+            ("existing_email_all", "existing_email_all_count"),
+            ("incoming_email_all", "incoming_email_all_count"),
+            ("existing_score",),
+            ("incoming_score",),
+        ]
+        for row_index, row in enumerate(displayed_rows):
+            row_data = row if isinstance(row, dict) else {}
+            for column_index, names in enumerate(field_names):
+                table.setItem(
+                    row_index,
+                    column_index,
+                    QtWidgets.QTableWidgetItem(self._first_preview_cell_value(row_data, names)),
+                )
+        table.setUpdatesEnabled(True)
+
+        table_header = table.horizontalHeader()
+        table_header.setStretchLastSection(False)
+        for column_index in range(table.columnCount()):
+            table_header.setSectionResizeMode(column_index, QtWidgets.QHeaderView.Interactive)
+        table_header.setSectionResizeMode(6, QtWidgets.QHeaderView.Fixed)
+        table_header.setSectionResizeMode(7, QtWidgets.QHeaderView.Fixed)
+        column_widths = [180, 180, 220, 220, 170, 170, 95, 95]
+        for column_index, width in enumerate(column_widths):
+            table.setColumnWidth(column_index, width)
+
+        layout.addWidget(table, 1)
+
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Cancel)
+        confirm_button = buttons.addButton("Confirm Merge", QtWidgets.QDialogButtonBox.AcceptRole)
+        cancel_button = buttons.button(QtWidgets.QDialogButtonBox.Cancel)
+        cancel_button.setText("Cancel")
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        confirm_button.setDefault(True)
+        layout.addWidget(buttons)
+        return dialog
 
     def _handle_worker_error(self, message: str):
         self.preview_button.setEnabled(True)
@@ -13285,40 +13386,44 @@ class LeadVaultTab(QtWidgets.QWidget):
         self.import_button.setEnabled(not unresolved_headers)
 
     def _format_merge_preview_summary(self, result: dict) -> str:
-        counts = result.get("merge_preview_counts", {}) or {}
-        lines = [
-            f"Source: {result.get('source_path', '')}",
-            f"Master: {result.get('master_path', '')}",
-            "",
-            "Merge Preview:",
-            f"New artists: {counts.get('NEW', 0)}",
-            f"Upgrades: {counts.get('UPGRADE', 0)}",
-            f"Kept existing: {counts.get('KEEP_EXISTING', 0)}",
-            f"Unchanged: {counts.get('UNCHANGED', 0)}",
-            f"Final row count: {result.get('rows_final', 0)}",
+        return "\n".join(f"{label} {self._preview_cell_text(value)}" for label, value in self._merge_preview_summary_items(result))
+
+    def _format_merge_confirm_summary(self, result: dict) -> str:
+        return "Merge confirmed.\n\n" + self._format_merge_preview_summary(result)
+
+    def _merge_preview_summary_items(self, result: dict) -> List[Tuple[str, object]]:
+        return [
+            ("New artists:", self._merge_preview_count_value(result, "NEW")),
+            ("Upgrades:", self._merge_preview_count_value(result, "UPGRADE")),
+            ("Kept existing:", self._merge_preview_count_value(result, "KEEP_EXISTING")),
+            ("Unchanged:", self._merge_preview_count_value(result, "UNCHANGED")),
+            ("Final row count:", result.get("rows_final", "")),
         ]
-        upgrade_rows = result.get("merge_preview_upgrade_rows", []) or []
-        if upgrade_rows:
-            lines.extend(["", "Upgrade Rows:"])
-            for row in upgrade_rows[:50]:
-                lines.append(
-                    "{artist} | {key} | Email {existing_email} -> {incoming_email} | "
-                    "Email_All {existing_count} -> {incoming_count} | Score {existing_score} -> {incoming_score}".format(
-                        artist=row.get("artist_name", ""),
-                        key=row.get("key", ""),
-                        existing_email=row.get("existing_email", ""),
-                        incoming_email=row.get("incoming_email", ""),
-                        existing_count=row.get("existing_email_all_count", 0),
-                        incoming_count=row.get("incoming_email_all_count", 0),
-                        existing_score=row.get("existing_score", 0),
-                        incoming_score=row.get("incoming_score", 0),
-                    )
-                )
-            if len(upgrade_rows) > 50:
-                lines.append(f"... {len(upgrade_rows) - 50} more upgrade row(s) not shown.")
-        return "\n".join(lines)
+
+    def _merge_preview_count_value(self, result: dict, key: str) -> object:
+        counts = result.get("merge_preview_counts", {}) or {}
+        return counts.get(key, "")
+
+    def _preview_cell_text(self, value: object) -> str:
+        if value is None:
+            return ""
+        return str(value)
+
+    def _first_preview_cell_value(self, row: dict, names: Tuple[str, ...]) -> str:
+        for name in names:
+            if name in row:
+                return self._preview_cell_text(row.get(name))
+        return ""
+
+    def _preview_count_as_int(self, value: object) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 0
 
     def _format_summary(self, result: dict, preview_only: bool) -> str:
+        if not preview_only and result.get("duplicate_strategy") == "merge_consolidate":
+            return self._format_merge_confirm_summary(result)
         lines = [
             f"Source: {result.get('source_path', '')}",
             f"Master: {result.get('master_path', '')}",
