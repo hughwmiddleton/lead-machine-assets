@@ -11964,6 +11964,49 @@ def _campaign_prep_has_email_value(value) -> bool:
     return cleaned.lower() not in {"", "nan", "none"}
 
 
+def _campaign_prep_parse_release_date(value) -> Optional[datetime.datetime]:
+    cleaned = str(value if value is not None else "").strip()
+    if not cleaned:
+        return None
+    try:
+        parsed = datetime.datetime.fromisoformat(cleaned)
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+    return parsed
+
+
+def _campaign_prep_desc_date_key(parsed: datetime.datetime) -> Tuple[int, int, int, int]:
+    return (
+        -parsed.toordinal(),
+        -(parsed.hour * 3600 + parsed.minute * 60 + parsed.second),
+        -parsed.microsecond,
+        -parsed.fold,
+    )
+
+
+def _campaign_prep_sort_buffer_by_release_date(
+    rows: List[Tuple[dict, dict]],
+    sort_mode: str,
+) -> List[Tuple[dict, dict]]:
+    if sort_mode in ("", "none", None):
+        return rows
+    if sort_mode not in ("ascending", "descending"):
+        raise ValueError(f"Invalid release_date_sort: {sort_mode}")
+
+    def sort_key(item: Tuple[dict, dict]):
+        source_row, _export_row = item
+        parsed = _campaign_prep_parse_release_date(source_row.get("Release Date", ""))
+        if parsed is None:
+            return (1, 0)
+        if sort_mode == "descending":
+            return (0, _campaign_prep_desc_date_key(parsed))
+        return (0, parsed)
+
+    return sorted(rows, key=sort_key)
+
+
 def _campaign_prep_atomic_write_csv(path: Path, rows: List[dict], columns: List[str]) -> None:
     tmp_path = path.with_name(f"{path.name}.tmp")
     try:
@@ -12061,6 +12104,7 @@ def generate_campaign_csvs(
     split_multiple_emails: bool = False,
     export_format: str = "lead_machine_full",
     remove_rows_without_emails: bool = False,
+    release_date_sort: str = "none",
     email_column_candidates: tuple[str, ...] = (
         "emails",
         "email",
@@ -12071,9 +12115,11 @@ def generate_campaign_csvs(
         "Primary Email",
         "All Emails",
     ),
-) -> dict:
+    ) -> dict:
     if export_format not in ("lead_machine_full", "woodpecker", "input_headers"):
         raise ValueError(f"Invalid export_format: {export_format}")
+    if release_date_sort not in ("none", "ascending", "descending"):
+        raise ValueError(f"Invalid release_date_sort: {release_date_sort}")
 
     read_kwargs = {
         "dtype": str,
@@ -12099,7 +12145,7 @@ def generate_campaign_csvs(
 
     email_column = _campaign_prep_resolve_alias(columns_by_lower, email_column_candidates)
 
-    output_rows: Dict[str, List[dict]] = {name: [] for name in CAMPAIGN_PREP_OUTPUT_ORDER}
+    output_rows: Dict[str, List[Tuple[dict, dict]]] = {name: [] for name in CAMPAIGN_PREP_OUTPUT_ORDER}
     column_indexes = {column: idx for idx, column in enumerate(columns)}
     output_columns = CAMPAIGN_PREP_WOODPECKER_COLUMNS if export_format == "woodpecker" else columns
 
@@ -12142,16 +12188,18 @@ def generate_campaign_csvs(
                 playback_segment = "Neither"
 
             export_row = _campaign_prep_export_row(final_row, export_format, columns_by_lower, email_column)
-            output_rows[f"{location_segment}.csv"].append(dict(export_row))
-            output_rows[f"{location_segment}_{playback_segment}.csv"].append(dict(export_row))
+            output_rows[f"{location_segment}.csv"].append((final_row, dict(export_row)))
+            output_rows[f"{location_segment}_{playback_segment}.csv"].append((final_row, dict(export_row)))
 
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
     result: Dict[str, int] = {}
     for filename in CAMPAIGN_PREP_OUTPUT_ORDER:
-        rows = output_rows[filename]
-        if filename not in ("Inside_VIC.csv", "Outside_VIC.csv") and not rows:
+        buffered_rows = output_rows[filename]
+        if filename not in ("Inside_VIC.csv", "Outside_VIC.csv") and not buffered_rows:
             continue
+        sorted_buffer = _campaign_prep_sort_buffer_by_release_date(buffered_rows, release_date_sort)
+        rows = [dict(export_row) for _source_row, export_row in sorted_buffer]
         _campaign_prep_atomic_write_csv(output_path / filename, rows, output_columns)
         result[filename] = len(rows)
     return result
@@ -12194,6 +12242,13 @@ class CampaignPrepTab(QtWidgets.QWidget):
         self.remove_rows_without_emails_checkbox = QtWidgets.QCheckBox("Remove rows without emails")
         self.remove_rows_without_emails_checkbox.setChecked(False)
         config_layout.addLayout(_lm_control_row(self.remove_rows_without_emails_checkbox))
+
+        self.release_date_sort_combo = QtWidgets.QComboBox()
+        self.release_date_sort_combo.addItem("None", "none")
+        self.release_date_sort_combo.addItem("Ascending (Oldest → Newest)", "ascending")
+        self.release_date_sort_combo.addItem("Descending (Newest → Oldest)", "descending")
+        self.release_date_sort_combo.setCurrentIndex(0)
+        config_layout.addLayout(_lm_row("Sort by Release Date:", self.release_date_sort_combo, add_stretch=True))
 
         self.export_format_combo = QtWidgets.QComboBox()
         self.export_format_combo.addItem("Lead Machine / Full Export", "lead_machine_full")
@@ -12267,6 +12322,7 @@ class CampaignPrepTab(QtWidgets.QWidget):
                 split_multiple_emails=self.split_emails_checkbox.isChecked(),
                 export_format=self.export_format_combo.currentData() or "lead_machine_full",
                 remove_rows_without_emails=self.remove_rows_without_emails_checkbox.isChecked(),
+                release_date_sort=self.release_date_sort_combo.currentData() or "none",
             )
             lines = [f"{filename}: {count} rows" for filename, count in result.items()]
             summary = "\n".join(lines)

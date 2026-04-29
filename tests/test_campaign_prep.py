@@ -251,6 +251,127 @@ def test_generate_campaign_csvs_filter_all_rows_removed_writes_primary_headers_o
     assert sorted(path.name for path in output_dir.glob("*.csv")) == ["Inside_VIC.csv", "Outside_VIC.csv"]
 
 
+def test_generate_campaign_csvs_release_date_sort_ascending_invalid_at_bottom_stable(tmp_path):
+    module = _load_legacy_module()
+    columns = ["Artist", "Location", "Release Date", "Email"]
+    input_path = tmp_path / "master.csv"
+    output_dir = tmp_path / "campaign"
+    _write_csv(
+        input_path,
+        [
+            {"Artist": "Invalid A", "Location": "VIC", "Release Date": "not-a-date", "Email": "a@test.com"},
+            {"Artist": "New", "Location": "VIC", "Release Date": "2026-03-10", "Email": "b@test.com"},
+            {"Artist": "Old", "Location": "VIC", "Release Date": "2025-01-02", "Email": "c@test.com"},
+            {"Artist": "Same 1", "Location": "VIC", "Release Date": "2026-03-10", "Email": "d@test.com"},
+            {"Artist": "Missing", "Location": "VIC", "Release Date": "", "Email": "e@test.com"},
+            {"Artist": "Invalid B", "Location": "VIC", "Release Date": "32/13/2026", "Email": "f@test.com"},
+        ],
+        columns,
+    )
+    source_bytes = input_path.read_bytes()
+
+    module.generate_campaign_csvs(str(input_path), str(output_dir), release_date_sort="ascending")
+
+    _, rows = _read_csv(output_dir / "Inside_VIC.csv")
+    assert [row["Artist"] for row in rows] == ["Old", "New", "Same 1", "Invalid A", "Missing", "Invalid B"]
+    assert [row["Release Date"] for row in rows[-3:]] == ["not-a-date", "", "32/13/2026"]
+    assert input_path.read_bytes() == source_bytes
+
+
+def test_generate_campaign_csvs_release_date_sort_descending_invalid_at_bottom_stable(tmp_path):
+    module = _load_legacy_module()
+    columns = ["Artist", "Location", "Release Date", "Email"]
+    input_path = tmp_path / "master.csv"
+    output_dir = tmp_path / "campaign"
+    _write_csv(
+        input_path,
+        [
+            {"Artist": "Middle 1", "Location": "Sydney", "Release Date": "2026-03-10", "Email": "a@test.com"},
+            {"Artist": "Old", "Location": "Sydney", "Release Date": "2025-01-02", "Email": "b@test.com"},
+            {"Artist": "Invalid A", "Location": "Sydney", "Release Date": "soon", "Email": "c@test.com"},
+            {"Artist": "Newest", "Location": "Sydney", "Release Date": "2026-12-01", "Email": "d@test.com"},
+            {"Artist": "Middle 2", "Location": "Sydney", "Release Date": "2026-03-10", "Email": "e@test.com"},
+            {"Artist": "Missing", "Location": "Sydney", "Release Date": "", "Email": "f@test.com"},
+        ],
+        columns,
+    )
+
+    module.generate_campaign_csvs(str(input_path), str(output_dir), release_date_sort="descending")
+
+    _, rows = _read_csv(output_dir / "Outside_VIC.csv")
+    assert [row["Artist"] for row in rows] == ["Newest", "Middle 1", "Middle 2", "Old", "Invalid A", "Missing"]
+
+
+def test_generate_campaign_csvs_release_date_sort_none_preserves_order_and_does_not_parse(tmp_path, monkeypatch):
+    module = _load_legacy_module()
+    columns = ["Artist", "Location", "Release Date", "Email"]
+    input_path = tmp_path / "master.csv"
+    output_dir = tmp_path / "campaign"
+    _write_csv(
+        input_path,
+        [
+            {"Artist": "B", "Location": "VIC", "Release Date": "bad", "Email": "b@test.com"},
+            {"Artist": "A", "Location": "VIC", "Release Date": "2025-01-01", "Email": "a@test.com"},
+        ],
+        columns,
+    )
+
+    def fail_parse(_value):
+        raise AssertionError("release date parser should not run for default no-sort exports")
+
+    monkeypatch.setattr(module, "_campaign_prep_parse_release_date", fail_parse)
+    module.generate_campaign_csvs(str(input_path), str(output_dir))
+
+    _, rows = _read_csv(output_dir / "Inside_VIC.csv")
+    assert [row["Artist"] for row in rows] == ["B", "A"]
+
+
+def test_generate_campaign_csvs_release_date_sort_after_split_and_email_filter(tmp_path):
+    module = _load_legacy_module()
+    columns = ["Artist", "Location", "Release Date", "Email"]
+    input_path = tmp_path / "master.csv"
+    output_dir = tmp_path / "campaign"
+    _write_csv(
+        input_path,
+        [
+            {"Artist": "Later Split", "Location": "VIC", "Release Date": "2026-05-01", "Email": "later1@test.com, later2@test.com"},
+            {"Artist": "No Email", "Location": "VIC", "Release Date": "2024-01-01", "Email": ""},
+            {"Artist": "Earlier", "Location": "VIC", "Release Date": "2025-01-01", "Email": "early@test.com"},
+        ],
+        columns,
+    )
+
+    result = module.generate_campaign_csvs(
+        str(input_path),
+        str(output_dir),
+        split_multiple_emails=True,
+        remove_rows_without_emails=True,
+        release_date_sort="ascending",
+    )
+
+    assert result["Inside_VIC.csv"] == 3
+    _, rows = _read_csv(output_dir / "Inside_VIC.csv")
+    assert [(row["Artist"], row["Email"]) for row in rows] == [
+        ("Earlier", "early@test.com"),
+        ("Later Split", "later1@test.com"),
+        ("Later Split", "later2@test.com"),
+    ]
+
+
+def test_generate_campaign_csvs_release_date_sort_does_not_mutate_export_rows(tmp_path):
+    module = _load_legacy_module()
+    rows = [
+        ({"Release Date": "2026-01-01", "Email": "a@test.com"}, {"Release Date": "2026-01-01", "Email": "a@test.com"}),
+        ({"Release Date": "2025-01-01", "Email": "b@test.com"}, {"Release Date": "2025-01-01", "Email": "b@test.com"}),
+    ]
+    original_rows = [({**source}, {**export}) for source, export in rows]
+
+    sorted_rows = module._campaign_prep_sort_buffer_by_release_date(rows, "ascending")
+
+    assert rows == original_rows
+    assert [export["Email"] for _source, export in sorted_rows] == ["b@test.com", "a@test.com"]
+
+
 def test_generate_campaign_csvs_supports_real_master_headers_and_alias_priority(tmp_path):
     module = _load_legacy_module()
     columns = [
@@ -473,6 +594,11 @@ def test_main_window_contains_campaign_prep_tab(qapp):
         window.campaign_prep_tab.export_format_combo.itemData(index)
         for index in range(window.campaign_prep_tab.export_format_combo.count())
     ] == ["lead_machine_full", "woodpecker", "input_headers"]
+    assert window.campaign_prep_tab.release_date_sort_combo.currentData() == "none"
+    assert [
+        window.campaign_prep_tab.release_date_sort_combo.itemData(index)
+        for index in range(window.campaign_prep_tab.release_date_sort_combo.count())
+    ] == ["none", "ascending", "descending"]
     window.close()
 
 
@@ -499,8 +625,10 @@ def test_campaign_prep_remove_rows_without_emails_checkbox_defaults_and_passes_v
     tab.output_dir_edit.setText(str(output_dir))
     tab.split_emails_checkbox.setChecked(True)
     tab.remove_rows_without_emails_checkbox.setChecked(True)
+    tab.release_date_sort_combo.setCurrentIndex(2)
     tab._generate_campaign_csvs()
 
     assert calls[0][1]["split_multiple_emails"] is True
     assert calls[0][1]["remove_rows_without_emails"] is True
+    assert calls[0][1]["release_date_sort"] == "descending"
     tab.close()
