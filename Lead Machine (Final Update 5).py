@@ -27,7 +27,7 @@ import shutil
 import logging
 import copy
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Mapping, Optional, Tuple
 
 from fb_email_override import should_accept_email_override
 # ---------------------------
@@ -289,7 +289,20 @@ FB_DRIVER_RECOVERY_SUMMARY_KEYS = (
     "retry_success",
     "fb_email_found",
 )
+FB_DRIVER_MANUAL_SUMMARY_KEYS = (
+    "driver_error_rows",
+    "driver_candidates_found",
+    "driver_retry_attempted",
+    "driver_retry_success",
+    "driver_fb_email_found",
+)
+FB_SHARE_MANUAL_SUMMARY_KEYS = (
+    "share_candidates_found",
+    "share_resolution_success",
+    "share_fb_email_found",
+)
 FB_SHARE_RECOVERY_DEFAULT_BATCH_SIZE = 40
+MANUAL_FB_RECOVERY_MAX_BATCHES = 10
 
 
 def _coerce_fb_share_recovery_batch_size(value) -> int:
@@ -311,11 +324,219 @@ def _parse_fb_driver_recovery_summary(stdout: str) -> Dict[str, str]:
     return summary
 
 
+def _parse_recovery_stdout(stdout: str) -> Dict[str, str]:
+    summary: Dict[str, str] = {}
+    for raw_line in str(stdout or "").splitlines():
+        line = raw_line.strip()
+        if not line or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        summary[key.strip()] = value.strip()
+    return summary
+
+
 def _fb_driver_recovery_int(summary: Dict[str, str], key: str) -> int:
     try:
         return int(str(summary.get(key, "0") or "0").strip())
     except Exception:
         return 0
+
+
+def _summary_int(summary: Mapping[str, object], key: str) -> int:
+    try:
+        return int(str(summary.get(key, "0") or "0").strip())
+    except Exception:
+        return 0
+
+
+def _first_summary_int(summary: Mapping[str, object], *keys: str) -> int:
+    for key in keys:
+        if key in summary:
+            return _summary_int(summary, key)
+    return 0
+
+
+def _normalize_manual_fb_share_summary(stdout: str) -> Dict[str, int]:
+    raw = _parse_recovery_stdout(stdout)
+    return {
+        "share_candidates_found": _first_summary_int(raw, "share_candidates_found", "candidates_found", "candidates"),
+        "share_resolution_success": _first_summary_int(raw, "share_resolution_success", "resolution_success", "resolved"),
+        "share_fb_email_found": _first_summary_int(raw, "share_fb_email_found", "fb_email_found", "enriched"),
+    }
+
+
+def _normalize_manual_fb_driver_summary(stdout: str) -> Dict[str, int]:
+    raw = _parse_recovery_stdout(stdout)
+    return {
+        "driver_error_rows": _summary_int(raw, "driver_error_rows"),
+        "driver_candidates_found": _first_summary_int(raw, "driver_candidates_found", "candidates_found"),
+        "driver_retry_attempted": _first_summary_int(raw, "driver_retry_attempted", "retry_attempted"),
+        "driver_retry_success": _first_summary_int(raw, "driver_retry_success", "retry_success"),
+        "driver_fb_email_found": _first_summary_int(raw, "driver_fb_email_found", "fb_email_found"),
+    }
+
+
+def _manual_fb_recovery_final_path(input_csv: str, *, in_place: bool = False) -> str:
+    path = Path(input_csv)
+    suffix = path.suffix or ".csv"
+    name = f"{path.stem}.recovered_temp{suffix}" if in_place else f"{path.stem}.recovered_final{suffix}"
+    return str(path.with_name(name))
+
+
+def _run_recovery_subprocess(cmd: list[str], *, base_path: Path, runner) -> tuple[str, int]:
+    completed = runner(
+        cmd,
+        cwd=str(base_path),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        check=False,
+    )
+    return getattr(completed, "stdout", "") or "", int(getattr(completed, "returncode", 0) or 0)
+
+
+def _run_manual_fb_recovery(
+    input_csv: str,
+    *,
+    recover_share: bool = True,
+    recover_driver: bool = True,
+    batch_size: int = 40,
+    in_place: bool = False,
+    dry_run: bool = False,
+    logger_fn=None,
+    runner=None,
+    python_executable: Optional[str] = None,
+    base_dir: Optional[str] = None,
+) -> Dict[str, object]:
+    def _log(message: str) -> None:
+        if callable(logger_fn):
+            logger_fn(message)
+
+    input_path = Path(input_csv)
+    if not input_path.exists():
+        raise FileNotFoundError(f"CSV not found: {input_csv}")
+    if not recover_share and not recover_driver:
+        raise ValueError("Select at least one recovery mode.")
+
+    batch_size = max(int(batch_size or FB_SHARE_RECOVERY_DEFAULT_BATCH_SIZE), 1)
+    runner = runner or subprocess.run
+    python_executable = python_executable or sys.executable
+    base_path = Path(base_dir or os.path.dirname(os.path.abspath(__file__)))
+    share_script = base_path / "scripts" / "recover_fb_share_rows.py"
+    driver_script = base_path / "scripts" / "recover_fb_driver_errors.py"
+    if recover_share and not share_script.exists():
+        raise FileNotFoundError(f"FB /share recovery script not found: {share_script}")
+    if recover_driver and not driver_script.exists():
+        raise FileNotFoundError(f"FB driver recovery script not found: {driver_script}")
+
+    summary: Dict[str, object] = {
+        **{key: 0 for key in FB_SHARE_MANUAL_SUMMARY_KEYS},
+        **{key: 0 for key in FB_DRIVER_MANUAL_SUMMARY_KEYS},
+        "final_recovered_csv": "<dry-run>" if dry_run else "",
+        "batches_run": 0,
+        "stopped_reason": "",
+        "dry_run": bool(dry_run),
+    }
+    _log("Manual FB Recovery started")
+    _log(f"input_csv={input_path}")
+
+    with tempfile.TemporaryDirectory(prefix="manual_fb_recovery_") as temp_dir:
+        temp_path = Path(temp_dir)
+        run_input = input_path
+        if dry_run:
+            run_input = temp_path / input_path.name
+            shutil.copy2(input_path, run_input)
+
+        current_input = str(run_input)
+        latest_output = current_input
+
+        if recover_share:
+            share_output = (
+                temp_path / f"{input_path.stem}.share_recovered{input_path.suffix or '.csv'}"
+                if dry_run
+                else input_path.with_name(f"{input_path.stem}.share_recovered{input_path.suffix or '.csv'}")
+            )
+            cmd = [
+                python_executable,
+                str(share_script),
+                "--input",
+                current_input,
+                "--output",
+                str(share_output),
+                "--limit",
+                str(batch_size),
+                "--force",
+            ]
+            stdout, returncode = _run_recovery_subprocess(cmd, base_path=base_path, runner=runner)
+            for line in stdout.splitlines():
+                if line.strip():
+                    _log(f"[Manual FB Share Recovery] {line.strip()}")
+            if returncode != 0:
+                raise RuntimeError(f"FB /share recovery failed with code {returncode}")
+            share_summary = _normalize_manual_fb_share_summary(stdout)
+            summary.update(share_summary)
+            latest_output = str(share_output)
+            current_input = latest_output
+
+        if recover_driver:
+            for batch_index in range(1, MANUAL_FB_RECOVERY_MAX_BATCHES + 1):
+                driver_output = temp_path / f"{input_path.stem}.driver_recovered_batch{batch_index}{input_path.suffix or '.csv'}"
+                cmd = [
+                    python_executable,
+                    str(driver_script),
+                    "--input",
+                    current_input,
+                    "--output",
+                    str(driver_output),
+                    "--limit",
+                    str(batch_size),
+                    "--batch-size",
+                    str(batch_size),
+                ]
+                if dry_run:
+                    cmd.append("--dry-run")
+                stdout, returncode = _run_recovery_subprocess(cmd, base_path=base_path, runner=runner)
+                for line in stdout.splitlines():
+                    if line.strip():
+                        _log(f"[Manual FB Driver Recovery] {line.strip()}")
+                if returncode != 0:
+                    raise RuntimeError(f"FB driver recovery batch {batch_index} failed with code {returncode}")
+                driver_summary = _normalize_manual_fb_driver_summary(stdout)
+                for key in FB_DRIVER_MANUAL_SUMMARY_KEYS:
+                    summary[key] = int(summary.get(key, 0) or 0) + int(driver_summary.get(key, 0) or 0)
+                summary["batches_run"] = batch_index
+
+                candidates_found = int(driver_summary.get("driver_candidates_found", 0) or 0)
+                retry_attempted = int(driver_summary.get("driver_retry_attempted", 0) or 0)
+                latest_output = current_input if dry_run else str(driver_output)
+                if candidates_found == 0:
+                    summary["stopped_reason"] = "candidates_found=0"
+                    break
+                if retry_attempted == 0:
+                    summary["stopped_reason"] = "retry_attempted=0"
+                    break
+                current_input = str(driver_output)
+            else:
+                summary["stopped_reason"] = "max_batches"
+
+        if dry_run:
+            final_output = "<dry-run>"
+        else:
+            final_output = _manual_fb_recovery_final_path(str(input_path), in_place=in_place)
+            _copy_csv_atomic(latest_output, final_output)
+            _validate_recovered_csv_matches_original(str(input_path), final_output)
+            if in_place:
+                os.replace(final_output, str(input_path))
+                final_output = str(input_path)
+        summary["final_recovered_csv"] = final_output
+
+    for key in FB_SHARE_MANUAL_SUMMARY_KEYS:
+        _log(f"{key}={int(summary.get(key, 0) or 0)}")
+    for key in FB_DRIVER_MANUAL_SUMMARY_KEYS:
+        _log(f"{key}={int(summary.get(key, 0) or 0)}")
+    _log(f"final_recovered_csv={summary['final_recovered_csv']}")
+    _log("Manual FB Recovery complete")
+    return summary
 
 
 def _validate_recovered_csv_matches_original(original_csv: str, recovered_csv: str) -> None:
@@ -13333,6 +13554,47 @@ class FbDriverRecoveryWorker(QtCore.QThread):
         self.finished_signal.emit(0, result)
 
 
+class ManualFbRecoveryWorker(QtCore.QThread):
+    log_signal = QtCore.pyqtSignal(str)
+    finished_signal = QtCore.pyqtSignal(int, object)
+
+    def __init__(
+        self,
+        input_csv: str,
+        *,
+        recover_share: bool,
+        recover_driver: bool,
+        batch_size: int,
+        in_place: bool,
+        dry_run: bool,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.input_csv = input_csv
+        self.recover_share = recover_share
+        self.recover_driver = recover_driver
+        self.batch_size = batch_size
+        self.in_place = in_place
+        self.dry_run = dry_run
+
+    def run(self):
+        try:
+            result = _run_manual_fb_recovery(
+                self.input_csv,
+                recover_share=self.recover_share,
+                recover_driver=self.recover_driver,
+                batch_size=self.batch_size,
+                in_place=self.in_place,
+                dry_run=self.dry_run,
+                logger_fn=self.log_signal.emit,
+            )
+        except Exception as exc:
+            self.log_signal.emit(f"[Manual FB Recovery] Error: {exc}")
+            self.finished_signal.emit(1, {"error": str(exc)})
+            return
+        self.finished_signal.emit(0, result)
+
+
 class NightModeTab(QtWidgets.QWidget):
     UNEARTHED_RESUME_MODE_OPTIONS = [
         ("Auto (resume from checkpoint or cursor)", "auto"),
@@ -14430,6 +14692,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.artist_thread = None
         self.fb_thread = None
         self.fb_av_worker = None
+        self.manual_fb_recovery_worker = None
         self.current_artist_source = ""
         self.create_menu()
         self.tabs = QtWidgets.QTabWidget()
@@ -14474,6 +14737,10 @@ class MainWindow(QtWidgets.QMainWindow):
         file_path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Select Facebook Output CSV", "", "CSV Files (*.csv)")
         if file_path:
             self.output_csv_edit.setText(file_path)
+    def browse_manual_fb_recovery_csv(self):
+        file_path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Select CSV for FB Recovery", "", "CSV Files (*.csv)")
+        if file_path:
+            self.manual_fb_recovery_csv_edit.setText(file_path)
     def create_artist_tab(self):
         layout = QtWidgets.QVBoxLayout()
         config_group, config_layout = _lm_section("Job Configuration")
@@ -14579,6 +14846,34 @@ class MainWindow(QtWidgets.QMainWindow):
         run_layout.addLayout(_lm_control_row(self.fb_start_button))
         layout.addWidget(run_group)
 
+        recovery_group, recovery_layout = _lm_section("Manual FB Recovery")
+        self.manual_fb_recovery_csv_edit = QtWidgets.QLineEdit()
+        manual_recovery_browse = QtWidgets.QPushButton("Select CSV...")
+        manual_recovery_browse.clicked.connect(self.browse_manual_fb_recovery_csv)
+        recovery_layout.addLayout(_lm_row("CSV:", self.manual_fb_recovery_csv_edit, manual_recovery_browse))
+        self.manual_fb_share_checkbox = QtWidgets.QCheckBox("Recover /share rows")
+        self.manual_fb_share_checkbox.setChecked(True)
+        self.manual_fb_driver_checkbox = QtWidgets.QCheckBox("Retry driver_error rows")
+        self.manual_fb_driver_checkbox.setChecked(True)
+        recovery_layout.addLayout(_lm_control_row(self.manual_fb_share_checkbox, self.manual_fb_driver_checkbox))
+        self.manual_fb_batch_spin = QtWidgets.QSpinBox()
+        self.manual_fb_batch_spin.setRange(1, 1000)
+        self.manual_fb_batch_spin.setValue(40)
+        recovery_layout.addLayout(_lm_row("Batch size:", self.manual_fb_batch_spin, add_stretch=True))
+        self.manual_fb_copy_radio = QtWidgets.QRadioButton("Write recovered copy")
+        self.manual_fb_copy_radio.setChecked(True)
+        self.manual_fb_in_place_radio = QtWidgets.QRadioButton("In-place update")
+        self.manual_fb_output_mode_group = QtWidgets.QButtonGroup(self)
+        self.manual_fb_output_mode_group.addButton(self.manual_fb_copy_radio)
+        self.manual_fb_output_mode_group.addButton(self.manual_fb_in_place_radio)
+        recovery_layout.addLayout(_lm_control_row(QtWidgets.QLabel("Output mode:"), self.manual_fb_copy_radio, self.manual_fb_in_place_radio))
+        self.manual_fb_dry_run_button = QtWidgets.QPushButton("Dry Run")
+        self.manual_fb_dry_run_button.clicked.connect(lambda: self.start_manual_fb_recovery(dry_run=True))
+        self.manual_fb_run_button = QtWidgets.QPushButton("Run Recovery")
+        self.manual_fb_run_button.clicked.connect(lambda: self.start_manual_fb_recovery(dry_run=False))
+        recovery_layout.addLayout(_lm_control_row(self.manual_fb_dry_run_button, self.manual_fb_run_button))
+        layout.addWidget(recovery_group)
+
         output_group, output_layout = _lm_section("Run Output + Logs")
         self.fb_progress_bar = QtWidgets.QProgressBar()
         self.fb_progress_bar.setRange(0, 0)
@@ -14590,6 +14885,47 @@ class MainWindow(QtWidgets.QMainWindow):
         output_layout.addWidget(self.fb_log)
         layout.addWidget(output_group)
         _lm_scrolled_tab(self.facebook_tab, layout)
+    def _append_manual_fb_recovery_log(self, message: str):
+        self.fb_log.append(str(message or ""))
+    def _set_manual_fb_recovery_running(self, running: bool):
+        self.manual_fb_dry_run_button.setEnabled(not running)
+        self.manual_fb_run_button.setEnabled(not running)
+    def _validate_manual_fb_recovery_inputs(self) -> Optional[str]:
+        csv_path = self.manual_fb_recovery_csv_edit.text().strip()
+        if not csv_path:
+            return "Select a CSV before running manual FB recovery."
+        if not os.path.exists(csv_path):
+            return f"CSV not found: {csv_path}"
+        if not self.manual_fb_share_checkbox.isChecked() and not self.manual_fb_driver_checkbox.isChecked():
+            return "Select at least one recovery mode."
+        return None
+    def start_manual_fb_recovery(self, *, dry_run: bool):
+        if self.manual_fb_recovery_worker and self.manual_fb_recovery_worker.isRunning():
+            QtWidgets.QMessageBox.information(self, "Manual FB Recovery", "Manual FB recovery is already running.")
+            return
+        validation_error = self._validate_manual_fb_recovery_inputs()
+        if validation_error:
+            self._append_manual_fb_recovery_log(validation_error)
+            QtWidgets.QMessageBox.warning(self, "Manual FB Recovery", validation_error)
+            return
+        self._set_manual_fb_recovery_running(True)
+        self.manual_fb_recovery_worker = ManualFbRecoveryWorker(
+            self.manual_fb_recovery_csv_edit.text().strip(),
+            recover_share=self.manual_fb_share_checkbox.isChecked(),
+            recover_driver=self.manual_fb_driver_checkbox.isChecked(),
+            batch_size=int(self.manual_fb_batch_spin.value()),
+            in_place=self.manual_fb_in_place_radio.isChecked(),
+            dry_run=dry_run,
+            parent=self,
+        )
+        self.manual_fb_recovery_worker.log_signal.connect(self._append_manual_fb_recovery_log)
+        self.manual_fb_recovery_worker.finished_signal.connect(self._on_manual_fb_recovery_finished)
+        self.manual_fb_recovery_worker.start()
+    def _on_manual_fb_recovery_finished(self, exit_code: int, result):
+        status = "complete" if exit_code == 0 else f"failed (code {exit_code})"
+        self._append_manual_fb_recovery_log(f"[Manual FB Recovery] {status}")
+        self._set_manual_fb_recovery_running(False)
+        self.manual_fb_recovery_worker = None
     def start_artist_scraping(self):
         source = self.source_combo.currentText()
         url = self.url_edit.text().strip()
@@ -14854,7 +15190,7 @@ class MainWindow(QtWidgets.QMainWindow):
         super().closeEvent(event)
 
     def _shutdown_threads(self):
-        for attr in ("artist_thread", "fb_thread"):
+        for attr in ("artist_thread", "fb_thread", "manual_fb_recovery_worker"):
             thread = getattr(self, attr, None)
             if thread and thread.isRunning():
                 try:
@@ -14871,6 +15207,8 @@ class MainWindow(QtWidgets.QMainWindow):
                         thread.wait(2000)
                     except Exception:
                         pass
+            if attr == "manual_fb_recovery_worker":
+                setattr(self, attr, None)
         if (
             hasattr(self, "cross_enricher_tab")
             and hasattr(self.cross_enricher_tab, "shutdown")
