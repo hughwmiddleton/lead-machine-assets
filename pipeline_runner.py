@@ -535,6 +535,20 @@ class _FBDriverRecycleController:
         self.pending_window = 0
         self.pending_failures = 0
 
+
+def _fb_driver_execution_entered(enriched: Optional[Mapping[str, Any]], attempt_state: str = "") -> bool:
+    if not enriched:
+        return False
+    marker = _cell_str(enriched.get("__fb_driver_execution_entered", "")).lower()
+    if marker in {"1", "true", "yes"}:
+        return True
+    if marker in {"0", "false", "no"}:
+        return False
+    attempt_norm = _cell_str(attempt_state or enriched.get(FB_ATTEMPT_STATE_COL, "")).lower()
+    if attempt_norm == "fb_not_attempted":
+        return False
+    return attempt_norm.startswith("attempted_fb")
+
 ENRICHMENT_YIELD_SOURCE_ORDER: Sequence[str] = (
     "website",
     "facebook",
@@ -4981,25 +4995,26 @@ def run_facebook_global_pass_nightmode(
 
                 write_after = _fb_write_surface_snapshot(df.loc[idx])
                 df.at[idx, FB_WRITE_STATE_COL] = _classify_fb_write_state(write_before, write_after, attempt_state)
-                reset_trigger = fb_driver_recycle.record_attempt_result(driver_error=row_driver_error)
-                rolling_failures = sum(1 for failed in fb_driver_recycle.rolling_failure_window if failed)
-                _safe_log_console(logger, f"[FB Driver] attempt_counter={fb_driver_recycle.attempt_counter}")
-                _safe_log_console(
-                    logger,
-                    f"[FB Driver] rolling_failures={rolling_failures}/{fb_driver_recycle.window_size}",
-                )
-                if reset_trigger == "row_interval":
+                if _fb_driver_execution_entered(enriched, attempt_state):
+                    reset_trigger = fb_driver_recycle.record_attempt_result(driver_error=row_driver_error)
+                    rolling_failures = sum(1 for failed in fb_driver_recycle.rolling_failure_window if failed)
+                    _safe_log_console(logger, f"[FB Driver] attempt_counter={fb_driver_recycle.attempt_counter}")
                     _safe_log_console(
                         logger,
-                        f"[FB Driver] reset_trigger=row_interval count={fb_driver_recycle.pending_count}",
+                        f"[FB Driver] rolling_failures={rolling_failures}/{fb_driver_recycle.window_size}",
                     )
-                elif reset_trigger == "failure_spike":
-                    _safe_log_console(
-                        logger,
-                        "[FB Driver] "
-                        f"reset_trigger=failure_spike window={fb_driver_recycle.pending_window} "
-                        f"failures={fb_driver_recycle.pending_failures}",
-                    )
+                    if reset_trigger == "row_interval":
+                        _safe_log_console(
+                            logger,
+                            f"[FB Driver] reset_trigger=row_interval count={fb_driver_recycle.pending_count}",
+                        )
+                    elif reset_trigger == "failure_spike":
+                        _safe_log_console(
+                            logger,
+                            "[FB Driver] "
+                            f"reset_trigger=failure_spike window={fb_driver_recycle.pending_window} "
+                            f"failures={fb_driver_recycle.pending_failures}",
+                        )
 
             df.at[idx, FB_DEBUG_REASON_COL] = _classify_fb_debug_reason(df.loc[idx])
             finalize_fb_row_attribution(df, idx)

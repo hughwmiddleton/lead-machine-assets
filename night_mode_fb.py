@@ -7380,6 +7380,7 @@ class NightModeFacebookEnricher:
         self._last_search_reject_reason: str = ""
         self._last_search_reject_score: Optional[int] = None
         self._last_explicit_guard_reason: str = ""
+        self._fb_driver_execution_entered_this_row = False
         self._pass_a_counts = {
             "attempted": 0,
             "found_email": 0,
@@ -9341,6 +9342,7 @@ class NightModeFacebookEnricher:
                 f'[Night FB] Skipping previously successful Facebook URL for artist="{artist_name or "<unknown>"}" url="{candidate_url or raw_fb_url or "<blank>"}"',
             )
             return None
+        self._fb_driver_execution_entered_this_row = True
         _log(
             self.logger,
             f'[Night FB] Starting FB scrape for artist="{artist_name or "<unknown>"}" url="{candidate_url or raw_fb_url or "<blank>"}"',
@@ -10640,6 +10642,7 @@ class NightModeFacebookEnricher:
         result["FB_Status"] = result.get("FB_Status", "") or ""
         self._checkpoint_warned_this_row = False
         self._page_budget_remaining = 2
+        self._fb_driver_execution_entered_this_row = False
         self._clear_last_fb_email_surface_state()
         self._last_pass_a_visible_contact_surfaces = []
 
@@ -10655,6 +10658,7 @@ class NightModeFacebookEnricher:
         def _finish(payload: Dict[str, str], *, attempted: bool = True) -> Dict[str, str]:
             if payload is None:
                 return payload
+            payload["__fb_driver_execution_entered"] = "1" if self._fb_driver_execution_entered_this_row else "0"
             if attempted:
                 payload[FB_ATTEMPT_STATE_COL] = _classify_night_fb_attempt_state(
                     payload.get("FB_Status", ""),
@@ -11138,6 +11142,7 @@ class NightModeFacebookEnricher:
                     return _finish(_finalize_explicit_content_unavailable(result))
             if not page_url:
                 pass_b_discovery_attempted = True
+                self._fb_driver_execution_entered_this_row = True
                 page_url = self._search_for_page(
                     artist_name,
                     location,

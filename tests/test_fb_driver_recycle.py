@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import pandas as pd
 
 import pipeline_runner
-from fb_attribution import FB_ATTEMPT_STATE_COL, FB_OPPORTUNITY_STATE_COL, FB_WRITE_STATE_COL
+from fb_attribution import FB_ATTEMPT_STATE_COL, FB_GATE_STATE_COL, FB_OPPORTUNITY_STATE_COL, FB_WRITE_STATE_COL
 
 
 class _RecycleDriver:
@@ -43,10 +43,15 @@ class _RecycleHelper:
     def enrich_row_with_facebook_night(self, row, row_index=0):
         self.rows.append({"row": dict(row or {}), "row_index": row_index})
         status = self.harness.next_status()
+        extra = {}
+        if isinstance(status, dict):
+            extra = dict(status)
+            status = extra.pop("FB_Status", extra.pop("status", "ok"))
         result = {
             "FB_Status": status,
             "Facebook_URL": row.get("Facebook_URL") or f"https://facebook.com/row{row_index}",
         }
+        result.update(extra)
         if status == "ok":
             result.update(
                 {
@@ -212,6 +217,150 @@ def test_fb_driver_recycle_counts_only_real_fb_executions(monkeypatch, tmp_path)
     assert list(df_out["Artist Name"]) == ["Attempt One", "Skipped No Identity", "Attempt Two"]
     assert any("[FB Driver] reset_trigger=row_interval count=2" in msg for msg in logs)
     assert any("[FB Driver] reset_completed next_row=3" in msg for msg in logs)
+
+
+def test_fb_driver_recycle_does_not_count_helper_not_attempted_rows(monkeypatch, tmp_path):
+    rows = [
+        {
+            "Artist Name": "Unearthed No URL",
+            "Email": "",
+            "Email_All": "",
+            "Facebook_URL": "",
+            "Source Directory": "Unearthed",
+        }
+        for _idx in range(3)
+    ]
+
+    harness, logs, _df_out = _run_fb_pass(
+        monkeypatch,
+        tmp_path,
+        rows,
+        [
+            {
+                "FB_Status": "no_canonical_fb_url",
+                FB_ATTEMPT_STATE_COL: "fb_not_attempted",
+            }
+        ]
+        * 3,
+        reset_interval="1",
+    )
+
+    assert harness.attempted_rows == [0, 1, 2]
+    assert not any("[FB Driver] attempt_counter=" in msg for msg in logs)
+    assert not any("[FB Driver] reset_trigger=" in msg for msg in logs)
+
+
+def test_fb_driver_recycle_mixed_rows_counts_executed_only(monkeypatch, tmp_path):
+    rows = [
+        {
+            "Artist Name": "Executed A",
+            "Email": "",
+            "Email_All": "",
+            "Facebook_URL": "https://facebook.com/executeda",
+        },
+        {
+            "Artist Name": "Not Executed",
+            "Email": "",
+            "Email_All": "",
+            "Facebook_URL": "",
+            "Source Directory": "Unearthed",
+        },
+        {
+            "Artist Name": "Executed B",
+            "Email": "",
+            "Email_All": "",
+            "Facebook_URL": "https://facebook.com/executedb",
+        },
+    ]
+
+    harness, logs, _df_out = _run_fb_pass(
+        monkeypatch,
+        tmp_path,
+        rows,
+        [
+            {"FB_Status": "ok", "__fb_driver_execution_entered": "1"},
+            {"FB_Status": "no_canonical_fb_url", FB_ATTEMPT_STATE_COL: "fb_not_attempted"},
+            {"FB_Status": "ok", "__fb_driver_execution_entered": "1"},
+        ],
+        reset_interval="2",
+    )
+
+    assert harness.attempted_rows == [0, 1, 2]
+    assert sum("[FB Driver] attempt_counter=" in msg for msg in logs) == 2
+    assert any("[FB Driver] reset_trigger=row_interval count=2" in msg for msg in logs)
+
+
+def test_fb_driver_recycle_does_not_count_share_resolution_failure(monkeypatch, tmp_path):
+    rows = [
+        {
+            "Artist Name": "Share Failed",
+            "Email": "",
+            "Email_All": "",
+            "Facebook_URL": "https://www.facebook.com/share/abc123",
+            FB_GATE_STATE_COL: "fb_share_resolution_failed",
+        }
+    ]
+
+    harness, logs, _df_out = _run_fb_pass(monkeypatch, tmp_path, rows, [], reset_interval="1")
+
+    assert harness.attempted_rows == []
+    assert not any("[FB Driver] attempt_counter=" in msg for msg in logs)
+    assert not any("[FB Driver] reset_trigger=" in msg for msg in logs)
+
+
+def test_fb_driver_recycle_does_not_count_existing_email_skip(monkeypatch, tmp_path):
+    rows = [
+        {
+            "Artist Name": "Already Has Email",
+            "Email": "existing@example.com",
+            "Email_All": "existing@example.com",
+            "Facebook_URL": "https://facebook.com/alreadyhasemail",
+            "Email_Provenance_JSON": (
+                '{"existing@example.com":{"extract_method":"regex",'
+                '"source_type":"facebook_enrich",'
+                '"source_url":"https://facebook.com/alreadyhasemail",'
+                '"surface":"about"}}'
+            ),
+        }
+    ]
+
+    harness, logs, _df_out = _run_fb_pass(monkeypatch, tmp_path, rows, [], reset_interval="1")
+
+    assert harness.attempted_rows == []
+    assert not any("[FB Driver] attempt_counter=" in msg for msg in logs)
+    assert not any("[FB Driver] reset_trigger=" in msg for msg in logs)
+
+
+def test_fb_driver_recycle_no_execution_rows_do_not_trigger_reset(monkeypatch, tmp_path):
+    rows = [
+        {
+            "Artist Name": f"No URL {idx}",
+            "Email": "",
+            "Email_All": "",
+            "Facebook_URL": "",
+            "Source Directory": "Unearthed",
+        }
+        for idx in range(50)
+    ]
+
+    harness, logs, _df_out = _run_fb_pass(
+        monkeypatch,
+        tmp_path,
+        rows,
+        [
+            {
+                "FB_Status": "no_canonical_fb_url",
+                FB_ATTEMPT_STATE_COL: "fb_not_attempted",
+            }
+        ]
+        * 50,
+        reset_interval="1",
+    )
+
+    assert harness.attempted_rows == list(range(50))
+    assert len(harness.helpers) == 1
+    assert not any("[FB Driver] attempt_counter=" in msg for msg in logs)
+    assert not any("[FB Driver] reset_trigger=" in msg for msg in logs)
 
 
 def test_fb_driver_recycle_does_not_change_fb_attribution_states(monkeypatch, tmp_path):

@@ -2411,8 +2411,33 @@ def test_guard_rejected_explicit_url_logs_reason(monkeypatch) -> None:
     result = enricher.enrich_row_with_facebook_night(row)
 
     assert result.get("FB_Status")
+    assert result.get("__fb_driver_execution_entered") == "0"
     assert any('[Night FB][Explicit Intake]' in msg and 'outcome="reject_guard"' in msg and 'guard_reason="shape_disallowed"' in msg for msg in logs)
     assert any('[Night FB][Explicit Guard]' in msg and 'reason="shape_disallowed"' in msg for msg in logs)
+
+
+def test_pass_b_discovery_sets_driver_execution_marker(monkeypatch) -> None:
+    enricher = night_mode_fb.NightModeFacebookEnricher(
+        legacy_module=None,
+        username="",
+        password="",
+        logger=lambda _msg: None,
+        use_shared_session=False,
+    )
+    monkeypatch.setattr(enricher, "_ensure_session", lambda: None)
+    monkeypatch.setattr(enricher, "_should_allow_anonymous", lambda row: True)
+    monkeypatch.setattr(enricher, "_search_for_page", lambda *args, **kwargs: "")
+
+    result = enricher.enrich_row_with_facebook_night(
+        {
+            "Artist Name": "Discovery Artist",
+            "Email": "",
+            "Email_All": "",
+            "Facebook_URL": "",
+        }
+    )
+
+    assert result.get("__fb_driver_execution_entered") == "1"
 
 
 @pytest.mark.parametrize(
