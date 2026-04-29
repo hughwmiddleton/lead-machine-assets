@@ -923,6 +923,10 @@ def _canonicalize_explicit_fb_share_for_row(
         else ""
     )
     if _is_explicit_fb_share_url(raw_share_url):
+        if existing_attempted.strip() in {"1", "true", "True"}:
+            # This row has already consumed its single runtime fallback attempt.
+            # Do not reseed fallback or modify fallback fields.
+            return ("", source_field)
         _set_fb_share_runtime_fallback(df, idx, raw_share_url, source_field)
         if existing_attempted:
             df.at[idx, FB_SHARE_RUNTIME_FALLBACK_ATTEMPTED_COL] = existing_attempted

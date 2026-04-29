@@ -464,6 +464,44 @@ def test_attempted_share_runtime_fallback_is_not_reentered():
     assert pipeline_runner.explicit_fb_entrypoint_present_for_row(row) is False
 
 
+def test_resolver_does_not_reseed_after_attempt():
+    raw_share = "https://www.facebook.com/share/XYZ"
+    base_df = pytest.importorskip("pandas").DataFrame(
+        [
+            {
+                "Artist Name": "Attempted Share",
+                "Social Link": raw_share,
+                "External Links": "",
+                "Facebook_URL": "",
+                "Facebook URL": "",
+                "facebook_url": "",
+            }
+        ],
+        dtype=str,
+    ).fillna("")
+
+    pipeline_runner._promote_fb_urls_df(base_df, share_resolver=lambda raw: "")
+
+    assert base_df.at[0, pipeline_runner.FB_SHARE_RUNTIME_FALLBACK_URL_COL] == raw_share
+    assert base_df.at[0, pipeline_runner.FB_SHARE_RUNTIME_FALLBACK_SOURCE_COL] == "Social Link"
+    assert pipeline_runner.fb_share_runtime_fallback_urls_for_row(base_df.loc[0].to_dict()) == [raw_share]
+
+    for attempted in ("1", "true", "True"):
+        df = base_df.copy(deep=True)
+        df.at[0, pipeline_runner.FB_SHARE_RUNTIME_FALLBACK_ATTEMPTED_COL] = attempted
+        fallback_url_before = df.at[0, pipeline_runner.FB_SHARE_RUNTIME_FALLBACK_URL_COL]
+        fallback_source_before = df.at[0, pipeline_runner.FB_SHARE_RUNTIME_FALLBACK_SOURCE_COL]
+
+        pipeline_runner._promote_fb_urls_df(df, share_resolver=lambda raw: "")
+        row = df.loc[0].to_dict()
+
+        assert df.at[0, pipeline_runner.FB_SHARE_RUNTIME_FALLBACK_URL_COL] == fallback_url_before
+        assert df.at[0, pipeline_runner.FB_SHARE_RUNTIME_FALLBACK_SOURCE_COL] == fallback_source_before
+        assert df.at[0, pipeline_runner.FB_SHARE_RUNTIME_FALLBACK_ATTEMPTED_COL] == attempted
+        assert pipeline_runner.fb_share_runtime_fallback_urls_for_row(row) == []
+        assert pipeline_runner.explicit_fb_entrypoint_present_for_row(row) is False
+
+
 def test_dataframe_promotion_preserves_existing_canonical_without_invoking_share_resolver():
     df = pytest.importorskip("pandas").DataFrame(
         [
