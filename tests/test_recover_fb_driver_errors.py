@@ -101,6 +101,30 @@ def test_social_link_fb_without_canonical_url_is_not_recovered():
     assert df.at[0, "retry_attempted"] == ""
 
 
+def test_recovery_selector_only_selects_driver_error_with_canonical_facebook_url():
+    rows = [
+        _base_row(
+            FB_Status="driver_error",
+            Facebook_URL="https://www.facebook.com/drivercanonical",
+            **{"Artist Name": "Driver Canonical"},
+        ),
+        _base_row(
+            FB_Status="no_candidates",
+            FB_Debug_Reason="",
+            Facebook_URL="https://www.facebook.com/nocandidatescanonical",
+            **{"Artist Name": "No Candidates Canonical"},
+        ),
+        _base_row(
+            FB_Status="no_canonical_fb_url",
+            FB_Debug_Reason="",
+            Facebook_URL="",
+            **{"Artist Name": "No Canonical"},
+        ),
+    ]
+
+    assert [row_qualifies_for_recovery(row) for row in rows] == [True, False, False]
+
+
 def test_existing_fb_email_is_skipped_for_driver_error_recovery():
     row = _base_row(
         Email="artist@example.com",

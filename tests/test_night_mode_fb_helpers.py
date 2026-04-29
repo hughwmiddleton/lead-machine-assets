@@ -1930,7 +1930,7 @@ def test_explicit_fb_url_placeholders_rejected(monkeypatch) -> None:
 
     for row in rows:
         result = enricher.enrich_row_with_facebook_night(row)
-        assert result.get("FB_Status") == "pass_a_skipped_no_fb_url"
+        assert result.get("FB_Status") == "no_candidates"
 
     assert any('[Night FB][Explicit Intake]' in msg and 'outcome="reject_invalid"' in msg for msg in logs)
 
@@ -2287,7 +2287,7 @@ def test_invalid_direct_facebook_url_values_skip_without_scraping(monkeypatch, v
     result = enricher.enrich_row_with_facebook_night(row)
 
     assert called is False
-    assert result.get("FB_Status") == "pass_a_skipped_no_fb_url"
+    assert result.get("FB_Status") == "no_candidates"
     if expect_skip_log:
         assert any("invalid facebook_url value" in msg for msg in logs)
 

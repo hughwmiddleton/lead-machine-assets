@@ -377,8 +377,8 @@ def test_unearthed_without_seeded_fb_skips_night_discovery(monkeypatch, enricher
 
     result = enricher.enrich_row_with_facebook_night(row)
 
-    assert result.get("FB_Status") == ""
-    assert result.get(nmfb.FB_ATTEMPT_STATE_COL, "") == ""
+    assert result.get("FB_Status") == "no_canonical_fb_url"
+    assert result.get(nmfb.FB_ATTEMPT_STATE_COL, "") == "fb_not_attempted"
     assert any("[Unearthed Path] no usable FB URL; skipping Night FB discovery" in msg for msg in logs)
     assert not any("[Unearthed Path] no usable FB URL; allowing bounded FB discovery" in msg for msg in logs)
     assert not any("[Unearthed Path] entering Unearthed no-URL FB discovery" in msg for msg in logs)
@@ -601,7 +601,7 @@ def test_non_unearthed_without_seeded_fb_still_runs_search(monkeypatch, enricher
     result = enricher.enrich_row_with_facebook_night(row)
 
     assert search_calls == [("Spotify Discovery", "", True, "")]
-    assert result.get("FB_Status") == "pass_a_skipped_no_fb_url"
+    assert result.get("FB_Status") == "no_candidates"
 
 
 def test_non_unearthed_unresolved_share_url_still_uses_standard_search(monkeypatch, enricher):
@@ -636,7 +636,7 @@ def test_non_unearthed_unresolved_share_url_still_uses_standard_search(monkeypat
     result = enricher.enrich_row_with_facebook_night(row)
 
     assert search_calls == [("Spotify Rejected Share", "", True, "")]
-    assert result.get("FB_Status") == "pass_a_skipped_no_fb_url"
+    assert result.get("FB_Status") == "no_candidates"
     assert any("source_fallback_blocked=1" in msg for msg in logs)
     assert any('[Night FB][Explicit Intake]' in msg and 'outcome="no_explicit_url"' in msg for msg in logs)
 
@@ -701,7 +701,7 @@ def test_rows_without_explicit_fb_urls_unchanged(monkeypatch, enricher):
     row = {"Artist Name": "No FB", "Email": "", "Email_All": "", "Social Link": ""}
     result = enricher.enrich_row_with_facebook_night(row)
 
-    assert result.get("FB_Status", "").startswith("pass_a_skipped") or result.get("FB_Status", "") == "ok" or not result.get("FB_Status", "")
+    assert result.get("FB_Status", "") in {"no_candidates", "ok", ""}
 
 
 class _TimeoutDriver:
