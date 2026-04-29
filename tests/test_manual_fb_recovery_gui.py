@@ -58,6 +58,19 @@ def test_manual_fb_recovery_no_csv_selected_validation(qapp, monkeypatch):
     window._shutdown_threads()
 
 
+def test_manual_fb_recovery_visible_labels_are_clear(qapp):
+    module = _load_legacy_module()
+    window = module.MainWindow()
+
+    group_titles = {group.title() for group in window.findChildren(QtWidgets.QGroupBox)}
+
+    assert "📦 Full FB Recovery (Driver + Share)" in group_titles
+    assert "📦 FB /share Recovery (Targeted)" in group_titles
+    assert window.manual_fb_run_button.text() == "▶ Run Full Recovery"
+    assert window.manual_fb_share_run_button.text() == "▶ Run /share Recovery"
+    window._shutdown_threads()
+
+
 def test_manual_fb_recovery_dry_run_uses_temp_files_only(tmp_path):
     module = _load_legacy_module()
     _write_scripts(tmp_path)
