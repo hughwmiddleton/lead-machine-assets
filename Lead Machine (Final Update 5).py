@@ -282,6 +282,160 @@ def _load_latest_night_mode_run_summary(run_root: str) -> Optional[dict]:
     return payload if isinstance(payload, dict) else None
 
 
+FB_DRIVER_RECOVERY_MAX_BATCHES = 10
+FB_DRIVER_RECOVERY_SUMMARY_KEYS = (
+    "candidates_found",
+    "retry_attempted",
+    "retry_success",
+    "fb_email_found",
+)
+
+
+def _parse_fb_driver_recovery_summary(stdout: str) -> Dict[str, str]:
+    summary: Dict[str, str] = {}
+    for raw_line in str(stdout or "").splitlines():
+        line = raw_line.strip()
+        if not line or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        summary[key.strip()] = value.strip()
+    return summary
+
+
+def _fb_driver_recovery_int(summary: Dict[str, str], key: str) -> int:
+    try:
+        return int(str(summary.get(key, "0") or "0").strip())
+    except Exception:
+        return 0
+
+
+def _validate_recovered_csv_matches_original(original_csv: str, recovered_csv: str) -> None:
+    original = pd.read_csv(original_csv, dtype=str, keep_default_na=False)
+    recovered = pd.read_csv(recovered_csv, dtype=str, keep_default_na=False)
+    if list(original.columns) != list(recovered.columns):
+        raise ValueError("Recovered CSV schema differs from original export.")
+    if len(original.index) != len(recovered.index):
+        raise ValueError("Recovered CSV row count differs from original export.")
+
+
+def _copy_csv_atomic(source_csv: str, dest_csv: str) -> None:
+    dest_path = Path(dest_csv)
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("wb", delete=False, dir=str(dest_path.parent), prefix=f".{dest_path.name}.", suffix=".tmp") as tmp:
+        tmp_path = tmp.name
+        with open(source_csv, "rb") as source:
+            shutil.copyfileobj(source, tmp)
+        tmp.flush()
+        os.fsync(tmp.fileno())
+    os.replace(tmp_path, dest_csv)
+
+
+def _run_fb_driver_recovery_chain(
+    export_csv: str,
+    *,
+    batch_size: int = 40,
+    in_place: bool = False,
+    logger_fn=None,
+    runner=None,
+    python_executable: Optional[str] = None,
+    base_dir: Optional[str] = None,
+) -> Dict[str, object]:
+    def _log(message: str) -> None:
+        if callable(logger_fn):
+            logger_fn(message)
+
+    export_path = Path(export_csv)
+    if not export_path.exists():
+        raise FileNotFoundError(f"Final export not found: {export_csv}")
+    batch_size = max(int(batch_size or 40), 1)
+    runner = runner or subprocess.run
+    python_executable = python_executable or sys.executable
+    base_path = Path(base_dir or os.path.dirname(os.path.abspath(__file__)))
+    script_path = base_path / "scripts" / "recover_fb_driver_errors.py"
+    if not script_path.exists():
+        raise FileNotFoundError(f"FB recovery script not found: {script_path}")
+
+    _log("FB Driver Recovery started")
+    current_input = str(export_path)
+    latest_output = ""
+    aggregate = {key: 0 for key in FB_DRIVER_RECOVERY_SUMMARY_KEYS}
+    batches_run = 0
+    stopped_reason = "max_batches"
+
+    for batch_index in range(1, FB_DRIVER_RECOVERY_MAX_BATCHES + 1):
+        batch_output = str(export_path.with_name(f"{export_path.stem}.fb_driver_recovered_batch{batch_index}{export_path.suffix or '.csv'}"))
+        cmd = [
+            python_executable,
+            str(script_path),
+            "--input",
+            current_input,
+            "--output",
+            batch_output,
+            "--limit",
+            str(batch_size),
+            "--batch-size",
+            str(batch_size),
+        ]
+        completed = runner(
+            cmd,
+            cwd=str(base_path),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            check=False,
+        )
+        stdout = getattr(completed, "stdout", "") or ""
+        returncode = int(getattr(completed, "returncode", 0) or 0)
+        for line in stdout.splitlines():
+            if line.strip():
+                _log(f"[FB Driver Recovery] {line.strip()}")
+        if returncode != 0:
+            raise RuntimeError(f"FB driver recovery batch {batch_index} failed with code {returncode}")
+
+        summary = _parse_fb_driver_recovery_summary(stdout)
+        for key in FB_DRIVER_RECOVERY_SUMMARY_KEYS:
+            aggregate[key] += _fb_driver_recovery_int(summary, key)
+        latest_output = batch_output
+        batches_run = batch_index
+
+        candidates_found = _fb_driver_recovery_int(summary, "candidates_found")
+        retry_attempted = _fb_driver_recovery_int(summary, "retry_attempted")
+        if candidates_found == 0:
+            stopped_reason = "candidates_found=0"
+            break
+        if retry_attempted == 0:
+            stopped_reason = "retry_attempted=0"
+            break
+        current_input = batch_output
+    else:
+        _log(f"[FB Driver Recovery] Warning: max_batches reached ({FB_DRIVER_RECOVERY_MAX_BATCHES}); keeping latest output.")
+
+    if not latest_output:
+        raise RuntimeError("FB driver recovery did not produce an output CSV.")
+
+    if in_place:
+        final_output = str(export_path.with_name(f"{export_path.stem}.recovered_temp{export_path.suffix or '.csv'}"))
+        _copy_csv_atomic(latest_output, final_output)
+        _validate_recovered_csv_matches_original(str(export_path), final_output)
+        os.replace(final_output, str(export_path))
+        final_output = str(export_path)
+    else:
+        final_output = str(export_path.with_name(f"{export_path.stem}.recovered_final{export_path.suffix or '.csv'}"))
+        _copy_csv_atomic(latest_output, final_output)
+        _validate_recovered_csv_matches_original(str(export_path), final_output)
+
+    for key in FB_DRIVER_RECOVERY_SUMMARY_KEYS:
+        _log(f"driver_{key}={aggregate[key]}")
+    _log(f"final_recovered_csv={final_output}")
+    _log("FB Driver Recovery complete")
+    return {
+        "final_recovered_csv": final_output,
+        "batches_run": batches_run,
+        "stopped_reason": stopped_reason,
+        **{f"driver_{key}": aggregate[key] for key in FB_DRIVER_RECOVERY_SUMMARY_KEYS},
+    }
+
+
 cross_directory_enricher = None
 try:
     import cross_directory_enricher
@@ -13145,6 +13299,31 @@ class NightModeWorker(QtCore.QThread):
                 pass
 
 
+class FbDriverRecoveryWorker(QtCore.QThread):
+    log_signal = QtCore.pyqtSignal(str)
+    finished_signal = QtCore.pyqtSignal(int, object)
+
+    def __init__(self, export_csv: str, batch_size: int, in_place: bool, parent=None):
+        super().__init__(parent)
+        self.export_csv = export_csv
+        self.batch_size = batch_size
+        self.in_place = in_place
+
+    def run(self):
+        try:
+            result = _run_fb_driver_recovery_chain(
+                self.export_csv,
+                batch_size=self.batch_size,
+                in_place=self.in_place,
+                logger_fn=self.log_signal.emit,
+            )
+        except Exception as exc:
+            self.log_signal.emit(f"[FB Driver Recovery] Error: {exc}")
+            self.finished_signal.emit(1, {"error": str(exc)})
+            return
+        self.finished_signal.emit(0, result)
+
+
 class NightModeTab(QtWidgets.QWidget):
     UNEARTHED_RESUME_MODE_OPTIONS = [
         ("Auto (resume from checkpoint or cursor)", "auto"),
@@ -13160,6 +13339,7 @@ class NightModeTab(QtWidgets.QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.worker = None
+        self.recovery_worker = None
         self.jobs = []
         self._active_unearthed_index_path = _unearthed_artist_url_index_path()
         self._bootstrap_stage = None  # None | "headless" | "headed" | "final_headless"
@@ -13278,6 +13458,21 @@ class NightModeTab(QtWidgets.QWidget):
         run_layout.addLayout(_lm_row("Cooldown (seconds):", self.fb_cooldown_spin, add_stretch=True))
         run_layout.addLayout(_lm_row("Max auto-resume attempts:", self.fb_max_attempts_spin, add_stretch=True))
         run_layout.addLayout(_lm_row("FB rows per run (0 = no limit):", self.fb_max_rows_spin, add_stretch=True))
+
+        self.fb_driver_recovery_checkbox = QtWidgets.QCheckBox("Run FB driver error recovery after Night Mode")
+        self.fb_driver_recovery_checkbox.setChecked(False)
+        self.fb_driver_recovery_batch_spin = QtWidgets.QSpinBox()
+        self.fb_driver_recovery_batch_spin.setRange(1, 1000)
+        self.fb_driver_recovery_batch_spin.setValue(40)
+        self.fb_driver_recovery_copy_radio = QtWidgets.QRadioButton("Write recovered copy")
+        self.fb_driver_recovery_copy_radio.setChecked(True)
+        self.fb_driver_recovery_in_place_radio = QtWidgets.QRadioButton("In-place update")
+        self.fb_driver_recovery_mode_group = QtWidgets.QButtonGroup(self)
+        self.fb_driver_recovery_mode_group.addButton(self.fb_driver_recovery_copy_radio)
+        self.fb_driver_recovery_mode_group.addButton(self.fb_driver_recovery_in_place_radio)
+        run_layout.addLayout(_lm_control_row(self.fb_driver_recovery_checkbox))
+        run_layout.addLayout(_lm_row("FB recovery batch size:", self.fb_driver_recovery_batch_spin, add_stretch=True))
+        run_layout.addLayout(_lm_control_row(self.fb_driver_recovery_copy_radio, self.fb_driver_recovery_in_place_radio))
 
         default_live_max = getattr(cross_directory_enricher, "LIVE_SEARCH_MAX_ATTEMPTS", 50) if cross_directory_enricher else 50
         self.master_enrich_checkbox = QtWidgets.QCheckBox("Use master cross-directory enrichment (recommended)")
@@ -13726,6 +13921,11 @@ class NightModeTab(QtWidgets.QWidget):
             "max_auto_resume_attempts": int(self.fb_max_attempts_spin.value()),
             "max_rows_per_run": int(self.fb_max_rows_spin.value()),
         }
+        config["fb_driver_recovery"] = {
+            "enabled": self.fb_driver_recovery_checkbox.isChecked(),
+            "batch_size": int(self.fb_driver_recovery_batch_spin.value()),
+            "output_mode": "in_place" if self.fb_driver_recovery_in_place_radio.isChecked() else "copy",
+        }
         config["master_enrichment"] = {"enabled": self.master_enrich_checkbox.isChecked()}
         config["soundcloud_meta_enricher"] = {"enabled": self.sc_meta_checkbox.isChecked()}
         try:
@@ -13810,6 +14010,16 @@ class NightModeTab(QtWidgets.QWidget):
             self.fb_max_rows_spin.setValue(int(fb_cfg.get("max_rows_per_run", self.fb_max_rows_spin.value())))
         except Exception:
             pass
+        fb_recovery_cfg = config.get("fb_driver_recovery", {}) or {}
+        self.fb_driver_recovery_checkbox.setChecked(bool(fb_recovery_cfg.get("enabled", False)))
+        try:
+            self.fb_driver_recovery_batch_spin.setValue(int(fb_recovery_cfg.get("batch_size", self.fb_driver_recovery_batch_spin.value())))
+        except Exception:
+            pass
+        if str(fb_recovery_cfg.get("output_mode", "copy") or "copy").strip().lower() in {"in_place", "in-place", "inplace"}:
+            self.fb_driver_recovery_in_place_radio.setChecked(True)
+        else:
+            self.fb_driver_recovery_copy_radio.setChecked(True)
         master_enrich_cfg = config.get("master_enrichment", {}) or {}
         self.master_enrich_checkbox.setChecked(bool(master_enrich_cfg.get("enabled", True)))
         self.master_live_checkbox.setChecked(bool(master_enrich_cfg.get("enable_live_search", True)))
@@ -13826,7 +14036,7 @@ class NightModeTab(QtWidgets.QWidget):
         self._update_jobs_summary_from_jobs()
 
     def _start_night_mode(self):
-        if self.worker and self.worker.isRunning():
+        if (self.worker and self.worker.isRunning()) or (self.recovery_worker and self.recovery_worker.isRunning()):
             QtWidgets.QMessageBox.information(self, "Night Mode", "Night Mode is already running.")
             return
         if not self._validate_active_unearthed_index_for_launch():
@@ -13855,6 +14065,11 @@ class NightModeTab(QtWidgets.QWidget):
                 "cooldown_seconds": int(self.fb_cooldown_spin.value()),
                 "max_auto_resume_attempts": int(self.fb_max_attempts_spin.value()),
                 "max_rows_per_run": int(self.fb_max_rows_spin.value()),
+            }
+            config["fb_driver_recovery"] = {
+                "enabled": self.fb_driver_recovery_checkbox.isChecked(),
+                "batch_size": int(self.fb_driver_recovery_batch_spin.value()),
+                "output_mode": "in_place" if self.fb_driver_recovery_in_place_radio.isChecked() else "copy",
             }
             config["master_enrichment"] = {
                 "enabled": self.master_enrich_checkbox.isChecked(),
@@ -13953,6 +14168,12 @@ class NightModeTab(QtWidgets.QWidget):
                 "Facebook login was not detected in the headed run. Please log in and try again.",
             )
 
+        if exit_code == 0 and self.fb_driver_recovery_checkbox.isChecked():
+            self.worker = None
+            self._bootstrap_stage = None
+            if self._start_fb_driver_recovery():
+                return
+
         status = "completed" if exit_code == 0 else f"finished with errors (code {exit_code})"
         self.status_label.setText(f"Status: {status}")
         self.start_button.setEnabled(True)
@@ -13960,6 +14181,42 @@ class NightModeTab(QtWidgets.QWidget):
         self._set_unearthed_index_controls_enabled(True)
         self.worker = None
         self._bootstrap_stage = None
+        self._refresh_run_summary()
+
+    def _latest_master_export_path(self) -> Optional[str]:
+        latest_run_dir = _discover_latest_night_mode_run_dir(self._night_mode_run_root())
+        if latest_run_dir is None:
+            return None
+        export_path = latest_run_dir / "master_export_leads.csv"
+        return str(export_path) if export_path.exists() else None
+
+    def _start_fb_driver_recovery(self) -> bool:
+        export_path = self._latest_master_export_path()
+        if not export_path:
+            self._append_log("[FB Driver Recovery] Skipped: final export master_export_leads.csv was not found.")
+            return False
+        self.status_label.setText("Status: running FB driver recovery")
+        self.start_button.setEnabled(False)
+        self.stop_button.setEnabled(False)
+        self._set_unearthed_index_controls_enabled(False)
+        self.recovery_worker = FbDriverRecoveryWorker(
+            export_path,
+            int(self.fb_driver_recovery_batch_spin.value()),
+            self.fb_driver_recovery_in_place_radio.isChecked(),
+            parent=self,
+        )
+        self.recovery_worker.log_signal.connect(self._append_log)
+        self.recovery_worker.finished_signal.connect(self._on_fb_driver_recovery_finished)
+        self.recovery_worker.start()
+        return True
+
+    def _on_fb_driver_recovery_finished(self, exit_code: int, result):
+        status = "completed" if exit_code == 0 else f"finished with errors (code {exit_code})"
+        self.status_label.setText(f"Status: {status}")
+        self.start_button.setEnabled(True)
+        self.stop_button.setEnabled(False)
+        self._set_unearthed_index_controls_enabled(True)
+        self.recovery_worker = None
         self._refresh_run_summary()
 
     def _toggle_master_live_controls(self):
@@ -14001,9 +14258,7 @@ class NightModeTab(QtWidgets.QWidget):
 
     def shutdown(self):
         worker = self.worker
-        if not worker:
-            return
-        if worker.isRunning():
+        if worker and worker.isRunning():
             try:
                 worker.stop()
                 worker.wait(2000)
@@ -14014,6 +14269,17 @@ class NightModeTab(QtWidgets.QWidget):
                 except Exception:
                     pass
         self.worker = None
+        recovery_worker = self.recovery_worker
+        if recovery_worker and recovery_worker.isRunning():
+            try:
+                recovery_worker.wait(2000)
+            except Exception:
+                try:
+                    recovery_worker.terminate()
+                    recovery_worker.wait(2000)
+                except Exception:
+                    pass
+        self.recovery_worker = None
 
 
 class NightModeJobDialog(QtWidgets.QDialog):
