@@ -490,12 +490,22 @@ def _apply_unresolved_share_discovery_failure(out: pd.DataFrame, idx: Any) -> No
     out.at[idx, FB_DEBUG_REASON_COL] = row.get(FB_DEBUG_REASON_COL, "")
 
 
+def _call_fb_enricher_strict(
+    fb_enricher: Callable[..., Mapping[str, Any]],
+    row: Dict[str, str],
+    idx: int,
+) -> Mapping[str, Any]:
+    row["__fb_recovery_allow_discovery"] = "0"
+    row["__fb_recovery_strict_canonical_only"] = "1"
+    return fb_enricher(row, idx, allow_discovery=False)
+
+
 def _run_fb_enrichment_for_canonical_url(
     *,
     out: pd.DataFrame,
     idx: Any,
     canonical_fb_url: str,
-    fb_enricher: Callable[[Dict[str, str], int], Mapping[str, Any]],
+    fb_enricher: Callable[..., Mapping[str, Any]],
     via_discovery: bool,
 ) -> None:
     working = {col: _cell(out.at[idx, col]) for col in out.columns}
@@ -512,7 +522,7 @@ def _run_fb_enrichment_for_canonical_url(
         if key in out.columns and (key in FB_RESULT_COPY_COLUMNS or key in DIRECT_FB_ALIAS_FIELDS):
             out.at[idx, key] = value
 
-    enriched = fb_enricher({k: _cell(v) for k, v in working.items()}, int(idx))
+    enriched = _call_fb_enricher_strict(fb_enricher, {k: _cell(v) for k, v in working.items()}, int(idx))
     if enriched:
         merged = {col: _cell(out.at[idx, col]) for col in out.columns}
         _copy_allowed_result_columns(merged, enriched)
@@ -567,7 +577,7 @@ class _DefaultFbEnricher:
     def __init__(self) -> None:
         self._helper = None
 
-    def __call__(self, row: Dict[str, str], row_index: int) -> Dict[str, str]:
+    def __call__(self, row: Dict[str, str], row_index: int, *, allow_discovery: bool = True) -> Dict[str, str]:
         if self._helper is None:
             from night_mode_fb import NightModeFacebookEnricher, create_night_fb_run_state
             from pipeline_runner import _load_legacy_module
@@ -589,7 +599,11 @@ class _DefaultFbEnricher:
                 entered = enter()
                 if entered is not None:
                     self._helper = entered
-        return self._helper.enrich_row_with_facebook_night(row, row_index=row_index)
+        return self._helper.enrich_row_with_facebook_night(
+            row,
+            row_index=row_index,
+            allow_discovery=allow_discovery,
+        )
 
     def close(self) -> None:
         if self._helper is not None:
@@ -626,7 +640,7 @@ def recover_dataframe(
     df: pd.DataFrame,
     *,
     share_resolver: Optional[Callable[[str], Optional[str]]] = None,
-    fb_enricher: Optional[Callable[[Dict[str, str], int], Mapping[str, Any]]] = None,
+    fb_enricher: Optional[Callable[..., Mapping[str, Any]]] = None,
     offset: int = 0,
     limit: Optional[int] = None,
 ) -> Tuple[pd.DataFrame, RecoverySummary]:
@@ -747,7 +761,7 @@ def recover_csv(
     *,
     in_place: bool = False,
     share_resolver: Optional[Callable[[str], Optional[str]]] = None,
-    fb_enricher: Optional[Callable[[Dict[str, str], int], Mapping[str, Any]]] = None,
+    fb_enricher: Optional[Callable[..., Mapping[str, Any]]] = None,
     offset: int = 0,
     limit: Optional[int] = None,
 ) -> RecoverySummary:

@@ -9049,12 +9049,25 @@ class NightModeFacebookEnricher:
         has_secondary_signal = bool(legacy_secondary_signal)
         if not primary_query:
             return None
-        html, nav_driver, search_timed_out, current_search_url = self._fetch_search_surface(
-            primary_query,
-            search_method="homepage_ui",
-            session=session,
-            row_label=row_label,
-        )
+
+        def _fetch_search_surface_with_row_label(query: str) -> Tuple[str, Optional[Any], bool, str]:
+            try:
+                return self._fetch_search_surface(
+                    query,
+                    search_method="homepage_ui",
+                    session=session,
+                    row_label=row_label,
+                )
+            except TypeError as exc:
+                if "row_label" not in str(exc):
+                    raise
+                return self._fetch_search_surface(
+                    query,
+                    search_method="homepage_ui",
+                    session=session,
+                )
+
+        html, nav_driver, search_timed_out, current_search_url = _fetch_search_surface_with_row_label(primary_query)
         primary_used_anon = bool(nav_driver is not None and nav_driver is self._anon_driver)
         self._sync_search_disable_from_run_state()
         if self._search_disabled_due_to_checkpoint:
@@ -9076,12 +9089,7 @@ class NightModeFacebookEnricher:
         def _run_refine_queries(diagnostics: Optional[Dict[str, Any]] = None) -> List["facebook_enrich.FbCandidate"]:
             refine_candidates: List["facebook_enrich.FbCandidate"] = []
             for refine_query in refine_query_list:
-                html_refined, drv_refined, _timed_out_refined, _current_refined_url = self._fetch_search_surface(
-                    refine_query,
-                    search_method="homepage_ui",
-                    session=session,
-                    row_label=row_label,
-                )
+                html_refined, drv_refined, _timed_out_refined, _current_refined_url = _fetch_search_surface_with_row_label(refine_query)
                 refine_candidates.extend(
                     _harvest_candidates(
                         html_refined,
@@ -10634,7 +10642,13 @@ class NightModeFacebookEnricher:
                 result["FB_Reason"] = status_reason
             return result
 
-    def enrich_row_with_facebook_night(self, row: Dict[str, str], row_index: Optional[int] = None) -> Dict[str, str]:
+    def enrich_row_with_facebook_night(
+        self,
+        row: Dict[str, str],
+        row_index: Optional[int] = None,
+        *,
+        allow_discovery: bool = True,
+    ) -> Dict[str, str]:
         """Night-Mode-only FB enrichment for a single row."""
         self._sync_search_disable_from_run_state()
         original_row = dict(row or {})
@@ -11135,6 +11149,14 @@ class NightModeFacebookEnricher:
                     _log_share_runtime_resolution("")
                 if share_runtime_attempted:
                     return _finish(result)
+
+            if not allow_discovery:
+                if not pass_a_urls:
+                    return _finish(
+                        _mark_night_fb_not_attempted(result, "no_canonical_fb_url", "strict_explicit_only"),
+                        attempted=False,
+                    )
+                return _finish(_finalize_explicit_content_unavailable(result))
 
             if not page_url:
                 session = self._ensure_session()

@@ -1,5 +1,6 @@
 import pandas as pd
 
+import night_mode_fb
 from scripts import recover_fb_share_rows as share_recovery
 from scripts.recover_fb_share_rows import (
     MAX_CANONICAL_DISCOVERY_CANDIDATES,
@@ -48,7 +49,9 @@ def test_successful_resolution_enters_fb_enrichment_seam():
     def resolver(raw):
         return "https://www.facebook.com/resolvedartist"
 
-    def enricher(row, idx):
+    def enricher(row, idx, *, allow_discovery):
+        assert allow_discovery is False
+        assert row["__fb_recovery_allow_discovery"] == "0"
         calls.append((idx, row.copy()))
         out = row.copy()
         out["FB_Status"] = "pass_a_no_email_on_page"
@@ -76,7 +79,9 @@ def test_successful_resolution_enters_fb_enrichment_seam():
 def test_failed_resolution_uses_canonical_discovery_and_writes_email():
     calls = []
 
-    def enricher(row, idx):
+    def enricher(row, idx, *, allow_discovery):
+        assert allow_discovery is False
+        assert row["__fb_recovery_allow_discovery"] == "0"
         calls.append(row["Facebook_URL"])
         assert "/share/" not in row["Facebook_URL"].lower()
         out = row.copy()
@@ -132,7 +137,7 @@ def test_failed_resolution_without_valid_candidates_does_not_attempt_fb():
     df, summary = recover_dataframe(
         before,
         share_resolver=lambda raw: "",
-        fb_enricher=lambda row, idx: calls.append(row) or row,
+        fb_enricher=lambda row, idx, *, allow_discovery: calls.append(row) or row,
     )
 
     assert summary.candidates == 1
@@ -150,7 +155,7 @@ def test_already_processed_rows_are_untouched():
     df, summary = recover_dataframe(
         pd.DataFrame([row]),
         share_resolver=lambda raw: "https://www.facebook.com/resolvedartist",
-        fb_enricher=lambda row, idx: (_ for _ in ()).throw(AssertionError("FB should not run")),
+        fb_enricher=lambda row, idx, *, allow_discovery: (_ for _ in ()).throw(AssertionError("FB should not run")),
     )
 
     assert summary.candidates == 0
@@ -169,7 +174,7 @@ def test_existing_fb_result_rows_are_untouched():
     df, summary = recover_dataframe(
         pd.DataFrame([row]),
         share_resolver=lambda raw: "https://www.facebook.com/resolvedartist",
-        fb_enricher=lambda row, idx: (_ for _ in ()).throw(AssertionError("FB should not run")),
+        fb_enricher=lambda row, idx, *, allow_discovery: (_ for _ in ()).throw(AssertionError("FB should not run")),
     )
 
     assert summary.candidates == 0
@@ -186,7 +191,7 @@ def test_existing_usable_non_fb_email_is_skipped():
     df, summary = recover_dataframe(
         pd.DataFrame([row]),
         share_resolver=lambda raw: (_ for _ in ()).throw(AssertionError("resolver should not run")),
-        fb_enricher=lambda row, idx: (_ for _ in ()).throw(AssertionError("FB should not run")),
+        fb_enricher=lambda row, idx, *, allow_discovery: (_ for _ in ()).throw(AssertionError("FB should not run")),
     )
 
     assert summary.candidates == 0
@@ -206,7 +211,7 @@ def test_no_duplication_and_non_fb_fields_are_preserved():
         ),
     ]
 
-    def enricher(row, idx):
+    def enricher(row, idx, *, allow_discovery):
         out = row.copy()
         out["FB_Status"] = "pass_a_no_email_on_page"
         out["Unrelated Field"] = "should-not-copy"
@@ -231,7 +236,7 @@ def test_valid_facebook_url_is_skipped_and_counted():
     df, summary = recover_dataframe(
         pd.DataFrame([row]),
         share_resolver=lambda raw: (_ for _ in ()).throw(AssertionError("resolver should not run")),
-        fb_enricher=lambda row, idx: (_ for _ in ()).throw(AssertionError("FB should not run")),
+        fb_enricher=lambda row, idx, *, allow_discovery: (_ for _ in ()).throw(AssertionError("FB should not run")),
     )
 
     assert summary.candidates == 0
@@ -244,7 +249,7 @@ def test_state_column_can_select_share_failure():
     df, summary = recover_dataframe(
         pd.DataFrame([row]),
         share_resolver=lambda raw: "https://www.facebook.com/fromstate",
-        fb_enricher=lambda row, idx: row,
+        fb_enricher=lambda row, idx, *, allow_discovery: row,
     )
 
     assert summary.candidates == 1
@@ -255,7 +260,7 @@ def test_state_column_can_select_share_failure():
 def test_idempotency_second_run_does_not_reenrich():
     calls = []
 
-    def enricher(row, idx):
+    def enricher(row, idx, *, allow_discovery):
         calls.append(idx)
         return row
 
@@ -267,7 +272,7 @@ def test_idempotency_second_run_does_not_reenrich():
     second, second_summary = recover_dataframe(
         first,
         share_resolver=lambda raw: "https://www.facebook.com/other",
-        fb_enricher=lambda row, idx: (_ for _ in ()).throw(AssertionError("FB should not run twice")),
+        fb_enricher=lambda row, idx, *, allow_discovery: (_ for _ in ()).throw(AssertionError("FB should not run twice")),
     )
 
     assert first_summary.enriched == 1
@@ -283,7 +288,7 @@ def test_successful_share_resolution_does_not_use_canonical_discovery_marker():
     df, summary = recover_dataframe(
         pd.DataFrame([_base_row()]),
         share_resolver=resolver,
-        fb_enricher=lambda row, idx: row,
+        fb_enricher=lambda row, idx, *, allow_discovery: row,
     )
 
     assert summary.resolved == 1
@@ -306,7 +311,7 @@ def test_candidate_cap_enforced_and_invalid_facebook_shapes_excluded():
 def test_no_direct_share_scrape_when_discovery_candidate_exists():
     calls = []
 
-    def enricher(row, idx):
+    def enricher(row, idx, *, allow_discovery):
         calls.append(row["Facebook_URL"])
         return row
 
@@ -320,6 +325,159 @@ def test_no_direct_share_scrape_when_discovery_candidate_exists():
     assert calls
     assert all("/share/" not in url.lower() for url in calls)
     assert "facebook.com/share/" in df.at[0, "Social Link"]
+
+
+def test_content_unavailable_candidate_moves_to_next_without_discovery_fallback():
+    calls = []
+
+    def enricher(row, idx, *, allow_discovery):
+        assert allow_discovery is False
+        calls.append(row["Facebook_URL"])
+        out = row.copy()
+        if len(calls) == 1:
+            out["FB_Status"] = "content_unavailable"
+            out["FB_Reason"] = "content_unavailable"
+            return out
+        out["Email"] = "second@example.com"
+        out["Email_All"] = "second@example.com"
+        out["Email_Source_URL"] = row["Facebook_URL"]
+        out["Email_Source_Type"] = "facebook_enrich"
+        out["Email_Extract_Method"] = "regex"
+        out["FB_Status"] = "pass_a_found_email"
+        return out
+
+    row = _base_row(
+        **{
+            "Artist Name": "zedena",
+            "Social Link": (
+                "https://www.facebook.com/share/1BwSqEJRTk?mibextid=abc | "
+                "instagram.com/zedenamusic | "
+                "youtube.com/@zedena4604"
+            ),
+        }
+    )
+    df, summary = recover_dataframe(
+        pd.DataFrame([row]),
+        share_resolver=lambda raw: "",
+        fb_enricher=enricher,
+    )
+
+    assert calls == [
+        "https://www.facebook.com/zedenamusic",
+        "https://www.facebook.com/zedena4604",
+    ]
+    assert summary.enriched == 2
+    assert df.at[0, "Email"] == "second@example.com"
+    assert "facebook.com/search" not in " ".join(calls)
+
+
+def test_discovery_hard_block_passes_allow_discovery_false_and_no_homepage_ui():
+    calls = []
+    logs = []
+
+    def enricher(row, idx, *, allow_discovery):
+        assert allow_discovery is False
+        assert row["__fb_recovery_strict_canonical_only"] == "1"
+        assert "search/top/?q=" not in row["Facebook_URL"]
+        logs.append(f"attempt url={row['Facebook_URL']}")
+        calls.append(row["Facebook_URL"])
+        out = row.copy()
+        out["FB_Status"] = "pass_a_no_email_on_page"
+        return out
+
+    row = _base_row(
+        **{
+            "Artist Name": "zedena",
+            "Song Title": "Flashback",
+            "Social Link": "https://www.facebook.com/share/1BwSqEJRTk?mibextid=abc | instagram.com/zedenamusic",
+        }
+    )
+    df, summary = recover_dataframe(
+        pd.DataFrame([row]),
+        share_resolver=lambda raw: "",
+        fb_enricher=enricher,
+    )
+
+    assert calls == ["https://www.facebook.com/zedenamusic", "https://www.facebook.com/zedena"]
+    assert summary.enriched == 2
+    joined_logs = "\n".join(logs)
+    assert "search_method=homepage_ui" not in joined_logs
+    assert "facebook.com/search/top/?q=zedena%20Flashback" not in joined_logs
+    assert df.at[0, "Email"] == ""
+
+
+def test_night_mode_default_discovery_still_enabled_outside_recovery(monkeypatch):
+    calls = []
+    worker = night_mode_fb.NightModeFacebookEnricher(
+        legacy_module=None,
+        username="",
+        password="",
+        logger=lambda msg: None,
+        use_shared_session=False,
+    )
+    monkeypatch.setattr(worker, "_maybe_recover_or_skip_on_checkpoint", lambda: True)
+    monkeypatch.setattr(worker, "_ensure_session", lambda: object())
+    monkeypatch.setattr(worker, "_search_for_page", lambda *args, **kwargs: calls.append("search") or "")
+
+    result = worker.enrich_row_with_facebook_night(
+        {
+            "Artist Name": "Strict Candidate",
+            "Facebook_URL": "",
+            "Email": "",
+            "Email_All": "",
+        },
+        row_index=0,
+    )
+
+    assert calls == ["search"]
+    assert result["FB_Status"] in {"no_candidates", "pass_a_no_email_on_page"}
+
+
+def test_night_mode_strict_recovery_flag_blocks_homepage_ui_search(monkeypatch):
+    calls = []
+    logs = []
+    worker = night_mode_fb.NightModeFacebookEnricher(
+        legacy_module=None,
+        username="",
+        password="",
+        logger=logs.append,
+        use_shared_session=False,
+    )
+    monkeypatch.setattr(worker, "_maybe_recover_or_skip_on_checkpoint", lambda: True)
+    monkeypatch.setattr(worker, "_has_authenticated_session", lambda: True)
+    monkeypatch.setattr(worker, "_resolve_pass_a_explicit_scrape_url", lambda url, **kwargs: url)
+    monkeypatch.setattr(
+        worker,
+        "_scrape_single_fb_candidate",
+        lambda *args, **kwargs: (
+            night_mode_fb.NightModeFacebookResult(
+                email=None,
+                email_all="",
+                facebook_url="https://www.facebook.com/strictcandidate",
+            ),
+            [],
+            "session",
+            "no_email_on_page",
+        ),
+    )
+    monkeypatch.setattr(worker, "_ensure_session", lambda: (_ for _ in ()).throw(AssertionError("session/search setup should not run")))
+    monkeypatch.setattr(worker, "_search_for_page", lambda *args, **kwargs: calls.append("search") or "")
+    monkeypatch.setattr(worker, "_fetch_search_surface", lambda *args, **kwargs: calls.append("homepage_ui") or ("", None, False, ""))
+
+    result = worker.enrich_row_with_facebook_night(
+        {
+            "Artist Name": "Strict Candidate",
+            "Facebook_URL": "https://www.facebook.com/strictcandidate",
+            "Email": "",
+            "Email_All": "",
+        },
+        row_index=0,
+        allow_discovery=False,
+    )
+
+    assert calls == []
+    assert result["FB_Status"] == "pass_a_no_email_on_page"
+    assert "search_method=homepage_ui" not in "\n".join(logs)
 
 
 def test_cli_accepts_batch_size_alias_and_output_equal_input_as_explicit_in_place(monkeypatch, tmp_path):
