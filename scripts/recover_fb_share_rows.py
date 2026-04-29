@@ -21,12 +21,18 @@ if str(ROOT) not in sys.path:
 from fb_attribution import (  # noqa: E402
     FB_ATTEMPT_STATE_COL,
     FB_DEBUG_REASON_COL,
+    FB_EXTRACT_STATE_COL,
     FB_GATE_STATE_COL,
     FB_OPPORTUNITY_STATE_COL,
     FB_WRITE_STATE_COL,
 )
 from source_scheduler import canonicalize_facebook_url, ensure_canonical_facebook_url  # noqa: E402
 from source_scheduler import _is_allowed_fb_share_entrypoint_url  # noqa: E402
+
+try:  # noqa: E402
+    from facebook_enrich import fb_is_allowed_profile_candidate_url
+except Exception:  # pragma: no cover - defensive import fallback
+    fb_is_allowed_profile_candidate_url = None  # type: ignore[assignment]
 
 try:  # noqa: E402
     from night_mode_fb import _classify_night_fb_attempt_state
@@ -79,11 +85,19 @@ FB_RESULT_COPY_COLUMNS = {
     "FB_Refine_Executed",
     FB_GATE_STATE_COL,
     FB_ATTEMPT_STATE_COL,
+    FB_EXTRACT_STATE_COL,
     FB_WRITE_STATE_COL,
     FB_DEBUG_REASON_COL,
 }
 
 _URL_SPLIT_RE = re.compile(r"[\s|,;]+")
+_HANDLE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{1,74}$")
+_URL_RE = re.compile(
+    r"(?i)\b(?:(?:https?://|www\.)[^\s|,;\"']+|(?:instagram|tiktok|youtube|soundcloud)\.com/[^\s|,;\"']+)"
+)
+MAX_CANONICAL_DISCOVERY_CANDIDATES = 8
+SHARE_DISCOVERY_SUCCESS_REASON = "share_resolution_failed_recovered_via_canonical_discovery"
+SHARE_DISCOVERY_FAILED_REASON = "unresolved_share_no_canonical_candidate_found"
 
 
 @dataclass
@@ -199,11 +213,14 @@ def _has_fb_sourced_usable_email(row: Mapping[str, Any]) -> bool:
     return "facebook" in source_blob or "fb_" in source_blob
 
 
+def _has_any_usable_email(row: Mapping[str, Any]) -> bool:
+    return _email_shape_present(" ".join(_cell(row.get(col, "")) for col in ("Email", "Email_All")))
+
+
 def _previous_fb_terminal_state(row: Mapping[str, Any]) -> bool:
     terminal_markers = {
         "found_email",
         "fb_enrich_found_email",
-        "fb_no_email_written",
         "attempted_fb_no_email_on_page",
         "recovered_share_url",
     }
@@ -238,9 +255,218 @@ def row_qualifies_for_recovery(row: Mapping[str, Any]) -> bool:
         return False
     if _fb_status_indicates_email_found(row):
         return False
+    if _has_any_usable_email(row):
+        return False
     if _has_fb_sourced_usable_email(row):
         return False
     return True
+
+
+def _append_debug_reason(row: MutableMapping[str, Any], reason: str) -> None:
+    if not reason:
+        return
+    current = _cell(row.get(FB_DEBUG_REASON_COL, ""))
+    parts = [part.strip() for part in re.split(r"[|;]", current) if part.strip()]
+    if reason not in parts:
+        parts.append(reason)
+    row[FB_DEBUG_REASON_COL] = ";".join(parts)
+
+
+def _clean_handle(raw: Any) -> str:
+    text = _cell(raw)
+    if not text:
+        return ""
+    text = urllib_unquote(text)
+    text = text.strip().strip("@").strip("/")
+    text = re.sub(r"(?i)[?#].*$", "", text)
+    text = text.strip().strip("@").strip("/")
+    if not _HANDLE_RE.match(text):
+        return ""
+    lowered = text.lower()
+    if lowered in {
+        "about",
+        "artist",
+        "channel",
+        "channels",
+        "events",
+        "explore",
+        "groups",
+        "music",
+        "pages",
+        "profile",
+        "profile.php",
+        "share",
+        "story.php",
+        "watch",
+    }:
+        return ""
+    return text
+
+
+def urllib_unquote(value: str) -> str:
+    try:
+        import urllib.parse
+
+        return urllib.parse.unquote(value)
+    except Exception:
+        return value
+
+
+def _append_unique_handle(handles: List[str], handle: str, *, cap: int) -> None:
+    cleaned = _clean_handle(handle)
+    if not cleaned:
+        return
+    seen = {item.lower() for item in handles}
+    if cleaned.lower() not in seen and len(handles) < cap:
+        handles.append(cleaned)
+
+
+def _handles_from_url(raw_url: str) -> List[str]:
+    try:
+        import urllib.parse
+
+        candidate = raw_url.strip()
+        if candidate.startswith("www."):
+            candidate = "https://" + candidate
+        elif "://" not in candidate:
+            candidate = "https://" + candidate
+        parsed = urllib.parse.urlparse(candidate)
+    except Exception:
+        return []
+
+    host = (parsed.netloc or "").lower()
+    parts = [part for part in (parsed.path or "").split("/") if part]
+    if not host or not parts:
+        return []
+
+    if "instagram.com" in host:
+        if parts[0].lower() not in {"p", "reel", "stories", "explore", "accounts"}:
+            return [parts[0]]
+    if "tiktok.com" in host:
+        for part in parts:
+            if part.startswith("@"):
+                return [part]
+    if "youtube.com" in host and parts[0].startswith("@"):
+        return [parts[0]]
+    if "soundcloud.com" in host and not host.startswith("on."):
+        if parts[0].lower() not in {"discover", "search", "you"}:
+            return [parts[0]]
+    return []
+
+
+def _artist_handle_candidates(name: str) -> List[str]:
+    text = _cell(name).lower()
+    if not text:
+        return []
+    stripped = re.sub(r"[^a-z0-9]+", "", text)
+    dashed = re.sub(r"[^a-z0-9]+", "-", text).strip("-")
+    candidates: List[str] = []
+    if stripped:
+        candidates.append(stripped)
+    if dashed and dashed != stripped:
+        candidates.append(dashed)
+    return candidates
+
+
+def discover_canonical_fb_candidates(row: Mapping[str, Any], *, max_candidates: int = MAX_CANONICAL_DISCOVERY_CANDIDATES) -> List[str]:
+    handles: List[str] = []
+    cap = max(int(max_candidates or 0), 0)
+    if cap <= 0:
+        return []
+
+    link_fields = (
+        "Instagram",
+        "Instagram URL",
+        "Instagram_URL",
+        "TikTok",
+        "TikTok URL",
+        "TikTok_URL",
+        "YouTube",
+        "Youtube",
+        "YouTube URL",
+        "Youtube URL",
+        "SoundCloud",
+        "SoundCloud Link",
+        "SoundCloud_URL",
+        "Social Link",
+        "External Links",
+    )
+    for field in link_fields:
+        value = _row_value(row, field)
+        if not value:
+            continue
+        for url in _URL_RE.findall(value):
+            for handle in _handles_from_url(url):
+                _append_unique_handle(handles, handle, cap=cap)
+                if len(handles) >= cap:
+                    break
+            if len(handles) >= cap:
+                break
+        if len(handles) >= cap:
+            break
+
+    handle_fields = (
+        "Instagram Handle",
+        "Instagram_Handle",
+        "Instagram",
+        "TikTok Handle",
+        "TikTok_Handle",
+        "TikTok",
+        "YouTube Handle",
+        "Youtube Handle",
+        "YouTube",
+        "Youtube",
+        "SoundCloud Slug",
+        "SoundCloud_Slug",
+        "SoundCloud",
+    )
+    for field in handle_fields:
+        value = _row_value(row, field)
+        if not value or _URL_RE.search(value):
+            continue
+        _append_unique_handle(handles, value, cap=cap)
+        if len(handles) >= cap:
+            break
+
+    name_fields = ("Spotify Artist Name", "Spotify_Artist_Name", "Artist Name", "Artist")
+    for field in name_fields:
+        for handle in _artist_handle_candidates(_row_value(row, field)):
+            _append_unique_handle(handles, handle, cap=cap)
+            if len(handles) >= cap:
+                break
+        if len(handles) >= cap:
+            break
+
+    candidates: List[str] = []
+    for handle in handles[:cap]:
+        canonical = _validate_discovered_fb_candidate(f"https://www.facebook.com/{handle}")
+        if canonical and canonical not in candidates:
+            candidates.append(canonical)
+    return candidates[:cap]
+
+
+def _validate_discovered_fb_candidate(candidate: str) -> str:
+    canonical = canonicalize_facebook_url(candidate)
+    if not canonical:
+        return ""
+    lowered = canonical.lower()
+    blocked = (
+        "/share/",
+        "/story.php",
+        "/groups/",
+        "/events/",
+        "/watch/",
+        "/sharer.php",
+        "/dialog/share",
+        "/plugins/",
+        "l.facebook.com/",
+        "lm.facebook.com/",
+    )
+    if any(token in lowered for token in blocked):
+        return ""
+    if callable(fb_is_allowed_profile_candidate_url) and not fb_is_allowed_profile_candidate_url(canonical):
+        return ""
+    return canonical
 
 
 def _promote_resolved_fb_url(row: MutableMapping[str, Any], resolved_fb_url: str) -> None:
@@ -250,6 +476,49 @@ def _promote_resolved_fb_url(row: MutableMapping[str, Any], resolved_fb_url: str
     if "Facebook URL" in row:
         row["Facebook URL"] = resolved_fb_url
     ensure_canonical_facebook_url(row, set_row=True)
+
+
+def _apply_unresolved_share_discovery_failure(out: pd.DataFrame, idx: Any) -> None:
+    if FB_DEBUG_REASON_COL not in out.columns:
+        return
+    row = {col: _cell(out.at[idx, col]) for col in out.columns}
+    _append_debug_reason(row, SHARE_DISCOVERY_FAILED_REASON)
+    out.at[idx, FB_DEBUG_REASON_COL] = row.get(FB_DEBUG_REASON_COL, "")
+
+
+def _run_fb_enrichment_for_canonical_url(
+    *,
+    out: pd.DataFrame,
+    idx: Any,
+    canonical_fb_url: str,
+    fb_enricher: Callable[[Dict[str, str], int], Mapping[str, Any]],
+    via_discovery: bool,
+) -> None:
+    working = {col: _cell(out.at[idx, col]) for col in out.columns}
+    _promote_resolved_fb_url(working, canonical_fb_url)
+    if FB_OPPORTUNITY_STATE_COL in out.columns:
+        working[FB_OPPORTUNITY_STATE_COL] = "fb_opportunity_present"
+    if FB_ATTEMPT_STATE_COL in out.columns:
+        working[FB_ATTEMPT_STATE_COL] = "attempted_fb"
+    working["FB_Status"] = "recovered_share_url"
+    if via_discovery and FB_DEBUG_REASON_COL in out.columns:
+        _append_debug_reason(working, SHARE_DISCOVERY_SUCCESS_REASON)
+
+    for key, value in working.items():
+        if key in out.columns and (key in FB_RESULT_COPY_COLUMNS or key in DIRECT_FB_ALIAS_FIELDS):
+            out.at[idx, key] = value
+
+    enriched = fb_enricher({k: _cell(v) for k, v in working.items()}, int(idx))
+    if enriched:
+        merged = {col: _cell(out.at[idx, col]) for col in out.columns}
+        _copy_allowed_result_columns(merged, enriched)
+        if via_discovery and FB_DEBUG_REASON_COL in out.columns:
+            _append_debug_reason(merged, SHARE_DISCOVERY_SUCCESS_REASON)
+        for key, value in merged.items():
+            if key in out.columns and (key in FB_RESULT_COPY_COLUMNS or key in EMAIL_WRITE_COLUMNS or str(key).startswith("FB_")):
+                out.at[idx, key] = value
+    out.at[idx, "Facebook_URL"] = canonical_fb_url
+    out.at[idx, "FB_Status"] = "recovered_share_url"
 
 
 class _DefaultShareResolver:
@@ -406,34 +675,44 @@ def recover_dataframe(
 
             resolved_raw = resolver(raw_fb_url)
             resolved_fb_url = canonicalize_facebook_url(resolved_raw)
-            if not resolved_fb_url:
+            via_discovery = False
+            target_fb_urls: List[str] = []
+            if resolved_fb_url:
+                target_fb_urls.append(resolved_fb_url)
+            else:
+                target_fb_urls = discover_canonical_fb_candidates(row)
+                via_discovery = bool(target_fb_urls)
+
+            if not target_fb_urls:
                 summary.failed += 1
+                _apply_unresolved_share_discovery_failure(out, idx)
+                if not out.loc[idx].equals(before):
+                    changed_rows.add(int(idx))
                 continue
 
             summary.resolved += 1
 
-            working = {col: _cell(out.at[idx, col]) for col in out.columns}
-            _promote_resolved_fb_url(working, resolved_fb_url)
-            if FB_OPPORTUNITY_STATE_COL in out.columns:
-                working[FB_OPPORTUNITY_STATE_COL] = "fb_opportunity_present"
-            if FB_ATTEMPT_STATE_COL in out.columns:
-                working[FB_ATTEMPT_STATE_COL] = "attempted_fb"
-            working["FB_Status"] = "recovered_share_url"
+            for target_fb_url in target_fb_urls:
+                safe_target = _validate_discovered_fb_candidate(target_fb_url)
+                if not safe_target:
+                    continue
+                summary.enriched += 1
+                _run_fb_enrichment_for_canonical_url(
+                    out=out,
+                    idx=idx,
+                    canonical_fb_url=safe_target,
+                    fb_enricher=fb_enricher,
+                    via_discovery=via_discovery,
+                )
+                if _row_has_fb_email_after({col: _cell(out.at[idx, col]) for col in out.columns}):
+                    break
 
-            for key, value in working.items():
-                if key in out.columns and (key in FB_RESULT_COPY_COLUMNS or key in DIRECT_FB_ALIAS_FIELDS):
-                    out.at[idx, key] = value
-
-            summary.enriched += 1
-            enriched = fb_enricher({k: _cell(v) for k, v in working.items()}, int(idx))
-            if enriched:
-                merged = {col: _cell(out.at[idx, col]) for col in out.columns}
-                _copy_allowed_result_columns(merged, enriched)
-                for key, value in merged.items():
-                    if key in out.columns and (key in FB_RESULT_COPY_COLUMNS or key in EMAIL_WRITE_COLUMNS or str(key).startswith("FB_")):
-                        out.at[idx, key] = value
-            out.at[idx, "Facebook_URL"] = resolved_fb_url
-            out.at[idx, "FB_Status"] = "recovered_share_url"
+            if not _cell(out.at[idx, "Facebook_URL"]):
+                summary.failed += 1
+                _apply_unresolved_share_discovery_failure(out, idx)
+                if not out.loc[idx].equals(before):
+                    changed_rows.add(int(idx))
+                continue
 
             attempt_state = _cell(out.at[idx, FB_ATTEMPT_STATE_COL]) if FB_ATTEMPT_STATE_COL in out.columns else ""
             if FB_ATTEMPT_STATE_COL in out.columns and attempt_state == "attempted_fb":
