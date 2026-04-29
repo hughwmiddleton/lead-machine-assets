@@ -279,3 +279,156 @@ def test_manual_fb_recovery_summary_parsing_share_variants_and_missing_fields():
     assert missing["driver_candidates_found"] == 0
     assert missing["driver_retry_attempted"] == 0
     assert missing["driver_retry_success"] == 1
+
+
+def test_manual_fb_share_recovery_trigger_invokes_subprocess_with_batch_size(tmp_path):
+    module = _load_legacy_module()
+    _write_scripts(tmp_path)
+    export = tmp_path / "manual.csv"
+    _write_export(export)
+    calls = []
+
+    def fake_runner(cmd, **kwargs):
+        calls.append(cmd)
+        output_path = Path(cmd[cmd.index("--output") + 1])
+        output_path.write_text(export.read_text(encoding="utf-8"), encoding="utf-8")
+        return SimpleNamespace(
+            returncode=0,
+            stdout="rows_scanned=5\ncandidates_found=2\nrows_recovered=1\nrows_skipped=3\nrows_failed=1\n",
+        )
+
+    result = module._run_manual_fb_share_recovery(
+        str(export),
+        batch_size=40,
+        runner=fake_runner,
+        python_executable="python",
+        base_dir=str(tmp_path),
+    )
+
+    assert len(calls) == 1
+    assert "recover_fb_share_rows.py" in calls[0][1]
+    assert calls[0][calls[0].index("--input") + 1] == str(export)
+    assert calls[0][calls[0].index("--output") + 1].endswith("manual_fb_share_recovered.csv")
+    assert calls[0][calls[0].index("--batch-size") + 1] == "40"
+    assert "--limit" not in calls[0]
+    assert result["summary"] == {
+        "rows_scanned": "5",
+        "candidates_found": "2",
+        "rows_recovered": "1",
+        "rows_skipped": "3",
+        "rows_failed": "1",
+    }
+
+
+def test_manual_fb_share_recovery_copy_mode_preserves_original_and_uses_suffix(tmp_path):
+    module = _load_legacy_module()
+    _write_scripts(tmp_path)
+    export = tmp_path / "manual.csv"
+    _write_export(export)
+    original = export.read_text(encoding="utf-8")
+
+    def fake_runner(cmd, **kwargs):
+        output_path = Path(cmd[cmd.index("--output") + 1])
+        _write_export(output_path, email="recovered@example.com")
+        return SimpleNamespace(returncode=0, stdout="rows_scanned=1\ncandidates_found=1\nrows_recovered=1\n")
+
+    result = module._run_manual_fb_share_recovery(
+        str(export),
+        runner=fake_runner,
+        python_executable="python",
+        base_dir=str(tmp_path),
+    )
+
+    assert export.read_text(encoding="utf-8") == original
+    assert Path(result["output_csv"]).name == "manual_fb_share_recovered.csv"
+    assert "recovered@example.com" in Path(result["output_csv"]).read_text(encoding="utf-8")
+
+
+def test_manual_fb_share_recovery_in_place_reuses_input_path_only_when_selected(tmp_path):
+    module = _load_legacy_module()
+    _write_scripts(tmp_path)
+    export = tmp_path / "manual.csv"
+    _write_export(export)
+    calls = []
+
+    def fake_runner(cmd, **kwargs):
+        calls.append(cmd)
+        output_path = Path(cmd[cmd.index("--output") + 1])
+        _write_export(output_path, email="recovered@example.com")
+        return SimpleNamespace(returncode=0, stdout="rows_scanned=1\nrows_recovered=1\n")
+
+    result = module._run_manual_fb_share_recovery(
+        str(export),
+        in_place=True,
+        runner=fake_runner,
+        python_executable="python",
+        base_dir=str(tmp_path),
+    )
+
+    assert calls[0][calls[0].index("--output") + 1] == str(export)
+    assert result["output_csv"] == str(export)
+    assert "recovered@example.com" in export.read_text(encoding="utf-8")
+
+
+def test_manual_fb_share_recovery_invalid_input_blocks_worker(qapp, monkeypatch):
+    module = _load_legacy_module()
+    window = module.MainWindow()
+    messages = []
+    monkeypatch.setattr(module.QtWidgets.QMessageBox, "warning", lambda *args: messages.append(args))
+
+    class FailWorker:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("worker should not be created")
+
+    monkeypatch.setattr(module, "ManualFbShareRecoveryWorker", FailWorker)
+    window.manual_fb_share_recovery_csv_edit.setText("/missing/not-a-real.csv")
+    window.start_manual_fb_share_recovery()
+
+    assert messages
+    assert "CSV not found" in window.fb_log.toPlainText()
+    window._shutdown_threads()
+
+
+def test_manual_fb_share_recovery_starts_qthread_without_blocking_main_thread(qapp, tmp_path, monkeypatch):
+    module = _load_legacy_module()
+    export = tmp_path / "manual.csv"
+    _write_export(export)
+    window = module.MainWindow()
+    window.manual_fb_share_recovery_csv_edit.setText(str(export))
+    started = []
+
+    class FakeSignal:
+        def connect(self, fn):
+            pass
+
+    class FakeWorker:
+        def __init__(self, *args, **kwargs):
+            self.log_signal = FakeSignal()
+            self.finished_signal = FakeSignal()
+
+        def isRunning(self):
+            return False
+
+        def start(self):
+            started.append(True)
+
+    monkeypatch.setattr(module, "ManualFbShareRecoveryWorker", FakeWorker)
+
+    window.start_manual_fb_share_recovery()
+
+    assert started == [True]
+    assert window.manual_fb_share_run_button.isEnabled() is False
+    window._shutdown_threads()
+
+
+def test_manual_fb_share_recovery_no_logic_duplication():
+    module = _load_legacy_module()
+    source_path = Path(module.__file__)
+    text = source_path.read_text(encoding="utf-8")
+    function_text = text[
+        text.index("def _run_manual_fb_share_recovery("):text.index("def _run_recovery_subprocess(")
+    ]
+
+    assert "recover_dataframe" not in function_text
+    assert "recover_csv" not in function_text
+    assert "import scripts.recover_fb_share_rows" not in text

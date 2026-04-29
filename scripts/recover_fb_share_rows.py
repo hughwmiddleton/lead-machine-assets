@@ -116,6 +116,10 @@ class RecoverySummary:
     def as_dict(self) -> Dict[str, int]:
         return {
             "rows_scanned": self.rows_scanned,
+            "candidates_found": self.candidates,
+            "rows_recovered": self.enriched,
+            "rows_skipped": self.skipped_existing,
+            "rows_failed": self.failed,
             "candidates": self.candidates,
             "resolved": self.resolved,
             "enriched": self.enriched,
@@ -774,14 +778,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--force", action="store_true", help="Allow overwriting an existing --output/default copy.")
     parser.add_argument("--offset", type=int, default=0, help="Skip this many eligible recovery candidates before processing.")
     parser.add_argument("--limit", type=int, help="Process at most this many eligible recovery candidates.")
+    parser.add_argument("--batch-size", type=int, help="Alias for --limit for GUI/manual recovery callers.")
     args = parser.parse_args(argv)
 
+    limit = args.batch_size if args.batch_size is not None else args.limit
     output = args.output or _default_output_path(args.input)
     if args.in_place and args.output:
         parser.error("--output cannot be combined with --in-place")
-    if not args.in_place and Path(output).exists() and not args.force:
+    output_is_input = Path(output).resolve() == Path(args.input).resolve()
+    in_place = bool(args.in_place or output_is_input)
+    if not in_place and Path(output).exists() and not args.force:
         parser.error(f"output already exists: {output} (use --force to overwrite)")
-    summary = recover_csv(args.input, output, in_place=bool(args.in_place), offset=args.offset, limit=args.limit)
+    summary = recover_csv(args.input, output, in_place=in_place, offset=args.offset, limit=limit)
     print(
         "[FB Share Recovery] "
         f"candidates={summary.candidates} "
@@ -793,7 +801,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     for key, value in summary.as_dict().items():
         print(f"{key}={value}")
-    if args.in_place:
+    if in_place:
         print(f"output={args.input}")
     else:
         print(f"output={output}")

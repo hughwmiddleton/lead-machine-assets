@@ -1,5 +1,6 @@
 import pandas as pd
 
+from scripts import recover_fb_share_rows as share_recovery
 from scripts.recover_fb_share_rows import (
     MAX_CANONICAL_DISCOVERY_CANDIDATES,
     SHARE_DISCOVERY_FAILED_REASON,
@@ -319,3 +320,33 @@ def test_no_direct_share_scrape_when_discovery_candidate_exists():
     assert calls
     assert all("/share/" not in url.lower() for url in calls)
     assert "facebook.com/share/" in df.at[0, "Social Link"]
+
+
+def test_cli_accepts_batch_size_alias_and_output_equal_input_as_explicit_in_place(monkeypatch, tmp_path):
+    export = tmp_path / "manual.csv"
+    export.write_text("Artist Name,Facebook_URL,FB_Status\nA,,fb_share_resolution_failed\n", encoding="utf-8")
+    calls = []
+
+    def fake_recover_csv(input_csv, output_csv, **kwargs):
+        calls.append((input_csv, output_csv, kwargs))
+        return share_recovery.RecoverySummary(rows_scanned=1, candidates=1, enriched=1, failed=0)
+
+    monkeypatch.setattr(share_recovery, "recover_csv", fake_recover_csv)
+
+    rc = share_recovery.main([
+        "--input",
+        str(export),
+        "--output",
+        str(export),
+        "--batch-size",
+        "40",
+    ])
+
+    assert rc == 0
+    assert calls == [
+        (
+            str(export),
+            str(export),
+            {"in_place": True, "offset": 0, "limit": 40},
+        )
+    ]
