@@ -187,6 +187,8 @@ _ALIAS_GROUPS = {
         "Source Link",
         "Profile URL",
         "profile_url",
+        "artist_url",
+        "Artist URL",
     ],
     "Import_Source_File": [
         "Import Source File",

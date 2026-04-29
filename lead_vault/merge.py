@@ -1,6 +1,7 @@
 import csv
 import datetime as dt
 import os
+import shutil
 import re
 import unicodedata
 from collections import defaultdict
@@ -17,7 +18,7 @@ from .schema import get_canonical_master_schema, get_default_master_csv_path
 PathLike = Union[str, Path]
 
 _LIST_LIKE_FIELDS = {"All_Emails", "Social Link", "External_Links", "Review_Urls"}
-_DUPLICATE_STRATEGIES = {"update", "skip", "keep_both"}
+_DUPLICATE_STRATEGIES = {"update", "skip", "keep_both", "merge_consolidate"}
 _SOCIAL_LINK_FIELDS = {
     "Website",
     "Contact_Page_URL",
@@ -117,6 +118,14 @@ def _run_csv_merge(
         raise ValueError(
             f"Unsupported duplicate strategy '{duplicate_strategy}'. "
             f"Expected one of: {', '.join(sorted(_DUPLICATE_STRATEGIES))}"
+        )
+    if duplicate_strategy == "merge_consolidate":
+        return _run_consolidating_csv_merge(
+            source_path,
+            header_overrides=header_overrides,
+            ignored_headers=ignored_headers,
+            master_path=master_path,
+            write_changes=write_changes,
         )
     preview = preview_csv_import(
         source_path,
@@ -224,6 +233,149 @@ def _run_csv_merge(
     return preview
 
 
+def _run_consolidating_csv_merge(
+    source_path: PathLike,
+    header_overrides: Optional[Dict[str, str]] = None,
+    ignored_headers: Optional[Iterable[str]] = None,
+    master_path: Optional[PathLike] = None,
+    write_changes: bool = True,
+) -> Dict[str, object]:
+    preview = preview_csv_import(
+        source_path,
+        header_overrides=header_overrides,
+        ignored_headers=ignored_headers,
+        master_path=master_path,
+    )
+    rows = list(read_csv_rows(source_path)["rows"])
+    preview["row_count"] = len(rows)
+    preview["duplicate_strategy"] = "merge_consolidate"
+    preview.update(
+        {
+            "rows_existing": 0,
+            "rows_incoming": len(rows),
+            "rows_merged": 0,
+            "rows_replaced": 0,
+            "rows_kept_existing": 0,
+            "rows_added_new": 0,
+            "rows_final": 0,
+            "backup_path": "",
+        }
+    )
+    if preview["unmapped_headers"]:
+        preview["rows_unresolved_mapping"] = len(rows)
+        return preview
+
+    resolved_master_path = Path(master_path) if master_path is not None else get_default_master_csv_path()
+    if write_changes:
+        resolved_master_path = ensure_master_csv_exists(resolved_master_path)
+    master_rows = _load_master_rows_exact(resolved_master_path) if resolved_master_path.exists() else []
+    preview["rows_existing"] = len(master_rows)
+
+    consolidated: Dict[Tuple[str, str], Dict[str, object]] = {}
+    final_rows: List[Dict[str, str]] = []
+
+    def _add_unkeyed(row: Dict[str, str], *, source: str) -> None:
+        if source == "incoming":
+            preview["rows_added_new"] += 1
+        final_rows.append(_copy_master_shaped_row(row))
+
+    def _consider(row: Dict[str, str], *, source: str, score_row: Optional[Dict[str, str]] = None) -> None:
+        key = _lead_vault_consolidation_key(row)
+        if key is None:
+            preview["rows_errors"] += 1
+            preview["error_rows"].append(
+                {
+                    "row_number": "",
+                    "reason": "missing artist_url and Artist Name",
+                    "row": row,
+                }
+            )
+            return
+        current = consolidated.get(key)
+        candidate = _copy_master_shaped_row(row)
+        candidate_score = _score_lead_vault_row(candidate, score_row=score_row)
+        if current is None:
+            consolidated[key] = {
+                "row": candidate,
+                "score": candidate_score,
+                "source": source,
+            }
+            if source == "incoming":
+                preview["rows_added_new"] += 1
+            return
+
+        preview["rows_duplicates_detected"] += 1
+        preview["rows_merged"] += 1
+        existing_score = int(current["score"])
+        if _candidate_beats_current(
+            candidate,
+            candidate_score,
+            current["row"],
+            existing_score,
+            current_source=str(current["source"]),
+            candidate_source=source,
+        ):
+            if current["source"] == "existing" and source == "incoming":
+                preview["rows_replaced"] += 1
+                preview["rows_updated"] += 1
+            consolidated[key] = {
+                "row": candidate,
+                "score": candidate_score,
+                "source": source,
+            }
+            return
+        if current["source"] == "existing" and source == "incoming":
+            preview["rows_kept_existing"] += 1
+            preview["rows_skipped_duplicates"] += 1
+
+    for row in master_rows:
+        key = _lead_vault_consolidation_key(row)
+        if key is None:
+            _add_unkeyed(row, source="existing")
+            continue
+        _consider(row, source="existing")
+
+    for row_offset, raw_row in enumerate(rows, start=2):
+        try:
+            canonical_row = build_canonical_row(
+                raw_row,
+                preview["mapped_headers"],
+                header_order=preview["detected_headers"],
+            )
+            key = _lead_vault_consolidation_key(canonical_row)
+            if key is None:
+                preview["rows_errors"] += 1
+                preview["error_rows"].append(
+                    {
+                        "row_number": row_offset,
+                        "reason": "missing artist_url and Artist Name",
+                        "row": canonical_row,
+                    }
+                )
+                continue
+            _consider(canonical_row, source="incoming", score_row=raw_row)
+        except Exception as exc:
+            preview["rows_errors"] += 1
+            preview["error_rows"].append(
+                {
+                    "row_number": row_offset,
+                    "reason": str(exc),
+                    "row": raw_row,
+                }
+            )
+
+    final_rows.extend(_copy_master_shaped_row(item["row"]) for item in consolidated.values())
+    preview["rows_added"] = preview["rows_added_new"]
+    preview["rows_final"] = len(final_rows)
+
+    if write_changes:
+        backup_path = _backup_master_csv(resolved_master_path)
+        preview["backup_path"] = str(backup_path)
+        _write_master_rows_exact(final_rows, resolved_master_path)
+
+    return preview
+
+
 def _make_result(
     source_path: PathLike,
     master_path: Optional[PathLike],
@@ -301,6 +453,13 @@ def _load_master_rows(path: PathLike) -> List[Dict[str, str]]:
         row = {field: _clean_cell(raw_row.get(field, "")) for field in schema}
         master_rows.append(row)
     return master_rows
+
+
+def _load_master_rows_exact(path: PathLike) -> List[Dict[str, str]]:
+    read_result = read_csv_rows(path)
+    rows = list(read_result["rows"])
+    schema = get_canonical_master_schema()
+    return [{field: "" if raw_row.get(field, "") is None else str(raw_row.get(field, "")) for field in schema} for raw_row in rows]
 
 
 def _build_indexes(
@@ -609,6 +768,97 @@ def _merge_social_field(
     return existing_value, external_links
 
 
+def _copy_master_shaped_row(row: Dict[str, str]) -> Dict[str, str]:
+    return {field: "" if row.get(field, "") is None else str(row.get(field, "")) for field in get_canonical_master_schema()}
+
+
+def _is_nullish_value(value: object) -> bool:
+    text = "" if value is None else str(value).strip()
+    return text == "" or text.casefold() in {"nan", "none"}
+
+
+def _lead_vault_consolidation_key(row: Dict[str, str]) -> Optional[Tuple[str, str]]:
+    artist_url = row.get("Source_URL", "")
+    if not _is_nullish_value(artist_url):
+        return ("artist_url", _normalize_profile_url(artist_url) or str(artist_url).strip().casefold())
+
+    artist = row.get("Artist", "")
+    if not _is_nullish_value(artist):
+        return ("artist", re.sub(r"\s+", " ", str(artist).strip()).casefold())
+
+    return None
+
+
+def _has_lead_vault_email(row: Dict[str, str]) -> bool:
+    return not _is_nullish_value(row.get("Primary_Email", ""))
+
+
+def _split_email_all_for_scoring(value: object) -> Set[str]:
+    if _is_nullish_value(value):
+        return set()
+    emails: Set[str] = set()
+    for token in re.split(r"[;,|]+", str(value)):
+        email = token.strip().lower()
+        if email and not _is_nullish_value(email):
+            emails.add(email)
+    return emails
+
+
+def _row_has_flag(row: Dict[str, str], flag_value: str, score_row: Optional[Dict[str, str]] = None) -> bool:
+    target = flag_value.casefold()
+    values: List[object] = list(row.values())
+    if score_row:
+        values.extend(score_row.values())
+    for value in values:
+        if str(value or "").strip().casefold() == target:
+            return True
+    return False
+
+
+def _score_lead_vault_row(row: Dict[str, str], score_row: Optional[Dict[str, str]] = None) -> int:
+    score = 0
+    has_email = _has_lead_vault_email(row)
+    if has_email:
+        score += 100
+    score += 10 * len(_split_email_all_for_scoring(row.get("All_Emails", "")))
+    if not _is_nullish_value(row.get("Facebook_URL", "")):
+        score += 5
+    if not _is_nullish_value(row.get("Instagram_URL", "")):
+        score += 5
+    if not _is_nullish_value(row.get("External_Links", "")):
+        score += 3
+    if not has_email and _row_has_flag(row, "fb_no_email_written", score_row=score_row):
+        score -= 5
+    if not has_email and _row_has_flag(row, "ig_no_email_written", score_row=score_row):
+        score -= 5
+    return score
+
+
+def _candidate_beats_current(
+    candidate_row: Dict[str, str],
+    candidate_score: int,
+    current_row: Dict[str, str],
+    current_score: int,
+    *,
+    current_source: str,
+    candidate_source: str,
+) -> bool:
+    current_has_email = _has_lead_vault_email(current_row)
+    candidate_has_email = _has_lead_vault_email(candidate_row)
+    if current_source == "existing" and candidate_source == "incoming":
+        if current_has_email and not candidate_has_email:
+            return False
+        if candidate_has_email and not current_has_email:
+            return True
+    if candidate_score > current_score:
+        return True
+    if candidate_score < current_score:
+        return False
+    if current_source == "existing" and candidate_source == "incoming":
+        return False
+    return False
+
+
 def _merge_external_links(existing_row: Dict[str, str], incoming_row: Dict[str, str]) -> str:
     return _merge_tokenized_values(
         existing_row.get("External_Links", ""),
@@ -846,6 +1096,40 @@ def _write_master_rows(rows: Sequence[Dict[str, str]], path: PathLike) -> None:
                 temp_path.unlink()
             except OSError:
                 pass
+
+
+def _write_master_rows_exact(rows: Sequence[Dict[str, str]], path: PathLike) -> None:
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = target.with_name(f"{target.stem}.tmp{target.suffix}")
+    fieldnames = get_canonical_master_schema()
+
+    if temp_path.exists():
+        temp_path.unlink()
+
+    try:
+        with open(temp_path, "w", newline="", encoding="utf-8-sig") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
+            writer.writeheader()
+            for row in rows:
+                writer.writerow({field: "" if row.get(field, "") is None else str(row.get(field, "")) for field in fieldnames})
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, target)
+    finally:
+        if temp_path.exists():
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass
+
+
+def _backup_master_csv(path: PathLike) -> Path:
+    source = Path(path)
+    timestamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup_path = source.with_name(f"master_backup_{timestamp}.csv")
+    shutil.copy2(source, backup_path)
+    return backup_path
 
 
 def _coerce_run_datetime(value: Optional[dt.datetime]) -> dt.datetime:

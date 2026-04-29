@@ -33,6 +33,7 @@ def test_alias_examples_map_correctly() -> None:
             "Genre",
                 "Unearthed_Genre_Raw",
                 "Source URL",
+                "artist_url",
                 "Profile URL",
                 "profile_url",
                 "Email Type",
@@ -57,6 +58,7 @@ def test_alias_examples_map_correctly() -> None:
     assert mapped["Genre"] == "Primary_Genre"
     assert mapped["Unearthed_Genre_Raw"] == "Unearthed_Genre_Raw"
     assert mapped["Source URL"] == "Source_URL"
+    assert mapped["artist_url"] == "Source_URL"
     assert mapped["Profile URL"] == "Source_URL"
     assert mapped["profile_url"] == "Source_URL"
     assert mapped["Email Type"] == "Email_Type"

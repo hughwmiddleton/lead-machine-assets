@@ -12524,6 +12524,10 @@ class LeadVaultTab(QtWidgets.QWidget):
         self.import_button = QtWidgets.QPushButton("Run Lead Vault Import")
         self.import_button.setEnabled(False)
         self.import_button.clicked.connect(self._start_import)
+        self.import_mode_combo = QtWidgets.QComboBox()
+        self.import_mode_combo.addItem("Append Only (existing)", "append_only")
+        self.import_mode_combo.addItem("Merge + Consolidate", "merge_consolidate")
+        controls.addWidget(self.import_mode_combo)
         controls.addWidget(self.import_button)
         mapping_layout.addLayout(controls)
         self.unmapped_table = QtWidgets.QTableWidget(0, 2)
@@ -12916,10 +12920,14 @@ class LeadVaultTab(QtWidgets.QWidget):
             )
             self._refresh_import_button()
             return
-        duplicate_strategy = self._choose_duplicate_strategy(source_path, header_overrides, ignored_headers)
-        if duplicate_strategy is None:
-            self._refresh_import_button()
-            return
+        import_mode = self.import_mode_combo.currentData() or "append_only"
+        if import_mode == "merge_consolidate":
+            duplicate_strategy = "merge_consolidate"
+        else:
+            duplicate_strategy = self._choose_duplicate_strategy(source_path, header_overrides, ignored_headers)
+            if duplicate_strategy is None:
+                self._refresh_import_button()
+                return
         self.preview_button.setEnabled(False)
         self.import_button.setEnabled(False)
         self.auto_map_known_button.setEnabled(False)
@@ -13229,6 +13237,10 @@ class LeadVaultTab(QtWidgets.QWidget):
                     f"Total rows processed: {result.get('row_count', 0)}",
                     f"New contacts added: {result.get('rows_added', 0)}",
                     f"Existing contacts updated: {result.get('rows_updated', 0)}",
+                    f"New artists added: {result.get('rows_added_new', result.get('rows_added', 0))}",
+                    f"Existing artists upgraded: {result.get('rows_replaced', result.get('rows_updated', 0))}",
+                    f"Existing artists unchanged: {result.get('rows_kept_existing', result.get('rows_skipped_duplicates', 0))}",
+                    f"Total final row count: {result.get('rows_final', '')}",
                     f"Duplicates skipped: {result.get('rows_skipped_duplicates', 0)}",
                     f"Duplicates kept: {result.get('rows_kept_duplicates', 0)}",
                     f"Duplicates detected: {result.get('rows_duplicates_detected', 0)}",
