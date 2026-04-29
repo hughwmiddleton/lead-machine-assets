@@ -118,6 +118,9 @@ MAX_DRIVER_RECOVERY_ATTEMPTS = 2
 _FORCED_DRIVER_CRASH_MESSAGE = "Forced driver crash for NM-S231 test"
 _forced_driver_crash_triggered = False
 _forced_driver_crash_already_logged_rows: Set[int] = set()
+DEFAULT_FB_DRIVER_RESET_INTERVAL = 50
+FB_DRIVER_FAILURE_WINDOW_SIZE = 10
+FB_DRIVER_FAILURE_SPIKE_THRESHOLD = 5
 
 _EMAIL_SUMMARY = {"emails_found": 0, "pattern_emails": 0}
 _NM_UE_DISPATCH_JOB_INDEX = ""
@@ -396,6 +399,141 @@ class _NightFBDriverOwner:
         terminated = self.close()
         helper = self.start()
         return helper, terminated
+
+    def recycle(self) -> Tuple[NightModeFacebookEnricher, bool]:
+        drivers = self._collect_drivers(self.helper)
+        terminated = self.close()
+        if self.night_fb_run_state is not None:
+            try:
+                drivers.extend(self._collect_drivers(getattr(self.night_fb_run_state, "session", None)))
+                close_night_fb_run_state(self.night_fb_run_state)
+                terminated = True
+            except Exception:
+                pass
+        self._wait_for_driver_processes(drivers, timeout_s=3.0)
+        helper = self.start()
+        self._verify_responsive(helper)
+        return helper, terminated
+
+    @staticmethod
+    def _collect_drivers(owner: Any) -> List[Any]:
+        drivers: List[Any] = []
+        if owner is None:
+            return drivers
+        for attr in ("driver", "browser", "page", "_anon_driver", "_unearthed_driver"):
+            driver = getattr(owner, attr, None)
+            if driver is not None:
+                drivers.append(driver)
+        session = getattr(owner, "session", None)
+        session_driver = getattr(session, "driver", None)
+        if session_driver is not None:
+            drivers.append(session_driver)
+        return drivers
+
+    @staticmethod
+    def _wait_for_driver_processes(drivers: Sequence[Any], timeout_s: float = 3.0) -> None:
+        deadline = time.time() + max(0.0, float(timeout_s or 0.0))
+        processes = []
+        for driver in drivers:
+            service = getattr(driver, "service", None)
+            process = getattr(service, "process", None)
+            poll = getattr(process, "poll", None)
+            if callable(poll):
+                processes.append(process)
+        while processes and time.time() < deadline:
+            remaining = []
+            for process in processes:
+                poll = getattr(process, "poll", None)
+                try:
+                    if callable(poll) and poll() is None:
+                        remaining.append(process)
+                except Exception:
+                    pass
+            if not remaining:
+                return
+            processes = remaining
+            time.sleep(0.1)
+
+    @staticmethod
+    def _verify_responsive(helper: Any) -> None:
+        drivers = _NightFBDriverOwner._collect_drivers(helper)
+        for driver in drivers:
+            get_method = getattr(driver, "get", None)
+            if callable(get_method):
+                get_method("about:blank")
+                return
+
+
+class _FBDriverRecycleController:
+    def __init__(
+        self,
+        *,
+        reset_interval: int = DEFAULT_FB_DRIVER_RESET_INTERVAL,
+        window_size: int = FB_DRIVER_FAILURE_WINDOW_SIZE,
+        failure_threshold: int = FB_DRIVER_FAILURE_SPIKE_THRESHOLD,
+    ) -> None:
+        self.reset_interval = max(0, int(reset_interval or 0))
+        self.window_size = max(1, int(window_size or 1))
+        self.failure_threshold = max(1, int(failure_threshold or 1))
+        self.attempt_counter = 0
+        self.total_attempts_since_reset = 0
+        self.rolling_failure_window: List[bool] = []
+        self.reset_pending = False
+        self.pending_trigger = ""
+        self.pending_count = 0
+        self.pending_window = 0
+        self.pending_failures = 0
+
+    def record_attempt_result(self, *, driver_error: bool) -> Optional[str]:
+        self.attempt_counter += 1
+        self.total_attempts_since_reset += 1
+        self.rolling_failure_window.append(bool(driver_error))
+        if len(self.rolling_failure_window) > self.window_size:
+            self.rolling_failure_window = self.rolling_failure_window[-self.window_size :]
+
+        if self.reset_interval > 0 and self.attempt_counter >= self.reset_interval:
+            self._mark_pending("row_interval", count=self.attempt_counter)
+            return self.pending_trigger
+
+        if self.total_attempts_since_reset >= self.window_size:
+            failures = sum(1 for failed in self.rolling_failure_window if failed)
+            if failures >= self.failure_threshold:
+                self._mark_pending(
+                    "failure_spike",
+                    window=self.window_size,
+                    failures=failures,
+                )
+                return self.pending_trigger
+        return None
+
+    def _mark_pending(self, trigger: str, *, count: int = 0, window: int = 0, failures: int = 0) -> None:
+        if self.reset_pending:
+            return
+        self.reset_pending = True
+        self.pending_trigger = trigger
+        self.pending_count = int(count or 0)
+        self.pending_window = int(window or 0)
+        self.pending_failures = int(failures or 0)
+
+    def consume_pending(self) -> Dict[str, int | str]:
+        if not self.reset_pending:
+            return {}
+        return {
+            "trigger": self.pending_trigger,
+            "count": self.pending_count,
+            "window": self.pending_window,
+            "failures": self.pending_failures,
+        }
+
+    def reset_after_recycle(self) -> None:
+        self.attempt_counter = 0
+        self.total_attempts_since_reset = 0
+        self.rolling_failure_window.clear()
+        self.reset_pending = False
+        self.pending_trigger = ""
+        self.pending_count = 0
+        self.pending_window = 0
+        self.pending_failures = 0
 
 ENRICHMENT_YIELD_SOURCE_ORDER: Sequence[str] = (
     "website",
@@ -718,6 +856,7 @@ def _canonicalize_explicit_fb_share_for_row(
         _write_explicit_fb_canonical_fields(df, idx, direct_canonical)
         _clear_fb_share_runtime_fallback(df, idx)
         return (direct_canonical, "")
+    existing_runtime_fallback_urls = fb_share_runtime_fallback_urls_for_row(row.to_dict())
 
     raw_share_url, source_field = _find_explicit_fb_share_candidate(row)
     if not raw_share_url:
@@ -760,8 +899,11 @@ def _canonicalize_explicit_fb_share_for_row(
         )
         return (canonical_url, source_field)
 
-    _clear_fb_share_runtime_fallback(df, idx)
-    if FB_GATE_STATE_COL in df.columns:
+    if existing_runtime_fallback_urls:
+        _set_fb_share_runtime_fallback(df, idx, existing_runtime_fallback_urls[0], source_field)
+    else:
+        _clear_fb_share_runtime_fallback(df, idx)
+    if FB_GATE_STATE_COL in df.columns and not existing_runtime_fallback_urls:
         df.at[idx, FB_GATE_STATE_COL] = "fb_share_resolution_failed"
     resolved_fragment = f" resolved_url='{resolved_url}'" if resolved_url else ""
     _safe_log_console(
@@ -772,7 +914,7 @@ def _canonicalize_explicit_fb_share_for_row(
         logger,
         f"[FB Share Intake Trace] artist='{artist_label}' raw_fb_url='{raw_share_url}' "
         f"resolved_fb_url='{resolved_url}' resolution_attempted=true resolution_success=false "
-        f"state='fb_share_resolution_failed'",
+        f"state='{'share_runtime_fallback' if existing_runtime_fallback_urls else 'fb_share_resolution_failed'}'",
     )
     return ("", source_field)
 
@@ -4459,6 +4601,12 @@ def run_facebook_global_pass_nightmode(
     processed_this_run = 0
     limit_reached = False
     captcha_detected = False
+    fb_driver_reset_interval_raw = os.getenv("FB_DRIVER_RESET_INTERVAL", str(DEFAULT_FB_DRIVER_RESET_INTERVAL))
+    try:
+        fb_driver_reset_interval = int(fb_driver_reset_interval_raw or str(DEFAULT_FB_DRIVER_RESET_INTERVAL))
+    except Exception:
+        fb_driver_reset_interval = DEFAULT_FB_DRIVER_RESET_INTERVAL
+    fb_driver_recycle = _FBDriverRecycleController(reset_interval=fb_driver_reset_interval)
     fb_owner = _NightFBDriverOwner(
         module,
         fb_username,
@@ -4683,6 +4831,7 @@ def run_facebook_global_pass_nightmode(
                     _safe_log_console(logger, f"[FB Night] Long break for {pause:.2f}s after {processed_this_run} rows.")
                     _safe_sleep(pause)
 
+                row_driver_error = False
                 for attempt in range(MAX_DRIVER_RECOVERY_ATTEMPTS + 1):
                     try:
                         clean_row = {k: ("" if pd.isna(v) else v) for k, v in row.to_dict().items()}
@@ -4711,6 +4860,7 @@ def run_facebook_global_pass_nightmode(
                         if not _is_recoverable_driver_error(exc):
                             _safe_log_console(logger, f'[Driver Recovery] non_recoverable_error row={idx} error="{exc}"')
                             raise
+                        row_driver_error = True
                         _safe_log_console(logger, f'[Driver Recovery] crash_detected row={idx} error="{exc}"')
                         if attempt == MAX_DRIVER_RECOVERY_ATTEMPTS:
                             _safe_log_console(
@@ -4812,14 +4962,44 @@ def run_facebook_global_pass_nightmode(
                         enriched.get(FB_ATTEMPT_STATE_COL, ""),
                     )
                     df.at[idx, FB_ATTEMPT_STATE_COL] = attempt_state
+                    status_norm_for_recycle = status_val.strip().lower()
+                    attempt_norm_for_recycle = str(attempt_state or "").strip().lower()
+                    if (
+                        "driver_error" in status_norm_for_recycle
+                        or "driver_error" in attempt_norm_for_recycle
+                        or "session" in status_norm_for_recycle
+                        or "timeout" in status_norm_for_recycle
+                        or "navigation" in status_norm_for_recycle
+                    ):
+                        row_driver_error = True
                 else:
                     # Attempted but no enrichment result; mark as no_candidates to avoid repeated retries.
                     df.at[idx, "FB_Status"] = "no_candidates"
                     attempt_state = "attempted_fb_timeout_or_fetch_error"
                     df.at[idx, FB_ATTEMPT_STATE_COL] = attempt_state
+                    row_driver_error = True
 
                 write_after = _fb_write_surface_snapshot(df.loc[idx])
                 df.at[idx, FB_WRITE_STATE_COL] = _classify_fb_write_state(write_before, write_after, attempt_state)
+                reset_trigger = fb_driver_recycle.record_attempt_result(driver_error=row_driver_error)
+                rolling_failures = sum(1 for failed in fb_driver_recycle.rolling_failure_window if failed)
+                _safe_log_console(logger, f"[FB Driver] attempt_counter={fb_driver_recycle.attempt_counter}")
+                _safe_log_console(
+                    logger,
+                    f"[FB Driver] rolling_failures={rolling_failures}/{fb_driver_recycle.window_size}",
+                )
+                if reset_trigger == "row_interval":
+                    _safe_log_console(
+                        logger,
+                        f"[FB Driver] reset_trigger=row_interval count={fb_driver_recycle.pending_count}",
+                    )
+                elif reset_trigger == "failure_spike":
+                    _safe_log_console(
+                        logger,
+                        "[FB Driver] "
+                        f"reset_trigger=failure_spike window={fb_driver_recycle.pending_window} "
+                        f"failures={fb_driver_recycle.pending_failures}",
+                    )
 
             df.at[idx, FB_DEBUG_REASON_COL] = _classify_fb_debug_reason(df.loc[idx])
             finalize_fb_row_attribution(df, idx)
@@ -4842,6 +5022,13 @@ def run_facebook_global_pass_nightmode(
 
             if skip_row:
                 continue
+
+            pending_reset = fb_driver_recycle.consume_pending()
+            if pending_reset:
+                fb_helper, _terminated = fb_owner.recycle()
+                fb_driver_recycle.reset_after_recycle()
+                _safe_log_console(logger, "[FB Driver] driver_restarted")
+                _safe_log_console(logger, f"[FB Driver] reset_completed next_row={int(idx) + 1}")
 
             if max_rows_per_run and processed_this_run >= max_rows_per_run:
                 limit_reached = True
