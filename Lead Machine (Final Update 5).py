@@ -236,6 +236,42 @@ def _lm_section(title: str) -> tuple[QtWidgets.QGroupBox, QtWidgets.QVBoxLayout]
     return group, layout
 
 
+def _lm_collapsible_section(title: str, *, collapsed: bool = True) -> tuple[QtWidgets.QWidget, QtWidgets.QToolButton, QtWidgets.QWidget, QtWidgets.QVBoxLayout]:
+    container = QtWidgets.QWidget()
+    outer_layout = QtWidgets.QVBoxLayout()
+    outer_layout.setContentsMargins(0, 0, 0, 0)
+    outer_layout.setSpacing(LM_SPACING_ROW)
+    container.setLayout(outer_layout)
+
+    toggle = QtWidgets.QToolButton()
+    toggle.setCheckable(True)
+    toggle.setChecked(not collapsed)
+    toggle.setToolButtonStyle(QtCore.Qt.ToolButtonTextBesideIcon)
+    toggle.setArrowType(QtCore.Qt.DownArrow if toggle.isChecked() else QtCore.Qt.RightArrow)
+    toggle.setText(title)
+    outer_layout.addWidget(toggle)
+
+    content = QtWidgets.QWidget()
+    content_layout = QtWidgets.QVBoxLayout()
+    content_layout.setContentsMargins(
+        LM_PADDING_SECTION,
+        0,
+        LM_PADDING_SECTION,
+        LM_PADDING_SECTION,
+    )
+    content_layout.setSpacing(LM_SPACING_ROW)
+    content.setLayout(content_layout)
+    content.setVisible(toggle.isChecked())
+    outer_layout.addWidget(content)
+
+    def _sync_collapsible(checked: bool) -> None:
+        toggle.setArrowType(QtCore.Qt.DownArrow if checked else QtCore.Qt.RightArrow)
+        content.setVisible(checked)
+
+    toggle.toggled.connect(_sync_collapsible)
+    return container, toggle, content, content_layout
+
+
 def _lm_scrolled_tab(tab: QtWidgets.QWidget, content_layout: QtWidgets.QVBoxLayout) -> None:
     content_layout.setContentsMargins(
         LM_PADDING_CONTAINER,
@@ -14184,12 +14220,10 @@ class NightModeTab(QtWidgets.QWidget):
         self.unearthed_source_mode_combo.currentIndexChanged.connect(self._sync_unearthed_source_mode_controls)
         layout.addWidget(output_resume_group)
 
-        run_group, run_layout = _lm_section("Run Settings")
+        run_group, run_layout = _lm_section("🌙 Night Mode")
         self.fb_user_edit = QtWidgets.QLineEdit()
-        run_layout.addLayout(_lm_row("FB Username (optional):", self.fb_user_edit))
         self.fb_pass_edit = QtWidgets.QLineEdit()
         self.fb_pass_edit.setEchoMode(QtWidgets.QLineEdit.Password)
-        run_layout.addLayout(_lm_row("FB Password (optional):", self.fb_pass_edit))
 
         self.fb_auto_resume_checkbox = QtWidgets.QCheckBox("Auto-resume FB after captcha")
         self.fb_cooldown_spin = QtWidgets.QSpinBox()
@@ -14200,13 +14234,9 @@ class NightModeTab(QtWidgets.QWidget):
         self.fb_max_attempts_spin.setValue(1)
         self.fb_max_rows_spin = QtWidgets.QSpinBox()
         self.fb_max_rows_spin.setRange(0, 100000)
-        self.fb_max_rows_spin.setValue(100)
-        run_layout.addLayout(_lm_control_row(self.fb_auto_resume_checkbox))
-        run_layout.addLayout(_lm_row("Cooldown (seconds):", self.fb_cooldown_spin, add_stretch=True))
-        run_layout.addLayout(_lm_row("Max auto-resume attempts:", self.fb_max_attempts_spin, add_stretch=True))
-        run_layout.addLayout(_lm_row("FB rows per run (0 = no limit):", self.fb_max_rows_spin, add_stretch=True))
+        self.fb_max_rows_spin.setValue(0)
 
-        self.fb_driver_recovery_checkbox = QtWidgets.QCheckBox("Run FB driver error recovery after Night Mode")
+        self.fb_driver_recovery_checkbox = QtWidgets.QCheckBox("Retry failed Facebook attempts (recommended for best results)")
         self.fb_driver_recovery_checkbox.setChecked(False)
         self.fb_driver_recovery_batch_spin = QtWidgets.QSpinBox()
         self.fb_driver_recovery_batch_spin.setRange(1, 1000)
@@ -14217,11 +14247,8 @@ class NightModeTab(QtWidgets.QWidget):
         self.fb_driver_recovery_mode_group = QtWidgets.QButtonGroup(self)
         self.fb_driver_recovery_mode_group.addButton(self.fb_driver_recovery_copy_radio)
         self.fb_driver_recovery_mode_group.addButton(self.fb_driver_recovery_in_place_radio)
-        run_layout.addLayout(_lm_control_row(self.fb_driver_recovery_checkbox))
-        run_layout.addLayout(_lm_row("FB recovery batch size:", self.fb_driver_recovery_batch_spin, add_stretch=True))
-        run_layout.addLayout(_lm_control_row(self.fb_driver_recovery_copy_radio, self.fb_driver_recovery_in_place_radio))
 
-        self.fb_share_recovery_checkbox = QtWidgets.QCheckBox("Run FB /share recovery after Night Mode")
+        self.fb_share_recovery_checkbox = QtWidgets.QCheckBox("Recover unresolved Facebook /share links (recommended for best results)")
         self.fb_share_recovery_checkbox.setChecked(False)
         self.fb_share_recovery_batch_spin = QtWidgets.QSpinBox()
         self.fb_share_recovery_batch_spin.setRange(1, 1000)
@@ -14232,22 +14259,15 @@ class NightModeTab(QtWidgets.QWidget):
         self.fb_share_recovery_mode_group = QtWidgets.QButtonGroup(self)
         self.fb_share_recovery_mode_group.addButton(self.fb_share_recovery_copy_radio)
         self.fb_share_recovery_mode_group.addButton(self.fb_share_recovery_in_place_radio)
-        run_layout.addLayout(_lm_control_row(self.fb_share_recovery_checkbox))
-        run_layout.addLayout(_lm_row("FB /share recovery batch size:", self.fb_share_recovery_batch_spin, add_stretch=True))
-        run_layout.addLayout(_lm_control_row(self.fb_share_recovery_copy_radio, self.fb_share_recovery_in_place_radio))
 
-        default_live_max = getattr(cross_directory_enricher, "LIVE_SEARCH_MAX_ATTEMPTS", 50) if cross_directory_enricher else 50
-        self.master_enrich_checkbox = QtWidgets.QCheckBox("Use master cross-directory enrichment (recommended)")
+        self.master_enrich_checkbox = QtWidgets.QCheckBox("Enrich leads using all available sources (recommended)")
         self.master_enrich_checkbox.setChecked(True)
-        run_layout.addLayout(_lm_control_row(self.master_enrich_checkbox))
 
-        self.master_live_checkbox = QtWidgets.QCheckBox("Enable live directory search during master enrich")
+        self.master_live_checkbox = QtWidgets.QCheckBox("Allow live searching for additional links during enrichment")
         self.master_live_checkbox.setChecked(True)
         self.master_live_spin = QtWidgets.QSpinBox()
         self.master_live_spin.setRange(0, 10000)
-        self.master_live_spin.setValue(default_live_max)
-        run_layout.addLayout(_lm_control_row(self.master_live_checkbox))
-        run_layout.addLayout(_lm_row("Max live searches (0 = unlimited):", self.master_live_spin, add_stretch=True))
+        self.master_live_spin.setValue(0)
         self.master_enrich_checkbox.stateChanged.connect(self._toggle_master_live_controls)
         self.master_live_checkbox.stateChanged.connect(self._toggle_master_live_controls)
 
@@ -14258,25 +14278,76 @@ class NightModeTab(QtWidgets.QWidget):
         self.run_root_edit = QtWidgets.QLineEdit()
         run_root_browse = QtWidgets.QPushButton("Browse...")
         run_root_browse.clicked.connect(self._browse_run_root)
-        run_layout.addLayout(_lm_row("Run root (optional):", self.run_root_edit, run_root_browse))
 
         self.refresh_run_summary_button = QtWidgets.QPushButton("Refresh Summary")
         self.refresh_run_summary_button.clicked.connect(self._refresh_run_summary)
-        run_layout.addLayout(_lm_control_row(self.refresh_run_summary_button))
         self.run_summary_view = QtWidgets.QPlainTextEdit()
         self.run_summary_view.setReadOnly(True)
         self.run_summary_view.setMinimumHeight(LM_LOG_MIN_HEIGHT)
         self.run_summary_view.setPlaceholderText(NIGHT_MODE_RUN_SUMMARY_PLACEHOLDER)
-        run_layout.addWidget(self.run_summary_view)
 
-        self.start_button = QtWidgets.QPushButton("Start Night Mode")
+        self.start_button = QtWidgets.QPushButton("Run Night Mode")
         self.start_button.clicked.connect(self._start_night_mode)
         self.stop_button = QtWidgets.QPushButton("Stop")
         self.stop_button.clicked.connect(self._stop_night_mode)
         self.stop_button.setEnabled(False)
         clear_log_btn = QtWidgets.QPushButton("Clear log")
         clear_log_btn.clicked.connect(self._clear_log)
-        run_layout.addLayout(_lm_control_row(self.start_button, self.stop_button, clear_log_btn))
+        run_layout.addLayout(_lm_control_row(self.start_button))
+        run_layout.addLayout(_lm_control_row(self.master_enrich_checkbox))
+        run_layout.addLayout(_lm_row("Cooldown:", self.fb_cooldown_spin, add_stretch=True))
+
+        advanced_container, self.advanced_toggle_button, _advanced_content, advanced_layout = _lm_collapsible_section("Advanced Settings")
+        advanced_help = QtWidgets.QLabel("These settings are optional and usually not required.")
+        advanced_help.setWordWrap(True)
+        advanced_layout.addLayout(_lm_control_row(advanced_help))
+
+        advanced_layout.addLayout(_lm_row("FB Username (optional):", self.fb_user_edit))
+        advanced_layout.addLayout(_lm_row("FB Password (optional):", self.fb_pass_edit))
+        advanced_layout.addLayout(_lm_control_row(self.fb_auto_resume_checkbox))
+        advanced_layout.addLayout(_lm_row("Facebook processing limit (0 = no limit):", self.fb_max_rows_spin, add_stretch=True))
+
+        optimisation_group, optimisation_layout = _lm_section("🛠 Post-Run Optimisation")
+        optimisation_layout.addLayout(_lm_control_row(self.fb_driver_recovery_checkbox))
+        self.fb_driver_recovery_options_widget = QtWidgets.QWidget()
+        fb_driver_recovery_options_layout = QtWidgets.QVBoxLayout()
+        fb_driver_recovery_options_layout.setContentsMargins(LM_LABEL_COLUMN_WIDTH, 0, 0, 0)
+        fb_driver_recovery_options_layout.setSpacing(LM_SPACING_ROW)
+        self.fb_driver_recovery_options_widget.setLayout(fb_driver_recovery_options_layout)
+        fb_driver_recovery_options_layout.addLayout(_lm_row("Batch size:", self.fb_driver_recovery_batch_spin, add_stretch=True))
+        fb_driver_recovery_options_layout.addLayout(_lm_control_row(self.fb_driver_recovery_copy_radio, self.fb_driver_recovery_in_place_radio))
+        optimisation_layout.addWidget(self.fb_driver_recovery_options_widget)
+
+        optimisation_layout.addLayout(_lm_control_row(self.fb_share_recovery_checkbox))
+        self.fb_share_recovery_options_widget = QtWidgets.QWidget()
+        fb_share_recovery_options_layout = QtWidgets.QVBoxLayout()
+        fb_share_recovery_options_layout.setContentsMargins(LM_LABEL_COLUMN_WIDTH, 0, 0, 0)
+        fb_share_recovery_options_layout.setSpacing(LM_SPACING_ROW)
+        self.fb_share_recovery_options_widget.setLayout(fb_share_recovery_options_layout)
+        fb_share_recovery_options_layout.addLayout(_lm_row("Batch size:", self.fb_share_recovery_batch_spin, add_stretch=True))
+        fb_share_recovery_options_layout.addLayout(_lm_control_row(self.fb_share_recovery_copy_radio, self.fb_share_recovery_in_place_radio))
+        optimisation_layout.addWidget(self.fb_share_recovery_options_widget)
+
+        optimisation_help = QtWidgets.QLabel(
+            "Improves results for difficult or partially failed cases.\n"
+            "Not always required for clean runs."
+        )
+        optimisation_help.setWordWrap(True)
+        optimisation_layout.addLayout(_lm_control_row(optimisation_help))
+        advanced_layout.addWidget(optimisation_group)
+        self.fb_driver_recovery_checkbox.stateChanged.connect(self._toggle_recovery_option_controls)
+        self.fb_share_recovery_checkbox.stateChanged.connect(self._toggle_recovery_option_controls)
+
+        enrichment_group, enrichment_layout = _lm_section("🔍 Enrichment Options")
+        enrichment_layout.addLayout(_lm_control_row(self.master_live_checkbox))
+        enrichment_layout.addLayout(_lm_row("Max live searches (0 = unlimited):", self.master_live_spin, add_stretch=True))
+        enrichment_layout.addLayout(_lm_control_row(self.sc_meta_checkbox))
+        advanced_layout.addWidget(enrichment_group)
+
+        advanced_layout.addLayout(_lm_row("Run root (optional):", self.run_root_edit, run_root_browse))
+        advanced_layout.addLayout(_lm_control_row(self.refresh_run_summary_button))
+        advanced_layout.addWidget(self.run_summary_view)
+        run_layout.addWidget(advanced_container)
         layout.addWidget(run_group)
 
         output_group, output_layout = _lm_section("Run Output + Logs")
@@ -14294,6 +14365,7 @@ class NightModeTab(QtWidgets.QWidget):
         self.log_console.setReadOnly(True)
         self.log_console.setMinimumHeight(LM_LOG_MIN_HEIGHT)
         output_layout.addWidget(self.log_console)
+        output_layout.addLayout(_lm_control_row(self.stop_button, clear_log_btn))
         layout.addWidget(output_group)
 
         _lm_scrolled_tab(self, layout)
@@ -14301,6 +14373,7 @@ class NightModeTab(QtWidgets.QWidget):
         self._sync_unearthed_resume_controls()
         self._sync_unearthed_source_mode_controls()
         self._toggle_master_live_controls()
+        self._toggle_recovery_option_controls()
         self._load_config_summary()
         self._refresh_run_summary()
 
@@ -14696,7 +14769,11 @@ class NightModeTab(QtWidgets.QWidget):
             "output_mode": "in_place" if self.fb_driver_recovery_in_place_radio.isChecked() else "copy",
         }
         config["fb_share_recovery"] = self._fb_share_recovery_config_for_gui()
-        config["master_enrichment"] = {"enabled": self.master_enrich_checkbox.isChecked()}
+        config["master_enrichment"] = {
+            "enabled": self.master_enrich_checkbox.isChecked(),
+            "enable_live_search": self.master_live_checkbox.isChecked(),
+            "max_live_searches": int(self.master_live_spin.value()),
+        }
         config["soundcloud_meta_enricher"] = {"enabled": self.sc_meta_checkbox.isChecked()}
         try:
             with open(path, "w", encoding="utf-8") as f:
@@ -14776,12 +14853,9 @@ class NightModeTab(QtWidgets.QWidget):
             self.fb_max_attempts_spin.setValue(int(fb_cfg.get("max_auto_resume_attempts", self.fb_max_attempts_spin.value())))
         except Exception:
             pass
-        try:
-            self.fb_max_rows_spin.setValue(int(fb_cfg.get("max_rows_per_run", self.fb_max_rows_spin.value())))
-        except Exception:
-            pass
+        self.fb_max_rows_spin.setValue(0)
         fb_recovery_cfg = config.get("fb_driver_recovery", {}) or {}
-        self.fb_driver_recovery_checkbox.setChecked(bool(fb_recovery_cfg.get("enabled", False)))
+        self.fb_driver_recovery_checkbox.setChecked(False)
         try:
             self.fb_driver_recovery_batch_spin.setValue(int(fb_recovery_cfg.get("batch_size", self.fb_driver_recovery_batch_spin.value())))
         except Exception:
@@ -14791,7 +14865,7 @@ class NightModeTab(QtWidgets.QWidget):
         else:
             self.fb_driver_recovery_copy_radio.setChecked(True)
         fb_share_recovery_cfg = config.get("fb_share_recovery", {}) or {}
-        self.fb_share_recovery_checkbox.setChecked(bool(fb_share_recovery_cfg.get("enabled", False)))
+        self.fb_share_recovery_checkbox.setChecked(False)
         self.fb_share_recovery_batch_spin.setValue(
             _coerce_fb_share_recovery_batch_size(
                 fb_share_recovery_cfg.get("batch_size", self.fb_share_recovery_batch_spin.value())
@@ -14803,12 +14877,10 @@ class NightModeTab(QtWidgets.QWidget):
             self.fb_share_recovery_copy_radio.setChecked(True)
         master_enrich_cfg = config.get("master_enrichment", {}) or {}
         self.master_enrich_checkbox.setChecked(bool(master_enrich_cfg.get("enabled", True)))
-        self.master_live_checkbox.setChecked(bool(master_enrich_cfg.get("enable_live_search", True)))
-        try:
-            self.master_live_spin.setValue(int(master_enrich_cfg.get("max_live_searches", self.master_live_spin.value())))
-        except Exception:
-            pass
+        self.master_live_checkbox.setChecked(True)
+        self.master_live_spin.setValue(0)
         self._toggle_master_live_controls()
+        self._toggle_recovery_option_controls()
         sc_meta_cfg = config.get("soundcloud_meta_enricher", {}) or {}
         self.sc_meta_checkbox.setChecked(bool(sc_meta_cfg.get("enabled", False)))
         if isinstance(jobs, list):
@@ -14875,7 +14947,19 @@ class NightModeTab(QtWidgets.QWidget):
             try:
                 with open(config_path, "r", encoding="utf-8") as f:
                     config = json.load(f)
+                config.setdefault("facebook", {})
+                config["facebook"].update({
+                    "auto_resume_after_captcha": self.fb_auto_resume_checkbox.isChecked(),
+                    "cooldown_seconds": int(self.fb_cooldown_spin.value()),
+                    "max_auto_resume_attempts": int(self.fb_max_attempts_spin.value()),
+                    "max_rows_per_run": int(self.fb_max_rows_spin.value()),
+                })
                 config["fb_share_recovery"] = self._fb_share_recovery_config_for_gui()
+                config["master_enrichment"] = {
+                    "enabled": self.master_enrich_checkbox.isChecked(),
+                    "enable_live_search": self.master_live_checkbox.isChecked(),
+                    "max_live_searches": int(self.master_live_spin.value()),
+                }
                 temp_dir = tempfile.mkdtemp(prefix="nightmode_")
                 config_path_to_use = os.path.join(temp_dir, "overnight_jobs_gui.json")
                 with open(config_path_to_use, "w", encoding="utf-8") as f:
@@ -15023,6 +15107,10 @@ class NightModeTab(QtWidgets.QWidget):
         enabled = self.master_enrich_checkbox.isChecked()
         self.master_live_checkbox.setEnabled(enabled)
         self.master_live_spin.setEnabled(enabled and self.master_live_checkbox.isChecked())
+
+    def _toggle_recovery_option_controls(self):
+        self.fb_driver_recovery_options_widget.setVisible(self.fb_driver_recovery_checkbox.isChecked())
+        self.fb_share_recovery_options_widget.setVisible(self.fb_share_recovery_checkbox.isChecked())
 
     def _append_log(self, message: str):
         msg = message or ""

@@ -1,8 +1,8 @@
 {
-  "unearthed_persistent_cursor": "https://www.abc.net.au/triplejunearthed/artist/hade",
-  "index_file_path": "/Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/data/unearthed_artist_url_index.csv",
-  "last_position": 4499,
-  "last_url": "https://www.abc.net.au/triplejunearthed/artist/hade",
-  "timestamp": "2026-04-29T09:25:34+00:00",
-  "batch_size": 1500
+  "unearthed_persistent_cursor": "https://www.abc.net.au/triplejunearthed/artist/divebar-youth",
+  "index_file_path": "/Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/data/indexes/unearthed/Index_FreshRun_test0.01.csv",
+  "last_position": 61,
+  "last_url": "https://www.abc.net.au/triplejunearthed/artist/divebar-youth",
+  "timestamp": "2026-04-29T23:50:14+00:00",
+  "batch_size": 62
 }
