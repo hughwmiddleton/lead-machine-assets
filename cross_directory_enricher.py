@@ -18054,7 +18054,9 @@ class CrossDirectoryEnricherWorker(QThread):
             "Date Added": datetime.date.today().isoformat(),
             "External Links": "",
             "Email": "",
-            "Source Directory": "",
+            "Lead_Source": origin,
+            "Source_Directory": origin,
+            "Source Directory": origin,
             "Source URL": "",
             "Seed Priority": "",
             "Expansion Parent": _clean_cell(parent_row.get("Artist Name", "")),
@@ -18396,21 +18398,8 @@ class CrossDirectoryEnricherWorker(QThread):
             current_sc = _coerce_directory_value(df.at[row_idx, "SoundCloud Link"])
             if not current_sc:
                 df.at[row_idx, "SoundCloud Link"] = payload.source_url
-        if payload.source_dir:
-            current_raw = _clean_cell(df.at[row_idx, "Source Directory"]) or ""
-            current_key = _canonical_source_key(current_raw)
-            current_priority = SOURCE_PRIORITY.get(current_key, 999)
-            candidate_key = payload.source_dir
-            candidate_priority = SOURCE_PRIORITY.get(candidate_key, 999)
-            if not current_key or candidate_priority < current_priority:
-                display_value = payload.source_detail or _format_source_display(candidate_key)
-                source_url = payload.source_url or ""
-                if candidate_key.startswith("bandcamp"):
-                    canonical = _canonicalise_bandcamp_url(source_url)
-                    if canonical:
-                        source_url = canonical
-                df.at[row_idx, "Source Directory"] = display_value
-                df.at[row_idx, "Source URL"] = source_url
+        # Enrichment provenance is captured in Email_Source_Type/Email_Source_URL above.
+        # Lead origin fields are immutable after ingest.
         try:
             from pipeline_runner import record_email_summary_row_change
 

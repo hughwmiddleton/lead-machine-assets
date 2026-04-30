@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Union
 
 from .alias_map import map_headers_to_canonical
+from .origin import repair_origin_fields
 from .schema import get_canonical_master_schema, get_default_master_csv_path
 
 PathLike = Union[str, Path]
@@ -80,6 +81,7 @@ def build_canonical_row(
             continue
         canonical_row[canonical_field] = value
 
+    repair_origin_fields(canonical_row)
     return canonical_row
 
 

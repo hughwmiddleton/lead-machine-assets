@@ -173,6 +173,10 @@ _ALIAS_GROUPS = {
     "Industry_Signals": [
         "Industry Signals",
     ],
+    "Lead_Source": [
+        "Lead Source",
+        "Lead_Source",
+    ],
     "Source_Directory": [
         "Source Directory",
         "Source_Directory",

@@ -87,6 +87,7 @@ from source_scheduler import (
     is_spotify_origin_row,
     preferred_upstream_identity_hint,
 )
+from lead_vault.origin import repair_origin_integrity_df, validate_origin_integrity_df
 
 try:  # Shared FB helper; safe fallback if unavailable.
     from facebook_enrich import is_fb_login_redirect  # type: ignore
@@ -2766,6 +2767,8 @@ RAW_FALLBACK_COLUMNS: List[str] = [
     "Email_Source_Type",
     "Email_Extract_Method",
     EMAIL_PROVENANCE_JSON_COL,
+    "Lead_Source",
+    "Source_Directory",
     "Source Directory",
 ]
 
@@ -2777,7 +2780,10 @@ def _write_rows_to_csv(rows: Iterable[Any], path: str, source_directory: str = "
     if not materialized:
         df = pd.DataFrame(columns=fallback_cols)
         if source_directory:
+            df["Lead_Source"] = source_directory
+            df["Source_Directory"] = source_directory
             df["Source Directory"] = source_directory
+        df = repair_origin_integrity_df(df, ingest_source=source_directory)
         return _safe_atomic_write_csv(df, path, fallback_cols, reason=f"job={source_directory or 'unknown'}")
     if isinstance(materialized[0], dict):
         columns = []
@@ -2793,8 +2799,14 @@ def _write_rows_to_csv(rows: Iterable[Any], path: str, source_directory: str = "
         df = pd.DataFrame(materialized, columns=ordered_columns)
     else:
         df = pd.DataFrame(materialized)
-    if source_directory and "Source Directory" not in df.columns:
-        df["Source Directory"] = source_directory
+    if source_directory:
+        if "Lead_Source" not in df.columns:
+            df["Lead_Source"] = source_directory
+        if "Source_Directory" not in df.columns:
+            df["Source_Directory"] = source_directory
+        if "Source Directory" not in df.columns:
+            df["Source Directory"] = source_directory
+    df = repair_origin_integrity_df(df, ingest_source=source_directory)
     fallback_cols = list(df.columns) if len(getattr(df, "columns", [])) else fallback_cols
     return _safe_atomic_write_csv(df, path, fallback_cols, reason=f"job={source_directory or 'unknown'}")
 
@@ -5211,6 +5223,8 @@ def export_master_leads(
 
         consolidated_df = pd.read_csv(input_csv, dtype=str, keep_default_na=False)
         consolidated_df = consolidated_df.fillna("")
+        consolidated_df = repair_origin_integrity_df(consolidated_df)
+        validate_origin_integrity_df(consolidated_df)
         consolidated_df = _consolidate_email_all(consolidated_df)
         consolidated_df = apply_platform_terminal_normalization_df(consolidated_df)
         consolidated_df = recompute_final_status_post_enrichment(consolidated_df, export_logger)

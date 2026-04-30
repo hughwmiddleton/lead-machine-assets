@@ -96,7 +96,9 @@ def test_stage_festival_expansion_row_shape_is_seed_like_and_non_recursive(tmp_p
     assert row["Expansion Origin"] == "bandcamp"
     assert row["Discovery Tier"] == "festival_expansion"
     assert row["Seed Priority"] == ""
-    assert row["Source Directory"] == ""
+    assert row["Lead_Source"] == "bandcamp"
+    assert row["Source_Directory"] == "bandcamp"
+    assert row["Source Directory"] == "bandcamp"
     assert row["Festival Sources"] == "bigsound;sxsw"
     assert row["Festival Count"] == "2"
 

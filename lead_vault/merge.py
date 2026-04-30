@@ -15,6 +15,7 @@ from email_normalizer import normalize_email_value
 
 from .alias_map import map_headers_to_canonical
 from .importer import build_canonical_row, ensure_master_csv_exists, read_csv_rows
+from .origin import merge_origin_fields, repair_origin_fields, validate_origin_integrity_rows
 from .schema import get_canonical_master_schema, get_default_master_csv_path
 
 PathLike = Union[str, Path]
@@ -378,6 +379,8 @@ def _run_consolidating_csv_merge(
             candidate_source=source,
         ):
             if current["source"] == "existing" and source == "incoming":
+                merge_origin_fields(candidate, current["row"])
+            if current["source"] == "existing" and source == "incoming":
                 preview["rows_replaced"] += 1
                 preview["rows_updated"] += 1
             consolidated[key] = {
@@ -461,6 +464,8 @@ def _run_consolidating_csv_merge(
             )
 
     final_rows.extend(_copy_master_shaped_row(item["row"]) for item in consolidated.values())
+    for row in final_rows:
+        repair_origin_fields(row, ingest_source=_derive_ingest_source(row, Path(source_path).name))
     preview["rows_added"] = preview["rows_added_new"]
     preview["rows_final"] = len(final_rows)
     classified_total = sum(int(value) for value in preview["merge_preview_counts"].values())
@@ -708,6 +713,7 @@ def _prepare_incoming_row(row: Dict[str, str]) -> Dict[str, str]:
     prepared["Primary_Email"] = _normalize_email(prepared.get("Primary_Email", ""))
     prepared["All_Emails"] = _merge_email_lists("", prepared.get("All_Emails", ""))
     prepared["Source_URL"] = _clean_cell(prepared.get("Source_URL", ""))
+    repair_origin_fields(prepared)
     return prepared
 
 
@@ -726,6 +732,7 @@ def _prepare_new_row(
         new_row["Date_Added"] = timestamp
     if "Last_Updated" in new_row:
         new_row["Last_Updated"] = timestamp
+    repair_origin_fields(new_row, ingest_source=_derive_ingest_source(new_row, source_basename))
     return new_row
 
 
@@ -736,13 +743,15 @@ def _merge_existing_row(
     timestamp: str,
 ) -> Tuple[Dict[str, str], bool]:
     merged = {field: _clean_cell(existing_row.get(field, "")) for field in get_canonical_master_schema()}
-    changed = False
+    original_origin = (merged.get("Lead_Source", ""), merged.get("Source_Directory", ""))
+    merge_origin_fields(merged, incoming_row)
+    changed = original_origin != (merged.get("Lead_Source", ""), merged.get("Source_Directory", ""))
 
     for field_name in get_canonical_master_schema():
         existing_value = merged[field_name]
         incoming_value = _clean_cell(incoming_row.get(field_name, ""))
 
-        if field_name in {"Import_Source_File", "Import_Batch", "Date_Added", "Last_Updated"}:
+        if field_name in {"Import_Source_File", "Import_Batch", "Date_Added", "Last_Updated", "Lead_Source", "Source_Directory"}:
             continue
 
         if field_name in _LIST_LIKE_FIELDS:
@@ -874,6 +883,15 @@ def _merge_social_field(
 
 def _copy_master_shaped_row(row: Dict[str, str]) -> Dict[str, str]:
     return {field: "" if row.get(field, "") is None else str(row.get(field, "")) for field in get_canonical_master_schema()}
+
+
+def _derive_ingest_source(row: Dict[str, str], source_basename: str = "") -> str:
+    for field_name in ("Lead_Source", "Source_Directory", "Discovery_Source", "Source_Job"):
+        value = _clean_cell(row.get(field_name, ""))
+        if value:
+            return value
+    stem = Path(source_basename).stem if source_basename else ""
+    return _clean_cell(stem)
 
 
 def _is_nullish_value(value: object) -> bool:
@@ -1228,10 +1246,16 @@ def _write_master_rows(rows: Sequence[Dict[str, str]], path: PathLike) -> None:
         temp_path.unlink()
 
     try:
+        prepared_rows = []
+        for row in rows:
+            prepared = {field: _clean_cell(row.get(field, "")) for field in fieldnames}
+            repair_origin_fields(prepared, ingest_source=_derive_ingest_source(prepared, Path(path).name))
+            prepared_rows.append(prepared)
+        validate_origin_integrity_rows(prepared_rows)
         with open(temp_path, "w", newline="", encoding="utf-8-sig") as handle:
             writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
             writer.writeheader()
-            for row in rows:
+            for row in prepared_rows:
                 writer.writerow({field: _clean_cell(row.get(field, "")) for field in fieldnames})
             handle.flush()
             os.fsync(handle.fileno())
@@ -1254,10 +1278,16 @@ def _write_master_rows_exact(rows: Sequence[Dict[str, str]], path: PathLike) -> 
         temp_path.unlink()
 
     try:
+        prepared_rows = []
+        for row in rows:
+            prepared = {field: "" if row.get(field, "") is None else str(row.get(field, "")) for field in fieldnames}
+            repair_origin_fields(prepared, ingest_source=_derive_ingest_source(prepared, Path(path).name))
+            prepared_rows.append(prepared)
+        validate_origin_integrity_rows(prepared_rows)
         with open(temp_path, "w", newline="", encoding="utf-8-sig") as handle:
             writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
             writer.writeheader()
-            for row in rows:
+            for row in prepared_rows:
                 writer.writerow({field: "" if row.get(field, "") is None else str(row.get(field, "")) for field in fieldnames})
             handle.flush()
             os.fsync(handle.fileno())

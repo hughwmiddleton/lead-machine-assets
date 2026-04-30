@@ -1,0 +1,151 @@
+import csv
+
+import pandas as pd
+import pytest
+
+from lead_vault.exporter import WOODPECKER_EXPORT_PRESET, export_with_preset
+from lead_vault.merge import merge_csv_into_master
+from lead_vault.origin import (
+    OriginIntegrityError,
+    OriginLockedRow,
+    repair_origin_fields,
+    repair_origin_integrity_df,
+    safe_row_update,
+    validate_origin_integrity_rows,
+)
+from lead_vault.schema import get_canonical_master_schema
+
+
+def _write_csv(path, headers, rows):
+    with open(path, "w", newline="", encoding="utf-8-sig") as handle:
+        writer = csv.DictWriter(handle, fieldnames=headers)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def _master_row(**overrides):
+    row = {field: "" for field in get_canonical_master_schema()}
+    row.update(overrides)
+    return row
+
+
+def test_origin_persists_when_email_source_changes_to_soundcloud():
+    row = {
+        "Lead_Source": "unearthed",
+        "Source_Directory": "unearthed",
+        "Source Directory": "unearthed",
+        "Email_Source_Type": "",
+    }
+
+    safe_row_update(
+        row,
+        {
+            "Email_Source_Type": "soundcloud",
+            "Email_Source_URL": "https://soundcloud.com/example",
+            "Source_Directory": "soundcloud",
+            "Lead_Source": "soundcloud",
+        },
+    )
+    repair_origin_fields(row)
+
+    assert row["Lead_Source"] == "unearthed"
+    assert row["Source_Directory"] == "unearthed"
+    assert row["Source Directory"] == "unearthed"
+    assert row["Email_Source_Type"] == "soundcloud"
+
+
+def test_guarded_mutation_blocks_origin_overwrite():
+    row = {"Lead_Source": "unearthed", "Source_Directory": "unearthed"}
+
+    safe_row_update(row, {"Source_Directory": "soundcloud"})
+
+    assert row["Source_Directory"] == "unearthed"
+
+
+def test_origin_locked_row_update_blocks_origin_overwrite():
+    row = OriginLockedRow({"Lead_Source": "unearthed", "Source_Directory": "unearthed"})
+
+    row.update({"Source_Directory": "soundcloud", "Lead_Source": "soundcloud"})
+
+    assert row["Lead_Source"] == "unearthed"
+    assert row["Source_Directory"] == "unearthed"
+
+
+def test_blank_source_directory_repairs_from_lead_source():
+    row = {"Lead_Source": "unearthed", "Source_Directory": ""}
+
+    repair_origin_fields(row)
+
+    assert row["Source_Directory"] == "unearthed"
+
+
+def test_merge_conflict_keeps_existing_lead_source(tmp_path):
+    master_path = tmp_path / "master.csv"
+    source_path = tmp_path / "incoming.csv"
+    _write_csv(
+        master_path,
+        get_canonical_master_schema(),
+        [
+            _master_row(
+                Artist="Origin Lock",
+                Source_URL="https://example.com/origin-lock",
+                Lead_Source="unearthed",
+                Source_Directory="unearthed",
+            )
+        ],
+    )
+    _write_csv(
+        source_path,
+        ["Artist Name", "Profile URL", "Lead Source", "Source Directory", "Email"],
+        [
+            {
+                "Artist Name": "Origin Lock",
+                "Profile URL": "https://example.com/origin-lock",
+                "Lead Source": "soundcloud",
+                "Source Directory": "soundcloud",
+                "Email": "artist@example.com",
+            }
+        ],
+    )
+
+    merge_csv_into_master(source_path, master_path=master_path)
+
+    with open(master_path, "r", newline="", encoding="utf-8-sig") as handle:
+        row = next(csv.DictReader(handle))
+    assert row["Lead_Source"] == "unearthed"
+    assert row["Source_Directory"] == "unearthed"
+    assert row["Primary_Email"] == "artist@example.com"
+
+
+def test_export_integrity_repair_and_validation(tmp_path):
+    valid = {"Lead_Source": "unearthed", "Source_Directory": "unearthed"}
+    validate_origin_integrity_rows([valid])
+
+    with pytest.raises(OriginIntegrityError):
+        validate_origin_integrity_rows([{"Lead_Source": "unearthed", "Source_Directory": "soundcloud"}])
+
+
+def test_woodpecker_export_fails_on_blank_origin(tmp_path):
+    master_path = tmp_path / "master.csv"
+    output_path = tmp_path / "woodpecker.csv"
+    row = _master_row(
+        Artist="Blank Origin",
+        Primary_Email="blank@example.com",
+        All_Emails="blank@example.com",
+        Lead_Source="",
+        Source_Directory="",
+    )
+    _write_csv(master_path, get_canonical_master_schema(), [row])
+
+    with pytest.raises(OriginIntegrityError):
+        export_with_preset(WOODPECKER_EXPORT_PRESET, master_path, output_path)
+
+
+def test_dataframe_blank_repair_keeps_source_directory_mirroring_lead_source():
+    df = pd.DataFrame([{"Lead_Source": "unearthed", "Source_Directory": "", "Source Directory": ""}])
+
+    repaired = repair_origin_integrity_df(df)
+
+    assert repaired.at[0, "Lead_Source"] == "unearthed"
+    assert repaired.at[0, "Source_Directory"] == "unearthed"
+    assert repaired.at[0, "Source Directory"] == "unearthed"

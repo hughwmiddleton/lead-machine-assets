@@ -45,6 +45,7 @@ CANONICAL_MASTER_SCHEMA: Tuple[str, ...] = (
     "Played_On_Unearthed",
     "Unearthed_Status",
     "Industry_Signals",
+    "Lead_Source",
     "Source_Directory",
     "Discovery_Source",
     "Source_URL",

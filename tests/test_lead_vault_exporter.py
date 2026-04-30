@@ -173,6 +173,8 @@ def test_final_export_bridge_strips_rejected_fb_emails_when_metadata_present(tmp
             "Email_Source_Type": "website_enrich",
             "FB_Status": "blocked_403",
             "__fb_emails_applied": "fb@test.com",
+            "Lead_Source": "website",
+            "Source_Directory": "website",
         }
     ]
 

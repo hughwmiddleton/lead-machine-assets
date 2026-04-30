@@ -4,6 +4,13 @@ from typing import Callable, Dict, Optional, Union
 
 import pandas as pd
 
+from .origin import (
+    repair_origin_fields,
+    repair_origin_integrity_df,
+    validate_origin_integrity_df,
+    validate_origin_integrity_rows,
+)
+
 PathLike = Union[str, Path]
 
 
@@ -123,14 +130,19 @@ def export_with_preset(
 
     with open(master_path, "r", encoding="utf-8-sig", newline="") as source_handle:
         reader = csv.DictReader(source_handle, restval="")
+        staged_rows = []
+        for raw_row in reader:
+            row = {str(key): "" if value is None else str(value) for key, value in raw_row.items() if key is not None}
+            rows_read += 1
+            if row_filter is not None and not row_filter(row):
+                continue
+            repair_origin_fields(row)
+            staged_rows.append(row)
+        validate_origin_integrity_rows(staged_rows)
         with open(export_path, "w", encoding="utf-8-sig", newline="") as output_handle:
             writer = csv.DictWriter(output_handle, fieldnames=headers)
             writer.writeheader()
-            for raw_row in reader:
-                row = {str(key): "" if value is None else str(value) for key, value in raw_row.items() if key is not None}
-                rows_read += 1
-                if row_filter is not None and not row_filter(row):
-                    continue
+            for row in staged_rows:
                 export_row = {}
                 for header in headers:
                     source_field = field_map.get(header)
@@ -160,10 +172,13 @@ def _export_legacy_final_export_bridge(
 
     master_df = pd.read_csv(master_path, dtype=str, keep_default_na=False).fillna("")
     rows_read = len(master_df.index)
+    master_df = repair_origin_integrity_df(master_df)
+    validate_origin_integrity_df(master_df)
 
     bridge_df = _build_legacy_final_export_bridge_frame(master_df)
     bridge_df = recompute_final_status_post_enrichment(bridge_df, logger=None)
     export_df = _build_final_export_frame(bridge_df)
+    export_df = export_df.reindex(columns=list(preset["headers"]), fill_value="")
     export_df.to_csv(export_path, index=False, encoding="utf-8-sig")
 
     rows_exported = len(export_df.index)
@@ -188,6 +203,9 @@ def _build_legacy_final_export_bridge_frame(df: pd.DataFrame) -> pd.DataFrame:
     _backfill_column(work, "SoundCloud Link", ["SoundCloud_URL"])
     _backfill_column(work, "External Links", ["External_Links"])
     _backfill_column(work, "Source Directory", ["Source_Directory"])
+    _backfill_column(work, "Lead_Source", ["Lead_Source", "Source_Directory", "Source Directory"])
+    _backfill_column(work, "Source_Directory", ["Lead_Source", "Source Directory"])
+    work = repair_origin_integrity_df(work)
     _backfill_column(work, "Source URL", ["Source_URL"])
     _backfill_column(work, "Played on triple J", ["Played_On_Triple_J"])
     _backfill_column(work, "Played on Unearthed", ["Played_On_Unearthed"])
