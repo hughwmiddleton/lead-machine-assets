@@ -12061,6 +12061,8 @@ def _campaign_prep_atomic_write_csv(path: Path, rows: List[dict], columns: List[
         raise
 
 
+CAMPAIGN_PREP_PROCESSED_MASTER_FILENAME = "master_export_leads.processed.csv"
+
 CAMPAIGN_PREP_LOCATION_ALIASES = (
     "Location",
     "location",
@@ -12182,6 +12184,7 @@ def generate_campaign_csvs(
     email_column = _campaign_prep_resolve_alias(columns_by_lower, email_column_candidates)
 
     output_rows: Dict[str, List[Tuple[dict, dict]]] = {name: [] for name in CAMPAIGN_PREP_OUTPUT_ORDER}
+    processed_master_rows: List[Tuple[dict, dict]] = []
     column_indexes = {column: idx for idx, column in enumerate(columns)}
     output_columns = CAMPAIGN_PREP_WOODPECKER_COLUMNS if export_format == "woodpecker" else columns
 
@@ -12223,12 +12226,21 @@ def generate_campaign_csvs(
             else:
                 playback_segment = "Neither"
 
+            processed_master_rows.append((final_row, dict(final_row)))
             export_row = _campaign_prep_export_row(final_row, export_format, columns_by_lower, email_column)
             output_rows[f"{location_segment}.csv"].append((final_row, dict(export_row)))
             output_rows[f"{location_segment}_{playback_segment}.csv"].append((final_row, dict(export_row)))
 
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
+    sorted_processed_master = _campaign_prep_sort_buffer_by_release_date(processed_master_rows, release_date_sort)
+    processed_master_output_rows = [dict(source_row) for source_row, _processed_row in sorted_processed_master]
+    _campaign_prep_atomic_write_csv(
+        output_path / CAMPAIGN_PREP_PROCESSED_MASTER_FILENAME,
+        processed_master_output_rows,
+        columns,
+    )
+
     result: Dict[str, int] = {}
     for filename in CAMPAIGN_PREP_OUTPUT_ORDER:
         buffered_rows = output_rows[filename]

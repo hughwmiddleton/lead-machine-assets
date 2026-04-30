@@ -215,7 +215,11 @@ def test_generate_campaign_csvs_no_email_column_filter_on_writes_empty_primary_f
     assert outside_columns == columns
     assert inside_rows == []
     assert outside_rows == []
-    assert sorted(path.name for path in output_dir.glob("*.csv")) == ["Inside_VIC.csv", "Outside_VIC.csv"]
+    assert sorted(path.name for path in output_dir.glob("*.csv")) == [
+        "Inside_VIC.csv",
+        "Outside_VIC.csv",
+        "master_export_leads.processed.csv",
+    ]
 
 
 def test_generate_campaign_csvs_filter_all_rows_removed_writes_primary_headers_only(tmp_path):
@@ -248,7 +252,11 @@ def test_generate_campaign_csvs_filter_all_rows_removed_writes_primary_headers_o
     assert outside_columns == columns
     assert inside_rows == []
     assert outside_rows == []
-    assert sorted(path.name for path in output_dir.glob("*.csv")) == ["Inside_VIC.csv", "Outside_VIC.csv"]
+    assert sorted(path.name for path in output_dir.glob("*.csv")) == [
+        "Inside_VIC.csv",
+        "Outside_VIC.csv",
+        "master_export_leads.processed.csv",
+    ]
 
 
 def test_generate_campaign_csvs_release_date_sort_ascending_invalid_at_bottom_stable(tmp_path):
@@ -356,6 +364,66 @@ def test_generate_campaign_csvs_release_date_sort_after_split_and_email_filter(t
         ("Later Split", "later1@test.com"),
         ("Later Split", "later2@test.com"),
     ]
+
+
+def test_generate_campaign_csvs_writes_processed_master_from_prepared_rows(tmp_path):
+    module = _load_legacy_module()
+    columns = ["Artist", "Location", "Release Date", "Email", "Email_All", "Custom Source Field"]
+    input_path = tmp_path / "master.csv"
+    output_dir = tmp_path / "campaign"
+    _write_csv(
+        input_path,
+        [
+            {
+                "Artist": "Later",
+                "Location": "Victoria",
+                "Release Date": "2026-05-01",
+                "Email": "later1@test.com, later2@test.com",
+                "Email_All": "later1@test.com, later2@test.com",
+                "Custom Source Field": "keep later",
+            },
+            {
+                "Artist": "No Email",
+                "Location": "Melbourne",
+                "Release Date": "2027-01-01",
+                "Email": "",
+                "Email_All": "",
+                "Custom Source Field": "filtered",
+            },
+            {
+                "Artist": "Earlier",
+                "Location": "Sydney",
+                "Release Date": "2025-01-01",
+                "Email": "earlier@test.com",
+                "Email_All": "earlier@test.com",
+                "Custom Source Field": "keep earlier",
+            },
+        ],
+        columns,
+    )
+    source_bytes = input_path.read_bytes()
+
+    result = module.generate_campaign_csvs(
+        str(input_path),
+        str(output_dir),
+        split_multiple_emails=True,
+        remove_rows_without_emails=True,
+        release_date_sort="ascending",
+        export_format="woodpecker",
+    )
+
+    processed_columns, processed_rows = _read_csv(output_dir / module.CAMPAIGN_PREP_PROCESSED_MASTER_FILENAME)
+    assert module.CAMPAIGN_PREP_PROCESSED_MASTER_FILENAME not in result
+    assert processed_columns == columns
+    assert [(row["Artist"], row["Email"], row["Custom Source Field"]) for row in processed_rows] == [
+        ("Earlier", "earlier@test.com", "keep earlier"),
+        ("Later", "later1@test.com", "keep later"),
+        ("Later", "later2@test.com", "keep later"),
+    ]
+
+    _, campaign_rows = _read_csv(output_dir / "Inside_VIC.csv")
+    assert [row["Email"] for row in campaign_rows] == ["later1@test.com", "later2@test.com"]
+    assert input_path.read_bytes() == source_bytes
 
 
 def test_generate_campaign_csvs_release_date_sort_does_not_mutate_export_rows(tmp_path):
