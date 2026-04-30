@@ -14127,7 +14127,6 @@ class NightModeTab(QtWidgets.QWidget):
         self._active_unearthed_index_path = _unearthed_artist_url_index_path()
         self._bootstrap_stage = None  # None | "headless" | "headed" | "final_headless"
         self._log_buffer: list[str] = []
-        self._phased_enabled = False
         self._build_ui()
         self._progress_timer = QtCore.QTimer(self)
         self._progress_timer.setInterval(1500)
@@ -14197,9 +14196,7 @@ class NightModeTab(QtWidgets.QWidget):
         output_resume_layout.addLayout(_lm_row("Index File:", self.unearthed_index_combo, self.unearthed_duplicate_index_button))
         self.resume_checkbox = QtWidgets.QCheckBox("Resume unfinished jobs")
         self.stop_on_failure_checkbox = QtWidgets.QCheckBox("Stop on first failure")
-        self.phased_checkbox = QtWidgets.QCheckBox("Use phased runner (v2)")
-        self.phased_checkbox.setToolTip("Runs Night Mode via the v2 phased runner (seed \u2192 enrich \u2192 contact).")
-        output_resume_layout.addLayout(_lm_control_row(self.resume_checkbox, self.stop_on_failure_checkbox, self.phased_checkbox))
+        output_resume_layout.addLayout(_lm_control_row(self.resume_checkbox, self.stop_on_failure_checkbox))
 
         self.unearthed_selected_cursor_label = QtWidgets.QLabel("Selected cursor checkpoint URL:")
         self.unearthed_selected_cursor_edit = QtWidgets.QLineEdit()
@@ -14756,7 +14753,7 @@ class NightModeTab(QtWidgets.QWidget):
             "unearthed_start_index_position": self._current_unearthed_start_index_position(),
             "unearthed_url_index_path": self._active_unearthed_index_path,
         }
-        config["phased"] = self.phased_checkbox.isChecked()
+        config["use_phased_runner"] = True
         config["facebook"] = {
             "auto_resume_after_captcha": self.fb_auto_resume_checkbox.isChecked(),
             "cooldown_seconds": int(self.fb_cooldown_spin.value()),
@@ -14840,9 +14837,6 @@ class NightModeTab(QtWidgets.QWidget):
             idx = self.export_mode_combo.findText(export_mode)
             if idx >= 0:
                 self.export_mode_combo.setCurrentIndex(idx)
-        phased_value = config.get("phased")
-        if phased_value is not None:
-            self.phased_checkbox.setChecked(bool(phased_value))
         fb_cfg = config.get("facebook", {}) or {}
         self.fb_auto_resume_checkbox.setChecked(bool(fb_cfg.get("auto_resume_after_captcha", False)))
         try:
@@ -14894,7 +14888,6 @@ class NightModeTab(QtWidgets.QWidget):
             return
         if not self._validate_active_unearthed_index_for_launch():
             return
-        self._phased_enabled = self.phased_checkbox.isChecked()
         self._bootstrap_stage = "headless"
         self._launch_night_mode(headless=True)
 
@@ -14912,7 +14905,7 @@ class NightModeTab(QtWidgets.QWidget):
                 "unearthed_start_index_position": self._current_unearthed_start_index_position(),
                 "unearthed_url_index_path": self._active_unearthed_index_path,
             }
-            config["phased"] = self._phased_enabled
+            config["use_phased_runner"] = True
             config["facebook"] = {
                 "auto_resume_after_captcha": self.fb_auto_resume_checkbox.isChecked(),
                 "cooldown_seconds": int(self.fb_cooldown_spin.value()),
@@ -14955,6 +14948,7 @@ class NightModeTab(QtWidgets.QWidget):
                     "max_rows_per_run": int(self.fb_max_rows_spin.value()),
                 })
                 config["fb_share_recovery"] = self._fb_share_recovery_config_for_gui()
+                config["use_phased_runner"] = True
                 config["master_enrichment"] = {
                     "enabled": self.master_enrich_checkbox.isChecked(),
                     "enable_live_search": self.master_live_checkbox.isChecked(),
@@ -14977,9 +14971,6 @@ class NightModeTab(QtWidgets.QWidget):
             cmd.append("--resume")
         if self.stop_on_failure_checkbox.isChecked():
             cmd.append("--stop-on-failure")
-        phased_enabled = self._phased_enabled
-        if phased_enabled:
-            cmd.append("--phased")
         run_root = self.run_root_edit.text().strip()
         if run_root:
             cmd.extend(["--run-root", run_root])

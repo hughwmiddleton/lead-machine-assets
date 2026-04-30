@@ -417,6 +417,13 @@ def _load_json(path: str) -> Dict[str, Any]:
         return json.load(f)
 
 
+def normalize_night_mode_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    normalized = dict(config or {})
+    normalized["use_phased_runner"] = True
+    normalized["phased"] = True
+    return normalized
+
+
 def _write_json(path: str, payload: Dict[str, Any]) -> None:
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     payload["last_update"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -1545,7 +1552,7 @@ def run_night_mode(
 ) -> Dict[str, Any]:
     stats = SmokeStats()
     config_load_start = time.time()
-    config = _load_json(config_path)
+    config = normalize_night_mode_config(_load_json(config_path))
     stats.jobs_attempted = len(config.get("jobs", []))
     export_mode = (export_mode_override or config.get("export_mode") or DEFAULT_EXPORT_MODE).strip().lower()
     if export_mode not in {"per_directory", "combined", "both"}:
@@ -1977,7 +1984,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--phased",
         action="store_true",
         default=False,
-        help="Run Night Mode via v2 phased runner (opt-in).",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument("--stop-on-failure", action="store_true", help="Abort all jobs if any job fails")
     parser.add_argument(
@@ -2027,42 +2034,24 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[List[str]] = None) -> None:
     parser = _build_arg_parser()
     args = parser.parse_args(argv)
-    if args.phased:
-        from night_mode_v2.phased_runner import run_phased_night_mode
+    from night_mode_v2.phased_runner import run_phased_night_mode
 
-        result = run_phased_night_mode(
-            config_path=args.config,
-            run_root=args.run_root,
-            resume=args.resume,
-            stop_on_failure=args.stop_on_failure,
-            export_mode=args.export_mode,
-            export_profile=args.export_profile,
-            fb_auto_resume_override=args.fb_auto_resume,
-            fb_cooldown_override=args.fb_cooldown_seconds,
-            fb_max_attempts_override=args.fb_max_auto_resume_attempts,
-            fb_max_rows_override=args.fb_max_rows_per_run,
-            with_sc_meta=args.with_sc_meta,
-            enable_fb_share_recovery=args.enable_fb_share_recovery,
-            fb_share_recovery_batch_size=args.fb_share_recovery_batch_size,
-            fb_share_recovery_in_place=args.fb_share_recovery_in_place,
-        )
-    else:
-        result = run_night_mode(
-            config_path=args.config,
-            resume=args.resume,
-            stop_on_failure=args.stop_on_failure,
-            export_mode_override=args.export_mode,
-            export_profile_override=args.export_profile,
-            run_root=args.run_root,
-            fb_auto_resume_override=args.fb_auto_resume,
-            fb_cooldown_override=args.fb_cooldown_seconds,
-            fb_max_attempts_override=args.fb_max_auto_resume_attempts,
-            fb_max_rows_override=args.fb_max_rows_per_run,
-            with_sc_meta=args.with_sc_meta,
-            enable_fb_share_recovery=args.enable_fb_share_recovery,
-            fb_share_recovery_batch_size=args.fb_share_recovery_batch_size,
-            fb_share_recovery_in_place=args.fb_share_recovery_in_place,
-        )
+    result = run_phased_night_mode(
+        config_path=args.config,
+        run_root=args.run_root,
+        resume=args.resume,
+        stop_on_failure=args.stop_on_failure,
+        export_mode=args.export_mode,
+        export_profile=args.export_profile,
+        fb_auto_resume_override=args.fb_auto_resume,
+        fb_cooldown_override=args.fb_cooldown_seconds,
+        fb_max_attempts_override=args.fb_max_auto_resume_attempts,
+        fb_max_rows_override=args.fb_max_rows_per_run,
+        with_sc_meta=args.with_sc_meta,
+        enable_fb_share_recovery=args.enable_fb_share_recovery,
+        fb_share_recovery_batch_size=args.fb_share_recovery_batch_size,
+        fb_share_recovery_in_place=args.fb_share_recovery_in_place,
+    )
     print(json.dumps(result, indent=2))
 
 

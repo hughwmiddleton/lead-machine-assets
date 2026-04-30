@@ -76,7 +76,7 @@ def _schema_hash_from_df(df: pd.DataFrame) -> str:
 
 def _load_config(config_path: str) -> Dict[str, Any]:
     with open(config_path, "r", encoding="utf-8") as f:
-        return json.load(f)
+        return night_mode_runner.normalize_night_mode_config(json.load(f))
 
 
 def _build_seed_runtime_job(job: Dict[str, Any], *, job_id: str, raw_csv: str) -> Dict[str, Any]:

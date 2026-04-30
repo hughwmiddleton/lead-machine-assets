@@ -75,6 +75,8 @@ def test_night_mode_ui_simplified_labels_and_advanced_defaults(qapp):
     assert "FB rows per run (0 = no limit):" not in label_texts
     assert "Use master cross-directory enrichment (recommended)" not in checkbox_texts
     assert "Enable live directory search during master enrich" not in checkbox_texts
+    assert "Use phased runner (v2)" not in checkbox_texts
+    assert not hasattr(tab, "phased_checkbox")
     assert tab.fb_max_rows_spin.value() == 0
     assert tab.master_live_checkbox.isChecked() is True
     assert tab.master_live_spin.value() == 0
@@ -82,6 +84,25 @@ def test_night_mode_ui_simplified_labels_and_advanced_defaults(qapp):
     assert tab.fb_share_recovery_checkbox.isChecked() is False
     assert tab.fb_driver_recovery_options_widget.isVisible() is False
     assert tab.fb_share_recovery_options_widget.isVisible() is False
+    tab.shutdown()
+
+
+def test_night_mode_gui_config_emits_phased_runner_locked_true(qapp, monkeypatch, tmp_path):
+    module = _load_legacy_module()
+    output_path = tmp_path / "overnight_jobs.json"
+    monkeypatch.setattr(
+        module.QtWidgets.QFileDialog,
+        "getSaveFileName",
+        lambda *args, **kwargs: (str(output_path), "JSON Files (*.json)"),
+    )
+
+    tab = module.NightModeTab()
+    tab.jobs = [{"directory": "spotify", "mode": "playlist", "input": "playlist"}]
+    tab._save_config_to_file()
+
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    assert payload["use_phased_runner"] is True
+    assert payload.get("phased") is not False
     tab.shutdown()
 
 
@@ -209,9 +230,12 @@ def test_fb_share_recovery_checkbox_off_overrides_saved_config(qapp, tmp_path, m
 
     cmd = captured["command"]
     assert "--enable-fb-share-recovery" not in cmd
+    assert "--phased" not in cmd
     prepared_config = json.loads(Path(cmd[cmd.index("--config") + 1]).read_text(encoding="utf-8"))
     assert prepared_config["fb_share_recovery"]["enabled"] is False
     assert prepared_config["fb_share_recovery"]["output_mode"] == "copy"
+    assert prepared_config["use_phased_runner"] is True
+    assert prepared_config.get("phased") is not False
     tab.shutdown()
 
 
