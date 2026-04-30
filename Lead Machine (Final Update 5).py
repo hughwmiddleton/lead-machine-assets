@@ -11924,15 +11924,27 @@ class AutoValidateWorker(QtCore.QThread):
             pass
 
 
+CAMPAIGN_PREP_RECENCY_BUCKET_COLUMN = "Recency_Bucket"
+CAMPAIGN_PREP_RECENCY_BUCKETS = (
+    "0_30_days",
+    "30_90_days",
+    "90_180_days",
+    "180_plus_days",
+)
+CAMPAIGN_PREP_REGION_SEGMENTS = ("Inside_VIC", "Outside_VIC")
+CAMPAIGN_PREP_RADIO_BUCKETS = ("Played_TripleJ", "Played_Unearthed", "Neither")
+CAMPAIGN_PREP_RUN_TIMEZONE = datetime.timezone.utc
+
+
+def _campaign_prep_campaign_filename(region: str, recency_bucket: str, radio_bucket: str) -> str:
+    return f"{recency_bucket}/{region}_{radio_bucket}.csv"
+
+
 CAMPAIGN_PREP_OUTPUT_ORDER = [
-    "Inside_VIC.csv",
-    "Outside_VIC.csv",
-    "Inside_VIC_Played_TripleJ.csv",
-    "Inside_VIC_Played_Unearthed.csv",
-    "Inside_VIC_Neither.csv",
-    "Outside_VIC_Played_TripleJ.csv",
-    "Outside_VIC_Played_Unearthed.csv",
-    "Outside_VIC_Neither.csv",
+    _campaign_prep_campaign_filename(region, recency_bucket, radio_bucket)
+    for region in CAMPAIGN_PREP_REGION_SEGMENTS
+    for recency_bucket in CAMPAIGN_PREP_RECENCY_BUCKETS
+    for radio_bucket in CAMPAIGN_PREP_RADIO_BUCKETS
 ]
 
 
@@ -12007,10 +12019,45 @@ def _campaign_prep_parse_release_date(value) -> Optional[datetime.datetime]:
     try:
         parsed = datetime.datetime.fromisoformat(cleaned)
     except (TypeError, ValueError):
-        return None
-    if parsed.tzinfo is not None:
-        parsed = parsed.astimezone(datetime.timezone.utc).replace(tzinfo=None)
-    return parsed
+        try:
+            parsed_ts = pd.to_datetime(cleaned, errors="coerce", dayfirst=True)
+        except Exception:
+            return None
+        if pd.isna(parsed_ts):
+            return None
+        parsed = parsed_ts.to_pydatetime()
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=CAMPAIGN_PREP_RUN_TIMEZONE)
+    return parsed.astimezone(CAMPAIGN_PREP_RUN_TIMEZONE)
+
+
+def _campaign_prep_recency_bucket(
+    parsed_release_date: Optional[datetime.datetime],
+    run_reference_date: datetime.datetime,
+) -> str:
+    if parsed_release_date is None:
+        return "180_plus_days"
+    release_date = parsed_release_date.astimezone(CAMPAIGN_PREP_RUN_TIMEZONE).date()
+    reference_date = run_reference_date.astimezone(CAMPAIGN_PREP_RUN_TIMEZONE).date()
+    days_since_release = (reference_date - release_date).days
+    if days_since_release < 0:
+        days_since_release = 0
+    if days_since_release <= 30:
+        return "0_30_days"
+    if days_since_release <= 90:
+        return "30_90_days"
+    if days_since_release <= 180:
+        return "90_180_days"
+    return "180_plus_days"
+
+
+def _campaign_prep_append_recency_column(columns: List[str]) -> List[str]:
+    base_columns = [
+        column
+        for column in columns
+        if str(column).lower() != CAMPAIGN_PREP_RECENCY_BUCKET_COLUMN.lower()
+    ]
+    return [*base_columns, CAMPAIGN_PREP_RECENCY_BUCKET_COLUMN]
 
 
 def _campaign_prep_desc_date_key(parsed: datetime.datetime) -> Tuple[int, int, int, int]:
@@ -12033,12 +12080,14 @@ def _campaign_prep_sort_buffer_by_release_date(
         raise ValueError(f"Invalid release_date_sort: {sort_mode}")
 
     def sort_key(item: Tuple[dict, dict]):
-        source_row, _export_row = item
-        if release_date_column is not None:
-            release_date_value = source_row.get(release_date_column, "")
-        else:
-            release_date_value = source_row.get("Release Date", source_row.get("Release_Date", ""))
-        parsed = _campaign_prep_parse_release_date(release_date_value)
+        source_row, prepared_row = item
+        parsed = prepared_row.get("parsed_release_date")
+        if parsed is None and "parsed_release_date" not in prepared_row:
+            if release_date_column is not None:
+                release_date_value = source_row.get(release_date_column, "")
+            else:
+                release_date_value = source_row.get("Release Date", source_row.get("Release_Date", ""))
+            parsed = _campaign_prep_parse_release_date(release_date_value)
         if parsed is None:
             return (1, 0)
         if sort_mode == "descending":
@@ -12049,6 +12098,7 @@ def _campaign_prep_sort_buffer_by_release_date(
 
 
 def _campaign_prep_atomic_write_csv(path: Path, rows: List[dict], columns: List[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_name(f"{path.name}.tmp")
     try:
         output_df = pd.DataFrame(rows, columns=columns)
@@ -12064,6 +12114,62 @@ def _campaign_prep_atomic_write_csv(path: Path, rows: List[dict], columns: List[
         except Exception:
             pass
         raise
+
+
+def _campaign_prep_build_diagnostics(
+    prepared_rows: List[Tuple[dict, dict]],
+    run_reference_date: datetime.datetime,
+    release_date_column: Optional[str],
+    both_release_date_columns_present: bool,
+) -> dict:
+    bucket_counts = {bucket: 0 for bucket in CAMPAIGN_PREP_RECENCY_BUCKETS}
+    invalid_values: List[str] = []
+    parsed_dates: List[datetime.datetime] = []
+    invalid_count = 0
+    for _source_row, prepared_row in prepared_rows:
+        bucket = prepared_row.get("recency_bucket", "180_plus_days")
+        bucket_counts[bucket] = bucket_counts.get(bucket, 0) + 1
+        parsed_release_date = prepared_row.get("parsed_release_date")
+        if parsed_release_date is None:
+            invalid_count += 1
+            if len(invalid_values) < 10:
+                invalid_values.append(str(prepared_row.get("release_date_raw", "")))
+        else:
+            parsed_dates.append(parsed_release_date)
+
+    diagnostics = {
+        "run_reference_date": run_reference_date.isoformat(),
+        "total_processed_rows": len(prepared_rows),
+        "recency_bucket_counts": bucket_counts,
+        "invalid_blank_unparseable_release_date_count": invalid_count,
+        "min_parsed_release_date": min(parsed_dates).date().isoformat() if parsed_dates else None,
+        "max_parsed_release_date": max(parsed_dates).date().isoformat() if parsed_dates else None,
+        "sample_invalid_release_date_values": invalid_values,
+        "missing_release_date_column": release_date_column is None,
+        "resolved_release_date_column": release_date_column,
+        "both_release_date_columns_present": both_release_date_columns_present,
+    }
+    return diagnostics
+
+
+def _campaign_prep_log_diagnostics(diagnostics: dict) -> None:
+    lines = [
+        "[Campaign Prep] Export summary diagnostics",
+        f"run_reference_date={diagnostics.get('run_reference_date')}",
+        f"total_processed_rows={diagnostics.get('total_processed_rows')}",
+        f"recency_bucket_counts={diagnostics.get('recency_bucket_counts')}",
+        "invalid_blank_unparseable_release_date_count="
+        f"{diagnostics.get('invalid_blank_unparseable_release_date_count')}",
+        f"min_parsed_release_date={diagnostics.get('min_parsed_release_date')}",
+        f"max_parsed_release_date={diagnostics.get('max_parsed_release_date')}",
+        f"sample_invalid_release_date_values={diagnostics.get('sample_invalid_release_date_values')}",
+        f"missing_release_date_column={diagnostics.get('missing_release_date_column')}",
+        f"resolved_release_date_column={diagnostics.get('resolved_release_date_column')}",
+        f"both_release_date_columns_present={diagnostics.get('both_release_date_columns_present')}",
+    ]
+    message = "\n".join(lines)
+    logging.getLogger(__name__).info(message)
+    print(message)
 
 
 CAMPAIGN_PREP_PROCESSED_MASTER_FILENAME = "master_export_leads.processed.csv"
@@ -12093,9 +12199,13 @@ CAMPAIGN_PREP_UNEARTHED_ALIASES = (
 )
 
 CAMPAIGN_PREP_RELEASE_DATE_ALIASES = (
-    "Release Date",
     "Release_Date",
-    "release_date",
+    "Release Date",
+)
+
+CAMPAIGN_PREP_UPLOAD_DATE_ALIASES = (
+    "Upload_Date",
+    "Upload Date",
 )
 
 CAMPAIGN_PREP_WOODPECKER_COLUMNS = [
@@ -12110,6 +12220,8 @@ CAMPAIGN_PREP_WOODPECKER_COLUMNS = [
     "Instagram",
     "Facebook",
     "Source URL",
+    "Release Date",
+    "Upload Date",
     "Notes",
 ]
 
@@ -12124,8 +12236,16 @@ CAMPAIGN_PREP_WOODPECKER_ALIASES = [
     ("Instagram", ("Instagram_URL", "Instagram")),
     ("Facebook", ("Facebook_URL", "Facebook")),
     ("Source URL", ("Source_URL", "Social Link")),
+    ("Release Date", CAMPAIGN_PREP_RELEASE_DATE_ALIASES),
+    ("Upload Date", CAMPAIGN_PREP_UPLOAD_DATE_ALIASES),
     ("Notes", ("Notes",)),
 ]
+
+
+class CampaignPrepResult(dict):
+    def __init__(self, *args, diagnostics: Optional[dict] = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.diagnostics = diagnostics or {}
 
 
 def _campaign_prep_export_row(
@@ -12154,6 +12274,7 @@ def generate_campaign_csvs(
     export_format: str = "lead_machine_full",
     remove_rows_without_emails: bool = False,
     release_date_sort: str = "none",
+    run_reference_date: Optional[datetime.datetime] = None,
     email_column_candidates: tuple[str, ...] = (
         "emails",
         "email",
@@ -12169,6 +12290,12 @@ def generate_campaign_csvs(
         raise ValueError(f"Invalid export_format: {export_format}")
     if release_date_sort not in ("none", "ascending", "descending"):
         raise ValueError(f"Invalid release_date_sort: {release_date_sort}")
+    if run_reference_date is None:
+        run_reference_date = datetime.datetime.now(CAMPAIGN_PREP_RUN_TIMEZONE)
+    elif run_reference_date.tzinfo is None:
+        run_reference_date = run_reference_date.replace(tzinfo=CAMPAIGN_PREP_RUN_TIMEZONE)
+    else:
+        run_reference_date = run_reference_date.astimezone(CAMPAIGN_PREP_RUN_TIMEZONE)
 
     read_kwargs = {
         "dtype": str,
@@ -12195,16 +12322,25 @@ def generate_campaign_csvs(
     email_column = _campaign_prep_resolve_alias(columns_by_lower, email_column_candidates)
 
     release_date_column = _campaign_prep_resolve_alias(columns_by_lower, CAMPAIGN_PREP_RELEASE_DATE_ALIASES)
+    both_release_date_columns_present = (
+        columns_by_lower.get("release_date") is not None
+        and columns_by_lower.get("release date") is not None
+    )
 
     prepared_rows: List[Tuple[dict, dict]] = []
     column_indexes = {column: idx for idx, column in enumerate(columns)}
-    output_columns = CAMPAIGN_PREP_WOODPECKER_COLUMNS if export_format == "woodpecker" else columns
+    processed_columns = _campaign_prep_append_recency_column(columns)
+    export_base_columns = CAMPAIGN_PREP_WOODPECKER_COLUMNS if export_format == "woodpecker" else columns
+    output_columns = _campaign_prep_append_recency_column(export_base_columns)
 
     for i in range(len(df)):
         row = {
             column: ("" if pd.isna(df.iat[i, column_indexes[column]]) else df.iat[i, column_indexes[column]])
             for column in columns
         }
+        release_date_value = row.get(release_date_column, "") if release_date_column is not None else ""
+        parsed_release_date = _campaign_prep_parse_release_date(release_date_value)
+        release_date_invalid = parsed_release_date is None
         rows_for_segmentation = [copy.deepcopy(row)]
         if split_multiple_emails and email_column is not None:
             tokens = _campaign_prep_email_tokens(row.get(email_column, ""))
@@ -12238,17 +12374,15 @@ def generate_campaign_csvs(
             else:
                 playback_segment = "Neither"
 
-            export_row = _campaign_prep_export_row(final_row, export_format, columns_by_lower, email_column)
             prepared_rows.append(
                 (
                     final_row,
                     {
-                        "processed_row": dict(final_row),
-                        "export_row": dict(export_row),
-                        "filenames": (
-                            f"{location_segment}.csv",
-                            f"{location_segment}_{playback_segment}.csv",
-                        ),
+                        "parsed_release_date": parsed_release_date,
+                        "release_date_invalid": release_date_invalid,
+                        "release_date_raw": release_date_value,
+                        "region": location_segment,
+                        "radio_bucket": playback_segment,
                     },
                 )
             )
@@ -12260,29 +12394,90 @@ def generate_campaign_csvs(
         release_date_sort,
         release_date_column=release_date_column,
     )
-    processed_master_output_rows = [
-        dict(prepared_row["processed_row"])
-        for _source_row, prepared_row in sorted_prepared_rows
-    ]
-    _campaign_prep_atomic_write_csv(
-        output_path / CAMPAIGN_PREP_PROCESSED_MASTER_FILENAME,
-        processed_master_output_rows,
-        columns,
-    )
 
-    output_rows: Dict[str, List[dict]] = {name: [] for name in CAMPAIGN_PREP_OUTPUT_ORDER}
-    for _source_row, prepared_row in sorted_prepared_rows:
-        for filename in prepared_row["filenames"]:
-            output_rows[filename].append(dict(prepared_row["export_row"]))
+    processed_master_output_rows: List[dict] = []
+    campaign_files: Dict[str, dict] = {}
+    campaign_counts: Dict[str, int] = {}
+    campaign_files_finalized = False
+    try:
+        for source_row, prepared_row in sorted_prepared_rows:
+            recency_bucket = _campaign_prep_recency_bucket(
+                prepared_row.get("parsed_release_date"),
+                run_reference_date,
+            )
+            prepared_row["recency_bucket"] = recency_bucket
+            processed_row = dict(source_row)
+            processed_row[CAMPAIGN_PREP_RECENCY_BUCKET_COLUMN] = prepared_row["recency_bucket"]
+            export_row = _campaign_prep_export_row(processed_row, export_format, columns_by_lower, email_column)
+            export_row[CAMPAIGN_PREP_RECENCY_BUCKET_COLUMN] = prepared_row["recency_bucket"]
+            filename = _campaign_prep_campaign_filename(
+                prepared_row["region"],
+                prepared_row["recency_bucket"],
+                prepared_row["radio_bucket"],
+            )
+            processed_master_output_rows.append(processed_row)
+            if filename not in campaign_files:
+                final_path = output_path / filename
+                final_path.parent.mkdir(parents=True, exist_ok=True)
+                tmp_path = final_path.with_name(f"{final_path.name}.tmp")
+                handle = open(tmp_path, "w", encoding="utf-8", newline="")
+                writer = csv.DictWriter(handle, fieldnames=output_columns)
+                writer.writeheader()
+                campaign_files[filename] = {
+                    "final_path": final_path,
+                    "tmp_path": tmp_path,
+                    "handle": handle,
+                    "writer": writer,
+                }
+                campaign_counts[filename] = 0
+            campaign_files[filename]["writer"].writerow(
+                {column: export_row.get(column, "") for column in output_columns}
+            )
+            campaign_counts[filename] += 1
 
-    result: Dict[str, int] = {}
-    for filename in CAMPAIGN_PREP_OUTPUT_ORDER:
-        rows = output_rows[filename]
-        if filename not in ("Inside_VIC.csv", "Outside_VIC.csv") and not rows:
-            continue
-        _campaign_prep_atomic_write_csv(output_path / filename, rows, output_columns)
-        result[filename] = len(rows)
-    return result
+        diagnostics = _campaign_prep_build_diagnostics(
+            sorted_prepared_rows,
+            run_reference_date,
+            release_date_column,
+            both_release_date_columns_present,
+        )
+        _campaign_prep_log_diagnostics(diagnostics)
+
+        _campaign_prep_atomic_write_csv(
+            output_path / CAMPAIGN_PREP_PROCESSED_MASTER_FILENAME,
+            processed_master_output_rows,
+            processed_columns,
+        )
+
+        result: Dict[str, int] = {}
+        for filename in CAMPAIGN_PREP_OUTPUT_ORDER:
+            if filename not in campaign_files:
+                continue
+            file_state = campaign_files[filename]
+            handle = file_state["handle"]
+            handle.flush()
+            os.fsync(handle.fileno())
+            handle.close()
+            file_state["handle"] = None
+            os.replace(file_state["tmp_path"], file_state["final_path"])
+            result[filename] = campaign_counts[filename]
+        campaign_files_finalized = True
+        return CampaignPrepResult(result, diagnostics=diagnostics)
+    finally:
+        if not campaign_files_finalized:
+            for file_state in campaign_files.values():
+                handle = file_state.get("handle")
+                if handle is not None:
+                    try:
+                        handle.close()
+                    except Exception:
+                        pass
+                try:
+                    tmp_path = file_state.get("tmp_path")
+                    if tmp_path is not None and tmp_path.exists():
+                        tmp_path.unlink()
+                except Exception:
+                    pass
 
 
 class CampaignPrepTab(QtWidgets.QWidget):

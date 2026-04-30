@@ -42,6 +42,24 @@ def _read_csv(path: Path) -> tuple[list[str], list[dict]]:
         return list(reader.fieldnames or []), list(reader)
 
 
+def _campaign_path(output_dir: Path, region: str, bucket: str, radio_bucket: str) -> Path:
+    return output_dir / bucket / f"{region}_{radio_bucket}.csv"
+
+
+def _campaign_result_key(region: str, bucket: str, radio_bucket: str) -> str:
+    return f"{bucket}/{region}_{radio_bucket}.csv"
+
+
+def _all_campaign_rows(output_dir: Path, processed_filename: str) -> list[dict]:
+    rows: list[dict] = []
+    for path in sorted(output_dir.glob("**/*.csv")):
+        if path.name == processed_filename:
+            continue
+        _, path_rows = _read_csv(path)
+        rows.extend(path_rows)
+    return rows
+
+
 def test_generate_campaign_csvs_segments_splits_and_preserves_values(tmp_path):
     module = _load_legacy_module()
     columns = ["Artist", "location", "Played on triple J", "Played on Unearthed", "emails", "Notes"]
@@ -89,33 +107,32 @@ def test_generate_campaign_csvs_segments_splits_and_preserves_values(tmp_path):
     result = module.generate_campaign_csvs(str(input_path), str(output_dir), split_multiple_emails=True)
 
     assert result == {
-        "Inside_VIC.csv": 4,
-        "Outside_VIC.csv": 2,
-        "Inside_VIC_Played_TripleJ.csv": 3,
-        "Inside_VIC_Neither.csv": 1,
-        "Outside_VIC_Played_Unearthed.csv": 2,
+        _campaign_result_key("Inside_VIC", "180_plus_days", "Played_TripleJ"): 3,
+        _campaign_result_key("Inside_VIC", "180_plus_days", "Neither"): 1,
+        _campaign_result_key("Outside_VIC", "180_plus_days", "Played_Unearthed"): 2,
     }
     assert list(result) == [
-        "Inside_VIC.csv",
-        "Outside_VIC.csv",
-        "Inside_VIC_Played_TripleJ.csv",
-        "Inside_VIC_Neither.csv",
-        "Outside_VIC_Played_Unearthed.csv",
+        _campaign_result_key("Inside_VIC", "180_plus_days", "Played_TripleJ"),
+        _campaign_result_key("Inside_VIC", "180_plus_days", "Neither"),
+        _campaign_result_key("Outside_VIC", "180_plus_days", "Played_Unearthed"),
     ]
 
-    output_columns, inside_rows = _read_csv(output_dir / "Inside_VIC.csv")
-    assert output_columns == columns
-    assert [row["emails"] for row in inside_rows[:3]] == ["a@gmail.com", "b@gmail.com", "a@gmail.com"]
-    assert inside_rows[0]["Notes"] == "  keep spaces  "
-    assert inside_rows[3]["emails"] == ""
+    output_columns, triplej_rows = _read_csv(_campaign_path(output_dir, "Inside_VIC", "180_plus_days", "Played_TripleJ"))
+    assert output_columns == [*columns, "Recency_Bucket"]
+    assert [row["emails"] for row in triplej_rows] == ["a@gmail.com", "b@gmail.com", "a@gmail.com"]
+    assert triplej_rows[0]["Notes"] == "  keep spaces  "
+    assert {row["Recency_Bucket"] for row in triplej_rows} == {"180_plus_days"}
 
-    _, outside_rows = _read_csv(output_dir / "Outside_VIC.csv")
+    _, neither_rows = _read_csv(_campaign_path(output_dir, "Inside_VIC", "180_plus_days", "Neither"))
+    assert neither_rows[0]["emails"] == ""
+
+    _, outside_rows = _read_csv(_campaign_path(output_dir, "Outside_VIC", "180_plus_days", "Played_Unearthed"))
     assert [row["Artist"] for row in outside_rows] == ["Act B", "Act D"]
     assert outside_rows[0]["location"] == "service area"
     assert outside_rows[0]["Notes"] == "NA"
     assert outside_rows[1]["emails"] == "None"
-    assert not (output_dir / "Inside_VIC_Played_Unearthed.csv").exists()
-    assert not (output_dir / "Outside_VIC_Played_TripleJ.csv").exists()
+    assert not _campaign_path(output_dir, "Inside_VIC", "180_plus_days", "Played_Unearthed").exists()
+    assert not _campaign_path(output_dir, "Outside_VIC", "180_plus_days", "Played_TripleJ").exists()
 
 
 def test_generate_campaign_csvs_no_email_column_is_safe_and_missing_columns_are_clear(tmp_path):
@@ -131,10 +148,11 @@ def test_generate_campaign_csvs_no_email_column_is_safe_and_missing_columns_are_
 
     result = module.generate_campaign_csvs(str(input_path), str(output_dir), split_multiple_emails=True)
 
-    assert result["Inside_VIC.csv"] == 1
-    assert result["Inside_VIC_Neither.csv"] == 1
-    output_columns, rows = _read_csv(output_dir / "Inside_VIC.csv")
-    assert output_columns == columns
+    assert result[_campaign_result_key("Inside_VIC", "180_plus_days", "Neither")] == 1
+    assert result.diagnostics["missing_release_date_column"] is True
+    assert result.diagnostics["resolved_release_date_column"] is None
+    output_columns, rows = _read_csv(_campaign_path(output_dir, "Inside_VIC", "180_plus_days", "Neither"))
+    assert output_columns == [*columns, "Recency_Bucket"]
     assert rows[0]["Location"] == "Victoria"
 
     bad_path = tmp_path / "bad.csv"
@@ -172,17 +190,47 @@ def test_generate_campaign_csvs_filters_rows_without_email_after_splitting(tmp_p
     )
 
     assert result == {
-        "Inside_VIC.csv": 1,
-        "Outside_VIC.csv": 2,
-        "Inside_VIC_Neither.csv": 1,
-        "Outside_VIC_Neither.csv": 2,
+        _campaign_result_key("Inside_VIC", "180_plus_days", "Neither"): 1,
+        _campaign_result_key("Outside_VIC", "180_plus_days", "Neither"): 2,
     }
-    _, inside_rows = _read_csv(output_dir / "Inside_VIC.csv")
-    _, outside_rows = _read_csv(output_dir / "Outside_VIC.csv")
+    _, inside_rows = _read_csv(_campaign_path(output_dir, "Inside_VIC", "180_plus_days", "Neither"))
+    _, outside_rows = _read_csv(_campaign_path(output_dir, "Outside_VIC", "180_plus_days", "Neither"))
     assert [row["emails"] for row in inside_rows] == ["a@test.com"]
     assert [row["emails"] for row in outside_rows] == ["e@test.com", "f@test.com"]
     assert input_path.read_bytes() == source_bytes
-    assert not (output_dir / "Outside_VIC_Played_Unearthed.csv").exists()
+    assert not _campaign_path(output_dir, "Outside_VIC", "180_plus_days", "Played_Unearthed").exists()
+
+
+def test_generate_campaign_csvs_release_date_alias_priority_reports_ambiguity(tmp_path):
+    module = _load_legacy_module()
+    columns = ["Artist", "Location", "Release_Date", "Release Date", "Email"]
+    input_path = tmp_path / "master.csv"
+    output_dir = tmp_path / "campaign"
+    reference = module.datetime.datetime(2026, 4, 30, tzinfo=module.datetime.timezone.utc)
+    _write_csv(
+        input_path,
+        [
+            {
+                "Artist": "Priority",
+                "Location": "VIC",
+                "Release_Date": "2026-04-10",
+                "Release Date": "2025-01-01",
+                "Email": "priority@test.com",
+            }
+        ],
+        columns,
+    )
+
+    result = module.generate_campaign_csvs(
+        str(input_path),
+        str(output_dir),
+        run_reference_date=reference,
+    )
+
+    _, processed_rows = _read_csv(output_dir / module.CAMPAIGN_PREP_PROCESSED_MASTER_FILENAME)
+    assert processed_rows[0]["Recency_Bucket"] == "0_30_days"
+    assert result.diagnostics["resolved_release_date_column"] == "Release_Date"
+    assert result.diagnostics["both_release_date_columns_present"] is True
 
 
 def test_generate_campaign_csvs_no_email_column_filter_on_writes_empty_primary_files(tmp_path):
@@ -205,19 +253,8 @@ def test_generate_campaign_csvs_no_email_column_filter_on_writes_empty_primary_f
         remove_rows_without_emails=True,
     )
 
-    assert result == {
-        "Inside_VIC.csv": 0,
-        "Outside_VIC.csv": 0,
-    }
-    inside_columns, inside_rows = _read_csv(output_dir / "Inside_VIC.csv")
-    outside_columns, outside_rows = _read_csv(output_dir / "Outside_VIC.csv")
-    assert inside_columns == columns
-    assert outside_columns == columns
-    assert inside_rows == []
-    assert outside_rows == []
+    assert result == {}
     assert sorted(path.name for path in output_dir.glob("*.csv")) == [
-        "Inside_VIC.csv",
-        "Outside_VIC.csv",
         "master_export_leads.processed.csv",
     ]
 
@@ -242,19 +279,8 @@ def test_generate_campaign_csvs_filter_all_rows_removed_writes_primary_headers_o
         remove_rows_without_emails=True,
     )
 
-    assert result == {
-        "Inside_VIC.csv": 0,
-        "Outside_VIC.csv": 0,
-    }
-    inside_columns, inside_rows = _read_csv(output_dir / "Inside_VIC.csv")
-    outside_columns, outside_rows = _read_csv(output_dir / "Outside_VIC.csv")
-    assert inside_columns == columns
-    assert outside_columns == columns
-    assert inside_rows == []
-    assert outside_rows == []
+    assert result == {}
     assert sorted(path.name for path in output_dir.glob("*.csv")) == [
-        "Inside_VIC.csv",
-        "Outside_VIC.csv",
         "master_export_leads.processed.csv",
     ]
 
@@ -280,7 +306,7 @@ def test_generate_campaign_csvs_release_date_sort_ascending_invalid_at_bottom_st
 
     module.generate_campaign_csvs(str(input_path), str(output_dir), release_date_sort="ascending")
 
-    _, rows = _read_csv(output_dir / "Inside_VIC.csv")
+    _, rows = _read_csv(output_dir / module.CAMPAIGN_PREP_PROCESSED_MASTER_FILENAME)
     assert [row["Artist"] for row in rows] == ["Old", "New", "Same 1", "Invalid A", "Missing", "Invalid B"]
     assert [row["Release Date"] for row in rows[-3:]] == ["not-a-date", "", "32/13/2026"]
     assert input_path.read_bytes() == source_bytes
@@ -306,11 +332,11 @@ def test_generate_campaign_csvs_release_date_sort_descending_invalid_at_bottom_s
 
     module.generate_campaign_csvs(str(input_path), str(output_dir), release_date_sort="descending")
 
-    _, rows = _read_csv(output_dir / "Outside_VIC.csv")
+    _, rows = _read_csv(output_dir / module.CAMPAIGN_PREP_PROCESSED_MASTER_FILENAME)
     assert [row["Artist"] for row in rows] == ["Newest", "Middle 1", "Middle 2", "Old", "Invalid A", "Missing"]
 
 
-def test_generate_campaign_csvs_release_date_sort_none_preserves_order_and_does_not_parse(tmp_path, monkeypatch):
+def test_generate_campaign_csvs_release_date_sort_none_preserves_order_while_parsing_for_recency(tmp_path):
     module = _load_legacy_module()
     columns = ["Artist", "Location", "Release Date", "Email"]
     input_path = tmp_path / "master.csv"
@@ -324,13 +350,9 @@ def test_generate_campaign_csvs_release_date_sort_none_preserves_order_and_does_
         columns,
     )
 
-    def fail_parse(_value):
-        raise AssertionError("release date parser should not run for default no-sort exports")
-
-    monkeypatch.setattr(module, "_campaign_prep_parse_release_date", fail_parse)
     module.generate_campaign_csvs(str(input_path), str(output_dir))
 
-    _, rows = _read_csv(output_dir / "Inside_VIC.csv")
+    _, rows = _read_csv(output_dir / module.CAMPAIGN_PREP_PROCESSED_MASTER_FILENAME)
     assert [row["Artist"] for row in rows] == ["B", "A"]
 
 
@@ -357,8 +379,8 @@ def test_generate_campaign_csvs_release_date_sort_after_split_and_email_filter(t
         release_date_sort="ascending",
     )
 
-    assert result["Inside_VIC.csv"] == 3
-    _, rows = _read_csv(output_dir / "Inside_VIC.csv")
+    assert sum(result.values()) == 3
+    _, rows = _read_csv(output_dir / module.CAMPAIGN_PREP_PROCESSED_MASTER_FILENAME)
     assert [(row["Artist"], row["Email"]) for row in rows] == [
         ("Earlier", "early@test.com"),
         ("Later Split", "later1@test.com"),
@@ -414,14 +436,15 @@ def test_generate_campaign_csvs_writes_processed_master_from_prepared_rows(tmp_p
 
     processed_columns, processed_rows = _read_csv(output_dir / module.CAMPAIGN_PREP_PROCESSED_MASTER_FILENAME)
     assert module.CAMPAIGN_PREP_PROCESSED_MASTER_FILENAME not in result
-    assert processed_columns == columns
+    assert processed_columns == [*columns, "Recency_Bucket"]
     assert [(row["Artist"], row["Email"], row["Custom Source Field"]) for row in processed_rows] == [
         ("Earlier", "earlier@test.com", "keep earlier"),
         ("Later", "later1@test.com", "keep later"),
         ("Later", "later2@test.com", "keep later"),
     ]
 
-    _, campaign_rows = _read_csv(output_dir / "Inside_VIC.csv")
+    assert len(_all_campaign_rows(output_dir, module.CAMPAIGN_PREP_PROCESSED_MASTER_FILENAME)) == len(processed_rows)
+    _, campaign_rows = _read_csv(_campaign_path(output_dir, "Inside_VIC", "0_30_days", "Neither"))
     assert [row["Email"] for row in campaign_rows] == ["later1@test.com", "later2@test.com"]
     assert input_path.read_bytes() == source_bytes
 
@@ -471,7 +494,7 @@ def test_generate_campaign_csvs_processed_master_uses_sorted_split_release_date_
     )
 
     _, processed_rows = _read_csv(output_dir / module.CAMPAIGN_PREP_PROCESSED_MASTER_FILENAME)
-    _, campaign_rows = _read_csv(output_dir / "Inside_VIC.csv")
+    campaign_rows = _all_campaign_rows(output_dir, module.CAMPAIGN_PREP_PROCESSED_MASTER_FILENAME)
     expected = [
         ("Newest", "new@test.com"),
         ("Middle", "mid@test.com"),
@@ -556,25 +579,10 @@ def test_generate_campaign_csvs_supports_real_master_headers_and_alias_priority(
     )
 
     assert result == {
-        "Inside_VIC.csv": 2,
-        "Outside_VIC.csv": 0,
-        "Inside_VIC_Played_Unearthed.csv": 2,
+        _campaign_result_key("Inside_VIC", "180_plus_days", "Played_Unearthed"): 2,
     }
-    output_columns, rows = _read_csv(output_dir / "Inside_VIC.csv")
-    assert output_columns == [
-        "Email",
-        "First Name",
-        "Company",
-        "Artist",
-        "Location",
-        "Song Title",
-        "Sounds Like",
-        "Website",
-        "Instagram",
-        "Facebook",
-        "Source URL",
-        "Notes",
-    ]
+    output_columns, rows = _read_csv(_campaign_path(output_dir, "Inside_VIC", "180_plus_days", "Played_Unearthed"))
+    assert output_columns == [*module.CAMPAIGN_PREP_WOODPECKER_COLUMNS, "Recency_Bucket"]
     assert [row["Email"] for row in rows] == ["primary1@example.com", "primary2@example.com"]
     assert {row["Email"] for row in rows}.isdisjoint({"ignored@example.com"})
     assert rows[0]["First Name"] == "Alex"
@@ -608,8 +616,8 @@ def test_generate_campaign_csvs_woodpecker_missing_fields_are_blank_and_duplicat
         export_format="woodpecker",
     )
 
-    output_columns, rows = _read_csv(output_dir / "Inside_VIC_Played_TripleJ.csv")
-    assert output_columns == module.CAMPAIGN_PREP_WOODPECKER_COLUMNS
+    output_columns, rows = _read_csv(_campaign_path(output_dir, "Inside_VIC", "180_plus_days", "Played_TripleJ"))
+    assert output_columns == [*module.CAMPAIGN_PREP_WOODPECKER_COLUMNS, "Recency_Bucket"]
     assert [row["Email"] for row in rows] == ["dup@example.com", "dup@example.com"]
     assert rows[0]["First Name"] == "Act B"
     assert rows[0]["Company"] == "Act B"
@@ -650,12 +658,10 @@ def test_generate_campaign_csvs_woodpecker_filter_uses_resolved_email_without_fa
     )
 
     assert result == {
-        "Inside_VIC.csv": 1,
-        "Outside_VIC.csv": 0,
-        "Inside_VIC_Neither.csv": 1,
+        _campaign_result_key("Inside_VIC", "180_plus_days", "Neither"): 1,
     }
-    output_columns, rows = _read_csv(output_dir / "Inside_VIC.csv")
-    assert output_columns == module.CAMPAIGN_PREP_WOODPECKER_COLUMNS
+    output_columns, rows = _read_csv(_campaign_path(output_dir, "Inside_VIC", "180_plus_days", "Neither"))
+    assert output_columns == [*module.CAMPAIGN_PREP_WOODPECKER_COLUMNS, "Recency_Bucket"]
     assert [row["Email"] for row in rows] == ["primary@example.com"]
     assert rows[0]["Artist"] == "Act B"
 
@@ -677,9 +683,9 @@ def test_generate_campaign_csvs_input_headers_and_invalid_format(tmp_path):
         split_multiple_emails=True,
         export_format="input_headers",
     )
-    output_columns, rows = _read_csv(output_dir / "Outside_VIC.csv")
-    assert result["Outside_VIC.csv"] == 2
-    assert output_columns == columns
+    output_columns, rows = _read_csv(_campaign_path(output_dir, "Outside_VIC", "180_plus_days", "Played_Unearthed"))
+    assert result[_campaign_result_key("Outside_VIC", "180_plus_days", "Played_Unearthed")] == 2
+    assert output_columns == [*columns, "Recency_Bucket"]
     assert [row["All Emails"] for row in rows] == ["a@example.com", "b@example.com"]
 
     with pytest.raises(ValueError, match="Invalid export_format"):
@@ -705,6 +711,130 @@ def test_generate_campaign_csvs_outputs_are_byte_stable(tmp_path):
     assert first == second
     for filename in first:
         assert (tmp_path / "one" / filename).read_bytes() == (tmp_path / "two" / filename).read_bytes()
+
+
+def test_generate_campaign_csvs_release_date_recency_buckets_partition_and_boundaries(tmp_path):
+    module = _load_legacy_module()
+    columns = ["Artist", "Location", "Release_Date", "Upload_Date", "Email", "Played_On_Triple_J", "Played_On_Unearthed"]
+    input_path = tmp_path / "master.csv"
+    output_dir = tmp_path / "campaign"
+    reference = module.datetime.datetime(2026, 4, 30, 10, 30, tzinfo=module.datetime.timezone.utc)
+    _write_csv(
+        input_path,
+        [
+            {"Artist": "Exactly 30", "Location": "Melbourne", "Release_Date": "2026-03-31", "Upload_Date": "2026-04-01", "Email": "d30@test.com", "Played_On_Triple_J": "yes", "Played_On_Unearthed": ""},
+            {"Artist": "Exactly 31 Split", "Location": "Sydney", "Release_Date": "2026-03-30", "Upload_Date": "2026-03-30", "Email": "d31a@test.com, d31b@test.com", "Played_On_Triple_J": "", "Played_On_Unearthed": "yes"},
+            {"Artist": "Within 90", "Location": "VIC", "Release_Date": "2026-02-15", "Upload_Date": "2026-02-16", "Email": "w90@test.com", "Played_On_Triple_J": "", "Played_On_Unearthed": ""},
+            {"Artist": "Exactly 90", "Location": "Brisbane", "Release_Date": "2026-01-30", "Upload_Date": "2026-01-31", "Email": "d90@test.com", "Played_On_Triple_J": "yes", "Played_On_Unearthed": ""},
+            {"Artist": "Exactly 91", "Location": "Victoria", "Release_Date": "2026-01-29", "Upload_Date": "2026-01-29", "Email": "d91@test.com", "Played_On_Triple_J": "", "Played_On_Unearthed": "yes"},
+            {"Artist": "Exactly 180", "Location": "Adelaide", "Release_Date": "2025-11-01", "Upload_Date": "2025-11-02", "Email": "d180@test.com", "Played_On_Triple_J": "", "Played_On_Unearthed": ""},
+            {"Artist": "Exactly 181", "Location": "Melbourne", "Release_Date": "2025-10-31", "Upload_Date": "2025-10-31", "Email": "d181@test.com", "Played_On_Triple_J": "yes", "Played_On_Unearthed": ""},
+            {"Artist": "Blank Date", "Location": "Perth", "Release_Date": "", "Upload_Date": "2026-04-02", "Email": "blank@test.com", "Played_On_Triple_J": "", "Played_On_Unearthed": ""},
+            {"Artist": "Invalid Date", "Location": "VIC", "Release_Date": "not-a-date", "Upload_Date": "2026-04-03", "Email": "invalid@test.com", "Played_On_Triple_J": "", "Played_On_Unearthed": "yes"},
+            {"Artist": "Future Date", "Location": "Hobart", "Release_Date": "2026-05-02", "Upload_Date": "2026-05-03", "Email": "future@test.com", "Played_On_Triple_J": "", "Played_On_Unearthed": ""},
+        ],
+        columns,
+    )
+
+    result = module.generate_campaign_csvs(
+        str(input_path),
+        str(output_dir),
+        split_multiple_emails=True,
+        export_format="woodpecker",
+        release_date_sort="descending",
+        run_reference_date=reference,
+    )
+
+    processed_columns, processed_rows = _read_csv(output_dir / module.CAMPAIGN_PREP_PROCESSED_MASTER_FILENAME)
+    assert processed_columns == [*columns, "Recency_Bucket"]
+    assert [(row["Artist"], row["Email"]) for row in processed_rows] == [
+        ("Future Date", "future@test.com"),
+        ("Exactly 30", "d30@test.com"),
+        ("Exactly 31 Split", "d31a@test.com"),
+        ("Exactly 31 Split", "d31b@test.com"),
+        ("Within 90", "w90@test.com"),
+        ("Exactly 90", "d90@test.com"),
+        ("Exactly 91", "d91@test.com"),
+        ("Exactly 180", "d180@test.com"),
+        ("Exactly 181", "d181@test.com"),
+        ("Blank Date", "blank@test.com"),
+        ("Invalid Date", "invalid@test.com"),
+    ]
+    assert {row["Recency_Bucket"] for row in processed_rows} <= set(module.CAMPAIGN_PREP_RECENCY_BUCKETS)
+    assert {
+        (row["Artist"], row["Email"]): row["Recency_Bucket"]
+        for row in processed_rows
+    } == {
+        ("Future Date", "future@test.com"): "0_30_days",
+        ("Exactly 30", "d30@test.com"): "0_30_days",
+        ("Exactly 31 Split", "d31a@test.com"): "30_90_days",
+        ("Exactly 31 Split", "d31b@test.com"): "30_90_days",
+        ("Within 90", "w90@test.com"): "30_90_days",
+        ("Exactly 90", "d90@test.com"): "30_90_days",
+        ("Exactly 91", "d91@test.com"): "90_180_days",
+        ("Exactly 180", "d180@test.com"): "90_180_days",
+        ("Exactly 181", "d181@test.com"): "180_plus_days",
+        ("Blank Date", "blank@test.com"): "180_plus_days",
+        ("Invalid Date", "invalid@test.com"): "180_plus_days",
+    }
+    assert processed_rows[-2]["Artist"] == "Blank Date"
+    assert processed_rows[-1]["Artist"] == "Invalid Date"
+
+    campaign_row_count = sum(result.values())
+    assert campaign_row_count == len(processed_rows)
+    bucket_counts = {
+        bucket: sum(1 for row in processed_rows if row["Recency_Bucket"] == bucket)
+        for bucket in module.CAMPAIGN_PREP_RECENCY_BUCKETS
+    }
+    assert sum(bucket_counts.values()) == len(processed_rows)
+    assert bucket_counts == {
+        "0_30_days": 2,
+        "30_90_days": 4,
+        "90_180_days": 2,
+        "180_plus_days": 3,
+    }
+    assert result.diagnostics["run_reference_date"] == reference.isoformat()
+    assert result.diagnostics["total_processed_rows"] == len(processed_rows)
+    assert result.diagnostics["recency_bucket_counts"] == bucket_counts
+    assert result.diagnostics["invalid_blank_unparseable_release_date_count"] == 2
+    assert result.diagnostics["min_parsed_release_date"] == "2025-10-31"
+    assert result.diagnostics["max_parsed_release_date"] == "2026-05-02"
+    assert result.diagnostics["sample_invalid_release_date_values"] == ["", "not-a-date"]
+    assert result.diagnostics["missing_release_date_column"] is False
+    assert result.diagnostics["resolved_release_date_column"] == "Release_Date"
+    assert result.diagnostics["both_release_date_columns_present"] is False
+    assert sorted(path.name for path in output_dir.iterdir() if path.is_dir()) == [
+        "0_30_days",
+        "180_plus_days",
+        "30_90_days",
+        "90_180_days",
+    ]
+    assert not any(path.name.startswith(("Inside_VIC_", "Outside_VIC_")) for path in output_dir.glob("*.csv"))
+
+    def expected_filename(row: dict) -> str:
+        region = "Inside_VIC" if module._campaign_prep_inside_vic(row["Location"]) else "Outside_VIC"
+        if module._campaign_prep_truthy(row["Played_On_Triple_J"]):
+            radio_bucket = "Played_TripleJ"
+        elif module._campaign_prep_truthy(row["Played_On_Unearthed"]):
+            radio_bucket = "Played_Unearthed"
+        else:
+            radio_bucket = "Neither"
+        return _campaign_result_key(region, row["Recency_Bucket"], radio_bucket)
+
+    for filename in result:
+        _, campaign_rows = _read_csv(output_dir / filename)
+        assert "Release Date" in campaign_rows[0]
+        assert "Upload Date" in campaign_rows[0]
+        assert list(campaign_rows[0])[-1] == "Recency_Bucket"
+        expected_rows = [
+            row
+            for row in processed_rows
+            if expected_filename(row) == filename
+        ]
+        assert [(row["Artist"], row["Email"], row["Recency_Bucket"]) for row in campaign_rows] == [
+            (row["Artist"], row["Email"], row["Recency_Bucket"])
+            for row in expected_rows
+        ]
 
 
 def test_main_window_contains_campaign_prep_tab(qapp):
