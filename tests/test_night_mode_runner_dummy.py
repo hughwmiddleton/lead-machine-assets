@@ -479,7 +479,7 @@ class FacebookNightModeWrapperTest(unittest.TestCase):
     def _write_input(self) -> None:
         df = pd.DataFrame(
             [
-                {"Artist Name": "HasEmail", "Email": "a@example.com", "Social Link": "https://facebook.com/hasemail"},
+                {"Artist Name": "HasEmail", "Email": "a@example.com", "Social Link": ""},
                 {"Artist Name": "NeedsFb1", "Email": "", "Social Link": "https://facebook.com/page1"},
                 {"Artist Name": "NameOnly", "Email": "", "Social Link": ""},
                 {"Artist Name": "", "Email": "", "Social Link": ""},
