@@ -255,7 +255,8 @@ def test_fb_share_recovery_runner_logs_script_summary_exactly(tmp_path, monkeypa
                 "enriched=1\n"
                 "failed=1\n"
                 "skipped_existing=3\n"
-                f"output={tmp_path / 'master_export_leads__fb_share_recovered.csv'}\n"
+                "rows_recovered=1\n"
+                f"output={tmp_path / 'master_export_leads.fb_share_recovered.csv'}\n"
             ),
         )
 
@@ -266,11 +267,14 @@ def test_fb_share_recovery_runner_logs_script_summary_exactly(tmp_path, monkeypa
         output = night_mode_runner._run_fb_share_recovery_after_export(
             str(export),
             batch_size="bad",
-            in_place=False,
             logger=logger,
         )
 
-    assert calls[0][calls[0].index("--limit") + 1] == "40"
+    assert "recover_fb_share_rows.py" in calls[0][1]
+    assert calls[0][calls[0].index("--input") + 1] == str(export)
+    assert calls[0][calls[0].index("--output") + 1].endswith("master_export_leads.fb_share_recovered.csv")
+    assert calls[0][calls[0].index("--batch-size") + 1] == "40"
+    assert "--limit" not in calls[0]
     assert "--in-place" not in calls[0]
     text = caplog.text
     assert "[FB Share Recovery] Starting post-run /share recovery" in text
@@ -278,30 +282,33 @@ def test_fb_share_recovery_runner_logs_script_summary_exactly(tmp_path, monkeypa
     assert "[FB Share Recovery] batch_size=40" in text
     assert "[FB Share Recovery] output_mode=copy" in text
     assert "[FB Share Recovery] candidates=2 resolved=1 enriched=1 failed=1 skipped_existing=3 duration_sec=4" in text
-    assert output.endswith("master_export_leads__fb_share_recovered.csv")
+    assert output["output_csv"].endswith("master_export_leads.fb_share_recovered.csv")
+    assert output["canonical_export_csv"].endswith("master_export_leads.fb_share_recovered.csv")
 
 
-def test_fb_share_recovery_runner_in_place_logs_explicit_mode(tmp_path, monkeypatch, caplog):
+def test_fb_share_recovery_runner_noop_keeps_original_canonical(tmp_path, monkeypatch, caplog):
     export = tmp_path / "master_export_leads.csv"
     export.write_text("Artist Name,FB_Status\nA,fb_share_resolution_failed\n", encoding="utf-8")
     calls = []
 
     def fake_run(cmd, **kwargs):
         calls.append(cmd)
-        return SimpleNamespace(returncode=0, stdout=f"candidates=0\noutput={export}\n")
+        return SimpleNamespace(
+            returncode=0,
+            stdout=f"candidates=0\nrows_recovered=0\noutput={tmp_path / 'master_export_leads.fb_share_recovered.csv'}\n",
+        )
 
     monkeypatch.setattr(night_mode_runner.subprocess, "run", fake_run)
-    logger = night_mode_runner.logging.getLogger("test_fb_share_recovery_in_place")
+    logger = night_mode_runner.logging.getLogger("test_fb_share_recovery_noop")
 
-    with caplog.at_level(night_mode_runner.logging.INFO, logger="test_fb_share_recovery_in_place"):
+    with caplog.at_level(night_mode_runner.logging.INFO, logger="test_fb_share_recovery_noop"):
         output = night_mode_runner._run_fb_share_recovery_after_export(
             str(export),
             batch_size=10,
-            in_place=True,
             logger=logger,
         )
 
-    assert "--in-place" in calls[0]
-    assert calls[0][calls[0].index("--limit") + 1] == "10"
-    assert "[FB Share Recovery] Running in-place update" in caplog.text
-    assert output == str(export)
+    assert "--in-place" not in calls[0]
+    assert calls[0][calls[0].index("--batch-size") + 1] == "10"
+    assert "[FB Share Recovery] No recovered rows; canonical export remains" in caplog.text
+    assert output["canonical_export_csv"] == str(export)

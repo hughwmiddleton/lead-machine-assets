@@ -1,5 +1,6 @@
 import importlib.util
 import os
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -9,6 +10,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PyQt5")
 
 from PyQt5 import QtWidgets
+
+import night_mode_runner
 
 
 def _load_legacy_module():
@@ -321,7 +324,7 @@ def test_manual_fb_share_recovery_trigger_invokes_subprocess_with_batch_size(tmp
     assert len(calls) == 1
     assert "recover_fb_share_rows.py" in calls[0][1]
     assert calls[0][calls[0].index("--input") + 1] == str(export)
-    assert calls[0][calls[0].index("--output") + 1].endswith("manual_fb_share_recovered.csv")
+    assert calls[0][calls[0].index("--output") + 1].endswith("manual.fb_share_recovered.csv")
     assert calls[0][calls[0].index("--batch-size") + 1] == "40"
     assert "--limit" not in calls[0]
     assert result["summary"] == {
@@ -353,7 +356,7 @@ def test_manual_fb_share_recovery_copy_mode_preserves_original_and_uses_suffix(t
     )
 
     assert export.read_text(encoding="utf-8") == original
-    assert Path(result["output_csv"]).name == "manual_fb_share_recovered.csv"
+    assert Path(result["output_csv"]).name == "manual.fb_share_recovered.csv"
     assert "recovered@example.com" in Path(result["output_csv"]).read_text(encoding="utf-8")
 
 
@@ -445,3 +448,28 @@ def test_manual_fb_share_recovery_no_logic_duplication():
     assert "recover_dataframe" not in function_text
     assert "recover_csv" not in function_text
     assert "import scripts.recover_fb_share_rows" not in text
+
+
+def test_auto_fb_share_recovery_matches_manual_script_noop_contract(tmp_path):
+    module = _load_legacy_module()
+    manual_input = tmp_path / "manual.csv"
+    auto_input = tmp_path / "master_export_leads.csv"
+    csv_text = (
+        "Artist Name,Social Link,Facebook_URL,Email,Email_All,FB_Status,FB_Gate_State,FB_Attempt_State\n"
+        "No Candidate,https://www.instagram.com/nocandidate,,,,ok,,\n"
+    )
+    manual_input.write_text(csv_text, encoding="utf-8")
+    auto_input.write_text(csv_text, encoding="utf-8")
+
+    manual = module._run_manual_fb_share_recovery(
+        str(manual_input),
+        batch_size=40,
+        python_executable=sys.executable,
+    )
+    auto = night_mode_runner._run_fb_share_recovery_after_export(str(auto_input), batch_size=40)
+
+    for key in ("rows_scanned", "candidates_found", "rows_recovered", "rows_failed"):
+        assert str(manual["summary"][key]) == str(auto["summary"][key])
+    assert Path(manual["output_csv"]).read_text(encoding="utf-8") == csv_text
+    assert Path(auto["output_csv"]).read_text(encoding="utf-8") == csv_text
+    assert auto["canonical_export_csv"] == str(auto_input)

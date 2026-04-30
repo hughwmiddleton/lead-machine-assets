@@ -545,6 +545,14 @@ def run_contact_phase(
     master_final_path = os.path.join(run_dir, "master_final.csv")
     master_export_path = os.path.join(run_dir, "master_export_leads.csv")
     fb_state_path = os.path.join(run_dir, "facebook_state.json")
+    share_recovery_cfg = cfg.get("fb_share_recovery", {}) or {}
+    fb_share_recovery_enabled_raw = kwargs.get("enable_fb_share_recovery")
+    if fb_share_recovery_enabled_raw is None:
+        fb_share_recovery_enabled_raw = share_recovery_cfg.get("enabled", cfg.get("enable_fb_share_recovery", False))
+    fb_share_recovery_enabled = bool(fb_share_recovery_enabled_raw)
+    fb_share_recovery_batch_size = kwargs.get("fb_share_recovery_batch_size")
+    if fb_share_recovery_batch_size is None:
+        fb_share_recovery_batch_size = share_recovery_cfg.get("batch_size")
 
     existing_post_df: Optional[pd.DataFrame] = None
     post_rows = _safe_count_rows(master_post_fb_path)
@@ -575,6 +583,7 @@ def run_contact_phase(
         _record_output(outputs, "master_post_fb", master_post_fb_path, df=existing_post_df)
         _record_output(outputs, "master_final", master_final_path)
         _record_output(outputs, "master_export_leads", master_export_path)
+        outputs["canonical_export_leads"] = dict(outputs["master_export_leads"])
         contact_phase["status"] = "skipped_cached"
         manifest["phases"]["contact"] = contact_phase
         write_manifest(manifest_path, manifest)
@@ -666,6 +675,19 @@ def run_contact_phase(
         return manifest
 
     _record_output(outputs, "master_export_leads", master_export_path)
+    canonical_export_path = master_export_path
+    if fb_share_recovery_enabled:
+        try:
+            recovery_result = night_mode_runner._run_fb_share_recovery_after_export(
+                master_export_path,
+                batch_size=fb_share_recovery_batch_size,
+                logger=logger,
+            )
+            canonical_export_path = str(recovery_result.get("canonical_export_csv") or master_export_path)
+        except Exception as exc:
+            logger.error("[FB Share Recovery] failed safely: %s", exc)
+            canonical_export_path = master_export_path
+    _record_output(outputs, "canonical_export_leads", canonical_export_path)
 
     contact_phase["status"] = "completed" if final_rows > 0 else "failed"
     manifest["phases"]["contact"] = contact_phase
@@ -718,6 +740,8 @@ def run_phased_night_mode(
             resume=resume,
             night_fb_run_state=night_fb_run_state,
             fb_max_rows_override=fb_max_rows_override,
+            enable_fb_share_recovery=kwargs.get("enable_fb_share_recovery"),
+            fb_share_recovery_batch_size=kwargs.get("fb_share_recovery_batch_size"),
         )
     finally:
         close_night_fb_run_state(night_fb_run_state)

@@ -1047,14 +1047,20 @@ def _build_run_summary(
     master_pre_fb: Optional[str] = None,
     master_post_fb: Optional[str] = None,
     master_final: Optional[str] = None,
+    final_export: Optional[str] = None,
 ) -> Dict[str, Any]:
     summary = _default_run_summary(run_dir)
-    artifact_candidates = _final_master_candidates(
-        run_dir,
-        master_final=master_final,
-        master_post_fb=master_post_fb,
-        master_pre_fb=master_pre_fb,
-        master_enriched=master_enriched,
+    artifact_candidates = []
+    if final_export:
+        artifact_candidates.append(final_export)
+    artifact_candidates.extend(
+        _final_master_candidates(
+            run_dir,
+            master_final=master_final,
+            master_post_fb=master_post_fb,
+            master_pre_fb=master_pre_fb,
+            master_enriched=master_enriched,
+        )
     )
     final_artifact = _select_existing_artifact(artifact_candidates)
     domain_sidecar = _discover_domain_org_sidecar(run_dir, artifact_candidates)
@@ -1097,9 +1103,8 @@ def _run_fb_share_recovery_after_export(
     export_csv: str,
     *,
     batch_size: Optional[int] = None,
-    in_place: bool = False,
     logger: Optional[logging.Logger] = None,
-) -> str:
+) -> Dict[str, Any]:
     export_path = str(export_csv or "").strip()
     if not export_path or not os.path.exists(export_path):
         raise FileNotFoundError(f"Final export not found: {export_csv}")
@@ -1118,20 +1123,20 @@ def _run_fb_share_recovery_after_export(
         logger.info("[FB Share Recovery] Starting post-run /share recovery")
         logger.info("[FB Share Recovery] input=%s", export_path)
         logger.info("[FB Share Recovery] batch_size=%s", normalized_batch_size)
-        logger.info("[FB Share Recovery] output_mode=%s", "in_place" if in_place else "copy")
-        if in_place:
-            logger.info("[FB Share Recovery] Running in-place update")
+        logger.info("[FB Share Recovery] output_mode=copy")
 
+    base, ext = os.path.splitext(export_path)
+    output_path = f"{base}.fb_share_recovered{ext or '.csv'}"
     cmd = [
         sys.executable,
         script_path,
         "--input",
         export_path,
-        "--limit",
+        "--output",
+        output_path,
+        "--batch-size",
         str(normalized_batch_size),
     ]
-    if in_place:
-        cmd.append("--in-place")
 
     completed = subprocess.run(
         cmd,
@@ -1148,12 +1153,32 @@ def _run_fb_share_recovery_after_export(
                 logger.info("%s", line.strip())
     if completed.returncode != 0:
         raise RuntimeError(f"FB share recovery failed with code {completed.returncode}")
-    output_path = export_path
+    summary: Dict[str, str] = {}
     for raw_line in stdout.splitlines():
         line = raw_line.strip()
-        if line.startswith("output="):
-            output_path = line.split("=", 1)[1].strip() or output_path
-    return output_path
+        if "=" in line and not line.startswith("["):
+            key, value = line.split("=", 1)
+            summary[key.strip()] = value.strip()
+    output_path = summary.get("output") or output_path
+    try:
+        rows_recovered = int(summary.get("rows_recovered") or summary.get("enriched") or 0)
+    except Exception:
+        rows_recovered = 0
+    canonical_export = output_path if rows_recovered > 0 else export_path
+    if logger:
+        if rows_recovered > 0:
+            logger.info("[FB Share Recovery] Promoted recovered export: %s", output_path)
+        else:
+            logger.info("[FB Share Recovery] No recovered rows; canonical export remains: %s", export_path)
+    return {
+        "input_csv": export_path,
+        "output_csv": output_path,
+        "canonical_export_csv": canonical_export,
+        "rows_recovered": rows_recovered,
+        "summary": summary,
+        "stdout": stdout,
+        "command": cmd,
+    }
 
 
 def _ensure_run_dir(resume: bool, run_root: str) -> Tuple[str, bool]:
@@ -1589,11 +1614,6 @@ def run_night_mode(
         if enable_fb_share_recovery is None
         else bool(enable_fb_share_recovery)
     )
-    fb_share_recovery_in_place_enabled = (
-        bool(share_recovery_cfg.get("in_place", False))
-        if fb_share_recovery_in_place is None
-        else bool(fb_share_recovery_in_place)
-    )
     fb_share_recovery_batch_raw = (
         fb_share_recovery_batch_size
         if fb_share_recovery_batch_size is not None
@@ -1900,15 +1920,18 @@ def run_night_mode(
                             export_profile=export_profile,
                         )
                         logger.info("[Master] Exported client-facing leads CSV: %s", export_path)
+                        final_export_path = export_path
                         if fb_share_recovery_enabled:
                             try:
-                                recovered_export_path = _run_fb_share_recovery_after_export(
+                                share_recovery_result = _run_fb_share_recovery_after_export(
                                     export_path,
                                     batch_size=fb_share_recovery_batch,
-                                    in_place=fb_share_recovery_in_place_enabled,
                                     logger=logger,
                                 )
-                                logger.info("[Master] FB share recovery output CSV: %s", recovered_export_path)
+                                final_export_path = str(
+                                    share_recovery_result.get("canonical_export_csv") or export_path
+                                )
+                                logger.info("[Master] Canonical final export CSV: %s", final_export_path)
                             except Exception as exc:
                                 logger.error("[Master] FB share recovery failed safely: %s", exc)
                         try:
@@ -1916,6 +1939,7 @@ def run_night_mode(
                                 {
                                     "emails_found": _count_nonempty_email_rows(master_final),
                                     "current_status": "export_complete",
+                                    "final_export_csv": final_export_path,
                                 }
                             )
                         except Exception:
@@ -1938,6 +1962,9 @@ def run_night_mode(
             master_enriched=master_enriched,
         )
     )
+    final_export_csv = locals().get("final_export_path") or os.path.join(run_dir, "master_export_leads.csv")
+    if final_export_csv and os.path.exists(final_export_csv):
+        final_artifact = final_export_csv
     if final_artifact:
         try:
             stats.emails_total = _count_nonempty_email_rows(final_artifact)
@@ -1957,6 +1984,7 @@ def run_night_mode(
             master_pre_fb=master_pre_fb,
             master_post_fb=master_post_fb,
             master_final=master_final,
+            final_export=final_export_csv,
         )
         run_summary_path = _write_run_summary(run_dir, run_summary)
         summary_logger.info("[Run Summary] Wrote run summary: %s", run_summary_path)
@@ -1971,6 +1999,7 @@ def run_night_mode(
         "master_pre_fb": master_pre_fb,
         "master_post_fb": master_post_fb,
         "master_csv": master_final,
+        "final_export_csv": final_export_csv,
         "export_mode": export_mode,
         "smoke_stats": stats.as_dict(),
     }

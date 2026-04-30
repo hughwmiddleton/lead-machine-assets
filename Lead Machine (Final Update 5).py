@@ -439,7 +439,7 @@ def _manual_fb_share_recovery_output_path(input_csv: str, *, in_place: bool = Fa
     path = Path(input_csv)
     if in_place:
         return str(path)
-    return str(path.with_name(f"{path.stem}_fb_share_recovered{path.suffix or '.csv'}"))
+    return str(path.with_name(f"{path.stem}.fb_share_recovered{path.suffix or '.csv'}"))
 
 
 def _validate_manual_fb_share_recovery_csv(input_csv: str) -> Path:

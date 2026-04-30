@@ -781,13 +781,13 @@ def recover_csv(
 
 def _default_output_path(input_csv: str) -> str:
     path = Path(input_csv)
-    return str(path.with_name(f"{path.stem}__fb_share_recovered{path.suffix or '.csv'}"))
+    return str(path.with_name(f"{path.stem}.fb_share_recovered{path.suffix or '.csv'}"))
 
 
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Recover missed Facebook /share/ rows in an existing CSV.")
     parser.add_argument("--input", required=True, help="Input CSV path")
-    parser.add_argument("--output", help="Output CSV path. Defaults to a separate __fb_share_recovered.csv file.")
+    parser.add_argument("--output", help="Output CSV path. Defaults to a separate .fb_share_recovered.csv file.")
     parser.add_argument("--in-place", action="store_true", help="Overwrite the input CSV explicitly.")
     parser.add_argument("--force", action="store_true", help="Allow overwriting an existing --output/default copy.")
     parser.add_argument("--offset", type=int, default=0, help="Skip this many eligible recovery candidates before processing.")
