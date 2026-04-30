@@ -426,6 +426,63 @@ def test_generate_campaign_csvs_writes_processed_master_from_prepared_rows(tmp_p
     assert input_path.read_bytes() == source_bytes
 
 
+def test_generate_campaign_csvs_processed_master_uses_sorted_split_release_date_buffer(tmp_path):
+    module = _load_legacy_module()
+    columns = ["Artist", "Location", "Release_Date", "Primary_Email"]
+    input_path = tmp_path / "master.csv"
+    output_dir = tmp_path / "campaign"
+    _write_csv(
+        input_path,
+        [
+            {
+                "Artist": "Older Split",
+                "Location": "VIC",
+                "Release_Date": "2025-01-01",
+                "Primary_Email": "old1@test.com, old2@test.com",
+            },
+            {
+                "Artist": "Newest",
+                "Location": "VIC",
+                "Release_Date": "2026-06-01",
+                "Primary_Email": "new@test.com",
+            },
+            {
+                "Artist": "Invalid",
+                "Location": "VIC",
+                "Release_Date": "coming soon",
+                "Primary_Email": "invalid@test.com",
+            },
+            {
+                "Artist": "Middle",
+                "Location": "VIC",
+                "Release_Date": "2025-09-15",
+                "Primary_Email": "mid@test.com",
+            },
+        ],
+        columns,
+    )
+
+    module.generate_campaign_csvs(
+        str(input_path),
+        str(output_dir),
+        split_multiple_emails=True,
+        remove_rows_without_emails=True,
+        release_date_sort="descending",
+    )
+
+    _, processed_rows = _read_csv(output_dir / module.CAMPAIGN_PREP_PROCESSED_MASTER_FILENAME)
+    _, campaign_rows = _read_csv(output_dir / "Inside_VIC.csv")
+    expected = [
+        ("Newest", "new@test.com"),
+        ("Middle", "mid@test.com"),
+        ("Older Split", "old1@test.com"),
+        ("Older Split", "old2@test.com"),
+        ("Invalid", "invalid@test.com"),
+    ]
+    assert [(row["Artist"], row["Primary_Email"]) for row in processed_rows] == expected
+    assert [(row["Artist"], row["Primary_Email"]) for row in campaign_rows] == expected
+
+
 def test_generate_campaign_csvs_release_date_sort_does_not_mutate_export_rows(tmp_path):
     module = _load_legacy_module()
     rows = [

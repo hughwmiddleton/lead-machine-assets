@@ -12025,6 +12025,7 @@ def _campaign_prep_desc_date_key(parsed: datetime.datetime) -> Tuple[int, int, i
 def _campaign_prep_sort_buffer_by_release_date(
     rows: List[Tuple[dict, dict]],
     sort_mode: str,
+    release_date_column: Optional[str] = None,
 ) -> List[Tuple[dict, dict]]:
     if sort_mode in ("", "none", None):
         return rows
@@ -12033,7 +12034,11 @@ def _campaign_prep_sort_buffer_by_release_date(
 
     def sort_key(item: Tuple[dict, dict]):
         source_row, _export_row = item
-        parsed = _campaign_prep_parse_release_date(source_row.get("Release Date", ""))
+        if release_date_column is not None:
+            release_date_value = source_row.get(release_date_column, "")
+        else:
+            release_date_value = source_row.get("Release Date", source_row.get("Release_Date", ""))
+        parsed = _campaign_prep_parse_release_date(release_date_value)
         if parsed is None:
             return (1, 0)
         if sort_mode == "descending":
@@ -12085,6 +12090,12 @@ CAMPAIGN_PREP_UNEARTHED_ALIASES = (
     "Played_On_Unearthed",
     "played_on_unearthed",
     "Unearthed",
+)
+
+CAMPAIGN_PREP_RELEASE_DATE_ALIASES = (
+    "Release Date",
+    "Release_Date",
+    "release_date",
 )
 
 CAMPAIGN_PREP_WOODPECKER_COLUMNS = [
@@ -12183,8 +12194,9 @@ def generate_campaign_csvs(
 
     email_column = _campaign_prep_resolve_alias(columns_by_lower, email_column_candidates)
 
-    output_rows: Dict[str, List[Tuple[dict, dict]]] = {name: [] for name in CAMPAIGN_PREP_OUTPUT_ORDER}
-    processed_master_rows: List[Tuple[dict, dict]] = []
+    release_date_column = _campaign_prep_resolve_alias(columns_by_lower, CAMPAIGN_PREP_RELEASE_DATE_ALIASES)
+
+    prepared_rows: List[Tuple[dict, dict]] = []
     column_indexes = {column: idx for idx, column in enumerate(columns)}
     output_columns = CAMPAIGN_PREP_WOODPECKER_COLUMNS if export_format == "woodpecker" else columns
 
@@ -12226,28 +12238,48 @@ def generate_campaign_csvs(
             else:
                 playback_segment = "Neither"
 
-            processed_master_rows.append((final_row, dict(final_row)))
             export_row = _campaign_prep_export_row(final_row, export_format, columns_by_lower, email_column)
-            output_rows[f"{location_segment}.csv"].append((final_row, dict(export_row)))
-            output_rows[f"{location_segment}_{playback_segment}.csv"].append((final_row, dict(export_row)))
+            prepared_rows.append(
+                (
+                    final_row,
+                    {
+                        "processed_row": dict(final_row),
+                        "export_row": dict(export_row),
+                        "filenames": (
+                            f"{location_segment}.csv",
+                            f"{location_segment}_{playback_segment}.csv",
+                        ),
+                    },
+                )
+            )
 
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
-    sorted_processed_master = _campaign_prep_sort_buffer_by_release_date(processed_master_rows, release_date_sort)
-    processed_master_output_rows = [dict(source_row) for source_row, _processed_row in sorted_processed_master]
+    sorted_prepared_rows = _campaign_prep_sort_buffer_by_release_date(
+        prepared_rows,
+        release_date_sort,
+        release_date_column=release_date_column,
+    )
+    processed_master_output_rows = [
+        dict(prepared_row["processed_row"])
+        for _source_row, prepared_row in sorted_prepared_rows
+    ]
     _campaign_prep_atomic_write_csv(
         output_path / CAMPAIGN_PREP_PROCESSED_MASTER_FILENAME,
         processed_master_output_rows,
         columns,
     )
 
+    output_rows: Dict[str, List[dict]] = {name: [] for name in CAMPAIGN_PREP_OUTPUT_ORDER}
+    for _source_row, prepared_row in sorted_prepared_rows:
+        for filename in prepared_row["filenames"]:
+            output_rows[filename].append(dict(prepared_row["export_row"]))
+
     result: Dict[str, int] = {}
     for filename in CAMPAIGN_PREP_OUTPUT_ORDER:
-        buffered_rows = output_rows[filename]
-        if filename not in ("Inside_VIC.csv", "Outside_VIC.csv") and not buffered_rows:
+        rows = output_rows[filename]
+        if filename not in ("Inside_VIC.csv", "Outside_VIC.csv") and not rows:
             continue
-        sorted_buffer = _campaign_prep_sort_buffer_by_release_date(buffered_rows, release_date_sort)
-        rows = [dict(export_row) for _source_row, export_row in sorted_buffer]
         _campaign_prep_atomic_write_csv(output_path / filename, rows, output_columns)
         result[filename] = len(rows)
     return result
