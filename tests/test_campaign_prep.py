@@ -52,7 +52,7 @@ def _campaign_result_key(region: str, bucket: str, radio_bucket: str) -> str:
 
 def _all_campaign_rows(output_dir: Path, processed_filename: str) -> list[dict]:
     rows: list[dict] = []
-    for path in sorted(output_dir.glob("**/*.csv")):
+    for path in sorted(output_dir.glob("*/*.csv")):
         if path.name == processed_filename:
             continue
         _, path_rows = _read_csv(path)
@@ -255,7 +255,14 @@ def test_generate_campaign_csvs_no_email_column_filter_on_writes_empty_primary_f
 
     assert result == {}
     assert sorted(path.name for path in output_dir.glob("*.csv")) == [
+        "campaign_export_manifest.csv",
+        "campaign_export_skipped_rows.csv",
         "master_export_leads.processed.csv",
+    ]
+    _, skipped_rows = _read_csv(output_dir / module.CAMPAIGN_PREP_SKIPPED_ROWS_FILENAME)
+    assert [(row["Artist"], row["reason_skipped"]) for row in skipped_rows] == [
+        ("Act A", "missing_email_column"),
+        ("Act B", "missing_email_column"),
     ]
 
 
@@ -281,7 +288,14 @@ def test_generate_campaign_csvs_filter_all_rows_removed_writes_primary_headers_o
 
     assert result == {}
     assert sorted(path.name for path in output_dir.glob("*.csv")) == [
+        "campaign_export_manifest.csv",
+        "campaign_export_skipped_rows.csv",
         "master_export_leads.processed.csv",
+    ]
+    _, skipped_rows = _read_csv(output_dir / module.CAMPAIGN_PREP_SKIPPED_ROWS_FILENAME)
+    assert [(row["Artist"], row["Email"], row["reason_skipped"]) for row in skipped_rows] == [
+        ("Act A", "", "missing_email"),
+        ("Act B", "None", "missing_email"),
     ]
 
 
@@ -666,7 +680,7 @@ def test_generate_campaign_csvs_woodpecker_filter_uses_resolved_email_without_fa
     assert rows[0]["Artist"] == "Act B"
 
 
-def test_generate_campaign_csvs_woodpecker_lightly_cleans_artist_or_song_only_at_export(tmp_path):
+def test_generate_campaign_csvs_woodpecker_cleans_spacing_without_artist_or_title_rebranding(tmp_path):
     module = _load_legacy_module()
     columns = ["Artist", "Location", "Primary_Email", "Song_Title"]
     input_path = tmp_path / "master.csv"
@@ -727,12 +741,156 @@ def test_generate_campaign_csvs_woodpecker_lightly_cleans_artist_or_song_only_at
 
     _, rows = _read_csv(_campaign_path(output_dir, "Inside_VIC", "180_plus_days", "Neither"))
     assert [(row["Artist"], row["Song Title"]) for row in rows] == [
-        (" ktp ", "Break Bread"),
-        ("KTP", "u + me"),
+        ("ktp", "break bread"),
+        ("K t p", "u + me"),
         ("teenage dads", "i don't care"),
-        ("Asha Jefferies", "!!!"),
-        ("Asha Jefferies", ""),
+        ("asha jefferies", "!!!"),
+        ("aSha jeFFeries", ""),
     ]
+    assert input_path.read_bytes() == source_bytes
+
+
+def test_generate_campaign_csvs_writes_manifest_summary_all_and_skipped_guard(tmp_path):
+    module = _load_legacy_module()
+    columns = ["Artist", "Location", "Release Date", "Email", "Played_On_Triple_J", "Song_Title"]
+    input_path = tmp_path / "master.csv"
+    output_dir = tmp_path / "campaign"
+    reference = module.datetime.datetime(2026, 4, 30, tzinfo=module.datetime.timezone.utc)
+    _write_csv(
+        input_path,
+        [
+            {
+                "Artist": "Act A",
+                "Location": "VIC",
+                "Release Date": "2026-04-20",
+                "Email": "a@test.com",
+                "Played_On_Triple_J": "yes",
+                "Song_Title": "RinRin",
+            },
+            {
+                "Artist": "Act B",
+                "Location": "Melbourne",
+                "Release Date": "2026-02-20",
+                "Email": "b@test.com",
+                "Played_On_Triple_J": "yes",
+                "Song_Title": "Radio Edit",
+            },
+            {
+                "Artist": "Act C",
+                "Location": "VIC",
+                "Release Date": "2026-04-01",
+                "Email": "",
+                "Played_On_Triple_J": "yes",
+                "Song_Title": "Skipped",
+            },
+        ],
+        columns,
+    )
+
+    result = module.generate_campaign_csvs(
+        str(input_path),
+        str(output_dir),
+        remove_rows_without_emails=True,
+        export_format="woodpecker",
+        run_reference_date=reference,
+    )
+
+    assert result.diagnostics["input_rows"] == 3
+    assert result.diagnostics["written_rows"] == 2
+    assert result.diagnostics["skipped_rows"] == 1
+
+    _, all_rows = _read_csv(output_dir / "Inside_VIC_Played_TripleJ_ALL.csv")
+    assert [(row["Artist"], row["Song Title"], row["Recency_Bucket"]) for row in all_rows] == [
+        ("Act A", "RinRin", "0_30_days"),
+        ("Act B", "Radio Edit", "30_90_days"),
+    ]
+
+    skipped_columns, skipped_rows = _read_csv(output_dir / module.CAMPAIGN_PREP_SKIPPED_ROWS_FILENAME)
+    assert skipped_columns == module.CAMPAIGN_PREP_SKIPPED_ROW_COLUMNS
+    assert skipped_rows == [
+        {
+            "Artist": "Act C",
+            "Email": "",
+            "Song Title": "Skipped",
+            "Segment": "Inside_VIC_Played_TripleJ",
+            "Recency_Bucket": "0_30_days",
+            "reason_skipped": "missing_email",
+        }
+    ]
+
+    _, manifest_rows = _read_csv(output_dir / module.CAMPAIGN_PREP_MANIFEST_FILENAME)
+    manifest_index = {(row["segment_name"], row["recency_bucket"], row["output_file"]): row for row in manifest_rows}
+    assert manifest_index[
+        ("Inside_VIC_Played_TripleJ", "ALL", "Inside_VIC_Played_TripleJ_ALL.csv")
+    ]["rows_written"] == "2"
+    assert manifest_index[
+        ("Inside_VIC_Played_TripleJ", "0_30_days", "0_30_days/Inside_VIC_Played_TripleJ.csv")
+    ]["rows_written"] == "1"
+    assert manifest_index[
+        ("Inside_VIC_Played_TripleJ", "30_90_days", "30_90_days/Inside_VIC_Played_TripleJ.csv")
+    ]["rows_written"] == "1"
+    assert manifest_index[
+        ("Skipped_Rows", "ALL", module.CAMPAIGN_PREP_SKIPPED_ROWS_FILENAME)
+    ]["rows_written"] == "1"
+
+    summary = (output_dir / module.CAMPAIGN_PREP_SUMMARY_FILENAME).read_text(encoding="utf-8")
+    assert "Inside_VIC_Played_TripleJ\n- ALL: 2" in summary
+    assert "- 0_30_days: 1" in summary
+    assert "- 30_90_days: 1" in summary
+    assert "- skipped_rows: 1" in summary
+
+
+def test_generate_campaign_csvs_skipped_rows_file_has_header_when_empty(tmp_path):
+    module = _load_legacy_module()
+    columns = ["Artist", "Location", "Email"]
+    input_path = tmp_path / "master.csv"
+    output_dir = tmp_path / "campaign"
+    _write_csv(input_path, [{"Artist": "Act", "Location": "VIC", "Email": "a@test.com"}], columns)
+
+    module.generate_campaign_csvs(
+        str(input_path),
+        str(output_dir),
+        remove_rows_without_emails=True,
+    )
+
+    skipped_columns, skipped_rows = _read_csv(output_dir / module.CAMPAIGN_PREP_SKIPPED_ROWS_FILENAME)
+    assert skipped_columns == module.CAMPAIGN_PREP_SKIPPED_ROW_COLUMNS
+    assert skipped_rows == []
+
+
+def test_generate_campaign_csvs_woodpecker_repairs_mojibake_only_in_export(tmp_path):
+    module = _load_legacy_module()
+    columns = ["Artist", "Location", "Email", "Song_Title", "Sounds Like", "Notes"]
+    input_path = tmp_path / "master.csv"
+    output_dir = tmp_path / "campaign"
+    _write_csv(
+        input_path,
+        [
+            {
+                "Artist": "R√úF√úS",
+                "Location": "Beb√© NSW",
+                "Email": "a@test.com",
+                "Song_Title": "Can‚Äôt Stop",
+                "Sounds Like": "Beb√©",
+                "Notes": "Can‚Äôt / ‚Äì",
+            }
+        ],
+        columns,
+    )
+    source_bytes = input_path.read_bytes()
+
+    module.generate_campaign_csvs(str(input_path), str(output_dir), export_format="woodpecker")
+
+    _, processed_rows = _read_csv(output_dir / module.CAMPAIGN_PREP_PROCESSED_MASTER_FILENAME)
+    assert processed_rows[0]["Artist"] == "R√úF√úS"
+    assert processed_rows[0]["Song_Title"] == "Can‚Äôt Stop"
+
+    _, rows = _read_csv(_campaign_path(output_dir, "Outside_VIC", "180_plus_days", "Neither"))
+    assert rows[0]["Artist"] == "RÜFÜS"
+    assert rows[0]["Location"] == "Bebé NSW"
+    assert rows[0]["Song Title"] == "Can’t Stop"
+    assert rows[0]["Sounds Like"] == "Bebé"
+    assert rows[0]["Notes"] == "Can’t / –"
     assert input_path.read_bytes() == source_bytes
 
 
@@ -879,7 +1037,19 @@ def test_generate_campaign_csvs_release_date_recency_buckets_partition_and_bound
         "30_90_days",
         "90_180_days",
     ]
-    assert not any(path.name.startswith(("Inside_VIC_", "Outside_VIC_")) for path in output_dir.glob("*.csv"))
+    combined_files = sorted(
+        path.name
+        for path in output_dir.glob("*_ALL.csv")
+        if path.name.startswith(("Inside_VIC_", "Outside_VIC_"))
+    )
+    assert combined_files == [
+        "Inside_VIC_Neither_ALL.csv",
+        "Inside_VIC_Played_TripleJ_ALL.csv",
+        "Inside_VIC_Played_Unearthed_ALL.csv",
+        "Outside_VIC_Neither_ALL.csv",
+        "Outside_VIC_Played_TripleJ_ALL.csv",
+        "Outside_VIC_Played_Unearthed_ALL.csv",
+    ]
 
     def expected_filename(row: dict) -> str:
         region = "Inside_VIC" if module._campaign_prep_inside_vic(row["Location"]) else "Outside_VIC"

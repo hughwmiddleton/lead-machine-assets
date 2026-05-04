@@ -26,7 +26,6 @@ import tempfile
 import shutil
 import logging
 import copy
-import string
 from pathlib import Path
 from typing import Dict, List, Mapping, Optional, Tuple
 
@@ -12174,9 +12173,62 @@ def _campaign_prep_log_diagnostics(diagnostics: dict) -> None:
 
 
 CAMPAIGN_PREP_PROCESSED_MASTER_FILENAME = "master_export_leads.processed.csv"
-CAMPAIGN_PREP_KNOWN_ARTIST_CAPS = {"KTP", "DMA'S"}
-CAMPAIGN_PREP_KNOWN_ARTIST_CASE = {
-    "asha jefferies": "Asha Jefferies",
+CAMPAIGN_PREP_MANIFEST_FILENAME = "campaign_export_manifest.csv"
+CAMPAIGN_PREP_SUMMARY_FILENAME = "campaign_export_summary.txt"
+CAMPAIGN_PREP_SKIPPED_ROWS_FILENAME = "campaign_export_skipped_rows.csv"
+CAMPAIGN_PREP_SKIPPED_ROW_COLUMNS = [
+    "Artist",
+    "Email",
+    "Song Title",
+    "Segment",
+    "Recency_Bucket",
+    "reason_skipped",
+]
+CAMPAIGN_PREP_WOODPECKER_ENCODING_CLEANUP_FIELDS = {
+    "Artist",
+    "Song Title",
+    "Sounds Like",
+    "Notes",
+    "Location",
+}
+CAMPAIGN_PREP_MOJIBAKE_REPLACEMENTS = {
+    "â€™": "’",
+    "â€˜": "‘",
+    "â€œ": '"',
+    "â€\x9d": '"',
+    "â€“": "–",
+    "â€”": "—",
+    "â€¦": "...",
+    "Â": "",
+    "Ã©": "é",
+    "Ã¨": "è",
+    "Ã¡": "á",
+    "Ã¢": "â",
+    "Ã³": "ó",
+    "Ã¶": "ö",
+    "Ã¼": "ü",
+    "Ãœ": "Ü",
+    "Ã±": "ñ",
+    "Ã‡": "Ç",
+    "Ã§": "ç",
+    "‚Äô": "’",
+    "‚Äò": "‘",
+    "‚Äú": '"',
+    "‚Äù": '"',
+    "‚Äì": "–",
+    "‚Äî": "—",
+    "‚Ä¶": "...",
+    "√©": "é",
+    "√®": "è",
+    "√°": "á",
+    "√¢": "â",
+    "√≥": "ó",
+    "√∂": "ö",
+    "√º": "ü",
+    "√ú": "Ü",
+    "√±": "ñ",
+    "√á": "Ç",
+    "√ß": "ç",
 }
 
 CAMPAIGN_PREP_LOCATION_ALIASES = (
@@ -12258,65 +12310,79 @@ def _campaign_prep_clean_display_text(value) -> str:
 
 def _campaign_prep_clean_song_title(title) -> str:
     cleaned = _campaign_prep_clean_display_text(title)
-    if not cleaned:
-        return cleaned
-    if any(char in cleaned for char in ["+", "!", "?"]) or len(cleaned) <= 3:
-        return cleaned
-    if cleaned.startswith("i "):
-        return cleaned
-    return string.capwords(cleaned)
+    return cleaned
 
 
 def _campaign_prep_clean_artist_name(artist) -> str:
-    cleaned = _campaign_prep_clean_display_text(artist)
-    if not cleaned:
-        return cleaned
+    return _campaign_prep_clean_display_text(artist)
 
-    cap_key = cleaned.upper()
-    if cap_key in CAMPAIGN_PREP_KNOWN_ARTIST_CAPS:
-        return cap_key
 
-    known_case = CAMPAIGN_PREP_KNOWN_ARTIST_CASE.get(cleaned.lower())
-    if known_case is not None:
-        return known_case
-
-    compact_acronym = re.sub(r"\s+", "", cleaned)
-    acronym_parts = cleaned.split()
-    if (
-        2 <= len(acronym_parts) <= 5
-        and all(re.fullmatch(r"[A-Za-z]", part) for part in acronym_parts)
-        and re.fullmatch(r"[A-Za-z]{2,5}", compact_acronym)
-    ):
-        return compact_acronym.upper()
-
-    parts = cleaned.split()
-    if len(parts) == 2 and all(re.fullmatch(r"[A-Za-z]+", part) for part in parts):
-        has_broken_mixed_case = any(
-            not (part.islower() or (part[:1].isupper() and part[1:].islower()))
-            for part in parts
-        )
-        if has_broken_mixed_case:
-            return string.capwords(cleaned)
-
-    return cleaned
+def _campaign_prep_repair_export_mojibake(value) -> str:
+    text = _campaign_prep_clean_display_text(value)
+    if not text:
+        return text
+    for broken, fixed in CAMPAIGN_PREP_MOJIBAKE_REPLACEMENTS.items():
+        text = text.replace(broken, fixed)
+    return text
 
 
 def _campaign_prep_clean_woodpecker_export_row(row: dict) -> dict:
     output = dict(row)
-
-    song_title = output.get("Song Title", "")
-    cleaned_song_title = _campaign_prep_clean_song_title(song_title)
-    if cleaned_song_title != song_title:
-        output["Song Title"] = cleaned_song_title
-        return output
-
-    artist = output.get("Artist", "")
-    cleaned_artist = _campaign_prep_clean_artist_name(artist)
-    if cleaned_artist != artist:
-        output["Artist"] = cleaned_artist
-        return output
-
+    for column in CAMPAIGN_PREP_WOODPECKER_ENCODING_CLEANUP_FIELDS:
+        if column == "Song Title":
+            output[column] = _campaign_prep_clean_song_title(output.get(column, ""))
+        elif column == "Artist":
+            output[column] = _campaign_prep_clean_artist_name(output.get(column, ""))
+        else:
+            output[column] = _campaign_prep_repair_export_mojibake(output.get(column, ""))
+        output[column] = _campaign_prep_repair_export_mojibake(output.get(column, ""))
     return output
+
+
+def _campaign_prep_segment_name(region: str, radio_bucket: str) -> str:
+    return f"{region}_{radio_bucket}"
+
+
+def _campaign_prep_combined_segment_filename(region: str, radio_bucket: str) -> str:
+    return f"{_campaign_prep_segment_name(region, radio_bucket)}_ALL.csv"
+
+
+def _campaign_prep_skipped_row(
+    row: dict,
+    columns_by_lower: Dict[str, str],
+    email_column: Optional[str],
+    segment_name: str,
+    recency_bucket: str,
+    reason: str,
+) -> dict:
+    artist_column = _campaign_prep_resolve_alias(columns_by_lower, ("Artist",))
+    song_title_column = _campaign_prep_resolve_alias(columns_by_lower, ("Song_Title", "Song Title"))
+    return {
+        "Artist": row.get(artist_column, "") if artist_column is not None else "",
+        "Email": row.get(email_column, "") if email_column is not None else "",
+        "Song Title": row.get(song_title_column, "") if song_title_column is not None else "",
+        "Segment": segment_name,
+        "Recency_Bucket": recency_bucket,
+        "reason_skipped": reason,
+    }
+
+
+def _campaign_prep_write_text_atomic(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f"{path.name}.tmp")
+    try:
+        with open(tmp_path, "w", encoding="utf-8", newline="") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except Exception:
+            pass
+        raise
 
 
 class CampaignPrepResult(dict):
@@ -12405,6 +12471,7 @@ def generate_campaign_csvs(
     )
 
     prepared_rows: List[Tuple[dict, dict]] = []
+    skipped_rows: List[dict] = []
     column_indexes = {column: idx for idx, column in enumerate(columns)}
     processed_columns = _campaign_prep_append_recency_column(columns)
     export_base_columns = CAMPAIGN_PREP_WOODPECKER_COLUMNS if export_format == "woodpecker" else columns
@@ -12432,16 +12499,6 @@ def generate_campaign_csvs(
                 split_row[email_column] = tokens[0]
                 rows_for_segmentation = [split_row]
 
-        if remove_rows_without_emails:
-            if email_column is None:
-                rows_for_segmentation = []
-            else:
-                rows_for_segmentation = [
-                    split_row
-                    for split_row in rows_for_segmentation
-                    if _campaign_prep_has_email_value(split_row.get(email_column, ""))
-                ]
-
         for final_row in rows_for_segmentation:
             location_segment = "Inside_VIC" if _campaign_prep_inside_vic(final_row.get(location_column, "")) else "Outside_VIC"
             if _campaign_prep_truthy(final_row.get(triplej_column, "")):
@@ -12450,6 +12507,34 @@ def generate_campaign_csvs(
                 playback_segment = "Played_Unearthed"
             else:
                 playback_segment = "Neither"
+            recency_bucket = _campaign_prep_recency_bucket(parsed_release_date, run_reference_date)
+            segment_name = _campaign_prep_segment_name(location_segment, playback_segment)
+
+            if remove_rows_without_emails:
+                if email_column is None:
+                    skipped_rows.append(
+                        _campaign_prep_skipped_row(
+                            final_row,
+                            columns_by_lower,
+                            email_column,
+                            segment_name,
+                            recency_bucket,
+                            "missing_email_column",
+                        )
+                    )
+                    continue
+                if not _campaign_prep_has_email_value(final_row.get(email_column, "")):
+                    skipped_rows.append(
+                        _campaign_prep_skipped_row(
+                            final_row,
+                            columns_by_lower,
+                            email_column,
+                            segment_name,
+                            recency_bucket,
+                            "missing_email",
+                        )
+                    )
+                    continue
 
             prepared_rows.append(
                 (
@@ -12460,6 +12545,7 @@ def generate_campaign_csvs(
                         "release_date_raw": release_date_value,
                         "region": location_segment,
                         "radio_bucket": playback_segment,
+                        "recency_bucket": recency_bucket,
                     },
                 )
             )
@@ -12473,90 +12559,184 @@ def generate_campaign_csvs(
     )
 
     processed_master_output_rows: List[dict] = []
-    campaign_files: Dict[str, dict] = {}
+    campaign_file_rows: Dict[str, List[dict]] = {}
+    combined_file_rows: Dict[str, List[dict]] = {}
     campaign_counts: Dict[str, int] = {}
-    campaign_files_finalized = False
-    try:
-        for source_row, prepared_row in sorted_prepared_rows:
-            recency_bucket = _campaign_prep_recency_bucket(
-                prepared_row.get("parsed_release_date"),
-                run_reference_date,
-            )
-            prepared_row["recency_bucket"] = recency_bucket
-            processed_row = dict(source_row)
-            processed_row[CAMPAIGN_PREP_RECENCY_BUCKET_COLUMN] = prepared_row["recency_bucket"]
-            export_row = _campaign_prep_export_row(processed_row, export_format, columns_by_lower, email_column)
-            if export_format == "woodpecker":
-                export_row = _campaign_prep_clean_woodpecker_export_row(export_row)
-            export_row[CAMPAIGN_PREP_RECENCY_BUCKET_COLUMN] = prepared_row["recency_bucket"]
-            filename = _campaign_prep_campaign_filename(
-                prepared_row["region"],
-                prepared_row["recency_bucket"],
-                prepared_row["radio_bucket"],
-            )
-            processed_master_output_rows.append(processed_row)
-            if filename not in campaign_files:
-                final_path = output_path / filename
-                final_path.parent.mkdir(parents=True, exist_ok=True)
-                tmp_path = final_path.with_name(f"{final_path.name}.tmp")
-                handle = open(tmp_path, "w", encoding="utf-8", newline="")
-                writer = csv.DictWriter(handle, fieldnames=output_columns)
-                writer.writeheader()
-                campaign_files[filename] = {
-                    "final_path": final_path,
-                    "tmp_path": tmp_path,
-                    "handle": handle,
-                    "writer": writer,
-                }
-                campaign_counts[filename] = 0
-            campaign_files[filename]["writer"].writerow(
-                {column: export_row.get(column, "") for column in output_columns}
-            )
-            campaign_counts[filename] += 1
-
-        diagnostics = _campaign_prep_build_diagnostics(
-            sorted_prepared_rows,
-            run_reference_date,
-            release_date_column,
-            both_release_date_columns_present,
+    combined_counts: Dict[str, int] = {}
+    for source_row, prepared_row in sorted_prepared_rows:
+        recency_bucket = prepared_row["recency_bucket"]
+        processed_row = dict(source_row)
+        processed_row[CAMPAIGN_PREP_RECENCY_BUCKET_COLUMN] = recency_bucket
+        export_row = _campaign_prep_export_row(processed_row, export_format, columns_by_lower, email_column)
+        if export_format == "woodpecker":
+            export_row = _campaign_prep_clean_woodpecker_export_row(export_row)
+        export_row[CAMPAIGN_PREP_RECENCY_BUCKET_COLUMN] = recency_bucket
+        filename = _campaign_prep_campaign_filename(
+            prepared_row["region"],
+            recency_bucket,
+            prepared_row["radio_bucket"],
         )
-        _campaign_prep_log_diagnostics(diagnostics)
+        combined_filename = _campaign_prep_combined_segment_filename(
+            prepared_row["region"],
+            prepared_row["radio_bucket"],
+        )
+        processed_master_output_rows.append(processed_row)
+        campaign_file_rows.setdefault(filename, []).append(
+            {column: export_row.get(column, "") for column in output_columns}
+        )
+        campaign_counts[filename] = campaign_counts.get(filename, 0) + 1
+        combined_file_rows.setdefault(combined_filename, []).append(
+            {column: export_row.get(column, "") for column in output_columns}
+        )
+        combined_counts[combined_filename] = combined_counts.get(combined_filename, 0) + 1
 
-        _campaign_prep_atomic_write_csv(
-            output_path / CAMPAIGN_PREP_PROCESSED_MASTER_FILENAME,
-            processed_master_output_rows,
-            processed_columns,
+    input_rows = len(sorted_prepared_rows) + len(skipped_rows)
+    written_rows = len(processed_master_output_rows)
+    skipped_row_count = len(skipped_rows)
+    if input_rows != written_rows + skipped_row_count:
+        raise RuntimeError(
+            "Campaign Prep export accounting mismatch: "
+            f"input_rows={input_rows} written_rows={written_rows} skipped_rows={skipped_row_count}"
         )
 
-        result: Dict[str, int] = {}
-        for filename in CAMPAIGN_PREP_OUTPUT_ORDER:
-            if filename not in campaign_files:
+    diagnostics = _campaign_prep_build_diagnostics(
+        sorted_prepared_rows,
+        run_reference_date,
+        release_date_column,
+        both_release_date_columns_present,
+    )
+    diagnostics["input_rows"] = input_rows
+    diagnostics["written_rows"] = written_rows
+    diagnostics["skipped_rows"] = skipped_row_count
+    _campaign_prep_log_diagnostics(diagnostics)
+    print(
+        "[Campaign Prep] Export accounting "
+        f"input_rows={input_rows} written_rows={written_rows} skipped_rows={skipped_row_count}"
+    )
+    if skipped_row_count > 0:
+        print("Export completed with skipped rows — review campaign_export_skipped_rows.csv")
+    written_buckets = {
+        filename.split("/", 1)[0]
+        for filename, count in campaign_counts.items()
+        if count and "/" in filename
+    }
+    if len(written_buckets) > 1:
+        print("Export split across recency buckets — see campaign_export_summary.txt")
+
+    _campaign_prep_atomic_write_csv(
+        output_path / CAMPAIGN_PREP_PROCESSED_MASTER_FILENAME,
+        processed_master_output_rows,
+        processed_columns,
+    )
+
+    manifest_rows: List[dict] = [
+        {
+            "segment_name": "Processed_Master",
+            "recency_bucket": "ALL",
+            "rows_written": len(processed_master_output_rows),
+            "output_file": CAMPAIGN_PREP_PROCESSED_MASTER_FILENAME,
+        }
+    ]
+    result: Dict[str, int] = {}
+    for filename in CAMPAIGN_PREP_OUTPUT_ORDER:
+        rows = campaign_file_rows.get(filename)
+        if not rows:
+            continue
+        _campaign_prep_atomic_write_csv(output_path / filename, rows, output_columns)
+        bucket, basename = filename.split("/", 1)
+        segment_name = basename[:-4]
+        manifest_rows.append(
+            {
+                "segment_name": segment_name,
+                "recency_bucket": bucket,
+                "rows_written": len(rows),
+                "output_file": filename,
+            }
+        )
+        result[filename] = campaign_counts[filename]
+
+    for region in CAMPAIGN_PREP_REGION_SEGMENTS:
+        for radio_bucket in CAMPAIGN_PREP_RADIO_BUCKETS:
+            combined_filename = _campaign_prep_combined_segment_filename(region, radio_bucket)
+            rows = combined_file_rows.get(combined_filename)
+            if not rows:
                 continue
-            file_state = campaign_files[filename]
-            handle = file_state["handle"]
-            handle.flush()
-            os.fsync(handle.fileno())
-            handle.close()
-            file_state["handle"] = None
-            os.replace(file_state["tmp_path"], file_state["final_path"])
-            result[filename] = campaign_counts[filename]
-        campaign_files_finalized = True
-        return CampaignPrepResult(result, diagnostics=diagnostics)
-    finally:
-        if not campaign_files_finalized:
-            for file_state in campaign_files.values():
-                handle = file_state.get("handle")
-                if handle is not None:
-                    try:
-                        handle.close()
-                    except Exception:
-                        pass
-                try:
-                    tmp_path = file_state.get("tmp_path")
-                    if tmp_path is not None and tmp_path.exists():
-                        tmp_path.unlink()
-                except Exception:
-                    pass
+            _campaign_prep_atomic_write_csv(output_path / combined_filename, rows, output_columns)
+            manifest_rows.append(
+                {
+                    "segment_name": _campaign_prep_segment_name(region, radio_bucket),
+                    "recency_bucket": "ALL",
+                    "rows_written": len(rows),
+                    "output_file": combined_filename,
+                }
+            )
+
+    _campaign_prep_atomic_write_csv(
+        output_path / CAMPAIGN_PREP_SKIPPED_ROWS_FILENAME,
+        skipped_rows,
+        CAMPAIGN_PREP_SKIPPED_ROW_COLUMNS,
+    )
+    manifest_rows.append(
+        {
+            "segment_name": "Skipped_Rows",
+            "recency_bucket": "ALL",
+            "rows_written": len(skipped_rows),
+            "output_file": CAMPAIGN_PREP_SKIPPED_ROWS_FILENAME,
+        }
+    )
+
+    summary_lines: List[str] = []
+    for region in CAMPAIGN_PREP_REGION_SEGMENTS:
+        for radio_bucket in CAMPAIGN_PREP_RADIO_BUCKETS:
+            segment_name = _campaign_prep_segment_name(region, radio_bucket)
+            combined_filename = _campaign_prep_combined_segment_filename(region, radio_bucket)
+            all_count = combined_counts.get(combined_filename, 0)
+            if all_count == 0:
+                continue
+            if summary_lines:
+                summary_lines.append("")
+            summary_lines.append(segment_name)
+            summary_lines.append(f"- ALL: {all_count}")
+            for bucket in CAMPAIGN_PREP_RECENCY_BUCKETS:
+                bucket_filename = _campaign_prep_campaign_filename(region, bucket, radio_bucket)
+                summary_lines.append(f"- {bucket}: {campaign_counts.get(bucket_filename, 0)}")
+    if summary_lines:
+        summary_lines.append("")
+    summary_lines.extend(
+        [
+            "Export accounting",
+            f"- input_rows: {input_rows}",
+            f"- written_rows: {written_rows}",
+            f"- skipped_rows: {skipped_row_count}",
+        ]
+    )
+    _campaign_prep_write_text_atomic(
+        output_path / CAMPAIGN_PREP_SUMMARY_FILENAME,
+        "\n".join(summary_lines) + "\n",
+    )
+
+    manifest_rows.append(
+        {
+            "segment_name": "Summary",
+            "recency_bucket": "ALL",
+            "rows_written": 0,
+            "output_file": CAMPAIGN_PREP_SUMMARY_FILENAME,
+        }
+    )
+    manifest_rows.append(
+        {
+            "segment_name": "Manifest",
+            "recency_bucket": "ALL",
+            "rows_written": len(manifest_rows) + 1,
+            "output_file": CAMPAIGN_PREP_MANIFEST_FILENAME,
+        }
+    )
+    _campaign_prep_atomic_write_csv(
+        output_path / CAMPAIGN_PREP_MANIFEST_FILENAME,
+        manifest_rows,
+        ["segment_name", "recency_bucket", "rows_written", "output_file"],
+    )
+    return CampaignPrepResult(result, diagnostics=diagnostics)
 
 
 class CampaignPrepTab(QtWidgets.QWidget):
@@ -12679,6 +12859,18 @@ class CampaignPrepTab(QtWidgets.QWidget):
                 release_date_sort=self.release_date_sort_combo.currentData() or "none",
             )
             lines = [f"{filename}: {count} rows" for filename, count in result.items()]
+            diagnostics = getattr(result, "diagnostics", {})
+            if diagnostics.get("skipped_rows", 0) > 0:
+                lines.append("")
+                lines.append("Export completed with skipped rows — review campaign_export_skipped_rows.csv")
+            written_buckets = {
+                filename.split("/", 1)[0]
+                for filename, count in result.items()
+                if count and "/" in filename
+            }
+            if len(written_buckets) > 1:
+                lines.append("")
+                lines.append("Export split across recency buckets — see campaign_export_summary.txt")
             summary = "\n".join(lines)
             self.summary_view.setPlainText(summary)
             QtWidgets.QMessageBox.information(self, "Campaign CSVs Generated", summary)
