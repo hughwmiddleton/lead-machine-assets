@@ -26,6 +26,7 @@ import tempfile
 import shutil
 import logging
 import copy
+import string
 from pathlib import Path
 from typing import Dict, List, Mapping, Optional, Tuple
 
@@ -12173,6 +12174,10 @@ def _campaign_prep_log_diagnostics(diagnostics: dict) -> None:
 
 
 CAMPAIGN_PREP_PROCESSED_MASTER_FILENAME = "master_export_leads.processed.csv"
+CAMPAIGN_PREP_KNOWN_ARTIST_CAPS = {"KTP", "DMA'S"}
+CAMPAIGN_PREP_KNOWN_ARTIST_CASE = {
+    "asha jefferies": "Asha Jefferies",
+}
 
 CAMPAIGN_PREP_LOCATION_ALIASES = (
     "Location",
@@ -12240,6 +12245,78 @@ CAMPAIGN_PREP_WOODPECKER_ALIASES = [
     ("Upload Date", CAMPAIGN_PREP_UPLOAD_DATE_ALIASES),
     ("Notes", ("Notes",)),
 ]
+
+
+def _campaign_prep_clean_display_text(value) -> str:
+    text = "" if value is None else str(value)
+    text = text.replace("\ufffd", "")
+    text = re.sub(r"\s+", " ", text).strip()
+    text = re.sub(r"\s+([,.;:!?])", r"\1", text)
+    text = re.sub(r"([,;:])(?=[^\s,.;:!?])", r"\1 ", text)
+    return text.strip()
+
+
+def _campaign_prep_clean_song_title(title) -> str:
+    cleaned = _campaign_prep_clean_display_text(title)
+    if not cleaned:
+        return cleaned
+    if any(char in cleaned for char in ["+", "!", "?"]) or len(cleaned) <= 3:
+        return cleaned
+    if cleaned.startswith("i "):
+        return cleaned
+    return string.capwords(cleaned)
+
+
+def _campaign_prep_clean_artist_name(artist) -> str:
+    cleaned = _campaign_prep_clean_display_text(artist)
+    if not cleaned:
+        return cleaned
+
+    cap_key = cleaned.upper()
+    if cap_key in CAMPAIGN_PREP_KNOWN_ARTIST_CAPS:
+        return cap_key
+
+    known_case = CAMPAIGN_PREP_KNOWN_ARTIST_CASE.get(cleaned.lower())
+    if known_case is not None:
+        return known_case
+
+    compact_acronym = re.sub(r"\s+", "", cleaned)
+    acronym_parts = cleaned.split()
+    if (
+        2 <= len(acronym_parts) <= 5
+        and all(re.fullmatch(r"[A-Za-z]", part) for part in acronym_parts)
+        and re.fullmatch(r"[A-Za-z]{2,5}", compact_acronym)
+    ):
+        return compact_acronym.upper()
+
+    parts = cleaned.split()
+    if len(parts) == 2 and all(re.fullmatch(r"[A-Za-z]+", part) for part in parts):
+        has_broken_mixed_case = any(
+            not (part.islower() or (part[:1].isupper() and part[1:].islower()))
+            for part in parts
+        )
+        if has_broken_mixed_case:
+            return string.capwords(cleaned)
+
+    return cleaned
+
+
+def _campaign_prep_clean_woodpecker_export_row(row: dict) -> dict:
+    output = dict(row)
+
+    song_title = output.get("Song Title", "")
+    cleaned_song_title = _campaign_prep_clean_song_title(song_title)
+    if cleaned_song_title != song_title:
+        output["Song Title"] = cleaned_song_title
+        return output
+
+    artist = output.get("Artist", "")
+    cleaned_artist = _campaign_prep_clean_artist_name(artist)
+    if cleaned_artist != artist:
+        output["Artist"] = cleaned_artist
+        return output
+
+    return output
 
 
 class CampaignPrepResult(dict):
@@ -12409,6 +12486,8 @@ def generate_campaign_csvs(
             processed_row = dict(source_row)
             processed_row[CAMPAIGN_PREP_RECENCY_BUCKET_COLUMN] = prepared_row["recency_bucket"]
             export_row = _campaign_prep_export_row(processed_row, export_format, columns_by_lower, email_column)
+            if export_format == "woodpecker":
+                export_row = _campaign_prep_clean_woodpecker_export_row(export_row)
             export_row[CAMPAIGN_PREP_RECENCY_BUCKET_COLUMN] = prepared_row["recency_bucket"]
             filename = _campaign_prep_campaign_filename(
                 prepared_row["region"],

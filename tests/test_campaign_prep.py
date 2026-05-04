@@ -666,6 +666,76 @@ def test_generate_campaign_csvs_woodpecker_filter_uses_resolved_email_without_fa
     assert rows[0]["Artist"] == "Act B"
 
 
+def test_generate_campaign_csvs_woodpecker_lightly_cleans_artist_or_song_only_at_export(tmp_path):
+    module = _load_legacy_module()
+    columns = ["Artist", "Location", "Primary_Email", "Song_Title"]
+    input_path = tmp_path / "master.csv"
+    output_dir = tmp_path / "campaign"
+    _write_csv(
+        input_path,
+        [
+            {
+                "Artist": " ktp ",
+                "Location": "VIC",
+                "Primary_Email": "song-first@example.com",
+                "Song_Title": "break  bread",
+            },
+            {
+                "Artist": "K t p",
+                "Location": "VIC",
+                "Primary_Email": "artist-acronym@example.com",
+                "Song_Title": "u + me",
+            },
+            {
+                "Artist": "teenage dads",
+                "Location": "VIC",
+                "Primary_Email": "brand@example.com",
+                "Song_Title": "i don't care",
+            },
+            {
+                "Artist": "asha jefferies",
+                "Location": "VIC",
+                "Primary_Email": "known-name@example.com",
+                "Song_Title": "!!!",
+            },
+            {
+                "Artist": "aSha jeFFeries",
+                "Location": "VIC",
+                "Primary_Email": "broken-case@example.com",
+                "Song_Title": "",
+            },
+        ],
+        columns,
+    )
+    source_bytes = input_path.read_bytes()
+
+    module.generate_campaign_csvs(
+        str(input_path),
+        str(output_dir),
+        export_format="woodpecker",
+        remove_rows_without_emails=True,
+    )
+
+    _, processed_rows = _read_csv(output_dir / module.CAMPAIGN_PREP_PROCESSED_MASTER_FILENAME)
+    assert [(row["Artist"], row["Song_Title"]) for row in processed_rows] == [
+        (" ktp ", "break  bread"),
+        ("K t p", "u + me"),
+        ("teenage dads", "i don't care"),
+        ("asha jefferies", "!!!"),
+        ("aSha jeFFeries", ""),
+    ]
+
+    _, rows = _read_csv(_campaign_path(output_dir, "Inside_VIC", "180_plus_days", "Neither"))
+    assert [(row["Artist"], row["Song Title"]) for row in rows] == [
+        (" ktp ", "Break Bread"),
+        ("KTP", "u + me"),
+        ("teenage dads", "i don't care"),
+        ("Asha Jefferies", "!!!"),
+        ("Asha Jefferies", ""),
+    ]
+    assert input_path.read_bytes() == source_bytes
+
+
 def test_generate_campaign_csvs_input_headers_and_invalid_format(tmp_path):
     module = _load_legacy_module()
     input_path = tmp_path / "master.csv"
