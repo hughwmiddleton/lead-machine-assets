@@ -1560,7 +1560,8 @@ def _write_empty_csv_with_headers(path: str):
     _ensure_parent_dir(path)
     headers = [
         'Artist Name', 'Location', 'Song Title', 'Sounds Like', 'Social Link', 'SoundCloud Link',
-        'Played on triple J', 'Played on Unearthed', 'Release Date', 'Primary Genre', 'Date Added', 'Email'
+        'Played on triple J', 'Played on Unearthed', 'Release Date', 'Primary Genre', 'Date Added', 'Email',
+        'Lead_Source', 'Source_Directory', 'Source Directory'
     ]
     pd.DataFrame(columns=headers).to_csv(path, index=False, encoding="utf-8-sig")
 
@@ -3226,6 +3227,9 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
                     "",
                     "",
                     email_value,
+                    "Triple J Unearthed",
+                    "unearthed",
+                    "Triple J Unearthed",
                 )
             )
             if isinstance(state, dict):
@@ -3568,7 +3572,8 @@ def scrape_artist_profile(driver, profile_url, fb_driver=None):
 def save_to_csv(data, filename):
     headers = [
         'Artist Name', 'Location', 'Song Title', 'Sounds Like', 'Social Link', 'SoundCloud Link',
-        'Played on triple J', 'Played on Unearthed', 'Release Date', 'Primary Genre', 'Unearthed_Genre_Raw', 'Bandcamp_Source_Mode', 'Bandcamp_Search_Domain', 'Date Added', 'Email'
+        'Played on triple J', 'Played on Unearthed', 'Release Date', 'Primary Genre', 'Unearthed_Genre_Raw', 'Bandcamp_Source_Mode', 'Bandcamp_Search_Domain', 'Date Added', 'Email',
+        'Lead_Source', 'Source_Directory', 'Source Directory'
     ]
     current_date = datetime.datetime.now().strftime("%Y-%m-%d")
 
@@ -3608,8 +3613,14 @@ def save_to_csv(data, filename):
             unearthed_genre_raw,
             bandcamp_source_mode,
             bandcamp_search_domain,
-            email_value
+            email_value,
+            lead_source,
+            source_directory,
+            legacy_source_directory,
         ) = entry_list[:expected_fields]
+        lead_source = str(lead_source or "").strip()
+        source_directory = str(source_directory or "").strip()
+        legacy_source_directory = str(legacy_source_directory or "").strip()
         if isinstance(social_links, (str, bytes)):
             links_iterable = [social_links] if social_links else []
         else:
@@ -3632,7 +3643,10 @@ def save_to_csv(data, filename):
                 'Bandcamp_Source_Mode': bandcamp_source_mode,
                 'Bandcamp_Search_Domain': bandcamp_search_domain,
                 'Date Added': current_date,
-                'Email': email_value
+                'Email': email_value,
+                'Lead_Source': lead_source,
+                'Source_Directory': source_directory,
+                'Source Directory': legacy_source_directory,
             })
 
     combined = pd.concat([existing_data, pd.DataFrame(new_data)], ignore_index=True)
@@ -12180,6 +12194,9 @@ CAMPAIGN_PREP_SKIPPED_ROW_COLUMNS = [
     "Artist",
     "Email",
     "Song Title",
+    "Lead_Source",
+    "Source_Directory",
+    "Source Directory",
     "Segment",
     "Recency_Bucket",
     "reason_skipped",
@@ -12277,6 +12294,9 @@ CAMPAIGN_PREP_WOODPECKER_COLUMNS = [
     "Instagram",
     "Facebook",
     "Source URL",
+    "Lead_Source",
+    "Source_Directory",
+    "Source Directory",
     "Release Date",
     "Upload Date",
     "Notes",
@@ -12293,6 +12313,9 @@ CAMPAIGN_PREP_WOODPECKER_ALIASES = [
     ("Instagram", ("Instagram_URL", "Instagram")),
     ("Facebook", ("Facebook_URL", "Facebook")),
     ("Source URL", ("Source_URL", "Social Link")),
+    ("Lead_Source", ("Lead_Source",)),
+    ("Source_Directory", ("Source_Directory",)),
+    ("Source Directory", ("Source Directory", "Source_Directory")),
     ("Release Date", CAMPAIGN_PREP_RELEASE_DATE_ALIASES),
     ("Upload Date", CAMPAIGN_PREP_UPLOAD_DATE_ALIASES),
     ("Notes", ("Notes",)),
@@ -12357,14 +12380,38 @@ def _campaign_prep_skipped_row(
 ) -> dict:
     artist_column = _campaign_prep_resolve_alias(columns_by_lower, ("Artist",))
     song_title_column = _campaign_prep_resolve_alias(columns_by_lower, ("Song_Title", "Song Title"))
+    lead_source_column = _campaign_prep_resolve_alias(columns_by_lower, ("Lead_Source",))
+    source_directory_column = _campaign_prep_resolve_alias(columns_by_lower, ("Source_Directory",))
+    legacy_source_directory_column = _campaign_prep_resolve_alias(columns_by_lower, ("Source Directory", "Source_Directory"))
     return {
         "Artist": row.get(artist_column, "") if artist_column is not None else "",
         "Email": row.get(email_column, "") if email_column is not None else "",
         "Song Title": row.get(song_title_column, "") if song_title_column is not None else "",
+        "Lead_Source": row.get(lead_source_column, "") if lead_source_column is not None else "",
+        "Source_Directory": row.get(source_directory_column, "") if source_directory_column is not None else "",
+        "Source Directory": row.get(legacy_source_directory_column, "") if legacy_source_directory_column is not None else "",
         "Segment": segment_name,
         "Recency_Bucket": recency_bucket,
         "reason_skipped": reason,
     }
+
+
+def _campaign_prep_validate_origin_contract(row: dict, row_number: int) -> None:
+    has_origin_contract = "Lead_Source" in row or "Source_Directory" in row
+    if not has_origin_contract:
+        return
+    lead_source = str(row.get("Lead_Source", "") or "").strip()
+    source_directory = str(row.get("Source_Directory", "") or "").strip()
+    if not lead_source or not source_directory:
+        missing = []
+        if not lead_source:
+            missing.append("Lead_Source")
+        if not source_directory:
+            missing.append("Source_Directory")
+        raise ValueError(
+            f"Export contract violation at input row {row_number}: "
+            f"missing required field(s): {', '.join(missing)}"
+        )
 
 
 def _campaign_prep_write_text_atomic(path: Path, text: str) -> None:
@@ -12482,6 +12529,7 @@ def generate_campaign_csvs(
             column: ("" if pd.isna(df.iat[i, column_indexes[column]]) else df.iat[i, column_indexes[column]])
             for column in columns
         }
+        _campaign_prep_validate_origin_contract(row, i + 2)
         release_date_value = row.get(release_date_column, "") if release_date_column is not None else ""
         parsed_release_date = _campaign_prep_parse_release_date(release_date_value)
         release_date_invalid = parsed_release_date is None

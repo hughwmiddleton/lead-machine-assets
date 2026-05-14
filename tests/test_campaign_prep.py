@@ -135,6 +135,84 @@ def test_generate_campaign_csvs_segments_splits_and_preserves_values(tmp_path):
     assert not _campaign_path(output_dir, "Outside_VIC", "180_plus_days", "Played_TripleJ").exists()
 
 
+def test_generate_campaign_csvs_preserves_origin_contract_fields(tmp_path):
+    module = _load_legacy_module()
+    columns = [
+        "Artist",
+        "Location",
+        "Email",
+        "Played on Unearthed",
+        "Lead_Source",
+        "Source_Directory",
+        "Source Directory",
+    ]
+    input_path = tmp_path / "master_export_leads.csv"
+    output_dir = tmp_path / "campaign"
+    _write_csv(
+        input_path,
+        [
+            {
+                "Artist": "Unearthed Act",
+                "Location": "Melbourne",
+                "Email": "act@example.com",
+                "Played on Unearthed": "yes",
+                "Lead_Source": "Triple J Unearthed",
+                "Source_Directory": "unearthed",
+                "Source Directory": "Triple J Unearthed",
+            }
+        ],
+        columns,
+    )
+
+    module.generate_campaign_csvs(
+        str(input_path),
+        str(output_dir),
+        export_format="woodpecker",
+        remove_rows_without_emails=True,
+    )
+
+    _, processed_rows = _read_csv(output_dir / module.CAMPAIGN_PREP_PROCESSED_MASTER_FILENAME)
+    assert processed_rows[0]["Lead_Source"] == "Triple J Unearthed"
+    assert processed_rows[0]["Source_Directory"] == "unearthed"
+    assert processed_rows[0]["Source Directory"] == "Triple J Unearthed"
+
+    _, campaign_rows = _read_csv(_campaign_path(output_dir, "Inside_VIC", "180_plus_days", "Played_Unearthed"))
+    assert campaign_rows[0]["Lead_Source"] == "Triple J Unearthed"
+    assert campaign_rows[0]["Source_Directory"] == "unearthed"
+    assert campaign_rows[0]["Source Directory"] == "Triple J Unearthed"
+
+    _, skipped_rows = _read_csv(output_dir / module.CAMPAIGN_PREP_SKIPPED_ROWS_FILENAME)
+    assert skipped_rows == []
+
+
+def test_generate_campaign_csvs_fails_closed_on_blank_origin_contract(tmp_path):
+    module = _load_legacy_module()
+    columns = ["Artist", "Location", "Email", "Lead_Source", "Source_Directory"]
+    input_path = tmp_path / "bad_master_export_leads.csv"
+    output_dir = tmp_path / "campaign"
+    _write_csv(
+        input_path,
+        [
+            {
+                "Artist": "Malformed",
+                "Location": "Melbourne",
+                "Email": "bad@example.com",
+                "Lead_Source": "",
+                "Source_Directory": "",
+            }
+        ],
+        columns,
+    )
+
+    with pytest.raises(ValueError) as excinfo:
+        module.generate_campaign_csvs(str(input_path), str(output_dir))
+
+    assert "Export contract violation" in str(excinfo.value)
+    assert "Lead_Source" in str(excinfo.value)
+    assert "Source_Directory" in str(excinfo.value)
+    assert not output_dir.exists()
+
+
 def test_generate_campaign_csvs_no_email_column_is_safe_and_missing_columns_are_clear(tmp_path):
     module = _load_legacy_module()
     columns = ["Artist", "Location"]
@@ -812,6 +890,9 @@ def test_generate_campaign_csvs_writes_manifest_summary_all_and_skipped_guard(tm
             "Artist": "Act C",
             "Email": "",
             "Song Title": "Skipped",
+            "Lead_Source": "",
+            "Source_Directory": "",
+            "Source Directory": "",
             "Segment": "Inside_VIC_Played_TripleJ",
             "Recency_Bucket": "0_30_days",
             "reason_skipped": "missing_email",

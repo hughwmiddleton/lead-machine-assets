@@ -1,0 +1,45 @@
+{
+  "export_mode": "both",
+  "jobs": [
+    {
+      "directory": "unearthed",
+      "mode": "",
+      "input_seed_csv": "",
+      "target_valid_leads": 30,
+      "max_hours": 0,
+      "job_id": "job_unearthed_1",
+      "unearthed_resume_mode": "fresh",
+      "use_unearthed_url_index": false,
+      "unearthed_url_index_path": "/Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/data/unearthed_artist_url_index.csv"
+    }
+  ],
+  "unearthed_resume_mode": "fresh",
+  "unearthed_selected_cursor": "",
+  "unearthed_start_index_position": "",
+  "unearthed_url_index_path": "/Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets/data/unearthed_artist_url_index.csv",
+  "use_phased_runner": true,
+  "facebook": {
+    "auto_resume_after_captcha": false,
+    "cooldown_seconds": 600,
+    "max_auto_resume_attempts": 1,
+    "max_rows_per_run": 0
+  },
+  "fb_driver_recovery": {
+    "enabled": false,
+    "batch_size": 40,
+    "output_mode": "copy"
+  },
+  "fb_share_recovery": {
+    "enabled": false,
+    "batch_size": 40,
+    "output_mode": "copy"
+  },
+  "master_enrichment": {
+    "enabled": true,
+    "enable_live_search": true,
+    "max_live_searches": 0
+  },
+  "soundcloud_meta_enricher": {
+    "enabled": false
+  }
+}

@@ -2777,12 +2777,17 @@ def _write_rows_to_csv(rows: Iterable[Any], path: str, source_directory: str = "
     _ensure_parent(path)
     materialized: List[Any] = list(rows or [])
     fallback_cols = RAW_FALLBACK_COLUMNS.copy()
+    canonical_lead_source = "Triple J Unearthed" if str(source_directory or "").strip().lower() == "unearthed" else source_directory
+    canonical_source_directory = "unearthed" if str(source_directory or "").strip().lower() == "unearthed" else source_directory
+    canonical_legacy_source_directory = (
+        "Triple J Unearthed" if str(source_directory or "").strip().lower() == "unearthed" else source_directory
+    )
     if not materialized:
         df = pd.DataFrame(columns=fallback_cols)
         if source_directory:
-            df["Lead_Source"] = source_directory
-            df["Source_Directory"] = source_directory
-            df["Source Directory"] = source_directory
+            df["Lead_Source"] = canonical_lead_source
+            df["Source_Directory"] = canonical_source_directory
+            df["Source Directory"] = canonical_legacy_source_directory
         df = repair_origin_integrity_df(df, ingest_source=source_directory)
         return _safe_atomic_write_csv(df, path, fallback_cols, reason=f"job={source_directory or 'unknown'}")
     if isinstance(materialized[0], dict):
@@ -2801,11 +2806,11 @@ def _write_rows_to_csv(rows: Iterable[Any], path: str, source_directory: str = "
         df = pd.DataFrame(materialized)
     if source_directory:
         if "Lead_Source" not in df.columns:
-            df["Lead_Source"] = source_directory
+            df["Lead_Source"] = canonical_lead_source
         if "Source_Directory" not in df.columns:
-            df["Source_Directory"] = source_directory
+            df["Source_Directory"] = canonical_source_directory
         if "Source Directory" not in df.columns:
-            df["Source Directory"] = source_directory
+            df["Source Directory"] = canonical_legacy_source_directory
     df = repair_origin_integrity_df(df, ingest_source=source_directory)
     fallback_cols = list(df.columns) if len(getattr(df, "columns", [])) else fallback_cols
     return _safe_atomic_write_csv(df, path, fallback_cols, reason=f"job={source_directory or 'unknown'}")
@@ -2830,6 +2835,8 @@ FINAL_EXPORT_COLUMNS: Sequence[str] = [
     "Email_Extract_Method",
     "Contact_Mode",
     "Discovery Source",
+    "Lead_Source",
+    "Source_Directory",
     "Source Directory",
     "Source URL",
     "Review_Urls",
@@ -2879,6 +2886,8 @@ WOODPECKER_EXPORT_COLUMNS: Sequence[str] = [
     "Spotify_URL",
     "External Links",
     "Discovery Source",
+    "Lead_Source",
+    "Source_Directory",
     "Source Directory",
     "Source URL",
     "Review_Urls",
@@ -3273,6 +3282,8 @@ def _build_final_export_frame(df: pd.DataFrame) -> pd.DataFrame:
                 "Email_Extract_Method": _cell_str(row_for_email_source.get("Email_Extract_Method", "")),
                 "Contact_Mode": contact_mode,
                 "Discovery Source": discovery_source,
+                "Lead_Source": str(row.get("Lead_Source", "") or "").strip(),
+                "Source_Directory": str(row.get("Source_Directory", "") or "").strip(),
                 "Source Directory": source_directory,
                 "Source URL": str(row.get("Source URL", "") or "").strip(),
                 "Review_Urls": review_urls,
@@ -5194,6 +5205,8 @@ DEFAULT_EXPORT_COLUMNS: Sequence[str] = [
     "Unearthed_Genre_Raw",
     "Date Added",
     "Spotify Playlist",
+    "Lead_Source",
+    "Source_Directory",
     "Source Directory",
     "Source URL",
     "Review_Urls",

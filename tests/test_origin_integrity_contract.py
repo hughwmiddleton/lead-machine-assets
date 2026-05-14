@@ -3,6 +3,7 @@ import csv
 import pandas as pd
 import pytest
 
+import pipeline_runner
 from lead_vault.exporter import WOODPECKER_EXPORT_PRESET, export_with_preset
 from lead_vault.merge import merge_csv_into_master
 from lead_vault.origin import (
@@ -120,6 +121,15 @@ def test_merge_conflict_keeps_existing_lead_source(tmp_path):
 def test_export_integrity_repair_and_validation(tmp_path):
     valid = {"Lead_Source": "unearthed", "Source_Directory": "unearthed"}
     validate_origin_integrity_rows([valid])
+    validate_origin_integrity_rows(
+        [
+            {
+                "Lead_Source": "Triple J Unearthed",
+                "Source_Directory": "unearthed",
+                "Source Directory": "Triple J Unearthed",
+            }
+        ]
+    )
 
     with pytest.raises(OriginIntegrityError):
         validate_origin_integrity_rows([{"Lead_Source": "unearthed", "Source_Directory": "soundcloud"}])
@@ -149,3 +159,64 @@ def test_dataframe_blank_repair_keeps_source_directory_mirroring_lead_source():
     assert repaired.at[0, "Lead_Source"] == "unearthed"
     assert repaired.at[0, "Source_Directory"] == "unearthed"
     assert repaired.at[0, "Source Directory"] == "unearthed"
+
+
+def test_unearthed_source_row_creation_sets_canonical_origin_fields(tmp_path):
+    output_path = tmp_path / "raw.csv"
+
+    pipeline_runner._write_rows_to_csv(
+        [{"Artist Name": "Unearthed Act", "Email": "act@example.com"}],
+        output_path.as_posix(),
+        source_directory="unearthed",
+    )
+
+    df = pd.read_csv(output_path, dtype=str, keep_default_na=False).fillna("")
+    row = df.iloc[0].to_dict()
+    assert row["Lead_Source"] == "Triple J Unearthed"
+    assert row["Source_Directory"] == "unearthed"
+    assert row["Source Directory"] == "Triple J Unearthed"
+
+
+def test_final_export_projection_preserves_origin_contract_fields():
+    df = pd.DataFrame(
+        [
+            {
+                "Artist Name": "Unearthed Act",
+                "Email": "act@example.com",
+                "Email_All": "act@example.com",
+                "Email_Source_URL": "https://example.com/contact",
+                "Email_Source_Type": "website_enrich",
+                "final_status": "OK",
+                "Lead_Source": "Triple J Unearthed",
+                "Source_Directory": "unearthed",
+                "Source Directory": "Triple J Unearthed",
+            }
+        ]
+    )
+
+    export_df = pipeline_runner._build_final_export_frame(df)
+
+    assert export_df.at[0, "Lead_Source"] == "Triple J Unearthed"
+    assert export_df.at[0, "Source_Directory"] == "unearthed"
+    assert export_df.at[0, "Source Directory"] == "Triple J Unearthed"
+
+
+def test_export_master_leads_keeps_fail_closed_on_blank_origin(tmp_path):
+    input_path = tmp_path / "master.csv"
+    output_path = tmp_path / "master_export_leads.csv"
+    pd.DataFrame(
+        [
+            {
+                "Artist Name": "Malformed",
+                "Email": "bad@example.com",
+                "Email_All": "bad@example.com",
+                "final_status": "OK",
+                "Lead_Source": "",
+                "Source_Directory": "",
+            }
+        ]
+    ).to_csv(input_path, index=False)
+
+    pipeline_runner.export_master_leads(input_path.as_posix(), output_path.as_posix(), export_profile="full_dump")
+
+    assert not output_path.exists()

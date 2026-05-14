@@ -44,17 +44,20 @@ def repair_origin_fields(
         if lead_source:
             row["Lead_Source"] = lead_source
 
-    if lead_source and source_directory and source_directory != lead_source and logger is not None:
+    if not source_directory:
+        source_directory = source or legacy_source_directory or lead_source
+        if source_directory:
+            row["Source_Directory"] = source_directory
+
+    if lead_source and source_directory and not _origin_values_compatible(lead_source, source_directory) and logger is not None:
         logger.error(
-            "[Origin] Source_Directory mismatch repaired: Lead_Source=%s Source_Directory=%s",
+            "[Origin] Source_Directory mismatch kept: Lead_Source=%s Source_Directory=%s",
             lead_source,
             source_directory,
         )
 
-    if lead_source:
-        row["Source_Directory"] = lead_source
-        if LEGACY_SOURCE_DIRECTORY_FIELD in row:
-            row[LEGACY_SOURCE_DIRECTORY_FIELD] = lead_source
+    if LEGACY_SOURCE_DIRECTORY_FIELD in row and not legacy_source_directory:
+        row[LEGACY_SOURCE_DIRECTORY_FIELD] = lead_source or source_directory
     return row
 
 
@@ -95,11 +98,11 @@ def validate_origin_integrity_rows(rows: Iterable[Mapping[str, object]]) -> None
             violations.append(f"row {idx}: Lead_Source blank")
         if not source_directory:
             violations.append(f"row {idx}: Source_Directory blank")
-        if lead_source and source_directory and source_directory != lead_source:
+        if lead_source and source_directory and not _origin_values_compatible(lead_source, source_directory):
             violations.append(
                 f"row {idx}: Source_Directory={source_directory!r} does not match Lead_Source={lead_source!r}"
             )
-        if legacy_source_directory and lead_source and legacy_source_directory != lead_source:
+        if legacy_source_directory and lead_source and not _origin_values_compatible(lead_source, legacy_source_directory):
             violations.append(
                 f"row {idx}: Source Directory={legacy_source_directory!r} does not match Lead_Source={lead_source!r}"
             )
@@ -134,3 +137,13 @@ def validate_origin_integrity_df(df) -> None:
 
 def _clean(value: object) -> str:
     return "" if value is None else str(value).strip()
+
+
+def _origin_values_compatible(lead_source: str, source_directory: str) -> bool:
+    lead = _clean(lead_source).lower()
+    directory = _clean(source_directory).lower()
+    if not lead or not directory:
+        return True
+    if lead == directory:
+        return True
+    return lead == "triple j unearthed" and directory == "unearthed"
