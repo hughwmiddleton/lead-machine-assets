@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Dict, List, Mapping, Optional, Tuple
 
 from fb_email_override import should_accept_email_override
+from lead_engine import campaign_prep_sidecar
 # ---------------------------
 # Dependency Check and Installation
 # ---------------------------
@@ -12465,6 +12466,8 @@ def generate_campaign_csvs(
     remove_rows_without_emails: bool = False,
     release_date_sort: str = "none",
     run_reference_date: Optional[datetime.datetime] = None,
+    ledger_operation_reference: Optional[str] = None,
+    ledger_created_at: Optional[str] = None,
     email_column_candidates: tuple[str, ...] = (
         "emails",
         "email",
@@ -12480,6 +12483,12 @@ def generate_campaign_csvs(
         raise ValueError(f"Invalid export_format: {export_format}")
     if release_date_sort not in ("none", "ascending", "descending"):
         raise ValueError(f"Invalid release_date_sort: {release_date_sort}")
+    if export_format == "woodpecker":
+        operation_reference = ledger_operation_reference or campaign_prep_sidecar.new_operation_reference()
+        export_created_at = ledger_created_at or campaign_prep_sidecar.operation_timestamp()
+    else:
+        operation_reference = ""
+        export_created_at = ""
     if run_reference_date is None:
         run_reference_date = datetime.datetime.now(CAMPAIGN_PREP_RUN_TIMEZONE)
     elif run_reference_date.tzinfo is None:
@@ -12608,7 +12617,9 @@ def generate_campaign_csvs(
 
     processed_master_output_rows: List[dict] = []
     campaign_file_rows: Dict[str, List[dict]] = {}
+    campaign_file_lineage_rows: Dict[str, List[dict]] = {}
     combined_file_rows: Dict[str, List[dict]] = {}
+    combined_file_lineage_rows: Dict[str, List[dict]] = {}
     campaign_counts: Dict[str, int] = {}
     combined_counts: Dict[str, int] = {}
     for source_row, prepared_row in sorted_prepared_rows:
@@ -12632,10 +12643,12 @@ def generate_campaign_csvs(
         campaign_file_rows.setdefault(filename, []).append(
             {column: export_row.get(column, "") for column in output_columns}
         )
+        campaign_file_lineage_rows.setdefault(filename, []).append(dict(source_row))
         campaign_counts[filename] = campaign_counts.get(filename, 0) + 1
         combined_file_rows.setdefault(combined_filename, []).append(
             {column: export_row.get(column, "") for column in output_columns}
         )
+        combined_file_lineage_rows.setdefault(combined_filename, []).append(dict(source_row))
         combined_counts[combined_filename] = combined_counts.get(combined_filename, 0) + 1
 
     input_rows = len(sorted_prepared_rows) + len(skipped_rows)
@@ -12671,6 +12684,19 @@ def generate_campaign_csvs(
     if len(written_buckets) > 1:
         print("Export split across recency buckets — see campaign_export_summary.txt")
 
+    diagnostics["ledger_sidecar_status"] = "not_applicable"
+    diagnostics["ledger_sidecar_error"] = ""
+    diagnostics["ledger_operation_reference"] = operation_reference
+    diagnostics["ledger_created_at"] = export_created_at
+    ledger_can_write = export_format == "woodpecker"
+    if ledger_can_write:
+        try:
+            campaign_prep_sidecar.invalidate_existing_sidecar(output_path)
+        except Exception as exc:
+            ledger_can_write = False
+            diagnostics["ledger_sidecar_status"] = "failed"
+            diagnostics["ledger_sidecar_error"] = f"Could not invalidate prior ledger sidecar: {exc}"
+
     _campaign_prep_atomic_write_csv(
         output_path / CAMPAIGN_PREP_PROCESSED_MASTER_FILENAME,
         processed_master_output_rows,
@@ -12686,6 +12712,7 @@ def generate_campaign_csvs(
         }
     ]
     result: Dict[str, int] = {}
+    ledger_artifacts: List[dict] = []
     for filename in CAMPAIGN_PREP_OUTPUT_ORDER:
         rows = campaign_file_rows.get(filename)
         if not rows:
@@ -12702,6 +12729,10 @@ def generate_campaign_csvs(
             }
         )
         result[filename] = campaign_counts[filename]
+        if export_format == "woodpecker":
+            ledger_artifacts.append(
+                {"filename": filename, "lineage_rows": campaign_file_lineage_rows[filename]}
+            )
 
     for region in CAMPAIGN_PREP_REGION_SEGMENTS:
         for radio_bucket in CAMPAIGN_PREP_RADIO_BUCKETS:
@@ -12718,6 +12749,10 @@ def generate_campaign_csvs(
                     "output_file": combined_filename,
                 }
             )
+            if export_format == "woodpecker":
+                ledger_artifacts.append(
+                    {"filename": combined_filename, "lineage_rows": combined_file_lineage_rows[combined_filename]}
+                )
 
     _campaign_prep_atomic_write_csv(
         output_path / CAMPAIGN_PREP_SKIPPED_ROWS_FILENAME,
@@ -12784,6 +12819,28 @@ def generate_campaign_csvs(
         manifest_rows,
         ["segment_name", "recency_bucket", "rows_written", "output_file"],
     )
+    if ledger_can_write and ledger_artifacts:
+        try:
+            campaign_prep_sidecar.write_campaign_export_sidecar(
+                output_path,
+                ledger_artifacts,
+                operation_reference=operation_reference,
+                created_at=export_created_at,
+                source_dataset_reference=Path(input_csv_path).name,
+            )
+            diagnostics["ledger_sidecar_status"] = "written"
+        except Exception as exc:
+            diagnostics["ledger_sidecar_status"] = "failed"
+            diagnostics["ledger_sidecar_error"] = str(exc)
+            try:
+                campaign_prep_sidecar.invalidate_existing_sidecar(output_path)
+            except Exception:
+                pass
+            warning = f"Campaign CSVs were generated, but the Lead Engine ledger sidecar failed: {exc}"
+            logging.getLogger(__name__).error(warning)
+            print(warning)
+    elif export_format == "woodpecker" and not ledger_artifacts and ledger_can_write:
+        diagnostics["ledger_sidecar_status"] = "not_written_empty"
     return CampaignPrepResult(result, diagnostics=diagnostics)
 
 
@@ -12919,9 +12976,19 @@ class CampaignPrepTab(QtWidgets.QWidget):
             if len(written_buckets) > 1:
                 lines.append("")
                 lines.append("Export split across recency buckets — see campaign_export_summary.txt")
+            ledger_failed = diagnostics.get("ledger_sidecar_status") == "failed"
+            if ledger_failed:
+                lines.append("")
+                lines.append(
+                    "Campaign CSVs were generated, but Lead Engine ledger tracking failed: "
+                    f"{diagnostics.get('ledger_sidecar_error', 'unknown error')}"
+                )
             summary = "\n".join(lines)
             self.summary_view.setPlainText(summary)
-            QtWidgets.QMessageBox.information(self, "Campaign CSVs Generated", summary)
+            if ledger_failed:
+                QtWidgets.QMessageBox.warning(self, "Campaign CSVs Generated With Warning", summary)
+            else:
+                QtWidgets.QMessageBox.information(self, "Campaign CSVs Generated", summary)
         except Exception as exc:
             message = f"Could not generate campaign CSVs:\n{exc}"
             self.summary_view.setPlainText(message)

@@ -151,8 +151,9 @@ and customer-specific lead ranking remain future work.
 ## Campaign Export Ledger
 
 The additive Campaign Export Ledger owns only the point where approved lead
-rows leave Studiflow as outbound CSV content. It is not wired into Campaign
-Prep and does not contact Woodpecker.
+rows leave Studiflow as outbound CSV content. Its pure contracts do not contact
+Woodpecker; the narrow Campaign Prep persistence integration is documented
+below.
 
 ### Existing Campaign Prep boundary
 
@@ -240,12 +241,59 @@ does not use shared contact as identity evidence.
 
 `CampaignExportLedger` is an in-memory deterministic index for exports and
 rows. It can retrieve by export/row ID and find rows by lead ID, normalized
-email, row fingerprint, or batch content fingerprint. It has no automatic file
-writer, production database, deduplication, or analytics event model.
+email, row fingerprint, or batch content fingerprint. The pure contract still
+has no automatic file writer, production database, deduplication, or analytics
+event model.
+
+### Campaign Prep runtime integration
+
+For the Woodpecker profile, one invocation of Campaign Prep is one intentional
+export operation. A fresh `campaign-prep:<uuid4>` operation reference is
+created once per user action and reused across every recency and combined CSV
+artifact. Supplying that reference again is the explicit retry/idempotency
+mechanism; an exact retry also supplies the original operation timestamp. A
+second deliberate action gets another UUID even when its content is identical.
+This event UUID is not a deterministic lead or source identity.
+
+One UTC, timezone-aware operation timestamp is captured at the start of the
+action and supplied to the frozen ledger. It is shared by all export rows and
+does not participate in export identity. The independent Campaign Prep
+recency-reference time retains its existing semantics.
+
+After all legacy output files, summary, and `campaign_export_manifest.csv`
+finish successfully, Campaign Prep writes the additive, versioned
+`campaign_export_ledger.json`. The existing manifest is unchanged. The JSON
+contains the frozen ledger serialization plus an integration-layer `artifacts`
+list. Each artifact entry records its relative filename, byte size, SHA-256 of
+the final bytes on disk, row count, global ledger row-position interval,
+`export_id`, and exact ordered `export_row_ids`. This wrapper represents the
+one-operation/many-file shape without changing the core export identifier.
+
+Ledger values are constructed from CSV rows re-read after their atomic writes,
+so exported fields and row order describe the actual files. Source rows are
+used only to retain lineage evidence that the fixed Woodpecker projection does
+not export. Split emails and duplicates remain separate occurrences. Explicit
+validated IDs and strong source-native evidence can resolve; weak, invalid, or
+conflicting evidence remains unresolved under the frozen adapter rules.
+
+The sidecar is serialized as canonical UTF-8 JSON and persisted through a
+same-directory temporary file, flush/fsync, and atomic replacement. A prior
+sidecar is invalidated before CSV overwrite begins. CSV failure or a partial
+multi-artifact write therefore produces no completed sidecar. An empty action
+with no campaign artifact produces no sidecar and claims no exported rows.
+If sidecar construction or persistence fails after the CSV workflow succeeds,
+the CSVs remain intact, temporary/final sidecar files are removed, and Campaign
+Prep reports visible degraded success rather than claiming tracked completion.
+
+Campaign CSV columns, values, bytes, filenames, filtering, segmentation,
+release-date ordering, split-email behavior, duplicate handling, and the
+legacy manifest remain behavior-compatible. Woodpecker upload remains manual
+and external. No Woodpecker campaign/prospect IDs, outreach or analytics
+events, CRM outcomes, canonical entities, or portal features are created here.
 
 A future Woodpecker reconciliation stage can attach provider campaign/prospect
 IDs and delivery/reply events to `export_row_id`, supported by exported email,
-profile, campaign label, filename, and lineage metadata. That can later power
+profile, artifact checksum/filename, and lineage metadata. That can later power
 the `LEADS EXPORTED` step in customer funnel reporting without changing these
 identifier semantics. Woodpecker API integration, event history, CRM handoff,
 canonical clustering, portal reporting, and customer-specific ranking remain
