@@ -291,10 +291,155 @@ legacy manifest remain behavior-compatible. Woodpecker upload remains manual
 and external. No Woodpecker campaign/prospect IDs, outreach or analytics
 events, CRM outcomes, canonical entities, or portal features are created here.
 
-A future Woodpecker reconciliation stage can attach provider campaign/prospect
-IDs and delivery/reply events to `export_row_id`, supported by exported email,
-profile, artifact checksum/filename, and lineage metadata. That can later power
-the `LEADS EXPORTED` step in customer funnel reporting without changing these
-identifier semantics. Woodpecker API integration, event history, CRM handoff,
+A future outreach linkage stage can attach Gmail conversation evidence to
+`export_row_id`, supported by exported email, profile, artifact checksum and
+filename, and lineage metadata. That can later power the `LEADS EXPORTED` step
+in customer funnel reporting without changing these identifier semantics.
+Woodpecker API integration, live Gmail access, production event history,
 canonical clustering, portal reporting, and customer-specific ranking remain
 out of scope.
+
+## Gmail outreach attribution and future CRM handoff
+
+### Audited production boundary
+
+The confirmed operating flow is:
+
+```text
+Lead Engine -> Campaign Prep -> Woodpecker CSV -> manual Woodpecker upload
+            -> Woodpecker sends through the user's Gmail account
+            -> Gmail sent message/thread -> inbound reply -> CRM process
+```
+
+Woodpecker is the outbound transport/execution layer in this flow. Gmail is the
+conversation evidence surface. Neither is the authoritative Lead Engine
+person, artist, or relationship identity. The CRM owns the relationship after
+engagement.
+
+Repository evidence establishes the Campaign Prep projection and the export
+sidecar, including the actual CSV filename/checksum and ordered
+`export_row_id`s. This repository contains no Gmail API client, sent-message or
+thread ingestion, RFC Message-ID handling, reply detector, Gmail contact
+matching, CRM contact creation, CRM lifecycle policy, or CRM mutation code.
+Those implementation and policy details are external and must be audited in
+their owning repository or integration before use.
+
+The fixed Woodpecker CSV contains destination and personalization columns, but
+does not contain `export_row_id`, `lead_id`, `outreach_attempt_id`, a Gmail
+message/thread ID, or another demonstrated durable correlation marker. The
+sidecar is local evidence and is not shown to travel through Woodpecker into
+Gmail. Consequently an export row cannot currently be deterministically linked
+to its resulting Gmail message from repository evidence alone.
+
+There is no repository proof that a Woodpecker custom field survives into an
+invisible Gmail header or other durable Gmail metadata. Existing subject/body
+template configuration is also absent. A future marker may be technically
+possible, but feasibility, privacy, visibility, template behavior, reply
+survival, and Gmail searchability must be verified against the real outbound
+integration before that approach is selected.
+
+### Outreach attempt identity
+
+`OutreachAttempt` represents one intentional outbound attempt associated with
+one `CampaignExportRow`. Its deterministic ID hashes only `export_row_id` and
+has the form `le:outreach-attempt:v1:<sha256>`. The invariant is one export row
+to one intended attempt. It does not mean that Woodpecker accepted or sent the
+row. Re-exporting the same email under a different export operation creates a
+different export row and therefore a different attempt. Split-email rows also
+remain distinct attempts.
+
+The attempt copies, without re-resolving, the frozen export ID, export row ID,
+row fingerprint, exported destination, export timestamp, lineage status,
+`lead_id`, and `source_occurrence_id`. Unresolved lineage remains unresolved.
+An attempt is not a Gmail contact, person, canonical artist, CRM relationship,
+or proof of delivery.
+
+### Gmail provider references
+
+`GmailMessageRef` preserves the provider-owned Gmail message ID and thread ID,
+optional RFC Message-ID, direction, normalized envelope sender/recipients,
+exact timezone-aware event timestamp, and optional subject/body fingerprints.
+`GmailThreadRef` preserves the provider thread ID and narrow participant
+references. Gmail IDs never replace Lead Engine, export-row, or outreach
+attempt IDs. A thread may contain several messages and may predate the campaign.
+
+Subject/body content can be reduced to deterministic SHA-256 fingerprints after
+whitespace normalization. Full message bodies are not part of this contract.
+Fingerprint compatibility is corroboration only unless a future integration
+proves that a field is an explicit persisted mapping.
+
+### Explainable attribution hierarchy
+
+`OutreachAttribution` relates one outbound Gmail message/thread to zero or one
+selected outreach attempt while retaining all candidate attempt IDs and named
+evidence. It uses explicit rule categories rather than an opaque score:
+
+- `EXACT`: one durable explicit marker or persisted mapping proves the row to
+  message link and no strong conflict defeats that candidate.
+- `HIGH_CONFIDENCE`: exactly one plausible attempt has an exact recipient plus
+  at least one other independent strong fact, such as the audited sending
+  account or a compatible campaign content fingerprint.
+- `HEURISTIC`: one candidate has only weak or insufficiently independent
+  support. Email alone and export-time proximity alone belong here.
+- `AMBIGUOUS`: multiple attempts plausibly match, including repeated campaigns
+  to the same address or multiple explicit mappings.
+- `CONFLICT`: strong evidence contradicts the proposed mapping, such as an
+  incompatible envelope recipient.
+- `UNMATCHED`: no supported candidate exists.
+
+Evidence retains its kind, relationship, strength, reason code, independence
+key, and narrow value. Time comparisons additionally retain the signed delta
+and caller-supplied tolerance. Export time is not send time: manual upload,
+scheduling, and execution delays mean export timestamp proximity is always
+weak in this V1 contract. All timestamps must be timezone-aware and serialize
+in UTC.
+
+Email is evidence, not identity. It may generate a candidate but cannot prove
+Lead Engine identity or exact attribution. Shared booking/management addresses,
+multiple artists per inbox, prior contacts, and repeated campaigns prevent that
+shortcut. The evaluator also does not search Gmail history automatically: a
+pre-existing thread with the same participant remains unmatched unless
+campaign-origin evidence is supplied. It never chooses the newest or oldest
+export merely because dates or recipients coincide.
+
+### Reply observation
+
+`ReplyObservation` means only that Gmail observed an inbound message on the
+same thread as a resolved outreach attribution. Its deterministic ID derives
+from the inbound Gmail message and attribution IDs. It records provider
+references, sender/recipients, observed time, and the inherited attribution
+classification. It does not infer positive/negative sentiment, interest,
+qualification, opportunity, booking, or lifecycle state.
+
+### CRM handoff boundary
+
+`EngagedLeadHandoff` is a provider-neutral future boundary object. It carries
+the available source occurrence, lead, export, export row, outreach attempt,
+Gmail thread, outbound message, reply message, contacted email, attribution,
+and reply-observation references. An unresolved Lead Engine lineage remains
+explicitly unresolved with blank IDs; Gmail IDs are never promoted into those
+fields.
+
+This contract neither creates a CRM contact nor authorizes automatic creation
+on reply. The CRM remains responsible for contact/relationship records,
+lifecycle and stage, queues, follow-up scheduling, drafting, and conversation
+management. A later audit must determine how the existing human/CRM process
+accepts this handoff. Lead Engine remains responsible for discovery provenance,
+lead identity, export lineage, and outreach-origin attribution; Gmail is the
+evidence bridge.
+
+### Registry, analytics, and non-goals
+
+`OutreachAttributionRegistry` is an in-memory deterministic index of attempts,
+Gmail references, attributions, and replies. It retrieves by export row, Gmail
+message, and Gmail thread, and exposes competing mappings rather than silently
+overwriting them. Serialization is stable. It is not production persistence
+and performs no network, Gmail, Woodpecker, or CRM action.
+
+This boundary can eventually support explainable counts from exported lead to
+attempt, sent conversation, reply, and accepted CRM handoff. It does not yet
+provide customer analytics, delivery metrics, live Woodpecker analytics,
+sentiment/intent, opportunity or client conversion, a customer portal, or
+canonical artist clustering. Those later measures must preserve attribution
+classification and unresolved/conflicting provenance rather than flattening
+all email matches into customers.
