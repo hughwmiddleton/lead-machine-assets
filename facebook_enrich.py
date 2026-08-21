@@ -1562,12 +1562,17 @@ def _fb_is_candidate_url_allowed(url: str) -> bool:
 
 def _fb_extract_candidates_from_search_dom(html_or_driver, logger=None, debug: bool = False, search_name: str = "") -> List[FbCandidate]:
     """
-    DOM-scoped extractor for Facebook search candidates.
-    - Restricts anchor collection to known search-result containers.
-    - Normalizes + dedupes hrefs.
-    - Applies existing hard URL gate (fb_is_allowed_profile_candidate_url).
-    - Emits structured diagnostics.
+    DOM-scoped layered extractor for Facebook search candidates.
+
+    Layers:
+    1. Narrow search-result scopes (aria-label, data-pagelet).
+    2. Search content scopes (role=article).
+    3. Bounded broader scopes (role=feed, role=main) only when
+       narrower layers yield zero usable candidates.
+
+    The best scope is chosen by usable candidate yield, not first-match.
     """
+
     def _emit(msg: str) -> None:
         if not msg:
             return
@@ -1606,31 +1611,6 @@ def _fb_extract_candidates_from_search_dom(html_or_driver, logger=None, debug: b
 
     soup = BeautifulSoup(html, "html.parser")
     all_anchor_count = len(soup.select("a")) if soup else 0
-
-    container_selectors: List[str] = [
-        "div[role=\"main\"] div[role=\"feed\"]",
-        "div[role=\"main\"] div[aria-label=\"Search results\"]",
-        "div[aria-label=\"Search results\"]",
-        "div[role=\"main\"]",
-        # Legacy/extra fallbacks kept for robustness
-        "div[role=\"main\"] section[aria-label*=\"Search results\"]",
-        "div[role=\"main\"] [data-pagelet^=\"SearchResults\"]",
-        "div[role=\"main\"] div[aria-label*=\"Search results\"]",
-        "div[role=\"main\"] div[role=\"article\"]",
-    ]
-
-    chosen_selector = "NONE"
-    containers = []
-    fallback_reason = ""
-    for selector in container_selectors:
-        try:
-            containers = soup.select(selector)
-        except Exception:
-            containers = []
-        if containers:
-            chosen_selector = selector
-            break
-
     gate_debug_env = os.getenv("FB_DEBUG_DOM_GATE", "0")
 
     def _normalize_href(href: str) -> str:
@@ -1646,6 +1626,24 @@ def _fb_extract_candidates_from_search_dom(html_or_driver, logger=None, debug: b
             pass
         href = href.split("#", 1)[0]
         return href
+
+    def _resolve_fb_redirect(url: str) -> str:
+        """Resolve known Facebook redirect wrappers to their destination."""
+        if not url:
+            return url
+        try:
+            parsed = urllib.parse.urlparse(url)
+            host = parsed.netloc.lower()
+            if host in ("l.facebook.com", "lm.facebook.com", "www.facebook.com"):
+                qs = urllib.parse.parse_qs(parsed.query)
+                for key in ("u", "h", "url"):
+                    if key in qs and qs[key]:
+                        dest = urllib.parse.unquote(qs[key][0])
+                        if dest and "facebook.com" in dest.lower():
+                            return dest
+        except Exception:
+            pass
+        return url
 
     def _extract_href_like_strings(value: str) -> List[str]:
         if not value:
@@ -1689,8 +1687,12 @@ def _fb_extract_candidates_from_search_dom(html_or_driver, logger=None, debug: b
                 "data-target-href",
                 "data-redirect",
                 "data-redirect-url",
+                "data-redirect-uri",
                 "data-uri",
                 "data-store",
+                "ajaxify",
+                "data-hovercard",
+                "data-hovercard-url",
             )
             for attr_name in attr_names:
                 try:
@@ -1709,7 +1711,9 @@ def _fb_extract_candidates_from_search_dom(html_or_driver, logger=None, debug: b
                                 label_el = nested_label
                         return href, label_el
 
-        return _normalize_href(href_raw), label_el
+        normalized = _normalize_href(href_raw)
+        resolved = _resolve_fb_redirect(normalized)
+        return resolved, label_el
 
     def _candidate_name_from_element(element: Tag, label_el: Optional[Tag], href: str) -> str:
         name = ""
@@ -1769,6 +1773,20 @@ def _fb_extract_candidates_from_search_dom(html_or_driver, logger=None, debug: b
                     seen_ids.add(el_id)
                     scoped.append(el)
         return scoped
+
+    def _is_nav_like(anchor: Tag) -> bool:
+        try:
+            parent_with_aria = anchor.find_parent(attrs={"aria-label": True})
+        except Exception:
+            parent_with_aria = None
+        aria_val = ""
+        if parent_with_aria is not None:
+            try:
+                aria_val = parent_with_aria.get("aria-label") or ""
+            except Exception:
+                aria_val = ""
+        aria_lower = aria_val.lower()
+        return any(tok in aria_lower for tok in ("navigation", "header", "footer"))
 
     def _extract_candidates_from_elements(elements: List[Tag]) -> Tuple[List[FbCandidate], int]:
         raw: List[FbCandidate] = []
@@ -1841,127 +1859,263 @@ def _fb_extract_candidates_from_search_dom(html_or_driver, logger=None, debug: b
 
         return raw, len(unique_elements)
 
-    if not containers:
+    def _evaluate_selector(selector: str) -> Dict[str, Any]:
+        """Evaluate a single selector and return candidate stats."""
+        result: Dict[str, Any] = {
+            "selector": selector,
+            "containers": [],
+            "containers_found": 0,
+            "anchors_in_scope": 0,
+            "candidates_pre_url_gate": 0,
+            "candidates_post_url_gate": 0,
+            "raw_candidates": [],
+            "candidate_elements": [],
+        }
         try:
-            # Conservative fallbacks: a standalone Search results region or article cards.
-            fallback_region = soup.find(attrs={"aria-label": re.compile(r"^Search results$", re.I)})
+            containers = soup.select(selector)
         except Exception:
-            fallback_region = None
-
-        if fallback_region:
-            containers = [fallback_region]
-            chosen_selector = "aria-label=Search results (fallback)"
-            fallback_reason = "fallback_aria_label"
-        else:
-            try:
-                containers = soup.select('[role="article"]')
-            except Exception:
-                containers = []
-            if containers:
-                chosen_selector = "[role=article] (fallback)"
-                fallback_reason = "fallback_article"
-
+            containers = []
+        result["containers"] = containers
+        result["containers_found"] = len(containers)
         if not containers:
-            _emit(
-                f"[FB Shared][DOM Gate] chosen_container_selector=NONE containers_found=0 anchors_in_scope=0 "
-                f"candidates_pre_url_gate=0 candidates_post_url_gate=0 dropped_by_dom_gate={all_anchor_count} "
-                f"reason=dom_container_missing search_name='{search_name or ''}'"
-            )
-            return []
+            return result
 
-    # Gather anchors/role links inside chosen containers (dedup by element id).
-    candidate_elements: List[Tag] = _gather_candidate_elements(containers)
-    anchors_in_scope_container = len(candidate_elements)
+        candidate_elements = _gather_candidate_elements(containers)
+        result["candidate_elements"] = candidate_elements
+        result["anchors_in_scope"] = len(candidate_elements)
 
-    fallback_enabled = os.getenv("NIGHT_FB_DOM_FALLBACK") == "1"
-    fallback_used = False
+        raw_candidates, _ = _extract_candidates_from_elements(candidate_elements)
+        result["raw_candidates"] = raw_candidates
+        result["candidates_pre_url_gate"] = len(raw_candidates)
 
-    def _is_nav_like(anchor: Tag) -> bool:
-        try:
-            parent_with_aria = anchor.find_parent(attrs={"aria-label": True})
-        except Exception:
-            parent_with_aria = None
-        aria_val = ""
-        if parent_with_aria is not None:
+        filtered: List[FbCandidate] = []
+        for cand in raw_candidates:
+            url_val = (cand.url or "").strip()
+            if not url_val:
+                continue
             try:
-                aria_val = parent_with_aria.get("aria-label") or ""
+                if is_junk_fb_candidate_url(url_val):
+                    continue
             except Exception:
-                aria_val = ""
-        aria_lower = aria_val.lower()
-        return any(tok in aria_lower for tok in ("navigation", "header", "footer"))
+                pass
+            if not _fb_is_candidate_url_allowed(url_val):
+                continue
+            filtered.append(cand)
+        result["candidates_post_url_gate"] = len(filtered)
+        result["filtered_candidates"] = filtered
+        return result
 
-    # First pass: only inside the scoped containers.
-    raw_candidates, _ = _extract_candidates_from_elements(candidate_elements)
-    candidates_pre_url_gate = len(raw_candidates)
+    # Layered selector tiers: narrow → content → broad.
+    selector_tiers: List[List[str]] = [
+        # Tier 1: narrow search-result scopes.
+        [
+            'div[role="main"] div[aria-label="Search results"]',
+            'div[aria-label="Search results"]',
+            'div[role="main"] section[aria-label*="Search results"]',
+            'div[role="main"] [data-pagelet^="SearchResults"]',
+            'div[role="main"] div[aria-label*="Search results"]',
+        ],
+        # Tier 2: search content scopes.
+        [
+            'div[role="main"] div[role="article"]',
+            'article[role="article"]',
+        ],
+        # Tier 3: bounded broader scopes (only if tiers 1+2 yield nothing usable).
+        [
+            'div[role="main"] div[role="feed"]',
+            'div[role="main"]',
+        ],
+    ]
 
-    if candidates_pre_url_gate == 0:
-        _emit(
-            f"[FB Shared][DOM Gate] reason=zero_usable_hrefs_in_scope containers_found={len(containers)} "
-            f"anchors_in_scope={anchors_in_scope_container} candidates_pre_url_gate=0 "
-            f"fallback={1 if fallback_enabled else 0} search_name='{search_name or ''}'"
+    # Collect fallback containers that are explicitly search-result-oriented.
+    fallback_containers: List[Tag] = []
+    try:
+        fallback_region = soup.find(attrs={"aria-label": re.compile(r"^Search results$", re.I)})
+    except Exception:
+        fallback_region = None
+    if fallback_region:
+        fallback_containers.append(fallback_region)
+    try:
+        article_nodes = soup.select('[role="article"]')
+    except Exception:
+        article_nodes = []
+    fallback_containers.extend(article_nodes)
+
+    all_results: List[Dict[str, Any]] = []
+    best_result: Optional[Dict[str, Any]] = None
+    tier_log: List[str] = []
+    fallback_reason = ""
+
+    for tier_idx, tier in enumerate(selector_tiers, start=1):
+        tier_results = []
+        for selector in tier:
+            result = _evaluate_selector(selector)
+            all_results.append(result)
+            tier_results.append(result)
+
+        # Score within tier: post_gate > pre_gate > anchors_in_scope.
+        def _score(res: Dict[str, Any]) -> Tuple[int, int, int]:
+            return (
+                res.get("candidates_post_url_gate", 0),
+                res.get("candidates_pre_url_gate", 0),
+                res.get("anchors_in_scope", 0),
+            )
+
+        best_in_tier = max(tier_results, key=_score) if tier_results else {}
+        tier_usable = best_in_tier.get("candidates_post_url_gate", 0)
+        tier_pre = best_in_tier.get("candidates_pre_url_gate", 0)
+        tier_anchors = best_in_tier.get("anchors_in_scope", 0)
+        tier_selector = best_in_tier.get("selector", "NONE")
+        tier_log.append(
+            f"tier{tier_idx}={tier_selector}:post={tier_usable}:pre={tier_pre}:anchors={tier_anchors}"
         )
 
-    # Optional DOM fallback: only when container extraction produced zero usable hrefs.
-    if fallback_enabled and candidates_pre_url_gate == 0:
-        fallback_container_selectors = [
-            'article[role="article"]',
-            'div[role="feed"]',
-            'div[role="main"]',
-        ]
+        if tier_usable > 0:
+            best_result = best_in_tier
+            fallback_reason = f"tier{tier_idx}_match"
+            break
+        elif tier_pre > 0 and (best_result is None or best_result.get("candidates_pre_url_gate", 0) == 0):
+            # Keep best pre-gate candidate as fallback within tier progression.
+            best_result = best_in_tier
+            fallback_reason = f"tier{tier_idx}_pre_gate"
 
-        fallback_containers: List[Tag] = []
-        for fb_selector in fallback_container_selectors:
-            try:
-                fallback_containers.extend(soup.select(fb_selector))
-            except Exception:
-                continue
+    # If no usable candidates from any tier, try the explicit fallback containers
+    # (aria-label search results + article cards) as a last bounded resort.
+    if best_result is None or best_result.get("candidates_post_url_gate", 0) == 0:
+        if fallback_containers:
+            fallback_elements = _gather_candidate_elements(fallback_containers)
+            fallback_elements = [el for el in fallback_elements if not _is_nav_like(el)]
+            raw_candidates, _ = _extract_candidates_from_elements(fallback_elements)
+            filtered: List[FbCandidate] = []
+            for cand in raw_candidates:
+                url_val = (cand.url or "").strip()
+                if not url_val:
+                    continue
+                try:
+                    if is_junk_fb_candidate_url(url_val):
+                        continue
+                except Exception:
+                    pass
+                if not _fb_is_candidate_url_allowed(url_val):
+                    continue
+                filtered.append(cand)
+            fallback_result = {
+                "selector": "fallback_search_results_or_article",
+                "containers": fallback_containers,
+                "containers_found": len(fallback_containers),
+                "anchors_in_scope": len(fallback_elements),
+                "candidates_pre_url_gate": len(raw_candidates),
+                "candidates_post_url_gate": len(filtered),
+                "raw_candidates": raw_candidates,
+                "filtered_candidates": filtered,
+                "candidate_elements": fallback_elements,
+            }
+            all_results.append(fallback_result)
+            if fallback_result["candidates_post_url_gate"] > 0:
+                best_result = fallback_result
+                fallback_reason = "fallback_search_results_or_article"
+            elif best_result is None:
+                best_result = fallback_result
+                fallback_reason = fallback_reason or "fallback_empty"
 
-        fallback_elements = _gather_candidate_elements(fallback_containers)
-        fallback_elements = [el for el in fallback_elements if not _is_nav_like(el)]
-
-        seen_ids = {id(el) for el in candidate_elements}
-        for el in fallback_elements:
-            el_id = id(el)
-            if el_id in seen_ids:
-                continue
-            seen_ids.add(el_id)
-            candidate_elements.append(el)
-
-        anchors_in_scope_container = len(candidate_elements)
-        raw_candidates, _ = _extract_candidates_from_elements(candidate_elements)
-        candidates_pre_url_gate = len(raw_candidates)
-        fallback_used = bool(candidate_elements)
-        if fallback_used:
-            fallback_reason = fallback_reason or "zero_anchor_fallback"
-
-    anchors_in_scope = len(candidate_elements)
-
-    gate_reject = 0
-    filtered: List[FbCandidate] = []
-    for cand in raw_candidates:
-        url_val = (cand.url or "").strip()
-        if not url_val:
-            gate_reject += 1
-            continue
+    # If we still have nothing and a driver was provided, attempt one bounded
+    # wait for async anchor population inside the most promising container.
+    waited_for_population = False
+    if driver is not None and best_result is not None and best_result.get("anchors_in_scope", 0) == 0:
+        best_selector = best_result.get("selector", "div[role=\"main\"]")
         try:
-            if is_junk_fb_candidate_url(url_val):
-                gate_reject += 1
-                continue
+            from selenium.webdriver.support.ui import WebDriverWait
+            from selenium.common.exceptions import TimeoutException
+
+            def _has_anchors(drv) -> bool:
+                try:
+                    ps = getattr(drv, "page_source", "") or ""
+                except Exception:
+                    ps = ""
+                if not ps:
+                    return False
+                mini_soup = BeautifulSoup(ps, "html.parser")
+                try:
+                    nodes = mini_soup.select(best_selector)
+                except Exception:
+                    nodes = []
+                if not nodes:
+                    return False
+                for node in nodes:
+                    if node.select("a[href]") or node.select('[role="link"]'):
+                        return True
+                return False
+
+            WebDriverWait(driver, 3.0).until(_has_anchors)
+            waited_for_population = True
+            # Re-evaluate after wait.
+            try:
+                html = driver.page_source or ""
+            except Exception:
+                html = ""
+            if html:
+                soup = BeautifulSoup(html, "html.parser")
+                # Re-run tier evaluation on refreshed soup.
+                all_results = []
+                best_result = None
+                fallback_reason = ""
+                for tier_idx, tier in enumerate(selector_tiers, start=1):
+                    tier_results = []
+                    for selector in tier:
+                        result = _evaluate_selector(selector)
+                        all_results.append(result)
+                        tier_results.append(result)
+
+                    def _score2(res: Dict[str, Any]) -> Tuple[int, int, int]:
+                        return (
+                            res.get("candidates_post_url_gate", 0),
+                            res.get("candidates_pre_url_gate", 0),
+                            res.get("anchors_in_scope", 0),
+                        )
+
+                    best_in_tier = max(tier_results, key=_score2) if tier_results else {}
+                    if best_in_tier.get("candidates_post_url_gate", 0) > 0:
+                        best_result = best_in_tier
+                        fallback_reason = f"tier{tier_idx}_match_after_wait"
+                        break
+                    elif best_in_tier.get("candidates_pre_url_gate", 0) > 0 and best_result is None:
+                        best_result = best_in_tier
+                        fallback_reason = f"tier{tier_idx}_pre_gate_after_wait"
         except Exception:
             pass
-        if not _fb_is_candidate_url_allowed(url_val):
-            gate_reject += 1
-            continue
-        filtered.append(cand)
 
-    candidates_post_url_gate = len(filtered)
+    if best_result is None:
+        _emit(
+            f"[FB Shared][DOM Gate] chosen_container_selector=NONE containers_found=0 anchors_in_scope=0 "
+            f"candidates_pre_url_gate=0 candidates_post_url_gate=0 dropped_by_dom_gate={all_anchor_count} "
+            f"reason=dom_container_missing search_name='{search_name or ''}'"
+        )
+        return []
+
+    chosen_selector = best_result.get("selector", "NONE")
+    containers = best_result.get("containers", [])
+    candidate_elements = best_result.get("candidate_elements", [])
+    raw_candidates = best_result.get("raw_candidates", [])
+    filtered = best_result.get("filtered_candidates", [])
+    candidates_pre_url_gate = best_result.get("candidates_pre_url_gate", 0)
+    candidates_post_url_gate = best_result.get("candidates_post_url_gate", 0)
+    anchors_in_scope = len(candidate_elements)
+
+    gate_reject = candidates_pre_url_gate - candidates_post_url_gate
     dropped_by_dom_gate = max(0, all_anchor_count - anchors_in_scope)
+
+    # Emit layered diagnostics.
+    layer_detail = " ".join(tier_log)
+    if candidates_pre_url_gate == 0:
+        reason = "zero_usable_hrefs_in_scope"
+    else:
+        reason = fallback_reason or "container_match"
 
     _emit(
         f"[FB Shared][DOM Gate] chosen_container_selector={chosen_selector} containers_found={len(containers)} "
         f"anchors_in_scope={anchors_in_scope} candidates_pre_url_gate={candidates_pre_url_gate} "
         f"candidates_post_url_gate={candidates_post_url_gate} url_gate_rejected={gate_reject} dropped_by_dom_gate={dropped_by_dom_gate} "
-        f"reason={fallback_reason or 'container_match'} search_name='{search_name or ''}'"
+        f"reason={reason} layers=[{layer_detail}] waited={int(waited_for_population)} search_name='{search_name or ''}'"
     )
 
     if gate_debug_env in ("1", "2"):

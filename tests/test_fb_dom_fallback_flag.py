@@ -17,10 +17,12 @@ HTML_FIXTURE = """
 """
 
 
-def test_dom_fallback_disabled_returns_empty(monkeypatch):
+def test_dom_fallback_auto_layered_finds_candidates_without_env_flag(monkeypatch):
+    """Layered extractor broadens automatically; no env flag required."""
     monkeypatch.delenv("NIGHT_FB_DOM_FALLBACK", raising=False)
     candidates = facebook_enrich._fb_extract_candidates_from_search_dom(HTML_FIXTURE, search_name="Test Page")
-    assert candidates == []
+    urls = [c.url for c in candidates]
+    assert "https://www.facebook.com/testpage" in urls
 
 
 def test_dom_fallback_enabled_augments_candidates(monkeypatch):
@@ -39,8 +41,9 @@ def test_dom_fallback_enabled_augments_candidates(monkeypatch):
         "https://www.facebook.com/sharer.php?u=https%3A%2F%2Fexample.com",
     ],
 )
-def test_dom_fallback_enabled_still_rejects_non_page_urls(monkeypatch, bad_href):
-    monkeypatch.setenv("NIGHT_FB_DOM_FALLBACK", "1")
+def test_dom_fallback_auto_layered_still_rejects_non_page_urls(monkeypatch, bad_href):
+    """Even with automatic broadening, junk URLs are still rejected."""
+    monkeypatch.delenv("NIGHT_FB_DOM_FALLBACK", raising=False)
     html = f"""
     <div role="main">
       <div aria-label="Search results">
