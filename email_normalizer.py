@@ -21,6 +21,91 @@ _OBVIOUS_PLACEHOLDER_EMAILS = frozenset(
     }
 )
 
+# Local parts that, when paired with a platform domain, indicate a platform-owned
+# support/admin/automated address rather than an artist contact email.
+_PLATFORM_SUPPORT_LOCAL_PARTS = frozenset(
+    {
+        "support",
+        "help",
+        "noreply",
+        "no-reply",
+        "no_reply",
+        "abuse",
+        "security",
+        "admin",
+        "postmaster",
+        "hostmaster",
+        "webmaster",
+        "root",
+        "legal",
+        "privacy",
+        "dpo",
+        "copyright",
+        "dmca",
+        "phishing",
+        "feedback",
+        "suggestions",
+        "complaints",
+        "donotreply",
+        "do-not-reply",
+    }
+)
+
+# Platform domains where the above local parts should be rejected.
+# Includes both exact matches and suffix matches (e.g. *.bandcamp.com).
+_PLATFORM_SUPPORT_DOMAINS_EXACT = frozenset(
+    {
+        "bandcamp.com",
+        "get.bandcamp.help",
+        "help.bandcamp.com",
+        "bandcamp.help",
+        "soundcloud.com",
+        "facebook.com",
+        "fb.com",
+        "instagram.com",
+        "instagr.am",
+        "spotify.com",
+        "last.fm",
+        "youtube.com",
+        "youtu.be",
+        "tiktok.com",
+        "twitter.com",
+        "x.com",
+        "linktr.ee",
+        "beacons.ai",
+        "mailchimp.com",
+        "list-manage.com",
+        "substack.com",
+        "squarespace.com",
+        "wix.com",
+    }
+)
+
+_PLATFORM_SUPPORT_DOMAINS_SUFFIX = frozenset(
+    {
+        ".bandcamp.com",
+        ".soundcloud.com",
+        ".facebook.com",
+        ".fb.com",
+        ".instagram.com",
+        ".instagr.am",
+        ".spotify.com",
+        ".last.fm",
+        ".youtube.com",
+        ".youtu.be",
+        ".tiktok.com",
+        ".twitter.com",
+        ".x.com",
+        ".linktr.ee",
+        ".beacons.ai",
+        ".mailchimp.com",
+        ".list-manage.com",
+        ".substack.com",
+        ".squarespace.com",
+        ".wix.com",
+    }
+)
+
 
 def normalize_obfuscated_email_patterns(text: str, logger: LoggerFn = None, max_logs: int = 3) -> Tuple[str, int]:
     """Replace common obfuscated email separators with '@'.
@@ -85,6 +170,55 @@ def is_system_telemetry_email(value: str) -> bool:
         return False
     _, domain = normalized.split("@", 1)
     return domain == "sentry.io" or domain.endswith(".sentry.io")
+
+
+def is_platform_support_email(value: str) -> bool:
+    """Return True for platform-owned support/admin/automated addresses.
+
+    Rejects emails such as support@*.bandcamp.com, noreply@*.soundcloud.com,
+    help@*.facebook.com, etc.  Does NOT reject artist-owned custom domains.
+    """
+    normalized = normalize_email_value(value)
+    if not normalized:
+        return False
+    local, domain = normalized.split("@", 1)
+    if local not in _PLATFORM_SUPPORT_LOCAL_PARTS:
+        return False
+    if domain in _PLATFORM_SUPPORT_DOMAINS_EXACT:
+        return True
+    if any(domain.endswith(suffix) for suffix in _PLATFORM_SUPPORT_DOMAINS_SUFFIX):
+        return True
+    return False
+
+
+def filter_platform_support_emails(values: Iterable[str] | str | None) -> list[str]:
+    """Normalize, dedupe, and drop platform support/admin emails."""
+    if values is None:
+        return []
+
+    if isinstance(values, str):
+        raw_items = _EMAIL_VALUE_SPLIT_RE.split(values)
+    else:
+        raw_items = []
+        for value in values:
+            if value is None:
+                continue
+            if isinstance(value, str):
+                raw_items.extend(_EMAIL_VALUE_SPLIT_RE.split(value))
+            else:
+                raw_items.append(str(value))
+
+    filtered: list[str] = []
+    seen: set[str] = set()
+    for raw in raw_items:
+        normalized = normalize_email_value(raw)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        if is_platform_support_email(normalized):
+            continue
+        filtered.append(normalized)
+    return filtered
 
 
 def filter_system_telemetry_emails(values: Iterable[str] | str | None) -> list[str]:

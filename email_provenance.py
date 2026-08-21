@@ -8,6 +8,7 @@ from urllib.parse import urlsplit
 import pandas as pd
 
 from email_normalizer import (
+    filter_platform_support_emails,
     filter_system_telemetry_emails,
     is_obvious_placeholder_email,
     normalize_email_value,
@@ -381,6 +382,9 @@ def _set_email_with_provenance(
     surface: str = "",
 ) -> None:
     filtered_emails = filter_system_telemetry_emails([email])
+    if not filtered_emails:
+        return
+    filtered_emails = filter_platform_support_emails(filtered_emails)
     if not filtered_emails:
         return
     email_clean = filtered_emails[0]

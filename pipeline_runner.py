@@ -49,7 +49,7 @@ from email_provenance import (
     parse_email_provenance_json,
     row_has_successful_source_url_provenance,
 )
-from email_normalizer import filter_system_telemetry_emails
+from email_normalizer import filter_platform_support_emails, filter_system_telemetry_emails
 from fb_email_skip_gate import (
     is_quarantined_repeat_email_row,
     row_has_usable_email_for_fb_skip,
@@ -1282,18 +1282,23 @@ def _set_email_all(
 ) -> str:
     """Centralized Email_All setter with merge + logging + guard."""
     existing_val = _cell_str(df.at[idx, "Email_All"] if "Email_All" in df.columns else "")
-    before_list = filter_system_telemetry_emails(normalize_emails(existing_val))
+    before_list = filter_platform_support_emails(filter_system_telemetry_emails(normalize_emails(existing_val)))
     before_count = len(before_list)
+    # Filter platform support emails from incoming batch before provenance merge.
+    if isinstance(new_emails, str):
+        filtered_new = filter_platform_support_emails(filter_system_telemetry_emails(normalize_emails(new_emails)))
+    else:
+        filtered_new = filter_platform_support_emails(filter_system_telemetry_emails(list(new_emails)))
     if source_url or source_type or surface:
         merge_email_provenance_into_target(
             (df, idx),
-            new_emails,
+            filtered_new,
             source_url=source_url,
             source_type=source_type,
             method=method,
             surface=surface,
         )
-    merged_list = _rank_contact_emails_for_row(df.loc[idx], _merge_email_lists(existing_val, new_emails))
+    merged_list = _rank_contact_emails_for_row(df.loc[idx], _merge_email_lists(existing_val, filtered_new))
     merged_str = ";".join(merged_list)
     _bump_email_summary("emails_found", max(0, len(merged_list) - before_count))
     df.at[idx, "Email_All"] = merged_str
@@ -1919,6 +1924,7 @@ def _get_email_source_trust(source_type: Any = "", surface: Any = "") -> int:
 
 def _rank_contact_emails_for_row(row_like: Any, values: Union[str, Sequence[str], None]) -> List[str]:
     normalized = filter_system_telemetry_emails(_merge_email_lists("", values or []))
+    normalized = filter_platform_support_emails(normalized)
     if not normalized:
         return []
 

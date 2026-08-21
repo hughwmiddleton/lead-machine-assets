@@ -46,7 +46,7 @@ from source_scheduler import (
     preferred_upstream_identity_hint,
 )
 from email_provenance import merge_email_provenance_into_target, row_has_successful_source_url_provenance
-from email_normalizer import filter_system_telemetry_emails, normalize_email_value
+from email_normalizer import filter_platform_support_emails, filter_system_telemetry_emails, normalize_email_value
 from fb_email_skip_gate import row_has_usable_email_for_fb_skip
 
 try:
@@ -5545,6 +5545,7 @@ def _extract_emails_from_html(
 
     def _finalize_emails(candidates: Sequence[str]) -> List[str]:
         filtered_emails = _filter_low_quality_fb_emails(list(candidates or []))
+        filtered_emails = filter_platform_support_emails(filtered_emails)
         unique: List[str] = []
         seen: Set[str] = set()
         for email in filtered_emails:
@@ -10203,7 +10204,7 @@ class NightModeFacebookEnricher:
         candidate_url: str = "",
         email_extract_method: str = "",
     ) -> Optional[NightModeFacebookResult]:
-        emails = filter_system_telemetry_emails(emails)
+        emails = filter_platform_support_emails(filter_system_telemetry_emails(emails))
         if not emails and not allow_empty:
             return None
         primary = _choose_primary_email(emails, artist_name, source_context=source_context) if emails else None
