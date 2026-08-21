@@ -44,6 +44,7 @@ from source_scheduler import (
     canonicalize_facebook_url,
     ensure_canonical_facebook_url,
     preferred_upstream_identity_hint,
+    _FB_BLOCKED_PUBLIC_PATH_SEGMENTS,
 )
 from email_provenance import merge_email_provenance_into_target, row_has_successful_source_url_provenance
 from email_normalizer import filter_system_telemetry_emails, normalize_email_value
@@ -448,6 +449,43 @@ def _load_fb_page_with_timeout(
     if not driver or not url:
         return "", url or "", False
 
+    # Shared helper: classify a Facebook path as blocked using the canonical
+    # blocked-route authority from source_scheduler.
+    def _is_blocked_fb_path(path: str) -> bool:
+        lowered = (path or "").lower().rstrip("/")
+        if not lowered:
+            return False
+        segments = [seg for seg in lowered.strip("/").split("/") if seg]
+        if segments and segments[0] in _FB_BLOCKED_PUBLIC_PATH_SEGMENTS:
+            return True
+        redirect_wrappers = (
+            "/l.php",
+            "/flx/warn",
+            "/share.php",
+            "/share/",
+            "/si/ajax/l/redirect/",
+            "/ajax/sharer/",
+        )
+        return any(lowered == wrapper or lowered.startswith(f"{wrapper}/") for wrapper in redirect_wrappers)
+
+    # Pre-navigation guard: reject private/non-public Facebook URLs.
+    def _is_blocked_fb_nav_url(nav_url: str) -> bool:
+        try:
+            parsed = urllib.parse.urlparse(str(nav_url or "").strip())
+        except Exception:
+            return True
+        host = (parsed.netloc or "").lower()
+        if "facebook.com" not in host and host not in {"fb.me", "www.fb.me", "m.fb.me"}:
+            return False  # Not a Facebook URL; let other layers handle it.
+        path = parsed.path or ""
+        if path in {"", "/"}:
+            return False  # Allow homepage.
+        return _is_blocked_fb_path(path)
+
+    if _is_blocked_fb_nav_url(url):
+        _log(logger, f"[FB Enrich] Blocked private/non-public Facebook URL before navigation: {url}")
+        return "", url, False
+
     timed_out = False
     baseline_url = ""
     baseline_html = ""
@@ -475,16 +513,10 @@ def _load_fb_page_with_timeout(
         path = (parsed.path or "").strip()
         if path in {"", "/"}:
             return False
-        lowered_path = path.lower()
-        redirect_wrappers = (
-            "/l.php",
-            "/flx/warn",
-            "/share.php",
-            "/share/",
-            "/si/ajax/l/redirect/",
-            "/ajax/sharer/",
-        )
-        return not any(lowered_path == wrapper or lowered_path.startswith(f"{wrapper}/") for wrapper in redirect_wrappers)
+        # Post-redirect guard: reject redirect wrappers and private/non-public surfaces.
+        if _is_blocked_fb_path(path):
+            return False
+        return True
 
     def _read_min_nav_ready_probe() -> Tuple[str, bool]:
         try:
@@ -6825,7 +6857,7 @@ def _pick_fb_contact_link(soup: BeautifulSoup, base_url: str) -> Optional[str]:
         "photos",
         "watch",
         "videos",
-    }
+    } | _FB_BLOCKED_PUBLIC_PATH_SEGMENTS
     allowed_sk = {"about", "about_contact_and_basic_info", "about_details"}
 
     def _canonicalize_resolved(candidate_url: str) -> Optional[Tuple[str, urllib.parse.ParseResult]]:
