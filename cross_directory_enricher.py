@@ -1802,35 +1802,47 @@ def compute_match_score(
     """
     Returns a score between 0.0 and 1.0 indicating confidence that
     this candidate matches the seed Spotify artist/track.
+    Uses identity-evidence scoring for the artist name instead of raw fuzz ratio.
     """
     seed_artist_n = normalize_text(seed_artist)
     seed_title_n = normalize_text(seed_title)
     cand_artist_n = normalize_text(cand_artist)
     cand_title_n = normalize_text(cand_title)
 
-    artist_score = fuzz.ratio(seed_artist_n, cand_artist_n) if seed_artist_n and cand_artist_n else 0
+    # Identity-based artist name score
+    artist_identity_score, artist_tier, _ = _compute_identity_match_score(
+        seed_artist=seed_artist,
+        candidate_display=cand_artist,
+        candidate_handle="",
+    )
+    # Map identity classification to a base contribution.
+    # Exact and strong must exceed the 0.7 MATCH_THRESHOLD on their own.
+    if artist_tier == "exact":
+        score = 0.80
+    elif artist_tier == "strong":
+        score = 0.72
+    elif artist_tier == "plausible":
+        score = 0.35
+    elif artist_identity_score >= 0.30:
+        score = 0.12
+    else:
+        score = 0.0
+
+    # Title match (preserved from original, but capped lower)
     title_score = fuzz.ratio(seed_title_n, cand_title_n) if seed_title_n and cand_title_n else 0
-
-    score = 0.0
-    if artist_score >= 90:
-        score += 0.5
-    elif artist_score >= 80:
-        score += 0.35
-    elif artist_score >= 70:
-        score += 0.2
-
     if title_score >= 90:
-        score += 0.3
+        score += 0.25
     elif title_score >= 80:
-        score += 0.2
+        score += 0.15
     elif title_score >= 70:
-        score += 0.1
+        score += 0.08
 
+    # Domain match
     spotify_domain = (spotify_domain or "").lower()
     candidate_domain = (candidate_domain or "").lower()
     if spotify_domain and candidate_domain:
         if spotify_domain == candidate_domain or candidate_domain.endswith("." + spotify_domain):
-            score += 0.2
+            score += 0.18
 
     return max(0.0, min(score, 1.0))
 
@@ -10800,6 +10812,356 @@ def _sc_handle_from_profile_url(url: str) -> Optional[str]:
     return _shared_soundcloud_handle_from_profile_url(url)
 
 
+# ---------------------------------------------------------------------------
+# Hardened cross-directory artist identity validation (Ticket 4)
+# ---------------------------------------------------------------------------
+
+_IDENTITY_EXACT_THRESHOLD = 0.95
+_IDENTITY_STRONG_THRESHOLD = 0.80
+_IDENTITY_PLAUSIBLE_THRESHOLD = 0.60
+
+_IDENTITY_MANAGEMENT_TOKENS = {
+    "mgmt",
+    "management",
+    "manager",
+    "managers",
+    "label",
+    "labels",
+    "records",
+    "recordings",
+    "recording",
+    "booking",
+    "bookings",
+    "agency",
+    "agencies",
+    "promotions",
+    "promo",
+    "press",
+    "publicity",
+    "tour",
+    "touring",
+    "events",
+}
+_IDENTITY_CORPORATE_TOKENS = {
+    "inc",
+    "llc",
+    "ltd",
+    "limited",
+    "corp",
+    "corporation",
+    "group",
+    "collective",
+    "enterprise",
+    "company",
+    "co",
+}
+_IDENTITY_HARMLESS_SUFFIXES = {
+    "official",
+    "music",
+    "band",
+    "artist",
+    "project",
+    "sounds",
+    "audio",
+    "beats",
+    "productions",
+    "prod",
+    "live",
+    "dj",
+    "mc",
+}
+
+
+def _identity_compact(name: str) -> str:
+    """Remove all non-alphanumeric characters and lowercase."""
+    return re.sub(r"[^a-z0-9]", "", normalize_name(name))
+
+
+def _tokens_in_order(needles: List[str], haystack: List[str]) -> bool:
+    """Return True if all needles appear in haystack in the same order."""
+    if not needles:
+        return True
+    if not haystack:
+        return False
+    idx = 0
+    for token in haystack:
+        if idx < len(needles) and token == needles[idx]:
+            idx += 1
+    return idx == len(needles)
+
+
+def _identity_name_tier(seed_name: str, candidate_name: str) -> Tuple[str, float]:
+    """
+    Classify display-name match strength.
+    Returns (tier, base_score) where tier is one of exact/strong/plausible/weak.
+    """
+    if not seed_name or not candidate_name:
+        return ("weak", 0.0)
+
+    seed_norm = normalize_name(seed_name)
+    cand_norm = normalize_name(candidate_name)
+    if not seed_norm or not cand_norm:
+        return ("weak", 0.0)
+
+    seed_compact = _identity_compact(seed_name)
+    cand_compact = _identity_compact(candidate_name)
+
+    # Exact
+    if seed_norm == cand_norm:
+        # Reject false exact matches caused by aggressive punctuation normalization
+        # (e.g. "Artist 1" vs "artist.1" where the dot is replaced with a space).
+        # Dots/underscores are structural in usernames and must not create exact identity.
+        seed_special = any(c in seed_name for c in "._")
+        cand_special = any(c in candidate_name for c in "._")
+        if seed_special == cand_special:
+            return ("exact", 0.98)
+        return ("strong", 0.88)
+    if seed_compact and cand_compact and seed_compact == cand_compact:
+        return ("exact", 0.97)
+
+    # Strong: fuzz ratio >= 95, or compact variant with harmless suffix
+    fuzz_score = fuzz.ratio(seed_norm, cand_norm) if seed_norm and cand_norm else 0
+    if fuzz_score >= 95:
+        return ("strong", 0.90)
+
+    if seed_compact and cand_compact:
+        longer, shorter = (
+            (cand_compact, seed_compact)
+            if len(cand_compact) > len(seed_compact)
+            else (seed_compact, cand_compact)
+        )
+        if len(shorter) >= 4 and longer.startswith(shorter):
+            extra = longer[len(shorter) :]
+            extra_tokens = [
+                t for t in re.findall(r"[a-z]+", extra) if t and t not in _IDENTITY_HARMLESS_SUFFIXES
+            ]
+            if not extra_tokens:
+                return ("strong", 0.88)
+
+    # Plausible: all seed tokens in order, or fuzz >= 80, or compact substring
+    seed_tokens = seed_norm.split()
+    cand_tokens = cand_norm.split()
+    if _tokens_in_order(seed_tokens, cand_tokens):
+        return ("plausible", 0.70)
+
+    if fuzz_score >= 80:
+        return ("plausible", 0.65)
+
+    if seed_compact and cand_compact and len(seed_compact) >= 4 and seed_compact in cand_compact:
+        return ("plausible", 0.60)
+
+    # Weak: partial token overlap or fuzz >= 60
+    shared_tokens = set(seed_tokens) & set(cand_tokens)
+    if shared_tokens and len(shared_tokens) >= max(1, len(seed_tokens) // 2):
+        return ("weak", 0.35)
+
+    if fuzz_score >= 60:
+        return ("weak", 0.30)
+
+    return ("weak", 0.10)
+
+
+def _identity_handle_tier(seed_name: str, handle: str) -> Tuple[str, float]:
+    """
+    Classify handle/username match strength.
+    Returns (tier, base_score).
+    """
+    if not seed_name or not handle:
+        return ("weak", 0.0)
+
+    seed_norm = normalize_name(seed_name)
+    handle_norm = _sc_normalise_text(handle)
+    if not seed_norm or not handle_norm:
+        return ("weak", 0.0)
+
+    seed_compact = _identity_compact(seed_name)
+    handle_compact = _identity_compact(handle)
+    seed_tokens = seed_norm.split()
+
+    # Exact
+    if seed_norm == handle_norm:
+        return ("exact", 0.95)
+    if seed_compact and handle_compact and seed_compact == handle_compact:
+        return ("exact", 0.94)
+
+    # Strong: handle is compact version or known separator variant
+    if handle_compact and seed_compact and handle_compact == seed_compact:
+        return ("strong", 0.88)
+
+    # Plausible: handle contains full compact seed
+    if len(seed_compact) >= 4 and seed_compact in handle_compact:
+        extra = handle_compact.replace(seed_compact, "", 1)
+        extra_tokens = [
+            t for t in re.findall(r"[a-z]+", extra) if t and t not in _IDENTITY_HARMLESS_SUFFIXES
+        ]
+        if not extra_tokens:
+            return ("plausible", 0.65)
+        if not any(t in _IDENTITY_MANAGEMENT_TOKENS or t in _IDENTITY_CORPORATE_TOKENS for t in extra_tokens):
+            return ("plausible", 0.55)
+
+    # Weak: shares first token
+    seed_first = seed_tokens[0] if seed_tokens else ""
+    if seed_first and len(seed_first) >= 3 and handle_norm.startswith(seed_first):
+        return ("weak", 0.30)
+
+    # Very weak: any shared token
+    shared = set(seed_tokens) & set(handle_norm.split())
+    if shared and len(shared) >= max(1, len(seed_tokens) // 2):
+        return ("weak", 0.20)
+
+    return ("weak", 0.05)
+
+
+def _identity_contradiction_penalty(
+    seed_name: str, candidate_name: str, handle: str, candidate_context: str = ""
+) -> float:
+    """Return penalty for identity contradictions (management accounts, etc.)."""
+    penalty = 0.0
+    texts = [candidate_name, handle, candidate_context]
+    combined = " ".join(t for t in texts if t).lower()
+    tokens = set(re.findall(r"[a-z]+", combined))
+    compact_combined = _identity_compact(combined)
+
+    seed_norm = normalize_name(seed_name)
+    cand_norm = normalize_name(candidate_name)
+    is_exact = bool(seed_norm and cand_norm and seed_norm == cand_norm)
+
+    # Word-boundary hits
+    mgmt_hits = tokens & _IDENTITY_MANAGEMENT_TOKENS
+    corp_hits = tokens & _IDENTITY_CORPORATE_TOKENS
+
+    # Compact-form hits (e.g. blackorangemgmt)
+    if not mgmt_hits:
+        mgmt_hits = {t for t in _IDENTITY_MANAGEMENT_TOKENS if t in compact_combined}
+    if not corp_hits:
+        corp_hits = {t for t in _IDENTITY_CORPORATE_TOKENS if t in compact_combined}
+
+    if mgmt_hits and not is_exact:
+        penalty += 0.40
+    elif mgmt_hits and is_exact:
+        penalty += 0.15
+
+    if corp_hits and not is_exact:
+        penalty += 0.20
+    elif corp_hits and is_exact:
+        penalty += 0.05
+
+    # Digits mismatch
+    seed_compact = _identity_compact(seed_name)
+    if seed_compact and not any(ch.isdigit() for ch in seed_compact):
+        if any(ch.isdigit() for ch in _identity_compact(handle)):
+            penalty += 0.15
+
+    # Generic-only handle
+    handle_norm = _sc_normalise_text(handle)
+    if handle_norm and handle_norm in _SC_GENERIC_TOKENS:
+        penalty += 0.25
+
+    return min(penalty, 0.80)
+
+
+def _identity_corroboration_boost(
+    seed_location: str = "",
+    seed_genre: str = "",
+    seed_website: str = "",
+    candidate_location: str = "",
+    candidate_context: str = "",
+    candidate_websites: Optional[Set[str]] = None,
+) -> float:
+    """Return boost for corroborating identity evidence."""
+    boost = 0.0
+    candidate_websites = candidate_websites or set()
+
+    # Website/domain match
+    if seed_website and candidate_websites:
+        seed_domain = extract_domain(seed_website)
+        if seed_domain and seed_domain not in GENERIC_SOCIAL_ROOT_HOSTS:
+            for cand_url in candidate_websites:
+                cand_domain = extract_domain(cand_url)
+                if cand_domain and (cand_domain == seed_domain or cand_domain.endswith("." + seed_domain)):
+                    boost += 0.15
+                    break
+
+    # Location match
+    if seed_location and candidate_location:
+        if _sc_location_match(seed_location, candidate_location):
+            boost += 0.08
+
+    # Genre match
+    if seed_genre and candidate_context:
+        seed_genre_norm = _sc_normalise_text(seed_genre)
+        if seed_genre_norm and seed_genre_norm in _sc_normalise_text(candidate_context):
+            boost += 0.05
+
+    return min(boost, 0.30)
+
+
+def _compute_identity_match_score(
+    seed_artist: str,
+    candidate_display: str,
+    candidate_handle: str,
+    candidate_url: str = "",
+    seed_location: str = "",
+    seed_genre: str = "",
+    seed_website: str = "",
+    candidate_location: str = "",
+    candidate_context: str = "",
+    candidate_websites: Optional[Set[str]] = None,
+) -> Tuple[float, str, Dict[str, float]]:
+    """
+    Compute conservative identity match score between seed artist and candidate profile.
+    Returns (score, classification, debug_dict).
+    Classification: exact / strong / plausible / weak/reject.
+    """
+    debug: Dict[str, float] = {}
+
+    display_tier, display_score = _identity_name_tier(seed_artist, candidate_display)
+    handle_tier, handle_score = _identity_handle_tier(seed_artist, candidate_handle)
+    debug["display_score"] = round(display_score, 3)
+    debug["handle_score"] = round(handle_score, 3)
+
+    # Combine display name and handle: display dominates when present.
+    if candidate_display and candidate_display.strip():
+        base_score = display_score
+        if handle_tier in ("exact", "strong"):
+            base_score = max(base_score, base_score + 0.03)
+        elif handle_tier == "plausible" and display_tier == "weak":
+            base_score = max(base_score, handle_score * 0.5)
+    elif candidate_handle and candidate_handle.strip():
+        base_score = handle_score * 0.85
+    else:
+        base_score = 0.0
+
+    debug["base_score"] = round(base_score, 3)
+
+    # Contradictions
+    contras = _identity_contradiction_penalty(seed_artist, candidate_display, candidate_handle, candidate_context)
+    debug["contradictions"] = round(contras, 3)
+
+    # Corroboration (only if base is at least weakly plausible)
+    corro = 0.0
+    if base_score >= 0.20:
+        corro = _identity_corroboration_boost(
+            seed_location, seed_genre, seed_website, candidate_location, candidate_context, candidate_websites
+        )
+    debug["corroboration"] = round(corro, 3)
+
+    score = base_score + corro - contras
+    score = max(0.0, min(score, 1.0))
+    debug["final"] = round(score, 3)
+
+    if score >= _IDENTITY_EXACT_THRESHOLD:
+        classification = "exact"
+    elif score >= _IDENTITY_STRONG_THRESHOLD:
+        classification = "strong"
+    elif score >= _IDENTITY_PLAUSIBLE_THRESHOLD:
+        classification = "plausible"
+    else:
+        classification = "weak/reject"
+
+    return score, classification, debug
+
+
 def _sc_normalise_text(value: str) -> str:
     cleaned = _normalise_for_soundcloud(value or "")
     return cleaned.lower().strip()
@@ -10863,41 +11225,50 @@ def _bandcamp_confidence(
     candidate_context: str = "",
 ) -> float:
     """
-    Lightweight Bandcamp confidence:
-    - Name similarity baseline
-    - Boost when subdomain closely matches artist name
-    - Optional boost when song title overlaps search context
-    - Small penalty for label/store/festival-like tokens
+    Conservative Bandcamp confidence using identity-evidence scoring.
+    Preserves subdomain, song-title, location, genre boosts and label penalties.
     """
     artist_norm = normalize_name(artist_name)
     disp_norm = normalize_name(display_name or "")
     if not artist_norm or not disp_norm:
         return 0.0
     context_norm = normalize_name(candidate_context or display_name or "")
-    score = difflib.SequenceMatcher(None, artist_norm, disp_norm).ratio()
+
+    # Identity-based name score
+    score, classification, _ = _compute_identity_match_score(
+        seed_artist=artist_name,
+        candidate_display=display_name or "",
+        candidate_handle="",
+        candidate_url=profile_url or "",
+    )
+
     # Subdomain boost when it closely matches the artist.
     try:
         parsed = urllib.parse.urlparse(profile_url or "")
         host = (parsed.netloc or "").split(".")[0].lower()
         host_norm = normalize_name(host)
         if host_norm and artist_norm and (host_norm == artist_norm or artist_norm in host_norm or host_norm in artist_norm):
-            score = max(score, score + 0.08)
+            score = max(score, score + 0.06)
     except Exception:
         pass
+
     # Song-title boost if provided and appears in display text.
     song_norm = normalize_name(song_title or "")
     if song_norm and song_norm in context_norm:
-        score += 0.03
-    if score >= 0.84:
+        score += 0.06
+
+    if score >= 0.45:
         location_signal = _bandcamp_location_signal(location_hint)
         if location_signal and _bandcamp_context_matches(location_signal, context_norm):
-            score += 0.03
+            score += 0.07
         genre_signal = _bandcamp_genre_signal(genre_hint)
         if genre_signal and _bandcamp_context_matches(genre_signal, context_norm):
-            score += 0.02
+            score += 0.05
+
     penalty_tokens = {"records", "recordings", "label", "store", "festival", "shop"}
     if any(tok in disp_norm for tok in penalty_tokens):
         score -= 0.1
+
     return max(0.0, min(score, 1.0))
 
 
@@ -11127,12 +11498,17 @@ def _spotify_sparse_bandcamp_slug_candidates(artist_name: str) -> List[str]:
 
 
 def _lastfm_confidence(artist_name: str, candidate_name: str) -> float:
+    """Conservative Last.fm confidence using identity-evidence scoring."""
     artist_norm = normalize_name(artist_name)
     cand_norm = normalize_name(candidate_name)
     if not artist_norm or not cand_norm:
         return 0.0
-    score = difflib.SequenceMatcher(None, artist_norm, cand_norm).ratio()
-    if artist_norm == cand_norm:
+    score, classification, _ = _compute_identity_match_score(
+        seed_artist=artist_name,
+        candidate_display=candidate_name,
+        candidate_handle="",
+    )
+    if classification == "exact":
         score = max(score, 0.98)
     return max(0.0, min(score, 1.0))
 
@@ -11260,10 +11636,9 @@ def _sc_score_candidate(
     track_hint: str = "",
 ) -> float:
     """
-    Lightweight confidence score for SoundCloud candidates:
-    - anchor on cleaned display name + handle similarity to artist name
-    - boost on location/genre/title hints when available
-    - penalise label/podcast-like handles to de-prioritise obvious mismatches
+    Conservative confidence score for SoundCloud candidates.
+    Uses identity-evidence scoring instead of raw string similarity.
+    Preserves location/genre/title boosts and label/podcast penalties.
     """
     artist_norm = _sc_normalise_text(artist_name)
     cand_norm = _sc_normalise_text(candidate_name or handle)
@@ -11273,26 +11648,21 @@ def _sc_score_candidate(
     artist_norm_basic = _sc_strip_basic(artist_norm)
     cand_norm_basic = _sc_strip_basic(cand_norm)
     handle_norm_basic = _sc_strip_basic(handle_norm)
-    ratio = difflib.SequenceMatcher(None, artist_norm, cand_norm).ratio()
-    score = ratio
-    if artist_norm == cand_norm:
-        score = max(score, 0.95)
-    if handle_norm and (artist_norm == handle_norm or artist_norm in handle_norm):
-        score = max(score, 0.92)
-    if handle_norm and handle_norm.replace("_", " ") == artist_norm:
-        score = max(score, 0.9)
-    if artist_norm and cand_norm.startswith(artist_norm):
-        score = max(score, 0.85)
-    if artist_norm and handle_norm.startswith(artist_norm.split()[0]):
-        score = max(score, score + 0.05)
-    name_score = score
-    if location_hint and _sc_location_match(location_hint, candidate_location):
-        score += 0.08
-    if genre_hint:
-        genre_norm = _sc_normalise_text(genre_hint)
-        if genre_norm and genre_norm in _sc_normalise_text(candidate_name):
-            score += 0.05
-    if name_score >= 0.55 or (
+
+    # Core identity score
+    score, classification, debug = _compute_identity_match_score(
+        seed_artist=artist_name,
+        candidate_display=candidate_name or "",
+        candidate_handle=handle or "",
+        candidate_url=profile_url or "",
+        seed_location=location_hint or "",
+        seed_genre=genre_hint or "",
+        candidate_location=candidate_location or "",
+        candidate_context=candidate_context or "",
+    )
+
+    # Preserve title/metadata boost for already-plausible candidates
+    if score >= 0.40 or (
         artist_norm_basic and artist_norm_basic in {cand_norm_basic, handle_norm_basic}
     ):
         score += _sc_title_metadata_boost(
@@ -11303,18 +11673,23 @@ def _sc_score_candidate(
             candidate_context,
             profile_url,
         )
+
+    # Preserve existing label/podcast penalties
     if any(keyword in handle_norm for keyword in _SC_LABEL_PODCAST_KEYWORDS):
         score -= 0.25
     if any(keyword in cand_norm for keyword in _SC_LABEL_PODCAST_KEYWORDS):
         score -= 0.15
-    # Generic/short-name penalty unless exact basic match.
+
+    # Generic/short-name penalty unless exact basic match
     if artist_norm_basic in _SC_GENERIC_TOKENS or len(artist_norm_basic) <= 3:
         if not (artist_norm_basic and artist_norm_basic == cand_norm_basic == handle_norm_basic):
             score -= 0.15
-    # Penalise digits in candidate when artist name has none.
+
+    # Penalise digits in candidate when artist name has none
     if artist_norm_basic and not any(ch.isdigit() for ch in artist_norm_basic):
         if any(ch.isdigit() for ch in cand_norm_basic) or any(ch.isdigit() for ch in handle_norm_basic):
             score -= 0.2
+
     return max(0.0, min(score, 1.0))
 
 
@@ -18182,26 +18557,45 @@ class CrossDirectoryEnricherWorker(QThread):
                 and self._row_is_spotify_origin(live_row, live_ctx)
                 and int(live_ctx.get("spotify_identity_tier") or 0) == 3
             )
-            borderline_score = score >= max(0.0, MATCH_THRESHOLD - 0.10)
+            # Hardened borderline: require higher floor and genuine identity evidence.
+            borderline_score = score >= max(0.0, MATCH_THRESHOLD - 0.05)
             source_identity_compact = re.sub(r"[^a-z0-9]+", "", normalize_name(source_identity))
+
+            # Stricter source-identity support: exact match or harmless variant only.
+            # Prefix/suffix containment (e.g. blackorangemgmt vs blackorange) is no longer enough.
+            def _is_harmless_slug_variant(compact_seed: str, compact_src: str) -> bool:
+                if not compact_seed or not compact_src:
+                    return False
+                if compact_seed == compact_src:
+                    return True
+                longer, shorter = (
+                    (compact_src, compact_seed)
+                    if len(compact_src) > len(compact_seed)
+                    else (compact_seed, compact_src)
+                )
+                if not longer.startswith(shorter):
+                    return False
+                extra = longer[len(shorter):]
+                extra_tokens = [t for t in re.findall(r"[a-z]+", extra) if t]
+                return bool(extra_tokens) and all(t in _IDENTITY_HARMLESS_SUFFIXES for t in extra_tokens)
+
             source_identity_support = bool(
                 seed_artist_compact
                 and source_identity_compact
-                and (
-                    source_identity_compact == seed_artist_compact
-                    or (
-                        len(seed_artist_compact) >= 6
-                        and (
-                            source_identity_compact.startswith(seed_artist_compact)
-                            or seed_artist_compact.startswith(source_identity_compact)
-                        )
-                    )
-                )
+                and _is_harmless_slug_variant(seed_artist_compact, source_identity_compact)
             )
+
+            # Explicitly block management/corporate accounts from bypass unless name is exact.
+            mgmt_corp_tokens = _IDENTITY_MANAGEMENT_TOKENS | _IDENTITY_CORPORATE_TOKENS
+            source_has_mgmt_corp = any(t in source_identity_compact for t in mgmt_corp_tokens)
+            cand_has_mgmt_corp = any(t in _identity_compact(candidate_name) for t in mgmt_corp_tokens)
+            blocked_by_org_tokens = (source_has_mgmt_corp or cand_has_mgmt_corp) and not conservative_name_match
+
             bypass_strict_guard = bool(
                 spotify_identity_pass_context
                 and source_key.startswith(("bandcamp", "soundcloud", "lastfm"))
                 and borderline_score
+                and not blocked_by_org_tokens
                 and (conservative_name_match or source_identity_support)
                 and (_payload_actionable(payload) or source_url)
             )
@@ -18732,7 +19126,7 @@ class CrossDirectoryEnricherWorker(QThread):
                     best_rank_score = max(best_rank_score, rank_confidence)
                 if status_code == 403 or self._bc_search_breaker_tripped:
                     break
-                if best_payload and best_score >= 0.95 and '"' in query:
+                if best_payload and best_score >= MIN_BC_CONFIDENCE and '"' in query:
                     break
                 if idx < len(queries) - 1:
                     self._bc_gap()
@@ -19599,8 +19993,24 @@ class CrossDirectoryEnricherWorker(QThread):
                 pass
 
             if payload:
-                payload.match_score = payload.match_score or attempt.match_score or 1.0
-                payload.candidate_name = artist_name
+                identity_score, identity_class, identity_debug = _compute_identity_match_score(
+                    seed_artist=artist_name,
+                    candidate_display=best_candidate.get("display_name") if best_candidate else "",
+                    candidate_handle=attempt.handle or "",
+                    candidate_url=attempt.profile_url or "",
+                )
+                payload.match_score = identity_score
+                payload.candidate_name = best_candidate.get("display_name") if best_candidate else artist_name
+                attempt.confidence = identity_score
+                attempt.match_score = identity_score
+                if os.getenv("NIGHT_SC_DEBUG"):
+                    try:
+                        self.log_message.emit(
+                            f"[Night SC] identity debug artist={artist_name} handle={attempt.handle} "
+                            f"class={identity_class} score={identity_score:.2f} debug={identity_debug}"
+                        )
+                    except Exception:
+                        pass
                 applied = self._apply_payload_guarded(df, row_idx, payload, artist_name, spotify_id=spotify_id)
             else:
                 applied = False
@@ -19664,8 +20074,26 @@ class CrossDirectoryEnricherWorker(QThread):
                 except Exception:
                     pass
                 if rss_payload and rss_ok:
-                    rss_payload.match_score = rss_payload.match_score or attempt.match_score or 1.0
+                    identity_score, identity_class, identity_debug = _compute_identity_match_score(
+                        seed_artist=artist_name,
+                        candidate_display="",
+                        candidate_handle=handle_for_rss or "",
+                        candidate_url=attempt.profile_url or "",
+                    )
+                    # Explicit seed link gets small trust bonus but never automatic 1.0
+                    identity_score = min(1.0, identity_score + 0.08)
+                    rss_payload.match_score = identity_score
                     rss_payload.candidate_name = artist_name
+                    attempt.confidence = identity_score
+                    attempt.match_score = identity_score
+                    if os.getenv("NIGHT_SC_DEBUG"):
+                        try:
+                            self.log_message.emit(
+                                f"[Night SC] seed-link identity debug artist={artist_name} handle={handle_for_rss} "
+                                f"class={identity_class} score={identity_score:.2f} debug={identity_debug}"
+                            )
+                        except Exception:
+                            pass
                     applied = self._apply_payload_guarded(df, row_idx, rss_payload, artist_name, spotify_id=spotify_id)
                     self._finalize_night_sc(df, row_idx, attempt, rss_payload if applied else None, artist_name)
                     return bool(applied)
@@ -19780,8 +20208,24 @@ class CrossDirectoryEnricherWorker(QThread):
                 except Exception:
                     pass
                 if reroute_payload:
-                    reroute_payload.match_score = reroute_payload.match_score or attempt.match_score or 1.0
+                    identity_score, identity_class, identity_debug = _compute_identity_match_score(
+                        seed_artist=artist_name,
+                        candidate_display="",
+                        candidate_handle=reroute_handle or "",
+                        candidate_url=attempt.profile_url or "",
+                    )
+                    reroute_payload.match_score = identity_score
                     reroute_payload.candidate_name = artist_name
+                    attempt.confidence = identity_score
+                    attempt.match_score = identity_score
+                    if os.getenv("NIGHT_SC_DEBUG"):
+                        try:
+                            self.log_message.emit(
+                                f"[Night SC] reroute identity debug artist={artist_name} handle={reroute_handle} "
+                                f"class={identity_class} score={identity_score:.2f} debug={identity_debug}"
+                            )
+                        except Exception:
+                            pass
                     applied = self._apply_payload_guarded(df, row_idx, reroute_payload, artist_name, spotify_id=spotify_id)
                 else:
                     applied = False
@@ -19805,10 +20249,24 @@ class CrossDirectoryEnricherWorker(QThread):
                     elif getattr(self, "_sc_rss_only_mode", False):
                         attempt.reason = attempt.reason or "rss_only_mode"
             if payload:
-                payload.match_score = 1.0
-                payload.candidate_name = artist_name
-                attempt.confidence = 1.0
-                attempt.match_score = 1.0
+                identity_score, identity_class, identity_debug = _compute_identity_match_score(
+                    seed_artist=artist_name,
+                    candidate_display=getattr(payload, "candidate_name", "") or "",
+                    candidate_handle=attempt.handle or "",
+                    candidate_url=attempt.profile_url or "",
+                )
+                payload.match_score = identity_score
+                payload.candidate_name = getattr(payload, "candidate_name", "") or artist_name
+                attempt.confidence = identity_score
+                attempt.match_score = identity_score
+                if os.getenv("NIGHT_SC_DEBUG"):
+                    try:
+                        self.log_message.emit(
+                            f"[Night SC] profile identity debug artist={artist_name} handle={attempt.handle} "
+                            f"class={identity_class} score={identity_score:.2f} debug={identity_debug}"
+                        )
+                    except Exception:
+                        pass
             applied = False
             if payload:
                 applied = self._apply_payload_guarded(df, row_idx, payload, artist_name, spotify_id=spotify_id)
@@ -20008,8 +20466,24 @@ class CrossDirectoryEnricherWorker(QThread):
             except Exception:
                 pass
             if reroute_payload:
-                reroute_payload.match_score = reroute_payload.match_score or attempt.match_score or 1.0
+                identity_score, identity_class, identity_debug = _compute_identity_match_score(
+                    seed_artist=artist_name,
+                    candidate_display="",
+                    candidate_handle=reroute_handle or "",
+                    candidate_url=attempt.profile_url or "",
+                )
+                reroute_payload.match_score = identity_score
                 reroute_payload.candidate_name = artist_name
+                attempt.confidence = identity_score
+                attempt.match_score = identity_score
+                if os.getenv("NIGHT_SC_DEBUG"):
+                    try:
+                        self.log_message.emit(
+                            f"[Night SC] reroute2 identity debug artist={artist_name} handle={reroute_handle} "
+                            f"class={identity_class} score={identity_score:.2f} debug={identity_debug}"
+                        )
+                    except Exception:
+                        pass
                 applied = self._apply_payload_guarded(df, row_idx, reroute_payload, artist_name, spotify_id=spotify_id)
             else:
                 applied = False
