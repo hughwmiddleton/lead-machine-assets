@@ -1294,6 +1294,34 @@ def _merge_raw_master(
         if not df.empty:
             non_empty_jobs_merged += 1
         df["__source_job"] = job_id
+        # Canonical source provenance: populate from explicit job metadata
+        # before any downstream merge/consolidation can mask origin.
+        source_directory = state.get("source_directory", "")
+        if not source_directory:
+            # Fallback: derive from job_id pattern like job_bandcamp_1
+            parts = job_id.split("_")
+            if len(parts) >= 2 and parts[0] == "job":
+                source_directory = parts[1]
+        if source_directory:
+            canonical_lead_source = (
+                "Triple J Unearthed" if source_directory == "unearthed" else source_directory
+            )
+            canonical_source_directory = (
+                "unearthed" if source_directory == "unearthed" else source_directory
+            )
+            canonical_legacy_source_directory = (
+                "Triple J Unearthed" if source_directory == "unearthed" else source_directory
+            )
+            for col, value in (
+                ("Lead_Source", canonical_lead_source),
+                ("Source_Directory", canonical_source_directory),
+                ("Source Directory", canonical_legacy_source_directory),
+            ):
+                if col not in df.columns:
+                    df[col] = ""
+                mask = df[col].fillna("").astype(str).str.strip() == ""
+                if mask.any():
+                    df.loc[mask, col] = value
         # Keep a copy of the per-job email fields before any merge/consolidation
         # so SmearGuard can rely on the originals if a later step smears values.
         if "Email" in df.columns:
@@ -1427,6 +1455,7 @@ def _process_job(
             "input_seed_csv": job.get("input_seed_csv", ""),
             "status": state.get("status") or "pending",
             "error_count": state.get("error_count", 0),
+            "source_directory": directory,
         }
     )
 

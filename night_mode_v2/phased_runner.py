@@ -305,6 +305,7 @@ def run_seed_phase(config_path: str, run_dir: str, resume: bool = False) -> Dict
         seed_jobs[job_id] = {
             "status": status,
             "directory": job_dir,
+            "source_directory": directory,
             "raw_csv": raw_csv,
             "row_count": int(row_count),
             "schema_hash": schema_hash or "",
