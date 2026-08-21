@@ -15720,10 +15720,25 @@ class NightModeTab(QtWidgets.QWidget):
 
 
 class NightModeJobDialog(QtWidgets.QDialog):
+    DIRECTORY_MODES = {
+        "spotify": ["", "playlist", "discover", "search"],
+        "bandcamp": ["discover", "tag", "search"],
+        "soundcloud": ["people"],
+        "unearthed": ["", "discover", "search"],
+    }
+
+    DYNAMIC_LABELS = {
+        ("soundcloud", "people"): ("People search URL:", "Paste SoundCloud /search/people URL", "https://soundcloud.com/search/people?q=indie&filter.place=berlin"),
+        ("bandcamp", "discover"): ("Discover URL:", "Paste Bandcamp Discover URL", "https://bandcamp.com/discover/manchester+rock?s=new"),
+        ("bandcamp", "tag"): ("Tag / Tag URL:", "e.g. indie-rock or https://bandcamp.com/tag/indie-rock", "indie-rock"),
+        ("bandcamp", "search"): ("Search terms / URL:", "e.g. indie rock london", "indie rock london"),
+    }
+
     def __init__(self, job: Optional[dict] = None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Night Mode Job")
         self.job = job or {}
+        self._legacy_mode = False
         self._build_ui()
         if job:
             self._load_job(job)
@@ -15735,7 +15750,12 @@ class NightModeJobDialog(QtWidgets.QDialog):
         self.directory_combo.addItems(["spotify", "bandcamp", "soundcloud", "unearthed"])
         self.mode_combo = QtWidgets.QComboBox()
         self.mode_combo.addItems(["", "playlist", "discover", "search", "people", "tracks"])
+        self.input_label = QtWidgets.QLabel("Input/Seed:")
         self.input_edit = QtWidgets.QLineEdit()
+        self.input_hint = QtWidgets.QLabel("")
+        self.input_hint.setStyleSheet("color: gray; font-size: 11px;")
+        self.input_hint.setWordWrap(True)
+
         self.target_spin = QtWidgets.QSpinBox()
         self.target_spin.setRange(0, 100000)
         self.target_spin.setValue(100)
@@ -15745,10 +15765,22 @@ class NightModeJobDialog(QtWidgets.QDialog):
         self.max_hours_spin.setValue(0.0)
         self.notes_edit = QtWidgets.QLineEdit()
 
+        # Bandcamp search controls
+        self.search_location_edit = QtWidgets.QLineEdit()
+        self.search_domain_combo = QtWidgets.QComboBox()
+        self.search_domain_combo.addItems(["artists", "tracks"])
+        self.bandcamp_search_widget = QtWidgets.QWidget()
+        bc_search_layout = QtWidgets.QFormLayout()
+        bc_search_layout.addRow("Location (optional):", self.search_location_edit)
+        bc_search_layout.addRow("Search:", self.search_domain_combo)
+        self.bandcamp_search_widget.setLayout(bc_search_layout)
+
         layout.addRow("Job ID (optional):", self.job_id_edit)
         layout.addRow("Directory:", self.directory_combo)
         layout.addRow("Mode:", self.mode_combo)
-        layout.addRow("Input/Seed:", self.input_edit)
+        layout.addRow(self.input_label, self.input_edit)
+        layout.addRow("", self.input_hint)
+        layout.addRow(self.bandcamp_search_widget)
         layout.addRow("Target leads:", self.target_spin)
         layout.addRow("Max hours (0 = no limit):", self.max_hours_spin)
         layout.addRow("Notes:", self.notes_edit)
@@ -15761,6 +15793,41 @@ class NightModeJobDialog(QtWidgets.QDialog):
         main_layout.addWidget(buttons)
         self.setLayout(main_layout)
 
+        self.directory_combo.currentTextChanged.connect(self._on_directory_changed)
+        self.mode_combo.currentTextChanged.connect(self._on_mode_changed)
+
+    def _on_directory_changed(self, directory: str):
+        modes = self.DIRECTORY_MODES.get(directory, ["", "playlist", "discover", "search", "people", "tracks"])
+        current_mode = self.mode_combo.currentText()
+        self.mode_combo.clear()
+        self.mode_combo.addItems(modes)
+        # Try to restore previous mode if it's still valid for this directory
+        idx = self.mode_combo.findText(current_mode)
+        if idx >= 0:
+            self.mode_combo.setCurrentIndex(idx)
+        else:
+            # If loading a legacy mode not in the new list, add it back temporarily
+            if current_mode and self._legacy_mode:
+                self.mode_combo.addItem(current_mode)
+                self.mode_combo.setCurrentIndex(self.mode_combo.count() - 1)
+        self._on_mode_changed(self.mode_combo.currentText())
+
+    def _on_mode_changed(self, mode: str):
+        directory = self.directory_combo.currentText().strip()
+        key = (directory, mode)
+        if key in self.DYNAMIC_LABELS:
+            label, placeholder, example = self.DYNAMIC_LABELS[key]
+            self.input_label.setText(label)
+            self.input_edit.setPlaceholderText(placeholder)
+            self.input_hint.setText(f"Example: {example}")
+        else:
+            self.input_label.setText("Input/Seed:")
+            self.input_edit.setPlaceholderText("")
+            self.input_hint.setText("")
+        # Show/hide Bandcamp search controls
+        show_bc_search = directory == "bandcamp" and mode == "search"
+        self.bandcamp_search_widget.setVisible(show_bc_search)
+
     def _load_job(self, job: dict):
         self.job_id_edit.setText(job.get("job_id", ""))
         directory = job.get("directory", "")
@@ -15768,9 +15835,19 @@ class NightModeJobDialog(QtWidgets.QDialog):
         if idx >= 0:
             self.directory_combo.setCurrentIndex(idx)
         mode = job.get("mode", "")
+        modes = self.DIRECTORY_MODES.get(directory, ["", "playlist", "discover", "search", "people", "tracks"])
+        self.mode_combo.clear()
+        self.mode_combo.addItems(modes)
         idx = self.mode_combo.findText(mode)
         if idx >= 0:
             self.mode_combo.setCurrentIndex(idx)
+            self._legacy_mode = False
+        else:
+            # Legacy mode not in current list: add temporarily for graceful load
+            if mode:
+                self.mode_combo.addItem(mode)
+                self.mode_combo.setCurrentIndex(self.mode_combo.count() - 1)
+                self._legacy_mode = True
         self.input_edit.setText(job.get("input_seed_csv", ""))
         try:
             self.target_spin.setValue(int(job.get("target_valid_leads", 100)))
@@ -15781,6 +15858,73 @@ class NightModeJobDialog(QtWidgets.QDialog):
         except Exception:
             pass
         self.notes_edit.setText(job.get("notes", ""))
+        self.search_location_edit.setText(job.get("search_location", ""))
+        domain = job.get("search_domain", "artists")
+        idx = self.search_domain_combo.findText(domain)
+        if idx >= 0:
+            self.search_domain_combo.setCurrentIndex(idx)
+        self._on_mode_changed(self.mode_combo.currentText())
+
+    def accept(self):
+        directory = self.directory_combo.currentText().strip()
+        mode = self.mode_combo.currentText().strip()
+        value = self.input_edit.text().strip()
+
+        if directory == "soundcloud" and mode == "people":
+            if not _sc_is_people_search_url(value):
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Invalid Input",
+                    "SoundCloud People mode requires a SoundCloud /search/people URL.\n\n"
+                    "Example: https://soundcloud.com/search/people?q=indie&filter.place=berlin",
+                )
+                return
+
+        if directory == "bandcamp" and mode == "discover":
+            if not _bandcamp_is_discover_url(value):
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Invalid Input",
+                    "Bandcamp Discover mode requires a Bandcamp /discover/... URL.\n\n"
+                    "Example: https://bandcamp.com/discover/manchester+rock?s=new",
+                )
+                return
+
+        if directory == "bandcamp" and mode == "tag":
+            if not value:
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Invalid Input",
+                    "Bandcamp Tag mode requires a tag slug or a Bandcamp tag URL.",
+                )
+                return
+            if value.lower().startswith(("http://", "https://")):
+                if not (_bc_is_bandcamp_url(value) and (_bc_url_kind(value) == "tag" or _bandcamp_extract_tag_from_url(value))):
+                    QtWidgets.QMessageBox.warning(
+                        self,
+                        "Invalid Input",
+                        "Bandcamp Tag mode requires a tag slug or a Bandcamp tag URL.",
+                    )
+                    return
+
+        if directory == "bandcamp" and mode == "search":
+            if not value:
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Invalid Input",
+                    "Bandcamp Search mode requires search terms or a Bandcamp search URL.",
+                )
+                return
+            if value.lower().startswith(("http://", "https://")):
+                if not _bc_is_bandcamp_url(value):
+                    QtWidgets.QMessageBox.warning(
+                        self,
+                        "Invalid Input",
+                        "Bandcamp Search mode requires search terms or a Bandcamp search URL.",
+                    )
+                    return
+
+        super().accept()
 
     def get_job(self) -> dict:
         job = dict(self.job)
@@ -15796,6 +15940,16 @@ class NightModeJobDialog(QtWidgets.QDialog):
         notes = self.notes_edit.text().strip()
         if notes:
             job["notes"] = notes
+        # Preserve Bandcamp search fields when visible, and keep legacy values otherwise
+        if job.get("directory") == "bandcamp" and job.get("mode") == "search":
+            job["search_location"] = self.search_location_edit.text().strip()
+            job["search_domain"] = self.search_domain_combo.currentText().strip()
+        else:
+            # Preserve existing values from self.job so switching modes doesn't drop them
+            if "search_location" in self.job:
+                job["search_location"] = self.job["search_location"]
+            if "search_domain" in self.job:
+                job["search_domain"] = self.job["search_domain"]
         return job
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
