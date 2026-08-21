@@ -52,6 +52,7 @@ from webdriver_manager.chrome import ChromeDriverManager
 from urllib.parse import urlparse, parse_qs, unquote
 from unidecode import unidecode
 from email_normalizer import (
+    filter_platform_support_emails,
     filter_system_telemetry_emails,
     is_obvious_placeholder_email,
     normalize_email_value,
@@ -4212,7 +4213,7 @@ def _filter_instagram_email_candidates_for_acceptance(
     log: Optional[Any] = None,
 ) -> List[str]:
     filtered: List[str] = []
-    for email in filter_system_telemetry_emails(emails):
+    for email in filter_platform_support_emails(filter_system_telemetry_emails(emails)):
         reason = _instagram_email_candidate_rejection_reason(email)
         if reason:
             if callable(log):
@@ -10454,6 +10455,7 @@ def _extract_emails_from_html_text(html: str) -> Set[str]:
         if len(local) < 2 or len(domain) < 4 or "." not in domain:
             continue
         emails.add(candidate)
+    emails = set(filter_platform_support_emails(list(emails)))
     return emails
 
 
@@ -10622,6 +10624,7 @@ def _extract_emails_from_html_text(html: str) -> Set[str]:
             cleaned = cleaned.replace("..", ".")
         if cleaned:
             emails.add(cleaned)
+    emails = set(filter_platform_support_emails(list(emails)))
     return emails
 
 
@@ -16209,7 +16212,7 @@ class CrossDirectoryEnricherWorker(QThread):
                     f"[Web] shallow sweep fetched={shallow_fetches} emails_found={shallow_emails_found}"
                 )
 
-            normalized_emails = filter_system_telemetry_emails(_normalize_emails(";".join(emails_found)))
+            normalized_emails = filter_platform_support_emails(filter_system_telemetry_emails(_normalize_emails(";".join(emails_found))))
             cache_entry = {
                 "status": "hit" if normalized_emails else "miss",
                 "emails": list(normalized_emails),
@@ -18744,7 +18747,8 @@ class CrossDirectoryEnricherWorker(QThread):
                 new_socials |= _scrape_link_hub_socials(self.session, hub)
         socials_all = existing_socials | new_socials
         sites_all = existing_sites | new_sites
-        emails_all = set(filter_system_telemetry_emails([*existing_emails, *new_emails]))
+        emails_all = set(filter_platform_support_emails(filter_system_telemetry_emails([*existing_emails, *new_emails])))
+        new_emails = set(filter_platform_support_emails(filter_system_telemetry_emails(list(new_emails))))
         if socials_all:
             ordered_socials = sorted(socials_all, key=_social_sort_key)
             ordered_socials = _prioritise_facebook_first(ordered_socials)
@@ -18761,6 +18765,8 @@ class CrossDirectoryEnricherWorker(QThread):
             df.at[row_idx, "External Links"] = ""
         if emails_all:
             df.at[row_idx, "Email"] = MULTI_VALUE_SEPARATOR.join(sorted(emails_all))
+        # Only attach provenance for emails that actually originated from this payload.
+        if new_emails:
             provenance_url = payload.source_url or ""
             provenance_type = payload.source_dir or (payload.source_detail or "cross_directory_enricher")
             merge_email_provenance_into_target(

@@ -8,7 +8,7 @@ from urllib.parse import urljoin, urlparse
 
 import requests
 from html_fetcher import fetch_html
-from email_normalizer import normalize_obfuscated_email_patterns
+from email_normalizer import filter_platform_support_emails, normalize_obfuscated_email_patterns
 from pipeline_runner import normalize_emails, increment_pattern_emails
 from bs4 import BeautifulSoup
 
@@ -217,7 +217,13 @@ def _extract_emails_from_html(html: str, logger: LoggerFn = None) -> List[str]:
         if normalized not in seen:
             seen.add(normalized)
             deduped.append(normalized)
-    return normalize_emails(";".join(deduped))
+    extracted = normalize_emails(";".join(deduped))
+    filtered = filter_platform_support_emails(extracted)
+    if logger and len(filtered) < len(extracted):
+        rejected = [e for e in extracted if e not in filtered]
+        for email in rejected:
+            logger(f"[WebsiteEmail] email_rejected reason=platform_support_domain value={email}")
+    return filtered
 
 
 def _follow_contact_links_and_extract(

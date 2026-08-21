@@ -155,8 +155,11 @@ def test_final_export_prefers_ranked_primary_over_weaker_existing_email() -> Non
     df = pd.DataFrame(
         [
             _build_export_row(
-                Email="support@bandcamp.com",
-                Email_All="support@bandcamp.com;booking@artist.com;press@artistlabel.com",
+                Email="noreply@artistlabel.com",
+                Email_All="noreply@artistlabel.com;booking@artist.com;press@artistlabel.com",
+                Email_Source_URL="",
+                Email_Source_Type="",
+                Email_Extract_Method="",
             )
         ]
     )
@@ -166,7 +169,7 @@ def test_final_export_prefers_ranked_primary_over_weaker_existing_email() -> Non
     assert export_df.iloc[0]["Primary Email"] == "booking@artist.com"
     assert (
         export_df.iloc[0]["All Emails"]
-        == "booking@artist.com;press@artistlabel.com;support@bandcamp.com"
+        == "booking@artist.com;press@artistlabel.com;noreply@artistlabel.com"
     )
 
 

@@ -84,12 +84,12 @@ def test_set_email_all_prefers_outreach_addresses_in_order():
     merged = pipeline_runner._set_email_all(
         df,
         0,
-        ["support@bandcamp.com", "booking@artist.com", "press@artistlabel.com"],
+        ["general@artist.com", "booking@artist.com", "press@artistlabel.com"],
         source="test_rank",
     )
 
-    assert merged == "booking@artist.com;press@artistlabel.com;support@bandcamp.com"
-    assert df.at[0, "Email_All"] == "booking@artist.com;press@artistlabel.com;support@bandcamp.com"
+    assert merged == "booking@artist.com;press@artistlabel.com;general@artist.com"
+    assert df.at[0, "Email_All"] == "booking@artist.com;press@artistlabel.com;general@artist.com"
 
 
 def test_consolidate_email_all_prefers_direct_fb_email_over_external_contact_site():
