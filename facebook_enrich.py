@@ -14,6 +14,8 @@ from typing import Dict, List, Optional, Tuple
 
 from bs4 import BeautifulSoup, NavigableString, Tag
 
+from source_scheduler import _FB_BLOCKED_PUBLIC_PATH_SEGMENTS
+
 # Blocks of common FB UI/notification text that should be ignored entirely.
 NOISY_FB_TOKENS = [
     "Unread",
@@ -1322,6 +1324,11 @@ def is_junk_facebook_candidate(candidate: FbCandidate) -> bool:
     if "/login/" in url or "/checkpoint/" in url:
         return True
 
+    # Canonical blocked-route guard for private/non-public surfaces.
+    path_segments = [seg for seg in path.strip("/").split("/") if seg]
+    if path_segments and path_segments[0].lower() in _FB_BLOCKED_PUBLIC_PATH_SEGMENTS:
+        return True
+
     if name in {"video", "videos"}:
         return True
     if "browse in video" in cat:
@@ -1531,19 +1538,7 @@ def _fb_is_candidate_url_allowed(url: str) -> bool:
     if not segments:
         return False
 
-    reserved = {
-        "groups",
-        "watch",
-        "reel",
-        "events",
-        "notifications",
-        "afad",
-        "photo.php",
-        "story.php",
-        "permalink.php",
-        "sharer.php",
-    }
-    if segments[0].lower() in reserved:
+    if segments[0].lower() in _FB_BLOCKED_PUBLIC_PATH_SEGMENTS:
         return False
 
     if any(tok in lowered_query for tok in ("ref=notif", "notif_id", "notif_t")):
