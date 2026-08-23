@@ -9124,9 +9124,9 @@ class FacebookSearchClient:
                     or (artist_norm and artist_norm.split() and artist_norm.split()[0] in (url_lc or ""))
                 )
             ):
-                fallback_candidates.append((max(final_score, 1.0), name_score, cat_boost, True, False, cand))
+                fallback_candidates.append((final_score, name_score, cat_boost, True, False, cand))
             else:
-                generic_candidates.append((max(final_score, 1.0), name_score, cat_boost, True, False, cand))
+                generic_candidates.append((final_score, name_score, cat_boost, True, False, cand))
 
         def _bucket_selection_key(item: Tuple[float, float, float, bool, bool, FbCandidate]) -> Tuple[float, int]:
             score, _, _, _, _, cand = item
