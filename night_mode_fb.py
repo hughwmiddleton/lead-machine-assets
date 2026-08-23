@@ -6038,6 +6038,13 @@ def _run_bounded_fb_accepted_page_sweep(
     ):
         return result
 
+    # Ticket 7: verify secondary surface did not redirect to a different entity
+    if secondary_surface.resolved_url and not _fb_secondary_landed_on_target(
+        secondary_url, secondary_surface.resolved_url
+    ):
+        result.secondary_status_reason = "redirect_mismatch"
+        return result
+
     # --- StallTrace: secondary email extraction ---
     _st_extract_sec_t = time.perf_counter() if _st_fn else 0.0
     if _st_fn:
@@ -6829,6 +6836,48 @@ def _fetch_fb_about_variants(base_url: str) -> List[str]:
         f"{normalized}/about",
     ]
     return variants
+
+
+def _fb_secondary_landed_on_target(requested_url: str, resolved_url: str) -> bool:
+    """
+    Validate that a secondary/about fetch landed on the same Facebook entity
+    as the requested artist page. Prevents cross-page redirect contamination
+    (e.g. Facebook redirecting profile.php?id=... to the logged-in user's profile).
+    """
+    req_norm = _normalise_fb_url(requested_url)
+    res_norm = _normalise_fb_url(resolved_url)
+
+    if req_norm and res_norm and req_norm == res_norm:
+        return True
+
+    try:
+        req_parsed = urllib.parse.urlparse(req_norm or "")
+        res_parsed = urllib.parse.urlparse(res_norm or "")
+    except Exception:
+        return False
+
+    # For profile.php URLs: require exact ID match (conservative).
+    # If Facebook redirects to a named profile, another ID, a post, feed,
+    # logged-in user, or any unverifiable entity, reject.
+    if req_parsed.path.lower() == "/profile.php":
+        req_qs = urllib.parse.parse_qs(req_parsed.query, keep_blank_values=False)
+        req_id = (req_qs.get("id") or [None])[0]
+        if req_id:
+            if res_parsed.path.lower() == "/profile.php":
+                res_qs = urllib.parse.parse_qs(res_parsed.query, keep_blank_values=False)
+                res_id = (res_qs.get("id") or [None])[0]
+                if res_id == req_id:
+                    return True
+            return False
+
+    # For named URLs: base slug must match.
+    # Allows harmless case normalization and query/path additions.
+    req_slug = req_parsed.path.strip("/").split("/")[0] if req_parsed.path else ""
+    res_slug = res_parsed.path.strip("/").split("/")[0] if res_parsed.path else ""
+    if req_slug and res_slug and req_slug.lower() == res_slug.lower():
+        return True
+
+    return False
 
 
 def _pick_fb_contact_link(soup: BeautifulSoup, base_url: str) -> Optional[str]:
