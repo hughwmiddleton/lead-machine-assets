@@ -3841,3 +3841,34 @@ def test_berca_regression_redirect_mismatch_no_email() -> None:
     assert result.secondary_status_reason == "redirect_mismatch"
     assert result.secondary_emails == []
     assert result.combined_emails == []
+
+
+def test_secondary_named_slug_redirect_allowed_in_sweep() -> None:
+    """A secondary fetch that redirects to a different path on the same named page
+    must still extract emails (not be treated as a redirect mismatch)."""
+
+    def _fake_fetch_surface(url: str):
+        if "directory_contact_info" in url:
+            return night_mode_fb.FacebookAcceptedPageFetchResult(
+                requested_url=url,
+                resolved_url="https://www.facebook.com/canonicalartist/about_contact_and_basic_info",
+                html="<html><body>artist@test.com</body></html>",
+                rendered_text="artist@test.com",
+                anchor_values=[],
+            )
+        return night_mode_fb.FacebookAcceptedPageFetchResult(
+            requested_url=url,
+            resolved_url=url,
+            html="<html><body></body></html>",
+            rendered_text="",
+            anchor_values=[],
+        )
+
+    result = night_mode_fb._run_bounded_fb_accepted_page_sweep(
+        "https://www.facebook.com/canonicalartist",
+        _fake_fetch_surface,
+        fallback_secondary_urls=night_mode_fb._fetch_fb_about_variants,
+        continue_after_main_email=True,
+    )
+    assert result.secondary_status_reason != "redirect_mismatch"
+    assert "artist@test.com" in result.combined_emails
