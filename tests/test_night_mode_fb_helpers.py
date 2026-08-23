@@ -3763,3 +3763,81 @@ def test_return_contract_unchanged() -> None:
     assert len(result) == 2
     assert isinstance(result[0], list)
     assert isinstance(result[1], bool)
+
+
+# ---------------------------------------------------------------------------
+# Ticket 7: Facebook secondary-surface landed-URL identity guard
+# ---------------------------------------------------------------------------
+
+
+def test_secondary_redirect_to_different_profile_rejected() -> None:
+    """A profile.php?id=... secondary that lands on a different user must be rejected."""
+    assert not night_mode_fb._fb_secondary_landed_on_target(
+        "https://www.facebook.com/profile.php?id=123&sk=about_contact_and_basic_info",
+        "https://www.facebook.com/hugh.middleton1/?sk=directory_contact_info",
+    )
+
+
+def test_secondary_same_named_slug_allowed() -> None:
+    """Case-normalisation and path additions on the same named page are allowed."""
+    assert night_mode_fb._fb_secondary_landed_on_target(
+        "https://www.facebook.com/flawedtheorem/directory_contact_info",
+        "https://www.facebook.com/FlawedTheorem/directory_contact_info",
+    )
+    assert night_mode_fb._fb_secondary_landed_on_target(
+        "https://www.facebook.com/flawedtheorem/about",
+        "https://www.facebook.com/flawedtheorem/about_contact_and_basic_info",
+    )
+
+
+def test_secondary_exact_profile_id_match_allowed() -> None:
+    """Exact profile.php?id=... match after navigation is allowed."""
+    assert night_mode_fb._fb_secondary_landed_on_target(
+        "https://www.facebook.com/profile.php?id=123&sk=about_contact_and_basic_info",
+        "https://www.facebook.com/profile.php?id=123",
+    )
+
+
+def test_secondary_profile_redirect_to_unverifiable_named_rejected() -> None:
+    """profile.php?id=... redirected to a named URL is rejected conservatively."""
+    assert not night_mode_fb._fb_secondary_landed_on_target(
+        "https://www.facebook.com/profile.php?id=123&sk=about",
+        "https://www.facebook.com/someusername",
+    )
+
+
+def test_berca_regression_redirect_mismatch_no_email() -> None:
+    """
+    Reproduce the exact BERCA contamination from the 2026-08-23 audit:
+    profile.php?id=61577580980538&sk=about_contact_and_basic_info
+    → hugh.middleton1/?sk=directory_contact_info
+    Must yield redirect_mismatch with zero extracted emails.
+    """
+
+    def _fake_fetch_surface(url: str):
+        if "about_contact_and_basic_info" in url:
+            return night_mode_fb.FacebookAcceptedPageFetchResult(
+                requested_url=url,
+                resolved_url="https://www.facebook.com/hugh.middleton1/?sk=directory_contact_info",
+                html="<html><body>hugh@outwiththein.com</body></html>",
+                rendered_text="hugh@outwiththein.com",
+                anchor_values=[],
+            )
+        # main page
+        return night_mode_fb.FacebookAcceptedPageFetchResult(
+            requested_url=url,
+            resolved_url=url,
+            html="<html><body></body></html>",
+            rendered_text="",
+            anchor_values=[],
+        )
+
+    result = night_mode_fb._run_bounded_fb_accepted_page_sweep(
+        "https://www.facebook.com/profile.php?id=61577580980538",
+        _fake_fetch_surface,
+        fallback_secondary_urls=night_mode_fb._fetch_fb_about_variants,
+        continue_after_main_email=True,
+    )
+    assert result.secondary_status_reason == "redirect_mismatch"
+    assert result.secondary_emails == []
+    assert result.combined_emails == []
