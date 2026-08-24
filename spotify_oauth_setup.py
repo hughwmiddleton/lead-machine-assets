@@ -16,8 +16,6 @@ SCOPES = [
     "playlist-read-collaborative",
 ]
 
-DEFAULT_CLIENT_ID = "d32944f1a2414cd7a1681b4759f6a402"
-DEFAULT_CLIENT_SECRET = "27188b55b8d94604a9a2172092e19416"
 DEFAULT_REDIRECT_URI = "http://127.0.0.1:8080/callback"
 
 
@@ -27,8 +25,8 @@ def prompt_for_redirect_url() -> str:
 
 
 def main() -> None:
-    client_id = (os.getenv("SPOTIFY_CLIENT_ID") or DEFAULT_CLIENT_ID).strip()
-    client_secret = (os.getenv("SPOTIFY_CLIENT_SECRET") or DEFAULT_CLIENT_SECRET).strip()
+    client_id = (os.getenv("SPOTIFY_CLIENT_ID") or "").strip()
+    client_secret = (os.getenv("SPOTIFY_CLIENT_SECRET") or "").strip()
     redirect_uri = (os.getenv("SPOTIFY_REDIRECT_URI") or DEFAULT_REDIRECT_URI).strip()
 
     if not client_id or not client_secret or not redirect_uri:
@@ -100,6 +98,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-DEFAULT_CLIENT_ID = "d32944f1a2414cd7a1681b4759f6a402"
-DEFAULT_CLIENT_SECRET = "27188b55b8d94604a9a2172092e19416"
-DEFAULT_REDIRECT_URI = "http://localhost:8080/callback"

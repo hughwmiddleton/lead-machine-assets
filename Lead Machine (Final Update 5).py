@@ -1034,7 +1034,9 @@ _SC_RUN_STATS = None
 _SC_ABOUT_DISABLED = False
 _SC_ABOUT_DISABLE_LOGGED = False
 _SC_ENGINE = SoundCloudEngine()
-SC_CLIENT_ID_CANDIDATES = ["MaZ7bR62GvbulJgV8EUjQnHfbZGDEKaI"]
+SC_CLIENT_ID_CANDIDATES = [
+    c for c in [(os.environ.get("SC_CLIENT_ID") or "").strip()] if c
+]
 SOCIAL_HOSTS = (
     "linktr.ee", "beacons.ai", "bandcamp.com", "carrd.co", "flow.page",
     "instagram.com", "facebook.com", "x.com", "twitter.com", "youtube.com", "tiktok.com",

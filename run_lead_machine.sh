@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
 PROJECT_DIR="/Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets"
 VENV_DIR="/Users/hughmiddleton/Lead Machine/Lead Machine Code/venv"
@@ -7,32 +7,32 @@ VENV_DIR="/Users/hughmiddleton/Lead Machine/Lead Machine Code/venv"
 cd "$PROJECT_DIR"
 
 if [ -d "$VENV_DIR" ]; then
-    # Activate the shared virtual environment if it exists.
     source "$VENV_DIR/bin/activate"
 else
     echo "Warning: virtual environment not found at $VENV_DIR" >&2
 fi
 
-# Provide Last.fm API key for this session so the scraper can run from VS Code.
-export LASTFM_API_KEY="7bc79636d72e2cb2fc4217aa7681199d"
+# Load local secrets if present
+if [ -f ".env.local" ]; then
+    source ".env.local"
+else
+    echo "Warning: .env.local not found. Expected at $(pwd)/.env.local" >&2
+    echo "Some features (Last.fm, Spotify, SoundCloud) may be unavailable." >&2
+fi
 
-# Spotify API credentials for playlist + About-page scraping.
-export SPOTIFY_CLIENT_ID="d32944f1a2414cd7a1681b4759f6a402"
-export SPOTIFY_CLIENT_SECRET="27188b55b8d94604a9a2172092e19416"
-export SPOTIFY_REDIRECT_URI="http://127.0.0.1:8080/callback"
-export SPOTIFY_REFRESH_TOKEN="AQB1vtP347IrhWrFAScJ_TwBSK0ZTiEdAbhxrmGf82vqmZIANMZdpLqnkpUDsEjGK9HZGGVfkfB9D915m28IK5CCAFFTMBwLd63n0UVmoYSSkjs_F8qXHJeDG-I0UgwrtAU"
-# =====================================================
-#!/bin/bash
-set -euo pipefail
+# Export required credential variables (fail clearly if genuinely required and missing)
+export LASTFM_API_KEY="${LASTFM_API_KEY:-}"
+export SPOTIFY_CLIENT_ID="${SPOTIFY_CLIENT_ID:-}"
+export SPOTIFY_CLIENT_SECRET="${SPOTIFY_CLIENT_SECRET:-}"
+export SPOTIFY_REDIRECT_URI="${SPOTIFY_REDIRECT_URI:-http://127.0.0.1:8080/callback}"
+export SPOTIFY_REFRESH_TOKEN="${SPOTIFY_REFRESH_TOKEN:-}"
+export SC_CLIENT_ID="${SC_CLIENT_ID:-}"
 
 # =====================================================
 # GENERAL
 # =====================================================
 unset SC_DEBUG_LATEST
 export PYTHONFAULTHANDLER=1
-
-# Optional: load secrets/tokens (DO NOT COMMIT .env.local)
-# [ -f ".env.local" ] && source ".env.local"
 
 # Enrichment execution mode:
 # - row_linear: per-row across sources
@@ -65,7 +65,7 @@ export FB_DEBUG_RANK_SORT=1
 export FB_CANDIDATE_RANKING=1
 export FB_CANDIDATE_RANKING_PREVIEW_N=10
 
-# Refine pass ON (fix: "unset VAR=1" is invalid bash)
+# Refine pass ON
 export FB_REFINE_QUERY=1
 
 # Leave deep internals OFF
@@ -103,9 +103,6 @@ export NIGHTMODE_SC_ENGINE=1
 export SC_ADAPTIVE_ABOUT_DISABLE=0
 export SC_DEBUG_FALLBACK_GATE=1
 export SC_ALLOW_FALLBACK_ON_TRACKS_401_403=1
-
-# Working client_id from Chrome devtools
-export SC_CLIENT_ID="1lzwHiVxAHeYKAMqN0IIGD3ZARgJy2kl"
 
 # =====================================================
 # BANDCAMP (minimal debug)
