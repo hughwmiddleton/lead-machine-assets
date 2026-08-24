@@ -9900,7 +9900,7 @@ class NightModeFacebookEnricher:
         explicit_visible_contact_surfaces: List[Tuple[FacebookAcceptedPageFetchResult, str]] = []
         if explicit_pass_a:
             self._last_pass_a_visible_contact_surfaces = []
-            if sweep_result.secondary_surface:
+            if sweep_result.secondary_surface and sweep_result.secondary_status_reason != "redirect_mismatch":
                 explicit_visible_contact_surfaces.append(
                     (
                         sweep_result.secondary_surface,
@@ -9967,6 +9967,9 @@ class NightModeFacebookEnricher:
             if sweep_result.secondary_status_reason == "login_wall" or _is_fb_login_or_security_url(final_about):
                 about_result = "blocked_login"
                 self.fb_rows_skipped["challenge"] += 1
+            elif sweep_result.secondary_status_reason == "redirect_mismatch":
+                about_result = "redirect_mismatch"
+                self.fb_rows_skipped["challenge"] += 1
             else:
                 lower_html = (about_html or "").lower()
                 if any(tok in lower_html for tok in ("checkpoint", "consent", "cookie", "privacy")):
@@ -10016,7 +10019,7 @@ class NightModeFacebookEnricher:
 
         if explicit_pass_a and not usable_combined_emails_before_visible_rescue:
             visible_contact_surfaces: List[Tuple[FacebookAcceptedPageFetchResult, str]] = []
-            if sweep_result.secondary_surface:
+            if sweep_result.secondary_surface and sweep_result.secondary_status_reason != "redirect_mismatch":
                 visible_contact_surfaces.append(
                     (
                         sweep_result.secondary_surface,
