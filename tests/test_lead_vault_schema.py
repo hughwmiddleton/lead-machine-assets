@@ -48,6 +48,7 @@ EXPECTED_CANONICAL_MASTER_SCHEMA = [
     "Played_On_Unearthed",
     "Unearthed_Status",
     "Industry_Signals",
+    "Lead_Source",
     "Source_Directory",
     "Discovery_Source",
     "Source_URL",
