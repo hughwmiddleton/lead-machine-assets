@@ -40,6 +40,11 @@ from source_scheduler import (
     soundcloud_handle_from_profile_url as _shared_soundcloud_handle_from_profile_url,
 )
 from musicbrainz_relationship_bridge import (
+    KNOWN_PROFILE_ACCEPTED,
+    KNOWN_PROFILE_CHALLENGE_UNAVAILABLE,
+    KNOWN_PROFILE_ERROR,
+    KNOWN_PROFILE_IDENTITY_REJECTED,
+    KnownProfileFetchResult,
     build_relationship_bridge_plan,
     musicbrainz_relationship_bridge_enabled,
 )
@@ -9890,6 +9895,23 @@ def _canonicalise_musicbrainz_bandcamp_url(value: str) -> str:
     return f"https://{host}/" if host.endswith(".bandcamp.com") else ""
 
 
+def _bandcamp_challenge_reason(html: str) -> str:
+    """Classify only deterministic Bandcamp challenge surfaces as unavailable."""
+    if not html:
+        return ""
+    if _detect_soft_block(html):
+        return "recognized_soft_block"
+    try:
+        soup = BeautifulSoup(html, "html.parser")
+        title = soup.find("title")
+        title_text = _clean_cell(title.get_text(" ", strip=True)) if title else ""
+    except Exception:
+        title_text = ""
+    if normalize_name(title_text) == "client challenge":
+        return "client_challenge_title"
+    return ""
+
+
 def _split_pipe_cell(value, is_email: bool = False) -> Set[str]:
     if value is None:
         return set()
@@ -15478,16 +15500,26 @@ class CrossDirectoryEnricherWorker(QThread):
         profile_url: str,
         artist_name: str,
         ctx: Dict[str, Any],
-    ) -> Optional[EnrichmentPayload]:
+    ) -> KnownProfileFetchResult:
         """Fetch a known URL through the existing platform parser with identity validation."""
         if not self._increment_live_counter():
-            return None
-        return self._fetch_profile_and_build(
+            return KnownProfileFetchResult(
+                KNOWN_PROFILE_ERROR,
+                reason="live_search_budget_exhausted",
+            )
+        payload = self._fetch_profile_and_build(
             profile_url,
             platform,
             identity_artist_name=artist_name,
             identity_song_title=_clean_cell(ctx.get("song_title", "")),
         )
+        status = getattr(self, "_last_known_profile_status", "")
+        reason = getattr(self, "_last_known_profile_reason", "")
+        if payload and status != KNOWN_PROFILE_ACCEPTED:
+            status = KNOWN_PROFILE_ACCEPTED
+        if not status:
+            status = KNOWN_PROFILE_ERROR
+        return KnownProfileFetchResult(status, payload=payload, reason=reason)
 
     def _enrich_row_musicbrainz_relationships(self, seed_df, row_idx, ctx) -> bool:
         if not musicbrainz_relationship_bridge_enabled():
@@ -15521,14 +15553,19 @@ class CrossDirectoryEnricherWorker(QThread):
                 continue
             accepted = []
             for candidate_url in candidates:
-                payload = self._fetch_musicbrainz_known_profile(
+                result = self._fetch_musicbrainz_known_profile(
                     platform,
                     candidate_url,
                     ctx["artist"],
                     ctx,
                 )
-                if payload:
-                    accepted.append(payload)
+                if result.status == KNOWN_PROFILE_ACCEPTED and result.payload:
+                    accepted.append(result.payload)
+                elif result.status == KNOWN_PROFILE_CHALLENGE_UNAVAILABLE:
+                    self.log_message.emit(
+                        f"[MusicBrainz Bridge] {platform} candidate unavailable "
+                        f"artist={ctx['artist']!r} reason={result.reason or 'challenge'}"
+                    )
             if len(accepted) != 1:
                 if len(accepted) > 1:
                     self.log_message.emit(
@@ -21574,6 +21611,12 @@ class CrossDirectoryEnricherWorker(QThread):
         identity_artist_name: str = "",
         identity_song_title: str = "",
     ) -> Optional[EnrichmentPayload]:
+        known_profile_attempt = bool(
+            identity_artist_name and source_dir in {"bandcamp", "soundcloud"}
+        )
+        if known_profile_attempt:
+            self._last_known_profile_status = KNOWN_PROFILE_ERROR
+            self._last_known_profile_reason = "profile_fetch_failed"
         self.log_message.emit(f"[Enricher] Fetching {source_dir} profile: {profile_url}")
         self._last_resolved_profile_url = profile_url
         attempts = LF_SEARCH_RETRY_MAX if source_dir == "lastfm" else 2
@@ -21585,6 +21628,16 @@ class CrossDirectoryEnricherWorker(QThread):
         identity_candidate_name = ""
         identity_match_score = 0.0
         if identity_artist_name and source_dir == "bandcamp":
+            challenge_reason = _bandcamp_challenge_reason(html)
+            if challenge_reason:
+                self._last_fetch_ok = False
+                self._last_known_profile_status = KNOWN_PROFILE_CHALLENGE_UNAVAILABLE
+                self._last_known_profile_reason = challenge_reason
+                self.log_message.emit(
+                    f"[MusicBrainz Bridge] Bandcamp candidate unavailable url={profile_url} "
+                    f"reason={challenge_reason}"
+                )
+                return None
             identity_candidate_name = _bc_slug_extract_page_artist_text(html)
             identity_match_score = _bandcamp_confidence(
                 identity_artist_name,
@@ -21599,6 +21652,8 @@ class CrossDirectoryEnricherWorker(QThread):
                     identity_candidate_name,
                 )
             ):
+                self._last_known_profile_status = KNOWN_PROFILE_IDENTITY_REJECTED
+                self._last_known_profile_reason = "artist_identity_contradiction"
                 self.log_message.emit(
                     f"[MusicBrainz Bridge] rejected Bandcamp identity url={profile_url}"
                 )
@@ -21624,6 +21679,8 @@ class CrossDirectoryEnricherWorker(QThread):
                 song_title=identity_song_title,
             )
             if identity_match_score < MIN_SC_CONFIDENCE:
+                self._last_known_profile_status = KNOWN_PROFILE_IDENTITY_REJECTED
+                self._last_known_profile_reason = "artist_identity_contradiction"
                 self.log_message.emit(
                     f"[MusicBrainz Bridge] rejected SoundCloud identity url={profile_url}"
                 )
@@ -21770,6 +21827,9 @@ class CrossDirectoryEnricherWorker(QThread):
                         f"[Enricher] Bandcamp: safe match but no actionable fields; returning url-only payload url={canonical_url}"
                         f"{_format_outcome_suffix(fetch_ok=fetch_ok_flag, actionable=False, http_status=http_status)}"
                     )
+                    if known_profile_attempt:
+                        self._last_known_profile_status = KNOWN_PROFILE_ACCEPTED
+                        self._last_known_profile_reason = ""
                     return payload
                 return None
         payload = EnrichmentPayload(
@@ -21784,6 +21844,9 @@ class CrossDirectoryEnricherWorker(QThread):
             match_score=identity_match_score,
             candidate_name=identity_candidate_name,
         )
+        if known_profile_attempt:
+            self._last_known_profile_status = KNOWN_PROFILE_ACCEPTED
+            self._last_known_profile_reason = ""
         return payload
 
     def _soundcloud_people_search_candidates(self, artist_query: str) -> List[Dict[str, Any]]:

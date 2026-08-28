@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 
 import cross_directory_enricher as cde
+import musicbrainz_relationship_bridge as mbrb
 from musicbrainz_relationship_bridge import build_relationship_bridge_plan
 
 
@@ -46,8 +47,10 @@ def _row(artist="Artist A", **overrides):
         "Social Link": "",
         "External Links": "",
         "Email": "",
+        "Email_Provenance_JSON": "",
         "final_status": "valid",
         "contact_safety": "safe",
+        "Match_Score": "0.40",
         "match_score_overall": "0.40",
         "directory_conflict_flag": "",
         "name_consistency_flag": "",
@@ -149,6 +152,120 @@ def _ctx(worker, dataframe):
     return worker._build_row_context(dataframe, 0, 1, 1)
 
 
+def _accepted(payload):
+    return mbrb.KnownProfileFetchResult(mbrb.KNOWN_PROFILE_ACCEPTED, payload=payload)
+
+
+@pytest.mark.parametrize(
+    ("html", "expected"),
+    [
+        ("<html><head><title>Client Challenge</title></head></html>", "client_challenge_title"),
+        ("<html><body>Verify you are human</body></html>", "recognized_soft_block"),
+    ],
+)
+def test_bandcamp_http_200_challenge_surfaces_are_recognized(html, expected):
+    assert cde._bandcamp_challenge_reason(html) == expected
+
+
+def test_normal_bandcamp_artist_page_is_not_challenge():
+    html = '<html><head><title>Artist A</title><meta property="og:title" content="Artist A"></head></html>'
+    assert cde._bandcamp_challenge_reason(html) == ""
+
+
+def test_known_bandcamp_result_distinguishes_challenge_identity_rejection_and_error(tmp_path, monkeypatch):
+    worker = _worker(tmp_path)
+    ctx = {"song_title": ""}
+
+    monkeypatch.setattr(
+        worker,
+        "_fetch_url",
+        lambda *args, **kwargs: "<html><head><title>Client Challenge</title></head></html>",
+    )
+    challenged = worker._fetch_musicbrainz_known_profile(
+        "bandcamp", "https://artist-a.bandcamp.com/", "Artist A", ctx
+    )
+    assert challenged.status == mbrb.KNOWN_PROFILE_CHALLENGE_UNAVAILABLE
+    assert challenged.reason == "client_challenge_title"
+    assert challenged.payload is None
+
+    monkeypatch.setattr(
+        worker,
+        "_fetch_url",
+        lambda *args, **kwargs: '<html><head><meta property="og:title" content="Other Artist"></head></html>',
+    )
+    rejected = worker._fetch_musicbrainz_known_profile(
+        "bandcamp", "https://artist-a.bandcamp.com/", "Artist A", ctx
+    )
+    assert rejected.status == mbrb.KNOWN_PROFILE_IDENTITY_REJECTED
+    assert rejected.reason == "artist_identity_contradiction"
+
+    monkeypatch.setattr(worker, "_fetch_url", lambda *args, **kwargs: None)
+    failed = worker._fetch_musicbrainz_known_profile(
+        "bandcamp", "https://artist-a.bandcamp.com/", "Artist A", ctx
+    )
+    assert failed.status == mbrb.KNOWN_PROFILE_ERROR
+    assert failed.reason == "profile_fetch_failed"
+    assert worker.live_search_attempts == 3
+
+
+@pytest.mark.parametrize(
+    ("email", "final_status", "contact_safety"),
+    [
+        ("safe@example.com", "valid", "safe"),
+        ("unsafe@example.com", "unsafe", "unsafe"),
+    ],
+)
+def test_challenged_bandcamp_candidate_is_neutral_and_preserves_fallback_budget(
+    tmp_path,
+    monkeypatch,
+    email,
+    final_status,
+    contact_safety,
+):
+    monkeypatch.setenv("MUSICBRAINZ_RELATIONSHIP_BRIDGE_ENABLED", "1")
+    dataframe = pd.DataFrame([_row(
+        Email=email,
+        final_status=final_status,
+        contact_safety=contact_safety,
+        Identity_Evidence_JSON=_evidence(bandcamp=("https://artist-a.bandcamp.com",)),
+    )])
+    worker = _worker(tmp_path)
+    worker.max_live_searches = 2
+    monkeypatch.setattr(
+        worker,
+        "_fetch_url",
+        lambda *args, **kwargs: "<html><head><title>Client Challenge</title></head></html>",
+    )
+    ctx = _ctx(worker, dataframe)
+    protected = {
+        field: dataframe.at[0, field]
+        for field in (
+            "Email",
+            "Email_Provenance_JSON",
+            "final_status",
+            "contact_safety",
+            "Match_Score",
+            "match_score_overall",
+            "directory_conflict_flag",
+            "name_consistency_flag",
+            "Lead_Source",
+            "Source_Directory",
+            "Source Directory",
+            "Source URL",
+        )
+    }
+
+    assert not worker._enrich_row_musicbrainz_relationships(dataframe, 0, ctx)
+    assert dataframe.at[0, "Bandcamp_URL"] == ""
+    assert worker._row_enrichment_state["bandcamp"] == "pending"
+    assert worker._platform_attempt_allowed("bandcamp", "Artist A", "Bandcamp Enrich")
+    assert worker.live_search_attempts == 1
+    assert worker._increment_live_counter()  # Existing fallback receives the remaining bounded unit.
+    assert not worker._increment_live_counter()  # The existing cap remains enforced.
+    for field, value in protected.items():
+        assert dataframe.at[0, field] == value
+
+
 def test_feature_flag_disabled_is_shadow_only(tmp_path, monkeypatch):
     monkeypatch.delenv("MUSICBRAINZ_RELATIONSHIP_BRIDGE_ENABLED", raising=False)
     dataframe = pd.DataFrame([_row(Identity_Evidence_JSON=_evidence(bandcamp=("https://artist-a.bandcamp.com",)))])
@@ -171,12 +288,12 @@ def test_enabled_known_bandcamp_and_soundcloud_use_guarded_payloads_and_preserve
 
     def fake_fetch(platform, url, artist, ctx):
         fetched.append((platform, url))
-        return cde.EnrichmentPayload(
+        return _accepted(cde.EnrichmentPayload(
             source_dir=platform,
             source_url=url,
             match_score=1.0,
             candidate_name=artist,
-        )
+        ))
 
     monkeypatch.setattr(worker, "_fetch_musicbrainz_known_profile", fake_fetch)
     assert worker._enrich_row_musicbrainz_relationships(dataframe, 0, _ctx(worker, dataframe))
@@ -197,7 +314,14 @@ def test_rejected_known_identity_falls_back_without_block_or_safety_change(tmp_p
     evidence = _evidence(**{platform: (f"https://artist-a.{platform}.com" if platform == "bandcamp" else "https://soundcloud.com/artist-a",)})
     dataframe = pd.DataFrame([_row(Email="safe@example.com", Identity_Evidence_JSON=evidence)])
     worker = _worker(tmp_path)
-    monkeypatch.setattr(worker, "_fetch_musicbrainz_known_profile", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        worker,
+        "_fetch_musicbrainz_known_profile",
+        lambda *args, **kwargs: mbrb.KnownProfileFetchResult(
+            mbrb.KNOWN_PROFILE_IDENTITY_REJECTED,
+            reason="artist_identity_contradiction",
+        ),
+    )
     assert not worker._enrich_row_musicbrainz_relationships(dataframe, 0, _ctx(worker, dataframe))
     assert dataframe.at[0, column] == ""
     assert dataframe.at[0, "Email"] == "safe@example.com"
@@ -218,9 +342,9 @@ def test_multiple_independently_accepted_candidates_remain_unresolved(tmp_path, 
     monkeypatch.setattr(
         worker,
         "_fetch_musicbrainz_known_profile",
-        lambda platform, url, artist, ctx: cde.EnrichmentPayload(
+        lambda platform, url, artist, ctx: _accepted(cde.EnrichmentPayload(
             source_dir=platform, source_url=url, match_score=1.0, candidate_name=artist
-        ),
+        )),
     )
     assert not worker._enrich_row_musicbrainz_relationships(dataframe, 0, _ctx(worker, dataframe))
     assert dataframe.at[0, "Bandcamp_URL"] == ""
@@ -237,6 +361,7 @@ def test_direct_known_bandcamp_fetch_uses_existing_parser_and_rejects_contradict
     assert worker._fetch_profile_and_build(
         "https://artist-a.bandcamp.com/", "bandcamp", identity_artist_name="Artist A"
     ) is None
+    assert worker._last_known_profile_status == mbrb.KNOWN_PROFILE_IDENTITY_REJECTED
 
 
 def test_direct_known_bandcamp_fetch_accepts_exact_profile_and_keeps_url_only_payload(tmp_path, monkeypatch):
@@ -253,6 +378,7 @@ def test_direct_known_bandcamp_fetch_accepts_exact_profile_and_keeps_url_only_pa
     assert payload.source_url == "https://artist-a.bandcamp.com"
     assert payload.candidate_name == "Artist A"
     assert payload.match_score >= cde.MIN_BC_CONFIDENCE
+    assert worker._last_known_profile_status == mbrb.KNOWN_PROFILE_ACCEPTED
 
 
 def test_direct_known_soundcloud_fetch_uses_existing_parser_and_accepts_exact_identity(tmp_path, monkeypatch):
@@ -272,6 +398,7 @@ def test_direct_known_soundcloud_fetch_uses_existing_parser_and_accepts_exact_id
     assert payload.source_dir == "soundcloud"
     assert payload.candidate_name == "Artist A"
     assert payload.match_score >= cde.MIN_SC_CONFIDENCE
+    assert worker._last_known_profile_status == mbrb.KNOWN_PROFILE_ACCEPTED
 
 
 def test_unsafe_email_status_is_not_upgraded_by_valid_identity(tmp_path, monkeypatch):
@@ -286,9 +413,9 @@ def test_unsafe_email_status_is_not_upgraded_by_valid_identity(tmp_path, monkeyp
     monkeypatch.setattr(
         worker,
         "_fetch_musicbrainz_known_profile",
-        lambda platform, url, artist, ctx: cde.EnrichmentPayload(
+        lambda platform, url, artist, ctx: _accepted(cde.EnrichmentPayload(
             source_dir=platform, source_url=url, match_score=1.0, candidate_name=artist
-        ),
+        )),
     )
     assert worker._enrich_row_musicbrainz_relationships(dataframe, 0, _ctx(worker, dataframe))
     assert dataframe.at[0, "Email"] == "unsafe@example.com"

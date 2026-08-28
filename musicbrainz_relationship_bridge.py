@@ -8,6 +8,12 @@ from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Sequence, Tuple
 
 
+KNOWN_PROFILE_ACCEPTED = "accepted"
+KNOWN_PROFILE_IDENTITY_REJECTED = "identity_rejected"
+KNOWN_PROFILE_CHALLENGE_UNAVAILABLE = "challenge_unavailable"
+KNOWN_PROFILE_ERROR = "error"
+
+
 def musicbrainz_relationship_bridge_enabled() -> bool:
     raw = str(os.getenv("MUSICBRAINZ_RELATIONSHIP_BRIDGE_ENABLED", "0") or "").strip().lower()
     return raw in {"1", "true", "yes", "on"}
@@ -48,6 +54,13 @@ class RelationshipBridgePlan:
     musicbrainz_artist: str = ""
     bandcamp_urls: Tuple[str, ...] = ()
     soundcloud_urls: Tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class KnownProfileFetchResult:
+    status: str
+    payload: Any = None
+    reason: str = ""
 
 
 def build_relationship_bridge_plan(
