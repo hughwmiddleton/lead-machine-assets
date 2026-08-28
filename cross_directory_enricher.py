@@ -10257,6 +10257,19 @@ def _collect_website_enrich_candidate_urls(row: Any) -> List[str]:
     return candidates
 
 
+def _row_has_existing_operational_website(row: Any) -> bool:
+    """Return whether the row already carries a non-platform website identity."""
+    if row is None or not hasattr(row, "get"):
+        return False
+    fields = ("Spotify_Website_URL", "External Links", *WEBSITE_EMAIL_OPTIONAL_FIELDS)
+    for field in fields:
+        for token in _split_multi_value(row.get(field, "")):
+            normalised = _normalise_url(token)
+            if normalised and _is_website_enrich_candidate_url(normalised):
+                return True
+    return False
+
+
 def _collect_website_enrich_link_hubs(row: Any) -> List[str]:
     if row is None:
         return []
@@ -15521,6 +15534,117 @@ class CrossDirectoryEnricherWorker(QThread):
             status = KNOWN_PROFILE_ERROR
         return KnownProfileFetchResult(status, payload=payload, reason=reason)
 
+    def _fetch_musicbrainz_known_instagram(
+        self,
+        profile_url: str,
+        artist_name: str,
+        row: Any,
+    ) -> KnownProfileFetchResult:
+        """Validate a known Instagram URL through the existing profile admission path."""
+        if not self._increment_live_counter():
+            return KnownProfileFetchResult(KNOWN_PROFILE_ERROR, reason="live_search_budget_exhausted")
+        accepted, reason = _spotify_seed_instagram_admission_profile_validation(
+            self.session,
+            row,
+            profile_url,
+            artist_name,
+        )
+        if not accepted:
+            status = (
+                KNOWN_PROFILE_CHALLENGE_UNAVAILABLE
+                if reason == "blocked:profile_unavailable"
+                else KNOWN_PROFILE_IDENTITY_REJECTED
+            )
+            return KnownProfileFetchResult(status, reason=reason)
+        return KnownProfileFetchResult(
+            KNOWN_PROFILE_ACCEPTED,
+            payload=EnrichmentPayload(
+                socials={profile_url},
+                source_dir="musicbrainz_instagram_bridge",
+                source_url=profile_url,
+                source_detail="MusicBrainz Instagram relationship",
+                match_score=1.0,
+                candidate_name=artist_name,
+            ),
+            reason=reason,
+        )
+
+    def _fetch_musicbrainz_known_website(
+        self,
+        website_url: str,
+        artist_name: str,
+    ) -> KnownProfileFetchResult:
+        """Boundedly validate a known official-site relationship before operational use."""
+        if not self._increment_live_counter():
+            return KnownProfileFetchResult(KNOWN_PROFILE_ERROR, reason="live_search_budget_exhausted")
+        result = _fetch_website_html_bounded(
+            self.session,
+            website_url,
+            timeout_s=WEBSITE_EMAIL_TIMEOUT,
+            max_bytes=WEBSITE_EMAIL_MAX_BYTES,
+        )
+        status = result.status
+        if (
+            not result.is_html
+            or not result.html
+            or (status is not None and not 200 <= int(status) < 400)
+            or not _website_fetch_result_is_same_domain(result, website_url)
+        ):
+            return KnownProfileFetchResult(
+                KNOWN_PROFILE_CHALLENGE_UNAVAILABLE,
+                reason="website_profile_unavailable",
+            )
+
+        soup = BeautifulSoup(result.html, "html.parser")
+        identity_texts: List[str] = []
+        for meta_tag in soup.select('meta[property="og:title"], meta[name="og:title"], meta[name="title"]'):
+            identity_texts.append(_clean_cell(meta_tag.get("content")))
+        identity_texts.extend(
+            _clean_cell(node.get_text(" ", strip=True))
+            for node in soup.select("title, h1, h2")
+        )
+        accepted = False
+        for raw_text in identity_texts:
+            if not raw_text:
+                continue
+            display_candidates = [raw_text]
+            display_candidates.extend(
+                part.strip()
+                for part in re.split(r"\s+[|\u2022\u2013\u2014-]\s+", raw_text)
+                if part.strip()
+            )
+            if any(
+                _compute_identity_match_score(
+                    artist_name,
+                    candidate_display,
+                    "",
+                    candidate_url=result.final_url or website_url,
+                )[1]
+                in {"exact", "strong"}
+                for candidate_display in display_candidates
+            ):
+                accepted = True
+                break
+        if not accepted:
+            return KnownProfileFetchResult(
+                KNOWN_PROFILE_IDENTITY_REJECTED,
+                reason="artist_identity_contradiction",
+            )
+
+        accepted_url = _normalise_url(result.final_url or website_url) or website_url
+        return KnownProfileFetchResult(
+            KNOWN_PROFILE_ACCEPTED,
+            payload=EnrichmentPayload(
+                websites={accepted_url},
+                source_dir="musicbrainz_website_bridge",
+                source_url=accepted_url,
+                source_detail="MusicBrainz official website relationship",
+                match_score=1.0,
+                candidate_name=artist_name,
+            ),
+            reason="strong:website_artist_identity",
+        )
+
     def _enrich_row_musicbrainz_relationships(self, seed_df, row_idx, ctx) -> bool:
         if not musicbrainz_relationship_bridge_enabled():
             return False
@@ -15534,6 +15658,10 @@ class CrossDirectoryEnricherWorker(QThread):
             canonicalize_soundcloud=_canonicalise_musicbrainz_soundcloud_url,
             valid_bandcamp=_is_valid_unearthed_bandcamp_url,
             valid_soundcloud=lambda value: bool(_canonicalise_musicbrainz_soundcloud_url(value)),
+            canonicalize_instagram=_canonicalize_instagram_profile_url,
+            canonicalize_website=lambda value: _normalise_url(value) or "",
+            valid_instagram=lambda value: bool(_canonicalize_instagram_profile_url(value)),
+            valid_website=_is_website_enrich_candidate_url,
         )
         if not plan.eligible:
             self.log_message.emit(
@@ -15583,6 +15711,52 @@ class CrossDirectoryEnricherWorker(QThread):
             if applied:
                 self._set_platform_state(platform, "matched")
                 enriched = True
+
+        if plan.instagram_urls and not _get_canonical_instagram_url(seed_df.loc[row_idx]):
+            accepted = []
+            for candidate_url in plan.instagram_urls:
+                result = self._fetch_musicbrainz_known_instagram(
+                    candidate_url,
+                    ctx["artist"],
+                    seed_df.loc[row_idx],
+                )
+                if result.status == KNOWN_PROFILE_ACCEPTED and result.payload:
+                    accepted.append(result.payload)
+            if len(accepted) == 1:
+                if self._apply_payload_guarded(
+                    seed_df,
+                    row_idx,
+                    accepted[0],
+                    ctx["artist"],
+                    spotify_id=ctx.get("spotify_id", ""),
+                ):
+                    enriched = True
+            elif len(accepted) > 1:
+                self.log_message.emit(
+                    f"[MusicBrainz Bridge] unresolved instagram candidates "
+                    f"artist={ctx['artist']!r} accepted={len(accepted)}"
+                )
+
+        if plan.official_website_urls and not _row_has_existing_operational_website(seed_df.loc[row_idx]):
+            accepted = []
+            for candidate_url in plan.official_website_urls:
+                result = self._fetch_musicbrainz_known_website(candidate_url, ctx["artist"])
+                if result.status == KNOWN_PROFILE_ACCEPTED and result.payload:
+                    accepted.append(result.payload)
+            if len(accepted) == 1:
+                if self._apply_payload_guarded(
+                    seed_df,
+                    row_idx,
+                    accepted[0],
+                    ctx["artist"],
+                    spotify_id=ctx.get("spotify_id", ""),
+                ):
+                    enriched = True
+            elif len(accepted) > 1:
+                self.log_message.emit(
+                    f"[MusicBrainz Bridge] unresolved official website candidates "
+                    f"artist={ctx['artist']!r} accepted={len(accepted)}"
+                )
         return enriched
 
     def _enrich_row_sc_live(self, seed_df, row_idx, ctx):

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
-from typing import Any, Callable, Mapping, Sequence, Tuple
+from typing import Any, Callable, Mapping, Optional, Sequence, Tuple
 
 
 KNOWN_PROFILE_ACCEPTED = "accepted"
@@ -54,6 +54,8 @@ class RelationshipBridgePlan:
     musicbrainz_artist: str = ""
     bandcamp_urls: Tuple[str, ...] = ()
     soundcloud_urls: Tuple[str, ...] = ()
+    instagram_urls: Tuple[str, ...] = ()
+    official_website_urls: Tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -71,6 +73,10 @@ def build_relationship_bridge_plan(
     canonicalize_soundcloud: Callable[[str], str],
     valid_bandcamp: Callable[[str], bool],
     valid_soundcloud: Callable[[str], bool],
+    canonicalize_instagram: Optional[Callable[[str], str]] = None,
+    canonicalize_website: Optional[Callable[[str], str]] = None,
+    valid_instagram: Optional[Callable[[str], bool]] = None,
+    valid_website: Optional[Callable[[str], bool]] = None,
 ) -> RelationshipBridgePlan:
     """Return validated, deduplicated known-profile candidates without mutating the row."""
     if _row_value(row, "MusicBrainz_Status") != "matched":
@@ -128,4 +134,14 @@ def build_relationship_bridge_plan(
         mb_artist,
         _candidates("bandcamp", canonicalize_bandcamp, valid_bandcamp),
         _candidates("soundcloud", canonicalize_soundcloud, valid_soundcloud),
+        _candidates(
+            "instagram",
+            canonicalize_instagram or (lambda _value: ""),
+            valid_instagram or (lambda _value: False),
+        ),
+        _candidates(
+            "official_homepage",
+            canonicalize_website or (lambda _value: ""),
+            valid_website or (lambda _value: False),
+        ),
     )

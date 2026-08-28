@@ -9,7 +9,14 @@ import musicbrainz_relationship_bridge as mbrb
 from musicbrainz_relationship_bridge import build_relationship_bridge_plan
 
 
-def _evidence(name="Artist A", aliases=(), bandcamp=(), soundcloud=()):
+def _evidence(
+    name="Artist A",
+    aliases=(),
+    bandcamp=(),
+    soundcloud=(),
+    instagram=(),
+    official_homepage=(),
+):
     artist = {"name": name}
     if aliases:
         artist["aliases"] = [{"name": alias} for alias in aliases]
@@ -23,6 +30,10 @@ def _evidence(name="Artist A", aliases=(), bandcamp=(), soundcloud=()):
                 "relationships": {
                     "bandcamp": [{"url": url, "type": "bandcamp"} for url in bandcamp],
                     "soundcloud": [{"url": url, "type": "soundcloud"} for url in soundcloud],
+                    "instagram": [{"url": url, "type": "instagram"} for url in instagram],
+                    "official_homepage": [
+                        {"url": url, "type": "official homepage"} for url in official_homepage
+                    ],
                     "facebook": [{"url": "https://facebook.com/must-not-promote"}],
                 },
             },
@@ -67,6 +78,10 @@ def _plan(row):
         canonicalize_soundcloud=cde._canonicalise_musicbrainz_soundcloud_url,
         valid_bandcamp=cde._is_valid_unearthed_bandcamp_url,
         valid_soundcloud=lambda value: bool(cde._canonicalise_musicbrainz_soundcloud_url(value)),
+        canonicalize_instagram=cde._canonicalize_instagram_profile_url,
+        canonicalize_website=lambda value: cde._normalise_url(value) or "",
+        valid_instagram=lambda value: bool(cde._canonicalize_instagram_profile_url(value)),
+        valid_website=cde._is_website_enrich_candidate_url,
     )
 
 
@@ -134,6 +149,36 @@ def test_candidates_reject_malformed_and_non_profile_urls_and_collapse_duplicate
     plan = _plan(row)
     assert plan.bandcamp_urls == ("https://artist-a.bandcamp.com/",)
     assert plan.soundcloud_urls == ("https://soundcloud.com/artist-a",)
+
+
+def test_instagram_and_official_website_candidates_are_canonical_and_platform_scoped():
+    row = _row(
+        Identity_Evidence_JSON=_evidence(
+            instagram=(
+                "https://www.instagram.com/artist_a/?igsh=tracking",
+                "https://instagram.com/artist_a/",
+                "https://instagram.com/p/not-a-profile/",
+            ),
+            official_homepage=(
+                "http://artist-a.test/",
+                "https://facebook.com/must-not-be-a-website",
+            ),
+        )
+    )
+    plan = _plan(row)
+    assert plan.instagram_urls == ("https://www.instagram.com/artist_a/",)
+    assert plan.official_website_urls == ("http://artist-a.test/",)
+
+
+def _website_result(url, html, *, final_url="", status=200, is_html=True):
+    return cde.WebsiteFetchResult(
+        url=url,
+        final_url=final_url or url,
+        status=status,
+        content_type="text/html" if is_html else "application/octet-stream",
+        html=html,
+        is_html=is_html,
+    )
 
 
 def _worker(tmp_path):
@@ -421,6 +466,223 @@ def test_unsafe_email_status_is_not_upgraded_by_valid_identity(tmp_path, monkeyp
     assert dataframe.at[0, "Email"] == "unsafe@example.com"
     assert dataframe.at[0, "final_status"] == "unsafe"
     assert dataframe.at[0, "contact_safety"] == "unsafe"
+
+
+def test_known_instagram_uses_existing_admission_and_classifies_unavailable(tmp_path, monkeypatch):
+    worker = _worker(tmp_path)
+    calls = []
+
+    def accepted_admission(session, row, url, artist):
+        calls.append((session, row["Artist Name"], url, artist))
+        return (True, "strong:profile_name_match")
+
+    monkeypatch.setattr(cde, "_spotify_seed_instagram_admission_profile_validation", accepted_admission)
+    result = worker._fetch_musicbrainz_known_instagram(
+        "https://www.instagram.com/artist_a/", "Artist A", _row()
+    )
+    assert result.status == mbrb.KNOWN_PROFILE_ACCEPTED
+    assert result.payload.socials == {"https://www.instagram.com/artist_a/"}
+    assert not result.payload.emails
+    assert calls[0][1:] == (
+        "Artist A",
+        "https://www.instagram.com/artist_a/",
+        "Artist A",
+    )
+
+    monkeypatch.setattr(
+        cde,
+        "_spotify_seed_instagram_admission_profile_validation",
+        lambda *args: (False, "blocked:profile_unavailable"),
+    )
+    unavailable = worker._fetch_musicbrainz_known_instagram(
+        "https://www.instagram.com/artist_a/", "Artist A", _row()
+    )
+    assert unavailable.status == mbrb.KNOWN_PROFILE_CHALLENGE_UNAVAILABLE
+    assert unavailable.payload is None
+
+    monkeypatch.setattr(
+        cde,
+        "_spotify_seed_instagram_admission_profile_validation",
+        lambda *args: (False, "blocked:insufficient_identity"),
+    )
+    rejected = worker._fetch_musicbrainz_known_instagram(
+        "https://www.instagram.com/artist_a/", "Artist A", _row()
+    )
+    assert rejected.status == mbrb.KNOWN_PROFILE_IDENTITY_REJECTED
+    assert rejected.payload is None
+
+
+def test_known_website_accepts_strong_identity_and_same_domain_redirect(tmp_path, monkeypatch):
+    worker = _worker(tmp_path)
+    monkeypatch.setattr(
+        cde,
+        "_fetch_website_html_bounded",
+        lambda *args, **kwargs: _website_result(
+            "http://artist-a.test/",
+            "<html><head><title>Artist A | Official Website</title></head></html>",
+            final_url="https://www.artist-a.test/",
+        ),
+    )
+    result = worker._fetch_musicbrainz_known_website("http://artist-a.test/", "Artist A")
+    assert result.status == mbrb.KNOWN_PROFILE_ACCEPTED
+    assert result.payload.websites == {"https://www.artist-a.test/"}
+    assert not result.payload.emails
+
+
+@pytest.mark.parametrize(
+    "fetch_result",
+    [
+        _website_result(
+            "https://artist-a.test/",
+            "<html><head><title>Other Artist</title></head></html>",
+        ),
+        _website_result(
+            "https://artist-a.test/",
+            "<html><head><title>Artist A</title></head></html>",
+            final_url="https://unrelated.test/",
+        ),
+        _website_result("https://artist-a.test/", "", status=503, is_html=False),
+    ],
+)
+def test_known_website_rejects_contradiction_cross_domain_redirect_or_unavailable(
+    tmp_path, monkeypatch, fetch_result
+):
+    worker = _worker(tmp_path)
+    monkeypatch.setattr(cde, "_fetch_website_html_bounded", lambda *args, **kwargs: fetch_result)
+    result = worker._fetch_musicbrainz_known_website("https://artist-a.test/", "Artist A")
+    assert result.status != mbrb.KNOWN_PROFILE_ACCEPTED
+    assert result.payload is None
+
+
+def test_unique_instagram_and_website_are_bridged_without_email_or_origin_mutation(tmp_path, monkeypatch):
+    monkeypatch.setenv("MUSICBRAINZ_RELATIONSHIP_BRIDGE_ENABLED", "1")
+    dataframe = pd.DataFrame([_row(
+        Email="safe@example.com",
+        Bandcamp_URL="https://artist-a.bandcamp.com/",
+        Email_Provenance_JSON='{"safe@example.com":{"source_type":"seed"}}',
+        Identity_Evidence_JSON=_evidence(
+            instagram=("https://instagram.com/artist_a/",),
+            official_homepage=("https://artist-a.test/",),
+        ),
+    )])
+    worker = _worker(tmp_path)
+    monkeypatch.setattr(
+        worker,
+        "_fetch_musicbrainz_known_instagram",
+        lambda url, artist, row: _accepted(cde.EnrichmentPayload(
+            socials={url}, source_dir="musicbrainz_instagram_bridge", source_url=url,
+            match_score=1.0, candidate_name=artist,
+        )),
+    )
+    monkeypatch.setattr(
+        worker,
+        "_fetch_musicbrainz_known_website",
+        lambda url, artist: _accepted(cde.EnrichmentPayload(
+            websites={url}, source_dir="musicbrainz_website_bridge", source_url=url,
+            match_score=1.0, candidate_name=artist,
+        )),
+    )
+    before = dataframe.loc[0, [
+        "Email", "Email_Provenance_JSON", "Lead_Source", "Source_Directory",
+        "Source Directory", "Source URL", "final_status", "contact_safety",
+    ]].to_dict()
+    assert worker._enrich_row_musicbrainz_relationships(dataframe, 0, _ctx(worker, dataframe))
+    assert cde._get_canonical_instagram_url(dataframe.loc[0]) == "https://www.instagram.com/artist_a/"
+    assert dataframe.at[0, "External Links"] == "https://artist-a.test/"
+    assert dataframe.at[0, "Bandcamp_URL"] == "https://artist-a.bandcamp.com/"
+    for field, value in before.items():
+        assert dataframe.at[0, field] == value
+
+
+def test_existing_instagram_and_website_values_skip_musicbrainz_candidates(tmp_path, monkeypatch):
+    monkeypatch.setenv("MUSICBRAINZ_RELATIONSHIP_BRIDGE_ENABLED", "1")
+    dataframe = pd.DataFrame([_row(
+        **{
+            "Social Link": "https://www.instagram.com/existing_artist/",
+            "External Links": "https://existing-artist.test/",
+            "Identity_Evidence_JSON": _evidence(
+                instagram=("https://instagram.com/artist_a/",),
+                official_homepage=("https://artist-a.test/",),
+            ),
+        },
+    )])
+    worker = _worker(tmp_path)
+    monkeypatch.setattr(worker, "_fetch_musicbrainz_known_instagram", lambda *args: pytest.fail("instagram fetch"))
+    monkeypatch.setattr(worker, "_fetch_musicbrainz_known_website", lambda *args: pytest.fail("website fetch"))
+    assert not worker._enrich_row_musicbrainz_relationships(dataframe, 0, _ctx(worker, dataframe))
+    assert dataframe.at[0, "Social Link"] == "https://www.instagram.com/existing_artist/"
+    assert dataframe.at[0, "External Links"] == "https://existing-artist.test/"
+
+
+@pytest.mark.parametrize("platform", ["instagram", "official_homepage"])
+def test_multiple_accepted_instagram_or_website_candidates_remain_unresolved(
+    tmp_path, monkeypatch, platform
+):
+    monkeypatch.setenv("MUSICBRAINZ_RELATIONSHIP_BRIDGE_ENABLED", "1")
+    urls = (
+        ("https://instagram.com/one/", "https://instagram.com/two/")
+        if platform == "instagram"
+        else ("https://one.test/", "https://two.test/")
+    )
+    dataframe = pd.DataFrame([_row(Identity_Evidence_JSON=_evidence(**{platform: urls}))])
+    worker = _worker(tmp_path)
+    if platform == "instagram":
+        monkeypatch.setattr(
+            worker,
+            "_fetch_musicbrainz_known_instagram",
+            lambda url, artist, row: _accepted(cde.EnrichmentPayload(
+                socials={url}, source_dir="musicbrainz_instagram_bridge",
+                source_url=url, match_score=1.0, candidate_name=artist,
+            )),
+        )
+    else:
+        monkeypatch.setattr(
+            worker,
+            "_fetch_musicbrainz_known_website",
+            lambda url, artist: _accepted(cde.EnrichmentPayload(
+                websites={url}, source_dir="musicbrainz_website_bridge",
+                source_url=url, match_score=1.0, candidate_name=artist,
+            )),
+        )
+    assert not worker._enrich_row_musicbrainz_relationships(dataframe, 0, _ctx(worker, dataframe))
+    assert dataframe.at[0, "Social Link"] == ""
+    assert dataframe.at[0, "External Links"] == ""
+
+
+def test_mayce_mismatch_blocks_instagram_and_website_without_fetch(tmp_path, monkeypatch):
+    monkeypatch.setenv("MUSICBRAINZ_RELATIONSHIP_BRIDGE_ENABLED", "1")
+    dataframe = pd.DataFrame([_row(
+        "MAYCE",
+        Identity_Evidence_JSON=_evidence(
+            name="Macy Kate",
+            instagram=("https://instagram.com/macykate/",),
+            official_homepage=("https://macykate.test/",),
+        ),
+    )])
+    worker = _worker(tmp_path)
+    monkeypatch.setattr(worker, "_fetch_musicbrainz_known_instagram", lambda *args: pytest.fail("instagram fetch"))
+    monkeypatch.setattr(worker, "_fetch_musicbrainz_known_website", lambda *args: pytest.fail("website fetch"))
+    assert not worker._enrich_row_musicbrainz_relationships(dataframe, 0, _ctx(worker, dataframe))
+
+
+def test_bridged_website_email_keeps_website_provenance(tmp_path, monkeypatch):
+    monkeypatch.setenv("MUSICBRAINZ_RELATIONSHIP_BRIDGE_ENABLED", "1")
+    dataframe = pd.DataFrame([_row(
+        Identity_Evidence_JSON=_evidence(official_homepage=("https://artist-a.test/",)),
+    )])
+    worker = _worker(tmp_path)
+    homepage = _website_result(
+        "https://artist-a.test/",
+        '<html><head><title>Artist A</title></head><body><a href="mailto:hello@artist-a.test">Email</a></body></html>',
+    )
+    monkeypatch.setattr(cde, "_fetch_website_html_bounded", lambda *args, **kwargs: homepage)
+    ctx = _ctx(worker, dataframe)
+    assert worker._enrich_row_musicbrainz_relationships(dataframe, 0, ctx)
+    assert worker._enrich_row_website_email(dataframe, 0, ctx)
+    assert dataframe.at[0, "Email"] == "hello@artist-a.test"
+    assert dataframe.at[0, "Email_Source_Type"] == "website_enrich"
+    assert dataframe.at[0, "Email_Source_URL"] == "https://artist-a.test/"
+    assert "musicbrainz" not in dataframe.at[0, "Email_Provenance_JSON"].lower()
 
 
 def test_row_linear_and_source_phased_modes_schedule_bridge_before_live_search(tmp_path, monkeypatch):
