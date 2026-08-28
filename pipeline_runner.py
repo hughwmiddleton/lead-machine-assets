@@ -3436,6 +3436,8 @@ def run_master_enrichment(
     """
     _safe_log(logger, f"[Master Enrich] Starting cross-directory enrichment for {seed_csv_path}")
     local_night_fb_run_state = False
+    musicbrainz_shadow_temp_path = ""
+    master_enrichment_seed_path = seed_csv_path
     if night_mode and night_fb_run_state is None:
         night_fb_run_state = create_night_fb_run_state(
             os.environ.get("FB_USERNAME", "").strip(),
@@ -3455,6 +3457,28 @@ def run_master_enrichment(
         unearthed_path_final = ""
         run_dir = Path(output_csv_path).resolve().parent
         yield_tracker = cross_directory_enricher.EnrichmentYieldTracker()
+        try:
+            from musicbrainz_identity import musicbrainz_shadow_enabled, run_musicbrainz_shadow_csv
+
+            if musicbrainz_shadow_enabled():
+                run_dir.mkdir(parents=True, exist_ok=True)
+                output_name = Path(output_csv_path).name
+                musicbrainz_shadow_temp_path = str(
+                    run_dir / f".{output_name}.musicbrainz_shadow.csv"
+                )
+                run_musicbrainz_shadow_csv(
+                    seed_csv_path,
+                    musicbrainz_shadow_temp_path,
+                    logger=logger,
+                )
+                master_enrichment_seed_path = musicbrainz_shadow_temp_path
+                _safe_log(logger, "[Master Enrich] MusicBrainz shadow identity stage completed")
+        except Exception as exc:
+            master_enrichment_seed_path = seed_csv_path
+            _safe_log(
+                logger,
+                f"[Master Enrich] MusicBrainz shadow stage failed safely: {type(exc).__name__}: {exc}",
+            )
         try:
             DETECT_RETRIES = 6
             DETECT_SLEEP_S = 1.0
@@ -3568,7 +3592,7 @@ def run_master_enrichment(
 
         first_pass_state: Dict[str, Any] = {}
         cross_directory_enricher.run_cross_directory_enrichment(
-            seed_csv_path,
+            master_enrichment_seed_path,
             output_csv_path,
             bandcamp_csv_path=bandcamp_path_final or "",
             soundcloud_csv_path=soundcloud_path_final or "",
@@ -3651,6 +3675,11 @@ def run_master_enrichment(
         _safe_log(logger, f"[Master Enrich] Enricher failed safely: {exc}")
         return _resolve_master_enrichment_failure_output(seed_csv_path, output_csv_path, logger=logger)
     finally:
+        if musicbrainz_shadow_temp_path:
+            try:
+                os.unlink(musicbrainz_shadow_temp_path)
+            except OSError:
+                pass
         if local_night_fb_run_state:
             close_night_fb_run_state(night_fb_run_state)
 
