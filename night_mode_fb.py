@@ -2453,13 +2453,14 @@ def _canonicalize_share_resolved_fb_url(url: str) -> str:
 def _canonicalize_and_dedupe_explicit_fb_urls(
     urls: Sequence[str], logger: LoggerFn = None, debug: bool = False
 ) -> List[str]:
-    """Normalize and dedupe explicit FB URLs while preserving order."""
+    """Normalize and dedupe explicit FB URLs while preserving order using canonical entity identity."""
 
-    before_count = len(urls or [])
+    raw_list = [str(u or "").strip() for u in (urls or []) if str(u or "").strip()]
+    before_count = len(raw_list)
     seen: Set[str] = set()
     canonical: List[str] = []
 
-    for raw in urls or []:
+    for raw in raw_list:
         if _is_invalid_fb_value(raw):
             if debug and logger:
                 _log(logger, f"[Night FB] Skipping invalid facebook_url value: {raw}")
@@ -2477,27 +2478,21 @@ def _canonicalize_and_dedupe_explicit_fb_urls(
             pass
 
         try:
-            parsed_for_key = urllib.parse.urlsplit(norm)
-            key = urllib.parse.urlunsplit(
-                (
-                    (parsed_for_key.scheme or "https").lower(),
-                    (parsed_for_key.netloc or "").lower(),
-                    parsed_for_key.path,
-                    parsed_for_key.query,
-                    "",
-                )
-            )
+            entity_key = canonicalize_facebook_url(norm) or norm
         except Exception:
-            key = norm
+            entity_key = norm
 
-        if key in seen:
+        if entity_key in seen:
             continue
-        seen.add(key)
+        seen.add(entity_key)
         canonical.append(norm)
 
     after_count = len(canonical)
     if debug and logger and before_count and before_count != after_count:
-        _log(logger, f"[Night FB] Deduplicated explicit FB URLs: {before_count} -> {after_count}")
+        _log(
+            logger,
+            f"[Night FB] Deduplicated explicit FB URLs: raw_explicit_fb_urls={before_count} unique_canonical_fb_entities={after_count} duplicate_fb_entity_urls_dropped={before_count - after_count}",
+        )
 
     return canonical
 
