@@ -67,6 +67,7 @@ from webdriver_manager.chrome import ChromeDriverManager
 from urllib.parse import urlparse, parse_qs, unquote
 from unidecode import unidecode
 from email_normalizer import (
+    filter_obvious_placeholder_emails,
     filter_platform_support_emails,
     filter_system_telemetry_emails,
     is_obvious_placeholder_email,
@@ -16608,6 +16609,7 @@ class CrossDirectoryEnricherWorker(QThread):
 
             if homepage_ok:
                 page_emails, used_mailto = _extract_website_emails_from_html(homepage.html)
+                page_emails = filter_obvious_placeholder_emails(page_emails)
                 if page_emails:
                     emails_found = page_emails
                     source_url = homepage_url
@@ -16627,6 +16629,7 @@ class CrossDirectoryEnricherWorker(QThread):
                     if not _website_fetch_result_is_same_domain(result, website_url):
                         continue
                     page_emails, used_mailto = _extract_website_emails_from_html(result.html)
+                    page_emails = filter_obvious_placeholder_emails(page_emails)
                     if not page_emails:
                         continue
                     if not source_url:
@@ -16654,6 +16657,7 @@ class CrossDirectoryEnricherWorker(QThread):
                     if not _website_fetch_result_is_same_domain(result, website_url):
                         continue
                     page_emails, used_mailto = _extract_website_emails_from_html(result.html)
+                    page_emails = filter_obvious_placeholder_emails(page_emails)
                     if not page_emails:
                         continue
                     if not source_url:
@@ -16668,7 +16672,13 @@ class CrossDirectoryEnricherWorker(QThread):
                     f"[Web] shallow sweep fetched={shallow_fetches} emails_found={shallow_emails_found}"
                 )
 
-            normalized_emails = filter_platform_support_emails(filter_system_telemetry_emails(_normalize_emails(";".join(emails_found))))
+            normalized_emails = filter_obvious_placeholder_emails(
+                filter_platform_support_emails(
+                    filter_system_telemetry_emails(
+                        _normalize_emails(";".join(emails_found))
+                    )
+                )
+            )
             cache_entry = {
                 "status": "hit" if normalized_emails else "miss",
                 "emails": list(normalized_emails),

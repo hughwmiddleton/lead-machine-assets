@@ -11,9 +11,9 @@ def _row(**kwargs) -> pd.Series:
     return pd.Series(kwargs)
 
 
-def test_skip_gate_skips_when_email_and_not_quarantined():
+def test_skip_gate_allows_shared_placeholder_email():
     row = _row(Email_All="user@example.com", **{"Artist Name": "Artist A"})
-    assert _should_skip_row_due_to_email(row) is True
+    assert _should_skip_row_due_to_email(row) is False
 
 
 def test_skip_gate_allows_placeholder_only_email():

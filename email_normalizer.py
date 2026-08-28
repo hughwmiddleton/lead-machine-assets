@@ -15,9 +15,14 @@ _OBFUSCATED_EMAIL_PATTERN = re.compile(
 _EMAIL_VALUE_SPLIT_RE = re.compile(r"[\s,;|]+")
 _OBVIOUS_PLACEHOLDER_EMAILS = frozenset(
     {
+        "email@example.com",
+        "example@example.com",
         "user@domain.com",
         "name@example.com",
+        "test@example.com",
         "test@test.com",
+        "user@example.com",
+        "you@example.com",
     }
 )
 
@@ -161,6 +166,38 @@ def is_obvious_placeholder_email(value: str) -> bool:
     if not normalized:
         return False
     return normalized in _OBVIOUS_PLACEHOLDER_EMAILS
+
+
+def filter_obvious_placeholder_emails(
+    values: Iterable[str] | str | None,
+) -> list[str]:
+    """Normalize, dedupe, and drop exact obvious placeholder emails."""
+    if values is None:
+        return []
+
+    if isinstance(values, str):
+        raw_items = _EMAIL_VALUE_SPLIT_RE.split(values)
+    else:
+        raw_items = []
+        for value in values:
+            if value is None:
+                continue
+            if isinstance(value, str):
+                raw_items.extend(_EMAIL_VALUE_SPLIT_RE.split(value))
+            else:
+                raw_items.append(str(value))
+
+    filtered: list[str] = []
+    seen: set[str] = set()
+    for raw in raw_items:
+        normalized = normalize_email_value(raw)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        if is_obvious_placeholder_email(normalized):
+            continue
+        filtered.append(normalized)
+    return filtered
 
 
 def is_system_telemetry_email(value: str) -> bool:

@@ -1021,6 +1021,30 @@ def test_bridged_website_email_keeps_website_provenance(tmp_path, monkeypatch):
     assert "musicbrainz" not in dataframe.at[0, "Email_Provenance_JSON"].lower()
 
 
+def test_bridged_website_identity_survives_placeholder_only_email_page(tmp_path, monkeypatch):
+    monkeypatch.setenv("MUSICBRAINZ_RELATIONSHIP_BRIDGE_ENABLED", "1")
+    dataframe = pd.DataFrame([_row(
+        Email_All="",
+        Identity_Evidence_JSON=_evidence(official_homepage=("https://artist-a.test/",)),
+    )])
+    worker = _worker(tmp_path)
+    homepage = _website_result(
+        "https://artist-a.test/",
+        "<html><head><title>Artist A</title></head>"
+        "<body>user@domain.com you@example.com</body></html>",
+    )
+    monkeypatch.setattr(cde, "_fetch_website_html_bounded", lambda *args, **kwargs: homepage)
+    ctx = _ctx(worker, dataframe)
+
+    assert worker._enrich_row_musicbrainz_relationships(dataframe, 0, ctx)
+    assert dataframe.at[0, "External Links"] == "https://artist-a.test/"
+    assert not worker._enrich_row_website_email(dataframe, 0, ctx)
+    assert dataframe.at[0, "Email"] == ""
+    assert dataframe.at[0, "Email_All"] == ""
+    assert dataframe.at[0, "Email_Provenance_JSON"] == ""
+    assert dataframe.at[0, "final_status"] == "valid"
+
+
 def test_row_linear_and_source_phased_modes_schedule_bridge_before_live_search(tmp_path, monkeypatch):
     monkeypatch.setenv("MUSICBRAINZ_RELATIONSHIP_BRIDGE_ENABLED", "1")
     dataframe = pd.DataFrame([_row()])

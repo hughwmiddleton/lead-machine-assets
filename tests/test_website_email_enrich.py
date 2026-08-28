@@ -150,6 +150,146 @@ def test_website_email_filters_telemetry_only_result(monkeypatch):
     assert seed_df.at[0, "Email_All"] == ""
 
 
+@pytest.mark.parametrize(
+    "placeholder",
+    [
+        "user@domain.com",
+        "you@example.com",
+        "user@example.com",
+        "name@example.com",
+        "email@example.com",
+        "test@example.com",
+    ],
+)
+def test_website_email_rejects_shared_placeholder_addresses(monkeypatch, placeholder):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Placeholder Artist",
+            "Email": "",
+            "Primary_Email": "",
+            "Email_All": "",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+            EMAIL_PROVENANCE_JSON_COL: "",
+            "Spotify_Website_URL": "https://artist.test",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+
+    monkeypatch.setattr(
+        cde,
+        "_fetch_website_html_bounded",
+        lambda session, url, **kwargs: _result(
+            url,
+            html=f"<html><body>{placeholder}</body></html>",
+        ),
+    )
+
+    matched = worker._enrich_row_website_email(seed_df, 0, ctx)
+
+    assert matched is False
+    assert seed_df.at[0, "Email"] == ""
+    assert seed_df.at[0, "Primary_Email"] == ""
+    assert seed_df.at[0, "Email_All"] == ""
+    assert seed_df.at[0, EMAIL_PROVENANCE_JSON_COL] == ""
+
+
+def test_website_email_preserves_real_addresses_when_placeholders_share_page(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Mixed Contact Artist",
+            "Email": "",
+            "Email_All": "",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+            "Email_Type": "",
+            EMAIL_PROVENANCE_JSON_COL: "",
+            "Spotify_Website_URL": "https://artist.test",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    html = (
+        "<html><body>user@domain.com you@example.com "
+        "booking@artist.test management@artist.test</body></html>"
+    )
+    monkeypatch.setattr(
+        cde,
+        "_fetch_website_html_bounded",
+        lambda session, url, **kwargs: _result(url, html=html),
+    )
+
+    matched = worker._enrich_row_website_email(seed_df, 0, ctx)
+
+    assert matched is True
+    assert set(seed_df.at[0, "Email_All"].split(";")) == {
+        "booking@artist.test",
+        "management@artist.test",
+    }
+    assert seed_df.at[0, "Email"] in {
+        "booking@artist.test",
+        "management@artist.test",
+    }
+    assert seed_df.at[0, "Email_Source_URL"] == "https://artist.test"
+    assert seed_df.at[0, "Email_Source_Type"] == "website_enrich"
+    provenance = json.loads(seed_df.at[0, EMAIL_PROVENANCE_JSON_COL])
+    assert set(provenance) == {"booking@artist.test", "management@artist.test"}
+    assert all(meta["source_type"] == "website_enrich" for meta in provenance.values())
+    assert all(meta["source_url"] == "https://artist.test" for meta in provenance.values())
+
+
+def test_website_placeholder_only_preserves_safe_existing_email(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Existing Contact Artist",
+            "Email": "safe@artist.test",
+            "Email_All": "safe@artist.test",
+            "Email_Source_URL": "https://trusted.test/contact",
+            "Email_Source_Type": "seed",
+            "Email_Extract_Method": "seed",
+            EMAIL_PROVENANCE_JSON_COL: json.dumps(
+                {
+                    "safe@artist.test": {
+                        "source_type": "seed",
+                        "source_url": "https://trusted.test/contact",
+                    }
+                }
+            ),
+            "Spotify_URL": "https://open.spotify.com/artist/spotify-id",
+            "Spotify_Artist_ID": "spotify-id",
+            "Source Directory": "spotify",
+            "Spotify_Website_URL": "https://artist.test",
+            "final_status": "valid",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    monkeypatch.setattr(
+        cde,
+        "_fetch_website_html_bounded",
+        lambda session, url, **kwargs: _result(
+            url,
+            html="<html><body>user@domain.com you@example.com</body></html>",
+        ),
+    )
+
+    matched = worker._enrich_row_website_email(seed_df, 0, ctx)
+
+    assert matched is False
+    assert seed_df.at[0, "Email"] == "safe@artist.test"
+    assert seed_df.at[0, "Email_All"] == "safe@artist.test"
+    assert set(json.loads(seed_df.at[0, EMAIL_PROVENANCE_JSON_COL])) == {
+        "safe@artist.test"
+    }
+    assert seed_df.at[0, "final_status"] == "valid"
+
+
 def test_website_email_same_domain_only(monkeypatch):
     logs = []
     worker = _make_worker(logs)
