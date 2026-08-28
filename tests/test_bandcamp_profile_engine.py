@@ -1,6 +1,7 @@
 import importlib.util
 from pathlib import Path
 
+import pytest
 import requests
 
 import bandcamp_profile_engine as bpe
@@ -18,6 +19,7 @@ ARTIST_HTML = """
       Contact artist@example.com. FFO: Slowdive, Beach House.
       <a href="https://artist-a.example/?utm_source=bandcamp">Website</a>
       <a href="https://instagram.com/artist_a">Profile</a>
+      <a href="https://soundcloud.com/Artist-A?utm_source=bandcamp">SoundCloud</a>
       <a href="https://linktr.ee/artist_a">Links</a>
     </div>
     <div class="tralbum-tags"><a>Dream Pop</a><a>Indie Rock</a></div>
@@ -70,6 +72,7 @@ def test_normal_artist_page_parses_rich_profile_and_preserves_canonical_url():
     assert result.profile["primary_genre"] in {"dream pop", "indie rock"}
     assert result.profile["website"] == "https://artist-a.example/"
     assert result.profile["socials"]["instagram"] == "https://instagram.com/artist_a"
+    assert result.profile["socials"]["soundcloud"] == "https://soundcloud.com/artist-a"
     assert result.profile["socials"]["linktree"] == "https://linktr.ee/artist_a"
     assert result.profile["email"] == "artist@example.com"
     assert result.profile["emails"] == ["artist@example.com"]
@@ -297,6 +300,51 @@ def test_no_credible_artist_site_leaves_website_empty():
     profile = bpe.parse_bandcamp_profile_html(
         "https://nowebsite.bandcamp.com/", html
     )
+    assert profile["website"] == ""
+    assert profile["all_social_links"] == []
+
+
+@pytest.mark.parametrize(
+    ("bandcamp_host", "soundcloud_url", "expected"),
+    (
+        ("thebandtoledo", "https://soundcloud.com/toledo_music", "https://soundcloud.com/toledo_music"),
+        ("westsidecowboy", "https://soundcloud.com/westsidecowboyyy", "https://soundcloud.com/westsidecowboyyy"),
+        ("shyone", "https://soundcloud.com/shyonebeats", "https://soundcloud.com/shyonebeats"),
+    ),
+)
+def test_bandcamp_retains_valid_soundcloud_artist_profiles(bandcamp_host, soundcloud_url, expected):
+    html = f"""
+    <meta property="og:site_name" content="SoundCloud Artist">
+    <a href="{soundcloud_url}">SoundCloud</a>
+    """
+    profile = bpe.parse_bandcamp_profile_html(
+        f"https://{bandcamp_host}.bandcamp.com/", html
+    )
+
+    assert profile["socials"]["soundcloud"] == expected
+    assert expected in profile["all_social_links"]
+    assert profile["website"] == ""
+
+
+@pytest.mark.parametrize(
+    "soundcloud_url",
+    (
+        "https://soundcloud.com/",
+        "https://soundcloud.com/search",
+        "https://soundcloud.com/discover",
+        "https://soundcloud.com/artist/track",
+        "https://soundcloud.com/artist/sets/playlist",
+        "https://on.soundcloud.com/share-token",
+    ),
+)
+def test_bandcamp_rejects_non_profile_soundcloud_routes(soundcloud_url):
+    html = f"""
+    <meta property="og:site_name" content="No SoundCloud Artist">
+    <a href="{soundcloud_url}">SoundCloud</a>
+    """
+    profile = bpe.parse_bandcamp_profile_html("https://no-sc.bandcamp.com/", html)
+
+    assert profile["socials"]["soundcloud"] == ""
     assert profile["website"] == ""
     assert profile["all_social_links"] == []
 

@@ -20,6 +20,7 @@ import requests
 from bs4 import BeautifulSoup
 from dateutil import parser as dparser
 from requests.adapters import HTTPAdapter
+from soundcloud_engine import canonicalize_soundcloud_profile_url
 from urllib3.util.retry import Retry
 
 
@@ -41,7 +42,7 @@ _SOCIAL_HOSTS_PATTERN = (
     r"(?:linktr\.ee|beacons\.ai|solo\.to|hypeddit\.com|toneden\.io|"
     r"carrd\.co|flow\.page|instagram\.com|facebook\.com|x\.com|"
     r"twitter\.com|youtube\.com|tiktok\.com|spotify\.com|"
-    r"bandsintown\.com|songkick\.com)"
+    r"soundcloud\.com|bandsintown\.com|songkick\.com)"
 )
 _SOCIAL_TEXT_RE = re.compile(
     rf"((?:https?://|www\.)?{_SOCIAL_HOSTS_PATTERN}[^\s\"'<)]+)", re.I
@@ -529,6 +530,9 @@ def _social_candidate(value: str, *, inferred: bool = False) -> Tuple[str, str]:
         if len(segments) >= 2 and first_lower == "artist":
             return "spotify", value
         return "", ""
+    if _host_matches(host, "soundcloud.com"):
+        canonical = canonicalize_soundcloud_profile_url(value)
+        return ("soundcloud", canonical) if canonical else ("", "")
     if _host_matches(host, "bandsintown.com"):
         if segments and first_lower in {"a", "artist", "artists"}:
             return "bandsintown", value
@@ -595,7 +599,7 @@ def parse_bandcamp_profile_html(
         "emails": [],
         "socials": {key: "" for key in (
             "instagram", "twitter", "facebook", "tiktok", "youtube", "linktree",
-            "spotify", "bandsintown", "songkick",
+            "spotify", "soundcloud", "bandsintown", "songkick",
         )},
         "genres": genres,
         "latest_release_title": "",

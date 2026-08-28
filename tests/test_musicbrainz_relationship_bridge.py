@@ -280,8 +280,14 @@ def test_known_bandcamp_uses_shared_engine_not_generic_fetch_and_keeps_bandcamp_
                 "website": "https://artist-a.example",
                 "email": "artist@example.com",
                 "emails": ["artist@example.com"],
-                "all_social_links": ["https://instagram.com/artist_a"],
-                "socials": {"instagram": "https://instagram.com/artist_a"},
+                "all_social_links": [
+                    "https://instagram.com/artist_a",
+                    "https://soundcloud.com/artist-a",
+                ],
+                "socials": {
+                    "instagram": "https://instagram.com/artist_a",
+                    "soundcloud": "https://soundcloud.com/artist-a",
+                },
             },
             identity_evidence={"page_artist": "Artist A"},
         )
@@ -297,7 +303,19 @@ def test_known_bandcamp_uses_shared_engine_not_generic_fetch_and_keeps_bandcamp_
     assert result.payload.source_url == "https://artist-a.bandcamp.com/"
     assert result.payload.emails == {"artist@example.com"}
     assert result.payload.websites == {"https://artist-a.example"}
-    assert result.payload.socials == {"https://instagram.com/artist_a"}
+    assert result.payload.socials == {
+        "https://instagram.com/artist_a",
+        "https://soundcloud.com/artist-a",
+    }
+
+    dataframe = pd.DataFrame([_row()])
+    worker._apply_payload(dataframe, 0, result.payload)
+    assert dataframe.at[0, "SoundCloud Link"] == "https://soundcloud.com/artist-a"
+    assert dataframe.at[0, "External Links"] == "https://artist-a.example"
+    assert dataframe.at[0, "Email_Source_Type"] == "bandcamp"
+    assert dataframe.at[0, "Email_Source_URL"] == "https://artist-a.bandcamp.com/"
+    for field in ("Lead_Source", "Source_Directory", "Source Directory", "Source URL"):
+        assert dataframe.at[0, field] == _row()[field]
 
 
 def test_link_hub_follow_excludes_application_shell_and_is_bounded():

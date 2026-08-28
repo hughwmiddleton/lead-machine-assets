@@ -21,7 +21,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
-from soundcloud_engine import SoundCloudEngine
+from soundcloud_engine import SoundCloudEngine, canonicalize_soundcloud_profile_url
 import soundcloud_engine as sc_engine
 from bandcamp_profile_engine import (
     PROFILE_ACCEPTED as BANDCAMP_PROFILE_ACCEPTED,
@@ -19204,6 +19204,15 @@ class CrossDirectoryEnricherWorker(QThread):
         new_socials = set(payload.socials)
         new_sites = set(payload.websites)
         new_emails = set(payload.emails)
+
+        if (payload.source_dir or "").startswith("bandcamp") and "SoundCloud Link" in df.columns:
+            current_sc = _coerce_directory_value(df.at[row_idx, "SoundCloud Link"])
+            if not current_sc:
+                for social_url in sorted(new_socials):
+                    canonical_sc = canonicalize_soundcloud_profile_url(social_url)
+                    if canonical_sc:
+                        df.at[row_idx, "SoundCloud Link"] = canonical_sc
+                        break
 
         def _set_email_provenance(source_url: str, source_type: str, method: str = "regex") -> None:
             if not source_url:
