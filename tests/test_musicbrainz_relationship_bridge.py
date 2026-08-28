@@ -335,6 +335,190 @@ def test_accepted_shared_bandcamp_result_enters_guarded_application(tmp_path, mo
     assert dataframe.at[0, "Lead_Source"] == "Spotify"
 
 
+def test_musicbrainz_bandcamp_challenge_uses_bounded_browser_and_guarded_apply(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("MUSICBRAINZ_RELATIONSHIP_BRIDGE_ENABLED", "1")
+    dataframe = pd.DataFrame([_row(
+        Identity_Evidence_JSON=_evidence(bandcamp=("https://artist-a.bandcamp.com",)),
+    )])
+    worker = _worker(tmp_path)
+    browser_calls = []
+    guarded_calls = []
+    monkeypatch.setattr(
+        worker,
+        "_bandcamp_browser_fetch",
+        lambda url: browser_calls.append(url) or "<html>usable artist page</html>",
+    )
+    monkeypatch.setattr(
+        worker,
+        "_fetch_url",
+        lambda *args, **kwargs: pytest.fail("generic fetch must remain unused"),
+    )
+
+    def shared(url, **kwargs):
+        assert kwargs["browser_on_empty"] is False
+        assert kwargs["browser_fetcher"](url) == "<html>usable artist page</html>"
+        return bpe.BandcampProfileResult(
+            bpe.PROFILE_ACCEPTED,
+            url,
+            profile={
+                "artist_name": "Artist A",
+                "email": "artist@example.com",
+                "emails": ["artist@example.com"],
+                "socials": {},
+            },
+            browser_used=True,
+            identity_evidence={"page_artist": "Artist A"},
+        )
+
+    monkeypatch.setattr(cde, "_shared_fetch_bandcamp_profile", shared)
+    original_guard = worker._apply_payload_guarded
+
+    def guarded(*args, **kwargs):
+        guarded_calls.append(args[2])
+        return original_guard(*args, **kwargs)
+
+    monkeypatch.setattr(worker, "_apply_payload_guarded", guarded)
+    assert worker._enrich_row_musicbrainz_relationships(
+        dataframe, 0, _ctx(worker, dataframe)
+    )
+    assert browser_calls == ["https://artist-a.bandcamp.com/"]
+    assert len(guarded_calls) == 1
+    assert guarded_calls[0].source_dir == "bandcamp"
+    assert dataframe.at[0, "Email"] == "artist@example.com"
+    assert dataframe.at[0, "Lead_Source"] == "Spotify"
+    assert worker.live_search_attempts == 1
+
+
+def test_usable_identity_contradiction_does_not_trigger_browser_retry(tmp_path, monkeypatch):
+    worker = _worker(tmp_path)
+    browser_calls = []
+    monkeypatch.setattr(
+        worker,
+        "_bandcamp_browser_fetch",
+        lambda url: browser_calls.append(url) or pytest.fail("identity rejection must not browse"),
+    )
+    monkeypatch.setattr(cde, "_shared_fetch_bandcamp_profile", lambda *args, **kwargs: bpe.BandcampProfileResult(
+        bpe.PROFILE_ACCEPTED,
+        "https://artist-a.bandcamp.com/",
+        profile={"artist_name": "Other Artist", "socials": {}, "emails": []},
+        browser_used=False,
+        identity_evidence={"page_artist": "Other Artist"},
+    ))
+    result = worker._fetch_musicbrainz_known_profile(
+        "bandcamp",
+        "https://artist-a.bandcamp.com/",
+        "Artist A",
+        {"song_title": ""},
+        allow_bandcamp_browser_fallback=True,
+    )
+    assert result.status == mbrb.KNOWN_PROFILE_IDENTITY_REJECTED
+    assert browser_calls == []
+    assert worker.live_search_attempts == 1
+
+
+def test_browser_challenge_remains_pending_and_consumes_one_unit(tmp_path, monkeypatch):
+    monkeypatch.setenv("MUSICBRAINZ_RELATIONSHIP_BRIDGE_ENABLED", "1")
+    dataframe = pd.DataFrame([_row(
+        Identity_Evidence_JSON=_evidence(bandcamp=("https://artist-a.bandcamp.com",)),
+    )])
+    worker = _worker(tmp_path)
+    worker.max_live_searches = 2
+    browser_calls = []
+    monkeypatch.setattr(
+        worker,
+        "_bandcamp_browser_fetch",
+        lambda url: browser_calls.append(url) or "<title>Client Challenge</title>",
+    )
+
+    def shared(url, **kwargs):
+        kwargs["browser_fetcher"](url)
+        return bpe.BandcampProfileResult(
+            bpe.PROFILE_CHALLENGE_UNAVAILABLE,
+            url,
+            reason="client_challenge_title",
+            browser_used=True,
+        )
+
+    monkeypatch.setattr(cde, "_shared_fetch_bandcamp_profile", shared)
+    assert not worker._enrich_row_musicbrainz_relationships(
+        dataframe, 0, _ctx(worker, dataframe)
+    )
+    assert browser_calls == ["https://artist-a.bandcamp.com/"]
+    assert worker.live_search_attempts == 1
+    assert worker._row_enrichment_state["bandcamp"] == "pending"
+    assert worker._increment_live_counter()
+
+
+def test_bandcamp_browser_owner_is_lazy_reused_and_cleaned_up(tmp_path, monkeypatch):
+    worker = _worker(tmp_path)
+
+    class Driver:
+        def __init__(self):
+            self.quit_calls = 0
+
+        def quit(self):
+            self.quit_calls += 1
+
+    driver = Driver()
+    setup_calls = []
+    visit_calls = []
+    monkeypatch.setattr(cde, "setup_bandcamp_driver", lambda: setup_calls.append(True) or driver)
+    monkeypatch.setattr(
+        cde,
+        "bandcamp_quick_visit",
+        lambda active_driver, url: visit_calls.append((active_driver, url)) or "<html>artist</html>",
+    )
+    assert worker._bandcamp_browser_fetch("https://one.bandcamp.com/") == "<html>artist</html>"
+    assert worker._bandcamp_browser_fetch("https://two.bandcamp.com/") == "<html>artist</html>"
+    worker._cleanup_bandcamp_browser_driver()
+    worker._cleanup_bandcamp_browser_driver()
+    assert setup_calls == [True]
+    assert [url for _, url in visit_calls] == [
+        "https://one.bandcamp.com/",
+        "https://two.bandcamp.com/",
+    ]
+    assert driver.quit_calls == 1
+
+
+def test_multiple_bandcamp_candidates_respect_global_budget_with_browser(tmp_path, monkeypatch):
+    monkeypatch.setenv("MUSICBRAINZ_RELATIONSHIP_BRIDGE_ENABLED", "1")
+    dataframe = pd.DataFrame([_row(
+        Identity_Evidence_JSON=_evidence(bandcamp=(
+            "https://one.bandcamp.com",
+            "https://two.bandcamp.com",
+        )),
+    )])
+    worker = _worker(tmp_path)
+    worker.max_live_searches = 1
+    shared_calls = []
+    browser_calls = []
+    monkeypatch.setattr(
+        worker,
+        "_bandcamp_browser_fetch",
+        lambda url: browser_calls.append(url) or "<title>Client Challenge</title>",
+    )
+
+    def shared(url, **kwargs):
+        shared_calls.append(url)
+        kwargs["browser_fetcher"](url)
+        return bpe.BandcampProfileResult(
+            bpe.PROFILE_CHALLENGE_UNAVAILABLE,
+            url,
+            reason="client_challenge_title",
+            browser_used=True,
+        )
+
+    monkeypatch.setattr(cde, "_shared_fetch_bandcamp_profile", shared)
+    assert not worker._enrich_row_musicbrainz_relationships(
+        dataframe, 0, _ctx(worker, dataframe)
+    )
+    assert len(shared_calls) == 1
+    assert len(browser_calls) == 1
+    assert worker.live_search_attempts == 1
+
+
 def test_mayce_macy_kate_gate_prevents_shared_bandcamp_fetch(tmp_path, monkeypatch):
     monkeypatch.setenv("MUSICBRAINZ_RELATIONSHIP_BRIDGE_ENABLED", "1")
     dataframe = pd.DataFrame([_row(
@@ -438,7 +622,7 @@ def test_enabled_known_bandcamp_and_soundcloud_use_guarded_payloads_and_preserve
     worker = _worker(tmp_path)
     fetched = []
 
-    def fake_fetch(platform, url, artist, ctx):
+    def fake_fetch(platform, url, artist, ctx, **kwargs):
         fetched.append((platform, url))
         return _accepted(cde.EnrichmentPayload(
             source_dir=platform,
@@ -494,7 +678,7 @@ def test_multiple_independently_accepted_candidates_remain_unresolved(tmp_path, 
     monkeypatch.setattr(
         worker,
         "_fetch_musicbrainz_known_profile",
-        lambda platform, url, artist, ctx: _accepted(cde.EnrichmentPayload(
+        lambda platform, url, artist, ctx, **kwargs: _accepted(cde.EnrichmentPayload(
             source_dir=platform, source_url=url, match_score=1.0, candidate_name=artist
         )),
     )
@@ -565,7 +749,7 @@ def test_unsafe_email_status_is_not_upgraded_by_valid_identity(tmp_path, monkeyp
     monkeypatch.setattr(
         worker,
         "_fetch_musicbrainz_known_profile",
-        lambda platform, url, artist, ctx: _accepted(cde.EnrichmentPayload(
+        lambda platform, url, artist, ctx, **kwargs: _accepted(cde.EnrichmentPayload(
             source_dir=platform, source_url=url, match_score=1.0, candidate_name=artist
         )),
     )

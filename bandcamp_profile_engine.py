@@ -601,14 +601,15 @@ def fetch_bandcamp_profile(
     *,
     session: Optional[requests.Session] = None,
     browser_fetcher: Optional[Callable[[str], str]] = None,
+    browser_on_empty: bool = True,
     seed_primary_genre: str = "",
     timeout: Tuple[float, float] = (6, 15),
 ) -> BandcampProfileResult:
     """Acquire and parse one known Bandcamp artist profile.
 
-    A browser callback is attempted at most once, only after an unavailable
-    HTTP result.  Challenge pages remain neutral and are never treated as an
-    identity contradiction.
+    A browser callback is attempted at most once after a challenge, or after
+    an empty/error response when ``browser_on_empty`` is enabled. Challenge
+    pages remain neutral and are never treated as an identity contradiction.
     """
     canonical_url = canonicalize_bandcamp_profile_url(profile_url)
     if not canonical_url:
@@ -626,8 +627,9 @@ def fetch_bandcamp_profile(
         request_reason = f"network_error:{type(exc).__name__}"
 
     challenge = bandcamp_challenge_reason(html_text)
+    http_challenge = bool(challenge)
     browser_used = False
-    if browser_fetcher and (not html_text or challenge):
+    if browser_fetcher and (challenge or (browser_on_empty and not html_text)):
         browser_used = True
         try:
             browser_html = browser_fetcher(canonical_url) or ""
@@ -665,8 +667,17 @@ def fetch_bandcamp_profile(
             PROFILE_ERROR, canonical_url, reason="profile_parse_failed",
             http_status=status, browser_used=browser_used,
         )
+    identity_evidence = _identity_evidence(html_text, profile)
+    if browser_used and http_challenge and not identity_evidence.get("page_artist"):
+        return BandcampProfileResult(
+            PROFILE_CHALLENGE_UNAVAILABLE,
+            canonical_url,
+            reason="browser_profile_unavailable",
+            http_status=status,
+            browser_used=True,
+        )
     return BandcampProfileResult(
         PROFILE_ACCEPTED, canonical_url, profile=profile,
         http_status=status, browser_used=browser_used,
-        identity_evidence=_identity_evidence(html_text, profile),
+        identity_evidence=identity_evidence,
     )

@@ -1144,6 +1144,8 @@ _FB_DRIVER_LOCK = threading.Lock()
 setup_facebook_driver = None
 fb_scrape_emails_from_page = None
 fb_find_page_and_emails_by_name = None
+setup_bandcamp_driver = None
+bandcamp_quick_visit = None
 if os.path.exists(FACEBOOK_HELPERS_PATH):
     try:
         spec = importlib.util.spec_from_file_location(
@@ -1155,10 +1157,14 @@ if os.path.exists(FACEBOOK_HELPERS_PATH):
             setup_facebook_driver = getattr(module, "setup_facebook_driver", None)
             fb_scrape_emails_from_page = getattr(module, "fb_scrape_emails_from_page", None)
             fb_find_page_and_emails_by_name = getattr(module, "fb_find_page_and_emails_by_name", None)
+            setup_bandcamp_driver = getattr(module, "setup_driver", None)
+            bandcamp_quick_visit = getattr(module, "_bandcamp_quick_visit", None)
     except Exception:
         setup_facebook_driver = None
         fb_scrape_emails_from_page = None
         fb_find_page_and_emails_by_name = None
+        setup_bandcamp_driver = None
+        bandcamp_quick_visit = None
 
 
 def normalize_external_url(u: str) -> str:
@@ -12376,6 +12382,8 @@ class CrossDirectoryEnricherWorker(QThread):
         self.max_live_searches = max_live_searches
         self.session = _build_session()
         self._bc_session = _build_bandcamp_session()
+        self._bandcamp_browser_driver = None
+        self._bandcamp_browser_disabled = False
         self.live_search_attempts = 0
         self._notified_limit = False
         self._sc_live_enrich_disabled: bool = False
@@ -12495,10 +12503,39 @@ class CrossDirectoryEnricherWorker(QThread):
             self.log_message.emit(f"[Enricher] Error: {exc}")
             self.finished.emit("")
         finally:
+            self._cleanup_bandcamp_browser_driver()
             try:
                 self.session.close()
             except Exception:
                 pass
+
+    def _bandcamp_browser_fetch(self, profile_url: str) -> str:
+        """Use the GUI's existing quick-visit seam with one lazy run-scoped driver."""
+        if self._bandcamp_browser_disabled:
+            return ""
+        if not callable(setup_bandcamp_driver) or not callable(bandcamp_quick_visit):
+            self._bandcamp_browser_disabled = True
+            return ""
+        if self._bandcamp_browser_driver is None:
+            try:
+                self._bandcamp_browser_driver = setup_bandcamp_driver()
+            except Exception as exc:
+                self._bandcamp_browser_disabled = True
+                self.log_message.emit(
+                    f"[MusicBrainz Bridge] Bandcamp browser unavailable reason={type(exc).__name__}"
+                )
+                return ""
+        return bandcamp_quick_visit(self._bandcamp_browser_driver, profile_url) or ""
+
+    def _cleanup_bandcamp_browser_driver(self) -> None:
+        driver = self._bandcamp_browser_driver
+        self._bandcamp_browser_driver = None
+        if driver is None:
+            return
+        try:
+            driver.quit()
+        except Exception:
+            pass
 
     def _emit_runtime_reset_log(self, message: str) -> None:
         if not message:
@@ -13562,6 +13599,7 @@ class CrossDirectoryEnricherWorker(QThread):
                 self.log_message.emit(f"[DomainOrg] failed to write sidecar safely: {exc}")
             self.finished.emit(self.output_csv_path)
         finally:
+            self._cleanup_bandcamp_browser_driver()
             _cleanup_enricher_facebook_driver()
 
     def _record_enrichment_yield(
@@ -15507,6 +15545,8 @@ class CrossDirectoryEnricherWorker(QThread):
         profile_url: str,
         artist_name: str,
         ctx: Dict[str, Any],
+        *,
+        allow_bandcamp_browser_fallback: bool = False,
     ) -> KnownProfileFetchResult:
         """Fetch a known URL through the existing platform parser with identity validation."""
         if not self._increment_live_counter():
@@ -15518,6 +15558,12 @@ class CrossDirectoryEnricherWorker(QThread):
             result = _shared_fetch_bandcamp_profile(
                 profile_url,
                 session=self._bc_session,
+                browser_fetcher=(
+                    self._bandcamp_browser_fetch
+                    if allow_bandcamp_browser_fallback
+                    else None
+                ),
+                browser_on_empty=False,
             )
             if result.status == BANDCAMP_PROFILE_CHALLENGE_UNAVAILABLE:
                 return KnownProfileFetchResult(
@@ -15750,12 +15796,21 @@ class CrossDirectoryEnricherWorker(QThread):
                 continue
             accepted = []
             for candidate_url in candidates:
-                result = self._fetch_musicbrainz_known_profile(
-                    platform,
-                    candidate_url,
-                    ctx["artist"],
-                    ctx,
-                )
+                if platform == "bandcamp":
+                    result = self._fetch_musicbrainz_known_profile(
+                        platform,
+                        candidate_url,
+                        ctx["artist"],
+                        ctx,
+                        allow_bandcamp_browser_fallback=True,
+                    )
+                else:
+                    result = self._fetch_musicbrainz_known_profile(
+                        platform,
+                        candidate_url,
+                        ctx["artist"],
+                        ctx,
+                    )
                 if result.status == KNOWN_PROFILE_ACCEPTED and result.payload:
                     accepted.append(result.payload)
                 elif result.status == KNOWN_PROFILE_CHALLENGE_UNAVAILABLE:

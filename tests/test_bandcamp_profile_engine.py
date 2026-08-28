@@ -121,6 +121,85 @@ def test_browser_fallback_is_bounded_and_challenge_remains_neutral():
     assert calls == ["https://artist-a.bandcamp.com/"]
 
 
+def test_usable_http_page_does_not_invoke_browser_callback():
+    calls = []
+    result = bpe.fetch_bandcamp_profile(
+        "https://artist-a.bandcamp.com/",
+        session=_Session(_Response(ARTIST_HTML)),
+        browser_fetcher=lambda url: calls.append(url) or "",
+    )
+    assert result.status == bpe.PROFILE_ACCEPTED
+    assert result.browser_used is False
+    assert calls == []
+
+
+def test_challenge_browser_success_uses_same_rich_parser():
+    calls = []
+    result = bpe.fetch_bandcamp_profile(
+        "https://artist-a.bandcamp.com/",
+        session=_Session(_Response("<title>Client Challenge</title>")),
+        browser_fetcher=lambda url: calls.append(url) or ARTIST_HTML,
+        browser_on_empty=False,
+    )
+    assert result.status == bpe.PROFILE_ACCEPTED
+    assert result.browser_used is True
+    assert calls == ["https://artist-a.bandcamp.com/"]
+    assert result.profile["artist_name"] == "Artist A"
+    assert result.profile["location"] == "Melbourne, Australia"
+    assert result.profile["emails"] == ["artist@example.com"]
+
+
+def test_browser_callback_failure_preserves_challenge_unavailable():
+    def fail(_url):
+        raise RuntimeError("driver unavailable")
+
+    result = bpe.fetch_bandcamp_profile(
+        "https://artist-a.bandcamp.com/",
+        session=_Session(_Response("<title>Client Challenge</title>")),
+        browser_fetcher=fail,
+        browser_on_empty=False,
+    )
+    assert result.status == bpe.PROFILE_CHALLENGE_UNAVAILABLE
+    assert result.reason == "client_challenge_title"
+    assert result.browser_used is True
+
+
+def test_browser_non_artist_html_after_challenge_remains_unavailable():
+    result = bpe.fetch_bandcamp_profile(
+        "https://artist-a.bandcamp.com/",
+        session=_Session(_Response("<title>Client Challenge</title>")),
+        browser_fetcher=lambda _url: "<html><body>Temporary service page</body></html>",
+        browser_on_empty=False,
+    )
+    assert result.status == bpe.PROFILE_CHALLENGE_UNAVAILABLE
+    assert result.reason == "browser_profile_unavailable"
+    assert result.browser_used is True
+
+
+def test_challenge_without_browser_callback_has_no_selenium_dependency():
+    result = bpe.fetch_bandcamp_profile(
+        "https://artist-a.bandcamp.com/",
+        session=_Session(_Response("<title>Client Challenge</title>")),
+        browser_fetcher=None,
+        browser_on_empty=False,
+    )
+    assert result.status == bpe.PROFILE_CHALLENGE_UNAVAILABLE
+    assert result.browser_used is False
+
+
+def test_challenge_only_mode_does_not_browse_after_network_error():
+    calls = []
+    result = bpe.fetch_bandcamp_profile(
+        "https://artist-a.bandcamp.com/",
+        session=_Session(error=requests.ConnectionError("offline")),
+        browser_fetcher=lambda url: calls.append(url) or ARTIST_HTML,
+        browser_on_empty=False,
+    )
+    assert result.status == bpe.PROFILE_ERROR
+    assert result.browser_used is False
+    assert calls == []
+
+
 def test_gui_parser_adapter_matches_shared_profile_fields():
     path = Path(__file__).resolve().parents[1] / "Lead Machine (Final Update 5).py"
     spec = importlib.util.spec_from_file_location("lead_machine_bandcamp_parity", path)
