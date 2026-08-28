@@ -39,6 +39,10 @@ from source_scheduler import (
     promote_facebook_url,
     soundcloud_handle_from_profile_url as _shared_soundcloud_handle_from_profile_url,
 )
+from musicbrainz_relationship_bridge import (
+    build_relationship_bridge_plan,
+    musicbrainz_relationship_bridge_enabled,
+)
 import html_fetcher
 from html_fetcher import fetch_html, _detect_soft_block
 from selenium import webdriver
@@ -9872,6 +9876,20 @@ def _canonicalise_bandcamp_url(value: str) -> str:
     return _shared_canonicalize_bandcamp_url(value)
 
 
+def _canonicalise_musicbrainz_bandcamp_url(value: str) -> str:
+    canonical = _canonicalise_bandcamp_url(value or "")
+    if not canonical:
+        return ""
+    try:
+        parsed = urllib.parse.urlparse(canonical)
+    except Exception:
+        return ""
+    host = (parsed.netloc or "").lower()
+    if host.startswith("www."):
+        host = host[4:]
+    return f"https://{host}/" if host.endswith(".bandcamp.com") else ""
+
+
 def _split_pipe_cell(value, is_email: bool = False) -> Set[str]:
     if value is None:
         return set()
@@ -12140,6 +12158,25 @@ def _is_valid_unearthed_soundcloud_url(value: str) -> bool:
         return bool((parsed.path or "").strip("/"))
     handle = _sc_handle_from_profile_url(normalised)
     return bool(handle and handle not in _UNEARTHED_SC_RESERVED_HANDLES)
+
+
+def _canonicalise_musicbrainz_soundcloud_url(value: str) -> str:
+    normalised = _normalise_url(value or "")
+    if not normalised:
+        return ""
+    try:
+        parsed = urllib.parse.urlparse(normalised)
+    except Exception:
+        return ""
+    host = (parsed.netloc or "").lower()
+    if host.startswith("www."):
+        host = host[4:]
+    if host != "soundcloud.com":
+        return ""
+    handle = _sc_handle_from_profile_url(normalised)
+    if not handle or handle in _UNEARTHED_SC_RESERVED_HANDLES:
+        return ""
+    return f"https://soundcloud.com/{handle}"
 
 
 def _is_valid_unearthed_bandcamp_url(value: str) -> bool:
@@ -15435,6 +15472,82 @@ class CrossDirectoryEnricherWorker(QThread):
                 )
         return enriched
 
+    def _fetch_musicbrainz_known_profile(
+        self,
+        platform: str,
+        profile_url: str,
+        artist_name: str,
+        ctx: Dict[str, Any],
+    ) -> Optional[EnrichmentPayload]:
+        """Fetch a known URL through the existing platform parser with identity validation."""
+        if not self._increment_live_counter():
+            return None
+        return self._fetch_profile_and_build(
+            profile_url,
+            platform,
+            identity_artist_name=artist_name,
+            identity_song_title=_clean_cell(ctx.get("song_title", "")),
+        )
+
+    def _enrich_row_musicbrainz_relationships(self, seed_df, row_idx, ctx) -> bool:
+        if not musicbrainz_relationship_bridge_enabled():
+            return False
+        row = seed_df.loc[row_idx]
+        if not self._row_is_spotify_origin(row, ctx):
+            return False
+        plan = build_relationship_bridge_plan(
+            row,
+            normalize_name=normalise_artist_name,
+            canonicalize_bandcamp=_canonicalise_musicbrainz_bandcamp_url,
+            canonicalize_soundcloud=_canonicalise_musicbrainz_soundcloud_url,
+            valid_bandcamp=_is_valid_unearthed_bandcamp_url,
+            valid_soundcloud=lambda value: bool(_canonicalise_musicbrainz_soundcloud_url(value)),
+        )
+        if not plan.eligible:
+            self.log_message.emit(
+                f"[MusicBrainz Bridge] skipped artist={ctx['artist']!r} reason={plan.reason}"
+            )
+            return False
+
+        enriched = False
+        platform_candidates = (
+            ("bandcamp", plan.bandcamp_urls, "Bandcamp_URL"),
+            ("soundcloud", plan.soundcloud_urls, "SoundCloud Link"),
+        )
+        for platform, candidates, target_column in platform_candidates:
+            if not candidates:
+                continue
+            if target_column in seed_df.columns and _coerce_directory_value(seed_df.at[row_idx, target_column]):
+                continue
+            accepted = []
+            for candidate_url in candidates:
+                payload = self._fetch_musicbrainz_known_profile(
+                    platform,
+                    candidate_url,
+                    ctx["artist"],
+                    ctx,
+                )
+                if payload:
+                    accepted.append(payload)
+            if len(accepted) != 1:
+                if len(accepted) > 1:
+                    self.log_message.emit(
+                        f"[MusicBrainz Bridge] unresolved {platform} candidates "
+                        f"artist={ctx['artist']!r} accepted={len(accepted)}"
+                    )
+                continue
+            applied = self._apply_payload_guarded(
+                seed_df,
+                row_idx,
+                accepted[0],
+                ctx["artist"],
+                spotify_id=ctx.get("spotify_id", ""),
+            )
+            if applied:
+                self._set_platform_state(platform, "matched")
+                enriched = True
+        return enriched
+
     def _enrich_row_sc_live(self, seed_df, row_idx, ctx):
         """Dedicated SoundCloud live check for a single row.
 
@@ -16778,6 +16891,8 @@ class CrossDirectoryEnricherWorker(QThread):
         try:
             # Phase 0: Directory matching (fast, no network)
             self._phase_directory_matching(seed_df, directory_indexes, priority, total, row_ids=row_ids)
+            if self.enable_live_search:
+                self._phase_musicbrainz_relationships(seed_df, total, row_ids=row_ids)
             if use_scheduler:
                 # Keep IG extraction outside the scheduler as a bounded single-page pass.
                 self._phase_spotify_discovery(seed_df, total, fb_driver=fb_driver, row_ids=row_ids)
@@ -16877,6 +16992,7 @@ class CrossDirectoryEnricherWorker(QThread):
                 if not bypass_shared:
                     enriched = self._enrich_row_directories(seed_df, row_idx, directory_indexes, priority, ctx)
                     if self.enable_live_search:
+                        enriched |= self._enrich_row_musicbrainz_relationships(seed_df, row_idx, ctx)
                         sc_enriched, skip_rest = self._enrich_row_sc_live(seed_df, row_idx, ctx)
                         enriched |= sc_enriched
                         if skip_rest:
@@ -17336,6 +17452,30 @@ class CrossDirectoryEnricherWorker(QThread):
             f"skipped_disabled={skipped_disabled}, deferred={len(deferred_rows)})"
         )
         return deferred_rows
+
+    def _phase_musicbrainz_relationships(
+        self,
+        seed_df,
+        total,
+        row_ids: Optional[Iterable[Any]] = None,
+    ) -> None:
+        if not musicbrainz_relationship_bridge_enabled():
+            return
+        enriched_count = 0
+        for row_idx in self._selected_row_ids(seed_df, row_ids):
+            position = seed_df.index.get_loc(row_idx) + 1
+            if self._should_bypass_unearthed_shared_enrichers(row_idx):
+                continue
+            ctx = self._build_row_context(seed_df, row_idx, position, total)
+            if not ctx or self._should_short_circuit_after_domain_reuse(seed_df, row_idx, ctx):
+                continue
+            self._init_row_enrichment_state()
+            if self._enrich_row_musicbrainz_relationships(seed_df, row_idx, ctx):
+                enriched_count += 1
+        self.log_message.emit(
+            f"[MusicBrainz Bridge] completed rows={len(self._selected_row_ids(seed_df, row_ids))} "
+            f"enriched={enriched_count}"
+        )
 
     def _phase_spotify_discovery(self, seed_df, total, fb_driver=None, row_ids: Optional[Iterable[Any]] = None):
         self.log_message.emit("[Enricher][Spotify Discovery] Starting...")
@@ -21427,7 +21567,12 @@ class CrossDirectoryEnricherWorker(QThread):
         return canonical
 
     def _fetch_profile_and_build(
-        self, profile_url: str, source_dir: str, confidence: Optional[float] = None
+        self,
+        profile_url: str,
+        source_dir: str,
+        confidence: Optional[float] = None,
+        identity_artist_name: str = "",
+        identity_song_title: str = "",
     ) -> Optional[EnrichmentPayload]:
         self.log_message.emit(f"[Enricher] Fetching {source_dir} profile: {profile_url}")
         self._last_resolved_profile_url = profile_url
@@ -21437,6 +21582,52 @@ class CrossDirectoryEnricherWorker(QThread):
         fetched_ok = bool(html)
         if not fetched_ok:
             return None
+        identity_candidate_name = ""
+        identity_match_score = 0.0
+        if identity_artist_name and source_dir == "bandcamp":
+            identity_candidate_name = _bc_slug_extract_page_artist_text(html)
+            identity_match_score = _bandcamp_confidence(
+                identity_artist_name,
+                identity_candidate_name,
+                profile_url,
+                song_title=identity_song_title,
+            )
+            if (
+                identity_match_score < MIN_BC_CONFIDENCE
+                or not _bc_slug_has_strong_artist_name_confirmation(
+                    identity_artist_name,
+                    identity_candidate_name,
+                )
+            ):
+                self.log_message.emit(
+                    f"[MusicBrainz Bridge] rejected Bandcamp identity url={profile_url}"
+                )
+                return None
+            confidence = identity_match_score
+        elif identity_artist_name and source_dir == "soundcloud":
+            try:
+                identity_soup = BeautifulSoup(html, "html.parser")
+                identity_meta = identity_soup.find("meta", attrs={"property": "og:title"})
+                identity_candidate_name = _clean_cell(identity_meta.get("content", "")) if identity_meta else ""
+                if not identity_candidate_name:
+                    identity_title = identity_soup.find("title")
+                    identity_candidate_name = identity_title.get_text(" ", strip=True) if identity_title else ""
+                identity_candidate_name = re.split(r"\s+[|\u2013\u2014]\s+", identity_candidate_name, maxsplit=1)[0].strip()
+            except Exception:
+                identity_candidate_name = ""
+            handle = _sc_handle_from_profile_url(profile_url) or ""
+            identity_match_score = _sc_score_candidate(
+                identity_artist_name,
+                identity_candidate_name,
+                handle,
+                profile_url=profile_url,
+                song_title=identity_song_title,
+            )
+            if identity_match_score < MIN_SC_CONFIDENCE:
+                self.log_message.emit(
+                    f"[MusicBrainz Bridge] rejected SoundCloud identity url={profile_url}"
+                )
+                return None
         if source_dir == "lastfm":
             profile_url = self._lf_resolve_canonical_profile_url(profile_url, html)
             self._last_resolved_profile_url = profile_url
@@ -21572,6 +21763,8 @@ class CrossDirectoryEnricherWorker(QThread):
                         source_url=canonical_url,
                         source_detail=_format_source_display(source_dir),
                         related_artists=related_artists,
+                        match_score=identity_match_score,
+                        candidate_name=identity_candidate_name,
                     )
                     self.log_message.emit(
                         f"[Enricher] Bandcamp: safe match but no actionable fields; returning url-only payload url={canonical_url}"
@@ -21588,6 +21781,8 @@ class CrossDirectoryEnricherWorker(QThread):
             source_url=profile_url,
             source_detail=_format_source_display(live_key),
             related_artists=related_artists,
+            match_score=identity_match_score,
+            candidate_name=identity_candidate_name,
         )
         return payload
 

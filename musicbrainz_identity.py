@@ -302,7 +302,7 @@ class MusicBrainzClient:
         mbid = candidate_mbids[0]
         artist_status, artist_payload = self._request_json(
             f"artist/{mbid}",
-            {"inc": "url-rels", "fmt": "json"},
+            {"inc": "url-rels+aliases", "fmt": "json"},
         )
         if artist_status != "ok":
             return MusicBrainzIdentityResult(
@@ -325,6 +325,20 @@ class MusicBrainzClient:
             for key in ("name", "sort-name", "disambiguation", "type", "country")
             if artist_payload.get(key) not in (None, "")
         }
+        aliases = artist_payload.get("aliases", [])
+        if isinstance(aliases, list):
+            compact_aliases = []
+            for alias in aliases:
+                if not isinstance(alias, dict) or not _clean(alias.get("name")):
+                    continue
+                compact_alias = {"name": _clean(alias.get("name"))}
+                if _clean(alias.get("sort-name")):
+                    compact_alias["sort-name"] = _clean(alias.get("sort-name"))
+                if alias.get("primary") is not None:
+                    compact_alias["primary"] = bool(alias.get("primary"))
+                compact_aliases.append(compact_alias)
+            if compact_aliases:
+                artist["aliases"] = compact_aliases
         return MusicBrainzIdentityResult(
             spotify_id,
             spotify_url,

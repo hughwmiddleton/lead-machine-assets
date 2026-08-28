@@ -57,6 +57,7 @@ def _artist_payload(mbid=MBID):
         "name": "Artist A",
         "sort-name": "Artist A",
         "country": "AU",
+        "aliases": [{"name": "Artist Alpha", "sort-name": "Artist Alpha", "primary": True}],
         "relations": [
             {
                 "target-type": "url",
@@ -141,7 +142,10 @@ def test_exact_spotify_url_relationship_resolves_unique_artist_mbid():
         "fmt": "json",
     }
     assert session.calls[1][0].endswith(f"/artist/{MBID}")
-    assert session.calls[1][1]["params"] == {"inc": "url-rels", "fmt": "json"}
+    assert session.calls[1][1]["params"] == {"inc": "url-rels+aliases", "fmt": "json"}
+    assert result.artist["aliases"] == [
+        {"name": "Artist Alpha", "sort-name": "Artist Alpha", "primary": True}
+    ]
     assert sleeps == [1.0]
 
 
