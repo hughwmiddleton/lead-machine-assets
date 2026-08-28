@@ -215,3 +215,119 @@ def test_gui_parser_adapter_matches_shared_profile_fields():
         "latest_release_precision", "sounds_like", "primary_genre",
     ):
         assert gui[field] == shared[field]
+
+
+HYGIENE_HTML = """
+<html>
+  <head>
+    <meta property="og:site_name" content="Hygiene Artist">
+    <meta name="keywords" content="indie pop, synth pop">
+  </head>
+  <body>
+    <div class="location">leeds, uk</div>
+    <a href="https://f4.bcbits.com/img/a123_10.jpg">Artwork</a>
+    <a href="https://static.example.test/assets/logo.svg">Asset</a>
+    <a href="https://hygieneartist.example/shows?utm_source=bandcamp">Official</a>
+    <a href="https://www.instagram.com/hygiene.artist/">Instagram</a>
+    <a href="https://instagram.com/p/not-a-profile">Post</a>
+    <a href="https://twitter.com/intent/tweet">Share</a>
+    <a href="https://facebook.com/sharer/sharer.php">Share</a>
+    <a href="https://www.tiktok.com/@hygieneartist">TikTok</a>
+    <a href="https://open.spotify.com/track/not-an-artist">Track</a>
+    <a href="https://discogs.com/artist/123">Database</a>
+    <a href="https://www.songkick.com/concerts/123-hygiene-artist">Event</a>
+    <a href="https://www.songkick.com/artists/123-hygiene-artist">Songkick artist</a>
+    <a href="https://linktr.ee/hygieneartist">Hub</a>
+    <div id="bio-container">
+      Contact one@example.com and bookings@example.org.
+      Instagram: Twitter. Twitter: Facebook. Instagram: discography.
+      Twitter: Nov. Instagram: tiktok.com.
+    </div>
+    <div class="tralbum-tags"><a>Indie Pop</a><a>Synth Pop</a></div>
+    <li class="music-grid-item">
+      <span class="title">Clean Release</span>
+      <span class="release-date">released June 4, 2026</span>
+    </li>
+  </body>
+</html>
+"""
+
+
+def test_bandcamp_parser_filters_assets_and_prefers_explicit_social_profiles():
+    profile = bpe.parse_bandcamp_profile_html(
+        "https://hygieneartist.bandcamp.com/", HYGIENE_HTML
+    )
+
+    assert profile["website"] == "https://hygieneartist.example/shows"
+    assert profile["socials"]["instagram"] == "https://www.instagram.com/hygiene.artist/"
+    assert profile["socials"]["twitter"] == ""
+    assert profile["socials"]["facebook"] == ""
+    assert profile["socials"]["tiktok"] == "https://www.tiktok.com/@hygieneartist"
+    assert profile["socials"]["songkick"] == "https://www.songkick.com/artists/123-hygiene-artist"
+    assert profile["socials"]["linktree"] == "https://linktr.ee/hygieneartist"
+    assert all("bcbits.com" not in value for value in profile["all_social_links"])
+    assert all("/assets/" not in value for value in profile["all_social_links"])
+    assert all("/concerts/" not in value for value in profile["all_social_links"])
+    assert all("open.spotify.com/track/" not in value for value in profile["all_social_links"])
+    assert all("discogs.com" not in value for value in profile["all_social_links"])
+
+
+def test_bandcamp_hygiene_preserves_email_and_profile_metadata_parity():
+    profile = bpe.parse_bandcamp_profile_html(
+        "https://hygieneartist.bandcamp.com/", HYGIENE_HTML
+    )
+
+    assert profile["artist_name"] == "Hygiene Artist"
+    assert profile["location"] == "Leeds, Uk"
+    assert set(profile["genres"]) == {"indie pop", "synth pop"}
+    assert profile["latest_release_title"] == "Clean Release"
+    assert profile["latest_release_date"] == "2026-06-04"
+    assert profile["email"] == "one@example.com"
+    assert profile["emails"] == ["one@example.com", "bookings@example.org"]
+
+
+def test_no_credible_artist_site_leaves_website_empty():
+    html = """
+    <meta property="og:site_name" content="No Website Artist">
+    <a href="https://f4.bcbits.com/img/a123_10.jpg">Artwork</a>
+    <a href="https://open.spotify.com/album/123">Streaming</a>
+    <a href="https://discogs.com/artist/123">Database</a>
+    <a href="https://www.songkick.com/concerts/123-artist">Event</a>
+    """
+    profile = bpe.parse_bandcamp_profile_html(
+        "https://nowebsite.bandcamp.com/", html
+    )
+    assert profile["website"] == ""
+    assert profile["all_social_links"] == []
+
+
+def test_legitimate_inferred_handle_is_kept_when_no_explicit_profile_exists():
+    html = """
+    <meta property="og:site_name" content="Handle Artist">
+    <div id="bio-container">Instagram: @legit.artist</div>
+    """
+    profile = bpe.parse_bandcamp_profile_html("https://handles.bandcamp.com/", html)
+    assert profile["socials"]["instagram"] == "https://instagram.com/legit.artist"
+
+
+def test_explicit_profile_is_not_overwritten_by_inferred_handle():
+    html = """
+    <meta property="og:site_name" content="Priority Artist">
+    <a href="https://instagram.com/priority.artist">Instagram</a>
+    <div id="bio-container">Instagram: @wrong.artist</div>
+    """
+    profile = bpe.parse_bandcamp_profile_html("https://priority.bandcamp.com/", html)
+    assert profile["socials"]["instagram"] == "https://instagram.com/priority.artist"
+
+
+def test_generic_and_domain_like_inferred_handles_are_rejected():
+    html = """
+    <meta property="og:site_name" content="Rejected Handles">
+    <div id="bio-container">
+      Instagram: Twitter. Twitter: Facebook. Instagram: discography.
+      Twitter: December. Instagram: tiktok.com.
+    </div>
+    """
+    profile = bpe.parse_bandcamp_profile_html("https://rejected.bandcamp.com/", html)
+    assert profile["socials"]["instagram"] == ""
+    assert profile["socials"]["twitter"] == ""

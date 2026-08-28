@@ -47,12 +47,55 @@ _SOCIAL_TEXT_RE = re.compile(
     rf"((?:https?://|www\.)?{_SOCIAL_HOSTS_PATTERN}[^\s\"'<)]+)", re.I
 )
 _HANDLE_HINTS = (
-    (re.compile(r"(?:instagram|ig)\s*[:\-]?\s*@?([a-z0-9._]{3,})", re.I),
+    (re.compile(r"(?:instagram|ig)\s*(?::|\-|@)\s*@?([a-z0-9._]{3,})", re.I),
      "https://instagram.com/{handle}"),
-    (re.compile(r"(?:twitter|x)\s*[:\-]?\s*@?([a-z0-9_]{3,})", re.I),
+    (re.compile(r"(?:twitter|x)\s*(?::|\-|@)\s*@?([a-z0-9_]{3,})", re.I),
      "https://twitter.com/{handle}"),
-    (re.compile(r"(?:tiktok)\s*[:\-]?\s*@?([a-z0-9._]{3,})", re.I),
+    (re.compile(r"(?:tiktok)\s*(?::|\-|@)\s*@?([a-z0-9._]{3,})", re.I),
      "https://www.tiktok.com/@{handle}"),
+)
+_ASSET_EXTENSIONS = frozenset({
+    ".avif", ".bmp", ".css", ".eot", ".gif", ".ico", ".jpeg", ".jpg",
+    ".js", ".map", ".mjs", ".otf", ".png", ".svg", ".tif", ".tiff",
+    ".ttf", ".webp", ".woff", ".woff2",
+})
+_ASSET_HOST_SUFFIXES = ("bcbits.com", "bandcamp.com", "bandcampcdn.com")
+_ASSET_PATH_MARKERS = ("/assets/", "/img/", "/image/", "/images/", "/static/")
+_GENERIC_HANDLE_TOKENS = frozenset({
+    "about", "account", "accounts", "artist", "artists", "bio", "contact",
+    "discography", "event", "events", "facebook", "follow", "help", "home",
+    "instagram", "legal", "link", "links", "login", "menu", "message",
+    "music", "news", "official", "privacy", "profile", "reel", "reels",
+    "share", "shop", "shows", "signup", "support", "terms", "tiktok",
+    "tour", "twitter", "website", "x",
+    "jan", "january", "feb", "february", "mar", "march", "apr", "april",
+    "may", "jun", "june", "jul", "july", "aug", "august", "sep",
+    "sept", "september", "oct", "october", "nov", "november", "dec",
+    "december",
+})
+_INSTAGRAM_ROUTE_TOKENS = frozenset({"accounts", "explore", "p", "reel", "reels", "stories"})
+_TWITTER_ROUTE_TOKENS = frozenset({"compose", "hashtag", "home", "i", "intent", "search", "share"})
+_FACEBOOK_ROUTE_TOKENS = frozenset({
+    "events", "groups", "help", "login", "marketplace", "reel", "reels",
+    "share", "sharer", "stories", "watch",
+})
+_LINK_HUB_ROUTE_TOKENS = frozenset({
+    "about", "admin", "blog", "features", "help", "legal", "login",
+    "marketplace", "pricing", "privacy", "s", "signup", "terms",
+})
+_LINK_HUB_HOST_SUFFIXES = (
+    "beacons.ai", "carrd.co", "flow.page", "hypeddit.com", "linktr.ee",
+    "lnk.to", "solo.to", "toneden.io", "withkoji.com",
+)
+_SOCIAL_HOST_SUFFIXES = (
+    "bandsintown.com", "facebook.com", "fb.me", "instagram.com", "spotify.com",
+    "songkick.com", "tiktok.com", "twitter.com", "x.com", "youtube.com", "youtu.be",
+    *_LINK_HUB_HOST_SUFFIXES,
+)
+_NON_WEBSITE_HOST_SUFFIXES = (
+    "bandsintown.com", "deezer.com", "discogs.com", "last.fm", "lastfm.com",
+    "music.apple.com", "musicbrainz.org", "open.spotify.com", "rateyourmusic.com",
+    "songkick.com", "soundcloud.com", "spotify.com",
 )
 _RELEASE_PATTERNS = (
     r"\breleased\s+([A-Za-z]+)\s+(\d{1,2}),\s*(\d{4})",
@@ -397,6 +440,119 @@ def _normalize_external_url(value: str) -> str:
     return re.sub(r"[?&]$", "", value)
 
 
+def _host_matches(host: str, domain: str) -> bool:
+    host = (host or "").lower().split(":", 1)[0]
+    domain = (domain or "").lower()
+    return host == domain or host.endswith("." + domain)
+
+
+def _url_parts(value: str) -> Tuple[str, Tuple[str, ...]]:
+    try:
+        parsed = urlparse(value)
+    except Exception:
+        return "", ()
+    host = (parsed.hostname or "").lower()
+    segments = tuple(unquote(part).strip() for part in (parsed.path or "").split("/") if part.strip())
+    return host, segments
+
+
+def _is_asset_url(value: str) -> bool:
+    try:
+        parsed = urlparse(value)
+    except Exception:
+        return True
+    host = (parsed.hostname or "").lower()
+    path = (parsed.path or "").lower()
+    if not host:
+        return True
+    if any(_host_matches(host, suffix) for suffix in _ASSET_HOST_SUFFIXES):
+        return True
+    if any(marker in path for marker in _ASSET_PATH_MARKERS):
+        return True
+    filename = path.rsplit("/", 1)[-1]
+    extension = "." + filename.rsplit(".", 1)[-1] if "." in filename else ""
+    return extension in _ASSET_EXTENSIONS
+
+
+def _valid_handle(handle: str, *, inferred: bool) -> bool:
+    clean = unquote(handle or "").strip().lstrip("@").lower()
+    if not clean or clean in _GENERIC_HANDLE_TOKENS:
+        return False
+    if not re.fullmatch(r"[a-z0-9._-]{2,64}", clean, re.I):
+        return False
+    if inferred and (
+        re.search(r"\.(?:com|net|org|co|io|fm|tv|band|music)$", clean)
+        or clean.startswith(("www.", "http"))
+    ):
+        return False
+    return True
+
+
+def _social_candidate(value: str, *, inferred: bool = False) -> Tuple[str, str]:
+    """Return a validated Bandcamp outbound social/profile candidate."""
+    host, segments = _url_parts(value)
+    if not host:
+        return "", ""
+    first = segments[0] if segments else ""
+    first_lower = first.lower()
+
+    if _host_matches(host, "instagram.com"):
+        if len(segments) != 1 or first_lower in _INSTAGRAM_ROUTE_TOKENS or not _valid_handle(first, inferred=inferred):
+            return "", ""
+        return "instagram", value
+    if _host_matches(host, "twitter.com") or _host_matches(host, "x.com"):
+        if len(segments) != 1 or first_lower in _TWITTER_ROUTE_TOKENS or not _valid_handle(first, inferred=inferred):
+            return "", ""
+        return "twitter", value
+    if _host_matches(host, "facebook.com") or host == "fb.me":
+        if len(segments) != 1 or first_lower in _FACEBOOK_ROUTE_TOKENS or not _valid_handle(first, inferred=inferred):
+            return "", ""
+        return "facebook", value
+    if _host_matches(host, "tiktok.com"):
+        handle = first.lstrip("@")
+        if len(segments) != 1 or not first.startswith("@") or not _valid_handle(handle, inferred=inferred):
+            return "", ""
+        return "tiktok", value
+    if _host_matches(host, "youtube.com") or host == "youtu.be":
+        if host == "youtu.be" or not segments:
+            return "", ""
+        if first_lower in {"watch", "shorts", "playlist", "results", "feed"}:
+            return "", ""
+        if first.startswith("@") or first_lower in {"channel", "c", "user"}:
+            return "youtube", value
+        return "", ""
+    if any(_host_matches(host, suffix) for suffix in _LINK_HUB_HOST_SUFFIXES):
+        if len(segments) != 1 or first_lower in _LINK_HUB_ROUTE_TOKENS or not _valid_handle(first, inferred=False):
+            return "", ""
+        return "linktree", value
+    if _host_matches(host, "spotify.com"):
+        if len(segments) >= 2 and first_lower == "artist":
+            return "spotify", value
+        return "", ""
+    if _host_matches(host, "bandsintown.com"):
+        if segments and first_lower in {"a", "artist", "artists"}:
+            return "bandsintown", value
+        return "", ""
+    if _host_matches(host, "songkick.com"):
+        if len(segments) >= 2 and first_lower == "artists":
+            return "songkick", value
+        return "", ""
+    return "", ""
+
+
+def _credible_website(value: str) -> bool:
+    if _is_asset_url(value):
+        return False
+    host, _ = _url_parts(value)
+    if not host or any(
+        _host_matches(host, suffix)
+        for suffix in (*_NON_WEBSITE_HOST_SUFFIXES, *_SOCIAL_HOST_SUFFIXES)
+    ):
+        return False
+    social_kind, _ = _social_candidate(value)
+    return not social_kind
+
+
 def _artist_name(soup: BeautifulSoup) -> str:
     site = soup.find("meta", attrs={"property": "og:site_name"})
     if site and site.get("content") and site["content"].strip():
@@ -438,7 +594,7 @@ def parse_bandcamp_profile_html(
         "email": "",
         "emails": [],
         "socials": {key: "" for key in (
-            "instagram", "twitter", "facebook", "youtube", "linktree",
+            "instagram", "twitter", "facebook", "tiktok", "youtube", "linktree",
             "spotify", "bandsintown", "songkick",
         )},
         "genres": genres,
@@ -459,6 +615,7 @@ def parse_bandcamp_profile_html(
     profile["location"] = _canonical_location(profile["location"])
     collected_links = []
     seen_links = set()
+    explicit_socials = set()
 
     def record_email(value: str) -> None:
         clean = (value or "").strip()
@@ -467,7 +624,7 @@ def parse_bandcamp_profile_html(
             if not profile["email"]:
                 profile["email"] = clean
 
-    def consume(candidate: str) -> None:
+    def consume(candidate: str, *, inferred: bool = False) -> None:
         candidate = (candidate or "").strip().strip("()[]{}<>.,; ")
         if not candidate:
             return
@@ -485,29 +642,23 @@ def parse_bandcamp_profile_html(
             candidate = "https://" + candidate
         normalized = _normalize_external_url(candidate)
         parsed = urlparse(normalized)
-        host = (parsed.netloc or "").lower()
+        host = (parsed.hostname or "").lower()
         if not parsed.scheme.startswith("http") or not host or host.endswith("bandcamp.com"):
             return
-        if normalized not in seen_links:
-            seen_links.add(normalized)
-            collected_links.append(normalized)
-        if "instagram.com" in host:
-            profile["socials"]["instagram"] = normalized
-        elif "facebook.com" in host or "fb.me" in host:
-            profile["socials"]["facebook"] = normalized
-        elif "twitter.com" in host or "x.com" in host:
-            profile["socials"]["twitter"] = normalized
-        elif "youtube.com" in host or "youtu.be" in host:
-            profile["socials"]["youtube"] = normalized
-        elif any(domain in host for domain in ("linktr.ee", "linktree", "withkoji.com", "beacons.ai")):
-            profile["socials"]["linktree"] = normalized
-        elif "spotify.com" in host:
-            profile["socials"]["spotify"] = normalized
-        elif "bandsintown.com" in host:
-            profile["socials"]["bandsintown"] = normalized
-        elif "songkick.com" in host:
-            profile["socials"]["songkick"] = normalized
-        elif not profile["website"]:
+        if _is_asset_url(normalized):
+            return
+        social_kind, social_url = _social_candidate(normalized, inferred=inferred)
+        if social_kind:
+            if inferred and social_kind in explicit_socials:
+                return
+            if not inferred:
+                explicit_socials.add(social_kind)
+            if not profile["socials"].get(social_kind) or not inferred:
+                profile["socials"][social_kind] = social_url
+            return
+        if inferred:
+            return
+        if _credible_website(normalized) and not profile["website"]:
             profile["website"] = normalized
 
     for anchor in soup.find_all("a", href=True):
@@ -528,7 +679,11 @@ def parse_bandcamp_profile_html(
             for handle in pattern.findall(block):
                 handle = handle.strip().lstrip("@").strip(".,/ ")
                 if handle:
-                    consume(template.format(handle=handle))
+                    consume(template.format(handle=handle), inferred=True)
+    for value in [profile["website"], *profile["socials"].values()]:
+        if value and value not in seen_links:
+            seen_links.add(value)
+            collected_links.append(value)
     profile["all_social_links"] = collected_links
 
     release_item = soup.find("li", class_=re.compile("music-grid-item", re.I))

@@ -300,6 +300,33 @@ def test_known_bandcamp_uses_shared_engine_not_generic_fetch_and_keeps_bandcamp_
     assert result.payload.socials == {"https://instagram.com/artist_a"}
 
 
+def test_link_hub_follow_excludes_application_shell_and_is_bounded():
+    external_socials = "".join(
+        f'<a href="https://instagram.com/artist_{index}">Artist social</a>'
+        for index in range(cde.MAX_LINK_HUB_SOCIALS_PER_ROW + 5)
+    )
+    html = (
+        '<a href="https://linktr.ee/blog">Blog</a>'
+        '<a href="https://linktr.ee/unrelated_creator">Other creator</a>'
+        '<a href="https://beacons.ai/unrelated_creator">Other hub</a>'
+        + external_socials
+    )
+
+    class Response:
+        text = html
+
+        @staticmethod
+        def raise_for_status():
+            return None
+
+    session = SimpleNamespace(get=lambda *args, **kwargs: Response())
+    result = cde._scrape_link_hub_socials(session, "https://linktr.ee/artist_a")
+
+    assert len(result) == cde.MAX_LINK_HUB_SOCIALS_PER_ROW
+    assert all("linktr.ee" not in value for value in result)
+    assert all("beacons.ai" not in value for value in result)
+
+
 def test_accepted_shared_bandcamp_result_enters_guarded_application(tmp_path, monkeypatch):
     monkeypatch.setenv("MUSICBRAINZ_RELATIONSHIP_BRIDGE_ENABLED", "1")
     dataframe = pd.DataFrame([_row(

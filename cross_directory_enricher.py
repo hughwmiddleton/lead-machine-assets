@@ -335,6 +335,7 @@ class ChunkYieldWindow:
 # ---------------------------------------------------------------------------
 LIVE_SEARCH_MAX_ATTEMPTS = 50  # 0 = no limit
 MAX_LINK_HUB_HOPS_PER_ROW = 1
+MAX_LINK_HUB_SOCIALS_PER_ROW = 12
 HTTP_TIMEOUT = 15
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -10758,6 +10759,7 @@ def _scrape_link_hub_socials(session: requests.Session, hub_url: str) -> Set[str
         print(f"[Enricher] Link hub fetch failed {hub_url}: {exc}")
         return socials
     soup = BeautifulSoup(resp.text, "html.parser")
+    hub_host = _host(hub_url)
     for anchor in soup.find_all("a", href=True):
         href = anchor.get("href", "").strip()
         if not href:
@@ -10767,8 +10769,14 @@ def _scrape_link_hub_socials(session: requests.Session, hub_url: str) -> Set[str
         if not normalised or _is_noise_url(normalised):
             continue
         host = _host(normalised)
+        # Link-hub application shells link to many unrelated public hub pages.
+        # Keep only bounded external account destinations for this specific hub.
+        if host == hub_host or host in LINK_HUB_HOSTS:
+            continue
         if any(host.endswith(domain) for domain in SOCIAL_HOST_WHITELIST):
             socials.add(normalised)
+            if len(socials) >= MAX_LINK_HUB_SOCIALS_PER_ROW:
+                break
     return socials
 
 
