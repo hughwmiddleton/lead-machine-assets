@@ -1881,6 +1881,7 @@ def test_spotify_discovery_pass_keeps_matched_bandcamp_terminal(tmp_path, monkey
         lambda: (_ for _ in ()).throw(AssertionError("matched bandcamp should stay terminal")),
     )
     monkeypatch.setattr(worker, "_night_sc_attempt_row", lambda *args, **kwargs: False)
+    monkeypatch.setattr(worker, "_run_spotify_seed_instagram_identity_recovery", lambda *args, **kwargs: False)
     monkeypatch.setattr(worker, "_live_search_lastfm", lambda _artist: None)
     monkeypatch.setattr(
         worker,
