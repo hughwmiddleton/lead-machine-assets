@@ -13,6 +13,7 @@ def _base_success_row(**overrides: str) -> dict[str, str]:
         "final_status": "WARN",
         "match_score_overall": "0.95",
         "name_consistency_flag": "1.0",
+        "name_consistency_flag_polarity": "consistent_is_1",
         "directory_conflict_flag": "0.0",
         "duplicate_email_flag": "0.0",
         "duplicate_artist_flag": "0.0",
@@ -95,6 +96,7 @@ def test_downgrades_origin_based_block_with_valid_email():
             "duplicate_email_flag": 0,
             "duplicate_artist_flag": 0,
             "name_consistency_flag": 1,
+            "name_consistency_flag_polarity": "consistent_is_1",
             "Email": "info@tandtheband.com",
             "Email_All": "",
         }
@@ -118,6 +120,7 @@ def test_duplicate_email_remains_block():
             "duplicate_email_flag": 1,
             "duplicate_artist_flag": 0,
             "name_consistency_flag": 1,
+            "name_consistency_flag_polarity": "consistent_is_1",
             "Email": "dupe@example.com",
         }
     )
@@ -139,6 +142,7 @@ def test_missing_email_remains_block():
             "duplicate_email_flag": 0,
             "duplicate_artist_flag": 0,
             "name_consistency_flag": 1,
+            "name_consistency_flag_polarity": "consistent_is_1",
             "Email": "",
             "Email_All": "",
         }
@@ -160,6 +164,7 @@ def test_short_name_domain_match_allows_downgrade():
             "duplicate_email_flag": 0,
             "duplicate_artist_flag": 0,
             "name_consistency_flag": 1,
+            "name_consistency_flag_polarity": "consistent_is_1",
             "Email": "hello@tandmusic.com",
             "Email_All": "",
         }
@@ -182,6 +187,7 @@ def test_post_enrich_respects_fb_reject_token():
             "duplicate_email_flag": 0,
             "duplicate_artist_flag": 0,
             "name_consistency_flag": 1,
+            "name_consistency_flag_polarity": "consistent_is_1",
             "Email": "ok@example.com",
             "Email_All": "ok@example.com",
             "FB_Status": "rejected_candidate",

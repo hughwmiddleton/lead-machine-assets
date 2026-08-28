@@ -140,6 +140,7 @@ def test_final_export_bridge_recomputes_post_enrichment_status_when_supported(tm
             "origin_match_flag": "0",
             "directory_conflict_flag": "0",
             "name_consistency_flag": "1",
+            "name_consistency_flag_polarity": "consistent_is_1",
             "duplicate_email_flag": "0",
             "duplicate_artist_flag": "0",
         }

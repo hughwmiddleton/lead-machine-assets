@@ -10200,9 +10200,12 @@ class NightModeFacebookEnricher:
             match_level_ctx = str(candidate_context.get("match_level") or "")
         name_consistency_flag_ctx: Optional[int] = None
         try:
-            raw_flag = row.get("name_consistency_flag")
-            if raw_flag is not None and raw_flag != "":
-                name_consistency_flag_ctx = int(raw_flag)
+            # Canonical read (1 = consistent). Legacy artifacts written before
+            # the polarity fix resolve to 0 or None rather than being trusted,
+            # so a stale row falls through to the match_level derivation below.
+            import final_checker
+
+            name_consistency_flag_ctx = final_checker.read_name_consistency_flag(row)
         except Exception:
             name_consistency_flag_ctx = None
         if name_consistency_flag_ctx is None:

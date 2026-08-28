@@ -1639,9 +1639,10 @@ def recompute_final_status_post_enrichment(df: pd.DataFrame, logger: LoggerFn = 
             dup_artist = _parse_intlike(row.get("duplicate_artist_flag", 0), 0)
             origin_flag = _parse_intlike(row.get("origin_match_flag", 1), 1)
             dir_conflict = _parse_intlike(row.get("directory_conflict_flag", 0), 0)
-            # name_consistency_flag: 1 = artist name consistent with its
-            # directory slugs, 0 = inconsistent (written by final_checker).
-            name_flag = _parse_intlike(row.get("name_consistency_flag", 0), 0)
+            # Canonical read: 1 = consistent, 0 = inconsistent, None = unknown.
+            # Legacy artifacts written before the polarity fix cannot drive a
+            # downgrade here, because they never resolve to 1.
+            name_flag = final_checker.read_name_consistency_flag(row)
 
             # Hard BLOCK guards. Contact safety is decided by the email's own
             # provenance: platform/support addresses, private-route surfaces and
@@ -1696,9 +1697,10 @@ def recompute_final_status_post_enrichment(df: pd.DataFrame, logger: LoggerFn = 
         )
         if any(str(row_dict.get(column, "") or "").strip() == "" for column in required_classifier_inputs):
             continue
-        name_consistency_flag = _parse_intlike(row_dict.get("name_consistency_flag", 0), 0)
+        name_consistency_flag = final_checker.read_name_consistency_flag(row_dict)
         flags = {
-            # Column is 1 = consistent; compute_final_status wants 1 = mismatch.
+            # Canonical column is 1 = consistent; compute_final_status wants
+            # 1 = mismatch. Unknown (legacy/ambiguous) is treated as mismatch.
             "name_flag": 0 if name_consistency_flag == 1 else 1,
             "dir_conflict_flag": _parse_intlike(row_dict.get("directory_conflict_flag", 0), 0),
             "dup_email_flag": _parse_intlike(row_dict.get("duplicate_email_flag", 0), 0),

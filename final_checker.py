@@ -187,6 +187,45 @@ def _optional_int_flag(value) -> Optional[int]:
         return None
 
 
+NAME_CONSISTENCY_FLAG_COL = "name_consistency_flag"
+NAME_CONSISTENCY_POLARITY_COL = "name_consistency_flag_polarity"
+NAME_CONSISTENCY_POLARITY_CONSISTENT_IS_1 = "consistent_is_1"
+
+
+def read_name_consistency_flag(row) -> Optional[int]:
+    """Read ``name_consistency_flag`` in canonical semantics: 1 = consistent.
+
+    Artifacts written before the polarity fix stored 1 = *mismatch*; artifacts
+    written after it carry ``name_consistency_flag_polarity`` and store
+    1 = consistent.  Absence of that marker therefore identifies a legacy
+    artifact explicitly, rather than guessing from the data.
+
+    Returns None when the value is absent, unparseable, or when a legacy value
+    cannot be mapped without guessing:
+
+    - marker present  -> the stored value is canonical, used as-is.
+    - marker absent, stored 1 -> 0. Legacy truth is "mismatch"; this is also the
+      safe reading if a marker were ever lost from a current artifact, because
+      it only forgoes a promotion.
+    - marker absent, stored 0 -> None. Ambiguous between "legacy: consistent"
+      and "current: inconsistent", so it is reported unknown, not guessed.
+
+    Net invariant: only an artifact carrying the polarity marker can drive a
+    name-consistency-based promotion.
+    """
+    if row is None or not hasattr(row, "get"):
+        return None
+    value = _optional_int_flag(row.get(NAME_CONSISTENCY_FLAG_COL, None))
+    if value is None:
+        return None
+    marker = _safe_lower(row.get(NAME_CONSISTENCY_POLARITY_COL, "")).strip()
+    if marker == NAME_CONSISTENCY_POLARITY_CONSISTENT_IS_1:
+        return 1 if value == 1 else 0
+    if value == 1:
+        return 0
+    return None
+
+
 ATTRIBUTION_NONE = ""
 ATTRIBUTION_UNSAFE = "unsafe"
 ATTRIBUTION_UNATTRIBUTED = "unattributed"
@@ -775,7 +814,10 @@ def run_final_checker(
         # column name and every reader (pipeline_runner, night_mode_fb). The
         # internal name_flag fed to compute_final_status is the inverse
         # (1 = mismatch) and is left untouched.
-        result_df["name_consistency_flag"] = [1 - flag for flag in name_flags]
+        result_df[NAME_CONSISTENCY_FLAG_COL] = [1 - flag for flag in name_flags]
+        # Stamp the polarity so downstream readers can tell this artifact from a
+        # pre-fix one without inspecting the data. See read_name_consistency_flag.
+        result_df[NAME_CONSISTENCY_POLARITY_COL] = NAME_CONSISTENCY_POLARITY_CONSISTENT_IS_1
         result_df["duplicate_email_flag"] = dup_email_flags
         result_df["duplicate_artist_flag"] = dup_artist_flags
         result_df["directory_conflict_flag"] = dir_conflict_flags

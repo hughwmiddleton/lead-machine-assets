@@ -348,6 +348,7 @@ def test_post_enrichment_repair_downgrades_directory_conflict_block_with_trusted
             "duplicate_email_flag": "0",
             "duplicate_artist_flag": "0",
             "name_consistency_flag": "1",
+            "name_consistency_flag_polarity": "consistent_is_1",
             "match_score_overall": "0.75",
         }
     )
@@ -368,6 +369,7 @@ def test_post_enrichment_repair_keeps_block_when_name_is_inconsistent() -> None:
             "duplicate_email_flag": "0",
             "duplicate_artist_flag": "0",
             "name_consistency_flag": "0",
+            "name_consistency_flag_polarity": "consistent_is_1",
             "match_score_overall": "0.5",
         }
     )
@@ -388,6 +390,7 @@ def test_post_enrichment_repair_does_not_rescue_rejected_fb_derived_email() -> N
             "duplicate_email_flag": "0",
             "duplicate_artist_flag": "0",
             "name_consistency_flag": "1",
+            "name_consistency_flag_polarity": "consistent_is_1",
             "match_score_overall": "0.75",
         }
     )
@@ -408,6 +411,7 @@ def test_post_enrichment_repair_rescues_non_fb_email_despite_fb_rejection() -> N
             "duplicate_email_flag": "0",
             "duplicate_artist_flag": "0",
             "name_consistency_flag": "1",
+            "name_consistency_flag_polarity": "consistent_is_1",
             "match_score_overall": "0.75",
         }
     )
