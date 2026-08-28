@@ -23,6 +23,12 @@ from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 from soundcloud_engine import SoundCloudEngine
 import soundcloud_engine as sc_engine
+from bandcamp_profile_engine import (
+    PROFILE_ACCEPTED as BANDCAMP_PROFILE_ACCEPTED,
+    PROFILE_CHALLENGE_UNAVAILABLE as BANDCAMP_PROFILE_CHALLENGE_UNAVAILABLE,
+    fetch_bandcamp_profile as _shared_fetch_bandcamp_profile,
+    bandcamp_challenge_reason as _shared_bandcamp_challenge_reason,
+)
 import pandas as pd
 import requests
 from bs4 import BeautifulSoup
@@ -9896,20 +9902,8 @@ def _canonicalise_musicbrainz_bandcamp_url(value: str) -> str:
 
 
 def _bandcamp_challenge_reason(html: str) -> str:
-    """Classify only deterministic Bandcamp challenge surfaces as unavailable."""
-    if not html:
-        return ""
-    if _detect_soft_block(html):
-        return "recognized_soft_block"
-    try:
-        soup = BeautifulSoup(html, "html.parser")
-        title = soup.find("title")
-        title_text = _clean_cell(title.get_text(" ", strip=True)) if title else ""
-    except Exception:
-        title_text = ""
-    if normalize_name(title_text) == "client challenge":
-        return "client_challenge_title"
-    return ""
+    """Compatibility adapter for the shared Bandcamp challenge classifier."""
+    return _shared_bandcamp_challenge_reason(html)
 
 
 def _split_pipe_cell(value, is_email: bool = False) -> Set[str]:
@@ -15519,6 +15513,81 @@ class CrossDirectoryEnricherWorker(QThread):
             return KnownProfileFetchResult(
                 KNOWN_PROFILE_ERROR,
                 reason="live_search_budget_exhausted",
+            )
+        if platform == "bandcamp":
+            result = _shared_fetch_bandcamp_profile(
+                profile_url,
+                session=self._bc_session,
+            )
+            if result.status == BANDCAMP_PROFILE_CHALLENGE_UNAVAILABLE:
+                return KnownProfileFetchResult(
+                    KNOWN_PROFILE_CHALLENGE_UNAVAILABLE,
+                    reason=result.reason or "bandcamp_profile_unavailable",
+                )
+            if result.status != BANDCAMP_PROFILE_ACCEPTED or not result.profile:
+                return KnownProfileFetchResult(
+                    KNOWN_PROFILE_ERROR,
+                    reason=result.reason or "profile_fetch_failed",
+                )
+
+            profile = result.profile
+            identity_candidate_name = _clean_cell(
+                (result.identity_evidence or {}).get("page_artist")
+                or profile.get("artist_name")
+            )
+            identity_match_score = _bandcamp_confidence(
+                artist_name,
+                identity_candidate_name,
+                result.canonical_url or profile_url,
+                song_title=_clean_cell(ctx.get("song_title", "")),
+            )
+            if (
+                identity_match_score < MIN_BC_CONFIDENCE
+                or not _bc_slug_has_strong_artist_name_confirmation(
+                    artist_name,
+                    identity_candidate_name,
+                )
+            ):
+                return KnownProfileFetchResult(
+                    KNOWN_PROFILE_IDENTITY_REJECTED,
+                    reason="artist_identity_contradiction",
+                )
+
+            socials = {
+                _normalise_url(value) or value
+                for value in (profile.get("socials") or {}).values()
+                if _normalise_url(value)
+            }
+            websites: Set[str] = set()
+            link_hubs: Set[str] = set()
+            for value in list(profile.get("all_social_links") or ()) + [profile.get("website", "")]:
+                normalized = _normalise_url(value)
+                if not normalized:
+                    continue
+                if _host(normalized) in LINK_HUB_HOSTS:
+                    link_hubs.add(normalized)
+                elif normalized not in socials:
+                    websites.add(normalized)
+            emails = {
+                _clean_cell(value).lower()
+                for value in list(profile.get("emails") or ()) + [profile.get("email", "")]
+                if _clean_cell(value)
+            }
+            payload = EnrichmentPayload(
+                socials=socials,
+                websites=websites,
+                emails=emails,
+                link_hubs=link_hubs,
+                source_dir="bandcamp",
+                source_url=result.canonical_url or profile_url,
+                source_detail="Bandcamp Live",
+                match_score=identity_match_score,
+                candidate_name=identity_candidate_name,
+            )
+            return KnownProfileFetchResult(
+                KNOWN_PROFILE_ACCEPTED,
+                payload=payload,
+                reason="strong:bandcamp_artist_identity",
             )
         payload = self._fetch_profile_and_build(
             profile_url,
