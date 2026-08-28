@@ -1630,10 +1630,6 @@ def recompute_final_status_post_enrichment(df: pd.DataFrame, logger: LoggerFn = 
 
         if status == "BLOCK":
             # Preserve the existing late BLOCK repair contract.
-            if "FB_Status" in df.columns:
-                fb_status_raw = str(row.get("FB_Status", "") or "")
-                if _fb_status_is_rejected(fb_status_raw):
-                    continue
             if "duplicate_email_flag" in df.columns and _truthy(row.get("duplicate_email_flag", 0)):
                 continue
             if "duplicate_artist_flag" in df.columns and _truthy(row.get("duplicate_artist_flag", 0)):
@@ -1643,11 +1639,17 @@ def recompute_final_status_post_enrichment(df: pd.DataFrame, logger: LoggerFn = 
             dup_artist = _parse_intlike(row.get("duplicate_artist_flag", 0), 0)
             origin_flag = _parse_intlike(row.get("origin_match_flag", 1), 1)
             dir_conflict = _parse_intlike(row.get("directory_conflict_flag", 0), 0)
+            # name_consistency_flag: 1 = artist name consistent with its
+            # directory slugs, 0 = inconsistent (written by final_checker).
             name_flag = _parse_intlike(row.get("name_consistency_flag", 0), 0)
 
-            # Hard BLOCK guards
-            fb_status_val = str(row.get("FB_Status", "") or "")
-            if _fb_status_is_rejected(fb_status_val):
+            # Hard BLOCK guards. Contact safety is decided by the email's own
+            # provenance: platform/support addresses, private-route surfaces and
+            # emails lifted from a rejected Facebook surface stay blocked. A
+            # Facebook rejection that did not produce this row's email is an
+            # enrichment failure, not a contact-safety failure, and must not
+            # condemn an email from an independent trusted source.
+            if final_checker.classify_contact_attribution(row) == final_checker.ATTRIBUTION_UNSAFE:
                 continue
             if dup_email == 1 or dup_artist == 1:
                 continue
@@ -1696,6 +1698,7 @@ def recompute_final_status_post_enrichment(df: pd.DataFrame, logger: LoggerFn = 
             continue
         name_consistency_flag = _parse_intlike(row_dict.get("name_consistency_flag", 0), 0)
         flags = {
+            # Column is 1 = consistent; compute_final_status wants 1 = mismatch.
             "name_flag": 0 if name_consistency_flag == 1 else 1,
             "dir_conflict_flag": _parse_intlike(row_dict.get("directory_conflict_flag", 0), 0),
             "dup_email_flag": _parse_intlike(row_dict.get("duplicate_email_flag", 0), 0),
