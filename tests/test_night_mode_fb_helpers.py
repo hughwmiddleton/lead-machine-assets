@@ -1830,6 +1830,40 @@ def test_explicit_pass_a_invalid_render_state_preserves_content_unavailable_reas
     assert any("[Night FB][RenderGate] content_unavailable -> targeted restabilization" in msg for msg in logs)
 
 
+def test_explicit_fb_entity_variants_share_one_comparison_key() -> None:
+    urls = [
+        "http://facebook.com/ArtistName",
+        "https://www.facebook.com/artistname/",
+        "https://FACEBOOK.com/artistname",
+        "https://www.facebook.com/profile.php?id=999&ref=share",
+        "https://facebook.com/profile.php?id=999",
+        "https://www.facebook.com/differentartist",
+        "https://www.facebook.com/profile.php?id=888",
+    ]
+    deduped = night_mode_fb._canonicalize_and_dedupe_explicit_fb_urls(urls, debug=True)
+    assert len(deduped) == 4
+    assert deduped[0] == "http://www.facebook.com/artistname"
+    assert deduped[1] == "https://www.facebook.com/profile.php?id=999"
+    assert deduped[2] == "https://www.facebook.com/differentartist"
+    assert deduped[3] == "https://www.facebook.com/profile.php?id=888"
+
+
+def test_explicit_fb_dedupe_diagnostics_report_raw_unique_and_dropped_counts() -> None:
+    urls = [
+        "http://facebook.com/ArtistName",
+        "https://www.facebook.com/artistname/",
+        "https://www.facebook.com/differentartist",
+    ]
+    logs = []
+    night_mode_fb._canonicalize_and_dedupe_explicit_fb_urls(urls, logger=logs.append, debug=True)
+    assert any(
+        "raw_explicit_fb_urls=3" in msg
+        and "unique_canonical_fb_entities=2" in msg
+        and "duplicate_fb_entity_urls_dropped=1" in msg
+        for msg in logs
+    )
+
+
 def test_explicit_fb_urls_canonicalized_and_deduped(monkeypatch) -> None:
     enricher = night_mode_fb.NightModeFacebookEnricher(
         legacy_module=None,
