@@ -12432,6 +12432,7 @@ class CrossDirectoryEnricherWorker(QThread):
         self.max_live_searches = max_live_searches
         self.session = _build_session()
         self._bc_session = _build_bandcamp_session()
+        self._closed_http_session_ids: Set[int] = set()
         self._bandcamp_browser_driver = None
         self._bandcamp_browser_disabled = False
         self.live_search_attempts = 0
@@ -12553,9 +12554,24 @@ class CrossDirectoryEnricherWorker(QThread):
             self.log_message.emit(f"[Enricher] Error: {exc}")
             self.finished.emit("")
         finally:
-            self._cleanup_bandcamp_browser_driver()
+            self._cleanup_owned_resources()
+
+    def _cleanup_owned_resources(self) -> None:
+        self._cleanup_bandcamp_browser_driver()
+        self._cleanup_http_sessions()
+
+    def _cleanup_http_sessions(self) -> None:
+        """Close each worker-owned HTTP session at most once."""
+        for attribute_name in ("session", "_bc_session"):
+            session = getattr(self, attribute_name, None)
+            if session is None:
+                continue
+            session_id = id(session)
+            if session_id in self._closed_http_session_ids:
+                continue
+            self._closed_http_session_ids.add(session_id)
             try:
-                self.session.close()
+                session.close()
             except Exception:
                 pass
 
@@ -22650,7 +22666,10 @@ def run_cross_directory_enrichment(
     worker.progress = type("obj", (), {"emit": lambda *args, **kwargs: None})
     worker.finished = type("obj", (), {"emit": lambda *args, **kwargs: None})
 
-    worker._run_impl()
+    try:
+        worker._run_impl()
+    finally:
+        worker._cleanup_owned_resources()
     if night_fb_run_state is not None:
         night_fb_run_state.session_warmup_complete = bool(getattr(worker, "_fb_session_warmup_complete", False))
     if isinstance(state_sink, dict):
