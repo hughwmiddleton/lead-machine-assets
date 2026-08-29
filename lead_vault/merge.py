@@ -18,6 +18,7 @@ from email_normalizer import (
     is_system_telemetry_email,
     normalize_email_value,
 )
+from link_surface_hygiene import is_useful_artist_link
 
 from .alias_map import map_headers_to_canonical
 from .importer import build_canonical_row, ensure_master_csv_exists, read_csv_rows
@@ -791,7 +792,15 @@ def _merge_existing_row(
             merged_value = (
                 _merge_all_emails_field(merged, incoming_row)
                 if field_name == "All_Emails"
-                else _merge_tokenized_values(existing_value, incoming_value, normalizer=_normalize_link_token)
+                else _merge_tokenized_values(
+                    existing_value,
+                    incoming_value,
+                    normalizer=(
+                        _operational_link_normalizer(merged, incoming_row)
+                        if field_name in {"Social Link", "External_Links"}
+                        else _normalize_link_token
+                    ),
+                )
             )
             if merged_value != existing_value:
                 merged[field_name] = merged_value
@@ -889,7 +898,7 @@ def _merge_facebook_field(existing_row: Dict[str, str], incoming_row: Dict[str, 
             external_links,
             existing_value,
             extras=[incoming_value],
-            normalizer=_normalize_link_token,
+            normalizer=_operational_link_normalizer(existing_row, incoming_row),
         )
     return incoming_value, external_links
 
@@ -909,7 +918,7 @@ def _merge_social_field(
     external_links = _merge_tokenized_values(
         external_links,
         incoming_value,
-        normalizer=_normalize_link_token,
+        normalizer=_operational_link_normalizer(existing_row, incoming_row),
     )
     return existing_value, external_links
 
@@ -1031,6 +1040,7 @@ def _coalesce_consolidation_enrichment(
     status, diagnostics, and canonical identity fields have different semantics.
     """
     merged = _copy_master_shaped_row(winner)
+    operational_normalizer = _operational_link_normalizer(winner, loser)
     rejected_relationships = _rejected_musicbrainz_relationship_urls(loser)
 
     loser_website = _allowed_losing_relationship_value(
@@ -1066,20 +1076,20 @@ def _coalesce_consolidation_enrichment(
             merged["External_Links"] = _merge_tokenized_values(
                 merged.get("External_Links", ""),
                 incoming_value,
-                normalizer=_normalize_link_token,
+                normalizer=operational_normalizer,
             )
 
     loser_social = _filter_rejected_relationship_tokens(
         loser.get("Social Link", ""), rejected_relationships
     )
     merged["Social Link"] = _merge_tokenized_values(
-        merged.get("Social Link", ""), loser_social, normalizer=_normalize_link_token
+        merged.get("Social Link", ""), loser_social, normalizer=operational_normalizer
     )
     loser_external = _filter_rejected_relationship_tokens(
         loser.get("External_Links", ""), rejected_relationships
     )
     merged["External_Links"] = _merge_tokenized_values(
-        merged.get("External_Links", ""), loser_external, normalizer=_normalize_link_token
+        merged.get("External_Links", ""), loser_external, normalizer=operational_normalizer
     )
 
     if not _clean_cell(merged.get("Instagram_Handle", "")) and _clean_cell(
@@ -1241,7 +1251,7 @@ def _merge_external_links(existing_row: Dict[str, str], incoming_row: Dict[str, 
     return _merge_tokenized_values(
         existing_row.get("External_Links", ""),
         incoming_row.get("External_Links", ""),
-        normalizer=_normalize_link_token,
+        normalizer=_operational_link_normalizer(existing_row, incoming_row),
     )
 
 
@@ -1278,7 +1288,7 @@ def _split_merged_tokens(raw: object) -> List[str]:
     text = _clean_cell(raw)
     if not text:
         return []
-    return [token for token in re.split(r"[;\n]+", text) if _clean_cell(token)]
+    return [token for token in re.split(r"[;\n]+|,\s+", text) if _clean_cell(token)]
 
 
 def _merge_email_lists(existing_value: str, incoming_value: str, extras: Optional[Sequence[str]] = None) -> str:
@@ -1432,6 +1442,22 @@ def _normalize_link_token(value: object) -> str:
         return ""
     normalized_url = _normalize_profile_url(text)
     return normalized_url or text.casefold()
+
+
+def _normalize_operational_link_token(value: object, *, artist_name: str = "") -> str:
+    text = _clean_cell(value)
+    if not text or not is_useful_artist_link(text, artist_name=artist_name):
+        return ""
+    return _normalize_link_token(text)
+
+
+def _operational_link_normalizer(*rows: Dict[str, str]):
+    artist_name = ""
+    for row in rows:
+        artist_name = _clean_cell(row.get("Artist", "") or row.get("Artist Name", ""))
+        if artist_name:
+            break
+    return lambda value: _normalize_operational_link_token(value, artist_name=artist_name)
 
 
 def _values_equivalent(field_name: str, existing_value: str, incoming_value: str) -> bool:

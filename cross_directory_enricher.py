@@ -74,6 +74,11 @@ from email_normalizer import (
     normalize_email_value,
     normalize_obfuscated_email_patterns,
 )
+from link_surface_hygiene import (
+    is_artist_link_hub_profile,
+    is_artist_platform_profile,
+    is_useful_artist_link,
+)
 from email_provenance import (
     EMAIL_PROVENANCE_JSON_COL,
     _set_email_with_provenance,
@@ -10015,7 +10020,7 @@ def _extract_directory_fields(
         value = row.get(column)
         for item in _split_multi_value(value):
             normalised = _normalise_url(item)
-            if not normalised or _is_noise_url(normalised):
+            if not normalised or _is_noise_url(normalised) or not is_useful_artist_link(normalised):
                 continue
             host = _host(normalised)
             if host in LINK_HUB_HOSTS:
@@ -10029,7 +10034,7 @@ def _extract_directory_fields(
         value = row.get(column)
         for item in _split_multi_value(value):
             normalised = _normalise_url(item)
-            if not normalised or _is_noise_url(normalised):
+            if not normalised or _is_noise_url(normalised) or not is_useful_artist_link(normalised):
                 continue
             host = _host(normalised)
             if host in LINK_HUB_HOSTS:
@@ -10286,6 +10291,8 @@ def _collect_website_enrich_link_hubs(row: Any) -> List[str]:
             if not normalised or normalised in seen_urls:
                 continue
             if _host(normalised) not in LINK_HUB_HOSTS:
+                continue
+            if not is_artist_link_hub_profile(normalised):
                 continue
             seen_urls.add(normalised)
             hub_urls.append(normalised)
@@ -10586,6 +10593,7 @@ def _extract_links_from_profile(
     if not html:
         return socials, websites, emails, link_hubs
     soup = BeautifulSoup(html, "html.parser")
+    parsing_link_hub = _host(profile_url) in LINK_HUB_HOSTS
     anchors = soup.find_all("a", href=True)
     for anchor in anchors:
         href = (anchor.get("href") or "").strip()
@@ -10602,6 +10610,22 @@ def _extract_links_from_profile(
         absolute = urllib.parse.urljoin(profile_url, href)
         normalised = _normalise_url(absolute)
         if not normalised or _is_noise_url(normalised):
+            continue
+        if not is_useful_artist_link(
+            normalised,
+            from_link_hub=parsing_link_hub,
+            source_hub_url=profile_url,
+            anchor_context=" ".join(
+                filter(
+                    None,
+                    (
+                        anchor.get_text(" ", strip=True),
+                        cell_to_str(anchor.get("aria-label")),
+                        cell_to_str(anchor.get("title")),
+                    ),
+                )
+            ),
+        ):
             continue
         parsed = urllib.parse.urlparse(normalised)
         if parsed.scheme not in ("http", "https"):
@@ -10623,7 +10647,7 @@ def _extract_links_from_profile(
         if host in LINK_HUB_HOSTS:
             link_hubs.add(normalised)
             websites.add(normalised)
-        elif any(host.endswith(domain) for domain in SOCIAL_HOST_WHITELIST):
+        elif any(host.endswith(domain) for domain in SOCIAL_HOST_WHITELIST) or is_artist_platform_profile(normalised):
             socials.add(normalised)
         else:
             if host in JUNK_WEBSITE_HOSTS:
@@ -10770,12 +10794,28 @@ def _scrape_link_hub_socials(session: requests.Session, hub_url: str) -> Set[str
         normalised = _normalise_url(absolute)
         if not normalised or _is_noise_url(normalised):
             continue
+        if not is_useful_artist_link(
+            normalised,
+            from_link_hub=True,
+            source_hub_url=hub_url,
+            anchor_context=" ".join(
+                filter(
+                    None,
+                    (
+                        anchor.get_text(" ", strip=True),
+                        cell_to_str(anchor.get("aria-label")),
+                        cell_to_str(anchor.get("title")),
+                    ),
+                )
+            ),
+        ):
+            continue
         host = _host(normalised)
         # Link-hub application shells link to many unrelated public hub pages.
         # Keep only bounded external account destinations for this specific hub.
         if host == hub_host or host in LINK_HUB_HOSTS:
             continue
-        if any(host.endswith(domain) for domain in SOCIAL_HOST_WHITELIST):
+        if any(host.endswith(domain) for domain in SOCIAL_HOST_WHITELIST) or is_artist_platform_profile(normalised):
             socials.add(normalised)
             if len(socials) >= MAX_LINK_HUB_SOCIALS_PER_ROW:
                 break
@@ -19227,8 +19267,10 @@ class CrossDirectoryEnricherWorker(QThread):
         existing_socials = _split_pipe_cell(original_social_raw)
         existing_sites = _split_pipe_cell(original_sites_raw)
         existing_emails = _split_pipe_cell(df.at[row_idx, "Email"], is_email=True)
-        new_socials = set(payload.socials)
-        new_sites = set(payload.websites)
+        existing_socials = {url for url in existing_socials if is_useful_artist_link(url)}
+        existing_sites = {url for url in existing_sites if is_useful_artist_link(url)}
+        new_socials = {url for url in payload.socials if is_useful_artist_link(url)}
+        new_sites = {url for url in payload.websites if is_useful_artist_link(url)}
         new_emails = set(payload.emails)
 
         if (payload.source_dir or "").startswith("bandcamp") and "SoundCloud Link" in df.columns:
@@ -19259,6 +19301,8 @@ class CrossDirectoryEnricherWorker(QThread):
         if payload.link_hubs and MAX_LINK_HUB_HOPS_PER_ROW > 0:
             hops = 0
             for hub in payload.link_hubs:
+                if not is_artist_link_hub_profile(hub):
+                    continue
                 if hops >= MAX_LINK_HUB_HOPS_PER_ROW:
                     break
                 hops += 1
