@@ -1,6 +1,7 @@
 import csv
 import datetime as dt
 import hashlib
+import json
 import os
 import shutil
 import re
@@ -11,7 +12,12 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple, Union
 from urllib.parse import urlsplit, urlunsplit
 
-from email_normalizer import normalize_email_value
+from email_normalizer import (
+    is_obvious_placeholder_email,
+    is_platform_support_email,
+    is_system_telemetry_email,
+    normalize_email_value,
+)
 
 from .alias_map import map_headers_to_canonical
 from .importer import build_canonical_row, ensure_master_csv_exists, read_csv_rows
@@ -35,6 +41,25 @@ _SOCIAL_LINK_FIELDS = {
     "YouTube_URL",
     "TikTok_URL",
 }
+_CONSOLIDATION_RELATIONSHIP_FIELDS = {
+    "Contact_Page_URL",
+    "Facebook_URL",
+    "Instagram_URL",
+    "Twitter_URL",
+    "SoundCloud_URL",
+    "Bandcamp_URL",
+    "Spotify_URL",
+    "LastFM_URL",
+    "YouTube_URL",
+    "TikTok_URL",
+}
+_MUSICBRAINZ_IDENTITY_FIELDS = (
+    "MusicBrainz_MBID",
+    "MusicBrainz_Status",
+    "Identity_Match_Method",
+    "Identity_Confidence",
+    "Identity_Evidence_JSON",
+)
 _IGNORE_HEADER_SENTINEL = "__IGNORE__"
 
 
@@ -356,6 +381,8 @@ def _run_consolidating_csv_merge(
             return
         current = consolidated.get(key)
         candidate = _copy_master_shaped_row(row)
+        if source == "incoming":
+            _remove_unsafe_incoming_contact(candidate)
         candidate_score = _score_lead_vault_row(candidate, score_row=score_row)
         if current is None:
             consolidated[key] = {
@@ -378,8 +405,9 @@ def _run_consolidating_csv_merge(
             current_source=str(current["source"]),
             candidate_source=source,
         ):
-            if current["source"] == "existing" and source == "incoming":
-                preserve_origin_fields(candidate, current["row"])
+            previous_row = _copy_master_shaped_row(current["row"])
+            preserve_origin_fields(candidate, previous_row)
+            candidate = _coalesce_consolidation_enrichment(candidate, previous_row)
             if current["source"] == "existing" and source == "incoming":
                 preview["rows_replaced"] += 1
                 preview["rows_updated"] += 1
@@ -389,6 +417,10 @@ def _run_consolidating_csv_merge(
                 "source": source,
             }
             return
+        current["row"] = _coalesce_consolidation_enrichment(
+            _copy_master_shaped_row(current["row"]),
+            candidate,
+        )
         if current["source"] == "existing" and source == "incoming":
             preview["rows_kept_existing"] += 1
             preview["rows_skipped_duplicates"] += 1
@@ -420,6 +452,7 @@ def _run_consolidating_csv_merge(
                 continue
 
             candidate = _copy_master_shaped_row(canonical_row)
+            _remove_unsafe_incoming_contact(candidate)
             candidate_score = _score_lead_vault_row(candidate, score_row=raw_row)
             current = consolidated.get(key)
             outcome = "NEW"
@@ -954,6 +987,187 @@ def _score_lead_vault_row(row: Dict[str, str], score_row: Optional[Dict[str, str
     if not has_email and _row_has_flag(row, "ig_no_email_written", score_row=score_row):
         score -= 5
     return score
+
+
+def _remove_unsafe_incoming_contact(row: Dict[str, str]) -> None:
+    """Keep rejected contact values from affecting consolidation winner selection."""
+    primary = _normalize_email(row.get("Primary_Email", ""))
+    if primary and _is_unsafe_lead_vault_email(primary):
+        row["Primary_Email"] = ""
+
+    raw_all = row.get("All_Emails", "")
+    all_emails = _normalize_email_list(raw_all)
+    safe_all = [email for email in all_emails if not _is_unsafe_lead_vault_email(email)]
+    if len(safe_all) != len(all_emails):
+        row["All_Emails"] = ";".join(safe_all)
+
+    if not _has_lead_vault_email(row) and not _split_email_all_for_scoring(row.get("All_Emails", "")):
+        for field_name in (
+            "Email_Source",
+            "Email_Source_URL",
+            "Email_Type",
+            "Email_Source_Type",
+            "Email_Extract_Method",
+            "Contact_Mode",
+        ):
+            row[field_name] = ""
+
+
+def _is_unsafe_lead_vault_email(email: str) -> bool:
+    return (
+        is_obvious_placeholder_email(email)
+        or is_platform_support_email(email)
+        or is_system_telemetry_email(email)
+    )
+
+
+def _coalesce_consolidation_enrichment(
+    winner: Dict[str, str],
+    loser: Dict[str, str],
+) -> Dict[str, str]:
+    """Preserve approved enrichment without changing the canonical row winner.
+
+    This deliberately does not call the generic update merge: contact, origin,
+    status, diagnostics, and canonical identity fields have different semantics.
+    """
+    merged = _copy_master_shaped_row(winner)
+    rejected_relationships = _rejected_musicbrainz_relationship_urls(loser)
+
+    loser_website = _allowed_losing_relationship_value(
+        "Website", loser.get("Website", ""), rejected_relationships
+    )
+    website_added = False
+    if not _clean_cell(merged.get("Website", "")) and loser_website:
+        merged["Website"] = loser_website
+        website_added = True
+    if website_added or (
+        loser_website
+        and _values_equivalent("Website", merged.get("Website", ""), loser_website)
+    ):
+        for field_name in ("Domain", "Domain_Root"):
+            if not _clean_cell(merged.get(field_name, "")):
+                merged[field_name] = _clean_cell(loser.get(field_name, ""))
+
+    for field_name in _CONSOLIDATION_RELATIONSHIP_FIELDS:
+        incoming_value = _allowed_losing_relationship_value(
+            field_name, loser.get(field_name, ""), rejected_relationships
+        )
+        if not incoming_value:
+            continue
+        existing_value = _clean_cell(merged.get(field_name, ""))
+        if not existing_value:
+            merged[field_name] = incoming_value
+            continue
+        if _values_equivalent(field_name, existing_value, incoming_value):
+            continue
+        # Keep the winner's canonical profile. A second validated social profile
+        # remains discoverable as an external relationship where the schema allows.
+        if field_name not in {"Contact_Page_URL", "Spotify_URL"}:
+            merged["External_Links"] = _merge_tokenized_values(
+                merged.get("External_Links", ""),
+                incoming_value,
+                normalizer=_normalize_link_token,
+            )
+
+    loser_social = _filter_rejected_relationship_tokens(
+        loser.get("Social Link", ""), rejected_relationships
+    )
+    merged["Social Link"] = _merge_tokenized_values(
+        merged.get("Social Link", ""), loser_social, normalizer=_normalize_link_token
+    )
+    loser_external = _filter_rejected_relationship_tokens(
+        loser.get("External_Links", ""), rejected_relationships
+    )
+    merged["External_Links"] = _merge_tokenized_values(
+        merged.get("External_Links", ""), loser_external, normalizer=_normalize_link_token
+    )
+
+    if not _clean_cell(merged.get("Instagram_Handle", "")) and _clean_cell(
+        merged.get("Instagram_URL", "")
+    ):
+        merged["Instagram_Handle"] = _clean_cell(loser.get("Instagram_Handle", ""))
+
+    if all(not _clean_cell(merged.get(field_name, "")) for field_name in _MUSICBRAINZ_IDENTITY_FIELDS):
+        if _musicbrainz_identity_is_eligible(loser):
+            for field_name in _MUSICBRAINZ_IDENTITY_FIELDS:
+                merged[field_name] = _clean_cell(loser.get(field_name, ""))
+
+    return merged
+
+
+def _allowed_losing_relationship_value(
+    field_name: str,
+    value: object,
+    rejected_relationships: Set[str],
+) -> str:
+    cleaned = _clean_cell(value)
+    if not cleaned:
+        return ""
+    normalized = _normalize_link_token(cleaned)
+    if normalized and normalized in rejected_relationships:
+        return ""
+    return cleaned
+
+
+def _filter_rejected_relationship_tokens(value: object, rejected_relationships: Set[str]) -> str:
+    allowed = []
+    for token in _split_merged_tokens(value):
+        if _normalize_link_token(token) not in rejected_relationships:
+            allowed.append(token)
+    return ";".join(allowed)
+
+
+def _musicbrainz_evidence(row: Dict[str, str]) -> Optional[Dict[str, object]]:
+    try:
+        payload = json.loads(_clean_cell(row.get("Identity_Evidence_JSON", "")))
+    except (TypeError, ValueError):
+        return None
+    musicbrainz = payload.get("musicbrainz") if isinstance(payload, dict) else None
+    return musicbrainz if isinstance(musicbrainz, dict) else None
+
+
+def _musicbrainz_identity_is_eligible(row: Dict[str, str]) -> bool:
+    if _clean_cell(row.get("MusicBrainz_Status", "")) != "matched":
+        return False
+    if _clean_cell(row.get("Identity_Match_Method", "")) != "spotify_url_relationship":
+        return False
+    evidence = _musicbrainz_evidence(row)
+    if not evidence or evidence.get("status") != "matched":
+        return False
+    if evidence.get("match_method") != "spotify_url_relationship":
+        return False
+    artist = evidence.get("artist")
+    if not isinstance(artist, dict):
+        return False
+    row_artist = _normalize_artist(row.get("Artist", ""))
+    accepted_names = {_normalize_artist(artist.get("name", ""))}
+    aliases = artist.get("aliases", [])
+    if isinstance(aliases, list):
+        for alias in aliases:
+            accepted_names.add(
+                _normalize_artist(alias.get("name", "") if isinstance(alias, dict) else alias)
+            )
+    accepted_names.discard("")
+    return bool(row_artist and row_artist in accepted_names)
+
+
+def _rejected_musicbrainz_relationship_urls(row: Dict[str, str]) -> Set[str]:
+    if _musicbrainz_identity_is_eligible(row):
+        return set()
+    evidence = _musicbrainz_evidence(row)
+    relationships = evidence.get("relationships") if evidence else None
+    if not isinstance(relationships, dict):
+        return set()
+    rejected: Set[str] = set()
+    for entries in relationships.values():
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            value = entry.get("url", "") if isinstance(entry, dict) else entry
+            normalized = _normalize_link_token(value)
+            if normalized:
+                rejected.add(normalized)
+    return rejected
 
 
 def _candidate_beats_current(
