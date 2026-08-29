@@ -11799,6 +11799,68 @@ def _sc_score_candidate(
     return max(0.0, min(score, 1.0))
 
 
+_SC_PROFILE_IDENTITY_TERMS = {
+    "artist", "band", "dj", "music", "musician", "producer", "rapper", "singer", "songwriter",
+}
+
+
+def _sc_candidate_substantive_evidence(
+    candidate: Dict[str, Any],
+    *,
+    location_hint: str = "",
+    genre_hint: str = "",
+    song_title: str = "",
+    track_hint: str = "",
+) -> Tuple[str, ...]:
+    """Return non-name evidence exposed by a generic SoundCloud candidate."""
+    evidence: List[str] = []
+    context = _clean_cell(candidate.get("context") or candidate.get("description"))
+    location = _clean_cell(candidate.get("location"))
+    external_urls = candidate.get("external_urls") or []
+    latest_track = _clean_cell(candidate.get("latest_track_title") or candidate.get("track_title"))
+    track_titles = candidate.get("track_titles") or []
+    if isinstance(track_titles, str):
+        track_titles = [track_titles]
+    exposed_track_text = " ".join(
+        [latest_track, *[_clean_cell(title) for title in track_titles if _clean_cell(title)]]
+    ).strip()
+    try:
+        track_count = int(candidate.get("track_count") or 0)
+    except (TypeError, ValueError):
+        track_count = 0
+
+    if track_count > 0 or exposed_track_text:
+        evidence.append("catalogue")
+    if context:
+        context_tokens = set(re.findall(r"[a-z]+", context.lower()))
+        if context_tokens & _SC_PROFILE_IDENTITY_TERMS:
+            evidence.append("artist_bio")
+        if re.search(r"https?://|www\.", context, flags=re.IGNORECASE):
+            evidence.append("outbound_link")
+    if external_urls:
+        evidence.append("outbound_link")
+    if location:
+        evidence.append("location")
+    if location_hint and location and _sc_location_match(location_hint, location):
+        evidence.append("location_match")
+    if genre_hint and context:
+        genre_norm = _sc_normalise_text(genre_hint)
+        if genre_norm and genre_norm in _sc_normalise_text(context):
+            evidence.append("genre_match")
+    if _sc_title_metadata_boost(song_title, track_hint, exposed_track_text, context) > 0:
+        evidence.append("seed_track_match")
+
+    # Default-style handles are collision-prone. Mere catalogue volume or an
+    # unrelated location does not corroborate them without a stronger signal.
+    handle = _sc_normalise_text(candidate.get("handle") or "")
+    if handle.startswith("user") and not {
+        "artist_bio", "outbound_link", "location_match", "genre_match", "seed_track_match",
+    }.intersection(evidence):
+        return ()
+
+    return tuple(dict.fromkeys(evidence))
+
+
 def _build_soundcloud_queries(base_query: str, track_hint: str = "", location_hint: str = "") -> List[str]:
     """
     Build a small set of progressively broader SoundCloud search strings.
@@ -21353,7 +21415,12 @@ class CrossDirectoryEnricherWorker(QThread):
         for query in _build_soundcloud_queries(sc_query, track_hint, location_hint):
             candidates = self._soundcloud_people_search_candidates(query)
             candidate = self._pick_best_soundcloud_candidate(
-                artist_name, candidates, location_hint, genre_hint
+                artist_name,
+                candidates,
+                location_hint,
+                genre_hint,
+                song_title=song_title,
+                track_hint=track_hint,
             )
             if candidate and _is_better_candidate(candidate, best_candidate):
                 best_candidate = candidate
@@ -21366,7 +21433,12 @@ class CrossDirectoryEnricherWorker(QThread):
             )
             uni_candidates = self._soundcloud_universal_search_candidates(sc_query)
             candidate = self._pick_best_soundcloud_candidate(
-                artist_name, uni_candidates, location_hint, genre_hint
+                artist_name,
+                uni_candidates,
+                location_hint,
+                genre_hint,
+                song_title=song_title,
+                track_hint=track_hint,
             )
             if candidate and _is_better_candidate(candidate, best_candidate):
                 best_candidate = candidate
@@ -21380,7 +21452,12 @@ class CrossDirectoryEnricherWorker(QThread):
                     f"trying artist-only query '{fallback_query}'."
                 )
                 fallback_candidate = self._soundcloud_best_candidate_for_query(
-                    artist_name, fallback_query, location_hint, genre_hint
+                    artist_name,
+                    fallback_query,
+                    location_hint,
+                    genre_hint,
+                    song_title=song_title,
+                    track_hint=track_hint,
                 )
                 if (
                     fallback_candidate
@@ -22263,7 +22340,7 @@ class CrossDirectoryEnricherWorker(QThread):
                         "profile_url": cand.get("profile_url") or f"https://soundcloud.com/{cand.get('handle','')}",
                         "handle": cand.get("handle") or "",
                         "display_name": cand.get("display_name") or cand.get("handle") or "",
-                        "location": cand.get("location") or cand.get("context") or "",
+                        "location": cand.get("location") or "",
                         "context": cand.get("context") or "",
                         "score": cand.get("score", 0),
                         "rank_score": cand.get("rank_score", cand.get("score", 0)),
@@ -22305,6 +22382,8 @@ class CrossDirectoryEnricherWorker(QThread):
         query: str,
         location_hint: str,
         genre_hint: str,
+        song_title: str = "",
+        track_hint: str = "",
     ) -> Optional[Dict[str, Any]]:
         def _is_better_candidate(candidate: Dict[str, Any], current: Optional[Dict[str, Any]]) -> bool:
             if not candidate:
@@ -22321,13 +22400,23 @@ class CrossDirectoryEnricherWorker(QThread):
 
         candidates = self._soundcloud_people_search_candidates(query)
         best_candidate = self._pick_best_soundcloud_candidate(
-            artist_name, candidates, location_hint, genre_hint
+            artist_name,
+            candidates,
+            location_hint,
+            genre_hint,
+            song_title=song_title,
+            track_hint=track_hint,
         )
         if not best_candidate or best_candidate.get("score", 0) < _SC_CONFIDENCE_MIN:
             # Try universal + API fallback using the same query.
             uni_candidates = self._soundcloud_universal_search_candidates(query)
             candidate = self._pick_best_soundcloud_candidate(
-                artist_name, uni_candidates, location_hint, genre_hint
+                artist_name,
+                uni_candidates,
+                location_hint,
+                genre_hint,
+                song_title=song_title,
+                track_hint=track_hint,
             )
             if candidate and _is_better_candidate(candidate, best_candidate):
                 best_candidate = candidate
@@ -22385,7 +22474,7 @@ class CrossDirectoryEnricherWorker(QThread):
                     "profile_url": profile_url,
                     "handle": handle,
                     "display_name": display_name,
-                    "location": location_text or context_text,
+                    "location": location_text,
                     "context": context_text,
                 }
             )
@@ -22436,6 +22525,11 @@ class CrossDirectoryEnricherWorker(QThread):
                     "display_name": user.get("full_name") or user.get("username") or handle,
                     "location": f"{user.get('city') or ''} {user.get('country_code') or ''}".strip(),
                     "context": user.get("description") or "",
+                    "track_count": user.get("track_count") or 0,
+                    # Retained for diagnostics only. Follower count is never an
+                    # admission signal: legitimate emerging artists may have zero.
+                    "followers_count": user.get("followers_count") or 0,
+                    "external_urls": user.get("external_urls") or [],
                 }
             )
             if len(candidates) >= limit:
@@ -22474,6 +22568,25 @@ class CrossDirectoryEnricherWorker(QThread):
             rank_score = _locale_rank_score(score, location_text, context_text)
             candidate["score"] = score
             candidate["rank_score"] = rank_score
+            substantive_evidence = _sc_candidate_substantive_evidence(
+                candidate,
+                location_hint=location_hint,
+                genre_hint=genre_hint,
+                song_title=song_title,
+                track_hint=track_hint,
+            )
+            candidate["substantive_evidence"] = substantive_evidence
+            if not substantive_evidence:
+                self.log_message.emit(
+                    f"[Enricher] SoundCloud Enrich: rejecting evidence-free generic candidate "
+                    f"'{display or handle}' ({profile_url})"
+                )
+                continue
+            self.log_message.emit(
+                f"[Enricher] SoundCloud Enrich: generic candidate evidence "
+                f"'{display or handle}' ({profile_url}) "
+                f"signals={','.join(substantive_evidence)} confidence={score:.2f}"
+            )
             candidate_domain = extract_domain(candidate.get("profile_url") or "")
             candidate["match_score"] = self._compute_match_score_for_candidate(
                 display or handle, "", candidate_domain

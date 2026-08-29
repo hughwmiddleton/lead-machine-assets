@@ -58,7 +58,7 @@ class SoundCloudEngineSwitchTests(unittest.TestCase):
             "handle": "legacy-test",
         }
         worker._soundcloud_people_search_candidates = lambda query: [candidate]
-        worker._pick_best_soundcloud_candidate = lambda artist_name, candidates, location_hint, genre_hint: candidates[0]
+        worker._pick_best_soundcloud_candidate = lambda *args, **kwargs: args[1][0]
         worker._soundcloud_universal_search_candidates = lambda query: []
         fetch_calls = {"count": 0}
 
@@ -424,7 +424,7 @@ class SoundCloudEngineSwitchTests(unittest.TestCase):
         self.assertEqual(without_title["handle"], "mooncrewlive")
         self.assertEqual(with_title["handle"], "mooncrewmusic")
 
-    def test_pick_best_soundcloud_candidate_preserves_selection_when_metadata_missing(self) -> None:
+    def test_pick_best_soundcloud_candidate_rejects_evidence_free_exact_name_shell(self) -> None:
         worker = self._make_worker()
         worker._compute_match_score_for_candidate = lambda *args, **kwargs: 0.0
 
@@ -435,6 +435,8 @@ class SoundCloudEngineSwitchTests(unittest.TestCase):
                 "display_name": "Amber",
                 "location": "",
                 "context": "",
+                "followers_count": 100000,
+                "track_count": 0,
             },
             {
                 "profile_url": "https://soundcloud.com/amber-music",
@@ -447,5 +449,143 @@ class SoundCloudEngineSwitchTests(unittest.TestCase):
 
         best = worker._pick_best_soundcloud_candidate("Amber", list(candidates))
 
+        self.assertIsNone(best)
+
+    def test_pick_best_soundcloud_candidate_rejects_abbey_cone_shell(self) -> None:
+        worker = self._make_worker()
+        worker._compute_match_score_for_candidate = lambda *args, **kwargs: 0.0
+        candidates = [
+            {
+                "profile_url": "https://soundcloud.com/abbey-cone",
+                "handle": "abbey-cone",
+                "display_name": "Abbey Cone",
+                "location": "",
+                "context": "",
+                "followers_count": 0,
+                "track_count": 0,
+            },
+            {
+                "profile_url": "https://soundcloud.com/abbeyconemusic",
+                "handle": "abbeyconemusic",
+                "display_name": "Abbey Cone",
+                "location": "Nashville US",
+                "context": "Singer songwriter. https://abbeycone.com",
+                "followers_count": 2026,
+                "track_count": 30,
+                "latest_track_title": "Greener",
+            },
+        ]
+
+        best = worker._pick_best_soundcloud_candidate(
+            "Abbey Cone", candidates, song_title="Greener", track_hint="Greener"
+        )
+
         self.assertIsNotNone(best)
-        self.assertEqual(best["handle"], "amber")
+        self.assertEqual(best["handle"], "abbeyconemusic")
+        self.assertEqual(candidates[0]["substantive_evidence"], ())
+
+    def test_soundcloud_api_search_retains_profile_evidence_without_using_followers_as_gate(self) -> None:
+        worker = self._make_worker()
+        response = mock.Mock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {
+            "collection": [
+                {
+                    "permalink": "tiny-artist",
+                    "permalink_url": "https://soundcloud.com/tiny-artist",
+                    "full_name": "Tiny Artist",
+                    "description": "Independent artist. https://tiny.example",
+                    "track_count": 1,
+                    "followers_count": 0,
+                    "external_urls": ["https://tiny.example"],
+                }
+            ]
+        }
+        worker.session = mock.Mock()
+        worker.session.get.return_value = response
+
+        with mock.patch.object(enricher, "_sc_get_client_id", return_value="client-id"):
+            candidates = worker._soundcloud_api_user_search("Tiny Artist")
+
+        self.assertEqual(candidates[0]["track_count"], 1)
+        self.assertEqual(candidates[0]["followers_count"], 0)
+        self.assertEqual(candidates[0]["external_urls"], ["https://tiny.example"])
+
+    def test_pick_best_soundcloud_candidate_accepts_zero_follower_artist_with_catalogue(self) -> None:
+        worker = self._make_worker()
+        worker._compute_match_score_for_candidate = lambda *args, **kwargs: 0.0
+        candidate = {
+            "profile_url": "https://soundcloud.com/tiny-artist",
+            "handle": "tiny-artist",
+            "display_name": "Tiny Artist",
+            "location": "",
+            "context": "",
+            "followers_count": 0,
+            "track_count": 1,
+            "latest_track_title": "First Light",
+        }
+
+        best = worker._pick_best_soundcloud_candidate(
+            "Tiny Artist", [candidate], song_title="First Light"
+        )
+
+        self.assertIsNotNone(best)
+        self.assertIn("catalogue", best["substantive_evidence"])
+        self.assertIn("seed_track_match", best["substantive_evidence"])
+
+    def test_pick_best_soundcloud_candidate_rejects_default_handle_without_alignment(self) -> None:
+        worker = self._make_worker()
+        worker._compute_match_score_for_candidate = lambda *args, **kwargs: 0.0
+        candidates = [
+            {
+                "profile_url": "https://soundcloud.com/usertoledo",
+                "handle": "usertoledo",
+                "display_name": "TOLEDO",
+                "location": "Somewhere",
+                "context": "T'ed up and posting things here.",
+                "track_count": 40,
+            },
+            {
+                "profile_url": "https://soundcloud.com/toledo_music",
+                "handle": "toledo_music",
+                "display_name": "TOLEDO",
+                "location": "Brooklyn, New York",
+                "context": "Brooklyn indie band and recording artists.",
+                "track_count": 12,
+                "latest_track_title": "Nothing Yet",
+            },
+        ]
+
+        best = worker._pick_best_soundcloud_candidate(
+            "TOLEDO", candidates, location_hint="Brooklyn", song_title="Nothing Yet"
+        )
+
+        self.assertIsNotNone(best)
+        self.assertEqual(best["handle"], "toledo_music")
+        self.assertEqual(candidates[0]["substantive_evidence"], ())
+
+    def test_pick_best_soundcloud_candidate_keeps_supported_shy_one_and_mayce_profiles(self) -> None:
+        worker = self._make_worker()
+        worker._compute_match_score_for_candidate = lambda *args, **kwargs: 0.0
+        fixtures = (
+            ("Shy One", "shyonebeats", "DJ and producer from London.", "I Can Tell"),
+            ("MAYCE", "mayce", "Independent singer and songwriter.", "Confident Soul"),
+        )
+
+        for artist, handle, context, track in fixtures:
+            with self.subTest(artist=artist):
+                candidate = {
+                    "profile_url": f"https://soundcloud.com/{handle}",
+                    "handle": handle,
+                    "display_name": artist,
+                    "location": "",
+                    "context": context,
+                    "followers_count": 0,
+                    "track_count": 1,
+                    "latest_track_title": track,
+                }
+                best = worker._pick_best_soundcloud_candidate(
+                    artist, [candidate], song_title=track
+                )
+                self.assertIsNotNone(best)
+                self.assertIn("artist_bio", best["substantive_evidence"])
