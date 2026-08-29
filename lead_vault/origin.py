@@ -1,8 +1,10 @@
 import logging
 from typing import Dict, Iterable, Mapping, MutableMapping, Optional
 
-ORIGIN_LOCKED_FIELDS = {"Source_Directory", "Lead_Source"}
 LEGACY_SOURCE_DIRECTORY_FIELD = "Source Directory"
+ORIGIN_DIRECTORY_FIELDS = ("Lead_Source", "Source_Directory", LEGACY_SOURCE_DIRECTORY_FIELD)
+ORIGIN_URL_FIELDS = ("Source URL", "Source_URL")
+ORIGIN_LOCKED_FIELDS = frozenset((*ORIGIN_DIRECTORY_FIELDS, *ORIGIN_URL_FIELDS))
 
 
 class OriginIntegrityError(ValueError):
@@ -22,7 +24,7 @@ class OriginLockedRow(dict):
 
 def safe_row_update(row: MutableMapping[str, object], updates: Mapping[str, object]) -> MutableMapping[str, object]:
     for key, value in dict(updates).items():
-        if key in ORIGIN_LOCKED_FIELDS:
+        if key in ORIGIN_LOCKED_FIELDS and _clean(row.get(key)):
             continue
         row[key] = value
     return row
@@ -67,25 +69,62 @@ def merge_origin_fields(
     *,
     logger: Optional[logging.Logger] = None,
 ) -> None:
-    existing_lead_source = _clean(existing_row.get("Lead_Source"))
-    incoming_lead_source = _clean(incoming_row.get("Lead_Source"))
-
-    if not existing_lead_source and incoming_lead_source:
-        existing_row["Lead_Source"] = incoming_lead_source
-        existing_lead_source = incoming_lead_source
-    elif (
-        existing_lead_source
-        and incoming_lead_source
-        and existing_lead_source != incoming_lead_source
-        and logger is not None
-    ):
-        logger.error(
-            "[Origin] Lead_Source conflict kept existing: existing=%s incoming=%s",
-            existing_lead_source,
-            incoming_lead_source,
-        )
+    for field_name in ORIGIN_LOCKED_FIELDS:
+        existing_value = _clean(existing_row.get(field_name))
+        incoming_value = _clean(incoming_row.get(field_name))
+        if not existing_value and incoming_value:
+            existing_row[field_name] = incoming_value
+        elif existing_value and incoming_value and existing_value != incoming_value and logger is not None:
+            logger.error(
+                "[Origin] %s conflict kept existing: existing=%s incoming=%s",
+                field_name,
+                existing_value,
+                incoming_value,
+            )
 
     repair_origin_fields(existing_row, logger=logger)
+
+
+def preserve_origin_fields(
+    target_row: MutableMapping[str, object],
+    canonical_row: Mapping[str, object],
+    *,
+    logger: Optional[logging.Logger] = None,
+) -> None:
+    """Restore established discovery origin onto a replacement/enriched row.
+
+    Blank canonical values do not erase legitimate initialization already present on
+    the target. Nonblank canonical values always win over secondary-source values.
+    """
+    canonical_values = {field_name: canonical_row.get(field_name) for field_name in ORIGIN_LOCKED_FIELDS}
+    directory_values = [_clean(canonical_values.get(field_name)) for field_name in ORIGIN_DIRECTORY_FIELDS]
+    spotify_url = _clean(canonical_row.get("Spotify_URL") or canonical_row.get("Spotify URL"))
+    spotify_origin = any(value.casefold() == "spotify" for value in directory_values)
+    if spotify_url and (spotify_origin or not any(directory_values)):
+        canonical_values["Lead_Source"] = canonical_values.get("Lead_Source") or "Spotify"
+        canonical_values["Source_Directory"] = canonical_values.get("Source_Directory") or "Spotify"
+        if LEGACY_SOURCE_DIRECTORY_FIELD in canonical_row:
+            canonical_values[LEGACY_SOURCE_DIRECTORY_FIELD] = (
+                canonical_values.get(LEGACY_SOURCE_DIRECTORY_FIELD) or "Spotify"
+            )
+        for field_name in ORIGIN_URL_FIELDS:
+            if field_name in canonical_row:
+                canonical_values[field_name] = canonical_values.get(field_name) or spotify_url
+
+    for field_name in ORIGIN_LOCKED_FIELDS:
+        canonical_value = _clean(canonical_values.get(field_name))
+        target_value = _clean(target_row.get(field_name))
+        if not canonical_value:
+            continue
+        if target_value and target_value != canonical_value and logger is not None:
+            logger.error(
+                "[Origin] %s conflict restored canonical: canonical=%s secondary=%s",
+                field_name,
+                canonical_value,
+                target_value,
+            )
+        target_row[field_name] = canonical_values.get(field_name)
+    repair_origin_fields(target_row, logger=logger)
 
 
 def validate_origin_integrity_rows(rows: Iterable[Mapping[str, object]]) -> None:

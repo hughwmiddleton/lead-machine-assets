@@ -15,7 +15,7 @@ from email_normalizer import normalize_email_value
 
 from .alias_map import map_headers_to_canonical
 from .importer import build_canonical_row, ensure_master_csv_exists, read_csv_rows
-from .origin import merge_origin_fields, repair_origin_fields, validate_origin_integrity_rows
+from .origin import merge_origin_fields, preserve_origin_fields, repair_origin_fields, validate_origin_integrity_rows
 from .schema import get_canonical_master_schema, get_default_master_csv_path
 
 PathLike = Union[str, Path]
@@ -379,7 +379,7 @@ def _run_consolidating_csv_merge(
             candidate_source=source,
         ):
             if current["source"] == "existing" and source == "incoming":
-                merge_origin_fields(candidate, current["row"])
+                preserve_origin_fields(candidate, current["row"])
             if current["source"] == "existing" and source == "incoming":
                 preview["rows_replaced"] += 1
                 preview["rows_updated"] += 1

@@ -81,6 +81,7 @@ from email_provenance import (
     row_has_successful_source_url_provenance,
 )
 from progress_state import init_progress, update_progress
+from lead_vault.origin import ORIGIN_LOCKED_FIELDS, preserve_origin_fields
 from fb_attribution import (
     FB_ATTEMPT_STATE_COL,
     FB_DEBUG_REASON_COL,
@@ -19205,6 +19206,21 @@ class CrossDirectoryEnricherWorker(QThread):
         return payload
 
     def _apply_payload(self, df: pd.DataFrame, row_idx, payload: EnrichmentPayload) -> None:
+        origin_before = {
+            field_name: df.at[row_idx, field_name]
+            for field_name in ORIGIN_LOCKED_FIELDS
+            if field_name in df.columns
+        }
+        try:
+            CrossDirectoryEnricherWorker._apply_payload_unprotected(self, df, row_idx, payload)
+        finally:
+            if origin_before:
+                enriched_row = df.loc[row_idx].to_dict()
+                preserve_origin_fields(enriched_row, origin_before)
+                for field_name in origin_before:
+                    df.at[row_idx, field_name] = enriched_row[field_name]
+
+    def _apply_payload_unprotected(self, df: pd.DataFrame, row_idx, payload: EnrichmentPayload) -> None:
         email_before = _row_email_summary_snapshot(df, row_idx)
         original_social_raw = df.at[row_idx, "Social Link"]
         original_sites_raw = df.at[row_idx, "External Links"]
@@ -19325,7 +19341,6 @@ class CrossDirectoryEnricherWorker(QThread):
                 _clean_cell(getattr(self, "_live_context", {}).get("spotify_domain", "")),
                 source_label=payload.source_detail or payload.source_dir or "",
             )
-
     def _apply_structured_fields(
         self,
         df: pd.DataFrame,

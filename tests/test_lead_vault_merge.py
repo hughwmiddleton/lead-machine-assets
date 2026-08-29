@@ -426,6 +426,48 @@ def test_merge_consolidate_incoming_email_replaces_empty_existing_and_writes_bac
     assert os.path.exists(result["backup_path"])
 
 
+def test_merge_consolidate_upgrade_restores_existing_spotify_discovery_origin(tmp_path):
+    master_path = tmp_path / "master.csv"
+    source_path = tmp_path / "import.csv"
+    spotify_url = "https://open.spotify.com/artist/origin-lock"
+    _write_csv(
+        master_path,
+        get_canonical_master_schema(),
+        [
+            _master_row(
+                Artist="Origin Lock",
+                Lead_Source="Spotify",
+                Source_Directory="Spotify",
+                Source_URL="",
+                Spotify_URL=spotify_url,
+            )
+        ],
+    )
+    _write_csv(
+        source_path,
+        ["Artist Name", "Lead Source", "Source Directory", "Email", "Bandcamp URL"],
+        [
+            {
+                "Artist Name": "Origin Lock",
+                "Lead Source": "Bandcamp",
+                "Source Directory": "bandcamp",
+                "Email": "artist@example.com",
+                "Bandcamp URL": "https://origin-lock.bandcamp.com",
+            }
+        ],
+    )
+
+    result = merge_csv_into_master(source_path, master_path=master_path, duplicate_strategy="merge_consolidate")
+    row = _read_master_rows(master_path)[0]
+
+    assert result["rows_replaced"] == 1
+    assert row["Lead_Source"] == "Spotify"
+    assert row["Source_Directory"] == "Spotify"
+    assert row["Source_URL"] == spotify_url
+    assert row["Bandcamp_URL"] == "https://origin-lock.bandcamp.com"
+    assert row["Primary_Email"] == "artist@example.com"
+
+
 def test_merge_consolidate_protects_existing_email_from_empty_incoming(tmp_path):
     master_path = tmp_path / "master.csv"
     source_path = tmp_path / "import.csv"
