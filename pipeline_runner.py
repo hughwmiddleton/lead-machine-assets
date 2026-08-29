@@ -49,7 +49,11 @@ from email_provenance import (
     parse_email_provenance_json,
     row_has_successful_source_url_provenance,
 )
-from email_normalizer import filter_platform_support_emails, filter_system_telemetry_emails
+from email_normalizer import (
+    filter_obvious_placeholder_emails,
+    filter_platform_support_emails,
+    filter_system_telemetry_emails,
+)
 from fb_email_skip_gate import (
     is_quarantined_repeat_email_row,
     row_has_usable_email_for_fb_skip,
@@ -1989,14 +1993,32 @@ def _rank_contact_emails_for_row(row_like: Any, values: Union[str, Sequence[str]
 
 def _select_primary_email_for_row(row_like: Any, email: str, email_all: str) -> Tuple[str, List[str]]:
     ranked = _rank_contact_emails_for_row(row_like, [email_all, email])
-    return (ranked[0] if ranked else "", ranked)
+    selectable = filter_obvious_placeholder_emails(ranked)
+    return (selectable[0] if selectable else "", selectable)
 
 
-def _align_row_email_provenance(df: pd.DataFrame, idx: int, selected_email: str) -> None:
-    if df is None or idx not in df.index or not selected_email:
+def _align_row_email_provenance(
+    df: pd.DataFrame,
+    idx: Any,
+    selected_email: str,
+    previous_email: str = "",
+) -> None:
+    if df is None or idx not in df.index:
         return
-    meta = get_email_provenance_entry(df.loc[idx], selected_email)
-    if not meta:
+
+    selected_key = normalize_email_key(selected_email)
+    previous_key = normalize_email_key(previous_email)
+    explicit_map = (
+        parse_email_provenance_json(df.at[idx, EMAIL_PROVENANCE_JSON_COL])
+        if EMAIL_PROVENANCE_JSON_COL in df.columns
+        else {}
+    )
+    meta = dict(explicit_map.get(selected_key) or {})
+
+    # A legacy row with no per-email map may retain its source bundle only while
+    # its primary is unchanged. Once ranking changes the address, the old
+    # row-level fields must not be reinterpreted as provenance for the winner.
+    if not meta and selected_key == previous_key:
         return
 
     for column, key in (
@@ -2006,9 +2028,7 @@ def _align_row_email_provenance(df: pd.DataFrame, idx: int, selected_email: str)
     ):
         if column not in df.columns:
             df[column] = ""
-        value = _cell_str(meta.get(key, ""))
-        if value:
-            df.at[idx, column] = value
+        df.at[idx, column] = _cell_str(meta.get(key, ""))
 
 
 def _rank_contact_emails(values: Union[str, Sequence[str], None]) -> List[str]:
@@ -2075,13 +2095,17 @@ def _consolidate_email_all(df: pd.DataFrame) -> pd.DataFrame:
 
     df["Email_All"] = df.apply(_build_email_all, axis=1)
     try:
-        for idx in range(len(df.index)):
+        for idx in df.index:
             if _is_quarantined(df.loc[idx]):
                 continue
             merged_str = _set_email_all(df, idx, df.at[idx, "Email_All"], source="consolidate", logger=_LOGGER.info)
+            previous_email = df.at[idx, "Email"]
             primary_email, ranked = _select_primary_email_for_row(df.loc[idx], df.at[idx, "Email"], merged_str)
             df.at[idx, "Email"] = primary_email if ranked else ""
-            _align_row_email_provenance(df, idx, primary_email)
+            for primary_column in ("Primary Email", "Primary_Email"):
+                if primary_column in df.columns:
+                    df.at[idx, primary_column] = primary_email if ranked else ""
+            _align_row_email_provenance(df, idx, primary_email, previous_email=previous_email)
     except Exception:
         pass
     return df
@@ -3069,6 +3093,15 @@ def infer_email_source(row: pd.Series) -> str:
 
     if email_type == "website_enrich" or email_source_type == "website_enrich":
         return "Website"
+
+    if email_type.startswith("ig_") or email_source_type.startswith("instagram"):
+        return "Instagram profile"
+
+    if email_source_type.startswith("bandcamp"):
+        return "Bandcamp page"
+
+    if email_source_type.startswith("soundcloud"):
+        return "SoundCloud profile"
 
     if "unearthed" in src_dir or "unearthed" in src_url:
         return "Triple J Unearthed profile"
