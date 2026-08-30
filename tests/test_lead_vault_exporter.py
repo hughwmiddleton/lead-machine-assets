@@ -1,9 +1,44 @@
 import csv
+import json
 
 import pytest
 
 from lead_vault.exporter import FINAL_EXPORT_PRESET, WOODPECKER_EXPORT_PRESET, export_with_preset
 from lead_vault.schema import get_canonical_master_schema
+
+
+def _write_master(path, rows) -> None:
+    fieldnames = list(get_canonical_master_schema())
+    for row in rows:
+        for field in row:
+            if field not in fieldnames:
+                fieldnames.append(field)
+    with open(path, "w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def _woodpecker_row(artist: str, email: str, status: str = "OK", **overrides: str) -> dict:
+    row = {field: "" for field in get_canonical_master_schema()}
+    domain = artist.lower().replace(" ", "") + ".test"
+    row.update(
+        {
+            "Artist": artist,
+            "Primary_Email": email,
+            "All_Emails": email,
+            "Final_Status": status,
+            "Lead_Source": "website",
+            "Source_Directory": "website",
+            "Source_URL": f"https://{domain}",
+            "Website": f"https://{domain}",
+            "Email_Source_URL": f"https://{domain}/contact",
+            "Email_Source_Type": "website_enrich",
+            "Email_Extract_Method": "regex",
+        }
+    )
+    row.update(overrides)
+    return row
 
 
 @pytest.fixture
@@ -243,3 +278,97 @@ def test_utf8_sig_output(mock_master_csv, tmp_path) -> None:
     export_with_preset(WOODPECKER_EXPORT_PRESET, mock_master_csv, output_path)
 
     assert output_path.read_bytes().startswith(b"\xef\xbb\xbf")
+
+
+def test_woodpecker_ticket_5d_shaped_export_is_contact_safe(tmp_path) -> None:
+    input_path = tmp_path / "ticket_5d_master.csv"
+    output_path = tmp_path / "woodpecker.csv"
+    multi_provenance = json.dumps(
+        {
+            "booking@multiartist.test": {
+                "source_type": "website_enrich",
+                "surface": "website_contact_page",
+                "source_url": "https://multiartist.test/contact",
+                "extract_method": "mailto",
+            },
+            "press@multiartist.test": {
+                "source_type": "website_enrich",
+                "surface": "website_contact_page",
+                "source_url": "https://multiartist.test/contact",
+                "extract_method": "regex",
+            },
+        }
+    )
+    rows = [
+        _woodpecker_row("Safe Artist", "hello@safeartist.test"),
+        _woodpecker_row("Warn Artist", "hello@warnartist.test", "WARN"),
+        _woodpecker_row("Block Artist", "hello@blockartist.test", "BLOCK"),
+        _woodpecker_row("No Email", ""),
+        _woodpecker_row("Telemetry", "1234@o123.ingest.sentry.io"),
+        _woodpecker_row("Bandcamp Support", "support@artist.bandcamp.com"),
+        _woodpecker_row("Platform Support", "help@spotify.com"),
+        _woodpecker_row("Placeholder", "email@example.com"),
+        _woodpecker_row(
+            "Multi Artist",
+            "press@multiartist.test, booking@multiartist.test",
+            All_Emails="press@multiartist.test;booking@multiartist.test",
+            Email_Provenance_JSON=multi_provenance,
+        ),
+        _woodpecker_row(
+            "Managed Artist",
+            "booking@legitmanagement.test",
+            Email_Source_URL="https://legitmanagement.test/artists/managed-artist",
+        ),
+    ]
+    _write_master(input_path, rows)
+
+    result = export_with_preset(WOODPECKER_EXPORT_PRESET, input_path, output_path)
+
+    with open(output_path, "r", encoding="utf-8-sig", newline="") as handle:
+        exported = list(csv.DictReader(handle))
+
+    assert [row["Artist Name"] for row in exported] == ["Safe Artist", "Multi Artist", "Managed Artist"]
+    assert [row["Primary Email"] for row in exported] == [
+        "hello@safeartist.test",
+        "booking@multiartist.test",
+        "booking@legitmanagement.test",
+    ]
+    assert all(row["Final_Status"] == "OK" for row in exported)
+    assert all(row["Needs_Review"] == "FALSE" for row in exported)
+    assert all("," not in row["Primary Email"] and ";" not in row["Primary Email"] for row in exported)
+    multi_row = exported[1]
+    assert multi_row["Email_Source_URL"] == "https://multiartist.test/contact"
+    assert multi_row["Email_Source_Type"] == "website_enrich"
+    assert multi_row["Email_Extract_Method"] == "mailto"
+    assert "press@multiartist.test" in multi_row["All Emails"]
+    assert result["rows_read"] == len(rows)
+    assert result["rows_exported"] == 3
+
+
+def test_woodpecker_rejects_unaligned_or_quarantined_primary_and_deduplicates_recipients(tmp_path) -> None:
+    input_path = tmp_path / "master.csv"
+    output_path = tmp_path / "woodpecker.csv"
+    rows = [
+        _woodpecker_row("First Recipient", "booking@shared.test"),
+        _woodpecker_row("Duplicate Recipient", "booking@shared.test"),
+        _woodpecker_row(
+            "Unaligned Alternate",
+            "noreply@unaligned.test, booking@unaligned.test",
+            All_Emails="noreply@unaligned.test;booking@unaligned.test",
+            Email_Source_URL="https://unaligned.test/noreply-only",
+        ),
+        _woodpecker_row(
+            "Quarantined",
+            "booking@quarantined.test",
+            Suspect_Email="booking@quarantined.test",
+        ),
+    ]
+    _write_master(input_path, rows)
+
+    export_with_preset(WOODPECKER_EXPORT_PRESET, input_path, output_path)
+
+    with open(output_path, "r", encoding="utf-8-sig", newline="") as handle:
+        exported = list(csv.DictReader(handle))
+    assert [(row["Artist Name"], row["Primary Email"]) for row in exported] == [
+        ("First Recipient", "booking@shared.test")
+    ]

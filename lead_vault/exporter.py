@@ -24,6 +24,10 @@ WOODPECKER_EXPORT_PRESET = {
         "Artist Name",
         "Primary Email",
         "All Emails",
+        "Email Source",
+        "Email_Source_URL",
+        "Email_Source_Type",
+        "Email_Extract_Method",
         "Location",
         "Primary Genre",
         "Website",
@@ -47,6 +51,10 @@ WOODPECKER_EXPORT_PRESET = {
         "Artist Name": "Artist",
         "Primary Email": "Primary_Email",
         "All Emails": "All_Emails",
+        "Email Source": "Email_Source",
+        "Email_Source_URL": "Email_Source_URL",
+        "Email_Source_Type": "Email_Source_Type",
+        "Email_Extract_Method": "Email_Extract_Method",
         "Location": "Location",
         "Primary Genre": "Primary_Genre",
         "Website": "Website",
@@ -66,8 +74,9 @@ WOODPECKER_EXPORT_PRESET = {
         "Needs_Review": "Needs_Review",
         "Review_Urls": "Review_Urls",
     },
-    "row_filter": "has_primary_email",
+    "row_filter": None,
     "filename_pattern": "woodpecker_export.csv",
+    "exporter": "legacy_woodpecker_export_bridge",
 }
 
 FINAL_EXPORT_PRESET = {
@@ -197,6 +206,129 @@ def _export_legacy_final_export_bridge(
     }
 
 
+def _export_legacy_woodpecker_export_bridge(
+    preset: dict,
+    master_csv_path: PathLike,
+    output_path: PathLike,
+) -> dict:
+    """Build the upload-ready file through the existing safe export contract."""
+    import final_checker
+    from email_normalizer import (
+        is_obvious_placeholder_email,
+        is_platform_support_email,
+        is_system_telemetry_email,
+        normalize_email_value,
+    )
+    from email_provenance import get_email_provenance_entry
+    from fb_email_skip_gate import is_quarantined_repeat_email_row
+    from pipeline_runner import (
+        _build_final_export_frame,
+        _is_valid_email_shape,
+        recompute_final_status_post_enrichment,
+    )
+
+    master_path = Path(master_csv_path)
+    export_path = Path(output_path)
+    export_path.parent.mkdir(parents=True, exist_ok=True)
+
+    master_df = pd.read_csv(master_path, dtype=str, keep_default_na=False).fillna("")
+    rows_read = len(master_df.index)
+    master_df = repair_origin_integrity_df(master_df)
+    validate_origin_integrity_df(master_df)
+
+    bridge_df = _build_legacy_final_export_bridge_frame(master_df)
+    bridge_df = recompute_final_status_post_enrichment(bridge_df, logger=None)
+    final_df = _build_final_export_frame(bridge_df)
+    status_mask = bridge_df["final_status"].fillna("").astype(str).str.strip().str.upper().isin(
+        {"OK", "WARN", "BLOCK"}
+    )
+    bridge_rows = [row for _, row in bridge_df.loc[status_mask].iterrows()]
+    master_rows = [master_df.loc[idx] for idx in bridge_df.index[status_mask]]
+
+    staged_rows = []
+    seen_recipients = set()
+    for final_row, bridge_row, master_row in zip(final_df.to_dict("records"), bridge_rows, master_rows):
+        primary_email = str(final_row.get("Primary Email", "") or "").strip().lower()
+        normalized_email = normalize_email_value(primary_email)
+
+        # The canonical studio-safe profile is deliberately status-strict: WARN
+        # and BLOCK remain in the full/review export, never the automatic file.
+        policy_row = dict(final_row)
+        policy_row["Email"] = primary_email
+        policy_row["Email_All"] = str(final_row.get("All Emails", "") or "")
+        if not final_checker.filter_rows_for_export("studio_safe", [policy_row]):
+            continue
+        if str(final_row.get("Needs_Review", "") or "").strip().upper() != "FALSE":
+            continue
+        if normalized_email != primary_email or not _is_valid_email_shape(primary_email):
+            continue
+        if any(separator in primary_email for separator in (",", ";", "|")):
+            continue
+        if (
+            is_obvious_placeholder_email(primary_email)
+            or is_platform_support_email(primary_email)
+            or is_system_telemetry_email(primary_email)
+        ):
+            continue
+        if is_quarantined_repeat_email_row(bridge_row) or any(
+            str(bridge_row.get(field, "") or "").strip()
+            for field in ("Suspect_Email", "Suspect_Email_All")
+        ):
+            continue
+        if final_checker.classify_contact_attribution(final_row) == final_checker.ATTRIBUTION_UNSAFE:
+            continue
+
+        selected_meta = get_email_provenance_entry(bridge_row, primary_email)
+        provenance_fields = (
+            ("Email_Source_URL", "source_url"),
+            ("Email_Source_Type", "source_type"),
+            ("Email_Extract_Method", "extract_method"),
+        )
+        if not selected_meta or any(
+            not str(selected_meta.get(meta_field, "") or "").strip()
+            or str(final_row.get(output_field, "") or "").strip()
+            != str(selected_meta.get(meta_field, "") or "").strip()
+            for output_field, meta_field in provenance_fields
+        ):
+            continue
+        if primary_email in seen_recipients:
+            continue
+        seen_recipients.add(primary_email)
+
+        staged_rows.append(_build_woodpecker_export_row(preset, final_row, master_row))
+
+    headers = list(preset["headers"])
+    with open(export_path, "w", encoding="utf-8-sig", newline="") as output_handle:
+        writer = csv.DictWriter(output_handle, fieldnames=headers)
+        writer.writeheader()
+        writer.writerows(staged_rows)
+
+    rows_exported = len(staged_rows)
+    return {
+        "preset": str(preset["name"]),
+        "rows_read": rows_read,
+        "rows_exported": rows_exported,
+        "rows_skipped": rows_read - rows_exported,
+        "output_file": str(export_path),
+    }
+
+
+def _build_woodpecker_export_row(preset: dict, final_row: dict, master_row: pd.Series) -> dict:
+    values = dict(final_row)
+    values["Final_Status"] = str(final_row.get("final_status", "") or "").strip()
+    values["Website"] = str(master_row.get("Website", "") or "").strip()
+    values["SoundCloud_URL"] = str(
+        final_row.get("SoundCloud Link", "") or master_row.get("SoundCloud_URL", "") or ""
+    ).strip()
+
+    export_row = {}
+    field_map = dict(preset.get("field_map", {}))
+    for header in preset["headers"]:
+        source_field = field_map.get(header, header)
+        export_row[header] = values.get(header, values.get(source_field, ""))
+    return export_row
+
+
 def _build_legacy_final_export_bridge_frame(df: pd.DataFrame) -> pd.DataFrame:
     work = df.copy()
 
@@ -267,6 +399,8 @@ def _resolve_exporter(
         return exporter
     if str(exporter) == "legacy_final_export_bridge":
         return _export_legacy_final_export_bridge
+    if str(exporter) == "legacy_woodpecker_export_bridge":
+        return _export_legacy_woodpecker_export_bridge
     raise ValueError(f"Unknown exporter: {exporter}")
 
 
