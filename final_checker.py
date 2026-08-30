@@ -580,21 +580,50 @@ def _looks_like_spotify_id(slug: str) -> bool:
     return bool(re.fullmatch(r"[A-Za-z0-9]{16,}", condensed))
 
 
-def _extract_url_from_row(row: pd.Series, keyword: str) -> str:
-    for _, value in row.items():
-        if not isinstance(value, str):
+def _split_url_values(value) -> list[str]:
+    """Return the ordered, de-duplicated URLs stored in a linkish cell."""
+    if not isinstance(value, str):
+        return []
+    seen: set[str] = set()
+    urls: list[str] = []
+    # Link columns are canonically pipe/comma separated, with semicolon and
+    # whitespace retained for older artifacts.
+    # A separator is structural only when another URL follows it. This keeps
+    # legal commas/pipes in URL paths or query strings intact.
+    for token in re.split(r"(?:\s*[|,;]\s*|\s+)(?=https?://)", value.strip()):
+        candidate = token.strip().strip("<>()[]{}\"'")
+        if not candidate.startswith(("http://", "https://")):
             continue
-        candidate = value.strip()
-        lower = candidate.lower()
-        if candidate.startswith(("http://", "https://")) and keyword in lower:
-            return candidate
-    return ""
+        key = candidate.lower().rstrip("/")
+        if key in seen:
+            continue
+        seen.add(key)
+        urls.append(candidate)
+    return urls
 
 
-def _extract_spotify_name(row: pd.Series) -> str:
-    url = _extract_url_from_row(row, "spotify.com")
-    if not url:
-        return ""
+def _extract_urls_from_row(row: pd.Series, keyword: str) -> list[str]:
+    urls: list[str] = []
+    seen: set[str] = set()
+    for _, value in row.items():
+        for candidate in _split_url_values(value):
+            if keyword not in candidate.lower():
+                continue
+            key = candidate.lower().rstrip("/")
+            if key in seen:
+                continue
+            seen.add(key)
+            urls.append(candidate)
+    return urls
+
+
+def _extract_url_from_row(row: pd.Series, keyword: str) -> str:
+    """Compatibility wrapper for callers that need only the first URL."""
+    urls = _extract_urls_from_row(row, keyword)
+    return urls[0] if urls else ""
+
+
+def _spotify_name_from_url(url: str) -> str:
     parsed = urlparse(url)
     parts = [p for p in (parsed.path or "").split("/") if p]
     slug = ""
@@ -611,10 +640,20 @@ def _extract_spotify_name(row: pd.Series) -> str:
     return _clean_name(slug)
 
 
-def _extract_bandcamp_name(row: pd.Series) -> str:
-    url = _extract_url_from_row(row, "bandcamp.com")
-    if not url:
-        return ""
+def _extract_spotify_names(row: pd.Series) -> list[str]:
+    return [
+        name
+        for url in _extract_urls_from_row(row, "spotify.com")
+        if (name := _spotify_name_from_url(url))
+    ]
+
+
+def _extract_spotify_name(row: pd.Series) -> str:
+    names = _extract_spotify_names(row)
+    return names[0] if names else ""
+
+
+def _bandcamp_name_from_url(url: str) -> str:
     parsed = urlparse(url)
     host = (parsed.netloc or "").lower()
     candidate = ""
@@ -629,10 +668,20 @@ def _extract_bandcamp_name(row: pd.Series) -> str:
     return _clean_name(candidate)
 
 
-def _extract_soundcloud_name(row: pd.Series) -> str:
-    url = _extract_url_from_row(row, "soundcloud.com")
-    if not url:
-        return ""
+def _extract_bandcamp_names(row: pd.Series) -> list[str]:
+    return [
+        name
+        for url in _extract_urls_from_row(row, "bandcamp.com")
+        if (name := _bandcamp_name_from_url(url))
+    ]
+
+
+def _extract_bandcamp_name(row: pd.Series) -> str:
+    names = _extract_bandcamp_names(row)
+    return names[0] if names else ""
+
+
+def _soundcloud_name_from_url(url: str) -> str:
     parsed = urlparse(url)
     parts = [p for p in (parsed.path or "").split("/") if p]
     if not parts:
@@ -641,10 +690,20 @@ def _extract_soundcloud_name(row: pd.Series) -> str:
     return _clean_name(candidate)
 
 
-def _extract_facebook_name(row: pd.Series) -> str:
-    url = _extract_url_from_row(row, "facebook.com")
-    if not url:
-        return ""
+def _extract_soundcloud_names(row: pd.Series) -> list[str]:
+    return [
+        name
+        for url in _extract_urls_from_row(row, "soundcloud.com")
+        if (name := _soundcloud_name_from_url(url))
+    ]
+
+
+def _extract_soundcloud_name(row: pd.Series) -> str:
+    names = _extract_soundcloud_names(row)
+    return names[0] if names else ""
+
+
+def _facebook_name_from_url(url: str) -> str:
     parsed = urlparse(url)
     parts = [p for p in (parsed.path or "").split("/") if p]
     if not parts:
@@ -659,12 +718,87 @@ def _extract_facebook_name(row: pd.Series) -> str:
     return _clean_name(candidate)
 
 
+def _extract_facebook_names(row: pd.Series) -> list[str]:
+    return [
+        name
+        for url in _extract_urls_from_row(row, "facebook.com")
+        if (name := _facebook_name_from_url(url))
+    ]
+
+
+def _extract_facebook_name(row: pd.Series) -> str:
+    names = _extract_facebook_names(row)
+    return names[0] if names else ""
+
+
+def _instagram_name_from_url(url: str) -> str:
+    parsed = urlparse(url)
+    parts = [p for p in (parsed.path or "").split("/") if p]
+    if not parts or parts[0].lower() in {"p", "reel", "reels", "stories", "explore"}:
+        return ""
+    return _clean_name(unquote(parts[0].replace("-", " ").replace("_", " ")))
+
+
+def _extract_instagram_names(row: pd.Series) -> list[str]:
+    return [
+        name
+        for url in _extract_urls_from_row(row, "instagram.com")
+        if (name := _instagram_name_from_url(url))
+    ]
+
+
+_IDENTITY_HANDLE_PREFIXES = ("theband",)
+_IDENTITY_HANDLE_SUFFIXES = ("musicofficial", "officialmusic", "official", "music", "band")
+
+
+def _identity_variants(name: str) -> set[str]:
+    """Generate conservative handle variants without changing match thresholds."""
+    cleaned = _clean_name(name)
+    if not cleaned:
+        return set()
+    compact = cleaned.replace(" ", "")
+    variants = {cleaned, compact}
+    words = cleaned.split()
+    while words and words[0] == "the":
+        words = words[1:]
+    while words and words[-1] in {"official", "music", "band"}:
+        words = words[:-1]
+    if words:
+        variants.add("".join(words))
+    frontier = [compact]
+    while frontier:
+        current = frontier.pop()
+        candidates = [
+            current[len(prefix) :]
+            for prefix in _IDENTITY_HANDLE_PREFIXES
+            if current.startswith(prefix)
+        ]
+        candidates.extend(
+            current[: -len(suffix)]
+            for suffix in _IDENTITY_HANDLE_SUFFIXES
+            if current.endswith(suffix)
+        )
+        for candidate in candidates:
+            if candidate and len(candidate) >= 4 and candidate not in variants:
+                variants.add(candidate)
+                frontier.append(candidate)
+    return variants
+
+
+def _identity_ratio(left: str, right: str) -> float:
+    left_variants = _identity_variants(left)
+    right_variants = _identity_variants(right)
+    if not left_variants or not right_variants:
+        return 0.0
+    return max(fuzz.ratio(a, b) for a in left_variants for b in right_variants)
+
+
 def _pairwise_conflict(names: list[str], threshold: float) -> int:
     if len(names) < 2:
         return 0
     for i in range(len(names)):
         for j in range(i + 1, len(names)):
-            if fuzz.ratio(names[i], names[j]) < threshold:
+            if _identity_ratio(names[i], names[j]) < threshold:
                 return 1
     return 0
 
@@ -754,19 +888,26 @@ def run_final_checker(
         for idx, row in result_df.iterrows():
             artist_clean = normalized_artists.iloc[idx]
 
-            spotify_name = _extract_spotify_name(row)
-            bandcamp_name = _extract_bandcamp_name(row)
-            soundcloud_name = _extract_soundcloud_name(row)
-            facebook_name = _extract_facebook_name(row)
+            spotify_names = _extract_spotify_names(row)
+            bandcamp_names = _extract_bandcamp_names(row)
+            soundcloud_names = _extract_soundcloud_names(row)
+            facebook_names = _extract_facebook_names(row)
+            instagram_names = _extract_instagram_names(row)
 
-            candidate_names = [n for n in (spotify_name, bandcamp_name, soundcloud_name, facebook_name) if n]
+            candidate_names = (
+                spotify_names
+                + bandcamp_names
+                + soundcloud_names
+                + facebook_names
+                + instagram_names
+            )
             if artist_clean and candidate_names:
-                best_score = max(fuzz.ratio(artist_clean, candidate) for candidate in candidate_names)
+                best_score = max(_identity_ratio(artist_clean, candidate) for candidate in candidate_names)
                 name_flag = 1 if best_score < 70 else 0
             else:
                 name_flag = 0
 
-            dir_names = [n for n in (bandcamp_name, soundcloud_name, facebook_name) if n]
+            dir_names = bandcamp_names + soundcloud_names + facebook_names + instagram_names
             dir_conflict_flag = _pairwise_conflict(dir_names, 70)
 
             email_key = normalized_emails.iloc[idx]

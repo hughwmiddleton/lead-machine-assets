@@ -1,5 +1,6 @@
 import csv
 import datetime as dt
+import json
 import os
 
 from lead_vault.alias_map import HEADER_ALIASES
@@ -426,13 +427,63 @@ def test_merge_consolidate_incoming_email_replaces_empty_existing_and_writes_bac
     assert os.path.exists(result["backup_path"])
 
 
+def test_merge_consolidate_upgrade_restores_existing_spotify_discovery_origin(tmp_path):
+    master_path = tmp_path / "master.csv"
+    source_path = tmp_path / "import.csv"
+    spotify_url = "https://open.spotify.com/artist/origin-lock"
+    _write_csv(
+        master_path,
+        get_canonical_master_schema(),
+        [
+            _master_row(
+                Artist="Origin Lock",
+                Lead_Source="Spotify",
+                Source_Directory="Spotify",
+                Source_URL="",
+                Spotify_URL=spotify_url,
+            )
+        ],
+    )
+    _write_csv(
+        source_path,
+        ["Artist Name", "Lead Source", "Source Directory", "Email", "Bandcamp URL"],
+        [
+            {
+                "Artist Name": "Origin Lock",
+                "Lead Source": "Bandcamp",
+                "Source Directory": "bandcamp",
+                "Email": "artist@example.com",
+                "Bandcamp URL": "https://origin-lock.bandcamp.com",
+            }
+        ],
+    )
+
+    result = merge_csv_into_master(source_path, master_path=master_path, duplicate_strategy="merge_consolidate")
+    row = _read_master_rows(master_path)[0]
+
+    assert result["rows_replaced"] == 1
+    assert row["Lead_Source"] == "Spotify"
+    assert row["Source_Directory"] == "Spotify"
+    assert row["Source_URL"] == spotify_url
+    assert row["Bandcamp_URL"] == "https://origin-lock.bandcamp.com"
+    assert row["Primary_Email"] == "artist@example.com"
+
+
 def test_merge_consolidate_protects_existing_email_from_empty_incoming(tmp_path):
     master_path = tmp_path / "master.csv"
     source_path = tmp_path / "import.csv"
     _write_csv(
         master_path,
         get_canonical_master_schema(),
-        [_master_row(Artist="Protected", Source_URL="https://example.com/protected", Primary_Email="keep@example.com")],
+        [
+            _master_row(
+                Artist="Protected",
+                Source_URL="https://example.com/protected",
+                Primary_Email="keep@example.com",
+                Email_Source="website_enrich",
+                Email_Source_URL="https://protected.example/contact",
+            )
+        ],
     )
     _write_csv(
         source_path,
@@ -445,7 +496,9 @@ def test_merge_consolidate_protects_existing_email_from_empty_incoming(tmp_path)
 
     assert result["rows_kept_existing"] == 1
     assert rows[0]["Primary_Email"] == "keep@example.com"
-    assert rows[0]["Facebook_URL"] == ""
+    assert rows[0]["Email_Source"] == "website_enrich"
+    assert rows[0]["Email_Source_URL"] == "https://protected.example/contact"
+    assert rows[0]["Facebook_URL"] == "https://facebook.com/protected"
 
 
 def test_merge_consolidate_email_all_unique_count_breaks_email_tie(tmp_path):
@@ -535,6 +588,381 @@ def test_merge_consolidate_no_email_uses_richer_enrichment_fields(tmp_path):
     assert rows[0]["Facebook_URL"] == "https://facebook.com/noemail"
     assert rows[0]["Instagram_URL"] == "https://instagram.com/noemail"
     assert rows[0]["External_Links"] == "https://noemail.example.com"
+
+
+def test_merge_consolidate_lucky_iris_keeps_contact_winner_and_no_email_enrichment(tmp_path):
+    master_path = tmp_path / "master.csv"
+    source_path = tmp_path / "import.csv"
+    spotify_url = "https://open.spotify.com/artist/lucky-iris"
+    _write_csv(
+        master_path,
+        get_canonical_master_schema(),
+        [
+            _master_row(
+                Artist="Lucky Iris",
+                Lead_Source="Spotify",
+                Source_Directory="Spotify",
+                Source_URL=spotify_url,
+                Spotify_URL=spotify_url,
+                Final_Status="valid",
+            )
+        ],
+    )
+    _write_csv(
+        source_path,
+        [
+            "Artist Name", "Source URL", "Lead Source", "Source Directory",
+            "Bandcamp URL", "Instagram URL", "External Links",
+            "IG_Write_State", "FB_Write_State", "Email",
+        ],
+        [
+            {
+                "Artist Name": "Lucky Iris",
+                "Source URL": spotify_url,
+                "Lead Source": "Bandcamp",
+                "Source Directory": "bandcamp",
+                "Bandcamp URL": "https://luckyiris.bandcamp.com/",
+                "Instagram URL": "https://instagram.com/luckyiris/",
+                "External Links": "https://luckyiris.example/links",
+                "IG_Write_State": "ig_no_email_written",
+                "FB_Write_State": "fb_no_email_written",
+                "Email": "",
+            }
+        ],
+    )
+
+    result = merge_csv_into_master(
+        source_path,
+        ignored_headers=["IG_Write_State", "FB_Write_State"],
+        master_path=master_path,
+        duplicate_strategy="merge_consolidate",
+    )
+    row = _read_master_rows(master_path)[0]
+
+    assert result["rows_final"] == 1
+    assert result["rows_kept_existing"] == 1
+    assert row["Primary_Email"] == ""
+    assert row["Final_Status"] == "valid"
+    assert row["Lead_Source"] == "Spotify"
+    assert row["Source_Directory"] == "Spotify"
+    assert row["Source_URL"] == spotify_url
+    assert row["Bandcamp_URL"] == "https://luckyiris.bandcamp.com/"
+    assert row["Instagram_URL"] == "https://instagram.com/luckyiris/"
+    assert row["External_Links"] == "https://luckyiris.example/links"
+
+
+def test_merge_consolidate_mayce_keeps_independent_soundcloud_but_blocks_mismatched_musicbrainz(tmp_path):
+    master_path = tmp_path / "master.csv"
+    source_path = tmp_path / "import.csv"
+    spotify_url = "https://open.spotify.com/artist/mayce"
+    evidence = json.dumps(
+        {
+            "musicbrainz": {
+                "status": "matched",
+                "match_method": "spotify_url_relationship",
+                "artist": {"name": "Macy Kate"},
+                "relationships": {
+                    "soundcloud": [{"url": "https://soundcloud.com/macy-kate"}],
+                    "bandcamp": [{"url": "https://macykate.bandcamp.com/"}],
+                },
+            }
+        }
+    )
+    _write_csv(
+        master_path,
+        get_canonical_master_schema(),
+        [
+            _master_row(
+                Artist="MAYCE",
+                Lead_Source="Spotify",
+                Source_Directory="Spotify",
+                Source_URL=spotify_url,
+                Spotify_URL=spotify_url,
+                Final_Status="valid",
+            )
+        ],
+    )
+    _write_csv(
+        source_path,
+        [
+            "Artist Name", "Source URL", "SoundCloud Link", "External Links",
+            "Bandcamp URL",
+            "MusicBrainz_MBID", "MusicBrainz_Status", "Identity_Match_Method",
+            "Identity_Confidence", "Identity_Evidence_JSON", "IG_Write_State",
+        ],
+        [
+            {
+                "Artist Name": "MAYCE",
+                "Source URL": spotify_url,
+                "SoundCloud Link": "https://soundcloud.com/mayce",
+                "External Links": "https://soundcloud.com/macy-kate;https://mayce.example",
+                "Bandcamp URL": "https://macykate.bandcamp.com/",
+                "MusicBrainz_MBID": "macy-kate-mbid",
+                "MusicBrainz_Status": "matched",
+                "Identity_Match_Method": "spotify_url_relationship",
+                "Identity_Confidence": "1.0",
+                "Identity_Evidence_JSON": evidence,
+                "IG_Write_State": "ig_no_email_written",
+            }
+        ],
+    )
+
+    result = merge_csv_into_master(
+        source_path,
+        ignored_headers=["IG_Write_State"],
+        master_path=master_path,
+        duplicate_strategy="merge_consolidate",
+    )
+    row = _read_master_rows(master_path)[0]
+
+    assert result["rows_final"] == 1
+    assert row["SoundCloud_URL"] == "https://soundcloud.com/mayce"
+    assert row["External_Links"] == "https://mayce.example"
+    assert row["Bandcamp_URL"] == ""
+    assert row["MusicBrainz_MBID"] == ""
+    assert row["MusicBrainz_Status"] == ""
+    assert row["Identity_Evidence_JSON"] == ""
+    assert row["Lead_Source"] == "Spotify"
+    assert row["Source_Directory"] == "Spotify"
+    assert row["Source_URL"] == spotify_url
+    assert row["Primary_Email"] == ""
+    assert row["Final_Status"] == "valid"
+
+
+def test_merge_consolidate_coalesces_bandcamp_and_soundcloud_into_blank_winner_fields(tmp_path):
+    master_path = tmp_path / "master.csv"
+    source_path = tmp_path / "import.csv"
+    _write_csv(
+        master_path,
+        get_canonical_master_schema(),
+        [_master_row(Artist="Relationship Fill", Source_URL="https://example.com/relationship-fill")],
+    )
+    _write_csv(
+        source_path,
+        ["Artist Name", "Source URL", "Bandcamp URL", "SoundCloud Link", "IG_Write_State"],
+        [
+            {
+                "Artist Name": "Relationship Fill",
+                "Source URL": "https://example.com/relationship-fill",
+                "Bandcamp URL": "https://relationship-fill.bandcamp.com",
+                "SoundCloud Link": "https://soundcloud.com/relationship-fill",
+                "IG_Write_State": "ig_no_email_written",
+            }
+        ],
+    )
+
+    merge_csv_into_master(
+        source_path,
+        ignored_headers=["IG_Write_State"],
+        master_path=master_path,
+        duplicate_strategy="merge_consolidate",
+    )
+    row = _read_master_rows(master_path)[0]
+
+    assert row["Bandcamp_URL"] == "https://relationship-fill.bandcamp.com"
+    assert row["SoundCloud_URL"] == "https://soundcloud.com/relationship-fill"
+
+
+def test_merge_consolidate_preserves_stronger_website_and_unions_complementary_socials(tmp_path):
+    master_path = tmp_path / "master.csv"
+    source_path = tmp_path / "import.csv"
+    _write_csv(
+        master_path,
+        get_canonical_master_schema(),
+        [
+            _master_row(
+                Artist="Social Union",
+                Source_URL="https://example.com/social-union",
+                Website="https://social-union.example",
+                Instagram_URL="https://instagram.com/socialunion",
+                External_Links="https://instagram.com/socialunion",
+            )
+        ],
+    )
+    _write_csv(
+        source_path,
+        ["Artist Name", "Source URL", "Website", "Facebook URL", "External Links", "IG_Write_State"],
+        [
+            {
+                "Artist Name": "Social Union",
+                "Source URL": "https://example.com/social-union",
+                "Website": "https://weaker.example",
+                "Facebook URL": "https://facebook.com/socialunion",
+                "External Links": "https://instagram.com/socialunion;https://youtube.com/@socialunion",
+                "IG_Write_State": "ig_no_email_written",
+            }
+        ],
+    )
+
+    merge_csv_into_master(
+        source_path,
+        ignored_headers=["IG_Write_State"],
+        master_path=master_path,
+        duplicate_strategy="merge_consolidate",
+    )
+    row = _read_master_rows(master_path)[0]
+
+    assert row["Website"] == "https://social-union.example"
+    assert row["Facebook_URL"] == "https://facebook.com/socialunion"
+    assert row["External_Links"].split(";") == [
+        "https://instagram.com/socialunion",
+        "https://youtube.com/@socialunion",
+    ]
+
+
+def test_merge_consolidate_does_not_promote_placeholder_email_but_keeps_links(tmp_path):
+    master_path = tmp_path / "master.csv"
+    source_path = tmp_path / "import.csv"
+    _write_csv(
+        master_path,
+        get_canonical_master_schema(),
+        [_master_row(Artist="Safe Contact", Source_URL="https://example.com/safe-contact")],
+    )
+    _write_csv(
+        source_path,
+        ["Artist Name", "Source URL", "Email", "Email All", "Bandcamp URL"],
+        [
+            {
+                "Artist Name": "Safe Contact",
+                "Source URL": "https://example.com/safe-contact",
+                "Email": "email@example.com",
+                "Email All": "email@example.com",
+                "Bandcamp URL": "https://safe-contact.bandcamp.com",
+            }
+        ],
+    )
+
+    result = merge_csv_into_master(source_path, master_path=master_path, duplicate_strategy="merge_consolidate")
+    row = _read_master_rows(master_path)[0]
+
+    assert result["rows_kept_existing"] == 1
+    assert row["Primary_Email"] == ""
+    assert row["All_Emails"] == ""
+    assert row["Bandcamp_URL"] == "https://safe-contact.bandcamp.com"
+
+
+def test_merge_consolidate_legitimate_email_still_wins_under_existing_policy(tmp_path):
+    master_path = tmp_path / "master.csv"
+    source_path = tmp_path / "import.csv"
+    _write_csv(
+        master_path,
+        get_canonical_master_schema(),
+        [_master_row(Artist="Legitimate Contact", Source_URL="https://example.com/legitimate")],
+    )
+    _write_csv(
+        source_path,
+        ["Artist Name", "Source URL", "Email", "Email Source", "Email Source URL"],
+        [
+            {
+                "Artist Name": "Legitimate Contact",
+                "Source URL": "https://example.com/legitimate",
+                "Email": "artist@legitimate.example",
+                "Email Source": "website_enrich",
+                "Email Source URL": "https://legitimate.example/contact",
+            }
+        ],
+    )
+
+    result = merge_csv_into_master(source_path, master_path=master_path, duplicate_strategy="merge_consolidate")
+    row = _read_master_rows(master_path)[0]
+
+    assert result["rows_replaced"] == 1
+    assert row["Primary_Email"] == "artist@legitimate.example"
+    assert row["Email_Source"] == "website_enrich"
+    assert row["Email_Source_URL"] == "https://legitimate.example/contact"
+
+
+def test_merge_consolidate_preserves_eligible_musicbrainz_identity_bundle(tmp_path):
+    master_path = tmp_path / "master.csv"
+    source_path = tmp_path / "import.csv"
+    evidence = json.dumps(
+        {
+            "musicbrainz": {
+                "status": "matched",
+                "match_method": "spotify_url_relationship",
+                "artist": {"name": "Identity Safe"},
+                "relationships": {},
+            }
+        }
+    )
+    _write_csv(
+        master_path,
+        get_canonical_master_schema(),
+        [_master_row(Artist="Identity Safe", Source_URL="https://example.com/identity-safe")],
+    )
+    _write_csv(
+        source_path,
+        [
+            "Artist Name", "Source URL", "MusicBrainz_MBID", "MusicBrainz_Status",
+            "Identity_Match_Method", "Identity_Confidence", "Identity_Evidence_JSON",
+            "IG_Write_State",
+        ],
+        [
+            {
+                "Artist Name": "Identity Safe",
+                "Source URL": "https://example.com/identity-safe",
+                "MusicBrainz_MBID": "safe-mbid",
+                "MusicBrainz_Status": "matched",
+                "Identity_Match_Method": "spotify_url_relationship",
+                "Identity_Confidence": "1.0",
+                "Identity_Evidence_JSON": evidence,
+                "IG_Write_State": "ig_no_email_written",
+            }
+        ],
+    )
+
+    merge_csv_into_master(
+        source_path,
+        ignored_headers=["IG_Write_State"],
+        master_path=master_path,
+        duplicate_strategy="merge_consolidate",
+    )
+    row = _read_master_rows(master_path)[0]
+
+    assert row["MusicBrainz_MBID"] == "safe-mbid"
+    assert row["MusicBrainz_Status"] == "matched"
+    assert row["Identity_Match_Method"] == "spotify_url_relationship"
+    assert row["Identity_Confidence"] == "1.0"
+    assert row["Identity_Evidence_JSON"] == evidence
+
+
+def test_merge_consolidate_losing_row_cannot_overwrite_origin(tmp_path):
+    master_path = tmp_path / "master.csv"
+    source_path = tmp_path / "import.csv"
+    spotify_url = "https://open.spotify.com/artist/origin-stays"
+    _write_csv(
+        master_path,
+        get_canonical_master_schema(),
+        [
+            _master_row(
+                Artist="Origin Stays",
+                Lead_Source="Spotify",
+                Source_Directory="Spotify",
+                Source_URL=spotify_url,
+                Primary_Email="artist@origin-stays.example",
+            )
+        ],
+    )
+    _write_csv(
+        source_path,
+        ["Artist Name", "Source URL", "Lead Source", "Source Directory", "Bandcamp URL"],
+        [
+            {
+                "Artist Name": "Origin Stays",
+                "Source URL": spotify_url,
+                "Lead Source": "Bandcamp",
+                "Source Directory": "bandcamp",
+                "Bandcamp URL": "https://origin-stays.bandcamp.com",
+            }
+        ],
+    )
+
+    merge_csv_into_master(source_path, master_path=master_path, duplicate_strategy="merge_consolidate")
+    row = _read_master_rows(master_path)[0]
+
+    assert row["Lead_Source"] == "Spotify"
+    assert row["Source_Directory"] == "Spotify"
+    assert row["Source_URL"] == spotify_url
 
 
 def test_merge_consolidate_stability_bias_keeps_equal_existing_row(tmp_path):

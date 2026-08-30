@@ -21,8 +21,14 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
-from soundcloud_engine import SoundCloudEngine
+from soundcloud_engine import SoundCloudEngine, canonicalize_soundcloud_profile_url
 import soundcloud_engine as sc_engine
+from bandcamp_profile_engine import (
+    PROFILE_ACCEPTED as BANDCAMP_PROFILE_ACCEPTED,
+    PROFILE_CHALLENGE_UNAVAILABLE as BANDCAMP_PROFILE_CHALLENGE_UNAVAILABLE,
+    fetch_bandcamp_profile as _shared_fetch_bandcamp_profile,
+    bandcamp_challenge_reason as _shared_bandcamp_challenge_reason,
+)
 import pandas as pd
 import requests
 from bs4 import BeautifulSoup
@@ -39,6 +45,15 @@ from source_scheduler import (
     promote_facebook_url,
     soundcloud_handle_from_profile_url as _shared_soundcloud_handle_from_profile_url,
 )
+from musicbrainz_relationship_bridge import (
+    KNOWN_PROFILE_ACCEPTED,
+    KNOWN_PROFILE_CHALLENGE_UNAVAILABLE,
+    KNOWN_PROFILE_ERROR,
+    KNOWN_PROFILE_IDENTITY_REJECTED,
+    KnownProfileFetchResult,
+    build_relationship_bridge_plan,
+    musicbrainz_relationship_bridge_enabled,
+)
 import html_fetcher
 from html_fetcher import fetch_html, _detect_soft_block
 from selenium import webdriver
@@ -52,11 +67,17 @@ from webdriver_manager.chrome import ChromeDriverManager
 from urllib.parse import urlparse, parse_qs, unquote
 from unidecode import unidecode
 from email_normalizer import (
+    filter_obvious_placeholder_emails,
     filter_platform_support_emails,
     filter_system_telemetry_emails,
     is_obvious_placeholder_email,
     normalize_email_value,
     normalize_obfuscated_email_patterns,
+)
+from link_surface_hygiene import (
+    is_artist_link_hub_profile,
+    is_artist_platform_profile,
+    is_useful_artist_link,
 )
 from email_provenance import (
     EMAIL_PROVENANCE_JSON_COL,
@@ -65,6 +86,7 @@ from email_provenance import (
     row_has_successful_source_url_provenance,
 )
 from progress_state import init_progress, update_progress
+from lead_vault.origin import ORIGIN_LOCKED_FIELDS, preserve_origin_fields
 from fb_attribution import (
     FB_ATTEMPT_STATE_COL,
     FB_DEBUG_REASON_COL,
@@ -320,6 +342,7 @@ class ChunkYieldWindow:
 # ---------------------------------------------------------------------------
 LIVE_SEARCH_MAX_ATTEMPTS = 50  # 0 = no limit
 MAX_LINK_HUB_HOPS_PER_ROW = 1
+MAX_LINK_HUB_SOCIALS_PER_ROW = 12
 HTTP_TIMEOUT = 15
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -1129,6 +1152,8 @@ _FB_DRIVER_LOCK = threading.Lock()
 setup_facebook_driver = None
 fb_scrape_emails_from_page = None
 fb_find_page_and_emails_by_name = None
+setup_bandcamp_driver = None
+bandcamp_quick_visit = None
 if os.path.exists(FACEBOOK_HELPERS_PATH):
     try:
         spec = importlib.util.spec_from_file_location(
@@ -1140,10 +1165,14 @@ if os.path.exists(FACEBOOK_HELPERS_PATH):
             setup_facebook_driver = getattr(module, "setup_facebook_driver", None)
             fb_scrape_emails_from_page = getattr(module, "fb_scrape_emails_from_page", None)
             fb_find_page_and_emails_by_name = getattr(module, "fb_find_page_and_emails_by_name", None)
+            setup_bandcamp_driver = getattr(module, "setup_driver", None)
+            bandcamp_quick_visit = getattr(module, "_bandcamp_quick_visit", None)
     except Exception:
         setup_facebook_driver = None
         fb_scrape_emails_from_page = None
         fb_find_page_and_emails_by_name = None
+        setup_bandcamp_driver = None
+        bandcamp_quick_visit = None
 
 
 def normalize_external_url(u: str) -> str:
@@ -9872,6 +9901,25 @@ def _canonicalise_bandcamp_url(value: str) -> str:
     return _shared_canonicalize_bandcamp_url(value)
 
 
+def _canonicalise_musicbrainz_bandcamp_url(value: str) -> str:
+    canonical = _canonicalise_bandcamp_url(value or "")
+    if not canonical:
+        return ""
+    try:
+        parsed = urllib.parse.urlparse(canonical)
+    except Exception:
+        return ""
+    host = (parsed.netloc or "").lower()
+    if host.startswith("www."):
+        host = host[4:]
+    return f"https://{host}/" if host.endswith(".bandcamp.com") else ""
+
+
+def _bandcamp_challenge_reason(html: str) -> str:
+    """Compatibility adapter for the shared Bandcamp challenge classifier."""
+    return _shared_bandcamp_challenge_reason(html)
+
+
 def _split_pipe_cell(value, is_email: bool = False) -> Set[str]:
     if value is None:
         return set()
@@ -9972,7 +10020,7 @@ def _extract_directory_fields(
         value = row.get(column)
         for item in _split_multi_value(value):
             normalised = _normalise_url(item)
-            if not normalised or _is_noise_url(normalised):
+            if not normalised or _is_noise_url(normalised) or not is_useful_artist_link(normalised):
                 continue
             host = _host(normalised)
             if host in LINK_HUB_HOSTS:
@@ -9986,7 +10034,7 @@ def _extract_directory_fields(
         value = row.get(column)
         for item in _split_multi_value(value):
             normalised = _normalise_url(item)
-            if not normalised or _is_noise_url(normalised):
+            if not normalised or _is_noise_url(normalised) or not is_useful_artist_link(normalised):
                 continue
             host = _host(normalised)
             if host in LINK_HUB_HOSTS:
@@ -10217,6 +10265,19 @@ def _collect_website_enrich_candidate_urls(row: Any) -> List[str]:
     return candidates
 
 
+def _row_has_existing_operational_website(row: Any) -> bool:
+    """Return whether the row already carries a non-platform website identity."""
+    if row is None or not hasattr(row, "get"):
+        return False
+    fields = ("Spotify_Website_URL", "External Links", *WEBSITE_EMAIL_OPTIONAL_FIELDS)
+    for field in fields:
+        for token in _split_multi_value(row.get(field, "")):
+            normalised = _normalise_url(token)
+            if normalised and _is_website_enrich_candidate_url(normalised):
+                return True
+    return False
+
+
 def _collect_website_enrich_link_hubs(row: Any) -> List[str]:
     if row is None:
         return []
@@ -10230,6 +10291,8 @@ def _collect_website_enrich_link_hubs(row: Any) -> List[str]:
             if not normalised or normalised in seen_urls:
                 continue
             if _host(normalised) not in LINK_HUB_HOSTS:
+                continue
+            if not is_artist_link_hub_profile(normalised):
                 continue
             seen_urls.add(normalised)
             hub_urls.append(normalised)
@@ -10530,6 +10593,7 @@ def _extract_links_from_profile(
     if not html:
         return socials, websites, emails, link_hubs
     soup = BeautifulSoup(html, "html.parser")
+    parsing_link_hub = _host(profile_url) in LINK_HUB_HOSTS
     anchors = soup.find_all("a", href=True)
     for anchor in anchors:
         href = (anchor.get("href") or "").strip()
@@ -10546,6 +10610,22 @@ def _extract_links_from_profile(
         absolute = urllib.parse.urljoin(profile_url, href)
         normalised = _normalise_url(absolute)
         if not normalised or _is_noise_url(normalised):
+            continue
+        if not is_useful_artist_link(
+            normalised,
+            from_link_hub=parsing_link_hub,
+            source_hub_url=profile_url,
+            anchor_context=" ".join(
+                filter(
+                    None,
+                    (
+                        anchor.get_text(" ", strip=True),
+                        cell_to_str(anchor.get("aria-label")),
+                        cell_to_str(anchor.get("title")),
+                    ),
+                )
+            ),
+        ):
             continue
         parsed = urllib.parse.urlparse(normalised)
         if parsed.scheme not in ("http", "https"):
@@ -10567,7 +10647,7 @@ def _extract_links_from_profile(
         if host in LINK_HUB_HOSTS:
             link_hubs.add(normalised)
             websites.add(normalised)
-        elif any(host.endswith(domain) for domain in SOCIAL_HOST_WHITELIST):
+        elif any(host.endswith(domain) for domain in SOCIAL_HOST_WHITELIST) or is_artist_platform_profile(normalised):
             socials.add(normalised)
         else:
             if host in JUNK_WEBSITE_HOSTS:
@@ -10705,6 +10785,7 @@ def _scrape_link_hub_socials(session: requests.Session, hub_url: str) -> Set[str
         print(f"[Enricher] Link hub fetch failed {hub_url}: {exc}")
         return socials
     soup = BeautifulSoup(resp.text, "html.parser")
+    hub_host = _host(hub_url)
     for anchor in soup.find_all("a", href=True):
         href = anchor.get("href", "").strip()
         if not href:
@@ -10713,9 +10794,31 @@ def _scrape_link_hub_socials(session: requests.Session, hub_url: str) -> Set[str
         normalised = _normalise_url(absolute)
         if not normalised or _is_noise_url(normalised):
             continue
+        if not is_useful_artist_link(
+            normalised,
+            from_link_hub=True,
+            source_hub_url=hub_url,
+            anchor_context=" ".join(
+                filter(
+                    None,
+                    (
+                        anchor.get_text(" ", strip=True),
+                        cell_to_str(anchor.get("aria-label")),
+                        cell_to_str(anchor.get("title")),
+                    ),
+                )
+            ),
+        ):
+            continue
         host = _host(normalised)
-        if any(host.endswith(domain) for domain in SOCIAL_HOST_WHITELIST):
+        # Link-hub application shells link to many unrelated public hub pages.
+        # Keep only bounded external account destinations for this specific hub.
+        if host == hub_host or host in LINK_HUB_HOSTS:
+            continue
+        if any(host.endswith(domain) for domain in SOCIAL_HOST_WHITELIST) or is_artist_platform_profile(normalised):
             socials.add(normalised)
+            if len(socials) >= MAX_LINK_HUB_SOCIALS_PER_ROW:
+                break
     return socials
 
 
@@ -11696,6 +11799,68 @@ def _sc_score_candidate(
     return max(0.0, min(score, 1.0))
 
 
+_SC_PROFILE_IDENTITY_TERMS = {
+    "artist", "band", "dj", "music", "musician", "producer", "rapper", "singer", "songwriter",
+}
+
+
+def _sc_candidate_substantive_evidence(
+    candidate: Dict[str, Any],
+    *,
+    location_hint: str = "",
+    genre_hint: str = "",
+    song_title: str = "",
+    track_hint: str = "",
+) -> Tuple[str, ...]:
+    """Return non-name evidence exposed by a generic SoundCloud candidate."""
+    evidence: List[str] = []
+    context = _clean_cell(candidate.get("context") or candidate.get("description"))
+    location = _clean_cell(candidate.get("location"))
+    external_urls = candidate.get("external_urls") or []
+    latest_track = _clean_cell(candidate.get("latest_track_title") or candidate.get("track_title"))
+    track_titles = candidate.get("track_titles") or []
+    if isinstance(track_titles, str):
+        track_titles = [track_titles]
+    exposed_track_text = " ".join(
+        [latest_track, *[_clean_cell(title) for title in track_titles if _clean_cell(title)]]
+    ).strip()
+    try:
+        track_count = int(candidate.get("track_count") or 0)
+    except (TypeError, ValueError):
+        track_count = 0
+
+    if track_count > 0 or exposed_track_text:
+        evidence.append("catalogue")
+    if context:
+        context_tokens = set(re.findall(r"[a-z]+", context.lower()))
+        if context_tokens & _SC_PROFILE_IDENTITY_TERMS:
+            evidence.append("artist_bio")
+        if re.search(r"https?://|www\.", context, flags=re.IGNORECASE):
+            evidence.append("outbound_link")
+    if external_urls:
+        evidence.append("outbound_link")
+    if location:
+        evidence.append("location")
+    if location_hint and location and _sc_location_match(location_hint, location):
+        evidence.append("location_match")
+    if genre_hint and context:
+        genre_norm = _sc_normalise_text(genre_hint)
+        if genre_norm and genre_norm in _sc_normalise_text(context):
+            evidence.append("genre_match")
+    if _sc_title_metadata_boost(song_title, track_hint, exposed_track_text, context) > 0:
+        evidence.append("seed_track_match")
+
+    # Default-style handles are collision-prone. Mere catalogue volume or an
+    # unrelated location does not corroborate them without a stronger signal.
+    handle = _sc_normalise_text(candidate.get("handle") or "")
+    if handle.startswith("user") and not {
+        "artist_bio", "outbound_link", "location_match", "genre_match", "seed_track_match",
+    }.intersection(evidence):
+        return ()
+
+    return tuple(dict.fromkeys(evidence))
+
+
 def _build_soundcloud_queries(base_query: str, track_hint: str = "", location_hint: str = "") -> List[str]:
     """
     Build a small set of progressively broader SoundCloud search strings.
@@ -12142,6 +12307,25 @@ def _is_valid_unearthed_soundcloud_url(value: str) -> bool:
     return bool(handle and handle not in _UNEARTHED_SC_RESERVED_HANDLES)
 
 
+def _canonicalise_musicbrainz_soundcloud_url(value: str) -> str:
+    normalised = _normalise_url(value or "")
+    if not normalised:
+        return ""
+    try:
+        parsed = urllib.parse.urlparse(normalised)
+    except Exception:
+        return ""
+    host = (parsed.netloc or "").lower()
+    if host.startswith("www."):
+        host = host[4:]
+    if host != "soundcloud.com":
+        return ""
+    handle = _sc_handle_from_profile_url(normalised)
+    if not handle or handle in _UNEARTHED_SC_RESERVED_HANDLES:
+        return ""
+    return f"https://soundcloud.com/{handle}"
+
+
 def _is_valid_unearthed_bandcamp_url(value: str) -> bool:
     canonical = _canonicalise_bandcamp_url(value or "")
     if not canonical:
@@ -12310,6 +12494,9 @@ class CrossDirectoryEnricherWorker(QThread):
         self.max_live_searches = max_live_searches
         self.session = _build_session()
         self._bc_session = _build_bandcamp_session()
+        self._closed_http_session_ids: Set[int] = set()
+        self._bandcamp_browser_driver = None
+        self._bandcamp_browser_disabled = False
         self.live_search_attempts = 0
         self._notified_limit = False
         self._sc_live_enrich_disabled: bool = False
@@ -12429,10 +12616,54 @@ class CrossDirectoryEnricherWorker(QThread):
             self.log_message.emit(f"[Enricher] Error: {exc}")
             self.finished.emit("")
         finally:
+            self._cleanup_owned_resources()
+
+    def _cleanup_owned_resources(self) -> None:
+        self._cleanup_bandcamp_browser_driver()
+        self._cleanup_http_sessions()
+
+    def _cleanup_http_sessions(self) -> None:
+        """Close each worker-owned HTTP session at most once."""
+        for attribute_name in ("session", "_bc_session"):
+            session = getattr(self, attribute_name, None)
+            if session is None:
+                continue
+            session_id = id(session)
+            if session_id in self._closed_http_session_ids:
+                continue
+            self._closed_http_session_ids.add(session_id)
             try:
-                self.session.close()
+                session.close()
             except Exception:
                 pass
+
+    def _bandcamp_browser_fetch(self, profile_url: str) -> str:
+        """Use the GUI's existing quick-visit seam with one lazy run-scoped driver."""
+        if self._bandcamp_browser_disabled:
+            return ""
+        if not callable(setup_bandcamp_driver) or not callable(bandcamp_quick_visit):
+            self._bandcamp_browser_disabled = True
+            return ""
+        if self._bandcamp_browser_driver is None:
+            try:
+                self._bandcamp_browser_driver = setup_bandcamp_driver()
+            except Exception as exc:
+                self._bandcamp_browser_disabled = True
+                self.log_message.emit(
+                    f"[MusicBrainz Bridge] Bandcamp browser unavailable reason={type(exc).__name__}"
+                )
+                return ""
+        return bandcamp_quick_visit(self._bandcamp_browser_driver, profile_url) or ""
+
+    def _cleanup_bandcamp_browser_driver(self) -> None:
+        driver = self._bandcamp_browser_driver
+        self._bandcamp_browser_driver = None
+        if driver is None:
+            return
+        try:
+            driver.quit()
+        except Exception:
+            pass
 
     def _emit_runtime_reset_log(self, message: str) -> None:
         if not message:
@@ -13496,6 +13727,7 @@ class CrossDirectoryEnricherWorker(QThread):
                 self.log_message.emit(f"[DomainOrg] failed to write sidecar safely: {exc}")
             self.finished.emit(self.output_csv_path)
         finally:
+            self._cleanup_bandcamp_browser_driver()
             _cleanup_enricher_facebook_driver()
 
     def _record_enrichment_yield(
@@ -15435,6 +15667,350 @@ class CrossDirectoryEnricherWorker(QThread):
                 )
         return enriched
 
+    def _fetch_musicbrainz_known_profile(
+        self,
+        platform: str,
+        profile_url: str,
+        artist_name: str,
+        ctx: Dict[str, Any],
+        *,
+        allow_bandcamp_browser_fallback: bool = False,
+    ) -> KnownProfileFetchResult:
+        """Fetch a known URL through the existing platform parser with identity validation."""
+        if not self._increment_live_counter():
+            return KnownProfileFetchResult(
+                KNOWN_PROFILE_ERROR,
+                reason="live_search_budget_exhausted",
+            )
+        if platform == "bandcamp":
+            result = _shared_fetch_bandcamp_profile(
+                profile_url,
+                session=self._bc_session,
+                browser_fetcher=(
+                    self._bandcamp_browser_fetch
+                    if allow_bandcamp_browser_fallback
+                    else None
+                ),
+                browser_on_empty=False,
+            )
+            if result.status == BANDCAMP_PROFILE_CHALLENGE_UNAVAILABLE:
+                return KnownProfileFetchResult(
+                    KNOWN_PROFILE_CHALLENGE_UNAVAILABLE,
+                    reason=result.reason or "bandcamp_profile_unavailable",
+                )
+            if result.status != BANDCAMP_PROFILE_ACCEPTED or not result.profile:
+                return KnownProfileFetchResult(
+                    KNOWN_PROFILE_ERROR,
+                    reason=result.reason or "profile_fetch_failed",
+                )
+
+            profile = result.profile
+            identity_candidate_name = _clean_cell(
+                (result.identity_evidence or {}).get("page_artist")
+                or profile.get("artist_name")
+            )
+            identity_match_score = _bandcamp_confidence(
+                artist_name,
+                identity_candidate_name,
+                result.canonical_url or profile_url,
+                song_title=_clean_cell(ctx.get("song_title", "")),
+            )
+            if (
+                identity_match_score < MIN_BC_CONFIDENCE
+                or not _bc_slug_has_strong_artist_name_confirmation(
+                    artist_name,
+                    identity_candidate_name,
+                )
+            ):
+                return KnownProfileFetchResult(
+                    KNOWN_PROFILE_IDENTITY_REJECTED,
+                    reason="artist_identity_contradiction",
+                )
+
+            socials = {
+                _normalise_url(value) or value
+                for value in (profile.get("socials") or {}).values()
+                if _normalise_url(value)
+            }
+            websites: Set[str] = set()
+            link_hubs: Set[str] = set()
+            for value in list(profile.get("all_social_links") or ()) + [profile.get("website", "")]:
+                normalized = _normalise_url(value)
+                if not normalized:
+                    continue
+                if _host(normalized) in LINK_HUB_HOSTS:
+                    link_hubs.add(normalized)
+                elif normalized not in socials:
+                    websites.add(normalized)
+            emails = {
+                _clean_cell(value).lower()
+                for value in list(profile.get("emails") or ()) + [profile.get("email", "")]
+                if _clean_cell(value)
+            }
+            payload = EnrichmentPayload(
+                socials=socials,
+                websites=websites,
+                emails=emails,
+                link_hubs=link_hubs,
+                source_dir="bandcamp",
+                source_url=result.canonical_url or profile_url,
+                source_detail="Bandcamp Live",
+                match_score=identity_match_score,
+                candidate_name=identity_candidate_name,
+            )
+            return KnownProfileFetchResult(
+                KNOWN_PROFILE_ACCEPTED,
+                payload=payload,
+                reason="strong:bandcamp_artist_identity",
+            )
+        payload = self._fetch_profile_and_build(
+            profile_url,
+            platform,
+            identity_artist_name=artist_name,
+            identity_song_title=_clean_cell(ctx.get("song_title", "")),
+        )
+        status = getattr(self, "_last_known_profile_status", "")
+        reason = getattr(self, "_last_known_profile_reason", "")
+        if payload and status != KNOWN_PROFILE_ACCEPTED:
+            status = KNOWN_PROFILE_ACCEPTED
+        if not status:
+            status = KNOWN_PROFILE_ERROR
+        return KnownProfileFetchResult(status, payload=payload, reason=reason)
+
+    def _fetch_musicbrainz_known_instagram(
+        self,
+        profile_url: str,
+        artist_name: str,
+        row: Any,
+    ) -> KnownProfileFetchResult:
+        """Validate a known Instagram URL through the existing profile admission path."""
+        if not self._increment_live_counter():
+            return KnownProfileFetchResult(KNOWN_PROFILE_ERROR, reason="live_search_budget_exhausted")
+        accepted, reason = _spotify_seed_instagram_admission_profile_validation(
+            self.session,
+            row,
+            profile_url,
+            artist_name,
+        )
+        if not accepted:
+            status = (
+                KNOWN_PROFILE_CHALLENGE_UNAVAILABLE
+                if reason == "blocked:profile_unavailable"
+                else KNOWN_PROFILE_IDENTITY_REJECTED
+            )
+            return KnownProfileFetchResult(status, reason=reason)
+        return KnownProfileFetchResult(
+            KNOWN_PROFILE_ACCEPTED,
+            payload=EnrichmentPayload(
+                socials={profile_url},
+                source_dir="musicbrainz_instagram_bridge",
+                source_url=profile_url,
+                source_detail="MusicBrainz Instagram relationship",
+                match_score=1.0,
+                candidate_name=artist_name,
+            ),
+            reason=reason,
+        )
+
+    def _fetch_musicbrainz_known_website(
+        self,
+        website_url: str,
+        artist_name: str,
+    ) -> KnownProfileFetchResult:
+        """Boundedly validate a known official-site relationship before operational use."""
+        if not self._increment_live_counter():
+            return KnownProfileFetchResult(KNOWN_PROFILE_ERROR, reason="live_search_budget_exhausted")
+        result = _fetch_website_html_bounded(
+            self.session,
+            website_url,
+            timeout_s=WEBSITE_EMAIL_TIMEOUT,
+            max_bytes=WEBSITE_EMAIL_MAX_BYTES,
+        )
+        status = result.status
+        if (
+            not result.is_html
+            or not result.html
+            or (status is not None and not 200 <= int(status) < 400)
+            or not _website_fetch_result_is_same_domain(result, website_url)
+        ):
+            return KnownProfileFetchResult(
+                KNOWN_PROFILE_CHALLENGE_UNAVAILABLE,
+                reason="website_profile_unavailable",
+            )
+
+        soup = BeautifulSoup(result.html, "html.parser")
+        identity_texts: List[str] = []
+        for meta_tag in soup.select('meta[property="og:title"], meta[name="og:title"], meta[name="title"]'):
+            identity_texts.append(_clean_cell(meta_tag.get("content")))
+        identity_texts.extend(
+            _clean_cell(node.get_text(" ", strip=True))
+            for node in soup.select("title, h1, h2")
+        )
+        accepted = False
+        for raw_text in identity_texts:
+            if not raw_text:
+                continue
+            display_candidates = [raw_text]
+            display_candidates.extend(
+                part.strip()
+                for part in re.split(r"\s+[|\u2022\u2013\u2014-]\s+", raw_text)
+                if part.strip()
+            )
+            if any(
+                _compute_identity_match_score(
+                    artist_name,
+                    candidate_display,
+                    "",
+                    candidate_url=result.final_url or website_url,
+                )[1]
+                in {"exact", "strong"}
+                for candidate_display in display_candidates
+            ):
+                accepted = True
+                break
+        if not accepted:
+            return KnownProfileFetchResult(
+                KNOWN_PROFILE_IDENTITY_REJECTED,
+                reason="artist_identity_contradiction",
+            )
+
+        accepted_url = _normalise_url(result.final_url or website_url) or website_url
+        return KnownProfileFetchResult(
+            KNOWN_PROFILE_ACCEPTED,
+            payload=EnrichmentPayload(
+                websites={accepted_url},
+                source_dir="musicbrainz_website_bridge",
+                source_url=accepted_url,
+                source_detail="MusicBrainz official website relationship",
+                match_score=1.0,
+                candidate_name=artist_name,
+            ),
+            reason="strong:website_artist_identity",
+        )
+
+    def _enrich_row_musicbrainz_relationships(self, seed_df, row_idx, ctx) -> bool:
+        if not musicbrainz_relationship_bridge_enabled():
+            return False
+        row = seed_df.loc[row_idx]
+        if not self._row_is_spotify_origin(row, ctx):
+            return False
+        plan = build_relationship_bridge_plan(
+            row,
+            normalize_name=normalise_artist_name,
+            canonicalize_bandcamp=_canonicalise_musicbrainz_bandcamp_url,
+            canonicalize_soundcloud=_canonicalise_musicbrainz_soundcloud_url,
+            valid_bandcamp=_is_valid_unearthed_bandcamp_url,
+            valid_soundcloud=lambda value: bool(_canonicalise_musicbrainz_soundcloud_url(value)),
+            canonicalize_instagram=_canonicalize_instagram_profile_url,
+            canonicalize_website=lambda value: _normalise_url(value) or "",
+            valid_instagram=lambda value: bool(_canonicalize_instagram_profile_url(value)),
+            valid_website=_is_website_enrich_candidate_url,
+        )
+        if not plan.eligible:
+            self.log_message.emit(
+                f"[MusicBrainz Bridge] skipped artist={ctx['artist']!r} reason={plan.reason}"
+            )
+            return False
+
+        enriched = False
+        platform_candidates = (
+            ("bandcamp", plan.bandcamp_urls, "Bandcamp_URL"),
+            ("soundcloud", plan.soundcloud_urls, "SoundCloud Link"),
+        )
+        for platform, candidates, target_column in platform_candidates:
+            if not candidates:
+                continue
+            if target_column in seed_df.columns and _coerce_directory_value(seed_df.at[row_idx, target_column]):
+                continue
+            accepted = []
+            for candidate_url in candidates:
+                if platform == "bandcamp":
+                    result = self._fetch_musicbrainz_known_profile(
+                        platform,
+                        candidate_url,
+                        ctx["artist"],
+                        ctx,
+                        allow_bandcamp_browser_fallback=True,
+                    )
+                else:
+                    result = self._fetch_musicbrainz_known_profile(
+                        platform,
+                        candidate_url,
+                        ctx["artist"],
+                        ctx,
+                    )
+                if result.status == KNOWN_PROFILE_ACCEPTED and result.payload:
+                    accepted.append(result.payload)
+                elif result.status == KNOWN_PROFILE_CHALLENGE_UNAVAILABLE:
+                    self.log_message.emit(
+                        f"[MusicBrainz Bridge] {platform} candidate unavailable "
+                        f"artist={ctx['artist']!r} reason={result.reason or 'challenge'}"
+                    )
+            if len(accepted) != 1:
+                if len(accepted) > 1:
+                    self.log_message.emit(
+                        f"[MusicBrainz Bridge] unresolved {platform} candidates "
+                        f"artist={ctx['artist']!r} accepted={len(accepted)}"
+                    )
+                continue
+            applied = self._apply_payload_guarded(
+                seed_df,
+                row_idx,
+                accepted[0],
+                ctx["artist"],
+                spotify_id=ctx.get("spotify_id", ""),
+            )
+            if applied:
+                self._set_platform_state(platform, "matched")
+                enriched = True
+
+        if plan.instagram_urls and not _get_canonical_instagram_url(seed_df.loc[row_idx]):
+            accepted = []
+            for candidate_url in plan.instagram_urls:
+                result = self._fetch_musicbrainz_known_instagram(
+                    candidate_url,
+                    ctx["artist"],
+                    seed_df.loc[row_idx],
+                )
+                if result.status == KNOWN_PROFILE_ACCEPTED and result.payload:
+                    accepted.append(result.payload)
+            if len(accepted) == 1:
+                if self._apply_payload_guarded(
+                    seed_df,
+                    row_idx,
+                    accepted[0],
+                    ctx["artist"],
+                    spotify_id=ctx.get("spotify_id", ""),
+                ):
+                    enriched = True
+            elif len(accepted) > 1:
+                self.log_message.emit(
+                    f"[MusicBrainz Bridge] unresolved instagram candidates "
+                    f"artist={ctx['artist']!r} accepted={len(accepted)}"
+                )
+
+        if plan.official_website_urls and not _row_has_existing_operational_website(seed_df.loc[row_idx]):
+            accepted = []
+            for candidate_url in plan.official_website_urls:
+                result = self._fetch_musicbrainz_known_website(candidate_url, ctx["artist"])
+                if result.status == KNOWN_PROFILE_ACCEPTED and result.payload:
+                    accepted.append(result.payload)
+            if len(accepted) == 1:
+                if self._apply_payload_guarded(
+                    seed_df,
+                    row_idx,
+                    accepted[0],
+                    ctx["artist"],
+                    spotify_id=ctx.get("spotify_id", ""),
+                ):
+                    enriched = True
+            elif len(accepted) > 1:
+                self.log_message.emit(
+                    f"[MusicBrainz Bridge] unresolved official website candidates "
+                    f"artist={ctx['artist']!r} accepted={len(accepted)}"
+                )
+        return enriched
+
     def _enrich_row_sc_live(self, seed_df, row_idx, ctx):
         """Dedicated SoundCloud live check for a single row.
 
@@ -16152,6 +16728,7 @@ class CrossDirectoryEnricherWorker(QThread):
 
             if homepage_ok:
                 page_emails, used_mailto = _extract_website_emails_from_html(homepage.html)
+                page_emails = filter_obvious_placeholder_emails(page_emails)
                 if page_emails:
                     emails_found = page_emails
                     source_url = homepage_url
@@ -16171,6 +16748,7 @@ class CrossDirectoryEnricherWorker(QThread):
                     if not _website_fetch_result_is_same_domain(result, website_url):
                         continue
                     page_emails, used_mailto = _extract_website_emails_from_html(result.html)
+                    page_emails = filter_obvious_placeholder_emails(page_emails)
                     if not page_emails:
                         continue
                     if not source_url:
@@ -16198,6 +16776,7 @@ class CrossDirectoryEnricherWorker(QThread):
                     if not _website_fetch_result_is_same_domain(result, website_url):
                         continue
                     page_emails, used_mailto = _extract_website_emails_from_html(result.html)
+                    page_emails = filter_obvious_placeholder_emails(page_emails)
                     if not page_emails:
                         continue
                     if not source_url:
@@ -16212,7 +16791,13 @@ class CrossDirectoryEnricherWorker(QThread):
                     f"[Web] shallow sweep fetched={shallow_fetches} emails_found={shallow_emails_found}"
                 )
 
-            normalized_emails = filter_platform_support_emails(filter_system_telemetry_emails(_normalize_emails(";".join(emails_found))))
+            normalized_emails = filter_obvious_placeholder_emails(
+                filter_platform_support_emails(
+                    filter_system_telemetry_emails(
+                        _normalize_emails(";".join(emails_found))
+                    )
+                )
+            )
             cache_entry = {
                 "status": "hit" if normalized_emails else "miss",
                 "emails": list(normalized_emails),
@@ -16778,6 +17363,8 @@ class CrossDirectoryEnricherWorker(QThread):
         try:
             # Phase 0: Directory matching (fast, no network)
             self._phase_directory_matching(seed_df, directory_indexes, priority, total, row_ids=row_ids)
+            if self.enable_live_search:
+                self._phase_musicbrainz_relationships(seed_df, total, row_ids=row_ids)
             if use_scheduler:
                 # Keep IG extraction outside the scheduler as a bounded single-page pass.
                 self._phase_spotify_discovery(seed_df, total, fb_driver=fb_driver, row_ids=row_ids)
@@ -16877,6 +17464,7 @@ class CrossDirectoryEnricherWorker(QThread):
                 if not bypass_shared:
                     enriched = self._enrich_row_directories(seed_df, row_idx, directory_indexes, priority, ctx)
                     if self.enable_live_search:
+                        enriched |= self._enrich_row_musicbrainz_relationships(seed_df, row_idx, ctx)
                         sc_enriched, skip_rest = self._enrich_row_sc_live(seed_df, row_idx, ctx)
                         enriched |= sc_enriched
                         if skip_rest:
@@ -17336,6 +17924,30 @@ class CrossDirectoryEnricherWorker(QThread):
             f"skipped_disabled={skipped_disabled}, deferred={len(deferred_rows)})"
         )
         return deferred_rows
+
+    def _phase_musicbrainz_relationships(
+        self,
+        seed_df,
+        total,
+        row_ids: Optional[Iterable[Any]] = None,
+    ) -> None:
+        if not musicbrainz_relationship_bridge_enabled():
+            return
+        enriched_count = 0
+        for row_idx in self._selected_row_ids(seed_df, row_ids):
+            position = seed_df.index.get_loc(row_idx) + 1
+            if self._should_bypass_unearthed_shared_enrichers(row_idx):
+                continue
+            ctx = self._build_row_context(seed_df, row_idx, position, total)
+            if not ctx or self._should_short_circuit_after_domain_reuse(seed_df, row_idx, ctx):
+                continue
+            self._init_row_enrichment_state()
+            if self._enrich_row_musicbrainz_relationships(seed_df, row_idx, ctx):
+                enriched_count += 1
+        self.log_message.emit(
+            f"[MusicBrainz Bridge] completed rows={len(self._selected_row_ids(seed_df, row_ids))} "
+            f"enriched={enriched_count}"
+        )
 
     def _phase_spotify_discovery(self, seed_df, total, fb_driver=None, row_ids: Optional[Iterable[Any]] = None):
         self.log_message.emit("[Enricher][Spotify Discovery] Starting...")
@@ -18712,15 +19324,41 @@ class CrossDirectoryEnricherWorker(QThread):
         return payload
 
     def _apply_payload(self, df: pd.DataFrame, row_idx, payload: EnrichmentPayload) -> None:
+        origin_before = {
+            field_name: df.at[row_idx, field_name]
+            for field_name in ORIGIN_LOCKED_FIELDS
+            if field_name in df.columns
+        }
+        try:
+            CrossDirectoryEnricherWorker._apply_payload_unprotected(self, df, row_idx, payload)
+        finally:
+            if origin_before:
+                enriched_row = df.loc[row_idx].to_dict()
+                preserve_origin_fields(enriched_row, origin_before)
+                for field_name in origin_before:
+                    df.at[row_idx, field_name] = enriched_row[field_name]
+
+    def _apply_payload_unprotected(self, df: pd.DataFrame, row_idx, payload: EnrichmentPayload) -> None:
         email_before = _row_email_summary_snapshot(df, row_idx)
         original_social_raw = df.at[row_idx, "Social Link"]
         original_sites_raw = df.at[row_idx, "External Links"]
         existing_socials = _split_pipe_cell(original_social_raw)
         existing_sites = _split_pipe_cell(original_sites_raw)
         existing_emails = _split_pipe_cell(df.at[row_idx, "Email"], is_email=True)
-        new_socials = set(payload.socials)
-        new_sites = set(payload.websites)
+        existing_socials = {url for url in existing_socials if is_useful_artist_link(url)}
+        existing_sites = {url for url in existing_sites if is_useful_artist_link(url)}
+        new_socials = {url for url in payload.socials if is_useful_artist_link(url)}
+        new_sites = {url for url in payload.websites if is_useful_artist_link(url)}
         new_emails = set(payload.emails)
+
+        if (payload.source_dir or "").startswith("bandcamp") and "SoundCloud Link" in df.columns:
+            current_sc = _coerce_directory_value(df.at[row_idx, "SoundCloud Link"])
+            if not current_sc:
+                for social_url in sorted(new_socials):
+                    canonical_sc = canonicalize_soundcloud_profile_url(social_url)
+                    if canonical_sc:
+                        df.at[row_idx, "SoundCloud Link"] = canonical_sc
+                        break
 
         def _set_email_provenance(source_url: str, source_type: str, method: str = "regex") -> None:
             if not source_url:
@@ -18741,6 +19379,8 @@ class CrossDirectoryEnricherWorker(QThread):
         if payload.link_hubs and MAX_LINK_HUB_HOPS_PER_ROW > 0:
             hops = 0
             for hub in payload.link_hubs:
+                if not is_artist_link_hub_profile(hub):
+                    continue
                 if hops >= MAX_LINK_HUB_HOPS_PER_ROW:
                     break
                 hops += 1
@@ -18823,7 +19463,6 @@ class CrossDirectoryEnricherWorker(QThread):
                 _clean_cell(getattr(self, "_live_context", {}).get("spotify_domain", "")),
                 source_label=payload.source_detail or payload.source_dir or "",
             )
-
     def _apply_structured_fields(
         self,
         df: pd.DataFrame,
@@ -20776,7 +21415,12 @@ class CrossDirectoryEnricherWorker(QThread):
         for query in _build_soundcloud_queries(sc_query, track_hint, location_hint):
             candidates = self._soundcloud_people_search_candidates(query)
             candidate = self._pick_best_soundcloud_candidate(
-                artist_name, candidates, location_hint, genre_hint
+                artist_name,
+                candidates,
+                location_hint,
+                genre_hint,
+                song_title=song_title,
+                track_hint=track_hint,
             )
             if candidate and _is_better_candidate(candidate, best_candidate):
                 best_candidate = candidate
@@ -20789,7 +21433,12 @@ class CrossDirectoryEnricherWorker(QThread):
             )
             uni_candidates = self._soundcloud_universal_search_candidates(sc_query)
             candidate = self._pick_best_soundcloud_candidate(
-                artist_name, uni_candidates, location_hint, genre_hint
+                artist_name,
+                uni_candidates,
+                location_hint,
+                genre_hint,
+                song_title=song_title,
+                track_hint=track_hint,
             )
             if candidate and _is_better_candidate(candidate, best_candidate):
                 best_candidate = candidate
@@ -20803,7 +21452,12 @@ class CrossDirectoryEnricherWorker(QThread):
                     f"trying artist-only query '{fallback_query}'."
                 )
                 fallback_candidate = self._soundcloud_best_candidate_for_query(
-                    artist_name, fallback_query, location_hint, genre_hint
+                    artist_name,
+                    fallback_query,
+                    location_hint,
+                    genre_hint,
+                    song_title=song_title,
+                    track_hint=track_hint,
                 )
                 if (
                     fallback_candidate
@@ -21427,8 +22081,19 @@ class CrossDirectoryEnricherWorker(QThread):
         return canonical
 
     def _fetch_profile_and_build(
-        self, profile_url: str, source_dir: str, confidence: Optional[float] = None
+        self,
+        profile_url: str,
+        source_dir: str,
+        confidence: Optional[float] = None,
+        identity_artist_name: str = "",
+        identity_song_title: str = "",
     ) -> Optional[EnrichmentPayload]:
+        known_profile_attempt = bool(
+            identity_artist_name and source_dir in {"bandcamp", "soundcloud"}
+        )
+        if known_profile_attempt:
+            self._last_known_profile_status = KNOWN_PROFILE_ERROR
+            self._last_known_profile_reason = "profile_fetch_failed"
         self.log_message.emit(f"[Enricher] Fetching {source_dir} profile: {profile_url}")
         self._last_resolved_profile_url = profile_url
         attempts = LF_SEARCH_RETRY_MAX if source_dir == "lastfm" else 2
@@ -21437,6 +22102,66 @@ class CrossDirectoryEnricherWorker(QThread):
         fetched_ok = bool(html)
         if not fetched_ok:
             return None
+        identity_candidate_name = ""
+        identity_match_score = 0.0
+        if identity_artist_name and source_dir == "bandcamp":
+            challenge_reason = _bandcamp_challenge_reason(html)
+            if challenge_reason:
+                self._last_fetch_ok = False
+                self._last_known_profile_status = KNOWN_PROFILE_CHALLENGE_UNAVAILABLE
+                self._last_known_profile_reason = challenge_reason
+                self.log_message.emit(
+                    f"[MusicBrainz Bridge] Bandcamp candidate unavailable url={profile_url} "
+                    f"reason={challenge_reason}"
+                )
+                return None
+            identity_candidate_name = _bc_slug_extract_page_artist_text(html)
+            identity_match_score = _bandcamp_confidence(
+                identity_artist_name,
+                identity_candidate_name,
+                profile_url,
+                song_title=identity_song_title,
+            )
+            if (
+                identity_match_score < MIN_BC_CONFIDENCE
+                or not _bc_slug_has_strong_artist_name_confirmation(
+                    identity_artist_name,
+                    identity_candidate_name,
+                )
+            ):
+                self._last_known_profile_status = KNOWN_PROFILE_IDENTITY_REJECTED
+                self._last_known_profile_reason = "artist_identity_contradiction"
+                self.log_message.emit(
+                    f"[MusicBrainz Bridge] rejected Bandcamp identity url={profile_url}"
+                )
+                return None
+            confidence = identity_match_score
+        elif identity_artist_name and source_dir == "soundcloud":
+            try:
+                identity_soup = BeautifulSoup(html, "html.parser")
+                identity_meta = identity_soup.find("meta", attrs={"property": "og:title"})
+                identity_candidate_name = _clean_cell(identity_meta.get("content", "")) if identity_meta else ""
+                if not identity_candidate_name:
+                    identity_title = identity_soup.find("title")
+                    identity_candidate_name = identity_title.get_text(" ", strip=True) if identity_title else ""
+                identity_candidate_name = re.split(r"\s+[|\u2013\u2014]\s+", identity_candidate_name, maxsplit=1)[0].strip()
+            except Exception:
+                identity_candidate_name = ""
+            handle = _sc_handle_from_profile_url(profile_url) or ""
+            identity_match_score = _sc_score_candidate(
+                identity_artist_name,
+                identity_candidate_name,
+                handle,
+                profile_url=profile_url,
+                song_title=identity_song_title,
+            )
+            if identity_match_score < MIN_SC_CONFIDENCE:
+                self._last_known_profile_status = KNOWN_PROFILE_IDENTITY_REJECTED
+                self._last_known_profile_reason = "artist_identity_contradiction"
+                self.log_message.emit(
+                    f"[MusicBrainz Bridge] rejected SoundCloud identity url={profile_url}"
+                )
+                return None
         if source_dir == "lastfm":
             profile_url = self._lf_resolve_canonical_profile_url(profile_url, html)
             self._last_resolved_profile_url = profile_url
@@ -21572,11 +22297,16 @@ class CrossDirectoryEnricherWorker(QThread):
                         source_url=canonical_url,
                         source_detail=_format_source_display(source_dir),
                         related_artists=related_artists,
+                        match_score=identity_match_score,
+                        candidate_name=identity_candidate_name,
                     )
                     self.log_message.emit(
                         f"[Enricher] Bandcamp: safe match but no actionable fields; returning url-only payload url={canonical_url}"
                         f"{_format_outcome_suffix(fetch_ok=fetch_ok_flag, actionable=False, http_status=http_status)}"
                     )
+                    if known_profile_attempt:
+                        self._last_known_profile_status = KNOWN_PROFILE_ACCEPTED
+                        self._last_known_profile_reason = ""
                     return payload
                 return None
         payload = EnrichmentPayload(
@@ -21588,7 +22318,12 @@ class CrossDirectoryEnricherWorker(QThread):
             source_url=profile_url,
             source_detail=_format_source_display(live_key),
             related_artists=related_artists,
+            match_score=identity_match_score,
+            candidate_name=identity_candidate_name,
         )
+        if known_profile_attempt:
+            self._last_known_profile_status = KNOWN_PROFILE_ACCEPTED
+            self._last_known_profile_reason = ""
         return payload
 
     def _soundcloud_people_search_candidates(self, artist_query: str) -> List[Dict[str, Any]]:
@@ -21605,7 +22340,7 @@ class CrossDirectoryEnricherWorker(QThread):
                         "profile_url": cand.get("profile_url") or f"https://soundcloud.com/{cand.get('handle','')}",
                         "handle": cand.get("handle") or "",
                         "display_name": cand.get("display_name") or cand.get("handle") or "",
-                        "location": cand.get("location") or cand.get("context") or "",
+                        "location": cand.get("location") or "",
                         "context": cand.get("context") or "",
                         "score": cand.get("score", 0),
                         "rank_score": cand.get("rank_score", cand.get("score", 0)),
@@ -21647,6 +22382,8 @@ class CrossDirectoryEnricherWorker(QThread):
         query: str,
         location_hint: str,
         genre_hint: str,
+        song_title: str = "",
+        track_hint: str = "",
     ) -> Optional[Dict[str, Any]]:
         def _is_better_candidate(candidate: Dict[str, Any], current: Optional[Dict[str, Any]]) -> bool:
             if not candidate:
@@ -21663,13 +22400,23 @@ class CrossDirectoryEnricherWorker(QThread):
 
         candidates = self._soundcloud_people_search_candidates(query)
         best_candidate = self._pick_best_soundcloud_candidate(
-            artist_name, candidates, location_hint, genre_hint
+            artist_name,
+            candidates,
+            location_hint,
+            genre_hint,
+            song_title=song_title,
+            track_hint=track_hint,
         )
         if not best_candidate or best_candidate.get("score", 0) < _SC_CONFIDENCE_MIN:
             # Try universal + API fallback using the same query.
             uni_candidates = self._soundcloud_universal_search_candidates(query)
             candidate = self._pick_best_soundcloud_candidate(
-                artist_name, uni_candidates, location_hint, genre_hint
+                artist_name,
+                uni_candidates,
+                location_hint,
+                genre_hint,
+                song_title=song_title,
+                track_hint=track_hint,
             )
             if candidate and _is_better_candidate(candidate, best_candidate):
                 best_candidate = candidate
@@ -21727,7 +22474,7 @@ class CrossDirectoryEnricherWorker(QThread):
                     "profile_url": profile_url,
                     "handle": handle,
                     "display_name": display_name,
-                    "location": location_text or context_text,
+                    "location": location_text,
                     "context": context_text,
                 }
             )
@@ -21778,6 +22525,11 @@ class CrossDirectoryEnricherWorker(QThread):
                     "display_name": user.get("full_name") or user.get("username") or handle,
                     "location": f"{user.get('city') or ''} {user.get('country_code') or ''}".strip(),
                     "context": user.get("description") or "",
+                    "track_count": user.get("track_count") or 0,
+                    # Retained for diagnostics only. Follower count is never an
+                    # admission signal: legitimate emerging artists may have zero.
+                    "followers_count": user.get("followers_count") or 0,
+                    "external_urls": user.get("external_urls") or [],
                 }
             )
             if len(candidates) >= limit:
@@ -21816,6 +22568,25 @@ class CrossDirectoryEnricherWorker(QThread):
             rank_score = _locale_rank_score(score, location_text, context_text)
             candidate["score"] = score
             candidate["rank_score"] = rank_score
+            substantive_evidence = _sc_candidate_substantive_evidence(
+                candidate,
+                location_hint=location_hint,
+                genre_hint=genre_hint,
+                song_title=song_title,
+                track_hint=track_hint,
+            )
+            candidate["substantive_evidence"] = substantive_evidence
+            if not substantive_evidence:
+                self.log_message.emit(
+                    f"[Enricher] SoundCloud Enrich: rejecting evidence-free generic candidate "
+                    f"'{display or handle}' ({profile_url})"
+                )
+                continue
+            self.log_message.emit(
+                f"[Enricher] SoundCloud Enrich: generic candidate evidence "
+                f"'{display or handle}' ({profile_url}) "
+                f"signals={','.join(substantive_evidence)} confidence={score:.2f}"
+            )
             candidate_domain = extract_domain(candidate.get("profile_url") or "")
             candidate["match_score"] = self._compute_match_score_for_candidate(
                 display or handle, "", candidate_domain
@@ -22008,7 +22779,10 @@ def run_cross_directory_enrichment(
     worker.progress = type("obj", (), {"emit": lambda *args, **kwargs: None})
     worker.finished = type("obj", (), {"emit": lambda *args, **kwargs: None})
 
-    worker._run_impl()
+    try:
+        worker._run_impl()
+    finally:
+        worker._cleanup_owned_resources()
     if night_fb_run_state is not None:
         night_fb_run_state.session_warmup_complete = bool(getattr(worker, "_fb_session_warmup_complete", False))
     if isinstance(state_sink, dict):

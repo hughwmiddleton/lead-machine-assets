@@ -43,6 +43,7 @@ from dateutil.relativedelta import relativedelta
 # ---------------------------
 SC_HANDLE_RE = re.compile(r"^https?://soundcloud\.com/([a-z0-9][a-z0-9._-]{1,49})/?$", re.IGNORECASE)
 SC_HANDLE_BAN = {
+    "charts",
     "feed",
     "upload",
     "terms-of-use",
@@ -54,6 +55,7 @@ SC_HANDLE_BAN = {
     "discover",
     "explore",
     "popular",
+    "search",
 }
 SC_AGGREGATOR_ALLOWLIST = ("linktr.ee", "beacons.ai", "solo.to", "hypeddit.com", "toneden.io")
 SC_AGGREGATOR_PREFERENCE = (
@@ -79,6 +81,34 @@ SC_CLIENT_ID_CANDIDATES = [
     c for c in [(os.environ.get("SC_CLIENT_ID") or "").strip()] if c
 ]
 NIGHT_SC_DEBUG = bool(os.getenv("NIGHT_SC_DEBUG"))
+
+
+def canonicalize_soundcloud_profile_url(value: str) -> str:
+    """Return a canonical SoundCloud artist profile URL, or an empty string."""
+    candidate = (value or "").strip()
+    if not candidate:
+        return ""
+    if candidate.startswith("//"):
+        candidate = "https:" + candidate
+    elif "://" not in candidate:
+        candidate = "https://" + candidate.lstrip("/")
+    try:
+        parsed = urlparse(candidate)
+    except Exception:
+        return ""
+    host = (parsed.hostname or "").lower()
+    if host.startswith("www."):
+        host = host[4:]
+    if host != "soundcloud.com" or parsed.query:
+        return ""
+    canonical_candidate = f"https://soundcloud.com{parsed.path or ''}"
+    match = SC_HANDLE_RE.fullmatch(canonical_candidate)
+    if not match:
+        return ""
+    handle = match.group(1).lower()
+    if handle in SC_HANDLE_BAN:
+        return ""
+    return f"https://soundcloud.com/{handle}"
 
 UAS = [
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0 Safari/537.36",

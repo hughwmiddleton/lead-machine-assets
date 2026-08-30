@@ -645,6 +645,112 @@ def test_consolidate_email_all_prefers_facebook_over_placeholder_website_email()
     assert consolidated.at[0, "Email_All"] == "artistname@gmail.com;user@domain.com"
 
 
+def test_shy_one_primary_email_and_provenance_are_selected_atomically():
+    provenance = {
+        "info@shyone.co.uk": {
+            "source_type": "website_enrich",
+            "surface": "website_contact_page",
+            "source_url": "https://shyone.co.uk/contact",
+            "extract_method": "mailto",
+        },
+        "abbey@poem.agency": {
+            "source_type": "bandcamp",
+            "surface": "bandcamp_profile",
+            "source_url": "https://shyone.bandcamp.com/",
+            "extract_method": "regex",
+        },
+        "alexandra@higher-ground.de": {
+            "source_type": "instagram_enrich",
+            "surface": "instagram_profile",
+            "source_url": "https://www.instagram.com/shyclart/",
+            "extract_method": "regex",
+        },
+    }
+    df = pd.DataFrame(
+        [{
+            "Artist Name": "Shy One",
+            "Spotify_Website_URL": "https://shyone.co.uk/",
+            "Email": "abbey@poem.agency",
+            "Primary Email": "abbey@poem.agency",
+            "Primary_Email": "abbey@poem.agency",
+            "Email_All": "alexandra@higher-ground.de;abbey@poem.agency;info@shyone.co.uk",
+            EMAIL_PROVENANCE_JSON_COL: json.dumps(provenance),
+            "Email_Source_Type": "bandcamp",
+            "Email_Source_URL": "https://shyone.bandcamp.com/",
+            "Email_Extract_Method": "regex",
+            "final_status": "OK",
+            "MusicBrainz_MBID": "must-not-leak",
+        }],
+        index=[41],
+    )
+
+    consolidated = pipeline_runner._consolidate_email_all(df)
+    winner = consolidated.at[41, "Email"]
+    winner_meta = json.loads(consolidated.at[41, EMAIL_PROVENANCE_JSON_COL])[winner]
+
+    assert winner == "alexandra@higher-ground.de"
+    assert consolidated.at[41, "Primary Email"] == winner
+    assert consolidated.at[41, "Primary_Email"] == winner
+    assert consolidated.at[41, "Email_Source_Type"] == winner_meta["source_type"]
+    assert consolidated.at[41, "Email_Source_URL"] == winner_meta["source_url"]
+    assert consolidated.at[41, "Email_Extract_Method"] == winner_meta["extract_method"]
+    assert set(consolidated.at[41, "Email_All"].split(";")) == set(provenance)
+    assert set(json.loads(consolidated.at[41, EMAIL_PROVENANCE_JSON_COL])) == set(provenance)
+
+    export_frame = pipeline_runner._build_final_export_frame(consolidated)
+    assert export_frame.iloc[0]["Primary Email"] == winner
+    assert export_frame.iloc[0]["Email Source"] == "Instagram profile"
+    assert export_frame.iloc[0]["Email_Source_Type"] == winner_meta["source_type"]
+    assert export_frame.iloc[0]["Email_Source_URL"] == winner_meta["source_url"]
+    assert export_frame.iloc[0]["Email_Extract_Method"] == winner_meta["extract_method"]
+    assert "MusicBrainz_MBID" not in export_frame.columns
+
+
+def test_primary_change_without_explicit_provenance_clears_old_source_bundle():
+    df = pd.DataFrame([{
+        "Artist Name": "Safe Artist",
+        "Email": "user@domain.com",
+        "Email_All": "user@domain.com;booking@safeartist.example",
+        "Email_Source_Type": "instagram_enrich",
+        "Email_Source_URL": "https://www.instagram.com/unrelated/",
+        "Email_Extract_Method": "regex",
+    }])
+
+    consolidated = pipeline_runner._consolidate_email_all(df)
+
+    assert consolidated.at[0, "Email"] == "booking@safeartist.example"
+    assert consolidated.at[0, "Email_Source_Type"] == ""
+    assert consolidated.at[0, "Email_Source_URL"] == ""
+    assert consolidated.at[0, "Email_Extract_Method"] == ""
+
+
+def test_quarantined_email_cannot_borrow_an_alternate_emails_safe_provenance():
+    df = pd.DataFrame([{
+        "Artist Name": "Safe Artist",
+        "Email": "unsafe@repeated.example",
+        "Email_All": "unsafe@repeated.example;booking@safeartist.example",
+        "Email Source": "Quarantined (repeat email)",
+        EMAIL_PROVENANCE_JSON_COL: json.dumps({
+            "booking@safeartist.example": {
+                "source_type": "website_enrich",
+                "surface": "website_contact_page",
+                "source_url": "https://safeartist.example/contact",
+                "extract_method": "mailto",
+            }
+        }),
+        "Email_Source_Type": "quarantined",
+        "Email_Source_URL": "https://unrelated.example/",
+        "Email_Extract_Method": "repeat_email_guard",
+    }])
+
+    consolidated = pipeline_runner._consolidate_email_all(df)
+
+    assert consolidated.at[0, "Email"] == "unsafe@repeated.example"
+    assert consolidated.at[0, "Email_Source_Type"] == "quarantined"
+    assert consolidated.at[0, "Email_Source_URL"] == "https://unrelated.example/"
+    assert consolidated.at[0, "Email_Extract_Method"] == "repeat_email_guard"
+
+
 def test_select_primary_email_falls_back_to_existing_order_without_source_metadata():
     primary, ranked = pipeline_runner._select_primary_email_for_row(
         {},
