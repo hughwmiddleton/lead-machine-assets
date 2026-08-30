@@ -636,6 +636,10 @@ def _load_fb_page_with_timeout(
 
                     url_valid = _is_valid_fb_handoff_url(current_url, baseline_url)
                     usable_handoff_url = _is_valid_fb_handoff_url(current_url, "")
+                    target_url_reached = bool(
+                        usable_handoff_url
+                        and str(current_url or "").rstrip("/") == str(url or "").rstrip("/")
+                    )
                     minimal_ready = bool(ready_state in {"interactive", "complete"} or has_body or surface_ready)
                     content_ready = False
                     if minimal_ready and usable_handoff_url:
@@ -647,7 +651,7 @@ def _load_fb_page_with_timeout(
                     # A non-baseline, non-wrapper Facebook URL is enough for the
                     # accepted-page handoff. Waiting for DOM probes to align here
                     # can strand successful SPA navigations in the timeout path.
-                    if url_valid or content_ready or (minimal_ready and usable_handoff_url):
+                    if url_valid or content_ready or (minimal_ready and target_url_reached):
                         break
                     time.sleep(0.1)
                 else:
@@ -5523,7 +5527,7 @@ def _extract_emails_from_html(
         extraction_budget_s = float(expensive_fallback_budget_s)
     except (TypeError, ValueError):
         extraction_budget_s = 0.0
-    extraction_started_at = time.perf_counter()
+    extraction_started_at = time.perf_counter() if extraction_budget_s > 0.0 else 0.0
 
     def _expensive_budget_exhausted() -> bool:
         if extraction_budget_s <= 0.0:
@@ -5618,7 +5622,7 @@ def _extract_emails_from_html(
         input_was_truncated = len(raw_html) > _FB_RAW_HTML_SCAN_CHAR_LIMIT
         chunk_size = _FB_RAW_HTML_SCAN_CHUNK
         overlap = 256  # avoid splitting an email at a chunk boundary
-        scan_start = time.perf_counter()
+        scan_start = extraction_started_at if extraction_budget_s > 0.0 else time.perf_counter()
         offset = 0
         while offset < raw_scan_limit:
             end = min(offset + chunk_size, raw_scan_limit)

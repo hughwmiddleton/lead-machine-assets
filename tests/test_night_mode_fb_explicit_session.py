@@ -15,6 +15,7 @@ def enricher(monkeypatch):
         _DummyLegacy(), username="user", password="pass", logger=None, use_shared_session=False
     )
     # Avoid real network/driver work.
+    monkeypatch.setattr(helper, "_maybe_recover_or_skip_on_checkpoint", lambda: True)
     monkeypatch.setattr(helper, "_ensure_driver_alive", lambda session: session)
     return helper
 
@@ -70,7 +71,9 @@ def test_explicit_fb_url_falls_back_to_legacy_anon(monkeypatch, enricher):
     logs = []
     enricher.logger = lambda msg: logs.append(msg)
     monkeypatch.setattr(enricher, "_has_authenticated_session", lambda: False)
+    monkeypatch.setattr(enricher, "_ensure_session", lambda: None)
     monkeypatch.setattr(enricher, "_should_allow_anonymous", lambda row: True)
+    monkeypatch.setattr(enricher, "_search_for_page", lambda *args, **kwargs: "")
 
     observed = {}
 

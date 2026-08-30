@@ -257,7 +257,7 @@ def test_extract_emails_bounds_beautifulsoup_fallback_input(monkeypatch) -> None
 def test_extract_emails_worst_case_cap_abandons_rendered_text_after_budgeted_soup_fallback(monkeypatch) -> None:
     html = "<html><body>No email on page</body></html>"
     samples = []
-    perf_counter_values = iter([0.0, 0.01, 0.06])
+    perf_counter_values = iter([0.0, 0.01, 0.02, 0.06])
 
     def fake_extract(sample: str):  # noqa: ANN001
         samples.append(sample)
@@ -1298,6 +1298,8 @@ def test_pass_a_uses_canonical_url_even_when_source_fields_still_contain_share(m
         logger=logs.append,
         use_shared_session=False,
     )
+    monkeypatch.setattr(enricher, "_maybe_recover_or_skip_on_checkpoint", lambda: True)
+    monkeypatch.setattr(enricher, "_has_authenticated_session", lambda: True)
     monkeypatch.setattr(
         enricher,
         "_search_for_page",
@@ -1398,6 +1400,7 @@ def test_pass_a_uses_rendered_visible_text_when_page_source_has_no_email(monkeyp
         logger=lambda msg: logs.append(msg),
         use_shared_session=False,
     )
+    monkeypatch.setattr(enricher, "_maybe_recover_or_skip_on_checkpoint", lambda: True)
     monkeypatch.setattr(enricher, "_has_authenticated_session", lambda: True)
     monkeypatch.setattr(night_mode_fb, "_night_fb_has_music_signals", lambda soup, context: False)
     monkeypatch.setattr(night_mode_fb, "should_accept_email_override", lambda *args, **kwargs: (True, "test_override"))
@@ -1927,6 +1930,10 @@ def test_existing_email_short_circuits_before_fb_scrape_even_for_unearthed(monke
         method="regex",
         surface="facebook_main",
     )
+    monkeypatch.setattr(enricher, "_maybe_recover_or_skip_on_checkpoint", lambda: True)
+    monkeypatch.setattr(enricher, "_has_authenticated_session", lambda: True)
+    monkeypatch.setattr(enricher, "_ensure_session", lambda: object())
+    monkeypatch.setattr(enricher, "_search_for_page", lambda *args, **kwargs: "")
 
     result = enricher.enrich_row_with_facebook_night(row)
 
@@ -2235,7 +2242,7 @@ def test_bounded_fb_accepted_page_sweep_main_surface_cap_still_continues_to_abou
     main_url = "https://www.facebook.com/artist"
     about_url = "https://www.facebook.com/artist/about"
     calls = []
-    perf_counter_values = iter([0.0, 0.01, 0.2, 1.0])
+    perf_counter_values = iter([0.0, 0.01, 0.02, 0.2, 1.0, 1.01, 1.02])
 
     class _FakeSoup:
         def get_text(self, separator=" ", strip=True):  # noqa: ANN001
