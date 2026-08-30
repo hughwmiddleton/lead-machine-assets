@@ -2790,6 +2790,12 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
             listing_text = " ".join(text_fragments + attr_fragments)
             listing_text_lower = listing_text.lower()
             location_value = ""
+            artist_link = (
+                listing_card
+                if getattr(listing_card, "name", "") == "a"
+                else listing_card.select_one('a[href^="/triplejunearthed/artist/"]')
+            )
+            display_artist_name = " ".join(artist_link.stripped_strings).strip() if artist_link else ""
 
             for text_fragment in text_fragments:
                 location_match = re.match(r"Location\s*:?\s*(.+)", text_fragment, flags=re.IGNORECASE)
@@ -2807,6 +2813,7 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
                     location_value = location_match.group(1).strip(" :-")
 
             return {
+                "artist_name": display_artist_name,
                 "location": location_value,
                 "played_on_triplej": "yes" if "played on triple j" in listing_text_lower else "",
                 "played_on_unearthed": "yes"
@@ -3213,6 +3220,13 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
                     _ue_startup_warn_if_slow("first_profile_fetch", first_fetch_elapsed, 15.0)
                     first_fetch_logged = True
             listing_metadata = listing_metadata_by_url.get(profile_url, {})
+            listing_artist_name = str(listing_metadata.get("artist_name") or "").strip()
+            profile_slug = normalize_unearthed_cursor(profile_url)
+            if listing_artist_name and (
+                not str(artist_name or "").strip()
+                or str(artist_name).strip().casefold() == profile_slug.casefold()
+            ):
+                artist_name = listing_artist_name
             location = (listing_metadata.get("location") or location or "").strip()
             # Determine drum status from the full page source.
             drum_status_raw = get_drum_status_from_source(driver.page_source)
@@ -3238,9 +3252,11 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
                     "",
                     "",
                     email_value,
-                    "Triple J Unearthed",
-                    "unearthed",
-                    "Triple J Unearthed",
+                    "Unearthed",
+                    "Unearthed",
+                    "Unearthed",
+                    profile_url,
+                    profile_url,
                 )
             )
             if isinstance(state, dict):
@@ -3351,6 +3367,21 @@ def unearthed_extract_release_date(html: str) -> str:
 
 _unearthed_extract_genre_text = extract_unearthed_genre_text
 
+
+def _unearthed_display_artist_name(soup) -> str:
+    """Return the source-styled artist identity already present on a profile."""
+    artist_heading = soup.find("h1") if soup else None
+    heading_text = artist_heading.get_text(" ", strip=True) if artist_heading else ""
+    heading_text = re.sub(r"^artist\s*:\s*", "", heading_text, flags=re.IGNORECASE).strip()
+    if heading_text and heading_text.casefold() != "artist":
+        return heading_text
+
+    title_meta = soup.select_one('meta[property="og:title"], meta[name="twitter:title"]') if soup else None
+    title_text = (title_meta.get("content") or "").strip() if title_meta else ""
+    title_text = re.sub(r"\s+-\s+triple\s+j\s+unearthed.*$", "", title_text, flags=re.IGNORECASE).strip()
+    return title_text if title_text.casefold() != "artist" else ""
+
+
 def scrape_artist_profile(driver, profile_url, fb_driver=None):
     social_links = []
     location = ""
@@ -3389,6 +3420,9 @@ def scrape_artist_profile(driver, profile_url, fb_driver=None):
             except Exception:
                 email_value = ""
         soup = BeautifulSoup(page_source, 'html.parser')
+        display_artist_name = _unearthed_display_artist_name(soup)
+        if display_artist_name:
+            artist_name = display_artist_name
         release_date = unearthed_extract_release_date(page_source) or ""
         genre_text_raw = _unearthed_extract_genre_text(soup)
         parsed_primary_genre, parsed_genre_raw = parse_unearthed_genre(genre_text_raw)
@@ -3584,7 +3618,7 @@ def save_to_csv(data, filename):
     headers = [
         'Artist Name', 'Location', 'Song Title', 'Sounds Like', 'Social Link', 'SoundCloud Link',
         'Played on triple J', 'Played on Unearthed', 'Release Date', 'Primary Genre', 'Unearthed_Genre_Raw', 'Bandcamp_Source_Mode', 'Bandcamp_Search_Domain', 'Date Added', 'Email',
-        'Lead_Source', 'Source_Directory', 'Source Directory'
+        'Lead_Source', 'Source_Directory', 'Source Directory', 'Source URL', 'Source_URL'
     ]
     current_date = datetime.datetime.now().strftime("%Y-%m-%d")
 
@@ -3628,6 +3662,8 @@ def save_to_csv(data, filename):
             lead_source,
             source_directory,
             legacy_source_directory,
+            source_url,
+            source_url_alias,
         ) = entry_list[:expected_fields]
         lead_source = str(lead_source or "").strip()
         source_directory = str(source_directory or "").strip()
@@ -3658,6 +3694,8 @@ def save_to_csv(data, filename):
                 'Lead_Source': lead_source,
                 'Source_Directory': source_directory,
                 'Source Directory': legacy_source_directory,
+                'Source URL': source_url,
+                'Source_URL': source_url_alias,
             })
 
     combined = pd.concat([existing_data, pd.DataFrame(new_data)], ignore_index=True)
