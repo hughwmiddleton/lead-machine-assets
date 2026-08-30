@@ -1213,6 +1213,22 @@ def _make_instagram_live_bridge(page):
     )
 
 
+def _install_deterministic_instagram_onehop_bridge(monkeypatch):
+    """Admit static one-hop fixtures without opening a real browser or network page."""
+    live_pages = []
+
+    def fake_open(*args, **kwargs):  # noqa: ANN001
+        page = _DummyInstagramHiddenContactPage(
+            "<html><body><main><header><h1>Deterministic Instagram profile</h1>"
+            "<button>Message</button></header></main></body></html>"
+        )
+        live_pages.append(page)
+        return _make_instagram_live_bridge(page)
+
+    monkeypatch.setattr(cde, "_open_instagram_live_page_bridge", fake_open)
+    return live_pages
+
+
 def _instagram_render_ready_marker_from_html(
     script,
     html,
@@ -4179,7 +4195,11 @@ def test_instagram_email_no_email_visible_after_requests_and_fallback_are_exhaus
 
     assert matched is False
     assert len(fetch_html_calls) == 1
-    assert seed_df.equals(before)
+    pd.testing.assert_frame_equal(seed_df.loc[:, before.columns], before)
+    assert seed_df.at[0, cde.IG_ATTEMPT_STATE_COL] == "attempted_ig_no_email_found"
+    assert seed_df.at[0, cde.IG_EXTRACT_STATE_COL] == "ig_no_usable_email_found"
+    assert seed_df.at[0, cde.IG_WRITE_STATE_COL] == "ig_no_email_written"
+    assert seed_df.at[0, cde.IG_TERMINAL_REASON_COL] == "ig_no_email_found"
     _assert_ig_visit_and_outcome(
         logs,
         "https://www.instagram.com/noemailhere/",
@@ -4484,6 +4504,7 @@ def test_instagram_email_no_visible_or_meta_email_keeps_one_hop_bounded_and_no_e
     )
     ctx = worker._build_row_context(seed_df, 0, 1, 1)
     before = seed_df.copy(deep=True)
+    _install_deterministic_instagram_onehop_bridge(monkeypatch)
 
     ig_fetch_calls = []
     bio_fetch_calls = []
@@ -4516,7 +4537,11 @@ def test_instagram_email_no_visible_or_meta_email_keeps_one_hop_bounded_and_no_e
     assert matched is False
     assert ig_fetch_calls == ["https://www.instagram.com/noemailhere/"]
     assert bio_fetch_calls == ["https://linktr.ee/noemailhere"]
-    assert seed_df.equals(before)
+    pd.testing.assert_frame_equal(seed_df.loc[:, before.columns], before)
+    assert seed_df.at[0, cde.IG_ATTEMPT_STATE_COL] == "attempted_ig_no_email_found"
+    assert seed_df.at[0, cde.IG_EXTRACT_STATE_COL] == "ig_no_usable_email_found"
+    assert seed_df.at[0, cde.IG_WRITE_STATE_COL] == "ig_no_email_written"
+    assert seed_df.at[0, cde.IG_TERMINAL_REASON_COL] == "ig_no_email_found"
     _assert_ig_visit_and_outcome(
         logs,
         "https://www.instagram.com/noemailhere/",
@@ -4547,7 +4572,11 @@ def test_instagram_email_fetch_failed_is_logged_distinctly(monkeypatch):
     matched = worker._enrich_row_instagram_email(seed_df, 0, ctx)
 
     assert matched is False
-    assert seed_df.equals(before)
+    pd.testing.assert_frame_equal(seed_df.loc[:, before.columns], before)
+    assert seed_df.at[0, cde.IG_ATTEMPT_STATE_COL] == "attempted_ig_blocked_or_unavailable"
+    assert seed_df.at[0, cde.IG_EXTRACT_STATE_COL] == "ig_extract_blocked_or_unavailable"
+    assert seed_df.at[0, cde.IG_WRITE_STATE_COL] == "ig_no_email_written"
+    assert seed_df.at[0, cde.IG_TERMINAL_REASON_COL] == "ig_blocked_or_unavailable"
     assert logs == [
         "[IG Email] Visiting https://www.instagram.com/fetchfailed/",
         "[IG Email] fetch_failed status=503",
@@ -4581,7 +4610,11 @@ def test_instagram_email_blocked_or_empty_is_logged_distinctly(monkeypatch):
     matched = worker._enrich_row_instagram_email(seed_df, 0, ctx)
 
     assert matched is False
-    assert seed_df.equals(before)
+    pd.testing.assert_frame_equal(seed_df.loc[:, before.columns], before)
+    assert seed_df.at[0, cde.IG_ATTEMPT_STATE_COL] == "attempted_ig_blocked_or_unavailable"
+    assert seed_df.at[0, cde.IG_EXTRACT_STATE_COL] == "ig_extract_blocked_or_unavailable"
+    assert seed_df.at[0, cde.IG_WRITE_STATE_COL] == "ig_no_email_written"
+    assert seed_df.at[0, cde.IG_TERMINAL_REASON_COL] == "ig_blocked_or_unavailable"
     assert logs == [
         "[IG Email] Visiting https://www.instagram.com/blockedartist/",
         "[IG Email] blocked_or_empty status=200 chars=55",
@@ -5750,6 +5783,7 @@ def test_instagram_email_one_hop_bio_link_recovers_direct_email_from_structured_
         }
     )
     ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    _install_deterministic_instagram_onehop_bridge(monkeypatch)
     bio_fetch_calls = []
 
     monkeypatch.setattr(
@@ -5812,6 +5846,7 @@ def test_instagram_email_one_hop_bio_link_recovers_direct_email(monkeypatch):
         }
     )
     ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    _install_deterministic_instagram_onehop_bridge(monkeypatch)
     bio_fetch_calls = []
 
     monkeypatch.setattr(
@@ -5873,6 +5908,7 @@ def test_instagram_email_one_hop_rejects_asset_artifact_pseudo_email(monkeypatch
         }
     )
     ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    _install_deterministic_instagram_onehop_bridge(monkeypatch)
 
     monkeypatch.setattr(
         cde,
@@ -5927,6 +5963,7 @@ def test_instagram_email_one_hop_mixed_candidates_keep_real_email_and_reject_art
         }
     )
     ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    _install_deterministic_instagram_onehop_bridge(monkeypatch)
 
     monkeypatch.setattr(
         cde,
@@ -5981,6 +6018,7 @@ def test_instagram_email_one_hop_bio_link_recovers_mailto(monkeypatch):
         }
     )
     ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    _install_deterministic_instagram_onehop_bridge(monkeypatch)
 
     monkeypatch.setattr(
         cde,
@@ -7754,6 +7792,7 @@ def test_instagram_email_invalid_bio_link_skips_one_hop_fetch(monkeypatch):
         }
     )
     ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    _install_deterministic_instagram_onehop_bridge(monkeypatch)
 
     monkeypatch.setattr(
         cde,
@@ -7797,6 +7836,7 @@ def test_instagram_email_without_outbound_target_skips_one_hop_fetch(monkeypatch
         }
     )
     ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    _install_deterministic_instagram_onehop_bridge(monkeypatch)
 
     monkeypatch.setattr(
         cde,
@@ -7840,6 +7880,7 @@ def test_instagram_email_one_hop_preserves_multiple_emails_in_aggregate_output(m
         }
     )
     ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    _install_deterministic_instagram_onehop_bridge(monkeypatch)
 
     monkeypatch.setattr(
         cde,
@@ -7935,6 +7976,7 @@ def test_instagram_email_one_hop_ranks_targets_but_still_fetches_only_one_url(mo
         }
     )
     ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    _install_deterministic_instagram_onehop_bridge(monkeypatch)
     bio_fetch_calls = []
 
     monkeypatch.setattr(
@@ -7988,6 +8030,7 @@ def test_instagram_email_one_hop_prefers_external_domain_over_internal_meta(monk
         }
     )
     ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    _install_deterministic_instagram_onehop_bridge(monkeypatch)
     bio_fetch_calls = []
 
     monkeypatch.setattr(
@@ -8040,6 +8083,7 @@ def test_instagram_email_one_hop_blocked_only_targets_skip_fetch(monkeypatch):
         }
     )
     ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    _install_deterministic_instagram_onehop_bridge(monkeypatch)
 
     monkeypatch.setattr(
         cde,
@@ -8083,6 +8127,7 @@ def test_instagram_email_one_hop_weak_utility_only_target_resolves_to_clean_no_e
         }
     )
     ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    _install_deterministic_instagram_onehop_bridge(monkeypatch)
 
     monkeypatch.setattr(
         cde,
@@ -8133,6 +8178,7 @@ def test_instagram_email_one_hop_does_not_follow_links_found_on_fetched_page(mon
         }
     )
     ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    _install_deterministic_instagram_onehop_bridge(monkeypatch)
     bio_fetch_calls = []
 
     monkeypatch.setattr(
