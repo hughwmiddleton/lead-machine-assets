@@ -524,6 +524,9 @@ def test_generate_campaign_csvs_writes_processed_master_from_prepared_rows(tmp_p
         remove_rows_without_emails=True,
         release_date_sort="ascending",
         export_format="woodpecker",
+        run_reference_date=module.datetime.datetime(
+            2026, 5, 15, tzinfo=module.datetime.timezone.utc
+        ),
     )
 
     processed_columns, processed_rows = _read_csv(output_dir / module.CAMPAIGN_PREP_PROCESSED_MASTER_FILENAME)
@@ -583,6 +586,11 @@ def test_generate_campaign_csvs_processed_master_uses_sorted_split_release_date_
         split_multiple_emails=True,
         remove_rows_without_emails=True,
         release_date_sort="descending",
+        # Keep every valid fixture date in one recency file: this test verifies
+        # the globally sorted/split buffer, not wall-clock bucket transitions.
+        run_reference_date=module.datetime.datetime(
+            2027, 1, 1, tzinfo=module.datetime.timezone.utc
+        ),
     )
 
     _, processed_rows = _read_csv(output_dir / module.CAMPAIGN_PREP_PROCESSED_MASTER_FILENAME)

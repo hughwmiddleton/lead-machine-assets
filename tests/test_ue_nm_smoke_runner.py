@@ -49,6 +49,7 @@ def test_write_smoke_config_preserves_repo_source_config_and_caps_current_ue_con
 
     assert DEFAULT_CONFIG.read_text(encoding="utf-8") == original_text
     smoke_payload = json.loads(smoke_config_path.read_text(encoding="utf-8"))
-    assert smoke_payload["jobs"][0]["target_valid_leads"] == 3
+    assert smoke_payload["jobs"][0]["target_valid_leads"] == 15
     assert smoke_payload["facebook"]["max_rows_per_run"] == 15
+    assert not any("target_valid_leads" in change for change in changes)
     assert any(change.endswith("100 -> 15") for change in changes)
