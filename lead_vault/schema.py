@@ -67,6 +67,7 @@ CANONICAL_MASTER_SCHEMA: Tuple[str, ...] = (
     "Email_Type",
     "Email_Source_Type",
     "Email_Extract_Method",
+    "Email_Provenance_JSON",
     "Contact_Mode",
     "Domain_Type",
     "Domain_Organization",

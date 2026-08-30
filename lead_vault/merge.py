@@ -18,16 +18,21 @@ from email_normalizer import (
     is_system_telemetry_email,
     normalize_email_value,
 )
+from email_provenance import (
+    dump_email_provenance_json,
+    merge_email_provenance_json_values,
+    parse_email_provenance_json,
+)
 from link_surface_hygiene import is_useful_artist_link
 
-from .alias_map import map_headers_to_canonical
+from .alias_map import is_default_ignored_header, map_headers_to_canonical
 from .importer import build_canonical_row, ensure_master_csv_exists, read_csv_rows
 from .origin import merge_origin_fields, preserve_origin_fields, repair_origin_fields, validate_origin_integrity_rows
 from .schema import get_canonical_master_schema, get_default_master_csv_path
 
 PathLike = Union[str, Path]
 
-_LIST_LIKE_FIELDS = {"All_Emails", "Social Link", "External_Links", "Review_Urls"}
+_LIST_LIKE_FIELDS = {"Social Link", "External_Links", "Review_Urls"}
 _DUPLICATE_STRATEGIES = {"update", "skip", "keep_both", "merge_consolidate"}
 _SOCIAL_LINK_FIELDS = {
     "Website",
@@ -62,6 +67,17 @@ _MUSICBRAINZ_IDENTITY_FIELDS = (
     "Identity_Evidence_JSON",
 )
 _IGNORE_HEADER_SENTINEL = "__IGNORE__"
+_EMAIL_PROVENANCE_BUNDLE_FIELDS = {
+    "Primary_Email",
+    "All_Emails",
+    "Email_Source",
+    "Email_Source_URL",
+    "Email_Type",
+    "Email_Source_Type",
+    "Email_Extract_Method",
+    "Email_Provenance_JSON",
+    "Contact_Mode",
+}
 
 
 def preview_csv_import(
@@ -562,7 +578,12 @@ def _resolve_headers(
 ) -> Tuple[Dict[str, str], List[str], List[str]]:
     canonical_schema = set(get_canonical_master_schema())
     mapped_headers = map_headers_to_canonical(detected_headers)
-    ignored = {str(header) for header in (ignored_headers or [])}
+    ignored = {
+        str(header)
+        for header in detected_headers
+        if is_default_ignored_header(header)
+    }
+    ignored.update(str(header) for header in (ignored_headers or []))
     overrides = dict(header_overrides or {})
 
     for raw_header, target in overrides.items():
@@ -573,6 +594,7 @@ def _resolve_headers(
             continue
         if target in canonical_schema:
             mapped_headers[header_name] = target
+            ignored.discard(header_name)
 
     ignored_headers_out: List[str] = []
     unmapped_headers: List[str] = []
@@ -746,9 +768,72 @@ def _prepare_incoming_row(row: Dict[str, str]) -> Dict[str, str]:
     prepared = {field: _clean_cell(row.get(field, "")) for field in get_canonical_master_schema()}
     prepared["Primary_Email"] = _normalize_email(prepared.get("Primary_Email", ""))
     prepared["All_Emails"] = _merge_email_lists("", prepared.get("All_Emails", ""))
+    if not prepared["Primary_Email"] and not prepared["All_Emails"]:
+        for field_name in _EMAIL_PROVENANCE_BUNDLE_FIELDS:
+            prepared[field_name] = ""
+    else:
+        prepared.update(_merge_email_provenance_bundle(prepared, {}))
     prepared["Source_URL"] = _clean_cell(prepared.get("Source_URL", ""))
     repair_origin_fields(prepared)
     return prepared
+
+
+def _merge_email_provenance_bundle(
+    existing_row: Dict[str, str],
+    incoming_row: Dict[str, str],
+) -> Dict[str, str]:
+    """Merge contact fields atomically while retaining per-email audit data."""
+    existing_primary = _normalize_email(existing_row.get("Primary_Email", ""))
+    incoming_primary = _normalize_email(incoming_row.get("Primary_Email", ""))
+    selected_primary = existing_primary or incoming_primary
+
+    # Only persist explicit audit maps. Legacy row-level source columns remain
+    # usable, but are not silently converted into a historical JSON migration.
+    existing_map = parse_email_provenance_json(existing_row.get("Email_Provenance_JSON", ""))
+    incoming_map = parse_email_provenance_json(incoming_row.get("Email_Provenance_JSON", ""))
+    merged_json = merge_email_provenance_json_values(existing_map, incoming_map)
+    merged_map = parse_email_provenance_json(merged_json)
+
+    alternate_primaries = (
+        [incoming_primary]
+        if existing_primary and incoming_primary and incoming_primary != existing_primary
+        else []
+    )
+    merged_all = _merge_email_lists(
+        existing_row.get("All_Emails", ""),
+        incoming_row.get("All_Emails", ""),
+        extras=alternate_primaries,
+    )
+    if not selected_primary and not merged_all:
+        return {field_name: "" for field_name in _EMAIL_PROVENANCE_BUNDLE_FIELDS}
+    if not selected_primary:
+        bundle = {field_name: "" for field_name in _EMAIL_PROVENANCE_BUNDLE_FIELDS}
+        bundle["All_Emails"] = merged_all
+        bundle["Email_Provenance_JSON"] = merged_json
+        return bundle
+
+    selected_meta = dict(merged_map.get(selected_primary) or {})
+    existing_meta = dict(existing_map.get(selected_primary) or {})
+    incoming_meta = dict(incoming_map.get(selected_primary) or {})
+    selected_owner = existing_row if existing_primary else incoming_row
+    if incoming_meta and selected_meta == incoming_meta and selected_meta != existing_meta:
+        selected_owner = incoming_row
+
+    bundle = {
+        "Primary_Email": selected_primary,
+        "All_Emails": merged_all,
+        "Email_Source": _clean_cell(selected_owner.get("Email_Source", "")),
+        "Email_Source_URL": _clean_cell(selected_meta.get("source_url", ""))
+        or _clean_cell(selected_owner.get("Email_Source_URL", "")),
+        "Email_Type": _clean_cell(selected_owner.get("Email_Type", "")),
+        "Email_Source_Type": _clean_cell(selected_meta.get("source_type", ""))
+        or _clean_cell(selected_owner.get("Email_Source_Type", "")),
+        "Email_Extract_Method": _clean_cell(selected_meta.get("extract_method", ""))
+        or _clean_cell(selected_owner.get("Email_Extract_Method", "")),
+        "Email_Provenance_JSON": merged_json,
+        "Contact_Mode": _clean_cell(selected_owner.get("Contact_Mode", "")),
+    }
+    return bundle
 
 
 def _prepare_new_row(
@@ -781,6 +866,12 @@ def _merge_existing_row(
     merge_origin_fields(merged, incoming_row)
     changed = original_origin != (merged.get("Lead_Source", ""), merged.get("Source_Directory", ""))
 
+    contact_bundle = _merge_email_provenance_bundle(merged, incoming_row)
+    for field_name, merged_value in contact_bundle.items():
+        if merged.get(field_name, "") != merged_value:
+            merged[field_name] = merged_value
+            changed = True
+
     for field_name in get_canonical_master_schema():
         existing_value = merged[field_name]
         incoming_value = _clean_cell(incoming_row.get(field_name, ""))
@@ -788,32 +879,21 @@ def _merge_existing_row(
         if field_name in {"Import_Source_File", "Import_Batch", "Date_Added", "Last_Updated", "Lead_Source", "Source_Directory"}:
             continue
 
+        if field_name in _EMAIL_PROVENANCE_BUNDLE_FIELDS:
+            continue
+
         if field_name in _LIST_LIKE_FIELDS:
-            merged_value = (
-                _merge_all_emails_field(merged, incoming_row)
-                if field_name == "All_Emails"
-                else _merge_tokenized_values(
-                    existing_value,
-                    incoming_value,
-                    normalizer=(
-                        _operational_link_normalizer(merged, incoming_row)
-                        if field_name in {"Social Link", "External_Links"}
-                        else _normalize_link_token
-                    ),
-                )
+            merged_value = _merge_tokenized_values(
+                existing_value,
+                incoming_value,
+                normalizer=(
+                    _operational_link_normalizer(merged, incoming_row)
+                    if field_name in {"Social Link", "External_Links"}
+                    else _normalize_link_token
+                ),
             )
             if merged_value != existing_value:
                 merged[field_name] = merged_value
-                changed = True
-            continue
-
-        if field_name == "Primary_Email":
-            merged_primary, merged_all = _merge_primary_email_field(merged, incoming_row)
-            if merged_primary != existing_value:
-                merged[field_name] = merged_primary
-                changed = True
-            if merged_all != merged["All_Emails"]:
-                merged["All_Emails"] = merged_all
                 changed = True
             continue
 
@@ -854,36 +934,6 @@ def _merge_existing_row(
     if "Last_Updated" in merged:
         merged["Last_Updated"] = timestamp
     return merged, True
-
-
-def _merge_all_emails_field(existing_row: Dict[str, str], incoming_row: Dict[str, str]) -> str:
-    existing_primary = _normalize_email(existing_row.get("Primary_Email", ""))
-    incoming_primary = _normalize_email(incoming_row.get("Primary_Email", ""))
-    existing_all = _clean_cell(existing_row.get("All_Emails", ""))
-    incoming_all = _clean_cell(incoming_row.get("All_Emails", ""))
-
-    extras: List[str] = []
-    if existing_primary and incoming_primary and incoming_primary != existing_primary:
-        extras.append(incoming_primary)
-
-    return _merge_email_lists(existing_all, incoming_all, extras)
-
-
-def _merge_primary_email_field(existing_row: Dict[str, str], incoming_row: Dict[str, str]) -> Tuple[str, str]:
-    existing_primary = _normalize_email(existing_row.get("Primary_Email", ""))
-    incoming_primary = _normalize_email(incoming_row.get("Primary_Email", ""))
-    merged_primary = existing_primary or incoming_primary
-    merged_all = _merge_all_emails_field(
-        {
-            **existing_row,
-            "Primary_Email": existing_primary,
-        },
-        {
-            **incoming_row,
-            "Primary_Email": incoming_primary,
-        },
-    )
-    return merged_primary, merged_all
 
 
 def _merge_facebook_field(existing_row: Dict[str, str], incoming_row: Dict[str, str]) -> Tuple[str, str]:
@@ -1010,6 +1060,17 @@ def _remove_unsafe_incoming_contact(row: Dict[str, str]) -> None:
     if len(safe_all) != len(all_emails):
         row["All_Emails"] = ";".join(safe_all)
 
+    retained_emails = set(safe_all)
+    retained_primary = _normalize_email(row.get("Primary_Email", ""))
+    if retained_primary:
+        retained_emails.add(retained_primary)
+    provenance_map = {
+        email: entry
+        for email, entry in parse_email_provenance_json(row.get("Email_Provenance_JSON", "")).items()
+        if email in retained_emails
+    }
+    row["Email_Provenance_JSON"] = dump_email_provenance_json(provenance_map)
+
     if not _has_lead_vault_email(row) and not _split_email_all_for_scoring(row.get("All_Emails", "")):
         for field_name in (
             "Email_Source",
@@ -1017,6 +1078,7 @@ def _remove_unsafe_incoming_contact(row: Dict[str, str]) -> None:
             "Email_Type",
             "Email_Source_Type",
             "Email_Extract_Method",
+            "Email_Provenance_JSON",
             "Contact_Mode",
         ):
             row[field_name] = ""
@@ -1040,6 +1102,7 @@ def _coalesce_consolidation_enrichment(
     status, diagnostics, and canonical identity fields have different semantics.
     """
     merged = _copy_master_shaped_row(winner)
+    merged.update(_merge_email_provenance_bundle(merged, loser))
     operational_normalizer = _operational_link_normalizer(winner, loser)
     rejected_relationships = _rejected_musicbrainz_relationship_urls(loser)
 

@@ -534,7 +534,12 @@ def test_merge_consolidate_email_all_unique_count_breaks_email_tie(tmp_path):
 
     assert result["rows_replaced"] == 1
     assert rows[0]["Primary_Email"] == "two@example.com"
-    assert rows[0]["All_Emails"] == "two@example.com, Two@example.com | three@example.com; four@example.com"
+    assert set(rows[0]["All_Emails"].split(";")) == {
+        "one@example.com",
+        "two@example.com",
+        "three@example.com",
+        "four@example.com",
+    }
 
 
 def test_merge_consolidate_adds_new_artist_and_prevents_duplicate_explosion(tmp_path):

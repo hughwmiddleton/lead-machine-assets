@@ -2,7 +2,7 @@ import csv
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Union
 
-from .alias_map import map_headers_to_canonical
+from .alias_map import is_default_ignored_header, map_headers_to_canonical
 from .origin import repair_origin_fields
 from .schema import get_canonical_master_schema, get_default_master_csv_path
 
@@ -92,12 +92,18 @@ def import_csv_to_canonical_rows(path: PathLike) -> Dict[str, object]:
     encoding = read_result["encoding"]
     header_map = map_headers_to_canonical(detected_headers)
     canonical_rows = [build_canonical_row(row, header_map, header_order=detected_headers) for row in rows]
-    unmapped_headers = [header for header in detected_headers if header not in header_map]
+    ignored_headers = [
+        header for header in detected_headers if header not in header_map and is_default_ignored_header(header)
+    ]
+    unmapped_headers = [
+        header for header in detected_headers if header not in header_map and header not in ignored_headers
+    ]
 
     return {
         "encoding": encoding,
         "detected_headers": detected_headers,
         "mapped_headers": header_map,
+        "ignored_headers": ignored_headers,
         "unmapped_headers": unmapped_headers,
         "canonical_rows": canonical_rows,
         "row_count": len(canonical_rows),

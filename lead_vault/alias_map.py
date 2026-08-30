@@ -57,6 +57,7 @@ _ALIAS_GROUPS = {
     ],
     "Country": [
         "Country",
+        "Country_Derived",
     ],
     "Primary_Genre": [
         "Primary Genre",
@@ -184,6 +185,7 @@ _ALIAS_GROUPS = {
     ],
     "Discovery_Source": [
         "Discovery Source",
+        "Spotify Playlist",
     ],
     "Source_URL": [
         "Source URL",
@@ -232,6 +234,9 @@ _ALIAS_GROUPS = {
     "Email_Extract_Method": [
         "Email Extract Method",
     ],
+    "Email_Provenance_JSON": [
+        "Email Provenance JSON",
+    ],
     "Contact_Mode": [
         "Contact Mode",
     ],
@@ -255,6 +260,7 @@ _ALIAS_GROUPS = {
     ],
     "Review_Reason": [
         "Review Reason",
+        "FB_Review_Reason",
     ],
     "Review_Urls": [
         "Review Urls",
@@ -291,6 +297,65 @@ _ALIAS_GROUPS = {
         "Notes",
     ],
 }
+
+
+# Current enriched-run implementation details that are useful while a job is
+# executing or being diagnosed, but are not durable Lead Vault contact data.
+# Keep this explicit so a new, genuinely unknown field still requires review.
+_DEFAULT_IGNORED_HEADERS = {
+    "Bandcamp_Source_Mode",
+    "Bandcamp_Search_Domain",
+    "IG_Opportunity_State",
+    "IG_Attempt_State",
+    "IG_Extract_State",
+    "IG_Write_State",
+    "IG_Terminal_Reason",
+    "IG_Execution_Path",
+    "IG_Surface_Reason",
+    "IG_Normalized_Terminal_Outcome",
+    "IG_Normalized_Terminal_Reason",
+    "FB_Opportunity_State",
+    "FB_Gate_State",
+    "FB_Attempt_State",
+    "FB_Extract_State",
+    "FB_Write_State",
+    "FB_Debug_Reason",
+    "FB_Terminal_Reason",
+    "FB_Normalized_Terminal_Outcome",
+    "FB_Normalized_Terminal_Reason",
+    "BC_Status",
+    "BC_Mode",
+    "BC_Attempts",
+    "BC_403_Count",
+    "SC_Status",
+    "SC_Reason",
+    "SC_Fetches",
+    "SC_ms",
+    "Match_Score",
+    "FB_Status",
+    "__fb_discovery_attempted_this_run",
+    "__fb_emails_applied",
+    "origin_match_flag",
+    "origin_match_reason",
+    "origin_artist_score",
+    "origin_title_score",
+    "match_score_overall",
+    "name_consistency_flag",
+    "name_consistency_flag_polarity",
+    "duplicate_email_flag",
+    "duplicate_artist_flag",
+    "directory_conflict_flag",
+    "genre_outlier_flag",
+    "FB_Refine_Decision",
+    "FB_Refine_Executed",
+    "FB_Name_Consistency_Flag",
+}
+
+DEFAULT_IGNORED_HEADER_KEYS = frozenset(normalize_header(header) for header in _DEFAULT_IGNORED_HEADERS)
+
+
+def is_default_ignored_header(header: object) -> bool:
+    return normalize_header(header) in DEFAULT_IGNORED_HEADER_KEYS
 
 
 def _build_header_aliases() -> Dict[str, str]:

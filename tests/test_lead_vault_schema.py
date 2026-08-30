@@ -70,6 +70,7 @@ EXPECTED_CANONICAL_MASTER_SCHEMA = [
     "Email_Type",
     "Email_Source_Type",
     "Email_Extract_Method",
+    "Email_Provenance_JSON",
     "Contact_Mode",
     "Domain_Type",
     "Domain_Organization",
@@ -129,5 +130,7 @@ def test_schema_contains_only_requested_outreach_additions() -> None:
     for header in ("Sounds Like", "Social Link", "Unearthed_Genre_Raw", "Email_Type"):
         assert header in schema
 
-    for header in ("FB_Debug_Reason", "FB_Opportunity_State", "Email_Provenance_JSON"):
+    assert "Email_Provenance_JSON" in schema
+
+    for header in ("FB_Debug_Reason", "FB_Opportunity_State"):
         assert header not in schema

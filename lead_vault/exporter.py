@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Callable, Dict, Optional, Union
 
 import pandas as pd
+from email_provenance import EMAIL_PROVENANCE_JSON_COL
 
 from .origin import (
     repair_origin_fields,
@@ -98,6 +99,7 @@ FINAL_EXPORT_PRESET = {
         "Email_Source_URL",
         "Email_Source_Type",
         "Email_Extract_Method",
+        EMAIL_PROVENANCE_JSON_COL,
         "Contact_Mode",
         "Discovery Source",
         "Lead_Source",
@@ -193,6 +195,11 @@ def _export_legacy_final_export_bridge(
     bridge_df = _build_legacy_final_export_bridge_frame(master_df)
     bridge_df = recompute_final_status_post_enrichment(bridge_df, logger=None)
     export_df = _build_final_export_frame(bridge_df)
+    if EMAIL_PROVENANCE_JSON_COL in preset["headers"]:
+        export_df[EMAIL_PROVENANCE_JSON_COL] = bridge_df.get(
+            EMAIL_PROVENANCE_JSON_COL,
+            pd.Series("", index=bridge_df.index, dtype=str),
+        ).fillna("").astype(str)
     export_df = export_df.reindex(columns=list(preset["headers"]), fill_value="")
     export_df.to_csv(export_path, index=False, encoding="utf-8-sig")
 

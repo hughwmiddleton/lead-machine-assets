@@ -44,6 +44,7 @@ from email_provenance import (
     _set_email_with_provenance,
     get_email_provenance_entry,
     get_row_email_provenance,
+    infer_email_surface,
     merge_email_provenance_into_target,
     normalize_email_key,
     parse_email_provenance_json,
@@ -3130,12 +3131,24 @@ def _selected_email_provenance(row_like: Any, selected_email: str) -> Dict[str, 
 def _facebook_email_surface_hint(source: Any) -> str:
     if source is None or not hasattr(source, "get"):
         return "facebook_main"
+    source_type = _cell_str(source.get("Email_Source_Type") or source.get("email_source_type")).lower()
+    source_url = _cell_str(
+        source.get("Email_Source_URL")
+        or source.get("email_source_url")
+        or source.get("Facebook_URL")
+    )
+    if source_type and not source_type.startswith("facebook"):
+        selected_email = _cell_str(source.get("Email") or source.get("Primary Email"))
+        selected_meta = get_email_provenance_entry(source, selected_email)
+        return _cell_str(selected_meta.get("surface")) or infer_email_surface(
+            source_type=source_type,
+            source_url=source_url,
+        )
     surface_raw = _cell_str(source.get("FB_Email_Source") or source.get("email_source")).lower()
     if surface_raw == "about":
         return "facebook_about"
     if surface_raw == "main":
         return "facebook_main"
-    source_url = _cell_str(source.get("Email_Source_URL") or source.get("email_source_url") or source.get("Facebook_URL"))
     return "facebook_about" if "/about" in source_url.lower() else "facebook_main"
 
 

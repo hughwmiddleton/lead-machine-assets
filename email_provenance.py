@@ -195,15 +195,21 @@ def get_row_email_provenance(row_like: Any) -> Dict[str, Dict[str, str]]:
         return {}
 
     provenance = parse_email_provenance_json(row_like.get(EMAIL_PROVENANCE_JSON_COL, ""))
-    selected_email = normalize_email_key(row_like.get("Email") or row_like.get("Primary Email") or "")
+    selected_email = normalize_email_key(
+        row_like.get("Email") or row_like.get("Primary Email") or row_like.get("Primary_Email") or ""
+    )
     if selected_email and selected_email not in provenance:
-        fallback_entry = _build_provenance_entry(
-            source_url=row_like.get("Email_Source_URL", ""),
-            source_type=row_like.get("Email_Source_Type", "") or row_like.get("Email_Type", ""),
-            method=row_like.get("Email_Extract_Method", "") or "regex",
-        )
-        if fallback_entry:
-            provenance[selected_email] = fallback_entry
+        source_url = row_like.get("Email_Source_URL", "")
+        source_type = row_like.get("Email_Source_Type", "") or row_like.get("Email_Type", "")
+        extract_method = row_like.get("Email_Extract_Method", "")
+        if _clean_str(source_url) or _clean_str(source_type) or _clean_str(extract_method):
+            fallback_entry = _build_provenance_entry(
+                source_url=source_url,
+                source_type=source_type,
+                method=extract_method or "regex",
+            )
+            if fallback_entry:
+                provenance[selected_email] = fallback_entry
     return provenance
 
 
@@ -310,6 +316,23 @@ def dump_email_provenance_json(provenance_map: Mapping[str, Mapping[str, Any]] |
         return ""
     ordered_payload = {email: cleaned[email] for email in sorted(cleaned)}
     return json.dumps(ordered_payload, sort_keys=True, separators=(",", ":"))
+
+
+def merge_email_provenance_json_values(*raw_values: Any) -> str:
+    """Merge per-email audit maps without replacing stronger provenance."""
+    merged: Dict[str, Dict[str, str]] = {}
+    for raw_value in raw_values:
+        for email, candidate_entry in parse_email_provenance_json(raw_value).items():
+            current_entry = dict(merged.get(email) or {})
+            if not current_entry or _provenance_sort_key(candidate_entry) < _provenance_sort_key(current_entry):
+                merged[email] = dict(candidate_entry)
+                continue
+            for field in _PROVENANCE_FIELDS:
+                value = candidate_entry.get(field, "")
+                if value and not current_entry.get(field, ""):
+                    current_entry[field] = value
+            merged[email] = current_entry
+    return dump_email_provenance_json(merged)
 
 
 def merge_email_provenance_json(
