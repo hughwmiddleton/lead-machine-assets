@@ -365,6 +365,8 @@ def _normalise_seed_source_name(raw_directory: str) -> str:
         return ""
     if "unearthed" in text or "triple j" in text:
         return "unearthed"
+    if "undiscovered_music" in text or "undiscovered music" in text:
+        return "undiscovered_music"
     if "bandcamp" in text:
         return "bandcamp"
     if "soundcloud" in text:
@@ -1303,15 +1305,18 @@ def _merge_raw_master(
             if len(parts) >= 2 and parts[0] == "job":
                 source_directory = parts[1]
         if source_directory:
-            canonical_lead_source = (
-                "Triple J Unearthed" if source_directory == "unearthed" else source_directory
-            )
-            canonical_source_directory = (
-                "unearthed" if source_directory == "unearthed" else source_directory
-            )
-            canonical_legacy_source_directory = (
-                "Triple J Unearthed" if source_directory == "unearthed" else source_directory
-            )
+            if source_directory == "unearthed":
+                canonical_lead_source = "Triple J Unearthed"
+                canonical_source_directory = "unearthed"
+                canonical_legacy_source_directory = "Triple J Unearthed"
+            elif source_directory == "undiscovered_music":
+                canonical_lead_source = "Undiscovered Music"
+                canonical_source_directory = "undiscovered_music"
+                canonical_legacy_source_directory = "Undiscovered Music"
+            else:
+                canonical_lead_source = source_directory
+                canonical_source_directory = source_directory
+                canonical_legacy_source_directory = source_directory
             for col, value in (
                 ("Lead_Source", canonical_lead_source),
                 ("Source_Directory", canonical_source_directory),

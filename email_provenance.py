@@ -40,6 +40,7 @@ _SURFACE_PRIORITY = {
     "bandcamp_track_follow": 14,
     "lastfm_profile": 15,
     "spotify_profile": 16,
+    "undiscovered_music_profile": 17,
     "domain_reuse": 40,
     "live_search": 50,
 }
@@ -122,6 +123,8 @@ def infer_email_surface(
         return "lastfm_profile"
     if source_type_clean.startswith("spotify"):
         return "spotify_profile"
+    if source_type_clean.startswith("undiscovered_music"):
+        return "undiscovered_music_profile"
     if source_type_clean == "domain_reuse":
         return "domain_reuse"
     if source_type_clean == "live_search":

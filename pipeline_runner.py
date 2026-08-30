@@ -2813,11 +2813,19 @@ def _write_rows_to_csv(rows: Iterable[Any], path: str, source_directory: str = "
     _ensure_parent(path)
     materialized: List[Any] = list(rows or [])
     fallback_cols = RAW_FALLBACK_COLUMNS.copy()
-    canonical_lead_source = "Triple J Unearthed" if str(source_directory or "").strip().lower() == "unearthed" else source_directory
-    canonical_source_directory = "unearthed" if str(source_directory or "").strip().lower() == "unearthed" else source_directory
-    canonical_legacy_source_directory = (
-        "Triple J Unearthed" if str(source_directory or "").strip().lower() == "unearthed" else source_directory
-    )
+    _sd = str(source_directory or "").strip().lower()
+    if _sd == "unearthed":
+        canonical_lead_source = "Triple J Unearthed"
+        canonical_source_directory = "unearthed"
+        canonical_legacy_source_directory = "Triple J Unearthed"
+    elif _sd == "undiscovered_music":
+        canonical_lead_source = "Undiscovered Music"
+        canonical_source_directory = "undiscovered_music"
+        canonical_legacy_source_directory = "Undiscovered Music"
+    else:
+        canonical_lead_source = source_directory
+        canonical_source_directory = source_directory
+        canonical_legacy_source_directory = source_directory
     if not materialized:
         df = pd.DataFrame(columns=fallback_cols)
         if source_directory:
@@ -3066,6 +3074,8 @@ def infer_discovery_source(row: pd.Series) -> str:
         source_token = lower_src or lower_job
         if "unearthed" in source_token:
             label = "Triple J Unearthed"
+        elif "undiscovered_music" in source_token:
+            label = "Undiscovered Music"
         elif "soundcloud" in source_token:
             label = "SoundCloud directory"
         elif "bandcamp" in source_token:
@@ -3106,6 +3116,9 @@ def infer_email_source(row: pd.Series) -> str:
 
     if "unearthed" in src_dir or "unearthed" in src_url:
         return "Triple J Unearthed profile"
+
+    if "undiscovered_music" in src_dir or "undiscovered.music" in src_url:
+        return "Undiscovered Music profile"
 
     if "soundcloud" in src_dir or "soundcloud.com" in src_url:
         return "SoundCloud profile"
@@ -4010,6 +4023,18 @@ def run_directory_job(job_config: Dict[str, Any], raw_output_path: str, logger: 
             _run_unearthed_full_pipeline(job_config, output_path, module, logger)
             finalize_result = _finalize_tmp_csv(tmp_path, final_path)
             result_path = str(finalize_result.final_path)
+            success = True
+
+        elif directory == "undiscovered_music":
+            from undiscovered_music import scrape_undiscovered_music
+
+            params = {
+                "max_results": job_config.get("max_results") or job_config.get("target_count") or job_config.get("target_valid_leads"),
+                "url": job_config.get("url") or job_config.get("seed") or job_config.get("input_seed_csv") or "",
+            }
+            rows = scrape_undiscovered_music(target_count, params, logger=logger)
+            write_result = _write_rows_to_csv(rows, final_path.as_posix(), source_directory="undiscovered_music")
+            result_path = str(write_result.final_path)
             success = True
 
         else:

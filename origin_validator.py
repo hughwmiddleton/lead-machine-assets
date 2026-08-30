@@ -312,6 +312,42 @@ def check_unearthed_origin(url: str, artist_name: str, song_title: str, session:
     return OriginMatchResult(match_flag, artist_score, best_score, best_title or None, reason)
 
 
+def _undiscovered_music_parse(html: str) -> Tuple[str, List[str]]:
+    soup = BeautifulSoup(html or "", "html.parser")
+    artist = ""
+    track_titles: List[str] = []
+    meta_title = _extract_meta_content(soup, "og:title", "title")
+    if meta_title:
+        if "|" in meta_title:
+            artist = meta_title.split("|")[0]
+        else:
+            artist = meta_title
+    heading = soup.find("h1")
+    if heading:
+        artist = heading.get_text(" ", strip=True) or artist
+    return artist, track_titles
+
+
+def check_undiscovered_music_origin(url: str, artist_name: str, song_title: str, session: requests.Session, cache: Dict[str, Optional[str]], logger: Optional[Logger] = None) -> OriginMatchResult:
+    html = _fetch_html(url, session, cache, logger)
+    if not html:
+        return OriginMatchResult(False, 0.0, 0.0, None, "fetch_error")
+    artist, titles = _undiscovered_music_parse(html)
+    artist_score = similarity_score(artist, artist_name)
+    row_core_title = normalize_text(extract_core_title(song_title))
+    best_title = ""
+    best_score = 0.0
+    for title in titles or []:
+        page_core = normalize_text(extract_core_title(title))
+        score = similarity_score(row_core_title, page_core)
+        if score > best_score:
+            best_score = score
+            best_title = title
+    match_flag = artist_score >= ARTIST_MATCH_THRESHOLD and best_score >= TITLE_MATCH_THRESHOLD
+    reason = "ok" if match_flag else ("artist_mismatch" if artist_score < ARTIST_MATCH_THRESHOLD else "title_not_found")
+    return OriginMatchResult(match_flag, artist_score, best_score, best_title or None, reason)
+
+
 def _spotify_parse(html: str) -> Tuple[str, List[str]]:
     soup = BeautifulSoup(html or "", "html.parser")
     artist = ""
@@ -397,6 +433,8 @@ def _infer_directory_from_url(url: str) -> str:
         return "soundcloud"
     if "triplejunearthed" in host or "abc.net.au" in host:
         return "unearthed"
+    if "undiscovered.music" in host:
+        return "undiscovered_music"
     if "spotify.com" in host:
         return "spotify"
     return ""
@@ -411,6 +449,8 @@ def _normalise_source_directory(raw_dir: str) -> Optional[str]:
         return "bandcamp"
     if "unearthed" in text or "triple j" in text:
         return "unearthed"
+    if "undiscovered_music" in text or "undiscovered music" in text:
+        return "undiscovered_music"
     if "spotify" in text:
         return "spotify"
     return None
@@ -421,6 +461,7 @@ def _choose_checker(directory: str):
         "bandcamp": check_bandcamp_origin,
         "soundcloud": check_soundcloud_origin,
         "unearthed": check_unearthed_origin,
+        "undiscovered_music": check_undiscovered_music_origin,
         "spotify": check_spotify_origin,
     }
     key = _normalise_source_directory(directory)
