@@ -15335,6 +15335,12 @@ class NightModeJobDialog(QtWidgets.QDialog):
             self.amrap_genre_label.setVisible(False)
             self.amrap_genre_edit.setVisible(False)
             self.mode_combo.setEnabled(False)
+        elif directory == "spotify":
+            self.input_label.setText("Playlist URL/URI or search term:")
+            self.input_edit.setPlaceholderText("e.g. https://open.spotify.com/playlist/...")
+            self.amrap_genre_label.setVisible(False)
+            self.amrap_genre_edit.setVisible(False)
+            self.mode_combo.setEnabled(True)
         else:
             self.input_label.setText("Input/Seed:")
             self.input_edit.setPlaceholderText("")

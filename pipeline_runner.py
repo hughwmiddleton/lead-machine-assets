@@ -3846,6 +3846,23 @@ def _run_unearthed_full_pipeline(job_config: Dict[str, Any], raw_output_path: st
     return raw_output_path
 
 
+def _spotify_dispatch_inputs(job_config: Mapping[str, Any]) -> Tuple[Any, str]:
+    """Route Spotify playlist seeds separately from free-text searches."""
+    from spotify_scraper import _extract_playlist_id
+
+    explicit_playlist_ids = job_config.get("playlist_ids")
+    if explicit_playlist_ids:
+        return explicit_playlist_ids, ""
+
+    input_seed = str(job_config.get("input_seed_csv") or "").strip()
+    playlist_id = _extract_playlist_id(input_seed)
+    if playlist_id:
+        return [playlist_id], ""
+
+    search_term = str(job_config.get("search_term") or input_seed).strip()
+    return None, search_term
+
+
 def run_directory_job(job_config: Dict[str, Any], raw_output_path: str, logger: LoggerFn = None) -> str:
     """
     Run a single directory scraper based on job_config.
@@ -3940,9 +3957,10 @@ def run_directory_job(job_config: Dict[str, Any], raw_output_path: str, logger: 
             _nm_ue_dispatch_warn_if_slow(logger, "scrape_call", scrape_call_start)
 
         elif directory == "spotify":
+            playlist_ids, search_term = _spotify_dispatch_inputs(job_config)
             params = {
-                "playlist_ids": job_config.get("playlist_ids"),
-                "search_term": job_config.get("search_term") or job_config.get("input_seed_csv") or "",
+                "playlist_ids": playlist_ids,
+                "search_term": search_term,
                 "spotify_client_id": job_config.get("spotify_client_id") or os.environ.get("SPOTIFY_CLIENT_ID"),
                 "spotify_client_secret": job_config.get("spotify_client_secret") or os.environ.get("SPOTIFY_CLIENT_SECRET"),
             }
