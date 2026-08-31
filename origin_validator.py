@@ -399,6 +399,8 @@ def _infer_directory_from_url(url: str) -> str:
         return "unearthed"
     if "spotify.com" in host:
         return "spotify"
+    if "amrap.org.au" in host:
+        return "amrap"
     return ""
 
 
@@ -413,6 +415,8 @@ def _normalise_source_directory(raw_dir: str) -> Optional[str]:
         return "unearthed"
     if "spotify" in text:
         return "spotify"
+    if "amrap" in text:
+        return "amrap"
     return None
 
 

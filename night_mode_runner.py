@@ -373,6 +373,8 @@ def _normalise_seed_source_name(raw_directory: str) -> str:
         return "spotify"
     if "lastfm" in text or "last.fm" in text:
         return "lastfm"
+    if "amrap" in text:
+        return "amrap"
     return text
 
 
