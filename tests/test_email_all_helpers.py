@@ -760,3 +760,85 @@ def test_select_primary_email_falls_back_to_existing_order_without_source_metada
 
     assert primary == "omega@beta.test"
     assert ranked == ["omega@beta.test", "zeta@alpha.test"]
+
+
+# --- Wix/Sentry telemetry filtering ---
+
+def test_filter_system_telemetry_emails_rejects_wix_sentry():
+    assert filter_system_telemetry_emails(["abc@sentry.wixpress.com"]) == []
+
+
+def test_filter_system_telemetry_emails_rejects_wix_sentry_next():
+    assert filter_system_telemetry_emails(["abc@sentry-next.wixpress.com"]) == []
+
+
+def test_filter_system_telemetry_emails_rejects_wix_sentry_subdomain():
+    assert filter_system_telemetry_emails(["abc@sub.sentry.wixpress.com"]) == []
+
+
+def test_filter_system_telemetry_emails_preserves_legitimate_wix_domain():
+    """Artist websites hosted on Wix must not be rejected merely for using Wix."""
+    assert filter_system_telemetry_emails(["booking@artist.wixsite.com"]) == ["booking@artist.wixsite.com"]
+
+
+def test_filter_system_telemetry_emails_preserves_normal_artist_email():
+    assert filter_system_telemetry_emails(
+        ["contact@artist.com", "abc@sentry.wixpress.com"]
+    ) == ["contact@artist.com"]
+
+
+def test_platform_filter_rejects_any_reverbnation_owned_mailbox():
+    assert pipeline_runner.filter_platform_support_emails(
+        ["itunes@reverbnation.com", "booking@artists.example"]
+    ) == ["booking@artists.example"]
+
+
+def test_platform_filter_preserves_artist_contact_from_page_with_reverbnation_widget():
+    assert pipeline_runner.filter_platform_support_emails(
+        ["booking@artist.example"]
+    ) == ["booking@artist.example"]
+
+
+def test_set_email_all_drops_wix_telemetry_only_result():
+    df = pd.DataFrame([{"Artist Name": "Artist C", "Email_All": ""}])
+
+    merged = pipeline_runner._set_email_all(
+        df,
+        0,
+        ["abc@sentry.wixpress.com"],
+        source="test_filter",
+    )
+
+    assert merged == ""
+    assert df.at[0, "Email_All"] == ""
+
+
+def test_set_email_all_drops_wix_telemetry_mixed_with_valid():
+    df = pd.DataFrame([{"Artist Name": "Artist D", "Email_All": ""}])
+
+    merged = pipeline_runner._set_email_all(
+        df,
+        0,
+        ["abc@sentry.wixpress.com", "booking@artist.test"],
+        source="test_filter",
+    )
+
+    assert merged == "booking@artist.test"
+    assert df.at[0, "Email_All"] == "booking@artist.test"
+
+
+def test_consolidate_email_all_blocks_row_with_only_telemetry_email():
+    df = pd.DataFrame(
+        [
+            {
+                "Artist Name": "Telemetry Artist",
+                "Email": "abc@sentry-next.wixpress.com",
+                "Email_All": "abc@sentry-next.wixpress.com",
+            }
+        ]
+    )
+
+    consolidated = pipeline_runner._consolidate_email_all(df)
+
+    assert consolidated.at[0, "Email"] == ""
+    assert consolidated.at[0, "Email_All"] == ""

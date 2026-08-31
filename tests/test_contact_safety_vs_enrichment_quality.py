@@ -510,3 +510,122 @@ def test_studio_safe_never_contains_a_block_row_for_any_input() -> None:
     for profile in ("studio_safe", "studio_plus"):
         exported = final_checker.filter_rows_for_export(profile, rows)
         assert all(str(r.get("final_status", "")).upper() != "BLOCK" for r in exported)
+
+
+# --------------------------------------------------------------------------
+# Website-enrich contact handoff
+# --------------------------------------------------------------------------
+
+
+def _trusted_website_row(**overrides) -> dict:
+    """An artist whose email came from their own website."""
+    email = overrides.pop("email", "booking@artist.test")
+    row = {
+        "Artist Name": "Web Artist",
+        "Song Title": "Test Track",
+        "Email": email,
+        "Email_All": email,
+        "Email_Source_Type": "website_enrich",
+        "Email_Source_URL": "https://artist.test/contact",
+        "Email_Extract_Method": "regex",
+        EMAIL_PROVENANCE_JSON_COL: _provenance(
+            email, "website_enrich", "https://artist.test/contact", "website_contact_page"
+        ),
+        "FB_Status": "",
+        "FB_Selected_By": "",
+        "FB_Match_Level": "",
+        "FB_Name_Consistency_Flag": "",
+        "FB_Review_Reason": "",
+        "Review_Urls": "",
+        "Source Directory": "undiscovered_music",
+        "Source URL": "https://undiscovered.music/artists/web-artist",
+        "Lead_Source": "Undiscovered Music",
+    }
+    row.update(overrides)
+    return row
+
+
+def test_website_enrich_email_is_classified_trusted() -> None:
+    row = _trusted_website_row()
+    assert final_checker.classify_contact_attribution(row) == final_checker.ATTRIBUTION_TRUSTED
+
+
+def test_website_enrich_email_gets_ok_when_validation_passes() -> None:
+    row = _trusted_website_row()
+    status = final_checker.compute_final_status(row, _flags(), match_score=0.95)
+    assert status == "OK"
+
+
+def test_website_enrich_preserves_discovery_origin() -> None:
+    row = _trusted_website_row()
+    assert row["Source Directory"] == "undiscovered_music"
+    assert row["Lead_Source"] == "Undiscovered Music"
+    assert row["Email_Source_Type"] == "website_enrich"
+
+
+def test_wix_sentry_telemetry_is_unsafe_and_blocks() -> None:
+    for email in ["abc@sentry.wixpress.com", "def@sentry-next.wixpress.com"]:
+        row = _trusted_website_row(email=email)
+        row[EMAIL_PROVENANCE_JSON_COL] = _provenance(
+            email, "website_enrich", "https://artist.test", "website_homepage"
+        )
+        assert final_checker.classify_contact_attribution(row) == final_checker.ATTRIBUTION_UNSAFE
+        assert final_checker.compute_final_status(row, _flags(), match_score=0.95) == "BLOCK"
+
+
+def test_reverbnation_owned_contact_is_unsafe_and_blocks() -> None:
+    row = _trusted_website_row(email="itunes@reverbnation.com")
+    row[EMAIL_PROVENANCE_JSON_COL] = _provenance(
+        "itunes@reverbnation.com", "website_enrich", "https://artist.test", "website_homepage"
+    )
+    assert final_checker.classify_contact_attribution(row) == final_checker.ATTRIBUTION_UNSAFE
+    assert final_checker.compute_final_status(row, _flags(), match_score=0.95) == "BLOCK"
+
+
+def test_duplicate_telemetry_contacts_cannot_cause_ok() -> None:
+    """Even with strong identity, telemetry-only contact must BLOCK."""
+    row = _trusted_website_row(
+        email="abc@sentry.wixpress.com",
+        Email_All="abc@sentry.wixpress.com;def@sentry-next.wixpress.com",
+    )
+    row[EMAIL_PROVENANCE_JSON_COL] = json.dumps(
+        {
+            "abc@sentry.wixpress.com": {
+                "source_type": "website_enrich",
+                "source_url": "https://artist.test",
+                "surface": "website_homepage",
+            },
+            "def@sentry-next.wixpress.com": {
+                "source_type": "website_enrich",
+                "source_url": "https://artist.test",
+                "surface": "website_homepage",
+            },
+        }
+    )
+    assert final_checker.compute_final_status(row, _flags(), match_score=0.95) == "BLOCK"
+
+
+def test_artist_on_wix_domain_is_not_rejected() -> None:
+    """A legitimate artist email on a Wix-hosted site must survive."""
+    row = _trusted_website_row(
+        email="booking@artist.wixsite.com",
+        Email_Source_URL="https://artist.wixsite.com/contact",
+    )
+    row[EMAIL_PROVENANCE_JSON_COL] = _provenance(
+        "booking@artist.wixsite.com", "website_enrich", "https://artist.wixsite.com/contact", "website_contact_page"
+    )
+    assert final_checker.classify_contact_attribution(row) == final_checker.ATTRIBUTION_TRUSTED
+    assert final_checker.compute_final_status(row, _flags(), match_score=0.95) == "OK"
+
+
+def test_website_enrich_role_inbox_on_unrelated_domain_is_third_party() -> None:
+    """Organisational inbox on unrelated domain warrants review, not auto-OK."""
+    row = _trusted_website_row(
+        email="info@label.test",
+        Email_Source_URL="https://label.test",
+    )
+    row[EMAIL_PROVENANCE_JSON_COL] = _provenance(
+        "info@label.test", "website_enrich", "https://label.test", "website_homepage"
+    )
+    assert final_checker.classify_contact_attribution(row) == final_checker.ATTRIBUTION_THIRD_PARTY
+    assert final_checker.compute_final_status(row, _flags(), match_score=0.95) == "WARN"

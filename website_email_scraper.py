@@ -8,7 +8,16 @@ from urllib.parse import urljoin, urlparse
 
 import requests
 from html_fetcher import fetch_html
-from email_normalizer import filter_platform_support_emails, normalize_obfuscated_email_patterns
+from email_normalizer import (
+    filter_obvious_placeholder_emails,
+    filter_platform_support_emails,
+    filter_system_telemetry_emails,
+    is_obvious_placeholder_email,
+    is_platform_support_email,
+    is_system_telemetry_email,
+    normalize_obfuscated_email_patterns,
+)
+from email_provenance import merge_email_provenance_into_target
 from pipeline_runner import normalize_emails, increment_pattern_emails
 from bs4 import BeautifulSoup
 
@@ -46,6 +55,7 @@ REQUEST_TIMEOUT = 10
 CONTACT_KEYWORDS = ("contact", "about", "connect", "book", "booking")
 MAX_CONTACT_FOLLOWUPS = 2
 GENERIC_PATH_KEYWORDS = ("/contact", "/about", "/support", "/privacy", "/terms", "/imprint", "/legal")
+IMAGE_EMAIL_FALSE_POSITIVE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".bmp", ".ico")
 
 
 def enrich_rows_with_website_emails(
@@ -66,6 +76,11 @@ def enrich_rows_with_website_emails(
     total = len(rows)
     for idx, row in enumerate(rows, start=1):
         _ensure_email_fields(row)
+        if normalize_emails(row.get("Email")) or normalize_emails(row.get("Email_All")):
+            if logger:
+                logger(f"[WebsiteEmail] Row {idx}/{total}: skipped; canonical contact already present")
+            _emit_progress(progress_callback, idx, total)
+            continue
         websites = _collect_candidate_websites(row)
         if logger:
             logger(f"[WebsiteEmail] Row {idx}/{total}: {len(websites)} website candidates")
@@ -98,19 +113,38 @@ def enrich_rows_with_website_emails(
                     email_source_url = normalized
                 break  # stop at first successful site
 
-        if emails_found and not str(row.get("Email") or "").strip():
+        if emails_found:
             row["Email_Source_URL"] = _normalize_url(email_source_url)
             path_lower = urlparse(email_source_url or "").path.lower()
             generic_hit = any(path_lower.startswith(token) for token in GENERIC_PATH_KEYWORDS)
             primary = _choose_primary_email(emails_found, email_types)
+
+            # Write to canonical email fields with website_enrich provenance so
+            # downstream consolidation and final checker treat this as a legitimate
+            # first-party website contact rather than an untrusted directory seed.
+            row["Email"] = primary
+            row["Email_All"] = ";".join(emails_found)
+            row["Email_Source_Type"] = "website_enrich"
+            row["Email_Extract_Method"] = "regex"
+            if generic_hit:
+                row["Email Source"] = "Website Enrich (generic contact page)"
+                row["Needs_Review"] = "TRUE"
+            else:
+                row["Email Source"] = "Website Enrich"
+
+            # Populate provenance JSON for ranking and attribution in final checker.
+            merge_email_provenance_into_target(
+                row,
+                emails_found,
+                source_url=_normalize_url(email_source_url),
+                source_type="website_enrich",
+                method="regex",
+            )
+
+            # Keep audit fields for backward compatibility.
             row["Seed_Directory_Email"] = primary
             row["Seed_Directory_Email_All"] = ";".join(emails_found)
             row["Email_Type"] = email_types.get(primary, "")
-            if generic_hit:
-                row["Email Source"] = "Seed directory (generic contact page)"
-                row["Needs_Review"] = "TRUE"
-            else:
-                row["Email Source"] = "Seed directory (site/email scrape)"
             if DEBUG_EMAIL_SMEAR and logger:
                 artist_name = str(row.get("Artist Name") or row.get("artist_name") or "").strip()
                 logger(
@@ -130,7 +164,7 @@ def enrich_rows_with_website_emails(
                     logger_fn = logger or (lambda _: None)
                     logger_fn(
                         f"[EmailSmear?] repeat_email={normalized_email} artist={artist_name!r} "
-                        f"source_url={source_url} email_source=seed_directory "
+                        f"source_url={source_url} email_source=website_enrich "
                         f"emails_found={emails_found}"
                     )
 
@@ -217,12 +251,25 @@ def _extract_emails_from_html(html: str, logger: LoggerFn = None) -> List[str]:
         if normalized not in seen:
             seen.add(normalized)
             deduped.append(normalized)
+    # Reject false positives caused by obfuscation normalizer hitting image filenames
+    # (e.g. "screenshot-2022-11-21-at-2-10-57-pm.png" -> "screenshot-2022-11-21-@-2-10-57-pm.png").
+    deduped = [e for e in deduped if not e.endswith(IMAGE_EMAIL_FALSE_POSITIVE_EXTENSIONS)]
     extracted = normalize_emails(";".join(deduped))
-    filtered = filter_platform_support_emails(extracted)
+    filtered = filter_obvious_placeholder_emails(
+        filter_platform_support_emails(filter_system_telemetry_emails(extracted))
+    )
     if logger and len(filtered) < len(extracted):
         rejected = [e for e in extracted if e not in filtered]
         for email in rejected:
-            logger(f"[WebsiteEmail] email_rejected reason=platform_support_domain value={email}")
+            if is_obvious_placeholder_email(email):
+                reason = "placeholder"
+            elif is_system_telemetry_email(email):
+                reason = "telemetry"
+            elif is_platform_support_email(email):
+                reason = "platform_support_domain"
+            else:
+                reason = "invalid_or_system"
+            logger(f"[WebsiteEmail] email_rejected reason={reason} value={email}")
     return filtered
 
 
