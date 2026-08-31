@@ -1525,6 +1525,51 @@ def test_instagram_bridge_surface_assessment_keeps_login_wall_blocked_without_ma
     assert assessment["reason"] == "blocked_page"
 
 
+def test_instagram_bridge_surface_assessment_accepts_po_e_profile_despite_generic_soft_block(monkeypatch):
+    html = """
+    <html>
+      <head>
+        <title>the Po (@po.e_music) • Instagram photos and videos</title>
+      </head>
+      <body>
+        <nav>Log In Sign Up</nav>
+        <main>
+          <header>
+            <h1>the Po</h1>
+            <button>Email</button>
+          </header>
+          <section>
+            <p>For inquiry→po.the.river@gmail.com</p>
+            <a href="https://poethepoet.com">Official website</a>
+          </section>
+        </main>
+        <footer>Enable JavaScript to continue using Instagram.</footer>
+      </body>
+    </html>
+    """
+    page = _DummyInstagramProfileSurfaceProbePage(
+        html,
+        url="https://www.instagram.com/po.e_music/",
+        title="the Po (@po.e_music) • Instagram photos and videos",
+    )
+    monkeypatch.setattr(cde, "_detect_soft_block", lambda _html: True)
+
+    assessment = cde._instagram_bridge_surface_assessment(
+        page,
+        "https://www.instagram.com/po.e_music/",
+        allow_html_fallback=True,
+    )
+
+    assert assessment["same_profile"] is True
+    assert assessment["blocked"] is False
+    assert assessment["ready"] is True
+    assert assessment["reason"] == "profile_surface"
+    assert assessment["main"] == 1
+    assert assessment["header"] == 1
+    assert assessment["descendants"] >= 4
+    assert assessment["text_length"] >= 16
+
+
 def test_instagram_bridge_surface_assessment_promotes_same_profile_under_rendered_shell():
     html = """
     <html>
@@ -3557,11 +3602,14 @@ def test_open_instagram_live_page_bridge_logged_out_shell_fails_after_bounded_re
     assert playwright.closed is True
 
 
-def test_open_instagram_live_page_bridge_valid_profile_surface_skips_wait_and_recovery(monkeypatch):
+def test_open_instagram_live_page_bridge_hands_off_po_e_profile_despite_generic_soft_block(monkeypatch):
     events = []
     ready_html = (
-        "<html><body><main><header><h1>Ready Artist</h1><button>Email</button></header>"
-        "<section><a href='https://linktr.ee/readyartist'>Bio</a></section></main></body></html>"
+        "<html><body><nav>Log In Sign Up</nav>"
+        "<main><header><h1>the Po</h1><button>Email</button></header>"
+        "<section><p>For inquiry→po.the.river@gmail.com</p>"
+        "<a href='https://poethepoet.com'>Official website</a></section></main>"
+        "<footer>Enable JavaScript to continue using Instagram.</footer></body></html>"
     )
 
     class DummyPage(_DummyClosable):
@@ -3572,8 +3620,11 @@ def test_open_instagram_live_page_bridge_valid_profile_surface_skips_wait_and_re
 
         def goto(self, url, wait_until=None, timeout=None):  # noqa: ANN001
             self.goto_calls += 1
-            self.url = "https://www.instagram.com/readyartist/"
+            self.url = "https://www.instagram.com/po.e_music/"
             events.append(("goto", self.url, wait_until, timeout))
+
+        def title(self):
+            return "the Po (@po.e_music) • Instagram photos and videos"
 
         def evaluate(self, script):  # noqa: ANN001
             script_text = str(script or "")
@@ -3581,10 +3632,10 @@ def test_open_instagram_live_page_bridge_valid_profile_surface_skips_wait_and_re
                 return _instagram_profile_surface_state_from_html(
                     script,
                     ready_html,
-                    rendered_main_text="Ready Artist Bio and booking details",
+                    rendered_main_text="the Po For inquiry→po.the.river@gmail.com Official website",
                 )
             if "document.body" in script_text and "innerText" in script_text:
-                return "Ready Artist Bio and booking details"
+                return "Log In Sign Up the Po For inquiry→po.the.river@gmail.com Official website"
             return _instagram_profile_surface_candidate_marker_from_html(script, ready_html)
 
         def content(self):
@@ -3648,9 +3699,10 @@ def test_open_instagram_live_page_bridge_valid_profile_surface_skips_wait_and_re
         "_wait_for_instagram_profile_render",
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("wait should not run")),
     )
+    monkeypatch.setattr(cde, "_detect_soft_block", lambda _html: True)
 
     bridge = _REAL_OPEN_INSTAGRAM_LIVE_PAGE_BRIDGE(
-        "https://www.instagram.com/readyartist/",
+        "https://www.instagram.com/po.e_music/",
         timeout_s=12.5,
     )
 
@@ -3662,7 +3714,7 @@ def test_open_instagram_live_page_bridge_valid_profile_surface_skips_wait_and_re
         ("launch", True),
         ("new_context",),
         ("new_page",),
-        ("goto", "https://www.instagram.com/readyartist/", "domcontentloaded", 12500.0),
+        ("goto", "https://www.instagram.com/po.e_music/", "domcontentloaded", 12500.0),
     ]
 
     bridge.close()

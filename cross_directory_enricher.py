@@ -3839,22 +3839,37 @@ def _instagram_bridge_surface_assessment(
     )
 
     url_lower = current_url.lower()
+    title_lower = current_title.strip().lower()
     text_lower = " ".join([current_title, current_body_text, current_html]).lower()
-    hard_blocked = False
-    if any(token in url_lower for token in ("/accounts/login", "/challenge", "/checkpoint", "/consent")):
-        hard_blocked = True
-    elif _detect_soft_block(current_html):
-        hard_blocked = True
-    elif any(
+    hard_block_url = any(
+        token in url_lower
+        for token in ("/accounts/login", "/challenge", "/checkpoint", "/consent")
+    )
+    explicit_block_surface = title_lower == "login • instagram" or any(
         token in text_lower
         for token in (
             "security check",
             "challenge_required",
             "checkpoint",
             "account suspended",
+            "verify you are human",
+            "access denied",
         )
-    ):
-        hard_blocked = True
+    )
+    explicit_hard_blocked = hard_block_url or explicit_block_surface
+    soft_blocked = _detect_soft_block(current_html)
+
+    has_header_or_bio = state["header"] > 0 or state["profile_markers"] >= 2
+    has_meaningful_descendants = state["descendants"] >= 4 or state["profile_markers"] >= 3
+    has_non_trivial_text = state["text_length"] >= 16
+    strong_same_profile_surface = (
+        same_profile
+        and state["main"] > 0
+        and has_non_trivial_text
+        and has_header_or_bio
+        and has_meaningful_descendants
+        and not explicit_hard_blocked
+    )
 
     login_text_shell = any(
         token in text_lower
@@ -3876,7 +3891,7 @@ def _instagram_bridge_surface_assessment(
     recoverable_logged_out_shell = False
     empty_live_probe = None
     profile_identity_markers = None
-    if not hard_blocked and recoverable_shell_indicators and target_handle and (same_profile or same_profile_routed):
+    if not explicit_hard_blocked and recoverable_shell_indicators and target_handle and (same_profile or same_profile_routed):
         empty_live_probe = (
             state["main"] <= 0
             and state["header"] <= 0
@@ -3899,7 +3914,10 @@ def _instagram_bridge_surface_assessment(
             profile_identity_markers += 1
         recoverable_logged_out_shell = empty_live_probe and profile_identity_markers >= 2
 
-    blocked = hard_blocked or (recoverable_shell_indicators and not recoverable_logged_out_shell)
+    blocked = explicit_hard_blocked or (
+        (soft_blocked or (recoverable_shell_indicators and not recoverable_logged_out_shell))
+        and not strong_same_profile_surface
+    )
     print("[IG DEBUG FINAL]", {
         "recoverable_logged_out_shell": recoverable_logged_out_shell,
         "blocked": blocked,
@@ -3909,9 +3927,6 @@ def _instagram_bridge_surface_assessment(
         "same_profile_routed": same_profile_routed,
     })
 
-    has_header_or_bio = state["header"] > 0 or state["profile_markers"] >= 2
-    has_meaningful_descendants = state["descendants"] >= 4 or state["profile_markers"] >= 3
-    has_non_trivial_text = state["text_length"] >= 16
     plausible_surface = _instagram_landed_page_is_plausible_profile_surface(page) or _instagram_landed_page_is_html_handoff_usable(
         profile_url,
         current_url,
