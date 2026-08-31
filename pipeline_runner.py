@@ -4037,6 +4037,20 @@ def run_directory_job(job_config: Dict[str, Any], raw_output_path: str, logger: 
             result_path = str(write_result.final_path)
             success = True
 
+        elif directory == "amrap":
+            from amrap_scraper import scrape_amrap
+
+            rows = scrape_amrap(
+                target_count=target_count or 200,
+                state_filter=str(job_config.get("amrap_state") or "").strip(),
+                genre_filter=str(job_config.get("amrap_genre") or "").strip(),
+                sleep_between_requests=float(job_config.get("amrap_sleep", 0.5)),
+                logger=logger,
+            )
+            write_result = _write_rows_to_csv(rows, final_path.as_posix(), source_directory="amrap")
+            result_path = str(write_result.final_path)
+            success = True
+
         else:
             raise ValueError(f"Unsupported directory: {directory}")
 

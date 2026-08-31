@@ -1,0 +1,135 @@
+{
+  "data": {
+    "id": "abc123",
+    "isFollowing": false,
+    "name": "Test Artist Alpha",
+    "aka": "Alpha Alias",
+    "slug": "test-artist-alpha",
+    "firstname": null,
+    "lastname": null,
+    "members": [],
+    "visibility": "public",
+    "imgProfile": "https://example.com/img1.png",
+    "img": "https://example.com/img1.png",
+    "type": "artist",
+    "genres": [
+      {
+        "id": 37,
+        "code_id": "2ca7ff60-e0cb-11e9-a7ca-358e60cac8b1",
+        "slug": "pop",
+        "parent_id": null,
+        "sort_index": null,
+        "type": "genre",
+        "name": "Pop",
+        "description": "Catchy is the key with these tunes.",
+        "photo": null,
+        "area": null,
+        "deleted_at": null,
+        "created_at": "2019-09-27 02:04:44",
+        "updated_at": "2019-09-27 02:10:53",
+        "pivot": {
+          "tag_to_id": 84748,
+          "tag_id": 37,
+          "tag_to_type": "App\\Model\\Profile\\User\\Artist"
+        }
+      },
+      {
+        "id": 42,
+        "code_id": "2caecb40-e0cb-11e9-9f70-15f9cf77dc9d",
+        "slug": "rock",
+        "parent_id": null,
+        "sort_index": null,
+        "type": "genre",
+        "name": "Rock",
+        "description": "Press play and turn it up!",
+        "photo": null,
+        "area": null,
+        "deleted_at": null,
+        "created_at": "2019-09-27 02:04:44",
+        "updated_at": "2019-09-27 02:10:53",
+        "pivot": {
+          "tag_to_id": 84748,
+          "tag_id": 42,
+          "tag_to_type": "App\\Model\\Profile\\User\\Artist"
+        }
+      }
+    ],
+    "phone": "+61400000001",
+    "contact": null,
+    "identities": [
+      {
+        "id": 2,
+        "code_id": "2c77d160-e0cb-11e9-a858-djhleb09abc1",
+        "slug": "male",
+        "parent_id": null,
+        "sort_index": null,
+        "type": "identity",
+        "name": "Male",
+        "description": null,
+        "photo": null,
+        "area": null,
+        "deleted_at": null,
+        "created_at": "2019-09-27 02:04:44",
+        "updated_at": "2019-09-27 02:04:44",
+        "pivot": {
+          "tag_to_id": 84748,
+          "tag_id": 2,
+          "tag_to_type": "App\\Model\\Profile\\User\\Artist"
+        }
+      }
+    ],
+    "socials": [
+      {
+        "id": 92144,
+        "type": "social",
+        "domain_name": "instagram",
+        "link": "https://www.instagram.com/testartistalpha",
+        "verified": 0,
+        "created_at": "2026-08-24 23:50:17",
+        "updated_at": "2026-08-26 22:34:19",
+        "profile_id": 84748
+      }
+    ],
+    "music_accounts": [
+      {
+        "id": 92141,
+        "type": "music",
+        "domain_name": "bandcamp",
+        "link": "https://testartistalpha.bandcamp.com",
+        "verified": 0,
+        "created_at": "2026-08-24 23:35:19",
+        "updated_at": "2026-08-24 23:47:56",
+        "profile_id": 84748
+      }
+    ],
+    "location": {
+      "id": 83587,
+      "specific": null,
+      "city": null,
+      "zipcode": null,
+      "county": null,
+      "country": "AU",
+      "state_id": 88,
+      "region_id": null,
+      "subregion_id": null,
+      "as_string": "NSW"
+    },
+    "websites": [
+      {
+        "id": 92139,
+        "type": "web",
+        "domain_name": "testartistalpha.com",
+        "link": "https://testartistalpha.com",
+        "verified": 0,
+        "created_at": "2026-08-24 22:48:06",
+        "updated_at": "2026-08-24 22:48:06",
+        "profile_id": 84748
+      }
+    ],
+    "bitSettings": {
+      "bit_artist_id": null,
+      "linked": false
+    },
+    "bio": "Test Artist Alpha is a Sydney-based pop-rock musician."
+  }
+}

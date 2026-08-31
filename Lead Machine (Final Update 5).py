@@ -11288,7 +11288,8 @@ class ArtistScraperThread(QtCore.QThread):
     log_signal = QtCore.pyqtSignal(str)
     finished_signal = QtCore.pyqtSignal()
     def __init__(self, website_url, max_artists, output_csv, source="Unearthed",
-                 pages_per_tag=BANDCAMP_PAGES_PER_TAG, seed_tags=None, bandcamp_mode: str = "discover", bandcamp_search_domain: str = "artists", bandcamp_search_location: str = "", parent=None):
+                 pages_per_tag=BANDCAMP_PAGES_PER_TAG, seed_tags=None, bandcamp_mode: str = "discover", bandcamp_search_domain: str = "artists", bandcamp_search_location: str = "",
+                 amrap_state_filter: str = "", amrap_genre_filter: str = "", parent=None):
         super().__init__(parent)
         self.website_url = website_url
         self.max_artists = max_artists
@@ -11298,6 +11299,8 @@ class ArtistScraperThread(QtCore.QThread):
         self.bandcamp_mode = (bandcamp_mode or "discover").strip().lower()
         self.bandcamp_search_domain = (bandcamp_search_domain or "artists").strip().lower() or "artists"
         self.bandcamp_search_location = (bandcamp_search_location or "").strip()
+        self.amrap_state_filter = (amrap_state_filter or "").strip()
+        self.amrap_genre_filter = (amrap_genre_filter or "").strip()
         if seed_tags is not None:
             self.seed_tags = list(seed_tags)
         elif self.source and self.source.lower() == "soundcloud":
@@ -11390,6 +11393,17 @@ class ArtistScraperThread(QtCore.QThread):
                     fallback_cols = column_order if column_order else spotify_columns
                     _safe_atomic_write_csv(combined, self.output_csv, fallback_cols, reason="spotify_gui")
                     self.log_signal.emit(f"Spotify scraping completed with {len(new_df)} rows.")
+            elif self.source.lower() == "amrap":
+                from amrap_scraper import scrape_amrap_to_csv
+                scrape_amrap_to_csv(
+                    target_count=self.max_artists,
+                    output_csv=self.output_csv,
+                    state_filter=self.amrap_state_filter,
+                    genre_filter=self.amrap_genre_filter,
+                    existing_csv=self.output_csv,
+                    logger=self.log_signal.emit,
+                )
+                self.log_signal.emit("AMRAP scraping completed.")
             else:
                 scrape_website(self.website_url, existing_csv=self.output_csv, max_artists=self.max_artists)
                 self.log_signal.emit("Artist scraping completed.")
@@ -15259,10 +15273,15 @@ class NightModeJobDialog(QtWidgets.QDialog):
         layout = QtWidgets.QFormLayout()
         self.job_id_edit = QtWidgets.QLineEdit()
         self.directory_combo = QtWidgets.QComboBox()
-        self.directory_combo.addItems(["spotify", "bandcamp", "soundcloud", "unearthed"])
+        self.directory_combo.addItems(["spotify", "bandcamp", "soundcloud", "unearthed", "amrap"])
+        self.directory_combo.currentTextChanged.connect(self._on_directory_changed)
         self.mode_combo = QtWidgets.QComboBox()
         self.mode_combo.addItems(["", "playlist", "discover", "search", "people", "tracks"])
         self.input_edit = QtWidgets.QLineEdit()
+        self.input_label = QtWidgets.QLabel("Input/Seed:")
+        self.amrap_genre_edit = QtWidgets.QLineEdit()
+        self.amrap_genre_edit.setPlaceholderText("e.g. rock, jazz (leave blank for all genres)")
+        self.amrap_genre_label = QtWidgets.QLabel("Genre filter (optional):")
         self.target_spin = QtWidgets.QSpinBox()
         self.target_spin.setRange(0, 100000)
         self.target_spin.setValue(100)
@@ -15275,7 +15294,8 @@ class NightModeJobDialog(QtWidgets.QDialog):
         layout.addRow("Job ID (optional):", self.job_id_edit)
         layout.addRow("Directory:", self.directory_combo)
         layout.addRow("Mode:", self.mode_combo)
-        layout.addRow("Input/Seed:", self.input_edit)
+        layout.addRow(self.input_label, self.input_edit)
+        layout.addRow(self.amrap_genre_label, self.amrap_genre_edit)
         layout.addRow("Target leads:", self.target_spin)
         layout.addRow("Max hours (0 = no limit):", self.max_hours_spin)
         layout.addRow("Notes:", self.notes_edit)
@@ -15287,6 +15307,22 @@ class NightModeJobDialog(QtWidgets.QDialog):
         main_layout.addLayout(layout)
         main_layout.addWidget(buttons)
         self.setLayout(main_layout)
+        self._on_directory_changed(self.directory_combo.currentText())
+
+    def _on_directory_changed(self, directory: str):
+        directory = str(directory or "").strip().lower()
+        if directory == "amrap":
+            self.input_label.setText("State filter (optional):")
+            self.input_edit.setPlaceholderText("e.g. NSW, VIC, QLD (leave blank for all states)")
+            self.amrap_genre_label.setVisible(True)
+            self.amrap_genre_edit.setVisible(True)
+            self.mode_combo.setEnabled(False)
+        else:
+            self.input_label.setText("Input/Seed:")
+            self.input_edit.setPlaceholderText("")
+            self.amrap_genre_label.setVisible(False)
+            self.amrap_genre_edit.setVisible(False)
+            self.mode_combo.setEnabled(True)
 
     def _load_job(self, job: dict):
         self.job_id_edit.setText(job.get("job_id", ""))
@@ -15299,6 +15335,7 @@ class NightModeJobDialog(QtWidgets.QDialog):
         if idx >= 0:
             self.mode_combo.setCurrentIndex(idx)
         self.input_edit.setText(job.get("input_seed_csv", ""))
+        self.amrap_genre_edit.setText(job.get("amrap_genre", ""))
         try:
             self.target_spin.setValue(int(job.get("target_valid_leads", 100)))
         except Exception:
@@ -15323,6 +15360,9 @@ class NightModeJobDialog(QtWidgets.QDialog):
         notes = self.notes_edit.text().strip()
         if notes:
             job["notes"] = notes
+        if job["directory"].lower() == "amrap":
+            job["amrap_state"] = job["input_seed_csv"]
+            job["amrap_genre"] = self.amrap_genre_edit.text().strip()
         return job
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
@@ -15390,7 +15430,7 @@ class MainWindow(QtWidgets.QMainWindow):
         layout = QtWidgets.QVBoxLayout()
         config_group, config_layout = _lm_section("Job Configuration")
         self.source_combo = QtWidgets.QComboBox()
-        self.source_combo.addItems(["Unearthed", "Bandcamp", "SoundCloud", "Last.fm Similar", "Spotify"])
+        self.source_combo.addItems(["Unearthed", "Bandcamp", "SoundCloud", "Last.fm Similar", "Spotify", "AMRAP"])
         self.source_combo.currentTextChanged.connect(self.on_source_changed)
         config_layout.addLayout(_lm_row("Source:", self.source_combo, add_stretch=True))
         self.url_label = QtWidgets.QLabel("Website URL:")
@@ -15449,6 +15489,14 @@ class MainWindow(QtWidgets.QMainWindow):
         elif source_text == "Last.fm Similar":
             self.url_label.setText("Seed Artists:")
             self.url_edit.setPlaceholderText("Seed artist names, comma separated (e.g. Hope D, Jaguar Jonze)")
+            current = self.url_edit.text().strip()
+            if not current or current in (UNEARTHED_DEFAULT_URL, BANDCAMP_DEFAULT_TAG_URL, SOUNDCLOUD_DEFAULT_TAG_URL):
+                self.url_edit.clear()
+            self.pages_per_tag_edit.setEnabled(False)
+            self.sc_meta_checkbox.setVisible(False)
+        elif source_text == "AMRAP":
+            self.url_label.setText("State filter (optional):")
+            self.url_edit.setPlaceholderText("e.g. NSW, VIC, QLD (leave blank for all states)")
             current = self.url_edit.text().strip()
             if not current or current in (UNEARTHED_DEFAULT_URL, BANDCAMP_DEFAULT_TAG_URL, SOUNDCLOUD_DEFAULT_TAG_URL):
                 self.url_edit.clear()
@@ -15653,6 +15701,8 @@ class MainWindow(QtWidgets.QMainWindow):
         bandcamp_mode = "discover"
         bandcamp_search_domain = "artists"
         bandcamp_search_location = ""
+        amrap_state_filter = ""
+        amrap_genre_filter = ""
         if source in ("Bandcamp", "SoundCloud") and not url:
             default_url = BANDCAMP_DEFAULT_TAG_URL if source == "Bandcamp" else SOUNDCLOUD_DEFAULT_TAG_URL
             url = default_url
@@ -15678,6 +15728,22 @@ class MainWindow(QtWidgets.QMainWindow):
                 pages_per_tag = BANDCAMP_PAGES_PER_TAG
         if max_artists <= 0:
             max_artists = 200
+        if source == "AMRAP":
+            amrap_state_filter = url
+            genre_value, genre_ok = QtWidgets.QInputDialog.getText(
+                self,
+                "AMRAP genre filter (optional)",
+                "Optional genre filter (keeps rows whose primary genre contains this text; leave blank for no filter):",
+                QtWidgets.QLineEdit.Normal,
+                "",
+            )
+            amrap_genre_filter = (genre_value if genre_ok else "").strip()
+            if amrap_state_filter:
+                self.artist_log.append(f"AMRAP: state filter={amrap_state_filter}")
+                print(f"AMRAP: state filter={amrap_state_filter}")
+            if amrap_genre_filter:
+                self.artist_log.append(f"AMRAP: genre filter={amrap_genre_filter}")
+                print(f"AMRAP: genre filter={amrap_genre_filter}")
         if source == "Bandcamp":
             default_pages = BANDCAMP_PAGES_PER_TAG
             bandcamp_mode = "discover"
@@ -15780,7 +15846,9 @@ class MainWindow(QtWidgets.QMainWindow):
             seed_tags=seed_tags,
             bandcamp_mode=bandcamp_mode if source == "Bandcamp" else "discover",
             bandcamp_search_domain=bandcamp_search_domain if source == "Bandcamp" else "artists",
-            bandcamp_search_location=bandcamp_search_location if source == "Bandcamp" else ""
+            bandcamp_search_location=bandcamp_search_location if source == "Bandcamp" else "",
+            amrap_state_filter=amrap_state_filter if source == "AMRAP" else "",
+            amrap_genre_filter=amrap_genre_filter if source == "AMRAP" else "",
         )
         self.artist_thread.log_signal.connect(self.update_artist_log)
         self.artist_thread.finished_signal.connect(self.artist_scraping_finished)

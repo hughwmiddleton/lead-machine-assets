@@ -1,0 +1,40 @@
+{
+  "data": {
+    "id": "ghi789",
+    "isFollowing": false,
+    "name": "Test Artist Minimal",
+    "aka": null,
+    "slug": "test-artist-minimal",
+    "firstname": null,
+    "lastname": null,
+    "members": [],
+    "visibility": "public",
+    "imgProfile": "https://example.com/img_min.png",
+    "img": "https://example.com/img_min.png",
+    "type": "artist",
+    "genres": [],
+    "phone": null,
+    "contact": null,
+    "identities": [],
+    "socials": [],
+    "music_accounts": [],
+    "location": {
+      "id": 83589,
+      "specific": null,
+      "city": null,
+      "zipcode": null,
+      "county": null,
+      "country": "AU",
+      "state_id": 46,
+      "region_id": null,
+      "subregion_id": null,
+      "as_string": "ACT"
+    },
+    "websites": [],
+    "bitSettings": {
+      "bit_artist_id": null,
+      "linked": false
+    },
+    "bio": null
+  }
+}
