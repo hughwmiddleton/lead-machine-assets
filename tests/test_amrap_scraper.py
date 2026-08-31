@@ -445,7 +445,7 @@ def test_night_mode_job_dialog_includes_amrap() -> None:
     """Static check that NightModeJobDialog directory combo includes amrap."""
     gui_path = Path(__file__).parent.parent / "Lead Machine (Final Update 5).py"
     source = gui_path.read_text(encoding="utf-8")
-    assert 'self.directory_combo.addItems(["spotify", "bandcamp", "soundcloud", "unearthed", "amrap"])' in source
+    assert 'self.directory_combo.addItems(["spotify", "bandcamp", "soundcloud", "unearthed", "undiscovered_music", "amrap"])' in source
 
 
 def test_night_mode_job_dialog_amrap_label_switching() -> None:
@@ -517,7 +517,7 @@ def test_gui_source_combo_includes_amrap() -> None:
     gui_path = Path(__file__).parent.parent / "Lead Machine (Final Update 5).py"
     source = gui_path.read_text(encoding="utf-8")
     assert '"AMRAP"' in source
-    assert 'self.source_combo.addItems(["Unearthed", "Bandcamp", "SoundCloud", "Last.fm Similar", "Spotify", "AMRAP"])' in source
+    assert 'self.source_combo.addItems(["Unearthed", "Bandcamp", "SoundCloud", "Last.fm Similar", "Spotify", "Undiscovered Music", "AMRAP"])' in source
 
 
 # ---------------------------------------------------------------------------

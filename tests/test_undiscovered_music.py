@@ -6,7 +6,9 @@ All tests use mocked HTML/responses; no live-network dependency.
 from __future__ import annotations
 
 import csv
+import importlib.util
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List
@@ -22,6 +24,26 @@ from lead_vault.merge import merge_csv_into_master
 from lead_vault.schema import get_canonical_master_schema
 
 import undiscovered_music as um
+
+
+def _load_gui_module():
+    path = Path(__file__).resolve().parents[1] / "Lead Machine (Final Update 5).py"
+    spec = importlib.util.spec_from_file_location("lead_machine_undiscovered_gui", path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.fixture
+def qapp():
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    QtWidgets = pytest.importorskip("PyQt5.QtWidgets")
+    app = QtWidgets.QApplication.instance()
+    if app is None:
+        app = QtWidgets.QApplication([])
+        app.setQuitOnLastWindowClosed(False)
+    return app
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -437,7 +459,7 @@ def test_run_directory_job_dispatches_undiscovered_music(monkeypatch, tmp_path: 
     raw_output = tmp_path / "raw.csv"
     calls = []
 
-    def _fake_scrape(target_count, params, logger=None):
+    def _fake_scrape(target_count, params, logger_fn=None):
         calls.append((target_count, params))
         return [
             {
@@ -464,6 +486,133 @@ def test_run_directory_job_dispatches_undiscovered_music(monkeypatch, tmp_path: 
     assert df.at[0, "Artist Name"] == "Test Artist"
     assert df.at[0, "Lead_Source"] == "Undiscovered Music"
     assert df.at[0, "Source_Directory"] == "undiscovered_music"
+    assert calls == [(5, {"max_results": 5, "url": ""})]
+
+
+def test_main_artist_source_combo_includes_undiscovered_and_existing_sources():
+    gui_source = (Path(__file__).resolve().parents[1] / "Lead Machine (Final Update 5).py").read_text(encoding="utf-8")
+    expected = (
+        'self.source_combo.addItems(["Unearthed", "Bandcamp", "SoundCloud", '
+        '"Last.fm Similar", "Spotify", "Undiscovered Music", "AMRAP"])'
+    )
+    assert expected in gui_source
+
+
+def test_undiscovered_main_gui_hides_irrelevant_source_inputs(qapp):
+    QtWidgets = pytest.importorskip("PyQt5.QtWidgets")
+    module = _load_gui_module()
+    controls = SimpleNamespace(
+        url_label=QtWidgets.QLabel("Website URL:"),
+        url_edit=QtWidgets.QLineEdit(module.UNEARTHED_DEFAULT_URL),
+        pages_per_tag_label=QtWidgets.QLabel("Pages per Tag:"),
+        pages_per_tag_edit=QtWidgets.QLineEdit(str(module.BANDCAMP_PAGES_PER_TAG)),
+        sc_meta_checkbox=QtWidgets.QCheckBox(),
+    )
+
+    module.MainWindow.on_source_changed(controls, "Undiscovered Music")
+
+    assert controls.url_label.isHidden()
+    assert controls.url_edit.isHidden()
+    assert controls.pages_per_tag_label.isHidden()
+    assert controls.pages_per_tag_edit.isHidden()
+    assert not controls.pages_per_tag_edit.isEnabled()
+    assert controls.sc_meta_checkbox.isHidden()
+
+
+def test_artist_scraper_thread_dispatches_undiscovered_target_to_existing_backend(qapp, monkeypatch, tmp_path: Path):
+    module = _load_gui_module()
+    calls = []
+
+    def _fake_run_directory_job(job_config, output_csv, logger=None):
+        calls.append((job_config, output_csv, logger))
+        return output_csv
+
+    monkeypatch.setattr(module.pipeline_runner, "run_directory_job", _fake_run_directory_job)
+    output_csv = tmp_path / "undiscovered.csv"
+    thread = module.ArtistScraperThread("", 17, str(output_csv), source="Undiscovered Music")
+
+    thread.run()
+
+    assert len(calls) == 1
+    job_config, dispatched_output, logger = calls[0]
+    assert job_config == {"directory": "undiscovered_music", "target_valid_leads": 17}
+    assert dispatched_output == str(output_csv)
+    assert callable(logger)
+
+
+def test_start_artist_scraping_builds_undiscovered_thread(qapp, monkeypatch, tmp_path: Path):
+    QtWidgets = pytest.importorskip("PyQt5.QtWidgets")
+    module = _load_gui_module()
+    created = []
+
+    class _Signal:
+        def connect(self, callback):
+            self.callback = callback
+
+    class _FakeThread:
+        def __init__(self, *args, **kwargs):
+            created.append((args, kwargs, self))
+            self.log_signal = _Signal()
+            self.finished_signal = _Signal()
+            self.started = False
+
+        def start(self):
+            self.started = True
+
+    monkeypatch.setattr(module, "ArtistScraperThread", _FakeThread)
+    source_combo = QtWidgets.QComboBox()
+    source_combo.addItem("Undiscovered Music")
+    controls = SimpleNamespace(
+        source_combo=source_combo,
+        url_edit=QtWidgets.QLineEdit(""),
+        max_artists_edit=QtWidgets.QLineEdit("31"),
+        pages_per_tag_edit=QtWidgets.QLineEdit("1"),
+        artist_output_csv_edit=QtWidgets.QLineEdit(str(tmp_path / "artists.csv")),
+        artist_start_button=QtWidgets.QPushButton(),
+        artist_progress_bar=QtWidgets.QProgressBar(),
+        artist_log=QtWidgets.QTextEdit(),
+        current_artist_source="",
+        artist_thread=None,
+        update_artist_log=lambda message: None,
+        artist_scraping_finished=lambda: None,
+    )
+
+    module.MainWindow.start_artist_scraping(controls)
+
+    assert len(created) == 1
+    args, kwargs, thread = created[0]
+    assert args[:3] == ("", 31, str(tmp_path / "artists.csv"))
+    assert kwargs["source"] == "Undiscovered Music"
+    assert controls.current_artist_source == "Undiscovered Music"
+    assert thread.started
+
+
+def test_night_mode_dialog_round_trips_undiscovered_job(qapp):
+    module = _load_gui_module()
+    original = {
+        "job_id": "job_undiscovered_gui",
+        "directory": "undiscovered_music",
+        "target_valid_leads": 23,
+        "max_hours": 1.5,
+        "notes": "directory-wide discovery",
+    }
+
+    dialog = module.NightModeJobDialog(original)
+    assert dialog.directory_combo.currentText() == "undiscovered_music"
+    assert dialog.target_spin.value() == 23
+    assert dialog.input_label.isHidden()
+    assert dialog.input_edit.isHidden()
+    assert not dialog.mode_combo.isEnabled()
+    assert dialog.amrap_genre_edit.isHidden()
+
+    saved = dialog.get_job()
+    reloaded = module.NightModeJobDialog(saved)
+    assert saved["directory"] == "undiscovered_music"
+    assert saved["target_valid_leads"] == 23
+    assert reloaded.directory_combo.currentText() == "undiscovered_music"
+    assert reloaded.target_spin.value() == 23
+    dialog.close()
+    reloaded.close()
 
 
 def test_night_mode_runner_normalizes_undiscovered_music_source():

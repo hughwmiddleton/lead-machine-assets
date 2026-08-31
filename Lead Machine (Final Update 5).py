@@ -11393,6 +11393,16 @@ class ArtistScraperThread(QtCore.QThread):
                     fallback_cols = column_order if column_order else spotify_columns
                     _safe_atomic_write_csv(combined, self.output_csv, fallback_cols, reason="spotify_gui")
                     self.log_signal.emit(f"Spotify scraping completed with {len(new_df)} rows.")
+            elif self.source.lower() == "undiscovered music":
+                pipeline_runner.run_directory_job(
+                    {
+                        "directory": "undiscovered_music",
+                        "target_valid_leads": self.max_artists,
+                    },
+                    self.output_csv,
+                    logger=self.log_signal.emit,
+                )
+                self.log_signal.emit("Undiscovered Music scraping completed.")
             elif self.source.lower() == "amrap":
                 from amrap_scraper import scrape_amrap_to_csv
                 scrape_amrap_to_csv(
@@ -15273,7 +15283,7 @@ class NightModeJobDialog(QtWidgets.QDialog):
         layout = QtWidgets.QFormLayout()
         self.job_id_edit = QtWidgets.QLineEdit()
         self.directory_combo = QtWidgets.QComboBox()
-        self.directory_combo.addItems(["spotify", "bandcamp", "soundcloud", "unearthed", "amrap"])
+        self.directory_combo.addItems(["spotify", "bandcamp", "soundcloud", "unearthed", "undiscovered_music", "amrap"])
         self.directory_combo.currentTextChanged.connect(self._on_directory_changed)
         self.mode_combo = QtWidgets.QComboBox()
         self.mode_combo.addItems(["", "playlist", "discover", "search", "people", "tracks"])
@@ -15311,11 +15321,19 @@ class NightModeJobDialog(QtWidgets.QDialog):
 
     def _on_directory_changed(self, directory: str):
         directory = str(directory or "").strip().lower()
+        self.input_label.setVisible(True)
+        self.input_edit.setVisible(True)
         if directory == "amrap":
             self.input_label.setText("State filter (optional):")
             self.input_edit.setPlaceholderText("e.g. NSW, VIC, QLD (leave blank for all states)")
             self.amrap_genre_label.setVisible(True)
             self.amrap_genre_edit.setVisible(True)
+            self.mode_combo.setEnabled(False)
+        elif directory == "undiscovered_music":
+            self.input_label.setVisible(False)
+            self.input_edit.setVisible(False)
+            self.amrap_genre_label.setVisible(False)
+            self.amrap_genre_edit.setVisible(False)
             self.mode_combo.setEnabled(False)
         else:
             self.input_label.setText("Input/Seed:")
@@ -15430,16 +15448,17 @@ class MainWindow(QtWidgets.QMainWindow):
         layout = QtWidgets.QVBoxLayout()
         config_group, config_layout = _lm_section("Job Configuration")
         self.source_combo = QtWidgets.QComboBox()
-        self.source_combo.addItems(["Unearthed", "Bandcamp", "SoundCloud", "Last.fm Similar", "Spotify", "AMRAP"])
+        self.source_combo.addItems(["Unearthed", "Bandcamp", "SoundCloud", "Last.fm Similar", "Spotify", "Undiscovered Music", "AMRAP"])
         self.source_combo.currentTextChanged.connect(self.on_source_changed)
         config_layout.addLayout(_lm_row("Source:", self.source_combo, add_stretch=True))
         self.url_label = QtWidgets.QLabel("Website URL:")
         self.url_edit = QtWidgets.QLineEdit(UNEARTHED_DEFAULT_URL)
         self.url_edit.setPlaceholderText(UNEARTHED_DEFAULT_URL)
         config_layout.addLayout(_lm_row_with_label_widget(self.url_label, self.url_edit))
+        self.pages_per_tag_label = QtWidgets.QLabel("Pages per Tag:")
         self.pages_per_tag_edit = QtWidgets.QLineEdit(str(BANDCAMP_PAGES_PER_TAG))
         self.pages_per_tag_edit.setEnabled(False)
-        config_layout.addLayout(_lm_row("Pages per Tag:", self.pages_per_tag_edit))
+        config_layout.addLayout(_lm_row_with_label_widget(self.pages_per_tag_label, self.pages_per_tag_edit))
         self.max_artists_edit = QtWidgets.QLineEdit("200")
         config_layout.addLayout(_lm_row("Max Artists:", self.max_artists_edit))
         self.sc_meta_checkbox = QtWidgets.QCheckBox("Run SoundCloud metadata enricher (fill missing genre/date)")
@@ -15470,6 +15489,10 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addWidget(output_group)
         _lm_scrolled_tab(self.artist_tab, layout)
     def on_source_changed(self, source_text):
+        self.url_label.setVisible(True)
+        self.url_edit.setVisible(True)
+        self.pages_per_tag_label.setVisible(True)
+        self.pages_per_tag_edit.setVisible(True)
         if source_text == "Bandcamp":
             self.url_label.setText("Website URL:")
             self.url_edit.setPlaceholderText(BANDCAMP_DEFAULT_TAG_URL)
@@ -15492,6 +15515,13 @@ class MainWindow(QtWidgets.QMainWindow):
             current = self.url_edit.text().strip()
             if not current or current in (UNEARTHED_DEFAULT_URL, BANDCAMP_DEFAULT_TAG_URL, SOUNDCLOUD_DEFAULT_TAG_URL):
                 self.url_edit.clear()
+            self.pages_per_tag_edit.setEnabled(False)
+            self.sc_meta_checkbox.setVisible(False)
+        elif source_text == "Undiscovered Music":
+            self.url_label.setVisible(False)
+            self.url_edit.setVisible(False)
+            self.pages_per_tag_label.setVisible(False)
+            self.pages_per_tag_edit.setVisible(False)
             self.pages_per_tag_edit.setEnabled(False)
             self.sc_meta_checkbox.setVisible(False)
         elif source_text == "AMRAP":
