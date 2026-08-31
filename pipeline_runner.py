@@ -4013,19 +4013,17 @@ def run_directory_job(job_config: Dict[str, Any], raw_output_path: str, logger: 
             success = True
 
         elif directory == "amrap":
-            from amrap_scraper import scrape_amrap_to_csv
+            from amrap_scraper import scrape_amrap
 
-            scrape_amrap_to_csv(
+            rows = scrape_amrap(
                 target_count=target_count or 200,
-                output_csv=output_path,
                 state_filter=str(job_config.get("amrap_state") or "").strip(),
                 genre_filter=str(job_config.get("amrap_genre") or "").strip(),
-                existing_csv=output_path,
                 sleep_between_requests=float(job_config.get("amrap_sleep", 0.5)),
                 logger=logger,
             )
-            finalize_result = _finalize_tmp_csv(tmp_path, final_path)
-            result_path = str(finalize_result.final_path)
+            write_result = _write_rows_to_csv(rows, final_path.as_posix(), source_directory="amrap")
+            result_path = str(write_result.final_path)
             success = True
 
         else:

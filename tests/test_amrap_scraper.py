@@ -9,6 +9,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, List
 
+import pandas as pd
 import pytest
 
 from amrap_scraper import (
@@ -383,23 +384,26 @@ def test_scrape_amrap_to_csv_writes_file(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 def test_pipeline_run_directory_job_dispatches_amrap(monkeypatch, tmp_path: Path) -> None:
-    """run_directory_job must dispatch directory=='amrap' to amrap_scraper."""
+    """run_directory_job must dispatch directory=='amrap' through the shared writer."""
     from pipeline_runner import run_directory_job
 
     calls: List[Dict[str, Any]] = []
 
-    def _fake_scrape_to_csv(**kwargs):
+    def _fake_scrape(**kwargs):
         calls.append(kwargs)
-        # Write a minimal CSV so the pipeline finalizes successfully
-        output = kwargs["output_csv"]
-        Path(output).parent.mkdir(parents=True, exist_ok=True)
-        Path(output).write_text(
-            "Artist Name,Lead_Source,Source_Directory,Source URL\n"
-            'Test Artist,AMRAP,amrap,https://amrap.org.au/artist/test-artist\n',
-            encoding="utf-8-sig",
-        )
+        return [
+            {
+                "Artist Name": "Test Artist",
+                "Lead_Source": "AMRAP",
+                "Source_Directory": "amrap",
+                "Source Directory": "AMRAP",
+                "Source URL": "https://amrap.org.au/artist/test-artist",
+                "Source_URL": "https://amrap.org.au/artist/test-artist",
+                "Email": "",
+            }
+        ]
 
-    monkeypatch.setattr("amrap_scraper.scrape_amrap_to_csv", _fake_scrape_to_csv)
+    monkeypatch.setattr("amrap_scraper.scrape_amrap", _fake_scrape)
 
     job_config = {
         "directory": "amrap",
@@ -416,6 +420,14 @@ def test_pipeline_run_directory_job_dispatches_amrap(monkeypatch, tmp_path: Path
     assert call["state_filter"] == "NSW"
     assert call["genre_filter"] == "rock"
     assert Path(result).exists()
+
+    # Verify shared _write_rows_to_csv path produced canonical origin fields
+    df = pd.read_csv(result, dtype=str, keep_default_na=False).fillna("")
+    assert len(df) == 1
+    assert df.at[0, "Lead_Source"] == "AMRAP"
+    assert df.at[0, "Source_Directory"] == "amrap"
+    assert df.at[0, "Source Directory"] == "AMRAP"
+    assert df.at[0, "Source URL"] == "https://amrap.org.au/artist/test-artist"
 
 
 # ---------------------------------------------------------------------------
@@ -461,17 +473,21 @@ def test_pipeline_run_directory_job_passes_target_count(monkeypatch, tmp_path: P
 
     calls: List[Dict[str, Any]] = []
 
-    def _fake_scrape_to_csv(**kwargs):
+    def _fake_scrape(**kwargs):
         calls.append(kwargs)
-        output = kwargs["output_csv"]
-        Path(output).parent.mkdir(parents=True, exist_ok=True)
-        Path(output).write_text(
-            "Artist Name,Lead_Source,Source_Directory,Source URL\n"
-            'Test Artist,AMRAP,amrap,https://amrap.org.au/artist/test-artist\n',
-            encoding="utf-8-sig",
-        )
+        return [
+            {
+                "Artist Name": "Test Artist",
+                "Lead_Source": "AMRAP",
+                "Source_Directory": "amrap",
+                "Source Directory": "AMRAP",
+                "Source URL": "https://amrap.org.au/artist/test-artist",
+                "Source_URL": "https://amrap.org.au/artist/test-artist",
+                "Email": "",
+            }
+        ]
 
-    monkeypatch.setattr("amrap_scraper.scrape_amrap_to_csv", _fake_scrape_to_csv)
+    monkeypatch.setattr("amrap_scraper.scrape_amrap", _fake_scrape)
 
     job_config = {
         "directory": "amrap",
@@ -542,3 +558,69 @@ def test_existing_night_mode_source_combo_unchanged() -> None:
     source = gui_path.read_text(encoding="utf-8")
     for src in ("spotify", "bandcamp", "soundcloud", "unearthed"):
         assert src in source.split('self.directory_combo.addItems([')[1].split(']')[0]
+
+
+# ---------------------------------------------------------------------------
+# Provenance / shared writer hardening
+# ---------------------------------------------------------------------------
+
+def test_amrap_source_row_creation_sets_canonical_origin_fields(tmp_path: Path) -> None:
+    """AMRAP rows through _write_rows_to_csv preserve canonical origin fields."""
+    import pipeline_runner
+
+    output_path = tmp_path / "raw.csv"
+    rows = [
+        {
+            "Artist Name": "AMRAP Act",
+            "Location": "NSW",
+            "Primary Genre": "Pop",
+            "Social Link": "",
+            "Source URL": "https://amrap.org.au/artist/amrap-act",
+            "Source_URL": "https://amrap.org.au/artist/amrap-act",
+            "Lead_Source": "AMRAP",
+            "Source_Directory": "amrap",
+            "Source Directory": "AMRAP",
+            "Date Added": "2026-08-31",
+            "Email": "",
+        }
+    ]
+    pipeline_runner._write_rows_to_csv(rows, output_path.as_posix(), source_directory="amrap")
+
+    df = pd.read_csv(output_path, dtype=str, keep_default_na=False).fillna("")
+    assert len(df) == 1
+    assert df.at[0, "Lead_Source"] == "AMRAP"
+    assert df.at[0, "Source_Directory"] == "amrap"
+    assert df.at[0, "Source Directory"] == "AMRAP"
+    assert df.at[0, "Source URL"] == "https://amrap.org.au/artist/amrap-act"
+    assert df.at[0, "Source_URL"] == "https://amrap.org.au/artist/amrap-act"
+
+
+def test_amrap_blank_email_no_provenance() -> None:
+    """AMRAP rows with blank Email must not invent an Email_Provenance_JSON record."""
+    fixture = _load_fixture("amrap_profile_public.json")
+    row = parse_amrap_profile(fixture["data"])
+    assert row is not None
+    assert row["Email"] == ""
+    assert "Email_Provenance_JSON" not in row or row.get("Email_Provenance_JSON") == ""
+
+
+def test_parse_hidden_phone_not_captured() -> None:
+    """The phone field from the AMRAP API must NEVER be ingested into the row."""
+    fixture = _load_fixture("amrap_profile_public.json")
+    row = parse_amrap_profile(fixture["data"])
+    assert row is not None
+    assert "phone" not in row
+    assert "Phone" not in row
+    for value in row.values():
+        assert "+61400000001" not in str(value)
+
+
+def test_parse_hidden_contact_not_captured() -> None:
+    """The contact field from the AMRAP API must NEVER be ingested into the row."""
+    fixture = _load_fixture("amrap_profile_with_hidden_email.json")
+    row = parse_amrap_profile(fixture["data"])
+    assert row is not None
+    assert "contact" not in row
+    assert "Contact" not in row
+    for value in row.values():
+        assert "hidden@example.com" not in str(value)
