@@ -76,6 +76,16 @@ def _artist_payload(mbid=MBID):
             },
             {
                 "target-type": "url",
+                "type": "social network",
+                "url": {"resource": "https://www.facebook.com/artist.a/"},
+            },
+            {
+                "target-type": "url",
+                "type": "soundcloud",
+                "url": {"resource": "https://soundcloud.com/artist-a"},
+            },
+            {
+                "target-type": "url",
                 "type": "discogs",
                 "url": {"resource": "https://www.discogs.com/artist/123"},
             },
@@ -251,6 +261,9 @@ def test_relationships_are_evidence_only_and_not_promoted():
     assert output.at[0, "MusicBrainz_Status"] == "matched"
     assert evidence["musicbrainz"]["relationships"]["bandcamp"][0]["url"] == "https://artist-a.bandcamp.com/"
     assert evidence["musicbrainz"]["relationships"]["instagram"][0]["url"] == "https://www.instagram.com/artist_a/"
+    assert evidence["musicbrainz"]["relationships"]["facebook"][0]["url"] == "https://www.facebook.com/artist.a/"
+    assert evidence["musicbrainz"]["relationships"]["soundcloud"][0]["url"] == "https://soundcloud.com/artist-a"
+    assert evidence["musicbrainz"]["relationships"]["official_homepage"][0]["url"] == "https://artist.example/"
     for column in ("Bandcamp_URL", "SoundCloud Link", "Facebook_URL", "Instagram_URL", "Website", "External Links"):
         assert output.at[0, column] == original[column]
 

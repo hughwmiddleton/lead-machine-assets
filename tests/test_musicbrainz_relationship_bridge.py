@@ -16,6 +16,7 @@ def _evidence(
     bandcamp=(),
     soundcloud=(),
     instagram=(),
+    facebook=(),
     official_homepage=(),
 ):
     artist = {"name": name}
@@ -35,7 +36,7 @@ def _evidence(
                     "official_homepage": [
                         {"url": url, "type": "official homepage"} for url in official_homepage
                     ],
-                    "facebook": [{"url": "https://facebook.com/must-not-promote"}],
+                    "facebook": [{"url": url, "type": "social network"} for url in facebook],
                 },
             },
         }
@@ -80,8 +81,10 @@ def _plan(row):
         valid_bandcamp=cde._is_valid_unearthed_bandcamp_url,
         valid_soundcloud=lambda value: bool(cde._canonicalise_musicbrainz_soundcloud_url(value)),
         canonicalize_instagram=cde._canonicalize_instagram_profile_url,
+        canonicalize_facebook=cde._canonicalize_fb_url,
         canonicalize_website=lambda value: cde._normalise_url(value) or "",
         valid_instagram=lambda value: bool(cde._canonicalize_instagram_profile_url(value)),
+        valid_facebook=lambda value: bool(cde._canonicalize_fb_url(value)),
         valid_website=cde._is_website_enrich_candidate_url,
     )
 
@@ -168,6 +171,27 @@ def test_instagram_and_official_website_candidates_are_canonical_and_platform_sc
     )
     plan = _plan(row)
     assert plan.instagram_urls == ("https://www.instagram.com/artist_a/",)
+    assert plan.official_website_urls == ("http://artist-a.test/",)
+
+
+def test_all_supported_relationship_candidates_are_canonical_and_survive_together():
+    row = _row(
+        Identity_Evidence_JSON=_evidence(
+            bandcamp=("https://artist-a.bandcamp.com/album/release",),
+            soundcloud=("https://www.soundcloud.com/Artist-A/tracks",),
+            instagram=("https://instagram.com/artist_a/?igsh=tracking",),
+            facebook=("https://m.facebook.com/ArtistA/?ref=bookmarks",),
+            official_homepage=("http://artist-a.test/",),
+        )
+    )
+
+    plan = _plan(row)
+
+    assert plan.eligible
+    assert plan.bandcamp_urls == ("https://artist-a.bandcamp.com/",)
+    assert plan.soundcloud_urls == ("https://soundcloud.com/artist-a",)
+    assert plan.instagram_urls == ("https://www.instagram.com/artist_a/",)
+    assert plan.facebook_urls == ("https://www.facebook.com/artista",)
     assert plan.official_website_urls == ("http://artist-a.test/",)
 
 
@@ -928,6 +952,163 @@ def test_unique_instagram_and_website_are_bridged_without_email_or_origin_mutati
     assert dataframe.at[0, "Bandcamp_URL"] == "https://artist-a.bandcamp.com/"
     for field, value in before.items():
         assert dataframe.at[0, field] == value
+
+
+def test_accepted_identity_routes_all_supported_relationships_without_sibling_suppression(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("MUSICBRAINZ_RELATIONSHIP_BRIDGE_ENABLED", "1")
+    dataframe = pd.DataFrame([_row(
+        Identity_Evidence_JSON=_evidence(
+            bandcamp=("https://artist-a.bandcamp.com/album/release",),
+            soundcloud=("https://soundcloud.com/artist-a/tracks",),
+            instagram=("https://instagram.com/artist_a/",),
+            facebook=("https://facebook.com/ArtistA/?ref=musicbrainz",),
+            official_homepage=("https://artist-a.test/",),
+        ),
+    )])
+    worker = _worker(tmp_path)
+    calls = []
+
+    def known_profile(platform, url, artist, ctx, **kwargs):
+        calls.append((platform, url))
+        return _accepted(cde.EnrichmentPayload(
+            source_dir=platform,
+            source_url=url,
+            match_score=1.0,
+            candidate_name=artist,
+        ))
+
+    monkeypatch.setattr(worker, "_fetch_musicbrainz_known_profile", known_profile)
+    monkeypatch.setattr(
+        worker,
+        "_fetch_musicbrainz_known_instagram",
+        lambda url, artist, row: calls.append(("instagram", url)) or _accepted(
+            cde.EnrichmentPayload(
+                socials={url}, source_dir="musicbrainz_instagram_bridge", source_url=url,
+                match_score=1.0, candidate_name=artist,
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        worker,
+        "_fetch_musicbrainz_known_website",
+        lambda url, artist: calls.append(("website", url)) or _accepted(
+            cde.EnrichmentPayload(
+                websites={url}, source_dir="musicbrainz_website_bridge", source_url=url,
+                match_score=1.0, candidate_name=artist,
+            )
+        ),
+    )
+
+    assert worker._enrich_row_musicbrainz_relationships(dataframe, 0, _ctx(worker, dataframe))
+    assert calls == [
+        ("bandcamp", "https://artist-a.bandcamp.com/"),
+        ("soundcloud", "https://soundcloud.com/artist-a"),
+        ("instagram", "https://www.instagram.com/artist_a/"),
+        ("website", "https://artist-a.test/"),
+    ]
+    assert dataframe.at[0, "Facebook_URL"] == "https://www.facebook.com/artista"
+    assert dataframe.at[0, "Bandcamp_URL"] == "https://artist-a.bandcamp.com"
+    assert dataframe.at[0, "SoundCloud Link"] == "https://soundcloud.com/artist-a"
+    assert cde._get_canonical_instagram_url(dataframe.loc[0]) == "https://www.instagram.com/artist_a/"
+    assert "https://artist-a.test/" in dataframe.at[0, "External Links"]
+    for field in ("Lead_Source", "Source_Directory", "Source Directory", "Source URL"):
+        assert dataframe.at[0, field] == _row()[field]
+
+
+@pytest.mark.parametrize(
+    ("status", "evidence_status"),
+    [("no_match", "matched"), ("ambiguous", "ambiguous")],
+)
+def test_failed_or_ambiguous_identity_blocks_every_relationship_before_routing(
+    tmp_path, monkeypatch, status, evidence_status
+):
+    monkeypatch.setenv("MUSICBRAINZ_RELATIONSHIP_BRIDGE_ENABLED", "1")
+    evidence = json.loads(_evidence(
+        bandcamp=("https://wrong.bandcamp.com",),
+        soundcloud=("https://soundcloud.com/wrong",),
+        instagram=("https://instagram.com/wrong/",),
+        facebook=("https://facebook.com/wrong",),
+        official_homepage=("https://wrong.test/",),
+    ))
+    evidence["musicbrainz"]["status"] = evidence_status
+    dataframe = pd.DataFrame([_row(
+        MusicBrainz_Status=status,
+        Identity_Evidence_JSON=json.dumps(evidence),
+    )])
+    worker = _worker(tmp_path)
+    monkeypatch.setattr(worker, "_fetch_musicbrainz_known_profile", lambda *args, **kwargs: pytest.fail("profile fetch"))
+    monkeypatch.setattr(worker, "_fetch_musicbrainz_known_instagram", lambda *args: pytest.fail("instagram fetch"))
+    monkeypatch.setattr(worker, "_fetch_musicbrainz_known_website", lambda *args: pytest.fail("website fetch"))
+
+    assert not worker._enrich_row_musicbrainz_relationships(dataframe, 0, _ctx(worker, dataframe))
+    assert dataframe.at[0, "Bandcamp_URL"] == ""
+    assert dataframe.at[0, "SoundCloud Link"] == ""
+    assert dataframe.at[0, "Social Link"] == ""
+    assert dataframe.at[0, "External Links"] == ""
+    assert "Facebook_URL" not in dataframe.columns or dataframe.at[0, "Facebook_URL"] == ""
+    assert worker.live_search_attempts == 0
+
+
+@pytest.mark.parametrize(
+    ("existing", "candidate"),
+    [
+        ("https://m.facebook.com/ArtistA/?ref=old", "https://facebook.com/artista/"),
+        ("https://www.facebook.com/existingartist", "https://facebook.com/artista/"),
+    ],
+)
+def test_existing_facebook_canonical_value_is_deduped_or_wins_conflict(
+    tmp_path, monkeypatch, existing, candidate
+):
+    monkeypatch.setenv("MUSICBRAINZ_RELATIONSHIP_BRIDGE_ENABLED", "1")
+    dataframe = pd.DataFrame([_row(
+        Facebook_URL=existing,
+        Identity_Evidence_JSON=_evidence(facebook=(candidate,)),
+    )])
+    worker = _worker(tmp_path)
+
+    assert not worker._enrich_row_musicbrainz_relationships(dataframe, 0, _ctx(worker, dataframe))
+    assert dataframe.at[0, "Facebook_URL"] == existing
+
+
+def test_musicbrainz_facebook_seed_reaches_existing_facebook_engine_and_guards(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("MUSICBRAINZ_RELATIONSHIP_BRIDGE_ENABLED", "1")
+    dataframe = pd.DataFrame([_row(
+        Email_All="",
+        Identity_Evidence_JSON=_evidence(facebook=("https://facebook.com/ArtistA/",)),
+    )])
+    cde._ensure_email_columns(dataframe)
+    worker = _worker(tmp_path)
+    ctx = _ctx(worker, dataframe)
+    assert worker._enrich_row_musicbrainz_relationships(dataframe, 0, ctx)
+    assert worker.live_search_attempts == 0
+    assert worker._row_enrichment_state["facebook"] == "pending"
+
+    calls = []
+    monkeypatch.setattr(
+        worker,
+        "_row_allows_heavy_enricher",
+        lambda row, active_ctx, target: cde.HeavyEnricherGateDecision(
+            True, 1.0, cde.HEAVY_ENRICHER_CONFIDENCE_THRESHOLD, ("test_identity_anchor",)
+        ),
+    )
+    monkeypatch.setattr(worker, "_ensure_fb_discovery_session", lambda driver: (True, "ready"))
+    monkeypatch.setattr(
+        cde,
+        "_extract_fb_emails_bounded",
+        lambda driver, url, **kwargs: calls.append(url) or (
+            ["hello@artist-a.test"], url, "found_email"
+        ),
+    )
+
+    assert worker._enrich_row_facebook(dataframe, 0, object(), ctx)
+    assert calls == ["https://www.facebook.com/artista"]
+    assert dataframe.at[0, "Email"] == "hello@artist-a.test"
+    assert dataframe.at[0, "Email_Source_Type"] == "facebook_enrich"
+    assert worker._row_enrichment_state["facebook"] == "matched"
 
 
 def test_existing_instagram_and_website_values_skip_musicbrainz_candidates(tmp_path, monkeypatch):

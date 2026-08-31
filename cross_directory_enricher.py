@@ -15917,8 +15917,10 @@ class CrossDirectoryEnricherWorker(QThread):
             valid_bandcamp=_is_valid_unearthed_bandcamp_url,
             valid_soundcloud=lambda value: bool(_canonicalise_musicbrainz_soundcloud_url(value)),
             canonicalize_instagram=_canonicalize_instagram_profile_url,
+            canonicalize_facebook=_canonicalize_fb_url,
             canonicalize_website=lambda value: _normalise_url(value) or "",
             valid_instagram=lambda value: bool(_canonicalize_instagram_profile_url(value)),
+            valid_facebook=lambda value: bool(_canonicalize_fb_url(value)),
             valid_website=_is_website_enrich_candidate_url,
         )
         if not plan.eligible:
@@ -15928,6 +15930,18 @@ class CrossDirectoryEnricherWorker(QThread):
             return False
 
         enriched = False
+        if plan.facebook_urls and not _get_canonical_fb_url(seed_df.loc[row_idx]):
+            facebook_payload = EnrichmentPayload(
+                socials=set(plan.facebook_urls),
+                source_dir="musicbrainz_facebook_bridge",
+                source_url=plan.facebook_urls[0],
+                source_detail="MusicBrainz Facebook relationship",
+                match_score=1.0,
+                candidate_name=ctx["artist"],
+            )
+            if _promote_payload_facebook_url(seed_df, row_idx, facebook_payload):
+                enriched = True
+
         platform_candidates = (
             ("bandcamp", plan.bandcamp_urls, "Bandcamp_URL"),
             ("soundcloud", plan.soundcloud_urls, "SoundCloud Link"),

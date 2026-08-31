@@ -55,6 +55,7 @@ class RelationshipBridgePlan:
     bandcamp_urls: Tuple[str, ...] = ()
     soundcloud_urls: Tuple[str, ...] = ()
     instagram_urls: Tuple[str, ...] = ()
+    facebook_urls: Tuple[str, ...] = ()
     official_website_urls: Tuple[str, ...] = ()
 
 
@@ -74,8 +75,10 @@ def build_relationship_bridge_plan(
     valid_bandcamp: Callable[[str], bool],
     valid_soundcloud: Callable[[str], bool],
     canonicalize_instagram: Optional[Callable[[str], str]] = None,
+    canonicalize_facebook: Optional[Callable[[str], str]] = None,
     canonicalize_website: Optional[Callable[[str], str]] = None,
     valid_instagram: Optional[Callable[[str], bool]] = None,
+    valid_facebook: Optional[Callable[[str], bool]] = None,
     valid_website: Optional[Callable[[str], bool]] = None,
 ) -> RelationshipBridgePlan:
     """Return validated, deduplicated known-profile candidates without mutating the row."""
@@ -128,18 +131,23 @@ def build_relationship_bridge_plan(
         return tuple(output)
 
     return RelationshipBridgePlan(
-        True,
-        "exact_name" if normalize_name(mb_artist) == row_key else "exact_alias",
-        row_artist,
-        mb_artist,
-        _candidates("bandcamp", canonicalize_bandcamp, valid_bandcamp),
-        _candidates("soundcloud", canonicalize_soundcloud, valid_soundcloud),
-        _candidates(
+        eligible=True,
+        reason="exact_name" if normalize_name(mb_artist) == row_key else "exact_alias",
+        row_artist=row_artist,
+        musicbrainz_artist=mb_artist,
+        bandcamp_urls=_candidates("bandcamp", canonicalize_bandcamp, valid_bandcamp),
+        soundcloud_urls=_candidates("soundcloud", canonicalize_soundcloud, valid_soundcloud),
+        instagram_urls=_candidates(
             "instagram",
             canonicalize_instagram or (lambda _value: ""),
             valid_instagram or (lambda _value: False),
         ),
-        _candidates(
+        facebook_urls=_candidates(
+            "facebook",
+            canonicalize_facebook or (lambda _value: ""),
+            valid_facebook or (lambda _value: False),
+        ),
+        official_website_urls=_candidates(
             "official_homepage",
             canonicalize_website or (lambda _value: ""),
             valid_website or (lambda _value: False),
