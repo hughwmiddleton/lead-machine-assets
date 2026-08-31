@@ -111,6 +111,20 @@ _PLATFORM_SUPPORT_DOMAINS_SUFFIX = frozenset(
     }
 )
 
+# Domains controlled by a third-party platform where no mailbox can be an
+# artist-owned contact.  Unlike the support-domain policy above, these are
+# rejected regardless of local part.
+_PLATFORM_OWNED_EMAIL_DOMAINS_EXACT = frozenset(
+    {
+        "reverbnation.com",
+    }
+)
+_PLATFORM_OWNED_EMAIL_DOMAINS_SUFFIX = frozenset(
+    {
+        ".reverbnation.com",
+    }
+)
+
 
 def normalize_obfuscated_email_patterns(text: str, logger: LoggerFn = None, max_logs: int = 3) -> Tuple[str, int]:
     """Replace common obfuscated email separators with '@'.
@@ -200,25 +214,51 @@ def filter_obvious_placeholder_emails(
     return filtered
 
 
+# Known telemetry/system domains that are never artist contacts.
+_TELEMETRY_DOMAINS_EXACT = frozenset(
+    {
+        "sentry.io",
+        "sentry.wixpress.com",
+        "sentry-next.wixpress.com",
+    }
+)
+_TELEMETRY_DOMAINS_SUFFIX = frozenset(
+    {
+        ".sentry.io",
+        ".sentry.wixpress.com",
+        ".sentry-next.wixpress.com",
+    }
+)
+
+
 def is_system_telemetry_email(value: str) -> bool:
     """Return True for known non-contact telemetry/system destinations."""
     normalized = normalize_email_value(value)
     if not normalized:
         return False
     _, domain = normalized.split("@", 1)
-    return domain == "sentry.io" or domain.endswith(".sentry.io")
+    if domain in _TELEMETRY_DOMAINS_EXACT:
+        return True
+    if any(domain.endswith(suffix) for suffix in _TELEMETRY_DOMAINS_SUFFIX):
+        return True
+    return False
 
 
 def is_platform_support_email(value: str) -> bool:
-    """Return True for platform-owned support/admin/automated addresses.
+    """Return True for platform-owned or platform support/admin addresses.
 
     Rejects emails such as support@*.bandcamp.com, noreply@*.soundcloud.com,
-    help@*.facebook.com, etc.  Does NOT reject artist-owned custom domains.
+    help@*.facebook.com, and any mailbox on domains reserved for platform-owned
+    contacts.  Does NOT reject artist-owned custom domains.
     """
     normalized = normalize_email_value(value)
     if not normalized:
         return False
     local, domain = normalized.split("@", 1)
+    if domain in _PLATFORM_OWNED_EMAIL_DOMAINS_EXACT:
+        return True
+    if any(domain.endswith(suffix) for suffix in _PLATFORM_OWNED_EMAIL_DOMAINS_SUFFIX):
+        return True
     if local not in _PLATFORM_SUPPORT_LOCAL_PARTS:
         return False
     if domain in _PLATFORM_SUPPORT_DOMAINS_EXACT:
