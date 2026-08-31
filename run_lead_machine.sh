@@ -43,7 +43,7 @@ export MUSICBRAINZ_USER_AGENT="${MUSICBRAINZ_USER_AGENT:-}"
 unset SC_DEBUG_LATEST
 export PYTHONFAULTHANDLER=1
 
-# This is the mode used in the successful Spotify + MusicBrainz validation run.
+# Operator default: source-phased enrichment is more resilient when source cooldowns occur.
 export ENRICHMENT_MODE="source_phased"
 
 # Qt GUI visible (macOS cocoa)
