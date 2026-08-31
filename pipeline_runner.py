@@ -4032,7 +4032,7 @@ def run_directory_job(job_config: Dict[str, Any], raw_output_path: str, logger: 
                 "max_results": job_config.get("max_results") or job_config.get("target_count") or job_config.get("target_valid_leads"),
                 "url": job_config.get("url") or job_config.get("seed") or job_config.get("input_seed_csv") or "",
             }
-            rows = scrape_undiscovered_music(target_count, params, logger=logger)
+            rows = scrape_undiscovered_music(target_count, params, logger_fn=logger)
             write_result = _write_rows_to_csv(rows, final_path.as_posix(), source_directory="undiscovered_music")
             result_path = str(write_result.final_path)
             success = True
