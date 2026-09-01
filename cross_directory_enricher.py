@@ -3586,6 +3586,15 @@ def _instagram_profile_fetch_usable(status: Optional[int], html: str) -> bool:
     return True
 
 
+def _instagram_identity_validated_live_html_usable(html: str) -> bool:
+    """Validate a snapshot after the live bridge has established profile identity."""
+    html_text = html if isinstance(html, str) else str(html or "")
+    return bool(
+        html_text.strip()
+        and len(html_text.strip()) >= _INSTAGRAM_MIN_PROFILE_HTML_CHARS
+    )
+
+
 def _instagram_profile_render_ready_marker(page: Any) -> str:
     evaluate = getattr(page, "evaluate", None)
     if not callable(evaluate):
@@ -3840,13 +3849,21 @@ def _instagram_bridge_surface_assessment(
 
     url_lower = current_url.lower()
     title_lower = current_title.strip().lower()
-    text_lower = " ".join([current_title, current_body_text, current_html]).lower()
+    body_text_lower = current_body_text.lower()
+    html_lower = current_html.lower()
+    visible_state_text_lower = " ".join([current_title, current_body_text]).lower()
     hard_block_url = any(
         token in url_lower
-        for token in ("/accounts/login", "/challenge", "/checkpoint", "/consent")
+        for token in (
+            "/accounts/login",
+            "/challenge",
+            "/checkpoint",
+            "/verification",
+            "/consent",
+        )
     )
     explicit_block_surface = title_lower == "login • instagram" or any(
-        token in text_lower
+        token in visible_state_text_lower
         for token in (
             "security check",
             "challenge_required",
@@ -3854,15 +3871,17 @@ def _instagram_bridge_surface_assessment(
             "account suspended",
             "verify you are human",
             "access denied",
+            "page isn't available",
+            "sorry, this page isn't available",
         )
     )
     explicit_hard_blocked = hard_block_url or explicit_block_surface
-    soft_blocked = _detect_soft_block(current_html)
+    raw_html_soft_blocked = _detect_soft_block(current_html)
 
     has_header_or_bio = state["header"] > 0 or state["profile_markers"] >= 2
     has_meaningful_descendants = state["descendants"] >= 4 or state["profile_markers"] >= 3
     has_non_trivial_text = state["text_length"] >= 16
-    strong_same_profile_surface = (
+    structural_same_profile_surface = (
         same_profile
         and state["main"] > 0
         and has_non_trivial_text
@@ -3872,16 +3891,19 @@ def _instagram_bridge_surface_assessment(
     )
 
     login_text_shell = any(
-        token in text_lower
+        token in visible_state_text_lower
         for token in (
             "log in to instagram",
             "login • instagram",
             "sign up to see photos and videos",
             "see instagram photos and videos from",
         )
+    ) or bool(
+        re.search(r"\blog in\b", body_text_lower)
+        and re.search(r"\bsign up\b", body_text_lower)
     )
     unavailable_text_shell = any(
-        token in text_lower
+        token in visible_state_text_lower
         for token in (
             "page isn't available",
             "sorry, this page isn't available",
@@ -3891,7 +3913,63 @@ def _instagram_bridge_surface_assessment(
     recoverable_logged_out_shell = False
     empty_live_probe = None
     profile_identity_markers = None
-    if not explicit_hard_blocked and recoverable_shell_indicators and target_handle and (same_profile or same_profile_routed):
+    title_handle_identity = False
+    body_handle_identity = False
+    profile_metadata_present = False
+    structured_profile_payload = False
+    affirmative_same_profile_identity = False
+    if not explicit_hard_blocked and target_handle and (same_profile or same_profile_routed):
+        title_handle_identity = bool(
+            re.search(rf"\(@{re.escape(target_handle)}\)", title_lower)
+        )
+        body_handle_identity = bool(
+            re.search(
+                rf"(?<![a-z0-9._@])@?{re.escape(target_handle)}(?![a-z0-9._])",
+                body_text_lower,
+            )
+        )
+        profile_metadata_present = bool(
+            re.search(r"\b\d[\d,.]*\s*[km]?\s+followers?\b", body_text_lower)
+            and re.search(r"\b\d[\d,.]*\s*[km]?\s+following\b", body_text_lower)
+        )
+        structured_profile_payload = (
+            '"@type":"profilepage"' in html_lower
+            or '"@type": "profilepage"' in html_lower
+        )
+        profile_identity_markers = 0
+        if title_handle_identity:
+            profile_identity_markers += 1
+        if body_handle_identity:
+            profile_identity_markers += 1
+        if "instagram photos and videos" in title_lower:
+            profile_identity_markers += 1
+        if structured_profile_payload:
+            profile_identity_markers += 1
+        if profile_metadata_present:
+            profile_identity_markers += 1
+
+        # Logged-out Instagram pages commonly retain generic login/JavaScript
+        # controls around a real public profile.  Treat those controls as
+        # non-terminal only when the landed URL, exact title handle, and a
+        # second rendered profile-payload signal all agree with the request.
+        affirmative_same_profile_identity = bool(
+            title_handle_identity
+            and body_handle_identity
+            and profile_metadata_present
+            and len(current_body_text.strip()) >= _INSTAGRAM_PROFILE_SURFACE_MIN_TEXT_LENGTH
+            and not unavailable_text_shell
+        )
+
+    strong_same_profile_surface = bool(
+        structural_same_profile_surface or affirmative_same_profile_identity
+    )
+
+    if (
+        not explicit_hard_blocked
+        and recoverable_shell_indicators
+        and target_handle
+        and (same_profile or same_profile_routed)
+    ):
         empty_live_probe = (
             state["main"] <= 0
             and state["header"] <= 0
@@ -3899,34 +3977,17 @@ def _instagram_bridge_surface_assessment(
             and state["text_length"] <= 0
             and state["profile_markers"] <= 0
         )
-        profile_identity_markers = 0
-        if f"@{target_handle}" in text_lower or f"(@{target_handle})" in text_lower:
-            profile_identity_markers += 1
-        if "instagram photos and videos" in text_lower:
-            profile_identity_markers += 1
-        if "\"@type\":\"profilepage\"" in text_lower or "\"@type\": \"profilepage\"" in text_lower:
-            profile_identity_markers += 1
-        if (
-            re.search(r"\b\d[\d,]*\s+followers?\b", text_lower)
-            and re.search(r"\b\d[\d,]*\s+following\b", text_lower)
-            and re.search(r"\b\d[\d,]*\s+posts?\b", text_lower)
-        ):
-            profile_identity_markers += 1
-        recoverable_logged_out_shell = empty_live_probe and profile_identity_markers >= 2
+        recoverable_logged_out_shell = bool(
+            empty_live_probe and (profile_identity_markers or 0) >= 2
+        )
 
     blocked = explicit_hard_blocked or (
-        (soft_blocked or (recoverable_shell_indicators and not recoverable_logged_out_shell))
+        (
+            raw_html_soft_blocked
+            or (recoverable_shell_indicators and not recoverable_logged_out_shell)
+        )
         and not strong_same_profile_surface
     )
-    print("[IG DEBUG FINAL]", {
-        "recoverable_logged_out_shell": recoverable_logged_out_shell,
-        "blocked": blocked,
-        "empty_live_probe": empty_live_probe,
-        "profile_identity_markers": profile_identity_markers,
-        "same_profile": same_profile,
-        "same_profile_routed": same_profile_routed,
-    })
-
     plausible_surface = _instagram_landed_page_is_plausible_profile_surface(page) or _instagram_landed_page_is_html_handoff_usable(
         profile_url,
         current_url,
@@ -3934,10 +3995,15 @@ def _instagram_bridge_surface_assessment(
     )
     relaxed_ready = (
         not blocked
-        and state["main"] > 0
-        and has_non_trivial_text
-        and has_header_or_bio
-        and has_meaningful_descendants
+        and (
+            (
+                state["main"] > 0
+                and has_non_trivial_text
+                and has_header_or_bio
+                and has_meaningful_descendants
+            )
+            or affirmative_same_profile_identity
+        )
     )
     profile_shell = (
         not blocked
@@ -3987,6 +4053,7 @@ def _instagram_bridge_surface_assessment(
         "recoverable_logged_out_shell": recoverable_logged_out_shell,
         "empty_live_probe": empty_live_probe,
         "profile_identity_markers": profile_identity_markers,
+        "affirmative_same_profile_identity": affirmative_same_profile_identity,
         "ready": relaxed_ready,
         "reason": reason,
         "allow_retry": not blocked and reason in {"profile_shell", "profile_surface_candidate", "recoverable_logged_out_shell"},
@@ -7900,7 +7967,7 @@ def _fetch_instagram_profile_result(
         live_page = _open_instagram_live_page_bridge(url, timeout_s=HTTP_TIMEOUT)
         if live_page is not None:
             live_html = live_page.snapshot_html()
-            if _instagram_profile_fetch_usable(200, live_html):
+            if _instagram_identity_validated_live_html_usable(live_html):
                 return InstagramProfileFetchResult(
                     html=live_html,
                     status=200,
@@ -7914,7 +7981,7 @@ def _fetch_instagram_profile_result(
             live_page = _open_instagram_live_page_bridge(url, timeout_s=HTTP_TIMEOUT)
             if live_page is not None:
                 live_html = live_page.snapshot_html()
-                if _instagram_profile_fetch_usable(200, live_html):
+                if _instagram_identity_validated_live_html_usable(live_html):
                     return InstagramProfileFetchResult(
                         html=live_html,
                         status=200,
@@ -16403,7 +16470,7 @@ class CrossDirectoryEnricherWorker(QThread):
                     if live_page is not None:
                         runtime_structured_payloads = _get_shared_runtime_structured_payloads()
                         live_html = live_page.snapshot_html()
-                        if _instagram_profile_fetch_usable(200, live_html):
+                        if _instagram_identity_validated_live_html_usable(live_html):
                             shared_live_html = live_html
                             print("DEBUG IG: shared_live_html length =", len(shared_live_html or ""))
                             print("DEBUG IG: running live HTML direct extraction")
