@@ -10363,9 +10363,11 @@ class NightModeFacebookEnricher:
             )
             return any(tok in status_norm for tok in tokens)
 
+        email_found = bool((night_result.email or "").strip() or emails)
         target_row["Email"] = night_result.email or target_row.get("Email", "")
         target_row["Email_All"] = night_result.email_all
-        target_row["Email_Type"] = night_result.email_type
+        if email_found:
+            target_row["Email_Type"] = night_result.email_type
         canonical_fb_url = canonicalize_facebook_url(night_result.facebook_url)
         if canonical_fb_url:
             next_fb_url, _ = _guard_authoritative_fb_url_update(
@@ -10376,7 +10378,10 @@ class NightModeFacebookEnricher:
                 context="apply_night_fb_result",
             )
             target_row["Facebook_URL"] = next_fb_url
-        provenance_emails = emails or night_result.email_all or night_result.email
+        # Only emails extracted from this Facebook attempt may receive Facebook
+        # provenance. Email_All also carries prior contacts forward on no-result
+        # passes and is not evidence that Facebook contained those addresses.
+        provenance_emails = emails
         provenance_surface = "facebook_about" if (night_result.email_source or "").strip().lower() == "about" else "facebook_main"
         provenance_source_context = getattr(night_result, "source_context", None)
         if isinstance(provenance_source_context, dict) and isinstance(provenance_source_context.get("surfaces"), dict):
@@ -10413,7 +10418,7 @@ class NightModeFacebookEnricher:
                     method=bucket_method,
                     surface=surface,
                 )
-        else:
+        elif provenance_emails:
             merge_email_provenance_into_target(
                 target_row,
                 provenance_emails,
@@ -10448,7 +10453,7 @@ class NightModeFacebookEnricher:
                 return str(val or "").strip()
             except Exception:
                 return ""
-        if _coerce(target_row.get("Email")):
+        if email_found and _coerce(target_row.get("Email")):
             if _coerce(target_row.get("Email_Source_URL")) == "":
                 target_row["Email_Source_URL"] = (
                     page_url
@@ -10461,7 +10466,6 @@ class NightModeFacebookEnricher:
             if _coerce(target_row.get("Email_Extract_Method")) == "":
                 method = night_result.email_extract_method or "regex"
                 target_row["Email_Extract_Method"] = method
-        email_found = bool((night_result.email or "").strip() or emails)
         if emails:
             # Track FB-applied emails for downstream defensive stripping.
             normalized_emails = []

@@ -1,3 +1,4 @@
+import json
 import os
 from types import SimpleNamespace
 
@@ -1124,6 +1125,81 @@ def test_nightmode_fb_pass_logs_outer_row_gate(monkeypatch, tmp_path):
         for msg in row_gate_logs
     )
     assert any("row=1" in msg and "artist='Try Me'" in msg and "fb_url_present=False" in msg and "eligible_for_fb=True" in msg for msg in row_gate_logs)
+
+
+def test_fb_global_no_result_does_not_relabel_existing_email_provenance(monkeypatch, tmp_path):
+    provenance = {
+        "primary@artist.com": {
+            "source_type": "instagram_enrich",
+            "surface": "instagram_bio_link_one_hop",
+            "source_url": "https://artist.example/",
+            "extract_method": "mailto",
+        },
+        "secondary@agency.com": {
+            "source_type": "website_enrich",
+            "surface": "website_contact_page",
+            "source_url": "https://agency.example/artist",
+            "extract_method": "regex",
+        },
+    }
+    input_csv = tmp_path / "master_pre_fb.csv"
+    output_csv = tmp_path / "master_post_fb.csv"
+    state_path = tmp_path / "fb_state.json"
+    pd.DataFrame(
+        [
+            {
+                "Artist Name": "Mixed Source No Result",
+                "Email": "primary@artist.com",
+                "Email_All": "primary@artist.com;secondary@agency.com",
+                "Email_Type": "ig_enrich",
+                "Email_Source_URL": "https://artist.example/",
+                "Email_Source_Type": "instagram_enrich",
+                "Email_Extract_Method": "mailto",
+                "Email_Provenance_JSON": json.dumps(provenance),
+                "Facebook_URL": "https://www.facebook.com/artist",
+            }
+        ]
+    ).to_csv(input_csv, index=False)
+
+    class NoResultFBHelper(DummyFBHelper):
+        def enrich_row_with_facebook_night(self, row, row_index=0):
+            self.calls += 1
+            result = dict(row)
+            result["FB_Status"] = "no_email_on_page"
+            return result
+
+    helper = NoResultFBHelper()
+    logs = []
+    monkeypatch.setenv("FB_USERNAME", "user")
+    monkeypatch.setenv("FB_PASSWORD", "pass")
+    monkeypatch.setenv("EMAIL_ALL_GUARD", "1")
+    monkeypatch.setattr(pipeline_runner, "NightModeFacebookEnricher", lambda *args, **kwargs: helper)
+    monkeypatch.setattr(pipeline_runner, "_load_legacy_module", _make_dummy_module)
+    monkeypatch.setattr(pipeline_runner, "_load_fb_state", lambda _: {})
+    monkeypatch.setattr(pipeline_runner, "_write_fb_state", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        pipeline_runner,
+        "_build_night_fb_share_promotion_resolver",
+        lambda **kwargs: (lambda url: ""),
+    )
+
+    status = pipeline_runner.run_facebook_global_pass_nightmode(
+        input_csv=input_csv.as_posix(),
+        output_csv=output_csv.as_posix(),
+        state_path=state_path.as_posix(),
+        skip_rows_with_email=False,
+        logger=logs.append,
+    )
+
+    output_row = pd.read_csv(output_csv, dtype=str, keep_default_na=False).iloc[0]
+    assert status.completed is True
+    assert helper.calls == 1
+    assert output_row["Email"] == "primary@artist.com"
+    assert output_row["Email_All"] == "primary@artist.com;secondary@agency.com"
+    assert output_row["Email_Type"] == "ig_enrich"
+    assert output_row["Email_Source_Type"] == "instagram_enrich"
+    assert json.loads(output_row["Email_Provenance_JSON"]) == provenance
+    assert not any("email_not_in_sources" in message for message in logs)
 
 
 def test_finalize_fb_row_attribution_classifies_authoritative_outcomes():

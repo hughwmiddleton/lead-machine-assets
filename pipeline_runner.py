@@ -1253,7 +1253,7 @@ def _log_email_all_change(row_idx: int, artist: str, before: str, after: str, so
 
 
 def _guard_email_all_sources(row: pd.Series, email_all: str, logger: LoggerFn = None) -> None:
-    """Debug-only guard: warn if Email_All contains emails not present in row-local sources."""
+    """Debug-only guard: warn if Email_All lacks row-local email evidence."""
     if os.getenv("EMAIL_ALL_GUARD", "0") not in {"1", "true", "TRUE"}:
         return
     sources = []
@@ -1263,7 +1263,11 @@ def _guard_email_all_sources(row: pd.Series, email_all: str, logger: LoggerFn = 
         if col in {"Email_All", "Suspect_Email_All"}:
             continue
         sources.extend(normalize_emails(_cell_str(row.get(col))))
+    # Email_Provenance_JSON is an authoritative per-email ledger, not a plain
+    # email-valued column. Parse its keys explicitly instead of treating the
+    # serialized JSON as an email string.
     source_set = set(sources)
+    source_set.update(get_row_email_provenance(row))
     for email in normalize_emails(email_all):
         if email not in source_set:
             artist = _cell_str(row.get("Artist Name"))
@@ -1284,6 +1288,7 @@ def _set_email_all(
     source_type: str = "",
     method: str = "regex",
     surface: str = "",
+    provenance_emails: Optional[Union[str, Sequence[str]]] = None,
 ) -> str:
     """Centralized Email_All setter with merge + logging + guard."""
     existing_val = _cell_str(df.at[idx, "Email_All"] if "Email_All" in df.columns else "")
@@ -1294,10 +1299,13 @@ def _set_email_all(
         filtered_new = filter_platform_support_emails(filter_system_telemetry_emails(normalize_emails(new_emails)))
     else:
         filtered_new = filter_platform_support_emails(filter_system_telemetry_emails(list(new_emails)))
-    if source_url or source_type or surface:
+    provenance_values = filtered_new if provenance_emails is None else filter_platform_support_emails(
+        filter_system_telemetry_emails(normalize_emails(provenance_emails))
+    )
+    if provenance_values and (source_url or source_type or surface):
         merge_email_provenance_into_target(
             (df, idx),
-            filtered_new,
+            provenance_values,
             source_url=source_url,
             source_type=source_type,
             method=method,
@@ -5099,22 +5107,50 @@ def run_facebook_global_pass_nightmode(
                         source_url = source_url or fb_url_hint or ""
                         source_type = enriched.get("Email_Source_Type") or "facebook_enrich"
                         method = enriched.get("Email_Extract_Method") or "regex"
-                        _set_email_with_provenance(
-                            (df, idx),
-                            enriched.get("Email"),
-                            source_url,
-                            source_type,
-                            method,
-                            _facebook_email_surface_hint(enriched),
+                        explicitly_applied_emails = filter_platform_support_emails(
+                            filter_system_telemetry_emails(
+                                normalize_emails(enriched.get("__fb_emails_applied", ""))
+                            )
                         )
-                        _fill_email_provenance_fields(
-                            df,
-                            idx,
-                            source=enriched,
-                            fb_url_hint=fb_url_hint,
-                            default_source_type=source_type or "facebook_enrich",
-                            default_method=method or "regex",
+                        existing_email_set = set(
+                            _merge_email_lists(
+                                "",
+                                [
+                                    df.at[idx, "Email"] if "Email" in df.columns else "",
+                                    df.at[idx, "Email_All"] if "Email_All" in df.columns else "",
+                                ],
+                            )
                         )
+                        newly_reported_emails = [
+                            email
+                            for email in _merge_email_lists(
+                                "",
+                                [enriched.get("Email", ""), enriched.get("Email_All", "")],
+                            )
+                            if email not in existing_email_set
+                        ]
+                        fb_applied_emails = _merge_email_lists(
+                            explicitly_applied_emails,
+                            newly_reported_emails,
+                        )
+                        selected_enriched_email = normalize_email_key(enriched.get("Email", ""))
+                        if selected_enriched_email and selected_enriched_email in set(fb_applied_emails):
+                            _set_email_with_provenance(
+                                (df, idx),
+                                selected_enriched_email,
+                                source_url,
+                                source_type,
+                                method,
+                                _facebook_email_surface_hint(enriched),
+                            )
+                            _fill_email_provenance_fields(
+                                df,
+                                idx,
+                                source=enriched,
+                                fb_url_hint=fb_url_hint,
+                                default_source_type=source_type or "facebook_enrich",
+                                default_method=method or "regex",
+                            )
                         if "Email_All" in enriched:
                             _set_email_all(
                                 df,
@@ -5126,6 +5162,7 @@ def run_facebook_global_pass_nightmode(
                                 source_type=source_type,
                                 method=method,
                                 surface=_facebook_email_surface_hint(enriched),
+                                provenance_emails=fb_applied_emails,
                             )
                     cols_to_copy = [
                         "Facebook_URL",
@@ -5138,7 +5175,7 @@ def run_facebook_global_pass_nightmode(
                         "FB_Refine_Executed",
                         FB_SHARE_RUNTIME_FALLBACK_ATTEMPTED_COL,
                     ]
-                    if not fb_rejected:
+                    if not fb_rejected and fb_applied_emails:
                         cols_to_copy.append("Email_Type")
                     for col in cols_to_copy:
                         if col in enriched:

@@ -48,6 +48,201 @@ def test_set_email_all_triggers_guard(monkeypatch):
     assert not messages  # guard should not fire when email is row-local
 
 
+def test_guard_recognizes_all_emails_in_per_email_provenance(monkeypatch):
+    messages = []
+    monkeypatch.setenv("EMAIL_ALL_GUARD", "1")
+    df = pd.DataFrame(
+        [
+            {
+                "Artist Name": "Multi-email Instagram Artist",
+                "Email": "primary@artist.com",
+                "Email_All": "primary@artist.com;secondary@management.com",
+                EMAIL_PROVENANCE_JSON_COL: json.dumps(
+                    {
+                        "primary@artist.com": {
+                            "source_type": "instagram_enrich",
+                            "surface": "instagram_profile",
+                            "source_url": "https://www.instagram.com/artist/",
+                            "extract_method": "regex",
+                        },
+                        "secondary@management.com": {
+                            "source_type": "instagram_enrich",
+                            "surface": "instagram_profile",
+                            "source_url": "https://www.instagram.com/artist/",
+                            "extract_method": "regex",
+                        },
+                    }
+                ),
+            }
+        ]
+    )
+
+    pipeline_runner._set_email_all(
+        df,
+        0,
+        df.at[0, "Email_All"],
+        source="fb_global_pass",
+        logger=messages.append,
+        provenance_emails=[],
+    )
+
+    assert df.at[0, "Email_All"] == "primary@artist.com;secondary@management.com"
+    assert not any("email_not_in_sources" in message for message in messages)
+
+
+def test_guard_recognizes_independent_mixed_source_provenance(monkeypatch):
+    messages = []
+    monkeypatch.setenv("EMAIL_ALL_GUARD", "1")
+    provenance = {
+        "onehop@artist.com": {
+            "source_type": "instagram_enrich",
+            "surface": "instagram_bio_link_one_hop",
+            "source_url": "https://artist.com/contact",
+            "extract_method": "mailto",
+        },
+        "booking@agency.com": {
+            "source_type": "website_enrich",
+            "surface": "website_contact_page",
+            "source_url": "https://agency.com/artist",
+            "extract_method": "regex",
+        },
+    }
+    df = pd.DataFrame(
+        [
+            {
+                "Artist Name": "Mixed Source Artist",
+                "Email": "onehop@artist.com",
+                "Email_All": "onehop@artist.com;booking@agency.com",
+                EMAIL_PROVENANCE_JSON_COL: json.dumps(provenance),
+            }
+        ]
+    )
+
+    pipeline_runner._set_email_all(
+        df,
+        0,
+        df.at[0, "Email_All"],
+        source="fb_global_pass",
+        logger=messages.append,
+        source_url="https://www.facebook.com/artist",
+        source_type="facebook_enrich",
+        surface="facebook_main",
+        provenance_emails=[],
+    )
+
+    assert set(df.at[0, "Email_All"].split(";")) == set(provenance)
+    assert json.loads(df.at[0, EMAIL_PROVENANCE_JSON_COL]) == provenance
+    assert not any("email_not_in_sources" in message for message in messages)
+
+
+def test_guard_still_flags_truly_unprovenanced_secondary_email(monkeypatch):
+    messages = []
+    monkeypatch.setenv("EMAIL_ALL_GUARD", "1")
+    df = pd.DataFrame(
+        [
+            {
+                "Artist Name": "Unprovenanced Artist",
+                "Email": "primary@artist.com",
+                "Email_All": "primary@artist.com;unknown@elsewhere.com",
+                EMAIL_PROVENANCE_JSON_COL: json.dumps(
+                    {
+                        "primary@artist.com": {
+                            "source_type": "website_enrich",
+                            "surface": "website_homepage",
+                            "source_url": "https://artist.com",
+                            "extract_method": "regex",
+                        }
+                    }
+                ),
+            }
+        ]
+    )
+
+    pipeline_runner._set_email_all(
+        df,
+        0,
+        df.at[0, "Email_All"],
+        source="test_guard",
+        logger=messages.append,
+        provenance_emails=[],
+    )
+
+    assert any("email_not_in_sources='unknown@elsewhere.com'" in message for message in messages)
+
+
+def test_facebook_no_result_preserves_existing_contacts_and_provenance(monkeypatch):
+    messages = []
+    monkeypatch.setenv("EMAIL_ALL_GUARD", "1")
+    provenance = {
+        "anton@agency.com": {
+            "source_type": "instagram_enrich",
+            "surface": "instagram_bio_link_one_hop",
+            "source_url": "https://artist.example/",
+            "extract_method": "mailto",
+        },
+        "secondary@label.com": {
+            "source_type": "instagram_enrich",
+            "surface": "instagram_bio_link_one_hop",
+            "source_url": "https://artist.example/",
+            "extract_method": "mailto",
+        },
+    }
+    row = {
+        "Artist Name": "Facebook No Result",
+        "Email": "anton@agency.com",
+        "Email_All": "anton@agency.com;secondary@label.com",
+        "Email_Type": "ig_enrich",
+        "Email_Source_URL": "https://artist.example/",
+        "Email_Source_Type": "instagram_enrich",
+        "Email_Extract_Method": "mailto",
+        EMAIL_PROVENANCE_JSON_COL: json.dumps(provenance),
+    }
+    enricher = night_mode_fb.NightModeFacebookEnricher(
+        legacy_module=None,
+        username="",
+        password="",
+        logger=None,
+    )
+    no_result = night_mode_fb.NightModeFacebookResult(
+        email=None,
+        email_all=row["Email_All"],
+        email_type="fb_night",
+        facebook_url="https://www.facebook.com/artist",
+        email_source="main",
+        email_source_url="https://www.facebook.com/artist",
+        email_extract_method="regex",
+    )
+
+    enriched = enricher._apply_night_fb_result(
+        dict(row),
+        no_result,
+        [],
+        "https://www.facebook.com/artist",
+    )
+    df = pd.DataFrame([enriched])
+    pipeline_runner._set_email_all(
+        df,
+        0,
+        enriched["Email_All"],
+        source="fb_global_pass",
+        logger=messages.append,
+        source_url=enriched["Email_Source_URL"],
+        source_type=enriched["Email_Source_Type"],
+        method=enriched["Email_Extract_Method"],
+        surface="facebook_main",
+        provenance_emails=[],
+    )
+
+    assert df.at[0, "Email"] == row["Email"]
+    assert df.at[0, "Email_All"] == row["Email_All"]
+    assert df.at[0, "Email_Type"] == "ig_enrich"
+    assert df.at[0, "Email_Source_URL"] == row["Email_Source_URL"]
+    assert df.at[0, "Email_Source_Type"] == "instagram_enrich"
+    assert json.loads(df.at[0, EMAIL_PROVENANCE_JSON_COL]) == provenance
+    assert "__fb_emails_applied" not in enriched
+    assert not any("email_not_in_sources" in message for message in messages)
+
+
 def test_set_email_all_merges_and_logs(monkeypatch):
     messages = []
 
