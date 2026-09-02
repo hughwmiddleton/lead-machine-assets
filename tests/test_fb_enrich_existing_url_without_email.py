@@ -339,6 +339,66 @@ def test_fb_enrich_runs_when_fb_url_present_or_promotable(monkeypatch, row_overr
     assert not any("already has facebook link" in msg.lower() for msg in logs)
 
 
+def test_fb_enrich_same_email_preserves_native_undiscovered_provenance(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    source_url = "https://undiscovered.music/artists/native-artist"
+    native_provenance = {
+        "artist@example.com": {
+            "source_type": "undiscovered_music_profile",
+            "surface": "undiscovered_music_profile",
+            "source_url": source_url,
+            "extract_method": "profile_direct",
+        }
+    }
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Native Artist",
+            "Lead_Source": "Undiscovered Music",
+            "Source_Directory": "undiscovered_music",
+            "Source Directory": "Undiscovered Music",
+            "Source URL": source_url,
+            "Email": "artist@example.com",
+            "Email_All": "artist@example.com",
+            "Email_Type": "source_native",
+            "Email_Source_URL": source_url,
+            "Email_Source_Type": "undiscovered_music_profile",
+            "Email_Extract_Method": "profile_direct",
+            EMAIL_PROVENANCE_JSON_COL: json.dumps(native_provenance),
+            "facebook_url": "https://www.facebook.com/nativeartist",
+            "Facebook_URL": "https://www.facebook.com/nativeartist",
+            "Social Link": "https://www.facebook.com/nativeartist",
+            "External Links": "",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+
+    monkeypatch.setattr(
+        cde,
+        "_extract_fb_emails_bounded",
+        lambda *args, **kwargs: (
+            ["artist@example.com"],
+            "https://www.facebook.com/nativeartist/about",
+            "",
+        ),
+    )
+
+    matched = worker._enrich_row_facebook(seed_df, 0, object(), ctx)
+
+    assert matched is True
+    assert seed_df.at[0, "Email"] == "artist@example.com"
+    assert seed_df.at[0, "Email_All"] == "artist@example.com"
+    assert seed_df.at[0, "Email_Type"] == "source_native"
+    assert seed_df.at[0, "Email_Source_URL"] == source_url
+    assert seed_df.at[0, "Email_Source_Type"] == "undiscovered_music_profile"
+    assert seed_df.at[0, "Email_Extract_Method"] == "profile_direct"
+    assert json.loads(seed_df.at[0, EMAIL_PROVENANCE_JSON_COL]) == native_provenance
+    assert not str(seed_df.loc[0].get("__fb_emails_applied", "") or "").strip()
+    assert seed_df.at[0, "Lead_Source"] == "Undiscovered Music"
+    assert seed_df.at[0, "Source_Directory"] == "undiscovered_music"
+    assert seed_df.at[0, "Source URL"] == source_url
+
+
 def test_fb_enrich_skips_same_fb_url_that_already_produced_email(monkeypatch):
     logs = []
     worker = _make_worker(logs)

@@ -212,6 +212,48 @@ def test_export_integrity_repair_and_validation(tmp_path):
         validate_origin_integrity_rows([{"Lead_Source": "unearthed", "Source_Directory": "soundcloud"}])
 
 
+def test_undiscovered_music_origin_pair_and_canonical_url_pass_export_validation():
+    validate_origin_integrity_rows(
+        [
+            {
+                "Lead_Source": "Undiscovered Music",
+                "Source_Directory": "undiscovered_music",
+                "Source Directory": "Undiscovered Music",
+                "Source URL": "https://undiscovered.music/artists/example-artist",
+            }
+        ]
+    )
+
+
+@pytest.mark.parametrize(
+    ("lead_source", "source_directory"),
+    [
+        ("Undiscovered Music", "soundcloud"),
+        ("Spotify", "undiscovered_music"),
+    ],
+)
+def test_undiscovered_music_origin_cross_source_pairings_still_fail(lead_source, source_directory):
+    with pytest.raises(OriginIntegrityError):
+        validate_origin_integrity_rows(
+            [{"Lead_Source": lead_source, "Source_Directory": source_directory}]
+        )
+
+
+@pytest.mark.parametrize(
+    ("lead_source", "source_directory"),
+    [
+        ("AMRAP", "amrap"),
+        ("Jamendo", "jamendo"),
+        ("Spotify", "spotify"),
+        ("Triple J Unearthed", "unearthed"),
+    ],
+)
+def test_existing_origin_pairings_remain_accepted(lead_source, source_directory):
+    validate_origin_integrity_rows(
+        [{"Lead_Source": lead_source, "Source_Directory": source_directory}]
+    )
+
+
 def test_woodpecker_export_fails_on_blank_origin(tmp_path):
     master_path = tmp_path / "master.csv"
     output_path = tmp_path / "woodpecker.csv"

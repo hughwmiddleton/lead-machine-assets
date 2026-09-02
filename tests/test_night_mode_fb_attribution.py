@@ -52,7 +52,7 @@ def _read_csv(path: Path) -> pd.DataFrame:
     return pd.read_csv(path, dtype=str, keep_default_na=False).fillna("")
 
 
-def _run_night_fb_pass(monkeypatch, tmp_path, rows, helper, logger=None):
+def _run_night_fb_pass(monkeypatch, tmp_path, rows, helper, logger=None, *, skip_rows_with_email=True):
     input_csv = tmp_path / "master_pre_fb.csv"
     output_csv = tmp_path / "master_post_fb.csv"
     state_path = tmp_path / "fb_state.json"
@@ -69,10 +69,151 @@ def _run_night_fb_pass(monkeypatch, tmp_path, rows, helper, logger=None):
         input_csv=input_csv.as_posix(),
         output_csv=output_csv.as_posix(),
         state_path=state_path.as_posix(),
-        skip_rows_with_email=True,
+        skip_rows_with_email=skip_rows_with_email,
         logger=logger,
     )
     return _read_csv(output_csv), status
+
+
+def _undiscovered_native_email_row(email="artist@example.com"):
+    source_url = "https://undiscovered.music/artists/native-artist"
+    provenance = {
+        email: {
+            "source_type": "undiscovered_music_profile",
+            "surface": "undiscovered_music_profile",
+            "source_url": source_url,
+            "extract_method": "profile_direct",
+        }
+    }
+    return {
+        "Artist Name": "Native Artist",
+        "Lead_Source": "Undiscovered Music",
+        "Source_Directory": "undiscovered_music",
+        "Source Directory": "Undiscovered Music",
+        "Source URL": source_url,
+        "Email": email,
+        "Email_All": email,
+        "Email_Source_URL": source_url,
+        "Email_Source_Type": "undiscovered_music_profile",
+        "Email_Extract_Method": "profile_direct",
+        EMAIL_PROVENANCE_JSON_COL: json.dumps(provenance),
+        "Facebook_URL": "https://facebook.com/nativeartist",
+        "Social Link": "https://facebook.com/nativeartist",
+    }
+
+
+def test_facebook_same_email_preserves_native_undiscovered_provenance(monkeypatch, tmp_path):
+    helper = StaticFBHelper(
+        {
+            "FB_Status": "pass_a_found_email",
+            FB_ATTEMPT_STATE_COL: "attempted_fb_found_email",
+            "Email": "artist@example.com",
+            "Email_All": "artist@example.com",
+            "__fb_emails_applied": "artist@example.com",
+            "Email_Type": "fb_night",
+            "Email_Source_URL": "https://facebook.com/nativeartist/about",
+            "Email_Source_Type": "facebook_enrich",
+            "Email_Extract_Method": "regex",
+            "Facebook_URL": "https://facebook.com/nativeartist",
+        }
+    )
+
+    df_out, _ = _run_night_fb_pass(
+        monkeypatch,
+        tmp_path,
+        [_undiscovered_native_email_row()],
+        helper,
+        skip_rows_with_email=False,
+    )
+
+    assert helper.calls == 1
+    assert df_out.loc[0, "Email"] == "artist@example.com"
+    assert df_out.loc[0, "Email_All"] == "artist@example.com"
+    assert df_out.loc[0, "Email_Source_URL"] == "https://undiscovered.music/artists/native-artist"
+    assert df_out.loc[0, "Email_Source_Type"] == "undiscovered_music_profile"
+    assert df_out.loc[0, "Email_Extract_Method"] == "profile_direct"
+    assert json.loads(df_out.loc[0, EMAIL_PROVENANCE_JSON_COL]) == json.loads(
+        _undiscovered_native_email_row()[EMAIL_PROVENANCE_JSON_COL]
+    )
+    assert df_out.loc[0, "Lead_Source"] == "Undiscovered Music"
+    assert df_out.loc[0, "Source_Directory"] == "undiscovered_music"
+    assert df_out.loc[0, "Source URL"] == "https://undiscovered.music/artists/native-artist"
+
+
+def test_facebook_distinct_email_is_retained_with_its_own_provenance(monkeypatch, tmp_path):
+    helper = StaticFBHelper(
+        {
+            "FB_Status": "pass_a_found_email",
+            FB_ATTEMPT_STATE_COL: "attempted_fb_found_email",
+            "Email": "facebook@example.com",
+            "Email_All": "artist@example.com;facebook@example.com",
+            "__fb_emails_applied": "facebook@example.com",
+            "Email_Type": "fb_night",
+            "Email_Source_URL": "https://facebook.com/nativeartist/about",
+            "Email_Source_Type": "facebook_enrich",
+            "Email_Extract_Method": "regex",
+            "Facebook_URL": "https://facebook.com/nativeartist",
+        }
+    )
+
+    df_out, _ = _run_night_fb_pass(
+        monkeypatch,
+        tmp_path,
+        [_undiscovered_native_email_row()],
+        helper,
+        skip_rows_with_email=False,
+    )
+
+    assert set(df_out.loc[0, "Email_All"].split(";")) == {
+        "artist@example.com",
+        "facebook@example.com",
+    }
+    provenance = json.loads(df_out.loc[0, EMAIL_PROVENANCE_JSON_COL])
+    assert provenance["artist@example.com"]["source_type"] == "undiscovered_music_profile"
+    assert provenance["facebook@example.com"]["source_type"] == "facebook_enrich"
+    assert provenance["facebook@example.com"]["source_url"] == "https://facebook.com/nativeartist/about"
+
+
+def test_facebook_mixed_corroborating_and_new_email_keeps_exact_provenance_keys(monkeypatch, tmp_path):
+    native_row = _undiscovered_native_email_row()
+    mixed_provenance = json.loads(native_row[EMAIL_PROVENANCE_JSON_COL])
+    mixed_provenance["facebook@example.com"] = {
+        "source_type": "facebook_enrich",
+        "surface": "facebook_about",
+        "source_url": "https://facebook.com/nativeartist/about",
+        "extract_method": "regex",
+    }
+    helper = StaticFBHelper(
+        {
+            "FB_Status": "pass_a_found_email",
+            FB_ATTEMPT_STATE_COL: "attempted_fb_found_email",
+            "Email": "artist@example.com",
+            "Email_All": "artist@example.com;facebook@example.com",
+            "__fb_emails_applied": "artist@example.com;facebook@example.com",
+            "Email_Type": "fb_night",
+            # The real helper carries the established primary's row-level bundle
+            # while its per-email ledger identifies the new Facebook secondary.
+            "Email_Source_URL": "https://undiscovered.music/artists/native-artist",
+            "Email_Source_Type": "undiscovered_music_profile",
+            "Email_Extract_Method": "profile_direct",
+            EMAIL_PROVENANCE_JSON_COL: json.dumps(mixed_provenance),
+            "Facebook_URL": "https://facebook.com/nativeartist",
+        }
+    )
+
+    df_out, _ = _run_night_fb_pass(
+        monkeypatch,
+        tmp_path,
+        [native_row],
+        helper,
+        skip_rows_with_email=False,
+    )
+
+    provenance = json.loads(df_out.loc[0, EMAIL_PROVENANCE_JSON_COL])
+    assert set(provenance) == {"artist@example.com", "facebook@example.com"}
+    assert provenance["artist@example.com"]["source_type"] == "undiscovered_music_profile"
+    assert provenance["facebook@example.com"]["source_type"] == "facebook_enrich"
+    assert provenance["facebook@example.com"]["source_url"] == "https://facebook.com/nativeartist/about"
 
 
 def test_upstream_identity_anchor_enters_discovery_fallback_path(monkeypatch, tmp_path):

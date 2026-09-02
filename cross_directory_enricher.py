@@ -17178,6 +17178,20 @@ class CrossDirectoryEnricherWorker(QThread):
                                 _fb_write_surface_snapshot = None
                                 fb_write_before = None
                             current_email = cell_to_str(seed_df.at[row_idx, "Email"])
+                            existing_email_set = {
+                                normalized
+                                for raw_value in (
+                                    current_email,
+                                    cell_to_str(seed_df.at[row_idx, "Email_All"]),
+                                )
+                                for token in re.split(r"[\s,;]+", raw_value)
+                                if (normalized := normalize_email_value(token))
+                            }
+                            fb_applied_emails = [
+                                email
+                                for email in fb_emails
+                                if normalize_email_value(email) not in existing_email_set
+                            ]
                             if not current_email:
                                 seed_df.at[row_idx, "Email"] = fb_emails[0]
                             if page_url_used and not cell_to_str(seed_df.at[row_idx, "Social Link"]):
@@ -17192,22 +17206,24 @@ class CrossDirectoryEnricherWorker(QThread):
                             )
                             merge_email_provenance_into_target(
                                 (seed_df, row_idx),
-                                fb_emails,
+                                fb_applied_emails,
                                 source_url=page_url_used or "",
                                 source_type="facebook_enrich",
                                 method="regex",
                                 surface="facebook_about" if "/about" in (page_url_used or "").lower() else "facebook_main",
                             )
-                            seed_df.at[row_idx, "Email_Type"] = "fb_enrich"
+                            if not current_email:
+                                seed_df.at[row_idx, "Email_Type"] = "fb_enrich"
                             if not cell_to_str(seed_df.at[row_idx, "Email_Source_URL"]):
                                 seed_df.at[row_idx, "Email_Source_URL"] = page_url_used or ""
                             if not cell_to_str(seed_df.at[row_idx, "Email_Source_Type"]):
                                 seed_df.at[row_idx, "Email_Source_Type"] = "facebook_enrich"
                             if not cell_to_str(seed_df.at[row_idx, "Email_Extract_Method"]):
                                 seed_df.at[row_idx, "Email_Extract_Method"] = "regex"
-                            seed_df.at[row_idx, "__fb_emails_applied"] = ";".join(
-                                sorted({e.strip().lower() for e in fb_emails if e})
-                            )
+                            if fb_applied_emails:
+                                seed_df.at[row_idx, "__fb_emails_applied"] = ";".join(
+                                    sorted({e.strip().lower() for e in fb_applied_emails if e})
+                                )
                             self._record_chunk_source_written(
                                 "facebook",
                                 row_idx,

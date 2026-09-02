@@ -5,6 +5,12 @@ LEGACY_SOURCE_DIRECTORY_FIELD = "Source Directory"
 ORIGIN_DIRECTORY_FIELDS = ("Lead_Source", "Source_Directory", LEGACY_SOURCE_DIRECTORY_FIELD)
 ORIGIN_URL_FIELDS = ("Source URL", "Source_URL")
 ORIGIN_LOCKED_FIELDS = frozenset((*ORIGIN_DIRECTORY_FIELDS, *ORIGIN_URL_FIELDS))
+ORIGIN_COMPATIBILITY_ALIASES = frozenset(
+    {
+        ("triple j unearthed", "unearthed"),
+        ("undiscovered music", "undiscovered_music"),
+    }
+)
 
 
 class OriginIntegrityError(ValueError):
@@ -185,4 +191,4 @@ def _origin_values_compatible(lead_source: str, source_directory: str) -> bool:
         return True
     if lead == directory:
         return True
-    return lead == "triple j unearthed" and directory == "unearthed"
+    return (lead, directory) in ORIGIN_COMPATIBILITY_ALIASES

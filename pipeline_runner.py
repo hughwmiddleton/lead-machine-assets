@@ -1300,7 +1300,7 @@ def _set_email_all(
     else:
         filtered_new = filter_platform_support_emails(filter_system_telemetry_emails(list(new_emails)))
     provenance_values = filtered_new if provenance_emails is None else filter_platform_support_emails(
-        filter_system_telemetry_emails(normalize_emails(provenance_emails))
+        filter_system_telemetry_emails(_merge_email_lists("", provenance_emails))
     )
     if provenance_values and (source_url or source_type or surface):
         merge_email_provenance_into_target(
@@ -5129,10 +5129,43 @@ def run_facebook_global_pass_nightmode(
                             )
                             if email not in existing_email_set
                         ]
-                        fb_applied_emails = _merge_email_lists(
-                            explicitly_applied_emails,
-                            newly_reported_emails,
+                        # Facebook may independently corroborate an address that
+                        # already has truthful upstream provenance. Treat only
+                        # addresses introduced by this attempt as Facebook-applied;
+                        # otherwise the same value can be re-attributed merely
+                        # because Facebook repeated it.
+                        fb_applied_emails = [
+                            email
+                            for email in _merge_email_lists(
+                                explicitly_applied_emails,
+                                newly_reported_emails,
+                            )
+                            if email not in existing_email_set
+                        ]
+                        enriched_provenance = parse_email_provenance_json(
+                            enriched.get(EMAIL_PROVENANCE_JSON_COL, "")
                         )
+                        applied_fb_meta = next(
+                            (
+                                dict(enriched_provenance.get(email) or {})
+                                for email in fb_applied_emails
+                                if _cell_str(
+                                    (enriched_provenance.get(email) or {}).get("source_type", "")
+                                ).lower().startswith("facebook")
+                            ),
+                            {},
+                        )
+                        if applied_fb_meta:
+                            source_url = _cell_str(applied_fb_meta.get("source_url", "")) or source_url
+                            source_type = _cell_str(applied_fb_meta.get("source_type", "")) or "facebook_enrich"
+                            method = _cell_str(applied_fb_meta.get("extract_method", "")) or "regex"
+                        elif fb_applied_emails and not _cell_str(source_type).lower().startswith("facebook"):
+                            # The Facebook helper preserves row-level provenance for
+                            # an existing native primary. Those inherited fields do
+                            # not describe a genuinely new Facebook-only secondary.
+                            source_url = _facebook_about_url(fb_url_hint) or fb_url_hint or ""
+                            source_type = "facebook_enrich"
+                            method = "regex"
                         selected_enriched_email = normalize_email_key(enriched.get("Email", ""))
                         if selected_enriched_email and selected_enriched_email in set(fb_applied_emails):
                             _set_email_with_provenance(

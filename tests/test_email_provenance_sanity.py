@@ -254,6 +254,50 @@ def test_set_email_all_preserves_stronger_existing_over_platform_support() -> No
     assert "support@artist.bandcamp.com" not in ranked
 
 
+@pytest.mark.parametrize("later_source_type", ["facebook_enrich", "instagram_enrich"])
+def test_direct_native_provenance_wins_when_later_platform_repeats_same_email(later_source_type):
+    native = {
+        "artist@example.com": {
+            "source_type": "undiscovered_music_profile",
+            "surface": "undiscovered_music_profile",
+            "source_url": "https://undiscovered.music/artists/native-artist",
+            "extract_method": "profile_direct",
+        }
+    }
+
+    merged = email_provenance.merge_email_provenance_map(
+        native,
+        ["artist@example.com"],
+        source_url=f"https://www.{later_source_type.split('_', 1)[0]}.com/nativeartist",
+        source_type=later_source_type,
+        method="regex",
+    )
+
+    assert merged == native
+
+
+def test_direct_native_provenance_does_not_block_distinct_platform_email():
+    native = {
+        "artist@example.com": {
+            "source_type": "undiscovered_music_profile",
+            "surface": "undiscovered_music_profile",
+            "source_url": "https://undiscovered.music/artists/native-artist",
+            "extract_method": "profile_direct",
+        }
+    }
+
+    merged = email_provenance.merge_email_provenance_map(
+        native,
+        ["facebook@example.com"],
+        source_url="https://www.facebook.com/nativeartist/about",
+        source_type="facebook_enrich",
+        method="regex",
+    )
+
+    assert merged["artist@example.com"] == native["artist@example.com"]
+    assert merged["facebook@example.com"]["source_type"] == "facebook_enrich"
+
+
 def test_apply_payload_does_not_overwrite_with_platform_support() -> None:
     df = pd.DataFrame(
         [

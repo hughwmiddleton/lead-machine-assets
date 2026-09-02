@@ -147,13 +147,14 @@ def _build_provenance_entry(
     return {key: value for key, value in entry.items() if value}
 
 
-def _provenance_sort_key(entry: Mapping[str, Any]) -> tuple[int, int, int, int, str, str]:
+def _provenance_sort_key(entry: Mapping[str, Any]) -> tuple[int, int, int, int, int, str, str]:
     surface = _clean_str(entry.get("surface", "")).lower()
     source_type = _clean_str(entry.get("source_type", "")).lower()
     source_url = _clean_str(entry.get("source_url", ""))
     extract_method = _clean_str(entry.get("extract_method", ""))
     completeness = sum(bool(_clean_str(entry.get(field, ""))) for field in _PROVENANCE_FIELDS)
     return (
+        0 if extract_method.casefold() == "profile_direct" else 1,
         _SURFACE_PRIORITY.get(surface, 80 if surface or source_type or source_url else 99),
         0 if source_url else 1,
         0 if extract_method else 1,
