@@ -21,6 +21,11 @@ from bs4 import BeautifulSoup
 
 from email_provenance import merge_email_provenance_json
 from html_fetcher import fetch_html
+from spotify_client import SpotifyClient
+from spotify_latest_release import (
+    SpotifyLatestReleaseEnricher,
+    extract_spotify_artist_identity,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -504,6 +509,13 @@ def parse_artist_profile(html: str, profile_url: str) -> Dict[str, Any]:
     genre_primary, genres = _extract_genres(soup)
     website_url = _extract_website(soup)
     social_urls, soundcloud_url = _extract_native_social_links(soup)
+    spotify_values = [url for url in social_urls if "spotify.com" in url.lower()]
+    spotify_artist_id = ""
+    spotify_url = ""
+    for value in spotify_values:
+        spotify_artist_id, spotify_url = extract_spotify_artist_identity(value)
+        if spotify_artist_id:
+            break
     bio_text = _extract_bio(soup)
     booking_contact_name, booking_emails = _extract_booking_info(soup)
     booking_email = booking_emails[0] if booking_emails else ""
@@ -517,6 +529,11 @@ def parse_artist_profile(html: str, profile_url: str) -> Dict[str, Any]:
         "website_url": website_url,
         "social_urls": social_urls,
         "soundcloud_url": soundcloud_url,
+        "spotify_artist_id": spotify_artist_id,
+        "spotify_url": spotify_url,
+        "spotify_identity_status": (
+            "valid" if spotify_artist_id else "malformed" if spotify_values else "missing"
+        ),
         "profile_url": profile_url,
         "booking_contact_name": booking_contact_name,
         "booking_email": booking_email,
@@ -672,6 +689,10 @@ def scrape_undiscovered_music(
     rejected = 0
     failed = 0
     attempted = 0
+    spotify_enricher: Optional[SpotifyLatestReleaseEnricher] = None
+    spotify_unavailable = False
+    valid_spotify_identities = 0
+    malformed_spotify_identities = 0
 
     for idx, url in enumerate(urls, start=1):
         attempted += 1
@@ -691,6 +712,31 @@ def scrape_undiscovered_music(
                 continue
 
             row = _build_row(profile, timestamp)
+            spotify_artist_id = str(profile.get("spotify_artist_id") or "")
+            spotify_status = profile.get("spotify_identity_status")
+            if spotify_status == "malformed":
+                malformed_spotify_identities += 1
+            if spotify_artist_id:
+                valid_spotify_identities += 1
+                if spotify_enricher is None and not spotify_unavailable:
+                    try:
+                        spotify_enricher = SpotifyLatestReleaseEnricher(
+                            SpotifyClient(
+                                client_id=params.get("spotify_client_id"),
+                                client_secret=params.get("spotify_client_secret"),
+                                logger=logger_fn,
+                            ),
+                            logger=logger_fn,
+                        )
+                    except Exception as exc:
+                        spotify_unavailable = True
+                        _log(logger_fn, f"[Spotify Latest Release] unavailable: {exc}")
+                if spotify_enricher is not None:
+                    latest = spotify_enricher.lookup(spotify_artist_id)
+                    if not str(row.get("Song Title") or "").strip():
+                        row["Song Title"] = latest.song_title
+                    if not str(row.get("Release Date") or "").strip():
+                        row["Release Date"] = latest.release_date
             rows.append(row)
             accepted += 1
             if max_results and accepted >= max_results:
@@ -705,5 +751,13 @@ def scrape_undiscovered_music(
         logger_fn,
         f"[Undiscovered Music] Complete: attempted={attempted}, accepted={accepted}, "
         f"rejected={rejected}, failed={failed}, total={len(rows)}",
+    )
+    _log(
+        logger_fn,
+        "[Spotify Latest Release] "
+        f"valid_identities={valid_spotify_identities}, "
+        f"successful_lookups={spotify_enricher.successful_lookups if spotify_enricher else 0}, "
+        f"malformed_identities={malformed_spotify_identities}, "
+        f"lookup_failures={spotify_enricher.lookup_failures if spotify_enricher else 0}",
     )
     return rows

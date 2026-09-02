@@ -203,3 +203,61 @@ class SpotifyClient:
         url = f"{self.API_BASE}/playlists/{playlist_id}"
         params = {"fields": "id,name"}
         return self._authorized_request("GET", url, params=params)
+
+    def get_artist_releases(
+        self,
+        artist_id: str,
+        *,
+        include_groups: str = "single,album",
+        max_items: int = 200,
+    ) -> List[Dict]:
+        """Fetch an artist's own album/single releases with bounded paging."""
+        if not artist_id:
+            return []
+        items: List[Dict] = []
+        offset = 0
+        limit = 50
+        max_items = max(1, min(int(max_items or 200), 200))
+        while offset < max_items:
+            page_limit = min(limit, max_items - offset)
+            data = self._authorized_request(
+                "GET",
+                f"{self.API_BASE}/artists/{artist_id}/albums",
+                params={
+                    "include_groups": include_groups,
+                    "limit": page_limit,
+                    "offset": offset,
+                },
+            )
+            page_items = data.get("items", []) or []
+            if not page_items:
+                break
+            items.extend(page_items)
+            offset += len(page_items)
+            if not data.get("next"):
+                break
+        return items[:max_items]
+
+    def get_album_tracks(self, album_id: str, *, max_items: int = 100) -> List[Dict]:
+        """Fetch tracks for one album/single with bounded paging."""
+        if not album_id:
+            return []
+        items: List[Dict] = []
+        offset = 0
+        limit = 50
+        max_items = max(1, min(int(max_items or 100), 100))
+        while offset < max_items:
+            page_limit = min(limit, max_items - offset)
+            data = self._authorized_request(
+                "GET",
+                f"{self.API_BASE}/albums/{album_id}/tracks",
+                params={"limit": page_limit, "offset": offset},
+            )
+            page_items = data.get("items", []) or []
+            if not page_items:
+                break
+            items.extend(page_items)
+            offset += len(page_items)
+            if not data.get("next"):
+                break
+        return items[:max_items]
