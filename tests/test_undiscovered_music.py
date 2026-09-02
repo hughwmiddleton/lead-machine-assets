@@ -90,6 +90,35 @@ STRONG_PROFILE_HTML = """
 </html>
 """
 
+NATIVE_LINKS_PROFILE_HTML = """
+<!DOCTYPE html>
+<html>
+<head><meta property="og:title" content="Native Links Artist | Undiscovered Music"></head>
+<body>
+  <h1>Native Links Artist</h1>
+  <p><strong>Genres:</strong> Indie</p>
+  <p><strong>Website:</strong> <a href="https://nativelinks.example">nativelinks.example</a></p>
+  <div id="social-links">
+    <a href="https://instagram.com/native.links"></a>
+    <a href="https://facebook.com/nativelinksartist"></a>
+    <a href="https://soundcloud.com/native-links"></a>
+    <a href="https://youtube.com/@nativelinks"></a>
+    <a href="https://tiktok.com/@nativelinks"></a>
+    <a href="https://open.spotify.com/artist/native-links"></a>
+    <a href="https://instagram.com/native.links"></a>
+    <a href="/artists/search"></a>
+    <a href="https://undiscovered.music/login"></a>
+    <a href="https://facebook.com/sharer/sharer.php?u=https://nativelinks.example"></a>
+    <a href="mailto:contact"></a>
+  </div>
+  <div id="subbrand">
+    <a href="https://facebook.com/UndiscoveredMusicNetwork"></a>
+  </div>
+  <a class="share-button" href="https://twitter.com/intent/tweet?url=https://nativelinks.example">Share</a>
+</body>
+</html>
+"""
+
 NO_EMAIL_PROFILE_HTML = """
 <!DOCTYPE html>
 <html>
@@ -176,6 +205,59 @@ EMPTY_PROFILE_HTML = """
 """
 
 
+def _cloudflare_encode(email: str, key: int = 0x42) -> str:
+    return f"{key:02x}" + "".join(f"{ord(char) ^ key:02x}" for char in email)
+
+
+BOOKING_EMAIL = "bookings@nativeartist.net"
+CHROME_EMAIL = "support@undiscovered.music"
+CLOUDFLARE_BOOKING_CARD_HTML = f"""
+<!DOCTYPE html>
+<html>
+<head><meta property="og:title" content="Native Booking Artist"></head>
+<body>
+  <h1>Native Booking Artist</h1>
+  <p><strong>Genres:</strong> Indie</p>
+  <div class="card mb-5">
+    <div class="card-header where-card">Booking Contact</div>
+    <div class="card-body">
+      <div>Native Booking Agent</div>
+      <div>
+        <a href="/cdn-cgi/l/email-protection#{_cloudflare_encode(BOOKING_EMAIL)}">
+          <span class="__cf_email__" data-cfemail="{_cloudflare_encode(BOOKING_EMAIL)}">[email protected]</span>
+        </a>
+      </div>
+    </div>
+  </div>
+  <footer>
+    <a href="/cdn-cgi/l/email-protection#{_cloudflare_encode(CHROME_EMAIL)}">
+      <span class="__cf_email__" data-cfemail="{_cloudflare_encode(CHROME_EMAIL)}">[email protected]</span>
+    </a>
+    <a href="mailto:hello@undiscovered.music">Site contact</a>
+  </footer>
+</body>
+</html>
+"""
+
+MAILTO_BOOKING_CARD_HTML = """
+<!DOCTYPE html>
+<html>
+<head><meta property="og:title" content="Mailto Booking Artist"></head>
+<body>
+  <h1>Mailto Booking Artist</h1>
+  <p><strong>Genres:</strong> Folk</p>
+  <div class="card mb-5">
+    <div class="card-header where-card">Booking Contact</div>
+    <div class="card-body">
+      <div>Mailto Booking Agent</div>
+      <div><a href="mailto:agent@mailtoartist.net?subject=Booking">Email agent</a></div>
+    </div>
+  </div>
+</body>
+</html>
+"""
+
+
 @pytest.fixture
 def mock_fetch_html(monkeypatch):
     """Monkeypatch html_fetcher.fetch_html to return controlled responses."""
@@ -230,6 +312,18 @@ def test_navigation_non_artist_urls_ignored(mock_fetch_html):
     assert "https://undiscovered.music/artists/search" not in urls
 
 
+def test_canonical_directory_hrefs_preserve_quotes_and_url_encoding():
+    html = """
+    <a href='/artists/"poor"_howard_stith'>"Poor" Howard Stith</a>
+    <a href="/artists/rock%27n%27roll%20collective">Rock'n'Roll Collective</a>
+    """
+
+    assert um._extract_profile_links(html) == [
+        'https://undiscovered.music/artists/"poor"_howard_stith',
+        "https://undiscovered.music/artists/rock%27n%27roll%20collective",
+    ]
+
+
 # ---------------------------------------------------------------------------
 # 5-13. Profile parsing
 # ---------------------------------------------------------------------------
@@ -248,6 +342,105 @@ def test_strong_profile_parses_correctly():
     assert profile["upcoming_show_count"] == 2
     assert profile["next_upcoming_show_date"] == "Sep 15, 2025"
     assert "blues and soul" in profile["bio_text"].lower()
+
+
+def test_native_booking_card_extracts_contact_name_and_cloudflare_email():
+    profile_url = "https://undiscovered.music/artists/native-booking-artist"
+    profile = um.parse_artist_profile(CLOUDFLARE_BOOKING_CARD_HTML, profile_url)
+    row = um._build_row(profile, "2025-01-01")
+
+    assert profile["booking_contact_name"] == "Native Booking Agent"
+    assert profile["booking_email"] == BOOKING_EMAIL
+    assert row["Booking_Contact_Name"] == "Native Booking Agent"
+    assert row["Email"] == BOOKING_EMAIL
+    assert row["Email_All"] == BOOKING_EMAIL
+    assert row["Email_Source_URL"] == profile_url
+    assert row["Email_Source_Type"] == "undiscovered_music_profile"
+    assert row["Email_Extract_Method"] == "profile_direct"
+    assert json.loads(row["Email_Provenance_JSON"]) == {
+        BOOKING_EMAIL: {
+            "extract_method": "profile_direct",
+            "source_type": "undiscovered_music_profile",
+            "source_url": profile_url,
+            "surface": "undiscovered_music_profile",
+        }
+    }
+
+
+def test_normal_mailto_booking_email_still_works_inside_booking_card():
+    profile = um.parse_artist_profile(
+        MAILTO_BOOKING_CARD_HTML,
+        "https://undiscovered.music/artists/mailto-booking-artist",
+    )
+
+    assert profile["booking_contact_name"] == "Mailto Booking Agent"
+    assert profile["booking_email"] == "agent@mailtoartist.net"
+
+
+def test_multiple_native_booking_emails_use_existing_email_all_convention():
+    html = """
+    <html><head><meta property="og:title" content="Two Agents"></head><body>
+      <p><strong>Genres:</strong> Rock</p>
+      <div class="card">
+        <div class="card-header">Booking Contact</div>
+        <div class="card-body">
+          <div>Two Agent Team</div>
+          <div><a href="mailto:first@twoagents.net">First</a></div>
+          <div><a href="mailto:second@twoagents.net">Second</a></div>
+        </div>
+      </div>
+    </body></html>
+    """
+    profile_url = "https://undiscovered.music/artists/two-agents"
+    profile = um.parse_artist_profile(html, profile_url)
+    row = um._build_row(profile, "2025-01-01")
+
+    assert row["Email"] == "first@twoagents.net"
+    assert row["Email_All"] == "first@twoagents.net;second@twoagents.net"
+    assert set(json.loads(row["Email_Provenance_JSON"])) == {
+        "first@twoagents.net",
+        "second@twoagents.net",
+    }
+
+
+def test_cloudflare_decoder_rejects_malformed_or_non_email_payloads():
+    assert um._decode_cloudflare_email(_cloudflare_encode(BOOKING_EMAIL)) == BOOKING_EMAIL
+    assert um._decode_cloudflare_email("not-hex") == ""
+    assert um._decode_cloudflare_email("42") == ""
+    assert um._decode_cloudflare_email(_cloudflare_encode("not an email")) == ""
+
+
+def test_cloudflare_and_site_contacts_outside_booking_card_are_ignored():
+    profile = um.parse_artist_profile(
+        CLOUDFLARE_BOOKING_CARD_HTML,
+        "https://undiscovered.music/artists/native-booking-artist",
+    )
+
+    assert profile["booking_emails"] == [BOOKING_EMAIL]
+    assert CHROME_EMAIL not in profile["booking_emails"]
+    assert "hello@undiscovered.music" not in profile["booking_emails"]
+
+
+def test_page_with_only_sitewide_contacts_leaves_booking_fields_blank():
+    html = f"""
+    <html><head><meta property="og:title" content="No Booking Artist"></head><body>
+      <p><strong>Genres:</strong> Ambient</p>
+      <footer>
+        <a href="/cdn-cgi/l/email-protection#{_cloudflare_encode(CHROME_EMAIL)}">
+          <span class="__cf_email__" data-cfemail="{_cloudflare_encode(CHROME_EMAIL)}">[email protected]</span>
+        </a>
+        <a href="mailto:hello@undiscovered.music">Site contact</a>
+      </footer>
+    </body></html>
+    """
+    profile = um.parse_artist_profile(html, "https://undiscovered.music/artists/no-booking")
+    row = um._build_row(profile, "2025-01-01")
+
+    assert profile["booking_contact_name"] == ""
+    assert profile["booking_email"] == ""
+    assert row["Booking_Contact_Name"] == ""
+    assert row["Email"] == ""
+    assert row["Email_Provenance_JSON"] == ""
 
 
 def test_hometown_parses_correctly():
@@ -269,14 +462,89 @@ def test_website_parses_and_enters_enrichment_path():
     assert row["External Links"] == "https://deltasoulmusic.com"
 
 
+def test_native_instagram_and_facebook_urls_are_retained():
+    profile = um.parse_artist_profile(
+        NATIVE_LINKS_PROFILE_HTML,
+        "https://undiscovered.music/artists/native-links",
+    )
+    row = um._build_row(profile, "2025-01-01")
+
+    assert "https://instagram.com/native.links" in row["Social Link"].split(" | ")
+    assert "https://facebook.com/nativelinksartist" in row["Social Link"].split(" | ")
+
+
+def test_native_soundcloud_url_populates_existing_soundcloud_field():
+    profile = um.parse_artist_profile(
+        NATIVE_LINKS_PROFILE_HTML,
+        "https://undiscovered.music/artists/native-links",
+    )
+    row = um._build_row(profile, "2025-01-01")
+
+    assert row["SoundCloud Link"] == "https://soundcloud.com/native-links"
+
+
+def test_multiple_native_links_preserve_website_and_all_supported_socials():
+    profile = um.parse_artist_profile(
+        NATIVE_LINKS_PROFILE_HTML,
+        "https://undiscovered.music/artists/native-links",
+    )
+    row = um._build_row(profile, "2025-01-01")
+
+    assert row["External Links"] == "https://nativelinks.example"
+    assert row["Social Link"].split(" | ") == [
+        "https://instagram.com/native.links",
+        "https://facebook.com/nativelinksartist",
+        "https://soundcloud.com/native-links",
+        "https://youtube.com/@nativelinks",
+        "https://tiktok.com/@nativelinks",
+        "https://open.spotify.com/artist/native-links",
+    ]
+
+
+def test_internal_navigation_site_chrome_and_share_links_are_ignored():
+    profile = um.parse_artist_profile(
+        NATIVE_LINKS_PROFILE_HTML,
+        "https://undiscovered.music/artists/native-links",
+    )
+    row = um._build_row(profile, "2025-01-01")
+    emitted = row["Social Link"]
+
+    assert "undiscovered.music" not in emitted
+    assert "UndiscoveredMusicNetwork" not in emitted
+    assert "/sharer/" not in emitted
+    assert "/intent/" not in emitted
+    assert "mailto:" not in emitted
+
+
+def test_native_links_do_not_change_source_url_or_provenance_fields():
+    profile_url = "https://undiscovered.music/artists/native-links"
+    profile = um.parse_artist_profile(NATIVE_LINKS_PROFILE_HTML, profile_url)
+    row = um._build_row(profile, "2025-01-01")
+
+    assert row["Source URL"] == profile_url
+    assert row["Source_URL"] == profile_url
+    assert row["Lead_Source"] == "Undiscovered Music"
+    assert row["Source_Directory"] == "undiscovered_music"
+    assert row["Source Directory"] == "Undiscovered Music"
+    assert row["Email_Source_URL"] == ""
+    assert row["Email_Source_Type"] == ""
+    assert row["Email_Extract_Method"] == ""
+    assert row["Email_Provenance_JSON"] == ""
+
+
 def test_public_booking_email_has_correct_provenance():
     profile = um.parse_artist_profile(STRONG_PROFILE_HTML, "https://undiscovered.music/artists/delta-soul")
     row = um._build_row(profile, "2025-01-01")
     assert row["Email"] == "booking@deltasoulmusic.com"
     assert row["Email_Source_Type"] == "undiscovered_music_profile"
     assert row["Email_Extract_Method"] == "profile_direct"
-    assert "undiscovered_music_profile" in row["Email_Provenance_JSON"]
     assert row["Email_Source_URL"] == "https://undiscovered.music/artists/delta-soul"
+    assert json.loads(row["Email_Provenance_JSON"])["booking@deltasoulmusic.com"] == {
+        "extract_method": "profile_direct",
+        "source_type": "undiscovered_music_profile",
+        "source_url": "https://undiscovered.music/artists/delta-soul",
+        "surface": "undiscovered_music_profile",
+    }
 
 
 def test_profile_without_booking_email_remains_valid():
@@ -342,6 +610,83 @@ def test_one_failed_profile_does_not_abort_run(mock_fetch_html, monkeypatch, tmp
     # Should get the one valid profile, not crash
     assert len(rows) >= 1
     assert any(r["Artist Name"] == "Delta Soul" for r in rows)
+
+
+def test_scrape_counts_only_accepted_rows_toward_target_and_stops(monkeypatch):
+    urls = [
+        "https://undiscovered.music/artists/16_swan_street",
+        'https://undiscovered.music/artists/"poor"_howard_stith',
+        "https://undiscovered.music/artists/blue-room",
+        "https://undiscovered.music/artists/echo-drift",
+        "https://undiscovered.music/artists/frost-byte",
+        "https://undiscovered.music/artists/must-not-be-fetched",
+    ]
+    html_by_url = {
+        urls[0]: EMPTY_PROFILE_HTML,
+        urls[1]: STRONG_PROFILE_HTML.replace("Delta Soul", '"Poor" Howard Stith'),
+        urls[2]: VENUE_PROFILE_HTML,
+        urls[3]: NO_EMAIL_PROFILE_HTML,
+        urls[4]: NO_WEBSITE_PROFILE_HTML,
+        urls[5]: STRONG_PROFILE_HTML,
+    }
+    discovery_limits = []
+    fetched = []
+    logs = []
+
+    def _discover(max_results, logger_fn=None):
+        discovery_limits.append(max_results)
+        return urls
+
+    def _fetch(url, **kwargs):
+        fetched.append(url)
+        return {"html": html_by_url[url], "status": 200, "reason": "ok"}
+
+    monkeypatch.setattr(um, "discover_artist_urls", _discover)
+    monkeypatch.setattr(um, "fetch_html", _fetch)
+
+    rows = um.scrape_undiscovered_music(target_count=3, params={}, logger_fn=logs.append)
+
+    assert discovery_limits == [0]
+    assert len(rows) == 3
+    assert fetched == urls[:5]
+    assert rows[0]["Artist Name"] == '"Poor" Howard Stith'
+    assert rows[0]["Source URL"] == urls[1]
+    assert rows[0]["Source_URL"] == urls[1]
+    assert all(row["Lead_Source"] == "Undiscovered Music" for row in rows)
+    assert all(row["Source_Directory"] == "undiscovered_music" for row in rows)
+    assert any("Rejected" in message and "16_swan_street" in message for message in logs)
+    assert any("attempted=5, accepted=3, rejected=2, failed=0" in message for message in logs)
+
+
+def test_scrape_returns_available_rows_when_candidate_pool_is_exhausted(monkeypatch):
+    urls = [
+        "https://undiscovered.music/artists/empty",
+        "https://undiscovered.music/artists/echo-drift",
+        "https://undiscovered.music/artists/unavailable",
+        "https://undiscovered.music/artists/frost-byte",
+    ]
+    responses = {
+        urls[0]: {"html": EMPTY_PROFILE_HTML, "status": 200},
+        urls[1]: {"html": NO_EMAIL_PROFILE_HTML, "status": 200},
+        urls[2]: {"html": "", "status": 503},
+        urls[3]: {"html": NO_WEBSITE_PROFILE_HTML, "status": 200},
+    }
+    fetched = []
+    logs = []
+
+    monkeypatch.setattr(um, "discover_artist_urls", lambda max_results, logger_fn=None: urls)
+
+    def _fetch(url, **kwargs):
+        fetched.append(url)
+        return responses[url]
+
+    monkeypatch.setattr(um, "fetch_html", _fetch)
+
+    rows = um.scrape_undiscovered_music(target_count=3, params={}, logger_fn=logs.append)
+
+    assert len(rows) == 2
+    assert fetched == urls
+    assert any("attempted=4, accepted=2, rejected=1, failed=1" in message for message in logs)
 
 
 def test_timeout_network_failure_is_neutral(mock_fetch_html):
@@ -467,6 +812,9 @@ def test_run_directory_job_dispatches_undiscovered_music(monkeypatch, tmp_path: 
                 "Location": "Nashville",
                 "Song Title": "",
                 "Primary Genre": "Country",
+                "Social Link": "https://instagram.com/testartist | https://facebook.com/testartist",
+                "SoundCloud Link": "https://soundcloud.com/testartist",
+                "External Links": "https://testartist.example",
                 "Email": "test@test.com",
                 "Source URL": "https://undiscovered.music/artists/test-artist",
             }
@@ -484,6 +832,9 @@ def test_run_directory_job_dispatches_undiscovered_music(monkeypatch, tmp_path: 
     df = pd.read_csv(result_path, dtype=str, keep_default_na=False).fillna("")
     assert len(df) == 1
     assert df.at[0, "Artist Name"] == "Test Artist"
+    assert df.at[0, "Social Link"] == "https://instagram.com/testartist | https://facebook.com/testartist"
+    assert df.at[0, "SoundCloud Link"] == "https://soundcloud.com/testartist"
+    assert df.at[0, "External Links"] == "https://testartist.example"
     assert df.at[0, "Lead_Source"] == "Undiscovered Music"
     assert df.at[0, "Source_Directory"] == "undiscovered_music"
     assert calls == [(5, {"max_results": 5, "url": ""})]

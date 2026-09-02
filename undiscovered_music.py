@@ -19,6 +19,7 @@ from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup
 
+from email_provenance import merge_email_provenance_json
 from html_fetcher import fetch_html
 
 logger = logging.getLogger(__name__)
@@ -62,6 +63,26 @@ _JUNK_NAME_PATTERNS = (
 
 # Minimum credible identity threshold
 _MIN_CREDIBLE_SIGNALS = 1
+
+_NATIVE_SOCIAL_HOSTS = (
+    "bandcamp.com",
+    "facebook.com",
+    "instagram.com",
+    "soundcloud.com",
+    "spotify.com",
+    "tiktok.com",
+    "twitter.com",
+    "x.com",
+    "youtu.be",
+    "youtube.com",
+)
+
+_SOCIAL_SHARE_PATH_PREFIXES = (
+    "/dialog/share",
+    "/intent/",
+    "/share",
+    "/sharer",
+)
 
 
 def _log(fn: LoggerFn, message: str) -> None:
@@ -273,57 +294,144 @@ def _extract_website(soup: BeautifulSoup) -> str:
     return ""
 
 
+def _host_matches(host: str, domain: str) -> bool:
+    return host == domain or host.endswith("." + domain)
+
+
+def _extract_native_social_links(soup: BeautifulSoup) -> Tuple[List[str], str]:
+    """Return source-native profile links and the first SoundCloud URL.
+
+    Undiscovered renders artist-owned social fields inside ``#social-links``.
+    Restricting extraction to that field prevents the site's own social link,
+    navigation, and sharing controls from being attributed to the artist.
+    """
+    links: List[str] = []
+    soundcloud_url = ""
+
+    for tag in soup.select("#social-links a[href]"):
+        href = _norm_text(tag.get("href"))
+        if not href:
+            continue
+        absolute = urljoin(BASE_URL, href)
+        parsed = urlparse(absolute)
+        if parsed.scheme not in {"http", "https"}:
+            continue
+        host = (parsed.hostname or "").lower().removeprefix("www.")
+        if not host or _host_matches(host, "undiscovered.music"):
+            continue
+        if not any(_host_matches(host, domain) for domain in _NATIVE_SOCIAL_HOSTS):
+            continue
+        path = (parsed.path or "").lower()
+        if any(path.startswith(prefix) for prefix in _SOCIAL_SHARE_PATH_PREFIXES):
+            continue
+        if absolute in links:
+            continue
+        links.append(absolute)
+        if not soundcloud_url and _host_matches(host, "soundcloud.com"):
+            soundcloud_url = absolute
+
+    return links, soundcloud_url
+
+
 def _is_valid_email(candidate: str) -> bool:
-    if not candidate or "@" not in candidate:
+    if not candidate:
         return False
-    lower = candidate.lower()
+    lower = candidate.strip().lower()
     if "[email" in lower or "email protected" in lower:
         return False
     if lower.endswith("@example.com") or lower.endswith("@test.com"):
         return False
-    return True
+    return bool(re.fullmatch(r"[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?(?:\.[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?)+", lower, re.I))
 
 
-def _extract_booking_info(soup: BeautifulSoup) -> Tuple[str, str]:
-    """Return (contact_name, email)."""
-    email = ""
+def _decode_cloudflare_email(encoded: str) -> str:
+    """Decode standard Cloudflare email-protection hex locally."""
+    value = _norm_text(encoded)
+    if len(value) < 4 or len(value) % 2 or not re.fullmatch(r"[0-9a-fA-F]+", value):
+        return ""
+    try:
+        key = int(value[:2], 16)
+        decoded = bytes(int(value[idx:idx + 2], 16) ^ key for idx in range(2, len(value), 2)).decode("utf-8")
+    except (UnicodeDecodeError, ValueError):
+        return ""
+    decoded = decoded.strip().lower()
+    return decoded if _is_valid_email(decoded) else ""
+
+
+def _booking_contact_surfaces(soup: BeautifulSoup) -> List[Any]:
+    """Return only native booking/management containers, never page chrome."""
+    surfaces: List[Any] = []
+
+    # Verified live structure: .card > .card-header + .card-body.
+    for card in soup.select(".card"):
+        header = card.find(class_="card-header", recursive=False)
+        if header and _norm_text(header.get_text(" ", strip=True)).lower() == "booking contact":
+            surfaces.append(card)
+
+    # Retain the older inline form without reopening page-wide email scraping.
+    for label_tag in soup.find_all(["strong", "label"]):
+        label = _norm_text(label_tag.get_text(" ", strip=True)).rstrip(":").lower()
+        if label not in {"booking", "bookings", "management", "booking contact"}:
+            continue
+        container = label_tag.find_parent(["p", "li", "section", "div"])
+        if container and container not in surfaces:
+            surfaces.append(container)
+
+    return surfaces
+
+
+def _extract_booking_info(soup: BeautifulSoup) -> Tuple[str, List[str]]:
+    """Return (contact_name, emails) from artist booking surfaces only."""
+    emails: List[str] = []
     contact_name = ""
-    # mailto links
-    for tag in soup.find_all("a", href=re.compile(r"^mailto:", re.I)):
-        href = tag["href"]
-        match = re.search(r"mailto:([^?\s]+)", href, re.I)
-        if match:
-            candidate = match.group(1).strip().lower()
-            if _is_valid_email(candidate):
-                email = candidate
-        if not contact_name:
-            contact_name = _norm_text(tag.get_text(" ", strip=True))
-    # Look for booking/management labels
-    for label in ["booking", "bookings", "management", "contact", "press", "email"]:
-        for tag in soup.find_all(string=re.compile(re.escape(label), re.I)):
-            parent = tag.parent
-            if not parent:
-                continue
-            container = parent.find_parent(["div", "section", "li", "p"])
-            if not container:
-                container = parent
-            text = container.get_text(" ", strip=True)
-            # Extract email from container text
-            em_match = re.search(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", text)
-            if em_match:
-                candidate = em_match.group(0).lower()
-                if _is_valid_email(candidate):
-                    email = candidate
-            # Extract name before email or label
-            lines = [l.strip() for l in text.split("\n") if l.strip()]
-            for line in lines:
-                if label.lower() in line.lower() and ":" in line:
-                    name_part = line.split(":", 1)[1].strip()
-                    name_part = re.sub(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", "", name_part)
-                    name_part = re.sub(r"[\s\u2013\u2014\-–—]+$", "", name_part).strip(", ")
-                    if name_part and not contact_name:
-                        contact_name = name_part
-    return contact_name, email
+
+    def _remember_email(candidate: str) -> None:
+        normalized = (candidate or "").strip().lower()
+        if _is_valid_email(normalized) and normalized not in emails:
+            emails.append(normalized)
+
+    for surface in _booking_contact_surfaces(soup):
+        body = surface.select_one(":scope > .card-body") if "card" in (surface.get("class") or []) else None
+        scoped = body or surface
+
+        for tag in scoped.select("[data-cfemail]"):
+            _remember_email(_decode_cloudflare_email(tag.get("data-cfemail", "")))
+
+        for tag in scoped.select('a[href*="/cdn-cgi/l/email-protection#"]'):
+            fragment = (tag.get("href") or "").split("#", 1)
+            if len(fragment) == 2:
+                _remember_email(_decode_cloudflare_email(fragment[1]))
+
+        for tag in scoped.find_all("a", href=re.compile(r"^mailto:", re.I)):
+            match = re.search(r"^mailto:([^?\s]+)", tag.get("href") or "", re.I)
+            if match:
+                _remember_email(match.group(1))
+
+        scoped_text = scoped.get_text(" ", strip=True)
+        for candidate in re.findall(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", scoped_text):
+            _remember_email(candidate)
+
+        if contact_name:
+            continue
+        if body:
+            for child in body.find_all("div", recursive=False):
+                if child.select_one("[data-cfemail], a[href^='mailto:'], a[href*='/cdn-cgi/l/email-protection']"):
+                    continue
+                candidate = _norm_text(child.get_text(" ", strip=True))
+                if candidate and not re.search(r"@|email\s*protected", candidate, re.I):
+                    contact_name = candidate
+                    break
+        else:
+            candidate = _norm_text(scoped_text)
+            label_text = _norm_text(surface.find(["strong", "label"]).get_text(" ", strip=True))
+            candidate = re.sub(r"^" + re.escape(label_text) + r"\s*", "", candidate, flags=re.I)
+            candidate = re.sub(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", "", candidate)
+            candidate = re.sub(r"\[email\s+protected\]", "", candidate, flags=re.I)
+            candidate = re.sub(r"^[\s:–—-]+|[\s:–—-]+$", "", candidate).strip(", ")
+            if candidate:
+                contact_name = candidate
+
+    return contact_name, emails
 
 
 def _extract_bio(soup: BeautifulSoup) -> str:
@@ -395,8 +503,10 @@ def parse_artist_profile(html: str, profile_url: str) -> Dict[str, Any]:
     hometown_raw = _extract_hometown(soup)
     genre_primary, genres = _extract_genres(soup)
     website_url = _extract_website(soup)
+    social_urls, soundcloud_url = _extract_native_social_links(soup)
     bio_text = _extract_bio(soup)
-    booking_contact_name, booking_email = _extract_booking_info(soup)
+    booking_contact_name, booking_emails = _extract_booking_info(soup)
+    booking_email = booking_emails[0] if booking_emails else ""
     upcoming_show_count, next_upcoming_show_date = _extract_upcoming_shows(soup)
 
     return {
@@ -405,9 +515,12 @@ def parse_artist_profile(html: str, profile_url: str) -> Dict[str, Any]:
         "genre_primary": genre_primary,
         "genres": genres,
         "website_url": website_url,
+        "social_urls": social_urls,
+        "soundcloud_url": soundcloud_url,
         "profile_url": profile_url,
         "booking_contact_name": booking_contact_name,
         "booking_email": booking_email,
+        "booking_emails": booking_emails,
         "upcoming_show_count": upcoming_show_count,
         "next_upcoming_show_date": next_upcoming_show_date,
         "bio_text": bio_text,
@@ -459,15 +572,18 @@ def _build_row(profile: Dict[str, Any], timestamp: str) -> Row:
     genre_primary = profile.get("genre_primary") or ""
     genres = profile.get("genres") or ""
     website = profile.get("website_url") or ""
+    social_urls = profile.get("social_urls") or []
+    soundcloud_url = profile.get("soundcloud_url") or ""
     profile_url = profile.get("profile_url") or ""
     booking_name = profile.get("booking_contact_name") or ""
     booking_email = profile.get("booking_email") or ""
+    booking_emails = profile.get("booking_emails") or ([booking_email] if booking_email else [])
     upcoming_count = profile.get("upcoming_show_count", 0)
     next_show = profile.get("next_upcoming_show_date") or ""
 
     # External Links: start with website if present
     external_links = website
-    social_link = ""
+    social_link = " | ".join(social_urls)
 
     # Email provenance fields
     email = ""
@@ -481,10 +597,13 @@ def _build_row(profile: Dict[str, Any], timestamp: str) -> Row:
         email_source_url = profile_url
         email_source_type = "undiscovered_music_profile"
         email_extract_method = "profile_direct"
-        email_provenance_json = (
-            f'[{{"email":"{booking_email}","source_type":"undiscovered_music_profile",'
-            f'"surface":"undiscovered_music_profile","source_url":"{profile_url}",'
-            f'"extract_method":"profile_direct"}}]'
+        email_provenance_json = merge_email_provenance_json(
+            "",
+            booking_emails,
+            source_url=profile_url,
+            source_type=email_source_type,
+            method=email_extract_method,
+            surface="undiscovered_music_profile",
         )
 
     row: Row = {
@@ -493,7 +612,7 @@ def _build_row(profile: Dict[str, Any], timestamp: str) -> Row:
         "Song Title": "",
         "Sounds Like": "",
         "Social Link": social_link,
-        "SoundCloud Link": "",
+        "SoundCloud Link": soundcloud_url,
         "Played on triple J": "",
         "Played on Unearthed": "",
         "Release Date": "",
@@ -501,6 +620,7 @@ def _build_row(profile: Dict[str, Any], timestamp: str) -> Row:
         "Date Added": timestamp,
         "External Links": external_links,
         "Email": email,
+        "Email_All": ";".join(booking_emails),
         "Email_Source_URL": email_source_url,
         "Email_Source_Type": email_source_type,
         "Email_Extract_Method": email_extract_method,
@@ -527,7 +647,7 @@ def scrape_undiscovered_music(
     """Main entry point for Undiscovered Music discovery.
 
     Args:
-        target_count: Maximum artist profiles to process. 0 means default cap.
+        target_count: Maximum accepted artist rows to return. 0 means default cap.
         params: Optional dict with keys like `max_results`, `url`, etc.
         logger_fn: Optional logging callable.
 
@@ -540,7 +660,9 @@ def scrape_undiscovered_music(
 
     _log(logger_fn, f"[Undiscovered Music] Starting discovery target={max_results}")
 
-    urls = discover_artist_urls(max_results=max_results, logger_fn=logger_fn)
+    # Rejections and fetch failures must not consume the operator's accepted-row
+    # target, so qualification needs access to the complete candidate pool.
+    urls = discover_artist_urls(max_results=0, logger_fn=logger_fn)
     if not urls:
         _log(logger_fn, "[Undiscovered Music] No profile URLs discovered")
         return []
@@ -549,8 +671,10 @@ def scrape_undiscovered_music(
     accepted = 0
     rejected = 0
     failed = 0
+    attempted = 0
 
     for idx, url in enumerate(urls, start=1):
+        attempted += 1
         try:
             _log(logger_fn, f"[Undiscovered Music] ({idx}/{len(urls)}) Fetching {url}")
             result = fetch_html(url, directory=SOURCE_KEY, timeout_s=REQUEST_TIMEOUT_S)
@@ -579,6 +703,7 @@ def scrape_undiscovered_music(
 
     _log(
         logger_fn,
-        f"[Undiscovered Music] Complete: accepted={accepted}, rejected={rejected}, failed={failed}, total={len(rows)}",
+        f"[Undiscovered Music] Complete: attempted={attempted}, accepted={accepted}, "
+        f"rejected={rejected}, failed={failed}, total={len(rows)}",
     )
     return rows
