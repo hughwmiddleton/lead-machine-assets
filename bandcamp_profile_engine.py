@@ -373,6 +373,116 @@ def bandcamp_extract_release_date(html_text: str) -> Dict[str, Optional[str]]:
     return {"date_iso": None, "precision": None, "raw": None}
 
 
+def _tralbum_payloads(soup: BeautifulSoup):
+    """Yield decoded Bandcamp tralbum payloads without interpreting titles."""
+    for node in soup.find_all(attrs={"data-tralbum": True}):
+        try:
+            data = json.loads(node.get("data-tralbum") or "")
+        except Exception:
+            continue
+        if isinstance(data, dict):
+            yield data
+
+    marker = re.compile(r"var\s+TralbumData\s*=", re.I)
+    for script in soup.find_all("script"):
+        text = script.string or ""
+        match = marker.search(text)
+        if not match:
+            continue
+        remainder = text[match.end():]
+        start = remainder.find("{")
+        if start < 0:
+            continue
+        depth = 0
+        end = None
+        in_string = False
+        escaped = False
+        for index, character in enumerate(remainder[start:]):
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif character == "\\":
+                    escaped = True
+                elif character == '"':
+                    in_string = False
+                continue
+            if character == '"':
+                in_string = True
+            elif character == "{":
+                depth += 1
+            elif character == "}":
+                depth -= 1
+                if depth == 0:
+                    end = start + index + 1
+                    break
+        try:
+            data = json.loads(remainder[start:end]) if end is not None else {}
+        except Exception:
+            continue
+        if isinstance(data, dict):
+            yield data
+
+
+def bandcamp_extract_track_title(html_text: str) -> str:
+    """Return a demonstrable track title, never a bare album/release title.
+
+    Bandcamp's ``current.title`` and page heading can name an album or EP, so
+    neither is accepted by itself. A title must come from the release's
+    structured ``trackinfo`` list, a MusicRecording JSON-LD object, or a
+    concrete track-list row. The first stable listed track is deterministic.
+    """
+    soup = BeautifulSoup(html_text or "", "html.parser")
+    for payload in _tralbum_payloads(soup):
+        trackinfo = payload.get("trackinfo")
+        if not isinstance(trackinfo, list):
+            current = payload.get("current")
+            trackinfo = current.get("trackinfo") if isinstance(current, dict) else None
+        if isinstance(trackinfo, list):
+            for track in trackinfo:
+                if not isinstance(track, dict):
+                    continue
+                title = str(track.get("title") or "").strip()
+                if title:
+                    return title
+
+    for script in soup.find_all("script", type=lambda value: value and "ld+json" in value):
+        try:
+            data = json.loads(script.string or "")
+        except Exception:
+            continue
+        pending = list(data) if isinstance(data, list) else [data]
+        while pending:
+            item = pending.pop(0)
+            if not isinstance(item, dict):
+                continue
+            item_type = item.get("@type")
+            types = {str(value).casefold() for value in item_type} if isinstance(item_type, list) else {str(item_type).casefold()}
+            if "musicrecording" in types:
+                title = str(item.get("name") or "").strip()
+                if title:
+                    return title
+            for key in ("track", "tracks", "itemListElement"):
+                child = item.get(key)
+                if isinstance(child, list):
+                    pending.extend(child)
+                elif isinstance(child, dict):
+                    pending.append(child)
+
+    selectors = (
+        "#track_table tr.track_row_view .track-title",
+        "#track_table .track-title",
+        "tr.track_row_view [itemprop='name']",
+        "a[itemprop='item'] [itemprop='name']",
+    )
+    for selector in selectors:
+        for node in soup.select(selector):
+            title = node.get_text(" ", strip=True)
+            title = re.sub(r"^\s*\d+[.)]?\s*", "", title).strip()
+            if title:
+                return title
+    return ""
+
+
 def _norm_tokens(line: str):
     parts = re.split(r"[,/|•]+|\band\b|\&", line or "", flags=re.I)
     output = []
@@ -605,6 +715,8 @@ def parse_bandcamp_profile_html(
         "latest_release_title": "",
         "latest_release_date": "",
         "latest_release_precision": "",
+        "latest_track_title": "",
+        "latest_track_date": "",
         "sounds_like": bandcamp_extract_sounds_like(soup),
         "primary_genre": primary_genre,
         "source_tag": "",
@@ -695,12 +807,17 @@ def parse_bandcamp_profile_html(
         title = release_item.find(class_=re.compile("title", re.I))
         if title:
             profile["latest_release_title"] = title.get_text(strip=True)
+        selected_release_date = ""
         date = release_item.find(class_=re.compile("release", re.I))
         if date and not profile["latest_release_date"]:
             raw = date.get_text(strip=True)
             iso, precision = _parse_any_date_to_iso(raw)
             profile["latest_release_date"] = iso or raw
             profile["latest_release_precision"] = precision or ""
+            selected_release_date = iso or ""
+        elif date:
+            raw = date.get_text(strip=True)
+            selected_release_date = _parse_any_date_to_iso(raw)[0] or ""
         anchor = release_item.find("a", href=True)
         if release_fetcher and anchor:
             release_url = urljoin(canonical_url, anchor.get("href", ""))
@@ -711,6 +828,11 @@ def parse_bandcamp_profile_html(
                     if release.get("date_iso"):
                         profile["latest_release_date"] = release["date_iso"]
                         profile["latest_release_precision"] = release.get("precision") or profile["latest_release_precision"]
+                    track_title = bandcamp_extract_track_title(release_html)
+                    track_date = release.get("date_iso") or selected_release_date
+                    if track_title and track_date:
+                        profile["latest_track_title"] = track_title
+                        profile["latest_track_date"] = track_date
                     if not profile["latest_release_title"]:
                         release_soup = BeautifulSoup(release_html, "html.parser")
                         title = release_soup.select_one("h2.trackTitle") or release_soup.select_one(".trackTitle") or release_soup.select_one("h1")
@@ -813,14 +935,41 @@ def fetch_bandcamp_profile(
         try:
             response = active_session.get(url, timeout=timeout, headers=bandcamp_headers())
             response.raise_for_status()
-            return getattr(response, "text", "") or ""
+            release_html = getattr(response, "text", "") or ""
         except Exception:
-            return ""
+            release_html = ""
+        if browser_fetcher and bandcamp_challenge_reason(release_html):
+            try:
+                browser_html = browser_fetcher(url) or ""
+            except Exception:
+                browser_html = ""
+            if browser_html and not bandcamp_challenge_reason(browser_html):
+                return browser_html
+        return release_html
+
+    preferred_release_url = ""
+    try:
+        requested = urlparse(profile_url if "://" in profile_url else f"https://{profile_url}")
+        requested_host = (requested.hostname or "").lower()
+        canonical_host = (urlparse(canonical_url).hostname or "").lower()
+        requested_path = re.sub(r"/+", "/", requested.path or "")
+        if requested_host == canonical_host and re.fullmatch(r"/(?:track|album)/[^/]+/?", requested_path, re.I):
+            preferred_release_url = f"https://{canonical_host}{requested_path.rstrip('/')}"
+    except Exception:
+        preferred_release_url = ""
 
     profile = parse_bandcamp_profile_html(
         canonical_url, html_text, seed_primary_genre,
         release_fetcher=release_fetcher,
     )
+    if profile and preferred_release_url:
+        release_html = release_fetcher(preferred_release_url)
+        if release_html and not bandcamp_challenge_reason(release_html):
+            track_title = bandcamp_extract_track_title(release_html)
+            release = bandcamp_extract_release_date(release_html)
+            if track_title and release.get("date_iso"):
+                profile["latest_track_title"] = track_title
+                profile["latest_track_date"] = release["date_iso"]
     if not profile:
         return BandcampProfileResult(
             PROFILE_ERROR, canonical_url, reason="profile_parse_failed",
