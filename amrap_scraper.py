@@ -19,6 +19,7 @@ import logging
 import os
 import re
 import time
+import urllib.parse
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence
 from urllib.parse import urlsplit, urlunsplit
@@ -27,6 +28,16 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+from bandcamp_profile_engine import (
+    PROFILE_ACCEPTED as BANDCAMP_PROFILE_ACCEPTED,
+    canonicalize_bandcamp_profile_url,
+    fetch_bandcamp_profile,
+)
+from link_surface_hygiene import (
+    is_artist_link_hub_profile,
+    is_artist_platform_profile,
+    is_useful_artist_link,
+)
 from spotify_client import SpotifyClient
 from spotify_latest_release import (
     SpotifyLatestReleaseEnricher,
@@ -38,6 +49,10 @@ AMRAP_PROFILE_URL_TEMPLATE = "https://amrap.org.au/api/profile/artist/{slug}"
 AMRAP_PUBLIC_PROFILE_URL_TEMPLATE = "https://amrap.org.au/artist/{slug}"
 AMRAP_RELEASES_URL_TEMPLATE = "https://amrap.org.au/api/track/release/artist/{slug}"
 AMRAP_PAGE_SIZE = 18
+_DEFAULT_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+)
 
 # Australian state abbreviations exposed by AMRAP public directory
 AMRAP_STATES = {"ACT", "NSW", "NT", "QLD", "SA", "TAS", "VIC", "WA"}
@@ -163,16 +178,309 @@ def enrich_amrap_spotify_releases(
     return rows
 
 
+def _amrap_link_values(row: Dict[str, Any]) -> List[str]:
+    values: List[str] = []
+    seen = set()
+    for field in ("Social Link", "External Links"):
+        raw = str(row.get(field) or "").strip()
+        for value in re.split(r"\s*(?:;|\|)\s*", raw):
+            value = value.strip()
+            if value and value not in seen:
+                seen.add(value)
+                values.append(value)
+    return values
+
+
+def _bandcamp_identity_url(value: str) -> str:
+    return canonicalize_bandcamp_profile_url(value)
+
+
+def _owned_page_candidates(row: Dict[str, Any], authorities: Any) -> List[str]:
+    artist_name = str(row.get("Artist Name") or "").strip()
+    candidates: List[str] = []
+    seen = set()
+    excluded_music_hosts = {
+        "bandcamp.com", "deezer.com", "music.apple.com", "soundcloud.com",
+        "spotify.com", "open.spotify.com", "play.spotify.com",
+    }
+    for raw in _amrap_link_values(row):
+        normalised = authorities._normalise_url(raw) or ""
+        if not normalised or normalised in seen:
+            continue
+        if _bandcamp_identity_url(normalised) or extract_spotify_artist_identity(normalised)[0]:
+            continue
+        try:
+            host = (urllib.parse.urlparse(normalised).hostname or "").lower()
+        except Exception:
+            continue
+        host = host[4:] if host.startswith("www.") else host
+        if any(host == domain or host.endswith("." + domain) for domain in excluded_music_hosts):
+            continue
+        if is_artist_platform_profile(normalised):
+            continue
+        if not is_useful_artist_link(normalised, artist_name=artist_name):
+            continue
+        if host in authorities.LINK_HUB_HOSTS and not is_artist_link_hub_profile(normalised):
+            continue
+        seen.add(normalised)
+        candidates.append(normalised)
+    return candidates
+
+
+class _BoundedBandcampBrowserFetcher:
+    """Run-scoped adapter over the existing bounded Bandcamp browser seam."""
+
+    def __init__(self, authorities: Any) -> None:
+        self.authorities = authorities
+        self.driver = None
+        self.disabled = False
+
+    def __call__(self, url: str) -> str:
+        if self.disabled:
+            return ""
+        setup = getattr(self.authorities, "setup_bandcamp_driver", None)
+        quick_visit = getattr(self.authorities, "bandcamp_quick_visit", None)
+        if not callable(setup) or not callable(quick_visit):
+            self.disabled = True
+            return ""
+        if self.driver is None:
+            try:
+                self.driver = setup()
+            except Exception:
+                self.disabled = True
+                return ""
+        try:
+            return quick_visit(self.driver, url) or ""
+        except Exception:
+            return ""
+
+    def close(self) -> None:
+        driver = self.driver
+        self.driver = None
+        if driver is not None:
+            try:
+                driver.quit()
+            except Exception:
+                pass
+
+
+def _validated_bandcamp_track(
+    artist_name: str,
+    profile_url: str,
+    *,
+    authorities: Any,
+    session: Optional[requests.Session],
+    browser_fetcher: Optional[Callable[[str], str]],
+) -> tuple[str, str, str]:
+    result = fetch_bandcamp_profile(
+        profile_url,
+        session=session,
+        browser_fetcher=browser_fetcher,
+        browser_on_empty=False,
+    )
+    if result.status != BANDCAMP_PROFILE_ACCEPTED or not result.profile:
+        return "", "", "unavailable"
+    page_artist = str(
+        (result.identity_evidence or {}).get("page_artist")
+        or result.profile.get("artist_name")
+        or ""
+    ).strip()
+    confidence = authorities._bandcamp_confidence(
+        artist_name,
+        page_artist,
+        result.canonical_url or profile_url,
+    )
+    if (
+        confidence < authorities.MIN_BC_CONFIDENCE
+        or not authorities._bc_slug_has_strong_artist_name_confirmation(
+            artist_name,
+            page_artist,
+        )
+    ):
+        return "", "", "identity_rejected"
+    track_title = str(result.profile.get("latest_track_title") or "").strip()
+    track_date = str(result.profile.get("latest_track_date") or "").strip()
+    if not track_title or not track_date:
+        return "", "", "track_semantic_rejected"
+    return track_title, track_date, "accepted"
+
+
+def enrich_amrap_release_cascade(
+    rows: List[Dict[str, Any]],
+    *,
+    spotify_client: Optional[SpotifyClient] = None,
+    bandcamp_session: Optional[requests.Session] = None,
+    website_session: Optional[requests.Session] = None,
+    browser_fetcher: Optional[Callable[[str], str]] = None,
+    logger: Optional[Callable[[str], None]] = None,
+) -> List[Dict[str, Any]]:
+    """Fill missing AMRAP release pairs through the bounded identity cascade."""
+    log = logger or _LOGGER.info
+    native_complete = sum(
+        1 for row in rows
+        if str(row.get("Song Title") or "").strip()
+        and str(row.get("Release Date") or "").strip()
+    )
+    initially_blank = {
+        index for index, row in enumerate(rows)
+        if not str(row.get("Song Title") or "").strip()
+        and not str(row.get("Release Date") or "").strip()
+    }
+    enrich_amrap_spotify_releases(rows, spotify_client=spotify_client, logger=logger)
+    direct_spotify_filled = sum(
+        1 for index in initially_blank
+        if str(rows[index].get("Song Title") or "").strip()
+        and str(rows[index].get("Release Date") or "").strip()
+    )
+
+    direct_bandcamp_candidates = 0
+    direct_bandcamp_filled = 0
+    owned_page_candidates = 0
+    owned_page_spotify_filled = 0
+    owned_page_bandcamp_filled = 0
+    track_semantic_rejections = 0
+
+    authorities = None
+    owned_spotify_enricher: Optional[SpotifyLatestReleaseEnricher] = None
+    owned_spotify_unavailable = False
+    active_website_session = website_session
+    owned_website_session = False
+    active_browser_fetcher = browser_fetcher
+    browser_adapter: Optional[_BoundedBandcampBrowserFetcher] = None
+
+    def load_authorities():
+        nonlocal authorities, active_browser_fetcher, browser_adapter
+        if authorities is None:
+            import cross_directory_enricher as shared_authorities
+            authorities = shared_authorities
+        if active_browser_fetcher is None:
+            browser_adapter = _BoundedBandcampBrowserFetcher(authorities)
+            active_browser_fetcher = browser_adapter
+        return authorities
+
+    def bandcamp_lookup(row: Dict[str, Any], url: str) -> bool:
+        nonlocal track_semantic_rejections
+        shared = load_authorities()
+        title, date, status = _validated_bandcamp_track(
+            str(row.get("Artist Name") or "").strip(),
+            url,
+            authorities=shared,
+            session=bandcamp_session,
+            browser_fetcher=active_browser_fetcher,
+        )
+        if status == "track_semantic_rejected":
+            track_semantic_rejections += 1
+        if status != "accepted":
+            return False
+        row["Song Title"] = title
+        row["Release Date"] = date
+        return True
+
+    try:
+        for row in rows:
+            song_title = str(row.get("Song Title") or "").strip()
+            release_date = str(row.get("Release Date") or "").strip()
+            if song_title or release_date:
+                continue
+
+            direct_bandcamp_urls: List[str] = []
+            seen_bandcamp = set()
+            for value in _amrap_link_values(row):
+                canonical = _bandcamp_identity_url(value)
+                if canonical and canonical not in seen_bandcamp:
+                    seen_bandcamp.add(canonical)
+                    direct_bandcamp_urls.append(value)
+            if direct_bandcamp_urls:
+                direct_bandcamp_candidates += 1
+            if any(bandcamp_lookup(row, url) for url in direct_bandcamp_urls):
+                direct_bandcamp_filled += 1
+                continue
+
+            shared = load_authorities()
+            page_candidates = _owned_page_candidates(row, shared)
+            if not page_candidates:
+                continue
+            owned_page_candidates += 1
+            if active_website_session is None:
+                active_website_session = requests.Session()
+                active_website_session.headers.update({"User-Agent": _DEFAULT_USER_AGENT})
+                owned_website_session = True
+
+            # One artist-owned page at most; outbound identities are not crawled.
+            page_url = page_candidates[0]
+            page = shared._fetch_website_html_bounded(active_website_session, page_url)
+            if not page.is_html or not page.html:
+                continue
+            socials, _websites, _emails, _link_hubs = shared._extract_links_from_profile(
+                page.html,
+                "website",
+                page.final_url or page_url,
+            )
+            outbound = sorted(socials | _websites)
+
+            spotify_id = ""
+            for value in outbound:
+                spotify_id, _canonical = extract_spotify_artist_identity(value)
+                if spotify_id:
+                    break
+            if spotify_id:
+                if owned_spotify_enricher is None and not owned_spotify_unavailable:
+                    try:
+                        client = spotify_client or SpotifyClient(logger=log)
+                        owned_spotify_enricher = SpotifyLatestReleaseEnricher(client, logger=log)
+                    except Exception as exc:
+                        owned_spotify_unavailable = True
+                        log(f"[Spotify Latest Release][AMRAP Owned Page] unavailable: {exc}")
+                if owned_spotify_enricher is not None:
+                    latest = owned_spotify_enricher.lookup(spotify_id)
+                    if latest.song_title and latest.release_date:
+                        row["Song Title"] = latest.song_title
+                        row["Release Date"] = latest.release_date
+                        owned_page_spotify_filled += 1
+                        continue
+
+            outbound_bandcamp = []
+            seen_outbound_bandcamp = set()
+            for value in outbound:
+                canonical = _bandcamp_identity_url(value)
+                if canonical and canonical not in seen_outbound_bandcamp:
+                    seen_outbound_bandcamp.add(canonical)
+                    outbound_bandcamp.append(value)
+            if any(bandcamp_lookup(row, url) for url in outbound_bandcamp):
+                owned_page_bandcamp_filled += 1
+    finally:
+        if browser_adapter is not None:
+            browser_adapter.close()
+        if owned_website_session and active_website_session is not None:
+            active_website_session.close()
+
+    unresolved = sum(
+        1 for row in rows
+        if not str(row.get("Song Title") or "").strip()
+        or not str(row.get("Release Date") or "").strip()
+    )
+    log(
+        "[AMRAP Release Cascade] "
+        f"native_complete={native_complete}, "
+        f"direct_spotify_filled={direct_spotify_filled}, "
+        f"direct_bandcamp_candidates={direct_bandcamp_candidates}, "
+        f"direct_bandcamp_filled={direct_bandcamp_filled}, "
+        f"owned_page_candidates={owned_page_candidates}, "
+        f"owned_page_spotify_filled={owned_page_spotify_filled}, "
+        f"owned_page_bandcamp_filled={owned_page_bandcamp_filled}, "
+        f"track_semantic_rejections={track_semantic_rejections}, "
+        f"unresolved={unresolved}"
+    )
+    return rows
+
+
 def _make_session() -> requests.Session:
     session = requests.Session()
     retries = Retry(total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
     session.mount("https://", HTTPAdapter(max_retries=retries))
     session.headers.update(
         {
-            "User-Agent": (
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            ),
+            "User-Agent": _DEFAULT_USER_AGENT,
             "Accept": "application/json",
         }
     )
@@ -578,7 +886,7 @@ def scrape_amrap(
             break
         page += 1
 
-    enrich_amrap_spotify_releases(results, logger=logger)
+    enrich_amrap_release_cascade(results, logger=logger)
     log(f"[AMRAP] Scraping complete. {len(results)} artists collected.")
     return results
 

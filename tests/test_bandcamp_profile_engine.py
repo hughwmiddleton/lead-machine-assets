@@ -31,6 +31,16 @@ ARTIST_HTML = """
 </html>
 """
 
+TRACK_RELEASE_HTML = """
+<html>
+  <head><meta property="og:site_name" content="Artist A"></head>
+  <body>
+    <div data-tralbum='{"current":{"title":"New EP","type":"album"},"trackinfo":[{"title":"Actual Song"},{"title":"Another Song"}]}'></div>
+    <div class="tralbum-credits">released August 2, 2025</div>
+  </body>
+</html>
+"""
+
 
 class _Response:
     def __init__(self, text, status_code=200, url="https://artist-a.bandcamp.com/"):
@@ -54,6 +64,16 @@ class _Session:
         if self.error:
             raise self.error
         return self.response
+
+
+class _MappedSession:
+    def __init__(self, responses):
+        self.responses = responses
+        self.calls = []
+
+    def get(self, url, **kwargs):
+        self.calls.append((url, kwargs))
+        return _Response(self.responses[url], url=url)
 
 
 def test_normal_artist_page_parses_rich_profile_and_preserves_canonical_url():
@@ -80,6 +100,68 @@ def test_normal_artist_page_parses_rich_profile_and_preserves_canonical_url():
     assert result.profile["latest_release_date"] == "2025-08-02"
     assert result.profile["sounds_like"] == "Slowdive, Beach House"
     assert result.identity_evidence["page_artist"] == "Artist A"
+
+
+def test_release_title_without_track_structure_is_not_a_track():
+    profile = bpe.parse_bandcamp_profile_html(
+        "https://artist-a.bandcamp.com/",
+        ARTIST_HTML,
+        release_fetcher=lambda _url: "<h2 class='trackTitle'>Autotrophism EP</h2><div>released August 2, 2025</div>",
+    )
+    assert profile["latest_release_title"] == "New EP"
+    assert profile["latest_track_title"] == ""
+    assert profile["latest_track_date"] == ""
+
+
+def test_album_page_selects_first_structured_track_with_release_date():
+    profile = bpe.parse_bandcamp_profile_html(
+        "https://artist-a.bandcamp.com/",
+        ARTIST_HTML.replace(
+            '<span class="title">New EP</span>',
+            '<a href="/album/new-ep"><span class="title">New EP</span></a>',
+        ),
+        release_fetcher=lambda _url: TRACK_RELEASE_HTML,
+    )
+    assert profile["latest_release_title"] == "New EP"
+    assert profile["latest_track_title"] == "Actual Song"
+    assert profile["latest_track_date"] == "2025-08-02"
+
+
+def test_track_extractor_does_not_accept_release_heading_alone():
+    html = "<h2 class='trackTitle'>Autotrophism EP</h2>"
+    assert bpe.bandcamp_extract_track_title(html) == ""
+
+
+def test_direct_track_url_uses_that_track_and_corresponding_date():
+    track_html = TRACK_RELEASE_HTML.replace("Actual Song", "Gobsmacked", 1)
+    session = _MappedSession({
+        "https://artist-a.bandcamp.com/": ARTIST_HTML,
+        "https://artist-a.bandcamp.com/track/gobsmacked": track_html,
+    })
+    result = bpe.fetch_bandcamp_profile(
+        "https://artist-a.bandcamp.com/track/gobsmacked",
+        session=session,
+    )
+    assert result.status == bpe.PROFILE_ACCEPTED
+    assert result.profile["latest_track_title"] == "Gobsmacked"
+    assert result.profile["latest_track_date"] == "2025-08-02"
+
+
+def test_release_challenge_uses_browser_once_for_that_release():
+    session = _MappedSession({
+        "https://artist-a.bandcamp.com/": ARTIST_HTML,
+        "https://artist-a.bandcamp.com/track/gobsmacked": "<title>Client Challenge</title>",
+    })
+    calls = []
+    result = bpe.fetch_bandcamp_profile(
+        "https://artist-a.bandcamp.com/track/gobsmacked",
+        session=session,
+        browser_fetcher=lambda url: calls.append(url) or TRACK_RELEASE_HTML.replace("Actual Song", "Gobsmacked", 1),
+    )
+    assert result.status == bpe.PROFILE_ACCEPTED
+    assert calls == ["https://artist-a.bandcamp.com/track/gobsmacked"]
+    assert result.profile["latest_track_title"] == "Gobsmacked"
+    assert result.profile["latest_track_date"] == "2025-08-02"
 
 
 def test_http_200_client_challenge_is_neutrally_unavailable():
