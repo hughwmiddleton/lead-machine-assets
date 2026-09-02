@@ -15,12 +15,19 @@ import datetime
 import logging
 import re
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
-from urllib.parse import urljoin, urlparse
+from urllib.parse import unquote, urljoin, urlparse, urlunparse
 
 from bs4 import BeautifulSoup
 
 from email_provenance import merge_email_provenance_json
 from html_fetcher import fetch_html
+from link_surface_hygiene import is_artist_platform_profile
+from soundcloud_engine import canonicalize_soundcloud_profile_url
+from source_scheduler import (
+    canonicalize_bandcamp_url,
+    canonicalize_facebook_url,
+    normalize_identity_url,
+)
 from spotify_client import SpotifyClient
 from spotify_latest_release import (
     SpotifyLatestReleaseEnricher,
@@ -81,14 +88,6 @@ _NATIVE_SOCIAL_HOSTS = (
     "youtu.be",
     "youtube.com",
 )
-
-_SOCIAL_SHARE_PATH_PREFIXES = (
-    "/dialog/share",
-    "/intent/",
-    "/share",
-    "/sharer",
-)
-
 
 def _log(fn: LoggerFn, message: str) -> None:
     if not fn or not message:
@@ -303,6 +302,87 @@ def _host_matches(host: str, domain: str) -> bool:
     return host == domain or host.endswith("." + domain)
 
 
+def _nested_facebook_url(value: str) -> str:
+    """Recover an absolute Facebook URL nested in a Facebook-prefixed href."""
+    try:
+        parsed = urlparse(value)
+    except Exception:
+        return ""
+    nested = unquote(parsed.path or "").lstrip("/")
+    if not nested.lower().startswith(("http://", "https://")):
+        return ""
+    if parsed.query:
+        nested = f"{nested}?{parsed.query}"
+    try:
+        nested_host = (urlparse(nested).hostname or "").lower().removeprefix("www.")
+    except Exception:
+        return ""
+    return nested if _host_matches(nested_host, "facebook.com") else ""
+
+
+def _canonicalize_instagram_profile_url(value: str) -> str:
+    """Normalize a direct Instagram handle URL without changing its query."""
+    normalized = normalize_identity_url(value) or ""
+    if not normalized:
+        return ""
+    try:
+        parsed = urlparse(normalized)
+    except Exception:
+        return ""
+    host = (parsed.hostname or "").lower().removeprefix("www.")
+    if host not in {"instagram.com", "instagr.am"}:
+        return ""
+    segments = [unquote(segment).strip() for segment in (parsed.path or "").split("/") if segment.strip()]
+    if len(segments) != 1:
+        return ""
+    handle = segments[0].lstrip("@").strip()
+    if not re.fullmatch(r"[A-Za-z0-9._]{1,30}", handle):
+        return ""
+    candidate = urlunparse(("https", host, f"/{handle}", "", parsed.query, ""))
+    return candidate if is_artist_platform_profile(candidate) else ""
+
+
+def _normalize_native_social_url(value: str) -> str:
+    """Return one conservative canonical artist URL from a native href."""
+    raw = _norm_text(value)
+    if not raw or any(char.isspace() for char in raw) or "," in raw:
+        return ""
+    absolute = urljoin(BASE_URL, raw)
+    try:
+        parsed = urlparse(absolute)
+    except Exception:
+        return ""
+    if parsed.scheme not in {"http", "https"}:
+        return ""
+    host = (parsed.hostname or "").lower().removeprefix("www.")
+    if not host or _host_matches(host, "undiscovered.music"):
+        return ""
+
+    if _host_matches(host, "facebook.com"):
+        nested = _nested_facebook_url(absolute)
+        canonical = canonicalize_facebook_url(nested or absolute)
+        if not canonical:
+            return ""
+        canonical_path = (urlparse(canonical).path or "").strip("/").casefold()
+        return "" if canonical_path == "undiscoveredmusicnetwork" else canonical
+
+    if _host_matches(host, "instagram.com") or host == "instagr.am":
+        return _canonicalize_instagram_profile_url(absolute)
+
+    if _host_matches(host, "soundcloud.com"):
+        return canonicalize_soundcloud_profile_url(absolute)
+
+    if _host_matches(host, "spotify.com"):
+        _, canonical = extract_spotify_artist_identity(absolute)
+        return canonical
+
+    if _host_matches(host, "bandcamp.com"):
+        return canonicalize_bandcamp_url(absolute)
+
+    normalized = normalize_identity_url(absolute) or ""
+    return normalized if normalized and is_artist_platform_profile(normalized) else ""
+
+
 def _extract_native_social_links(soup: BeautifulSoup) -> Tuple[List[str], str]:
     """Return source-native profile links and the first SoundCloud URL.
 
@@ -314,26 +394,17 @@ def _extract_native_social_links(soup: BeautifulSoup) -> Tuple[List[str], str]:
     soundcloud_url = ""
 
     for tag in soup.select("#social-links a[href]"):
-        href = _norm_text(tag.get("href"))
-        if not href:
+        normalized = _normalize_native_social_url(tag.get("href") or "")
+        if not normalized:
             continue
-        absolute = urljoin(BASE_URL, href)
-        parsed = urlparse(absolute)
-        if parsed.scheme not in {"http", "https"}:
+        normalized_host = (urlparse(normalized).hostname or "").lower().removeprefix("www.")
+        if not any(_host_matches(normalized_host, domain) for domain in _NATIVE_SOCIAL_HOSTS):
             continue
-        host = (parsed.hostname or "").lower().removeprefix("www.")
-        if not host or _host_matches(host, "undiscovered.music"):
+        if normalized in links:
             continue
-        if not any(_host_matches(host, domain) for domain in _NATIVE_SOCIAL_HOSTS):
-            continue
-        path = (parsed.path or "").lower()
-        if any(path.startswith(prefix) for prefix in _SOCIAL_SHARE_PATH_PREFIXES):
-            continue
-        if absolute in links:
-            continue
-        links.append(absolute)
-        if not soundcloud_url and _host_matches(host, "soundcloud.com"):
-            soundcloud_url = absolute
+        links.append(normalized)
+        if not soundcloud_url and _host_matches(normalized_host, "soundcloud.com"):
+            soundcloud_url = normalized
 
     return links, soundcloud_url
 

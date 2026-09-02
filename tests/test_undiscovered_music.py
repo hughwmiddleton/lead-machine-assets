@@ -104,7 +104,7 @@ NATIVE_LINKS_PROFILE_HTML = """
     <a href="https://soundcloud.com/native-links"></a>
     <a href="https://youtube.com/@nativelinks"></a>
     <a href="https://tiktok.com/@nativelinks"></a>
-    <a href="https://open.spotify.com/artist/native-links"></a>
+    <a href="https://open.spotify.com/artist/0123456789ABCDEFGHIJKL"></a>
     <a href="https://instagram.com/native.links"></a>
     <a href="/artists/search"></a>
     <a href="https://undiscovered.music/login"></a>
@@ -470,7 +470,7 @@ def test_native_instagram_and_facebook_urls_are_retained():
     row = um._build_row(profile, "2025-01-01")
 
     assert "https://instagram.com/native.links" in row["Social Link"].split(" | ")
-    assert "https://facebook.com/nativelinksartist" in row["Social Link"].split(" | ")
+    assert "https://www.facebook.com/nativelinksartist" in row["Social Link"].split(" | ")
 
 
 def test_native_soundcloud_url_populates_existing_soundcloud_field():
@@ -493,12 +493,74 @@ def test_multiple_native_links_preserve_website_and_all_supported_socials():
     assert row["External Links"] == "https://nativelinks.example"
     assert row["Social Link"].split(" | ") == [
         "https://instagram.com/native.links",
-        "https://facebook.com/nativelinksartist",
+        "https://www.facebook.com/nativelinksartist",
         "https://soundcloud.com/native-links",
         "https://youtube.com/@nativelinks",
         "https://tiktok.com/@nativelinks",
-        "https://open.spotify.com/artist/native-links",
+        "https://open.spotify.com/artist/0123456789ABCDEFGHIJKL",
     ]
+
+
+def test_native_social_platform_urls_are_normalized_and_malformed_values_rejected():
+    html = """
+    <html><head><meta property="og:title" content="Social Hygiene Artist"></head><body>
+      <h1>Social Hygiene Artist</h1><p><strong>Genres:</strong> Indie</p>
+      <div id="social-links">
+        <a href="https://www.facebook.com/profile.php?id=123"></a>
+        <a href="https://facebook.com/https://www.facebook.com/profile.php?id=456"></a>
+        <a href="https://facebook.com/aformerfriendandfriends, a4merfriend"></a>
+        <a href="https://instagram.com//aaronburdett"></a>
+        <a href="https://instagram.com/valid.artist"></a>
+        <a href="https://open.spotify.com/artist/accounts./en/status"></a>
+        <a href="https://open.spotify.com/artist/0123456789ABCDEFGHIJKL"></a>
+        <a href="https://soundcloud.com/m./davevansise"></a>
+        <a href="https://soundcloud.com/valid-artist"></a>
+        <a href="https://facebook.com/sharer/sharer.php?u=https://example.com"></a>
+        <a href="https://instagram.com/explore"></a>
+        <a href="https://facebook.com/UndiscoveredMusicNetwork"></a>
+      </div>
+    </body></html>
+    """
+    profile = um.parse_artist_profile(html, "https://undiscovered.music/artists/social-hygiene")
+    row = um._build_row(profile, "2025-01-01")
+    links = row["Social Link"].split(" | ")
+
+    assert links == [
+        "https://www.facebook.com/profile.php?id=123",
+        "https://www.facebook.com/profile.php?id=456",
+        "https://instagram.com/aaronburdett",
+        "https://instagram.com/valid.artist",
+        "https://open.spotify.com/artist/0123456789ABCDEFGHIJKL",
+        "https://soundcloud.com/valid-artist",
+    ]
+    assert not any("facebook.com/https" in link for link in links)
+    assert not any("," in link for link in links)
+    assert "accounts./en/status" not in row["Social Link"]
+    assert "m./davevansise" not in row["Social Link"]
+    assert row["SoundCloud Link"] == "https://soundcloud.com/valid-artist"
+    assert profile["spotify_artist_id"] == "0123456789ABCDEFGHIJKL"
+
+
+def test_native_social_normalization_preserves_website_booking_and_admission_fields():
+    html = STRONG_PROFILE_HTML.replace(
+        "</body>",
+        '<div id="social-links"><a href="https://instagram.com//delta.soul"></a></div></body>',
+    )
+    profile = um.parse_artist_profile(html, "https://undiscovered.music/artists/delta-soul")
+    row = um._build_row(profile, "2025-01-01")
+
+    assert um.qualify_artist_profile(profile) is True
+    assert row["Social Link"] == "https://instagram.com/delta.soul"
+    assert row["External Links"] == "https://deltasoulmusic.com"
+    assert row["Booking_Contact_Name"] == "Sarah Jones"
+    assert row["Email"] == "booking@deltasoulmusic.com"
+    assert row["Email_All"] == "booking@deltasoulmusic.com"
+    assert row["Email_Source_URL"] == "https://undiscovered.music/artists/delta-soul"
+    assert row["Email_Source_Type"] == "undiscovered_music_profile"
+    assert row["Email_Extract_Method"] == "profile_direct"
+    assert row["Email_Provenance_JSON"]
+    assert row["Lead_Source"] == "Undiscovered Music"
+    assert row["Source_Directory"] == "undiscovered_music"
 
 
 def test_internal_navigation_site_chrome_and_share_links_are_ignored():
