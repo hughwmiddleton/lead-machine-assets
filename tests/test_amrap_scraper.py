@@ -13,10 +13,14 @@ import pandas as pd
 import pytest
 
 from amrap_scraper import (
+    AMRAP_CSV_FIELDS,
     AMRAP_PUBLIC_PROFILE_URL_TEMPLATE,
+    extract_latest_amrap_release,
     extract_state_from_location,
     fetch_directory_page,
     fetch_profile,
+    fetch_release_rows,
+    normalize_amrap_external_url,
     parse_amrap_profile,
     scrape_amrap,
     scrape_amrap_to_csv,
@@ -97,6 +101,107 @@ def test_parse_minimal_profile() -> None:
     assert row["Social Link"] == ""
     assert row["Location"] == "ACT"
     assert extract_state_from_location(row["Location"]) == "ACT"
+
+
+def test_latest_release_is_selected_by_parsed_date_not_first_row() -> None:
+    rows = [
+        {"title": "Older First", "release": {"released_at": "2024-06-02"}},
+        {"title": "Newest Track", "release_date": "18/08/2026"},
+        {"title": "Middle Track", "released_at": "2025-11-30T12:00:00Z"},
+    ]
+    assert extract_latest_amrap_release(rows) == ("Newest Track", "2026-08-18")
+
+
+def test_latest_release_supports_current_amrap_year_and_release_payload() -> None:
+    rows = [
+        {"title": "Older Track", "year": "07-11-25", "release": {}},
+        {
+            "title": "Division",
+            "year": "28-04-26",
+            "release": {"title": "Division", "released_at": "2026-04-28 03:00:00"},
+        },
+    ]
+    assert extract_latest_amrap_release(rows) == ("Division", "2026-04-28")
+
+
+def test_latest_release_same_date_uses_stable_profile_order() -> None:
+    rows = [
+        {"title": "First Newest", "release_date": "2026-08-18"},
+        {"title": "Second Newest", "release_date": "2026-08-18"},
+    ]
+    assert extract_latest_amrap_release(rows) == ("First Newest", "2026-08-18")
+
+
+@pytest.mark.parametrize("rows", [[], None, [{"title": "Undated"}], [{"release_date": "2026-01-01"}]])
+def test_missing_release_metadata_safely_produces_blanks(rows) -> None:
+    assert extract_latest_amrap_release(rows) == ("", "")
+
+
+def test_parse_profile_populates_canonical_latest_release_fields() -> None:
+    fixture = _load_fixture("amrap_profile_public.json")
+    releases = [
+        {"title": "Early Song", "release_date": "2025"},
+        {"track": {"title": "Displayed Track Title"}, "release": {"released_at": "2026-07-09"}},
+    ]
+    row = parse_amrap_profile(fixture["data"], releases)
+    assert row is not None
+    assert row["Song Title"] == "Displayed Track Title"
+    assert row["Release Date"] == "2026-07-09"
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("https://www.instagram.com/testartist?utm_source=amrap", "https://www.instagram.com/testartist?utm_source=amrap"),
+        ("instagram.com/bayzaleslie", "https://instagram.com/bayzaleslie"),
+        ("ratfinkmusic.bandcamp.com", "https://ratfinkmusic.bandcamp.com"),
+        ("https://soundcloud.com/www.soundcloud.com/toonacarbrastudio", "https://soundcloud.com/toonacarbrastudio"),
+        ("https://www.toonacarbrastudio.bandcamp.com.bandcamp.com/releases", "https://toonacarbrastudio.bandcamp.com/releases"),
+        ("https://www.toonacarbrastudio@bandcamp.com.bandcamp.com/releases", "https://toonacarbrastudio.bandcamp.com/releases"),
+    ],
+)
+def test_amrap_external_url_normalization(raw: str, expected: str) -> None:
+    assert normalize_amrap_external_url(raw) == expected
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "not a url",
+        "javascript:alert(1)",
+        "https://soundcloud.com/www.soundcloud.com",
+        "https://foo.bar.bandcamp.com.bandcamp.com/releases",
+    ],
+)
+def test_ambiguous_or_unsafe_amrap_urls_are_discarded(raw: str) -> None:
+    assert normalize_amrap_external_url(raw) == ""
+
+
+def test_fetch_release_rows_collects_all_available_release_pages() -> None:
+    class Response:
+        status_code = 200
+
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._payload
+
+    class Session:
+        def __init__(self):
+            self.pages = []
+
+        def get(self, url, params, timeout):
+            page = params["page"]
+            self.pages.append(page)
+            return Response({"data": [{"title": f"Track {page}"}], "meta": {"last_page": 2}})
+
+    session = Session()
+    assert [row["title"] for row in fetch_release_rows(session, "artist-slug")] == ["Track 1", "Track 2"]
+    assert session.pages == [1, 2]
 
 
 def test_parse_skips_non_public_profile() -> None:
@@ -215,8 +320,10 @@ def test_scrape_amrap_skips_existing_slugs(tmp_path: Path) -> None:
     import amrap_scraper
     orig_fetch_directory = amrap_scraper.fetch_directory_page
     orig_fetch_profile = amrap_scraper.fetch_profile
+    orig_fetch_releases = amrap_scraper.fetch_release_rows
     amrap_scraper.fetch_directory_page = _fake_directory_page
     amrap_scraper.fetch_profile = _fake_profile
+    amrap_scraper.fetch_release_rows = lambda session, slug: []
 
     try:
         rows = scrape_amrap(
@@ -227,6 +334,7 @@ def test_scrape_amrap_skips_existing_slugs(tmp_path: Path) -> None:
     finally:
         amrap_scraper.fetch_directory_page = orig_fetch_directory
         amrap_scraper.fetch_profile = orig_fetch_profile
+        amrap_scraper.fetch_release_rows = orig_fetch_releases
 
     slugs = {r["Source URL"].rstrip("/").split("/")[-1] for r in rows}
     assert "test-artist-alpha" not in slugs
@@ -270,8 +378,10 @@ def test_scrape_amrap_state_filter(tmp_path: Path) -> None:
     import amrap_scraper
     orig_fetch_directory = amrap_scraper.fetch_directory_page
     orig_fetch_profile = amrap_scraper.fetch_profile
+    orig_fetch_releases = amrap_scraper.fetch_release_rows
     amrap_scraper.fetch_directory_page = _fake_directory_page
     amrap_scraper.fetch_profile = _fake_profile
+    amrap_scraper.fetch_release_rows = lambda session, slug: []
 
     try:
         rows = scrape_amrap(
@@ -282,6 +392,7 @@ def test_scrape_amrap_state_filter(tmp_path: Path) -> None:
     finally:
         amrap_scraper.fetch_directory_page = orig_fetch_directory
         amrap_scraper.fetch_profile = orig_fetch_profile
+        amrap_scraper.fetch_release_rows = orig_fetch_releases
 
     assert len(rows) == 2
     for r in rows:
@@ -324,8 +435,10 @@ def test_scrape_amrap_genre_filter(tmp_path: Path) -> None:
     import amrap_scraper
     orig_fetch_directory = amrap_scraper.fetch_directory_page
     orig_fetch_profile = amrap_scraper.fetch_profile
+    orig_fetch_releases = amrap_scraper.fetch_release_rows
     amrap_scraper.fetch_directory_page = _fake_directory_page
     amrap_scraper.fetch_profile = _fake_profile
+    amrap_scraper.fetch_release_rows = lambda session, slug: []
 
     try:
         rows = scrape_amrap(
@@ -336,6 +449,7 @@ def test_scrape_amrap_genre_filter(tmp_path: Path) -> None:
     finally:
         amrap_scraper.fetch_directory_page = orig_fetch_directory
         amrap_scraper.fetch_profile = orig_fetch_profile
+        amrap_scraper.fetch_release_rows = orig_fetch_releases
 
     assert len(rows) == 1
     assert rows[0]["Artist Name"] == "Test Artist Beta"
@@ -357,8 +471,10 @@ def test_scrape_amrap_to_csv_writes_file(tmp_path: Path) -> None:
     import amrap_scraper
     orig_fetch_directory = amrap_scraper.fetch_directory_page
     orig_fetch_profile = amrap_scraper.fetch_profile
+    orig_fetch_releases = amrap_scraper.fetch_release_rows
     amrap_scraper.fetch_directory_page = _fake_directory_page
     amrap_scraper.fetch_profile = _fake_profile
+    amrap_scraper.fetch_release_rows = lambda session, slug: []
 
     output_csv = tmp_path / "amrap_out.csv"
     try:
@@ -370,6 +486,7 @@ def test_scrape_amrap_to_csv_writes_file(tmp_path: Path) -> None:
     finally:
         amrap_scraper.fetch_directory_page = orig_fetch_directory
         amrap_scraper.fetch_profile = orig_fetch_profile
+        amrap_scraper.fetch_release_rows = orig_fetch_releases
 
     assert Path(result_path).exists()
     text = output_csv.read_text(encoding="utf-8-sig")
@@ -377,6 +494,58 @@ def test_scrape_amrap_to_csv_writes_file(tmp_path: Path) -> None:
     assert "Test Artist Alpha" in text
     assert "AMRAP" in text
     assert "https://amrap.org.au/artist/test-artist-alpha" in text
+
+
+def test_legacy_amrap_sparse_and_rich_rows_stay_schema_aligned(monkeypatch, tmp_path: Path) -> None:
+    import csv
+    import amrap_scraper
+
+    legacy_columns = [
+        "Artist Name", "Location", "Song Title", "Sounds Like", "Social Link",
+        "SoundCloud Link", "Played on triple J", "Played on Unearthed", "Release Date",
+        "Primary Genre", "Unearthed_Genre_Raw", "Bandcamp_Source_Mode",
+        "Bandcamp_Search_Domain", "Date Added", "Email", "Lead_Source",
+        "Source_Directory", "Source Directory", "Source URL", "Source_URL",
+    ]
+    output_csv = tmp_path / "legacy_amrap.csv"
+    with output_csv.open("w", encoding="utf-8-sig", newline="") as handle:
+        csv.DictWriter(handle, fieldnames=legacy_columns).writeheader()
+
+    sparse = {
+        "Artist Name": "Sparse Artist", "Location": "VIC", "Song Title": "",
+        "Social Link": "", "Release Date": "", "Date Added": "2026-09-02",
+        "Lead_Source": "AMRAP", "Source_Directory": "amrap", "Source Directory": "AMRAP",
+        "Source URL": "https://amrap.org.au/artist/sparse", "Source_URL": "https://amrap.org.au/artist/sparse",
+    }
+    rich = {
+        "Artist Name": "Rich Artist", "Location": "VIC, Melbourne", "Song Title": "Newest Song",
+        "Social Link": "https://instagram.com/rich; https://rich.bandcamp.com",
+        "SoundCloud Link": "https://soundcloud.com/rich", "Release Date": "2026-08-18",
+        "Date Added": "2026-09-02", "Lead_Source": "AMRAP", "Source_Directory": "amrap",
+        "Source Directory": "AMRAP", "Source URL": "https://amrap.org.au/artist/rich",
+        "Source_URL": "https://amrap.org.au/artist/rich",
+    }
+    monkeypatch.setattr(amrap_scraper, "scrape_amrap", lambda **kwargs: [sparse, rich])
+    scrape_amrap_to_csv(2, str(output_csv), existing_csv=str(output_csv), sleep_between_requests=0)
+
+    with output_csv.open(encoding="utf-8-sig", newline="") as handle:
+        raw_rows = list(csv.reader(handle))
+    assert all(len(row) == len(raw_rows[0]) for row in raw_rows)
+
+    df = pd.read_csv(output_csv, dtype=str, keep_default_na=False)
+    assert list(df.columns[: len(legacy_columns)]) == legacy_columns
+    assert set(AMRAP_CSV_FIELDS).issubset(df.columns)
+    assert df.loc[0, "Artist Name"] == "Sparse Artist"
+    assert df.loc[0, "Social Link"] == ""
+    assert df.loc[0, "Release Date"] == ""
+    assert df.loc[1, "Song Title"] == "Newest Song"
+    assert df.loc[1, "Release Date"] == "2026-08-18"
+    for index, slug in ((0, "sparse"), (1, "rich")):
+        assert df.loc[index, "Lead_Source"] == "AMRAP"
+        assert df.loc[index, "Source_Directory"] == "amrap"
+        assert df.loc[index, "Source Directory"] == "AMRAP"
+        assert df.loc[index, "Source URL"] == f"https://amrap.org.au/artist/{slug}"
+        assert df.loc[index, "Source_URL"] == f"https://amrap.org.au/artist/{slug}"
 
 
 # ---------------------------------------------------------------------------

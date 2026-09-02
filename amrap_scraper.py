@@ -17,9 +17,11 @@ import csv
 import datetime
 import logging
 import os
+import re
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence
+from urllib.parse import urlsplit, urlunsplit
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -28,12 +30,35 @@ from urllib3.util.retry import Retry
 AMRAP_DIRECTORY_URL = "https://amrap.org.au/api/search/artist"
 AMRAP_PROFILE_URL_TEMPLATE = "https://amrap.org.au/api/profile/artist/{slug}"
 AMRAP_PUBLIC_PROFILE_URL_TEMPLATE = "https://amrap.org.au/artist/{slug}"
+AMRAP_RELEASES_URL_TEMPLATE = "https://amrap.org.au/api/track/release/artist/{slug}"
 AMRAP_PAGE_SIZE = 18
 
 # Australian state abbreviations exposed by AMRAP public directory
 AMRAP_STATES = {"ACT", "NSW", "NT", "QLD", "SA", "TAS", "VIC", "WA"}
 
 _LOGGER = logging.getLogger(__name__)
+
+AMRAP_CSV_FIELDS: List[str] = [
+    "Artist Name",
+    "Location",
+    "Song Title",
+    "Sounds Like",
+    "Social Link",
+    "SoundCloud Link",
+    "Release Date",
+    "Primary Genre",
+    "Date Added",
+    "External Links",
+    "Email",
+    "Email_Source_URL",
+    "Email_Source_Type",
+    "Email_Extract_Method",
+    "Lead_Source",
+    "Source_Directory",
+    "Source Directory",
+    "Source URL",
+    "Source_URL",
+]
 
 
 def _make_session() -> requests.Session:
@@ -70,7 +95,146 @@ def extract_state_from_location(location_str: str) -> str:
     return candidate if candidate in AMRAP_STATES else ""
 
 
-def parse_amrap_profile(profile_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def normalize_amrap_external_url(value: Any) -> str:
+    """Return a safe AMRAP external URL, repairing only deterministic defects."""
+    candidate = str(value or "").strip()
+    if not candidate or any(char.isspace() for char in candidate):
+        return ""
+    supplied_scheme = "://" in candidate
+    if candidate.startswith("//"):
+        candidate = "https:" + candidate
+    elif "://" not in candidate:
+        candidate = "https://" + candidate.lstrip("/")
+
+    try:
+        parsed = urlsplit(candidate)
+    except (TypeError, ValueError):
+        return ""
+    if parsed.scheme.lower() not in {"http", "https"}:
+        return ""
+
+    netloc = parsed.netloc
+    host = (parsed.hostname or "").lower().rstrip(".")
+    path = parsed.path or ""
+
+    # AMRAP sometimes stores a complete SoundCloud host as the first path
+    # segment beneath another SoundCloud host.
+    if host in {"soundcloud.com", "www.soundcloud.com"}:
+        nested = re.match(r"^/(?:www\.)?soundcloud\.com(/.*)$", path, flags=re.IGNORECASE)
+        if nested:
+            host = "soundcloud.com"
+            netloc = host
+            path = nested.group(1)
+
+    # Repair duplicated Bandcamp hosts, including the observed malformed
+    # userinfo form.  Only a single-label artist subdomain is accepted.
+    bandcamp_source = netloc.lower()
+    if "@" in bandcamp_source:
+        userinfo, _, netloc_host = bandcamp_source.rpartition("@")
+        if netloc_host == "bandcamp.com.bandcamp.com":
+            bandcamp_source = f"{userinfo}.bandcamp.com.bandcamp.com"
+    bandcamp_match = re.fullmatch(
+        r"(?:www\.)?([a-z0-9][a-z0-9-]{0,62})\.bandcamp\.com\.bandcamp\.com(?::\d+)?",
+        bandcamp_source,
+        flags=re.IGNORECASE,
+    )
+    if bandcamp_match:
+        netloc = f"{bandcamp_match.group(1).lower()}.bandcamp.com"
+        host = netloc
+
+    if not host or "." not in host or "@" in netloc:
+        return ""
+    if host.endswith(".bandcamp.com.bandcamp.com") or (
+        host in {"soundcloud.com", "www.soundcloud.com"}
+        and re.match(r"^/(?:www\.)?soundcloud\.com(?:/|$)", path, flags=re.IGNORECASE)
+    ):
+        return ""
+
+    scheme = parsed.scheme.lower() if supplied_scheme else "https"
+    return urlunsplit((scheme, netloc, path, parsed.query, parsed.fragment))
+
+
+def _release_track_title(row: Dict[str, Any]) -> str:
+    for value in (row.get("title"), row.get("track"), row.get("track_title"), row.get("name")):
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    track = row.get("track")
+    if isinstance(track, dict):
+        for key in ("title", "name"):
+            value = track.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return ""
+
+
+def _parse_release_date(value: Any) -> Optional[datetime.date]:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    iso_candidate = text[:10]
+    try:
+        return datetime.date.fromisoformat(iso_candidate)
+    except ValueError:
+        pass
+    for fmt in (
+        "%d/%m/%Y",
+        "%d-%m-%Y",
+        "%d/%m/%y",
+        "%d-%m-%y",
+        "%Y/%m/%d",
+        "%d %B %Y",
+        "%d %b %Y",
+    ):
+        try:
+            return datetime.datetime.strptime(text, fmt).date()
+        except ValueError:
+            continue
+    if re.fullmatch(r"\d{4}", text):
+        try:
+            return datetime.date(int(text), 1, 1)
+        except ValueError:
+            return None
+    return None
+
+
+def extract_latest_amrap_release(release_rows: Any) -> tuple[str, str]:
+    """Select the first profile-order track on the newest safely parsed date."""
+    if not isinstance(release_rows, list):
+        return "", ""
+    newest: Optional[tuple[datetime.date, str]] = None
+    for item in release_rows:
+        if not isinstance(item, dict):
+            continue
+        title = _release_track_title(item)
+        if not title:
+            continue
+        release = item.get("release") if isinstance(item.get("release"), dict) else {}
+        date_candidates = (
+            item.get("release_date"),
+            item.get("released_at"),
+            item.get("date"),
+            item.get("year"),
+            release.get("release_date"),
+            release.get("released_at"),
+            release.get("date"),
+            release.get("year"),
+        )
+        parsed_date = next(
+            (parsed for parsed in (_parse_release_date(value) for value in date_candidates) if parsed is not None),
+            None,
+        )
+        if parsed_date is None:
+            continue
+        if newest is None or parsed_date > newest[0]:
+            newest = (parsed_date, title)
+    if newest is None:
+        return "", ""
+    return newest[1], newest[0].isoformat()
+
+
+def parse_amrap_profile(
+    profile_data: Dict[str, Any], release_rows: Optional[List[Dict[str, Any]]] = None
+) -> Optional[Dict[str, Any]]:
     """Parse public AMRAP profile JSON into a canonical Lead Machine row dict.
 
     Returns None for non-public profiles so they can be skipped.
@@ -98,11 +262,23 @@ def parse_amrap_profile(profile_data: Dict[str, Any]) -> Optional[Dict[str, Any]
 
     # Links: websites + socials + music_accounts
     links: List[str] = []
+    seen_links = set()
     for key in ("websites", "socials", "music_accounts"):
         for item in profile_data.get(key, []):
             if isinstance(item, dict) and item.get("link"):
-                links.append(str(item["link"]).strip())
+                link = normalize_amrap_external_url(item["link"])
+                if link and link not in seen_links:
+                    links.append(link)
+                    seen_links.add(link)
     social_link = "; ".join(links)
+
+    if release_rows is None:
+        for key in ("releases", "release_rows", "tracks"):
+            candidate_rows = profile_data.get(key)
+            if isinstance(candidate_rows, list):
+                release_rows = candidate_rows
+                break
+    song_title, release_date = extract_latest_amrap_release(release_rows or [])
 
     canonical_url = AMRAP_PUBLIC_PROFILE_URL_TEMPLATE.format(slug=slug)
     current_date = datetime.datetime.now().strftime("%Y-%m-%d")
@@ -119,10 +295,10 @@ def parse_amrap_profile(profile_data: Dict[str, Any]) -> Optional[Dict[str, Any]
         "Source Directory": "AMRAP",
         "Date Added": current_date,
         # Fields left blank for downstream enrichment
-        "Song Title": "",
+        "Song Title": song_title,
         "Sounds Like": "",
         "SoundCloud Link": "",
-        "Release Date": "",
+        "Release Date": release_date,
         "External Links": "",
         "Email": "",
         "Email_Source_URL": "",
@@ -147,6 +323,29 @@ def fetch_profile(session: requests.Session, slug: str) -> Optional[Dict[str, An
         return None
     response.raise_for_status()
     return response.json()
+
+
+def fetch_release_rows(session: requests.Session, slug: str) -> List[Dict[str, Any]]:
+    """Fetch every public Available Releases page for an AMRAP artist."""
+    rows: List[Dict[str, Any]] = []
+    page = 1
+    while True:
+        url = AMRAP_RELEASES_URL_TEMPLATE.format(slug=slug)
+        response = session.get(url, params={"page": page}, timeout=30)
+        if response.status_code == 404:
+            return rows
+        response.raise_for_status()
+        payload = response.json()
+        page_rows = payload.get("data", []) if isinstance(payload, dict) else []
+        rows.extend(item for item in page_rows if isinstance(item, dict))
+        meta = payload.get("meta", {}) if isinstance(payload, dict) else {}
+        try:
+            last_page = int(meta.get("last_page") or page)
+        except (TypeError, ValueError):
+            last_page = page
+        if page >= last_page:
+            return rows
+        page += 1
 
 
 def _passes_filters(row: Dict[str, Any], state_filter: str, genre_filter: str) -> bool:
@@ -256,6 +455,15 @@ def scrape_amrap(
             if not _passes_filters(row, state_filter, genre_filter):
                 continue
 
+            try:
+                release_rows = fetch_release_rows(session, slug)
+            except (requests.RequestException, ValueError) as exc:
+                log(f"[AMRAP] Release fetch failed for {slug}: {exc}")
+                release_rows = []
+            song_title, release_date = extract_latest_amrap_release(release_rows)
+            row["Song Title"] = song_title
+            row["Release Date"] = release_date
+
             seen_slugs.add(slug)
             results.append(row)
             log(f"[AMRAP] Accepted {row['Artist Name']} ({slug}) — count {len(results)}/{target_count}")
@@ -298,48 +506,29 @@ def scrape_amrap_to_csv(
     # Ensure parent directory exists
     Path(output_csv).parent.mkdir(parents=True, exist_ok=True)
 
-    fieldnames = [
-        "Artist Name",
-        "Location",
-        "Song Title",
-        "Sounds Like",
-        "Social Link",
-        "SoundCloud Link",
-        "Release Date",
-        "Primary Genre",
-        "Date Added",
-        "External Links",
-        "Email",
-        "Email_Source_URL",
-        "Email_Source_Type",
-        "Email_Extract_Method",
-        "Lead_Source",
-        "Source_Directory",
-        "Source Directory",
-        "Source URL",
-        "Source_URL",
-    ]
-
-    # If appending to an existing file, preserve any extra columns
-    extra_columns: List[str] = []
-    if existing_csv and os.path.exists(existing_csv):
+    # Existing Legacy output headers are authoritative.  Rewrite by field name
+    # so an AMRAP-specific ordering can never shift values beneath that header.
+    existing_rows: List[Dict[str, Any]] = []
+    existing_columns: List[str] = []
+    append_existing = bool(existing_csv and os.path.exists(existing_csv))
+    if append_existing:
         try:
             with open(existing_csv, "r", encoding="utf-8-sig", newline="") as f:
                 reader = csv.DictReader(f)
                 if reader.fieldnames:
-                    extra_columns = [c for c in reader.fieldnames if c not in fieldnames]
-        except Exception:
-            pass
+                    existing_columns = list(reader.fieldnames)
+                    existing_rows = list(reader)
+        except (OSError, csv.Error) as exc:
+            log(f"[AMRAP] Warning: could not preserve existing CSV schema: {exc}")
 
-    all_columns = fieldnames + extra_columns
-    write_mode = "a" if existing_csv and os.path.exists(existing_csv) else "w"
-    write_header = not (existing_csv and os.path.exists(existing_csv))
+    all_columns = existing_columns + [field for field in AMRAP_CSV_FIELDS if field not in existing_columns]
+    if not all_columns:
+        all_columns = AMRAP_CSV_FIELDS.copy()
 
-    with open(output_csv, write_mode, encoding="utf-8-sig", newline="") as f:
+    with open(output_csv, "w", encoding="utf-8-sig", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=all_columns, extrasaction="ignore")
-        if write_header:
-            writer.writeheader()
-        for row in rows:
+        writer.writeheader()
+        for row in [*existing_rows, *rows]:
             writer.writerow(row)
 
     log(f"[AMRAP] Wrote {len(rows)} rows to {output_csv}")
