@@ -27,6 +27,12 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+from spotify_client import SpotifyClient
+from spotify_latest_release import (
+    SpotifyLatestReleaseEnricher,
+    extract_spotify_artist_identity,
+)
+
 AMRAP_DIRECTORY_URL = "https://amrap.org.au/api/search/artist"
 AMRAP_PROFILE_URL_TEMPLATE = "https://amrap.org.au/api/profile/artist/{slug}"
 AMRAP_PUBLIC_PROFILE_URL_TEMPLATE = "https://amrap.org.au/artist/{slug}"
@@ -59,6 +65,102 @@ AMRAP_CSV_FIELDS: List[str] = [
     "Source URL",
     "Source_URL",
 ]
+
+
+def extract_amrap_spotify_artist_identity(row: Dict[str, Any]) -> tuple[str, str, str]:
+    """Return a strict direct Spotify artist identity from AMRAP link fields.
+
+    AMRAP aggregates artist-supplied URLs in ``Social Link``. Only identities
+    accepted by the shared Spotify validator qualify; track, album, playlist,
+    shortened, and malformed URLs fail closed. The status supports aggregate
+    logging without exposing or guessing an artist identity.
+    """
+    spotify_values: List[str] = []
+    for field in ("Social Link", "External Links"):
+        raw = str(row.get(field) or "").strip()
+        if not raw:
+            continue
+        for value in re.split(r"\s*(?:;|\|)\s*", raw):
+            value = value.strip()
+            if not value:
+                continue
+            if "spotify." not in value.lower() and not value.lower().startswith("spotify:"):
+                continue
+            spotify_values.append(value)
+            artist_id, canonical_url = extract_spotify_artist_identity(value)
+            if artist_id:
+                return artist_id, canonical_url, "valid"
+    return "", "", "malformed" if spotify_values else "missing"
+
+
+def enrich_amrap_spotify_releases(
+    rows: List[Dict[str, Any]],
+    *,
+    spotify_client: Optional[SpotifyClient] = None,
+    logger: Optional[Callable[[str], None]] = None,
+) -> List[Dict[str, Any]]:
+    """Fill blank AMRAP release pairs from strict Spotify artist identities.
+
+    Native AMRAP title/date pairs are authoritative. Partial native metadata
+    is also left untouched so values from different releases cannot be paired.
+    Only the shared Spotify latest-release selector performs API lookups.
+    """
+    log = logger or _LOGGER.info
+    enricher: Optional[SpotifyLatestReleaseEnricher] = None
+    spotify_unavailable = False
+    native_complete = 0
+    partial_native = 0
+    fallback_candidates = 0
+    valid_identities = 0
+    malformed_identities = 0
+    filled = 0
+
+    for row in rows:
+        song_title = str(row.get("Song Title") or "").strip()
+        release_date = str(row.get("Release Date") or "").strip()
+        if song_title and release_date:
+            native_complete += 1
+            continue
+        if song_title or release_date:
+            partial_native += 1
+            continue
+
+        fallback_candidates += 1
+        artist_id, _canonical_url, identity_status = extract_amrap_spotify_artist_identity(row)
+        if identity_status == "malformed":
+            malformed_identities += 1
+        if not artist_id:
+            continue
+
+        valid_identities += 1
+        if enricher is None and not spotify_unavailable:
+            try:
+                client = spotify_client or SpotifyClient(logger=log)
+                enricher = SpotifyLatestReleaseEnricher(client, logger=log)
+            except Exception as exc:
+                spotify_unavailable = True
+                log(f"[Spotify Latest Release][AMRAP] unavailable: {exc}")
+        if enricher is None:
+            continue
+
+        latest = enricher.lookup(artist_id)
+        if latest.song_title and latest.release_date:
+            row["Song Title"] = latest.song_title
+            row["Release Date"] = latest.release_date
+            filled += 1
+
+    log(
+        "[Spotify Latest Release][AMRAP] "
+        f"native_complete={native_complete}, "
+        f"partial_native={partial_native}, "
+        f"fallback_candidates={fallback_candidates}, "
+        f"valid_identities={valid_identities}, "
+        f"successful_lookups={enricher.successful_lookups if enricher else 0}, "
+        f"filled={filled}, "
+        f"malformed_identities={malformed_identities}, "
+        f"lookup_failures={enricher.lookup_failures if enricher else 0}"
+    )
+    return rows
 
 
 def _make_session() -> requests.Session:
@@ -476,6 +578,7 @@ def scrape_amrap(
             break
         page += 1
 
+    enrich_amrap_spotify_releases(results, logger=logger)
     log(f"[AMRAP] Scraping complete. {len(results)} artists collected.")
     return results
 
