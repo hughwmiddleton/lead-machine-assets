@@ -256,6 +256,53 @@ def _extract_hometown(soup: BeautifulSoup) -> str:
     return ""
 
 
+def _derive_primary_genre(raw_genres: str) -> str:
+    """Derive a useful primary genre without breaking parenthetical labels."""
+    value = _norm_text(raw_genres)
+    if not value:
+        return ""
+
+    # A leading parenthesized value is a source taxonomy list without an
+    # explicit top-level category. Keep compact labels such as
+    # ``Singer/Songwriter`` intact and select the first list item.
+    if value.startswith("("):
+        if not value.endswith(")") or value.count("(") != value.count(")"):
+            return ""
+        inner = value[1:-1].strip()
+        primary = re.split(r"[,\u2022]", inner, maxsplit=1)[0].strip()
+        return primary.title() if primary else ""
+
+    # Outside a source taxonomy, compact slashes belong to the label while a
+    # spaced slash retains the established list-separator convention.
+    if "(" not in value:
+        if ")" in value:
+            return ""
+        primary = re.split(r"[,\u2022]", value, maxsplit=1)[0].strip()
+        primary = re.split(r"\s+/\s+", primary, maxsplit=1)[0].strip()
+        return primary.title() if primary else ""
+
+    # Preserve the existing Undiscovered convention for explicit top-level
+    # categories, including Folk/Americana -> Folk and Celtic (Celtic) as-is.
+    legacy_primary = re.split(r"[/,\u2022]", value, maxsplit=1)[0].strip()
+    if (
+        legacy_primary
+        and not legacy_primary.startswith("(")
+        and legacy_primary.count("(") == legacy_primary.count(")")
+    ):
+        return legacy_primary.title()
+
+    # A slash inside a balanced parenthetical label made the legacy split
+    # syntactically invalid (for example, Pop (Singer/Songwriter)). Prefer the
+    # explicit category before that taxonomy rather than returning a fragment.
+    if value.count("(") == value.count(")") and "(" in value:
+        explicit_category = value.split("(", 1)[0].strip()
+        primary = re.split(r"[/,\u2022]", explicit_category, maxsplit=1)[0].strip()
+        if primary:
+            return primary.title()
+
+    return ""
+
+
 def _extract_genres(soup: BeautifulSoup) -> Tuple[str, str]:
     """Return (primary_genre, all_genres_string)."""
     val = _extract_label_value(soup, "genres")
@@ -265,9 +312,7 @@ def _extract_genres(soup: BeautifulSoup) -> Tuple[str, str]:
         # Guard: if value contains other known labels, it's likely cross-contamination
         if any(kw in val.lower() for kw in ("hometown:", "website:", "booking contact")):
             return "", ""
-        parts = [p.strip() for p in re.split(r"[/,•\\-]", val) if p.strip()]
-        primary = parts[0].title() if parts else ""
-        return primary, val
+        return _derive_primary_genre(val), val
     return "", ""
 
 

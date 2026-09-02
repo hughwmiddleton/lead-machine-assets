@@ -455,6 +455,50 @@ def test_genre_and_subgenres_parse_correctly():
     assert "Funk" in profile["genres"]
 
 
+@pytest.mark.parametrize(
+    ("raw_genres", "expected_primary"),
+    [
+        ("Singer/Songwriter", "Singer/Songwriter"),
+        (
+            "(Singer/Songwriter, Traditional Country, Rockabilly, Old Time Country, Roots Rock, Alt Country)",
+            "Singer/Songwriter",
+        ),
+        ("Pop (Singer/Songwriter)", "Pop"),
+        ("(Bluegrass, Western Swing)", "Bluegrass"),
+        ("Folk", "Folk"),
+        ("Folk/Americana (Singer/Songwriter, Americana, Folk Rock)", "Folk"),
+        ("Celtic (Celtic)", "Celtic (Celtic)"),
+        ("Alt-Country (Alt Country)", "Alt-Country (Alt Country)"),
+        ("", ""),
+        ("Pop (Singer/Songwriter", ""),
+    ],
+)
+def test_primary_genre_normalization_preserves_valid_labels(
+    raw_genres: str,
+    expected_primary: str,
+):
+    assert um._derive_primary_genre(raw_genres) == expected_primary
+
+
+@pytest.mark.parametrize(
+    "raw_genres",
+    [
+        "(Singer/Songwriter, Traditional Country, Rockabilly)",
+        "(Bluegrass, Western Swing)",
+        "Pop (Singer/Songwriter)",
+        "Celtic (Celtic)",
+    ],
+)
+def test_genre_raw_remains_source_faithful(raw_genres: str):
+    html = f"<p><strong>Genres:</strong> {raw_genres}</p>"
+    profile = um.parse_artist_profile(html, "https://undiscovered.music/artists/example")
+    row = um._build_row(profile, "2025-01-01")
+
+    assert profile["genres"] == raw_genres
+    assert row["Undiscovered_Genre_Raw"] == raw_genres
+    assert row["Primary Genre"] == profile["genre_primary"]
+
+
 def test_website_parses_and_enters_enrichment_path():
     profile = um.parse_artist_profile(STRONG_PROFILE_HTML, "https://undiscovered.music/artists/delta-soul")
     assert profile["website_url"] == "https://deltasoulmusic.com"
