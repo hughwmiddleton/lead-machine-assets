@@ -61,7 +61,7 @@ class NightModeRunnerDummyTest(unittest.TestCase):
             return enriched_output_path
 
         def fake_run_master_enrichment(
-            input_csv, output_csv, logger=None, enable_live_search=True, max_live_searches=None, night_mode=False
+            input_csv, output_csv, logger=None, enable_live_search=True, max_live_searches=None, night_mode=False, **kwargs
         ):
             df = pd.read_csv(input_csv)
             df["master_enriched"] = True
@@ -152,7 +152,7 @@ class NightModeRunnerDummyTest(unittest.TestCase):
             return enriched_output_path
 
         def fake_run_master_enrichment(
-            input_csv, output_csv, logger=None, enable_live_search=True, max_live_searches=None, night_mode=False
+            input_csv, output_csv, logger=None, enable_live_search=True, max_live_searches=None, night_mode=False, **kwargs
         ):
             shutil.copyfile(input_csv, output_csv)
             sidecar_path = cde._domain_org_index_path(output_csv)
@@ -219,7 +219,7 @@ class NightModeRunnerDummyTest(unittest.TestCase):
             return enriched_output_path
 
         def fake_run_master_enrichment(
-            input_csv, output_csv, logger=None, enable_live_search=True, max_live_searches=None, night_mode=False
+            input_csv, output_csv, logger=None, enable_live_search=True, max_live_searches=None, night_mode=False, **kwargs
         ):
             shutil.copyfile(input_csv, output_csv)
             return output_csv
@@ -321,7 +321,7 @@ class NightModeRunnerDummyTest(unittest.TestCase):
             return raw_output_path
 
         def fake_run_master_enrichment(
-            input_csv, output_csv, logger=None, enable_live_search=True, max_live_searches=None, night_mode=False
+            input_csv, output_csv, logger=None, enable_live_search=True, max_live_searches=None, night_mode=False, **kwargs
         ):
             shutil.copyfile(input_csv, output_csv)
             return output_csv
@@ -389,6 +389,7 @@ class NightModeRunnerDummyTest(unittest.TestCase):
             max_live_searches=None,
             night_mode=False,
             night_fb_run_state=None,
+            **kwargs,
         ):
             phase_run_states.append(("master", night_fb_run_state))
             self.assertIsNotNone(night_fb_run_state)
@@ -443,7 +444,7 @@ class NightModeRunnerDummyTest(unittest.TestCase):
         class FakeModule:
             def scrape_csv(self, in_csv, out_csv, fb_user, fb_pass, max_emails=None):
                 calls.append((in_csv, out_csv, fb_user, fb_pass))
-                df_local = pd.read_csv(in_csv)
+                df_local = pd.read_csv(in_csv, dtype=str, keep_default_na=False)
                 df_local.loc[df_local["Artist Name"] == "HasFacebook", "Email"] = "fb@example.com"
                 df_local.to_csv(out_csv, index=False)
 

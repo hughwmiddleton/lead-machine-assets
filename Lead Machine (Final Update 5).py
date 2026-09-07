@@ -5047,6 +5047,7 @@ _BC_KNOWN_DISCOVER_LOCATION_LABELS = {
     "baltimore",
     "berlin",
     "boston",
+    "bristol",
     "brooklyn",
     "buenos aires",
     "chicago",
@@ -5563,10 +5564,10 @@ def _bandcamp_parse_discover_filters(url: str) -> dict:
     except Exception:
         pass
 
-    if not genre_slugs:
-        genre_slugs = set(_BC_KNOWN_DISCOVER_GENRE_SLUGS)
-    if not location_labels:
-        location_labels = set(_BC_KNOWN_DISCOVER_LOCATION_LABELS)
+    # Always merge static knowledge so that live data omissions (e.g. a city
+    # temporarily missing from featured locations) do not break classification.
+    genre_slugs = genre_slugs | set(_BC_KNOWN_DISCOVER_GENRE_SLUGS)
+    location_labels = location_labels | set(_BC_KNOWN_DISCOVER_LOCATION_LABELS)
 
     # Explicit loc param takes precedence
     explicit_loc = (query.get("loc") or [""])[0].strip()
@@ -5590,13 +5591,14 @@ def _bandcamp_parse_discover_filters(url: str) -> dict:
             # Unknown token — treat as a potential location rather than silently
             # discarding it or misclassifying it as a genre.
             location_parts.append(part)
-        # else: known genre — already filtered by the discover page itself
+        else:
+            genre_parts.append(part)
 
     if location_parts and not result["location"]:
         result["location"] = " ".join(location_parts).replace("-", " ")
 
     result["location_label"] = result["location"]
-    result["genre"] = " ".join([p for p in slug_parts if p.lower() in genre_slugs])
+    result["genre"] = " ".join(genre_parts)
 
     # Resolve API params for cursor pagination
     norm_loc = _bc_normalize_uk_city_filter(result["location"]).strip().lower()
