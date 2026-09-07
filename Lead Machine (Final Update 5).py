@@ -327,6 +327,122 @@ def _load_latest_night_mode_run_summary(run_root: str) -> Optional[dict]:
     return payload if isinstance(payload, dict) else None
 
 
+def _parse_night_mode_run_dir_handshake(line: str) -> Optional[str]:
+    """Extract run_dir from a phased-runner handshake line, or None."""
+    if not line:
+        return None
+    prefix = "[Night Mode][Runtime] run_dir="
+    if prefix in line:
+        idx = line.index(prefix) + len(prefix)
+        return line[idx:].strip()
+    return None
+
+
+def _read_json_safe(path: str) -> Optional[dict]:
+    """Read JSON defensively; return None for missing or malformed files."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def _count_unique_bandcamp_urls(progress: Optional[dict]) -> Optional[int]:
+    """Count unique scraped_artist_urls across all Bandcamp progress checkpoints."""
+    if not progress:
+        return None
+    urls: set[str] = set()
+    for value in progress.values():
+        if isinstance(value, dict):
+            for url in value.get("scraped_artist_urls") or []:
+                if url:
+                    urls.add(str(url))
+    return len(urls) if urls else None
+
+
+def _find_current_job_index(job_statuses: List[Dict[str, Any]]) -> Optional[int]:
+    """Return the first job index with status == 'running', or None."""
+    for idx, status in enumerate(job_statuses):
+        if isinstance(status, dict) and str(status.get("status", "")).strip().lower() == "running":
+            return idx
+    return None
+
+
+def _build_night_mode_progress_display(
+    jobs: List[Dict[str, Any]],
+    active_run_dir: str,
+    job_statuses: List[Dict[str, Any]],
+    bandcamp_progress: Optional[dict] = None,
+) -> Dict[str, Any]:
+    """Build a truthful progress payload for the Night Mode GUI.
+
+    Returns a dict with keys:
+      - phase: str
+      - source: str
+      - job_index: int (1-based) or None
+      - total_jobs: int
+      - target_valid_leads: Optional[int]
+      - heartbeat: Optional[str]
+      - status_text: str
+      - indeterminate: bool
+      - row_count: Optional[int]
+    """
+    total_jobs = len(jobs)
+    current_idx = _find_current_job_index(job_statuses)
+
+    # If no job is explicitly running, look for the first non-completed job
+    # that might be starting, or fall back to the last job.
+    if current_idx is None and job_statuses:
+        for idx, status in enumerate(job_statuses):
+            st = str(status.get("status", "")).strip().lower() if isinstance(status, dict) else ""
+            if st not in {"completed", "failed"}:
+                current_idx = idx
+                break
+        if current_idx is None:
+            # All done; point at last job for display.
+            current_idx = total_jobs - 1 if total_jobs > 0 else None
+
+    result: Dict[str, Any] = {
+        "phase": "starting" if current_idx is None else "processing",
+        "source": "",
+        "job_index": (current_idx + 1) if current_idx is not None else None,
+        "total_jobs": total_jobs,
+        "target_valid_leads": None,
+        "heartbeat": None,
+        "status_text": "processing" if current_idx is not None else "idle",
+        "indeterminate": True,
+        "row_count": None,
+    }
+
+    if current_idx is not None and 0 <= current_idx < total_jobs:
+        job = jobs[current_idx]
+        result["source"] = str(job.get("directory") or job.get("source") or "").strip()
+        try:
+            result["target_valid_leads"] = int(job.get("target_valid_leads") or job.get("target_count") or job.get("max_results") or 0) or None
+        except Exception:
+            result["target_valid_leads"] = None
+        status = job_statuses[current_idx] if current_idx < len(job_statuses) else {}
+        if isinstance(status, dict):
+            result["row_count"] = status.get("row_count")
+            st = str(status.get("status", "")).strip().lower()
+            if st == "completed":
+                result["status_text"] = "completed"
+                result["indeterminate"] = False
+            elif st == "failed":
+                result["status_text"] = "failed"
+            else:
+                result["status_text"] = "processing"
+
+        # Bandcamp heartbeat from per-job progress file.
+        if result["source"].lower() == "bandcamp" and bandcamp_progress is not None:
+            unique = _count_unique_bandcamp_urls(bandcamp_progress)
+            if unique is not None:
+                result["heartbeat"] = f"Profiles checked: {unique}"
+
+    return result
+
+
 FB_DRIVER_RECOVERY_MAX_BATCHES = 10
 FB_DRIVER_RECOVERY_SUMMARY_KEYS = (
     "candidates_found",
@@ -14876,6 +14992,8 @@ class NightModeWorker(QtCore.QThread):
             pretty_cmd = " ".join(self.command)
             masked_cmd = self._mask(pretty_cmd)
             self.log_signal.emit(f"[Night Mode] Running: {masked_cmd}")
+            env = dict(self.env) if self.env else os.environ.copy()
+            env["PYTHONUNBUFFERED"] = "1"
             self._process = subprocess.Popen(
                 self.command,
                 cwd=self.workdir,
@@ -14883,25 +15001,26 @@ class NightModeWorker(QtCore.QThread):
                 stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,
-                env=self.env,
+                env=env,
             )
             stdout = self._process.stdout
-            while stdout:
-                if self._stop_requested:
-                    break
-                ready, _, _ = select.select([stdout], [], [], 0.5)
-                if ready:
-                    line = stdout.readline()
-                    if line:
-                        self.log_signal.emit(self._mask(line.rstrip("\n")))
-                        continue
-                if self._process.poll() is not None:
-                    if ready:
-                        for line in stdout:
-                            self.log_signal.emit(self._mask(line.rstrip("\n")))
-                    break
+            if stdout:
+                for line in stdout:
+                    if self._stop_requested:
+                        break
+                    self.log_signal.emit(self._mask(line.rstrip("\n")))
+                # Drain any remaining output after stop or process exit.
+                if self._process.poll() is None:
+                    self._process.wait()
+                if stdout:
+                    remaining = stdout.read()
+                    if remaining:
+                        for rem_line in remaining.splitlines():
+                            self.log_signal.emit(self._mask(rem_line))
             if self._process:
-                exit_code = self._process.wait()
+                exit_code = self._process.returncode
+                if exit_code is None:
+                    exit_code = self._process.wait()
         except Exception as exc:
             self.log_signal.emit(f"[Night Mode] Error: {self._mask(str(exc))}")
         self.finished_signal.emit(exit_code)
@@ -15035,6 +15154,9 @@ class NightModeTab(QtWidgets.QWidget):
         self._active_unearthed_index_path = _unearthed_artist_url_index_path()
         self._bootstrap_stage = None  # None | "headless" | "headed" | "final_headless"
         self._log_buffer: list[str] = []
+        self._active_run_dir: Optional[str] = None
+        self._active_jobs_config: List[Dict[str, Any]] = []
+        self._handshake_seen = False
         self._build_ui()
         self._progress_timer = QtCore.QTimer(self)
         self._progress_timer.setInterval(1500)
@@ -15325,33 +15447,105 @@ class NightModeTab(QtWidgets.QWidget):
         return f"ETA {secs}s"
 
     def _refresh_runtime_progress(self):
+        # While a Night Mode worker is active, prefer the exact phased-run state
+        # over the global singleton progress file to avoid stale data.
+        if self.worker and self.worker.isRunning():
+            self._refresh_runtime_progress_from_active_run()
+            return
+
+        # No active worker: do not display stale global progress as if it were
+        # the current run. Show idle unless the global file is unambiguous.
         progress = read_progress()
         phase = str(progress.get("phase") or "idle")
-        processed = int(progress.get("processed_rows") or 0)
-        total = progress.get("total_rows")
-        percentage = progress.get("percentage")
-        if percentage is None:
-            self.runtime_progress_bar.setRange(0, 0 if phase not in {"idle", "complete"} else 1000)
+        if phase == "idle":
+            self.runtime_progress_bar.setRange(0, 1000)
             self.runtime_progress_bar.setValue(0)
-            pct_text = "--"
+            self.runtime_progress_detail.setText("idle")
+            return
+        # Even without a worker, avoid presenting a stale complete payload.
+        self.runtime_progress_bar.setRange(0, 1000)
+        self.runtime_progress_bar.setValue(0)
+        self.runtime_progress_detail.setText(f"{phase} — waiting for next run")
+
+    def _refresh_runtime_progress_from_active_run(self):
+        if not self._handshake_seen:
+            self.runtime_progress_bar.setRange(0, 0)
+            self.runtime_progress_bar.setValue(0)
+            self.runtime_progress_detail.setText("Night Mode starting…")
+            return
+
+        run_dir = self._active_run_dir
+        if not run_dir or not os.path.isdir(run_dir):
+            self.runtime_progress_bar.setRange(0, 0)
+            self.runtime_progress_bar.setValue(0)
+            self.runtime_progress_detail.setText("Waiting for current job state…")
+            return
+
+        # Read job statuses for each configured job in order.
+        job_statuses: List[Dict[str, Any]] = []
+        for job in self._active_jobs_config:
+            job_id = job.get("job_id") or job.get("id") or ""
+            job_dir = os.path.join(run_dir, job_id) if job_id else ""
+            status = _read_json_safe(os.path.join(job_dir, "job_status.json")) if job_dir else None
+            job_statuses.append(status or {})
+
+        # Bandcamp heartbeat: read the current job's progress file if applicable.
+        current_idx = _find_current_job_index(job_statuses)
+        bandcamp_progress: Optional[dict] = None
+        if current_idx is not None and 0 <= current_idx < len(self._active_jobs_config):
+            job = self._active_jobs_config[current_idx]
+            if str(job.get("directory") or "").strip().lower() == "bandcamp":
+                job_id = job.get("job_id") or job.get("id") or ""
+                bc_path = os.path.join(run_dir, job_id, "bandcamp_progress.json")
+                bandcamp_progress = _read_json_safe(bc_path)
+
+        display = _build_night_mode_progress_display(
+            self._active_jobs_config,
+            run_dir,
+            job_statuses,
+            bandcamp_progress=bandcamp_progress,
+        )
+
+        source = display.get("source", "")
+        job_index = display.get("job_index")
+        total_jobs = display.get("total_jobs", 0)
+        target = display.get("target_valid_leads")
+        heartbeat = display.get("heartbeat")
+        status_text = display.get("status_text", "processing")
+        indeterminate = display.get("indeterminate", True)
+        row_count = display.get("row_count")
+
+        if indeterminate:
+            self.runtime_progress_bar.setRange(0, 0)
+            self.runtime_progress_bar.setValue(0)
         else:
             self.runtime_progress_bar.setRange(0, 1000)
-            pct_value = max(0.0, min(float(percentage), 100.0))
-            self.runtime_progress_bar.setValue(int(round(pct_value * 10)))
-            pct_text = f"{pct_value:.1f}%"
-        rows_text = f"{processed} / {total}" if total is not None else f"{processed} / unknown"
-        emails = int(progress.get("emails_found") or 0)
-        source = str(progress.get("current_source") or "").strip()
-        status = str(progress.get("current_status") or "").strip()
-        source_status = " | ".join(part for part in (source, status) if part)
-        details = [
-            f"{phase} | {pct_text} | rows {rows_text}",
-            f"emails {emails}",
-            self._format_eta(progress.get("eta_seconds")),
-        ]
-        if source_status:
-            details.append(source_status)
-        self.runtime_progress_detail.setText(" | ".join(details))
+            self.runtime_progress_bar.setValue(1000)
+
+        parts: List[str] = []
+        if source:
+            job_of = f"Job {job_index} of {total_jobs}" if job_index is not None and total_jobs > 0 else ""
+            parts.append(f"{source.capitalize()}{' — ' + job_of if job_of else ''}")
+        else:
+            parts.append("Night Mode")
+
+        if status_text == "processing":
+            parts.append("Status: processing")
+        else:
+            parts.append(f"Status: {status_text}")
+
+        info_parts: List[str] = []
+        if heartbeat:
+            info_parts.append(heartbeat)
+        if target is not None:
+            info_parts.append(f"Target leads: {target}")
+        if row_count is not None:
+            info_parts.append(f"Rows: {row_count}")
+
+        if info_parts:
+            parts.append(" | ".join(info_parts))
+
+        self.runtime_progress_detail.setText("\n".join(parts))
 
     def _update_jobs_summary_from_jobs(self):
         lines = []
@@ -15802,6 +15996,8 @@ class NightModeTab(QtWidgets.QWidget):
     def _launch_night_mode(self, headless: bool):
         # Fresh log buffer per run to avoid stale auth signals.
         self._log_buffer = []
+        self._active_run_dir = None
+        self._handshake_seen = False
         config_path = self.config_path_edit.text().strip()
         config_path_to_use = ""
         if self.jobs:
@@ -15841,6 +16037,7 @@ class NightModeTab(QtWidgets.QWidget):
             except Exception as exc:
                 QtWidgets.QMessageBox.warning(self, "Config error", f"Could not write temp config:\n{exc}")
                 return
+            self._active_jobs_config = list(config.get("jobs", []))
         else:
             if not config_path or not os.path.exists(config_path):
                 QtWidgets.QMessageBox.warning(self, "Config missing", "Add jobs in the table or select a valid night mode config JSON.")
@@ -15869,6 +16066,7 @@ class NightModeTab(QtWidgets.QWidget):
             except Exception as exc:
                 QtWidgets.QMessageBox.warning(self, "Config error", f"Could not prepare config:\n{exc}")
                 return
+            self._active_jobs_config = list(config.get("jobs", []))
         base_dir = os.path.dirname(os.path.abspath(__file__))
         script_path = os.path.join(base_dir, "night_mode_runner.py")
         cmd = [sys.executable, script_path, "--config", config_path_to_use]
@@ -16020,6 +16218,12 @@ class NightModeTab(QtWidgets.QWidget):
         scrollbar = self.log_console.verticalScrollBar()
         if scrollbar:
             scrollbar.setValue(scrollbar.maximum())
+        # Detect phased-runner handshake and bind to the exact run directory.
+        if not self._handshake_seen:
+            run_dir = _parse_night_mode_run_dir_handshake(msg)
+            if run_dir and os.path.isdir(run_dir):
+                self._active_run_dir = run_dir
+                self._handshake_seen = True
 
     def _auth_failure_seen(self) -> bool:
         phrases = [

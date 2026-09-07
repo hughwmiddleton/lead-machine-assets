@@ -720,6 +720,9 @@ def run_phased_night_mode(
     root = run_root or run_dir or "overnight_runs"
     run_dir_path, _ = night_mode_runner._ensure_run_dir(resume=resume, run_root=root)
 
+    # Emit runtime handshake so the GUI can bind to this exact run directory.
+    print(f"[Night Mode][Runtime] run_dir={os.path.abspath(run_dir_path)}", flush=True)
+
     cfg = _load_config(config_path)
     night_fb_run_state = create_night_fb_run_state(
         os.environ.get("FB_USERNAME", "").strip(),
