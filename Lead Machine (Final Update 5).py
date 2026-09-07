@@ -1018,6 +1018,84 @@ def polite_sleep(min_ms=120, max_ms=240):
     time.sleep(random.uniform(min_ms / 1000.0, max_ms / 1000.0))
 
 
+class BandcampPacingPolicy:
+    """Conservative request pacing for Bandcamp cursor API and profile fetches.
+
+    Injectable so tests can patch sleeps away.
+    """
+
+    def __init__(
+        self,
+        cursor_delay_ms=(800, 1200),
+        min_gap_ms=400,
+        max_retries=4,
+    ):
+        self.cursor_delay_ms = cursor_delay_ms
+        self.min_gap_ms = min_gap_ms
+        self.max_retries = max_retries
+        self._last_request_time = 0.0
+
+    def _ensure_gap(self):
+        now = time.time()
+        elapsed = now - self._last_request_time
+        min_gap = self.min_gap_ms / 1000.0
+        if elapsed < min_gap:
+            time.sleep(min_gap - elapsed)
+        self._last_request_time = time.time()
+
+    def sleep_cursor(self):
+        """Sleep between cursor API batches."""
+        time.sleep(random.uniform(self.cursor_delay_ms[0] / 1000.0, self.cursor_delay_ms[1] / 1000.0))
+        self._ensure_gap()
+
+    def sleep_retry(self, attempt, retry_after=None):
+        """Sleep after a 429 before retrying.
+
+        Returns the number of seconds slept.
+        """
+        if retry_after is not None and retry_after > 0:
+            wait = min(retry_after, 300)
+        else:
+            base = 10.0 * (2 ** attempt)
+            wait = min(base, 60.0) + random.uniform(0, 2.0)
+        time.sleep(wait)
+        self._last_request_time = time.time()
+        return wait
+
+
+# Module-level shared pacing state so sequential jobs inherit cooldown.
+_BANDCAMP_PACING = BandcampPacingPolicy()
+
+
+def _bandcamp_session():
+    """Bandcamp-specific session: 429 is handled explicitly, not by urllib3 retry."""
+    session = requests.Session()
+    retry = Retry(
+        total=3,
+        connect=3,
+        read=3,
+        status=3,
+        backoff_factor=0.4,
+        status_forcelist=(500, 502, 503, 504),
+        allowed_methods=False,
+    )
+    adapter = HTTPAdapter(pool_connections=64, pool_maxsize=64, max_retries=retry)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    session.headers.update(_rand_headers())
+    return session
+
+
+def _bandcamp_parse_retry_after(response):
+    raw = response.headers.get("Retry-After") or response.headers.get("retry-after")
+    if raw:
+        try:
+            return int(raw)
+        except ValueError:
+            pass
+    return None
+
+
 def _sc_stat_inc(key: str, n: int = 1):
     global _SC_RUN_STATS
     if _SC_RUN_STATS is None:
@@ -4512,6 +4590,419 @@ _BC_GENRE_FILTER_TOKENS = {
     "folk",
     "rnb",
     "soul",
+    # Normalised compound genres that _norm_text_ produces (hyphens -> spaces)
+    "indie rock",
+    "math rock",
+    "blues rock",
+    "country rock",
+    "experimental rock",
+    "folk rock",
+    "funk rock",
+    "latin rock",
+    "punk rock",
+    "prog rock",
+    "post rock",
+    "rock roll",
+    "psychedelic rock",
+    "hard rock",
+    "garage rock",
+    "surf rock",
+    "indie folk",
+    "indie pop",
+    "singer songwriter",
+    "hip hop rap",
+    "r b soul",
+    "spoken word",
+    "new wave",
+    "dream pop",
+    "shoegaze",
+    "noise rock",
+    "post punk",
+    "hardcore",
+    "emo",
+    "grunge",
+    "black metal",
+    "death metal",
+    "thrash",
+    "metalcore",
+    "folk metal",
+    "doom metal",
+    "progressive metal",
+    "power metal",
+    "symphonic metal",
+    "industrial",
+    "ebm",
+    "dark ambient",
+    "dungeon synth",
+    "neo classical",
+    "minimal",
+    "drone",
+    "noise",
+    "house",
+    "techno",
+    "trance",
+    "dubstep",
+    "drum and bass",
+    "breakbeat",
+    "idm",
+    "glitch",
+    "synth pop",
+    "electropop",
+    "indietronica",
+    "chillwave",
+    "vaporwave",
+    "future funk",
+    "synthwave",
+    "lo fi",
+    "bedroom pop",
+    # Also include hyphenated forms because _norm_text_ does not normalise hyphens
+    "indie-rock",
+    "math-rock",
+    "blues-rock",
+    "country-rock",
+    "experimental-rock",
+    "folk-rock",
+    "funk-rock",
+    "latin-rock",
+    "punk-rock",
+    "prog-rock",
+    "post-rock",
+    "rock-roll",
+    "psychedelic-rock",
+    "hard-rock",
+    "garage-rock",
+    "surf-rock",
+    "indie-folk",
+    "indie-pop",
+    "singer-songwriter",
+    "hip-hop-rap",
+    "r-b-soul",
+    "spoken-word",
+    "new-wave",
+    "dream-pop",
+    "noise-rock",
+    "post-punk",
+    "black-metal",
+    "death-metal",
+    "folk-metal",
+    "doom-metal",
+    "progressive-metal",
+    "power-metal",
+    "symphonic-metal",
+    "dark-ambient",
+    "dungeon-synth",
+    "neo-classical",
+    "synth-pop",
+    "future-funk",
+    "lo-fi",
+    "bedroom-pop",
+}
+
+# Extracted from Bandcamp discover data-blob (2026-09-07). Used as fallback when live fetch fails.
+_BC_KNOWN_DISCOVER_GENRE_SLUGS = {
+    "acoustic",
+    "adult-contemporary",
+    "african",
+    "alt-country",
+    "alternative",
+    "ambient",
+    "americana",
+    "atmospheric",
+    "audiobooks",
+    "avant-garde",
+    "baby",
+    "bachata",
+    "balkan",
+    "baroque",
+    "beat-tape",
+    "beats",
+    "bebop",
+    "big-band",
+    "black-metal",
+    "bluegrass",
+    "blues",
+    "blues-rock",
+    "bolero",
+    "boogie",
+    "boogie-woogie",
+    "boom-bap",
+    "brazilian",
+    "breaks",
+    "britpop",
+    "celtic",
+    "chamber-music",
+    "chill-out",
+    "chillwave",
+    "chiptune",
+    "choral",
+    "christian",
+    "classical",
+    "classical-piano",
+    "comedy",
+    "conscious-hip-hop",
+    "contemporary-classical",
+    "contemporary-r-b",
+    "country",
+    "country-blues",
+    "country-folk",
+    "country-rock",
+    "crust-punk",
+    "cumbia",
+    "dance",
+    "dancehall",
+    "dark-ambient",
+    "death-metal",
+    "deathcore",
+    "deep-funk",
+    "delta-blues",
+    "devotional",
+    "doom",
+    "downtempo",
+    "dream-pop",
+    "drone",
+    "drum-bass",
+    "dub",
+    "dubstep",
+    "edm",
+    "educational",
+    "electric-blues",
+    "electro",
+    "electro-acoustic",
+    "electro-pop",
+    "electronic",
+    "electronica",
+    "emo",
+    "experimental",
+    "experimental-folk",
+    "experimental-pop",
+    "experimental-rock",
+    "family-music",
+    "field-recordings",
+    "film-music",
+    "flamenco",
+    "folk",
+    "folk-punk",
+    "folk-rock",
+    "footwork",
+    "free-jazz",
+    "funk",
+    "funk-jam",
+    "funk-rock",
+    "fusion",
+    "g-funk",
+    "garage",
+    "garage-rock",
+    "glitch",
+    "go-go",
+    "gospel",
+    "goth",
+    "grime",
+    "grindcore",
+    "grunge",
+    "guitar",
+    "gypsy",
+    "hard-rock",
+    "hardcore",
+    "hardcore-punk",
+    "heavy-metal",
+    "hillbilly",
+    "hip-hop-rap",
+    "honky-tonk",
+    "house",
+    "idm",
+    "improv",
+    "improvisation",
+    "indie",
+    "indie-folk",
+    "indie-pop",
+    "indie-rock",
+    "industrial",
+    "inspirational",
+    "instrumental",
+    "instrumental-hip-hop",
+    "j-pop",
+    "jangle-pop",
+    "jazz",
+    "jazz-funk",
+    "juke",
+    "kids",
+    "latin",
+    "latin-jazz",
+    "latin-rock",
+    "lovers-rock",
+    "lullaby",
+    "math-rock",
+    "meditation",
+    "merengue",
+    "metal",
+    "metalcore",
+    "modern-classical",
+    "modern-jazz",
+    "motown",
+    "music-therapy",
+    "musique-concrete",
+    "méxico-d.f.",
+    "neo-classical",
+    "neo-soul",
+    "new-age",
+    "new-wave",
+    "no-wave",
+    "noise",
+    "noise-pop",
+    "nu-jazz",
+    "opera",
+    "orchestral",
+    "ost",
+    "outlaw",
+    "piano",
+    "podcasts",
+    "poetry",
+    "pop",
+    "pop-folk",
+    "pop-punk",
+    "post-hardcore",
+    "post-punk",
+    "post-rock",
+    "power-pop",
+    "prog-rock",
+    "progressive-metal",
+    "psychedelic-rock",
+    "punk",
+    "punk-rock",
+    "r-b",
+    "r-b-soul",
+    "ragga",
+    "rap",
+    "rare-groove",
+    "reggae",
+    "reggaeton",
+    "rhythm-blues",
+    "rock",
+    "rock-roll",
+    "rockabilly",
+    "rocksteady",
+    "roots",
+    "salsa",
+    "self-help",
+    "shoegaze",
+    "singer-songwriter",
+    "ska",
+    "sludge-metal",
+    "soul",
+    "soul-jazz",
+    "sound-art",
+    "soundscapes",
+    "soundtrack",
+    "spiritual",
+    "spiritual-jazz",
+    "spoken-word",
+    "stand-up",
+    "storytelling",
+    "surf-rock",
+    "swing",
+    "synth-pop",
+    "synthwave",
+    "tango",
+    "techno",
+    "thrash",
+    "thrash-metal",
+    "traditional",
+    "trance",
+    "trap",
+    "tribal",
+    "tropical",
+    "underground-hip-hop",
+    "urban",
+    "vaporwave",
+    "video-game",
+    "video-game-music",
+    "vocal-jazz",
+    "western",
+    "witch-house",
+    "world",
+    "world-fusion",
+    "worship",
+}
+
+_BC_KNOWN_DISCOVER_LOCATION_LABELS = {
+    "amsterdam",
+    "atlanta",
+    "austin",
+    "baltimore",
+    "berlin",
+    "boston",
+    "brooklyn",
+    "buenos aires",
+    "chicago",
+    "denver",
+    "detroit",
+    "dublin",
+    "from anywhere",
+    "glasgow",
+    "london",
+    "los angeles",
+    "madrid",
+    "manchester",
+    "melbourne",
+    "mexico city",
+    "miami",
+    "minneapolis",
+    "montreal",
+    "nashville",
+    "new orleans",
+    "new york city",
+    "oakland",
+    "paris",
+    "philadelphia",
+    "portland",
+    "san francisco",
+    "seattle",
+    "sydney",
+    "toronto",
+    "vancouver",
+    "washington, dc",
+}
+
+# Verified geoname_ids for featured Bandcamp discover locations.
+# Used as fallback when the live data-blob does not contain the location.
+_BC_KNOWN_LOCATION_GEONAME_IDS = {
+    "amsterdam": 2759794,
+    "atlanta": 4180439,
+    "austin": 4671654,
+    "baltimore": 4347778,
+    "berlin": 2950159,
+    "boston": 4930956,
+    "brooklyn": 5110302,
+    "buenos aires": 3435907,
+    "chicago": 4887398,
+    "denver": 5419384,
+    "detroit": 4990729,
+    "dublin": 2964574,
+    "glasgow": 3333231,
+    "london": 2643743,
+    "los angeles": 5368361,
+    "madrid": 3117735,
+    "manchester": 2643123,
+    "melbourne": 2158177,
+    "mexico city": 3530597,
+    "miami": 4164138,
+    "minneapolis": 5037649,
+    "montreal": 6077243,
+    "nashville": 4644585,
+    "new orleans": 4335045,
+    "new york": 5128581,
+    "new york city": 5128581,
+    "oakland": 5378538,
+    "paris": 2988507,
+    "philadelphia": 4560349,
+    "portland": 5746545,
+    "san francisco": 5391959,
+    "seattle": 5809844,
+    "sydney": 2147714,
+    "toronto": 6167865,
+    "vancouver": 6173331,
+    "washington, dc": 4140963,
+    "bristol": 2654675,
 }
 
 def _bc_decode_filter(s: str | None) -> str | None:
@@ -4567,9 +5058,41 @@ def _bc_sanitize_location_filter(label: str | None) -> str:
             print(f"BC_DEBUG_FILTER_SRC: {debug_payload}")
     return sanitized_label
 
+_UK_COUNTRY_ALIASES = (
+    "united kingdom",
+    "great britain",
+    "northern ireland",
+    "england",
+    "scotland",
+    "wales",
+    "uk",
+    "gb",
+)
+
+
+def _bc_normalize_uk_city_filter(text: str) -> str:
+    """
+    Strip UK country qualifiers from city+country filters so that
+    'london uk', 'london united kingdom', etc. behave like 'london'.
+    Pure country filters ('uk', 'england', etc.) are preserved.
+    """
+    if not text:
+        return text
+    norm = _norm_text_(text).replace("-", " ")
+    remaining = norm
+    for alias in sorted(_UK_COUNTRY_ALIASES, key=len, reverse=True):
+        remaining = remaining.replace(alias, "")
+    remaining = remaining.strip()
+    if remaining:
+        return remaining
+    return text
+
+
 def _bandcamp_location_match_(profile_loc: str, api_hint: str, requested_label: str | None, requested_hint: str | None) -> bool:
     requested_label = _bc_decode_filter(requested_label)
     requested_hint = _bc_decode_filter(requested_hint)
+    requested_label = _bc_normalize_uk_city_filter(requested_label)
+    requested_hint = _bc_normalize_uk_city_filter(requested_hint)
     if not requested_label and not requested_hint:
         return True
     profile_norm = _norm_text_(profile_loc).replace("-", " ")
@@ -4853,43 +5376,176 @@ def _bandcamp_parse_discover_params(url: str) -> dict:
         result["t"] = tag_value
     return result
 
-def _bandcamp_location_label_from_url(url: str) -> dict:
+def _bandcamp_parse_discover_filters(url: str) -> dict:
+    """
+    Parse a Bandcamp discover URL to extract genre and location filters.
+    Uses Bandcamp's actual discover data-blob when available, falling back
+    to statically-cached genre/location sets.
+
+    Returns: {
+        "genre": "indie-rock",
+        "location": "london uk",
+        "location_label": "london uk",
+        "sort": "new",
+        "raw_slug": "indie-rock+london-uk",
+    }
+    """
+    result = {
+        "genre": "",
+        "location": "",
+        "location_label": "",
+        "sort": "new",
+        "raw_slug": "",
+    }
     if not _bandcamp_is_discover_url(url):
-        return {"display_label": "", "hint": ""}
-    params = _bandcamp_parse_discover_params(url)
-    loc_value = params.get("loc") or ""
-    loc_value_decoded = _bc_decode_filter(loc_value) or ""
-    display_label = ""
+        return result
+
+    parsed = urlparse(url)
+    query = parse_qs(parsed.query or "")
+    result["sort"] = (query.get("s") or ["new"])[0] or "new"
+
+    segments = [seg for seg in (parsed.path or "").split("/") if seg]
+    if len(segments) >= 2 and segments[0] == "discover":
+        result["raw_slug"] = segments[1]
+
+    slug_parts = [part.strip() for part in re.split(r"[+\s]+", result["raw_slug"]) if part.strip()]
+    if not slug_parts:
+        return result
+
+    # Fetch metadata from Bandcamp's own data-blob
+    genre_slugs = set()
+    location_labels = set()
+    loc_by_id = {}
+    state = {}
     try:
         session = build_hardened_session()
         response = session.get(url, headers=_rand_headers(), timeout=(6, 15))
         response.raise_for_status()
-        match = re.search(r'id="DiscoverApp"[^>]+data-blob="([^"]+)"', response.text)
+        match = re.search(r'data-blob="([^"]+)"', response.text)
         if match:
             blob = json.loads(html.unescape(match.group(1)))
-            locations = (
-                blob.get("appData", {})
-                    .get("initialState", {})
-                    .get("locations", [])
-            )
-            for entry in locations:
-                if str(entry.get("id")) == str(loc_value):
-                    display_label = entry.get("label", "") or ""
-                    break
+            state = blob.get("appData", {}).get("initialState", {})
+            for g in state.get("genres", []):
+                s = g.get("slug", "").strip().lower()
+                if s:
+                    genre_slugs.add(s)
+            for sg in state.get("subgenres", []):
+                s = sg.get("slug", "").strip().lower()
+                if s:
+                    genre_slugs.add(s)
+            for ct in state.get("customTags", []):
+                s = ct.get("slug", "").strip().lower()
+                if s:
+                    genre_slugs.add(s)
+            for loc in state.get("locations", []):
+                label = loc.get("label", "").strip().lower()
+                loc_id = str(loc.get("id", "")).strip()
+                if label:
+                    location_labels.add(label)
+                if loc_id:
+                    loc_by_id[loc_id] = label
     except Exception:
-        display_label = ""
-    if not display_label and loc_value and not loc_value.isdigit():
-        display_label = loc_value_decoded or loc_value
-    hint = ""
-    if display_label:
-        hint = display_label
-    elif loc_value.isdigit():
-        hint = f"loc:{loc_value}"
-    elif loc_value:
-        hint = loc_value_decoded or loc_value
-    display_label = _bc_decode_filter(display_label) or ""
-    hint = _bc_decode_filter(hint) or ""
-    return {"display_label": display_label, "hint": hint}
+        pass
+
+    if not genre_slugs:
+        genre_slugs = set(_BC_KNOWN_DISCOVER_GENRE_SLUGS)
+    if not location_labels:
+        location_labels = set(_BC_KNOWN_DISCOVER_LOCATION_LABELS)
+
+    # Explicit loc param takes precedence
+    explicit_loc = (query.get("loc") or [""])[0].strip()
+    if explicit_loc:
+        if explicit_loc in loc_by_id:
+            result["location"] = loc_by_id[explicit_loc]
+        elif not explicit_loc.isdigit():
+            result["location"] = _bc_decode_filter(explicit_loc) or explicit_loc
+
+    # Classify slug parts using Bandcamp's own genre/location data
+    genre_parts = []
+    location_parts = []
+    for part in slug_parts:
+        part_lower = part.lower()
+        contains_location = any(loc_label in part_lower for loc_label in location_labels)
+        is_genre = part_lower in genre_slugs
+
+        if contains_location:
+            location_parts.append(part)
+        elif not is_genre:
+            # Unknown token — treat as a potential location rather than silently
+            # discarding it or misclassifying it as a genre.
+            location_parts.append(part)
+        # else: known genre — already filtered by the discover page itself
+
+    if location_parts and not result["location"]:
+        result["location"] = " ".join(location_parts).replace("-", " ")
+
+    result["location_label"] = result["location"]
+    result["genre"] = " ".join([p for p in slug_parts if p.lower() in genre_slugs])
+
+    # Resolve API params for cursor pagination
+    norm_loc = _bc_normalize_uk_city_filter(result["location"]).strip().lower()
+    resolved_geoname = None
+    custom_tag_slug = None
+
+    # 1. Try live data-blob featured locations
+    for loc in state.get("locations", []):
+        loc_label = (loc.get("label") or "").strip().lower()
+        if loc_label == norm_loc:
+            resolved_geoname = loc.get("id")
+            break
+
+    # 2. Try live data-blob custom tags (e.g. bristol-uk when not featured)
+    if not resolved_geoname:
+        for ct in state.get("customTags", []):
+            ct_slug = (ct.get("slug") or "").strip().lower()
+            ct_label = (ct.get("label") or "").strip().lower()
+            if ct_label == result["location"].strip().lower():
+                custom_tag_slug = ct_slug
+                break
+            if ct_slug == result["location"].strip().lower().replace(" ", "-"):
+                custom_tag_slug = ct_slug
+                break
+
+    # 3. Static geoname fallback
+    if not resolved_geoname and not custom_tag_slug:
+        resolved_geoname = _BC_KNOWN_LOCATION_GEONAME_IDS.get(norm_loc)
+        # Also try matching raw slug parts directly
+        if not resolved_geoname:
+            for part in slug_parts:
+                part_clean = _bc_normalize_uk_city_filter(part.lower().replace("-", " "))
+                if part_clean in _BC_KNOWN_LOCATION_GEONAME_IDS:
+                    resolved_geoname = _BC_KNOWN_LOCATION_GEONAME_IDS[part_clean]
+                    break
+
+    # Determine which slug parts are actually genres vs locations for the API
+    location_slugs = {lp.lower() for lp in location_parts}
+    if custom_tag_slug:
+        location_slugs.add(custom_tag_slug)
+    if resolved_geoname:
+        for part in slug_parts:
+            part_clean = _bc_normalize_uk_city_filter(part.lower().replace("-", " "))
+            if part_clean in _BC_KNOWN_LOCATION_GEONAME_IDS:
+                location_slugs.add(part.lower())
+        if result["location"]:
+            location_slugs.add(result["location"].strip().lower().replace(" ", "-"))
+            location_slugs.add(norm_loc.replace(" ", "-"))
+
+    api_tags = [p for p in slug_parts if p.lower() in genre_slugs and p.lower() not in location_slugs]
+    if custom_tag_slug and custom_tag_slug not in api_tags:
+        api_tags.append(custom_tag_slug)
+
+    result["geoname_id"] = resolved_geoname
+    result["api_tags"] = api_tags
+    return result
+
+
+def _bandcamp_location_label_from_url(url: str) -> dict:
+    if not _bandcamp_is_discover_url(url):
+        return {"display_label": "", "hint": ""}
+    filters = _bandcamp_parse_discover_filters(url)
+    location = filters.get("location") or ""
+    location = _bc_decode_filter(location) or ""
+    return {"display_label": location, "hint": location}
 
 
 def _bandcamp_fetch_profile_html(profile_url: str, session=None) -> str:
@@ -5271,37 +5927,20 @@ def scrape_bandcamp(
     seen_profiles = set()
     requested_label = ""
     requested_hint = ""
-    slug_parts = []
-    loc_guess = ""
     if url_input and _bandcamp_is_discover_url(url_input):
-        loc_meta = _bandcamp_location_label_from_url(url_input)
-        requested_label = _bc_sanitize_location_filter(loc_meta.get("display_label", "") or "")
-        requested_hint = _bc_sanitize_location_filter(loc_meta.get("hint", "") or "")
-        if not requested_hint:
-            params = _bandcamp_parse_discover_params(url_input)
-            requested_hint = _bc_sanitize_location_filter(params.get("loc") or params.get("location") or "")
-        parsed = urlparse(url_input)
-        segments = [seg for seg in (parsed.path or "").split("/") if seg]
-        if len(segments) >= 2 and segments[0] == "discover":
-            slug = segments[1]
-            slug_parts = [part for part in re.split(r"[+\s]+", slug) if part]
-        if len(slug_parts) >= 2:
-            loc_guess = " ".join(slug_parts[:-1]).strip()
-            loc_guess = _bc_sanitize_location_filter(loc_guess)
-            if loc_guess and not requested_hint:
-                requested_hint = loc_guess
-        # Also include the slug-derived location as a hint so spacing/label issues don't prune everything.
-        if loc_guess:
-            loc_norm = _norm_text_(loc_guess)
-            label_norm = _norm_text_(requested_label)
-            if requested_label and loc_norm and loc_norm not in label_norm:
-                requested_label = loc_guess
-            if requested_hint and loc_guess.lower() not in requested_hint.lower():
-                requested_hint = f"{requested_hint} {loc_guess}".strip()
-            elif requested_label and loc_guess.lower() not in requested_label.lower():
-                requested_hint = loc_guess
-        requested_label = _bc_sanitize_location_filter(requested_label)
-        requested_hint = _bc_sanitize_location_filter(requested_hint)
+        discover_filters = _bandcamp_parse_discover_filters(url_input)
+        inferred_location = _bc_sanitize_location_filter(discover_filters.get("location") or "")
+        requested_label = inferred_location
+        requested_hint = inferred_location
+        genre_tag = discover_filters.get("genre") or ""
+        sort_mode = discover_filters.get("sort") or "new"
+        if requested_label or requested_hint or genre_tag:
+            print(
+                f"Bandcamp: discover filters -> "
+                f"genre={genre_tag or 'none'} "
+                f"location={requested_label or 'none'} "
+                f"sort={sort_mode}"
+            )
         if requested_label or requested_hint:
             print(f"Bandcamp: applying location filter -> {requested_label or requested_hint}")
     elif normalized_mode == "search" and normalized_search_location:
@@ -5804,7 +6443,14 @@ def _bandcamp_collect_mode_pages(driver, base_url: str, mode_label: str, selecto
     return collected
 
 def scrape_bandcamp_discover(driver, discover_url: str, max_pages: int = 1, max_items: int | None = None) -> list:
-    return _bandcamp_collect_discover_dom(driver, discover_url, max_pages, max_items=max_items)
+    # Primary: cursor-based API pagination
+    api_candidates = _bandcamp_collect_discover_via_api(discover_url, max_candidates=max_items)
+    if api_candidates:
+        return api_candidates
+
+    # Fallback: first-page DOM only (do not use fake ?p=N pagination as primary)
+    print("Bandcamp: discover API yielded no candidates; falling back to first-page DOM")
+    return _bandcamp_collect_discover_dom(driver, discover_url, max_pages=1, max_items=max_items)
 
 def scrape_bandcamp_tag(driver, tag_url: str, max_pages: int = 20, max_items: int | None = None) -> list:
     return _bandcamp_collect_mode_pages(driver, tag_url, "tag", _BANDCAMP_GRID_SELECTORS, max_pages, max_items=max_items)
@@ -6070,6 +6716,138 @@ def _bandcamp_collect_tag_via_api(slug: str, page_index: int, base_params: dict 
     return candidates
 
 
+def _bandcamp_collect_discover_via_api(discover_url: str, max_candidates: int | None = None) -> list:
+    """
+    Collect discover candidates via Bandcamp's cursor-based API.
+    Falls back to an empty list if params cannot be resolved or the API fails.
+    """
+    filters = _bandcamp_parse_discover_filters(discover_url)
+    geoname_id = filters.get("geoname_id")
+    api_tags = filters.get("api_tags") or []
+    sort_slice = filters.get("sort") or "new"
+
+    if not geoname_id and not api_tags:
+        print("Bandcamp: discover API skipped — no resolvable geoname_id or tags")
+        return []
+
+    api_url = "https://bandcamp.com/api/discover/1/discover_web"
+    session = _bandcamp_session()
+
+    body = {
+        "category_id": 0,
+        "tag_norm_names": api_tags,
+        "slice": sort_slice,
+        "time_facet_id": None,
+        "cursor": None,
+        "size": 20,
+        "include_result_types": ["a"],
+        "followed_bands": False,
+    }
+    if geoname_id:
+        body["geoname_id"] = geoname_id
+
+    candidates = []
+    seen_item_ids = set()
+    seen_urls = set()
+    batch_num = 0
+    cursor = None
+    safety_limit = 50  # Hard ceiling to prevent runaway loops
+
+    pacing = _BANDCAMP_PACING
+
+    while batch_num < safety_limit:
+        batch_num += 1
+        request_body = {**body, "cursor": cursor}
+
+        # Ensure minimum gap from the last Bandcamp request (cross-job safety).
+        pacing._ensure_gap()
+
+        data = None
+        for attempt in range(pacing.max_retries + 1):
+            try:
+                resp = session.post(
+                    api_url,
+                    json=request_body,
+                    headers={**_rand_headers(), "Accept": "application/json"},
+                    timeout=(6, 15),
+                )
+                if resp.status_code == 429:
+                    retry_after = _bandcamp_parse_retry_after(resp)
+                    if attempt < pacing.max_retries:
+                        wait = pacing.sleep_retry(attempt, retry_after)
+                        print(f"Bandcamp: rate limited -> waiting {wait:.0f}s before retry {attempt + 1}/{pacing.max_retries}")
+                        continue
+                    print(f"Bandcamp: rate limited -> retries exhausted after {pacing.max_retries} attempts")
+                    break
+                resp.raise_for_status()
+                data = resp.json() or {}
+                break
+            except Exception as exc:
+                if attempt < pacing.max_retries:
+                    continue
+                print(f"Bandcamp: discover API failed batch {batch_num}: {exc}")
+                break
+
+        if data is None:
+            break
+
+        results = data.get("results") or []
+        next_cursor = data.get("cursor")
+        batch_count = len(results)
+
+        new_unique = 0
+        for item in results:
+            item_id = item.get("item_id")
+            band_url = item.get("band_url") or ""
+            if not band_url:
+                continue
+
+            # Canonicalize profile URL
+            band_url = band_url.split("?")[0]
+            if not band_url.endswith("/"):
+                band_url += "/"
+
+            # Deduplicate by stable item_id and canonical URL
+            if item_id and item_id in seen_item_ids:
+                continue
+            url_key = band_url.rstrip("/").lower()
+            if url_key in seen_urls:
+                continue
+
+            if item_id:
+                seen_item_ids.add(item_id)
+            seen_urls.add(url_key)
+
+            candidates.append({
+                "url": band_url,
+                "primary_genre": "",
+                "location": item.get("band_location") or "",
+                "item_id": item_id,
+            })
+            new_unique += 1
+
+            if max_candidates and len(candidates) >= max_candidates:
+                break
+
+        has_cursor = bool(next_cursor)
+        print(f"Bandcamp: discover API batch {batch_num} -> results={batch_count} new_unique={new_unique} cursor={'yes' if has_cursor else 'no'}")
+
+        if max_candidates and len(candidates) >= max_candidates:
+            print(f"Bandcamp: candidate budget reached -> {len(candidates)}")
+            break
+
+        if not next_cursor:
+            break
+        if new_unique == 0:
+            print("Bandcamp: discover API zero new candidates; stopping")
+            break
+
+        cursor = next_cursor
+        pacing.sleep_cursor()
+
+    return candidates
+
+
 def _bandcamp_collect_discover_dom(driver, discover_url: str, max_pages: int = 1, max_items: int | None = None) -> list:
     max_pages = max(1, int(max_pages or 1))
     selectors = [
@@ -6081,6 +6859,8 @@ def _bandcamp_collect_discover_dom(driver, discover_url: str, max_pages: int = 1
     candidates = []
     seen = set()
     base_url = discover_url
+    previous_page_urls = set()
+    pagination_broken = False
     for page_index in range(max_pages):
         page_url = _bandcamp_replace_query_param(base_url, "p", page_index)
         page_label = page_index + 1
@@ -6105,21 +6885,40 @@ def _bandcamp_collect_discover_dom(driver, discover_url: str, max_pages: int = 1
             break
         raw_count = len(page_candidates)
         # Deduplicate across pages and checkpoint; track kept_count for stop logic.
+        current_page_urls = set()
         new_added = 0
         for cand in page_candidates:
             key = (cand.get("url") or "").rstrip("/").lower()
-            if not key or key in seen:
+            if not key:
+                continue
+            current_page_urls.add(key)
+            if key in seen:
                 continue
             seen.add(key)
             candidates.append(cand)
             new_added += 1
             if max_items and len(candidates) >= max_items:
                 break
+        # Detect broken pagination: if this page is a 100% duplicate of the previous page,
+        # Bandcamp's pagination is not working and we should stop.
+        overlap = len(current_page_urls & previous_page_urls)
+        if page_index > 0 and current_page_urls and overlap == len(current_page_urls):
+            print(
+                f"Bandcamp: discover page {page_label} appears to be a duplicate of page {page_label - 1} "
+                f"(overlap={overlap}/{len(current_page_urls)}); stopping pagination"
+            )
+            pagination_broken = True
+            break
+        previous_page_urls = current_page_urls
         print(f"Bandcamp: discover page {page_label} unique candidates = {raw_count}")
         print(f"Bandcamp: discover page {page_label} kept_after_filters = {new_added}")
+        if page_index > 0:
+            print(f"Bandcamp: discover page {page_label} overlap_with_previous = {overlap}")
         print(f"Bandcamp: discover page {page_label} -> {new_added} items")
         if max_items and len(candidates) >= max_items:
             break
+    if pagination_broken:
+        print("Bandcamp: discover pagination halted — subsequent pages returned identical content")
     print(f"Bandcamp: discover collected total = {len(candidates)}")
     return candidates
 
