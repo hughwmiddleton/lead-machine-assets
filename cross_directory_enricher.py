@@ -19111,7 +19111,8 @@ class CrossDirectoryEnricherWorker(QThread):
             current = 0.0
         cleaned = round(max(0.0, min(float(score or 0.0), 1.0)), 4)
         if cleaned > current:
-            df.at[row_idx, "Match_Score"] = str(cleaned)
+            value = str(cleaned) if isinstance(df["Match_Score"].dtype, pd.StringDtype) else cleaned
+            df.at[row_idx, "Match_Score"] = value
 
     def _row_is_festival_expansion(self, row: pd.Series) -> bool:
         discovery_tier = _clean_cell(row.get("Discovery Tier", "")).strip().lower()

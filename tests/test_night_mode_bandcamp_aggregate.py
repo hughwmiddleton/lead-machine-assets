@@ -8,7 +8,9 @@ from unittest import mock
 import pandas as pd
 
 import night_mode_runner
+import night_mode_bandcamp
 import pipeline_runner
+from night_mode_v2 import phased_runner
 
 
 class BandcampAggregateTest(unittest.TestCase):
@@ -131,6 +133,130 @@ class BandcampAggregateTest(unittest.TestCase):
         path = night_mode_runner._build_bandcamp_aggregate_csv(self.run_dir, [state1, state2], logger)
         df = pd.read_csv(path)
         self.assertEqual(len(df), 1)
+
+    def test_corrupt_file_does_not_break_aggregation(self):
+        rows = [{"Artist Name": "Artist A", "Profile URL": "https://artist.bandcamp.com/"}]
+        state1 = self._make_job_state("job_bandcamp_1", "bandcamp", bandcamp_rows=rows)
+        state2 = self._make_job_state("job_bandcamp_2", "bandcamp")
+        corrupt_path = os.path.join(os.path.dirname(state2["raw_csv"]), "bandcamp_enriched.csv")
+        with open(corrupt_path, "wb") as f:
+            f.write(b"\xff\xfe\x00\x80")
+        logger = mock.Mock(spec=["info", "warning"])
+
+        path = night_mode_runner._build_bandcamp_aggregate_csv(self.run_dir, [state1, state2], logger)
+        df = pd.read_csv(path)
+        self.assertEqual(len(df), 1)
+        logger.warning.assert_called_once()
+
+    def test_runner_aliases_the_single_shared_implementation(self):
+        self.assertIs(
+            night_mode_runner._build_bandcamp_aggregate_csv,
+            night_mode_bandcamp.build_bandcamp_aggregate_csv,
+        )
+
+
+class PhasedBandcampAggregateTest(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.run_dir = os.path.join(self.tmpdir.name, "run")
+        os.makedirs(self.run_dir, exist_ok=True)
+
+    def _job(self, job_id, source_directory, rows=None, *, output="bandcamp"):
+        job_dir = os.path.join(self.run_dir, job_id)
+        os.makedirs(job_dir, exist_ok=True)
+        raw_csv = os.path.join(job_dir, "raw.csv")
+        raw_rows = rows or [{"Artist Name": job_id, "Profile URL": ""}]
+        pd.DataFrame(raw_rows).to_csv(raw_csv, index=False)
+        state = {
+            "status": "completed",
+            "directory": job_dir,
+            "source_directory": source_directory,
+            "raw_csv": raw_csv,
+            "row_count": len(raw_rows),
+            "schema_hash": "",
+        }
+        if output == "bandcamp":
+            pd.DataFrame(rows or []).to_csv(os.path.join(job_dir, "bandcamp_enriched.csv"), index=False)
+        elif output == "empty":
+            open(os.path.join(job_dir, "bandcamp_enriched.csv"), "w", encoding="utf-8").close()
+        elif output == "corrupt":
+            with open(os.path.join(job_dir, "bandcamp_enriched.csv"), "wb") as f:
+                f.write(b"\xff\xfe\x00\x80")
+        return state
+
+    def _run_phase(self, jobs):
+        master_raw = os.path.join(self.run_dir, "master_raw.csv")
+        pd.DataFrame([{"Artist Name": "Seed Artist", "Email": ""}]).to_csv(master_raw, index=False)
+        captured = []
+
+        def fake_master_enrichment(input_csv, output_csv, **kwargs):
+            captured.append(kwargs.get("bandcamp_csv_path", ""))
+            shutil.copyfile(input_csv, output_csv)
+            return output_csv
+
+        def fake_enrichment(input_csv, output_csv, **kwargs):
+            shutil.copyfile(input_csv, output_csv)
+            return output_csv
+
+        seed_result = {
+            "schema_version": "2.0",
+            "phases": {"seed": {"status": "completed", "jobs": jobs}},
+        }
+        with mock.patch.object(night_mode_runner, "_merge_raw_master", return_value=master_raw), mock.patch.object(
+            pipeline_runner, "run_master_enrichment", side_effect=fake_master_enrichment
+        ), mock.patch.object(pipeline_runner, "run_enrichment", side_effect=fake_enrichment):
+            result = phased_runner.run_enrich_phase(
+                {"jobs": [], "master_enrichment": {"enable_live_search": False}},
+                self.run_dir,
+                seed_result,
+            )
+        self.assertEqual(result["phases"]["enrich"]["status"], "completed")
+        self.assertEqual(len(captured), 1)
+        return captured[0]
+
+    def test_one_bandcamp_job_passes_run_scoped_aggregate(self):
+        rows = [{"Artist Name": "Solo", "Profile URL": "https://solo.bandcamp.com/"}]
+        aggregate_path = self._run_phase({"anything": self._job("anything", "bandcamp", rows)})
+
+        self.assertEqual(aggregate_path, os.path.join(self.run_dir, "bandcamp_enriched_aggregate.csv"))
+        self.assertEqual(pd.read_csv(aggregate_path)["Artist Name"].tolist(), ["Solo"])
+
+    def test_phased_path_aggregates_metadata_selected_jobs_and_skips_bad_outputs(self):
+        jobs = {
+            "misleading_spotify_id": self._job(
+                "misleading_spotify_id",
+                "bandcamp",
+                [{"Artist Name": "First", "Profile URL": "https://shared.bandcamp.com/"}],
+            ),
+            "second": self._job(
+                "second",
+                "bandcamp",
+                [
+                    {"Artist Name": "Duplicate", "Profile URL": "https://shared.bandcamp.com/album/release"},
+                    {"Artist Name": "Second", "Profile URL": "https://second.bandcamp.com/"},
+                ],
+            ),
+            "third": self._job(
+                "third",
+                "bandcamp",
+                [{"Artist Name": "Third", "Profile URL": "https://third.bandcamp.com/"}],
+            ),
+            "soundcloud_named_bandcamp": self._job(
+                "soundcloud_named_bandcamp",
+                "soundcloud",
+                [{"Artist Name": "Excluded", "Profile URL": "https://excluded.bandcamp.com/"}],
+            ),
+            "missing": self._job("missing", "bandcamp", output="missing"),
+            "empty": self._job("empty", "bandcamp", output="empty"),
+            "corrupt": self._job("corrupt", "bandcamp", output="corrupt"),
+        }
+
+        aggregate_path = self._run_phase(jobs)
+        aggregate = pd.read_csv(aggregate_path, dtype=str, keep_default_na=False)
+
+        self.assertEqual(aggregate["Artist Name"].tolist(), ["First", "Second", "Third"])
+        self.assertNotIn("Excluded", aggregate["Artist Name"].tolist())
 
 
 class BandcampAggregateEndToEndTest(unittest.TestCase):
