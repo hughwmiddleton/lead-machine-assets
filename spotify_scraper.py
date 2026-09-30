@@ -53,6 +53,10 @@ DIRECTORY_GENRE_FILES: Sequence[Sequence[Any]] = [
 SCRIPT_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
+class SpotifySeedOperationalError(RuntimeError):
+    """Spotify discovery could not obtain a usable source response."""
+
+
 def _extract_playlist_id(value: str) -> Optional[str]:
     if not value:
         return None
@@ -705,11 +709,11 @@ def scrape_spotify(
     except ValueError as exc:
         if logger:
             logger(f"[Spotify] {exc}")
-        return []
+        raise SpotifySeedOperationalError(str(exc)) from exc
     except Exception as exc:  # pragma: no cover - defensive
         if logger:
             logger(f"[Spotify] Failed to initialize Spotify client: {exc}")
-        return []
+        raise SpotifySeedOperationalError(f"Failed to initialize Spotify client: {exc}") from exc
 
     if logger:
         logger(f"[Spotify] Starting playlist discovery for {target_count} artists.")
@@ -733,9 +737,10 @@ def scrape_spotify(
         playlist_ids = FRESH_FINDS_PLAYLIST_IDS
     resolved_playlist_ids = [pid for pid in playlist_ids if pid and not pid.startswith("TODO_")]
     if not resolved_playlist_ids:
+        message = "No valid playlist ID was parsed or configured."
         if logger:
-            logger("[Spotify] No playlist IDs configured. Update FRESH_FINDS_PLAYLIST_IDS or pass playlist_ids in params.")
-        return []
+            logger(f"[Spotify] {message}")
+        raise SpotifySeedOperationalError(message)
 
     artists_by_id: Dict[str, Dict[str, Any]] = {}
     tracks_by_artist_id: Dict[str, List[Dict[str, Any]]] = {}
@@ -743,6 +748,8 @@ def scrape_spotify(
     used_song_titles: Set[str] = set()
     total_tracks_scanned = 0
     track_order = 0
+    successful_source_fetch = False
+    fetch_failures: List[str] = []
 
     for playlist_id in resolved_playlist_ids:
         if len(artists_by_id) >= target_count:
@@ -757,6 +764,7 @@ def scrape_spotify(
                 logger(f"[Spotify] Attempting API playlist fetch for {playlist_id_clean}...")
             tracks = client.get_playlist_tracks(playlist_id_clean, limit=100, max_items=max(target_count * 3, 300))
         except Exception as exc:
+            fetch_failures.append(f"playlist {playlist_id_clean} API fetch failed: {exc}")
             if logger:
                 logger(f"[Spotify] API playlist fetch failed for {playlist_id_clean}: {exc}")
             if _should_use_html_fallback(exc):
@@ -771,7 +779,9 @@ def scrape_spotify(
                     progress_callback=progress_callback,
                 )
                 if not html_artists:
+                    fetch_failures.append(f"playlist {playlist_id_clean} HTML fallback returned no artists")
                     continue
+                successful_source_fetch = True
                 fallback_label = html_artists[0].get("playlist_name") or playlist_label
                 for artist in html_artists:
                     if len(artists_by_id) >= target_count:
@@ -813,6 +823,7 @@ def scrape_spotify(
                     logger(f"[Spotify] Not using HTML fallback for playlist {playlist_id_clean}; skipping.")
                 continue
 
+        successful_source_fetch = True
         total_tracks_scanned += len(tracks)
         for playlist_position, entry in enumerate(tracks, start=1):
             if len(artists_by_id) >= target_count:
@@ -866,7 +877,11 @@ def scrape_spotify(
         logger(f"[Spotify] Scanned {total_tracks_scanned} tracks across playlists. Unique artists: {len(artists_by_id)}")
 
     if not artists_by_id:
-        return []
+        if successful_source_fetch and total_tracks_scanned == 0:
+            # A valid, successful playlist response can legitimately be empty.
+            return []
+        detail = "; ".join(fetch_failures) or "playlist response contained no usable artist records"
+        raise SpotifySeedOperationalError(f"Spotify seed discovery produced no usable artists: {detail}")
 
     try:
         artist_details = client.get_artists_details(list(artists_by_id.keys()))
