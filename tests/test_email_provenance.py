@@ -53,6 +53,11 @@ def test_export_columns_include_provenance() -> None:
         assert "Email_Source_URL" in cols
         assert "Email_Source_Type" in cols
         assert "Email_Extract_Method" in cols
+        assert "Email_Role" in cols
+        assert "Email_Role_Evidence" in cols
+
+    assert EMAIL_PROVENANCE_JSON_COL in pipeline_runner.DEFAULT_EXPORT_COLUMNS
+    assert EMAIL_PROVENANCE_JSON_COL in pipeline_runner.FINAL_EXPORT_COLUMNS
 
 
 def test_facebook_apply_sets_provenance() -> None:

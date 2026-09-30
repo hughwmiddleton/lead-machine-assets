@@ -61,6 +61,8 @@ EMAIL_WRITE_COLUMNS = {
     "Email",
     "Email_All",
     "Email_Type",
+    "Email_Role",
+    "Email_Role_Evidence",
     "Email_Source_URL",
     "Email_Source_Type",
     "Email_Extract_Method",

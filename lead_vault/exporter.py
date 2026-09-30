@@ -24,6 +24,7 @@ WOODPECKER_EXPORT_PRESET = {
         "Artist Name",
         "Primary Email",
         "All Emails",
+        "Email_Role",
         "Location",
         "Primary Genre",
         "Website",
@@ -47,6 +48,7 @@ WOODPECKER_EXPORT_PRESET = {
         "Artist Name": "Artist",
         "Primary Email": "Primary_Email",
         "All Emails": "All_Emails",
+        "Email_Role": "Contact_Role",
         "Location": "Location",
         "Primary Genre": "Primary_Genre",
         "Website": "Website",
@@ -85,6 +87,9 @@ FINAL_EXPORT_PRESET = {
         "External Links",
         "Primary Email",
         "All Emails",
+        "Email_Role",
+        "Email_Role_Evidence",
+        "Email_Provenance_JSON",
         "Email Source",
         "Email_Source_URL",
         "Email_Source_Type",
@@ -203,6 +208,7 @@ def _build_legacy_final_export_bridge_frame(df: pd.DataFrame) -> pd.DataFrame:
     _backfill_column(work, "Artist Name", ["Artist"])
     _backfill_column(work, "Email", ["Primary_Email"])
     _backfill_column(work, "Email_All", ["All_Emails"])
+    _backfill_column(work, "Email_Role", ["Contact_Role"])
     _backfill_column(work, "Country_Derived", ["Country"])
     _backfill_column(work, "Song Title", ["Song_Title"])
     _backfill_column(work, "Primary Genre", ["Primary_Genre"])

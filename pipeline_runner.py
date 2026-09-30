@@ -41,7 +41,10 @@ except Exception:  # pragma: no cover - selenium is an optional runtime dependen
         pass
 from email_provenance import (
     EMAIL_PROVENANCE_JSON_COL,
+    EMAIL_ROLE_COL,
+    EMAIL_ROLE_EVIDENCE_COL,
     _set_email_with_provenance,
+    apply_email_role_metadata_df,
     get_email_provenance_entry,
     get_row_email_provenance,
     merge_email_provenance_into_target,
@@ -1992,6 +1995,8 @@ def _align_row_email_provenance(df: pd.DataFrame, idx: int, selected_email: str)
         ("Email_Source_URL", "source_url"),
         ("Email_Source_Type", "source_type"),
         ("Email_Extract_Method", "extract_method"),
+        (EMAIL_ROLE_COL, "role"),
+        (EMAIL_ROLE_EVIDENCE_COL, "role_evidence"),
     ):
         if column not in df.columns:
             df[column] = ""
@@ -2073,6 +2078,7 @@ def _consolidate_email_all(df: pd.DataFrame) -> pd.DataFrame:
             _align_row_email_provenance(df, idx, primary_email)
     except Exception:
         pass
+    apply_email_role_metadata_df(df)
     return df
 
 
@@ -2763,6 +2769,10 @@ RAW_FALLBACK_COLUMNS: List[str] = [
     "Date Added",
     "External Links",
     "Email",
+    "Email_All",
+    EMAIL_ROLE_COL,
+    EMAIL_ROLE_EVIDENCE_COL,
+    "Email_Type",
     "Email_Source_URL",
     "Email_Source_Type",
     "Email_Extract_Method",
@@ -2804,6 +2814,7 @@ def _write_rows_to_csv(rows: Iterable[Any], path: str, source_directory: str = "
         df = pd.DataFrame(materialized, columns=ordered_columns)
     else:
         df = pd.DataFrame(materialized)
+    apply_email_role_metadata_df(df)
     if source_directory:
         if "Lead_Source" not in df.columns:
             df["Lead_Source"] = canonical_lead_source
@@ -2829,6 +2840,12 @@ FINAL_EXPORT_COLUMNS: Sequence[str] = [
     "External Links",
     "Primary Email",
     "All Emails",
+    "Email",
+    "Email_All",
+    EMAIL_ROLE_COL,
+    EMAIL_ROLE_EVIDENCE_COL,
+    "Email_Type",
+    EMAIL_PROVENANCE_JSON_COL,
     "Email Source",
     "Email_Source_URL",
     "Email_Source_Type",
@@ -2871,6 +2888,8 @@ WOODPECKER_EXPORT_COLUMNS: Sequence[str] = [
     "Artist Name",
     "Primary Email",
     "All Emails",
+    EMAIL_ROLE_COL,
+    EMAIL_ROLE_EVIDENCE_COL,
     "Email Source",
     "Email_Source_URL",
     "Email_Source_Type",
@@ -3204,6 +3223,7 @@ def _build_final_export_frame(df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame(columns=FINAL_EXPORT_COLUMNS)
 
     work = df.copy()
+    apply_email_role_metadata_df(work)
     status_series = work.get("final_status", pd.Series("", index=work.index)).astype(str).str.strip().str.upper()
     filtered = work.loc[status_series.isin(_FINAL_STATUS_KEEP)].copy()
     if filtered.empty:
@@ -3255,6 +3275,10 @@ def _build_final_export_frame(df: pd.DataFrame) -> pd.DataFrame:
             row_for_email_source["Email_Source_URL"] = _cell_str(selected_meta.get("source_url", ""))
             row_for_email_source["Email_Source_Type"] = _cell_str(selected_meta.get("source_type", ""))
             row_for_email_source["Email_Extract_Method"] = _cell_str(selected_meta.get("extract_method", ""))
+        email_role = _cell_str(selected_meta.get("role", "")) or _cell_str(row.get(EMAIL_ROLE_COL, ""))
+        email_role_evidence = _cell_str(selected_meta.get("role_evidence", "")) or _cell_str(
+            row.get(EMAIL_ROLE_EVIDENCE_COL, "")
+        )
         email_source = infer_email_source(row_for_email_source)
         needs_review = _compute_export_needs_review(row_for_email_source, primary_email, email_source)
 
@@ -3276,6 +3300,12 @@ def _build_final_export_frame(df: pd.DataFrame) -> pd.DataFrame:
                 "External Links": external_links,
                 "Primary Email": primary_email,
                 "All Emails": all_emails,
+                "Email": primary_email,
+                "Email_All": all_emails,
+                EMAIL_ROLE_COL: email_role,
+                EMAIL_ROLE_EVIDENCE_COL: email_role_evidence,
+                "Email_Type": _cell_str(row.get("Email_Type", "")),
+                EMAIL_PROVENANCE_JSON_COL: _cell_str(row.get(EMAIL_PROVENANCE_JSON_COL, "")),
                 "Email Source": email_source,
                 "Email_Source_URL": email_source_url_val,
                 "Email_Source_Type": _cell_str(row_for_email_source.get("Email_Source_Type", "")),
@@ -5174,6 +5204,8 @@ DEFAULT_EXPORT_COLUMNS: Sequence[str] = [
     "Facebook_URL",
     "Email",
     "Email_All",
+    EMAIL_ROLE_COL,
+    EMAIL_ROLE_EVIDENCE_COL,
     "Email_Source_URL",
     "Email_Source_Type",
     "Email_Extract_Method",
