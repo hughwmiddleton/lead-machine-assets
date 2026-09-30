@@ -449,3 +449,191 @@ class SoundCloudEngineSwitchTests(unittest.TestCase):
 
         self.assertIsNotNone(best)
         self.assertEqual(best["handle"], "amber")
+
+    def test_pick_best_soundcloud_candidate_rejects_weak_generic_name_collision(self) -> None:
+        worker = self._make_worker()
+        worker._compute_match_score_for_candidate = lambda *args, **kwargs: 0.05
+        candidate = {
+            "profile_url": "https://soundcloud.com/lomare-langinbelik",
+            "handle": "lomare-langinbelik",
+            "display_name": "Francis & Lala Langinbelik",
+            "location": "",
+            "context": "Independent acoustic recordings.",
+        }
+
+        best = worker._pick_best_soundcloud_candidate("Lala", [candidate])
+
+        self.assertIsNone(best)
+
+    def test_pick_best_soundcloud_candidate_accepts_short_name_with_strong_corroboration(self) -> None:
+        worker = self._make_worker()
+        worker._compute_match_score_for_candidate = lambda *args, **kwargs: 0.95
+        candidate = {
+            "profile_url": "https://soundcloud.com/nova-music-au",
+            "handle": "nova-music-au",
+            "display_name": "Nova",
+            "location": "Melbourne, Australia",
+            "context": "Melbourne electronic artist. Latest track Crystal Skin.",
+        }
+
+        best = worker._pick_best_soundcloud_candidate(
+            "Nova",
+            [candidate],
+            location_hint="Melbourne",
+            song_title="Crystal Skin",
+        )
+
+        self.assertIsNotNone(best)
+        self.assertEqual(best["handle"], "nova-music-au")
+
+    def test_pick_best_soundcloud_candidate_distinctive_name_behavior_is_unchanged(self) -> None:
+        worker = self._make_worker()
+        worker._compute_match_score_for_candidate = lambda *args, **kwargs: 0.70
+        candidate = {
+            "profile_url": "https://soundcloud.com/velvet-echo-collective",
+            "handle": "velvet-echo-collective",
+            "display_name": "Velvet Echo Collective",
+            "location": "",
+            "context": "",
+        }
+
+        best = worker._pick_best_soundcloud_candidate("Velvet Echo", [candidate])
+
+        self.assertIsNotNone(best)
+        self.assertEqual(best["handle"], "velvet-echo-collective")
+
+    def test_unearthed_night_discovery_applies_short_name_collision_guard(self) -> None:
+        cases = [
+            (
+                "historical_lala_collision",
+                "Lala",
+                "Melbourne",
+                {
+                    "profile_url": "https://soundcloud.com/lomare-langinbelik",
+                    "handle": "lomare-langinbelik",
+                    "display_name": "Francis & Lala Langinbelik",
+                    "location": "Melbourne, Australia",
+                    "context": "Lala appears in this independent acoustic artist bio.",
+                    "match_score": 0.05,
+                },
+                False,
+            ),
+            (
+                "weak_short_name",
+                "Nova",
+                "",
+                {
+                    "profile_url": "https://soundcloud.com/nova-music",
+                    "handle": "nova-music",
+                    "display_name": "Nova",
+                    "location": "",
+                    "context": "",
+                    "match_score": 0.95,
+                },
+                False,
+            ),
+            (
+                "corroborated_short_name",
+                "Nova",
+                "Melbourne",
+                {
+                    "profile_url": "https://soundcloud.com/nova-music-au",
+                    "handle": "nova-music-au",
+                    "display_name": "Nova",
+                    "location": "Melbourne, Australia",
+                    "context": "Melbourne electronic artist.",
+                    "match_score": 0.95,
+                },
+                True,
+            ),
+            (
+                "distinctive_longer_name",
+                "Velvet Echo",
+                "",
+                {
+                    "profile_url": "https://soundcloud.com/velvet-echo-collective",
+                    "handle": "velvet-echo-collective",
+                    "display_name": "Velvet Echo Collective",
+                    "location": "",
+                    "context": "",
+                    "match_score": 0.70,
+                },
+                True,
+            ),
+        ]
+
+        for label, artist_name, location, candidate, expected_applied in cases:
+            with self.subTest(label=label):
+                worker = self._make_worker()
+                worker.night_mode = True
+                worker._live_context = {
+                    "song_title": "",
+                    "location": location,
+                    "track": "",
+                    "genre": "",
+                }
+                worker._row_allows_heavy_enricher = lambda *args, **kwargs: types.SimpleNamespace(
+                    allowed=True
+                )
+                worker._compute_match_score_for_candidate = (
+                    lambda *args, score=candidate["match_score"], **kwargs: score
+                )
+                worker._night_sc_http_get = lambda *args, **kwargs: (200, "")
+                worker._night_sc_cache_lookup = lambda *args, **kwargs: None
+                worker._sc_build_rss_payload = lambda handle, base_payload, row_idx=None: (
+                    EnrichmentPayload(
+                        websites={f"https://soundcloud.com/{handle}"},
+                        source_dir="soundcloud",
+                        source_url=f"https://soundcloud.com/{handle}",
+                        source_detail=_format_source_display("soundcloud_live"),
+                    ),
+                    True,
+                    True,
+                    "rss_success",
+                )
+                applied_urls = []
+                worker._apply_payload_guarded = (
+                    lambda df, row_idx, payload, artist, spotify_id="": applied_urls.append(
+                        payload.source_url
+                    )
+                    or True
+                )
+
+                df = pd.DataFrame(
+                    [
+                        {
+                            "Artist Name": artist_name,
+                            "Source Directory": "Triple J Unearthed",
+                            "SoundCloud Link": "",
+                            "Country": "",
+                            "SC_Status": "",
+                            "SC_Reason": "",
+                            "SC_Fetches": 0,
+                            "SC_ms": 0,
+                        }
+                    ]
+                )
+                ctx = {"artist": artist_name, "spotify_id": ""}
+
+                with mock.patch.object(
+                    enricher._SC_SHARED_ENGINE,
+                    "people_search_candidates_v2",
+                    return_value=[dict(candidate)],
+                ), mock.patch.object(
+                    enricher._SC_SHARED_ENGINE,
+                    "get_run_flags",
+                    return_value={
+                        "root_fetch_disabled": 0,
+                        "about_disabled": 0,
+                        "tracks_api_blocked": 0,
+                        "used_user_api": 1,
+                        "used_rss": 1,
+                    },
+                ):
+                    applied, skip_rest = worker._enrich_row_sc_live(df, 0, ctx)
+
+                self.assertEqual(applied, expected_applied)
+                self.assertFalse(skip_rest)
+                self.assertEqual(bool(applied_urls), expected_applied)
+                if expected_applied:
+                    self.assertEqual(applied_urls, [candidate["profile_url"]])

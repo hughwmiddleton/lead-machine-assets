@@ -5911,6 +5911,40 @@ def test_instagram_email_one_hop_rejects_asset_artifact_pseudo_email(monkeypatch
     )
 
 
+def test_one_hop_website_email_extraction_ignores_hydration_payload_accounts():
+    html = """
+    <html>
+      <head>
+        <script type="application/json">
+          {"accounts":["raz@guy.raz","adiverg21@gaby.mcarvalho",
+          "ap93motors@viccunha.fisio","maybetomorrow.archive@historinhasparadormir.com.br"]}
+        </script>
+      </head>
+      <body><main>No public contact details</main></body>
+    </html>
+    """
+
+    emails, used_mailto = cde._extract_onehop_website_emails_from_html(html)
+
+    assert emails == []
+    assert used_mailto is False
+
+
+def test_one_hop_website_email_extraction_preserves_visible_and_mailto_contacts():
+    html = """
+    <html><body>
+      <p>Management: manager@artist.com</p>
+      <a href="mailto:bookings@artist.com?subject=Booking">Book the artist</a>
+      <script>window.__DATA__ = {"unrelated":"payload@example.invalid"};</script>
+    </body></html>
+    """
+
+    emails, used_mailto = cde._extract_onehop_website_emails_from_html(html)
+
+    assert emails == ["bookings@artist.com", "manager@artist.com"]
+    assert used_mailto is True
+
+
 def test_instagram_email_one_hop_mixed_candidates_keep_real_email_and_reject_artifact(monkeypatch):
     logs = []
     worker = _make_worker(logs)
@@ -6063,7 +6097,14 @@ def test_instagram_email_one_hop_bio_link_recovers_direct_email_from_rendered_li
             final_url=live_target,
             status=200,
             content_type="text/html",
-            html="<html><body>Bookings: rendered@artist.com</body></html>",
+            html=(
+                "<html><body>Bookings: rendered@artist.com"
+                "<script type='application/json'>"
+                '{"accounts":["raz@guy.raz","adiverg21@gaby.mcarvalho",'
+                '"ap93motors@viccunha.fisio",'
+                '"maybetomorrow.archive@historinhasparadormir.com.br"]}'
+                "</script></body></html>"
+            ),
             is_html=True,
         )
 
