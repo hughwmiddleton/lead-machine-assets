@@ -1198,7 +1198,14 @@ def test_fb_global_no_result_does_not_relabel_existing_email_provenance(monkeypa
     assert output_row["Email_All"] == "primary@artist.com;secondary@agency.com"
     assert output_row["Email_Type"] == "ig_enrich"
     assert output_row["Email_Source_Type"] == "instagram_enrich"
-    assert json.loads(output_row["Email_Provenance_JSON"]) == provenance
+    output_provenance = json.loads(output_row["Email_Provenance_JSON"])
+    for email, expected_meta in provenance.items():
+        assert {
+            field: output_provenance[email][field]
+            for field in ("source_type", "surface", "source_url", "extract_method")
+        } == expected_meta
+        assert output_provenance[email]["role"] == "unknown"
+        assert output_provenance[email]["role_evidence"] == "insufficient_evidence"
     assert not any("email_not_in_sources" in message for message in logs)
 
 

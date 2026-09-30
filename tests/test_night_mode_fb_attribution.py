@@ -132,9 +132,15 @@ def test_facebook_same_email_preserves_native_undiscovered_provenance(monkeypatc
     assert df_out.loc[0, "Email_Source_URL"] == "https://undiscovered.music/artists/native-artist"
     assert df_out.loc[0, "Email_Source_Type"] == "undiscovered_music_profile"
     assert df_out.loc[0, "Email_Extract_Method"] == "profile_direct"
-    assert json.loads(df_out.loc[0, EMAIL_PROVENANCE_JSON_COL]) == json.loads(
-        _undiscovered_native_email_row()[EMAIL_PROVENANCE_JSON_COL]
-    )
+    output_provenance = json.loads(df_out.loc[0, EMAIL_PROVENANCE_JSON_COL])
+    expected_provenance = json.loads(_undiscovered_native_email_row()[EMAIL_PROVENANCE_JSON_COL])
+    output_meta = output_provenance["artist@example.com"]
+    assert {
+        field: output_meta[field]
+        for field in ("source_type", "surface", "source_url", "extract_method")
+    } == expected_provenance["artist@example.com"]
+    assert output_meta["role"] == "unknown"
+    assert output_meta["role_evidence"] == "insufficient_evidence"
     assert df_out.loc[0, "Lead_Source"] == "Undiscovered Music"
     assert df_out.loc[0, "Source_Directory"] == "undiscovered_music"
     assert df_out.loc[0, "Source URL"] == "https://undiscovered.music/artists/native-artist"
