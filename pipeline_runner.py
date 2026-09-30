@@ -2879,6 +2879,42 @@ def _write_rows_to_csv(rows: Iterable[Any], path: str, source_directory: str = "
     return _safe_atomic_write_csv(df, path, fallback_cols, reason=f"job={source_directory or 'unknown'}")
 
 
+def ensure_seed_origin_fields(csv_path: Union[str, Path], source_directory: str) -> AtomicCSVResult:
+    """Backfill blank origin fields from the trusted seed-job directory.
+
+    Some legacy scrapers write their CSVs directly instead of using
+    ``_write_rows_to_csv``.  Normalize those files at the seed boundary so
+    downstream enrichment never has to infer origin from enrichment URLs.
+    Existing nonblank origin values are deliberately preserved.
+    """
+    source_key = str(source_directory or "").strip().lower()
+    canonical_lead_source = "Triple J Unearthed" if source_key == "unearthed" else source_key
+    canonical_source_directory = "unearthed" if source_key == "unearthed" else source_key
+    canonical_legacy_source_directory = (
+        "Triple J Unearthed" if source_key == "unearthed" else source_key
+    )
+    path = Path(csv_path)
+    df = pd.read_csv(path, dtype=str, keep_default_na=False).fillna("")
+    canonical_values = {
+        "Lead_Source": canonical_lead_source,
+        "Source_Directory": canonical_source_directory,
+        "Source Directory": canonical_legacy_source_directory,
+    }
+    for column, canonical_value in canonical_values.items():
+        if column not in df.columns:
+            df[column] = ""
+        if canonical_value:
+            blank_mask = df[column].fillna("").astype(str).str.strip().eq("")
+            df.loc[blank_mask, column] = canonical_value
+    df = repair_origin_integrity_df(df, ingest_source=canonical_source_directory)
+    return _safe_atomic_write_csv(
+        df,
+        path.as_posix(),
+        list(df.columns) or RAW_FALLBACK_COLUMNS.copy(),
+        reason=f"seed_origin={source_key or 'unknown'}",
+    )
+
+
 FINAL_EXPORT_COLUMNS: Sequence[str] = [
     "Artist Name",
     "Location",
@@ -4130,7 +4166,10 @@ def run_directory_job(job_config: Dict[str, Any], raw_output_path: str, logger: 
         except Exception:
             pass
 
-    return result_path if result_path is not None else str(final_path)
+    resolved_result_path = result_path if result_path is not None else str(final_path)
+    if success:
+        ensure_seed_origin_fields(resolved_result_path, directory)
+    return resolved_result_path
 
 
 def run_enrichment(raw_csv_path: str, enriched_output_path: str, logger: LoggerFn = None, night_mode: bool = False) -> str:

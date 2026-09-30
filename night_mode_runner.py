@@ -1533,6 +1533,7 @@ def _process_job(
                     except Exception:
                         pass
             pipeline_runner.ensure_final_raw_csv(state["raw_csv"], job_id, logger=logger.info)
+        pipeline_runner.ensure_seed_origin_fields(state["raw_csv"], directory)
         raw_row_count = _count_data_rows(state["raw_csv"])
         state["row_count"] = raw_row_count
         state["current_row_index"] = max(_count_rows(state["raw_csv"]) - 1, 0)
