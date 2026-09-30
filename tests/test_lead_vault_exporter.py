@@ -21,6 +21,7 @@ def mock_master_csv(tmp_path):
                 "Artist": artist,
                 "Primary_Email": email,
                 "All_Emails": email,
+                "Contact_Role": "management" if email else "",
                 "Location": "Melbourne",
                 "Country": "Australia",
                 "Primary_Genre": "indie",
@@ -117,6 +118,7 @@ def test_final_export_bridge_maps_canonical_fields_to_legacy_schema(mock_master_
 
     assert row["Artist Name"] == "First Act"
     assert row["Primary Email"] == "first@example.com"
+    assert row["Email_Role"] == "management"
     assert row["Primary Genre"] == "indie"
     assert row["Source Directory"] == "spotify"
     assert row["Discovery Source"] == "Playlist Alpha (spotify)"
