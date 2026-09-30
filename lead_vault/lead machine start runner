@@ -1,0 +1,7 @@
+cd "/Users/hughmiddleton/Lead Machine/Lead Machine VS Code/lead-machine-assets" || exit 1
+
+export PATH="/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+"/Users/hughmiddleton/Lead Machine/Lead Machine Code/venv/bin/python3" \
+  "Lead Machine (Final Update 5).py"
+  
