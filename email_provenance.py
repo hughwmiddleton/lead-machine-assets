@@ -13,10 +13,15 @@ from email_normalizer import (
     is_obvious_placeholder_email,
     normalize_email_value,
 )
+from contact_role_classifier import ROLE_VALUES, classify_email_role
 
 EMAIL_PROVENANCE_JSON_COL = "Email_Provenance_JSON"
+EMAIL_ROLE_COL = "Email_Role"
+EMAIL_ROLE_EVIDENCE_COL = "Email_Role_Evidence"
 
-_PROVENANCE_FIELDS = ("source_type", "surface", "source_url", "extract_method")
+_SOURCE_PROVENANCE_FIELDS = ("source_type", "surface", "source_url", "extract_method")
+_ROLE_FIELDS = ("role", "role_evidence")
+_PROVENANCE_FIELDS = _SOURCE_PROVENANCE_FIELDS + _ROLE_FIELDS
 _WEBSITE_CONTACT_HINTS = (
     "/about",
     "/book",
@@ -137,13 +142,27 @@ def _build_provenance_entry(
     source_type: Any = "",
     method: Any = "regex",
     surface: Any = "",
+    role: Any = "",
+    role_evidence: Any = "",
 ) -> Dict[str, str]:
+    source_type_clean = _clean_str(source_type).lower()
+    source_url_clean = _clean_str(source_url)
+    surface_clean = infer_email_surface(source_type=source_type, source_url=source_url, surface=surface)
+    method_clean = _clean_str(method)
+    if not method_clean and (source_type_clean or source_url_clean or surface_clean):
+        method_clean = "regex"
     entry = {
-        "source_type": _clean_str(source_type).lower(),
-        "surface": infer_email_surface(source_type=source_type, source_url=source_url, surface=surface),
-        "source_url": _clean_str(source_url),
-        "extract_method": _clean_str(method or "regex") or "regex",
+        "source_type": source_type_clean,
+        "surface": surface_clean,
+        "source_url": source_url_clean,
+        "extract_method": method_clean,
     }
+    role_clean = _clean_str(role).lower()
+    if role_clean in ROLE_VALUES:
+        entry["role"] = role_clean
+        evidence_clean = _clean_str(role_evidence)
+        if evidence_clean:
+            entry["role_evidence"] = evidence_clean
     return {key: value for key, value in entry.items() if value}
 
 
@@ -152,7 +171,7 @@ def _provenance_sort_key(entry: Mapping[str, Any]) -> tuple[int, int, int, int, 
     source_type = _clean_str(entry.get("source_type", "")).lower()
     source_url = _clean_str(entry.get("source_url", ""))
     extract_method = _clean_str(entry.get("extract_method", ""))
-    completeness = sum(bool(_clean_str(entry.get(field, ""))) for field in _PROVENANCE_FIELDS)
+    completeness = sum(bool(_clean_str(entry.get(field, ""))) for field in _SOURCE_PROVENANCE_FIELDS)
     return (
         0 if extract_method.casefold() == "profile_direct" else 1,
         _SURFACE_PRIORITY.get(surface, 80 if surface or source_type or source_url else 99),
@@ -188,6 +207,8 @@ def parse_email_provenance_json(raw_value: Any) -> Dict[str, Dict[str, str]]:
             source_type=meta.get("source_type", ""),
             method=meta.get("extract_method", ""),
             surface=meta.get("surface", ""),
+            role=meta.get("role", ""),
+            role_evidence=meta.get("role_evidence", ""),
         )
         if cleaned_meta:
             parsed[normalized_email] = cleaned_meta
@@ -222,6 +243,88 @@ def get_email_provenance_entry(row_like: Any, email: Any) -> Dict[str, str]:
     if not normalized:
         return {}
     return dict(get_row_email_provenance(row_like).get(normalized) or {})
+
+
+def classify_row_email_roles(row_like: Any) -> tuple[Dict[str, Dict[str, str]], str, str]:
+    """Return per-email role metadata plus role fields for the selected primary email."""
+    if row_like is None or not hasattr(row_like, "get"):
+        return {}, "", ""
+
+    provenance = get_row_email_provenance(row_like)
+    emails = normalize_email_keys(
+        [
+            row_like.get("Email_All", ""),
+            row_like.get("All Emails", ""),
+            row_like.get("Email", ""),
+            row_like.get("Primary Email", ""),
+        ]
+    )
+    selected = normalize_email_key(row_like.get("Email") or row_like.get("Primary Email") or "")
+    for email in emails:
+        entry = dict(provenance.get(email) or {})
+        context = dict(row_like)
+        if email != selected:
+            for field in (
+                "Contact_Role",
+                "Contact Role",
+                "Domain_Role",
+                "Domain Role",
+                "Organization_Type",
+                "Organization Type",
+            ):
+                context.pop(field, None)
+        classification = classify_email_role(
+            email,
+            artist_name=row_like.get("Artist Name", "") or row_like.get("Artist", ""),
+            source_url=entry.get("source_url", "")
+            or (row_like.get("Email_Source_URL", "") if email == selected else ""),
+            row_context=context,
+        )
+        entry["role"] = classification.role
+        entry["role_evidence"] = classification.evidence
+        provenance[email] = entry
+
+    selected_entry = provenance.get(selected, {}) if selected else {}
+    return (
+        provenance,
+        _clean_str(selected_entry.get("role", "")),
+        _clean_str(selected_entry.get("role_evidence", "")),
+    )
+
+
+def apply_email_role_metadata(target: Any) -> None:
+    """Populate role fields without changing email acceptance or selection."""
+    if isinstance(target, MutableMapping):
+        provenance, role, evidence = classify_row_email_roles(target)
+        target[EMAIL_PROVENANCE_JSON_COL] = dump_email_provenance_json(provenance)
+        target[EMAIL_ROLE_COL] = role
+        target[EMAIL_ROLE_EVIDENCE_COL] = evidence
+        return
+
+    if isinstance(target, tuple) and len(target) == 2 and isinstance(target[0], pd.DataFrame):
+        df, idx = target
+        if idx not in df.index:
+            return
+        provenance, role, evidence = classify_row_email_roles(df.loc[idx])
+        for column in (EMAIL_PROVENANCE_JSON_COL, EMAIL_ROLE_COL, EMAIL_ROLE_EVIDENCE_COL):
+            if column not in df.columns:
+                df[column] = ""
+        df.at[idx, EMAIL_PROVENANCE_JSON_COL] = dump_email_provenance_json(provenance)
+        df.at[idx, EMAIL_ROLE_COL] = role
+        df.at[idx, EMAIL_ROLE_EVIDENCE_COL] = evidence
+
+
+def apply_email_role_metadata_df(df: pd.DataFrame | None) -> pd.DataFrame | None:
+    if df is None:
+        return df
+    for column in (EMAIL_PROVENANCE_JSON_COL, EMAIL_ROLE_COL, EMAIL_ROLE_EVIDENCE_COL):
+        if column not in df.columns:
+            df[column] = ""
+        else:
+            df[column] = df[column].fillna("").astype(str)
+    for idx in df.index:
+        apply_email_role_metadata((df, idx))
+    return df
 
 
 def row_has_successful_source_url_provenance(
@@ -303,7 +406,11 @@ def merge_email_provenance_map(
 
         current_key = _provenance_sort_key(current_entry)
         if candidate_key < current_key:
-            merged[email] = dict(candidate_entry)
+            replacement = dict(candidate_entry)
+            for field in _ROLE_FIELDS:
+                if current_entry.get(field, ""):
+                    replacement[field] = current_entry[field]
+            merged[email] = replacement
             continue
 
         for field in _PROVENANCE_FIELDS:
@@ -440,6 +547,7 @@ def _set_email_with_provenance(
         if method and not str(target.get("Email_Extract_Method", "")).strip():
             target["Email_Extract_Method"] = method
 
+        apply_email_role_metadata(target)
         return
 
     if (
@@ -475,3 +583,5 @@ def _set_email_with_provenance(
                 df["Email_Extract_Method"] = ""
             if not str(df.at[idx, "Email_Extract_Method"]).strip():
                 df.at[idx, "Email_Extract_Method"] = method
+
+        apply_email_role_metadata((df, idx))

@@ -81,7 +81,11 @@ from link_surface_hygiene import (
 )
 from email_provenance import (
     EMAIL_PROVENANCE_JSON_COL,
+    EMAIL_ROLE_COL,
+    EMAIL_ROLE_EVIDENCE_COL,
     _set_email_with_provenance,
+    apply_email_role_metadata,
+    apply_email_role_metadata_df,
     merge_email_provenance_into_target,
     row_has_successful_source_url_provenance,
 )
@@ -12232,6 +12236,8 @@ def dedupe_pre_enrich(df: pd.DataFrame) -> pd.DataFrame:
 EMAIL_COLUMNS_REQUIRED: Tuple[str, ...] = ("Email", "Email_All")
 EMAIL_COLUMNS_PROVENANCE: Tuple[str, ...] = (
     "Email_Type",
+    EMAIL_ROLE_COL,
+    EMAIL_ROLE_EVIDENCE_COL,
     "Email_Source_URL",
     "Email_Source_Type",
     "Email_Extract_Method",
@@ -12820,6 +12826,7 @@ class CrossDirectoryEnricherWorker(QThread):
             return
         if not isinstance(row_idx, int):
             raise RuntimeError(f"resume checkpoint row index must be int, got {type(row_idx).__name__}")
+        apply_email_role_metadata((seed_df, row_idx))
         _ensure_parent_dir(self.output_csv_path)
         seed_df.to_csv(self.output_csv_path, index=False, encoding="utf-8-sig")
         checkpoint.append_completed(row_idx, logger=self.log_message.emit)
@@ -13590,7 +13597,8 @@ class CrossDirectoryEnricherWorker(QThread):
             }
             seed_df = _ensure_email_columns(seed_df)
             self.log_message.emit(
-                "[Schema] ensured email columns: Email, Email_All, Email_Type, Email_Source_URL, Email_Source_Type, Email_Extract_Method, Email_Provenance_JSON"
+                "[Schema] ensured email columns: Email, Email_All, Email_Type, Email_Role, Email_Role_Evidence, "
+                "Email_Source_URL, Email_Source_Type, Email_Extract_Method, Email_Provenance_JSON"
             )
             seed_df = _apply_fb_promotion_df(
                 seed_df,
@@ -13807,6 +13815,7 @@ class CrossDirectoryEnricherWorker(QThread):
             )
             self._write_festival_expansion_sidecar()
             seed_df = self._ensure_bandcamp_output_columns(seed_df)
+            apply_email_role_metadata_df(seed_df)
             _ensure_parent_dir(self.output_csv_path)
             try:
                 seed_df.to_csv(self.output_csv_path, index=False, encoding="utf-8-sig")

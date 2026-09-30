@@ -31,14 +31,15 @@ def test_alias_examples_map_correctly() -> None:
             "Sounds Like",
             "Social Link",
             "Genre",
-                "Unearthed_Genre_Raw",
-                "Source URL",
-                "artist_url",
-                "Profile URL",
-                "profile_url",
-                "Email Type",
-                "facebook_url",
-                "Facebook URL",
+            "Unearthed_Genre_Raw",
+            "Source URL",
+            "artist_url",
+            "Profile URL",
+            "profile_url",
+            "Email Type",
+            "Email_Role",
+            "facebook_url",
+            "Facebook URL",
             "SoundCloud Link",
             "Source Directory",
             "Date Added",
@@ -62,6 +63,7 @@ def test_alias_examples_map_correctly() -> None:
     assert mapped["Profile URL"] == "Source_URL"
     assert mapped["profile_url"] == "Source_URL"
     assert mapped["Email Type"] == "Email_Type"
+    assert mapped["Email_Role"] == "Contact_Role"
     assert mapped["facebook_url"] == "Facebook_URL"
     assert mapped["Facebook URL"] == "Facebook_URL"
     assert mapped["SoundCloud Link"] == "SoundCloud_URL"

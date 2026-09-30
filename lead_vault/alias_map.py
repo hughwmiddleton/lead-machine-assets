@@ -31,6 +31,8 @@ _ALIAS_GROUPS = {
     "Contact_Role": [
         "Contact Role",
         "contact_role",
+        "Email_Role",
+        "Email Role",
     ],
     "Contact_Type": [
         "Contact Type",
