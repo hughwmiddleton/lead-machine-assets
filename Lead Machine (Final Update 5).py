@@ -5721,7 +5721,10 @@ def scrape_bandcamp(
                 "",
                 normalized_mode,
                 bandcamp_search_domain,
-                email_value
+                email_value,
+                "bandcamp",
+                "bandcamp",
+                "bandcamp",
             ))
             socials = artist_dict.get("socials", {})
             enriched_rows.append({
@@ -5743,7 +5746,10 @@ def scrape_bandcamp(
                 "Primary Genre": primary_genre_value,
                 "Source Tag": artist_dict.get("source_tag", ""),
                 "Bandcamp_Source_Mode": normalized_mode,
-                "Bandcamp_Search_Domain": bandcamp_search_domain
+                "Bandcamp_Search_Domain": bandcamp_search_domain,
+                "Lead_Source": "bandcamp",
+                "Source_Directory": "bandcamp",
+                "Source Directory": "bandcamp",
             })
             # Bandcamp resume-from-checkpoint: persist profile URLs once written to CSV rows
             profile_key = (artist_dict.get("profile_url", "") or "").rstrip("/").lower()
@@ -6742,6 +6748,9 @@ def _bandcamp_write_enriched_csv(rows, existing_csv):
         "Source Tag",
         "Bandcamp_Source_Mode",
         "Bandcamp_Search_Domain",
+        "Lead_Source",
+        "Source_Directory",
+        "Source Directory",
     ]
     base_dir = os.path.dirname(os.path.abspath(existing_csv))
     enriched_path = os.path.join(base_dir, "bandcamp_enriched.csv")
