@@ -12,8 +12,8 @@ def _write_zero_row_csv(path: Path) -> None:
     path.write_text("Artist Name,Email\n", encoding="utf-8")
 
 
-def test_seed_job_zero_rows_marked_completed(monkeypatch, tmp_path: Path) -> None:
-    """A successful scrape that returns zero rows should be classified as completed."""
+def test_non_spotify_seed_job_zero_rows_remains_completed(monkeypatch, tmp_path: Path) -> None:
+    """A successful non-Spotify scrape that returns zero rows remains completed."""
 
     def fake_run_directory_job(job_config, raw_output_path, logger=None):  # type: ignore[override]
         _write_zero_row_csv(Path(raw_output_path))
@@ -25,7 +25,7 @@ def test_seed_job_zero_rows_marked_completed(monkeypatch, tmp_path: Path) -> Non
         "jobs": [
             {
                 "job_id": "job_zero",
-                "directory": "spotify",
+                "directory": "festival",
                 "search_term": "artist",
             }
         ]
