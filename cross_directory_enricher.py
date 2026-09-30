@@ -7510,7 +7510,7 @@ def _instagram_onehop_emails_from_surface(
     if not (bio_link_result.is_html and bio_link_result.html):
         return ([], "", "regex", onehop_target)
 
-    all_ig_emails, used_mailto = _extract_website_emails_from_html(
+    all_ig_emails, used_mailto = _extract_onehop_website_emails_from_html(
         bio_link_result.html
     )
     if not all_ig_emails:
@@ -10171,6 +10171,43 @@ def _extract_website_emails_from_html(html: str) -> Tuple[List[str], bool]:
         return ([], False)
     try:
         emails, used_mailto = _extract_emails_from_html(html)
+    except Exception:
+        try:
+            soup = BeautifulSoup(html, "html.parser")
+        except Exception:
+            soup = None
+        emails, used_mailto = _mailto_emails_from_soup(soup)
+    return (emails, used_mailto)
+
+
+def _extract_onehop_website_emails_from_html(html: str) -> Tuple[List[str], bool]:
+    if not html:
+        return ([], False)
+    try:
+        soup = BeautifulSoup(html, "html.parser")
+        anchor_values = [
+            cell_to_str(anchor.get("href"))
+            for anchor in soup.select("a[href]")
+            if cell_to_str(anchor.get("href"))
+        ]
+        # Framework pages (notably link hubs) can contain unrelated account data
+        # inside hydration/config payloads.  Those strings are not rendered contact
+        # evidence, so keep one-hop extraction to clickable links, page metadata,
+        # and visible text instead of regex-scanning the raw document first.
+        visible_soup = BeautifulSoup(html, "html.parser")
+        for hidden in visible_soup.select("script, style, template, noscript, svg"):
+            hidden.decompose()
+        visible_parts = [visible_soup.get_text(" ", strip=True)]
+        for meta_tag in soup.select('meta[property="og:description"], meta[name="description"]'):
+            content = cell_to_str(meta_tag.get("content"))
+            if content:
+                visible_parts.append(content)
+        emails, used_mailto = _extract_emails_from_html(
+            "",
+            rendered_text=" ".join(part for part in visible_parts if part),
+            anchor_values=anchor_values,
+            stop_after_first_filtered=True,
+        )
     except Exception:
         try:
             soup = BeautifulSoup(html, "html.parser")
@@ -22719,6 +22756,42 @@ class CrossDirectoryEnricherWorker(QThread):
                 abs(score - best_score) <= 0.02 and rank_score > best_rank
             ):
                 best = candidate
+        # A short, single-token artist identity is unusually collision-prone.
+        # Do not promote a candidate merely because that token occurs somewhere
+        # in a longer display name; require two independent identity signals, or
+        # a name/handle signal plus strong metadata corroboration.
+        artist_tokens = artist_norm_basic.split()
+        if best and len(artist_tokens) == 1 and len(artist_norm_basic) <= 5:
+            display_basic = _sc_strip_basic(
+                _sc_normalise_text(best.get("display_name") or "")
+            )
+            handle_basic = _sc_strip_basic(_sc_normalise_text(best.get("handle") or ""))
+            location_match = _sc_location_match(
+                location_hint,
+                best.get("location") or "",
+            )
+            title_match = _sc_title_metadata_boost(
+                song_title,
+                track_hint,
+                best.get("display_name") or "",
+                best.get("handle") or "",
+                best.get("context") or "",
+                best.get("profile_url") or "",
+            ) > 0.0
+            context_tokens = set(_sc_normalise_text(best.get("context") or "").split())
+            display_exact = bool(display_basic and display_basic == artist_norm_basic)
+            handle_exact = bool(handle_basic and handle_basic == artist_norm_basic)
+            bio_match = artist_norm_basic in context_tokens
+            identity_signals = int(display_exact) + int(handle_exact)
+            metadata_signals = int(location_match) + int(title_match) + int(bio_match)
+            if identity_signals < 2 and not (identity_signals >= 1 and metadata_signals >= 1):
+                self.log_message.emit(
+                    f"[Enricher] SoundCloud Enrich: rejecting candidate '{best.get('display_name') or best.get('handle')}' "
+                    f"for ambiguous short artist '{artist_name}' "
+                    f"(display_exact={int(display_exact)}, handle_exact={int(handle_exact)}, "
+                    f"location={int(location_match)}, title={int(title_match)}, bio={int(bio_match)})"
+                )
+                return None
         # Short-name guard: require near-exact match for very short artist names.
         if best and artist_norm_basic and len(artist_norm_basic) <= 3:
             best_basic_display = _sc_strip_basic(_sc_normalise_text(best.get("display_name") or best.get("handle") or ""))

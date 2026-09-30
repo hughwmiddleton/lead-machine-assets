@@ -589,3 +589,58 @@ class SoundCloudEngineSwitchTests(unittest.TestCase):
                 )
                 self.assertIsNotNone(best)
                 self.assertIn("artist_bio", best["substantive_evidence"])
+    def test_pick_best_soundcloud_candidate_rejects_weak_generic_name_collision(self) -> None:
+        worker = self._make_worker()
+        worker._compute_match_score_for_candidate = lambda *args, **kwargs: 0.05
+        candidate = {
+            "profile_url": "https://soundcloud.com/lomare-langinbelik",
+            "handle": "lomare-langinbelik",
+            "display_name": "Francis & Lala Langinbelik",
+            "location": "",
+            "context": "Independent acoustic recordings.",
+        }
+
+        best = worker._pick_best_soundcloud_candidate("Lala", [candidate])
+
+        self.assertIsNone(best)
+
+    def test_pick_best_soundcloud_candidate_accepts_short_name_with_strong_corroboration(self) -> None:
+        worker = self._make_worker()
+        worker._compute_match_score_for_candidate = lambda *args, **kwargs: 0.95
+        candidate = {
+            "profile_url": "https://soundcloud.com/nova-music-au",
+            "handle": "nova-music-au",
+            "display_name": "Nova",
+            "location": "Melbourne, Australia",
+            "context": "Melbourne electronic artist. Latest track Crystal Skin.",
+        }
+
+        best = worker._pick_best_soundcloud_candidate(
+            "Nova",
+            [candidate],
+            location_hint="Melbourne",
+            song_title="Crystal Skin",
+        )
+
+        self.assertIsNotNone(best)
+        self.assertEqual(best["handle"], "nova-music-au")
+
+    def test_pick_best_soundcloud_candidate_distinctive_name_behavior_is_unchanged(self) -> None:
+        worker = self._make_worker()
+        worker._compute_match_score_for_candidate = lambda *args, **kwargs: 0.70
+        candidate = {
+            "profile_url": "https://soundcloud.com/velvet-echo-collective",
+            "handle": "velvet-echo-collective",
+            "display_name": "Velvet Echo Collective",
+            "location": "",
+            "context": "Independent artist and recording project.",
+            "track_count": 1,
+            "latest_track_title": "Velvet Echo",
+        }
+
+        best = worker._pick_best_soundcloud_candidate(
+            "Velvet Echo", [candidate], song_title="Velvet Echo"
+        )
+
+        self.assertIsNotNone(best)
+        self.assertEqual(best["handle"], "velvet-echo-collective")
