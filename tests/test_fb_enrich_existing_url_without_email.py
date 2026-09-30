@@ -339,6 +339,66 @@ def test_fb_enrich_runs_when_fb_url_present_or_promotable(monkeypatch, row_overr
     assert not any("already has facebook link" in msg.lower() for msg in logs)
 
 
+def test_fb_enrich_same_email_preserves_native_undiscovered_provenance(monkeypatch):
+    logs = []
+    worker = _make_worker(logs)
+    source_url = "https://undiscovered.music/artists/native-artist"
+    native_provenance = {
+        "artist@example.com": {
+            "source_type": "undiscovered_music_profile",
+            "surface": "undiscovered_music_profile",
+            "source_url": source_url,
+            "extract_method": "profile_direct",
+        }
+    }
+    seed_df = _seed_df(
+        {
+            "Artist Name": "Native Artist",
+            "Lead_Source": "Undiscovered Music",
+            "Source_Directory": "undiscovered_music",
+            "Source Directory": "Undiscovered Music",
+            "Source URL": source_url,
+            "Email": "artist@example.com",
+            "Email_All": "artist@example.com",
+            "Email_Type": "source_native",
+            "Email_Source_URL": source_url,
+            "Email_Source_Type": "undiscovered_music_profile",
+            "Email_Extract_Method": "profile_direct",
+            EMAIL_PROVENANCE_JSON_COL: json.dumps(native_provenance),
+            "facebook_url": "https://www.facebook.com/nativeartist",
+            "Facebook_URL": "https://www.facebook.com/nativeartist",
+            "Social Link": "https://www.facebook.com/nativeartist",
+            "External Links": "",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+
+    monkeypatch.setattr(
+        cde,
+        "_extract_fb_emails_bounded",
+        lambda *args, **kwargs: (
+            ["artist@example.com"],
+            "https://www.facebook.com/nativeartist/about",
+            "",
+        ),
+    )
+
+    matched = worker._enrich_row_facebook(seed_df, 0, object(), ctx)
+
+    assert matched is True
+    assert seed_df.at[0, "Email"] == "artist@example.com"
+    assert seed_df.at[0, "Email_All"] == "artist@example.com"
+    assert seed_df.at[0, "Email_Type"] == "source_native"
+    assert seed_df.at[0, "Email_Source_URL"] == source_url
+    assert seed_df.at[0, "Email_Source_Type"] == "undiscovered_music_profile"
+    assert seed_df.at[0, "Email_Extract_Method"] == "profile_direct"
+    assert json.loads(seed_df.at[0, EMAIL_PROVENANCE_JSON_COL]) == native_provenance
+    assert not str(seed_df.loc[0].get("__fb_emails_applied", "") or "").strip()
+    assert seed_df.at[0, "Lead_Source"] == "Undiscovered Music"
+    assert seed_df.at[0, "Source_Directory"] == "undiscovered_music"
+    assert seed_df.at[0, "Source URL"] == source_url
+
+
 def test_fb_enrich_skips_same_fb_url_that_already_produced_email(monkeypatch):
     logs = []
     worker = _make_worker(logs)
@@ -1213,7 +1273,7 @@ def test_fb_enrich_resolves_share_url_before_unearthed_gate(monkeypatch):
     assert not any("[Unearthed Path] strict explicit-only FB mode; skipping Night FB discovery" in msg for msg in logs)
 
 
-def test_fb_enrich_disallowed_resolved_share_url_stays_skipped_for_unearthed(monkeypatch):
+def test_fb_enrich_disallowed_resolved_share_url_uses_bounded_runtime_fallback_for_unearthed(monkeypatch):
     logs = []
     worker = _make_worker(logs)
     worker._row_allows_heavy_enricher = lambda *args, **kwargs: SimpleNamespace(allowed=True)
@@ -1241,11 +1301,13 @@ def test_fb_enrich_disallowed_resolved_share_url_stays_skipped_for_unearthed(mon
         "_discover_facebook_identity",
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("discovery should not run for disallowed share result")),
     )
-    monkeypatch.setattr(
-        cde,
-        "_extract_fb_emails_bounded",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("disallowed share result must not reach scrape")),
-    )
+    scrape_calls = []
+
+    def fake_extract(_driver, url, **kwargs):  # noqa: ANN001
+        scrape_calls.append(url)
+        return [], url, "no_email_on_page"
+
+    monkeypatch.setattr(cde, "_extract_fb_emails_bounded", fake_extract)
 
     matched = worker._enrich_row_facebook(seed_df, 0, object(), ctx)
 
@@ -1254,8 +1316,10 @@ def test_fb_enrich_disallowed_resolved_share_url_stays_skipped_for_unearthed(mon
     assert seed_df.at[0, "Facebook_URL"] == ""
     assert seed_df.at[0, "Facebook URL"] == ""
     assert seed_df.at[0, cde.FB_OPPORTUNITY_STATE_COL] == "no_fb_opportunity"
-    assert seed_df.at[0, cde.FB_GATE_STATE_COL] == "skipped_no_canonical_facebook_url"
-    assert any("[Unearthed Path] strict explicit-only FB mode; skipping Night FB discovery" in msg for msg in logs)
+    assert seed_df.at[0, cde.FB_GATE_STATE_COL] == ""
+    assert seed_df.at[0, cde.FB_ATTEMPT_STATE_COL] == "attempted_fb"
+    assert scrape_calls == ["https://www.facebook.com/share/19bactwuev"]
+    assert any("state='share_runtime_fallback'" in msg for msg in logs)
 
 
 def test_fb_enrich_unearthed_explicit_url_merges_with_existing_instagram_email(monkeypatch):

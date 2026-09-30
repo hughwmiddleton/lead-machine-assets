@@ -1213,6 +1213,22 @@ def _make_instagram_live_bridge(page):
     )
 
 
+def _install_deterministic_instagram_onehop_bridge(monkeypatch):
+    """Admit static one-hop fixtures without opening a real browser or network page."""
+    live_pages = []
+
+    def fake_open(*args, **kwargs):  # noqa: ANN001
+        page = _DummyInstagramHiddenContactPage(
+            "<html><body><main><header><h1>Deterministic Instagram profile</h1>"
+            "<button>Message</button></header></main></body></html>"
+        )
+        live_pages.append(page)
+        return _make_instagram_live_bridge(page)
+
+    monkeypatch.setattr(cde, "_open_instagram_live_page_bridge", fake_open)
+    return live_pages
+
+
 def _instagram_render_ready_marker_from_html(
     script,
     html,
@@ -1372,16 +1388,26 @@ def _resolve_instagram_profile_surface_root_from_html(soup):
 
 
 class _DummyInstagramProfileSurfaceProbePage:
-    def __init__(self, html, *, url="https://www.instagram.com/probeartist/", title="Instagram"):
+    def __init__(
+        self,
+        html,
+        *,
+        url="https://www.instagram.com/probeartist/",
+        title="Instagram",
+        rendered_body_text=None,
+    ):
         self._html = html
         self.url = url
         self._title = title
+        self._rendered_body_text = rendered_body_text
 
     def evaluate(self, script):  # noqa: ANN001
         script_text = str(script or "")
         if "profile_markers" in script_text:
             return _instagram_profile_surface_state_from_html(script, self._html)
         if "document.body" in script_text and "innerText" in script_text:
+            if self._rendered_body_text is not None:
+                return self._rendered_body_text
             return " ".join(BeautifulSoup(self._html, "html.parser").get_text(" ", strip=True).split())
         return False
 
@@ -1507,6 +1533,337 @@ def test_instagram_bridge_surface_assessment_keeps_login_wall_blocked_without_ma
     assert assessment["promoted_shell"] is False
     assert assessment["ready"] is False
     assert assessment["reason"] == "blocked_page"
+
+
+def test_instagram_bridge_surface_assessment_accepts_po_e_profile_despite_generic_soft_block(monkeypatch):
+    html = """
+    <html>
+      <head>
+        <title>the Po (@po.e_music) • Instagram photos and videos</title>
+      </head>
+      <body>
+        <nav>Log In Sign Up</nav>
+        <main>
+          <header>
+            <h1>the Po</h1>
+            <button>Email</button>
+          </header>
+          <section>
+            <p>For inquiry→po.the.river@gmail.com</p>
+            <a href="https://poethepoet.com">Official website</a>
+          </section>
+        </main>
+        <footer>Enable JavaScript to continue using Instagram.</footer>
+      </body>
+    </html>
+    """
+    page = _DummyInstagramProfileSurfaceProbePage(
+        html,
+        url="https://www.instagram.com/po.e_music/",
+        title="the Po (@po.e_music) • Instagram photos and videos",
+    )
+    monkeypatch.setattr(cde, "_detect_soft_block", lambda _html: True)
+
+    assessment = cde._instagram_bridge_surface_assessment(
+        page,
+        "https://www.instagram.com/po.e_music/",
+        allow_html_fallback=True,
+    )
+
+    assert assessment["same_profile"] is True
+    assert assessment["blocked"] is False
+    assert assessment["ready"] is True
+    assert assessment["reason"] == "profile_surface"
+    assert assessment["main"] == 1
+    assert assessment["header"] == 1
+    assert assessment["descendants"] >= 4
+    assert assessment["text_length"] >= 16
+
+
+def test_instagram_bridge_surface_assessment_accepts_logged_out_profile_without_recognised_dom_root(
+    monkeypatch,
+):
+    html = """
+    <html>
+      <head><title>Test Artist (@loggedoutartist) • Instagram photos and videos</title></head>
+      <body>
+        <nav>Log In Sign Up</nav>
+        <div>@loggedoutartist</div>
+        <div>12 posts 1,234 followers 56 following</div>
+        <div>Public artist biography and official website</div>
+        <footer>Meta About Blog Jobs Help Privacy Terms Enable JavaScript</footer>
+      </body>
+    </html>
+    """
+    page = _DummyInstagramProfileSurfaceProbePage(
+        html,
+        url="https://www.instagram.com/loggedoutartist/",
+        title="Test Artist (@loggedoutartist) • Instagram photos and videos",
+    )
+    monkeypatch.setattr(cde, "_detect_soft_block", lambda _html: True)
+
+    assessment = cde._instagram_bridge_surface_assessment(
+        page,
+        "https://www.instagram.com/loggedoutartist/",
+        allow_html_fallback=True,
+    )
+
+    assert assessment["same_profile"] is True
+    assert assessment["main"] == 0
+    assert assessment["affirmative_same_profile_identity"] is True
+    assert assessment["profile_identity_markers"] >= 4
+    assert assessment["blocked"] is False
+    assert assessment["ready"] is True
+    assert assessment["reason"] == "profile_surface"
+
+
+def test_instagram_bridge_surface_assessment_accepts_8485_shaped_logged_out_profile_email(
+    monkeypatch,
+):
+    html = """
+    <html>
+      <head><title>8485 (@warehost) • Instagram photos and videos</title></head>
+      <body>
+        <nav>Log In Sign Up</nav>
+        <div>warehost</div>
+        <div>8485</div>
+        <div>38 posts 36.6K followers 611 following</div>
+        <div>artist profile · mgmt: management@test-artist.example</div>
+        <a href="https://test-artist.example">Official website</a>
+        <footer>Meta About Blog Jobs Help Privacy Terms Enable JavaScript</footer>
+      </body>
+    </html>
+    """
+    page = _DummyInstagramProfileSurfaceProbePage(
+        html,
+        url="https://www.instagram.com/warehost/",
+        title="8485 (@warehost) • Instagram photos and videos",
+    )
+    monkeypatch.setattr(cde, "_detect_soft_block", lambda _html: True)
+
+    assessment = cde._instagram_bridge_surface_assessment(
+        page,
+        "https://www.instagram.com/warehost/",
+        allow_html_fallback=True,
+    )
+    emails = cde._filter_instagram_email_candidates_for_acceptance(
+        cde._extract_instagram_direct_profile_candidate_emails(html)
+    )
+
+    assert assessment["same_profile"] is True
+    assert assessment["affirmative_same_profile_identity"] is True
+    assert assessment["blocked"] is False
+    assert assessment["ready"] is True
+    assert emails == ["management@test-artist.example"]
+
+
+def test_instagram_bridge_surface_assessment_ignores_incidental_raw_bundle_block_strings():
+    rendered_body_text = (
+        "Log In Sign Up rajan 23.5K followers 1,285 following "
+        "Rajan music touring Take Me Under open.spotify.com/track/example "
+        "Show more posts from rajan Meta About Blog Jobs Help Privacy Terms"
+    )
+    html = """
+    <html>
+      <body>
+        <main>
+          <header><h1>Rajan</h1></header>
+          <section><div>Rendered public profile application root</div></section>
+        </main>
+        <script>
+          const frameworkStrings = [
+            "challenge_required", "checkpoint", "login", "access denied",
+            "Verify you are human", "Sorry, this page isn't available.",
+            "Enable JavaScript"
+          ];
+        </script>
+      </body>
+    </html>
+    """
+    page = _DummyInstagramProfileSurfaceProbePage(
+        html,
+        url="https://www.instagram.com/rajan/",
+        title="Rajan (@rajan) • Instagram photos and videos",
+        rendered_body_text=rendered_body_text,
+    )
+
+    assessment = cde._instagram_bridge_surface_assessment(
+        page,
+        "https://www.instagram.com/rajan/",
+        allow_html_fallback=True,
+    )
+
+    assert assessment["same_profile"] is True
+    assert assessment["affirmative_same_profile_identity"] is True
+    assert assessment["blocked"] is False
+    assert assessment["ready"] is True
+    assert assessment["reason"] == "profile_surface"
+
+
+def test_instagram_bridge_surface_assessment_keeps_challenge_terminal_despite_profile_identity():
+    html = """
+    <html><body>
+      <div>@challengeartist</div>
+      <div>12 posts 1,234 followers 56 following</div>
+      <div>Verify you are human</div>
+    </body></html>
+    """
+    page = _DummyInstagramProfileSurfaceProbePage(
+        html,
+        url="https://www.instagram.com/challengeartist/",
+        title="Challenge Artist (@challengeartist) • Instagram photos and videos",
+    )
+
+    assessment = cde._instagram_bridge_surface_assessment(
+        page,
+        "https://www.instagram.com/challengeartist/",
+        allow_html_fallback=True,
+    )
+
+    assert assessment["same_profile"] is True
+    assert assessment["affirmative_same_profile_identity"] is False
+    assert assessment["blocked"] is True
+    assert assessment["reason"] == "blocked_page"
+
+
+@pytest.mark.parametrize("route", ["challenge", "checkpoint", "verification"])
+def test_instagram_bridge_surface_assessment_challenge_routes_always_block(route):
+    html = """
+    <html><body>
+      <main><header><h1>Challenge Artist</h1></header></main>
+      <div>challengeartist 1,234 followers 56 following</div>
+    </body></html>
+    """
+    page = _DummyInstagramProfileSurfaceProbePage(
+        html,
+        url=f"https://www.instagram.com/{route}/required/",
+        title="Challenge Artist (@challengeartist) • Instagram photos and videos",
+    )
+
+    assessment = cde._instagram_bridge_surface_assessment(
+        page,
+        "https://www.instagram.com/challengeartist/",
+        allow_html_fallback=True,
+    )
+
+    assert assessment["blocked"] is True
+    assert assessment["ready"] is False
+    assert assessment["reason"] == "blocked_page"
+
+
+def test_instagram_bridge_surface_assessment_visible_unavailable_profile_is_blocked():
+    html = """
+    <html><body>
+      <div>unavailableartist</div>
+      <div>Sorry, this page isn't available.</div>
+    </body></html>
+    """
+    page = _DummyInstagramProfileSurfaceProbePage(
+        html,
+        url="https://www.instagram.com/unavailableartist/",
+        title="Unavailable Artist (@unavailableartist) • Instagram photos and videos",
+    )
+
+    assessment = cde._instagram_bridge_surface_assessment(
+        page,
+        "https://www.instagram.com/unavailableartist/",
+        allow_html_fallback=True,
+    )
+
+    assert assessment["blocked"] is True
+    assert assessment["ready"] is False
+    assert assessment["reason"] == "blocked_page"
+
+
+def test_instagram_bridge_surface_assessment_wrong_profile_cannot_admit_visible_email():
+    html = """
+    <html><body>
+      <nav>Log In Sign Up</nav>
+      <div>@renderedartist</div>
+      <div>12 posts 1,234 followers 56 following</div>
+      <div>management: wrong-profile@test-artist.example</div>
+    </body></html>
+    """
+    page = _DummyInstagramProfileSurfaceProbePage(
+        html,
+        url="https://www.instagram.com/renderedartist/",
+        title="Rendered Artist (@renderedartist) • Instagram photos and videos",
+    )
+
+    assessment = cde._instagram_bridge_surface_assessment(
+        page,
+        "https://www.instagram.com/requestedartist/",
+        allow_html_fallback=True,
+    )
+
+    assert assessment["same_profile"] is False
+    assert assessment["same_profile_routed"] is False
+    assert assessment["affirmative_same_profile_identity"] is False
+    assert assessment["ready"] is False
+    assert assessment["reason"] in {"blocked_page", "not_profile_surface"}
+
+
+def test_instagram_bridge_surface_assessment_login_redirect_remains_blocked():
+    html = """
+    <html><body><form>Log In Sign Up</form></body></html>
+    """
+    page = _DummyInstagramProfileSurfaceProbePage(
+        html,
+        url="https://www.instagram.com/accounts/login/",
+        title="Login • Instagram",
+    )
+
+    assessment = cde._instagram_bridge_surface_assessment(
+        page,
+        "https://www.instagram.com/requestedartist/",
+        allow_html_fallback=True,
+    )
+
+    assert assessment["blocked"] is True
+    assert assessment["ready"] is False
+    assert assessment["reason"] == "blocked_page"
+
+
+def test_instagram_private_profile_uses_only_visible_public_metadata():
+    html = """
+    <html><body>
+      <nav>Log In Sign Up</nav>
+      <div>@privateartist</div>
+      <div>0 posts 321 followers 104 following</div>
+      <div>This account is private</div>
+    </body></html>
+    """
+    page = _DummyInstagramProfileSurfaceProbePage(
+        html,
+        url="https://www.instagram.com/privateartist/",
+        title="Private Artist (@privateartist) • Instagram photos and videos",
+    )
+
+    assessment = cde._instagram_bridge_surface_assessment(
+        page,
+        "https://www.instagram.com/privateartist/",
+        allow_html_fallback=True,
+    )
+    emails = cde._filter_instagram_email_candidates_for_acceptance(
+        cde._extract_instagram_direct_profile_candidate_emails(html)
+    )
+
+    assert assessment["affirmative_same_profile_identity"] is True
+    assert assessment["blocked"] is False
+    assert emails == []
+
+
+def test_instagram_email_filter_rejects_platform_support_and_placeholder_candidates():
+    emails = cde._filter_instagram_email_candidates_for_acceptance(
+        [
+            "support@instagram.com",
+            "security@mail.instagram.com",
+            "email@example.com",
+            "bookings@artist.example",
+        ]
+    )
+
+    assert emails == ["bookings@artist.example"]
 
 
 def test_instagram_bridge_surface_assessment_promotes_same_profile_under_rendered_shell():
@@ -1655,7 +2012,6 @@ def test_instagram_bridge_surface_assessment_marks_same_profile_logged_out_shell
       <body>
         <script type="application/ld+json">{"@type":"ProfilePage"}</script>
         <div>Log in to Instagram</div>
-        <div>Sorry, this page isn't available.</div>
       </body>
     </html>
     """
@@ -3541,11 +3897,14 @@ def test_open_instagram_live_page_bridge_logged_out_shell_fails_after_bounded_re
     assert playwright.closed is True
 
 
-def test_open_instagram_live_page_bridge_valid_profile_surface_skips_wait_and_recovery(monkeypatch):
+def test_open_instagram_live_page_bridge_hands_off_po_e_profile_despite_generic_soft_block(monkeypatch):
     events = []
     ready_html = (
-        "<html><body><main><header><h1>Ready Artist</h1><button>Email</button></header>"
-        "<section><a href='https://linktr.ee/readyartist'>Bio</a></section></main></body></html>"
+        "<html><body><nav>Log In Sign Up</nav>"
+        "<main><header><h1>the Po</h1><button>Email</button></header>"
+        "<section><p>For inquiry→po.the.river@gmail.com</p>"
+        "<a href='https://poethepoet.com'>Official website</a></section></main>"
+        "<footer>Enable JavaScript to continue using Instagram.</footer></body></html>"
     )
 
     class DummyPage(_DummyClosable):
@@ -3556,8 +3915,11 @@ def test_open_instagram_live_page_bridge_valid_profile_surface_skips_wait_and_re
 
         def goto(self, url, wait_until=None, timeout=None):  # noqa: ANN001
             self.goto_calls += 1
-            self.url = "https://www.instagram.com/readyartist/"
+            self.url = "https://www.instagram.com/po.e_music/"
             events.append(("goto", self.url, wait_until, timeout))
+
+        def title(self):
+            return "the Po (@po.e_music) • Instagram photos and videos"
 
         def evaluate(self, script):  # noqa: ANN001
             script_text = str(script or "")
@@ -3565,10 +3927,10 @@ def test_open_instagram_live_page_bridge_valid_profile_surface_skips_wait_and_re
                 return _instagram_profile_surface_state_from_html(
                     script,
                     ready_html,
-                    rendered_main_text="Ready Artist Bio and booking details",
+                    rendered_main_text="the Po For inquiry→po.the.river@gmail.com Official website",
                 )
             if "document.body" in script_text and "innerText" in script_text:
-                return "Ready Artist Bio and booking details"
+                return "Log In Sign Up the Po For inquiry→po.the.river@gmail.com Official website"
             return _instagram_profile_surface_candidate_marker_from_html(script, ready_html)
 
         def content(self):
@@ -3632,9 +3994,10 @@ def test_open_instagram_live_page_bridge_valid_profile_surface_skips_wait_and_re
         "_wait_for_instagram_profile_render",
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("wait should not run")),
     )
+    monkeypatch.setattr(cde, "_detect_soft_block", lambda _html: True)
 
     bridge = _REAL_OPEN_INSTAGRAM_LIVE_PAGE_BRIDGE(
-        "https://www.instagram.com/readyartist/",
+        "https://www.instagram.com/po.e_music/",
         timeout_s=12.5,
     )
 
@@ -3646,7 +4009,7 @@ def test_open_instagram_live_page_bridge_valid_profile_surface_skips_wait_and_re
         ("launch", True),
         ("new_context",),
         ("new_page",),
-        ("goto", "https://www.instagram.com/readyartist/", "domcontentloaded", 12500.0),
+        ("goto", "https://www.instagram.com/po.e_music/", "domcontentloaded", 12500.0),
     ]
 
     bridge.close()
@@ -4179,7 +4542,11 @@ def test_instagram_email_no_email_visible_after_requests_and_fallback_are_exhaus
 
     assert matched is False
     assert len(fetch_html_calls) == 1
-    assert seed_df.equals(before)
+    pd.testing.assert_frame_equal(seed_df.loc[:, before.columns], before)
+    assert seed_df.at[0, cde.IG_ATTEMPT_STATE_COL] == "attempted_ig_no_email_found"
+    assert seed_df.at[0, cde.IG_EXTRACT_STATE_COL] == "ig_no_usable_email_found"
+    assert seed_df.at[0, cde.IG_WRITE_STATE_COL] == "ig_no_email_written"
+    assert seed_df.at[0, cde.IG_TERMINAL_REASON_COL] == "ig_no_email_found"
     _assert_ig_visit_and_outcome(
         logs,
         "https://www.instagram.com/noemailhere/",
@@ -4484,6 +4851,7 @@ def test_instagram_email_no_visible_or_meta_email_keeps_one_hop_bounded_and_no_e
     )
     ctx = worker._build_row_context(seed_df, 0, 1, 1)
     before = seed_df.copy(deep=True)
+    _install_deterministic_instagram_onehop_bridge(monkeypatch)
 
     ig_fetch_calls = []
     bio_fetch_calls = []
@@ -4516,7 +4884,11 @@ def test_instagram_email_no_visible_or_meta_email_keeps_one_hop_bounded_and_no_e
     assert matched is False
     assert ig_fetch_calls == ["https://www.instagram.com/noemailhere/"]
     assert bio_fetch_calls == ["https://linktr.ee/noemailhere"]
-    assert seed_df.equals(before)
+    pd.testing.assert_frame_equal(seed_df.loc[:, before.columns], before)
+    assert seed_df.at[0, cde.IG_ATTEMPT_STATE_COL] == "attempted_ig_no_email_found"
+    assert seed_df.at[0, cde.IG_EXTRACT_STATE_COL] == "ig_no_usable_email_found"
+    assert seed_df.at[0, cde.IG_WRITE_STATE_COL] == "ig_no_email_written"
+    assert seed_df.at[0, cde.IG_TERMINAL_REASON_COL] == "ig_no_email_found"
     _assert_ig_visit_and_outcome(
         logs,
         "https://www.instagram.com/noemailhere/",
@@ -4547,7 +4919,11 @@ def test_instagram_email_fetch_failed_is_logged_distinctly(monkeypatch):
     matched = worker._enrich_row_instagram_email(seed_df, 0, ctx)
 
     assert matched is False
-    assert seed_df.equals(before)
+    pd.testing.assert_frame_equal(seed_df.loc[:, before.columns], before)
+    assert seed_df.at[0, cde.IG_ATTEMPT_STATE_COL] == "attempted_ig_blocked_or_unavailable"
+    assert seed_df.at[0, cde.IG_EXTRACT_STATE_COL] == "ig_extract_blocked_or_unavailable"
+    assert seed_df.at[0, cde.IG_WRITE_STATE_COL] == "ig_no_email_written"
+    assert seed_df.at[0, cde.IG_TERMINAL_REASON_COL] == "ig_blocked_or_unavailable"
     assert logs == [
         "[IG Email] Visiting https://www.instagram.com/fetchfailed/",
         "[IG Email] fetch_failed status=503",
@@ -4581,7 +4957,11 @@ def test_instagram_email_blocked_or_empty_is_logged_distinctly(monkeypatch):
     matched = worker._enrich_row_instagram_email(seed_df, 0, ctx)
 
     assert matched is False
-    assert seed_df.equals(before)
+    pd.testing.assert_frame_equal(seed_df.loc[:, before.columns], before)
+    assert seed_df.at[0, cde.IG_ATTEMPT_STATE_COL] == "attempted_ig_blocked_or_unavailable"
+    assert seed_df.at[0, cde.IG_EXTRACT_STATE_COL] == "ig_extract_blocked_or_unavailable"
+    assert seed_df.at[0, cde.IG_WRITE_STATE_COL] == "ig_no_email_written"
+    assert seed_df.at[0, cde.IG_TERMINAL_REASON_COL] == "ig_blocked_or_unavailable"
     assert logs == [
         "[IG Email] Visiting https://www.instagram.com/blockedartist/",
         "[IG Email] blocked_or_empty status=200 chars=55",
@@ -5750,6 +6130,7 @@ def test_instagram_email_one_hop_bio_link_recovers_direct_email_from_structured_
         }
     )
     ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    _install_deterministic_instagram_onehop_bridge(monkeypatch)
     bio_fetch_calls = []
 
     monkeypatch.setattr(
@@ -5812,6 +6193,7 @@ def test_instagram_email_one_hop_bio_link_recovers_direct_email(monkeypatch):
         }
     )
     ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    _install_deterministic_instagram_onehop_bridge(monkeypatch)
     bio_fetch_calls = []
 
     monkeypatch.setattr(
@@ -5873,6 +6255,7 @@ def test_instagram_email_one_hop_rejects_asset_artifact_pseudo_email(monkeypatch
         }
     )
     ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    _install_deterministic_instagram_onehop_bridge(monkeypatch)
 
     monkeypatch.setattr(
         cde,
@@ -5961,6 +6344,7 @@ def test_instagram_email_one_hop_mixed_candidates_keep_real_email_and_reject_art
         }
     )
     ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    _install_deterministic_instagram_onehop_bridge(monkeypatch)
 
     monkeypatch.setattr(
         cde,
@@ -6015,6 +6399,7 @@ def test_instagram_email_one_hop_bio_link_recovers_mailto(monkeypatch):
         }
     )
     ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    _install_deterministic_instagram_onehop_bridge(monkeypatch)
 
     monkeypatch.setattr(
         cde,
@@ -7190,6 +7575,73 @@ def test_instagram_email_live_direct_uses_shared_live_html_before_live_surface_o
     )
 
 
+def test_instagram_email_8485_shaped_validated_live_snapshot_writes_email_and_provenance(
+    monkeypatch,
+):
+    logs = []
+    worker = _make_worker(logs)
+    seed_df = _seed_df(
+        {
+            "Artist Name": "8485-shaped fixture",
+            "Source Directory": "Spotify",
+            "Source": "spotify",
+            "Email": "",
+            "Email_All": "",
+            "Instagram_URL": "https://instagram.com/warehost/",
+            "Email_Source_URL": "",
+            "Email_Source_Type": "",
+            "Email_Extract_Method": "",
+            "Email_Type": "",
+            EMAIL_PROVENANCE_JSON_COL: "",
+        }
+    )
+    ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    live_html = """
+    <html>
+      <head><title>8485 (@warehost) • Instagram photos and videos</title></head>
+      <body>
+        <nav>Log In Sign Up</nav>
+        <main>
+          <header><h1>8485</h1><div>@warehost</div></header>
+          <section>
+            <div>38 posts 24,800 followers 611 following</div>
+            <div>artist profile · mgmt: management@artist.example</div>
+          </section>
+        </main>
+        <footer>Meta About Blog Jobs Help Privacy Terms Enable JavaScript</footer>
+      </body>
+    </html>
+    """
+    live_pages = _install_instagram_profile_fetch_scope(
+        monkeypatch,
+        static_html="<html><body><div>Static profile shell without email or bio link</div></body></html>",
+        live_page_factory=lambda: _DummyInstagramHiddenContactPage(live_html),
+    )
+    monkeypatch.setattr(
+        cde,
+        "_fetch_website_html_bounded",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("one-hop should not run")),
+    )
+
+    matched = worker._enrich_row_instagram_email(seed_df, 0, ctx)
+
+    assert matched is True
+    assert len(live_pages) == 1
+    assert seed_df.at[0, "Email"] == "management@artist.example"
+    assert seed_df.at[0, "Email_All"] == "management@artist.example"
+    assert seed_df.at[0, "Source Directory"] == "Spotify"
+    assert seed_df.at[0, "Source"] == "spotify"
+    provenance = seed_df.at[0, EMAIL_PROVENANCE_JSON_COL]
+    assert "instagram_profile" in provenance
+    assert "instagram_enrich" in provenance
+    assert seed_df.at[0, "Email_Type"] == "ig_enrich"
+    _assert_ig_visit_and_outcome(
+        logs,
+        "https://www.instagram.com/warehost/",
+        "[IG Email] Found email: management@artist.example",
+    )
+
+
 def test_instagram_email_live_direct_uses_rendered_text_when_snapshot_html_misses_email(monkeypatch):
     logs = []
     worker = _make_worker(logs)
@@ -7795,6 +8247,7 @@ def test_instagram_email_invalid_bio_link_skips_one_hop_fetch(monkeypatch):
         }
     )
     ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    _install_deterministic_instagram_onehop_bridge(monkeypatch)
 
     monkeypatch.setattr(
         cde,
@@ -7838,6 +8291,7 @@ def test_instagram_email_without_outbound_target_skips_one_hop_fetch(monkeypatch
         }
     )
     ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    _install_deterministic_instagram_onehop_bridge(monkeypatch)
 
     monkeypatch.setattr(
         cde,
@@ -7881,6 +8335,7 @@ def test_instagram_email_one_hop_preserves_multiple_emails_in_aggregate_output(m
         }
     )
     ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    _install_deterministic_instagram_onehop_bridge(monkeypatch)
 
     monkeypatch.setattr(
         cde,
@@ -7976,6 +8431,7 @@ def test_instagram_email_one_hop_ranks_targets_but_still_fetches_only_one_url(mo
         }
     )
     ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    _install_deterministic_instagram_onehop_bridge(monkeypatch)
     bio_fetch_calls = []
 
     monkeypatch.setattr(
@@ -8029,6 +8485,7 @@ def test_instagram_email_one_hop_prefers_external_domain_over_internal_meta(monk
         }
     )
     ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    _install_deterministic_instagram_onehop_bridge(monkeypatch)
     bio_fetch_calls = []
 
     monkeypatch.setattr(
@@ -8081,6 +8538,7 @@ def test_instagram_email_one_hop_blocked_only_targets_skip_fetch(monkeypatch):
         }
     )
     ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    _install_deterministic_instagram_onehop_bridge(monkeypatch)
 
     monkeypatch.setattr(
         cde,
@@ -8124,6 +8582,7 @@ def test_instagram_email_one_hop_weak_utility_only_target_resolves_to_clean_no_e
         }
     )
     ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    _install_deterministic_instagram_onehop_bridge(monkeypatch)
 
     monkeypatch.setattr(
         cde,
@@ -8174,6 +8633,7 @@ def test_instagram_email_one_hop_does_not_follow_links_found_on_fetched_page(mon
         }
     )
     ctx = worker._build_row_context(seed_df, 0, 1, 1)
+    _install_deterministic_instagram_onehop_bridge(monkeypatch)
     bio_fetch_calls = []
 
     monkeypatch.setattr(

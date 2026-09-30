@@ -30,6 +30,15 @@ from pathlib import Path
 from typing import Dict, List, Mapping, Optional, Tuple
 
 from fb_email_override import should_accept_email_override
+from bandcamp_profile_engine import (
+    PROFILE_ACCEPTED as BANDCAMP_PROFILE_ACCEPTED,
+    bandcamp_extract_genres,
+    bandcamp_extract_release_date,
+    bandcamp_extract_sounds_like,
+    fetch_bandcamp_profile as _shared_fetch_bandcamp_profile,
+    parse_bandcamp_profile_html as _shared_parse_bandcamp_profile_html,
+    _parse_any_date_to_iso,
+)
 # ---------------------------
 # Dependency Check and Installation
 # ---------------------------
@@ -316,6 +325,122 @@ def _load_latest_night_mode_run_summary(run_root: str) -> Optional[dict]:
     except Exception:
         return None
     return payload if isinstance(payload, dict) else None
+
+
+def _parse_night_mode_run_dir_handshake(line: str) -> Optional[str]:
+    """Extract run_dir from a phased-runner handshake line, or None."""
+    if not line:
+        return None
+    prefix = "[Night Mode][Runtime] run_dir="
+    if prefix in line:
+        idx = line.index(prefix) + len(prefix)
+        return line[idx:].strip()
+    return None
+
+
+def _read_json_safe(path: str) -> Optional[dict]:
+    """Read JSON defensively; return None for missing or malformed files."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def _count_unique_bandcamp_urls(progress: Optional[dict]) -> Optional[int]:
+    """Count unique scraped_artist_urls across all Bandcamp progress checkpoints."""
+    if not progress:
+        return None
+    urls: set[str] = set()
+    for value in progress.values():
+        if isinstance(value, dict):
+            for url in value.get("scraped_artist_urls") or []:
+                if url:
+                    urls.add(str(url))
+    return len(urls) if urls else None
+
+
+def _find_current_job_index(job_statuses: List[Dict[str, Any]]) -> Optional[int]:
+    """Return the first job index with status == 'running', or None."""
+    for idx, status in enumerate(job_statuses):
+        if isinstance(status, dict) and str(status.get("status", "")).strip().lower() == "running":
+            return idx
+    return None
+
+
+def _build_night_mode_progress_display(
+    jobs: List[Dict[str, Any]],
+    active_run_dir: str,
+    job_statuses: List[Dict[str, Any]],
+    bandcamp_progress: Optional[dict] = None,
+) -> Dict[str, Any]:
+    """Build a truthful progress payload for the Night Mode GUI.
+
+    Returns a dict with keys:
+      - phase: str
+      - source: str
+      - job_index: int (1-based) or None
+      - total_jobs: int
+      - target_valid_leads: Optional[int]
+      - heartbeat: Optional[str]
+      - status_text: str
+      - indeterminate: bool
+      - row_count: Optional[int]
+    """
+    total_jobs = len(jobs)
+    current_idx = _find_current_job_index(job_statuses)
+
+    # If no job is explicitly running, look for the first non-completed job
+    # that might be starting, or fall back to the last job.
+    if current_idx is None and job_statuses:
+        for idx, status in enumerate(job_statuses):
+            st = str(status.get("status", "")).strip().lower() if isinstance(status, dict) else ""
+            if st not in {"completed", "failed"}:
+                current_idx = idx
+                break
+        if current_idx is None:
+            # All done; point at last job for display.
+            current_idx = total_jobs - 1 if total_jobs > 0 else None
+
+    result: Dict[str, Any] = {
+        "phase": "starting" if current_idx is None else "processing",
+        "source": "",
+        "job_index": (current_idx + 1) if current_idx is not None else None,
+        "total_jobs": total_jobs,
+        "target_valid_leads": None,
+        "heartbeat": None,
+        "status_text": "processing" if current_idx is not None else "idle",
+        "indeterminate": True,
+        "row_count": None,
+    }
+
+    if current_idx is not None and 0 <= current_idx < total_jobs:
+        job = jobs[current_idx]
+        result["source"] = str(job.get("directory") or job.get("source") or "").strip()
+        try:
+            result["target_valid_leads"] = int(job.get("target_valid_leads") or job.get("target_count") or job.get("max_results") or 0) or None
+        except Exception:
+            result["target_valid_leads"] = None
+        status = job_statuses[current_idx] if current_idx < len(job_statuses) else {}
+        if isinstance(status, dict):
+            result["row_count"] = status.get("row_count")
+            st = str(status.get("status", "")).strip().lower()
+            if st == "completed":
+                result["status_text"] = "completed"
+                result["indeterminate"] = False
+            elif st == "failed":
+                result["status_text"] = "failed"
+            else:
+                result["status_text"] = "processing"
+
+        # Bandcamp heartbeat from per-job progress file.
+        if result["source"].lower() == "bandcamp" and bandcamp_progress is not None:
+            unique = _count_unique_bandcamp_urls(bandcamp_progress)
+            if unique is not None:
+                result["heartbeat"] = f"Profiles checked: {unique}"
+
+    return result
 
 
 FB_DRIVER_RECOVERY_MAX_BATCHES = 10
@@ -1009,6 +1134,84 @@ def polite_sleep(min_ms=120, max_ms=240):
     time.sleep(random.uniform(min_ms / 1000.0, max_ms / 1000.0))
 
 
+class BandcampPacingPolicy:
+    """Conservative request pacing for Bandcamp cursor API and profile fetches.
+
+    Injectable so tests can patch sleeps away.
+    """
+
+    def __init__(
+        self,
+        cursor_delay_ms=(800, 1200),
+        min_gap_ms=400,
+        max_retries=4,
+    ):
+        self.cursor_delay_ms = cursor_delay_ms
+        self.min_gap_ms = min_gap_ms
+        self.max_retries = max_retries
+        self._last_request_time = 0.0
+
+    def _ensure_gap(self):
+        now = time.time()
+        elapsed = now - self._last_request_time
+        min_gap = self.min_gap_ms / 1000.0
+        if elapsed < min_gap:
+            time.sleep(min_gap - elapsed)
+        self._last_request_time = time.time()
+
+    def sleep_cursor(self):
+        """Sleep between cursor API batches."""
+        time.sleep(random.uniform(self.cursor_delay_ms[0] / 1000.0, self.cursor_delay_ms[1] / 1000.0))
+        self._ensure_gap()
+
+    def sleep_retry(self, attempt, retry_after=None):
+        """Sleep after a 429 before retrying.
+
+        Returns the number of seconds slept.
+        """
+        if retry_after is not None and retry_after > 0:
+            wait = min(retry_after, 300)
+        else:
+            base = 10.0 * (2 ** attempt)
+            wait = min(base, 60.0) + random.uniform(0, 2.0)
+        time.sleep(wait)
+        self._last_request_time = time.time()
+        return wait
+
+
+# Module-level shared pacing state so sequential jobs inherit cooldown.
+_BANDCAMP_PACING = BandcampPacingPolicy()
+
+
+def _bandcamp_session():
+    """Bandcamp-specific session: 429 is handled explicitly, not by urllib3 retry."""
+    session = requests.Session()
+    retry = Retry(
+        total=3,
+        connect=3,
+        read=3,
+        status=3,
+        backoff_factor=0.4,
+        status_forcelist=(500, 502, 503, 504),
+        allowed_methods=False,
+    )
+    adapter = HTTPAdapter(pool_connections=64, pool_maxsize=64, max_retries=retry)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    session.headers.update(_rand_headers())
+    return session
+
+
+def _bandcamp_parse_retry_after(response):
+    raw = response.headers.get("Retry-After") or response.headers.get("retry-after")
+    if raw:
+        try:
+            return int(raw)
+        except ValueError:
+            pass
+    return None
+
+
 def _sc_stat_inc(key: str, n: int = 1):
     global _SC_RUN_STATS
     if _SC_RUN_STATS is None:
@@ -1034,7 +1237,9 @@ _SC_RUN_STATS = None
 _SC_ABOUT_DISABLED = False
 _SC_ABOUT_DISABLE_LOGGED = False
 _SC_ENGINE = SoundCloudEngine()
-SC_CLIENT_ID_CANDIDATES = ["MaZ7bR62GvbulJgV8EUjQnHfbZGDEKaI"]
+SC_CLIENT_ID_CANDIDATES = [
+    c for c in [(os.environ.get("SC_CLIENT_ID") or "").strip()] if c
+]
 SOCIAL_HOSTS = (
     "linktr.ee", "beacons.ai", "bandcamp.com", "carrd.co", "flow.page",
     "instagram.com", "facebook.com", "x.com", "twitter.com", "youtube.com", "tiktok.com",
@@ -2779,6 +2984,12 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
             listing_text = " ".join(text_fragments + attr_fragments)
             listing_text_lower = listing_text.lower()
             location_value = ""
+            artist_link = (
+                listing_card
+                if getattr(listing_card, "name", "") == "a"
+                else listing_card.select_one('a[href^="/triplejunearthed/artist/"]')
+            )
+            display_artist_name = " ".join(artist_link.stripped_strings).strip() if artist_link else ""
 
             for text_fragment in text_fragments:
                 location_match = re.match(r"Location\s*:?\s*(.+)", text_fragment, flags=re.IGNORECASE)
@@ -2796,6 +3007,7 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
                     location_value = location_match.group(1).strip(" :-")
 
             return {
+                "artist_name": display_artist_name,
                 "location": location_value,
                 "played_on_triplej": "yes" if "played on triple j" in listing_text_lower else "",
                 "played_on_unearthed": "yes"
@@ -3202,6 +3414,13 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
                     _ue_startup_warn_if_slow("first_profile_fetch", first_fetch_elapsed, 15.0)
                     first_fetch_logged = True
             listing_metadata = listing_metadata_by_url.get(profile_url, {})
+            listing_artist_name = str(listing_metadata.get("artist_name") or "").strip()
+            profile_slug = normalize_unearthed_cursor(profile_url)
+            if listing_artist_name and (
+                not str(artist_name or "").strip()
+                or str(artist_name).strip().casefold() == profile_slug.casefold()
+            ):
+                artist_name = listing_artist_name
             location = (listing_metadata.get("location") or location or "").strip()
             # Determine drum status from the full page source.
             drum_status_raw = get_drum_status_from_source(driver.page_source)
@@ -3227,9 +3446,11 @@ def scrape_website(url, existing_csv="artist_social_links.csv", max_artists=200,
                     "",
                     "",
                     email_value,
-                    "Triple J Unearthed",
-                    "unearthed",
-                    "Triple J Unearthed",
+                    "Unearthed",
+                    "Unearthed",
+                    "Unearthed",
+                    profile_url,
+                    profile_url,
                 )
             )
             if isinstance(state, dict):
@@ -3340,6 +3561,21 @@ def unearthed_extract_release_date(html: str) -> str:
 
 _unearthed_extract_genre_text = extract_unearthed_genre_text
 
+
+def _unearthed_display_artist_name(soup) -> str:
+    """Return the source-styled artist identity already present on a profile."""
+    artist_heading = soup.find("h1") if soup else None
+    heading_text = artist_heading.get_text(" ", strip=True) if artist_heading else ""
+    heading_text = re.sub(r"^artist\s*:\s*", "", heading_text, flags=re.IGNORECASE).strip()
+    if heading_text and heading_text.casefold() != "artist":
+        return heading_text
+
+    title_meta = soup.select_one('meta[property="og:title"], meta[name="twitter:title"]') if soup else None
+    title_text = (title_meta.get("content") or "").strip() if title_meta else ""
+    title_text = re.sub(r"\s+-\s+triple\s+j\s+unearthed.*$", "", title_text, flags=re.IGNORECASE).strip()
+    return title_text if title_text.casefold() != "artist" else ""
+
+
 def scrape_artist_profile(driver, profile_url, fb_driver=None):
     social_links = []
     location = ""
@@ -3378,6 +3614,9 @@ def scrape_artist_profile(driver, profile_url, fb_driver=None):
             except Exception:
                 email_value = ""
         soup = BeautifulSoup(page_source, 'html.parser')
+        display_artist_name = _unearthed_display_artist_name(soup)
+        if display_artist_name:
+            artist_name = display_artist_name
         release_date = unearthed_extract_release_date(page_source) or ""
         genre_text_raw = _unearthed_extract_genre_text(soup)
         parsed_primary_genre, parsed_genre_raw = parse_unearthed_genre(genre_text_raw)
@@ -3573,7 +3812,7 @@ def save_to_csv(data, filename):
     headers = [
         'Artist Name', 'Location', 'Song Title', 'Sounds Like', 'Social Link', 'SoundCloud Link',
         'Played on triple J', 'Played on Unearthed', 'Release Date', 'Primary Genre', 'Unearthed_Genre_Raw', 'Bandcamp_Source_Mode', 'Bandcamp_Search_Domain', 'Date Added', 'Email',
-        'Lead_Source', 'Source_Directory', 'Source Directory'
+        'Lead_Source', 'Source_Directory', 'Source Directory', 'Source URL', 'Source_URL'
     ]
     current_date = datetime.datetime.now().strftime("%Y-%m-%d")
 
@@ -3617,6 +3856,8 @@ def save_to_csv(data, filename):
             lead_source,
             source_directory,
             legacy_source_directory,
+            source_url,
+            source_url_alias,
         ) = entry_list[:expected_fields]
         lead_source = str(lead_source or "").strip()
         source_directory = str(source_directory or "").strip()
@@ -3647,6 +3888,8 @@ def save_to_csv(data, filename):
                 'Lead_Source': lead_source,
                 'Source_Directory': source_directory,
                 'Source Directory': legacy_source_directory,
+                'Source URL': source_url,
+                'Source_URL': source_url_alias,
             })
 
     combined = pd.concat([existing_data, pd.DataFrame(new_data)], ignore_index=True)
@@ -3857,294 +4100,7 @@ def save_soundcloud_csv(rows, filename):
 # ---------------------------
 # Bandcamp release date extraction (robust)
 # ---------------------------
-_BC_RELEASE_PATTERNS = [
-    r"\breleased\s+([A-Za-z]+)\s+(\d{1,2}),\s*(\d{4})",
-    r"\breleased\s+(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})",
-    r"\breleased\s+([A-Za-z]+)\s+(\d{4})",
-    r"\breleased\s+(\d{4})"
-]
-
-_BC_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", re.IGNORECASE)
-
-def _parse_any_date_to_iso(text: str):
-    """
-    Try to parse any human date into ISO YYYY-MM-DD.
-    Returns (date_iso, precision) where precision is 'day'|'month'|'year'.
-    """
-    if not text:
-        return None, None
-    text_clean = " ".join(text.split())
-    try:
-        dt = dparser.parse(
-            text_clean,
-            fuzzy=True,
-            dayfirst=False,
-            default=datetime.datetime(1900, 1, 1)
-        )
-        year = dt.year
-        now_year = datetime.datetime.now().year
-        if 2000 <= year <= now_year + 1:
-            return dt.strftime("%Y-%m-%d"), "day"
-    except Exception:
-        pass
-    month_match = re.search(r"\b([A-Za-z]+)\s+(\d{4})\b", text_clean)
-    if month_match:
-        try:
-            dt = dparser.parse(
-                f"01 {month_match.group(1)} {month_match.group(2)}",
-                fuzzy=True,
-                dayfirst=True
-            )
-            return dt.strftime("%Y-%m-%d"), "month"
-        except Exception:
-            pass
-    year_match = re.search(r"\b(20\d{2}|19\d{2})\b", text_clean)
-    if year_match:
-        year = int(year_match.group(1))
-        now_year = datetime.datetime.now().year
-        if 2000 <= year <= now_year + 1:
-            return f"{year:04d}-01-01", "year"
-    return None, None
-
-def _extract_from_json_ld(soup) -> tuple:
-    """Scan all JSON-LD blocks for datePublished/uploadDate/dateCreated."""
-    for script in soup.find_all("script", type=lambda t: t and "ld+json" in t):
-        try:
-            data = json.loads(script.string or "")
-        except Exception:
-            continue
-        items = data if isinstance(data, list) else [data]
-        for obj in items:
-            if not isinstance(obj, dict):
-                continue
-            for key in ("datePublished", "uploadDate", "dateCreated"):
-                val = obj.get(key)
-                if isinstance(val, str) and val.strip():
-                    date_iso, prec = _parse_any_date_to_iso(val)
-                    if date_iso:
-                        return date_iso, prec, val
-    return None, None, None
-
-def _extract_from_meta(soup) -> tuple:
-    metas = []
-    metas += soup.select('meta[itemprop="datePublished"]')
-    metas += soup.select('meta[itemprop="dateCreated"]')
-    metas += soup.select('meta[name="date"]')
-    metas += soup.select('meta[property="music:release_date"]')
-    for meta in metas:
-        val = (meta.get("content") or meta.get("value") or "").strip()
-        if val:
-            date_iso, prec = _parse_any_date_to_iso(val)
-            if date_iso:
-                return date_iso, prec, val
-    og_meta = soup.select_one('meta[property="og:description"], meta[name="description"]')
-    if og_meta:
-        desc = (og_meta.get("content") or "").strip()
-        if "released" in desc.lower():
-            date_iso, prec = _parse_any_date_to_iso(desc)
-            if date_iso:
-                return date_iso, prec, desc
-    return None, None, None
-
-def _extract_from_tralbum_attr(soup) -> tuple:
-    """Look for data-tralbum attributes embedded on the page."""
-    for node in soup.find_all(attrs={"data-tralbum": True}):
-        blob = node.get("data-tralbum")
-        if not blob:
-            continue
-        try:
-            data = json.loads(blob)
-        except Exception:
-            continue
-        blocks = []
-        if isinstance(data, dict):
-            blocks.append(data)
-            current = data.get("current")
-            if isinstance(current, dict):
-                blocks.append(current)
-            trackinfo = data.get("trackinfo")
-            if isinstance(trackinfo, list):
-                blocks.extend([ti for ti in trackinfo if isinstance(ti, dict)])
-        for block in blocks:
-            for key in ("release_date", "publish_date", "album_release_date", "date"):
-                val = block.get(key)
-                if isinstance(val, str) and val.strip():
-                    date_iso, prec = _parse_any_date_to_iso(val)
-                    if date_iso:
-                        return date_iso, prec, val
-    return None, None, None
-
-def _extract_from_tralbum_data(soup) -> tuple:
-    """Parse the inline TralbumData blob for release dates."""
-    pattern = re.compile(r"var\s+TralbumData\s*=", re.IGNORECASE)
-    for script in soup.find_all("script"):
-        text = script.string or ""
-        if not text or "TralbumData" not in text:
-            continue
-        match = pattern.search(text)
-        if not match:
-            continue
-        remainder = text[match.end():].strip()
-        brace_index = remainder.find("{")
-        if brace_index == -1:
-            continue
-        json_text = remainder[brace_index:]
-        brace_count = 0
-        end_index = None
-        for idx, ch in enumerate(json_text):
-            if ch == "{":
-                brace_count += 1
-            elif ch == "}":
-                brace_count -= 1
-                if brace_count == 0:
-                    end_index = idx + 1
-                    break
-        if end_index is None:
-            continue
-        payload = json_text[:end_index]
-        try:
-            data = json.loads(payload)
-        except Exception:
-            continue
-        candidates = []
-        blocks = []
-        if isinstance(data, dict):
-            blocks.append(data)
-            current = data.get("current")
-            if isinstance(current, dict):
-                blocks.append(current)
-            trackinfo = data.get("trackinfo")
-            if isinstance(trackinfo, list):
-                blocks.extend([ti for ti in trackinfo if isinstance(ti, dict)])
-        for block in blocks:
-            for key in ("release_date", "publish_date", "date", "album_release_date"):
-                val = block.get(key)
-                if isinstance(val, str) and val.strip():
-                    candidates.append(val.strip())
-        for val in candidates:
-            date_iso, prec = _parse_any_date_to_iso(val)
-            if date_iso:
-                return date_iso, prec, val
-    return None, None, None
-
-def _extract_from_time_tag(soup) -> tuple:
-    for time_el in soup.find_all("time"):
-        dt_attr = (time_el.get("datetime") or "").strip()
-        if dt_attr:
-            date_iso, prec = _parse_any_date_to_iso(dt_attr)
-            if date_iso:
-                return date_iso, prec, dt_attr
-        text = time_el.get_text(" ", strip=True)
-        if text:
-            date_iso, prec = _parse_any_date_to_iso(text)
-            if date_iso:
-                return date_iso, prec, text
-    return None, None, None
-
-def _extract_from_text_released(soup) -> tuple:
-    containers = []
-    containers += soup.select(".tralbum-credits")
-    containers += soup.select(".tralbumData")
-    containers += soup.select("#trackInfoInner, #bio-container")
-    collected_text = " ".join([c.get_text(" ", strip=True) for c in containers]) or soup.get_text(" ", strip=True)
-    for pattern in _BC_RELEASE_PATTERNS:
-        match = re.search(pattern, collected_text, flags=re.IGNORECASE)
-        if match:
-            raw = match.group(0)
-            date_iso, prec = _parse_any_date_to_iso(raw)
-            if date_iso:
-                return date_iso, prec, raw
-    return None, None, None
-
-def bandcamp_extract_release_date(html: str) -> dict:
-    """
-    Robust extractor. Order: JSON-LD -> meta -> <time> -> free-text 'released ...'
-    Returns dict with keys date_iso, precision, raw.
-    """
-    soup = BeautifulSoup(html, "html.parser")
-    extractors = (
-        _extract_from_json_ld,
-        _extract_from_tralbum_attr,
-        _extract_from_tralbum_data,
-        _extract_from_meta,
-        _extract_from_time_tag,
-        _extract_from_text_released,
-    )
-    for extractor in extractors:
-        try:
-            date_iso, precision, raw = extractor(soup)
-            if date_iso:
-                return {"date_iso": date_iso, "precision": precision, "raw": raw}
-        except Exception:
-            continue
-    return {"date_iso": None, "precision": None, "raw": None}
-
-# ---------------------------
-# Bandcamp genres (tags) + sounds-like extraction
-# ---------------------------
-_BC_SOUNDS_PATTERNS = [
-    r"\bffo\b[:\-–]\s*([^.;\n]+)",
-    r"\briyl\b[:\-–]\s*([^.;\n]+)",
-    r"\bfor\s+fans\s+of\b[:\-–]?\s*([^.;\n]+)",
-    r"\bsounds\s+like\b[:\-–]?\s*([^.;\n]+)",
-    r"\binfluences?\b[:\-–]?\s*([^.;\n]+)",
-    r"\binspired\s+by\b[:\-–]?\s*([^.;\n]+)",
-]
-
-def _norm_tokens(line: str) -> list:
-    """Split a comma/pipe/slash separated line into clean tokens."""
-    if not line:
-        return []
-    parts = re.split(r"[,/|•]+|\band\b|\&", line, flags=re.IGNORECASE)
-    cleaned = []
-    for part in parts:
-        token = re.sub(r"\s+", " ", part).strip(" .;:()[]{}\"\u2013\u2014").strip()
-        if token:
-            cleaned.append(token)
-    seen = set()
-    unique = []
-    for token in cleaned:
-        key = token.lower()
-        if key not in seen:
-            seen.add(key)
-            unique.append(token)
-    return unique
-
-def bandcamp_extract_genres(soup) -> list:
-    """Collect Bandcamp tags/genres from artist or album pages."""
-    tags = set()
-    for anchor in soup.select(".tralbum-tags a, a.tag, #tags a"):
-        txt = anchor.get_text(" ", strip=True)
-        if txt:
-            tags.add(txt.lower())
-    meta_keywords = soup.select_one('meta[name="keywords"]')
-    if meta_keywords and meta_keywords.get("content"):
-        for token in _norm_tokens(meta_keywords["content"]):
-            if token:
-                tags.add(token.lower())
-    return list(tags)
-
-def bandcamp_extract_sounds_like(soup) -> str:
-    """Pull FFO/RIYL/sounds-like phrases from descriptive text."""
-    blocks = []
-    blocks += [b.get_text(" ", strip=True) for b in soup.select("#bio-container, .tralbum-credits, .tralbumData, #trackInfoInner")]
-    desc_meta = soup.select_one('meta[property="og:description"], meta[name="description"]')
-    if desc_meta and desc_meta.get("content"):
-        blocks.append(desc_meta["content"])
-    text = " \n".join(filter(None, blocks))
-    text = re.sub(r"\s+", " ", text).strip()
-    for pattern in _BC_SOUNDS_PATTERNS:
-        match = re.search(pattern, text, flags=re.IGNORECASE)
-        if match and match.group(1):
-            tokens = _norm_tokens(match.group(1))
-            if tokens:
-                return ", ".join(t.title() for t in tokens[:5])
-    fallback = re.search(r"\b(ffo|riyl)\b[:\-–]\s*([^.;\n]+)", text, flags=re.IGNORECASE)
-    if fallback and fallback.group(2):
-        tokens = _norm_tokens(fallback.group(2))
-        if tokens:
-            return ", ".join(t.title() for t in tokens[:5])
-    return ""
+# Shared profile-level parser helpers are imported from bandcamp_profile_engine.
 
 # ---------------------------
 # Bandcamp: card-level genre extraction (uses <p class="genre">)
@@ -4750,6 +4706,420 @@ _BC_GENRE_FILTER_TOKENS = {
     "folk",
     "rnb",
     "soul",
+    # Normalised compound genres that _norm_text_ produces (hyphens -> spaces)
+    "indie rock",
+    "math rock",
+    "blues rock",
+    "country rock",
+    "experimental rock",
+    "folk rock",
+    "funk rock",
+    "latin rock",
+    "punk rock",
+    "prog rock",
+    "post rock",
+    "rock roll",
+    "psychedelic rock",
+    "hard rock",
+    "garage rock",
+    "surf rock",
+    "indie folk",
+    "indie pop",
+    "singer songwriter",
+    "hip hop rap",
+    "r b soul",
+    "spoken word",
+    "new wave",
+    "dream pop",
+    "shoegaze",
+    "noise rock",
+    "post punk",
+    "hardcore",
+    "emo",
+    "grunge",
+    "black metal",
+    "death metal",
+    "thrash",
+    "metalcore",
+    "folk metal",
+    "doom metal",
+    "progressive metal",
+    "power metal",
+    "symphonic metal",
+    "industrial",
+    "ebm",
+    "dark ambient",
+    "dungeon synth",
+    "neo classical",
+    "minimal",
+    "drone",
+    "noise",
+    "house",
+    "techno",
+    "trance",
+    "dubstep",
+    "drum and bass",
+    "breakbeat",
+    "idm",
+    "glitch",
+    "synth pop",
+    "electropop",
+    "indietronica",
+    "chillwave",
+    "vaporwave",
+    "future funk",
+    "synthwave",
+    "lo fi",
+    "bedroom pop",
+    # Also include hyphenated forms because _norm_text_ does not normalise hyphens
+    "indie-rock",
+    "math-rock",
+    "blues-rock",
+    "country-rock",
+    "experimental-rock",
+    "folk-rock",
+    "funk-rock",
+    "latin-rock",
+    "punk-rock",
+    "prog-rock",
+    "post-rock",
+    "rock-roll",
+    "psychedelic-rock",
+    "hard-rock",
+    "garage-rock",
+    "surf-rock",
+    "indie-folk",
+    "indie-pop",
+    "singer-songwriter",
+    "hip-hop-rap",
+    "r-b-soul",
+    "spoken-word",
+    "new-wave",
+    "dream-pop",
+    "noise-rock",
+    "post-punk",
+    "black-metal",
+    "death-metal",
+    "folk-metal",
+    "doom-metal",
+    "progressive-metal",
+    "power-metal",
+    "symphonic-metal",
+    "dark-ambient",
+    "dungeon-synth",
+    "neo-classical",
+    "synth-pop",
+    "future-funk",
+    "lo-fi",
+    "bedroom-pop",
+}
+
+# Extracted from Bandcamp discover data-blob (2026-09-07). Used as fallback when live fetch fails.
+_BC_KNOWN_DISCOVER_GENRE_SLUGS = {
+    "acoustic",
+    "adult-contemporary",
+    "african",
+    "alt-country",
+    "alternative",
+    "ambient",
+    "americana",
+    "atmospheric",
+    "audiobooks",
+    "avant-garde",
+    "baby",
+    "bachata",
+    "balkan",
+    "baroque",
+    "beat-tape",
+    "beats",
+    "bebop",
+    "big-band",
+    "black-metal",
+    "bluegrass",
+    "blues",
+    "blues-rock",
+    "bolero",
+    "boogie",
+    "boogie-woogie",
+    "boom-bap",
+    "brazilian",
+    "breaks",
+    "britpop",
+    "celtic",
+    "chamber-music",
+    "chill-out",
+    "chillwave",
+    "chiptune",
+    "choral",
+    "christian",
+    "classical",
+    "classical-piano",
+    "comedy",
+    "conscious-hip-hop",
+    "contemporary-classical",
+    "contemporary-r-b",
+    "country",
+    "country-blues",
+    "country-folk",
+    "country-rock",
+    "crust-punk",
+    "cumbia",
+    "dance",
+    "dancehall",
+    "dark-ambient",
+    "death-metal",
+    "deathcore",
+    "deep-funk",
+    "delta-blues",
+    "devotional",
+    "doom",
+    "downtempo",
+    "dream-pop",
+    "drone",
+    "drum-bass",
+    "dub",
+    "dubstep",
+    "edm",
+    "educational",
+    "electric-blues",
+    "electro",
+    "electro-acoustic",
+    "electro-pop",
+    "electronic",
+    "electronica",
+    "emo",
+    "experimental",
+    "experimental-folk",
+    "experimental-pop",
+    "experimental-rock",
+    "family-music",
+    "field-recordings",
+    "film-music",
+    "flamenco",
+    "folk",
+    "folk-punk",
+    "folk-rock",
+    "footwork",
+    "free-jazz",
+    "funk",
+    "funk-jam",
+    "funk-rock",
+    "fusion",
+    "g-funk",
+    "garage",
+    "garage-rock",
+    "glitch",
+    "go-go",
+    "gospel",
+    "goth",
+    "grime",
+    "grindcore",
+    "grunge",
+    "guitar",
+    "gypsy",
+    "hard-rock",
+    "hardcore",
+    "hardcore-punk",
+    "heavy-metal",
+    "hillbilly",
+    "hip-hop-rap",
+    "honky-tonk",
+    "house",
+    "idm",
+    "improv",
+    "improvisation",
+    "indie",
+    "indie-folk",
+    "indie-pop",
+    "indie-rock",
+    "industrial",
+    "inspirational",
+    "instrumental",
+    "instrumental-hip-hop",
+    "j-pop",
+    "jangle-pop",
+    "jazz",
+    "jazz-funk",
+    "juke",
+    "kids",
+    "latin",
+    "latin-jazz",
+    "latin-rock",
+    "lovers-rock",
+    "lullaby",
+    "math-rock",
+    "meditation",
+    "merengue",
+    "metal",
+    "metalcore",
+    "modern-classical",
+    "modern-jazz",
+    "motown",
+    "music-therapy",
+    "musique-concrete",
+    "méxico-d.f.",
+    "neo-classical",
+    "neo-soul",
+    "new-age",
+    "new-wave",
+    "no-wave",
+    "noise",
+    "noise-pop",
+    "nu-jazz",
+    "opera",
+    "orchestral",
+    "ost",
+    "outlaw",
+    "piano",
+    "podcasts",
+    "poetry",
+    "pop",
+    "pop-folk",
+    "pop-punk",
+    "post-hardcore",
+    "post-punk",
+    "post-rock",
+    "power-pop",
+    "prog-rock",
+    "progressive-metal",
+    "psychedelic-rock",
+    "punk",
+    "punk-rock",
+    "r-b",
+    "r-b-soul",
+    "ragga",
+    "rap",
+    "rare-groove",
+    "reggae",
+    "reggaeton",
+    "rhythm-blues",
+    "rock",
+    "rock-roll",
+    "rockabilly",
+    "rocksteady",
+    "roots",
+    "salsa",
+    "self-help",
+    "shoegaze",
+    "singer-songwriter",
+    "ska",
+    "sludge-metal",
+    "soul",
+    "soul-jazz",
+    "sound-art",
+    "soundscapes",
+    "soundtrack",
+    "spiritual",
+    "spiritual-jazz",
+    "spoken-word",
+    "stand-up",
+    "storytelling",
+    "surf-rock",
+    "swing",
+    "synth-pop",
+    "synthwave",
+    "tango",
+    "techno",
+    "thrash",
+    "thrash-metal",
+    "traditional",
+    "trance",
+    "trap",
+    "tribal",
+    "tropical",
+    "underground-hip-hop",
+    "urban",
+    "vaporwave",
+    "video-game",
+    "video-game-music",
+    "vocal-jazz",
+    "western",
+    "witch-house",
+    "world",
+    "world-fusion",
+    "worship",
+}
+
+_BC_KNOWN_DISCOVER_LOCATION_LABELS = {
+    "amsterdam",
+    "atlanta",
+    "austin",
+    "baltimore",
+    "berlin",
+    "boston",
+    "bristol",
+    "brooklyn",
+    "buenos aires",
+    "chicago",
+    "denver",
+    "detroit",
+    "dublin",
+    "from anywhere",
+    "glasgow",
+    "london",
+    "los angeles",
+    "madrid",
+    "manchester",
+    "melbourne",
+    "mexico city",
+    "miami",
+    "minneapolis",
+    "montreal",
+    "nashville",
+    "new orleans",
+    "new york city",
+    "oakland",
+    "paris",
+    "philadelphia",
+    "portland",
+    "san francisco",
+    "seattle",
+    "sydney",
+    "toronto",
+    "vancouver",
+    "washington, dc",
+}
+
+# Verified geoname_ids for featured Bandcamp discover locations.
+# Used as fallback when the live data-blob does not contain the location.
+_BC_KNOWN_LOCATION_GEONAME_IDS = {
+    "amsterdam": 2759794,
+    "atlanta": 4180439,
+    "austin": 4671654,
+    "baltimore": 4347778,
+    "berlin": 2950159,
+    "boston": 4930956,
+    "brooklyn": 5110302,
+    "buenos aires": 3435907,
+    "chicago": 4887398,
+    "denver": 5419384,
+    "detroit": 4990729,
+    "dublin": 2964574,
+    "glasgow": 3333231,
+    "london": 2643743,
+    "los angeles": 5368361,
+    "madrid": 3117735,
+    "manchester": 2643123,
+    "melbourne": 2158177,
+    "mexico city": 3530597,
+    "miami": 4164138,
+    "minneapolis": 5037649,
+    "montreal": 6077243,
+    "nashville": 4644585,
+    "new orleans": 4335045,
+    "new york": 5128581,
+    "new york city": 5128581,
+    "oakland": 5378538,
+    "paris": 2988507,
+    "philadelphia": 4560349,
+    "portland": 5746545,
+    "san francisco": 5391959,
+    "seattle": 5809844,
+    "sydney": 2147714,
+    "toronto": 6167865,
+    "vancouver": 6173331,
+    "washington, dc": 4140963,
+    "bristol": 2654675,
 }
 
 def _bc_decode_filter(s: str | None) -> str | None:
@@ -4805,9 +5175,41 @@ def _bc_sanitize_location_filter(label: str | None) -> str:
             print(f"BC_DEBUG_FILTER_SRC: {debug_payload}")
     return sanitized_label
 
+_UK_COUNTRY_ALIASES = (
+    "united kingdom",
+    "great britain",
+    "northern ireland",
+    "england",
+    "scotland",
+    "wales",
+    "uk",
+    "gb",
+)
+
+
+def _bc_normalize_uk_city_filter(text: str) -> str:
+    """
+    Strip UK country qualifiers from city+country filters so that
+    'london uk', 'london united kingdom', etc. behave like 'london'.
+    Pure country filters ('uk', 'england', etc.) are preserved.
+    """
+    if not text:
+        return text
+    norm = _norm_text_(text).replace("-", " ")
+    remaining = norm
+    for alias in sorted(_UK_COUNTRY_ALIASES, key=len, reverse=True):
+        remaining = remaining.replace(alias, "")
+    remaining = remaining.strip()
+    if remaining:
+        return remaining
+    return text
+
+
 def _bandcamp_location_match_(profile_loc: str, api_hint: str, requested_label: str | None, requested_hint: str | None) -> bool:
     requested_label = _bc_decode_filter(requested_label)
     requested_hint = _bc_decode_filter(requested_hint)
+    requested_label = _bc_normalize_uk_city_filter(requested_label)
+    requested_hint = _bc_normalize_uk_city_filter(requested_hint)
     if not requested_label and not requested_hint:
         return True
     profile_norm = _norm_text_(profile_loc).replace("-", " ")
@@ -5091,43 +5493,177 @@ def _bandcamp_parse_discover_params(url: str) -> dict:
         result["t"] = tag_value
     return result
 
-def _bandcamp_location_label_from_url(url: str) -> dict:
+def _bandcamp_parse_discover_filters(url: str) -> dict:
+    """
+    Parse a Bandcamp discover URL to extract genre and location filters.
+    Uses Bandcamp's actual discover data-blob when available, falling back
+    to statically-cached genre/location sets.
+
+    Returns: {
+        "genre": "indie-rock",
+        "location": "london uk",
+        "location_label": "london uk",
+        "sort": "new",
+        "raw_slug": "indie-rock+london-uk",
+    }
+    """
+    result = {
+        "genre": "",
+        "location": "",
+        "location_label": "",
+        "sort": "new",
+        "raw_slug": "",
+    }
     if not _bandcamp_is_discover_url(url):
-        return {"display_label": "", "hint": ""}
-    params = _bandcamp_parse_discover_params(url)
-    loc_value = params.get("loc") or ""
-    loc_value_decoded = _bc_decode_filter(loc_value) or ""
-    display_label = ""
+        return result
+
+    parsed = urlparse(url)
+    query = parse_qs(parsed.query or "")
+    result["sort"] = (query.get("s") or ["new"])[0] or "new"
+
+    segments = [seg for seg in (parsed.path or "").split("/") if seg]
+    if len(segments) >= 2 and segments[0] == "discover":
+        result["raw_slug"] = segments[1]
+
+    slug_parts = [part.strip() for part in re.split(r"[+\s]+", result["raw_slug"]) if part.strip()]
+    if not slug_parts:
+        return result
+
+    # Fetch metadata from Bandcamp's own data-blob
+    genre_slugs = set()
+    location_labels = set()
+    loc_by_id = {}
+    state = {}
     try:
         session = build_hardened_session()
         response = session.get(url, headers=_rand_headers(), timeout=(6, 15))
         response.raise_for_status()
-        match = re.search(r'id="DiscoverApp"[^>]+data-blob="([^"]+)"', response.text)
+        match = re.search(r'data-blob="([^"]+)"', response.text)
         if match:
             blob = json.loads(html.unescape(match.group(1)))
-            locations = (
-                blob.get("appData", {})
-                    .get("initialState", {})
-                    .get("locations", [])
-            )
-            for entry in locations:
-                if str(entry.get("id")) == str(loc_value):
-                    display_label = entry.get("label", "") or ""
-                    break
+            state = blob.get("appData", {}).get("initialState", {})
+            for g in state.get("genres", []):
+                s = g.get("slug", "").strip().lower()
+                if s:
+                    genre_slugs.add(s)
+            for sg in state.get("subgenres", []):
+                s = sg.get("slug", "").strip().lower()
+                if s:
+                    genre_slugs.add(s)
+            for ct in state.get("customTags", []):
+                s = ct.get("slug", "").strip().lower()
+                if s:
+                    genre_slugs.add(s)
+            for loc in state.get("locations", []):
+                label = loc.get("label", "").strip().lower()
+                loc_id = str(loc.get("id", "")).strip()
+                if label:
+                    location_labels.add(label)
+                if loc_id:
+                    loc_by_id[loc_id] = label
     except Exception:
-        display_label = ""
-    if not display_label and loc_value and not loc_value.isdigit():
-        display_label = loc_value_decoded or loc_value
-    hint = ""
-    if display_label:
-        hint = display_label
-    elif loc_value.isdigit():
-        hint = f"loc:{loc_value}"
-    elif loc_value:
-        hint = loc_value_decoded or loc_value
-    display_label = _bc_decode_filter(display_label) or ""
-    hint = _bc_decode_filter(hint) or ""
-    return {"display_label": display_label, "hint": hint}
+        pass
+
+    # Always merge static knowledge so that live data omissions (e.g. a city
+    # temporarily missing from featured locations) do not break classification.
+    genre_slugs = genre_slugs | set(_BC_KNOWN_DISCOVER_GENRE_SLUGS)
+    location_labels = location_labels | set(_BC_KNOWN_DISCOVER_LOCATION_LABELS)
+
+    # Explicit loc param takes precedence
+    explicit_loc = (query.get("loc") or [""])[0].strip()
+    if explicit_loc:
+        if explicit_loc in loc_by_id:
+            result["location"] = loc_by_id[explicit_loc]
+        elif not explicit_loc.isdigit():
+            result["location"] = _bc_decode_filter(explicit_loc) or explicit_loc
+
+    # Classify slug parts using Bandcamp's own genre/location data
+    genre_parts = []
+    location_parts = []
+    for part in slug_parts:
+        part_lower = part.lower()
+        contains_location = any(loc_label in part_lower for loc_label in location_labels)
+        is_genre = part_lower in genre_slugs
+
+        if contains_location:
+            location_parts.append(part)
+        elif not is_genre:
+            # Unknown token — treat as a potential location rather than silently
+            # discarding it or misclassifying it as a genre.
+            location_parts.append(part)
+        else:
+            genre_parts.append(part)
+
+    if location_parts and not result["location"]:
+        result["location"] = " ".join(location_parts).replace("-", " ")
+
+    result["location_label"] = result["location"]
+    result["genre"] = " ".join(genre_parts)
+
+    # Resolve API params for cursor pagination
+    norm_loc = _bc_normalize_uk_city_filter(result["location"]).strip().lower()
+    resolved_geoname = None
+    custom_tag_slug = None
+
+    # 1. Try live data-blob featured locations
+    for loc in state.get("locations", []):
+        loc_label = (loc.get("label") or "").strip().lower()
+        if loc_label == norm_loc:
+            resolved_geoname = loc.get("id")
+            break
+
+    # 2. Try live data-blob custom tags (e.g. bristol-uk when not featured)
+    if not resolved_geoname:
+        for ct in state.get("customTags", []):
+            ct_slug = (ct.get("slug") or "").strip().lower()
+            ct_label = (ct.get("label") or "").strip().lower()
+            if ct_label == result["location"].strip().lower():
+                custom_tag_slug = ct_slug
+                break
+            if ct_slug == result["location"].strip().lower().replace(" ", "-"):
+                custom_tag_slug = ct_slug
+                break
+
+    # 3. Static geoname fallback
+    if not resolved_geoname and not custom_tag_slug:
+        resolved_geoname = _BC_KNOWN_LOCATION_GEONAME_IDS.get(norm_loc)
+        # Also try matching raw slug parts directly
+        if not resolved_geoname:
+            for part in slug_parts:
+                part_clean = _bc_normalize_uk_city_filter(part.lower().replace("-", " "))
+                if part_clean in _BC_KNOWN_LOCATION_GEONAME_IDS:
+                    resolved_geoname = _BC_KNOWN_LOCATION_GEONAME_IDS[part_clean]
+                    break
+
+    # Determine which slug parts are actually genres vs locations for the API
+    location_slugs = {lp.lower() for lp in location_parts}
+    if custom_tag_slug:
+        location_slugs.add(custom_tag_slug)
+    if resolved_geoname:
+        for part in slug_parts:
+            part_clean = _bc_normalize_uk_city_filter(part.lower().replace("-", " "))
+            if part_clean in _BC_KNOWN_LOCATION_GEONAME_IDS:
+                location_slugs.add(part.lower())
+        if result["location"]:
+            location_slugs.add(result["location"].strip().lower().replace(" ", "-"))
+            location_slugs.add(norm_loc.replace(" ", "-"))
+
+    api_tags = [p for p in slug_parts if p.lower() in genre_slugs and p.lower() not in location_slugs]
+    if custom_tag_slug and custom_tag_slug not in api_tags:
+        api_tags.append(custom_tag_slug)
+
+    result["geoname_id"] = resolved_geoname
+    result["api_tags"] = api_tags
+    return result
+
+
+def _bandcamp_location_label_from_url(url: str) -> dict:
+    if not _bandcamp_is_discover_url(url):
+        return {"display_label": "", "hint": ""}
+    filters = _bandcamp_parse_discover_filters(url)
+    location = filters.get("location") or ""
+    location = _bc_decode_filter(location) or ""
+    return {"display_label": location, "hint": location}
 
 
 def _bandcamp_fetch_profile_html(profile_url: str, session=None) -> str:
@@ -5193,6 +5729,7 @@ def _bandcamp_process_candidate_profiles(
     fetch_html_fn=None,
     parse_html_fn=None,
     quick_visit_fn=None,
+    profile_engine_fn=None,
 ):
     """
     Process Bandcamp candidate profiles with early stop once rows_limit is reached.
@@ -5200,9 +5737,11 @@ def _bandcamp_process_candidate_profiles(
     When smoke_cap_active=True, fetches are performed sequentially to avoid
     unnecessary HTTP/selenium work beyond the capped target.
     """
+    use_shared_engine = fetch_html_fn is None and parse_html_fn is None
     fetch_html_fn = fetch_html_fn or _bandcamp_fetch_profile_html
     parse_html_fn = parse_html_fn or _bandcamp_parse_html
     quick_visit_fn = quick_visit_fn or _bandcamp_quick_visit
+    profile_engine_fn = profile_engine_fn or _shared_fetch_bandcamp_profile
 
     aggregated = {}
     http_success = 0
@@ -5295,17 +5834,38 @@ def _bandcamp_process_candidate_profiles(
 
     fallback_candidates = []
 
+    def acquire_http(candidate):
+        if use_shared_engine:
+            return profile_engine_fn(
+                candidate["profile_url"],
+                session=_bandcamp_thread_session(),
+                seed_primary_genre=candidate.get("seed_genre", ""),
+            )
+        return fetch_html_fn(candidate["profile_url"])
+
+    def consume_http(candidate, acquired):
+        nonlocal http_success
+        if use_shared_engine:
+            if acquired.status == BANDCAMP_PROFILE_ACCEPTED:
+                http_success += 1
+                process_artist(candidate, dict(acquired.profile))
+                return
+            fallback_candidates.append(candidate)
+            return
+        if acquired:
+            http_success += 1
+            process_artist(
+                candidate,
+                parse_html_fn(candidate["profile_url"], acquired, candidate.get("seed_genre", "")),
+            )
+        else:
+            fallback_candidates.append(candidate)
+
     if smoke_cap_active:
         for cand in candidate_profiles:
             if stop_processing:
                 break
-            html = fetch_html_fn(cand["profile_url"])
-            if html:
-                http_success += 1
-                artist_dict = parse_html_fn(cand["profile_url"], html, cand.get("seed_genre", ""))
-                process_artist(cand, artist_dict)
-            else:
-                fallback_candidates.append(cand)
+            consume_http(cand, acquire_http(cand))
             if stop_processing:
                 break
     else:
@@ -5315,19 +5875,13 @@ def _bandcamp_process_candidate_profiles(
             for cand in candidate_profiles:
                 if stop_processing:
                     break
-                fut = executor.submit(fetch_html_fn, cand["profile_url"])
+                fut = executor.submit(acquire_http, cand)
                 future_map[fut] = cand
             for future in as_completed(future_map):
                 if stop_processing:
                     break
                 cand = future_map[future]
-                html = future.result()
-                if html:
-                    http_success += 1
-                    artist_dict = parse_html_fn(cand["profile_url"], html, cand.get("seed_genre", ""))
-                    process_artist(cand, artist_dict)
-                else:
-                    fallback_candidates.append(cand)
+                consume_http(cand, future.result())
                 if stop_processing:
                     break
 
@@ -5338,7 +5892,14 @@ def _bandcamp_process_candidate_profiles(
         if not html:
             continue
         selenium_used += 1
-        artist_dict = parse_html_fn(cand["profile_url"], html, cand.get("seed_genre", ""))
+        artist_dict = _shared_parse_bandcamp_profile_html(
+            cand["profile_url"],
+            html,
+            cand.get("seed_genre", ""),
+            release_fetcher=_bandcamp_fetch_profile_html,
+        ) if use_shared_engine else parse_html_fn(
+            cand["profile_url"], html, cand.get("seed_genre", "")
+        )
         process_artist(cand, artist_dict)
         if stop_processing:
             break
@@ -5484,37 +6045,20 @@ def scrape_bandcamp(
     seen_profiles = set()
     requested_label = ""
     requested_hint = ""
-    slug_parts = []
-    loc_guess = ""
     if url_input and _bandcamp_is_discover_url(url_input):
-        loc_meta = _bandcamp_location_label_from_url(url_input)
-        requested_label = _bc_sanitize_location_filter(loc_meta.get("display_label", "") or "")
-        requested_hint = _bc_sanitize_location_filter(loc_meta.get("hint", "") or "")
-        if not requested_hint:
-            params = _bandcamp_parse_discover_params(url_input)
-            requested_hint = _bc_sanitize_location_filter(params.get("loc") or params.get("location") or "")
-        parsed = urlparse(url_input)
-        segments = [seg for seg in (parsed.path or "").split("/") if seg]
-        if len(segments) >= 2 and segments[0] == "discover":
-            slug = segments[1]
-            slug_parts = [part for part in re.split(r"[+\s]+", slug) if part]
-        if len(slug_parts) >= 2:
-            loc_guess = " ".join(slug_parts[:-1]).strip()
-            loc_guess = _bc_sanitize_location_filter(loc_guess)
-            if loc_guess and not requested_hint:
-                requested_hint = loc_guess
-        # Also include the slug-derived location as a hint so spacing/label issues don't prune everything.
-        if loc_guess:
-            loc_norm = _norm_text_(loc_guess)
-            label_norm = _norm_text_(requested_label)
-            if requested_label and loc_norm and loc_norm not in label_norm:
-                requested_label = loc_guess
-            if requested_hint and loc_guess.lower() not in requested_hint.lower():
-                requested_hint = f"{requested_hint} {loc_guess}".strip()
-            elif requested_label and loc_guess.lower() not in requested_label.lower():
-                requested_hint = loc_guess
-        requested_label = _bc_sanitize_location_filter(requested_label)
-        requested_hint = _bc_sanitize_location_filter(requested_hint)
+        discover_filters = _bandcamp_parse_discover_filters(url_input)
+        inferred_location = _bc_sanitize_location_filter(discover_filters.get("location") or "")
+        requested_label = inferred_location
+        requested_hint = inferred_location
+        genre_tag = discover_filters.get("genre") or ""
+        sort_mode = discover_filters.get("sort") or "new"
+        if requested_label or requested_hint or genre_tag:
+            print(
+                f"Bandcamp: discover filters -> "
+                f"genre={genre_tag or 'none'} "
+                f"location={requested_label or 'none'} "
+                f"sort={sort_mode}"
+            )
         if requested_label or requested_hint:
             print(f"Bandcamp: applying location filter -> {requested_label or requested_hint}")
     elif normalized_mode == "search" and normalized_search_location:
@@ -6023,7 +6567,14 @@ def _bandcamp_collect_mode_pages(driver, base_url: str, mode_label: str, selecto
     return collected
 
 def scrape_bandcamp_discover(driver, discover_url: str, max_pages: int = 1, max_items: int | None = None) -> list:
-    return _bandcamp_collect_discover_dom(driver, discover_url, max_pages, max_items=max_items)
+    # Primary: cursor-based API pagination
+    api_candidates = _bandcamp_collect_discover_via_api(discover_url, max_candidates=max_items)
+    if api_candidates:
+        return api_candidates
+
+    # Fallback: first-page DOM only (do not use fake ?p=N pagination as primary)
+    print("Bandcamp: discover API yielded no candidates; falling back to first-page DOM")
+    return _bandcamp_collect_discover_dom(driver, discover_url, max_pages=1, max_items=max_items)
 
 def scrape_bandcamp_tag(driver, tag_url: str, max_pages: int = 20, max_items: int | None = None) -> list:
     return _bandcamp_collect_mode_pages(driver, tag_url, "tag", _BANDCAMP_GRID_SELECTORS, max_pages, max_items=max_items)
@@ -6289,6 +6840,138 @@ def _bandcamp_collect_tag_via_api(slug: str, page_index: int, base_params: dict 
     return candidates
 
 
+def _bandcamp_collect_discover_via_api(discover_url: str, max_candidates: int | None = None) -> list:
+    """
+    Collect discover candidates via Bandcamp's cursor-based API.
+    Falls back to an empty list if params cannot be resolved or the API fails.
+    """
+    filters = _bandcamp_parse_discover_filters(discover_url)
+    geoname_id = filters.get("geoname_id")
+    api_tags = filters.get("api_tags") or []
+    sort_slice = filters.get("sort") or "new"
+
+    if not geoname_id and not api_tags:
+        print("Bandcamp: discover API skipped — no resolvable geoname_id or tags")
+        return []
+
+    api_url = "https://bandcamp.com/api/discover/1/discover_web"
+    session = _bandcamp_session()
+
+    body = {
+        "category_id": 0,
+        "tag_norm_names": api_tags,
+        "slice": sort_slice,
+        "time_facet_id": None,
+        "cursor": None,
+        "size": 20,
+        "include_result_types": ["a"],
+        "followed_bands": False,
+    }
+    if geoname_id:
+        body["geoname_id"] = geoname_id
+
+    candidates = []
+    seen_item_ids = set()
+    seen_urls = set()
+    batch_num = 0
+    cursor = None
+    safety_limit = 50  # Hard ceiling to prevent runaway loops
+
+    pacing = _BANDCAMP_PACING
+
+    while batch_num < safety_limit:
+        batch_num += 1
+        request_body = {**body, "cursor": cursor}
+
+        # Ensure minimum gap from the last Bandcamp request (cross-job safety).
+        pacing._ensure_gap()
+
+        data = None
+        for attempt in range(pacing.max_retries + 1):
+            try:
+                resp = session.post(
+                    api_url,
+                    json=request_body,
+                    headers={**_rand_headers(), "Accept": "application/json"},
+                    timeout=(6, 15),
+                )
+                if resp.status_code == 429:
+                    retry_after = _bandcamp_parse_retry_after(resp)
+                    if attempt < pacing.max_retries:
+                        wait = pacing.sleep_retry(attempt, retry_after)
+                        print(f"Bandcamp: rate limited -> waiting {wait:.0f}s before retry {attempt + 1}/{pacing.max_retries}")
+                        continue
+                    print(f"Bandcamp: rate limited -> retries exhausted after {pacing.max_retries} attempts")
+                    break
+                resp.raise_for_status()
+                data = resp.json() or {}
+                break
+            except Exception as exc:
+                if attempt < pacing.max_retries:
+                    continue
+                print(f"Bandcamp: discover API failed batch {batch_num}: {exc}")
+                break
+
+        if data is None:
+            break
+
+        results = data.get("results") or []
+        next_cursor = data.get("cursor")
+        batch_count = len(results)
+
+        new_unique = 0
+        for item in results:
+            item_id = item.get("item_id")
+            band_url = item.get("band_url") or ""
+            if not band_url:
+                continue
+
+            # Canonicalize profile URL
+            band_url = band_url.split("?")[0]
+            if not band_url.endswith("/"):
+                band_url += "/"
+
+            # Deduplicate by stable item_id and canonical URL
+            if item_id and item_id in seen_item_ids:
+                continue
+            url_key = band_url.rstrip("/").lower()
+            if url_key in seen_urls:
+                continue
+
+            if item_id:
+                seen_item_ids.add(item_id)
+            seen_urls.add(url_key)
+
+            candidates.append({
+                "url": band_url,
+                "primary_genre": "",
+                "location": item.get("band_location") or "",
+                "item_id": item_id,
+            })
+            new_unique += 1
+
+            if max_candidates and len(candidates) >= max_candidates:
+                break
+
+        has_cursor = bool(next_cursor)
+        print(f"Bandcamp: discover API batch {batch_num} -> results={batch_count} new_unique={new_unique} cursor={'yes' if has_cursor else 'no'}")
+
+        if max_candidates and len(candidates) >= max_candidates:
+            print(f"Bandcamp: candidate budget reached -> {len(candidates)}")
+            break
+
+        if not next_cursor:
+            break
+        if new_unique == 0:
+            print("Bandcamp: discover API zero new candidates; stopping")
+            break
+
+        cursor = next_cursor
+        pacing.sleep_cursor()
+
+    return candidates
+
+
 def _bandcamp_collect_discover_dom(driver, discover_url: str, max_pages: int = 1, max_items: int | None = None) -> list:
     max_pages = max(1, int(max_pages or 1))
     selectors = [
@@ -6300,6 +6983,8 @@ def _bandcamp_collect_discover_dom(driver, discover_url: str, max_pages: int = 1
     candidates = []
     seen = set()
     base_url = discover_url
+    previous_page_urls = set()
+    pagination_broken = False
     for page_index in range(max_pages):
         page_url = _bandcamp_replace_query_param(base_url, "p", page_index)
         page_label = page_index + 1
@@ -6324,21 +7009,40 @@ def _bandcamp_collect_discover_dom(driver, discover_url: str, max_pages: int = 1
             break
         raw_count = len(page_candidates)
         # Deduplicate across pages and checkpoint; track kept_count for stop logic.
+        current_page_urls = set()
         new_added = 0
         for cand in page_candidates:
             key = (cand.get("url") or "").rstrip("/").lower()
-            if not key or key in seen:
+            if not key:
+                continue
+            current_page_urls.add(key)
+            if key in seen:
                 continue
             seen.add(key)
             candidates.append(cand)
             new_added += 1
             if max_items and len(candidates) >= max_items:
                 break
+        # Detect broken pagination: if this page is a 100% duplicate of the previous page,
+        # Bandcamp's pagination is not working and we should stop.
+        overlap = len(current_page_urls & previous_page_urls)
+        if page_index > 0 and current_page_urls and overlap == len(current_page_urls):
+            print(
+                f"Bandcamp: discover page {page_label} appears to be a duplicate of page {page_label - 1} "
+                f"(overlap={overlap}/{len(current_page_urls)}); stopping pagination"
+            )
+            pagination_broken = True
+            break
+        previous_page_urls = current_page_urls
         print(f"Bandcamp: discover page {page_label} unique candidates = {raw_count}")
         print(f"Bandcamp: discover page {page_label} kept_after_filters = {new_added}")
+        if page_index > 0:
+            print(f"Bandcamp: discover page {page_label} overlap_with_previous = {overlap}")
         print(f"Bandcamp: discover page {page_label} -> {new_added} items")
         if max_items and len(candidates) >= max_items:
             break
+    if pagination_broken:
+        print("Bandcamp: discover pagination halted — subsequent pages returned identical content")
     print(f"Bandcamp: discover collected total = {len(candidates)}")
     return candidates
 
@@ -6443,275 +7147,15 @@ def _bandcamp_resolve_artist_profile_url(candidate_url: str) -> str:
         return ""
     scheme = parsed.scheme or "https"
     return f"{scheme}://{host}/"
-def _bc_extract_artist_name_from_profile_soup(soup: BeautifulSoup) -> str:
-    meta_site = soup.find('meta', attrs={'property': 'og:site_name'})
-    if meta_site and meta_site.get('content'):
-        name = meta_site['content'].strip()
-        if name:
-            return name
-    meta_title = soup.find('meta', attrs={'property': 'og:title'})
-    if meta_title and meta_title.get('content'):
-        raw = meta_title['content'].strip()
-        left = raw.split('·')[0].strip()
-        if left:
-            return left
-    for sel in ['.band-name', 'h1.band-name', 'h1.title', '#name-section h1', 'header h1', 'h2.band-name']:
-        el = soup.select_one(sel)
-        if el:
-            txt = el.get_text(" ", strip=True)
-            if txt:
-                return txt
-    header_link = soup.select_one('header a[href]')
-    if header_link:
-        txt = header_link.get_text(" ", strip=True)
-        if txt:
-            return txt
-    return ""
-
 def _bandcamp_parse_html(profile_url: str, html: str, seed_primary_genre: str = "") -> dict:
-    artist = {
-        "artist_name": "",
-        "profile_url": profile_url,
-        "location": "",
-        "website": "",
-        "email": "",
-        "emails": [],
-        "socials": {
-            "instagram": "",
-            "twitter": "",
-            "facebook": "",
-            "youtube": "",
-            "linktree": "",
-            "spotify": "",
-            "bandsintown": "",
-            "songkick": ""
-        },
-        "genres": [],
-        "latest_release_title": "",
-        "latest_release_date": "",
-        "latest_release_precision": "",
-        "sounds_like": "",
-        "primary_genre": "",
-        "source_tag": ""
-    }
-    page_source = ""
-    if not html:
-        return {}
-    soup = BeautifulSoup(html, 'html.parser')
-    artist["artist_name"] = _bc_extract_artist_name_from_profile_soup(soup)
-    artist["genres"] = bandcamp_extract_genres(soup)
-    primary_genre = (seed_primary_genre or (artist["genres"][0] if artist["genres"] else "")).strip()
-    artist["primary_genre"] = primary_genre
-    if not artist["genres"] and primary_genre:
-        artist["genres"] = [primary_genre]
-    artist["sounds_like"] = bandcamp_extract_sounds_like(soup)
-    release_info = bandcamp_extract_release_date(html)
-    if release_info.get("date_iso"):
-        artist["latest_release_date"] = release_info.get("date_iso", "")
-        artist["latest_release_precision"] = release_info.get("precision", "") or ""
-    location_el = soup.find(class_=re.compile('location', re.I))
-    if location_el:
-        artist["location"] = location_el.get_text(" ", strip=True)
-    if not artist["location"]:
-        bio_el = soup.find('div', class_=re.compile('location', re.I))
-        if bio_el:
-            artist["location"] = bio_el.get_text(" ", strip=True)
-    artist["location"] = _canon_location(artist.get("location", ""))
-    collected_links = []
-    seen_links = set()
+    """Compatibility adapter for the shared profile parser."""
+    return _shared_parse_bandcamp_profile_html(
+        profile_url,
+        html,
+        seed_primary_genre,
+        release_fetcher=_bandcamp_fetch_profile_html,
+    )
 
-    def _record_link(url: str):
-        if not url:
-            return
-        if url not in seen_links:
-            seen_links.add(url)
-            collected_links.append(url)
-
-    def _record_email(value: str):
-        if not value:
-            return
-        cleaned = value.strip()
-        if not cleaned:
-            return
-        if cleaned not in artist["emails"]:
-            artist["emails"].append(cleaned)
-        if not artist["email"]:
-            artist["email"] = cleaned
-    def _consume_external_candidate(candidate: str):
-        if not candidate:
-            return
-        candidate = candidate.strip()
-        if not candidate:
-            return
-        candidate = candidate.strip("()[]{}<>.,; ")
-        if not candidate:
-            return
-        if candidate.lower().startswith("mailto:"):
-            email_value = candidate.split("mailto:")[-1].split("?")[0]
-            if email_value:
-                _record_email(email_value)
-            return
-        normalized = candidate.split("#")[0]
-        if normalized.startswith("//"):
-            normalized = f"https:{normalized}"
-        elif normalized.startswith("/"):
-            normalized = urljoin(profile_url, normalized)
-        elif normalized.startswith("www."):
-            normalized = f"https://{normalized}"
-        else:
-            try:
-                parsed = urlparse(normalized)
-                if not parsed.scheme:
-                    normalized = f"https://{normalized}"
-            except Exception:
-                normalized = f"https://{normalized}"
-        normalized = normalize_external_url(normalized)
-        try:
-            parsed = urlparse(normalized)
-        except Exception:
-            return
-        scheme = (parsed.scheme or "").lower()
-        if not scheme.startswith("http"):
-            return
-        netloc = (parsed.netloc or "").lower()
-        if not netloc or netloc.endswith("bandcamp.com"):
-            return
-        _record_link(normalized)
-        if "instagram.com" in netloc:
-            artist["socials"]["instagram"] = normalized
-        elif "facebook.com" in netloc or "fb.me" in netloc:
-            artist["socials"]["facebook"] = normalized
-        elif "twitter.com" in netloc or "x.com" in netloc:
-            artist["socials"]["twitter"] = normalized
-        elif "youtube.com" in netloc or "youtu.be" in netloc:
-            artist["socials"]["youtube"] = normalized
-        elif any(domain in netloc for domain in ["linktr.ee", "linktree", "withkoji.com", "beacons.ai"]):
-            artist["socials"]["linktree"] = normalized
-        elif "spotify.com" in netloc:
-            artist["socials"]["spotify"] = normalized
-        elif "bandsintown.com" in netloc:
-            artist["socials"]["bandsintown"] = normalized
-        elif "songkick.com" in netloc:
-            artist["socials"]["songkick"] = normalized
-        else:
-            if not artist["website"]:
-                artist["website"] = normalized
-
-    for anchor in soup.find_all('a', href=True):
-        _consume_external_candidate(anchor['href'])
-    contact_texts = []
-    contact_selectors = [
-        "#bio-container",
-        "#bio-text",
-        ".bio-container",
-        ".bio-text",
-        ".bio",
-        ".band-bio",
-        ".profile-bio",
-        "#rightColumn",
-        "#right-column",
-        ".rightColumn",
-        ".tralbum-about",
-        ".tralbumData",
-    ]
-    for selector in contact_selectors:
-        for node in soup.select(selector):
-            text = node.get_text(" ", strip=True)
-            if text:
-                contact_texts.append(text)
-    combined_contact_text = " ".join(contact_texts)
-    for block in contact_texts or [combined_contact_text]:
-        if not block:
-            continue
-        for match in _BC_EMAIL_RE.findall(block):
-            _record_email(match)
-        for candidate in _SOCIAL_TEXT_RE.findall(block):
-            _consume_external_candidate(candidate)
-        for pattern, template in _BANDCAMP_HANDLE_HINTS:
-            for handle in pattern.findall(block):
-                handle_clean = handle.strip().lstrip("@").strip(".,/ ")
-                if not handle_clean:
-                    continue
-                _consume_external_candidate(template.format(handle=handle_clean))
-    artist["all_social_links"] = collected_links
-    release_container = soup.find('li', class_=re.compile('music-grid-item', re.I))
-    release_page_html = ""
-    if release_container:
-        title_el = release_container.find(class_=re.compile('title', re.I))
-        if title_el:
-            artist["latest_release_title"] = title_el.get_text(strip=True)
-        date_el = release_container.find(class_=re.compile('release', re.I))
-        if date_el and not artist["latest_release_date"]:
-            raw_text = date_el.get_text(strip=True)
-            date_iso, prec = _parse_any_date_to_iso(raw_text)
-            if date_iso:
-                artist["latest_release_date"] = date_iso
-                artist["latest_release_precision"] = prec or artist["latest_release_precision"]
-            else:
-                artist["latest_release_date"] = raw_text
-        if not release_page_html:
-            release_anchor = release_container.find("a", href=True)
-            if release_anchor:
-                rel = release_anchor.get("href", "").strip()
-                release_url = ""
-                if rel.startswith("//"):
-                    release_url = f"https:{rel}"
-                elif rel.startswith("http"):
-                    release_url = rel
-                elif rel.startswith("/"):
-                    release_url = urljoin(profile_url, rel)
-                elif rel:
-                    release_url = urljoin(profile_url, f"/{rel.lstrip('/')}")
-                if release_url and release_url != profile_url:
-                    release_page_html = _bandcamp_fetch_profile_html(release_url)
-                    if release_page_html:
-                        release_info = bandcamp_extract_release_date(release_page_html)
-                        if release_info.get("date_iso"):
-                            artist["latest_release_date"] = release_info["date_iso"]
-                            artist["latest_release_precision"] = release_info.get("precision") or artist["latest_release_precision"]
-                        if not artist["latest_release_title"]:
-                            release_soup = BeautifulSoup(release_page_html, "html.parser")
-                            title_candidate = (
-                                release_soup.select_one("h2.trackTitle")
-                                or release_soup.select_one(".trackTitle")
-                                or release_soup.select_one("h1")
-                            )
-                            if title_candidate:
-                                artist["latest_release_title"] = title_candidate.get_text(" ", strip=True)
-    if not artist["latest_release_title"]:
-        track_title = soup.find(class_=re.compile('trackTitle', re.I))
-        if track_title:
-            artist["latest_release_title"] = track_title.get_text(strip=True)
-    if not artist["latest_release_date"]:
-        release_text = soup.find(class_=re.compile('release-date', re.I))
-        if release_text:
-            raw_text = release_text.get_text(strip=True)
-            date_iso, prec = _parse_any_date_to_iso(raw_text)
-            if date_iso:
-                artist["latest_release_date"] = date_iso
-                artist["latest_release_precision"] = prec or artist["latest_release_precision"]
-            else:
-                artist["latest_release_date"] = raw_text
-    if not artist["latest_release_date"]:
-        credits = soup.find('div', class_=re.compile(r'tralbum-credits', re.I))
-        if credits:
-            credits_text = credits.get_text(" ", strip=True)
-            match = re.search(r"released\s+(.+)", credits_text, re.I)
-            if match:
-                raw_text = match.group(1).strip()
-                date_iso, prec = _parse_any_date_to_iso(raw_text)
-                if date_iso:
-                    artist["latest_release_date"] = date_iso
-                    artist["latest_release_precision"] = prec or artist["latest_release_precision"]
-                else:
-                    artist["latest_release_date"] = raw_text
-            else:
-                artist["latest_release_date"] = credits_text.strip()
-    if not artist["latest_release_date"]:
-        artist["latest_release_date"] = "not present"
-    if not artist["latest_release_title"]:
-        artist["latest_release_title"] = ""
-    return artist
 
 def _bandcamp_parse_artist_profile(driver, profile_url, seed_primary_genre="") -> dict:
     """Visit artist profile via Selenium fallback."""
@@ -11770,7 +12214,8 @@ class ArtistScraperThread(QtCore.QThread):
     log_signal = QtCore.pyqtSignal(str)
     finished_signal = QtCore.pyqtSignal()
     def __init__(self, website_url, max_artists, output_csv, source="Unearthed",
-                 pages_per_tag=BANDCAMP_PAGES_PER_TAG, seed_tags=None, bandcamp_mode: str = "discover", bandcamp_search_domain: str = "artists", bandcamp_search_location: str = "", parent=None):
+                 pages_per_tag=BANDCAMP_PAGES_PER_TAG, seed_tags=None, bandcamp_mode: str = "discover", bandcamp_search_domain: str = "artists", bandcamp_search_location: str = "",
+                 amrap_state_filter: str = "", amrap_genre_filter: str = "", parent=None):
         super().__init__(parent)
         self.website_url = website_url
         self.max_artists = max_artists
@@ -11780,6 +12225,8 @@ class ArtistScraperThread(QtCore.QThread):
         self.bandcamp_mode = (bandcamp_mode or "discover").strip().lower()
         self.bandcamp_search_domain = (bandcamp_search_domain or "artists").strip().lower() or "artists"
         self.bandcamp_search_location = (bandcamp_search_location or "").strip()
+        self.amrap_state_filter = (amrap_state_filter or "").strip()
+        self.amrap_genre_filter = (amrap_genre_filter or "").strip()
         if seed_tags is not None:
             self.seed_tags = list(seed_tags)
         elif self.source and self.source.lower() == "soundcloud":
@@ -11872,6 +12319,27 @@ class ArtistScraperThread(QtCore.QThread):
                     fallback_cols = column_order if column_order else spotify_columns
                     _safe_atomic_write_csv(combined, self.output_csv, fallback_cols, reason="spotify_gui")
                     self.log_signal.emit(f"Spotify scraping completed with {len(new_df)} rows.")
+            elif self.source.lower() == "undiscovered music":
+                pipeline_runner.run_directory_job(
+                    {
+                        "directory": "undiscovered_music",
+                        "target_valid_leads": self.max_artists,
+                    },
+                    self.output_csv,
+                    logger=self.log_signal.emit,
+                )
+                self.log_signal.emit("Undiscovered Music scraping completed.")
+            elif self.source.lower() == "amrap":
+                from amrap_scraper import scrape_amrap_to_csv
+                scrape_amrap_to_csv(
+                    target_count=self.max_artists,
+                    output_csv=self.output_csv,
+                    state_filter=self.amrap_state_filter,
+                    genre_filter=self.amrap_genre_filter,
+                    existing_csv=self.output_csv,
+                    logger=self.log_signal.emit,
+                )
+                self.log_signal.emit("AMRAP scraping completed.")
             else:
                 scrape_website(self.website_url, existing_csv=self.output_csv, max_artists=self.max_artists)
                 self.log_signal.emit("Artist scraping completed.")
@@ -14535,6 +15003,8 @@ class NightModeWorker(QtCore.QThread):
             pretty_cmd = " ".join(self.command)
             masked_cmd = self._mask(pretty_cmd)
             self.log_signal.emit(f"[Night Mode] Running: {masked_cmd}")
+            env = dict(self.env) if self.env else os.environ.copy()
+            env["PYTHONUNBUFFERED"] = "1"
             self._process = subprocess.Popen(
                 self.command,
                 cwd=self.workdir,
@@ -14542,25 +15012,26 @@ class NightModeWorker(QtCore.QThread):
                 stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,
-                env=self.env,
+                env=env,
             )
             stdout = self._process.stdout
-            while stdout:
-                if self._stop_requested:
-                    break
-                ready, _, _ = select.select([stdout], [], [], 0.5)
-                if ready:
-                    line = stdout.readline()
-                    if line:
-                        self.log_signal.emit(self._mask(line.rstrip("\n")))
-                        continue
-                if self._process.poll() is not None:
-                    if ready:
-                        for line in stdout:
-                            self.log_signal.emit(self._mask(line.rstrip("\n")))
-                    break
+            if stdout:
+                for line in stdout:
+                    if self._stop_requested:
+                        break
+                    self.log_signal.emit(self._mask(line.rstrip("\n")))
+                # Drain any remaining output after stop or process exit.
+                if self._process.poll() is None:
+                    self._process.wait()
+                if stdout:
+                    remaining = stdout.read()
+                    if remaining:
+                        for rem_line in remaining.splitlines():
+                            self.log_signal.emit(self._mask(rem_line))
             if self._process:
-                exit_code = self._process.wait()
+                exit_code = self._process.returncode
+                if exit_code is None:
+                    exit_code = self._process.wait()
         except Exception as exc:
             self.log_signal.emit(f"[Night Mode] Error: {self._mask(str(exc))}")
         self.finished_signal.emit(exit_code)
@@ -14694,6 +15165,9 @@ class NightModeTab(QtWidgets.QWidget):
         self._active_unearthed_index_path = _unearthed_artist_url_index_path()
         self._bootstrap_stage = None  # None | "headless" | "headed" | "final_headless"
         self._log_buffer: list[str] = []
+        self._active_run_dir: Optional[str] = None
+        self._active_jobs_config: List[Dict[str, Any]] = []
+        self._handshake_seen = False
         self._build_ui()
         self._progress_timer = QtCore.QTimer(self)
         self._progress_timer.setInterval(1500)
@@ -14984,33 +15458,105 @@ class NightModeTab(QtWidgets.QWidget):
         return f"ETA {secs}s"
 
     def _refresh_runtime_progress(self):
+        # While a Night Mode worker is active, prefer the exact phased-run state
+        # over the global singleton progress file to avoid stale data.
+        if self.worker and self.worker.isRunning():
+            self._refresh_runtime_progress_from_active_run()
+            return
+
+        # No active worker: do not display stale global progress as if it were
+        # the current run. Show idle unless the global file is unambiguous.
         progress = read_progress()
         phase = str(progress.get("phase") or "idle")
-        processed = int(progress.get("processed_rows") or 0)
-        total = progress.get("total_rows")
-        percentage = progress.get("percentage")
-        if percentage is None:
-            self.runtime_progress_bar.setRange(0, 0 if phase not in {"idle", "complete"} else 1000)
+        if phase == "idle":
+            self.runtime_progress_bar.setRange(0, 1000)
             self.runtime_progress_bar.setValue(0)
-            pct_text = "--"
+            self.runtime_progress_detail.setText("idle")
+            return
+        # Even without a worker, avoid presenting a stale complete payload.
+        self.runtime_progress_bar.setRange(0, 1000)
+        self.runtime_progress_bar.setValue(0)
+        self.runtime_progress_detail.setText(f"{phase} — waiting for next run")
+
+    def _refresh_runtime_progress_from_active_run(self):
+        if not self._handshake_seen:
+            self.runtime_progress_bar.setRange(0, 0)
+            self.runtime_progress_bar.setValue(0)
+            self.runtime_progress_detail.setText("Night Mode starting…")
+            return
+
+        run_dir = self._active_run_dir
+        if not run_dir or not os.path.isdir(run_dir):
+            self.runtime_progress_bar.setRange(0, 0)
+            self.runtime_progress_bar.setValue(0)
+            self.runtime_progress_detail.setText("Waiting for current job state…")
+            return
+
+        # Read job statuses for each configured job in order.
+        job_statuses: List[Dict[str, Any]] = []
+        for job in self._active_jobs_config:
+            job_id = job.get("job_id") or job.get("id") or ""
+            job_dir = os.path.join(run_dir, job_id) if job_id else ""
+            status = _read_json_safe(os.path.join(job_dir, "job_status.json")) if job_dir else None
+            job_statuses.append(status or {})
+
+        # Bandcamp heartbeat: read the current job's progress file if applicable.
+        current_idx = _find_current_job_index(job_statuses)
+        bandcamp_progress: Optional[dict] = None
+        if current_idx is not None and 0 <= current_idx < len(self._active_jobs_config):
+            job = self._active_jobs_config[current_idx]
+            if str(job.get("directory") or "").strip().lower() == "bandcamp":
+                job_id = job.get("job_id") or job.get("id") or ""
+                bc_path = os.path.join(run_dir, job_id, "bandcamp_progress.json")
+                bandcamp_progress = _read_json_safe(bc_path)
+
+        display = _build_night_mode_progress_display(
+            self._active_jobs_config,
+            run_dir,
+            job_statuses,
+            bandcamp_progress=bandcamp_progress,
+        )
+
+        source = display.get("source", "")
+        job_index = display.get("job_index")
+        total_jobs = display.get("total_jobs", 0)
+        target = display.get("target_valid_leads")
+        heartbeat = display.get("heartbeat")
+        status_text = display.get("status_text", "processing")
+        indeterminate = display.get("indeterminate", True)
+        row_count = display.get("row_count")
+
+        if indeterminate:
+            self.runtime_progress_bar.setRange(0, 0)
+            self.runtime_progress_bar.setValue(0)
         else:
             self.runtime_progress_bar.setRange(0, 1000)
-            pct_value = max(0.0, min(float(percentage), 100.0))
-            self.runtime_progress_bar.setValue(int(round(pct_value * 10)))
-            pct_text = f"{pct_value:.1f}%"
-        rows_text = f"{processed} / {total}" if total is not None else f"{processed} / unknown"
-        emails = int(progress.get("emails_found") or 0)
-        source = str(progress.get("current_source") or "").strip()
-        status = str(progress.get("current_status") or "").strip()
-        source_status = " | ".join(part for part in (source, status) if part)
-        details = [
-            f"{phase} | {pct_text} | rows {rows_text}",
-            f"emails {emails}",
-            self._format_eta(progress.get("eta_seconds")),
-        ]
-        if source_status:
-            details.append(source_status)
-        self.runtime_progress_detail.setText(" | ".join(details))
+            self.runtime_progress_bar.setValue(1000)
+
+        parts: List[str] = []
+        if source:
+            job_of = f"Job {job_index} of {total_jobs}" if job_index is not None and total_jobs > 0 else ""
+            parts.append(f"{source.capitalize()}{' — ' + job_of if job_of else ''}")
+        else:
+            parts.append("Night Mode")
+
+        if status_text == "processing":
+            parts.append("Status: processing")
+        else:
+            parts.append(f"Status: {status_text}")
+
+        info_parts: List[str] = []
+        if heartbeat:
+            info_parts.append(heartbeat)
+        if target is not None:
+            info_parts.append(f"Target leads: {target}")
+        if row_count is not None:
+            info_parts.append(f"Rows: {row_count}")
+
+        if info_parts:
+            parts.append(" | ".join(info_parts))
+
+        self.runtime_progress_detail.setText("\n".join(parts))
 
     def _update_jobs_summary_from_jobs(self):
         lines = []
@@ -15461,6 +16007,8 @@ class NightModeTab(QtWidgets.QWidget):
     def _launch_night_mode(self, headless: bool):
         # Fresh log buffer per run to avoid stale auth signals.
         self._log_buffer = []
+        self._active_run_dir = None
+        self._handshake_seen = False
         config_path = self.config_path_edit.text().strip()
         config_path_to_use = ""
         if self.jobs:
@@ -15500,6 +16048,7 @@ class NightModeTab(QtWidgets.QWidget):
             except Exception as exc:
                 QtWidgets.QMessageBox.warning(self, "Config error", f"Could not write temp config:\n{exc}")
                 return
+            self._active_jobs_config = list(config.get("jobs", []))
         else:
             if not config_path or not os.path.exists(config_path):
                 QtWidgets.QMessageBox.warning(self, "Config missing", "Add jobs in the table or select a valid night mode config JSON.")
@@ -15528,6 +16077,7 @@ class NightModeTab(QtWidgets.QWidget):
             except Exception as exc:
                 QtWidgets.QMessageBox.warning(self, "Config error", f"Could not prepare config:\n{exc}")
                 return
+            self._active_jobs_config = list(config.get("jobs", []))
         base_dir = os.path.dirname(os.path.abspath(__file__))
         script_path = os.path.join(base_dir, "night_mode_runner.py")
         cmd = [sys.executable, script_path, "--config", config_path_to_use]
@@ -15679,6 +16229,12 @@ class NightModeTab(QtWidgets.QWidget):
         scrollbar = self.log_console.verticalScrollBar()
         if scrollbar:
             scrollbar.setValue(scrollbar.maximum())
+        # Detect phased-runner handshake and bind to the exact run directory.
+        if not self._handshake_seen:
+            run_dir = _parse_night_mode_run_dir_handshake(msg)
+            if run_dir and os.path.isdir(run_dir):
+                self._active_run_dir = run_dir
+                self._handshake_seen = True
 
     def _auth_failure_seen(self) -> bool:
         phrases = [
@@ -15741,10 +16297,15 @@ class NightModeJobDialog(QtWidgets.QDialog):
         layout = QtWidgets.QFormLayout()
         self.job_id_edit = QtWidgets.QLineEdit()
         self.directory_combo = QtWidgets.QComboBox()
-        self.directory_combo.addItems(["spotify", "bandcamp", "soundcloud", "unearthed"])
+        self.directory_combo.addItems(["spotify", "bandcamp", "soundcloud", "unearthed", "undiscovered_music", "amrap"])
+        self.directory_combo.currentTextChanged.connect(self._on_directory_changed)
         self.mode_combo = QtWidgets.QComboBox()
         self.mode_combo.addItems(["", "playlist", "discover", "search", "people", "tracks"])
         self.input_edit = QtWidgets.QLineEdit()
+        self.input_label = QtWidgets.QLabel("Input/Seed:")
+        self.amrap_genre_edit = QtWidgets.QLineEdit()
+        self.amrap_genre_edit.setPlaceholderText("e.g. rock, jazz (leave blank for all genres)")
+        self.amrap_genre_label = QtWidgets.QLabel("Genre filter (optional):")
         self.target_spin = QtWidgets.QSpinBox()
         self.target_spin.setRange(0, 100000)
         self.target_spin.setValue(100)
@@ -15757,7 +16318,8 @@ class NightModeJobDialog(QtWidgets.QDialog):
         layout.addRow("Job ID (optional):", self.job_id_edit)
         layout.addRow("Directory:", self.directory_combo)
         layout.addRow("Mode:", self.mode_combo)
-        layout.addRow("Input/Seed:", self.input_edit)
+        layout.addRow(self.input_label, self.input_edit)
+        layout.addRow(self.amrap_genre_label, self.amrap_genre_edit)
         layout.addRow("Target leads:", self.target_spin)
         layout.addRow("Max hours (0 = no limit):", self.max_hours_spin)
         layout.addRow("Notes:", self.notes_edit)
@@ -15769,6 +16331,36 @@ class NightModeJobDialog(QtWidgets.QDialog):
         main_layout.addLayout(layout)
         main_layout.addWidget(buttons)
         self.setLayout(main_layout)
+        self._on_directory_changed(self.directory_combo.currentText())
+
+    def _on_directory_changed(self, directory: str):
+        directory = str(directory or "").strip().lower()
+        self.input_label.setVisible(True)
+        self.input_edit.setVisible(True)
+        if directory == "amrap":
+            self.input_label.setText("State filter (optional):")
+            self.input_edit.setPlaceholderText("e.g. NSW, VIC, QLD (leave blank for all states)")
+            self.amrap_genre_label.setVisible(True)
+            self.amrap_genre_edit.setVisible(True)
+            self.mode_combo.setEnabled(False)
+        elif directory == "undiscovered_music":
+            self.input_label.setVisible(False)
+            self.input_edit.setVisible(False)
+            self.amrap_genre_label.setVisible(False)
+            self.amrap_genre_edit.setVisible(False)
+            self.mode_combo.setEnabled(False)
+        elif directory == "spotify":
+            self.input_label.setText("Playlist URL/URI or search term:")
+            self.input_edit.setPlaceholderText("e.g. https://open.spotify.com/playlist/...")
+            self.amrap_genre_label.setVisible(False)
+            self.amrap_genre_edit.setVisible(False)
+            self.mode_combo.setEnabled(True)
+        else:
+            self.input_label.setText("Input/Seed:")
+            self.input_edit.setPlaceholderText("")
+            self.amrap_genre_label.setVisible(False)
+            self.amrap_genre_edit.setVisible(False)
+            self.mode_combo.setEnabled(True)
 
     def _load_job(self, job: dict):
         self.job_id_edit.setText(job.get("job_id", ""))
@@ -15781,6 +16373,7 @@ class NightModeJobDialog(QtWidgets.QDialog):
         if idx >= 0:
             self.mode_combo.setCurrentIndex(idx)
         self.input_edit.setText(job.get("input_seed_csv", ""))
+        self.amrap_genre_edit.setText(job.get("amrap_genre", ""))
         try:
             self.target_spin.setValue(int(job.get("target_valid_leads", 100)))
         except Exception:
@@ -15805,6 +16398,9 @@ class NightModeJobDialog(QtWidgets.QDialog):
         notes = self.notes_edit.text().strip()
         if notes:
             job["notes"] = notes
+        if job["directory"].lower() == "amrap":
+            job["amrap_state"] = job["input_seed_csv"]
+            job["amrap_genre"] = self.amrap_genre_edit.text().strip()
         return job
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
@@ -15872,16 +16468,17 @@ class MainWindow(QtWidgets.QMainWindow):
         layout = QtWidgets.QVBoxLayout()
         config_group, config_layout = _lm_section("Job Configuration")
         self.source_combo = QtWidgets.QComboBox()
-        self.source_combo.addItems(["Unearthed", "Bandcamp", "SoundCloud", "Last.fm Similar", "Spotify"])
+        self.source_combo.addItems(["Unearthed", "Bandcamp", "SoundCloud", "Last.fm Similar", "Spotify", "Undiscovered Music", "AMRAP"])
         self.source_combo.currentTextChanged.connect(self.on_source_changed)
         config_layout.addLayout(_lm_row("Source:", self.source_combo, add_stretch=True))
         self.url_label = QtWidgets.QLabel("Website URL:")
         self.url_edit = QtWidgets.QLineEdit(UNEARTHED_DEFAULT_URL)
         self.url_edit.setPlaceholderText(UNEARTHED_DEFAULT_URL)
         config_layout.addLayout(_lm_row_with_label_widget(self.url_label, self.url_edit))
+        self.pages_per_tag_label = QtWidgets.QLabel("Pages per Tag:")
         self.pages_per_tag_edit = QtWidgets.QLineEdit(str(BANDCAMP_PAGES_PER_TAG))
         self.pages_per_tag_edit.setEnabled(False)
-        config_layout.addLayout(_lm_row("Pages per Tag:", self.pages_per_tag_edit))
+        config_layout.addLayout(_lm_row_with_label_widget(self.pages_per_tag_label, self.pages_per_tag_edit))
         self.max_artists_edit = QtWidgets.QLineEdit("200")
         config_layout.addLayout(_lm_row("Max Artists:", self.max_artists_edit))
         self.sc_meta_checkbox = QtWidgets.QCheckBox("Run SoundCloud metadata enricher (fill missing genre/date)")
@@ -15912,6 +16509,10 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addWidget(output_group)
         _lm_scrolled_tab(self.artist_tab, layout)
     def on_source_changed(self, source_text):
+        self.url_label.setVisible(True)
+        self.url_edit.setVisible(True)
+        self.pages_per_tag_label.setVisible(True)
+        self.pages_per_tag_edit.setVisible(True)
         if source_text == "Bandcamp":
             self.url_label.setText("Website URL:")
             self.url_edit.setPlaceholderText(BANDCAMP_DEFAULT_TAG_URL)
@@ -15931,6 +16532,21 @@ class MainWindow(QtWidgets.QMainWindow):
         elif source_text == "Last.fm Similar":
             self.url_label.setText("Seed Artists:")
             self.url_edit.setPlaceholderText("Seed artist names, comma separated (e.g. Hope D, Jaguar Jonze)")
+            current = self.url_edit.text().strip()
+            if not current or current in (UNEARTHED_DEFAULT_URL, BANDCAMP_DEFAULT_TAG_URL, SOUNDCLOUD_DEFAULT_TAG_URL):
+                self.url_edit.clear()
+            self.pages_per_tag_edit.setEnabled(False)
+            self.sc_meta_checkbox.setVisible(False)
+        elif source_text == "Undiscovered Music":
+            self.url_label.setVisible(False)
+            self.url_edit.setVisible(False)
+            self.pages_per_tag_label.setVisible(False)
+            self.pages_per_tag_edit.setVisible(False)
+            self.pages_per_tag_edit.setEnabled(False)
+            self.sc_meta_checkbox.setVisible(False)
+        elif source_text == "AMRAP":
+            self.url_label.setText("State filter (optional):")
+            self.url_edit.setPlaceholderText("e.g. NSW, VIC, QLD (leave blank for all states)")
             current = self.url_edit.text().strip()
             if not current or current in (UNEARTHED_DEFAULT_URL, BANDCAMP_DEFAULT_TAG_URL, SOUNDCLOUD_DEFAULT_TAG_URL):
                 self.url_edit.clear()
@@ -16135,6 +16751,8 @@ class MainWindow(QtWidgets.QMainWindow):
         bandcamp_mode = "discover"
         bandcamp_search_domain = "artists"
         bandcamp_search_location = ""
+        amrap_state_filter = ""
+        amrap_genre_filter = ""
         if source in ("Bandcamp", "SoundCloud") and not url:
             default_url = BANDCAMP_DEFAULT_TAG_URL if source == "Bandcamp" else SOUNDCLOUD_DEFAULT_TAG_URL
             url = default_url
@@ -16160,6 +16778,22 @@ class MainWindow(QtWidgets.QMainWindow):
                 pages_per_tag = BANDCAMP_PAGES_PER_TAG
         if max_artists <= 0:
             max_artists = 200
+        if source == "AMRAP":
+            amrap_state_filter = url
+            genre_value, genre_ok = QtWidgets.QInputDialog.getText(
+                self,
+                "AMRAP genre filter (optional)",
+                "Optional genre filter (keeps rows whose primary genre contains this text; leave blank for no filter):",
+                QtWidgets.QLineEdit.Normal,
+                "",
+            )
+            amrap_genre_filter = (genre_value if genre_ok else "").strip()
+            if amrap_state_filter:
+                self.artist_log.append(f"AMRAP: state filter={amrap_state_filter}")
+                print(f"AMRAP: state filter={amrap_state_filter}")
+            if amrap_genre_filter:
+                self.artist_log.append(f"AMRAP: genre filter={amrap_genre_filter}")
+                print(f"AMRAP: genre filter={amrap_genre_filter}")
         if source == "Bandcamp":
             default_pages = BANDCAMP_PAGES_PER_TAG
             bandcamp_mode = "discover"
@@ -16262,7 +16896,9 @@ class MainWindow(QtWidgets.QMainWindow):
             seed_tags=seed_tags,
             bandcamp_mode=bandcamp_mode if source == "Bandcamp" else "discover",
             bandcamp_search_domain=bandcamp_search_domain if source == "Bandcamp" else "artists",
-            bandcamp_search_location=bandcamp_search_location if source == "Bandcamp" else ""
+            bandcamp_search_location=bandcamp_search_location if source == "Bandcamp" else "",
+            amrap_state_filter=amrap_state_filter if source == "AMRAP" else "",
+            amrap_genre_filter=amrap_genre_filter if source == "AMRAP" else "",
         )
         self.artist_thread.log_signal.connect(self.update_artist_log)
         self.artist_thread.finished_signal.connect(self.artist_scraping_finished)

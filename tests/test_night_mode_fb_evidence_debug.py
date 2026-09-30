@@ -4,13 +4,18 @@ import night_mode_fb
 
 
 def _build_enricher(logs=None) -> night_mode_fb.NightModeFacebookEnricher:
-    return night_mode_fb.NightModeFacebookEnricher(
+    enricher = night_mode_fb.NightModeFacebookEnricher(
         legacy_module=None,
         username="",
         password="",
         logger=logs.append if logs is not None else None,
         use_shared_session=False,
     )
+    # These tests exercise post-fetch evidence/writeback with synthetic scrape
+    # results; never consult a real Chrome/profile session.
+    enricher._maybe_recover_or_skip_on_checkpoint = lambda: True
+    enricher._has_authenticated_session = lambda: True
+    return enricher
 
 
 def _set_surface_state(

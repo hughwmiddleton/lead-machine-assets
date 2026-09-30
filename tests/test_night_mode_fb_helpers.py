@@ -257,7 +257,7 @@ def test_extract_emails_bounds_beautifulsoup_fallback_input(monkeypatch) -> None
 def test_extract_emails_worst_case_cap_abandons_rendered_text_after_budgeted_soup_fallback(monkeypatch) -> None:
     html = "<html><body>No email on page</body></html>"
     samples = []
-    perf_counter_values = iter([0.0, 0.01, 0.06])
+    perf_counter_values = iter([0.0, 0.01, 0.02, 0.06])
 
     def fake_extract(sample: str):  # noqa: ANN001
         samples.append(sample)
@@ -1298,6 +1298,8 @@ def test_pass_a_uses_canonical_url_even_when_source_fields_still_contain_share(m
         logger=logs.append,
         use_shared_session=False,
     )
+    monkeypatch.setattr(enricher, "_maybe_recover_or_skip_on_checkpoint", lambda: True)
+    monkeypatch.setattr(enricher, "_has_authenticated_session", lambda: True)
     monkeypatch.setattr(
         enricher,
         "_search_for_page",
@@ -1398,6 +1400,7 @@ def test_pass_a_uses_rendered_visible_text_when_page_source_has_no_email(monkeyp
         logger=lambda msg: logs.append(msg),
         use_shared_session=False,
     )
+    monkeypatch.setattr(enricher, "_maybe_recover_or_skip_on_checkpoint", lambda: True)
     monkeypatch.setattr(enricher, "_has_authenticated_session", lambda: True)
     monkeypatch.setattr(night_mode_fb, "_night_fb_has_music_signals", lambda soup, context: False)
     monkeypatch.setattr(night_mode_fb, "should_accept_email_override", lambda *args, **kwargs: (True, "test_override"))
@@ -1830,6 +1833,40 @@ def test_explicit_pass_a_invalid_render_state_preserves_content_unavailable_reas
     assert any("[Night FB][RenderGate] content_unavailable -> targeted restabilization" in msg for msg in logs)
 
 
+def test_explicit_fb_entity_variants_share_one_comparison_key() -> None:
+    urls = [
+        "http://facebook.com/ArtistName",
+        "https://www.facebook.com/artistname/",
+        "https://FACEBOOK.com/artistname",
+        "https://www.facebook.com/profile.php?id=999&ref=share",
+        "https://facebook.com/profile.php?id=999",
+        "https://www.facebook.com/differentartist",
+        "https://www.facebook.com/profile.php?id=888",
+    ]
+    deduped = night_mode_fb._canonicalize_and_dedupe_explicit_fb_urls(urls, debug=True)
+    assert len(deduped) == 4
+    assert deduped[0] == "http://www.facebook.com/artistname"
+    assert deduped[1] == "https://www.facebook.com/profile.php?id=999"
+    assert deduped[2] == "https://www.facebook.com/differentartist"
+    assert deduped[3] == "https://www.facebook.com/profile.php?id=888"
+
+
+def test_explicit_fb_dedupe_diagnostics_report_raw_unique_and_dropped_counts() -> None:
+    urls = [
+        "http://facebook.com/ArtistName",
+        "https://www.facebook.com/artistname/",
+        "https://www.facebook.com/differentartist",
+    ]
+    logs = []
+    night_mode_fb._canonicalize_and_dedupe_explicit_fb_urls(urls, logger=logs.append, debug=True)
+    assert any(
+        "raw_explicit_fb_urls=3" in msg
+        and "unique_canonical_fb_entities=2" in msg
+        and "duplicate_fb_entity_urls_dropped=1" in msg
+        for msg in logs
+    )
+
+
 def test_explicit_fb_urls_canonicalized_and_deduped(monkeypatch) -> None:
     enricher = night_mode_fb.NightModeFacebookEnricher(
         legacy_module=None,
@@ -1893,6 +1930,10 @@ def test_existing_email_short_circuits_before_fb_scrape_even_for_unearthed(monke
         method="regex",
         surface="facebook_main",
     )
+    monkeypatch.setattr(enricher, "_maybe_recover_or_skip_on_checkpoint", lambda: True)
+    monkeypatch.setattr(enricher, "_has_authenticated_session", lambda: True)
+    monkeypatch.setattr(enricher, "_ensure_session", lambda: object())
+    monkeypatch.setattr(enricher, "_search_for_page", lambda *args, **kwargs: "")
 
     result = enricher.enrich_row_with_facebook_night(row)
 
@@ -2201,7 +2242,7 @@ def test_bounded_fb_accepted_page_sweep_main_surface_cap_still_continues_to_abou
     main_url = "https://www.facebook.com/artist"
     about_url = "https://www.facebook.com/artist/about"
     calls = []
-    perf_counter_values = iter([0.0, 0.01, 0.2, 1.0])
+    perf_counter_values = iter([0.0, 0.01, 0.02, 0.2, 1.0, 1.01, 1.02])
 
     class _FakeSoup:
         def get_text(self, separator=" ", strip=True):  # noqa: ANN001
@@ -3763,3 +3804,201 @@ def test_return_contract_unchanged() -> None:
     assert len(result) == 2
     assert isinstance(result[0], list)
     assert isinstance(result[1], bool)
+
+
+# ---------------------------------------------------------------------------
+# Ticket 7: Facebook secondary-surface landed-URL identity guard
+# ---------------------------------------------------------------------------
+
+
+def test_secondary_redirect_to_different_profile_rejected() -> None:
+    """A profile.php?id=... secondary that lands on a different user must be rejected."""
+    assert not night_mode_fb._fb_secondary_landed_on_target(
+        "https://www.facebook.com/profile.php?id=123&sk=about_contact_and_basic_info",
+        "https://www.facebook.com/hugh.middleton1/?sk=directory_contact_info",
+    )
+
+
+def test_secondary_same_named_slug_allowed() -> None:
+    """Case-normalisation and path additions on the same named page are allowed."""
+    assert night_mode_fb._fb_secondary_landed_on_target(
+        "https://www.facebook.com/flawedtheorem/directory_contact_info",
+        "https://www.facebook.com/FlawedTheorem/directory_contact_info",
+    )
+    assert night_mode_fb._fb_secondary_landed_on_target(
+        "https://www.facebook.com/flawedtheorem/about",
+        "https://www.facebook.com/flawedtheorem/about_contact_and_basic_info",
+    )
+
+
+def test_secondary_exact_profile_id_match_allowed() -> None:
+    """Exact profile.php?id=... match after navigation is allowed."""
+    assert night_mode_fb._fb_secondary_landed_on_target(
+        "https://www.facebook.com/profile.php?id=123&sk=about_contact_and_basic_info",
+        "https://www.facebook.com/profile.php?id=123",
+    )
+
+
+def test_secondary_profile_redirect_to_unverifiable_named_rejected() -> None:
+    """profile.php?id=... redirected to a named URL is rejected conservatively."""
+    assert not night_mode_fb._fb_secondary_landed_on_target(
+        "https://www.facebook.com/profile.php?id=123&sk=about",
+        "https://www.facebook.com/someusername",
+    )
+
+
+def test_berca_regression_redirect_mismatch_no_email() -> None:
+    """
+    Reproduce the exact BERCA contamination from the 2026-08-23 audit:
+    profile.php?id=61577580980538&sk=about_contact_and_basic_info
+    → hugh.middleton1/?sk=directory_contact_info
+    Must yield redirect_mismatch with zero extracted emails.
+    """
+
+    def _fake_fetch_surface(url: str):
+        if "about_contact_and_basic_info" in url:
+            return night_mode_fb.FacebookAcceptedPageFetchResult(
+                requested_url=url,
+                resolved_url="https://www.facebook.com/hugh.middleton1/?sk=directory_contact_info",
+                html="<html><body>hugh@outwiththein.com</body></html>",
+                rendered_text="hugh@outwiththein.com",
+                anchor_values=[],
+            )
+        # main page
+        return night_mode_fb.FacebookAcceptedPageFetchResult(
+            requested_url=url,
+            resolved_url=url,
+            html="<html><body></body></html>",
+            rendered_text="",
+            anchor_values=[],
+        )
+
+    result = night_mode_fb._run_bounded_fb_accepted_page_sweep(
+        "https://www.facebook.com/profile.php?id=61577580980538",
+        _fake_fetch_surface,
+        fallback_secondary_urls=night_mode_fb._fetch_fb_about_variants,
+        continue_after_main_email=True,
+    )
+    assert result.secondary_status_reason == "redirect_mismatch"
+    assert result.secondary_emails == []
+    assert result.combined_emails == []
+
+
+def test_secondary_named_slug_redirect_allowed_in_sweep() -> None:
+    """A secondary fetch that redirects to a different path on the same named page
+    must still extract emails (not be treated as a redirect mismatch)."""
+
+    def _fake_fetch_surface(url: str):
+        if "directory_contact_info" in url:
+            return night_mode_fb.FacebookAcceptedPageFetchResult(
+                requested_url=url,
+                resolved_url="https://www.facebook.com/canonicalartist/about_contact_and_basic_info",
+                html="<html><body>artist@test.com</body></html>",
+                rendered_text="artist@test.com",
+                anchor_values=[],
+            )
+        return night_mode_fb.FacebookAcceptedPageFetchResult(
+            requested_url=url,
+            resolved_url=url,
+            html="<html><body></body></html>",
+            rendered_text="",
+            anchor_values=[],
+        )
+
+    result = night_mode_fb._run_bounded_fb_accepted_page_sweep(
+        "https://www.facebook.com/canonicalartist",
+        _fake_fetch_surface,
+        fallback_secondary_urls=night_mode_fb._fetch_fb_about_variants,
+        continue_after_main_email=True,
+    )
+    assert result.secondary_status_reason != "redirect_mismatch"
+    assert "artist@test.com" in result.combined_emails
+
+
+def test_pass_a_berca_redirect_mismatch_blocks_email_extraction(monkeypatch) -> None:
+    """
+    BERCA-style runtime contamination:
+    profile.php?id=61577580980538 → hugh.middleton1/?sk=directory_contact_info
+    Sweep detects redirect_mismatch, but Pass A must also honour it and
+    return zero emails.
+    """
+    enricher = night_mode_fb.NightModeFacebookEnricher(
+        legacy_module=None,
+        username="",
+        password="",
+        logger=None,
+        use_shared_session=False,
+    )
+    monkeypatch.setattr(night_mode_fb, "_night_fb_has_music_signals", lambda *args, **kwargs: True)
+
+    def fake_fetch(url, goto_about=False, collect_surfaces=True):  # noqa: ANN001
+        if "about_contact_and_basic_info" in url:
+            # Fallback lands on logged-in user's profile
+            enricher._last_fb_visible_text = "hugh@outwiththein.com"
+            enricher._last_fb_live_anchor_values = []
+            return (
+                "<html><body>hugh@outwiththein.com</body></html>",
+                "https://www.facebook.com/hugh.middleton1/?sk=directory_contact_info",
+            )
+        # Main page – no emails, triggers fallback
+        enricher._last_fb_visible_text = "Page content without emails"
+        enricher._last_fb_live_anchor_values = []
+        return "<html><body>Page content without emails</body></html>", url
+
+    monkeypatch.setattr(enricher, "_fetch_html_with_url", fake_fetch)
+
+    candidate = enricher._scrape_single_fb_candidate(
+        "https://www.facebook.com/profile.php?id=61577580980538",
+        {"Email_All": ""},
+        "BERCA",
+        candidate_context={"explicit_accepted_url": True},
+    )
+
+    night_result, emails, driver_kind, outcome = candidate
+    assert emails == []
+    assert outcome == "no_email_on_page"
+    assert night_result is None or not night_result.email
+
+
+def test_pass_a_lena_cross_page_redirect_mismatch_no_email(monkeypatch) -> None:
+    """
+    Lena-style runtime contamination:
+    profile.php?id=100076208083591 → unrelated post or profile page.
+    Sweep returns redirect_mismatch; Pass A must not extract emails.
+    """
+    enricher = night_mode_fb.NightModeFacebookEnricher(
+        legacy_module=None,
+        username="",
+        password="",
+        logger=None,
+        use_shared_session=False,
+    )
+    monkeypatch.setattr(night_mode_fb, "_night_fb_has_music_signals", lambda *args, **kwargs: True)
+
+    def fake_fetch(url, goto_about=False, collect_surfaces=True):  # noqa: ANN001
+        if "about_contact_and_basic_info" in url:
+            # Redirected to an unrelated named profile
+            enricher._last_fb_visible_text = "random@email.com"
+            enricher._last_fb_live_anchor_values = []
+            return (
+                "<html><body>random@email.com</body></html>",
+                "https://www.facebook.com/someunrelateduser",
+            )
+        # Main page – no emails, triggers fallback
+        enricher._last_fb_visible_text = "Page content without emails"
+        enricher._last_fb_live_anchor_values = []
+        return "<html><body>Page content without emails</body></html>", url
+
+    monkeypatch.setattr(enricher, "_fetch_html_with_url", fake_fetch)
+
+    candidate = enricher._scrape_single_fb_candidate(
+        "https://www.facebook.com/profile.php?id=100076208083591",
+        {"Email_All": ""},
+        "Lena Brysch",
+        candidate_context={"explicit_accepted_url": True},
+    )
+
+    night_result, emails, driver_kind, outcome = candidate
+    assert emails == []
+    assert outcome == "no_email_on_page"
+    assert night_result is None or not night_result.email

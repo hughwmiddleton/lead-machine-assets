@@ -44,9 +44,10 @@ from source_scheduler import (
     canonicalize_facebook_url,
     ensure_canonical_facebook_url,
     preferred_upstream_identity_hint,
+    _FB_BLOCKED_PUBLIC_PATH_SEGMENTS,
 )
 from email_provenance import merge_email_provenance_into_target, row_has_successful_source_url_provenance
-from email_normalizer import filter_system_telemetry_emails, normalize_email_value
+from email_normalizer import filter_platform_support_emails, filter_system_telemetry_emails, normalize_email_value
 from fb_email_skip_gate import row_has_usable_email_for_fb_skip
 
 try:
@@ -448,6 +449,43 @@ def _load_fb_page_with_timeout(
     if not driver or not url:
         return "", url or "", False
 
+    # Shared helper: classify a Facebook path as blocked using the canonical
+    # blocked-route authority from source_scheduler.
+    def _is_blocked_fb_path(path: str) -> bool:
+        lowered = (path or "").lower().rstrip("/")
+        if not lowered:
+            return False
+        segments = [seg for seg in lowered.strip("/").split("/") if seg]
+        if segments and segments[0] in _FB_BLOCKED_PUBLIC_PATH_SEGMENTS:
+            return True
+        redirect_wrappers = (
+            "/l.php",
+            "/flx/warn",
+            "/share.php",
+            "/share/",
+            "/si/ajax/l/redirect/",
+            "/ajax/sharer/",
+        )
+        return any(lowered == wrapper or lowered.startswith(f"{wrapper}/") for wrapper in redirect_wrappers)
+
+    # Pre-navigation guard: reject private/non-public Facebook URLs.
+    def _is_blocked_fb_nav_url(nav_url: str) -> bool:
+        try:
+            parsed = urllib.parse.urlparse(str(nav_url or "").strip())
+        except Exception:
+            return True
+        host = (parsed.netloc or "").lower()
+        if "facebook.com" not in host and host not in {"fb.me", "www.fb.me", "m.fb.me"}:
+            return False  # Not a Facebook URL; let other layers handle it.
+        path = parsed.path or ""
+        if path in {"", "/"}:
+            return False  # Allow homepage.
+        return _is_blocked_fb_path(path)
+
+    if _is_blocked_fb_nav_url(url):
+        _log(logger, f"[FB Enrich] Blocked private/non-public Facebook URL before navigation: {url}")
+        return "", url, False
+
     timed_out = False
     baseline_url = ""
     baseline_html = ""
@@ -475,16 +513,10 @@ def _load_fb_page_with_timeout(
         path = (parsed.path or "").strip()
         if path in {"", "/"}:
             return False
-        lowered_path = path.lower()
-        redirect_wrappers = (
-            "/l.php",
-            "/flx/warn",
-            "/share.php",
-            "/share/",
-            "/si/ajax/l/redirect/",
-            "/ajax/sharer/",
-        )
-        return not any(lowered_path == wrapper or lowered_path.startswith(f"{wrapper}/") for wrapper in redirect_wrappers)
+        # Post-redirect guard: reject redirect wrappers and private/non-public surfaces.
+        if _is_blocked_fb_path(path):
+            return False
+        return True
 
     def _read_min_nav_ready_probe() -> Tuple[str, bool]:
         try:
@@ -604,6 +636,10 @@ def _load_fb_page_with_timeout(
 
                     url_valid = _is_valid_fb_handoff_url(current_url, baseline_url)
                     usable_handoff_url = _is_valid_fb_handoff_url(current_url, "")
+                    target_url_reached = bool(
+                        usable_handoff_url
+                        and str(current_url or "").rstrip("/") == str(url or "").rstrip("/")
+                    )
                     minimal_ready = bool(ready_state in {"interactive", "complete"} or has_body or surface_ready)
                     content_ready = False
                     if minimal_ready and usable_handoff_url:
@@ -615,7 +651,7 @@ def _load_fb_page_with_timeout(
                     # A non-baseline, non-wrapper Facebook URL is enough for the
                     # accepted-page handoff. Waiting for DOM probes to align here
                     # can strand successful SPA navigations in the timeout path.
-                    if url_valid or content_ready or (minimal_ready and usable_handoff_url):
+                    if url_valid or content_ready or (minimal_ready and target_url_reached):
                         break
                     time.sleep(0.1)
                 else:
@@ -2421,13 +2457,14 @@ def _canonicalize_share_resolved_fb_url(url: str) -> str:
 def _canonicalize_and_dedupe_explicit_fb_urls(
     urls: Sequence[str], logger: LoggerFn = None, debug: bool = False
 ) -> List[str]:
-    """Normalize and dedupe explicit FB URLs while preserving order."""
+    """Normalize and dedupe explicit FB URLs while preserving order using canonical entity identity."""
 
-    before_count = len(urls or [])
+    raw_list = [str(u or "").strip() for u in (urls or []) if str(u or "").strip()]
+    before_count = len(raw_list)
     seen: Set[str] = set()
     canonical: List[str] = []
 
-    for raw in urls or []:
+    for raw in raw_list:
         if _is_invalid_fb_value(raw):
             if debug and logger:
                 _log(logger, f"[Night FB] Skipping invalid facebook_url value: {raw}")
@@ -2445,27 +2482,21 @@ def _canonicalize_and_dedupe_explicit_fb_urls(
             pass
 
         try:
-            parsed_for_key = urllib.parse.urlsplit(norm)
-            key = urllib.parse.urlunsplit(
-                (
-                    (parsed_for_key.scheme or "https").lower(),
-                    (parsed_for_key.netloc or "").lower(),
-                    parsed_for_key.path,
-                    parsed_for_key.query,
-                    "",
-                )
-            )
+            entity_key = canonicalize_facebook_url(norm) or norm
         except Exception:
-            key = norm
+            entity_key = norm
 
-        if key in seen:
+        if entity_key in seen:
             continue
-        seen.add(key)
+        seen.add(entity_key)
         canonical.append(norm)
 
     after_count = len(canonical)
     if debug and logger and before_count and before_count != after_count:
-        _log(logger, f"[Night FB] Deduplicated explicit FB URLs: {before_count} -> {after_count}")
+        _log(
+            logger,
+            f"[Night FB] Deduplicated explicit FB URLs: raw_explicit_fb_urls={before_count} unique_canonical_fb_entities={after_count} duplicate_fb_entity_urls_dropped={before_count - after_count}",
+        )
 
     return canonical
 
@@ -5496,7 +5527,7 @@ def _extract_emails_from_html(
         extraction_budget_s = float(expensive_fallback_budget_s)
     except (TypeError, ValueError):
         extraction_budget_s = 0.0
-    extraction_started_at = time.perf_counter()
+    extraction_started_at = time.perf_counter() if extraction_budget_s > 0.0 else 0.0
 
     def _expensive_budget_exhausted() -> bool:
         if extraction_budget_s <= 0.0:
@@ -5545,6 +5576,7 @@ def _extract_emails_from_html(
 
     def _finalize_emails(candidates: Sequence[str]) -> List[str]:
         filtered_emails = _filter_low_quality_fb_emails(list(candidates or []))
+        filtered_emails = filter_platform_support_emails(filtered_emails)
         unique: List[str] = []
         seen: Set[str] = set()
         for email in filtered_emails:
@@ -5590,7 +5622,7 @@ def _extract_emails_from_html(
         input_was_truncated = len(raw_html) > _FB_RAW_HTML_SCAN_CHAR_LIMIT
         chunk_size = _FB_RAW_HTML_SCAN_CHUNK
         overlap = 256  # avoid splitting an email at a chunk boundary
-        scan_start = time.perf_counter()
+        scan_start = extraction_started_at if extraction_budget_s > 0.0 else time.perf_counter()
         offset = 0
         while offset < raw_scan_limit:
             end = min(offset + chunk_size, raw_scan_limit)
@@ -6003,6 +6035,13 @@ def _run_bounded_fb_accepted_page_sweep(
     if result.secondary_status_reason and not (
         secondary_surface.html or secondary_surface.rendered_text or secondary_surface.anchor_values
     ):
+        return result
+
+    # Ticket 7: verify secondary surface did not redirect to a different entity
+    if secondary_surface.resolved_url and not _fb_secondary_landed_on_target(
+        secondary_url, secondary_surface.resolved_url
+    ):
+        result.secondary_status_reason = "redirect_mismatch"
         return result
 
     # --- StallTrace: secondary email extraction ---
@@ -6798,6 +6837,48 @@ def _fetch_fb_about_variants(base_url: str) -> List[str]:
     return variants
 
 
+def _fb_secondary_landed_on_target(requested_url: str, resolved_url: str) -> bool:
+    """
+    Validate that a secondary/about fetch landed on the same Facebook entity
+    as the requested artist page. Prevents cross-page redirect contamination
+    (e.g. Facebook redirecting profile.php?id=... to the logged-in user's profile).
+    """
+    req_norm = _normalise_fb_url(requested_url)
+    res_norm = _normalise_fb_url(resolved_url)
+
+    if req_norm and res_norm and req_norm == res_norm:
+        return True
+
+    try:
+        req_parsed = urllib.parse.urlparse(req_norm or "")
+        res_parsed = urllib.parse.urlparse(res_norm or "")
+    except Exception:
+        return False
+
+    # For profile.php URLs: require exact ID match (conservative).
+    # If Facebook redirects to a named profile, another ID, a post, feed,
+    # logged-in user, or any unverifiable entity, reject.
+    if req_parsed.path.lower() == "/profile.php":
+        req_qs = urllib.parse.parse_qs(req_parsed.query, keep_blank_values=False)
+        req_id = (req_qs.get("id") or [None])[0]
+        if req_id:
+            if res_parsed.path.lower() == "/profile.php":
+                res_qs = urllib.parse.parse_qs(res_parsed.query, keep_blank_values=False)
+                res_id = (res_qs.get("id") or [None])[0]
+                if res_id == req_id:
+                    return True
+            return False
+
+    # For named URLs: base slug must match.
+    # Allows harmless case normalization and query/path additions.
+    req_slug = req_parsed.path.strip("/").split("/")[0] if req_parsed.path else ""
+    res_slug = res_parsed.path.strip("/").split("/")[0] if res_parsed.path else ""
+    if req_slug and res_slug and req_slug.lower() == res_slug.lower():
+        return True
+
+    return False
+
+
 def _pick_fb_contact_link(soup: BeautifulSoup, base_url: str) -> Optional[str]:
     """
     Choose a single valid Facebook contact/about surface from the main page.
@@ -6825,7 +6906,7 @@ def _pick_fb_contact_link(soup: BeautifulSoup, base_url: str) -> Optional[str]:
         "photos",
         "watch",
         "videos",
-    }
+    } | _FB_BLOCKED_PUBLIC_PATH_SEGMENTS
     allowed_sk = {"about", "about_contact_and_basic_info", "about_details"}
 
     def _canonicalize_resolved(candidate_url: str) -> Optional[Tuple[str, urllib.parse.ParseResult]]:
@@ -9818,7 +9899,7 @@ class NightModeFacebookEnricher:
         explicit_visible_contact_surfaces: List[Tuple[FacebookAcceptedPageFetchResult, str]] = []
         if explicit_pass_a:
             self._last_pass_a_visible_contact_surfaces = []
-            if sweep_result.secondary_surface:
+            if sweep_result.secondary_surface and sweep_result.secondary_status_reason != "redirect_mismatch":
                 explicit_visible_contact_surfaces.append(
                     (
                         sweep_result.secondary_surface,
@@ -9885,6 +9966,9 @@ class NightModeFacebookEnricher:
             if sweep_result.secondary_status_reason == "login_wall" or _is_fb_login_or_security_url(final_about):
                 about_result = "blocked_login"
                 self.fb_rows_skipped["challenge"] += 1
+            elif sweep_result.secondary_status_reason == "redirect_mismatch":
+                about_result = "redirect_mismatch"
+                self.fb_rows_skipped["challenge"] += 1
             else:
                 lower_html = (about_html or "").lower()
                 if any(tok in lower_html for tok in ("checkpoint", "consent", "cookie", "privacy")):
@@ -9934,7 +10018,7 @@ class NightModeFacebookEnricher:
 
         if explicit_pass_a and not usable_combined_emails_before_visible_rescue:
             visible_contact_surfaces: List[Tuple[FacebookAcceptedPageFetchResult, str]] = []
-            if sweep_result.secondary_surface:
+            if sweep_result.secondary_surface and sweep_result.secondary_status_reason != "redirect_mismatch":
                 visible_contact_surfaces.append(
                     (
                         sweep_result.secondary_surface,
@@ -10120,9 +10204,12 @@ class NightModeFacebookEnricher:
             match_level_ctx = str(candidate_context.get("match_level") or "")
         name_consistency_flag_ctx: Optional[int] = None
         try:
-            raw_flag = row.get("name_consistency_flag")
-            if raw_flag is not None and raw_flag != "":
-                name_consistency_flag_ctx = int(raw_flag)
+            # Canonical read (1 = consistent). Legacy artifacts written before
+            # the polarity fix resolve to 0 or None rather than being trusted,
+            # so a stale row falls through to the match_level derivation below.
+            import final_checker
+
+            name_consistency_flag_ctx = final_checker.read_name_consistency_flag(row)
         except Exception:
             name_consistency_flag_ctx = None
         if name_consistency_flag_ctx is None:
@@ -10203,7 +10290,7 @@ class NightModeFacebookEnricher:
         candidate_url: str = "",
         email_extract_method: str = "",
     ) -> Optional[NightModeFacebookResult]:
-        emails = filter_system_telemetry_emails(emails)
+        emails = filter_platform_support_emails(filter_system_telemetry_emails(emails))
         if not emails and not allow_empty:
             return None
         primary = _choose_primary_email(emails, artist_name, source_context=source_context) if emails else None
@@ -10276,9 +10363,11 @@ class NightModeFacebookEnricher:
             )
             return any(tok in status_norm for tok in tokens)
 
+        email_found = bool((night_result.email or "").strip() or emails)
         target_row["Email"] = night_result.email or target_row.get("Email", "")
         target_row["Email_All"] = night_result.email_all
-        target_row["Email_Type"] = night_result.email_type
+        if email_found:
+            target_row["Email_Type"] = night_result.email_type
         canonical_fb_url = canonicalize_facebook_url(night_result.facebook_url)
         if canonical_fb_url:
             next_fb_url, _ = _guard_authoritative_fb_url_update(
@@ -10289,7 +10378,10 @@ class NightModeFacebookEnricher:
                 context="apply_night_fb_result",
             )
             target_row["Facebook_URL"] = next_fb_url
-        provenance_emails = emails or night_result.email_all or night_result.email
+        # Only emails extracted from this Facebook attempt may receive Facebook
+        # provenance. Email_All also carries prior contacts forward on no-result
+        # passes and is not evidence that Facebook contained those addresses.
+        provenance_emails = emails
         provenance_surface = "facebook_about" if (night_result.email_source or "").strip().lower() == "about" else "facebook_main"
         provenance_source_context = getattr(night_result, "source_context", None)
         if isinstance(provenance_source_context, dict) and isinstance(provenance_source_context.get("surfaces"), dict):
@@ -10326,7 +10418,7 @@ class NightModeFacebookEnricher:
                     method=bucket_method,
                     surface=surface,
                 )
-        else:
+        elif provenance_emails:
             merge_email_provenance_into_target(
                 target_row,
                 provenance_emails,
@@ -10361,7 +10453,7 @@ class NightModeFacebookEnricher:
                 return str(val or "").strip()
             except Exception:
                 return ""
-        if _coerce(target_row.get("Email")):
+        if email_found and _coerce(target_row.get("Email")):
             if _coerce(target_row.get("Email_Source_URL")) == "":
                 target_row["Email_Source_URL"] = (
                     page_url
@@ -10374,7 +10466,6 @@ class NightModeFacebookEnricher:
             if _coerce(target_row.get("Email_Extract_Method")) == "":
                 method = night_result.email_extract_method or "regex"
                 target_row["Email_Extract_Method"] = method
-        email_found = bool((night_result.email or "").strip() or emails)
         if emails:
             # Track FB-applied emails for downstream defensive stripping.
             normalized_emails = []

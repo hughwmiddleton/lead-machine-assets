@@ -47,12 +47,17 @@ from email_provenance import (
     apply_email_role_metadata_df,
     get_email_provenance_entry,
     get_row_email_provenance,
+    infer_email_surface,
     merge_email_provenance_into_target,
     normalize_email_key,
     parse_email_provenance_json,
     row_has_successful_source_url_provenance,
 )
-from email_normalizer import filter_system_telemetry_emails
+from email_normalizer import (
+    filter_obvious_placeholder_emails,
+    filter_platform_support_emails,
+    filter_system_telemetry_emails,
+)
 from fb_email_skip_gate import (
     is_quarantined_repeat_email_row,
     row_has_usable_email_for_fb_skip,
@@ -1251,7 +1256,7 @@ def _log_email_all_change(row_idx: int, artist: str, before: str, after: str, so
 
 
 def _guard_email_all_sources(row: pd.Series, email_all: str, logger: LoggerFn = None) -> None:
-    """Debug-only guard: warn if Email_All contains emails not present in row-local sources."""
+    """Debug-only guard: warn if Email_All lacks row-local email evidence."""
     if os.getenv("EMAIL_ALL_GUARD", "0") not in {"1", "true", "TRUE"}:
         return
     sources = []
@@ -1261,7 +1266,11 @@ def _guard_email_all_sources(row: pd.Series, email_all: str, logger: LoggerFn = 
         if col in {"Email_All", "Suspect_Email_All"}:
             continue
         sources.extend(normalize_emails(_cell_str(row.get(col))))
+    # Email_Provenance_JSON is an authoritative per-email ledger, not a plain
+    # email-valued column. Parse its keys explicitly instead of treating the
+    # serialized JSON as an email string.
     source_set = set(sources)
+    source_set.update(get_row_email_provenance(row))
     for email in normalize_emails(email_all):
         if email not in source_set:
             artist = _cell_str(row.get("Artist Name"))
@@ -1282,21 +1291,30 @@ def _set_email_all(
     source_type: str = "",
     method: str = "regex",
     surface: str = "",
+    provenance_emails: Optional[Union[str, Sequence[str]]] = None,
 ) -> str:
     """Centralized Email_All setter with merge + logging + guard."""
     existing_val = _cell_str(df.at[idx, "Email_All"] if "Email_All" in df.columns else "")
-    before_list = filter_system_telemetry_emails(normalize_emails(existing_val))
+    before_list = filter_platform_support_emails(filter_system_telemetry_emails(normalize_emails(existing_val)))
     before_count = len(before_list)
-    if source_url or source_type or surface:
+    # Filter platform support emails from incoming batch before provenance merge.
+    if isinstance(new_emails, str):
+        filtered_new = filter_platform_support_emails(filter_system_telemetry_emails(normalize_emails(new_emails)))
+    else:
+        filtered_new = filter_platform_support_emails(filter_system_telemetry_emails(list(new_emails)))
+    provenance_values = filtered_new if provenance_emails is None else filter_platform_support_emails(
+        filter_system_telemetry_emails(_merge_email_lists("", provenance_emails))
+    )
+    if provenance_values and (source_url or source_type or surface):
         merge_email_provenance_into_target(
             (df, idx),
-            new_emails,
+            provenance_values,
             source_url=source_url,
             source_type=source_type,
             method=method,
             surface=surface,
         )
-    merged_list = _rank_contact_emails_for_row(df.loc[idx], _merge_email_lists(existing_val, new_emails))
+    merged_list = _rank_contact_emails_for_row(df.loc[idx], _merge_email_lists(existing_val, filtered_new))
     merged_str = ";".join(merged_list)
     _bump_email_summary("emails_found", max(0, len(merged_list) - before_count))
     df.at[idx, "Email_All"] = merged_str
@@ -1628,10 +1646,6 @@ def recompute_final_status_post_enrichment(df: pd.DataFrame, logger: LoggerFn = 
 
         if status == "BLOCK":
             # Preserve the existing late BLOCK repair contract.
-            if "FB_Status" in df.columns:
-                fb_status_raw = str(row.get("FB_Status", "") or "")
-                if _fb_status_is_rejected(fb_status_raw):
-                    continue
             if "duplicate_email_flag" in df.columns and _truthy(row.get("duplicate_email_flag", 0)):
                 continue
             if "duplicate_artist_flag" in df.columns and _truthy(row.get("duplicate_artist_flag", 0)):
@@ -1641,11 +1655,18 @@ def recompute_final_status_post_enrichment(df: pd.DataFrame, logger: LoggerFn = 
             dup_artist = _parse_intlike(row.get("duplicate_artist_flag", 0), 0)
             origin_flag = _parse_intlike(row.get("origin_match_flag", 1), 1)
             dir_conflict = _parse_intlike(row.get("directory_conflict_flag", 0), 0)
-            name_flag = _parse_intlike(row.get("name_consistency_flag", 0), 0)
+            # Canonical read: 1 = consistent, 0 = inconsistent, None = unknown.
+            # Legacy artifacts written before the polarity fix cannot drive a
+            # downgrade here, because they never resolve to 1.
+            name_flag = final_checker.read_name_consistency_flag(row)
 
-            # Hard BLOCK guards
-            fb_status_val = str(row.get("FB_Status", "") or "")
-            if _fb_status_is_rejected(fb_status_val):
+            # Hard BLOCK guards. Contact safety is decided by the email's own
+            # provenance: platform/support addresses, private-route surfaces and
+            # emails lifted from a rejected Facebook surface stay blocked. A
+            # Facebook rejection that did not produce this row's email is an
+            # enrichment failure, not a contact-safety failure, and must not
+            # condemn an email from an independent trusted source.
+            if final_checker.classify_contact_attribution(row) == final_checker.ATTRIBUTION_UNSAFE:
                 continue
             if dup_email == 1 or dup_artist == 1:
                 continue
@@ -1692,8 +1713,10 @@ def recompute_final_status_post_enrichment(df: pd.DataFrame, logger: LoggerFn = 
         )
         if any(str(row_dict.get(column, "") or "").strip() == "" for column in required_classifier_inputs):
             continue
-        name_consistency_flag = _parse_intlike(row_dict.get("name_consistency_flag", 0), 0)
+        name_consistency_flag = final_checker.read_name_consistency_flag(row_dict)
         flags = {
+            # Canonical column is 1 = consistent; compute_final_status wants
+            # 1 = mismatch. Unknown (legacy/ambiguous) is treated as mismatch.
             "name_flag": 0 if name_consistency_flag == 1 else 1,
             "dir_conflict_flag": _parse_intlike(row_dict.get("directory_conflict_flag", 0), 0),
             "dup_email_flag": _parse_intlike(row_dict.get("duplicate_email_flag", 0), 0),
@@ -1922,6 +1945,7 @@ def _get_email_source_trust(source_type: Any = "", surface: Any = "") -> int:
 
 def _rank_contact_emails_for_row(row_like: Any, values: Union[str, Sequence[str], None]) -> List[str]:
     normalized = filter_system_telemetry_emails(_merge_email_lists("", values or []))
+    normalized = filter_platform_support_emails(normalized)
     if not normalized:
         return []
 
@@ -1981,14 +2005,32 @@ def _rank_contact_emails_for_row(row_like: Any, values: Union[str, Sequence[str]
 
 def _select_primary_email_for_row(row_like: Any, email: str, email_all: str) -> Tuple[str, List[str]]:
     ranked = _rank_contact_emails_for_row(row_like, [email_all, email])
-    return (ranked[0] if ranked else "", ranked)
+    selectable = filter_obvious_placeholder_emails(ranked)
+    return (selectable[0] if selectable else "", selectable)
 
 
-def _align_row_email_provenance(df: pd.DataFrame, idx: int, selected_email: str) -> None:
-    if df is None or idx not in df.index or not selected_email:
+def _align_row_email_provenance(
+    df: pd.DataFrame,
+    idx: Any,
+    selected_email: str,
+    previous_email: str = "",
+) -> None:
+    if df is None or idx not in df.index:
         return
-    meta = get_email_provenance_entry(df.loc[idx], selected_email)
-    if not meta:
+
+    selected_key = normalize_email_key(selected_email)
+    previous_key = normalize_email_key(previous_email)
+    explicit_map = (
+        parse_email_provenance_json(df.at[idx, EMAIL_PROVENANCE_JSON_COL])
+        if EMAIL_PROVENANCE_JSON_COL in df.columns
+        else {}
+    )
+    meta = dict(explicit_map.get(selected_key) or {})
+
+    # A legacy row with no per-email map may retain its source bundle only while
+    # its primary is unchanged. Once ranking changes the address, the old
+    # row-level fields must not be reinterpreted as provenance for the winner.
+    if not meta and selected_key == previous_key:
         return
 
     for column, key in (
@@ -2000,9 +2042,7 @@ def _align_row_email_provenance(df: pd.DataFrame, idx: int, selected_email: str)
     ):
         if column not in df.columns:
             df[column] = ""
-        value = _cell_str(meta.get(key, ""))
-        if value:
-            df.at[idx, column] = value
+        df.at[idx, column] = _cell_str(meta.get(key, ""))
 
 
 def _rank_contact_emails(values: Union[str, Sequence[str], None]) -> List[str]:
@@ -2069,13 +2109,17 @@ def _consolidate_email_all(df: pd.DataFrame) -> pd.DataFrame:
 
     df["Email_All"] = df.apply(_build_email_all, axis=1)
     try:
-        for idx in range(len(df.index)):
+        for idx in df.index:
             if _is_quarantined(df.loc[idx]):
                 continue
             merged_str = _set_email_all(df, idx, df.at[idx, "Email_All"], source="consolidate", logger=_LOGGER.info)
+            previous_email = df.at[idx, "Email"]
             primary_email, ranked = _select_primary_email_for_row(df.loc[idx], df.at[idx, "Email"], merged_str)
             df.at[idx, "Email"] = primary_email if ranked else ""
-            _align_row_email_provenance(df, idx, primary_email)
+            for primary_column in ("Primary Email", "Primary_Email"):
+                if primary_column in df.columns:
+                    df.at[idx, primary_column] = primary_email if ranked else ""
+            _align_row_email_provenance(df, idx, primary_email, previous_email=previous_email)
     except Exception:
         pass
     apply_email_role_metadata_df(df)
@@ -2787,11 +2831,19 @@ def _write_rows_to_csv(rows: Iterable[Any], path: str, source_directory: str = "
     _ensure_parent(path)
     materialized: List[Any] = list(rows or [])
     fallback_cols = RAW_FALLBACK_COLUMNS.copy()
-    canonical_lead_source = "Triple J Unearthed" if str(source_directory or "").strip().lower() == "unearthed" else source_directory
-    canonical_source_directory = "unearthed" if str(source_directory or "").strip().lower() == "unearthed" else source_directory
-    canonical_legacy_source_directory = (
-        "Triple J Unearthed" if str(source_directory or "").strip().lower() == "unearthed" else source_directory
-    )
+    _sd = str(source_directory or "").strip().lower()
+    if _sd == "unearthed":
+        canonical_lead_source = "Triple J Unearthed"
+        canonical_source_directory = "unearthed"
+        canonical_legacy_source_directory = "Triple J Unearthed"
+    elif _sd == "undiscovered_music":
+        canonical_lead_source = "Undiscovered Music"
+        canonical_source_directory = "undiscovered_music"
+        canonical_legacy_source_directory = "Undiscovered Music"
+    else:
+        canonical_lead_source = source_directory
+        canonical_source_directory = source_directory
+        canonical_legacy_source_directory = source_directory
     if not materialized:
         df = pd.DataFrame(columns=fallback_cols)
         if source_directory:
@@ -3085,6 +3137,8 @@ def infer_discovery_source(row: pd.Series) -> str:
         source_token = lower_src or lower_job
         if "unearthed" in source_token:
             label = "Triple J Unearthed"
+        elif "undiscovered_music" in source_token:
+            label = "Undiscovered Music"
         elif "soundcloud" in source_token:
             label = "SoundCloud directory"
         elif "bandcamp" in source_token:
@@ -3114,8 +3168,20 @@ def infer_email_source(row: pd.Series) -> str:
     if email_type == "website_enrich" or email_source_type == "website_enrich":
         return "Website"
 
+    if email_type.startswith("ig_") or email_source_type.startswith("instagram"):
+        return "Instagram profile"
+
+    if email_source_type.startswith("bandcamp"):
+        return "Bandcamp page"
+
+    if email_source_type.startswith("soundcloud"):
+        return "SoundCloud profile"
+
     if "unearthed" in src_dir or "unearthed" in src_url:
         return "Triple J Unearthed profile"
+
+    if "undiscovered_music" in src_dir or "undiscovered.music" in src_url:
+        return "Undiscovered Music profile"
 
     if "soundcloud" in src_dir or "soundcloud.com" in src_url:
         return "SoundCloud profile"
@@ -3141,12 +3207,24 @@ def _selected_email_provenance(row_like: Any, selected_email: str) -> Dict[str, 
 def _facebook_email_surface_hint(source: Any) -> str:
     if source is None or not hasattr(source, "get"):
         return "facebook_main"
+    source_type = _cell_str(source.get("Email_Source_Type") or source.get("email_source_type")).lower()
+    source_url = _cell_str(
+        source.get("Email_Source_URL")
+        or source.get("email_source_url")
+        or source.get("Facebook_URL")
+    )
+    if source_type and not source_type.startswith("facebook"):
+        selected_email = _cell_str(source.get("Email") or source.get("Primary Email"))
+        selected_meta = get_email_provenance_entry(source, selected_email)
+        return _cell_str(selected_meta.get("surface")) or infer_email_surface(
+            source_type=source_type,
+            source_url=source_url,
+        )
     surface_raw = _cell_str(source.get("FB_Email_Source") or source.get("email_source")).lower()
     if surface_raw == "about":
         return "facebook_about"
     if surface_raw == "main":
         return "facebook_main"
-    source_url = _cell_str(source.get("Email_Source_URL") or source.get("email_source_url") or source.get("Facebook_URL"))
     return "facebook_about" if "/about" in source_url.lower() else "facebook_main"
 
 
@@ -3491,6 +3569,8 @@ def run_master_enrichment(
     """
     _safe_log(logger, f"[Master Enrich] Starting cross-directory enrichment for {seed_csv_path}")
     local_night_fb_run_state = False
+    musicbrainz_shadow_temp_path = ""
+    master_enrichment_seed_path = seed_csv_path
     if night_mode and night_fb_run_state is None:
         night_fb_run_state = create_night_fb_run_state(
             os.environ.get("FB_USERNAME", "").strip(),
@@ -3510,6 +3590,28 @@ def run_master_enrichment(
         unearthed_path_final = ""
         run_dir = Path(output_csv_path).resolve().parent
         yield_tracker = cross_directory_enricher.EnrichmentYieldTracker()
+        try:
+            from musicbrainz_identity import musicbrainz_shadow_enabled, run_musicbrainz_shadow_csv
+
+            if musicbrainz_shadow_enabled():
+                run_dir.mkdir(parents=True, exist_ok=True)
+                output_name = Path(output_csv_path).name
+                musicbrainz_shadow_temp_path = str(
+                    run_dir / f".{output_name}.musicbrainz_shadow.csv"
+                )
+                run_musicbrainz_shadow_csv(
+                    seed_csv_path,
+                    musicbrainz_shadow_temp_path,
+                    logger=logger,
+                )
+                master_enrichment_seed_path = musicbrainz_shadow_temp_path
+                _safe_log(logger, "[Master Enrich] MusicBrainz shadow identity stage completed")
+        except Exception as exc:
+            master_enrichment_seed_path = seed_csv_path
+            _safe_log(
+                logger,
+                f"[Master Enrich] MusicBrainz shadow stage failed safely: {type(exc).__name__}: {exc}",
+            )
         try:
             DETECT_RETRIES = 6
             DETECT_SLEEP_S = 1.0
@@ -3623,7 +3725,7 @@ def run_master_enrichment(
 
         first_pass_state: Dict[str, Any] = {}
         cross_directory_enricher.run_cross_directory_enrichment(
-            seed_csv_path,
+            master_enrichment_seed_path,
             output_csv_path,
             bandcamp_csv_path=bandcamp_path_final or "",
             soundcloud_csv_path=soundcloud_path_final or "",
@@ -3706,6 +3808,11 @@ def run_master_enrichment(
         _safe_log(logger, f"[Master Enrich] Enricher failed safely: {exc}")
         return _resolve_master_enrichment_failure_output(seed_csv_path, output_csv_path, logger=logger)
     finally:
+        if musicbrainz_shadow_temp_path:
+            try:
+                os.unlink(musicbrainz_shadow_temp_path)
+            except OSError:
+                pass
         if local_night_fb_run_state:
             close_night_fb_run_state(night_fb_run_state)
 
@@ -3813,6 +3920,23 @@ def _run_unearthed_full_pipeline(job_config: Dict[str, Any], raw_output_path: st
     return raw_output_path
 
 
+def _spotify_dispatch_inputs(job_config: Mapping[str, Any]) -> Tuple[Any, str]:
+    """Route Spotify playlist seeds separately from free-text searches."""
+    from spotify_scraper import _extract_playlist_id
+
+    explicit_playlist_ids = job_config.get("playlist_ids")
+    if explicit_playlist_ids:
+        return explicit_playlist_ids, ""
+
+    input_seed = str(job_config.get("input_seed_csv") or "").strip()
+    playlist_id = _extract_playlist_id(input_seed)
+    if playlist_id:
+        return [playlist_id], ""
+
+    search_term = str(job_config.get("search_term") or input_seed).strip()
+    return None, search_term
+
+
 def run_directory_job(job_config: Dict[str, Any], raw_output_path: str, logger: LoggerFn = None) -> str:
     """
     Run a single directory scraper based on job_config.
@@ -3907,9 +4031,10 @@ def run_directory_job(job_config: Dict[str, Any], raw_output_path: str, logger: 
             _nm_ue_dispatch_warn_if_slow(logger, "scrape_call", scrape_call_start)
 
         elif directory == "spotify":
+            playlist_ids, search_term = _spotify_dispatch_inputs(job_config)
             params = {
-                "playlist_ids": job_config.get("playlist_ids"),
-                "search_term": job_config.get("search_term") or job_config.get("input_seed_csv") or "",
+                "playlist_ids": playlist_ids,
+                "search_term": search_term,
                 "spotify_client_id": job_config.get("spotify_client_id") or os.environ.get("SPOTIFY_CLIENT_ID"),
                 "spotify_client_secret": job_config.get("spotify_client_secret") or os.environ.get("SPOTIFY_CLIENT_SECRET"),
             }
@@ -3990,6 +4115,32 @@ def run_directory_job(job_config: Dict[str, Any], raw_output_path: str, logger: 
             _run_unearthed_full_pipeline(job_config, output_path, module, logger)
             finalize_result = _finalize_tmp_csv(tmp_path, final_path)
             result_path = str(finalize_result.final_path)
+            success = True
+
+        elif directory == "undiscovered_music":
+            from undiscovered_music import scrape_undiscovered_music
+
+            params = {
+                "max_results": job_config.get("max_results") or job_config.get("target_count") or job_config.get("target_valid_leads"),
+                "url": job_config.get("url") or job_config.get("seed") or job_config.get("input_seed_csv") or "",
+            }
+            rows = scrape_undiscovered_music(target_count, params, logger_fn=logger)
+            write_result = _write_rows_to_csv(rows, final_path.as_posix(), source_directory="undiscovered_music")
+            result_path = str(write_result.final_path)
+            success = True
+
+        elif directory == "amrap":
+            from amrap_scraper import scrape_amrap
+
+            rows = scrape_amrap(
+                target_count=target_count or 200,
+                state_filter=str(job_config.get("amrap_state") or "").strip(),
+                genre_filter=str(job_config.get("amrap_genre") or "").strip(),
+                sleep_between_requests=float(job_config.get("amrap_sleep", 0.5)),
+                logger=logger,
+            )
+            write_result = _write_rows_to_csv(rows, final_path.as_posix(), source_directory="amrap")
+            result_path = str(write_result.final_path)
             success = True
 
         else:
@@ -5025,22 +5176,83 @@ def run_facebook_global_pass_nightmode(
                         source_url = source_url or fb_url_hint or ""
                         source_type = enriched.get("Email_Source_Type") or "facebook_enrich"
                         method = enriched.get("Email_Extract_Method") or "regex"
-                        _set_email_with_provenance(
-                            (df, idx),
-                            enriched.get("Email"),
-                            source_url,
-                            source_type,
-                            method,
-                            _facebook_email_surface_hint(enriched),
+                        explicitly_applied_emails = filter_platform_support_emails(
+                            filter_system_telemetry_emails(
+                                normalize_emails(enriched.get("__fb_emails_applied", ""))
+                            )
                         )
-                        _fill_email_provenance_fields(
-                            df,
-                            idx,
-                            source=enriched,
-                            fb_url_hint=fb_url_hint,
-                            default_source_type=source_type or "facebook_enrich",
-                            default_method=method or "regex",
+                        existing_email_set = set(
+                            _merge_email_lists(
+                                "",
+                                [
+                                    df.at[idx, "Email"] if "Email" in df.columns else "",
+                                    df.at[idx, "Email_All"] if "Email_All" in df.columns else "",
+                                ],
+                            )
                         )
+                        newly_reported_emails = [
+                            email
+                            for email in _merge_email_lists(
+                                "",
+                                [enriched.get("Email", ""), enriched.get("Email_All", "")],
+                            )
+                            if email not in existing_email_set
+                        ]
+                        # Facebook may independently corroborate an address that
+                        # already has truthful upstream provenance. Treat only
+                        # addresses introduced by this attempt as Facebook-applied;
+                        # otherwise the same value can be re-attributed merely
+                        # because Facebook repeated it.
+                        fb_applied_emails = [
+                            email
+                            for email in _merge_email_lists(
+                                explicitly_applied_emails,
+                                newly_reported_emails,
+                            )
+                            if email not in existing_email_set
+                        ]
+                        enriched_provenance = parse_email_provenance_json(
+                            enriched.get(EMAIL_PROVENANCE_JSON_COL, "")
+                        )
+                        applied_fb_meta = next(
+                            (
+                                dict(enriched_provenance.get(email) or {})
+                                for email in fb_applied_emails
+                                if _cell_str(
+                                    (enriched_provenance.get(email) or {}).get("source_type", "")
+                                ).lower().startswith("facebook")
+                            ),
+                            {},
+                        )
+                        if applied_fb_meta:
+                            source_url = _cell_str(applied_fb_meta.get("source_url", "")) or source_url
+                            source_type = _cell_str(applied_fb_meta.get("source_type", "")) or "facebook_enrich"
+                            method = _cell_str(applied_fb_meta.get("extract_method", "")) or "regex"
+                        elif fb_applied_emails and not _cell_str(source_type).lower().startswith("facebook"):
+                            # The Facebook helper preserves row-level provenance for
+                            # an existing native primary. Those inherited fields do
+                            # not describe a genuinely new Facebook-only secondary.
+                            source_url = _facebook_about_url(fb_url_hint) or fb_url_hint or ""
+                            source_type = "facebook_enrich"
+                            method = "regex"
+                        selected_enriched_email = normalize_email_key(enriched.get("Email", ""))
+                        if selected_enriched_email and selected_enriched_email in set(fb_applied_emails):
+                            _set_email_with_provenance(
+                                (df, idx),
+                                selected_enriched_email,
+                                source_url,
+                                source_type,
+                                method,
+                                _facebook_email_surface_hint(enriched),
+                            )
+                            _fill_email_provenance_fields(
+                                df,
+                                idx,
+                                source=enriched,
+                                fb_url_hint=fb_url_hint,
+                                default_source_type=source_type or "facebook_enrich",
+                                default_method=method or "regex",
+                            )
                         if "Email_All" in enriched:
                             _set_email_all(
                                 df,
@@ -5052,6 +5264,7 @@ def run_facebook_global_pass_nightmode(
                                 source_type=source_type,
                                 method=method,
                                 surface=_facebook_email_surface_hint(enriched),
+                                provenance_emails=fb_applied_emails,
                             )
                     cols_to_copy = [
                         "Facebook_URL",
@@ -5064,7 +5277,7 @@ def run_facebook_global_pass_nightmode(
                         "FB_Refine_Executed",
                         FB_SHARE_RUNTIME_FALLBACK_ATTEMPTED_COL,
                     ]
-                    if not fb_rejected:
+                    if not fb_rejected and fb_applied_emails:
                         cols_to_copy.append("Email_Type")
                     for col in cols_to_copy:
                         if col in enriched:

@@ -9,6 +9,8 @@ from lead_vault.merge import merge_csv_into_master
 from lead_vault.origin import (
     OriginIntegrityError,
     OriginLockedRow,
+    merge_origin_fields,
+    preserve_origin_fields,
     repair_origin_fields,
     repair_origin_integrity_df,
     safe_row_update,
@@ -56,11 +58,86 @@ def test_origin_persists_when_email_source_changes_to_soundcloud():
 
 
 def test_guarded_mutation_blocks_origin_overwrite():
-    row = {"Lead_Source": "unearthed", "Source_Directory": "unearthed"}
+    row = {
+        "Lead_Source": "unearthed",
+        "Source_Directory": "unearthed",
+        "Source Directory": "unearthed",
+        "Source URL": "https://www.abc.net.au/triplejunearthed/artist/origin-lock",
+        "Source_URL": "https://www.abc.net.au/triplejunearthed/artist/origin-lock",
+    }
 
-    safe_row_update(row, {"Source_Directory": "soundcloud"})
+    safe_row_update(
+        row,
+        {
+            "Source_Directory": "soundcloud",
+            "Source Directory": "soundcloud",
+            "Source URL": "https://soundcloud.com/origin-lock",
+            "Source_URL": "https://soundcloud.com/origin-lock",
+        },
+    )
 
     assert row["Source_Directory"] == "unearthed"
+    assert row["Source Directory"] == "unearthed"
+    assert row["Source URL"].startswith("https://www.abc.net.au/")
+    assert row["Source_URL"].startswith("https://www.abc.net.au/")
+
+
+def test_guarded_mutation_allows_blank_origin_initialization():
+    row = {"Lead_Source": "", "Source_Directory": "", "Source URL": ""}
+
+    safe_row_update(
+        row,
+        {"Lead_Source": "Bandcamp", "Source_Directory": "bandcamp", "Source URL": "https://act.bandcamp.com"},
+    )
+
+    assert row == {
+        "Lead_Source": "Bandcamp",
+        "Source_Directory": "bandcamp",
+        "Source URL": "https://act.bandcamp.com",
+    }
+
+
+def test_merge_origin_fields_preserves_existing_values_and_backfills_blanks():
+    row = {"Lead_Source": "Bandcamp", "Source_Directory": "bandcamp", "Source_URL": ""}
+
+    merge_origin_fields(
+        row,
+        {"Lead_Source": "SoundCloud", "Source_Directory": "soundcloud", "Source_URL": "https://act.bandcamp.com"},
+    )
+
+    assert row == {
+        "Lead_Source": "Bandcamp",
+        "Source_Directory": "bandcamp",
+        "Source_URL": "https://act.bandcamp.com",
+    }
+
+
+def test_replacement_restores_spotify_origin_from_existing_row():
+    replacement = {
+        "Lead_Source": "Bandcamp",
+        "Source_Directory": "bandcamp",
+        "Source Directory": "Bandcamp",
+        "Source URL": "https://act.bandcamp.com",
+        "Source_URL": "https://act.bandcamp.com",
+    }
+    original = {
+        "Lead_Source": "Spotify",
+        "Source_Directory": "Spotify",
+        "Source Directory": "Spotify",
+        "Source URL": "https://open.spotify.com/artist/abc",
+        "Source_URL": "https://open.spotify.com/artist/abc",
+        "Spotify_URL": "https://open.spotify.com/artist/abc",
+    }
+
+    preserve_origin_fields(replacement, original)
+
+    assert replacement == {
+        "Lead_Source": "Spotify",
+        "Source_Directory": "Spotify",
+        "Source Directory": "Spotify",
+        "Source URL": "https://open.spotify.com/artist/abc",
+        "Source_URL": "https://open.spotify.com/artist/abc",
+    }
 
 
 def test_origin_locked_row_update_blocks_origin_overwrite():
@@ -133,6 +210,48 @@ def test_export_integrity_repair_and_validation(tmp_path):
 
     with pytest.raises(OriginIntegrityError):
         validate_origin_integrity_rows([{"Lead_Source": "unearthed", "Source_Directory": "soundcloud"}])
+
+
+def test_undiscovered_music_origin_pair_and_canonical_url_pass_export_validation():
+    validate_origin_integrity_rows(
+        [
+            {
+                "Lead_Source": "Undiscovered Music",
+                "Source_Directory": "undiscovered_music",
+                "Source Directory": "Undiscovered Music",
+                "Source URL": "https://undiscovered.music/artists/example-artist",
+            }
+        ]
+    )
+
+
+@pytest.mark.parametrize(
+    ("lead_source", "source_directory"),
+    [
+        ("Undiscovered Music", "soundcloud"),
+        ("Spotify", "undiscovered_music"),
+    ],
+)
+def test_undiscovered_music_origin_cross_source_pairings_still_fail(lead_source, source_directory):
+    with pytest.raises(OriginIntegrityError):
+        validate_origin_integrity_rows(
+            [{"Lead_Source": lead_source, "Source_Directory": source_directory}]
+        )
+
+
+@pytest.mark.parametrize(
+    ("lead_source", "source_directory"),
+    [
+        ("AMRAP", "amrap"),
+        ("Jamendo", "jamendo"),
+        ("Spotify", "spotify"),
+        ("Triple J Unearthed", "unearthed"),
+    ],
+)
+def test_existing_origin_pairings_remain_accepted(lead_source, source_directory):
+    validate_origin_integrity_rows(
+        [{"Lead_Source": lead_source, "Source_Directory": source_directory}]
+    )
 
 
 def test_woodpecker_export_fails_on_blank_origin(tmp_path):

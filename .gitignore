@@ -1,18 +1,37 @@
-
 .vscode/settings.json
-__pycache__/
-*.pyc
-
-soundcloud_about_cache.json
 
 # Python cache
 __pycache__/
 *.pyc
 
+# macOS
+.DS_Store
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Runtime logs
+*.log
+
+# Browser / session state
+night_fb_profile/
+chrome_profile/
+browser_profile/
+
+# SoundCloud cache
+soundcloud_about_cache.json
+
 # FB DOM gate debug dumps
 fb_dom_gate_debug_*.json
-fb_dom_gate_debug_*.json
-fb_dom_gate_debug_*.json
-fb_dom_gate_debug_*.json
-fb_dom_gate_debug_*.json
-fb_dom_gate_debug_*.json
+
+# Generated Lead Machine outputs
+overnight_runs/
+data/runtime_progress/
+data/master_backup_*.csv
+data/master_lead_machine_contacts.csv
+
+# Temporary validation artifacts
+validation_run.log
+validation_run_config.json

@@ -450,6 +450,10 @@ def test_lastfm_phase_skips_rows_without_stopping(monkeypatch):
     logs: List[str] = []
     worker.log_message = SimpleNamespace(emit=lambda msg: logs.append(msg))
 
+    # Isolate Last.fm cooldown behaviour from SoundCloud/Bandcamp side effects.
+    monkeypatch.setattr(worker, "_live_search_soundcloud", lambda artist: None)
+    monkeypatch.setattr(worker, "_live_search_bandcamp", lambda artist: None)
+
     df = pd.DataFrame(
         {
             "Artist Name": [f"Artist {i}" for i in range(10)],

@@ -42,6 +42,7 @@ from pipeline_runner import (
 )
 from source_scheduler import canonicalize_facebook_url, ensure_canonical_facebook_url, promote_facebook_url
 from soundcloud_metadata_enricher import enrich_soundcloud_metadata
+from night_mode_bandcamp import build_bandcamp_aggregate_csv
 from progress_state import finalize_progress, init_progress
 
 
@@ -365,6 +366,8 @@ def _normalise_seed_source_name(raw_directory: str) -> str:
         return ""
     if "unearthed" in text or "triple j" in text:
         return "unearthed"
+    if "undiscovered_music" in text or "undiscovered music" in text:
+        return "undiscovered_music"
     if "bandcamp" in text:
         return "bandcamp"
     if "soundcloud" in text:
@@ -373,6 +376,8 @@ def _normalise_seed_source_name(raw_directory: str) -> str:
         return "spotify"
     if "lastfm" in text or "last.fm" in text:
         return "lastfm"
+    if "amrap" in text:
+        return "amrap"
     return text
 
 
@@ -918,6 +923,9 @@ def _dedupe_master(df: pd.DataFrame) -> pd.DataFrame:
     return deduped
 
 
+_build_bandcamp_aggregate_csv = build_bandcamp_aggregate_csv
+
+
 def _discover_latest_run_dir(root: str) -> Optional[str]:
     if not os.path.exists(root):
         return None
@@ -1294,6 +1302,37 @@ def _merge_raw_master(
         if not df.empty:
             non_empty_jobs_merged += 1
         df["__source_job"] = job_id
+        # Canonical source provenance: populate from explicit job metadata
+        # before any downstream merge/consolidation can mask origin.
+        source_directory = state.get("source_directory", "")
+        if not source_directory:
+            # Fallback: derive from job_id pattern like job_bandcamp_1
+            parts = job_id.split("_")
+            if len(parts) >= 2 and parts[0] == "job":
+                source_directory = parts[1]
+        if source_directory:
+            if source_directory == "unearthed":
+                canonical_lead_source = "Triple J Unearthed"
+                canonical_source_directory = "unearthed"
+                canonical_legacy_source_directory = "Triple J Unearthed"
+            elif source_directory == "undiscovered_music":
+                canonical_lead_source = "Undiscovered Music"
+                canonical_source_directory = "undiscovered_music"
+                canonical_legacy_source_directory = "Undiscovered Music"
+            else:
+                canonical_lead_source = source_directory
+                canonical_source_directory = source_directory
+                canonical_legacy_source_directory = source_directory
+            for col, value in (
+                ("Lead_Source", canonical_lead_source),
+                ("Source_Directory", canonical_source_directory),
+                ("Source Directory", canonical_legacy_source_directory),
+            ):
+                if col not in df.columns:
+                    df[col] = ""
+                mask = df[col].fillna("").astype(str).str.strip() == ""
+                if mask.any():
+                    df.loc[mask, col] = value
         # Keep a copy of the per-job email fields before any merge/consolidation
         # so SmearGuard can rely on the originals if a later step smears values.
         if "Email" in df.columns:
@@ -1427,6 +1466,7 @@ def _process_job(
             "input_seed_csv": job.get("input_seed_csv", ""),
             "status": state.get("status") or "pending",
             "error_count": state.get("error_count", 0),
+            "source_directory": directory,
         }
     )
 
@@ -1825,6 +1865,7 @@ def run_night_mode(
                         meta={"phase": "processing", "current_status": "master_raw_ready"},
                     )
                     master_enriched = os.path.join(run_dir, "master_enriched.csv")
+                    bandcamp_aggregate_csv = _build_bandcamp_aggregate_csv(run_dir, job_states, logger)
                     master_enriched = _call_with_optional_master_enrichment_kwargs(
                         run_master_enrichment,
                         master_raw,
@@ -1835,6 +1876,7 @@ def run_night_mode(
                         night_mode=True,
                         night_fb_run_state=night_fb_run_state,
                         night_runtime_reset_interval_rows=master_night_runtime_reset_interval_rows,
+                        bandcamp_csv_path=bandcamp_aggregate_csv,
                     )
                     master_pre_fb = os.path.join(run_dir, "master_pre_fb.csv")
                     master_pre_fb = run_enrichment(master_enriched, master_pre_fb, logger=stats_logger, night_mode=True)

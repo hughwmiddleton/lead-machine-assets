@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional
 import pandas as pd
 
 from night_mode_fb import close_night_fb_run_state, create_night_fb_run_state
+from night_mode_bandcamp import build_bandcamp_aggregate_csv
 from night_mode_v2.cache_policy import should_skip_phase
 from night_mode_v2.manifest import config_hash, load_manifest, write_manifest
 from night_mode_v2.schema_registry import validate_schema
@@ -305,6 +306,7 @@ def run_seed_phase(config_path: str, run_dir: str, resume: bool = False) -> Dict
         seed_job_entry = {
             "status": status,
             "directory": job_dir,
+            "source_directory": directory,
             "raw_csv": raw_csv,
             "row_count": int(row_count),
             "schema_hash": schema_hash or "",
@@ -471,6 +473,7 @@ def run_enrich_phase(
     if max_live_searches is not None and max_live_searches < 0:
         max_live_searches = 0
 
+    bandcamp_aggregate_csv = build_bandcamp_aggregate_csv(run_dir, job_states, logger)
     master_enriched = pipeline_runner.run_master_enrichment(
         master_raw,
         master_enriched_path,
@@ -479,6 +482,7 @@ def run_enrich_phase(
         max_live_searches=max_live_searches,
         night_mode=True,
         night_fb_run_state=night_fb_run_state,
+        bandcamp_csv_path=bandcamp_aggregate_csv,
     )
     enriched_rows = _record_output(outputs, "master_enriched", master_enriched)
     if not master_enriched or enriched_rows == 0:
@@ -723,6 +727,9 @@ def run_phased_night_mode(
     # Preserve v1 semantics for run directory discovery/creation.
     root = run_root or run_dir or "overnight_runs"
     run_dir_path, _ = night_mode_runner._ensure_run_dir(resume=resume, run_root=root)
+
+    # Emit runtime handshake so the GUI can bind to this exact run directory.
+    print(f"[Night Mode][Runtime] run_dir={os.path.abspath(run_dir_path)}", flush=True)
 
     cfg = _load_config(config_path)
     night_fb_run_state = create_night_fb_run_state(

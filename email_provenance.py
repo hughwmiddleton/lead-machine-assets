@@ -8,6 +8,7 @@ from urllib.parse import urlsplit
 import pandas as pd
 
 from email_normalizer import (
+    filter_platform_support_emails,
     filter_system_telemetry_emails,
     is_obvious_placeholder_email,
     normalize_email_value,
@@ -44,6 +45,7 @@ _SURFACE_PRIORITY = {
     "bandcamp_track_follow": 14,
     "lastfm_profile": 15,
     "spotify_profile": 16,
+    "undiscovered_music_profile": 17,
     "domain_reuse": 40,
     "live_search": 50,
 }
@@ -126,6 +128,8 @@ def infer_email_surface(
         return "lastfm_profile"
     if source_type_clean.startswith("spotify"):
         return "spotify_profile"
+    if source_type_clean.startswith("undiscovered_music"):
+        return "undiscovered_music_profile"
     if source_type_clean == "domain_reuse":
         return "domain_reuse"
     if source_type_clean == "live_search":
@@ -162,13 +166,14 @@ def _build_provenance_entry(
     return {key: value for key, value in entry.items() if value}
 
 
-def _provenance_sort_key(entry: Mapping[str, Any]) -> tuple[int, int, int, int, str, str]:
+def _provenance_sort_key(entry: Mapping[str, Any]) -> tuple[int, int, int, int, int, str, str]:
     surface = _clean_str(entry.get("surface", "")).lower()
     source_type = _clean_str(entry.get("source_type", "")).lower()
     source_url = _clean_str(entry.get("source_url", ""))
     extract_method = _clean_str(entry.get("extract_method", ""))
     completeness = sum(bool(_clean_str(entry.get(field, ""))) for field in _SOURCE_PROVENANCE_FIELDS)
     return (
+        0 if extract_method.casefold() == "profile_direct" else 1,
         _SURFACE_PRIORITY.get(surface, 80 if surface or source_type or source_url else 99),
         0 if source_url else 1,
         0 if extract_method else 1,
@@ -215,15 +220,21 @@ def get_row_email_provenance(row_like: Any) -> Dict[str, Dict[str, str]]:
         return {}
 
     provenance = parse_email_provenance_json(row_like.get(EMAIL_PROVENANCE_JSON_COL, ""))
-    selected_email = normalize_email_key(row_like.get("Email") or row_like.get("Primary Email") or "")
+    selected_email = normalize_email_key(
+        row_like.get("Email") or row_like.get("Primary Email") or row_like.get("Primary_Email") or ""
+    )
     if selected_email and selected_email not in provenance:
-        fallback_entry = _build_provenance_entry(
-            source_url=row_like.get("Email_Source_URL", ""),
-            source_type=row_like.get("Email_Source_Type", "") or row_like.get("Email_Type", ""),
-            method=row_like.get("Email_Extract_Method", "") or "regex",
-        )
-        if fallback_entry:
-            provenance[selected_email] = fallback_entry
+        source_url = row_like.get("Email_Source_URL", "")
+        source_type = row_like.get("Email_Source_Type", "") or row_like.get("Email_Type", "")
+        extract_method = row_like.get("Email_Extract_Method", "")
+        if _clean_str(source_url) or _clean_str(source_type) or _clean_str(extract_method):
+            fallback_entry = _build_provenance_entry(
+                source_url=source_url,
+                source_type=source_type,
+                method=extract_method or "regex",
+            )
+            if fallback_entry:
+                provenance[selected_email] = fallback_entry
     return provenance
 
 
@@ -418,6 +429,23 @@ def dump_email_provenance_json(provenance_map: Mapping[str, Mapping[str, Any]] |
     return json.dumps(ordered_payload, sort_keys=True, separators=(",", ":"))
 
 
+def merge_email_provenance_json_values(*raw_values: Any) -> str:
+    """Merge per-email audit maps without replacing stronger provenance."""
+    merged: Dict[str, Dict[str, str]] = {}
+    for raw_value in raw_values:
+        for email, candidate_entry in parse_email_provenance_json(raw_value).items():
+            current_entry = dict(merged.get(email) or {})
+            if not current_entry or _provenance_sort_key(candidate_entry) < _provenance_sort_key(current_entry):
+                merged[email] = dict(candidate_entry)
+                continue
+            for field in _PROVENANCE_FIELDS:
+                value = candidate_entry.get(field, "")
+                if value and not current_entry.get(field, ""):
+                    current_entry[field] = value
+            merged[email] = current_entry
+    return dump_email_provenance_json(merged)
+
+
 def merge_email_provenance_json(
     raw_value: Any,
     emails: Any,
@@ -488,6 +516,9 @@ def _set_email_with_provenance(
     surface: str = "",
 ) -> None:
     filtered_emails = filter_system_telemetry_emails([email])
+    if not filtered_emails:
+        return
+    filtered_emails = filter_platform_support_emails(filtered_emails)
     if not filtered_emails:
         return
     email_clean = filtered_emails[0]

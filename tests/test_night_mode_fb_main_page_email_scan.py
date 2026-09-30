@@ -33,12 +33,14 @@ class _FbContainerTextDriver:
             return _FakeBodyElement(self.body_text)
         raise LookupError(value)
 
-    def execute_script(self, script):  # noqa: ANN001
+    def execute_script(self, script, *args):  # noqa: ANN001
         script_text = str(script or "")
-        if "document.body" in script_text:
+        if "fb_rendered_text_snapshot" in script_text:
             return self.body_text
-        if "role=\"main\"" in script_text or "role=\"complementary\"" in script_text:
+        if "fb_visible_text_container_blocks" in script_text:
             return list(self.container_texts)
+        if "fb_visible_text_region_fragment_fallback" in script_text:
+            return []
         return []
 
 

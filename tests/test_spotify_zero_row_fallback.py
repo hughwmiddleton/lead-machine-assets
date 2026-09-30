@@ -37,7 +37,7 @@ def _install_common_stubs(monkeypatch, directory_rows: dict[str, list[dict]], ca
         _write_seed_csv(raw_output_path, directory_rows.get(directory, []))
         return raw_output_path
 
-    def fake_run_master_enrichment(input_csv, output_csv, logger=None, enable_live_search=True, max_live_searches=None, night_mode=False):
+    def fake_run_master_enrichment(input_csv, output_csv, logger=None, enable_live_search=True, max_live_searches=None, night_mode=False, **kwargs):
         shutil.copyfile(input_csv, output_csv)
         return output_csv
 

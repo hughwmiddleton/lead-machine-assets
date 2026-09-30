@@ -86,7 +86,7 @@ def test_live_search_bandcamp_uses_metadata_context_without_extra_queries(tmp_pa
 
     baseline = cde._bandcamp_confidence(
         "Nightlight",
-        "Nightlight Band",
+        "The Nightlight",
         "https://nightlight.bandcamp.com/",
         song_title="Midnight Run",
     )
@@ -98,7 +98,7 @@ def test_live_search_bandcamp_uses_metadata_context_without_extra_queries(tmp_pa
         search_urls.append(url)
         return (
             _bandcamp_search_html(
-                "Nightlight Band",
+                "The Nightlight",
                 "https://nightlight.bandcamp.com/",
                 extra_text="Midnight Run Melbourne Australia Dream Pop",
             ),
@@ -127,7 +127,7 @@ def test_live_search_bandcamp_uses_metadata_context_without_extra_queries(tmp_pa
 
     assert payload is not None
     assert payload.source_url == "https://nightlight.bandcamp.com/"
-    assert payload.candidate_name == "Nightlight Band"
+    assert payload.candidate_name == "The Nightlight"
     assert len(search_urls) == 1
     assert _query_value(search_urls[0]) == '"Nightlight" "Midnight Run" "melbourne"'
 

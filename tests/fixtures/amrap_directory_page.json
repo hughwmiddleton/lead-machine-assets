@@ -1,0 +1,49 @@
+{
+  "data": [
+    {
+      "id": 10001,
+      "name": "Test Artist Alpha",
+      "aka": null,
+      "slug": "test-artist-alpha",
+      "firstname": null,
+      "lastname": null,
+      "img": "https://example.com/img1.png",
+      "type": "artist"
+    },
+    {
+      "id": 10002,
+      "name": "Test Artist Beta",
+      "aka": "Beta Alias",
+      "slug": "test-artist-beta",
+      "firstname": null,
+      "lastname": null,
+      "img": "https://example.com/img2.png",
+      "type": "artist"
+    },
+    {
+      "id": 10003,
+      "name": "Test Artist Gamma",
+      "aka": null,
+      "slug": "test-artist-gamma",
+      "firstname": null,
+      "lastname": null,
+      "img": "https://example.com/img3.png",
+      "type": "artist"
+    }
+  ],
+  "links": {
+    "first": "https://amrap.org.au/api/search/artist?page=1",
+    "last": "https://amrap.org.au/api/search/artist?page=10",
+    "prev": null,
+    "next": "https://amrap.org.au/api/search/artist?page=2"
+  },
+  "meta": {
+    "current_page": 1,
+    "from": 1,
+    "last_page": 10,
+    "path": "https://amrap.org.au/api/search/artist",
+    "per_page": 18,
+    "to": 3,
+    "total": 180
+  }
+}

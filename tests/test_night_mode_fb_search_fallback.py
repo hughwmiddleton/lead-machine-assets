@@ -613,7 +613,7 @@ def test_pass_b_terminal_result_preserves_refine_telemetry(monkeypatch) -> None:
 
     result = enricher.enrich_row_with_facebook_night({"Artist Name": "Test Artist", "Email": "", "Email_All": ""})
 
-    assert result["FB_Status"] == "pass_a_skipped_no_fb_url"
+    assert result["FB_Status"] == "no_candidates"
     assert result["FB_Refine_Decision"] == "allowed"
     assert result["FB_Refine_Executed"] is True
 

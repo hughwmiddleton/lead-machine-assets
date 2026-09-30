@@ -48,6 +48,201 @@ def test_set_email_all_triggers_guard(monkeypatch):
     assert not messages  # guard should not fire when email is row-local
 
 
+def test_guard_recognizes_all_emails_in_per_email_provenance(monkeypatch):
+    messages = []
+    monkeypatch.setenv("EMAIL_ALL_GUARD", "1")
+    df = pd.DataFrame(
+        [
+            {
+                "Artist Name": "Multi-email Instagram Artist",
+                "Email": "primary@artist.com",
+                "Email_All": "primary@artist.com;secondary@management.com",
+                EMAIL_PROVENANCE_JSON_COL: json.dumps(
+                    {
+                        "primary@artist.com": {
+                            "source_type": "instagram_enrich",
+                            "surface": "instagram_profile",
+                            "source_url": "https://www.instagram.com/artist/",
+                            "extract_method": "regex",
+                        },
+                        "secondary@management.com": {
+                            "source_type": "instagram_enrich",
+                            "surface": "instagram_profile",
+                            "source_url": "https://www.instagram.com/artist/",
+                            "extract_method": "regex",
+                        },
+                    }
+                ),
+            }
+        ]
+    )
+
+    pipeline_runner._set_email_all(
+        df,
+        0,
+        df.at[0, "Email_All"],
+        source="fb_global_pass",
+        logger=messages.append,
+        provenance_emails=[],
+    )
+
+    assert df.at[0, "Email_All"] == "primary@artist.com;secondary@management.com"
+    assert not any("email_not_in_sources" in message for message in messages)
+
+
+def test_guard_recognizes_independent_mixed_source_provenance(monkeypatch):
+    messages = []
+    monkeypatch.setenv("EMAIL_ALL_GUARD", "1")
+    provenance = {
+        "onehop@artist.com": {
+            "source_type": "instagram_enrich",
+            "surface": "instagram_bio_link_one_hop",
+            "source_url": "https://artist.com/contact",
+            "extract_method": "mailto",
+        },
+        "booking@agency.com": {
+            "source_type": "website_enrich",
+            "surface": "website_contact_page",
+            "source_url": "https://agency.com/artist",
+            "extract_method": "regex",
+        },
+    }
+    df = pd.DataFrame(
+        [
+            {
+                "Artist Name": "Mixed Source Artist",
+                "Email": "onehop@artist.com",
+                "Email_All": "onehop@artist.com;booking@agency.com",
+                EMAIL_PROVENANCE_JSON_COL: json.dumps(provenance),
+            }
+        ]
+    )
+
+    pipeline_runner._set_email_all(
+        df,
+        0,
+        df.at[0, "Email_All"],
+        source="fb_global_pass",
+        logger=messages.append,
+        source_url="https://www.facebook.com/artist",
+        source_type="facebook_enrich",
+        surface="facebook_main",
+        provenance_emails=[],
+    )
+
+    assert set(df.at[0, "Email_All"].split(";")) == set(provenance)
+    assert json.loads(df.at[0, EMAIL_PROVENANCE_JSON_COL]) == provenance
+    assert not any("email_not_in_sources" in message for message in messages)
+
+
+def test_guard_still_flags_truly_unprovenanced_secondary_email(monkeypatch):
+    messages = []
+    monkeypatch.setenv("EMAIL_ALL_GUARD", "1")
+    df = pd.DataFrame(
+        [
+            {
+                "Artist Name": "Unprovenanced Artist",
+                "Email": "primary@artist.com",
+                "Email_All": "primary@artist.com;unknown@elsewhere.com",
+                EMAIL_PROVENANCE_JSON_COL: json.dumps(
+                    {
+                        "primary@artist.com": {
+                            "source_type": "website_enrich",
+                            "surface": "website_homepage",
+                            "source_url": "https://artist.com",
+                            "extract_method": "regex",
+                        }
+                    }
+                ),
+            }
+        ]
+    )
+
+    pipeline_runner._set_email_all(
+        df,
+        0,
+        df.at[0, "Email_All"],
+        source="test_guard",
+        logger=messages.append,
+        provenance_emails=[],
+    )
+
+    assert any("email_not_in_sources='unknown@elsewhere.com'" in message for message in messages)
+
+
+def test_facebook_no_result_preserves_existing_contacts_and_provenance(monkeypatch):
+    messages = []
+    monkeypatch.setenv("EMAIL_ALL_GUARD", "1")
+    provenance = {
+        "anton@agency.com": {
+            "source_type": "instagram_enrich",
+            "surface": "instagram_bio_link_one_hop",
+            "source_url": "https://artist.example/",
+            "extract_method": "mailto",
+        },
+        "secondary@label.com": {
+            "source_type": "instagram_enrich",
+            "surface": "instagram_bio_link_one_hop",
+            "source_url": "https://artist.example/",
+            "extract_method": "mailto",
+        },
+    }
+    row = {
+        "Artist Name": "Facebook No Result",
+        "Email": "anton@agency.com",
+        "Email_All": "anton@agency.com;secondary@label.com",
+        "Email_Type": "ig_enrich",
+        "Email_Source_URL": "https://artist.example/",
+        "Email_Source_Type": "instagram_enrich",
+        "Email_Extract_Method": "mailto",
+        EMAIL_PROVENANCE_JSON_COL: json.dumps(provenance),
+    }
+    enricher = night_mode_fb.NightModeFacebookEnricher(
+        legacy_module=None,
+        username="",
+        password="",
+        logger=None,
+    )
+    no_result = night_mode_fb.NightModeFacebookResult(
+        email=None,
+        email_all=row["Email_All"],
+        email_type="fb_night",
+        facebook_url="https://www.facebook.com/artist",
+        email_source="main",
+        email_source_url="https://www.facebook.com/artist",
+        email_extract_method="regex",
+    )
+
+    enriched = enricher._apply_night_fb_result(
+        dict(row),
+        no_result,
+        [],
+        "https://www.facebook.com/artist",
+    )
+    df = pd.DataFrame([enriched])
+    pipeline_runner._set_email_all(
+        df,
+        0,
+        enriched["Email_All"],
+        source="fb_global_pass",
+        logger=messages.append,
+        source_url=enriched["Email_Source_URL"],
+        source_type=enriched["Email_Source_Type"],
+        method=enriched["Email_Extract_Method"],
+        surface="facebook_main",
+        provenance_emails=[],
+    )
+
+    assert df.at[0, "Email"] == row["Email"]
+    assert df.at[0, "Email_All"] == row["Email_All"]
+    assert df.at[0, "Email_Type"] == "ig_enrich"
+    assert df.at[0, "Email_Source_URL"] == row["Email_Source_URL"]
+    assert df.at[0, "Email_Source_Type"] == "instagram_enrich"
+    assert json.loads(df.at[0, EMAIL_PROVENANCE_JSON_COL]) == provenance
+    assert "__fb_emails_applied" not in enriched
+    assert not any("email_not_in_sources" in message for message in messages)
+
+
 def test_set_email_all_merges_and_logs(monkeypatch):
     messages = []
 
@@ -84,12 +279,12 @@ def test_set_email_all_prefers_outreach_addresses_in_order():
     merged = pipeline_runner._set_email_all(
         df,
         0,
-        ["support@bandcamp.com", "booking@artist.com", "press@artistlabel.com"],
+        ["general@artist.com", "booking@artist.com", "press@artistlabel.com"],
         source="test_rank",
     )
 
-    assert merged == "booking@artist.com;press@artistlabel.com;support@bandcamp.com"
-    assert df.at[0, "Email_All"] == "booking@artist.com;press@artistlabel.com;support@bandcamp.com"
+    assert merged == "booking@artist.com;press@artistlabel.com;general@artist.com"
+    assert df.at[0, "Email_All"] == "booking@artist.com;press@artistlabel.com;general@artist.com"
 
 
 def test_consolidate_email_all_prefers_direct_fb_email_over_external_contact_site():
@@ -645,6 +840,112 @@ def test_consolidate_email_all_prefers_facebook_over_placeholder_website_email()
     assert consolidated.at[0, "Email_All"] == "artistname@gmail.com;user@domain.com"
 
 
+def test_shy_one_primary_email_and_provenance_are_selected_atomically():
+    provenance = {
+        "info@shyone.co.uk": {
+            "source_type": "website_enrich",
+            "surface": "website_contact_page",
+            "source_url": "https://shyone.co.uk/contact",
+            "extract_method": "mailto",
+        },
+        "abbey@poem.agency": {
+            "source_type": "bandcamp",
+            "surface": "bandcamp_profile",
+            "source_url": "https://shyone.bandcamp.com/",
+            "extract_method": "regex",
+        },
+        "alexandra@higher-ground.de": {
+            "source_type": "instagram_enrich",
+            "surface": "instagram_profile",
+            "source_url": "https://www.instagram.com/shyclart/",
+            "extract_method": "regex",
+        },
+    }
+    df = pd.DataFrame(
+        [{
+            "Artist Name": "Shy One",
+            "Spotify_Website_URL": "https://shyone.co.uk/",
+            "Email": "abbey@poem.agency",
+            "Primary Email": "abbey@poem.agency",
+            "Primary_Email": "abbey@poem.agency",
+            "Email_All": "alexandra@higher-ground.de;abbey@poem.agency;info@shyone.co.uk",
+            EMAIL_PROVENANCE_JSON_COL: json.dumps(provenance),
+            "Email_Source_Type": "bandcamp",
+            "Email_Source_URL": "https://shyone.bandcamp.com/",
+            "Email_Extract_Method": "regex",
+            "final_status": "OK",
+            "MusicBrainz_MBID": "must-not-leak",
+        }],
+        index=[41],
+    )
+
+    consolidated = pipeline_runner._consolidate_email_all(df)
+    winner = consolidated.at[41, "Email"]
+    winner_meta = json.loads(consolidated.at[41, EMAIL_PROVENANCE_JSON_COL])[winner]
+
+    assert winner == "alexandra@higher-ground.de"
+    assert consolidated.at[41, "Primary Email"] == winner
+    assert consolidated.at[41, "Primary_Email"] == winner
+    assert consolidated.at[41, "Email_Source_Type"] == winner_meta["source_type"]
+    assert consolidated.at[41, "Email_Source_URL"] == winner_meta["source_url"]
+    assert consolidated.at[41, "Email_Extract_Method"] == winner_meta["extract_method"]
+    assert set(consolidated.at[41, "Email_All"].split(";")) == set(provenance)
+    assert set(json.loads(consolidated.at[41, EMAIL_PROVENANCE_JSON_COL])) == set(provenance)
+
+    export_frame = pipeline_runner._build_final_export_frame(consolidated)
+    assert export_frame.iloc[0]["Primary Email"] == winner
+    assert export_frame.iloc[0]["Email Source"] == "Instagram profile"
+    assert export_frame.iloc[0]["Email_Source_Type"] == winner_meta["source_type"]
+    assert export_frame.iloc[0]["Email_Source_URL"] == winner_meta["source_url"]
+    assert export_frame.iloc[0]["Email_Extract_Method"] == winner_meta["extract_method"]
+    assert "MusicBrainz_MBID" not in export_frame.columns
+
+
+def test_primary_change_without_explicit_provenance_clears_old_source_bundle():
+    df = pd.DataFrame([{
+        "Artist Name": "Safe Artist",
+        "Email": "user@domain.com",
+        "Email_All": "user@domain.com;booking@safeartist.example",
+        "Email_Source_Type": "instagram_enrich",
+        "Email_Source_URL": "https://www.instagram.com/unrelated/",
+        "Email_Extract_Method": "regex",
+    }])
+
+    consolidated = pipeline_runner._consolidate_email_all(df)
+
+    assert consolidated.at[0, "Email"] == "booking@safeartist.example"
+    assert consolidated.at[0, "Email_Source_Type"] == ""
+    assert consolidated.at[0, "Email_Source_URL"] == ""
+    assert consolidated.at[0, "Email_Extract_Method"] == ""
+
+
+def test_quarantined_email_cannot_borrow_an_alternate_emails_safe_provenance():
+    df = pd.DataFrame([{
+        "Artist Name": "Safe Artist",
+        "Email": "unsafe@repeated.example",
+        "Email_All": "unsafe@repeated.example;booking@safeartist.example",
+        "Email Source": "Quarantined (repeat email)",
+        EMAIL_PROVENANCE_JSON_COL: json.dumps({
+            "booking@safeartist.example": {
+                "source_type": "website_enrich",
+                "surface": "website_contact_page",
+                "source_url": "https://safeartist.example/contact",
+                "extract_method": "mailto",
+            }
+        }),
+        "Email_Source_Type": "quarantined",
+        "Email_Source_URL": "https://unrelated.example/",
+        "Email_Extract_Method": "repeat_email_guard",
+    }])
+
+    consolidated = pipeline_runner._consolidate_email_all(df)
+
+    assert consolidated.at[0, "Email"] == "unsafe@repeated.example"
+    assert consolidated.at[0, "Email_Source_Type"] == "quarantined"
+    assert consolidated.at[0, "Email_Source_URL"] == "https://unrelated.example/"
+    assert consolidated.at[0, "Email_Extract_Method"] == "repeat_email_guard"
+
+
 def test_select_primary_email_falls_back_to_existing_order_without_source_metadata():
     primary, ranked = pipeline_runner._select_primary_email_for_row(
         {},
@@ -654,3 +955,85 @@ def test_select_primary_email_falls_back_to_existing_order_without_source_metada
 
     assert primary == "omega@beta.test"
     assert ranked == ["omega@beta.test", "zeta@alpha.test"]
+
+
+# --- Wix/Sentry telemetry filtering ---
+
+def test_filter_system_telemetry_emails_rejects_wix_sentry():
+    assert filter_system_telemetry_emails(["abc@sentry.wixpress.com"]) == []
+
+
+def test_filter_system_telemetry_emails_rejects_wix_sentry_next():
+    assert filter_system_telemetry_emails(["abc@sentry-next.wixpress.com"]) == []
+
+
+def test_filter_system_telemetry_emails_rejects_wix_sentry_subdomain():
+    assert filter_system_telemetry_emails(["abc@sub.sentry.wixpress.com"]) == []
+
+
+def test_filter_system_telemetry_emails_preserves_legitimate_wix_domain():
+    """Artist websites hosted on Wix must not be rejected merely for using Wix."""
+    assert filter_system_telemetry_emails(["booking@artist.wixsite.com"]) == ["booking@artist.wixsite.com"]
+
+
+def test_filter_system_telemetry_emails_preserves_normal_artist_email():
+    assert filter_system_telemetry_emails(
+        ["contact@artist.com", "abc@sentry.wixpress.com"]
+    ) == ["contact@artist.com"]
+
+
+def test_platform_filter_rejects_any_reverbnation_owned_mailbox():
+    assert pipeline_runner.filter_platform_support_emails(
+        ["itunes@reverbnation.com", "booking@artists.example"]
+    ) == ["booking@artists.example"]
+
+
+def test_platform_filter_preserves_artist_contact_from_page_with_reverbnation_widget():
+    assert pipeline_runner.filter_platform_support_emails(
+        ["booking@artist.example"]
+    ) == ["booking@artist.example"]
+
+
+def test_set_email_all_drops_wix_telemetry_only_result():
+    df = pd.DataFrame([{"Artist Name": "Artist C", "Email_All": ""}])
+
+    merged = pipeline_runner._set_email_all(
+        df,
+        0,
+        ["abc@sentry.wixpress.com"],
+        source="test_filter",
+    )
+
+    assert merged == ""
+    assert df.at[0, "Email_All"] == ""
+
+
+def test_set_email_all_drops_wix_telemetry_mixed_with_valid():
+    df = pd.DataFrame([{"Artist Name": "Artist D", "Email_All": ""}])
+
+    merged = pipeline_runner._set_email_all(
+        df,
+        0,
+        ["abc@sentry.wixpress.com", "booking@artist.test"],
+        source="test_filter",
+    )
+
+    assert merged == "booking@artist.test"
+    assert df.at[0, "Email_All"] == "booking@artist.test"
+
+
+def test_consolidate_email_all_blocks_row_with_only_telemetry_email():
+    df = pd.DataFrame(
+        [
+            {
+                "Artist Name": "Telemetry Artist",
+                "Email": "abc@sentry-next.wixpress.com",
+                "Email_All": "abc@sentry-next.wixpress.com",
+            }
+        ]
+    )
+
+    consolidated = pipeline_runner._consolidate_email_all(df)
+
+    assert consolidated.at[0, "Email"] == ""
+    assert consolidated.at[0, "Email_All"] == ""
