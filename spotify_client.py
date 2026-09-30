@@ -41,6 +41,7 @@ class SpotifyClient:
         self._token_expires_at: float = 0.0
         self._user_access_token: Optional[str] = None
         self._user_access_token_expires_at: float = 0.0
+        self._refresh_token_unusable = False
 
         if not self.client_id or not self.client_secret:
             raise ValueError("Spotify credentials not configured. Set SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET.")
@@ -110,9 +111,19 @@ class SpotifyClient:
         return self._user_access_token
 
     def _auth_headers(self) -> Dict[str, str]:
-        if self.refresh_token:
-            token = self._get_user_access_token_from_refresh()
-        else:
+        token = ""
+        if self.refresh_token and not self._refresh_token_unusable:
+            try:
+                token = self._get_user_access_token_from_refresh()
+            except Exception as exc:
+                # Playlist discovery only needs application authorization. A stale
+                # optional user refresh token must not disable that valid path.
+                self._refresh_token_unusable = True
+                self._log(
+                    "[Spotify] User refresh token unavailable; "
+                    f"falling back to client credentials: {exc}"
+                )
+        if not token:
             token = self.get_access_token()
         return {
             "Authorization": f"Bearer {token}",

@@ -302,13 +302,18 @@ def run_seed_phase(config_path: str, run_dir: str, resume: bool = False) -> Dict
             if not error_msg:
                 error_msg = "raw.csv missing"
 
-        seed_jobs[job_id] = {
+        seed_job_entry = {
             "status": status,
             "directory": job_dir,
             "raw_csv": raw_csv,
             "row_count": int(row_count),
             "schema_hash": schema_hash or "",
         }
+        if directory == "spotify":
+            seed_job_entry["error"] = error_msg or ""
+            if note_msg:
+                seed_job_entry["note"] = note_msg
+        seed_jobs[job_id] = seed_job_entry
 
         status_payload = {
             "job_id": job_id,
