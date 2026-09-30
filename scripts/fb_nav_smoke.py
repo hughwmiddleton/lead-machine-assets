@@ -16,6 +16,8 @@ from urllib.parse import quote_plus
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 
+DEBUG_DIR = Path(__file__).resolve().parents[1] / "runtime" / "debug" / "facebook"
+
 
 def build_driver(profile_dir: Path) -> webdriver.Chrome:
     options = Options()
@@ -26,7 +28,8 @@ def build_driver(profile_dir: Path) -> webdriver.Chrome:
 
 
 def save_screenshot(driver: webdriver.Chrome, filename: str) -> None:
-    screenshot_path = Path.cwd() / filename
+    DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+    screenshot_path = DEBUG_DIR / filename
     driver.save_screenshot(str(screenshot_path))
 
 
@@ -76,7 +79,7 @@ def main() -> int:
         wait_for_settle(2)
         print_location("HOME_READY", driver)
         save_screenshot(driver, "fb_home.png")
-        print("Saved screenshot: fb_home.png", flush=True)
+        print(f"Saved screenshot: {DEBUG_DIR / 'fb_home.png'}", flush=True)
         print(flush=True)
 
         print("[2] Opening known page...", flush=True)
@@ -93,7 +96,7 @@ def main() -> int:
         wait_for_settle(2)
         print_location("KNOWN_READY", driver)
         save_screenshot(driver, "fb_known_page.png")
-        print("Saved screenshot: fb_known_page.png", flush=True)
+        print(f"Saved screenshot: {DEBUG_DIR / 'fb_known_page.png'}", flush=True)
         print(flush=True)
 
         print("[3] Opening search route...", flush=True)
@@ -110,13 +113,13 @@ def main() -> int:
         wait_for_settle(2)
         print_location("SEARCH_READY", driver)
         save_screenshot(driver, "fb_search.png")
-        print("Saved screenshot: fb_search.png", flush=True)
+        print(f"Saved screenshot: {DEBUG_DIR / 'fb_search.png'}", flush=True)
         print(flush=True)
 
         print("Screenshots saved:", flush=True)
-        print("fb_home.png", flush=True)
-        print("fb_known_page.png", flush=True)
-        print("fb_search.png", flush=True)
+        print(DEBUG_DIR / "fb_home.png", flush=True)
+        print(DEBUG_DIR / "fb_known_page.png", flush=True)
+        print(DEBUG_DIR / "fb_search.png", flush=True)
         print(flush=True)
 
         input("Final inspection complete. Press Enter to quit...")
