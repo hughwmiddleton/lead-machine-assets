@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -139,6 +140,50 @@ def test_unexpected_path_fails_closed(tmp_path: Path) -> None:
         cleanup.validate_artifact(repo, cleanup.Artifact(unexpected, "debug-log"))
 
 
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "data/runtime_progress/current_run_progress.json",
+        "data/unearthed_artist_url_index.csv",
+        "data/master_lead_machine_contacts.csv",
+        "overnight_runs/unearthed_cursor.json",
+        "tests/fixtures/legacy_name_consistency_master_final.csv",
+        "overnight_runs/operator-selected-acceptance/evidence.json",
+    ],
+)
+def test_repo_ignore_rules_keep_state_and_fixtures_visible(relative: str) -> None:
+    repo = Path(__file__).resolve().parents[1]
+
+    result = subprocess.run(
+        ["git", "check-ignore", "--no-index", "--quiet", relative],
+        cwd=repo,
+        check=False,
+    )
+
+    assert result.returncode == 1, f"critical repository path is ignored: {relative}"
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "overnight_runs/2099-01-02_030405/run_manifest_v2.json",
+        "overnight_runs/ticket5d-v1-acceptance/2099-01-02_030405/master_final.csv",
+        "overnight_runs/undiscovered_music_handoff_smoke_runs/2099-01-02_030405/master_final.csv",
+        "overnight_runs/undiscovered_music_handoff_smoke_20990102.json",
+    ],
+)
+def test_repo_ignore_rules_hide_only_designated_run_output(relative: str) -> None:
+    repo = Path(__file__).resolve().parents[1]
+
+    result = subprocess.run(
+        ["git", "check-ignore", "--no-index", "--quiet", relative],
+        cwd=repo,
+        check=False,
+    )
+
+    assert result.returncode == 0, f"generated run path is unexpectedly visible: {relative}"
+
+
 def test_gitignore_covers_generated_classes_without_hiding_operational_state() -> None:
     ignore = (Path(__file__).resolve().parents[1] / ".gitignore").read_text(encoding="utf-8")
     rules = {line.strip() for line in ignore.splitlines() if line.strip() and not line.startswith("#")}
@@ -155,4 +200,5 @@ def test_gitignore_covers_generated_classes_without_hiding_operational_state() -
     assert "data/master_backup_*.csv" not in rules
     assert "data/master_lead_machine_contacts.csv" not in rules
     assert "!/overnight_runs/" in rules
-    assert "!/overnight_runs/**" in rules
+    assert "/overnight_runs/20??-??-??_*/" in rules
+    assert "!/overnight_runs/unearthed_cursor.json" in rules
