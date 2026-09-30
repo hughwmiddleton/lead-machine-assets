@@ -2,7 +2,13 @@
 
 # Python cache
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
 
 # macOS
 .DS_Store
@@ -19,6 +25,14 @@ __pycache__/
 night_fb_profile/
 chrome_profile/
 browser_profile/
+/.../
+
+# Bounded local diagnostics
+/runtime/debug/
+/fb_attach_*.png
+/fb_home.png
+/fb_known_page.png
+/fb_search.png
 
 # SoundCloud cache
 soundcloud_about_cache.json
@@ -26,11 +40,16 @@ soundcloud_about_cache.json
 # FB DOM gate debug dumps
 fb_dom_gate_debug_*.json
 
-# Generated Lead Machine outputs
-overnight_runs/
-data/runtime_progress/
-data/master_backup_*.csv
-data/master_lead_machine_contacts.csv
+# Editor and process temporary files
+*.tmp
+*.swp
+*~
+
+# Operational run/recovery state is intentionally not ignored. In particular,
+# keep overnight runs, runtime progress, master backups, and Lead Vault contacts
+# visible to operators and Git status so they cannot be discarded as cache.
+!/overnight_runs/
+!/overnight_runs/**
 
 # Temporary validation artifacts
 validation_run.log

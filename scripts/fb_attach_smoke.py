@@ -20,6 +20,8 @@ from urllib.parse import quote_plus
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 
+DEBUG_DIR = Path(__file__).resolve().parents[1] / "runtime" / "debug" / "facebook"
+
 
 def build_driver() -> webdriver.Chrome:
     options = Options()
@@ -28,7 +30,8 @@ def build_driver() -> webdriver.Chrome:
 
 
 def save_screenshot(driver: webdriver.Chrome, filename: str) -> None:
-    screenshot_path = Path.cwd() / filename
+    DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+    screenshot_path = DEBUG_DIR / filename
     driver.save_screenshot(str(screenshot_path))
 
 

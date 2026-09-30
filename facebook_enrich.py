@@ -14,6 +14,7 @@ from typing import Dict, List, Optional, Tuple
 
 from bs4 import BeautifulSoup, NavigableString, Tag
 
+from runtime_artifacts import write_bounded_json_debug
 from source_scheduler import _FB_BLOCKED_PUBLIC_PATH_SEGMENTS
 
 # Blocks of common FB UI/notification text that should be ignored entirely.
@@ -2138,10 +2139,8 @@ def _fb_extract_candidates_from_search_dom(html_or_driver, logger=None, debug: b
             "search_name": search_name or "",
         }
         try:
-            fname = f"fb_dom_gate_debug_{int(time.time())}.json"
-            with open(fname, "w", encoding="utf-8") as fh:
-                json.dump(artifact, fh, indent=2)
-        except Exception:
+            write_bounded_json_debug(artifact, prefix="fb_dom_gate_debug_", keep=30)
+        except (OSError, RuntimeError, ValueError):
             pass
         if warnings and gate_debug_env == "2":
             raise AssertionError(f"FB DOM gate warnings: {warnings}")
