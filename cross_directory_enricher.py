@@ -172,6 +172,14 @@ from night_mode_fb import (
 NIGHT_RUNTIME_RESET_INTERVAL_ROWS_DEFAULT = 50
 NIGHT_RUNTIME_CANARY_TIMEOUT_S = 1.0
 NIGHT_RUNTIME_CANARY_IG_URL = "https://www.instagram.com/"
+DEFAULT_ENRICHMENT_MODE = "source_phased"
+
+
+def resolve_enrichment_mode() -> Tuple[str, str]:
+    """Return the selected enrichment mode and its configuration source."""
+    if "ENRICHMENT_MODE" in os.environ:
+        return os.environ["ENRICHMENT_MODE"], "environment"
+    return DEFAULT_ENRICHMENT_MODE, "default"
 
 
 class NightRuntimeCanaryFailure(RuntimeError):
@@ -13611,6 +13619,7 @@ class CrossDirectoryEnricherWorker(QThread):
                 seed_df = apply_fb_opportunity_state_df(seed_df, overwrite=True)
             total = len(seed_df.index)
             self.total_rows = total
+            enrichment_mode, enrichment_mode_source = resolve_enrichment_mode()
             if not getattr(self, "night_mode", False):
                 try:
                     init_progress(
@@ -13624,7 +13633,6 @@ class CrossDirectoryEnricherWorker(QThread):
                 try:
                     from pipeline_runner import ResumeCheckpointError, build_resume_checkpoint
 
-                    enrichment_mode = os.getenv("ENRICHMENT_MODE", "row_linear")
                     self._resume_checkpoint = build_resume_checkpoint(
                         self.seed_csv_path,
                         os.path.dirname(os.path.abspath(self.output_csv_path)) or ".",
@@ -13775,15 +13783,16 @@ class CrossDirectoryEnricherWorker(QThread):
                     f"[Enricher] SoundCloud directory path set -> {self.soundcloud_csv_path}"
                 )
             priority = ["bandcamp", "soundcloud", "lastfm", "unearthed"]
-            _enrichment_mode = os.getenv("ENRICHMENT_MODE", "row_linear")
-            self.log_message.emit(f"[Enricher] mode={_enrichment_mode}")
+            self.log_message.emit(
+                f"[Enricher] mode={enrichment_mode} source={enrichment_mode_source}"
+            )
             self._run_with_night_runtime_chunks(
                 seed_df,
                 directory_indexes,
                 priority,
                 fb_driver,
                 total,
-                enrichment_mode=_enrichment_mode,
+                enrichment_mode=enrichment_mode,
             )
             self._run_late_domain_email_backfill(seed_df, total)
             # Bandcamp per-run summary (low noise)
