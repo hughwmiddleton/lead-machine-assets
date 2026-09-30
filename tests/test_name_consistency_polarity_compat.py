@@ -10,7 +10,7 @@ name-consistency-based promotion.
 """
 
 import csv
-import os
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -24,16 +24,9 @@ from final_checker import (
 )
 from pipeline_runner import recompute_final_status_post_enrichment
 
-SOAK_MASTER_FINAL = "overnight_runs/2026-08-28_102151/master_final.csv"
-SOAK_MASTER_POST_FB = "overnight_runs/2026-08-28_102151/master_post_fb.csv"
-
-
-def _require_soak_artifacts() -> None:
-    missing = [path for path in (SOAK_MASTER_FINAL, SOAK_MASTER_POST_FB) if not os.path.isfile(path)]
-    if missing:
-        pytest.skip(
-            "historical ignored soak artifacts unavailable: " + ", ".join(missing)
-        )
+FIXTURE_DIR = Path(__file__).with_name("fixtures")
+SOAK_MASTER_FINAL = FIXTURE_DIR / "legacy_name_consistency_master_final.csv"
+SOAK_MASTER_POST_FB = FIXTURE_DIR / "legacy_name_consistency_master_post_fb.csv"
 
 
 # --------------------------------------------------------------------------
@@ -285,8 +278,7 @@ def test_fb_name_consistency_flag_only_ever_adds_review() -> None:
 # --------------------------------------------------------------------------
 
 
-def _read_soak(path: str) -> pd.DataFrame:
-    _require_soak_artifacts()
+def _read_soak(path: Path) -> pd.DataFrame:
     return pd.read_csv(path, dtype=str, keep_default_na=False).fillna("")
 
 
@@ -363,7 +355,6 @@ def test_soak_block_promotions_return_once_the_artifact_is_re_checked(tmp_path) 
 
 def test_soak_reprocessed_through_checker_is_current_format(tmp_path) -> None:
     """Once re-checked, the soak carries the marker and reads canonically."""
-    _require_soak_artifacts()
     staged = tmp_path / "master.csv"
     staged.write_bytes(open(SOAK_MASTER_POST_FB, "rb").read())
 

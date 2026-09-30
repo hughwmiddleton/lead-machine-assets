@@ -45,11 +45,17 @@ fb_dom_gate_debug_*.json
 *.swp
 *~
 
-# Operational run/recovery state is intentionally not ignored. In particular,
-# keep overnight runs, runtime progress, master backups, and Lead Vault contacts
-# visible to operators and Git status so they cannot be discarded as cache.
+# Timestamped run directories are generated operational history. Keep them on
+# disk (or archive them outside the repository), but do not accumulate new runs
+# in source control. Curated regression evidence belongs in tests/fixtures.
 !/overnight_runs/
-!/overnight_runs/**
+/overnight_runs/20??-??-??_*/
+/overnight_runs/ticket5d-v1-acceptance/
+/overnight_runs/undiscovered_music_handoff_smoke_runs/
+/overnight_runs/undiscovered_music_handoff_smoke_*.json
+
+# Persistent recovery state must remain visible to operators and Git status.
+!/overnight_runs/unearthed_cursor.json
 
 # Temporary validation artifacts
 validation_run.log
