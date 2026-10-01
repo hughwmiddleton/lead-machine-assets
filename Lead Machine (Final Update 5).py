@@ -27,7 +27,7 @@ import shutil
 import logging
 import copy
 from pathlib import Path
-from typing import Dict, List, Mapping, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from fb_email_override import should_accept_email_override
 from bandcamp_profile_engine import (
@@ -441,6 +441,217 @@ def _build_night_mode_progress_display(
                 result["heartbeat"] = f"Profiles checked: {unique}"
 
     return result
+
+
+NIGHT_MODE_STAGE_LABELS = (
+    "Discovery",
+    "Enrichment",
+    "Social / Contact",
+    "Validation",
+    "Export",
+)
+
+NIGHT_MODE_SOURCE_LABELS = {
+    "amrap": "AMRAP",
+    "bandcamp": "Bandcamp",
+    "soundcloud": "SoundCloud",
+    "spotify": "Spotify",
+    "unearthed": "Unearthed",
+    "undiscovered_music": "Undiscovered Music",
+}
+
+
+def _night_mode_source_label(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    return NIGHT_MODE_SOURCE_LABELS.get(normalized, normalized.replace("_", " ").title() or "Job")
+
+
+def _night_mode_job_scope(job: Mapping[str, Any]) -> str:
+    """Return a compact human-readable scope without changing job config."""
+    for key in ("location", "country", "region", "amrap_state"):
+        value = str(job.get(key) or "").strip()
+        if value:
+            return value
+    seed = str(job.get("input_seed_csv") or job.get("input") or "").strip()
+    mode = str(job.get("mode") or "").strip()
+    if not seed:
+        return mode.title() if mode else "Standard"
+    try:
+        parsed = urlparse(seed)
+        if "bandcamp.com" in parsed.netloc.lower() and "/discover/" in parsed.path:
+            scope = parsed.path.split("/discover/", 1)[1].strip("/")
+            if scope:
+                return " · ".join(part.replace("-", " ").title() for part in scope.split("+") if part)
+        if "soundcloud.com" in parsed.netloc.lower():
+            query = parse_qs(parsed.query)
+            place = (query.get("filter.place") or [""])[0].strip()
+            if place:
+                return place.title()
+            term = (query.get("q") or [""])[0].strip()
+            if term:
+                return term.title()
+        if "spotify.com" in parsed.netloc.lower():
+            return mode.title() if mode else "Playlist"
+    except Exception:
+        pass
+    if os.path.basename(seed) != seed:
+        return os.path.basename(seed)
+    return seed if len(seed) <= 48 else f"{seed[:45]}…"
+
+
+def _format_night_mode_job(job: Mapping[str, Any]) -> str:
+    source = _night_mode_source_label(job.get("directory") or job.get("source"))
+    scope = _night_mode_job_scope(job)
+    try:
+        target = max(int(job.get("target_valid_leads") or job.get("target_count") or 0), 0)
+    except Exception:
+        target = 0
+    lead_label = "lead" if target == 1 else "leads"
+    return f"{source} · {scope} · {target} {lead_label}"
+
+
+def _build_night_mode_pre_run_summary(config: Mapping[str, Any]) -> Dict[str, Any]:
+    """Derive operator-facing readiness from the same effective config used to run."""
+    jobs = config.get("jobs") if isinstance(config, Mapping) else []
+    jobs = jobs if isinstance(jobs, list) else []
+    target_total = 0
+    for job in jobs:
+        if not isinstance(job, Mapping):
+            continue
+        try:
+            target_total += max(int(job.get("target_valid_leads") or job.get("target_count") or 0), 0)
+        except Exception:
+            continue
+    master = config.get("master_enrichment") or {}
+    facebook = config.get("facebook") or {}
+    export_mode = str(config.get("export_mode") or "both").strip() or "both"
+    warnings: List[str] = []
+    if not jobs:
+        warnings.append("Add at least one job")
+    if not bool(master.get("enabled", True)):
+        warnings.append("Full enrichment is OFF")
+    try:
+        max_rows = int(facebook.get("max_rows_per_run") or 0)
+    except Exception:
+        max_rows = 0
+    if max_rows > 0:
+        warnings.append(f"Facebook limited to {max_rows} rows")
+    try:
+        max_live = int(master.get("max_live_searches") or 0)
+    except Exception:
+        max_live = 0
+    if bool(master.get("enable_live_search", True)) and max_live > 0:
+        warnings.append(f"Live search limited to {max_live}")
+    return {
+        "job_count": len(jobs),
+        "target_leads": target_total,
+        "ready": bool(jobs),
+        "headline": f"{len(jobs)} {'job' if len(jobs) == 1 else 'jobs'} · {target_total} target leads",
+        "features": (
+            f"Full enrichment {'ON' if bool(master.get('enabled', True)) else 'OFF'} · "
+            f"Facebook ON · Auto-resume {'ON' if bool(facebook.get('auto_resume_after_captcha')) else 'OFF'}"
+        ),
+        "export": f"Export: {export_mode.replace('_', ' ')}",
+        "warnings": warnings,
+    }
+
+
+def _build_night_mode_stage_display(manifest: Optional[Mapping[str, Any]], run_dir: str = "") -> Dict[str, Any]:
+    """Map authoritative phased-run artifacts to the operator stage model."""
+    phases = (manifest or {}).get("phases") or {}
+    seed = phases.get("seed") or {}
+    enrich = phases.get("enrich") or {}
+    contact = phases.get("contact") or {}
+    statuses = {
+        "seed": str(seed.get("status") or "").lower(),
+        "enrich": str(enrich.get("status") or "").lower(),
+        "contact": str(contact.get("status") or "").lower(),
+    }
+    failed = next((key for key, value in statuses.items() if value == "failed"), "")
+    if failed:
+        failed_stage = {"seed": "Discovery", "enrich": "Enrichment", "contact": "Social / Contact"}[failed]
+        return {"stage": failed_stage, "state": "failed", "stages": NIGHT_MODE_STAGE_LABELS}
+    completed_values = {"completed", "skipped_cached"}
+    if statuses["contact"] in completed_values:
+        return {"stage": "Completed", "state": "completed", "stages": NIGHT_MODE_STAGE_LABELS}
+    if statuses["contact"]:
+        if run_dir and os.path.exists(os.path.join(run_dir, "master_export_leads.csv")):
+            stage = "Export"
+        elif run_dir and os.path.exists(os.path.join(run_dir, "master_final.csv")):
+            stage = "Export"
+        elif run_dir and os.path.exists(os.path.join(run_dir, "master_post_fb.csv")):
+            stage = "Validation"
+        else:
+            stage = "Social / Contact"
+        return {"stage": stage, "state": "running", "stages": NIGHT_MODE_STAGE_LABELS}
+    if statuses["enrich"]:
+        return {"stage": "Enrichment", "state": "running", "stages": NIGHT_MODE_STAGE_LABELS}
+    if statuses["seed"]:
+        return {"stage": "Discovery", "state": "running", "stages": NIGHT_MODE_STAGE_LABELS}
+    return {"stage": "Starting", "state": "starting", "stages": NIGHT_MODE_STAGE_LABELS}
+
+
+def _format_facebook_availability(payload: Optional[Mapping[str, Any]]) -> Dict[str, str]:
+    payload = payload or {}
+    degradation = payload.get("facebook_degradation") if isinstance(payload.get("facebook_degradation"), Mapping) else payload
+    state = str(degradation.get("state") or degradation.get("fb_availability_state") or "healthy").strip().lower()
+    reason = str(degradation.get("reason") or degradation.get("fb_degradation_reason") or "").strip()
+    skipped = degradation.get("later_opportunities_skipped", degradation.get("fb_skipped_opportunities", 0))
+    try:
+        skipped_count = max(int(skipped or 0), 0)
+    except Exception:
+        skipped_count = 0
+    labels = {
+        "healthy": "Facebook healthy",
+        "temporarily_degraded": "Facebook temporarily degraded",
+        "recovery_pending": "Facebook recovery pending",
+        "unavailable": "Facebook unavailable",
+    }
+    text = labels.get(state, f"Facebook {state.replace('_', ' ')}")
+    if reason:
+        text += f" · {reason.replace('_', ' ')}"
+    if skipped_count:
+        text += f"\n{skipped_count} later Facebook opportunities skipped"
+    return {"state": state, "text": text}
+
+
+def _read_night_mode_export_metrics(export_path: str) -> Dict[str, Any]:
+    metrics: Dict[str, Any] = {"leads": 0, "emails": 0, "status_counts": {"OK": 0, "WARN": 0, "BLOCK": 0}}
+    if not export_path or not os.path.exists(export_path):
+        return metrics
+    try:
+        with open(export_path, "r", encoding="utf-8-sig", newline="") as handle:
+            reader = csv.DictReader(handle)
+            for row in reader:
+                metrics["leads"] += 1
+                email = str(row.get("Email") or row.get("email") or "").strip()
+                email_all = str(row.get("Email_All") or row.get("email_all") or "").strip()
+                if email or email_all:
+                    metrics["emails"] += 1
+                status = str(row.get("final_status") or row.get("Final_Status") or "").strip().upper()
+                if status in metrics["status_counts"]:
+                    metrics["status_counts"][status] += 1
+    except Exception:
+        return {"leads": 0, "emails": 0, "status_counts": {"OK": 0, "WARN": 0, "BLOCK": 0}}
+    return metrics
+
+
+def _build_night_mode_completion_summary(summary: Optional[Mapping[str, Any]], export_path: str = "") -> Dict[str, Any]:
+    summary = summary or {}
+    metrics = _read_night_mode_export_metrics(export_path)
+    has_export = bool(export_path and os.path.exists(export_path))
+    leads = int(metrics["leads"] if has_export else (summary.get("artists_processed") or 0))
+    emails = int(metrics["emails"] if has_export else (summary.get("emails_discovered") or 0))
+    yield_percent = round((emails / leads) * 100) if leads else 0
+    counts = metrics["status_counts"]
+    return {
+        "leads": leads,
+        "emails": emails,
+        "yield_percent": yield_percent,
+        "status_counts": counts,
+        "headline": f"{leads} leads · {emails} emails · {yield_percent}% yield",
+        "statuses": f"OK {counts['OK']}  ·  WARN {counts['WARN']}  ·  BLOCK {counts['BLOCK']}",
+    }
 
 
 FB_DRIVER_RECOVERY_MAX_BATCHES = 10
@@ -15168,6 +15379,7 @@ class NightModeTab(QtWidgets.QWidget):
         self._active_run_dir: Optional[str] = None
         self._active_jobs_config: List[Dict[str, Any]] = []
         self._handshake_seen = False
+        self._run_elapsed_timer = QtCore.QElapsedTimer()
         self._build_ui()
         self._progress_timer = QtCore.QTimer(self)
         self._progress_timer.setInterval(1500)
@@ -15178,87 +15390,169 @@ class NightModeTab(QtWidgets.QWidget):
     def _build_ui(self):
         layout = QtWidgets.QVBoxLayout()
 
-        job_group, job_layout = _lm_section("Job Configuration")
+        intro = QtWidgets.QLabel("Night Mode")
+        intro.setStyleSheet("font-size: 22px; font-weight: 700;")
+        subtitle = QtWidgets.QLabel("Configure the run, monitor progress, then review the export.")
+        subtitle.setWordWrap(True)
+        layout.addWidget(intro)
+        layout.addWidget(subtitle)
+
+        job_group, job_layout = _lm_section("Jobs")
+        job_group.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Maximum)
+        job_layout.setContentsMargins(10, 10, 10, 10)
+        job_layout.setSpacing(8)
+
+        self.jobs_table = QtWidgets.QTableWidget(0, 4)
+        self.jobs_table.setHorizontalHeaderLabels(["Job", "Scope", "Target", "Actions"])
+        self.jobs_table.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeToContents)
+        self.jobs_table.horizontalHeader().setSectionResizeMode(1, QtWidgets.QHeaderView.Stretch)
+        self.jobs_table.horizontalHeader().setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeToContents)
+        self.jobs_table.horizontalHeader().setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeToContents)
+        self.jobs_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.jobs_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.jobs_table.setFixedHeight(86)
+        self.jobs_table.cellDoubleClicked.connect(lambda row, _column: self._edit_job_at(row))
+        job_layout.addWidget(self.jobs_table)
+
+        add_btn = QtWidgets.QPushButton("Add Job")
+        add_btn.clicked.connect(self._add_job_dialog)
+        add_job_row = QtWidgets.QHBoxLayout()
+        add_job_row.addWidget(_lm_apply_control_sizing(add_btn))
+        add_job_row.addStretch()
+        job_layout.addLayout(add_job_row)
+        layout.addWidget(job_group)
+
+        run_group, run_layout = _lm_section("Run")
+        run_group.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Maximum)
+        run_layout.setContentsMargins(10, 10, 10, 10)
+        run_layout.setSpacing(8)
+        self.master_enrich_checkbox = QtWidgets.QCheckBox("Full enrichment (recommended)")
+        self.master_enrich_checkbox.setChecked(True)
+        self.export_mode_combo = QtWidgets.QComboBox()
+        self.export_mode_combo.addItems(["both", "per_directory", "combined"])
+        self.resume_checkbox = QtWidgets.QCheckBox("Resume unfinished jobs")
+        self.stop_on_failure_checkbox = QtWidgets.QCheckBox("Stop on first failure")
+        self.stop_on_failure_checkbox.setChecked(True)
+        run_options_row = QtWidgets.QHBoxLayout()
+        run_options_row.setSpacing(18)
+        for checkbox in (
+            self.master_enrich_checkbox,
+            self.resume_checkbox,
+            self.stop_on_failure_checkbox,
+        ):
+            run_options_row.addWidget(_lm_apply_control_sizing(checkbox))
+        run_options_row.addStretch()
+        run_layout.addLayout(run_options_row)
+        run_layout.addLayout(_lm_row("Export:", self.export_mode_combo, add_stretch=True))
+
+        self.run_root_edit = QtWidgets.QLineEdit()
+        self.run_root_edit.setPlaceholderText("Use default output folder")
+        run_root_browse = QtWidgets.QPushButton("Browse...")
+        run_root_browse.clicked.connect(self._browse_run_root)
+        run_layout.addLayout(_lm_row("Output folder:", self.run_root_edit, run_root_browse))
+        self.run_destination_label = QtWidgets.QLabel()
+        self.run_destination_label.setWordWrap(True)
+        self.run_destination_label.setStyleSheet("color: #aeb8c4;")
+        run_layout.addWidget(self.run_destination_label)
+        layout.addWidget(run_group)
+
+        readiness_frame = QtWidgets.QFrame()
+        readiness_frame.setObjectName("nightModeReadiness")
+        readiness_frame.setStyleSheet(
+            "QFrame#nightModeReadiness { background: #202832; border: 1px solid #3a4654; border-radius: 6px; }"
+        )
+        readiness_layout = QtWidgets.QVBoxLayout(readiness_frame)
+        readiness_layout.setContentsMargins(12, 9, 12, 9)
+        readiness_layout.setSpacing(3)
+        readiness_title = QtWidgets.QLabel("Readiness")
+        readiness_title.setStyleSheet("font-weight: 700; color: #edf2f7; border: none;")
+        readiness_layout.addWidget(readiness_title)
+        self.pre_run_summary_label = QtWidgets.QLabel()
+        self.pre_run_summary_label.setWordWrap(True)
+        self.pre_run_summary_label.setStyleSheet("color: #edf2f7; border: none;")
+        readiness_layout.addWidget(self.pre_run_summary_label)
+        layout.addWidget(readiness_frame)
+
+        self.start_button = QtWidgets.QPushButton("Run Night Mode")
+        self.start_button.setMinimumHeight(48)
+        self.start_button.setStyleSheet(
+            "QPushButton { background: #2f6f9f; color: white; border: 1px solid #4f91bf; "
+            "border-radius: 5px; font-size: 16px; font-weight: 700; padding: 10px 24px; }"
+            "QPushButton:hover { background: #397eaf; }"
+            "QPushButton:disabled { background: #35414b; color: #8d98a3; border-color: #46525e; }"
+        )
+        self.start_button.clicked.connect(self._start_night_mode)
+        self.stop_button = QtWidgets.QPushButton("Stop")
+        self.stop_button.clicked.connect(self._stop_night_mode)
+        self.stop_button.setEnabled(False)
+        self.stop_button.setVisible(False)
+        primary_action_row = QtWidgets.QHBoxLayout()
+        primary_action_row.addStretch()
+        primary_action_row.addWidget(self.start_button, 2)
+        primary_action_row.addStretch()
+        layout.addLayout(primary_action_row)
+
+        advanced_container, self.advanced_toggle_button, self.advanced_content, advanced_layout = _lm_collapsible_section("Advanced Settings")
+        advanced_help = QtWidgets.QLabel("Source controls, recovery, credentials, and raw JSON configuration.")
+        advanced_help.setWordWrap(True)
+        advanced_layout.addWidget(advanced_help)
+
+        config_group, config_layout = _lm_section("Configuration File")
         self.config_path_edit = QtWidgets.QLineEdit("overnight_jobs.json")
         browse_btn = QtWidgets.QPushButton("Browse...")
         browse_btn.clicked.connect(self._browse_config)
         reload_btn = QtWidgets.QPushButton("Reload")
         reload_btn.clicked.connect(self._load_config_summary)
-        job_layout.addLayout(_lm_row("Night Mode config (JSON):", self.config_path_edit, browse_btn, reload_btn))
+        config_layout.addLayout(_lm_row("Night Mode config (JSON):", self.config_path_edit, browse_btn, reload_btn))
 
         self.jobs_summary = QtWidgets.QPlainTextEdit()
         self.jobs_summary.setReadOnly(True)
-        self.jobs_summary.setPlaceholderText("Load a config to view jobs (job_id, directory, mode, target_valid_leads, max_hours).")
-        self.jobs_summary.setMinimumHeight(LM_LOG_MIN_HEIGHT)
-        job_layout.addWidget(self.jobs_summary)
-
-        jobs_label = QtWidgets.QLabel("Configure Night Mode jobs here. You can add multiple directories to run overnight in sequence.")
-        jobs_label.setWordWrap(True)
-        job_layout.addLayout(_lm_control_row(jobs_label))
-
-        self.jobs_table = QtWidgets.QTableWidget(0, 6)
-        self.jobs_table.setHorizontalHeaderLabels(["#", "Directory", "Mode", "Input/Seed", "Target Leads", "Max Hours"])
-        self.jobs_table.horizontalHeader().setStretchLastSection(True)
-        self.jobs_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
-        self.jobs_table.setMinimumHeight(LM_TABLE_MIN_HEIGHT)
-        job_layout.addWidget(self.jobs_table)
-
-        add_btn = QtWidgets.QPushButton("Add job")
-        edit_btn = QtWidgets.QPushButton("Edit job")
-        remove_btn = QtWidgets.QPushButton("Remove job")
+        self.jobs_summary.setPlaceholderText("Raw configuration preview")
+        self.jobs_summary.setMinimumHeight(110)
+        config_layout.addWidget(self.jobs_summary)
         save_btn = QtWidgets.QPushButton("Save config")
         load_btn = QtWidgets.QPushButton("Load config")
-        add_btn.clicked.connect(self._add_job_dialog)
-        edit_btn.clicked.connect(self._edit_job_dialog)
-        remove_btn.clicked.connect(self._remove_selected_job)
         save_btn.clicked.connect(self._save_config_to_file)
         load_btn.clicked.connect(self._browse_config)
-        job_layout.addLayout(_lm_control_row(add_btn, edit_btn, remove_btn, save_btn, load_btn))
-        layout.addWidget(job_group)
+        config_layout.addLayout(_lm_control_row(save_btn, load_btn))
+        advanced_layout.addWidget(config_group)
 
-        output_resume_group, output_resume_layout = _lm_section("Output / Resume Settings")
-        self.export_mode_combo = QtWidgets.QComboBox()
-        self.export_mode_combo.addItems(["both", "per_directory", "combined"])
-        output_resume_layout.addLayout(_lm_row("Export mode:", self.export_mode_combo, add_stretch=True))
+        source_group, source_layout = _lm_section("Unearthed Source / Resume")
         self.unearthed_resume_mode_combo = QtWidgets.QComboBox()
         for label, value in self.UNEARTHED_RESUME_MODE_OPTIONS:
             self.unearthed_resume_mode_combo.addItem(label, value)
         self._set_unearthed_resume_mode("auto")
-        output_resume_layout.addLayout(_lm_row("Unearthed Resume Mode:", self.unearthed_resume_mode_combo, add_stretch=True))
+        source_layout.addLayout(_lm_row("Resume mode:", self.unearthed_resume_mode_combo, add_stretch=True))
         self.unearthed_source_mode_combo = QtWidgets.QComboBox()
         for label, value in self.UNEARTHED_SOURCE_MODE_OPTIONS:
             self.unearthed_source_mode_combo.addItem(label, value)
         self._set_unearthed_source_mode(False)
-        output_resume_layout.addLayout(_lm_row("Unearthed Source Mode:", self.unearthed_source_mode_combo, add_stretch=True))
+        source_layout.addLayout(_lm_row("Source mode:", self.unearthed_source_mode_combo, add_stretch=True))
         self.unearthed_index_combo = QtWidgets.QComboBox()
         self.unearthed_index_combo.currentIndexChanged.connect(self._handle_unearthed_index_selection)
         self.unearthed_duplicate_index_button = QtWidgets.QPushButton("Duplicate Index")
         self.unearthed_duplicate_index_button.clicked.connect(self._save_current_unearthed_index_as)
-        output_resume_layout.addLayout(_lm_row("Index File:", self.unearthed_index_combo, self.unearthed_duplicate_index_button))
-        self.resume_checkbox = QtWidgets.QCheckBox("Resume unfinished jobs")
-        self.stop_on_failure_checkbox = QtWidgets.QCheckBox("Stop on first failure")
-        output_resume_layout.addLayout(_lm_control_row(self.resume_checkbox, self.stop_on_failure_checkbox))
-
+        source_layout.addLayout(_lm_row("Index file:", self.unearthed_index_combo, self.unearthed_duplicate_index_button))
         self.unearthed_selected_cursor_label = QtWidgets.QLabel("Selected cursor checkpoint URL:")
         self.unearthed_selected_cursor_edit = QtWidgets.QLineEdit()
         self.unearthed_selected_cursor_edit.setPlaceholderText(
             "https://www.abc.net.au/triplejunearthed/artist/artist-slug"
         )
-        output_resume_layout.addLayout(_lm_row_with_label_widget(self.unearthed_selected_cursor_label, self.unearthed_selected_cursor_edit))
+        source_layout.addLayout(_lm_row_with_label_widget(self.unearthed_selected_cursor_label, self.unearthed_selected_cursor_edit))
         self.unearthed_start_index_label = QtWidgets.QLabel("Start from index position:")
         self.unearthed_start_index_edit = QtWidgets.QLineEdit()
         self.unearthed_start_index_edit.setPlaceholderText("Optional, e.g. 1500")
         self.unearthed_start_index_edit.setValidator(QtGui.QIntValidator(0, 100000000, self))
-        output_resume_layout.addLayout(_lm_row_with_label_widget(self.unearthed_start_index_label, self.unearthed_start_index_edit))
+        source_layout.addLayout(_lm_row_with_label_widget(self.unearthed_start_index_label, self.unearthed_start_index_edit))
         self.unearthed_resume_mode_combo.currentIndexChanged.connect(self._sync_unearthed_resume_controls)
 
         self.unearthed_index_status_label = QtWidgets.QLabel("")
         self.unearthed_index_status_label.setWordWrap(True)
-        output_resume_layout.addLayout(_lm_control_row(self.unearthed_index_status_label))
+        source_layout.addWidget(self.unearthed_index_status_label)
         self.unearthed_source_mode_combo.currentIndexChanged.connect(self._sync_unearthed_source_mode_controls)
-        layout.addWidget(output_resume_group)
+        advanced_layout.addWidget(source_group)
 
-        run_group, run_layout = _lm_section("🌙 Night Mode")
+        facebook_group, facebook_layout = _lm_section("Facebook / Recovery")
         self.fb_user_edit = QtWidgets.QLineEdit()
         self.fb_pass_edit = QtWidgets.QLineEdit()
         self.fb_pass_edit.setEchoMode(QtWidgets.QLineEdit.Password)
@@ -15298,9 +15592,6 @@ class NightModeTab(QtWidgets.QWidget):
         self.fb_share_recovery_mode_group.addButton(self.fb_share_recovery_copy_radio)
         self.fb_share_recovery_mode_group.addButton(self.fb_share_recovery_in_place_radio)
 
-        self.master_enrich_checkbox = QtWidgets.QCheckBox("Enrich leads using all available sources (recommended)")
-        self.master_enrich_checkbox.setChecked(True)
-
         self.master_live_checkbox = QtWidgets.QCheckBox("Allow live searching for additional links during enrichment")
         self.master_live_checkbox.setChecked(True)
         self.master_live_spin = QtWidgets.QSpinBox()
@@ -15311,39 +15602,12 @@ class NightModeTab(QtWidgets.QWidget):
 
         self.sc_meta_checkbox = QtWidgets.QCheckBox("Run SoundCloud metadata enricher (fills missing genre/date)")
         self.sc_meta_checkbox.setChecked(False)
-        run_layout.addLayout(_lm_control_row(self.sc_meta_checkbox))
-
-        self.run_root_edit = QtWidgets.QLineEdit()
-        run_root_browse = QtWidgets.QPushButton("Browse...")
-        run_root_browse.clicked.connect(self._browse_run_root)
-
-        self.refresh_run_summary_button = QtWidgets.QPushButton("Refresh Summary")
-        self.refresh_run_summary_button.clicked.connect(self._refresh_run_summary)
-        self.run_summary_view = QtWidgets.QPlainTextEdit()
-        self.run_summary_view.setReadOnly(True)
-        self.run_summary_view.setMinimumHeight(LM_LOG_MIN_HEIGHT)
-        self.run_summary_view.setPlaceholderText(NIGHT_MODE_RUN_SUMMARY_PLACEHOLDER)
-
-        self.start_button = QtWidgets.QPushButton("Run Night Mode")
-        self.start_button.clicked.connect(self._start_night_mode)
-        self.stop_button = QtWidgets.QPushButton("Stop")
-        self.stop_button.clicked.connect(self._stop_night_mode)
-        self.stop_button.setEnabled(False)
-        clear_log_btn = QtWidgets.QPushButton("Clear log")
-        clear_log_btn.clicked.connect(self._clear_log)
-        run_layout.addLayout(_lm_control_row(self.start_button))
-        run_layout.addLayout(_lm_control_row(self.master_enrich_checkbox))
-        run_layout.addLayout(_lm_row("Cooldown:", self.fb_cooldown_spin, add_stretch=True))
-
-        advanced_container, self.advanced_toggle_button, _advanced_content, advanced_layout = _lm_collapsible_section("Advanced Settings")
-        advanced_help = QtWidgets.QLabel("These settings are optional and usually not required.")
-        advanced_help.setWordWrap(True)
-        advanced_layout.addLayout(_lm_control_row(advanced_help))
-
-        advanced_layout.addLayout(_lm_row("FB Username (optional):", self.fb_user_edit))
-        advanced_layout.addLayout(_lm_row("FB Password (optional):", self.fb_pass_edit))
-        advanced_layout.addLayout(_lm_control_row(self.fb_auto_resume_checkbox))
-        advanced_layout.addLayout(_lm_row("Facebook processing limit (0 = no limit):", self.fb_max_rows_spin, add_stretch=True))
+        facebook_layout.addLayout(_lm_row("FB username (optional):", self.fb_user_edit))
+        facebook_layout.addLayout(_lm_row("FB password (optional):", self.fb_pass_edit))
+        facebook_layout.addLayout(_lm_control_row(self.fb_auto_resume_checkbox))
+        facebook_layout.addLayout(_lm_row("Cooldown seconds:", self.fb_cooldown_spin, add_stretch=True))
+        facebook_layout.addLayout(_lm_row("Max auto-resume attempts:", self.fb_max_attempts_spin, add_stretch=True))
+        facebook_layout.addLayout(_lm_row("Facebook processing limit (0 = no limit):", self.fb_max_rows_spin, add_stretch=True))
 
         optimisation_group, optimisation_layout = _lm_section("🛠 Post-Run Optimisation")
         optimisation_layout.addLayout(_lm_control_row(self.fb_driver_recovery_checkbox))
@@ -15372,9 +15636,10 @@ class NightModeTab(QtWidgets.QWidget):
         )
         optimisation_help.setWordWrap(True)
         optimisation_layout.addLayout(_lm_control_row(optimisation_help))
-        advanced_layout.addWidget(optimisation_group)
+        facebook_layout.addWidget(optimisation_group)
         self.fb_driver_recovery_checkbox.stateChanged.connect(self._toggle_recovery_option_controls)
         self.fb_share_recovery_checkbox.stateChanged.connect(self._toggle_recovery_option_controls)
+        advanced_layout.addWidget(facebook_group)
 
         enrichment_group, enrichment_layout = _lm_section("🔍 Enrichment Options")
         enrichment_layout.addLayout(_lm_control_row(self.master_live_checkbox))
@@ -15382,38 +15647,114 @@ class NightModeTab(QtWidgets.QWidget):
         enrichment_layout.addLayout(_lm_control_row(self.sc_meta_checkbox))
         advanced_layout.addWidget(enrichment_group)
 
-        advanced_layout.addLayout(_lm_row("Run root (optional):", self.run_root_edit, run_root_browse))
-        advanced_layout.addLayout(_lm_control_row(self.refresh_run_summary_button))
-        advanced_layout.addWidget(self.run_summary_view)
-        run_layout.addWidget(advanced_container)
-        layout.addWidget(run_group)
-
-        output_group, output_layout = _lm_section("Run Output + Logs")
-        self.status_label = QtWidgets.QLabel("Status: idle")
+        output_group, output_layout = _lm_section("Progress")
+        output_group.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Maximum)
+        output_layout.setContentsMargins(10, 10, 10, 10)
+        output_layout.setSpacing(7)
+        self.stage_pipeline_label = QtWidgets.QLabel("  →  ".join(NIGHT_MODE_STAGE_LABELS))
+        self.stage_pipeline_label.setWordWrap(True)
+        self.stage_pipeline_label.setStyleSheet("font-weight: 600; color: #aeb8c4;")
+        output_layout.addWidget(self.stage_pipeline_label)
+        self.status_label = QtWidgets.QLabel("Ready")
         self.status_label.setWordWrap(True)
-        output_layout.addLayout(_lm_control_row(self.status_label))
+        self.status_label.setStyleSheet("font-size: 16px; font-weight: 700;")
+        output_layout.addWidget(self.status_label)
         self.runtime_progress_bar = QtWidgets.QProgressBar()
         self.runtime_progress_bar.setRange(0, 1000)
         self.runtime_progress_bar.setValue(0)
         output_layout.addWidget(_lm_apply_control_sizing(self.runtime_progress_bar))
-        self.runtime_progress_detail = QtWidgets.QLabel("idle")
+        self.runtime_progress_detail = QtWidgets.QLabel("Waiting to run")
         self.runtime_progress_detail.setWordWrap(True)
-        output_layout.addLayout(_lm_control_row(self.runtime_progress_detail))
+        output_layout.addWidget(self.runtime_progress_detail)
+        self.facebook_status_label = QtWidgets.QLabel("Facebook ready")
+        self.facebook_status_label.setWordWrap(True)
+        output_layout.addWidget(self.facebook_status_label)
+        self.elapsed_label = QtWidgets.QLabel("Elapsed: —")
+        output_layout.addWidget(self.elapsed_label)
+        output_layout.addLayout(_lm_control_row(self.stop_button))
+        layout.addWidget(output_group)
+
+        result_group, result_layout = _lm_section("Results")
+        result_group.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Maximum)
+        result_layout.setContentsMargins(10, 10, 10, 10)
+        result_layout.setSpacing(6)
+        self.result_context_label = QtWidgets.QLabel("Current session")
+        self.result_context_label.setStyleSheet("color: #8f9aa5; font-size: 11px;")
+        result_layout.addWidget(self.result_context_label)
+        self.completion_headline_label = QtWidgets.QLabel("No completed run in this session.")
+        self.completion_headline_label.setWordWrap(True)
+        self.completion_headline_label.setStyleSheet("font-size: 15px; font-weight: 600;")
+        result_layout.addWidget(self.completion_headline_label)
+        self.results_detail_widget = QtWidgets.QWidget()
+        results_detail_layout = QtWidgets.QVBoxLayout(self.results_detail_widget)
+        results_detail_layout.setContentsMargins(0, 0, 0, 0)
+        results_detail_layout.setSpacing(6)
+        self.completion_status_counts_label = QtWidgets.QLabel("")
+        results_detail_layout.addWidget(self.completion_status_counts_label)
+        self.run_summary_view = QtWidgets.QPlainTextEdit()
+        self.run_summary_view.setReadOnly(True)
+        self.run_summary_view.setMaximumHeight(105)
+        self.run_summary_view.setPlaceholderText(NIGHT_MODE_RUN_SUMMARY_PLACEHOLDER)
+        results_detail_layout.addWidget(self.run_summary_view)
+        self.open_export_button = QtWidgets.QPushButton("Open Export")
+        self.open_export_button.clicked.connect(self._open_latest_export)
+        self.open_run_folder_button = QtWidgets.QPushButton("Open Run Folder")
+        self.open_run_folder_button.clicked.connect(self._open_latest_run_folder)
+        self.review_results_button = QtWidgets.QPushButton("Review WARN / BLOCK")
+        self.review_results_button.clicked.connect(self._open_latest_export)
+        self.refresh_run_summary_button = QtWidgets.QPushButton("Show Latest Run")
+        self.refresh_run_summary_button.clicked.connect(lambda: self._refresh_run_summary(include_latest=True))
+        self.result_actions_widget = QtWidgets.QWidget()
+        result_actions = QtWidgets.QHBoxLayout(self.result_actions_widget)
+        result_actions.setContentsMargins(0, 0, 0, 0)
+        result_actions.setSpacing(8)
+        for button in (
+            self.open_export_button,
+            self.open_run_folder_button,
+            self.review_results_button,
+            self.refresh_run_summary_button,
+        ):
+            result_actions.addWidget(_lm_apply_control_sizing(button))
+        result_actions.addStretch()
+        result_layout.addWidget(self.results_detail_widget)
+        result_layout.addWidget(self.result_actions_widget)
+        layout.addWidget(result_group)
+        layout.addWidget(advanced_container)
+
+        log_container, self.log_toggle_button, _log_content, log_layout = _lm_collapsible_section("Raw Log")
+        clear_log_btn = QtWidgets.QPushButton("Clear log")
+        clear_log_btn.clicked.connect(self._clear_log)
         self.log_console = QtWidgets.QPlainTextEdit()
         self.log_console.setReadOnly(True)
         self.log_console.setMinimumHeight(LM_LOG_MIN_HEIGHT)
-        output_layout.addWidget(self.log_console)
-        output_layout.addLayout(_lm_control_row(self.stop_button, clear_log_btn))
-        layout.addWidget(output_group)
+        log_layout.addWidget(self.log_console)
+        log_layout.addLayout(_lm_control_row(clear_log_btn))
+        layout.addWidget(log_container)
 
         _lm_scrolled_tab(self, layout)
+        layout.setContentsMargins(14, 12, 14, 14)
+        layout.setSpacing(12)
         self._refresh_unearthed_index_selector()
         self._sync_unearthed_resume_controls()
         self._sync_unearthed_source_mode_controls()
         self._toggle_master_live_controls()
         self._toggle_recovery_option_controls()
         self._load_config_summary()
-        self._refresh_run_summary()
+        for signal in (
+            self.export_mode_combo.currentIndexChanged,
+            self.resume_checkbox.stateChanged,
+            self.stop_on_failure_checkbox.stateChanged,
+            self.master_enrich_checkbox.stateChanged,
+            self.fb_auto_resume_checkbox.stateChanged,
+            self.fb_max_rows_spin.valueChanged,
+            self.master_live_checkbox.stateChanged,
+            self.master_live_spin.valueChanged,
+        ):
+            signal.connect(self._mark_configuration_changed)
+        self.run_root_edit.textChanged.connect(self._handle_run_root_changed)
+        self._refresh_pre_run_summary()
+        self._refresh_run_destination()
+        self._refresh_run_summary(include_latest=False)
 
     def _night_mode_run_root(self) -> str:
         configured = self.run_root_edit.text().strip()
@@ -15421,12 +15762,153 @@ class NightModeTab(QtWidgets.QWidget):
             return configured
         return os.path.join(os.path.dirname(os.path.abspath(__file__)), "overnight_runs")
 
-    def _refresh_run_summary(self):
-        summary = _load_latest_night_mode_run_summary(self._night_mode_run_root())
+    def _effective_config_snapshot(self) -> Dict[str, Any]:
+        """Read current widgets into the same config shape used by the runner."""
+        return {
+            "export_mode": self.export_mode_combo.currentText().strip() or "both",
+            "jobs": self._night_mode_jobs_for_config(),
+            "facebook": {
+                "auto_resume_after_captcha": self.fb_auto_resume_checkbox.isChecked(),
+                "cooldown_seconds": int(self.fb_cooldown_spin.value()),
+                "max_auto_resume_attempts": int(self.fb_max_attempts_spin.value()),
+                "max_rows_per_run": int(self.fb_max_rows_spin.value()),
+            },
+            "master_enrichment": {
+                "enabled": self.master_enrich_checkbox.isChecked(),
+                "enable_live_search": self.master_live_checkbox.isChecked(),
+                "max_live_searches": int(self.master_live_spin.value()),
+            },
+        }
+
+    def _refresh_pre_run_summary(self, *_args):
+        summary = _build_night_mode_pre_run_summary(self._effective_config_snapshot())
+        lines = [f"{summary['headline']}  ·  {summary['features']}  ·  {summary['export']}"]
+        if summary["warnings"]:
+            lines.append("Review: " + " · ".join(summary["warnings"]))
+        else:
+            lines.append("Ready to run")
+        self.pre_run_summary_label.setText("\n".join(lines))
+        self.start_button.setEnabled(bool(summary["ready"]) and not (self.worker and self.worker.isRunning()))
+
+    def _refresh_run_destination(self, *_args):
+        root = os.path.abspath(os.path.expanduser(self._night_mode_run_root()))
+        prefix = "Default" if not self.run_root_edit.text().strip() else "Selected"
+        self.run_destination_label.setText(f"{prefix}: {root} · A timestamped run folder is created automatically.")
+
+    def _clear_run_results(self, message: str = "No completed run for this setup yet.") -> None:
+        self.result_context_label.setText("Current session")
+        self.completion_headline_label.setText(message)
+        self.completion_status_counts_label.setText("")
+        self.run_summary_view.setPlainText("")
+        self.results_detail_widget.setVisible(False)
+        self.open_export_button.setEnabled(False)
+        self.open_export_button.setVisible(False)
+        self.open_run_folder_button.setEnabled(False)
+        self.open_run_folder_button.setVisible(False)
+        self.review_results_button.setEnabled(False)
+        self.review_results_button.setVisible(False)
+        self.refresh_run_summary_button.setVisible(True)
+
+    def _mark_configuration_changed(self, *_args) -> None:
+        self._refresh_pre_run_summary()
+        if not (self.worker and self.worker.isRunning()):
+            self._active_run_dir = None
+            self._clear_run_results()
+            self._run_elapsed_timer.invalidate()
+            self.stage_pipeline_label.setText("  →  ".join(NIGHT_MODE_STAGE_LABELS))
+            self.status_label.setText("Ready")
+            self.status_label.setStyleSheet("font-size: 16px; font-weight: 700;")
+            self.runtime_progress_bar.setRange(0, 1000)
+            self.runtime_progress_bar.setValue(0)
+            self.runtime_progress_detail.setText("Waiting to run")
+            self._set_facebook_status({"state": "healthy", "text": "Facebook ready"})
+            self.elapsed_label.setText("Elapsed: —")
+
+    def _handle_run_root_changed(self, *_args) -> None:
+        self._refresh_run_destination()
+        self._mark_configuration_changed()
+
+    def _latest_result_paths(self, *, allow_historical: bool = True) -> Tuple[Optional[Path], Optional[Path]]:
+        run_dir = Path(self._active_run_dir) if self._active_run_dir and os.path.isdir(self._active_run_dir) else None
+        if run_dir is None and allow_historical:
+            run_dir = _discover_latest_night_mode_run_dir(self._night_mode_run_root())
+        if run_dir is None:
+            return None, None
+        export_path: Optional[Path] = None
+        manifest = _read_json_safe(str(run_dir / "run_manifest_v2.json")) or {}
+        contact = ((manifest.get("phases") or {}).get("contact") or {})
+        outputs = contact.get("outputs") or {}
+        canonical = outputs.get("canonical_export_leads") or outputs.get("master_export_leads") or {}
+        candidate = canonical.get("path") if isinstance(canonical, dict) else canonical
+        if candidate and os.path.exists(str(candidate)):
+            export_path = Path(str(candidate))
+        else:
+            fallback = run_dir / "master_export_leads.csv"
+            if fallback.exists():
+                export_path = fallback
+        return run_dir, export_path
+
+    def _open_local_path(self, path: Optional[Path]):
+        if path is None or not path.exists():
+            QtWidgets.QMessageBox.information(self, "Result not available", "No completed result is available yet.")
+            return
+        QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(path.resolve())))
+
+    def _open_latest_export(self):
+        _run_dir, export_path = self._latest_result_paths()
+        self._open_local_path(export_path)
+
+    def _open_latest_run_folder(self):
+        run_dir, _export_path = self._latest_result_paths()
+        self._open_local_path(run_dir)
+
+    def _refresh_run_summary(self, *, include_latest: bool = True):
+        run_dir, export_path = self._latest_result_paths(allow_historical=include_latest)
+        summary = _read_json_safe(str(run_dir / NIGHT_MODE_RUN_SUMMARY_FILENAME)) if run_dir else None
         if not summary:
             self.run_summary_view.setPlainText(NIGHT_MODE_RUN_SUMMARY_PLACEHOLDER)
+            self.completion_headline_label.setText(
+                "Run finished without a completion summary." if run_dir else "No completed run for this setup yet."
+            )
+            self.completion_status_counts_label.setText("")
+            self.result_context_label.setText("Current run" if self._active_run_dir else "Current session")
+            self.results_detail_widget.setVisible(bool(run_dir))
+            self.open_export_button.setEnabled(False)
+            self.open_export_button.setVisible(False)
+            self.open_run_folder_button.setEnabled(bool(run_dir))
+            self.open_run_folder_button.setVisible(bool(run_dir))
+            self.review_results_button.setEnabled(False)
+            self.review_results_button.setVisible(False)
             return
         self.run_summary_view.setPlainText(self._format_run_summary(summary))
+        completion = _build_night_mode_completion_summary(summary, str(export_path or ""))
+        self.completion_headline_label.setText(completion["headline"])
+        self.completion_status_counts_label.setText(completion["statuses"])
+        if self._active_run_dir:
+            self.result_context_label.setText("Current run")
+        else:
+            self.result_context_label.setText(f"Previous completed run · {run_dir.name}")
+        self.results_detail_widget.setVisible(True)
+        if self._active_run_dir:
+            self._set_facebook_status(_format_facebook_availability(summary))
+        self.open_export_button.setEnabled(bool(export_path))
+        self.open_export_button.setVisible(bool(export_path))
+        self.open_run_folder_button.setEnabled(bool(run_dir))
+        self.open_run_folder_button.setVisible(bool(run_dir))
+        counts = completion["status_counts"]
+        self.review_results_button.setEnabled(bool(export_path) and bool(counts["WARN"] or counts["BLOCK"]))
+        self.review_results_button.setVisible(bool(export_path) and bool(counts["WARN"] or counts["BLOCK"]))
+
+    def _set_facebook_status(self, display: Mapping[str, str]):
+        state = display.get("state", "healthy")
+        self.facebook_status_label.setText(display.get("text", "Facebook healthy"))
+        colour = {
+            "healthy": "#77c58a",
+            "temporarily_degraded": "#e6b85c",
+            "recovery_pending": "#e6b85c",
+            "unavailable": "#e58a65",
+        }.get(state, "#aeb8c4")
+        self.facebook_status_label.setStyleSheet(f"font-weight: 600; color: {colour};")
 
     def _format_run_summary(self, summary: dict) -> str:
         lines = [
@@ -15457,6 +15939,32 @@ class NightModeTab(QtWidgets.QWidget):
             return f"ETA {minutes}m {secs}s"
         return f"ETA {secs}s"
 
+    def _refresh_elapsed(self):
+        if not self._run_elapsed_timer.isValid():
+            self.elapsed_label.setText("Elapsed: —")
+            return
+        total_seconds = max(int(self._run_elapsed_timer.elapsed() / 1000), 0)
+        hours, remainder = divmod(total_seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        elapsed = f"{hours}h {minutes:02d}m" if hours else f"{minutes}m {seconds:02d}s"
+        self.elapsed_label.setText(f"Elapsed: {elapsed}")
+
+    def _set_stage_display(self, display: Mapping[str, Any]):
+        active = str(display.get("stage") or "Starting")
+        stages = list(display.get("stages") or NIGHT_MODE_STAGE_LABELS)
+        rendered = [f"[{stage}]" if stage == active else stage for stage in stages]
+        self.stage_pipeline_label.setText("  →  ".join(rendered))
+        state = str(display.get("state") or "running")
+        if state == "failed":
+            self.status_label.setText(f"Run failed during {active}")
+            self.status_label.setStyleSheet("font-size: 16px; font-weight: 700; color: #e36d6d;")
+        elif state == "completed":
+            self.status_label.setText("Run completed")
+            self.status_label.setStyleSheet("font-size: 16px; font-weight: 700; color: #77c58a;")
+        else:
+            self.status_label.setText(f"Running · {active}")
+            self.status_label.setStyleSheet("font-size: 16px; font-weight: 700; color: #7db8e8;")
+
     def _refresh_runtime_progress(self):
         # While a Night Mode worker is active, prefer the exact phased-run state
         # over the global singleton progress file to avoid stale data.
@@ -15464,25 +15972,20 @@ class NightModeTab(QtWidgets.QWidget):
             self._refresh_runtime_progress_from_active_run()
             return
 
-        # No active worker: do not display stale global progress as if it were
-        # the current run. Show idle unless the global file is unambiguous.
-        progress = read_progress()
-        phase = str(progress.get("phase") or "idle")
-        if phase == "idle":
-            self.runtime_progress_bar.setRange(0, 1000)
-            self.runtime_progress_bar.setValue(0)
-            self.runtime_progress_detail.setText("idle")
-            return
-        # Even without a worker, avoid presenting a stale complete payload.
+        # No active worker: never present singleton progress from an earlier run
+        # as current authoritative status.
         self.runtime_progress_bar.setRange(0, 1000)
         self.runtime_progress_bar.setValue(0)
-        self.runtime_progress_detail.setText(f"{phase} — waiting for next run")
+        if not self._run_elapsed_timer.isValid():
+            self.runtime_progress_detail.setText("Waiting to run")
 
     def _refresh_runtime_progress_from_active_run(self):
+        self._refresh_elapsed()
         if not self._handshake_seen:
             self.runtime_progress_bar.setRange(0, 0)
             self.runtime_progress_bar.setValue(0)
             self.runtime_progress_detail.setText("Night Mode starting…")
+            self._set_stage_display({"stage": "Starting", "state": "starting", "stages": NIGHT_MODE_STAGE_LABELS})
             return
 
         run_dir = self._active_run_dir
@@ -15491,6 +15994,11 @@ class NightModeTab(QtWidgets.QWidget):
             self.runtime_progress_bar.setValue(0)
             self.runtime_progress_detail.setText("Waiting for current job state…")
             return
+
+        manifest = _read_json_safe(os.path.join(run_dir, "run_manifest_v2.json")) or {}
+        self._set_stage_display(_build_night_mode_stage_display(manifest, run_dir))
+        fb_state = _read_json_safe(os.path.join(run_dir, "facebook_state.json")) or {}
+        self._set_facebook_status(_format_facebook_availability(fb_state))
 
         # Read job statuses for each configured job in order.
         job_statuses: List[Dict[str, Any]] = []
@@ -15572,21 +16080,38 @@ class NightModeTab(QtWidgets.QWidget):
         if not lines:
             lines.append("No jobs configured.")
         self.jobs_summary.setPlainText("\n".join(lines))
+        self._mark_configuration_changed()
 
     def _refresh_jobs_table(self):
         self.jobs_table.setRowCount(len(self.jobs))
         for idx, job in enumerate(self.jobs):
             values = [
-                str(idx + 1),
-                job.get("directory", ""),
-                job.get("mode", ""),
-                job.get("input_seed_csv", ""),
+                _night_mode_source_label(job.get("directory", "")),
+                _night_mode_job_scope(job),
                 str(job.get("target_valid_leads", "")),
-                str(job.get("max_hours", "")),
             ]
             for col, value in enumerate(values):
                 item = QtWidgets.QTableWidgetItem(value)
                 self.jobs_table.setItem(idx, col, item)
+            actions = QtWidgets.QWidget()
+            actions_layout = QtWidgets.QHBoxLayout(actions)
+            actions_layout.setContentsMargins(2, 2, 2, 2)
+            actions_layout.setSpacing(6)
+            edit_button = QtWidgets.QPushButton("Edit")
+            duplicate_button = QtWidgets.QPushButton("Duplicate")
+            remove_button = QtWidgets.QPushButton("Remove")
+            edit_button.clicked.connect(lambda _checked=False, row=idx: self._edit_job_at(row))
+            duplicate_button.clicked.connect(lambda _checked=False, row=idx: self._duplicate_job_at(row))
+            remove_button.clicked.connect(lambda _checked=False, row=idx: self._remove_job_at(row))
+            actions_layout.addWidget(edit_button)
+            actions_layout.addWidget(duplicate_button)
+            actions_layout.addWidget(remove_button)
+            self.jobs_table.setCellWidget(idx, 3, actions)
+            self.jobs_table.setRowHeight(idx, max(LM_BUTTON_MIN_HEIGHT + 8, self.jobs_table.rowHeight(idx)))
+        header_height = self.jobs_table.horizontalHeader().height()
+        visible_rows_height = sum(self.jobs_table.rowHeight(row) for row in range(min(len(self.jobs), 3)))
+        self.jobs_table.setFixedHeight(max(86, min(190, header_height + visible_rows_height + 6)))
+        self._refresh_pre_run_summary()
 
     def _current_unearthed_resume_mode(self) -> str:
         value = str(self.unearthed_resume_mode_combo.currentData() or "auto").strip().lower()
@@ -15830,21 +16355,45 @@ class NightModeTab(QtWidgets.QWidget):
     def _add_job_dialog(self):
         self._open_job_dialog()
 
+    def _edit_job_at(self, row: int):
+        if 0 <= row < len(self.jobs):
+            self._open_job_dialog(existing_job=self.jobs[row], index=row)
+
+    def _duplicate_job_at(self, row: int):
+        if row < 0 or row >= len(self.jobs):
+            return
+        duplicate = copy.deepcopy(self.jobs[row])
+        base_id = str(duplicate.get("job_id") or f"job_{duplicate.get('directory', 'dir')}").strip()
+        existing_ids = {str(job.get("job_id") or "") for job in self.jobs}
+        suffix = 2
+        candidate = f"{base_id}_copy"
+        while candidate in existing_ids:
+            candidate = f"{base_id}_copy_{suffix}"
+            suffix += 1
+        duplicate["job_id"] = candidate
+        self.jobs.insert(row + 1, duplicate)
+        self._refresh_jobs_table()
+        self._update_jobs_summary_from_jobs()
+
+    def _remove_job_at(self, row: int):
+        if 0 <= row < len(self.jobs):
+            del self.jobs[row]
+            self._refresh_jobs_table()
+            self._update_jobs_summary_from_jobs()
+
     def _edit_job_dialog(self):
         row = self.jobs_table.currentRow()
         if row < 0 or row >= len(self.jobs):
             QtWidgets.QMessageBox.information(self, "Select a job", "Please select a job to edit.")
             return
-        self._open_job_dialog(existing_job=self.jobs[row], index=row)
+        self._edit_job_at(row)
 
     def _remove_selected_job(self):
         row = self.jobs_table.currentRow()
         if row < 0 or row >= len(self.jobs):
             QtWidgets.QMessageBox.information(self, "Select a job", "Please select a job to remove.")
             return
-        del self.jobs[row]
-        self._refresh_jobs_table()
-        self._update_jobs_summary_from_jobs()
+        self._remove_job_at(row)
 
     def _save_config_to_file(self):
         if not self.jobs:
@@ -16107,11 +16656,17 @@ class NightModeTab(QtWidgets.QWidget):
             if self.fb_share_recovery_in_place_radio.isChecked():
                 cmd.append("--fb-share-recovery-in-place")
 
+        self._clear_run_results("Run in progress…")
         self.log_console.clear()
         mode_label = "headless" if headless else "headed"
-        self.status_label.setText(f"Status: running ({mode_label})")
+        self._run_elapsed_timer.start()
+        self.status_label.setText(f"Starting Night Mode · {mode_label}")
+        self.status_label.setStyleSheet("font-size: 16px; font-weight: 700; color: #7db8e8;")
+        self.runtime_progress_detail.setText("Preparing timestamped run directory…")
+        self._set_facebook_status({"state": "healthy", "text": "Facebook ready"})
         self.start_button.setEnabled(False)
         self.stop_button.setEnabled(True)
+        self.stop_button.setVisible(True)
         self._set_unearthed_index_controls_enabled(False)
         env = os.environ.copy()
         fb_user = self.fb_user_edit.text().strip()
@@ -16134,11 +16689,14 @@ class NightModeTab(QtWidgets.QWidget):
         if not self.worker:
             return
         self._append_log("[Night Mode] Stop requested.")
+        self.status_label.setText("Stopping safely…")
+        self.status_label.setStyleSheet("font-size: 16px; font-weight: 700; color: #e6b85c;")
         self.worker.stop()
         self.stop_button.setEnabled(False)
 
     def _on_finished(self, exit_code: int):
         stage = self._bootstrap_stage
+        stop_requested = bool(getattr(self.worker, "_stop_requested", False))
         if exit_code != 0 and stage == "headless":
             if self._auth_failure_seen():
                 QtWidgets.QMessageBox.information(
@@ -16166,10 +16724,18 @@ class NightModeTab(QtWidgets.QWidget):
             if self._start_fb_driver_recovery():
                 return
 
-        status = "completed" if exit_code == 0 else f"finished with errors (code {exit_code})"
-        self.status_label.setText(f"Status: {status}")
+        if stop_requested:
+            self.status_label.setText("Run stopped by operator")
+            self.status_label.setStyleSheet("font-size: 16px; font-weight: 700; color: #e6b85c;")
+        elif exit_code == 0:
+            self._set_stage_display({"stage": "Completed", "state": "completed", "stages": NIGHT_MODE_STAGE_LABELS})
+        else:
+            self.status_label.setText(f"Run failed · exit code {exit_code}")
+            self.status_label.setStyleSheet("font-size: 16px; font-weight: 700; color: #e36d6d;")
+        self._refresh_elapsed()
         self.start_button.setEnabled(True)
         self.stop_button.setEnabled(False)
+        self.stop_button.setVisible(False)
         self._set_unearthed_index_controls_enabled(True)
         self.worker = None
         self._bootstrap_stage = None
@@ -16187,9 +16753,10 @@ class NightModeTab(QtWidgets.QWidget):
         if not export_path:
             self._append_log("[FB Driver Recovery] Skipped: final export master_export_leads.csv was not found.")
             return False
-        self.status_label.setText("Status: running FB driver recovery")
+        self.status_label.setText("Running post-run Facebook recovery")
         self.start_button.setEnabled(False)
         self.stop_button.setEnabled(False)
+        self.stop_button.setVisible(False)
         self._set_unearthed_index_controls_enabled(False)
         self.recovery_worker = FbDriverRecoveryWorker(
             export_path,
@@ -16203,10 +16770,15 @@ class NightModeTab(QtWidgets.QWidget):
         return True
 
     def _on_fb_driver_recovery_finished(self, exit_code: int, result):
-        status = "completed" if exit_code == 0 else f"finished with errors (code {exit_code})"
-        self.status_label.setText(f"Status: {status}")
+        if exit_code == 0:
+            self.status_label.setText("Run completed · Facebook recovery complete")
+            self.status_label.setStyleSheet("font-size: 16px; font-weight: 700; color: #77c58a;")
+        else:
+            self.status_label.setText(f"Run completed · Facebook recovery failed (code {exit_code})")
+            self.status_label.setStyleSheet("font-size: 16px; font-weight: 700; color: #e6b85c;")
         self.start_button.setEnabled(True)
         self.stop_button.setEnabled(False)
+        self.stop_button.setVisible(False)
         self._set_unearthed_index_controls_enabled(True)
         self.recovery_worker = None
         self._refresh_run_summary()
@@ -16405,7 +16977,7 @@ class NightModeJobDialog(QtWidgets.QDialog):
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Artist & Facebook Scraper")
+        self.setWindowTitle("Lead Machine")
         self.setMinimumSize(800, 600)
         self.artist_thread = None
         self.fb_thread = None
@@ -16416,11 +16988,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.create_menu()
         self.tabs = QtWidgets.QTabWidget()
         self.setCentralWidget(self.tabs)
+        self.night_mode_tab = NightModeTab()
+        self.tabs.addTab(self.night_mode_tab, "Night Mode")
         self.artist_tab = QtWidgets.QWidget()
-        self.tabs.addTab(self.artist_tab, "Artist Scraping")
+        self.tabs.addTab(self.artist_tab, "Legacy Artist Scraping")
         self.create_artist_tab()
         self.facebook_tab = QtWidgets.QWidget()
-        self.tabs.addTab(self.facebook_tab, "Facebook Scraping")
+        self.tabs.addTab(self.facebook_tab, "Legacy Facebook Scraping")
         self.create_facebook_tab()
         self.cross_enricher_tab = CrossDirectoryEnricherTab(
             enricher_module=cross_directory_enricher
@@ -16432,8 +17006,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tabs.addTab(self.campaign_prep_tab, "Campaign Prep")
         self.auto_validate_tab = AutoValidateTab()
         self.tabs.addTab(self.auto_validate_tab, "Auto-Validate")
-        self.night_mode_tab = NightModeTab()
-        self.tabs.addTab(self.night_mode_tab, "Night Mode")
+        self.tabs.setCurrentWidget(self.night_mode_tab)
     def create_menu(self):
         menubar = self.menuBar()
         file_menu = menubar.addMenu("File")
