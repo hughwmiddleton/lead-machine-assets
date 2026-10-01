@@ -62,13 +62,19 @@ def test_night_mode_ui_simplified_labels_and_advanced_defaults(qapp):
     checkbox_texts = {checkbox.text() for checkbox in tab.findChildren(QtWidgets.QCheckBox)}
     button_texts = {button.text() for button in tab.findChildren(QtWidgets.QAbstractButton)}
 
-    assert "🌙 Night Mode" in group_titles
+    assert {"Jobs", "Run", "Progress", "Results"}.issubset(group_titles)
     assert "🛠 Post-Run Optimisation" in group_titles
     assert "🔍 Enrichment Options" in group_titles
     assert "Run Night Mode" in button_texts
     assert "Advanced Settings" in button_texts
     assert tab.advanced_toggle_button.isChecked() is False
     assert tab.master_enrich_checkbox.text() == "Full enrichment (recommended)"
+    assert tab.stop_on_failure_checkbox.text() == "Stop on first failure"
+    assert tab.stop_on_failure_checkbox.isChecked() is True
+    assert not tab.advanced_content.isAncestorOf(tab.stop_on_failure_checkbox)
+    assert not tab.advanced_content.isAncestorOf(tab.run_root_edit)
+    assert "Output folder:" in label_texts
+    assert "Run root (optional):" not in label_texts
     assert tab.master_live_checkbox.text() == "Allow live searching for additional links during enrichment"
     assert "Facebook processing limit (0 = no limit):" in label_texts
     assert "Max auto-resume attempts:" in label_texts

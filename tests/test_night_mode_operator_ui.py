@@ -143,7 +143,7 @@ def test_main_window_opens_on_night_mode_with_lead_machine_title(qapp):
     window.close()
 
 
-def test_launch_config_matches_operator_controls(qapp, monkeypatch):
+def test_launch_config_and_arguments_match_operator_controls(qapp, monkeypatch, tmp_path):
     module = _load_gui()
     captured = {}
 
@@ -166,6 +166,8 @@ def test_launch_config_matches_operator_controls(qapp, monkeypatch):
     tab.fb_auto_resume_checkbox.setChecked(True)
     tab.fb_max_rows_spin.setValue(9)
     tab.export_mode_combo.setCurrentText("combined")
+    selected_output = tmp_path / "operator-output"
+    tab.run_root_edit.setText(str(selected_output))
 
     expected = tab._effective_config_snapshot()
     tab._launch_night_mode(headless=True)
@@ -176,4 +178,45 @@ def test_launch_config_matches_operator_controls(qapp, monkeypatch):
     assert payload["export_mode"] == expected["export_mode"]
     assert payload["facebook"] == expected["facebook"]
     assert payload["master_enrichment"] == expected["master_enrichment"]
+    assert tab.stop_on_failure_checkbox.isChecked() is True
+    assert "--stop-on-failure" in command
+    assert command[command.index("--run-root") + 1] == str(selected_output)
+
+    tab.stop_on_failure_checkbox.setChecked(False)
+    tab.run_root_edit.clear()
+    tab._launch_night_mode(headless=True)
+    disabled_command = captured["command"]
+
+    assert "--stop-on-failure" not in disabled_command
+    assert "--run-root" not in disabled_command
+    tab.shutdown()
+
+
+def test_changed_run_configuration_hides_stale_previous_results(qapp, tmp_path):
+    module = _load_gui()
+    run_root = tmp_path / "runs"
+    previous_run = run_root / "2026-09-30_230000"
+    previous_run.mkdir(parents=True)
+    (previous_run / module.NIGHT_MODE_RUN_SUMMARY_FILENAME).write_text(
+        json.dumps({"artists_processed": 3, "emails_discovered": 2}),
+        encoding="utf-8",
+    )
+
+    tab = module.NightModeTab()
+    tab.run_root_edit.setText(str(run_root))
+    tab._refresh_run_summary(include_latest=True)
+
+    assert tab.result_context_label.text() == "Previous completed run · 2026-09-30_230000"
+    assert tab.results_detail_widget.isHidden() is False
+
+    tab.status_label.setText("Run completed")
+    tab.runtime_progress_detail.setText("Previous run complete")
+    tab._run_elapsed_timer.start()
+    tab.export_mode_combo.setCurrentText("combined")
+
+    assert tab.completion_headline_label.text() == "No completed run for this setup yet."
+    assert tab.results_detail_widget.isHidden() is True
+    assert tab.status_label.text() == "Ready"
+    assert tab.runtime_progress_detail.text() == "Waiting to run"
+    assert tab._run_elapsed_timer.isValid() is False
     tab.shutdown()
