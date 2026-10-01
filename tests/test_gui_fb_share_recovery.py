@@ -68,10 +68,10 @@ def test_night_mode_ui_simplified_labels_and_advanced_defaults(qapp):
     assert "Run Night Mode" in button_texts
     assert "Advanced Settings" in button_texts
     assert tab.advanced_toggle_button.isChecked() is False
-    assert tab.master_enrich_checkbox.text() == "Enrich leads using all available sources (recommended)"
+    assert tab.master_enrich_checkbox.text() == "Full enrichment (recommended)"
     assert tab.master_live_checkbox.text() == "Allow live searching for additional links during enrichment"
     assert "Facebook processing limit (0 = no limit):" in label_texts
-    assert "Max auto-resume attempts:" not in label_texts
+    assert "Max auto-resume attempts:" in label_texts
     assert "FB rows per run (0 = no limit):" not in label_texts
     assert "Use master cross-directory enrichment (recommended)" not in checkbox_texts
     assert "Enable live directory search during master enrich" not in checkbox_texts
