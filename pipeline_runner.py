@@ -115,8 +115,10 @@ from night_mode_fb import (
     fb_share_runtime_fallback_urls_for_row,
     close_night_fb_run_state,
     create_night_fb_run_state,
+    disable_night_fb_run_state,
     explicit_fb_entrypoint_urls_for_row,
     normalize_night_fb_session_source,
+    transition_night_fb_availability,
 )
 
 LoggerFn = Optional[Callable[[str], None]]
@@ -307,6 +309,27 @@ def _is_recoverable_driver_error(exc: BaseException) -> bool:
             return True
         return any(token in message for token in _DRIVER_RECOVERY_ERROR_TOKENS)
     return False
+
+
+class _FacebookAuthDegradation(RuntimeError):
+    """Internal signal for a confirmed login/security wall."""
+
+
+def _facebook_auth_degradation_reason(value: Any) -> str:
+    if isinstance(value, Mapping):
+        text = " ".join(
+            _cell_str(value.get(field, ""))
+            for field in ("FB_Status", "FB_Reason", FB_ATTEMPT_STATE_COL)
+        ).lower()
+    else:
+        text = str(value or "").strip().lower()
+    if any(token in text for token in ("two_factor", "two-factor", "two factor")):
+        return "two_factor"
+    if "checkpoint" in text:
+        return "checkpoint"
+    if any(token in text for token in ("login_wall", "login wall", "login_required", "redirect_login")):
+        return "login_wall"
+    return ""
 
 
 def _terminate_fb_helper_for_recovery(helper: Any) -> bool:
@@ -1428,6 +1451,8 @@ def _classify_fb_debug_reason(row_like: Any) -> str:
 
     if gate_norm in {"skipped_no_identity_anchor", "skipped_no_canonical_facebook_url"}:
         return "no_fb_candidate"
+    if gate_norm == "skipped_fb_session_unavailable":
+        return "login_required_or_blocked"
     if gate_norm in {
         "skipped_duplicate_fb_discovery",
         "skipped_existing_usable_email",
@@ -1473,6 +1498,8 @@ def _classify_fb_terminal_reason(row_like: Any) -> str:
 
     if opportunity_norm == "no_fb_opportunity":
         return "no_fb_opportunity"
+    if gate_norm == "skipped_fb_session_unavailable":
+        return "fb_login_required_or_blocked"
     if gate_norm == "skipped_existing_usable_email":
         return "fb_opportunity_not_attempted_existing_email_gate"
     if gate_norm == "skipped_same_source_url_success":
@@ -1579,30 +1606,14 @@ def has_contact_email_for_short_circuit(row: pd.Series) -> bool:
     return False
 
 
-def _strong_domain_match_short_name(artist_name: str, emails: List[str]) -> bool:
-    """
-    Optional helper: for very short artist names, treat a domain token match as a strong signal
-    that directory_conflict-based BLOCKs are over-aggressive.
-    """
-    artist_slug = re.sub(r"[^a-z0-9]+", "", (artist_name or "").lower())
-    if not artist_slug or len(artist_slug) > 4:
-        return False
-    for email in emails:
-        if "@" not in email:
-            continue
-        domain = email.split("@", 1)[1].lower()
-        if artist_slug in domain:
-            return True
-    return False
-
-
 def recompute_final_status_post_enrichment(df: pd.DataFrame, logger: LoggerFn = None) -> pd.DataFrame:
     """
-    Post-enrichment guardrail to repair stale non-OK statuses after enrichment.
+    Reconcile final status once from the completed, provenance-bearing row.
 
-    Existing BLOCK repair behaviour is preserved for origin/directory cases.
-    Other non-OK rows are reclassified with the canonical final checker so
-    stale WARN rows can be promoted to OK after successful enrichment.
+    The canonical final checker is the sole status authority here. Inherited
+    WARN/BLOCK values are inputs only; durable duplicate, identity and contact
+    safety evidence remains authoritative while stale intermediate states can
+    be cleared after later enrichment succeeds.
     """
     if df is None or df.empty:
         return df
@@ -1611,15 +1622,14 @@ def recompute_final_status_post_enrichment(df: pd.DataFrame, logger: LoggerFn = 
         df["Needs_Review"] = ""
     if "FB_Review_Reason" not in df.columns:
         df["FB_Review_Reason"] = ""
+    if "Final_Status_Reason" not in df.columns:
+        df["Final_Status_Reason"] = ""
 
     status_col = "final_status" if "final_status" in df.columns else None
     if not status_col:
         return df
 
     import final_checker
-
-    def _truthy(val) -> bool:
-        return str(val).strip().lower() in {"1", "true", "yes", "y"}
 
     def _parse_floatlike(val, default: float = 0.0) -> float:
         text = str(val or "").strip()
@@ -1639,79 +1649,58 @@ def recompute_final_status_post_enrichment(df: pd.DataFrame, logger: LoggerFn = 
         except Exception:
             return default
 
+    def _status_reason(row_dict: Dict[str, Any], computed_status: str, flags: Dict[str, int], attribution: str) -> str:
+        if computed_status == "BLOCK":
+            if attribution == final_checker.ATTRIBUTION_UNSAFE:
+                return "unsafe_contact"
+            if flags["dup_email_flag"]:
+                return "duplicate_email"
+            if flags["dup_artist_flag"]:
+                return "duplicate_artist"
+            if flags["name_flag"]:
+                return "identity_unresolved"
+            if final_checker.looks_like_label_or_show(row_dict):
+                return "non_artist_entity"
+            if not _row_has_valid_email(pd.Series(row_dict))[0]:
+                return "no_attributable_contact"
+            return "authoritative_hard_block"
+        if computed_status == "WARN":
+            if flags["dir_conflict_flag"]:
+                return "directory_conflict_review"
+            if _parse_intlike(row_dict.get("origin_match_flag", 1), 1) == 0:
+                return "origin_mismatch_review"
+            if attribution == final_checker.ATTRIBUTION_THIRD_PARTY:
+                return "professional_contact_review"
+            if attribution == final_checker.ATTRIBUTION_UNATTRIBUTED:
+                return "contact_attribution_review"
+            if flags["dup_email_flag"] or flags["dup_artist_flag"]:
+                return "duplicate_review"
+            if not _row_has_valid_email(pd.Series(row_dict))[0]:
+                return "missing_contact_review"
+            return "identity_or_enrichment_review"
+        return "final_evidence_accepted"
+
     for idx, row in df.iterrows():
         status = str(row.get(status_col, "") or "").strip().upper()
-        if status == "OK":
-            continue
-
-        if status == "BLOCK":
-            # Preserve the existing late BLOCK repair contract.
-            if "duplicate_email_flag" in df.columns and _truthy(row.get("duplicate_email_flag", 0)):
-                continue
-            if "duplicate_artist_flag" in df.columns and _truthy(row.get("duplicate_artist_flag", 0)):
-                continue
-
-            dup_email = _parse_intlike(row.get("duplicate_email_flag", 0), 0)
-            dup_artist = _parse_intlike(row.get("duplicate_artist_flag", 0), 0)
-            origin_flag = _parse_intlike(row.get("origin_match_flag", 1), 1)
-            dir_conflict = _parse_intlike(row.get("directory_conflict_flag", 0), 0)
-            # Canonical read: 1 = consistent, 0 = inconsistent, None = unknown.
-            # Legacy artifacts written before the polarity fix cannot drive a
-            # downgrade here, because they never resolve to 1.
-            name_flag = final_checker.read_name_consistency_flag(row)
-
-            # Hard BLOCK guards. Contact safety is decided by the email's own
-            # provenance: platform/support addresses, private-route surfaces and
-            # emails lifted from a rejected Facebook surface stay blocked. A
-            # Facebook rejection that did not produce this row's email is an
-            # enrichment failure, not a contact-safety failure, and must not
-            # condemn an email from an independent trusted source.
-            if final_checker.classify_contact_attribution(row) == final_checker.ATTRIBUTION_UNSAFE:
-                continue
-            if dup_email == 1 or dup_artist == 1:
-                continue
-
-            has_email, emails = _row_has_valid_email(row)
-            if not has_email:
-                continue
-            if not emails or not all(_is_valid_email_shape(e) for e in emails):
-                continue
-
-            origin_or_dir_conflict = (origin_flag == 0) or (dir_conflict == 1)
-            short_name_domain_match = _strong_domain_match_short_name(str(row.get("Artist Name", "")), emails)
-            if not origin_or_dir_conflict and not short_name_domain_match:
-                continue
-            if name_flag != 1:
-                continue
-
-            df.at[idx, status_col] = "WARN"
-            df.at[idx, "Needs_Review"] = "TRUE"
-            df.at[idx, "FB_Review_Reason"] = "origin_mismatch_downgraded"
-
-            artist = str(row.get("Artist Name", "") or "").strip()
-            primary_email = emails[0] if emails else ""
-            log_msg = (
-                f"[PostEnrichStatus] Downgraded '{artist}' email='{primary_email}' "
-                f"from BLOCK -> WARN (reason=origin_mismatch_downgraded)"
-            )
-            try:
-                if logger and hasattr(logger, "debug"):
-                    logger.debug(log_msg)
-                elif _LOGGER.isEnabledFor(logging.DEBUG):
-                    _LOGGER.debug(log_msg)
-            except Exception:
-                pass
-            continue
-
         row_dict = df.loc[idx].to_dict()
         required_classifier_inputs = (
             "name_consistency_flag",
             "directory_conflict_flag",
             "duplicate_email_flag",
             "duplicate_artist_flag",
-            "match_score_overall",
         )
-        if any(str(row_dict.get(column, "") or "").strip() == "" for column in required_classifier_inputs):
+
+        def _classifier_value_missing(value: Any) -> bool:
+            if value is None:
+                return True
+            try:
+                if pd.isna(value):
+                    return True
+            except Exception:
+                pass
+            return str(value).strip() == ""
+
+        if any(_classifier_value_missing(row_dict.get(column)) for column in required_classifier_inputs):
             continue
         name_consistency_flag = final_checker.read_name_consistency_flag(row_dict)
         flags = {
@@ -1725,8 +1714,30 @@ def recompute_final_status_post_enrichment(df: pd.DataFrame, logger: LoggerFn = 
         }
         match_score = _parse_floatlike(row_dict.get("match_score_overall", 0), 0.0)
         computed_status = final_checker.compute_final_status(row_dict, flags, match_score)
+        attribution = final_checker.classify_contact_attribution(row_dict)
+        reason = _status_reason(row_dict, computed_status, flags, attribution)
+        df.at[idx, "Final_Status_Reason"] = reason
         if computed_status != status:
             df.at[idx, status_col] = computed_status
+            artist = str(row.get("Artist Name", "") or "").strip()
+            _safe_log_console(
+                logger,
+                f"[PostEnrichStatus] Reconciled '{artist}' {status or 'UNSET'} -> {computed_status} "
+                f"(reason={reason})",
+            )
+        if computed_status == "WARN":
+            df.at[idx, "Needs_Review"] = "TRUE"
+            if status == "BLOCK" and (
+                _parse_intlike(row_dict.get("origin_match_flag", 1), 1) == 0
+                or flags["dir_conflict_flag"] == 1
+            ):
+                # Backward-compatible review marker; Final_Status_Reason is the
+                # authoritative reconciliation provenance.
+                df.at[idx, "FB_Review_Reason"] = "origin_mismatch_downgraded"
+        elif computed_status == "OK":
+            df.at[idx, "Needs_Review"] = "FALSE"
+            if _cell_str(df.at[idx, "FB_Review_Reason"]) == "origin_mismatch_downgraded":
+                df.at[idx, "FB_Review_Reason"] = ""
 
     return df
 
@@ -1965,7 +1976,7 @@ def _rank_contact_emails_for_row(row_like: Any, values: Union[str, Sequence[str]
         )
     indexed = list(enumerate(normalized))
 
-    def _sort_key(item: Tuple[int, str]) -> Tuple[int, int, int, int, int, int, int, int, str]:
+    def _sort_key(item: Tuple[int, str]) -> Tuple[int, int, int, int, int, int, int, int, int, int, str]:
         index, email = item
         meta = get_email_provenance_entry(row_like, email)
         bucket = _email_surface_bucket(row_like, email, meta, artist_domain)
@@ -1984,9 +1995,26 @@ def _rank_contact_emails_for_row(row_like: Any, values: Union[str, Sequence[str]
             extract_method_penalty = 3
         artist_domain_penalty = 0 if artist_domain and _email_domain(email) == artist_domain else 1
         identity_penalty = 0 if _email_identity_score(email, identity_tokens) > 0 else 1
+        role = _cell_str(meta.get("role", "")).lower()
+        professional_roles = {"management", "booking", "pr_publicity", "team_business", "label"}
+        profile_direct = _cell_str(meta.get("extract_method", "")).lower() == "profile_direct"
+        trusted_current_profile = email == current_selected and source_trust >= 3
+        if trusted_current_profile:
+            contact_authority = 0
+        elif role == "artist_direct" and ((source_trust >= 1 and bucket <= 1) or profile_direct):
+            contact_authority = 0
+        elif role in professional_roles and (source_trust >= 2 or (source_trust >= 1 and bucket <= 1)):
+            contact_authority = 0
+        elif source_trust >= 2 and bucket <= 1:
+            contact_authority = 1
+        elif role in {"artist_direct", *professional_roles} and source_trust >= 1:
+            contact_authority = 2
+        else:
+            contact_authority = 3
         legacy_current_penalty = 0 if (not explicit_provenance and preserve_legacy_current and email == current_selected) else 1
         has_provenance_penalty = 0 if meta else 1
         return (
+            contact_authority,
             3 - source_trust,
             bucket,
             artist_domain_penalty,
@@ -2950,6 +2978,7 @@ FINAL_EXPORT_COLUMNS: Sequence[str] = [
     "Release Date",
     "Date Added",
     "final_status",
+    "Final_Status_Reason",
     "Needs_Review",
     "FB_Review_Reason",
     FB_OPPORTUNITY_STATE_COL,
@@ -3436,6 +3465,7 @@ def _build_final_export_frame(df: pd.DataFrame) -> pd.DataFrame:
                 "Release Date": release_date_norm,
                 "Date Added": date_added_norm,
                 "final_status": final_status,
+                "Final_Status_Reason": str(row.get("Final_Status_Reason", "") or "").strip(),
                 "Needs_Review": "TRUE" if needs_review else "FALSE",
                 "FB_Review_Reason": fb_review_reason,
                 FB_OPPORTUNITY_STATE_COL: str(row.get(FB_OPPORTUNITY_STATE_COL, "") or "").strip(),
@@ -4559,6 +4589,11 @@ class FacebookGlobalPassStatus:
     hit_captcha: bool
     limit_reached: bool
     attempted_total: int
+    facebook_availability_state: str = "healthy"
+    degradation_reason: str = ""
+    degraded_after_row: Optional[int] = None
+    skipped_opportunities: int = 0
+    recovery_attempts: int = 0
 
 
 def run_facebook_global_pass_nightmode(
@@ -4873,6 +4908,8 @@ def run_facebook_global_pass_nightmode(
     processed_this_run = 0
     limit_reached = False
     captcha_detected = False
+    if night_fb_run_state.availability_state == "probe_pending":
+        transition_night_fb_availability(night_fb_run_state, "healthy")
     fb_driver_reset_interval_raw = os.getenv("FB_DRIVER_RESET_INTERVAL", str(DEFAULT_FB_DRIVER_RESET_INTERVAL))
     try:
         fb_driver_reset_interval = int(fb_driver_reset_interval_raw or str(DEFAULT_FB_DRIVER_RESET_INTERVAL))
@@ -4890,9 +4927,18 @@ def run_facebook_global_pass_nightmode(
     fb_helper = fb_owner.start()
 
     def _write_state_with_pass_a(extra: Dict[str, Any]) -> None:
+        extra = dict(extra or {})
+        extra.update(
+            {
+                "fb_availability_state": night_fb_run_state.availability_state,
+                "fb_degradation_reason": night_fb_run_state.degradation_reason,
+                "fb_degraded_after_row": night_fb_run_state.degraded_after_row,
+                "fb_recovery_attempts": night_fb_run_state.recovery_attempts,
+                "fb_skipped_opportunities": night_fb_run_state.skipped_opportunities,
+            }
+        )
         try:
             counts = fb_helper.get_pass_a_counts()
-            extra = dict(extra or {})
             extra.update({f"pass_a_{k}": v for k, v in counts.items()})
         except Exception:
             pass
@@ -5018,7 +5064,20 @@ def run_facebook_global_pass_nightmode(
 
             skip_row = False
 
-            if share_resolution_failed:
+            if night_fb_run_state.availability_state == "unavailable" and eligible_for_fb:
+                night_fb_run_state.skipped_opportunities += 1
+                df.at[idx, FB_GATE_STATE_COL] = "skipped_fb_session_unavailable"
+                df.at[idx, FB_ATTEMPT_STATE_COL] = "fb_not_attempted"
+                if not _cell_str(df.at[idx, FB_WRITE_STATE_COL]):
+                    df.at[idx, FB_WRITE_STATE_COL] = "fb_no_email_written"
+                _safe_log_console(
+                    logger,
+                    f"[FB Night] Skipping row {idx} ('{artist_label}') - shared Facebook session unavailable "
+                    f"(reason={night_fb_run_state.degradation_reason or 'unknown'}).",
+                )
+                skip_row = True
+
+            elif share_resolution_failed:
                 if not _cell_str(df.at[idx, FB_WRITE_STATE_COL]):
                     df.at[idx, FB_WRITE_STATE_COL] = "fb_no_email_written"
                 raw_share_url, _share_source = _find_explicit_fb_share_candidate(row_payload)
@@ -5108,15 +5167,70 @@ def run_facebook_global_pass_nightmode(
                     _safe_sleep(pause)
 
                 row_driver_error = False
+                enriched = None
+                auth_degradation_failed = False
                 for attempt in range(MAX_DRIVER_RECOVERY_ATTEMPTS + 1):
                     try:
                         clean_row = {k: ("" if pd.isna(v) else v) for k, v in row.to_dict().items()}
                         _maybe_force_driver_crash_for_test(int(idx), fb_helper, logger=logger)
                         enriched = fb_helper.enrich_row_with_facebook_night(clean_row, row_index=idx)
+                        auth_reason = _facebook_auth_degradation_reason(enriched)
+                        if auth_reason:
+                            raise _FacebookAuthDegradation(auth_reason)
                         if attempt > 0:
                             _safe_log_console(logger, f"[Driver Recovery] recovery_success row={idx}")
+                        if night_fb_run_state.availability_state == "recovery_pending":
+                            transition_night_fb_availability(night_fb_run_state, "healthy")
                         break
                     except Exception as exc:  # pragma: no cover - defensive
+                        auth_reason = _facebook_auth_degradation_reason(exc)
+                        if auth_reason:
+                            transition_night_fb_availability(
+                                night_fb_run_state,
+                                "temporarily_degraded",
+                                reason=auth_reason,
+                                row_index=int(idx),
+                            )
+                            _safe_log_console(
+                                logger,
+                                f"[FB Degradation] state=temporarily_degraded reason={auth_reason} row={idx}",
+                            )
+                            if night_fb_run_state.recovery_attempts < 1:
+                                night_fb_run_state.recovery_attempts += 1
+                                transition_night_fb_availability(
+                                    night_fb_run_state,
+                                    "recovery_pending",
+                                    reason=auth_reason,
+                                    row_index=int(idx),
+                                )
+                                _safe_log_console(
+                                    logger,
+                                    f"[FB Degradation] state=recovery_pending reason={auth_reason} "
+                                    f"row={idx} attempt={night_fb_run_state.recovery_attempts}",
+                                )
+                                df.loc[idx] = row_start_snapshot
+                                row = df.loc[idx]
+                                fb_helper, terminated = fb_owner.restart()
+                                _safe_log_console(
+                                    logger,
+                                    f"[FB Degradation] recovery_probe_started row={idx} "
+                                    f"stale_driver_terminated={str(bool(terminated)).lower()}",
+                                )
+                                continue
+                            disable_night_fb_run_state(
+                                night_fb_run_state,
+                                auth_reason,
+                                checkpointed=auth_reason == "checkpoint",
+                                session_unhealthy=True,
+                            )
+                            df.loc[idx] = row_start_snapshot
+                            row = df.loc[idx]
+                            auth_degradation_failed = True
+                            _safe_log_console(
+                                logger,
+                                f"[FB Degradation] state=unavailable reason={auth_reason} row={idx}",
+                            )
+                            break
                         if _is_captcha_error(exc):
                             captcha_flag = True
                             captcha_detected = True
@@ -5156,7 +5270,12 @@ def run_facebook_global_pass_nightmode(
                     break
 
                 write_before = _fb_write_surface_snapshot(df.loc[idx])
-                if enriched:
+                if auth_degradation_failed:
+                    df.at[idx, "FB_Status"] = night_fb_run_state.degradation_reason or "login_wall"
+                    attempt_state = "attempted_fb_login_wall_or_checkpoint"
+                    df.at[idx, FB_ATTEMPT_STATE_COL] = attempt_state
+                    row_driver_error = True
+                elif enriched:
                     status_val = str(enriched.get("FB_Status", "") or "")
                     fb_rejected = _fb_status_is_rejected(status_val)
                     if fb_rejected:
@@ -5390,6 +5509,11 @@ def run_facebook_global_pass_nightmode(
             "fb_run_completed": run_completed,
             "fb_limit_reached": limit_reached,
             "fb_resume_input": os.path.abspath(input_csv),
+            "fb_availability_state": night_fb_run_state.availability_state,
+            "fb_degradation_reason": night_fb_run_state.degradation_reason,
+            "fb_degraded_after_row": night_fb_run_state.degraded_after_row,
+            "fb_recovery_attempts": night_fb_run_state.recovery_attempts,
+            "fb_skipped_opportunities": night_fb_run_state.skipped_opportunities,
         }
     )
     _write_state_with_pass_a(state)
@@ -5423,6 +5547,15 @@ def run_facebook_global_pass_nightmode(
             f"skipped_cooldown={email_stats.get('fb_rows_skipped_reason_cooldown',0)} "
             f"skipped_no_opportunity={email_stats.get('fb_rows_skipped_reason_no_opportunity',0)}",
         )
+    if night_fb_run_state.degradation_reason:
+        _safe_log_console(
+            logger,
+            "[FB Degradation Summary] "
+            f"Facebook degraded: {night_fb_run_state.degradation_reason} "
+            f"after row {night_fb_run_state.degraded_after_row}; "
+            f"{night_fb_run_state.skipped_opportunities} later Facebook opportunities skipped; "
+            f"recovery_attempts={night_fb_run_state.recovery_attempts}; run_completed={str(run_completed).lower()}",
+        )
 
     df.drop(columns=["__row_id"], inplace=True, errors="ignore")
     df.to_csv(output_csv, index=False)
@@ -5439,6 +5572,11 @@ def run_facebook_global_pass_nightmode(
         hit_captcha=captcha_detected or captcha_flag,
         limit_reached=limit_reached,
         attempted_total=attempted_total,
+        facebook_availability_state=night_fb_run_state.availability_state,
+        degradation_reason=night_fb_run_state.degradation_reason,
+        degraded_after_row=night_fb_run_state.degraded_after_row,
+        skipped_opportunities=night_fb_run_state.skipped_opportunities,
+        recovery_attempts=night_fb_run_state.recovery_attempts,
     )
 
 
@@ -5495,6 +5633,7 @@ DEFAULT_EXPORT_COLUMNS: Sequence[str] = [
     "Source URL",
     "Review_Urls",
     "final_status",
+    "Final_Status_Reason",
 ]
 
 

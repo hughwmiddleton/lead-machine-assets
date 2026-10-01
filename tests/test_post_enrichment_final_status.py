@@ -1,3 +1,5 @@
+import json
+
 import pandas as pd
 
 from pipeline_runner import export_master_leads, recompute_final_status_post_enrichment
@@ -209,3 +211,73 @@ def test_export_master_leads_recomputes_stale_warn_status_before_writing(tmp_pat
 
     exported = pd.read_csv(output_path, dtype=str, keep_default_na=False)
     assert exported.iloc[0]["final_status"] == "OK"
+
+
+def test_copper_feast_later_canonical_contact_clears_stale_block():
+    email = "copperfeastrecords@gmail.com"
+    row = _base_success_row(
+        **{
+            "Artist Name": "Copper Feast Records",
+            "final_status": "BLOCK",
+            "Email": email,
+            "Email_All": email,
+            "Email_Source_URL": "https://www.facebook.com/copperfeastrecords/about",
+            "Email_Source_Type": "facebook_enrich",
+            "Email_Extract_Method": "regex",
+            "Email_Role": "label",
+            "Email_Provenance_JSON": json.dumps(
+                {
+                    email: {
+                        "source_type": "facebook_enrich",
+                        "surface": "facebook_about",
+                        "source_url": "https://www.facebook.com/copperfeastrecords/about",
+                        "extract_method": "regex",
+                        "role": "label",
+                        "role_evidence": "local_part:records",
+                    }
+                }
+            ),
+            "SoundCloud_Match_Status": "rejected",
+            "SoundCloud_Match_Confidence": "0.35",
+        }
+    )
+
+    result = recompute_final_status_post_enrichment(_make_df(row))
+
+    assert result.iloc[0]["final_status"] == "WARN"
+    assert result.iloc[0]["Final_Status_Reason"] == "identity_or_enrichment_review"
+
+
+def test_a_different_thread_first_party_contact_does_not_remain_blocked():
+    email = "info@adifferentthread.com"
+    row = _base_success_row(
+        **{
+            "Artist Name": "A Different Thread",
+            "final_status": "BLOCK",
+            "match_score_overall": "0.75",
+            "directory_conflict_flag": "1",
+            "Email": email,
+            "Email_All": email,
+            "Spotify_Website_URL": "https://adifferentthread.com",
+            "Email_Source_URL": "https://undiscovered.music/artists/a_different_thread",
+            "Email_Source_Type": "undiscovered_music_profile",
+            "Email_Extract_Method": "profile_direct",
+            "Email_Provenance_JSON": json.dumps(
+                {
+                    email: {
+                        "source_type": "undiscovered_music_profile",
+                        "surface": "undiscovered_music_profile",
+                        "source_url": "https://undiscovered.music/artists/a_different_thread",
+                        "extract_method": "profile_direct",
+                        "role": "artist_direct",
+                        "role_evidence": "identity:artist_name_in_domain",
+                    }
+                }
+            ),
+        }
+    )
+
+    result = recompute_final_status_post_enrichment(_make_df(row))
+
+    assert result.iloc[0]["final_status"] == "WARN"
+    assert result.iloc[0]["Final_Status_Reason"] == "directory_conflict_review"

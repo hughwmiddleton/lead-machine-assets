@@ -803,6 +803,75 @@ def test_select_primary_email_keeps_direct_profile_email_ahead_of_weaker_externa
     assert ranked == ["artistname@gmail.com", "booking@label.test"]
 
 
+def test_a_bright_abyss_primary_prefers_profile_direct_artist_contact():
+    row = {
+        "Artist Name": "A Bright Abyss",
+        "Email": "streaming@wqrt.org",
+        "Email_All": "streaming@wqrt.org;abrightabyss@gmail.com",
+        "External Links": "https://www.bigcar.org/project/vibe/",
+        EMAIL_PROVENANCE_JSON_COL: json.dumps(
+            {
+                "streaming@wqrt.org": {
+                    "source_type": "website_enrich",
+                    "surface": "website_homepage",
+                    "source_url": "https://www.bigcar.org/project/vibe/",
+                    "extract_method": "regex",
+                    "role": "unknown",
+                    "role_evidence": "insufficient_evidence",
+                },
+                "abrightabyss@gmail.com": {
+                    "source_type": "undiscovered_music_profile",
+                    "surface": "undiscovered_music_profile",
+                    "source_url": "https://undiscovered.music/artists/a_bright_abyss",
+                    "extract_method": "profile_direct",
+                    "role": "artist_direct",
+                    "role_evidence": "identity:artist_name_in_local_part",
+                },
+            }
+        ),
+    }
+
+    primary, ranked = pipeline_runner._select_primary_email_for_row(row, row["Email"], row["Email_All"])
+
+    assert primary == "abrightabyss@gmail.com"
+    assert ranked == ["abrightabyss@gmail.com", "streaming@wqrt.org"]
+
+
+def test_verified_professional_representative_can_remain_primary():
+    row = {
+        "Artist Name": "Example Artist",
+        EMAIL_PROVENANCE_JSON_COL: json.dumps(
+            {
+                "management@exampleagency.com": {
+                    "source_type": "instagram_enrich",
+                    "surface": "instagram_profile",
+                    "source_url": "https://www.instagram.com/exampleartist/",
+                    "extract_method": "profile_direct",
+                    "role": "management",
+                    "role_evidence": "local_part:management",
+                },
+                "exampleartist@gmail.com": {
+                    "source_type": "live_search",
+                    "surface": "live_search",
+                    "source_url": "https://directory.example/exampleartist",
+                    "extract_method": "regex",
+                    "role": "artist_direct",
+                    "role_evidence": "identity:artist_name_in_local_part",
+                },
+            }
+        ),
+    }
+
+    primary, ranked = pipeline_runner._select_primary_email_for_row(
+        row,
+        "",
+        "exampleartist@gmail.com;management@exampleagency.com",
+    )
+
+    assert primary == "management@exampleagency.com"
+    assert set(ranked) == {"management@exampleagency.com", "exampleartist@gmail.com"}
+
+
 def test_consolidate_email_all_prefers_facebook_over_placeholder_website_email():
     df = pd.DataFrame(
         [
