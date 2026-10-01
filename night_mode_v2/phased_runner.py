@@ -699,8 +699,33 @@ def run_contact_phase(
     _record_output(outputs, "canonical_export_leads", canonical_export_path)
 
     contact_phase["status"] = "completed" if final_rows > 0 else "failed"
+    try:
+        fb_state = night_mode_runner._load_state(fb_state_path)
+    except Exception:
+        fb_state = {}
+    degradation_reason = str(fb_state.get("fb_degradation_reason") or "").strip()
+    if degradation_reason:
+        contact_phase["facebook_degradation"] = {
+            "state": str(fb_state.get("fb_availability_state") or "unavailable"),
+            "reason": degradation_reason,
+            "after_row": fb_state.get("fb_degraded_after_row"),
+            "recovery_attempts": int(fb_state.get("fb_recovery_attempts") or 0),
+            "later_opportunities_skipped": int(fb_state.get("fb_skipped_opportunities") or 0),
+            "run_completed": bool(fb_state.get("fb_run_completed")),
+        }
     manifest["phases"]["contact"] = contact_phase
     write_manifest(manifest_path, manifest)
+    try:
+        summary = night_mode_runner._build_run_summary(
+            run_dir,
+            master_pre_fb=master_pre_fb_path,
+            master_post_fb=master_post_fb_path,
+            master_final=master_final_path,
+            final_export=canonical_export_path,
+        )
+        night_mode_runner._write_run_summary(run_dir, summary)
+    except Exception:
+        pass
     return manifest
 
 

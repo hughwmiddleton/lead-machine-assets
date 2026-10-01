@@ -248,6 +248,7 @@ _ATTRIBUTABLE_EMAIL_SURFACES = frozenset(
         "bandcamp_track_follow",
         "lastfm_profile",
         "spotify_profile",
+        "undiscovered_music_profile",
     }
 )
 
@@ -451,13 +452,14 @@ def compute_final_status(
     match_score: float,
 ) -> str:
     existing = _normalise_status(row.get("final_status", ""))
-    if existing == "BLOCK":
-        return "BLOCK"
 
     name_flag = int(flags.get("name_flag", 0) or 0)
     dir_conflict_flag = int(flags.get("dir_conflict_flag", 0) or 0)
     dup_email_flag = int(flags.get("dup_email_flag", 0) or 0)
     dup_artist_flag = int(flags.get("dup_artist_flag", 0) or 0)
+    origin_match_flag = _optional_int_flag(row.get("origin_match_flag", None))
+    origin_mismatch = origin_match_flag == 0
+    inherited_origin_block = existing in {"BLOCK", "BLOCKED", "BLOCKED_BY_ORIGIN"} and origin_mismatch
     # genre_outlier_flag stays available as diagnostic metadata but must not
     # affect status: genre rarity is measured within a single run, so it makes
     # classification depend on batch composition rather than contact safety.
@@ -474,11 +476,34 @@ def compute_final_status(
     if attribution == ATTRIBUTION_UNSAFE:
         return "BLOCK"
     contact_is_attributable = has_email and attribution in _ATTRIBUTABLE_CONTACT
+    artist_slug = _compact_slug(row.get("Artist Name", ""))
+    identity_linked_contact = (
+        has_email
+        and 0 < len(artist_slug) <= 4
+        and _email_belongs_to_entity(_first_usable_email(row), row.get("Artist Name", ""))
+    )
+    try:
+        selected_meta = (get_row_email_provenance(row) or {}).get(_first_usable_email(row)) or {}
+    except Exception:
+        selected_meta = {}
+    label_contact = _safe_lower(selected_meta.get("role", "")) == "label"
+
+    # Duplicate flags are durable row-level evidence, unlike an inherited
+    # final_status value. Preserve an existing hard block only when one of
+    # those authoritative duplicate reasons is still present.
+    if existing == "BLOCK" and (name_flag or dup_email_flag or dup_artist_flag):
+        return "BLOCK"
+    if existing in {"BLOCK", "BLOCKED", "BLOCKED_BY_ORIGIN"} and not (has_email or unearthed_no_emails):
+        return "BLOCK"
 
     fb_selected_by = _safe_lower(row.get("FB_Selected_By", ""))
     fb_match_level = _safe_lower(row.get("FB_Match_Level", ""))
     fb_name_flag = _optional_int_flag(row.get("FB_Name_Consistency_Flag", None))
     fb_review_reason = _cell_text(row.get("FB_Review_Reason", "")).strip()
+    if fb_review_reason == "origin_mismatch_downgraded":
+        # Legacy reconciliation wrote its own reason into the Facebook review
+        # field. It is not evidence of a low-confidence Facebook match.
+        fb_review_reason = ""
     fb_low_confidence = (
         fb_selected_by == "mismatch_fallback"
         or fb_match_level == "mismatch"
@@ -486,7 +511,14 @@ def compute_final_status(
         or bool(fb_review_reason)
     )
 
-    strong_identity = match_score >= 0.75 and not name_flag and not dir_conflict_flag and not dup_artist_flag and not labelish
+    strong_identity = (
+        match_score >= 0.75
+        and not name_flag
+        and not inherited_origin_block
+        and not dir_conflict_flag
+        and not dup_artist_flag
+        and not labelish
+    )
     if strong_identity:
         if fb_low_confidence:
             return "WARN"
@@ -497,19 +529,16 @@ def compute_final_status(
     # --- Hard blockers: identity contradiction or unusable entity ------------
     if name_flag and match_score < 0.75:
         return "BLOCK"
-    if labelish:
+    if labelish and not (contact_is_attributable and label_contact):
         return "BLOCK"
     if review_labelish and match_score < 0.85 and not (has_email or unearthed_no_emails):
         return "BLOCK"
-    if existing in {"BLOCK", "BLOCKED", "BLOCKED_BY_ORIGIN"} and not (has_email or unearthed_no_emails):
-        return "BLOCK"
-
     # --- Enrichment quality, not contact safety ------------------------------
     # A cross-directory slug disagreement is dominated by slug formatting (
     # ".official" suffixes, host-in-path artifacts, numeric SoundCloud handles,
     # alternate handles), so it blocks only when there is no attributable
     # contact to protect. Otherwise it is a human-review signal.
-    if dir_conflict_flag and not contact_is_attributable:
+    if dir_conflict_flag and not (contact_is_attributable or identity_linked_contact):
         return "BLOCK"
 
     if fb_low_confidence:
@@ -521,7 +550,7 @@ def compute_final_status(
         return "WARN"
     if not has_email:
         return "WARN"
-    if dir_conflict_flag or attribution == ATTRIBUTION_THIRD_PARTY:
+    if inherited_origin_block or dir_conflict_flag or attribution == ATTRIBUTION_THIRD_PARTY or labelish:
         return "WARN"
     return "OK"
 

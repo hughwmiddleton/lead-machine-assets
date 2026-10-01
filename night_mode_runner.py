@@ -1096,6 +1096,21 @@ def _build_run_summary(
     rows_added, rows_updated = _preview_lead_vault_counts(final_artifact)
     summary["vault_rows_added"] = rows_added
     summary["vault_rows_updated"] = rows_updated
+    fb_state_path = os.path.join(run_dir, FACEBOOK_STATE_FILENAME)
+    try:
+        fb_state = _load_state(fb_state_path)
+    except Exception:
+        fb_state = {}
+    degradation_reason = str(fb_state.get("fb_degradation_reason") or "").strip()
+    if degradation_reason:
+        summary["facebook_degradation"] = {
+            "state": str(fb_state.get("fb_availability_state") or "unavailable"),
+            "reason": degradation_reason,
+            "after_row": fb_state.get("fb_degraded_after_row"),
+            "recovery_attempts": int(fb_state.get("fb_recovery_attempts") or 0),
+            "later_opportunities_skipped": int(fb_state.get("fb_skipped_opportunities") or 0),
+            "run_completed": bool(fb_state.get("fb_run_completed")),
+        }
     return summary
 
 

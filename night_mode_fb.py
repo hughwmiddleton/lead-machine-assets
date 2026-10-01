@@ -3062,6 +3062,45 @@ class NightFBRunState:
     trust_score: int = 0
     search_disabled_for_run: bool = False
     search_disable_reason: str = ""
+    availability_state: str = "probe_pending"
+    degradation_reason: str = ""
+    degraded_after_row: Optional[int] = None
+    recovery_attempts: int = 0
+    skipped_opportunities: int = 0
+    availability_history: List[str] = field(default_factory=lambda: ["probe_pending"])
+
+
+def transition_night_fb_availability(
+    run_state: Optional[NightFBRunState],
+    state: str,
+    *,
+    reason: str = "",
+    row_index: Optional[int] = None,
+) -> str:
+    """Record the bounded shared-session lifecycle for the current run."""
+    normalized = str(state or "").strip().lower()
+    allowed = {"probe_pending", "healthy", "temporarily_degraded", "recovery_pending", "unavailable"}
+    if normalized not in allowed:
+        raise ValueError(f"Unsupported Night FB availability state: {state}")
+    if run_state is None:
+        return normalized
+    run_state.availability_state = normalized
+    if not run_state.availability_history or run_state.availability_history[-1] != normalized:
+        run_state.availability_history.append(normalized)
+    reason_code = str(reason or "").strip().lower()
+    if reason_code:
+        run_state.degradation_reason = reason_code
+    if row_index is not None and run_state.degraded_after_row is None:
+        run_state.degraded_after_row = int(row_index)
+    if normalized == "healthy":
+        run_state.authenticated = True
+        run_state.session_unhealthy = False
+        run_state.reusable = bool(run_state.session and not run_state.disabled_for_run)
+    elif normalized in {"temporarily_degraded", "recovery_pending", "unavailable"}:
+        run_state.authenticated = False
+        run_state.session_unhealthy = True
+        run_state.reusable = False
+    return normalized
 
 
 def _is_profile_session_sentinel(value: str) -> bool:
@@ -3302,6 +3341,8 @@ def update_night_fb_run_state(
         and not run_state.disabled_for_run
         and not run_state.session_invalid
     )
+    if decision.authenticated and decision.usable:
+        transition_night_fb_availability(run_state, "healthy")
     return decision
 
 
@@ -3326,6 +3367,7 @@ def disable_night_fb_run_state(
     )
     run_state.authenticated = False
     run_state.reusable = False
+    transition_night_fb_availability(run_state, "unavailable", reason=reason_code)
     if close_session and run_state.session is not None:
         try:
             run_state.session.close()
@@ -3376,6 +3418,12 @@ def reset_night_fb_run_runtime_state(run_state: Optional[NightFBRunState]) -> No
     run_state.trust_score = 0
     run_state.search_disabled_for_run = False
     run_state.search_disable_reason = ""
+    run_state.availability_state = "probe_pending"
+    run_state.degradation_reason = ""
+    run_state.degraded_after_row = None
+    run_state.recovery_attempts = 0
+    run_state.skipped_opportunities = 0
+    run_state.availability_history = ["probe_pending"]
 
 
 def _night_fb_page_health_snapshot(

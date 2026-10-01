@@ -1265,3 +1265,84 @@ def test_finalize_fb_row_attribution_classifies_authoritative_outcomes():
     assert df.loc[6, pipeline_runner.FB_ATTEMPT_STATE_COL] == "fb_not_attempted"
     assert df.loc[6, pipeline_runner.FB_TERMINAL_REASON_COL] == "fb_indeterminate"
     assert df.loc[6, pipeline_runner.FB_EXTRACT_STATE_COL] == "fb_extract_indeterminate"
+
+
+def test_two_factor_degrades_once_then_skips_later_fb_opportunities(monkeypatch, tmp_path):
+    artists = ["60s Thunder", "65 North Pickers", "A A Bondy", "A Bright Abyss", "A Different Thread"]
+    rows = [
+        {
+            "Artist Name": artist,
+            "Email": f"existing{idx}@example.com",
+            "Email_All": f"existing{idx}@example.com",
+            "Facebook_URL": f"https://www.facebook.com/artist{idx}",
+        }
+        for idx, artist in enumerate(artists)
+    ]
+    input_csv = tmp_path / "master_pre_fb.csv"
+    output_csv = tmp_path / "master_post_fb.csv"
+    state_path = tmp_path / "facebook_state.json"
+    pd.DataFrame(rows).to_csv(input_csv, index=False)
+
+    helpers = []
+
+    class TwoFactorHelper(DummyFBHelper):
+        def close(self):
+            return None
+
+        def enrich_row_with_facebook_night(self, row, row_index=0):
+            self.calls += 1
+            raise nmfb.FacebookDriverError("two_factor")
+
+    def helper_factory(*args, **kwargs):
+        helper = TwoFactorHelper()
+        helpers.append(helper)
+        return helper
+
+    logs = []
+    run_state = nmfb.create_night_fb_run_state("user", "pass")
+    monkeypatch.setenv("FB_USERNAME", "user")
+    monkeypatch.setenv("FB_PASSWORD", "pass")
+    monkeypatch.setattr(pipeline_runner, "NightModeFacebookEnricher", helper_factory)
+    monkeypatch.setattr(pipeline_runner, "_load_legacy_module", _make_dummy_module)
+    monkeypatch.setattr(
+        pipeline_runner,
+        "_build_night_fb_share_promotion_resolver",
+        lambda **kwargs: (lambda url: ""),
+    )
+
+    status = pipeline_runner.run_facebook_global_pass_nightmode(
+        input_csv=input_csv.as_posix(),
+        output_csv=output_csv.as_posix(),
+        state_path=state_path.as_posix(),
+        skip_rows_with_email=False,
+        per_row_delay_range=(0.0, 0.0),
+        short_break_every=0,
+        long_break_every=0,
+        logger=logs.append,
+        night_fb_run_state=run_state,
+    )
+
+    output = pd.read_csv(output_csv, dtype=str, keep_default_na=False)
+    checkpoint_lines = next((tmp_path / "checkpoints").glob("*.checkpoint")).read_text().splitlines()
+    persisted = json.loads(state_path.read_text())
+
+    assert status.completed is True
+    assert status.degradation_reason == "two_factor"
+    assert status.recovery_attempts == 1
+    assert status.skipped_opportunities == 4
+    assert sum(helper.calls for helper in helpers) == 2
+    assert output["Email"].tolist() == [row["Email"] for row in rows]
+    assert output.loc[0, pipeline_runner.FB_ATTEMPT_STATE_COL] == "attempted_fb_login_wall_or_checkpoint"
+    assert output.loc[1:, pipeline_runner.FB_GATE_STATE_COL].eq("skipped_fb_session_unavailable").all()
+    assert checkpoint_lines == ["0", "1", "2", "3", "4"]
+    assert persisted["fb_run_completed"] is True
+    assert persisted["fb_degradation_reason"] == "two_factor"
+    assert run_state.availability_history == [
+        "probe_pending",
+        "healthy",
+        "temporarily_degraded",
+        "recovery_pending",
+        "temporarily_degraded",
+        "unavailable",
+    ]
+    assert any("Facebook degraded: two_factor after row 0" in message for message in logs)
