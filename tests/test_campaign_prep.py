@@ -719,8 +719,8 @@ def test_generate_campaign_csvs_woodpecker_missing_fields_are_blank_and_duplicat
     output_columns, rows = _read_csv(_campaign_path(output_dir, "Inside_VIC", "180_plus_days", "Played_TripleJ"))
     assert output_columns == [*module.CAMPAIGN_PREP_WOODPECKER_COLUMNS, "Recency_Bucket"]
     assert [row["Email"] for row in rows] == ["dup@example.com", "dup@example.com"]
-    assert rows[0]["First Name"] == "Act B"
-    assert rows[0]["Company"] == "Act B"
+    assert rows[0]["First Name"] == ""
+    assert rows[0]["Company"] == ""
     assert rows[0]["Website"] == ""
     assert rows[0]["Instagram"] == ""
     assert rows[0]["Facebook"] == ""
@@ -1216,3 +1216,69 @@ def test_campaign_prep_remove_rows_without_emails_checkbox_defaults_and_passes_v
     assert calls[0][1]["remove_rows_without_emails"] is True
     assert calls[0][1]["release_date_sort"] == "descending"
     tab.close()
+
+def test_generate_campaign_csvs_woodpecker_accepts_artist_name_alias(tmp_path):
+    module = _load_legacy_module()
+    columns = [
+        "Artist Name",
+        "Location",
+        "Email",
+        "Song Title",
+        "Release Date",
+        "Lead_Source",
+        "Source_Directory",
+        "Email_Role",
+        "Email_Role_Evidence",
+        "Email_Source_URL",
+        "Email_Source_Type",
+        "Email_Extract_Method",
+        "Email_Type",
+    ]
+    input_path = tmp_path / "master_export_leads.csv"
+    output_dir = tmp_path / "campaign"
+
+    _write_csv(
+        input_path,
+        [
+            {
+                "Artist Name": "immy-owusu",
+                "Location": "Melbourne, VIC",
+                "Email": "grace@watartists.com",
+                "Song Title": "Hard People",
+                "Release Date": "9 Sep 2026",
+                "Lead_Source": "Triple J Unearthed",
+                "Source_Directory": "unearthed",
+                "Email_Role": "representative",
+                "Email_Role_Evidence": "agency domain",
+                "Email_Source_URL": "https://example.com/contact",
+                "Email_Source_Type": "facebook",
+                "Email_Extract_Method": "page_text",
+                "Email_Type": "work",
+            }
+        ],
+        columns,
+    )
+
+    module.generate_campaign_csvs(
+        str(input_path),
+        str(output_dir),
+        export_format="woodpecker",
+        remove_rows_without_emails=True,
+    )
+
+    _, rows = _read_csv(
+        output_dir / "Inside_VIC_Neither_ALL.csv"
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["Artist"] == "immy-owusu"
+    assert rows[0]["First Name"] == ""
+    assert rows[0]["Company"] == ""
+    assert rows[0]["Song Title"] == "Hard People"
+    assert rows[0]["Release Date"] == "9 Sep 2026"
+    assert rows[0]["Email_Role"] == "representative"
+    assert rows[0]["Email_Role_Evidence"] == "agency domain"
+    assert rows[0]["Email_Source_URL"] == "https://example.com/contact"
+    assert rows[0]["Email_Source_Type"] == "facebook"
+    assert rows[0]["Email_Extract_Method"] == "page_text"
+    assert rows[0]["Email_Type"] == "work"

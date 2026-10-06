@@ -12987,13 +12987,19 @@ CAMPAIGN_PREP_WOODPECKER_COLUMNS = [
     "Source Directory",
     "Release Date",
     "Upload Date",
+    "Email_Role",
+    "Email_Role_Evidence",
+    "Email_Source_URL",
+    "Email_Source_Type",
+    "Email_Extract_Method",
+    "Email_Type",
     "Notes",
 ]
 
 CAMPAIGN_PREP_WOODPECKER_ALIASES = [
-    ("First Name", ("Contact_Name", "Artist")),
-    ("Company", ("Organization", "Artist")),
-    ("Artist", ("Artist",)),
+    ("First Name", ("First Name", "First_Name", "Contact_Name", "Contact Name")),
+    ("Company", ("Company", "Organization")),
+    ("Artist", ("Artist", "Artist Name")),
     ("Location", CAMPAIGN_PREP_LOCATION_ALIASES),
     ("Song Title", ("Song_Title", "Song Title")),
     ("Sounds Like", ("Sounds Like", "Sounds_Like")),
@@ -13006,6 +13012,12 @@ CAMPAIGN_PREP_WOODPECKER_ALIASES = [
     ("Source Directory", ("Source Directory", "Source_Directory")),
     ("Release Date", CAMPAIGN_PREP_RELEASE_DATE_ALIASES),
     ("Upload Date", CAMPAIGN_PREP_UPLOAD_DATE_ALIASES),
+    ("Email_Role", ("Email_Role",)),
+    ("Email_Role_Evidence", ("Email_Role_Evidence",)),
+    ("Email_Source_URL", ("Email_Source_URL",)),
+    ("Email_Source_Type", ("Email_Source_Type",)),
+    ("Email_Extract_Method", ("Email_Extract_Method",)),
+    ("Email_Type", ("Email_Type",)),
     ("Notes", ("Notes",)),
 ]
 
