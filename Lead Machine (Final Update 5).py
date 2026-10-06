@@ -12875,6 +12875,7 @@ def _campaign_prep_log_diagnostics(diagnostics: dict) -> None:
 
 
 CAMPAIGN_PREP_PROCESSED_MASTER_FILENAME = "master_export_leads.processed.csv"
+CAMPAIGN_PREP_WOODPECKER_MASTER_FILENAME = "woodpecker_master.csv"
 CAMPAIGN_PREP_MANIFEST_FILENAME = "campaign_export_manifest.csv"
 CAMPAIGN_PREP_SUMMARY_FILENAME = "campaign_export_summary.txt"
 CAMPAIGN_PREP_SKIPPED_ROWS_FILENAME = "campaign_export_skipped_rows.csv"
@@ -13307,6 +13308,7 @@ def generate_campaign_csvs(
     )
 
     processed_master_output_rows: List[dict] = []
+    woodpecker_master_output_rows: List[dict] = []
     campaign_file_rows: Dict[str, List[dict]] = {}
     combined_file_rows: Dict[str, List[dict]] = {}
     campaign_counts: Dict[str, int] = {}
@@ -13329,12 +13331,18 @@ def generate_campaign_csvs(
             prepared_row["radio_bucket"],
         )
         processed_master_output_rows.append(processed_row)
+        canonical_export_row = {
+            column: export_row.get(column, "")
+            for column in output_columns
+        }
+        if export_format == "woodpecker":
+            woodpecker_master_output_rows.append(dict(canonical_export_row))
         campaign_file_rows.setdefault(filename, []).append(
-            {column: export_row.get(column, "") for column in output_columns}
+            dict(canonical_export_row)
         )
         campaign_counts[filename] = campaign_counts.get(filename, 0) + 1
         combined_file_rows.setdefault(combined_filename, []).append(
-            {column: export_row.get(column, "") for column in output_columns}
+            dict(canonical_export_row)
         )
         combined_counts[combined_filename] = combined_counts.get(combined_filename, 0) + 1
 
@@ -13385,6 +13393,22 @@ def generate_campaign_csvs(
             "output_file": CAMPAIGN_PREP_PROCESSED_MASTER_FILENAME,
         }
     ]
+
+    if export_format == "woodpecker":
+        _campaign_prep_atomic_write_csv(
+            output_path / CAMPAIGN_PREP_WOODPECKER_MASTER_FILENAME,
+            woodpecker_master_output_rows,
+            output_columns,
+        )
+        manifest_rows.append(
+            {
+                "segment_name": "Woodpecker_Master",
+                "recency_bucket": "ALL",
+                "rows_written": len(woodpecker_master_output_rows),
+                "output_file": CAMPAIGN_PREP_WOODPECKER_MASTER_FILENAME,
+            }
+        )
+
     result: Dict[str, int] = {}
     for filename in CAMPAIGN_PREP_OUTPUT_ORDER:
         rows = campaign_file_rows.get(filename)
@@ -13456,6 +13480,11 @@ def generate_campaign_csvs(
             f"- input_rows: {input_rows}",
             f"- written_rows: {written_rows}",
             f"- skipped_rows: {skipped_row_count}",
+            *(
+                [f"- woodpecker_master_rows: {len(woodpecker_master_output_rows)}"]
+                if export_format == "woodpecker"
+                else []
+            ),
         ]
     )
     _campaign_prep_write_text_atomic(

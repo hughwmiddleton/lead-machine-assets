@@ -1282,3 +1282,163 @@ def test_generate_campaign_csvs_woodpecker_accepts_artist_name_alias(tmp_path):
     assert rows[0]["Email_Source_Type"] == "facebook"
     assert rows[0]["Email_Extract_Method"] == "page_text"
     assert rows[0]["Email_Type"] == "work"
+
+
+def test_generate_campaign_csvs_writes_canonical_woodpecker_master_before_segmentation(tmp_path):
+    module = _load_legacy_module()
+    columns = [
+        "Artist Name",
+        "Location",
+        "Email",
+        "Played on triple J",
+        "Played on Unearthed",
+        "Release Date",
+        "Song Title",
+    ]
+    input_path = tmp_path / "master.csv"
+    output_dir = tmp_path / "campaign"
+
+    _write_csv(
+        input_path,
+        [
+            {
+                "Artist Name": "Inside Triple J",
+                "Location": "Melbourne, VIC",
+                "Email": "inside-triplej@example.com",
+                "Played on triple J": "yes",
+                "Played on Unearthed": "",
+                "Release Date": "2026-09-01",
+                "Song Title": "One",
+            },
+            {
+                "Artist Name": "Inside Neither",
+                "Location": "Geelong, VIC",
+                "Email": "inside-neither@example.com",
+                "Played on triple J": "",
+                "Played on Unearthed": "",
+                "Release Date": "2026-08-01",
+                "Song Title": "Two",
+            },
+            {
+                "Artist Name": "Outside Unearthed",
+                "Location": "Sydney, NSW",
+                "Email": "outside-unearthed@example.com",
+                "Played on triple J": "",
+                "Played on Unearthed": "yes",
+                "Release Date": "2026-07-01",
+                "Song Title": "Three",
+            },
+        ],
+        columns,
+    )
+
+    result = module.generate_campaign_csvs(
+        str(input_path),
+        str(output_dir),
+        export_format="woodpecker",
+        remove_rows_without_emails=True,
+    )
+
+    master_columns, master_rows = _read_csv(
+        output_dir / module.CAMPAIGN_PREP_WOODPECKER_MASTER_FILENAME
+    )
+
+    assert master_columns == [
+        *module.CAMPAIGN_PREP_WOODPECKER_COLUMNS,
+        "Recency_Bucket",
+    ]
+    assert len(master_rows) == sum(result.values()) == 3
+
+    assert {
+        (
+            row["Email"],
+            row["Artist"],
+            row["Song Title"],
+            row["Location"],
+            row["Recency_Bucket"],
+        )
+        for row in master_rows
+    } == {
+        (
+            "inside-triplej@example.com",
+            "Inside Triple J",
+            "One",
+            "Melbourne, VIC",
+            master_rows[0]["Recency_Bucket"],
+        ),
+        (
+            "inside-neither@example.com",
+            "Inside Neither",
+            "Two",
+            "Geelong, VIC",
+            master_rows[1]["Recency_Bucket"],
+        ),
+        (
+            "outside-unearthed@example.com",
+            "Outside Unearthed",
+            "Three",
+            "Sydney, NSW",
+            master_rows[2]["Recency_Bucket"],
+        ),
+    }
+
+    segmented_rows = []
+    for filename in result:
+        _, rows = _read_csv(output_dir / filename)
+        segmented_rows.extend(rows)
+
+    def identity(row):
+        return (
+            row["Email"],
+            row["Artist"],
+            row["Song Title"],
+            row["Location"],
+            row["Recency_Bucket"],
+        )
+
+    assert sorted(map(identity, master_rows)) == sorted(map(identity, segmented_rows))
+
+    _, manifest_rows = _read_csv(
+        output_dir / module.CAMPAIGN_PREP_MANIFEST_FILENAME
+    )
+    master_manifest = [
+        row
+        for row in manifest_rows
+        if row["segment_name"] == "Woodpecker_Master"
+    ]
+    assert master_manifest == [
+        {
+            "segment_name": "Woodpecker_Master",
+            "recency_bucket": "ALL",
+            "rows_written": "3",
+            "output_file": module.CAMPAIGN_PREP_WOODPECKER_MASTER_FILENAME,
+        }
+    ]
+
+
+def test_generate_campaign_csvs_does_not_write_woodpecker_master_for_other_profiles(tmp_path):
+    module = _load_legacy_module()
+    input_path = tmp_path / "master.csv"
+    output_dir = tmp_path / "campaign"
+
+    _write_csv(
+        input_path,
+        [
+            {
+                "Artist": "Act",
+                "Location": "VIC",
+                "Email": "act@example.com",
+            }
+        ],
+        ["Artist", "Location", "Email"],
+    )
+
+    module.generate_campaign_csvs(
+        str(input_path),
+        str(output_dir),
+        export_format="lead_machine_full",
+    )
+
+    assert not (
+        output_dir / module.CAMPAIGN_PREP_WOODPECKER_MASTER_FILENAME
+    ).exists()
