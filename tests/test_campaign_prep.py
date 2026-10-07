@@ -259,6 +259,76 @@ def test_generate_campaign_csvs_split_uses_per_email_provenance(tmp_path):
     assert by_email[email_b]["Email_Extract_Method"] == "profile_direct"
 
 
+def test_generate_campaign_csvs_authoritative_preferred_contact_suppresses_alternates(tmp_path):
+    module = _load_legacy_module()
+    preferred = "hello@stimpies.band"
+    alternate = "pjbyrne999@gmail.com"
+    columns = [
+        "Artist", "Location", "Email", "Email_All", "final_status",
+        "Preferred_Outreach_Email", "Alternate_Emails", "Email_Provenance_JSON",
+    ]
+    input_path = tmp_path / "master.csv"
+    output_dir = tmp_path / "campaign"
+    _write_csv(
+        input_path,
+        [{
+            "Artist": "Stimpies",
+            "Location": "VIC",
+            "Email": preferred,
+            "Email_All": f"{preferred};{alternate}",
+            "final_status": "OK",
+            "Preferred_Outreach_Email": preferred,
+            "Alternate_Emails": alternate,
+            "Email_Provenance_JSON": json.dumps({
+                preferred: {"validation_status": "OK", "send_eligible": "true", "preferred": "true"},
+                alternate: {"validation_status": "WARN", "send_eligible": "false", "preferred": "false"},
+            }),
+        }],
+        columns,
+    )
+
+    module.generate_campaign_csvs(
+        str(input_path), str(output_dir), split_multiple_emails=True, export_format="woodpecker"
+    )
+
+    _, rows = _read_csv(output_dir / module.CAMPAIGN_PREP_WOODPECKER_MASTER_FILENAME)
+    assert [row["Email"] for row in rows] == [preferred]
+    _, processed = _read_csv(output_dir / module.CAMPAIGN_PREP_PROCESSED_MASTER_FILENAME)
+    assert processed[0]["Alternate_Emails"] == alternate
+
+
+def test_generate_campaign_csvs_warn_requires_approval_for_the_selected_contact(tmp_path):
+    module = _load_legacy_module()
+    approved = "manager@example.com"
+    columns = [
+        "Artist", "Location", "Email", "final_status", "Preferred_Outreach_Email",
+        "Approved_Contact_Email", "Review_Approved", "Email_Provenance_JSON",
+    ]
+    input_path = tmp_path / "master.csv"
+    output_dir = tmp_path / "campaign"
+    _write_csv(
+        input_path,
+        [{
+            "Artist": "Reviewed Artist",
+            "Location": "VIC",
+            "Email": approved,
+            "final_status": "WARN",
+            "Preferred_Outreach_Email": approved,
+            "Approved_Contact_Email": approved,
+            "Review_Approved": "TRUE",
+            "Email_Provenance_JSON": json.dumps({
+                approved: {"validation_status": "WARN", "send_eligible": "false", "preferred": "true"},
+            }),
+        }],
+        columns,
+    )
+
+    module.generate_campaign_csvs(str(input_path), str(output_dir), export_format="woodpecker")
+
+    _, rows = _read_csv(output_dir / module.CAMPAIGN_PREP_WOODPECKER_MASTER_FILENAME)
+    assert [row["Email"] for row in rows] == [approved]
+
+
 def test_generate_campaign_csvs_fails_closed_on_blank_origin_contract(tmp_path):
     module = _load_legacy_module()
     columns = ["Artist", "Location", "Email", "Lead_Source", "Source_Directory"]
