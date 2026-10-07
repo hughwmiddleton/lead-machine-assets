@@ -766,7 +766,7 @@ def test_generate_campaign_csvs_woodpecker_filter_uses_resolved_email_without_fa
     assert rows[0]["Artist"] == "Act B"
 
 
-def test_generate_campaign_csvs_woodpecker_cleans_spacing_without_artist_or_title_rebranding(tmp_path):
+def test_generate_campaign_csvs_woodpecker_cleans_spacing_and_lowercase_titles_without_rebranding_artists(tmp_path):
     module = _load_legacy_module()
     columns = ["Artist", "Location", "Primary_Email", "Song_Title"]
     input_path = tmp_path / "master.csv"
@@ -827,9 +827,9 @@ def test_generate_campaign_csvs_woodpecker_cleans_spacing_without_artist_or_titl
 
     _, rows = _read_csv(_campaign_path(output_dir, "Inside_VIC", "180_plus_days", "Neither"))
     assert [(row["Artist"], row["Song Title"]) for row in rows] == [
-        ("ktp", "break bread"),
-        ("K t p", "u + me"),
-        ("teenage dads", "i don't care"),
+        ("ktp", "Break Bread"),
+        ("K t p", "U + Me"),
+        ("teenage dads", "I Don't Care"),
         ("asha jefferies", "!!!"),
         ("aSha jeFFeries", ""),
     ]
@@ -1271,7 +1271,7 @@ def test_generate_campaign_csvs_woodpecker_accepts_artist_name_alias(tmp_path):
     )
 
     assert len(rows) == 1
-    assert rows[0]["Artist"] == "immy-owusu"
+    assert rows[0]["Artist"] == "Immy Owusu"
     assert rows[0]["First Name"] == ""
     assert rows[0]["Company"] == ""
     assert rows[0]["Song Title"] == "Hard People"
@@ -1442,3 +1442,111 @@ def test_generate_campaign_csvs_does_not_write_woodpecker_master_for_other_profi
     assert not (
         output_dir / module.CAMPAIGN_PREP_WOODPECKER_MASTER_FILENAME
     ).exists()
+
+
+def test_campaign_prep_woodpecker_display_cleanup_is_bounded():
+    module = _load_legacy_module()
+
+    assert module._campaign_prep_clean_artist_name(
+        "zoe-fox-and-rocket-clocks"
+    ) == "Zoe Fox and Rocket Clocks"
+    assert module._campaign_prep_clean_artist_name(
+        "immy-owusu"
+    ) == "Immy Owusu"
+    assert module._campaign_prep_clean_artist_name(
+        "public-figures"
+    ) == "Public Figures"
+    assert module._campaign_prep_clean_artist_name(
+        "nemi-phnx"
+    ) == "Nemi Phnx"
+
+    # Already-presentable artist styling stays authoritative.
+    assert module._campaign_prep_clean_artist_name("DOG UNIT") == "DOG UNIT"
+    assert module._campaign_prep_clean_artist_name("A A Bondy") == "A A Bondy"
+    assert module._campaign_prep_clean_artist_name(
+        '"Poor" Howard Stith'
+    ) == '"Poor" Howard Stith'
+
+    assert module._campaign_prep_clean_song_title(
+        "i dont like that"
+    ) == "I Don't Like That"
+    assert module._campaign_prep_clean_song_title(
+        "coming from the sun"
+    ) == "Coming from the Sun"
+
+    # Existing casing remains untouched.
+    assert module._campaign_prep_clean_song_title(
+        "Hard People"
+    ) == "Hard People"
+    assert module._campaign_prep_clean_song_title(
+        "B.E.G.D"
+    ) == "B.E.G.D"
+    assert module._campaign_prep_clean_song_title(
+        "dna"
+    ) == "DNA"
+
+
+def test_generate_campaign_csvs_cleans_display_values_only_in_woodpecker_exports(tmp_path):
+    module = _load_legacy_module()
+
+    input_path = tmp_path / "master_export_leads.csv"
+    output_dir = tmp_path / "campaign"
+
+    _write_csv(
+        input_path,
+        [
+            {
+                "Artist Name": "zoe-fox-and-rocket-clocks",
+                "Location": "Melbourne, VIC",
+                "Email": "beau@example.com",
+                "Song Title": "coming from the sun",
+            },
+            {
+                "Artist Name": "zaqquack",
+                "Location": "Melbourne, VIC",
+                "Email": "management@example.com",
+                "Song Title": "i dont like that",
+            },
+        ],
+        ["Artist Name", "Location", "Email", "Song Title"],
+    )
+
+    module.generate_campaign_csvs(
+        str(input_path),
+        str(output_dir),
+        export_format="woodpecker",
+        remove_rows_without_emails=True,
+    )
+
+    _, processed_rows = _read_csv(
+        output_dir / module.CAMPAIGN_PREP_PROCESSED_MASTER_FILENAME
+    )
+
+    # Source-faithful processed master remains unchanged.
+    assert processed_rows[0]["Artist Name"] == "zoe-fox-and-rocket-clocks"
+    assert processed_rows[0]["Song Title"] == "coming from the sun"
+    assert processed_rows[1]["Artist Name"] == "zaqquack"
+    assert processed_rows[1]["Song Title"] == "i dont like that"
+
+    _, master_rows = _read_csv(
+        output_dir / module.CAMPAIGN_PREP_WOODPECKER_MASTER_FILENAME
+    )
+
+    assert master_rows[0]["Artist"] == "Zoe Fox and Rocket Clocks"
+    assert master_rows[0]["Song Title"] == "Coming from the Sun"
+
+    # Non-slug artist text is retained, while lowercase song copy is cleaned.
+    assert master_rows[1]["Artist"] == "zaqquack"
+    assert master_rows[1]["Song Title"] == "I Don't Like That"
+
+    _, cohort_rows = _read_csv(
+        output_dir / "Inside_VIC_Neither_ALL.csv"
+    )
+
+    assert [
+        (row["Artist"], row["Song Title"])
+        for row in cohort_rows
+    ] == [
+        ("Zoe Fox and Rocket Clocks", "Coming from the Sun"),
+        ("zaqquack", "I Don't Like That"),
+    ]
