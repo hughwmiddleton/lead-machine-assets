@@ -516,6 +516,83 @@ def apply_staleness_downgrade(
     return status
 
 
+_UNRESOLVED_ORIGIN_REASONS = frozenset(
+    {
+        "",
+        "title_not_found",
+        "title_missing",
+        "missing_title",
+        "artist_not_found",
+        "insufficient_evidence",
+        "unresolved",
+        "unable_to_verify",
+        "verification_unavailable",
+    }
+)
+
+
+def origin_mismatch_is_durable(row: dict) -> bool:
+    """Return whether an origin mismatch is a hard contradiction.
+
+    Origin validators also use a zero flag for unresolved or incomplete source
+    evidence. Those states are review signals, not durable proof that the
+    current artist/contact validation is wrong.
+    """
+    if _optional_int_flag(row.get("origin_match_flag", None)) != 0:
+        return False
+    reason = _safe_lower(_cell_text(row.get("origin_match_reason", ""))).strip()
+    return reason not in _UNRESOLVED_ORIGIN_REASONS
+
+
+def derive_final_status_reason(row: dict, status: str, flags: dict) -> str:
+    """Derive fresh reason metadata from the current authoritative evidence."""
+    status = _normalise_status(status)
+    preferred_status = _normalise_status(row.get(PREFERRED_CONTACT_STATUS_COL, ""))
+    preferred_reason = _cell_text(row.get(PREFERRED_CONTACT_REASON_COL, "")).strip()
+    attribution = classify_contact_attribution(row)
+
+    if status == "OK":
+        if preferred_status == "OK" and preferred_reason:
+            return "preferred_contact_accepted"
+        return "final_evidence_accepted"
+
+    if status == "BLOCK":
+        if attribution == ATTRIBUTION_UNSAFE:
+            return "unsafe_contact"
+        if flags.get("dup_email_flag"):
+            return "duplicate_email"
+        if flags.get("dup_artist_flag"):
+            return "duplicate_artist"
+        if flags.get("name_flag"):
+            return "identity_unresolved"
+        if looks_like_label_or_show(row):
+            return "non_artist_entity"
+        if not _has_valid_email(row):
+            return "no_attributable_contact"
+        if preferred_status == "BLOCK" and preferred_reason:
+            return preferred_reason
+        return "authoritative_hard_block"
+
+    if status == "WARN":
+        if preferred_status == "WARN" and preferred_reason:
+            return preferred_reason
+        if flags.get("dir_conflict_flag"):
+            return "directory_conflict_review"
+        if _optional_int_flag(row.get("origin_match_flag", 1)) == 0:
+            return "origin_mismatch_review"
+        if attribution == ATTRIBUTION_THIRD_PARTY:
+            return "professional_contact_review"
+        if attribution == ATTRIBUTION_UNATTRIBUTED:
+            return "contact_attribution_review"
+        if flags.get("dup_email_flag") or flags.get("dup_artist_flag"):
+            return "duplicate_review"
+        if not _has_valid_email(row):
+            return "missing_contact_review"
+        return "identity_or_enrichment_review"
+
+    return ""
+
+
 def compute_final_status(
     row: dict,
     flags: dict,
@@ -529,6 +606,7 @@ def compute_final_status(
     dup_artist_flag = int(flags.get("dup_artist_flag", 0) or 0)
     origin_match_flag = _optional_int_flag(row.get("origin_match_flag", None))
     origin_mismatch = origin_match_flag == 0
+    durable_origin_mismatch = origin_mismatch_is_durable(row)
     inherited_origin_block = existing in {"BLOCK", "BLOCKED", "BLOCKED_BY_ORIGIN"} and origin_mismatch
     # genre_outlier_flag stays available as diagnostic metadata but must not
     # affect status: genre rarity is measured within a single run, so it makes
@@ -600,7 +678,7 @@ def compute_final_status(
     if preferred_contact_status == "WARN":
         return "WARN"
     if preferred_contact_status == "OK":
-        if dup_artist_flag or inherited_origin_block or fb_low_confidence:
+        if dup_artist_flag or durable_origin_mismatch or fb_low_confidence:
             return "WARN"
         if labelish and not label_contact:
             return "BLOCK"
@@ -1349,6 +1427,7 @@ def run_final_checker(
             row_dict["duplicate_artist_flag"] = dup_artist_flag
             row_dict["genre_outlier_flag"] = genre_flag
             row_dict["final_status"] = status
+            row_dict["Final_Status_Reason"] = derive_final_status_reason(row_dict, status, flags)
             validated_rows.append(row_dict)
 
             name_flags.append(name_flag)

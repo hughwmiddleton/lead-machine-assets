@@ -191,3 +191,67 @@ def test_preferred_selection_is_stable_for_multiple_professional_contacts():
     assert first["Preferred_Outreach_Email"] == "cara@slowclap.com.au"
     assert first["Preferred_Outreach_Email"] == second["Preferred_Outreach_Email"]
     assert len(first["Alternate_Emails"].split(";")) == 2
+
+
+def test_run_final_checker_refreshes_stale_status_reasons(tmp_path):
+    owner = _row(
+        "Stimpies",
+        "https://facebook.com/stimpiess",
+        [("hello@stimpies.band", "https://facebook.com/stimpiess", "facebook_enrich", "artist_direct")],
+    )
+    rows = [
+        _row(
+            "Yung Milla",
+            "https://www.facebook.com/YUNG-MILLA-392355807989428/ | https://instagram.com/yungmilla_",
+            [("aum@aum.net.au", "https://instagram.com/yungmilla_", "instagram_enrich", "unknown")],
+        ),
+        _row(
+            "Effie Isobel",
+            "https://facebook.com/musicbyeffie | https://instagram.com/effie.isobel",
+            [("hello@effiemusic.com", "https://facebook.com/musicbyeffie", "facebook_enrich", "artist_direct")],
+        ),
+        _row(
+            "Younique",
+            "https://facebook.com/youniqueflavour | https://instagram.com/youniqueflavour",
+            [("management@youniquemusic.com", "https://facebook.com/youniqueflavour", "facebook_enrich", "management")],
+        ),
+        _row(
+            "Clancy",
+            "https://instagram.com/chefspiss_",
+            [("skinny@sidequest.com.au", "https://instagram.com/chefspiss_", "instagram_enrich", "unknown")],
+        ),
+        _row(
+            "Meiia",
+            "https://instagram.com/meiialiveshere | https://facebook.com/stimpiess",
+            [
+                ("booking@meiia.com", "https://instagram.com/meiialiveshere", "instagram_enrich", "booking"),
+                ("hello@stimpies.band", "https://facebook.com/stimpiess", "facebook_enrich", "unknown"),
+            ],
+        ),
+        owner,
+    ]
+    for row in rows:
+        row["Final_Status_Reason"] = "identity_unresolved"
+        row["final_status"] = "OK" if row["Artist Name"] == "Clancy" else "BLOCK"
+
+    input_path = tmp_path / "golden.csv"
+    pd.DataFrame(rows).to_csv(input_path, index=False)
+    checked_path = final_checker.run_final_checker(str(input_path))
+    checked = pd.read_csv(checked_path, dtype=str, keep_default_na=False)
+    by_artist = checked.set_index("Artist Name")
+
+    assert by_artist.loc["Yung Milla", ["final_status", "Final_Status_Reason"]].tolist() == [
+        "OK", "preferred_contact_accepted"
+    ]
+    assert by_artist.loc["Effie Isobel", ["final_status", "Final_Status_Reason"]].tolist() == [
+        "OK", "preferred_contact_accepted"
+    ]
+    assert by_artist.loc["Younique", ["final_status", "Final_Status_Reason"]].tolist() == [
+        "OK", "preferred_contact_accepted"
+    ]
+    assert by_artist.loc["Clancy", ["final_status", "Final_Status_Reason"]].tolist() == [
+        "WARN", "source_identity_unresolved"
+    ]
+    assert by_artist.loc["Meiia", ["final_status", "Final_Status_Reason"]].tolist() == [
+        "BLOCK", "duplicate_email"
+    ]

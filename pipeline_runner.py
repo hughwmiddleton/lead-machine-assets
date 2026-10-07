@@ -1649,42 +1649,6 @@ def recompute_final_status_post_enrichment(df: pd.DataFrame, logger: LoggerFn = 
         except Exception:
             return default
 
-    def _status_reason(row_dict: Dict[str, Any], computed_status: str, flags: Dict[str, int], attribution: str) -> str:
-        preferred_reason = _cell_str(row_dict.get("Preferred_Contact_Reason", ""))
-        if preferred_reason:
-            if computed_status == "OK":
-                return "preferred_contact_accepted"
-            return preferred_reason
-        if computed_status == "BLOCK":
-            if attribution == final_checker.ATTRIBUTION_UNSAFE:
-                return "unsafe_contact"
-            if flags["dup_email_flag"]:
-                return "duplicate_email"
-            if flags["dup_artist_flag"]:
-                return "duplicate_artist"
-            if flags["name_flag"]:
-                return "identity_unresolved"
-            if final_checker.looks_like_label_or_show(row_dict):
-                return "non_artist_entity"
-            if not _row_has_valid_email(pd.Series(row_dict))[0]:
-                return "no_attributable_contact"
-            return "authoritative_hard_block"
-        if computed_status == "WARN":
-            if flags["dir_conflict_flag"]:
-                return "directory_conflict_review"
-            if _parse_intlike(row_dict.get("origin_match_flag", 1), 1) == 0:
-                return "origin_mismatch_review"
-            if attribution == final_checker.ATTRIBUTION_THIRD_PARTY:
-                return "professional_contact_review"
-            if attribution == final_checker.ATTRIBUTION_UNATTRIBUTED:
-                return "contact_attribution_review"
-            if flags["dup_email_flag"] or flags["dup_artist_flag"]:
-                return "duplicate_review"
-            if not _row_has_valid_email(pd.Series(row_dict))[0]:
-                return "missing_contact_review"
-            return "identity_or_enrichment_review"
-        return "final_evidence_accepted"
-
     for idx, row in df.iterrows():
         status = str(row.get(status_col, "") or "").strip().upper()
         row_dict = df.loc[idx].to_dict()
@@ -1719,8 +1683,7 @@ def recompute_final_status_post_enrichment(df: pd.DataFrame, logger: LoggerFn = 
         }
         match_score = _parse_floatlike(row_dict.get("match_score_overall", 0), 0.0)
         computed_status = final_checker.compute_final_status(row_dict, flags, match_score)
-        attribution = final_checker.classify_contact_attribution(row_dict)
-        reason = _status_reason(row_dict, computed_status, flags, attribution)
+        reason = final_checker.derive_final_status_reason(row_dict, computed_status, flags)
         df.at[idx, "Final_Status_Reason"] = reason
         if computed_status != status:
             df.at[idx, status_col] = computed_status
