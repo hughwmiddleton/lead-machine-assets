@@ -155,6 +155,7 @@ from night_mode_fb import (
     _extract_fb_visible_text_with_container_fallback,
     _guard_homepage_fb_search_candidates,
     _fb_search_surface_miss_reason,
+    facebook_source_belongs_to_candidate,
     _is_fb_login_or_security_url,
     _looks_like_fb_warning_or_block,
     _merge_email_all,
@@ -8348,6 +8349,12 @@ def _extract_fb_emails_bounded(fb_driver, fb_url: str, log_fn=None, fb_session=N
                 nav_html = nav_html or (fast_path_fetcher._last_fb_surface_html or "")
                 rendered_text = fast_path_fetcher._last_fb_visible_text or ""
                 anchor_values = list(fast_path_fetcher._last_fb_live_anchor_values or [])
+                if not nav_html:
+                    return FacebookAcceptedPageFetchResult(
+                        requested_url=target_fetch,
+                        resolved_url=target_fetch,
+                        status_reason="fetch_error",
+                    )
             elif fb_session is not None and hasattr(fb_session, "navigate"):
                 try:
                     active_driver = fb_session.navigate(target_fetch, logger=log_fn)
@@ -8359,14 +8366,24 @@ def _extract_fb_emails_bounded(fb_driver, fb_url: str, log_fn=None, fb_session=N
             else:
                 fb_driver.get(target_fetch)
             current_url = nav_current_url or getattr(active_driver, "current_url", "") or target_fetch
-            resolved_url = _normalise_fb_surface_url(current_url) or _normalise_fb_url(normalize_external_url(current_url) or current_url) or current_url
             if _is_fb_login_or_security_url(current_url):
+                resolved_url = _normalise_fb_surface_url(current_url) or current_url
                 _log("[FB Enrich] Facebook login/checkpoint detected; skipping.")
                 return FacebookAcceptedPageFetchResult(
                     requested_url=target_fetch,
                     resolved_url=resolved_url,
                     status_reason="login_wall",
                 )
+            if not facebook_source_belongs_to_candidate(target_fetch, current_url):
+                _log(
+                    f"[FB Ownership] rejected stale/mismatched browser surface requested='{target_fetch}' resolved='{current_url}'"
+                )
+                return FacebookAcceptedPageFetchResult(
+                    requested_url=target_fetch,
+                    resolved_url=target_fetch,
+                    status_reason="candidate_source_mismatch",
+                )
+            resolved_url = _normalise_fb_surface_url(current_url) or _normalise_fb_url(normalize_external_url(current_url) or current_url) or current_url
             html = nav_html or getattr(active_driver, "page_source", "") or ""
             warning = _looks_like_fb_warning_or_block(html, current_url)
             if warning:
@@ -17195,6 +17212,14 @@ class CrossDirectoryEnricherWorker(QThread):
                                 )
                             fb_emails = filter_system_telemetry_emails(fb_emails)
                             page_url_used = resolved_url or candidate
+                            if not facebook_source_belongs_to_candidate(candidate, page_url_used):
+                                self.log_message.emit(
+                                    f"[FB Ownership] Discarding mismatched Facebook result for '{artist}' candidate='{candidate}' source='{page_url_used}'"
+                                )
+                                fb_emails = []
+                                page_url_used = ""
+                                fb_status_reason = "candidate_source_mismatch"
+                                break
                             if fb_emails:
                                 break
                             if fb_status_reason in {"login_wall", "warning_interstitial", "checkpoint"}:
