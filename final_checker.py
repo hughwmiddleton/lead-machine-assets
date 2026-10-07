@@ -1,9 +1,10 @@
 import datetime
+import json
 import logging
 import os
 import re
 from urllib.parse import urlparse, unquote
-from typing import Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 import pandas as pd
 from rapidfuzz import fuzz
@@ -14,7 +15,12 @@ from email_normalizer import (
     is_system_telemetry_email,
     normalize_email_value,
 )
-from email_provenance import get_row_email_provenance, infer_email_surface
+from email_provenance import (
+    dump_email_provenance_json,
+    get_row_email_provenance,
+    infer_email_surface,
+    normalize_email_keys,
+)
 from source_scheduler import canonicalize_facebook_url
 
 """
@@ -232,6 +238,14 @@ ATTRIBUTION_UNATTRIBUTED = "unattributed"
 ATTRIBUTION_THIRD_PARTY = "third_party"
 ATTRIBUTION_TRUSTED = "trusted"
 
+ARTIST_IDENTITY_STATUS_COL = "Artist_Identity_Status"
+IDENTITY_ASSESSMENT_JSON_COL = "Identity_Assessment_JSON"
+PREFERRED_OUTREACH_EMAIL_COL = "Preferred_Outreach_Email"
+ALTERNATE_EMAILS_COL = "Alternate_Emails"
+PREFERRED_CONTACT_STATUS_COL = "Preferred_Contact_Status"
+PREFERRED_CONTACT_REASON_COL = "Preferred_Contact_Reason"
+APPROVED_CONTACT_EMAIL_COL = "Approved_Contact_Email"
+
 _ATTRIBUTABLE_CONTACT = (ATTRIBUTION_TRUSTED, ATTRIBUTION_THIRD_PARTY)
 
 # Provenance surfaces owned by, or directly attributable to, the entity itself.
@@ -339,7 +353,7 @@ def _email_is_role_inbox(email: str) -> bool:
     return bool(tokens & _ROLE_EMAIL_LOCAL_PARTS)
 
 
-def classify_contact_attribution(row: dict) -> str:
+def classify_contact_attribution(row: dict, email: str = "") -> str:
     """Answer the contact-safety question for a row's primary email.
 
     This is deliberately independent of enrichment completeness: it only asks
@@ -359,7 +373,7 @@ def classify_contact_attribution(row: dict) -> str:
     if row is None or not hasattr(row, "get"):
         return ATTRIBUTION_NONE
 
-    email = _first_usable_email(row)
+    email = normalize_email_value(email) or _first_usable_email(row)
     if not email:
         return ATTRIBUTION_NONE
     if is_platform_support_email(email) or is_system_telemetry_email(email):
@@ -422,7 +436,7 @@ def _email_entry_for_row(row: dict, email: str) -> dict:
     return entry
 
 
-def duplicate_email_is_unsafe(row: dict, peer_rows: Iterable[dict]) -> bool:
+def duplicate_email_is_unsafe(row: dict, peer_rows: Iterable[dict], email: str = "") -> bool:
     """Return whether this row's repeated primary email is a conflict.
 
     A shared professional inbox is a valid multi-artist contact.  A repeated
@@ -430,7 +444,7 @@ def duplicate_email_is_unsafe(row: dict, peer_rows: Iterable[dict]) -> bool:
     shared role and which conflicts with an artist-direct attribution belonging
     to a different artist.
     """
-    email = _first_usable_email(row)
+    email = normalize_email_value(email) or _first_usable_email(row)
     if not email:
         return False
     current_entry = _email_entry_for_row(row, email)
@@ -443,8 +457,10 @@ def duplicate_email_is_unsafe(row: dict, peer_rows: Iterable[dict]) -> bool:
     for peer in peer_rows:
         if peer is row:
             continue
-        peer_email = _first_usable_email(peer)
-        if peer_email != email:
+        peer_emails = normalize_email_keys(
+            [peer.get("Email", ""), peer.get("Email_All", ""), peer.get("All Emails", "")]
+        )
+        if email not in peer_emails:
             continue
         peer_artist = _compact_slug(peer.get("Artist Name", ""))
         if not peer_artist or peer_artist == current_artist:
@@ -574,6 +590,21 @@ def compute_final_status(
         or (fb_name_flag is not None and fb_name_flag == 0)
         or bool(fb_review_reason)
     )
+
+    # Current checker artifacts carry an authoritative per-contact decision.
+    # Prefer it over the legacy row-level threshold model; legacy artifacts
+    # without these fields continue through the compatibility logic below.
+    preferred_contact_status = _normalise_status(row.get(PREFERRED_CONTACT_STATUS_COL, ""))
+    if preferred_contact_status == "BLOCK":
+        return "BLOCK"
+    if preferred_contact_status == "WARN":
+        return "WARN"
+    if preferred_contact_status == "OK":
+        if dup_artist_flag or inherited_origin_block or fb_low_confidence:
+            return "WARN"
+        if labelish and not label_contact:
+            return "BLOCK"
+        return "OK"
 
     strong_identity = (
         match_score >= 0.75
@@ -801,7 +832,9 @@ def _facebook_name_from_url(url: str) -> str:
     parts = [p for p in (parsed.path or "").split("/") if p]
     if not parts:
         return ""
-    if parts[0] in ("pages",):
+    if parts[0].lower() in {"share", "sharer", "dialog", "plugins", "messages"}:
+        candidate = ""
+    elif parts[0] in ("pages",):
         candidate = parts[1] if len(parts) > 1 else ""
     elif parts[0] == "profile.php":
         candidate = ""
@@ -840,7 +873,7 @@ def _extract_instagram_names(row: pd.Series) -> list[str]:
     ]
 
 
-_IDENTITY_HANDLE_PREFIXES = ("theband",)
+_IDENTITY_HANDLE_PREFIXES = ("musicby", "official", "theband")
 _IDENTITY_HANDLE_SUFFIXES = ("musicofficial", "officialmusic", "official", "music", "band")
 
 
@@ -884,6 +917,309 @@ def _identity_ratio(left: str, right: str) -> float:
     if not left_variants or not right_variants:
         return 0.0
     return max(fuzz.ratio(a, b) for a in left_variants for b in right_variants)
+
+
+def _strip_platform_identity_noise(candidate: str, source: str) -> str:
+    """Remove non-semantic platform-generated handle material.
+
+    Facebook page slugs commonly append a long numeric page identifier.  It is
+    diagnostic routing data, not part of the artist identity.  Short numbers
+    remain meaningful (for example, ``blink 182``).
+    """
+    cleaned = _clean_name(candidate)
+    if source == "facebook":
+        cleaned = re.sub(r"(?:^|\s)\d{5,}(?=\s|$)", " ", cleaned)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
+
+
+def _identity_candidates(row: Mapping[str, Any]) -> list[dict[str, str]]:
+    series = pd.Series(dict(row))
+    extractors = (
+        ("spotify", "spotify.com", _spotify_name_from_url),
+        ("bandcamp", "bandcamp.com", _bandcamp_name_from_url),
+        ("soundcloud", "soundcloud.com", _soundcloud_name_from_url),
+        ("facebook", "facebook.com", _facebook_name_from_url),
+        ("instagram", "instagram.com", _instagram_name_from_url),
+    )
+    candidates: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for source, host, extractor in extractors:
+        for url in _extract_urls_from_row(series, host):
+            candidate = _strip_platform_identity_noise(extractor(url), source)
+            if not candidate:
+                continue
+            key = (source, url.lower().rstrip("/"))
+            if key in seen:
+                continue
+            seen.add(key)
+            candidates.append({"source": source, "url": url, "candidate": candidate})
+    return candidates
+
+
+def assess_artist_identity(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Assess every platform identity against the canonical artist.
+
+    Candidates are not required to agree pairwise.  A common handle containing
+    the canonical artist token can also be accepted as a plausible alias when
+    independently corroborated by two platforms.  Unrelated candidates remain
+    visible as rejected evidence without overriding stronger aligned sources.
+    """
+    canonical = _clean_name(row.get("Artist Name", ""))
+    canonical_compact = canonical.replace(" ", "")
+    candidates = _identity_candidates(row)
+    cluster_sources: dict[str, set[str]] = {}
+    for item in candidates:
+        cluster_sources.setdefault(_compact_slug(item["candidate"]), set()).add(item["source"])
+
+    accepted = 0
+    assessments: list[dict[str, Any]] = []
+    provisional: list[tuple[dict[str, str], float, str]] = []
+    for item in candidates:
+        score = _identity_ratio(canonical, item["candidate"]) if canonical else 0.0
+        compact = _compact_slug(item["candidate"])
+        canonical_words = {word for word in canonical.split() if len(word) >= 5}
+        prefixed_word_alias = any(
+            compact.startswith(prefix) and compact[len(prefix) :] in canonical_words
+            for prefix in ("musicby", "official")
+        )
+        canonical_extension_alias = (
+            len(canonical_compact) >= 5
+            and compact.startswith(canonical_compact)
+            and score >= 50
+        )
+        corroborated_alias = (
+            len(canonical_compact) >= 4
+            and canonical_compact in compact
+            and len(cluster_sources.get(compact, set())) >= 2
+        )
+        if score >= 85:
+            state = "matched"
+        elif score >= 70 or prefixed_word_alias or canonical_extension_alias or corroborated_alias:
+            state = "plausible_alias"
+        else:
+            state = "unresolved"
+        if state in {"matched", "plausible_alias"}:
+            accepted += 1
+        provisional.append((item, score, state))
+
+    for item, score, state in provisional:
+        if state == "unresolved" and accepted:
+            state = "rejected"
+        assessments.append({**item, "state": state, "score": round(score / 100.0, 4)})
+
+    if not candidates:
+        overall = "unknown"
+        match_score = 0.0
+    elif accepted:
+        overall = "matched" if any(a["state"] == "matched" for a in assessments) else "plausible_alias"
+        weights = {"spotify": 1.0, "facebook": 1.0, "instagram": 1.0, "bandcamp": 0.8, "soundcloud": 0.6}
+        earned = sum(weights.get(a["source"], 0.5) for a in assessments if a["state"] in {"matched", "plausible_alias"})
+        possible = sum(weights.get(a["source"], 0.5) for a in assessments)
+        match_score = max(a["score"] for a in assessments if a["state"] in {"matched", "plausible_alias"})
+        if possible:
+            match_score = max(match_score, earned / possible)
+    else:
+        overall = "unresolved"
+        match_score = max((a["score"] for a in assessments), default=0.0)
+
+    directory_conflict = int(
+        overall == "unresolved"
+        or (accepted < 2 and any(a["state"] == "rejected" for a in assessments))
+    )
+    return {
+        "status": overall,
+        "match_score": round(min(1.0, match_score), 4),
+        "name_consistent": overall in {"matched", "plausible_alias"},
+        "directory_conflict": directory_conflict,
+        "candidates": assessments,
+    }
+
+
+def _canonical_url_key(value: Any) -> str:
+    text = _cell_text(value).strip()
+    if not text:
+        return ""
+    try:
+        parsed = urlparse(text)
+        host = (parsed.netloc or "").lower().removeprefix("www.")
+        path = re.sub(r"/+", "/", unquote(parsed.path or "")).rstrip("/").lower()
+        return f"{host}{path}"
+    except Exception:
+        return text.lower().split("?", 1)[0].rstrip("/")
+
+
+def _source_identity_state(email: str, row: Mapping[str, Any], entry: Mapping[str, Any], identity: Mapping[str, Any]) -> str:
+    source_url = _cell_text(entry.get("source_url", ""))
+    source_key = _canonical_url_key(source_url)
+    if source_key:
+        for candidate in identity.get("candidates", []):
+            if _canonical_url_key(candidate.get("url", "")) == source_key:
+                return _cell_text(candidate.get("state", "")) or "unresolved"
+    surface = infer_email_surface(entry.get("source_type", ""), source_url, entry.get("surface", ""))
+    if surface.startswith("website_") and _email_belongs_to_entity(email, row.get("Artist Name", "")):
+        return "matched"
+    return "unknown"
+
+
+def _truthy(value: Any) -> bool:
+    return _safe_lower(value).strip() in {"1", "true", "yes", "y", "approved"}
+
+
+def assess_row_contacts(
+    row: Mapping[str, Any],
+    identity: Mapping[str, Any],
+    peer_rows: Iterable[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Validate every email independently and choose one outreach default."""
+    mutable_row = dict(row)
+    provenance = get_row_email_provenance(mutable_row)
+    emails = normalize_email_keys(
+        [row.get("Email_All", ""), row.get("All Emails", ""), row.get("Email", ""), row.get("Primary Email", "")]
+    )
+    role_priority = {
+        "artist_direct": 0,
+        "management": 1,
+        "team_business": 2,
+        "label": 2,
+        "booking": 3,
+        "pr_publicity": 4,
+        "unknown": 9,
+    }
+    status_priority = {"OK": 0, "WARN": 1, "BLOCK": 2}
+    source_priority = {"matched": 0, "plausible_alias": 1, "unknown": 2, "unresolved": 3, "rejected": 4, "conflicting": 5}
+    contacts: list[dict[str, Any]] = []
+
+    for index, email in enumerate(emails):
+        entry = dict(provenance.get(email) or {})
+        if not entry and email == normalize_email_value(row.get("Email", "")):
+            entry = _email_entry_for_row(dict(row), email)
+        row_for_email = dict(row)
+        row_for_email["Email"] = email
+        attribution = classify_contact_attribution(row_for_email, email)
+        source_identity = _source_identity_state(email, row, entry, identity)
+        role = _safe_lower(entry.get("role", "") or (row.get("Email_Role", "") if index == 0 else "")) or "unknown"
+        duplicate_unsafe = duplicate_email_is_unsafe(row_for_email, peer_rows, email=email)
+
+        if attribution == ATTRIBUTION_UNSAFE:
+            status, reason = "BLOCK", "unsafe_contact"
+        elif duplicate_unsafe:
+            status, reason = "BLOCK", "cross_artist_contact_conflict"
+        elif source_identity == "conflicting":
+            status, reason = "BLOCK", "source_identity_conflict"
+        elif source_identity == "rejected":
+            status, reason = "WARN", "source_identity_rejected_review"
+        elif source_identity == "unresolved":
+            status, reason = "WARN", "source_identity_unresolved"
+        elif source_identity in {"matched", "plausible_alias"}:
+            if attribution in _ATTRIBUTABLE_CONTACT:
+                status, reason = "OK", "contact_attributable"
+            else:
+                status, reason = "WARN", "contact_attribution_review"
+        elif _email_belongs_to_entity(email, row.get("Artist Name", "")) and attribution != ATTRIBUTION_UNATTRIBUTED:
+            status, reason = "OK", "artist_identity_in_email"
+        else:
+            status, reason = "WARN", "contact_attribution_review"
+
+        contacts.append(
+            {
+                "email": email,
+                "entry": entry,
+                "role": role,
+                "attribution": attribution,
+                "source_identity": source_identity,
+                "status": status,
+                "reason": reason,
+                "index": index,
+                "rank": (
+                    status_priority[status],
+                    role_priority.get(role, 8),
+                    source_priority.get(source_identity, 8),
+                    index,
+                    email,
+                ),
+            }
+        )
+
+    selectable = [contact for contact in contacts if contact["status"] != "BLOCK"]
+    preferred = min(selectable, key=lambda contact: contact["rank"]) if selectable else None
+    approved_email = normalize_email_value(row.get(APPROVED_CONTACT_EMAIL_COL, ""))
+    row_approved = any(
+        _truthy(row.get(column, ""))
+        for column in ("Review_Approved", "Reviewed_Approved", "Final_Status_Approved", "Approved")
+    )
+    for contact in contacts:
+        is_preferred = bool(preferred and contact["email"] == preferred["email"])
+        explicitly_approved = contact["status"] == "WARN" and (
+            approved_email == contact["email"] or (row_approved and not approved_email and is_preferred)
+        )
+        entry = contact["entry"]
+        entry.update(
+            {
+                "role": contact["role"],
+                "source_identity_state": contact["source_identity"],
+                "attribution_state": contact["attribution"],
+                "validation_status": contact["status"],
+                "send_eligible": "true" if contact["status"] == "OK" or explicitly_approved else "false",
+                "review_reason": contact["reason"],
+                "preferred": "true" if is_preferred else "false",
+            }
+        )
+        provenance[contact["email"]] = entry
+
+    preferred_email = preferred["email"] if preferred else ""
+    return {
+        "provenance": provenance,
+        "preferred_email": preferred_email,
+        "alternate_emails": [email for email in emails if email != preferred_email],
+        "preferred_status": preferred["status"] if preferred else (
+            "BLOCK"
+            if contacts
+            or (
+                identity.get("directory_conflict")
+                and identity.get("status") in {"matched", "plausible_alias"}
+            )
+            else "WARN"
+        ),
+        "preferred_reason": preferred["reason"] if preferred else ("no_safe_contact" if contacts else "no_contact"),
+        "contacts": contacts,
+    }
+
+
+def apply_authoritative_validation(
+    row: Mapping[str, Any],
+    peer_rows: Iterable[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Return a row updated with authoritative identity/contact summaries."""
+    output = dict(row)
+    identity = assess_artist_identity(output)
+    contacts = assess_row_contacts(output, identity, peer_rows)
+    output[ARTIST_IDENTITY_STATUS_COL] = identity["status"]
+    output[IDENTITY_ASSESSMENT_JSON_COL] = json.dumps(
+        identity["candidates"], sort_keys=True, separators=(",", ":")
+    )
+    output[NAME_CONSISTENCY_FLAG_COL] = 1 if identity["name_consistent"] else 0
+    output[NAME_CONSISTENCY_POLARITY_COL] = NAME_CONSISTENCY_POLARITY_CONSISTENT_IS_1
+    output["directory_conflict_flag"] = identity["directory_conflict"]
+    output["match_score_overall"] = identity["match_score"]
+    output[PREFERRED_OUTREACH_EMAIL_COL] = contacts["preferred_email"]
+    output[ALTERNATE_EMAILS_COL] = ";".join(contacts["alternate_emails"])
+    output[PREFERRED_CONTACT_STATUS_COL] = contacts["preferred_status"]
+    output[PREFERRED_CONTACT_REASON_COL] = contacts["preferred_reason"]
+    output["Email_Provenance_JSON"] = dump_email_provenance_json(contacts["provenance"])
+
+    if contacts["preferred_email"]:
+        output["Email"] = contacts["preferred_email"]
+        preferred_meta = contacts["provenance"].get(contacts["preferred_email"], {})
+        for column, key in (
+            ("Email_Role", "role"),
+            ("Email_Role_Evidence", "role_evidence"),
+            ("Email_Source_URL", "source_url"),
+            ("Email_Source_Type", "source_type"),
+            ("Email_Extract_Method", "extract_method"),
+        ):
+            output[column] = _cell_text(preferred_meta.get(key, ""))
+    return output
 
 
 def _pairwise_conflict(names: list[str], threshold: float) -> int:
@@ -960,11 +1296,8 @@ def run_final_checker(
         result_df["Primary Genre"] = genre_values
 
         artist_series = result_df.get("Artist Name", pd.Series(dtype=str)).fillna("").astype(str)
-        email_series = result_df.get("Email", pd.Series(dtype=str)).fillna("").astype(str)
-        normalized_emails = email_series.str.strip().str.lower()
         normalized_artists = artist_series.apply(_clean_name)
 
-        email_counts = normalized_emails[normalized_emails != ""].value_counts().to_dict()
         artist_counts = normalized_artists[normalized_artists != ""].value_counts().to_dict()
 
         normalized_genres = pd.Series(genre_values, dtype=str).str.strip().str.lower()
@@ -978,34 +1311,18 @@ def run_final_checker(
         match_scores = []
         statuses = []
         row_records = result_df.to_dict("records")
+        validated_rows: list[dict[str, Any]] = []
 
         for idx, row in result_df.iterrows():
             artist_clean = normalized_artists.iloc[idx]
-
-            spotify_names = _extract_spotify_names(row)
-            bandcamp_names = _extract_bandcamp_names(row)
-            soundcloud_names = _extract_soundcloud_names(row)
-            facebook_names = _extract_facebook_names(row)
-            instagram_names = _extract_instagram_names(row)
-
-            candidate_names = (
-                spotify_names
-                + bandcamp_names
-                + soundcloud_names
-                + facebook_names
-                + instagram_names
+            row_dict = apply_authoritative_validation(row.to_dict(), row_records)
+            identity_status = _safe_lower(row_dict.get(ARTIST_IDENTITY_STATUS_COL, ""))
+            name_flag = 0 if identity_status in {"matched", "plausible_alias", "unknown"} else 1
+            dir_conflict_flag = int(row_dict.get("directory_conflict_flag", 0) or 0)
+            provenance = get_row_email_provenance(row_dict)
+            dup_email_flag = int(
+                any(meta.get("review_reason") == "cross_artist_contact_conflict" for meta in provenance.values())
             )
-            if artist_clean and candidate_names:
-                best_score = max(_identity_ratio(artist_clean, candidate) for candidate in candidate_names)
-                name_flag = 1 if best_score < 70 else 0
-            else:
-                name_flag = 0
-
-            dir_names = bandcamp_names + soundcloud_names + facebook_names + instagram_names
-            dir_conflict_flag = _pairwise_conflict(dir_names, 70)
-
-            email_key = normalized_emails.iloc[idx]
-            dup_email_flag = 1 if email_key and email_counts.get(email_key, 0) > 1 and duplicate_email_is_unsafe(row.to_dict(), row_records) else 0
 
             artist_key = artist_clean
             dup_artist_flag = 1 if artist_key and artist_counts.get(artist_key, 0) > 1 else 0
@@ -1017,13 +1334,7 @@ def run_final_checker(
                 freq = genre_counts.get(genre_key, 0) / total_rows
                 genre_flag = 1 if freq < 0.05 else 0
 
-            calculated_match = 1.0 - 0.25 * (name_flag + dir_conflict_flag + dup_email_flag + dup_artist_flag)
-            calculated_match = max(0.0, min(1.0, calculated_match))
-            try:
-                existing_match = float(row.get("match_score_overall", 0) or 0)
-            except Exception:
-                existing_match = 0.0
-            match_score = max(calculated_match, existing_match)
+            match_score = float(row_dict.get("match_score_overall", 0) or 0)
 
             flags = {
                 "name_flag": name_flag,
@@ -1032,9 +1343,13 @@ def run_final_checker(
                 "dup_artist_flag": dup_artist_flag,
                 "genre_outlier_flag": genre_flag,
             }
-            row_dict = row.to_dict()
             status = compute_final_status(row_dict, flags, match_score)
             status = apply_staleness_downgrade(status, row_dict, enabled=stale_enabled, fresh_year_cutoff=fresh_year_cutoff)
+            row_dict["duplicate_email_flag"] = dup_email_flag
+            row_dict["duplicate_artist_flag"] = dup_artist_flag
+            row_dict["genre_outlier_flag"] = genre_flag
+            row_dict["final_status"] = status
+            validated_rows.append(row_dict)
 
             name_flags.append(name_flag)
             dup_email_flags.append(dup_email_flag)
@@ -1043,6 +1358,8 @@ def run_final_checker(
             genre_outlier_flags.append(genre_flag)
             match_scores.append(match_score)
             statuses.append(status)
+
+        result_df = pd.DataFrame(validated_rows)
 
         # Column contract: name_consistency_flag is 1 when the artist name is
         # CONSISTENT with its directory slugs and 0 when it is not, matching the

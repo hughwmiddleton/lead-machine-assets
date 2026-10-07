@@ -13211,6 +13211,38 @@ def _campaign_prep_review_skip_reason(
     row: dict,
     columns_by_lower: Dict[str, str],
 ) -> Optional[str]:
+    email_column = _campaign_prep_resolve_alias(
+        columns_by_lower,
+        ("Email", "Primary Email", "Primary_Email", "emails", "email"),
+    )
+    email = normalize_email_key(row.get(email_column, "")) if email_column is not None else ""
+    entry = parse_email_provenance_json(row.get("Email_Provenance_JSON", "")).get(email, {})
+    contact_status = str(entry.get("validation_status", "") or "").strip().upper()
+    if contact_status == "BLOCK":
+        return "contact_validation_block"
+
+    approval_column = _campaign_prep_resolve_alias(
+        columns_by_lower,
+        (
+            "Review_Approved",
+            "Reviewed_Approved",
+            "Final_Status_Approved",
+            "Approved",
+        ),
+    )
+    approved_email_column = _campaign_prep_resolve_alias(columns_by_lower, ("Approved_Contact_Email",))
+    approved_email = normalize_email_key(row.get(approved_email_column, "")) if approved_email_column else ""
+    approved = (
+        str(entry.get("send_eligible", "")).strip().lower() == "true"
+        or (
+            approval_column is not None
+            and _campaign_prep_truthy(row.get(approval_column, ""))
+            and (not approved_email or approved_email == email)
+        )
+    )
+    if contact_status == "WARN" and not approved:
+        return "review_not_approved"
+
     status_column = columns_by_lower.get("final_status")
     if status_column is None:
         return None
@@ -13220,16 +13252,6 @@ def _campaign_prep_review_skip_reason(
     if status == "OK":
         return None
     if status == "WARN":
-        approval_column = _campaign_prep_resolve_alias(
-            columns_by_lower,
-            (
-                "Review_Approved",
-                "Reviewed_Approved",
-                "Final_Status_Approved",
-                "Approved",
-            ),
-        )
-        approved = approval_column is not None and _campaign_prep_truthy(row.get(approval_column, ""))
         return None if approved else "review_not_approved"
     return "review_not_approved"
 
@@ -13372,7 +13394,18 @@ def generate_campaign_csvs(
         parsed_release_date = _campaign_prep_parse_release_date(release_date_value)
         release_date_invalid = parsed_release_date is None
         rows_for_segmentation = [copy.deepcopy(row)]
-        if split_multiple_emails and email_column is not None:
+        preferred_column = _campaign_prep_resolve_alias(columns_by_lower, ("Preferred_Outreach_Email",))
+        approved_contact_column = _campaign_prep_resolve_alias(columns_by_lower, ("Approved_Contact_Email",))
+        authoritative_email = ""
+        if approved_contact_column is not None:
+            authoritative_email = normalize_email_key(row.get(approved_contact_column, ""))
+        if not authoritative_email and preferred_column is not None:
+            authoritative_email = normalize_email_key(row.get(preferred_column, ""))
+        if authoritative_email and email_column is not None:
+            selected_row = _campaign_prep_split_email_metadata(row, authoritative_email)
+            selected_row[email_column] = authoritative_email
+            rows_for_segmentation = [selected_row]
+        elif split_multiple_emails and email_column is not None:
             split_source_value = row.get(email_column, "")
             primary_tokens = _campaign_prep_email_tokens(split_source_value)
             email_all_column = _campaign_prep_resolve_alias(

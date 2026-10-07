@@ -21,7 +21,15 @@ EMAIL_ROLE_EVIDENCE_COL = "Email_Role_Evidence"
 
 _SOURCE_PROVENANCE_FIELDS = ("source_type", "surface", "source_url", "extract_method")
 _ROLE_FIELDS = ("role", "role_evidence")
-_PROVENANCE_FIELDS = _SOURCE_PROVENANCE_FIELDS + _ROLE_FIELDS
+_VALIDATION_FIELDS = (
+    "source_identity_state",
+    "attribution_state",
+    "validation_status",
+    "send_eligible",
+    "review_reason",
+    "preferred",
+)
+_PROVENANCE_FIELDS = _SOURCE_PROVENANCE_FIELDS + _ROLE_FIELDS + _VALIDATION_FIELDS
 _WEBSITE_CONTACT_HINTS = (
     "/about",
     "/book",
@@ -144,6 +152,12 @@ def _build_provenance_entry(
     surface: Any = "",
     role: Any = "",
     role_evidence: Any = "",
+    source_identity_state: Any = "",
+    attribution_state: Any = "",
+    validation_status: Any = "",
+    send_eligible: Any = "",
+    review_reason: Any = "",
+    preferred: Any = "",
 ) -> Dict[str, str]:
     source_type_clean = _clean_str(source_type).lower()
     source_url_clean = _clean_str(source_url)
@@ -163,6 +177,17 @@ def _build_provenance_entry(
         evidence_clean = _clean_str(role_evidence)
         if evidence_clean:
             entry["role_evidence"] = evidence_clean
+    for key, value in (
+        ("source_identity_state", source_identity_state),
+        ("attribution_state", attribution_state),
+        ("validation_status", validation_status),
+        ("send_eligible", send_eligible),
+        ("review_reason", review_reason),
+        ("preferred", preferred),
+    ):
+        cleaned_value = _clean_str(value)
+        if cleaned_value:
+            entry[key] = cleaned_value
     return {key: value for key, value in entry.items() if value}
 
 
@@ -209,6 +234,12 @@ def parse_email_provenance_json(raw_value: Any) -> Dict[str, Dict[str, str]]:
             surface=meta.get("surface", ""),
             role=meta.get("role", ""),
             role_evidence=meta.get("role_evidence", ""),
+            source_identity_state=meta.get("source_identity_state", ""),
+            attribution_state=meta.get("attribution_state", ""),
+            validation_status=meta.get("validation_status", ""),
+            send_eligible=meta.get("send_eligible", ""),
+            review_reason=meta.get("review_reason", ""),
+            preferred=meta.get("preferred", ""),
         )
         if cleaned_meta:
             parsed[normalized_email] = cleaned_meta

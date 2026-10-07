@@ -1650,6 +1650,11 @@ def recompute_final_status_post_enrichment(df: pd.DataFrame, logger: LoggerFn = 
             return default
 
     def _status_reason(row_dict: Dict[str, Any], computed_status: str, flags: Dict[str, int], attribution: str) -> str:
+        preferred_reason = _cell_str(row_dict.get("Preferred_Contact_Reason", ""))
+        if preferred_reason:
+            if computed_status == "OK":
+                return "preferred_contact_accepted"
+            return preferred_reason
         if computed_status == "BLOCK":
             if attribution == final_checker.ATTRIBUTION_UNSAFE:
                 return "unsafe_contact"
@@ -1976,9 +1981,12 @@ def _rank_contact_emails_for_row(row_like: Any, values: Union[str, Sequence[str]
         )
     indexed = list(enumerate(normalized))
 
-    def _sort_key(item: Tuple[int, str]) -> Tuple[int, int, int, int, int, int, int, int, int, int, str]:
+    def _sort_key(item: Tuple[int, str]) -> Tuple[int, int, int, int, int, int, int, int, int, int, int, int, str]:
         index, email = item
         meta = get_email_provenance_entry(row_like, email)
+        validation_status = _cell_str(meta.get("validation_status", "")).upper()
+        validation_penalty = {"OK": 0, "WARN": 1, "": 2, "BLOCK": 3}.get(validation_status, 2)
+        preferred_penalty = 0 if _cell_str(meta.get("preferred", "")).lower() == "true" else 1
         bucket = _email_surface_bucket(row_like, email, meta, artist_domain)
         source_trust = _get_email_source_trust(meta.get("source_type", ""), meta.get("surface", ""))
         if source_trust == 2 and bucket >= 2:
@@ -2014,6 +2022,8 @@ def _rank_contact_emails_for_row(row_like: Any, values: Union[str, Sequence[str]
         legacy_current_penalty = 0 if (not explicit_provenance and preserve_legacy_current and email == current_selected) else 1
         has_provenance_penalty = 0 if meta else 1
         return (
+            validation_penalty,
+            preferred_penalty,
             contact_authority,
             3 - source_trust,
             bucket,
@@ -2033,7 +2043,11 @@ def _rank_contact_emails_for_row(row_like: Any, values: Union[str, Sequence[str]
 
 def _select_primary_email_for_row(row_like: Any, email: str, email_all: str) -> Tuple[str, List[str]]:
     ranked = _rank_contact_emails_for_row(row_like, [email_all, email])
-    selectable = filter_obvious_placeholder_emails(ranked)
+    selectable = [
+        candidate
+        for candidate in filter_obvious_placeholder_emails(ranked)
+        if _cell_str(get_email_provenance_entry(row_like, candidate).get("validation_status", "")).upper() != "BLOCK"
+    ]
     return (selectable[0] if selectable else "", selectable)
 
 
@@ -2842,6 +2856,14 @@ RAW_FALLBACK_COLUMNS: List[str] = [
     "External Links",
     "Email",
     "Email_All",
+    "Artist_Identity_Status",
+    "Identity_Assessment_JSON",
+    "Preferred_Outreach_Email",
+    "Alternate_Emails",
+    "Preferred_Contact_Status",
+    "Preferred_Contact_Reason",
+    "Review_Approved",
+    "Approved_Contact_Email",
     EMAIL_ROLE_COL,
     EMAIL_ROLE_EVIDENCE_COL,
     "Email_Type",
@@ -2958,6 +2980,14 @@ FINAL_EXPORT_COLUMNS: Sequence[str] = [
     "All Emails",
     "Email",
     "Email_All",
+    "Artist_Identity_Status",
+    "Identity_Assessment_JSON",
+    "Preferred_Outreach_Email",
+    "Alternate_Emails",
+    "Preferred_Contact_Status",
+    "Preferred_Contact_Reason",
+    "Review_Approved",
+    "Approved_Contact_Email",
     EMAIL_ROLE_COL,
     EMAIL_ROLE_EVIDENCE_COL,
     "Email_Type",
@@ -3117,6 +3147,11 @@ def normalize_country_from_location(location_raw: str) -> str:
 
 
 def _derive_primary_email(email: str, email_all: str, row_like: Any = None) -> str:
+    preferred = normalize_email_key(row_like.get("Preferred_Outreach_Email", "")) if hasattr(row_like, "get") else ""
+    if preferred:
+        meta = get_email_provenance_entry(row_like, preferred)
+        if _cell_str(meta.get("validation_status", "")).upper() != "BLOCK":
+            return preferred
     _, ranked = _select_primary_email_for_row(row_like, email, email_all)
     return ranked[0] if ranked else ""
 
@@ -3445,6 +3480,14 @@ def _build_final_export_frame(df: pd.DataFrame) -> pd.DataFrame:
                 "All Emails": all_emails,
                 "Email": primary_email,
                 "Email_All": all_emails,
+                "Artist_Identity_Status": _cell_str(row.get("Artist_Identity_Status", "")),
+                "Identity_Assessment_JSON": _cell_str(row.get("Identity_Assessment_JSON", "")),
+                "Preferred_Outreach_Email": _cell_str(row.get("Preferred_Outreach_Email", "")) or primary_email,
+                "Alternate_Emails": _cell_str(row.get("Alternate_Emails", "")),
+                "Preferred_Contact_Status": _cell_str(row.get("Preferred_Contact_Status", "")),
+                "Preferred_Contact_Reason": _cell_str(row.get("Preferred_Contact_Reason", "")),
+                "Review_Approved": _cell_str(row.get("Review_Approved", "")),
+                "Approved_Contact_Email": _cell_str(row.get("Approved_Contact_Email", "")),
                 EMAIL_ROLE_COL: email_role,
                 EMAIL_ROLE_EVIDENCE_COL: email_role_evidence,
                 "Email_Type": _cell_str(row.get("Email_Type", "")),
