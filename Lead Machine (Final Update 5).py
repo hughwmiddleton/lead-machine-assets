@@ -13032,13 +13032,105 @@ def _campaign_prep_clean_display_text(value) -> str:
     return text.strip()
 
 
+CAMPAIGN_PREP_DISPLAY_SMALL_WORDS = {
+    "a",
+    "an",
+    "and",
+    "as",
+    "at",
+    "by",
+    "for",
+    "from",
+    "in",
+    "of",
+    "on",
+    "or",
+    "the",
+    "to",
+    "with",
+}
+
+CAMPAIGN_PREP_DISPLAY_ACRONYMS = {
+    "dna": "DNA",
+}
+
+CAMPAIGN_PREP_DISPLAY_CONTRACTIONS = {
+    "arent": "Aren't",
+    "cant": "Can't",
+    "couldnt": "Couldn't",
+    "didnt": "Didn't",
+    "doesnt": "Doesn't",
+    "dont": "Don't",
+    "hadnt": "Hadn't",
+    "hasnt": "Hasn't",
+    "havent": "Haven't",
+    "im": "I'm",
+    "isnt": "Isn't",
+    "ive": "I've",
+    "shouldnt": "Shouldn't",
+    "wasnt": "Wasn't",
+    "werent": "Weren't",
+    "wont": "Won't",
+    "wouldnt": "Wouldn't",
+    "youre": "You're",
+    "youve": "You've",
+}
+
+
+def _campaign_prep_title_case_display_text(value: str) -> str:
+    words = value.split()
+    if not words:
+        return value
+
+    output = []
+    last_index = len(words) - 1
+
+    for index, word in enumerate(words):
+        lower = word.lower()
+
+        if lower in CAMPAIGN_PREP_DISPLAY_ACRONYMS:
+            output.append(CAMPAIGN_PREP_DISPLAY_ACRONYMS[lower])
+            continue
+
+        if lower in CAMPAIGN_PREP_DISPLAY_CONTRACTIONS:
+            output.append(CAMPAIGN_PREP_DISPLAY_CONTRACTIONS[lower])
+            continue
+
+        if index not in (0, last_index) and lower in CAMPAIGN_PREP_DISPLAY_SMALL_WORDS:
+            output.append(lower)
+            continue
+
+        output.append(lower[:1].upper() + lower[1:])
+
+    return " ".join(output)
+
+
 def _campaign_prep_clean_song_title(title) -> str:
     cleaned = _campaign_prep_clean_display_text(title)
+    if not cleaned:
+        return cleaned
+
+    # Only normalise casing when the source is entirely lowercase.
+    # Existing artist-intended casing/styling remains authoritative.
+    if cleaned == cleaned.lower():
+        cleaned = _campaign_prep_title_case_display_text(cleaned)
+
     return cleaned
 
 
 def _campaign_prep_clean_artist_name(artist) -> str:
-    return _campaign_prep_clean_display_text(artist)
+    cleaned = _campaign_prep_clean_display_text(artist)
+    if not cleaned:
+        return cleaned
+
+    # Artist identifiers from directory sources may arrive as URL-style slugs.
+    # Restrict de-slugging to lowercase hyphenated values so intentional
+    # punctuation/casing in already-presentable artist names is preserved.
+    if re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)+", cleaned):
+        cleaned = cleaned.replace("-", " ")
+        cleaned = _campaign_prep_title_case_display_text(cleaned)
+
+    return cleaned
 
 
 def _campaign_prep_repair_export_mojibake(value) -> str:
