@@ -2,6 +2,7 @@ import json
 
 import pandas as pd
 
+import final_checker
 from pipeline_runner import export_master_leads, recompute_final_status_post_enrichment
 
 
@@ -281,3 +282,64 @@ def test_a_different_thread_first_party_contact_does_not_remain_blocked():
 
     assert result.iloc[0]["final_status"] == "WARN"
     assert result.iloc[0]["Final_Status_Reason"] == "directory_conflict_review"
+
+
+def test_younique_management_contact_clears_stale_identity_block():
+    email = "management@youniquemusic.com"
+    row = _base_success_row(
+        **{
+            "Artist Name": "Younique",
+            "final_status": "BLOCK",
+            "name_consistency_flag": "0",
+            "match_score_overall": "0.70",
+            "origin_match_flag": "0",
+            "Email": email,
+            "Email_All": email,
+            "Email_Source_URL": "https://www.facebook.com/youniqueflavour",
+            "Email_Source_Type": "facebook_enrich",
+            "Email_Role": "management",
+            "Email_Role_Evidence": "local_part:management",
+            "Email_Provenance_JSON": json.dumps(
+                {
+                    email: {
+                        "source_type": "facebook_enrich",
+                        "source_url": "https://www.facebook.com/youniqueflavour",
+                        "extract_method": "regex",
+                        "role": "management",
+                        "role_evidence": "local_part:management",
+                    }
+                }
+            ),
+        }
+    )
+
+    result = recompute_final_status_post_enrichment(_make_df(row))
+
+    assert result.iloc[0]["final_status"] == "WARN"
+    assert result.iloc[0]["Final_Status_Reason"] != "identity_unresolved"
+
+
+def test_duplicate_email_conflict_blocks_contaminated_artist_but_not_owner():
+    email = "hello@stimpies.band"
+    owner = {
+        "Artist Name": "Stimpies",
+        "Email": email,
+        "Email_Provenance_JSON": json.dumps({email: {"role": "artist_direct", "role_evidence": "identity:artist_name_in_domain"}}),
+    }
+    contaminated = {
+        "Artist Name": "Meiia",
+        "Email": email,
+        "Email_Provenance_JSON": json.dumps({email: {"role": "artist_direct", "role_evidence": "source:stimpies"}}),
+    }
+
+    assert not final_checker.duplicate_email_is_unsafe(owner, [owner, contaminated])
+    assert final_checker.duplicate_email_is_unsafe(contaminated, [owner, contaminated])
+
+
+def test_repeated_management_email_is_not_an_unsafe_duplicate():
+    email = "management@example.com"
+    first = {"Artist Name": "Artist One", "Email": email, "Email_Role": "management"}
+    second = {"Artist Name": "Artist Two", "Email": email, "Email_Role": "management"}
+
+    assert not final_checker.duplicate_email_is_unsafe(first, [first, second])
+    assert not final_checker.duplicate_email_is_unsafe(second, [first, second])

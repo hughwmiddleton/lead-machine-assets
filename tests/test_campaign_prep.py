@@ -1,4 +1,5 @@
 import csv
+import json
 import importlib.util
 import os
 from pathlib import Path
@@ -183,6 +184,79 @@ def test_generate_campaign_csvs_preserves_origin_contract_fields(tmp_path):
 
     _, skipped_rows = _read_csv(output_dir / module.CAMPAIGN_PREP_SKIPPED_ROWS_FILENAME)
     assert skipped_rows == []
+
+
+def test_generate_campaign_csvs_excludes_block_and_unapproved_warn_rows(tmp_path):
+    module = _load_legacy_module()
+    columns = ["Artist", "Location", "Email", "final_status"]
+    input_path = tmp_path / "master_export_leads.csv"
+    output_dir = tmp_path / "campaign"
+    _write_csv(
+        input_path,
+        [
+            {"Artist": "Good", "Location": "VIC", "Email": "good@example.com", "final_status": "OK"},
+            {"Artist": "Blocked", "Location": "VIC", "Email": "blocked@example.com", "final_status": "BLOCK"},
+            {"Artist": "Needs Review", "Location": "VIC", "Email": "warn@example.com", "final_status": "WARN"},
+        ],
+        columns,
+    )
+
+    module.generate_campaign_csvs(
+        str(input_path), str(output_dir), export_format="woodpecker", remove_rows_without_emails=True
+    )
+
+    _, rows = _read_csv(output_dir / module.CAMPAIGN_PREP_WOODPECKER_MASTER_FILENAME)
+    assert [row["Email"] for row in rows] == ["good@example.com"]
+    _, skipped = _read_csv(output_dir / module.CAMPAIGN_PREP_SKIPPED_ROWS_FILENAME)
+    assert {(row["Artist"], row["reason_skipped"]) for row in skipped} == {
+        ("Blocked", "final_status_block"),
+        ("Needs Review", "review_not_approved"),
+    }
+
+
+def test_generate_campaign_csvs_split_uses_per_email_provenance(tmp_path):
+    module = _load_legacy_module()
+    columns = [
+        "Artist", "Location", "Email", "Email_Provenance_JSON", "Email_Role",
+        "Email_Role_Evidence", "Email_Source_URL", "Email_Source_Type", "Email_Extract_Method",
+    ]
+    email_a = "hello@stimpies.band"
+    email_b = "pjbyrne999@gmail.com"
+    input_path = tmp_path / "master.csv"
+    output_dir = tmp_path / "campaign"
+    _write_csv(
+        input_path,
+        [{
+            "Artist": "Stimpies",
+            "Location": "VIC",
+            "Email": f"{email_a}, {email_b}",
+            "Email_Provenance_JSON": json.dumps({
+                email_a: {"role": "artist_direct", "role_evidence": "identity:artist_name_in_domain", "source_url": "https://www.facebook.com/stimpiess", "source_type": "facebook_enrich", "extract_method": "regex"},
+                email_b: {"role": "unknown", "role_evidence": "insufficient_evidence", "source_url": "https://www.instagram.com/stimpiess", "source_type": "instagram_enrich", "extract_method": "profile_direct"},
+            }),
+            "Email_Role": "artist_direct",
+            "Email_Role_Evidence": "identity:artist_name_in_domain",
+            "Email_Source_URL": "https://www.facebook.com/stimpiess",
+            "Email_Source_Type": "facebook_enrich",
+            "Email_Extract_Method": "regex",
+        }],
+        columns,
+    )
+
+    module.generate_campaign_csvs(
+        str(input_path), str(output_dir), split_multiple_emails=True, export_format="woodpecker"
+    )
+
+    _, rows = _read_csv(output_dir / module.CAMPAIGN_PREP_WOODPECKER_MASTER_FILENAME)
+    by_email = {row["Email"]: row for row in rows}
+    assert by_email[email_a]["Email_Role"] == "artist_direct"
+    assert by_email[email_a]["Email_Role_Evidence"] == "identity:artist_name_in_domain"
+    assert by_email[email_a]["Email_Source_URL"].endswith("stimpiess")
+    assert by_email[email_b]["Email_Role"] == "unknown"
+    assert by_email[email_b]["Email_Role_Evidence"] == "insufficient_evidence"
+    assert "instagram.com" in by_email[email_b]["Email_Source_URL"]
+    assert by_email[email_b]["Email_Source_Type"] == "instagram_enrich"
+    assert by_email[email_b]["Email_Extract_Method"] == "profile_direct"
 
 
 def test_generate_campaign_csvs_fails_closed_on_blank_origin_contract(tmp_path):
