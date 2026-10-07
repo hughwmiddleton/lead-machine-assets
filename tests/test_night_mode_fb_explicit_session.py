@@ -756,7 +756,7 @@ def test_explicit_fb_timeout_without_html(monkeypatch, enricher):
     assert driver.stop_called is True
 
 
-def test_explicit_fb_timeout_with_salvage_html(monkeypatch, enricher):
+def test_explicit_fb_timeout_with_unchanged_html_is_not_salvaged(monkeypatch, enricher):
     html = '<html><body><a href="mailto:artist@test.com">email</a></body></html>'
     driver = _TimeoutDriver(html=html)
     monkeypatch.setattr(enricher, "_has_authenticated_session", lambda: False)
@@ -775,10 +775,10 @@ def test_explicit_fb_timeout_with_salvage_html(monkeypatch, enricher):
 
     result = enricher.enrich_row_with_facebook_night(row)
 
-    assert result.get("FB_Status") != "pass_a_timeout"
+    assert result.get("FB_Status") == "pass_a_timeout"
     assert driver.stop_called is True
-    # Salvaged HTML should still be parsed and produce the email.
-    assert "artist@test.com" in (result.get("Email_All") or "") or result.get("Email") == "artist@test.com"
+    assert "artist@test.com" not in (result.get("Email_All") or "")
+    assert result.get("Email") == ""
 
 
 def test_explicit_content_unavailable_allows_one_pass_b_discovery_fallback(monkeypatch, enricher):

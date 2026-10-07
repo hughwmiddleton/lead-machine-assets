@@ -575,15 +575,17 @@ def _load_fb_page_with_timeout(
     except Exception:
         pass
 
+    # Capture the prior surface for every navigation mode.  Selenium can leave
+    # it displayed after either a normal get() timeout or the async handoff.
+    try:
+        baseline_url = getattr(driver, "current_url", "") or ""
+    except Exception:
+        baseline_url = ""
+    try:
+        baseline_html = getattr(driver, "page_source", "") or ""
+    except Exception:
+        baseline_html = ""
     if unblock_on_ready:
-        try:
-            baseline_url = getattr(driver, "current_url", "") or ""
-        except Exception:
-            baseline_url = ""
-        try:
-            baseline_html = getattr(driver, "page_source", "") or ""
-        except Exception:
-            baseline_html = ""
         _, baseline_surface_signature = _read_nav_surface_probe()
 
     try:
@@ -687,7 +689,7 @@ def _load_fb_page_with_timeout(
     except Exception:
         html = ""
 
-    if unblock_on_ready and timed_out and current_url == baseline_url and html == baseline_html:
+    if timed_out and current_url == baseline_url and html == baseline_html:
         current_url = url
         html = ""
 
@@ -2140,6 +2142,51 @@ def _guard_authoritative_fb_url_update(
         return current_canonical, True
 
     return proposed_canonical, False
+
+
+def _facebook_page_ownership_key(value: Any) -> str:
+    """Return the public Facebook entity owned by a candidate/source URL."""
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    canonical = _normalise_fb_url(raw)
+    if not canonical:
+        return ""
+    try:
+        parsed = urllib.parse.urlparse(canonical)
+    except Exception:
+        return ""
+    host = (parsed.netloc or "").lower().removeprefix("www.").removeprefix("m.")
+    if host != "facebook.com":
+        return ""
+    parts = [part for part in (parsed.path or "").strip("/").split("/") if part]
+    if not parts:
+        return ""
+    first = parts[0].lower()
+    if first in _FB_BLOCKED_PUBLIC_PATH_SEGMENTS or first in {
+        "dialog",
+        "l.php",
+        "plugins",
+        "share",
+        "share.php",
+        "sharer.php",
+    }:
+        return ""
+    if first == "profile.php":
+        profile_id = (urllib.parse.parse_qs(parsed.query or "").get("id") or [""])[0]
+        return f"profile:{profile_id}" if str(profile_id).isdigit() else ""
+    if first == "pg" and len(parts) >= 2:
+        first = parts[1].lower()
+    if first == "people" and len(parts) >= 3 and parts[2].isdigit():
+        return f"people:{parts[1].lower()}:{parts[2]}"
+    return f"slug:{first}"
+
+
+def facebook_source_belongs_to_candidate(candidate_url: Any, source_url: Any) -> bool:
+    """True only when a scraped source is a surface of the selected candidate."""
+    candidate_key = _facebook_page_ownership_key(candidate_url)
+    source_key = _facebook_page_ownership_key(source_url)
+    return bool(candidate_key and source_key and candidate_key == source_key)
 
 
 _FB_LOW_INFO_SONG_TITLE_TOKENS = frozenset(
@@ -8733,9 +8780,16 @@ class NightModeFacebookEnricher:
                     except TypeError:
                         driver = session.navigate(url)
             timed_out = bool(getattr(session, "last_nav_timed_out", False))
+            nav_current_url = str(getattr(session, "last_nav_current_url", "") or "").strip()
+            nav_page_source = str(getattr(session, "last_nav_page_source", "") or "")
             if timed_out:
                 self._last_fb_timeout = True
                 self._last_fb_timeout_url = url
+                # The shared browser may still display the previous artist.  The
+                # navigation helper deliberately returns an empty snapshot when
+                # no row-local handoff occurred; never repopulate it from driver.
+                if not nav_page_source or not facebook_source_belongs_to_candidate(url, nav_current_url):
+                    return None, url
             if goto_about:
                 goto_about_fn = getattr(self.legacy, "_goto_facebook_about", None)
                 if callable(goto_about_fn):
@@ -8743,14 +8797,23 @@ class NightModeFacebookEnricher:
                         goto_about_fn(driver, url, timeout=5.0)
                     except Exception:
                         pass
-            page_source = getattr(driver, "page_source", "") or ""
+            current_url = nav_current_url or str(getattr(driver, "current_url", None) or url)
+            page_source = nav_page_source or getattr(driver, "page_source", "") or ""
+            if _is_fb_login_or_security_url(current_url):
+                return page_source, current_url
+            if not facebook_source_belongs_to_candidate(url, current_url):
+                _log(
+                    self.logger,
+                    f"[FB Ownership] rejected stale/mismatched browser surface requested='{url}' resolved='{current_url}'",
+                )
+                return None, url
             if collect_surfaces:
                 page_source, rendered_text, anchor_values, reveal_actions = _collect_fb_email_surface_state(
                     driver,
                     logger=self.logger,
                 )
                 self._last_fb_surface_html = page_source
-                self._last_fb_surface_url = str(getattr(driver, "current_url", None) or url)
+                self._last_fb_surface_url = current_url
                 self._last_fb_surface_driver_kind = "session"
                 self._last_fb_surface_html_available = True
                 self._last_fb_visible_text_available = True
@@ -8761,10 +8824,9 @@ class NightModeFacebookEnricher:
                 self._last_fb_reveal_actions = list(reveal_actions or [])
             else:
                 self._last_fb_surface_html = page_source or html
-                self._last_fb_surface_url = str(getattr(driver, "current_url", None) or url)
+                self._last_fb_surface_url = current_url
                 self._last_fb_surface_driver_kind = "session"
                 self._last_fb_surface_html_available = True
-            current_url = getattr(driver, "current_url", None) or url
             return page_source or driver.page_source, current_url
 
         html: Optional[str] = None
@@ -8830,6 +8892,14 @@ class NightModeFacebookEnricher:
             if timed_out:
                 self._last_fb_timeout = True
                 self._last_fb_timeout_url = url
+                if not html or not facebook_source_belongs_to_candidate(url, current_url):
+                    return None, url
+            if not facebook_source_belongs_to_candidate(url, current_url):
+                _log(
+                    self.logger,
+                    f"[FB Ownership] rejected stale/mismatched anonymous surface requested='{url}' resolved='{current_url}'",
+                )
+                return None, url
             if goto_about:
                 goto_about_fn = getattr(self.legacy, "_goto_facebook_about", None)
                 if callable(goto_about_fn):
@@ -8999,11 +9069,16 @@ class NightModeFacebookEnricher:
                 self._log_fb_driver_selection("session", "session_primary", row_label or "<unknown>")
                 drv = session.navigate(search_url)
                 time.sleep(1.5)
+                timed_out = bool(getattr(session, "last_nav_timed_out", False))
+                nav_html = str(getattr(session, "last_nav_page_source", "") or "")
+                nav_url = str(getattr(session, "last_nav_current_url", "") or search_url)
+                if timed_out and not nav_html:
+                    return "", drv, True, search_url
                 return (
-                    getattr(drv, "page_source", "") or "",
+                    nav_html or getattr(drv, "page_source", "") or "",
                     drv,
-                    bool(getattr(session, "last_nav_timed_out", False)),
-                    getattr(session, "last_nav_current_url", "") or _safe_current_url(drv) or search_url,
+                    timed_out,
+                    nav_url,
                 )
 
             def _nav_anon() -> Tuple[str, Any, bool, str]:
@@ -10223,7 +10298,7 @@ class NightModeFacebookEnricher:
             allow_empty=True if not accepted else has_music_signals or combined_emails or gate_soft_pass_category or gate_soft_pass_identity,
             accepted=accepted,
             reject_reason=reject_reason,
-            candidate_url=resolved_url,
+            candidate_url=candidate_url,
             email_extract_method=email_method or "regex",
         )
         if not night_result:
@@ -10243,7 +10318,7 @@ class NightModeFacebookEnricher:
         night_result.visible_contact_surfaces = list(explicit_visible_contact_surfaces)
         night_result.accepted = accepted
         night_result.reject_reason = reject_reason or ""
-        night_result.candidate_url = resolved_url
+        night_result.candidate_url = candidate_url
         night_result.about_attempted = about_attempted
         night_result.about_result = about_result or ("soft_pass_identity" if gate_soft_pass_identity else "soft_pass_category" if gate_soft_pass_category else "")
         # Propagate confidence metadata for downstream review flagging.
@@ -10394,6 +10469,40 @@ class NightModeFacebookEnricher:
                 f"[FB Guard] Discarding emails from rejected FB page '{page_label}' for '{artist_name}' (reason={reason})",
             )
             # Do not mutate email fields; preserve status/reason already set.
+            return target_row
+
+        selected_candidate_url = str(
+            getattr(night_result, "candidate_url", "")
+            or page_url
+            or night_result.facebook_url
+            or target_row.get("Facebook_URL", "")
+            or ""
+        ).strip()
+        source_urls = [
+            str(page_url or "").strip(),
+            str(night_result.email_source_url or "").strip(),
+            str(night_result.facebook_url or "").strip(),
+        ]
+        mismatched_sources = [
+            source_url
+            for source_url in source_urls
+            if source_url and not facebook_source_belongs_to_candidate(selected_candidate_url, source_url)
+        ]
+        has_fb_derived_write = bool(
+            (night_result.email or "").strip()
+            or emails
+            or canonicalize_facebook_url(night_result.facebook_url)
+        )
+        if has_fb_derived_write and (
+            not _facebook_page_ownership_key(selected_candidate_url) or mismatched_sources
+        ):
+            target_row[FB_ATTEMPT_STATE_COL] = "attempted_fb_rejected_by_ownership_guard"
+            target_row["FB_Status"] = "candidate_source_mismatch"
+            target_row["FB_Reason"] = "candidate_source_mismatch"
+            _log(
+                self.logger,
+                f"[FB Ownership] Discarding row-local result for '{artist_name}' candidate='{selected_candidate_url or '<blank>'}' source='{mismatched_sources[0] if mismatched_sources else '<blank>'}'",
+            )
             return target_row
 
         def _fb_status_is_terminal(status: str) -> bool:
@@ -10802,6 +10911,16 @@ class NightModeFacebookEnricher:
         self._fb_driver_execution_entered_this_row = False
         self._clear_last_fb_email_surface_state()
         self._last_pass_a_visible_contact_surfaces = []
+        # Candidate/result diagnostics are row-scoped.  Search normally resets
+        # these too, but explicit-only and early-return rows must not retain the
+        # previous artist's selection or failure payload.
+        self._last_selected_candidate_context = None
+        self._last_search_candidates = []
+        self._last_search_reject_reason = ""
+        self._last_search_reject_score = None
+        self._last_explicit_guard_reason = ""
+        self._last_fb_timeout = False
+        self._last_fb_timeout_url = ""
 
         def _clean_val(value: str) -> str:
             try:
