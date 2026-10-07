@@ -293,8 +293,12 @@ def test_younique_management_contact_clears_stale_identity_block():
             "name_consistency_flag": "0",
             "match_score_overall": "0.70",
             "origin_match_flag": "0",
+            "origin_match_reason": "title_not_found",
             "Email": email,
             "Email_All": email,
+            "Preferred_Outreach_Email": email,
+            "Preferred_Contact_Status": "OK",
+            "Preferred_Contact_Reason": "contact_attributable",
             "Email_Source_URL": "https://www.facebook.com/youniqueflavour",
             "Email_Source_Type": "facebook_enrich",
             "Email_Role": "management",
@@ -307,6 +311,8 @@ def test_younique_management_contact_clears_stale_identity_block():
                         "extract_method": "regex",
                         "role": "management",
                         "role_evidence": "local_part:management",
+                        "validation_status": "OK",
+                        "send_eligible": "true",
                     }
                 }
             ),
@@ -315,8 +321,64 @@ def test_younique_management_contact_clears_stale_identity_block():
 
     result = recompute_final_status_post_enrichment(_make_df(row))
 
+    assert result.iloc[0]["final_status"] == "OK"
+    assert result.iloc[0]["Final_Status_Reason"] == "preferred_contact_accepted"
+
+
+def test_authoritative_contact_ok_ignores_missing_origin_evidence():
+    row = _base_success_row(
+        **{
+            "Artist Name": "Younique",
+            "final_status": "BLOCK",
+            "origin_match_flag": "0",
+            "origin_match_reason": "",
+            "Preferred_Outreach_Email": "management@youniquemusic.com",
+            "Preferred_Contact_Status": "OK",
+            "Preferred_Contact_Reason": "contact_attributable",
+        }
+    )
+
+    result = recompute_final_status_post_enrichment(_make_df(row))
+
+    assert result.iloc[0]["final_status"] == "OK"
+    assert result.iloc[0]["Final_Status_Reason"] == "preferred_contact_accepted"
+
+
+def test_authoritative_contact_ok_preserves_hard_origin_contradiction():
+    row = _base_success_row(
+        **{
+            "Artist Name": "Younique",
+            "final_status": "BLOCK",
+            "origin_match_flag": "0",
+            "origin_match_reason": "artist_mismatch",
+            "Preferred_Outreach_Email": "management@youniquemusic.com",
+            "Preferred_Contact_Status": "OK",
+            "Preferred_Contact_Reason": "contact_attributable",
+        }
+    )
+
+    result = recompute_final_status_post_enrichment(_make_df(row))
+
     assert result.iloc[0]["final_status"] == "WARN"
-    assert result.iloc[0]["Final_Status_Reason"] != "identity_unresolved"
+    assert result.iloc[0]["Final_Status_Reason"] == "origin_mismatch_review"
+
+
+def test_authoritative_contact_ok_preserves_duplicate_artist_conflict():
+    row = _base_success_row(
+        **{
+            "Artist Name": "Younique",
+            "final_status": "BLOCK",
+            "Preferred_Outreach_Email": "management@youniquemusic.com",
+            "Preferred_Contact_Status": "OK",
+            "Preferred_Contact_Reason": "contact_attributable",
+            "duplicate_artist_flag": "1",
+        }
+    )
+
+    result = recompute_final_status_post_enrichment(_make_df(row))
+
+    assert result.iloc[0]["final_status"] == "BLOCK"
+    assert result.iloc[0]["Final_Status_Reason"] == "duplicate_artist"
 
 
 def test_duplicate_email_conflict_blocks_contaminated_artist_but_not_owner():
