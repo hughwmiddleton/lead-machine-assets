@@ -276,6 +276,10 @@ _ROLE_EMAIL_LOCAL_PARTS = frozenset(
     }
 )
 
+_SHARED_PROFESSIONAL_ROLES = frozenset(
+    {"management", "booking", "label", "pr_publicity", "team_business"}
+)
+
 
 def _compact_slug(value) -> str:
     return re.sub(r"[^a-z0-9]+", "", _cell_text(value).lower())
@@ -407,6 +411,56 @@ def classify_contact_attribution(row: dict) -> str:
     return ATTRIBUTION_TRUSTED
 
 
+def _email_entry_for_row(row: dict, email: str) -> dict:
+    try:
+        entry = dict((get_row_email_provenance(row) or {}).get(email) or {})
+    except Exception:
+        entry = {}
+    if not entry.get("role") and normalize_email_value(row.get("Email", "")) == email:
+        entry["role"] = _safe_lower(row.get("Email_Role", ""))
+        entry["role_evidence"] = _cell_text(row.get("Email_Role_Evidence", ""))
+    return entry
+
+
+def duplicate_email_is_unsafe(row: dict, peer_rows: Iterable[dict]) -> bool:
+    """Return whether this row's repeated primary email is a conflict.
+
+    A shared professional inbox is a valid multi-artist contact.  A repeated
+    address becomes unsafe only for a row whose provenance does not identify a
+    shared role and which conflicts with an artist-direct attribution belonging
+    to a different artist.
+    """
+    email = _first_usable_email(row)
+    if not email:
+        return False
+    current_entry = _email_entry_for_row(row, email)
+    current_role = _safe_lower(current_entry.get("role", ""))
+    if current_role in _SHARED_PROFESSIONAL_ROLES:
+        return False
+    current_artist = _compact_slug(row.get("Artist Name", ""))
+    current_email_matches = _email_belongs_to_entity(email, row.get("Artist Name", ""))
+
+    for peer in peer_rows:
+        if peer is row:
+            continue
+        peer_email = _first_usable_email(peer)
+        if peer_email != email:
+            continue
+        peer_artist = _compact_slug(peer.get("Artist Name", ""))
+        if not peer_artist or peer_artist == current_artist:
+            continue
+        peer_entry = _email_entry_for_row(peer, email)
+        peer_role = _safe_lower(peer_entry.get("role", ""))
+        if peer_role in _SHARED_PROFESSIONAL_ROLES:
+            continue
+        peer_artist_direct = peer_role == "artist_direct" or (
+            not peer_role and _email_belongs_to_entity(email, peer.get("Artist Name", ""))
+        )
+        if peer_artist_direct and not current_email_matches:
+            return True
+    return False
+
+
 def _parse_release_year(value: str) -> Optional[int]:
     if not value:
         return None
@@ -487,11 +541,21 @@ def compute_final_status(
     except Exception:
         selected_meta = {}
     label_contact = _safe_lower(selected_meta.get("role", "")) == "label"
+    selected_role = _safe_lower(selected_meta.get("role", "") or row.get("Email_Role", ""))
+    stale_identity_block_reconsiderable = (
+        existing == "BLOCK"
+        and contact_is_attributable
+        and selected_role in _SHARED_PROFESSIONAL_ROLES
+    )
 
     # Duplicate flags are durable row-level evidence, unlike an inherited
     # final_status value. Preserve an existing hard block only when one of
     # those authoritative duplicate reasons is still present.
-    if existing == "BLOCK" and (name_flag or dup_email_flag or dup_artist_flag):
+    if existing == "BLOCK" and (
+        dup_email_flag
+        or dup_artist_flag
+        or (name_flag and not stale_identity_block_reconsiderable)
+    ):
         return "BLOCK"
     if existing in {"BLOCK", "BLOCKED", "BLOCKED_BY_ORIGIN"} and not (has_email or unearthed_no_emails):
         return "BLOCK"
@@ -527,7 +591,7 @@ def compute_final_status(
         return "WARN"
 
     # --- Hard blockers: identity contradiction or unusable entity ------------
-    if name_flag and match_score < 0.75:
+    if name_flag and match_score < 0.75 and not stale_identity_block_reconsiderable:
         return "BLOCK"
     if labelish and not (contact_is_attributable and label_contact):
         return "BLOCK"
@@ -913,6 +977,7 @@ def run_final_checker(
         genre_outlier_flags = []
         match_scores = []
         statuses = []
+        row_records = result_df.to_dict("records")
 
         for idx, row in result_df.iterrows():
             artist_clean = normalized_artists.iloc[idx]
@@ -940,7 +1005,7 @@ def run_final_checker(
             dir_conflict_flag = _pairwise_conflict(dir_names, 70)
 
             email_key = normalized_emails.iloc[idx]
-            dup_email_flag = 1 if email_key and email_counts.get(email_key, 0) > 1 else 0
+            dup_email_flag = 1 if email_key and email_counts.get(email_key, 0) > 1 and duplicate_email_is_unsafe(row.to_dict(), row_records) else 0
 
             artist_key = artist_clean
             dup_artist_flag = 1 if artist_key and artist_counts.get(artist_key, 0) > 1 else 0

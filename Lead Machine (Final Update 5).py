@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from fb_email_override import should_accept_email_override
+from email_provenance import dump_email_provenance_json, normalize_email_key, parse_email_provenance_json
 from bandcamp_profile_engine import (
     PROFILE_ACCEPTED as BANDCAMP_PROFILE_ACCEPTED,
     bandcamp_extract_genres,
@@ -12701,7 +12702,7 @@ def _campaign_prep_inside_vic(value) -> bool:
 def _campaign_prep_email_tokens(value) -> List[str]:
     raw = "" if value is None else str(value)
     tokens: List[str] = []
-    for token in raw.split(","):
+    for token in re.split(r"[,;]", raw):
         cleaned = token.strip()
         if cleaned.lower() in ("", "nan", "none"):
             continue
@@ -13171,7 +13172,7 @@ def _campaign_prep_skipped_row(
     recency_bucket: str,
     reason: str,
 ) -> dict:
-    artist_column = _campaign_prep_resolve_alias(columns_by_lower, ("Artist",))
+    artist_column = _campaign_prep_resolve_alias(columns_by_lower, ("Artist", "Artist Name"))
     song_title_column = _campaign_prep_resolve_alias(columns_by_lower, ("Song_Title", "Song Title"))
     lead_source_column = _campaign_prep_resolve_alias(columns_by_lower, ("Lead_Source",))
     source_directory_column = _campaign_prep_resolve_alias(columns_by_lower, ("Source_Directory",))
@@ -13187,6 +13188,50 @@ def _campaign_prep_skipped_row(
         "Recency_Bucket": recency_bucket,
         "reason_skipped": reason,
     }
+
+
+def _campaign_prep_split_email_metadata(row: dict, email: str) -> dict:
+    """Apply only the provenance belonging to one split email token."""
+    output = dict(row)
+    normalized_email = normalize_email_key(email)
+    provenance = parse_email_provenance_json(row.get("Email_Provenance_JSON", ""))
+    entry = dict(provenance.get(normalized_email) or {})
+    output["Email_Provenance_JSON"] = dump_email_provenance_json(
+        {normalized_email: entry} if normalized_email and entry else {}
+    )
+    output["Email_Role"] = entry.get("role", "unknown") if entry else "unknown"
+    output["Email_Role_Evidence"] = entry.get("role_evidence", "") if entry else ""
+    output["Email_Source_URL"] = entry.get("source_url", "") if entry else ""
+    output["Email_Source_Type"] = entry.get("source_type", "") if entry else ""
+    output["Email_Extract_Method"] = entry.get("extract_method", "") if entry else ""
+    return output
+
+
+def _campaign_prep_review_skip_reason(
+    row: dict,
+    columns_by_lower: Dict[str, str],
+) -> Optional[str]:
+    status_column = columns_by_lower.get("final_status")
+    if status_column is None:
+        return None
+    status = str(row.get(status_column, "") or "").strip().upper()
+    if status == "BLOCK":
+        return "final_status_block"
+    if status == "OK":
+        return None
+    if status == "WARN":
+        approval_column = _campaign_prep_resolve_alias(
+            columns_by_lower,
+            (
+                "Review_Approved",
+                "Reviewed_Approved",
+                "Final_Status_Approved",
+                "Approved",
+            ),
+        )
+        approved = approval_column is not None and _campaign_prep_truthy(row.get(approval_column, ""))
+        return None if approved else "review_not_approved"
+    return "review_not_approved"
 
 
 def _campaign_prep_validate_origin_contract(row: dict, row_number: int) -> None:
@@ -13328,15 +13373,27 @@ def generate_campaign_csvs(
         release_date_invalid = parsed_release_date is None
         rows_for_segmentation = [copy.deepcopy(row)]
         if split_multiple_emails and email_column is not None:
-            tokens = _campaign_prep_email_tokens(row.get(email_column, ""))
+            split_source_value = row.get(email_column, "")
+            primary_tokens = _campaign_prep_email_tokens(split_source_value)
+            email_all_column = _campaign_prep_resolve_alias(
+                columns_by_lower,
+                ("Email_All", "All Emails", "All_Emails", "Primary Email", "Primary_Email"),
+            )
+            if (
+                len(primary_tokens) <= 1
+                and email_all_column is not None
+                and len(_campaign_prep_email_tokens(row.get(email_all_column, ""))) > 1
+            ):
+                split_source_value = row.get(email_all_column, "")
+            tokens = _campaign_prep_email_tokens(split_source_value)
             if len(tokens) > 1:
                 rows_for_segmentation = []
                 for token in tokens:
-                    split_row = copy.deepcopy(row)
+                    split_row = _campaign_prep_split_email_metadata(row, token)
                     split_row[email_column] = token
                     rows_for_segmentation.append(split_row)
             elif len(tokens) == 1:
-                split_row = copy.deepcopy(row)
+                split_row = _campaign_prep_split_email_metadata(row, tokens[0])
                 split_row[email_column] = tokens[0]
                 rows_for_segmentation = [split_row]
 
@@ -13350,6 +13407,20 @@ def generate_campaign_csvs(
                 playback_segment = "Neither"
             recency_bucket = _campaign_prep_recency_bucket(parsed_release_date, run_reference_date)
             segment_name = _campaign_prep_segment_name(location_segment, playback_segment)
+
+            review_skip_reason = _campaign_prep_review_skip_reason(final_row, columns_by_lower)
+            if review_skip_reason:
+                skipped_rows.append(
+                    _campaign_prep_skipped_row(
+                        final_row,
+                        columns_by_lower,
+                        email_column,
+                        segment_name,
+                        recency_bucket,
+                        review_skip_reason,
+                    )
+                )
+                continue
 
             if remove_rows_without_emails:
                 if email_column is None:
