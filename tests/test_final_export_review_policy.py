@@ -1,6 +1,7 @@
 import json
 
 import pandas as pd
+import pytest
 
 from email_provenance import EMAIL_PROVENANCE_JSON_COL
 from pipeline_runner import _build_final_export_frame, _derive_primary_email, _select_primary_email_for_row
@@ -29,6 +30,40 @@ def _build_export_row(**overrides: str) -> dict[str, str]:
         "Source URL": "https://testartist.com",
         "Source Directory": "website",
     }
+    row.update(overrides)
+    return row
+
+
+def _authoritative_export_row(
+    *,
+    source_type: str = "instagram_enrich",
+    source_url: str = "https://www.instagram.com/testartist/",
+    email: str = "hello@testartist.com",
+    **overrides: str,
+) -> dict[str, str]:
+    row = _build_export_row(
+        Email=email,
+        Email_All=email,
+        Email_Source_URL=source_url,
+        Email_Source_Type=source_type,
+        Email_Extract_Method="profile_direct",
+        Preferred_Outreach_Email=email,
+        Preferred_Contact_Status="OK",
+        Preferred_Contact_Reason="contact_attributable",
+    )
+    default_provenance = json.dumps(
+        {
+            email: {
+                "source_type": source_type,
+                "surface": "instagram_profile" if source_type.startswith("instagram") else "website_contact_page",
+                "source_url": source_url,
+                "extract_method": "profile_direct",
+                "validation_status": "OK",
+                "send_eligible": "true",
+            }
+        }
+    )
+    row[EMAIL_PROVENANCE_JSON_COL] = default_provenance
     row.update(overrides)
     return row
 
@@ -77,7 +112,7 @@ def test_final_export_marks_suspicious_system_email_for_review() -> None:
     assert export_df.iloc[0]["Needs_Review"] == "TRUE"
 
 
-def test_final_export_auto_approves_warn_rows_with_explicit_facebook_provenance() -> None:
+def test_final_export_keeps_warn_rows_with_explicit_facebook_provenance_under_review() -> None:
     df = pd.DataFrame(
         [
             _build_export_row(
@@ -95,16 +130,118 @@ def test_final_export_auto_approves_warn_rows_with_explicit_facebook_provenance(
     export_df = _build_final_export_frame(df)
 
     assert export_df.iloc[0]["Email Source"] == "Facebook About"
-    assert export_df.iloc[0]["Needs_Review"] == "FALSE"
+    assert export_df.iloc[0]["Needs_Review"] == "TRUE"
 
 
-def test_final_export_auto_approves_warn_rows_with_website_provenance() -> None:
+def test_final_export_keeps_warn_rows_with_website_provenance_under_review() -> None:
     df = pd.DataFrame([_build_export_row(final_status="WARN")])
 
     export_df = _build_final_export_frame(df)
 
     assert export_df.iloc[0]["Email Source"] == "Website"
+    assert export_df.iloc[0]["Needs_Review"] == "TRUE"
+
+
+def test_final_export_authoritative_ok_instagram_contact_is_not_reflagged() -> None:
+    export_df = _build_final_export_frame(pd.DataFrame([_authoritative_export_row()]))
+
     assert export_df.iloc[0]["Needs_Review"] == "FALSE"
+    assert export_df.iloc[0]["Email_Source_Type"] == "instagram_enrich"
+
+
+def test_final_export_authoritative_ok_facebook_contact_is_not_reflagged() -> None:
+    export_df = _build_final_export_frame(
+        pd.DataFrame(
+            [
+                _authoritative_export_row(
+                    source_type="facebook_enrich",
+                    source_url="https://www.facebook.com/testartist/about",
+                )
+            ]
+        )
+    )
+
+    assert export_df.iloc[0]["Needs_Review"] == "FALSE"
+
+
+def test_final_export_authoritative_ok_website_contact_is_not_reflagged() -> None:
+    export_df = _build_final_export_frame(
+        pd.DataFrame(
+            [
+                _authoritative_export_row(
+                    source_type="website_enrich",
+                    source_url="https://testartist.com/contact",
+                )
+            ]
+        )
+    )
+
+    assert export_df.iloc[0]["Needs_Review"] == "FALSE"
+
+
+def test_final_export_authoritative_warn_instagram_contact_remains_review_only() -> None:
+    export_df = _build_final_export_frame(
+        pd.DataFrame([_authoritative_export_row(final_status="WARN")])
+    )
+
+    assert export_df.iloc[0]["Needs_Review"] == "TRUE"
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"Preferred_Outreach_Email": "other@testartist.com"},
+        {EMAIL_PROVENANCE_JSON_COL: ""},
+        {
+            EMAIL_PROVENANCE_JSON_COL: json.dumps(
+                {
+                    "hello@testartist.com": {
+                        "source_type": "instagram_enrich",
+                        "surface": "instagram_profile",
+                        "source_url": "https://www.instagram.com/testartist/",
+                        "extract_method": "profile_direct",
+                        "validation_status": "BLOCK",
+                    }
+                }
+            )
+        },
+    ],
+)
+def test_final_export_authoritative_contact_must_match_safe_selected_provenance(overrides) -> None:
+    export_df = _build_final_export_frame(
+        pd.DataFrame([_authoritative_export_row(**overrides)])
+    )
+
+    assert export_df.iloc[0]["Needs_Review"] == "TRUE"
+
+
+def test_final_export_authoritative_unsafe_attribution_remains_review_only() -> None:
+    export_df = _build_final_export_frame(
+        pd.DataFrame(
+            [
+                _authoritative_export_row(
+                    email="support@spotify.com",
+                    source_url="https://www.instagram.com/testartist/",
+                )
+            ]
+        )
+    )
+
+    assert export_df.iloc[0]["Needs_Review"] == "TRUE"
+
+
+def test_final_export_authoritative_quarantined_repeat_email_remains_review_only() -> None:
+    export_df = _build_final_export_frame(
+        pd.DataFrame(
+            [
+                _authoritative_export_row(
+                    Suspect_Email="hello@testartist.com",
+                )
+            ]
+        )
+    )
+
+    assert export_df.iloc[0]["Needs_Review"] == "TRUE"
 
 
 def test_final_export_keeps_warn_rows_with_weak_provenance_under_review() -> None:
