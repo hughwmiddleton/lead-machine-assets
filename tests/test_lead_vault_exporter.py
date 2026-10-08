@@ -1,5 +1,6 @@
 import csv
 import json
+from pathlib import Path
 
 import pytest
 
@@ -374,3 +375,38 @@ def test_woodpecker_rejects_unaligned_or_quarantined_primary_and_deduplicates_re
     assert [(row["Artist Name"], row["Primary Email"]) for row in exported] == [
         ("First Recipient", "booking@shared.test")
     ]
+
+
+def test_woodpecker_golden_run_exports_authoritative_ok_contacts_only(tmp_path) -> None:
+    source_path = (
+        Path(__file__).resolve().parents[2]
+        / "output_tests"
+        / "Golden_Run_3_FINAL_ACCEPTANCE"
+        / "master_export_leads.csv"
+    )
+    if not source_path.exists():
+        pytest.skip("Golden Run 3 acceptance fixture is outside this checkout")
+
+    output_path = tmp_path / "golden_woodpecker.csv"
+    result = export_with_preset(WOODPECKER_EXPORT_PRESET, source_path, output_path)
+
+    with open(output_path, "r", encoding="utf-8-sig", newline="") as handle:
+        exported = list(csv.DictReader(handle))
+
+    assert [row["Artist Name"] for row in exported] == [
+        "Yung Milla",
+        "effie isobel",
+        "Younique",
+        "Stimpies",
+        "Yung Maynie",
+        "Public Figures",
+    ]
+    assert all(row["Final_Status"] == "OK" for row in exported)
+    assert all(row["Needs_Review"] == "FALSE" for row in exported)
+    assert all(row["Primary Email"] for row in exported)
+    assert all(row["Email_Source_URL"] for row in exported)
+    assert all(row["Email_Source_Type"] for row in exported)
+    assert all(row["Email_Extract_Method"] for row in exported)
+    assert result["rows_read"] == 10
+    assert result["rows_exported"] == 6
+    assert result["rows_skipped"] == 4

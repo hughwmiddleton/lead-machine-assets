@@ -57,6 +57,9 @@ from email_normalizer import (
     filter_obvious_placeholder_emails,
     filter_platform_support_emails,
     filter_system_telemetry_emails,
+    is_obvious_placeholder_email,
+    is_platform_support_email,
+    is_system_telemetry_email,
 )
 from fb_email_skip_gate import (
     is_quarantined_repeat_email_row,
@@ -3339,7 +3342,7 @@ def _compute_export_needs_review(row: pd.Series, primary_email: str, email_sourc
     if status_normalized == "BLOCK":
         return True
     if status_normalized == "WARN":
-        return not safe_explicit_source
+        return True
     if not _is_valid_email_shape(primary_email):
         return True
     if not email_source_url:
@@ -3349,11 +3352,55 @@ def _compute_export_needs_review(row: pd.Series, primary_email: str, email_sourc
     if _export_email_looks_suspicious(primary_email):
         return True
 
-    # Domain-reuse rows are not exposed with a stable export-time label yet, so only
-    # auto-approve explicit FB/website provenance and keep ambiguous sources under review.
+    # The authoritative preferred-contact decision supersedes the legacy source-type
+    # rule, but only after the selected email has passed the same final safety gates.
+    if status_normalized == "OK" and _authoritative_preferred_contact_is_export_safe(row, primary_email):
+        return False
+
+    # Preserve compatibility for older rows that predate authoritative contact
+    # fields. These rows still receive the conservative explicit-source policy.
     if status_normalized == "OK" and safe_explicit_source:
         return False
     return True
+
+
+def _authoritative_preferred_contact_is_export_safe(row: pd.Series, primary_email: str) -> bool:
+    """Return whether the selected email has an authoritative safe contact decision."""
+    if str(row.get("_status_normalized", "") or "").strip().upper() != "OK":
+        return False
+    if str(row.get("Preferred_Contact_Status", "") or "").strip().upper() != "OK":
+        return False
+    if str(row.get("Preferred_Contact_Reason", "") or "").strip().lower() != "contact_attributable":
+        return False
+    if normalize_email_key(row.get("Preferred_Outreach_Email", "")) != normalize_email_key(primary_email):
+        return False
+    if not _is_valid_email_shape(primary_email):
+        return False
+
+    selected_meta = _selected_email_provenance(row, primary_email)
+    if not selected_meta:
+        return False
+    if any(not str(selected_meta.get(field, "") or "").strip() for field in ("source_url", "source_type", "extract_method")):
+        return False
+    validation_status = str(selected_meta.get("validation_status", "") or "").strip().upper()
+    if not validation_status or validation_status == "BLOCK":
+        return False
+    if str(selected_meta.get("send_eligible", "") or "").strip().lower() in {"false", "0", "no"}:
+        return False
+    if (
+        is_obvious_placeholder_email(primary_email)
+        or is_platform_support_email(primary_email)
+        or is_system_telemetry_email(primary_email)
+    ):
+        return False
+    if is_quarantined_repeat_email_row(row) or any(
+        str(row.get(field, "") or "").strip() for field in ("Suspect_Email", "Suspect_Email_All")
+    ):
+        return False
+
+    import final_checker
+
+    return final_checker.classify_contact_attribution(row, primary_email) != final_checker.ATTRIBUTION_UNSAFE
 
 
 def _build_final_export_frame(df: pd.DataFrame) -> pd.DataFrame:
