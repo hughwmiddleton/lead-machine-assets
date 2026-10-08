@@ -404,6 +404,17 @@ def test_woodpecker_golden_run_exports_authoritative_ok_contacts_only(tmp_path) 
     assert all(row["Final_Status"] == "OK" for row in exported)
     assert all(row["Needs_Review"] == "FALSE" for row in exported)
     assert all(row["Primary Email"] for row in exported)
+    assert {
+        row["Artist Name"]: (row["Email_Role"], row["Email_Role_Evidence"])
+        for row in exported
+    } == {
+        "Yung Milla": ("unknown", "insufficient_evidence"),
+        "effie isobel": ("unknown", "insufficient_evidence"),
+        "Younique": ("management", "local_part:management"),
+        "Stimpies": ("artist_direct", "identity:artist_name_in_domain"),
+        "Yung Maynie": ("artist_direct", "identity:artist_name_in_domain"),
+        "Public Figures": ("unknown", "insufficient_evidence"),
+    }
     assert all(row["Email_Source_URL"] for row in exported)
     assert all(row["Email_Source_Type"] for row in exported)
     assert all(row["Email_Extract_Method"] for row in exported)
